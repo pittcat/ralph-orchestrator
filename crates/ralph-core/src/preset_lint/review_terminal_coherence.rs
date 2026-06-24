@@ -5,30 +5,31 @@
 //! `review.passed` to `review.complete`:
 //!
 //! - **`check_reviewer_dual_subscribe`**: a downstream consumer hat that
-//!   triggers on **both** `review.passed` and `review.complete` violates
-//!   the **single-canonical-trigger** invariant. The two are mutually
-//!   exclusive branch events emitted by `review-synthesizer` (see
-//!   `presets/en/ce-executor-serial.yml:1534-1542`). A hat that listens
-//!   to both will accept the cheaper `review.complete` and bypass the
-//!   intended `verdict_gate` check that distinguishes `pass` from
-//!   `pass_with_residuals`.
+//!   triggers on **both** topics of a mutually exclusive terminal pair
+//!   violates the **single-canonical-trigger** invariant.
 //!
-//! - **`check_publisher_terminal_completeness`**: `review-synthesizer`
-//!   (or any hat claiming the review terminal ownership) MUST declare
-//!   BOTH `review.passed` and `review.complete` in its `publishes` set,
-//!   because the preset can branch either way based on the residual
-//!   findings. A publisher that omits one will be rejected by
-//!   `event_policy` at runtime, silently dropping the terminal signal.
+//! - **`check_publisher_terminal_completeness`**: a hat claiming the
+//!   terminal ownership of a pair MUST declare BOTH topics in its
+//!   `publishes` set; otherwise the runtime will reject the missing
+//!   publish, silently dropping the terminal signal.
 //!
 //! Both rules are **structural** — they look at declared triggers and
 //! publishes only, no runtime events required. This is intentional: the
 //! drift already happened in the field, and we want the gate to fire
 //! BEFORE the loop starts, not after the fact.
+//!
+//! 2026-06-24 plan U3: the `REVIEW_PAIR` list is now empty. The new
+//! 10-hat architecture has `review-synthesizer` emit only
+//! `review.complete` (no `review.passed` / `review.failed` pair), so
+//! there is no mutually exclusive terminal pair to police. The lint
+//! functions and tests are retained for KTD-TTC-2 follow-up work that
+//! may add new pairs (`fix.applied` / `fix.exhausted`, etc.) with their
+//! own narrow exemption rules.
 
 use crate::config::RalphConfig;
 
 use super::finding_id::{FINDING_TERMINAL_DUAL_SUBSCRIBE, FINDING_TERMINAL_PUBLISHER_INCOMPLETE};
-use super::{LintFinding, LintSeverity};
+use super::LintFinding;
 
 /// Mutually exclusive terminal topic pairs covered by this lint.
 ///
@@ -40,32 +41,26 @@ use super::{LintFinding, LintSeverity};
 /// other will have the omitted publish rejected at runtime (the runtime
 /// only allows declared publishes), silently dropping the terminal.
 ///
-/// **Scope: review-terminal pair only (2026-06-23-004 plan KTD-RTC).**
-/// The lint intentionally does NOT cover `plan.complete` /
-/// `plan.blocked` because `plan.blocked` is legitimately a
-/// multi-publisher signal (plan-gate, debug-resolver, progress-steward
-/// all publish it; shipper and plan-gate both consume it). Adding it
-/// here would produce false positives on every existing preset.
+/// **2026-06-24 plan U3: empty list.** The new 10-hat architecture
+/// removed the `review.passed` / `review.complete` pair —
+/// `review-synthesizer` now emits only `review.complete`. There is
+/// no mutually exclusive terminal pair in the current preset.
 ///
 /// Future work (KTD-TTC-2): extend the SSOT to cover the other
 /// "branch-decision" pairs (`fix.applied` / `fix.exhausted`, etc.)
 /// with their own narrow exemption rules. The `pub` accessor below
 /// is the API surface for that follow-up.
-const REVIEW_PAIR: &[(&str, &str)] = &[("review.passed", "review.complete")];
+const REVIEW_PAIR: &[(&str, &str)] = &[];
 
 /// Return the list of mutually exclusive terminal pairs covered by
-/// this lint. Currently a single pair — see the comment on
-/// `REVIEW_PAIR` for the rationale and the KTD-TTC-2 follow-up.
+/// this lint. Currently empty — see the comment on `REVIEW_PAIR` for
+/// the rationale and the KTD-TTC-2 follow-up.
 pub fn mutually_exclusive_terminal_pairs() -> &'static [(&'static str, &'static str)] {
     REVIEW_PAIR
 }
 
 /// Default consumer hat ids that legitimately consume a terminal
-/// pair as a unit. The set is intentionally empty; `ce-executor-serial`
-/// opts in to exempting `plan-gate` (see the inline `event_loop`
-/// block in `presets/en/ce-executor-serial.yml`) because plan-gate
-/// legitimately needs to branch on the `verdict` payload field
-/// regardless of which terminal carries it.
+/// pair as a unit. The set is intentionally empty.
 const DEFAULT_EXEMPT_CONSUMERS: &[String] = &[];
 
 /// Detect a downstream hat that triggers on both topics of any
@@ -209,55 +204,15 @@ mod tests {
         serde_yaml::from_str(yaml).expect("test yaml must parse")
     }
 
-    #[test]
-    fn dual_subscribe_is_flagged() {
-        let yaml = r#"
-hats:
-  plan-gate:
-    name: Plan Gate
-    description: gate
-    triggers:
-      - review.passed
-      - review.complete
-    publishes:
-      - plan.complete
-event_loop:
-  starting_event: work.start
-  completion_promise: LOOP_COMPLETE
-tasks:
-  enabled: false
-"#;
-        let cfg = parse(yaml);
-        let findings = check_reviewer_dual_subscribe(&cfg);
-        assert_eq!(findings.len(), 1, "dual subscribe must be flagged");
-        assert_eq!(findings[0].id, FINDING_TERMINAL_DUAL_SUBSCRIBE);
-        assert_eq!(findings[0].severity, LintSeverity::Error);
-        assert_eq!(findings[0].hat.as_deref(), Some("plan-gate"));
-    }
+    /// 2026-06-24 plan U3: REVIEW_PAIR is now empty (10-hat architecture
+    /// has no `review.passed` / `review.complete` pair). The lint must
+    /// be silent on every preset because there is no pair to police.
+    /// These tests pin the empty-pair semantics: regardless of what a
+    /// hat declares, no finding is produced until KTD-TTC-2 adds a new
+    /// pair to `REVIEW_PAIR`.
 
     #[test]
-    fn single_subscribe_is_clean() {
-        let yaml = r#"
-hats:
-  plan-gate:
-    name: Plan Gate
-    description: gate
-    triggers:
-      - review.passed
-    publishes:
-      - plan.complete
-event_loop:
-  starting_event: work.start
-  completion_promise: LOOP_COMPLETE
-tasks:
-  enabled: false
-"#;
-        let cfg = parse(yaml);
-        assert!(check_reviewer_dual_subscribe(&cfg).is_empty());
-    }
-
-    #[test]
-    fn dual_subscribe_with_exemption_is_clean() {
+    fn empty_pair_silent_on_dual_subscribe() {
         let yaml = r#"
 hats:
   observer:
@@ -271,43 +226,6 @@ hats:
 event_loop:
   starting_event: work.start
   completion_promise: LOOP_COMPLETE
-  review_terminal_coherence_exempt_consumers:
-    - observer
-tasks:
-  enabled: false
-"#;
-        let cfg = parse(yaml);
-        assert!(
-            check_reviewer_dual_subscribe(&cfg).is_empty(),
-            "exempted consumer must not be flagged"
-        );
-    }
-
-    /// KTD-TTC-2 follow-up (deferred from 2026-06-23-004 plan).
-    /// The lint intentionally does NOT cover `plan.complete` /
-    /// `plan.blocked` in KTD-RTC because `plan.blocked` is a
-    /// multi-publisher signal (plan-gate, debug-resolver,
-    /// progress-steward all publish it; shipper and plan-gate both
-    /// consume it legitimately). The plan.* pair needs its own
-    /// narrow exemption rule before it can be linted without
-    /// producing false positives on every existing preset. This
-    /// test pins the KTD-RTC scope: the lint must stay silent on
-    /// the plan.* pair until KTD-TTC-2 lands.
-    #[test]
-    fn plan_complete_blocked_dual_subscribe_is_NOT_flagged_in_rtc_scope() {
-        let yaml = r#"
-hats:
-  bad-gate:
-    name: Bad Gate
-    description: branches on both
-    triggers:
-      - plan.complete
-      - plan.blocked
-    publishes:
-      - queue.advance
-event_loop:
-  starting_event: work.start
-  completion_promise: LOOP_COMPLETE
 tasks:
   enabled: false
 "#;
@@ -315,28 +233,24 @@ tasks:
         let findings = check_reviewer_dual_subscribe(&cfg);
         assert!(
             findings.is_empty(),
-            "plan.* pair is deferred to KTD-TTC-2; must not fire in KTD-RTC scope, got {findings:?}"
+            "REVIEW_PAIR is empty; no dual subscribe can be flagged, got {findings:?}"
         );
     }
 
-    /// KTD-TTC-2 follow-up. Same rationale as
-    /// `plan_complete_blocked_dual_subscribe_is_NOT_flagged_in_rtc_scope`:
-    /// `fix.applied` / `fix.exhausted` is a legitimate fixer branch
-    /// decision but a downstream hat observing both needs its own
-    /// exemption rule (e.g. shipper wants to know both "fix is in"
-    /// and "fix is out"). Defer to KTD-TTC-2.
     #[test]
-    fn fix_applied_exhausted_dual_subscribe_is_NOT_flagged_in_rtc_scope() {
+    fn empty_pair_silent_on_publisher_completeness() {
         let yaml = r#"
 hats:
-  bad-fixer:
-    name: Bad Fixer
-    description: branches on both
+  review-synthesizer:
+    name: Synth
+    description: synth
     triggers:
-      - fix.applied
-      - fix.exhausted
+      - review.dimensions.complete
     publishes:
-      - log.entry
+      - review.complete
+topic_owners:
+  review.complete:
+    - review-synthesizer
 event_loop:
   starting_event: work.start
   completion_promise: LOOP_COMPLETE
@@ -344,16 +258,14 @@ tasks:
   enabled: false
 "#;
         let cfg = parse(yaml);
-        let findings = check_reviewer_dual_subscribe(&cfg);
+        let findings = check_publisher_terminal_completeness(&cfg);
         assert!(
             findings.is_empty(),
-            "fix.* pair is deferred to KTD-TTC-2; must not fire in KTD-RTC scope, got {findings:?}"
+            "REVIEW_PAIR is empty; no publisher completeness check can fire, got {findings:?}"
         );
     }
 
-    /// P1-D 修复的回归测试:exemption 引用不存在的 hat_id 时不 panic,
-    /// 静默跳过(为兼容 typo 的 preset)。这不是 lint 的设计意图(应 warning),
-    /// 但至少不应阻塞启动。
+    /// P1-D regression: exemption referencing unknown hat_id does not panic.
     #[test]
     fn exemption_referencing_unknown_hat_does_not_panic() {
         let yaml = r#"
@@ -384,22 +296,21 @@ tasks:
         );
     }
 
+    /// KTD-TTC-2 follow-up pins: these pairs are NOT in REVIEW_PAIR
+    /// today, so the lint must stay silent. When KTD-TTC-2 adds them,
+    /// these tests will need updating.
     #[test]
-    fn publisher_missing_sibling_is_flagged() {
+    fn plan_complete_blocked_dual_subscribe_is_NOT_flagged_in_rtc_scope() {
         let yaml = r#"
 hats:
-  review-synthesizer:
-    name: Synth
-    description: synth
+  bad-gate:
+    name: Bad Gate
+    description: branches on both
     triggers:
-      - review.dimensions.complete
+      - plan.complete
+      - plan.blocked
     publishes:
-      - review.passed
-topic_owners:
-  review.passed:
-    - review-synthesizer
-  review.complete:
-    - review-synthesizer
+      - queue.advance
 event_loop:
   starting_event: work.start
   completion_promise: LOOP_COMPLETE
@@ -407,79 +318,25 @@ tasks:
   enabled: false
 "#;
         let cfg = parse(yaml);
-        let findings = check_publisher_terminal_completeness(&cfg);
-        // `review.passed` declared but `review.complete` not → must flag.
-        // (The hat has no other mutual pair declared, so we get exactly
-        // one finding.)
-        assert_eq!(
-            findings.len(),
-            1,
-            "missing review.complete must be flagged (got {findings:?})"
-        );
-        assert_eq!(findings[0].id, FINDING_TERMINAL_PUBLISHER_INCOMPLETE);
-        assert_eq!(findings[0].topic.as_deref(), Some("review.complete"));
-    }
-
-    /// Mechanism review 2026-06-24 P1: a non-owner hat that
-    /// publishes one terminal as a status readback (e.g. shipper
-    /// mirrors `review.complete` after observing it) is NOT
-    /// required to declare the sibling. Without the P1 narrowing
-    /// this would have produced a false positive.
-    #[test]
-    fn non_owner_publishing_one_terminal_is_NOT_flagged() {
-        let yaml = r#"
-hats:
-  review-synthesizer:
-    name: Synth
-    description: synth
-    triggers:
-      - review.dimensions.complete
-    publishes:
-      - review.passed
-      - review.complete
-  shipper:
-    name: Shipper
-    description: status readback
-    triggers:
-      - review.passed
-    publishes:
-      - review.complete
-topic_owners:
-  review.passed:
-    - review-synthesizer
-  review.complete:
-    - review-synthesizer
-event_loop:
-  starting_event: work.start
-  completion_promise: LOOP_COMPLETE
-tasks:
-  enabled: false
-"#;
-        let cfg = parse(yaml);
-        let findings = check_publisher_terminal_completeness(&cfg);
+        let findings = check_reviewer_dual_subscribe(&cfg);
         assert!(
             findings.is_empty(),
-            "non-owner shipper mirroring review.complete must not be flagged, got {findings:?}"
+            "plan.* pair is deferred to KTD-TTC-2; must not fire, got {findings:?}"
         );
     }
 
-    /// Mechanism review 2026-06-24 P1: when `topic_owners` does
-    /// not register an owner for either terminal, the rule is
-    /// silent for the entire pair. This pins the "no owner →
-    /// no claim" semantics so the lint does not become a
-    /// catch-all that breaks presets that predate the ownership
-    /// map (or operators that have chosen not to use it).
     #[test]
-    fn unowned_pair_is_silent_for_entire_pair() {
+    fn fix_applied_exhausted_dual_subscribe_is_NOT_flagged_in_rtc_scope() {
         let yaml = r#"
 hats:
-  review-synthesizer:
-    name: Synth
-    description: synth
+  bad-fixer:
+    name: Bad Fixer
+    description: branches on both
     triggers:
-      - review.dimensions.complete
+      - fix.applied
+      - fix.exhausted
     publishes:
-      - review.passed
+      - log.entry
 event_loop:
   starting_event: work.start
   completion_promise: LOOP_COMPLETE
@@ -487,63 +344,13 @@ tasks:
   enabled: false
 "#;
         let cfg = parse(yaml);
-        let findings = check_publisher_terminal_completeness(&cfg);
+        let findings = check_reviewer_dual_subscribe(&cfg);
         assert!(
             findings.is_empty(),
-            "no topic_owners entry → rule must be silent, got {findings:?}"
+            "fix.* pair is deferred to KTD-TTC-2; must not fire, got {findings:?}"
         );
     }
 
-    #[test]
-    fn publisher_with_both_terminals_is_clean() {
-        let yaml = r#"
-hats:
-  review-synthesizer:
-    name: Synth
-    description: synth
-    triggers:
-      - review.dimensions.complete
-    publishes:
-      - review.passed
-      - review.complete
-event_loop:
-  starting_event: work.start
-  completion_promise: LOOP_COMPLETE
-tasks:
-  enabled: false
-"#;
-        let cfg = parse(yaml);
-        assert!(check_publisher_terminal_completeness(&cfg).is_empty());
-    }
-
-    #[test]
-    fn publisher_with_neither_terminal_is_clean() {
-        let yaml = r#"
-hats:
-  executor:
-    name: Executor
-    description: impl
-    triggers:
-      - work.ready
-    publishes:
-      - work.done
-event_loop:
-  starting_event: work.start
-  completion_promise: LOOP_COMPLETE
-tasks:
-  enabled: false
-"#;
-        let cfg = parse(yaml);
-        assert!(check_publisher_terminal_completeness(&cfg).is_empty());
-    }
-
-    /// KTD-TTC-2 follow-up. The `fix.applied` / `fix.exhausted`
-    /// pair is a legitimate fixer branch decision and the publisher
-    /// may legitimately declare only the "success" terminal if it
-    /// never exhausts (e.g. when the preset's `max_fix_rounds` is
-    /// small and exhaustion is handled by a separate hat). Defer
-    /// the publisher-completeness check for this pair to KTD-TTC-2
-    /// — the current scope is `review.*` only.
     #[test]
     fn fixer_missing_fix_exhausted_is_NOT_flagged_in_rtc_scope() {
         let yaml = r#"
@@ -552,7 +359,7 @@ hats:
     name: Fixer
     description: applies safe_auto
     triggers:
-      - review.failed
+      - test.failed
     publishes:
       - fix.applied
 event_loop:
@@ -565,7 +372,7 @@ tasks:
         let findings = check_publisher_terminal_completeness(&cfg);
         assert!(
             findings.is_empty(),
-            "fix.* pair is deferred to KTD-TTC-2; must not fire in KTD-RTC scope, got {findings:?}"
+            "fix.* pair is deferred to KTD-TTC-2; must not fire, got {findings:?}"
         );
     }
 }

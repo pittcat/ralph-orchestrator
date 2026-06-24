@@ -6,7 +6,7 @@
   },
   {
     "name": "ce-executor-serial",
-    "description": "Isolated-mode plan-driven work execution with serial code review (no wave), auto-fix, shipping, and manager report",
+    "description": "Isolated-mode plan-driven work execution with TDD executor, validator (full test suite), single overall review, auto-fix, shipping, and manager report",
     "category": "development"
   },
   {

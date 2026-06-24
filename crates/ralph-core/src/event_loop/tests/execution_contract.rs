@@ -638,8 +638,13 @@ fn u6_fix_applied_contract_present_in_ce_executor_serial_preset() {
     .expect("schemas/ce-executor-serial.yml must be readable");
     let ssot: serde_yaml::Value =
         serde_yaml::from_str(&ssot_text).expect("schemas/ce-executor-serial.yml must parse");
+    // 2026-06-24 plan U2: SSOT topics are now nested under top-level
+    // `schemas:` key (matches build.rs merge expectation). Previously
+    // topics were top-level keys, which caused build.rs to skip the
+    // schema merge entirely (inline schemas were the only source).
     let fix_applied_required: Vec<String> = ssot
-        .get("fix.applied")
+        .get("schemas")
+        .and_then(|s| s.get("fix.applied"))
         .and_then(|f| f.get("required_fields"))
         .and_then(|r| r.as_sequence())
         .map(|seq| {
@@ -647,7 +652,7 @@ fn u6_fix_applied_contract_present_in_ce_executor_serial_preset() {
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect()
         })
-        .expect("schemas/ce-executor-serial.yml must declare fix.applied.required_fields (KTD-12)");
+        .expect("schemas/ce-executor-serial.yml must declare schemas.fix.applied.required_fields (KTD-12)");
 
     assert!(
         fix_applied_required.contains(&"commit_count".to_string()),

@@ -349,20 +349,19 @@ pub fn check_re_emit_trap(
 /// - another hat's `triggers` (a downstream workflow hat will pick up the work), or
 /// - a known terminal/completion topic set.
 ///
-/// The 4-hop bound (raised from the 002 plan's 2-hop default by
-/// WRC-U3 / 2026-06-12-003) accommodates the canonical
-/// `ce-executor-serial` workflow: `work.done → review-coordinator
-/// → plan-gate → shipper → reporter → LOOP_COMPLETE` is a
-/// 5-node path. A 2-hop BFS would not see past the first two
-/// transitions and would falsely flag every hat in the chain as
-/// "no activation egress". The 4-hop bound is still tight enough
-/// to catch genuine dead ends (e.g. a hat that publishes to a
-/// topic with no consumer at all) without false-positiving the
-/// long-but-valid ce-executor chain. The T-U1-03 test fixture
-/// uses a 1-hop chain (a single hat publishing to an
-/// unreachable topic) and continues to fire under the wider
-/// bound.
-const EGRESS_MAX_HOPS: usize = 4;
+/// The 8-hop bound (raised from 4 by the 2026-06-24 10-hat refactor)
+/// accommodates the canonical `ce-executor-serial` workflow's review
+/// chain: `review.dimension.done → review-coordinator →
+/// review.dimensions.complete → review-synthesizer → review.complete
+/// → coordinator → plan.complete → shipper → REVIEW_COMPLETE →
+/// reporter → LOOP_COMPLETE` is a 7-hop path. The DFS also wastes
+/// hops on the review-coordinator ↔ dimension-reviewer cycle before
+/// backtracking to find the `review.dimensions.complete` branch, so
+/// the bound must account for that overhead. 8 hops is still tight
+/// enough to catch genuine dead ends (a hat publishing to a topic
+/// with no consumer at all fails at hop 1). The T-U1-03 test fixture
+/// uses a 1-hop chain and continues to fire under the wider bound.
+const EGRESS_MAX_HOPS: usize = 8;
 
 pub fn check_activation_egress(
     config: &RalphConfig,

@@ -43,8 +43,6 @@ mod payload_types;
 mod persistent_mode;
 // 2026-06-23-005 U3: typed dead-letter termination path (R4+R8+AE-3).
 mod plan_blocked_termination;
-// 2026-06-23-005 U5: plan-gate ↔ executor work.ready bridging.
-mod plan_gate_bridge;
 mod progress_steward;
 mod r5_hard_gate_routing;
 mod recovery_envelope_u7_u8;

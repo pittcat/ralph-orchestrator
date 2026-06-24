@@ -21,331 +21,321 @@
 # preset is regenerated on every build; there is no other path that
 # the four consumer chains read.
 #
-# Coverage:
-#   coordinator         -> work.ready
-#   coordinator/executor -> work.failed
-#   executor            -> work.done
+# 2026-06-24 plan U2: 10-hat architecture (TDD executor + validator +
+# overall review). debug-resolver and plan-gate removed; fixer merges
+# diagnosis capability; coordinator directly advances units.
+#
+# Coverage (10 hats):
+#   coordinator         -> work.ready / review.start / plan.complete / plan.blocked
+#   executor            -> work.done / work.failed
+#   validator           -> test.passed / test.failed
+#   fixer               -> fix.applied / fix.exhausted
 #   review-coordinator  -> review.dimension.ready / review.dimensions.complete
 #   dimension-reviewer  -> review.dimension.done / review.dimension.failed
-#   review-synthesizer  -> review.passed / review.failed / review.complete / plan.blocked
-#   fixer               -> fix.applied / fix.exhausted
-#   debug-resolver      -> fix.plan.ready / debug.exhausted / plan.blocked
-#   plan-gate           -> queue.advance / plan.complete / plan.blocked
+#   review-synthesizer  -> review.complete (with fix_plan)
 #   shipper             -> REVIEW_COMPLETE
-#   reporter            -> report.done
+#   reporter            -> report.done / LOOP_COMPLETE
+#   progress-steward    -> task.resume / plan.blocked
 #
-# Serial-review deviation from ce-executor-serial:
-#   * Removed: review.wave.ready (no wave dispatcher in serial path).
-#   * Added  : review.dimension.ready  — emitted by review-coordinator to
-#             kick off a single dimension's review (replaces wave).
-#   * Added  : review.dimension.failed  — emitted by dimension-reviewer
-#             when an individual dimension's review cannot complete
-#             (timeout, parse failure, etc.). Coordinator continues
-#             to the next pending dimension regardless.
-#   * Added  : review.dimensions.complete — emitted by review-coordinator
-#             after every dimension in the sequence reaches a terminal
-#             status. Triggers review-synthesizer. Note the plural
-#             `dimensions` — the event is an aggregate over the whole
-#             review sequence, not a single dimension.
-
-work.ready:
-  required_fields:
-    - plan_name
-    - plan_path
-    - task_id
-    - task_key
-    - step
-    - complexity
-  payload: json_object
-
-work.done:
-  required_fields:
-    - plan_name
-    - plan_path
-    - task_id
-    - task_key
-    - step
-    - commit_count
-    - changed_lines
-  payload: json_object
-
-work.failed:
-  required_fields:
-    - reason
-  payload: json_object
-
-# Serial path replaces the parallel `review.wave.ready` with a per-dimension
-# kick-off event. The shape mirrors the wave payload that dimension-reviewer
-# used to consume, minus the wave metadata. `findings_file` is intentionally
-# absent on this event — it is the dimension-reviewer's output path, not its
-# input.
-review.dimension.ready:
-  required_fields:
-    - dimension
-    - focus
-    - depth
-    - diff_base
-    - intent_summary
-    - changed_files
-    - plan_name
-    - task_id
-    - task_key
-    - step
-  payload: json_object
-
-# Single-dimension completion, mirrors the wave path's `review.dimension.done`
-# payload. Carries the path to the per-dimension findings file the synthesizer
-# will read.
-review.dimension.done:
-  required_fields:
-    - dimension
-    - findings_count
-    - findings_file
-    - plan_name
-    - task_id
-    - task_key
-    - step
-  payload: json_object
-
-# Single-dimension failure, emitted by dimension-reviewer when it cannot
-# complete the review for this specific dimension (timeout, panic, or
-# explicit decision to fail). Coordinator MUST accept a minimal payload
-# (only `dimension` + `reason` is strictly required by the runtime contract)
-# and continue to the next pending dimension. Findings files are NOT
-# required for failed dimensions.
-review.dimension.failed:
-  required_fields:
-    - dimension
-    - reason
-    - plan_name
-    - task_id
-    - task_key
-    - step
-  payload: json_object
-
-# Aggregate event over the entire review sequence. Triggers
-# review-synthesizer. The `dimensions` array is the authoritative per-dim
-# status list; the synthesizer does NOT need to read review-sequence.json
-# to know which dimensions completed. The `dimensions` array element shape
-# (dimension / status / optional findings_file / optional reason) is
-# enforced by agent prompt discipline and by the coordinator + synthesizer
-# instructions, not by EventSchema, because the current EventSchema only
-# validates top-level fields and has no nested array-element validation.
-review.dimensions.complete:
-  # 2026-06-18-004 plan U0 (R4, KTD3): fix_round is the dedup SSOT for
-  # `review.dimensions.complete`. The policy layer keys dedup on
-  # `{plan}::{step}::{task}::{fix_round}` (U5), and `fix.applied` prune
-  # (U1) clears the matching bucket so a re-review round can legally
-  # close a new `review.dimensions.complete`. Default to 0 for the
-  # empty-diff fast path / pre-fix round.
-  required_fields:
-    - plan_name
-    - task_id
-    - task_key
-    - step
-    - dimensions
-    - fix_round
-  payload: json_object
-
-review.passed:
-  required_fields:
-    - plan_name
-    - task_id
-    - task_key
-    - step
-    - findings_count
-    - fix_round
-    - verdict
-    - skip_reason
-  payload: json_object
-  # 2026-06-17-004 plan U1 (R3): `review.passed` is owned exclusively by
-  # `review-synthesizer`. The empty-diff fast path is now closed by
-  # `review-coordinator` emitting `review.dimensions.complete`, and the
-  # synthesizer emits `review.passed(skip_reason=dimensions_complete)`.
-  # Therefore `empty_diff` is removed from the legal skip_reason values and
-  # `review-coordinator` is removed from hat_allowed_values.
-  allowed_values:
-    skip_reason:
-      - trivial_step
-      - dimensions_complete
-  hat_allowed_values:
-    skip_reason:
-      - hat_id: review-synthesizer
-        values:
-          - dimensions_complete
-
-review.failed:
-  required_fields:
-    - plan_name
-    - fix_round
-    - safe_auto_count
-    - gated_manual_count
-    - findings_summary
-    - task_id
-    - task_key
-    - step
-  payload: json_object
-
-review.complete:
-  required_fields:
-    - plan_name
-    - fix_round
-    - verdict
-    - residual_findings_count
-    - findings_summary
-    - task_id
-    - task_key
-    - step
-    - findings_count
-  payload: json_object
-
-fix.applied:
-  required_fields:
-    - plan_name
-    - fix_round
-    - applied_count
-    - failed_count
-    - task_id
-    - task_key
-    - step
-    - commit_count
-    - changed_lines
-  payload: json_object
-
-fix.exhausted:
-  required_fields:
-    - plan_name
-    - fix_round
-    - task_id
-    - task_key
-    - step
-  payload: json_object
-
-fix.plan.ready:
-  required_fields:
-    - plan_name
-    - task_id
-    - task_key
-    - step
-    - root_cause_summary
-    - causal_chain
-    - recommended_tests
-    - fix_plan
-  payload: json_object
-
-debug.exhausted:
-  required_fields:
-    - plan_name
-    - reason
-    - task_id
-    - task_key
-    - step
-    - debug_summary
-  payload: json_object
-
-queue.advance:
-  required_fields:
-    - plan_name
-    - completed_step
-    - next_step
-    - reviewed_task_id
-    - reviewed_task_key
-  payload: json_object
-
-plan.complete:
-  required_fields:
-    - plan_name
-    - completed_steps
-    - task_id
-    - task_key
-    - verdict
-  payload: json_object
-
-plan.blocked:
-  required_fields:
-    - reason
-  payload: json_object
-
-loop.cancel:
-  required_fields:
-    - reason
-  payload: json_object
-
-LOOP_COMPLETE:
-  required_fields:
-    - reason
-  payload: json_object
-
-REVIEW_COMPLETE:
-  required_fields:
-    - plan_name
-    - verdict
-    - pass_or_fail
-    - residual_findings_summary
-  payload: json_object
-
-report.done:
-  required_fields:
-    - report_path
-    - awaiting_decision
-  payload: json_object
-
-# 2026-06-16-001 U3/U5: recovery signal used by origin guard,
-# workflow guard, execution contract, isolated scope, and the
-# `progress-steward` hat. Carries the source event's id and
-# timestamp for freshness filtering (U3 TTL) and audit.
+# Removed topics (2026-06-24 plan U1/U2):
+#   - review.passed / review.failed  (review-synthesizer only emits review.complete)
+#   - fix.plan.ready                 (debug-resolver removed; fixer merges diagnosis)
+#   - debug.exhausted                (debug-resolver removed)
+#   - queue.advance                  (plan-gate removed; coordinator advances directly)
 #
-# `target_task_id` / `source_event_id` removed: the runtime
-# cannot reconstruct a task id from a Rejection (the task
-# id lives in `tasks.jsonl`, not the rejection). See the
-# matching SSOT entry in
-# `presets/schemas/ce-executor-serial.yml` for the
-# rationale.
-#
-# 2026-06-23 fix plan U5 (CB-2): `kind` is the typed-dispatch SSOT
-# surfaced by `build_task_resume_payload` (rejection.rs:503-519).
-# It carries the gate's `RejectionKind::reason_code()` so the
-# coordinator's typed dispatch can route on kind rather than
-# substring-matching `reason`. The U4 typed dispatch (plan
-# 2026-06-23-004) uses `CoordinatorDispatcher::dispatch(kind, count)`
-# driven by this field; without it declared here, the drift
-# detector never reports producer-side omission as a finding.
-task.resume:
-  required_fields:
-    - reason
-    - target_hat
-    - kind
-  payload: json_object
+# New topics (2026-06-24 plan U1/U2):
+#   - test.passed  — validator emits when full test suite passes
+#   - test.failed  — validator emits when full test suite fails
+#   - review.start — coordinator emits to trigger overall review after all units done
 
-# 2026-06-16-001 U5: diagnostic topic emitted when the loop
-# has stalled (no accepted business event for
-# `max_steward_iterations` consecutive turns). Routes to
-# the `progress-steward` hat.
-loop.stalled:
-  required_fields:
-    - reason
-  payload: json_object
+schemas:
+  work.ready:
+    required_fields:
+      - plan_name
+      - plan_path
+      - task_id
+      - task_key
+      - step
+      - complexity
+    payload: json_object
 
-# 2026-06-16-001 U5: RObot/Telegram human guidance topic.
-#
-# The `human.guidance` schema is retained so an operator can still
-# emit it manually from a Telegram/RObot context. The serial preset's
-# `progress-steward` does NOT subscribe to this topic — it is
-# auto-woken on `loop.stalled` only. The 2026-06-17-003 plan
-# (merry-lotus follow-up) records the product decision: automated
-# recovery flows through `task.resume` (structured), not
-# `human.guidance` (free-form, reserved for humans).
-human.guidance:
-  required_fields:
-    - message
-  payload: json_object
+  work.done:
+    required_fields:
+      - plan_name
+      - plan_path
+      - task_id
+      - task_key
+      - step
+      - commit_count
+      - changed_lines
+    payload: json_object
+
+  work.failed:
+    # 2026-06-24 plan U2: work.failed now carries task correlation
+    # fields so the coordinator can identify which unit failed and
+    # emit a meaningful plan.blocked. Previously only `reason` was
+    # required, leaving the coordinator blind to the failing unit.
+    required_fields:
+      - plan_name
+      - task_id
+      - task_key
+      - step
+      - reason
+    payload: json_object
+
+  # 2026-06-24 plan U2: new test.* topics from validator hat.
+  # validator runs `cargo nextest run` (full suite) after executor
+  # completes a unit or fixer applies a fix, then emits one of these.
+  test.passed:
+    required_fields:
+      - plan_name
+      - task_id
+      - task_key
+      - step
+      - tests_run
+      - tests_passed
+    payload: json_object
+
+  test.failed:
+    required_fields:
+      - plan_name
+      - task_id
+      - task_key
+      - step
+      - failures
+      - test_errors
+    payload: json_object
+
+  # 2026-06-24 plan U2: review.start emitted by coordinator when all
+  # units + fix-units complete. Triggers review-coordinator to begin
+  # the 2-dimension review sequence (correctness → testing).
+  review.start:
+    required_fields:
+      - plan_name
+      - task_id
+      - task_key
+    payload: json_object
+
+  # Serial path replaces the parallel `review.wave.ready` with a per-dimension
+  # kick-off event. The shape mirrors the wave payload that dimension-reviewer
+  # used to consume, minus the wave metadata. `findings_file` is intentionally
+  # absent on this event — it is the dimension-reviewer's output path, not its
+  # input.
+  review.dimension.ready:
+    required_fields:
+      - dimension
+      - focus
+      - depth
+      - diff_base
+      - intent_summary
+      - changed_files
+      - plan_name
+      - task_id
+      - task_key
+      - step
+    payload: json_object
+
+  # Single-dimension completion, mirrors the wave path's `review.dimension.done`
+  # payload. Carries the path to the per-dimension findings file the synthesizer
+  # will read.
+  review.dimension.done:
+    required_fields:
+      - dimension
+      - findings_count
+      - findings_file
+      - plan_name
+      - task_id
+      - task_key
+      - step
+    payload: json_object
+
+  # Single-dimension failure, emitted by dimension-reviewer when it cannot
+  # complete the review for this specific dimension (timeout, panic, or
+  # explicit decision to fail). Coordinator MUST accept a minimal payload
+  # (only `dimension` + `reason` is strictly required by the runtime contract)
+  # and continue to the next pending dimension. Findings files are NOT
+  # required for failed dimensions.
+  review.dimension.failed:
+    required_fields:
+      - dimension
+      - reason
+      - plan_name
+      - task_id
+      - task_key
+      - step
+    payload: json_object
+
+  # Aggregate event over the entire review sequence. Triggers
+  # review-synthesizer. The `dimensions` array is the authoritative per-dim
+  # status list; the synthesizer does NOT need to read review-sequence.json
+  # to know which dimensions completed. The `dimensions` array element shape
+  # (dimension / status / optional findings_file / optional reason) is
+  # enforced by agent prompt discipline and by the coordinator + synthesizer
+  # instructions, not by EventSchema, because the current EventSchema only
+  # validates top-level fields and has no nested array-element validation.
+  review.dimensions.complete:
+    # 2026-06-18-004 plan U0 (R4, KTD3): fix_round is the dedup SSOT for
+    # `review.dimensions.complete`. The policy layer keys dedup on
+    # `{plan}::{step}::{task}::{fix_round}` (U5), and `fix.applied` prune
+    # (U1) clears the matching bucket so a re-review round can legally
+    # close a new `review.dimensions.complete`. Default to 0 for the
+    # empty-diff fast path / pre-fix round.
+    required_fields:
+      - plan_name
+      - task_id
+      - task_key
+      - step
+      - dimensions
+      - fix_round
+    payload: json_object
+
+  # 2026-06-24 plan U2: review-synthesizer only emits `review.complete`
+  # (no `review.passed` / `review.failed` pair). The `fix_plan` field
+  # carries the P0/P1 fix plan for coordinator to create fix-unit tasks
+  # when review finds residual issues. `fix_round` is retained for
+  # dedup compatibility — the policy layer keys dedup on
+  # `{plan}::{step}::{task}::{fix_round}`.
+  review.complete:
+    required_fields:
+      - plan_name
+      - fix_round
+      - fix_plan
+      - verdict
+      - residual_findings_count
+      - findings_summary
+      - task_id
+      - task_key
+      - step
+      - findings_count
+    payload: json_object
+
+  fix.applied:
+    required_fields:
+      - plan_name
+      - fix_round
+      - applied_count
+      - failed_count
+      - task_id
+      - task_key
+      - step
+      - commit_count
+      - changed_lines
+    payload: json_object
+
+  # 2026-06-24 plan U2: fix.exhausted now carries `reason` so the
+  # consuming executor (rewrite chance) and shipper (terminal) can
+  # log/branch on the exhaustion cause. fixer emits this when locate
+  # budget (max 10) or fix budget (max 10) is exhausted.
+  fix.exhausted:
+    required_fields:
+      - plan_name
+      - fix_round
+      - task_id
+      - task_key
+      - step
+      - reason
+    payload: json_object
+
+  plan.complete:
+    # 2026-06-24 plan U2: `final_findings_count` is read by shipper
+    # for verdict promotion (pass_with_residuals → pass when
+    # final_findings_count <= max_residuals). `fix_round` is the
+    # dedup SSOT carried from the last review.complete.
+    required_fields:
+      - plan_name
+      - completed_steps
+      - task_id
+      - task_key
+      - verdict
+      - final_findings_count
+      - fix_round
+    payload: json_object
+
+  plan.blocked:
+    required_fields:
+      - reason
+    payload: json_object
+
+  loop.cancel:
+    required_fields:
+      - reason
+    payload: json_object
+
+  LOOP_COMPLETE:
+    required_fields:
+      - reason
+    payload: json_object
+
+  REVIEW_COMPLETE:
+    required_fields:
+      - plan_name
+      - verdict
+      - pass_or_fail
+      - residual_findings_summary
+    payload: json_object
+
+  report.done:
+    required_fields:
+      - report_path
+      - awaiting_decision
+    payload: json_object
+
+  # 2026-06-16-001 U3/U5: recovery signal used by origin guard,
+  # workflow guard, execution contract, isolated scope, and the
+  # `progress-steward` hat. Carries the source event's id and
+  # timestamp for freshness filtering (U3 TTL) and audit.
+  #
+  # `target_task_id` / `source_event_id` removed: the runtime
+  # cannot reconstruct a task id from a Rejection (the task
+  # id lives in `tasks.jsonl`, not the rejection). See the
+  # matching SSOT entry in
+  # `presets/schemas/ce-executor-serial.yml` for the
+  # rationale.
+  #
+  # 2026-06-23 fix plan U5 (CB-2): `kind` is the typed-dispatch SSOT
+  # surfaced by `build_task_resume_payload` (rejection.rs:503-519).
+  # It carries the gate's `RejectionKind::reason_code()` so the
+  # coordinator's typed dispatch can route on kind rather than
+  # substring-matching `reason`. The U4 typed dispatch (plan
+  # 2026-06-23-004) uses `CoordinatorDispatcher::dispatch(kind, count)`
+  # driven by this field; without it declared here, the drift
+  # detector never reports producer-side omission as a finding.
+  task.resume:
+    required_fields:
+      - reason
+      - target_hat
+      - kind
+    payload: json_object
+
+  # 2026-06-16-001 U5: diagnostic topic emitted when the loop
+  # has stalled (no accepted business event for
+  # `max_steward_iterations` consecutive turns). Routes to
+  # the `progress-steward` hat.
+  loop.stalled:
+    required_fields:
+      - reason
+    payload: json_object
+
+  # 2026-06-16-001 U5: RObot/Telegram human guidance topic.
+  #
+  # The `human.guidance` schema is retained so an operator can still
+  # emit it manually from a Telegram/RObot context. The serial preset's
+  # `progress-steward` does NOT subscribe to this topic — it is
+  # auto-woken on `loop.stalled` only. The 2026-06-17-003 plan
+  # (merry-lotus follow-up) records the product decision: automated
+  # recovery flows through `task.resume` (structured), not
+  # `human.guidance` (free-form, reserved for humans).
+  human.guidance:
+    required_fields:
+      - message
+    payload: json_object
 
 # =============================================================================
 # Protocol SSOT extensions (plan 2026-06-20-001 v3.1)
 # Top-level topic keys above remain the payload SSOT (plan 2026-06-16-002).
 # Sections below extend the schemas file into the *full serial protocol*:
 # `build.rs` deep-merges them into the embedded preset at `event_loop.*`
-# paths (see Merge 映射表 in plan). Operators edit ONLY this file +
+# paths (see Merge mapping table in plan). Operators edit ONLY this file +
 # `cargo build` to change behavior. Rust does NOT maintain a duplicate
 # field table — engine reads these values via `ProtocolView`.
 #
@@ -410,21 +400,23 @@ workflow_contract:
   step_handoff:
     progress_task_gate: true
   handoff_topic_seeds:
-    - queue.advance
+    # 2026-06-24 plan U2: 10-hat architecture.
+    # Removed: queue.advance, review.passed, review.failed,
+    #          fix.plan.ready, debug.exhausted.
+    # Added:   test.passed, test.failed, review.start.
     - work.ready
     - work.done
     - work.failed
+    - test.passed
+    - test.failed
+    - review.start
     - review.dimension.ready
     - review.dimension.done
     - review.dimension.failed
     - review.dimensions.complete
-    - review.passed
-    - review.failed
     - review.complete
     - fix.applied
     - fix.exhausted
-    - fix.plan.ready
-    - debug.exhausted
     - plan.complete
     - plan.blocked
     - REPORT_COMPLETE
@@ -445,17 +437,14 @@ state_projection:
         step: "step"
       - kind: mark_step_completed
         step: "step"
-    queue.advance:
-      - kind: advance_step
-        current_step: "next_step"
-        completed_step: "completed_step"
     plan.complete:
       - kind: plan_complete
         final_step: "step"
 
-# 2026-06-23 user decision: 关闭 hat handoff 机制
-# (30 天第 6 次复发根因 — 业务传递通过 task ownership 即可,
-# 不需要 SSOT 文件名五段式结构;revert 上一轮 fix 不再触发)。
+# 2026-06-23 user decision: hat handoff disabled
+# (root cause: 6th recurrence in 30 days — business handoff via
+# task ownership is sufficient; no SSOT filename 5-segment
+# structure needed; reverting a previous fix no longer triggers).
 hat_handoff:
   enabled: false
   artifact:

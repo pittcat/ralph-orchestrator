@@ -1,47 +1,53 @@
-# ce-executor-serial: Isolated Mode Plan-Driven Work Execution with Serial Code Review, Auto-Fix, Debug Resolver, and Manager Report
-# Pattern: Plan → Execute → Serial Review → Auto-Fix → Debug Resolver → Fix Plan → Review → Ship → Report
+# ce-executor-serial: Isolated Mode Plan-Driven Work Execution with TDD, Validator, and Manager Report
+# Pattern: Plan → Execute (TDD) → Validate → Fix (if needed) → Review (after all units) → Ship → Report
 #
-# Same 10-hat topology as ce-executor-serial, but the review stage is
-# STRICTLY SERIAL and LIGHTWEIGHT: review-coordinator walks a fixed
-# 2-dimension sequence (correctness → testing) one dimension at a time,
-# so dimension-reviewer runs as a single instance per activation
-# (no `concurrency`, no wave dispatcher, no `wave_id`).
+# 10-hat topology with TDD executor and validator:
+# - Executor writes tests first, then implements (TDD mode)
+# - Validator runs full test suite after each unit
+# - Fixer handles test failures with diagnosis + fix (merged debug-resolver capability)
+# - Review runs once after all units complete (not per-step)
+# - Coordinator directly advances units (no plan-gate middle layer)
 #
 # 10 Hats:
-# - Coordinator: Parses plan files, assesses complexity, creates working directory and runtime tasks
-# - Executor: TDD implementation following plan content, one runtime task per iteration; also executes fix plans from debug-resolver
-# - review-coordinator: Initializes review-sequence.json on work.done / fix.applied, then emits one `review.dimension.ready` per turn, advancing the sequence until all dimensions reach a terminal status, then emits `review.dimensions.complete` to wake the synthesizer
-# - dimension-reviewer (serial, no concurrency): Reviews a single dimension and emits `review.dimension.done` or `review.dimension.failed`
-# - review-synthesizer: Reads all per-dimension findings files + review-sequence.json, gives the final verdict
-# - Fixer: Applies safe_auto findings up to max_fix_rounds rounds
-# - debug-resolver: Root-cause diagnosis after Fixer exhaustion; ports ce-debug Phase 0–2 discipline
-# - plan-gate: Reconciles review verdict against plan.md / progress.md / runtime tasks; decides queue.advance vs plan.complete
-# - Shipper: Final validation, plan status update, final commit (no PR creation)
+# - Coordinator: Parses plan files, creates unit tasks, advances units on test.passed, triggers review after all units
+# - Executor: TDD implementation — write/update tests first, then implement, run unit tests
+# - Validator: Runs full test suite (auto-discovers test entry point), publishes test.passed / test.failed
+# - Fixer: Diagnoses and fixes test failures (merged debug-resolver: locate max 10 + fix max 10)
+# - review-coordinator: Walks fixed 2-dimension sequence (correctness → testing), one dimension per turn
+# - dimension-reviewer: Reviews a single dimension, emits review.dimension.done / review.dimension.failed
+# - review-synthesizer: Reads per-dimension findings, emits review.complete with fix_plan
+# - Shipper: Final validation, plan status update, final commit
 # - Reporter: Generates manager-facing completion report
+# - progress-steward: Loop-level fallback hat, wakes on loop.stalled
 #
 # Usage:
 #   ralph run -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
 #
-# Serial Review Architecture:
-#   work.done → review-coordinator → review-sequence.json (init 2 dims)
-#     → review.dimension.ready (c) → dimension-reviewer → review.dimension.done (c)
-#     → review.dimension.ready (t) → dimension-reviewer → review.dimension.done (t)
-#     → review-coordinator → review.dimensions.complete
-#     → review-synthesizer → review.passed/failed/complete
-#     → plan-gate → queue.advance (more steps) OR plan.complete (all done)
-#   review.failed → Fixer (≤max_fix_rounds safe_auto rounds) → fix.applied → review-coordinator (re-init 2-dim sequence)
-#   Fixer → fix.exhausted → debug-resolver → fix.plan.ready → Executor → work.done → review-coordinator
-#   debug-resolver → debug.exhausted → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
-#   plan-gate → plan.complete / plan.blocked → Shipper → REVIEW_COMPLETE → Reporter → LOOP_COMPLETE
+# Event Flow:
+#   coordinator → executor (unit-01, TDD) → validator
+#     ├─ test.passed → coordinator → executor (unit-02) → ... → unit-N all done
+#     │                                    ↓
+#     │                                  coordinator → review.start
+#     │                                  review-coordinator → dimension-reviewer(correctness)
+#     │                                  → review-coordinator → dimension-reviewer(testing)
+#     │                                  → review-coordinator → review-synthesizer
+#     │                                  → review.complete + fix_plan
+#     │                                  → coordinator (creates fix-unit tasks)
+#     │                                  → executor (fix-unit) → validator → ...
+#     │                                  → all fix-units done → coordinator → plan.complete
+#     │                                  → shipper → reporter → [LOOP_COMPLETE]
+#     │
+#     └─ test.failed → fixer (diagnose + fix, max 10 locate + 10 fix)
+#                        ├─ fix.applied → validator (re-run tests)
+#                        │   ├─ test.passed → back to main line
+#                        │   └─ test.failed → fixer (continue)
+#                        └─ fix.exhausted → executor (rewrite chance, max 10) → validator → ...
 #
-# Why serial (deviation from ce-executor-serial):
-#   The parallel wave variant mis-routes dimensions, drops workers, and
-#   hits `plan.blocked(reason=dimension_reviewers_failed_to_converge)`
-#   frequently enough that wall-clock and correctness both regress.
-#   Walking the sequence one dimension per turn is deterministic and
-#   fits the isolated single-business-event boundary by construction.
-#   Trade-off: wall time scales linearly with the number of dimensions
-#   (2 dims × 1800s timeout = up to 1h per step).
+# Why this architecture:
+#   - No multi-consumer topics: every event has exactly one subscriber
+#   - No plan-gate: coordinator directly advances units on test.passed
+#   - No debug-resolver: fixer merges diagnosis + fix capability
+#   - No per-step review: review runs once after all units complete
 
 topic_format_whitelist:
   - LOOP_COMPLETE
@@ -52,15 +58,13 @@ tasks:
   coordinator_hats:
     - coordinator
     - executor
-    - plan-gate
+    - validator
     - fixer
-    - debug-resolver
     - shipper
     - reporter
     # progress-steward is a loop-level fallback hat that publishes
-    # `task.resume` to nudge a stuck hat (e.g. plan-gate that never
-    # emitted plan.complete). It is therefore a coordinator-style
-    # hat for the `tasks` workflow contract.
+    # `task.resume` to nudge a stuck hat. It is therefore a
+    # coordinator-style hat for the `tasks` workflow contract.
     - progress-steward
 
 event_loop:
@@ -73,18 +77,12 @@ event_loop:
   # injection. Operators must enable it in their project ralph.yml under
   # the top-level `telemetry:` key, or set RALPH_DIAGNOSTICS=1.
   #
-  # 2026-06-23-004 plan U1 KTD-RTC exemption: `plan-gate` legitimately
-  # consumes BOTH `review.passed` and `review.complete` because it
-  # branches on the payload `verdict` field (`pass` / `pass_with_residuals`
-  # / `fail` may appear on either terminal). The KTD-RTC lint
-  # `preset.review_terminal_dual_subscribe` would otherwise block this
-  # preset from booting. The exemption is auditable here, and the
-  # comment at `crates/ralph-core/src/preset_lint/review_terminal_coherence.rs`
-  # explains why plan-gate is the one allowed exception in
-  # `ce-executor-serial`. If you add another dual-subscribe hat, copy
-  # this pattern with a brief justification.
-  review_terminal_coherence_exempt_consumers:
-    - plan-gate
+  # 2026-06-24 plan U1: review-synthesizer now only emits `review.complete`
+  # (no `review.passed` / `review.failed` pair). The
+  # `review_terminal_coherence` lint's `REVIEW_PAIR` check no longer
+  # applies — there is no mutually exclusive terminal pair in this
+  # architecture. The exempt list is empty by design.
+  review_terminal_coherence_exempt_consumers: []
   completion_promise: "LOOP_COMPLETE"
   required_events: ["report.done"]
   starting_event: "work.start"
@@ -251,44 +249,51 @@ event_loop:
     # (loop.cancel, task.resume, human.*) and orchestrator diagnostics
     # are exempt — the loop itself emits them.
     require_emit_provenance: true
-    # Topic-deny rules with glob support. Serial preset replaces
-    # `review.wave.ready` with three new topics; each is restricted to
-    # its owning hat and locked for the runtime pseudo-hat `ralph`.
-    # The `debug.*` glob uses Topic::matches_str for segment wildcard
-    # matching. Locked-out workflow topics follow the same convention
-    # as ce-executor-serial.
+    # Topic-deny rules with glob support. Each topic is restricted to
+    # its owning hat. The `debug.*` glob is retained for forward-compat
+    # even though debug-resolver is removed.
     topic_deny_rules:
       - {hat_id: executor, topic: build.done}
+      - {hat_id: executor, topic: test.passed}
+      - {hat_id: executor, topic: test.failed}
+      - {hat_id: executor, topic: 'review.*'}
       - {hat_id: coordinator, topic: build.done}
+      - {hat_id: coordinator, topic: 'test.*'}
+      - {hat_id: coordinator, topic: 'review.dimension.*'}
+      - {hat_id: coordinator, topic: 'fix.*'}
       - {hat_id: coordinator, topic: 'debug.*'}
+      # validator is read-only on work.done / fix.applied; cannot emit
+      - {hat_id: validator, topic: build.done}
+      - {hat_id: validator, topic: 'review.*'}
+      - {hat_id: validator, topic: 'fix.*'}
+      - {hat_id: validator, topic: work.ready}
+      - {hat_id: validator, topic: work.done}
+      # fixer cannot emit work/test/review topics
+      - {hat_id: fixer, topic: build.done}
+      - {hat_id: fixer, topic: 'review.*'}
+      - {hat_id: fixer, topic: work.ready}
+      - {hat_id: fixer, topic: work.done}
+      - {hat_id: fixer, topic: 'test.*'}
       # Serial-review topic ownership: only review-coordinator may emit
       # these.
       - {hat_id: dimension-reviewer, topic: review.dimension.ready}
       - {hat_id: dimension-reviewer, topic: review.dimensions.complete}
+      - {hat_id: dimension-reviewer, topic: review.complete}
       - {hat_id: review-synthesizer, topic: review.dimension.ready}
       - {hat_id: review-synthesizer, topic: review.dimensions.complete}
       - {hat_id: review-coordinator, topic: review.dimension.done}
       - {hat_id: review-coordinator, topic: review.dimension.failed}
-      # 2026-06-17-004 plan U1 (R3): review.passed is owned exclusively
-      # by review-synthesizer. review-coordinator is locked out at the
-      # policy layer as a defence-in-depth alongside the `publishes`
-      # scope check (which already rejects review-coordinator emitting
-      # review.passed at the CLI precheck). The empty-diff fast path
-      # now closes the sequence with `review.dimensions.complete`
-      # instead.
-      - {hat_id: review-coordinator, topic: review.passed}
+      - {hat_id: review-coordinator, topic: review.complete}
       # ralph (the loop-runner fallback hat) is locked out of every
-      # workflow topic that downstream hats own. The JSONL origin guard
-      # already rejects ralph at read time, but enforcing the same
-      # deny-list at the policy layer means an event never even lands
-      # in the events file under ralph's hat.
+      # workflow topic that downstream hats own.
       - {hat_id: ralph, topic: review.dimension.ready}
       - {hat_id: ralph, topic: review.dimension.done}
       - {hat_id: ralph, topic: review.dimension.failed}
       - {hat_id: ralph, topic: review.dimensions.complete}
-      - {hat_id: ralph, topic: review.passed}
+      - {hat_id: ralph, topic: review.complete}
       - {hat_id: ralph, topic: work.ready}
-      - {hat_id: ralph, topic: queue.advance}
+      - {hat_id: ralph, topic: test.passed}
+      - {hat_id: ralph, topic: test.failed}
       - {hat_id: ralph, topic: plan.complete}
       - {hat_id: ralph, topic: plan.blocked}
     # U4: enable plan_name equality validation — work.done plan_name
@@ -302,112 +307,14 @@ event_loop:
     # disable the gate (NOT recommended). The 50-line threshold
     # matches the wave gate so the two presets stay synchronized.
     trivial_step_max_changed_lines: 50
-    # NOTE: schemas below are merged from
+    # NOTE: schemas are merged from
     # `presets/schemas/ce-executor-serial.yml` by `build.rs` at compile
-    # time. That file is the authoring single source of truth; the
-    # entries here are kept as a per-field override layer during the
-    # transition. For stable topics, prefer editing the SSOT file and
-    # clearing the matching inline entry here so the merge is trivially
-    # auditable.
-    schemas:
-      work.ready:
-        required_fields: [plan_name, plan_path, task_id, task_key, step, complexity]
-        payload: json_object
-      work.done:
-        required_fields: [plan_name, plan_path, task_id, task_key, step, commit_count, changed_lines]
-        payload: json_object
-      work.failed:
-        required_fields: [reason]
-        payload: json_object
-      # Serial-review topics — base fields only. The full per-field
-      # definitions live in presets/schemas/ce-executor-serial.yml; the
-      # SSOT merge picks them up at compile time.
-      review.dimension.ready:
-        required_fields: [dimension, focus, depth, diff_base, intent_summary, changed_files, plan_name, task_id, task_key, step]
-        payload: json_object
-      review.dimension.done:
-        required_fields: [dimension, findings_count, findings_file, plan_name, task_id, task_key, step]
-        payload: json_object
-      review.dimension.failed:
-        required_fields: [dimension, reason, plan_name, task_id, task_key, step]
-        payload: json_object
-      review.dimensions.complete:
-        # 2026-06-18-006 plan U1: inline `fix_round` mirrors the SSOT at
-        # presets/schemas/ce-executor-serial.yml (KTD1). The `build.rs`
-        # wholesale override for sequence types means this inline entry
-        # is what embedded presets actually enforce.
-        required_fields: [plan_name, task_id, task_key, step, dimensions, fix_round]
-        payload: json_object
-      review.passed:
-        # skip_reason is a hard audit field — every review.passed MUST
-        # declare WHY the review was skipped. The serial preset uses
-        # `dimensions_complete` for the normal all-dimensions pass
-        # (no wave to time out). 2026-06-17-004 plan U1 (R3) removes
-        # `empty_diff` from the legal values because
-        # `review-coordinator` no longer publishes `review.passed` —
-        # the empty-diff fast path now closes the sequence with
-        # `review.dimensions.complete` and the synthesizer emits
-        # `review.passed(skip_reason=dimensions_complete)`.
-        required_fields: [plan_name, task_id, task_key, step, findings_count, fix_round, verdict, skip_reason]
-        payload: json_object
-        allowed_values:
-          skip_reason: ["trivial_step", "dimensions_complete"]
-        hat_allowed_values:
-          skip_reason:
-            - hat_id: review-synthesizer
-              values: ["dimensions_complete"]
-      review.failed:
-        required_fields: [plan_name, fix_round, safe_auto_count, gated_manual_count, findings_summary, task_id, task_key, step]
-        payload: json_object
-      review.complete:
-        required_fields: [plan_name, fix_round, verdict, residual_findings_count, findings_summary, task_id, task_key, step, findings_count]
-        payload: json_object
-      fix.applied:
-        required_fields: [plan_name, fix_round, applied_count, failed_count, task_id, task_key, step, commit_count, changed_lines]
-        payload: json_object
-      fix.exhausted:
-        required_fields: [plan_name, fix_round, task_id, task_key, step]
-        payload: json_object
-      fix.plan.ready:
-        required_fields: [plan_name, task_id, task_key, step, root_cause_summary, causal_chain, recommended_tests, fix_plan]
-        payload: json_object
-      debug.exhausted:
-        required_fields: [plan_name, reason, task_id, task_key, step, debug_summary]
-        payload: json_object
-      queue.advance:
-        required_fields: [plan_name, completed_step, next_step, reviewed_task_id, reviewed_task_key]
-        payload: json_object
-      plan.complete:
-        required_fields: [plan_name, completed_steps, task_id, task_key, verdict]
-        payload: json_object
-      plan.blocked:
-        required_fields: [reason]
-        payload: json_object
-      loop.cancel:
-        required_fields: [reason]
-        payload: json_object
-      LOOP_COMPLETE:
-        required_fields: [reason]
-        payload: json_object
-      REVIEW_COMPLETE:
-        required_fields: [plan_name, verdict, pass_or_fail, residual_findings_summary]
-        payload: json_object
-      report.done:
-        required_fields: [report_path, awaiting_decision]
-        payload: json_object
-      task.resume:
-        required_fields: [reason, target_hat, kind]
-        payload: json_object
-      loop.stalled:
-        required_fields: [reason]
-        payload: json_object
-      # human.guidance is retained for operator/manual emit; the
-      # serial preset's progress-steward does NOT subscribe to it
-      # (auto-wake is loop.stalled only — see U4 / 2026-06-17-003
-      # plan).
-      human.guidance:
-        required_fields: [message]
-        payload: json_object
+    # time. That file is the authoring single source of truth. The
+    # inline `schemas:` block was removed (2026-06-24 plan U2) to
+    # eliminate inline-vs-SSOT drift; every topic's required_fields
+    # is owned by the SSOT file. Edit the SSOT file to change any
+    # payload contract.
+    schemas: {}
 
 cli:
   backend: "claude"
@@ -428,16 +335,21 @@ core:
 hats:
   coordinator:
     name: "📋 Coordinator"
-    description: "Parses plan files, assesses complexity, creates working directory and runtime tasks."
-    triggers: ["work.start", "task.resume"]
-    publishes: ["work.ready", "work.failed"]
-    default_publishes: "work.failed"
-    terminal_events: ["work.ready", "work.failed"]
+    description: "Parses plan files, creates unit tasks, advances next unit on test.passed, triggers review after all units complete."
+    # 2026-06-24 plan U1: coordinator directly advances unit flow (plan-gate removed)
+    # - test.passed → advance to next unit via work.ready
+    # - review.complete → parse fix_plan, create fix-unit tasks
+    # - work.failed → executor could not complete the unit; emit plan.blocked
+    # - all units + fix-units complete → plan.complete
+    triggers: ["work.start", "task.resume", "test.passed", "review.complete", "work.failed"]
+    publishes: ["work.ready", "review.start", "plan.complete", "plan.blocked"]
+    default_publishes: "plan.blocked"
+    terminal_events: ["work.ready", "review.start", "plan.complete", "plan.blocked"]
     instructions: |
-      ## EXECUTION MODE — Plan Parsing, Task Decomposition, and Complexity Assessment
+      ## EXECUTION MODE — Plan Parsing, Unit Advancement, and Review Triggering
 
-      You own plan parsing, task decomposition, complexity assessment, and queue initialization.
-      Do not implement. Do not review.
+      You own plan parsing, unit task creation, unit flow advancement, and overall review triggering.
+      Do NOT implement code. Do NOT review code.
 
       ### Task Resume Reception
       2026-06-23 update: hat_handoff is disabled for this preset
@@ -456,7 +368,7 @@ hats:
          `CoordinatorDispatcher` after 3 consecutive same-kind
          `task.resume`; do not emit it manually.
 
-      ### Plan File Resolution
+      ### Plan File Resolution (work.start trigger)
       - Read the prompt to find the plan file path. Supports `.md` and `.html` formats.
       - **Error handling:**
         - File does not exist → publish `work.failed`, payload: `{"reason": "plan file not found: <path>"}`
@@ -505,7 +417,7 @@ hats:
         - `ce-executor:{plan_name}:step-02:{slug}`
       - Each task description includes: Goal, Files, Approach, Execution note, Verification
       - Only create current step's tasks (do not pre-create future steps)
-      - **Current U Principle (HARD RULE)**: only call `ralph tools task ensure` for the *current* U. Do NOT pre-create tasks for U2, U3, etc. — the runtime will reject the sibling `ensure` and surface a `task.resume` so the failure is loud, not silent. When U1 closes, plan-gate will dispatch a new `work.ready` and the next coordinator activation will create U2's task.
+      - **Current U Principle (HARD RULE)**: only call `ralph tools task ensure` for the *current* U. Do NOT pre-create tasks for U2, U3, etc. — the runtime will reject the sibling `ensure` and surface a `task.resume` so the failure is loud, not silent. When U1 closes, coordinator will dispatch a new `work.ready` and the next coordinator activation will create U2's task.
       - **R4 carve-out — sub-units**: when a plan explicitly splits a U into sub-units (`U1a / U1b / U1c`), use keys `...:u1a-impl`, `...:u1b-impl`, `...:u1c-impl`. The runtime collapses these to the same base unit so they coexist alongside the parent `U1` task when needed.
       - **Trivial mode**: create one summary task, key `ce-executor:{plan_name}:trivial`
 
@@ -542,12 +454,12 @@ hats:
       - If recording fails, note `start_sha: unavailable` and reason in context.md
 
       ### Branch / Worktree Policy (HARD RULE)
-      - **MUST NOT create, switch, or rename any branch.** Coordinator 阶段只做记录，不做 git checkout / git switch / git branch 任何动作。
+      - **MUST NOT create, switch, or rename any branch.** The coordinator phase only records state; do NOT run any git checkout / git switch / git branch action.
       - The loop runs in the current working branch by default. ALL commits land here.
       - A new worktree + branch is created **only** when the user passes `--worktree` to `ralph run`; that is handled by the orchestrator, not by the agent. You cannot and must not replicate it.
       - Do NOT run `git checkout -b ...`, `git switch -c ...`, `git worktree add ...`, or any equivalent. If a task seems to require a new branch, stop and publish `work.failed` with `reason: "branch creation forbidden in this preset; pass --worktree to ralph run"`.
 
-      ### Pre-Publish Validation
+      ### Pre-Publish Validation (work.start only)
       - **2026-06-17-003 U5**: trust the `## ORCHESTRATOR CONTEXT`
         block — if the open_tasks list is empty, the projector
         has not yet received your `work.ready` events, or the
@@ -555,12 +467,42 @@ hats:
         `ralph tools task ensure` directly to backfill; emit a
         `work.ready` for the missing unit and let the loop
         route it.
-      - **必选检查**: 执行 `ralph tools task list` 验证步骤 1 的 runtime tasks 已创建
-      - 如果 task list 为空或命令失败（说明 `ralph tools task ensure` 未被正确执行）：
-        - 返回 Runtime Task Creation 步骤，确保 tasks 被创建
-        - 重试最多 2 次
-        - 2 次都失败 → 发布 `work.failed`, payload: `{"reason": "task creation failed after 2 attempts"}`
-      - 只有验证通过后才能执行 Event Publishing
+      - **Mandatory check**: run `ralph tools task list` to verify step 1 runtime tasks have been created
+      - If the task list is empty or the command fails (meaning `ralph tools task ensure` did not run correctly):
+        - Return to the Runtime Task Creation step and ensure tasks are created
+        - Retry up to 2 times
+        - If 2 attempts fail → publish `work.failed`, payload: `{"reason": "task creation failed after 2 attempts"}`
+      - Only after validation passes may you proceed to Event Publishing
+
+      ### Unit Advancement (test.passed trigger)
+      When `test.passed` arrives, the validator has confirmed the current unit's full test suite passes:
+      1. Read `progress.md` and `plan.md` to determine the current unit and the next unit
+      2. If there is a next unit:
+         - Create the runtime task for the next unit (if not already created)
+         - Publish `work.ready` with payload containing the next unit's `task_id`, `task_key`, `step`, `plan_path`, `plan_name`, `complexity`
+         - Stop — do NOT proceed to any other work
+      3. If the current unit is the last one (all plan units complete):
+         - Publish `review.start` with payload: `plan_name`, `task_id`, `task_key`
+         - Stop — the review flow is taken over by review-coordinator
+
+      ### Fix Plan Handling (review.complete trigger)
+      When `review.complete` arrives, review-synthesizer has finished the overall review:
+      1. Read the `fix_plan` field from the `review.complete` payload (P0/P1 fix plan, grouped by unit)
+      2. If `fix_plan` is empty or null (no issues to fix):
+         - Publish `plan.complete` with payload: `plan_name`, `completed_steps`, `task_id`, `task_key`, `verdict: "pass"`
+         - Stop
+      3. If `fix_plan` is non-empty (issues to fix):
+         - Create a runtime task for each fix-unit, key format: `ce-executor:{plan_name}:fix-{NN}:{slug}`
+         - Publish `work.ready` for the first fix-unit with payload containing the fix-unit's `task_id`, `task_key`, `step: "fix-01"`, `plan_path`, `plan_name`, `complexity: "small"`
+         - Stop — subsequent fix-units are advanced by the unit advancement logic after the validator's `test.passed`
+      4. After all fix-units complete (on receiving the last fix-unit's `test.passed`):
+         - Publish `plan.complete` with payload: `plan_name`, `completed_steps`, `task_id`, `task_key`, `verdict: "pass_with_residuals"` (or `"pass"` if no residuals)
+
+      ### Executor Failure Handling (work.failed trigger)
+      When `work.failed` arrives, the executor could not complete the unit:
+      1. Read `reason` from the `work.failed` payload
+      2. Publish `plan.blocked` with payload: `{"reason": "executor failed: <reason>"}`
+      3. Stop — the shipper will translate `plan.blocked` into `REVIEW_COMPLETE` for the reporter
 
       ### Event Publishing
       - Publish `work.ready` with payload:
@@ -570,7 +512,7 @@ hats:
         - `step`: step identifier (e.g., "step-01" or "trivial")
         - `preflight_checks`: list of hard prerequisites the executor must verify before implementation
       - Stop — do not continue to other work
-      - **发布 work.ready 后立即停止**——不得继续执行任何其他工作，包括模拟其他 hat 的行为或发其他事件
+      - **Stop immediately after publishing work.ready** — do NOT continue any other work, including simulating other hats' behavior or emitting other events
       - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit work.ready --json '{...}'` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
 
       ### Constraints
@@ -578,11 +520,11 @@ hats:
       - MUST NOT create future-step tasks (trivial mode excepted)
       - MUST NOT modify the plan file
       - MUST complete all file creation and task creation before publishing `work.ready`
-      - **MUST NOT publish events for any hat other than coordinator** (work.ready or work.failed only)
+      - **MUST NOT publish events for any hat other than coordinator** (work.ready / review.start / plan.complete / plan.blocked only)
       - **MUST NOT create, switch, or rename branches** — see Branch / Worktree Policy above
 
       ### Plan Frontmatter Status Discipline (HARD RULE)
-      - After every unit closure (i.e. when a `work.done` lands and the corresponding runtime task is `closed`), the **next** coordinator activation MUST update the plan's YAML frontmatter `status` field before publishing the next `work.ready`.
+      - After every unit closure (i.e. when a `test.passed` lands and the corresponding runtime task is `closed`), the **next** coordinator activation MUST update the plan's YAML frontmatter `status` field before publishing the next `work.ready`.
       - Allowed `status` enum values (kept in sync with `crates/ralph-cli/src/doctor.rs` `ALLOWED_PLAN_STATUSES`):
         - `draft` — plan written but no U dispatched
         - `active` — at least one U in flight, no U stalled
@@ -595,28 +537,29 @@ hats:
 
   executor:
     name: "⚙️ Executor"
-    description: "TDD implementer following plan content, one runtime task per iteration."
-    triggers: ["work.ready", "fix.plan.ready"]
+    description: "TDD implementer — write/update tests first, then implement code, run unit tests on completion."
+    # 2026-06-24 plan U1: TDD mode + fix.exhausted rewrite opportunity
+    # - work.ready → normal unit implementation (TDD: tests first, then implement)
+    # - fix.exhausted → fixer could not fix; executor gets rewrite opportunity (max 10)
+    triggers: ["work.ready", "fix.exhausted"]
     publishes: ["work.done", "work.failed"]
     terminal_events: ["work.done", "work.failed"]
     instructions: |
-      ## EXECUTOR MODE — Plan-Driven Task Execution
+      ## EXECUTOR MODE — TDD Plan-Driven Task Execution
 
-      You own implementation. Follow existing patterns, test continuously, and ship complete features.
+      You own implementation. Use TDD mode: write/update tests first, then implement code.
+      The full test suite is the validator's responsibility; you only run unit tests.
       You MUST NOT invoke `[Tool] Agent` or any parallel subagent tool in this preset.
 
       ### HARD RULES (P1-1, P2-2)
 
-      - **NEVER emit `build.done` / `test.done` / `lint.done`** —
+      - **NEVER emit `build.done` / `test.done` / `test.passed` / `test.failed`** —
         those topics are not in your `publishes` list and will be
         rejected by the isolated scope guard. Put verification
         results (build / test / lint summaries) into the
         `work.done` payload (e.g. as
         `verification: { build_ok, test_ok, lint_ok }`) so the
-        review-coordinator can read them from a single event.
-        Emitting partial topics triggers a `task.resume` retry
-        loop and is a leading indicator of the 2026-06-13
-        incident's 6x scope-drop pattern.
+        validator can read them from a single event.
       - **Commit BEFORE you emit `work.done`.** The
         `work.done` payload's `commit_count` and `changed_lines`
         fields are derived from the diff between the previous
@@ -624,10 +567,9 @@ hats:
         `work.done` before `git commit`, the contract rejects
         the event as a payload mismatch and the loop stalls.
       - **Update `progress.md` checkboxes** for the step you
-        just completed. The plan-gate reads `progress.md` to
-        decide `queue.advance` vs `plan.complete`; a stale
-        checkbox (left unchecked after the work is committed)
-        forces an unnecessary review-synthesizer round.
+        just completed. The coordinator reads `progress.md` to
+        decide unit advancement; a stale checkbox forces an
+        unnecessary review round.
         - **2026-06-17-003 U5 (state projection)**: in Phase 1
           the orchestrator is the canonical writer for
           `progress.md`; the projector marks the step as
@@ -666,13 +608,21 @@ hats:
 
       ### Read State (on every activation)
       1. Determine activation source and read payload fields:
-         - `work.ready`: read `task_id`, `task_key`, `plan_path`, `plan_name`, `step`, `complexity`. When `reviewed_task_id` / `reviewed_task_key` / `next_step` are present (plan-gate step advance), those are the *reviewed* step's tasks for correlation only — use `task_id` / `step` for the work you must execute now.
-         - `fix.plan.ready`: read `plan_name`, `task_id`, `task_key`, `step`, `root_cause_summary`, `causal_chain`, `recommended_tests`, `fix_plan`. This is a debug-resolver handoff, NOT a normal plan step.
+         - `work.ready`: read `task_id`, `task_key`, `plan_path`, `plan_name`, `step`, `complexity`.
+         - `fix.exhausted`: read `plan_name`, `fix_round`, `task_id`, `task_key`, `step`, `reason`. This is the rewrite opportunity after fixer could not fix it; it is NOT a normal plan step. Read `fix-log.md` to understand what fixer already tried and avoid repeating the same fix paths.
       2. Read runtime task:
-         - For `work.ready`: `ralph tools task show <task_id> --format json`
-         - For `fix.plan.ready`: use `ralph tools task show <task_id> --format json` to load the task for correlation; the actual work is defined by the payload's `fix_plan`
+         - `ralph tools task show <task_id> --format json`
       3. Read `context.md` and `plan.md` and `progress.md`
       4. Search memories for relevant patterns
+
+      ### TDD Execution Mode (HARD RULE)
+      Use TDD mode: write/update tests first, then implement code.
+      1. **RED**: Write or update tests first; the tests should fail (proving the bug or missing feature)
+      2. **GREEN**: Implement the minimal code to make the tests pass
+      3. **REFACTOR**: Refactor the code while keeping tests passing
+
+      On completion, run **unit tests** (NOT the full test suite — that is the validator's responsibility).
+      If unit tests fail, do NOT publish `work.done`; keep fixing until unit tests pass.
 
       ### Preflight Contract (HARD RULE)
       If the `work.ready` payload contains `preflight_checks`:
@@ -697,7 +647,7 @@ hats:
       ### Complexity Routing
       **Trivial** (`complexity: trivial`):
       - Implement directly (1-2 files), run minimal verification, commit with `git add <files>` + `git commit`
-      - Publish `work.done` with payload: `plan_name`, `plan_path`, `commit_count`, `changed_lines`, `task_id`, `task_key`, `step` (MUST include all three from the triggering event payload — review-coordinator needs them for correlation)
+      - Publish `work.done` with payload: `plan_name`, `plan_path`, `commit_count`, `changed_lines`, `task_id`, `task_key`, `step` (MUST include all three from the triggering event payload — validator needs them for correlation)
       - Skip detailed task-by-task execution
 
       **Small/Large**: Enter standard task execution loop.
@@ -713,23 +663,18 @@ hats:
         2. Update `progress.md` (path: `.agents/scratchpad/ce-executor/{plan_name}/progress.md`): set `Current Step`, `Runtime Task ID`, `Status: in_progress`, update time. Concrete shape (replace `<...>` placeholders, do NOT wrap in nested fenced block — this section is itself a fenced block):
 
            ## Current Step
-           - <step number + title from `work.ready` payload `step` field, e.g. `step-04 (U4 progress/task 轻量对账)`>
+           - <step number + title from `work.ready` payload `step` field, e.g. `step-04 (U4 progress/task lightweight reconciliation)`>
 
            ## Active Task
            - Runtime Task ID: <task_id from step 1, e.g. `task-1781221021-bdf3`>
            - Status: in_progress
            - Updated: <`date -u +%FT%TZ`>
         3. Read task files and patterns
-        4. Implement (test-first / characterization-first per Execution note)
-        5. Run and verify tests
+        4. TDD: write/update tests first (RED), then implement code (GREEN), then refactor (REFACTOR)
+        5. Run and verify unit tests (NOT the full test suite — that is the validator's job)
         6. ralph tools task close <task_id>     ← missing → contract rejection
         7. Evaluate incremental commit
       ```
-
-      **Execution strategy per Execution note:**
-      - `test-first`: RED → GREEN → REFACTOR. Write failing test first.
-      - `characterization-first`: capture existing behavior first, then modify.
-      - none: pragmatic execution, but new behavior must have tests.
 
       **Test Discovery:** Before modifying files, find related test files via import/pattern search.
 
@@ -772,44 +717,31 @@ hats:
       ### Step Advancement
       - All tasks in current step done → update `progress.md` (move step to Completed Steps)
       - Publish `work.done` with `plan_name`, `plan_path`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
-      - Do NOT publish `queue.advance` from the executor. Queue advancement is owned by `plan-gate`.
+      - Do NOT publish `test.passed` or `test.failed` — those are owned by validator.
 
-      ### work.ready Activation (step advance from plan-gate)
-      When triggered by `work.ready` from `plan-gate` (payload includes `next_step` or `reviewed_task_id`):
-      - Use `task_id` / `step` from the payload — plan-gate already ensured runtime tasks for the next step.
-      - `ralph tools task start <task_id>` for the handed-off task.
-      - Update `progress.md` (path: `.agents/scratchpad/ce-executor/{plan_name}/progress.md`): set `Current Step`, `Runtime Task ID`, `Status: in_progress`, and update time.
-      - Begin implementation (follow the Task Execution Loop below).
-      - Publish `work.done` when the task is complete, carrying this task's `task_id` and `task_key` (not `reviewed_task_id`/`reviewed_task_key`).
-
-      ### FIX PLAN EXECUTION MODE (fix.plan.ready only)
-      When triggered by `fix.plan.ready` (from `debug-resolver`):
-      - You are executing a root-cause fix plan, NOT advancing the next plan.md step.
-      - Do NOT create runtime tasks for a new step and do NOT modify `progress.md` Completed Steps.
-      - **Test-first**: write or update the tests listed in `recommended_tests` before changing production code. The tests should fail in a way that proves the root cause.
-      - **One root-cause fix at a time**: execute only the steps in `fix_plan`. Do not bundle drive-by refactors, formatting, or unrelated changes.
-      - If implementation disproves the causal chain or a prediction (e.g., the hypothesized code path is not actually exercised), stop and publish `work.failed` with a clear reason such as `"fix plan invalidated: causal chain prediction failed"`. Do NOT force the fix to appear successful.
-      - After applying the fix, run verification:
-        - targeted tests from `recommended_tests`
-        - broader test suite for regressions
-        - build / lint / typecheck
-      - If verification fails, revert the change and publish `work.failed`.
-      - If verification passes, publish a normal `work.done` with `plan_name`, `plan_path`, `task_id`, `task_key`, `step`. The fix will re-enter review via `review-coordinator`.
+      ### fix.exhausted Activation (Rewrite Opportunity)
+      When triggered by `fix.exhausted` (from fixer):
+      - You get a rewrite opportunity. The fixer already tried to fix but failed; you need to re-examine the code and rewrite it.
+      - Read `fix-log.md` to understand what the fixer already tried and avoid repeating the same fix paths.
+      - Read `.agents/scratchpad/ce-executor/{plan_name}/findings.md` to understand the review findings.
+      - Use TDD mode to rewrite: write tests first to prove the problem, then rewrite the code to make tests pass.
+      - On completion, publish a normal `work.done`; the validator will re-run the full test suite.
+      - If the rewrite also fails, publish `work.failed` with payload: `reason: "executor rewrite failed: <detail>"`.
 
       ### Events You MUST and MUST NOT Emit
       - **Terminal events**: Only `work.done` (success) and `work.failed` (blocked/failure) advance the workflow. You MUST emit one of these at the end of every iteration.
-      - **DO NOT emit progress events**: Do NOT emit `build.done`, `test.done`, `lint.done`, or any verification progress topic. Record verification results in files/logs and include them in the final `work.done` payload if relevant.
-      - **DO NOT emit**: `queue.advance`, `review.dimension.ready`, `review.dimension.done`, `review.dimension.failed`, `review.dimensions.complete`, `review.passed`, `review.failed`, `review.complete`, `fix.applied`, `plan.complete`, `REVIEW_COMPLETE`, `LOOP_COMPLETE`, `report.done` — these belong to other hats.
+      - **DO NOT emit progress events**: Do NOT emit `build.done`, `test.done`, `test.passed`, `test.failed`, `lint.done`, or any verification progress topic. Record verification results in files/logs and include them in the final `work.done` payload if relevant.
+      - **DO NOT emit**: `review.dimension.ready`, `review.dimension.done`, `review.dimension.failed`, `review.dimensions.complete`, `review.complete`, `fix.applied`, `plan.complete`, `REVIEW_COMPLETE`, `LOOP_COMPLETE`, `report.done` — these belong to other hats.
 
       ### Failure Handling
       - If command fails, dependency missing, or blocked:
         - Record `fix` memory: `ralph tools memory add`
-        - If unresolvable this iteration, publish `work.failed` with `task_id`, `task_key`, `reason`
+        - If unresolvable this iteration, publish `work.failed` with `plan_name`, `task_id`, `task_key`, `step`, `reason`
 
       ### Constraints
       - ONE runtime task per iteration (trivial mode excepted)
       - MUST implement the task from current payload, not next in progress.md
-      - Tests before implementation (test-first mode)
+      - TDD: tests before implementation
       - No features outside task description
       - Code in repo, docs in shared directory
       - **MUST NOT create, switch, or rename branches** — see Branch / Worktree Policy above
@@ -821,51 +753,93 @@ hats:
       - <50: Choose safe default + document in `decisions.md`
       - `decisions.md` format: ID (DEC-NNN), confidence, alternatives, reasoning, reversibility
 
+  validator:
+    name: "✅ Validator"
+    description: "Runs the full test suite, publishes test.passed or test.failed."
+    # 2026-06-24 plan U1: new validator hat
+    # - work.done → run full test suite → test.passed / test.failed
+    # - fix.applied → run full test suite (re-run after fixer applies) → test.passed / test.failed
+    triggers: ["work.done", "fix.applied"]
+    publishes: ["test.passed", "test.failed"]
+    terminal_events: ["test.passed", "test.failed"]
+    instructions: |
+      ## VALIDATOR MODE — Full Test Suite Execution
+
+      You own running the full test suite. After the executor finishes implementation, you run the full test suite; after the fixer applies a fix, you re-run the full test suite.
+      Do NOT implement code, review code, or fix code.
+
+      ### Read State
+      1. Read fields from the triggering event payload:
+         - `work.done`: `plan_name`, `plan_path`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
+         - `fix.applied`: `plan_name`, `fix_round`, `applied_count`, `failed_count`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
+      2. Read `context.md` and `plan.md` for project background
+      3. Read the project's `AGENTS.md` / `CLAUDE.md` / `README.md` for test entry point rules
+
+      ### Discover Test Entry Point (HARD RULE)
+      **Do NOT assume the test toolchain.** Discover the project's test entry point by this priority:
+      1. If the project's `AGENTS.md` / `CLAUDE.md` explicitly specifies a test command, use that command
+      2. If the project has `./scripts/run-tests.sh` or `just test` / `make test`, prefer that
+      3. If the project has `package.json`, run `npm test` (or `yarn test` / `pnpm test`)
+      4. If the project has `Cargo.toml`, run `cargo nextest run` (fallback: `cargo test --workspace`)
+      5. If the project has `pytest.ini` / `pyproject.toml` / `setup.cfg`, run `pytest`
+      6. If the project has `go.mod`, run `go test ./...`
+      7. If none of the above match, read the project docs to find the test entry point; if not found, emit `test.failed` and explain the reason in `test_errors`
+
+      Follow the project's parallel/serial grading rules (if documented).
+
+      Parse the test results:
+      - Record `tests_run` (total test count)
+      - Record `tests_passed` (passing test count)
+      - Record `failures` (list of failed tests, each with test name + failure summary)
+      - Record `test_errors` (list of compile errors or runtime errors)
+
+      ### Event Publishing
+      When all tests pass:
+      ```bash
+      ralph emit test.passed --json '{
+        "plan_name": "<plan_name>",
+        "task_id": "<task_id>",
+        "task_key": "<task_key>",
+        "step": "<step>",
+        "tests_run": <int>,
+        "tests_passed": <int>
+      }'
+      ```
+
+      When tests have failures:
+      ```bash
+      ralph emit test.failed --json '{
+        "plan_name": "<plan_name>",
+        "task_id": "<task_id>",
+        "task_key": "<task_key>",
+        "step": "<step>",
+        "failures": [{"test": "<test_name>", "summary": "<failure summary>"}],
+        "test_errors": ["<error 1>", "<error 2>"]
+      }'
+      ```
+
+      MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit` only.
+
+      ### Constraints
+      - MUST NOT implement code
+      - MUST NOT modify code
+      - MUST NOT review code
+      - MUST NOT emit `work.done`, `fix.applied`, `review.*`, `plan.*` — those belong to other hats
+      - MUST run the full test suite (not just unit tests — that is the executor's job)
+      - MUST parse and report accurate test counts
+
   review-coordinator:
     name: "🔍 Review Coordinator (Serial)"
-    description: "Owns the review-sequence.json state machine. Walks a fixed 2-dimension sequence (correctness → testing), one dimension per turn, until all dimensions reach a terminal status; then emits review.dimensions.complete."
-    # Serial triggers: work.done / fix.applied initialize the sequence;
-    # each per-dimension completion re-enters the coordinator so it can
-    # either kick the next dimension or close the sequence.
-    triggers: ["work.done", "fix.applied", "review.dimension.done", "review.dimension.failed"]
-    # 2026-06-17-004 plan U1 (R3): review.passed is owned by review-synthesizer
-    # only. review-coordinator's empty-diff fast path was the source of a
-    # dual-publisher race with the synthesizer; ownership is now scoped to a
-    # single hat. review-coordinator instead emits `review.dimensions.complete`
-    # on the empty-diff path, with the per-dim `dimensions` array marked
-    # `status: done` and `findings_file: null`. The synthesizer reads that
-    # payload, sees no findings, and emits
-    # `review.passed(skip_reason=dimensions_complete)`.
+    description: "Overall review sequence state machine. On review.start, walks the 2-dimension sequence (correctness → testing); advances one dimension per turn; emits review.dimensions.complete when all dimensions finish."
+    # 2026-06-24 plan U1: review runs only once after all units complete
+    # - review.start → initialize sequence, emit first review.dimension.ready
+    # - review.dimension.done/failed → advance to next dimension or close the sequence
+    triggers: ["review.start", "review.dimension.done", "review.dimension.failed"]
     publishes: ["review.dimension.ready", "review.dimensions.complete"]
     terminal_events: ["review.dimension.ready", "review.dimensions.complete"]
     obligations:
-      - on_trigger: "work.done"
+      - on_trigger: "review.start"
         must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
-        conditional_must_emit:
-          - when: { commit_count_min: 1 }
-            must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
-          - when: { changed_lines_min: 50 }
-            must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
-          - when: { has_untracked: true }
-            must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
-      - on_trigger: "fix.applied"
-        # U3 (2026-06-18-004 plan, R1, KTD3): after `fix.applied`
-        # we MUST walk the 2-dim sequence again via
-        # `review.dimension.ready`. The previous
-        # `review.dimensions.complete` shortcut allowed the
-        # perky-maple P2-5 spiral where the agent emitted the
-        # 5th `review.dimensions.complete` without a fresh
-        # walk. Closing the shortcut here is a structural fix
-        # that complements the U1 policy prune and the U5
-        # complete dedup.
-        must_emit_any_of: ["review.dimension.ready"]
-        conditional_must_emit:
-          - when: { commit_count_min: 1 }
-            must_emit_any_of: ["review.dimension.ready"]
-          - when: { changed_lines_min: 50 }
-            must_emit_any_of: ["review.dimension.ready"]
-          - when: { has_untracked: true }
-            must_emit_any_of: ["review.dimension.ready"]
       - on_trigger: "review.dimension.done"
         must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
       - on_trigger: "review.dimension.failed"
@@ -873,36 +847,15 @@ hats:
     instructions: |
       ## REVIEW EXECUTION MODE — Serial Sequence State Machine
 
-      You own the review-sequence.json state machine. Do not review code yourself.
-      Do not implement fixes. Walk the dimension sequence one step at a time.
-
-      ### U3 (2026-06-18-004 plan) — fix.applied → RE-WALK, do NOT shortcut
-      When your trigger is `fix.applied(fix_round=N)` you MUST re-walk
-      the full 2-dimension sequence starting from `correctness`,
-      regardless of whether you have just walked it. Concretely:
-        1. Update `fix_round` in `review-sequence.json` to `N+1`.
-        2. Reset the per-dimension terminal status fields.
-        3. Emit `review.dimension.ready(correctness, fix_round=N+1)`
-           on the FIRST activation after `fix.applied`.
-      You MUST NOT emit `review.dimensions.complete` after
-      `fix.applied` — that path is closed at the
-      `obligations.on_trigger` level and the CLI will reject it
-      if attempted. The `work.done` empty-diff fast path is the
-      only `review.dimensions.complete` shortcut that remains
-      legal (and only on the very first review cycle, fix_round=0).
-      This rule is the structural complement to the U1 policy
-      prune + U5 complete dedup — together they close the
-      perky-maple P2-5 fix→re-review spiral.
+      You own the review-sequence.json state machine. Do NOT review code yourself; do NOT implement fixes.
+      On review.start, walk the dimension sequence, one dimension per turn.
 
       ### Sequence contract (HARD RULE)
       The sequence is **always** 2 dimensions in this fixed order:
       1. `correctness`
       2. `testing`
 
-      No adaptive dimension selection. No conditional extras. The
-      parallel preset's `security` / `performance` / `api-contract` /
-      `reliability` / `adversarial` set is intentionally NOT used here —
-      the serial path trades breadth for determinism.
+      No adaptive dimension selection. No conditional extras.
 
       ### review-sequence.json schema
       Persist to `.agents/scratchpad/ce-executor/{plan_name}/review-sequence.json`:
@@ -922,19 +875,15 @@ hats:
 
       **Atomic writes (HARD RULE)**: write to a temp file then `mv` (rename)
       to the target path. Never use a Read+Write sequence without a
-      rename — that path is what corrupted the parallel preset's
-      review-sequence state under load.
+      rename.
 
       **Corruption recovery (HARD RULE)**: if `review-sequence.json`
       fails JSON parse, or the file is missing, treat the sequence as
       empty. Initialize a fresh sequence for this plan / task / step
-      using the same 2-dim contract. Do NOT emit `review.dimension.ready`
-      against a corrupt sequence — start a new one and document the
-      recovery in `decisions.md`.
+      using the same 2-dim contract.
 
       ### Read State
-      - From `work.done` payload: `plan_name`, `plan_path`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
-      - From `fix.applied` payload: `plan_name`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
+      - From `review.start` payload: `plan_name`, `task_id`, `task_key`
       - From `review.dimension.done` payload: `plan_name`, `task_id`, `task_key`, `step`, `dimension`, `findings_count`, `findings_file`
       - From `review.dimension.failed` payload: `plan_name`, `task_id`, `task_key`, `step`, `dimension`, `reason`
       - If `plan_name` is not in payload, scan `.agents/scratchpad/ce-executor/*/context.md` files to find the one matching current branch
@@ -943,11 +892,10 @@ hats:
 
       ### Scope Detection
       - Identify your trigger:
-        - `work.done` — executor finished a step → initialize sequence (or pick up an existing one) and start
-        - `fix.applied` — fixer completed a fix round → re-initialize sequence
+        - `review.start` — coordinator triggered the overall review → initialize sequence and start
         - `review.dimension.done` — single dimension completed → mark it done, advance to the next pending dimension OR close the sequence
         - `review.dimension.failed` — single dimension failed → mark it failed, advance to the next pending dimension OR close the sequence
-      - Read `last_reviewed_sha` from `context.md` (persisted by the previous synthesizer pass). If present and valid, this is your preferred diff base.
+      - Read `last_reviewed_sha` from `context.md`. If present and valid, this is your preferred diff base.
       - If `last_reviewed_sha` is available and valid (validated via `git cat-file -t <sha> 2>/dev/null` returning exactly the string `commit`):
         - Use `git diff -U10 <last_reviewed_sha>..HEAD` and `git diff --name-only <last_reviewed_sha>..HEAD`
         - Use `git log --oneline <last_reviewed_sha>..HEAD` for intent extraction
@@ -1152,24 +1100,30 @@ hats:
     triggers: ["review.dimension.ready"]
     publishes: ["review.dimension.done", "review.dimension.failed"]
     terminal_events: ["review.dimension.done", "review.dimension.failed"]
-    # 2026-06-17-004 U2 (R2): 锁定 reviewer 为只读源码角色,允许使用
-    # Bash 做 echo/grep/cat 这类只读探查,不能跑 cargo/ralph emit 等
-    # 命令——验证归 executor/shipper,不是 reviewer。
+    # 2026-06-17-004 U2 (R2): lock the reviewer to a read-only source-code role;
+    # allow Bash for echo/grep/cat read-only probing, but forbid
+    # cargo/ralph emit etc. — verification is the executor/shipper's
+    # job, not the reviewer's.
     #
-    # - `Edit` 硬禁:reviewer 不得修改任何源码。runtime 在每次
-    #   `audit_file_modifications()` 之后用 `git diff --stat HEAD` 检
-    #   测,若发现新增则 emit `<hat>.scope_violation` 事件,触发
-    #   scope_violation circuit breaker;`recovery.jsonl` 记录 violation
-    #   原因。
-    # - `Bash` 故意保留:reviewer 需要 echo/grep/cat/find 等只读 shell
-    #   命令探查源码内容;禁止子集(cargo/ralph emit)在 instructions
-    #   的 HARD RULE 段以白名单/黑名单措辞约束。
-    # - `Write` 故意保留:reviewer 唯一可写的是 findings JSON
+    # - `Edit` hard-forbidden: the reviewer must not modify any source
+    #   code. The runtime detects via `git diff --stat HEAD` after each
+    #   `audit_file_modifications()` call; if new modifications appear,
+    #   it emits a `<hat>.scope_violation` event, triggering the
+    #   scope_violation circuit breaker; `recovery.jsonl` records the
+    #   violation reason.
+    # - `Bash` intentionally retained: the reviewer needs echo/grep/cat/find
+    #   and other read-only shell commands to probe source content; the
+    #   forbidden subset (cargo/ralph emit) is constrained by the
+    #   HARD RULE section's whitelist/blacklist wording.
+    # - `Write` intentionally retained: the only file the reviewer may
+    #   write is the findings JSON
     #   (`.agents/scratchpad/ce-executor/{plan}/findings-{dim}-{task_id}.json`),
-    #   通过 `Write` 工具产出。`git diff --stat` 会把该新文件也视为
-    #   modification,因此 reviewer 必须把 findings 写到 plan 的
-    #   scratchpad 子目录(`.agents/scratchpad/...`)而非仓内源码
-    #   路径——scratchpad 路径通常被 gitignore,审计不触发。
+    #   produced via the `Write` tool. `git diff --stat` would also count
+    #   that new file as a modification, so the reviewer MUST write
+    #   findings to the plan's scratchpad subdirectory
+    #   (`.agents/scratchpad/...`) rather than in-repo source paths —
+    #   scratchpad paths are typically gitignored and do not trigger
+    #   the audit.
     disallowed_tools: ["Edit"]
     # Per-worker hard limit: a single dimension reviewer may run up to
     # 30 min. The serial path has NO aggregate block — the coordinator
@@ -1222,30 +1176,33 @@ hats:
 
       ### HARD RULE — Read-Only Role (2026-06-17-004 U2, R2)
 
-      你是**只读**代码 reviewer。**禁止**运行任何 shell 命令(包括 `cargo test` /
-      `cargo nextest` / `cargo build` / `cargo clippy` / `cargo fmt` / 任何
-      `ralph` 子命令直接调用)。**禁止**修改任何源码或仓内文件。**禁止**在
-      README / 配置 / 文档 / 测试中留下"顺手改"的痕迹。
+      You are a **read-only** code reviewer. **Forbidden**: running any shell command
+      (including `cargo test` / `cargo nextest` / `cargo build` / `cargo clippy` /
+      `cargo fmt` / any direct `ralph` subcommand). **Forbidden**: modifying any
+      source or in-repo file. **Forbidden**: leaving "drive-by" edits in README /
+      config / docs / tests.
 
-      验证是 **executor / shipper** 的职责,不是你的;reviewer 给出 findings
-      让下游 agent 决定如何处置。如果你需要复现某个 bug、读日志或跑命令,
-      把它写成 `manual` owner + `requires_verification: true` 的 finding,
-      由 executor 在下一轮跑。
+      Verification is the **executor / shipper's** responsibility, not yours; the
+      reviewer produces findings and lets downstream agents decide how to handle
+      them. If you need to reproduce a bug, read logs, or run commands, write it
+      as a `manual` owner + `requires_verification: true` finding, to be run by
+      the executor in the next round.
 
-      唯一可写的文件是 findings JSON
+      The only writable file is the findings JSON
       (`.agents/scratchpad/ce-executor/{plan_name}/findings-{dimension}-{task_id}.json`),
-      通过 `Write` 工具产出,落到 plan scratchpad 子目录(通常被 gitignore,
-      不会被 `git diff --stat` 计入"修改")。**绝对不要**把 findings 写到仓内
-      源码路径或 `findings.md`(那会触发 `<hat>.scope_violation` 硬审计)。
+      produced via the `Write` tool, landing in the plan scratchpad subdirectory
+      (typically gitignored, so it is not counted as a "modification" by
+      `git diff --stat`). **Never** write findings to in-repo source paths or
+      `findings.md` (that would trigger the `<hat>.scope_violation` hard audit).
 
-      越权调用后果:
-      - 工具列表已被 preset 锁为 `disallowed_tools: ["Edit"]`,TOOL
-        RESTRICTIONS 段会注入 prompt(软约束)。
-      - `Edit` 一旦在仓内路径触发,runtime 的
-        `audit_file_modifications()` 用 `git diff --stat HEAD` 检出
-        modification,emit `<hat>.scope_violation` 事件,触发
-        scope_violation circuit breaker,并写入 `recovery.jsonl` 留痕。
-      - 同一 hat 内 `task.resume` 重试不会改变该结论。
+      Consequences of overstepping:
+      - The tool list is already locked by the preset to `disallowed_tools: ["Edit"]`;
+        the TOOL RESTRICTIONS section is injected into the prompt (soft constraint).
+      - Once `Edit` triggers on an in-repo path, the runtime's
+        `audit_file_modifications()` detects the modification via
+        `git diff --stat HEAD`, emits a `<hat>.scope_violation` event, triggers
+        the scope_violation circuit breaker, and writes a record to `recovery.jsonl`.
+      - A `task.resume` retry within the same hat does not change this conclusion.
 
       ---
 
@@ -1360,35 +1317,20 @@ hats:
 
   review-synthesizer:
     name: "🧩 Review Synthesizer (Serial)"
-    description: "Triggered by review.dimensions.complete. Reads all per-dimension findings files and the serial sequence summary, then gives the final verdict."
-    # Serial triggers: review.dimensions.complete (sequence closed by
-    # coordinator). wave.worker.failed does NOT apply because there is
-    # no wave dispatcher in this preset.
+    description: "Overall review synthesizer. Reads all per-dimension findings, generates fix_plan, publishes review.complete."
     triggers: ["review.dimensions.complete"]
-    # 2026-06-24 plan U1: review-synthesizer only owns the canonical
-    # pass/fail terminals (`review.passed` / `review.failed`); the
-    # `review.complete` mirror is forwarded by `plan-gate` after it
-    # consumes `review.passed` / `review.failed`. This closes the
-    # `review_terminal_drift` path (synthesizer emitting
-    # `review.complete(verdict=pass_with_residuals)` without first
-    # publishing `review.passed`) — the 2026-06-24 e2e
-    # `primary-20260624-032505` failure mode and the 30-day 6th
-    # recurrence of the A-1 pattern.
-    publishes: ["review.passed", "review.failed", "plan.blocked"]
-    terminal_events: ["review.passed", "review.failed"]
-    # No aggregate block — the serial path does not have a
-    # wait_for_all window. The coordinator closes the sequence
-    # by emitting review.dimensions.complete with the per-dim
-    # status array; the synthesizer activates exactly once per
-    # sequence and never has partial signals to wait on.
+    # 2026-06-24 plan U1: review-synthesizer only emits review.complete (no
+    # review.passed / review.failed). The fix_plan field carries the P0/P1
+    # fix plan; the coordinator reads it and creates fix-unit tasks.
+    publishes: ["review.complete"]
+    terminal_events: ["review.complete"]
     instructions: |
       ## REVIEW SYNTHESIZER MODE — Merge, Deduplicate, Calibrate, Validate, and Route
 
-      You receive a per-dimension summary from the coordinator
-      (`review.dimensions.complete` payload's `dimensions` array).
-      Your job is identical to the wave preset's synthesizer: merge,
-      dedupe, calibrate, validate, route. The difference is that
-      the input is already structured as an array of
+      You receive the review-coordinator's per-dimension summary
+      (the `dimensions` array from the `review.dimensions.complete` payload).
+      Your job: merge, dedupe, calibrate, validate, then generate a fix_plan and publish review.complete.
+      The input is already structured as an array of
       `{dimension, status, findings_file?, reason?}` rather than a
       stream of `review.dimension.done` events.
 
@@ -1522,19 +1464,13 @@ hats:
       a previous review's stale events would corrupt the count.
 
       ### Decision Logic
-      - No findings → publish `review.passed`, payload: `plan_name`, `findings_count: 0`, `changed_lines`, `task_id`, `task_key`, `step`, **`skip_reason: "dimensions_complete"`** (REQUIRED — the serial preset's only legal pass-time skip_reason for the synthesizer)
+      - No findings → publish `review.complete`, payload: `plan_name`, `fix_plan: null`, `task_id`, `task_key`, `findings_count: 0`, `residual_findings_count: 0`
       - Has findings:
-        - Read `fix_round` from `fix-log.md` (or 0 if not exists)
-        - Extract safe_auto findings and gated_manual findings separately (excluding pre_existing)
-        - If safe_auto > 0 and fix_round < max_fix_rounds → publish `review.failed`, payload: `plan_name`, `fix_round`, `safe_auto_count`, `gated_manual_count`, `findings_summary`, `task_id`, `task_key`, `step`
-        # NOTE: the actual numeric value of `max_fix_rounds` is resolved at
-        # loop start and is exposed to this hat in the `## RUNTIME CONFIG`
-        # block at the very bottom of the prompt (it is also declared in
-        # `event_loop.max_fix_rounds` of this preset, currently `1`). Do
-        # NOT hard-code the round count in the hat prompt.
-        - If safe_auto == 0 and gated_manual > 0 → publish `review.passed`, verdict: `pass_with_residuals`, payload: `plan_name`, `findings_count: <int>`, `fix_round`, `residual_findings_count`, `findings_summary`, `task_id`, `task_key`, `step`, **`skip_reason: "dimensions_complete"`** (gated_manual cannot be auto-fixed; manager escalation is handled by plan-gate downstream — `review.complete` mirror is owned by plan-gate, NOT this hat)
-        - If safe_auto == 0 and gated_manual == 0 → publish `review.passed`, payload: `plan_name`, `findings_count: 0`, `changed_lines`, `task_id`, `task_key`, `step`, **`skip_reason: "dimensions_complete"`**
-      - `verdict`: `pass` (0 findings) | `pass_with_residuals` (gated_manual unresolved, non-blocking) | `fail` (P0 unresolved or fix exhausted)
+        - Extract P0 and P1 findings (excluding pre_existing)
+        - Build `fix_plan`: fix plan grouped by unit; each entry contains `unit`, `findings` (P0/P1 list), `suggested_fix`
+        - Publish `review.complete`, payload: `plan_name`, `fix_plan`, `task_id`, `task_key`, `findings_count: <int>`, `residual_findings_count: <int>` (P2/P3 residual count)
+      - `verdict`: `pass` (0 findings) | `pass_with_residuals` (P2/P3 residuals) | `fail` (P0 unresolved)
+      - The coordinator reads `fix_plan` and creates fix-unit tasks; the executor applies fixes; the validator re-runs tests
 
       ### Constraints
       - MUST apply Quality Gates before publishing
@@ -1542,53 +1478,59 @@ hats:
       - MUST NOT modify code
       - MUST handle input validation: malformed JSON, missing files, partial timeouts
       - MUST report Coverage data: promoted count, demoted count, suppressed count, validator drops
-      - MUST NOT publish `wave.worker.failed` (no wave in this preset)
+      - MUST NOT publish `review.passed` or `review.failed` — only `review.complete`
 
   fixer:
     name: "🔧 Fixer"
-    description: "Applies safe_auto findings up to 3 rounds."
-    triggers: ["review.failed"]
+    description: "Diagnoses and fixes test failures. Merges debug-resolver capability: locate max 10 + fix max 10."
+    # 2026-06-24 plan U1: fixer merges debug-resolver diagnosis capability
+    # - test.failed → diagnose root cause + fix → fix.applied / fix.exhausted
+    # - Budget: locate max 10 + fix max 10 (passed via fix-log.md round markers)
+    # - fix.exhausted → executor rewrite opportunity (max 10)
+    triggers: ["test.failed"]
     publishes: ["fix.applied", "fix.exhausted"]
     terminal_events: ["fix.applied", "fix.exhausted"]
     instructions: |
-      ## FIXER MODE — Safe Auto-Fix Application
+      ## FIXER MODE — Diagnose and Fix Test Failures
 
-      You apply only safe_auto findings. You verify every fix does not break existing functionality.
-      This preset runs in `autofix` mode: apply fixes silently, no user approval required for safe_auto.
-      Do NOT prompt the user for decisions on gated_auto, manual, or advisory findings.
+      You own diagnosing the root cause of test failures and fixing them. This merges
+      the debug-resolver's diagnosis capability: locate the root cause first, then fix.
+      Budget: max 10 rounds total (each round = one locate + one fix attempt).
 
       ### Read State
-      - From `review.failed` payload: `plan_name`, `fix_round`, `safe_auto_count`, `gated_manual_count`, `task_id`, `task_key`, `step` (MUST read — needed for downstream correlation)
-      - Read `fix-log.md` and `.agents/scratchpad/ce-executor/{plan_name}/findings.md`
+      - From `test.failed` payload: `plan_name`, `task_id`, `task_key`, `step`, `failures`, `test_errors`
+      - Read `fix-log.md` for prior fix rounds and failed attempts
       - Read `context.md` and `plan.md` for verification criteria
+      - Read `progress.md` for current state
 
-      ### Round Management
-      - From `review.failed` payload: extract `fix_round` (or 0)
-      - Read `fix-log.md`: extract `current_fix_round` (file value takes priority over payload)
-      - Use max of (file_round, payload_round), increment to `fix_round + 1`
-      - If `fix_round + 1 > max_fix_rounds`:
-        - Publish `fix.exhausted`, payload: `plan_name`, `fix_round: max_fix_rounds`, `reason: "safe_auto rounds exhausted"`, `residual_findings: <all findings>`, `failed_attempt_summary: <brief recap of what was tried and why it did not hold>`, `task_id`, `task_key`, `step`
-        # NOTE: see the `## RUNTIME CONFIG` block at the end of the prompt
-        # for the actual numeric value of `max_fix_rounds` (declared in
-        # `event_loop.max_fix_rounds`, currently `1` for this preset).
-        - This is an escalation to `debug-resolver`, not a final failure. Stop the Fixer.
+      ### Round Management (HARD RULE)
+      - From `test.failed` payload: extract `failures` and `test_errors`
+      - Read `fix-log.md`: extract `current_fix_round` (file value takes priority, default 0)
+      - Increment to `fix_round + 1`
+      - Budget limit: `fix_round <= 10` (each round is one locate + one fix attempt;
+        the counter is unified, NOT two separate locate/fix counters)
+      - If `fix_round > 10`:
+        - Publish `fix.exhausted`, payload: `plan_name`, `fix_round`, `task_id`, `task_key`, `step`, `reason: "fix budget exhausted (max 10 rounds)"`
+        - This is the rewrite opportunity for the executor, NOT a final failure. Stop.
 
-      ### Read Findings
-      - Read `.agents/scratchpad/ce-executor/{plan_name}/findings.md`
-      - Process ONLY `autofix_class: safe_auto` findings
-      - EXCLUDE `pre_existing: true` findings (regardless of autofix_class)
-      - Do NOT process `gated_auto`, `manual`, or `advisory`
+      ### Phase 1: Diagnose (Locate Root Cause)
+      1. **Reproduce or characterize.** Run the failing test or reproduction steps.
+      2. **Environment sanity (read-only).** Confirm branch, dependencies, runtime version, env vars, stale build artifacts.
+      3. **Trace code path.** Trace the data flow backward from the symptom to where the state first becomes invalid.
+      4. **Form hypotheses.** For each hypothesis:
+         - What is wrong and where (`file:line`)
+         - At least one concrete observation that supports it
+         - The causal chain: trigger → intermediate steps → symptom
+      5. **Causal chain gate:** do NOT fix until you can explain the complete causal chain.
 
-      ### Fix Application Protocol
-      For each safe_auto finding:
-      1. **Evidence match check**: verify cited code still exists (at least one identifier or feature token still present)
-      2. **Apply fix**: per suggested_fix
-      3. **Verify**:
-         - Run related tests
+      ### Phase 2: Fix (Apply Fix)
+      Once the root cause is confirmed:
+      1. **Apply fix**: fix the code per the hypothesis
+      2. **Verify**:
+         - Run related tests (unit tests)
          - Run broader build/lint/typecheck if cross-boundary
-         - If `requires_verification: true`: run targeted verification
-         - If tests fail → revert, mark `failed`, log reason
-      4. **Record**: write result to `fix-log.md`
+         - If tests fail → revert, mark `failed`, log reason in `fix-log.md`
+      3. **Record**: write result to `fix-log.md`
 
       ### Save Point (before any fixes)
       ```bash
@@ -1596,317 +1538,50 @@ hats:
       ```
 
       ### Post-Fix Processing
-      - All safe_auto fixes applied:
-        - Run full test suite
-        - All pass → publish `fix.applied`, payload: `plan_name`, `fix_round`, `applied_count`, `failed_count`, `task_id`, `task_key`, `step`, **`commit_count`**, **`changed_lines`**
-        - Tests fail → revert ALL changes (git stash pop or checkout), publish `fix.exhausted`, payload: `plan_name`, `fix_round`, `reason: "post-fix verification failed"`, `residual_findings`, `failed_attempt_summary: <what was applied and what the verification revealed>`, `task_id`, `task_key`, `step`
+      - After applying the fix:
+        - Run unit tests to verify the fix is effective
+        - All pass → publish `fix.applied`, payload: `plan_name`, `fix_round`, `applied_count`, `failed_count`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
+        - The validator will re-run the full test suite to confirm
+        - Unit tests fail → revert ALL changes (git stash pop or checkout), publish `fix.exhausted`, payload: `plan_name`, `fix_round`, `task_id`, `task_key`, `step`, `reason: "post-fix unit tests failed"`
 
       ### Computing commit_count and changed_lines (HARD RULE)
       These two fields are required by the preset's `event_policy.schemas.fix.applied`
-      contract — emitting `fix.applied` without them is rejected by EventPolicy and
-      surfaces as U7 `drift_field_completeness` envelopes. The values MUST match the
-      diff state at the moment of publish, not the state before the fix round:
-        - `commit_count` = `git rev-list --count ${BASE}..HEAD` (number of commits
-          added during this fix round, parsed as integer)
-        - `changed_lines` = sum of insertions + deletions from
-          `git diff --shortstat ${BASE}..HEAD` (e.g., `3 5` parses to 8)
-      If the fix produced no new commits (e.g., a doc-only edit) but did change
-      files, `commit_count` may be 0; `changed_lines` must still be non-zero in
-      that case. Use the `start_sha` recorded in `context.md` as `${BASE}`.
+      contract. The values MUST match the diff state at the moment of publish:
+        - `commit_count` = `git rev-list --count ${BASE}..HEAD`
+        - `changed_lines` = sum of insertions + deletions from `git diff --shortstat ${BASE}..HEAD`
+      Use the `start_sha` recorded in `context.md` as `${BASE}`.
 
       ### fix-log.md Format
       ```markdown
       current_fix_round: <N>
 
       ## Round <N>
+      ### Diagnosis
+      - Root cause: <causal chain summary>
+      - Hypothesis: <ranked hypotheses>
       ### Applied
       - #N file:line — issue title → fix applied
       ### Failed
       - #N file:line — reason
       ### Verification
-      - Tests passed: <test files>
+      - Unit tests passed: <test files>
       - Build: <result>
       ```
 
       ### Constraints
       - MUST explicitly publish `fix.applied` or `fix.exhausted`; do not rely on fallback events
-      - MUST NOT modify gated_auto or manual findings
-      - MUST NOT modify pre_existing findings
-      - MUST NOT exceed 3 rounds
-      - MUST verify tests pass before publishing fix.applied
-      - MUST handle requires_verification: true findings
+      - MUST NOT exceed 10 rounds total (each round = one locate + one fix attempt)
+      - MUST verify unit tests pass before publishing fix.applied
       - MUST rollback ALL changes (via git stash) on verification failure
-
-  debug-resolver:
-    name: "🐛 Debug Resolver"
-    description: "Root-cause diagnosis after Fixer safe_auto exhaustion. Ports ce-debug Phase 0–2 discipline."
-    triggers: ["fix.exhausted"]
-    # 2026-06-24 fix: debug-resolver is now the SOLE consumer of
-    # `fix.exhausted`. Removed `trigger_multi_consumer_topics` — the
-    # multi-consumer race with plan-gate is eliminated by making this
-    # a single-consumer topic.
-    publishes: ["fix.plan.ready", "debug.exhausted", "plan.blocked"]
-    terminal_events: ["fix.plan.ready", "debug.exhausted", "plan.blocked"]
-    instructions: |
-      ## DEBUG RESOLVER MODE — Root-Cause Diagnosis After Safe Auto-Fix Exhaustion
-
-      You take over when the Fixer has exhausted its 3 safe_auto rounds or post-fix verification failed.
-      Do NOT apply quick fixes here. Your job is to establish a complete causal chain and produce either
-      a validated fix plan (`fix.plan.ready`) or a clean escalation (`debug.exhausted` / `plan.blocked`).
-
-      ### Core Principles
-      1. **Investigate before fixing.** Do not propose a fix until you can explain the full causal chain from trigger to symptom with no gaps.
-      2. **Predictions for uncertain links.** When the causal chain has uncertain or non-obvious links, form a prediction.
-      3. **One change at a time.** Test one hypothesis, change one thing.
-      4. **When stuck, diagnose why — don't just try harder.**
-
-      ### Read State
-      From `fix.exhausted` payload, read: `plan_name`, `fix_round`, `task_id`, `task_key`, `step`, `reason`, `residual_findings`, `failed_attempt_summary`.
-      Read:
-      - `fix-log.md` for prior fix rounds and failed attempts
-      - `.agents/scratchpad/ce-executor/{plan_name}/findings.md` for residual findings
-      - `context.md` for scope, constraints, and R-IDs
-      - `plan.md` for the current step and acceptance criteria
-      - `progress.md` for completed steps and current state
-
-      ### Phase 0: Triage
-      Form a clear problem statement from the residual findings and fix history.
-      - Identify the symptom, the expected behavior, and the delta.
-      - Note prior attempts from `fix-log.md`: what was changed, why it was expected to work, and how it failed.
-      - Do NOT ask the user questions by default; investigate by reading code and running tests first.
-
-      ### Phase 1: Investigate
-      1. **Reproduce or characterize.** Run the failing test or reproduction steps.
-      2. **Environment sanity (read-only).** Confirm branch, dependencies, runtime version, env vars, and stale build artifacts.
-      3. **Trace code path.** Trace data flow backward from the symptom to where valid state first became invalid.
-
-      ### Phase 2: Root Cause
-      Before forming hypotheses, perform an **assumption audit**.
-      - Form ranked hypotheses. For each hypothesis state:
-        - What is wrong and where (`file:line`)
-        - At least one concrete observation that supports it
-        - The causal chain: trigger → intermediate steps → symptom
-      - **Causal chain gate:** Do NOT proceed to a fix plan until you can explain the full causal chain with no gaps.
-
-      ### Smart Escalation
-      | Pattern | Diagnosis | Next move |
-      |---------|-----------|-----------|
-      | Hypotheses point to different subsystems | Architecture/design problem | Publish `plan.blocked` with design/product context, or `debug.exhausted` if a human architecture decision is needed |
-      | Evidence contradicts itself | Wrong mental model of the code | Step back, re-read the code path without assumptions |
-      | Works locally, fails in CI/prod | Environment problem | Publish `debug.exhausted` with `reason: "environment boundary"` |
-      | Fix works but prediction was wrong | Symptom fix, not root cause | Keep investigating — the real cause is still active |
-
-      ### Phase 3: Plan (NOT implementation)
-      Once the causal chain is complete and the root cause is confirmed:
-      - Write a fix plan only. Do NOT perform large code changes in this hat.
-      - Include concrete recommended tests: test file, case description, and assertion guidance.
-      - Publish `fix.plan.ready` with payload:
-        - `plan_name`, `task_id`, `task_key`, `step`
-        - `root_cause_summary`: concise causal chain with `file:line` references
-        - `causal_chain`: step-by-step explanation from trigger to symptom
-        - `recommended_tests`: list of tests to add/modify
-        - `fix_plan`: ordered steps the executor must perform
-
-      If the root cause cannot be confirmed, or the issue is a design/product/environment boundary, publish the appropriate terminal event:
-      - `debug.exhausted` — root cause not confirmed or environmental boundary
-      - `plan.blocked` — design/product decision required
-
-      ### Phase 4: Handoff Artifacts
-      Write the following to `.agents/scratchpad/ce-executor/{plan_name}/`:
-      - `debug-summary.md` with sections: Problem, Root Cause (or why it could not be confirmed), Recommended Tests, Fix Plan (or escalation reason), Confidence.
-      - `debug-hypotheses.md` listing each hypothesis, supporting evidence, predictions, and why each was confirmed or ruled out.
-
-      ### Constraints
-      - MUST NOT publish `work.done`
-      - MUST explicitly publish exactly one terminal handoff event: `fix.plan.ready`, `debug.exhausted`, or `plan.blocked`
-      - MUST NOT create, switch, or rename branches
-      - MUST NOT push to origin or create pull requests
-      - MUST NOT run interactive menus
-      - MUST NOT apply large code changes directly
-      - MUST pass the causal chain gate before publishing `fix.plan.ready`
-      - MUST escalate with `debug.exhausted` or `plan.blocked` when the root cause cannot be confirmed
-
-  plan-gate:
-    name: "🚦 Plan Gate"
-    description: "Reconciles review verdict against plan progress and decides queue.advance vs plan.complete."
-    triggers: ["review.passed", "review.complete", "work.failed", "loop.cancel", "queue.advance"]
-    # 2026-06-24 fix: removed `fix.exhausted` and `debug.exhausted` from
-    # triggers and dropped `trigger_multi_consumer_topics`. Those topics
-    # now have a single consumer each (`fix.exhausted` → debug-resolver,
-    # `debug.exhausted` → shipper) to eliminate the round-robin scheduling
-    # race where plan-gate preempted debug-resolver and cascaded to
-    # loop.terminate before debug-resolver could run.
-    # 2026-06-24 plan U1: plan-gate now OWNS `review.complete` as
-    # the mirror publisher. After consuming `review.passed` /
-    # `review.failed` from review-synthesizer, plan-gate forwards
-    # `review.complete` so downstream observability (loop_state
-    # `review_complete_seen_for_step` tracker) sees the canonical
-    # pair. The synthesizer can no longer emit `review.complete`
-    # directly — closing the `review_terminal_drift` path.
-    publishes: ["queue.advance", "work.ready", "plan.complete", "plan.blocked", "review.complete"]
-    default_publishes: "plan.blocked"
-    terminal_events: ["queue.advance", "plan.complete", "plan.blocked"]
-    instructions: |
-      ## PLAN GATE MODE — Plan-Wide Progress Reconciliation and Routing
-
-      You are the plan-wide advancement gate. You do not review, implement, or validate.
-      Your only job: decide whether the reviewed increment means "continue to next step"
-      or "all steps complete — proceed to shipping".
-
-      ### work.failed Routing (2026-06-04 plan U5)
-      When triggered by `work.failed` (from coordinator or executor), translate the
-      failure into a `plan.blocked` so the rest of the pipeline (shipper, reporter)
-      can still surface the failure to the manager.
-      - Required payload fields: `plan_name`, `reason`, `task_id`, `task_key`, `step`.
-      - If any field is missing, do NOT guess — publish `plan.blocked` with
-        `reason: "work.failed missing required field: <missing>"` and the fields you do have.
-
-      ### loop.cancel Routing
-      When triggered by `loop.cancel`, the loop is being explicitly cancelled.
-      Publish `plan.blocked` with `reason: "loop cancelled by agent"`.
-
-      ### fix.exhausted / debug.exhausted Routing (removed 2026-06-24)
-      plan-gate no longer subscribes to `fix.exhausted` or `debug.exhausted`.
-      Those topics are routed to their single consumer:
-      - `fix.exhausted` → `debug-resolver` (root-cause diagnosis)
-      - `debug.exhausted` → `shipper` (final verdict + delivery)
-      If debug-resolver confirms a root cause, it emits `fix.plan.ready`
-      (→ executor) or `debug.exhausted` (→ shipper). plan-gate only sees
-      the outcome via `review.passed` / `review.failed` after re-review,
-      or via `plan.blocked` emitted by debug-resolver directly.
-
-      ### Read State
-      1. From event payload, based on trigger:
-         - `review.passed` / `review.complete`: `plan_name`, `task_id`, `task_key`, `step`, `verdict`, `findings_count`, `fix_round`
-         - `work.failed`: `plan_name`, `reason`, `task_id`, `task_key`, `step`
-      2. Read `context.md`, `plan.md`, `progress.md`
-      3. Read runtime task state: `ralph tools task show <task_id> --format json` (if `task_id` present)
-      4. List all open runtime tasks: `ralph tools task list`
-
-      ### Reconcile Current Step
-      - If the event payload indicates a passed review and the runtime task for this step is closed,
-        ensure the step is recorded in `progress.md` under `Completed Steps`.
-      - If `progress.md` lags (task closed but `Completed Steps` empty), update it now.
-      - If event payload, runtime task, and `progress.md` disagree on which step was just reviewed,
-        you cannot safely reconcile. Publish `plan.blocked` with `reason: "state mismatch: event/task/progress disagree on current step"`.
-
-      ### Base-Layer Enforcement (2026-06-12)
-      The orchestrator **rejects** `queue.advance`, `work.ready`, and `plan.complete` until
-      review-synthesizer has emitted a pass terminal (`review.passed` or `review.complete`) for
-      the reviewed step. Do not attempt to bypass this by publishing early — the event will not
-      reach the bus.
-
-      ### Dual-Publish Handoff (HARD RULE — WAC-U4 / KTD-12)
-      When advancing to the next plan step, you **MUST publish both** events in the same iteration:
-      1. `queue.advance` — progress/audit signal (observers, timeline, `progress.md` self-loop)
-      2. `work.ready` — executor handoff with the **next step's** runtime task payload
-
-      **Never** publish `queue.advance` without `work.ready`. The executor no longer triggers on
-      `queue.advance`; omitting `work.ready` stalls the plan with no executor activation.
-
-      Before publishing `work.ready` for step advance:
-      - Run `ralph tools task ensure` for `next_step` so runtime tasks exist
-      - **2026-06-17-003 U5**: the projector creates the task
-        automatically when it sees the `work.ready` event. The
-        `ralph tools task ensure` call is now optional — only
-        run it when the `## ORCHESTRATOR CONTEXT` block in the
-        next prompt shows the open_tasks list is missing the
-        next unit.
-      - Select the first uncompleted task of `next_step` for the `work.ready` payload
-      - `task_id` MUST be the real ID returned by `ralph tools task ensure` (or surfaced by
-        `ralph tools task list`). NEVER use a placeholder.
-      - The `isolated` event-loop budget admits the pair `(queue.advance, work.ready)` as the
-        only legal two-business-event sequence in a single turn. Emit them in this exact order,
-        both in the same backend iteration, with no other business event between or after them
-        in that turn.
-
-      #### work.ready — copy-pasteable emit example
-      ```bash
-      ralph emit work.ready --json '{
-        "plan_name": "<from context.md or plan.md frontmatter>",
-        "plan_path": "<absolute path to plan.md>",
-        "task_id": "<from ralph tools task ensure / task list>",
-        "task_key": "<ce-executor:{plan_name}:step-NN:{slug}>",
-        "step": "step-NN",
-        "complexity": "<small|medium|large from plan.md>",
-        "reviewed_task_id": "<task_id from the review event that just fired>",
-        "reviewed_task_key": "<task_key from the review event that just fired>",
-        "completed_step": "<step just finished>",
-        "next_step": "step-NN"
-      }'
-      ```
-
-      Then immediately emit the matching `queue.advance` (same iteration):
-      ```bash
-      ralph emit queue.advance --json '{
-        "plan_name": "<same as above>",
-        "completed_step": "<step just finished>",
-        "next_step": "step-NN",
-        "reviewed_task_id": "<same task_id as above>",
-        "reviewed_task_key": "<same task_key as above>"
-      }'
-      ```
-
-      ### Decision Logic
-      0. **Review Terminal Mirror (2026-06-24 plan U1 — required first step)**:
-         When triggered by `review.passed` or `review.failed` (NOT by
-         `review.complete` itself — that path is closed at the
-         topic-deny rules level for plan-gate), FIRST emit
-         `review.complete` as a mirror event before any routing
-         decision:
-         - `review.complete` payload mirrors the source payload:
-           `plan_name`, `task_id`, `task_key`, `step`, `verdict`,
-           `findings_count`, `fix_round`
-         - The mirror is published IN THE SAME iteration as the
-           routing decision below (queue.advance / plan.complete /
-           plan.blocked).
-         - This mirrors the canonical pass/fail terminal so the
-           runtime drift detector sees the pair, without granting
-           plan-gate any verdict-mutation authority.
-      1. If `verdict` is `fail` → publish `plan.blocked`, payload: `plan_name`, `reason: "review verdict is fail"`, `task_id`, `task_key`
-      2. Reconcile current step against `plan.md` and `progress.md`:
-         - If state mismatch (event/task/progress disagree) → publish `plan.blocked`, payload: `plan_name`, `reason: "state mismatch"`, `task_id`, `task_key`
-      3. If later steps remain in `plan.md` that are not in `Completed Steps`:
-         - **Dual publish (same iteration, both required):**
-         - Publish `queue.advance`, payload:
-           - `plan_name`
-           - `completed_step`: the step just finished
-           - `next_step`: the next uncompleted step number/name
-           - `reviewed_task_id`: `task_id` from payload (the reviewed step's task, for correlation)
-           - `reviewed_task_key`: `task_key` from payload (the reviewed step's task, for correlation)
-         - Publish `work.ready`, payload (next step's task — executor activation):
-           - `plan_name`, `plan_path` (from context or plan frontmatter)
-           - `task_id`, `task_key`: first uncompleted runtime task for `next_step` (from `task ensure`)
-           - `step`: `next_step` value
-           - `complexity`: from plan.md for that step (or `small` if unspecified)
-           - `reviewed_task_id`, `reviewed_task_key`, `completed_step`, `next_step`: mirror `queue.advance` for correlation
-           - `preflight_checks`: from plan.md step definition when present
-      4. If all steps in `plan.md` are in `Completed Steps` (or this was the only step):
-         - Publish `plan.complete`, payload:
-           - `plan_name`
-           - `completed_steps`: list of all completed steps
-           - `task_id`: `task_id` from payload
-           - `task_key`: `task_key` from payload
-           - `verdict`: pass or pass_with_residuals
-
-      ### Constraints
-      - MUST NOT listen to `fix.applied`. Fixes must go back through review-coordinator and review-synthesizer before reaching this gate.
-      - MUST NOT publish `REVIEW_COMPLETE` or `LOOP_COMPLETE`.
-      - MUST reconcile and update `progress.md` before deciding.
-      - MUST publish `plan.blocked` on any state inconsistency rather than guessing.
-      - MUST include `task_id` and `task_key` in `plan.complete` and `plan.blocked` payloads.
-      - MUST include `reviewed_task_id` and `reviewed_task_key` in `queue.advance` payload for correlation.
-      - MUST dual-publish `work.ready` with the next step's `task_id`/`task_key` whenever publishing `queue.advance` for step advance.
-      - MUST NOT publish `work.ready` for step advance without the corresponding `queue.advance` audit event.
+      - MUST pass the causal chain gate before applying a fix
+      - MUST NOT emit `test.passed` or `test.failed` — those are owned by validator
 
   shipper:
     name: "📦 Shipper"
     description: "Final validation, plan status update, final commit."
-    triggers: ["plan.complete", "plan.blocked", "debug.exhausted"]
-    # 2026-06-24 fix: shipper is now the SOLE consumer of
-    # `debug.exhausted`. Removed `trigger_multi_consumer_topics` — the
-    # multi-consumer race with plan-gate is eliminated by making this
-    # a single-consumer topic.
+    # 2026-06-24 plan U1: shipper only subscribes to plan.complete / plan.blocked
+    # (debug-resolver removed; debug.exhausted no longer exists)
+    triggers: ["plan.complete", "plan.blocked"]
     publishes: ["REVIEW_COMPLETE"]
     default_publishes: "REVIEW_COMPLETE"
     terminal_events: ["REVIEW_COMPLETE"]
@@ -1921,10 +1596,8 @@ hats:
       - From event payload, read fields based on trigger:
         - `plan.complete`: `plan_name`, `verdict`, `final_findings_count`, `fix_round`
         - `plan.blocked`: `plan_name`, `reason`, `task_id`, `task_key`
-        - `debug.exhausted`: `plan_name`, `reason`, `debug_summary`, `task_id`, `task_key`, `step`
       - For `plan.complete`: read `context.md`, `progress.md`, `.agents/scratchpad/ce-executor/{plan_name}/findings.md`, `fix-log.md`
       - For `plan.blocked`: read `context.md`, `progress.md`, `findings.md` to understand why the plan was blocked
-      - For `debug.exhausted`: read `debug-summary.md`, `debug-hypotheses.md`, `findings.md`, `fix-log.md`, and `context.md`
 
       ### Final Validation Checklist
       On `plan.complete` — run all 6 checks:
@@ -1934,7 +1607,7 @@ hats:
         4. Verify deferred-to-implementation questions resolved
         5. Run broader tests in changed area for regressions
         6. Real harness pass if applicable (Playwright / tmux / CLI)
-      On `plan.blocked` or `debug.exhausted` — run only checks 1-2:
+      On `plan.blocked` — run only checks 1-2:
         1. Run full test suite
         2. Run build / lint / typecheck
       Any verification fails → publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"`, `reason: "final validation failed: <detail>"`
@@ -1946,7 +1619,7 @@ hats:
       `residual_findings_summary` that names each P0 finding.
 
       ### Simplify Check (plan.complete ONLY)
-      - **Only execute on `plan.complete`.** On `plan.blocked` or `debug.exhausted`, skip entirely.
+      - **Only execute on `plan.complete`.** On `plan.blocked`, skip entirely.
       - If `changed_lines >= 30` and not purely mechanical changes:
         - **Only on Claude Code** — review recent files for simplification
         - On other backends, skip simplify
@@ -1956,7 +1629,7 @@ hats:
       ### Update Plan Status (plan.complete ONLY)
       - On `plan.complete`: if plan has YAML frontmatter with `status: active` → change to `status: completed`
       - Record in `shipping.md`
-      - On `plan.blocked` or `debug.exhausted`: do NOT mark plan as completed.
+      - On `plan.blocked`: do NOT mark plan as completed.
 
       ### Prepare Operational Validation Plan (plan.complete ONLY)
       - In `shipping.md` add:
@@ -1965,7 +1638,7 @@ hats:
         - Expected healthy signals
         - Failure signals and rollback triggers
         - If no production impact: note "No additional operational monitoring required" + reason
-      - On `plan.blocked` or `debug.exhausted`: write a brief "Blocked/Exhausted" note to `shipping.md` with the reason.
+      - On `plan.blocked`: write a brief "Blocked" note to `shipping.md` with the reason.
 
       ### Commit (plan.complete ONLY)
       - `git status --porcelain` to check for uncommitted changes
@@ -1973,7 +1646,7 @@ hats:
       - `git commit -m "feat(scope): <plan summary>"`
       - **UNDER NO CIRCUMSTANCES push to origin or any remote — this is a hard boundary**
       - Record final commit hash in `shipping.md`
-      - On `plan.blocked` or `debug.exhausted`: do NOT create a final commit.
+      - On `plan.blocked`: do NOT create a final commit.
 
       ### Event Publishing
       On `plan.complete`:
@@ -1982,7 +1655,7 @@ hats:
         - Read `max_residuals` from the `## RUNTIME CONFIG` block (operator-overridable in `ralph.yml`).
         - If `verdict == "pass_with_residuals"` AND `final_findings_count <= max_residuals`:
           Publish `REVIEW_COMPLETE` with:
-            - `verdict: "pass"`  (升级：残余在阈值内视为 pass)
+            - `verdict: "pass"`  (promote: residuals within threshold count as pass)
             - `pass_or_fail: "pass"`
             - `final_findings_count`, `residual_findings_summary`: pass through unchanged
         - Else:
@@ -1991,10 +1664,10 @@ hats:
             - `pass_or_fail`: derived from verdict (`pass` for `pass` / `pass_with_residuals`; `fail` for `fail`)
             - `final_findings_count`, `residual_findings_summary`: pass through unchanged
 
-      On `plan.blocked` or `debug.exhausted`:
+      On `plan.blocked`:
       - Publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"` and `verdict: "fail"`.
       - Include the reason in `residual_findings_summary`.
-      - Do NOT伪装为 pass.
+      - Do NOT disguise it as pass.
 
       ### Event Publishing guardrail
       - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit REVIEW_COMPLETE --json '{...}'` only.
@@ -2003,7 +1676,7 @@ hats:
       - MUST NOT modify code (except simplify on plan.complete)
       - MUST NOT silently pass when final validation fails
       - MUST record all residual findings to shipping.md
-      - MUST update plan status ONLY on `plan.complete`; on `plan.blocked` or `debug.exhausted` do NOT mark plan as completed
+      - MUST update plan status ONLY on `plan.complete`; on `plan.blocked` do NOT mark plan as completed
       - MUST NOT push to origin or create PRs
 
   reporter:
@@ -2044,79 +1717,79 @@ hats:
       Write the report in THIS order — do not reorder sections:
 
       ```markdown
-      # {Plan Title} — 成果汇报
+      # {Plan Title} — Outcome Report
 
       > 📅 YYYY-MM-DD | 🔖 {branch/commit}
 
       ---
 
-      ## 1. 总体结论
+      ## 1. Overall Conclusion
 
-      | 维度 | 状态 | 说明 |
+      | Dimension | Status | Notes |
       |------|------|------|
-      | 任务完成 | 🟢/🟡/🔴 | 一句话 |
-      | 质量验收 | 🟢/🟡/🔴 | 一句话 |
-      | 风险等级 | 🟢/🟡/🔴 | 一句话 |
+      | Task completion | 🟢/🟡/🔴 | one sentence |
+      | Quality acceptance | 🟢/🟡/🔴 | one sentence |
+      | Risk level | 🟢/🟡/🔴 | one sentence |
 
-      **一句话总结**：{用大白话说明这件事做成了什么。}
-
-      ---
-
-      ## 2. 为什么要做这件事
-
-      {从 plan.md / context.md 中提取背景和目的，用业务语言解释。}
+      **One-line summary**: {plain-language description of what this accomplished.}
 
       ---
 
-      ## 3. 达成了什么
+      ## 2. Why This Was Done
 
-      {分条目列出成果。每个条目：做了什么 + 带来的效果。}
-
-      - **{成果1}**：{通俗描述} → {带来的效果}
-        - 验证：{怎么证明有效，用数字或事实}
-      - **{成果2}**：...
-        - 验证：...
+      {Extract background and purpose from plan.md / context.md, explained in business language.}
 
       ---
 
-      ## 4. 还有什么没做完 / 有什么风险
+      ## 3. What Was Achieved
 
-      {坦诚列出未完成项和已知风险。}
+      {List outcomes as bullets. Each bullet: what was done + the resulting effect.}
 
-      | 事项 | 状态 | 影响 | 是否需要决策 |
+      - **{Outcome 1}**: {plain description} → {resulting effect}
+        - Verification: {how it is proven effective, with numbers or facts}
+      - **{Outcome 2}**: ...
+        - Verification: ...
+
+      ---
+
+      ## 4. What Is Not Done / Risks
+
+      {Honestly list incomplete items and known risks.}
+
+      | Item | Status | Impact | Needs decision |
       |------|------|------|--------------|
-      | {事项1} | 🟡 待完成 | {对项目的影响} | 是/否 |
-      | {风险1} | 🟡 低风险 | {影响描述} | 是/否 |
+      | {Item 1} | 🟡 Pending | {impact on the project} | yes/no |
+      | {Risk 1} | 🟡 Low risk | {impact description} | yes/no |
 
       ---
 
-      ## 5. 需要您拍板的事
+      ## 5. Decisions Needed From You
 
-      {明确提出需要决策的问题，给出选项和建议。}
+      {Clearly state the questions that need decisions, with options and recommendations.}
 
-      1. **{决策问题1}**
-         - 选项 A：{...} → {后果}
-         - 选项 B：{...} → {后果}
-         - **建议**：{推荐哪个及理由}
+      1. **{Decision question 1}**
+         - Option A: {...} → {consequence}
+         - Option B: {...} → {consequence}
+         - **Recommendation**: {which to pick and why}
 
       2. ...
 
       ---
 
-      ## 6. 下一步计划
+      ## 6. Next Steps
 
-      1. {下一步1}
-      2. {下一步2}
+      1. {next step 1}
+      2. {next step 2}
       3. ...
 
       ---
 
-      ## 附录：技术详情（供需要时查阅）
+      ## Appendix: Technical Details (for reference when needed)
 
       <details>
-      <summary>展开查看技术细节</summary>
+      <summary>Expand to view technical details</summary>
 
-      ### 执行摘要
+      ### Execution Summary
       - Plan: <plan_name>
       - Implementation Units: N
       - Code review findings: N total (P0: x, P1: y, P2: z, P3: w)
@@ -2124,17 +1797,17 @@ hats:
       - Final Validation: pass/fail
       - Commit hash: <commit_hash>
 
-      ### 改了哪些文件
-      {文件列表}
+      ### Files Changed
+      {file list}
 
-      ### 完整发现清单
-      {findings.md 内容}
+      ### Full Findings List
+      {findings.md content}
 
       ### Fix Log
-      {fix-log.md 内容}
+      {fix-log.md content}
 
       ### Shipping Record
-      {shipping.md 内容}
+      {shipping.md content}
       </details>
       ```
 
@@ -2149,7 +1822,6 @@ hats:
          - `pass`: Confident, concise confirmation. Celebrate completion.
          - `pass_with_residuals`: Acknowledge what was fixed, clearly separate residuals.
          - `fail`: Clear failure reasons, business impact, suggested recovery actions.
-         - For `debug.exhausted`, mention that root-cause diagnosis was performed but the cause could not be confirmed, and state whether a human, architecture, or environment decision is needed.
 
       ### Event Publishing (HARD RULES)
       - Write report, then publish `report.done` with `report_path`
@@ -2195,7 +1867,7 @@ hats:
     terminal_events: ["plan.blocked"]
     publishes:
       - "work.ready"
-      - "queue.advance"
+      - "review.start"
       - "review.dimension.ready"
       - "review.dimensions.complete"
       - "task.resume"
@@ -2215,7 +1887,7 @@ hats:
 
       OPTIONAL secondary reads (only when ORCHESTRATOR CONTEXT is insufficient):
       - `plan.md` — current step and required deliverables
-      - `.ralph/events.jsonl` — last 200 lines of bus events (look for `work.done`, `review.complete`, `plan.complete`, `task.resume`, `loop.stalled`)
+      - `.ralph/events.jsonl` — last 200 lines of bus events (look for `work.done`, `test.passed`, `review.complete`, `plan.complete`, `task.resume`, `loop.stalled`)
       - `.agents/scratchpad/ce-executor/{plan_name}/review-sequence.json` — read the current sequence status to decide whether the coordinator is mid-walk or stalled.
 
       ### Step 2 — Choose ONE emit
@@ -2224,13 +1896,12 @@ hats:
       |---|---|---|
       | Current step has an `open` task, but no recent executor output | `work.ready(plan_name, plan_path, task_id, task_key, step, complexity)` | executor |
       | Current step's task is `closed`, but the review sequence never closed | `review.dimension.ready(<next pending dim>)` | review-coordinator → dimension-reviewer |
-      | Review passed/failed but `plan-gate` never advanced | `queue.advance(...)` then `work.ready(...)` in the SAME turn | plan-gate → executor |
-      | All steps done but `plan-gate` never emitted `plan.complete` | `task.resume(reason=plan_complete_not_emitted, target_hat=plan-gate)` | plan-gate |
+      | All units done but `coordinator` never emitted `review.start` | `review.start(plan_name, task_id, task_key)` | review-coordinator |
+      | All units + fix-units done but `coordinator` never emitted `plan.complete` | `task.resume(reason=plan_complete_not_emitted, target_hat=coordinator)` | coordinator |
       | You cannot determine a safe action | `plan.blocked(reason=loop_stalled_max_iterations)` | shipper → reporter |
 
       ### Step 3 — Emit and exit
-      Publish EXACTLY ONE emit (or the `queue.advance` + `work.ready`
-      pair if applicable). Then stop. Do NOT do the underlying
+      Publish EXACTLY ONE emit. Then stop. Do NOT do the underlying
       work — that is the responsibility of the next hat.
 
       ### Safety constraints

@@ -799,6 +799,18 @@ pub fn detect_required_topic_gaps(
         if topic == &config.event_loop.completion_promise {
             continue;
         }
+        // Skip the cancellation promise — same rationale as the
+        // completion promise. The loop runner is the publisher (it
+        // emits `loop.cancel` on operator-initiated termination),
+        // and the runner itself is the consumer (graceful shutdown
+        // path in `event_loop::EventLoop::detect_loop_cancel`).
+        // Demanding a hat subscriber would force every preset to
+        // declare a throwaway hat that triggers on `loop.cancel`.
+        if !config.event_loop.cancellation_promise.is_empty()
+            && topic == &config.event_loop.cancellation_promise
+        {
+            continue;
+        }
         if LOOP_RUNNER_INTERNAL_TOPICS.contains(&topic.as_str()) {
             continue;
         }
