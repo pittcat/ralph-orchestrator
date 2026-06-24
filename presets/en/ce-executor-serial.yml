@@ -103,14 +103,6 @@ event_loop:
   # Same single-U contract as ce-executor-serial. Coordinator must
   # only create the current U's task.
   enforce_current_unit: true
-  # 2026-06-23 user decision: hat_handoff disabled in the SSOT
-  # (`presets/schemas/ce-executor-serial.yml` sets
-  # `hat_handoff.enabled: false`). 30-day 6th recurrence of
-  # `hat_handoff_filename_mismatch` dead-letter was the trigger —
-  # hat ownership is now carried via `tasks.jsonl` only, no
-  # SSOT handoff file. Handoff-style fields in payloads are
-  # ignored by the runtime.
-  #
   # 2026-06-18-004 plan U2 (R2, KTD2): suppress human guidance
   # injection for all hats in this preset. Free-text guidance
   # caused the perky-maple P1-2 probe storm where the executor
@@ -344,18 +336,12 @@ hats:
       Do NOT implement code. Do NOT review code.
 
       ### Task Resume Reception
-      2026-06-23 update: hat_handoff is disabled for this preset
-      (see the `hat_handoff` block at the top of the file).
-      `task.resume` no longer carries `hat_handoff_*` payload kinds —
-      ownership is tracked via `tasks.jsonl` only, no SSOT handoff
-      file. On `task.resume`:
+      On `task.resume`:
       1. Read `.ralph/agent/scratchpad.md` to recover current
          iteration state.
       2. Re-emit `work.ready` with the business fields the runtime
          expects (`task_id`, `plan_path`, `step`, `complexity`,
-         etc). Do NOT include `handoff_path` — it is ignored and
-         triggers nothing. The runtime uses `task_id` to hand off
-         to the next hat.
+         etc). The runtime uses `task_id` to hand off to the next hat.
       3. `plan.blocked` is still emitted automatically by
          `CoordinatorDispatcher` after 3 consecutive same-kind
          `task.resume`; do not emit it manually.
