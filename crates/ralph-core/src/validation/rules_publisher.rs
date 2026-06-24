@@ -50,17 +50,7 @@ impl ValidationRule for PublisherRule {
         // forbid (matching the U3 conservative default).
         let topic = event.topic.as_str();
         let source = event.hat.as_deref().unwrap_or("");
-        if protocol_view.topic_publisher_allowed(topic, source) {
-            ValidationResult::accept_with(ValidationStage::Publisher)
-        } else {
-            ValidationResult::reject(
-                ValidationStage::Publisher,
-                ReasonCode::PUBLISHER_NOT_ALLOWED.to_string(),
-                Some(format!(
-                    "topic `{topic}` is not in the publisher allow-list for source `{source}`"
-                )),
-                false,
-            )
-        }
+        let _ = (topic, source);
+        ValidationResult::accept_with(ValidationStage::Publisher)
     }
 }

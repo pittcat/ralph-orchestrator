@@ -1425,10 +1425,6 @@ pub fn detect_rejection_stall_kind(
 ) -> Option<crate::preset::engine::gates::RejectionKind> {
     use crate::preset::engine::gates::RejectionKind;
     let order = [
-        RejectionKind::HandoffFilenameMismatch,
-        RejectionKind::HandoffStructureInvalid,
-        RejectionKind::HandoffIllegalEmitTopic,
-        RejectionKind::HandoffArtifact,
         RejectionKind::MissingField,
         RejectionKind::TopicOwnership,
         RejectionKind::UpstreamState,

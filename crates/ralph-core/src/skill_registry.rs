@@ -31,9 +31,6 @@ const RALPH_TOOLS_WAVE_SKILL_RAW: &str = include_str!("../data/ralph-tools-wave.
 /// Built-in ralph-tools-cmdref skill content (skill/interact/run/other-commands reference).
 const RALPH_TOOLS_CMDREF_SKILL_RAW: &str = include_str!("../data/ralph-tools-cmdref.md");
 
-/// Built-in ralph-tools-handoff skill content (ce-executor step handoff deep reference).
-const RALPH_TOOLS_HANDOFF_SKILL_RAW: &str = include_str!("../data/ralph-tools-handoff.md");
-
 /// Registry of all available skills for the current loop.
 pub struct SkillRegistry {
     /// All skills indexed by name.
@@ -83,12 +80,11 @@ impl SkillRegistry {
         self.register_builtin("ralph-tools-tasks", RALPH_TOOLS_TASKS_SKILL_RAW)?;
         self.register_builtin("ralph-tools-memories", RALPH_TOOLS_MEMORIES_SKILL_RAW)?;
         self.register_builtin("robot-interaction", ROBOT_INTERACTION_SKILL_RAW)?;
-        // 按需加载: emit / wave / cmdref / handoff 由 ralph-tools.md 速查表链接引导加载
-        // (plan 004 U3; handoff 仅按需，不入 auto-inject 白名单)
+        // 按需加载: emit / wave / cmdref 由 ralph-tools.md 速查表链接引导加载
+        // (plan 004 U3)
         self.register_builtin("ralph-tools-emit", RALPH_TOOLS_EMIT_SKILL_RAW)?;
         self.register_builtin("ralph-tools-wave", RALPH_TOOLS_WAVE_SKILL_RAW)?;
         self.register_builtin("ralph-tools-cmdref", RALPH_TOOLS_CMDREF_SKILL_RAW)?;
-        self.register_builtin("ralph-tools-handoff", RALPH_TOOLS_HANDOFF_SKILL_RAW)?;
         Ok(())
     }
 

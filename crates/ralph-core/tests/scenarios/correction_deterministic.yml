@@ -41,8 +41,6 @@ config:
     execution_mode: isolated
     starting_event: "task.start"
     completion_promise: "LOOP_COMPLETE"
-    hat_handoff:
-      enabled: true
     event_policy:
       enabled: true
       mode: enforce
