@@ -480,8 +480,6 @@ mod tests {
     fn test_state() -> LoopState {
         LoopState {
             iteration: 12,
-            // 2026-06-18-002 U1: reset on iteration boundary.
-            hat_handoff_seq: 0,
             consecutive_failures: 0,
             cumulative_cost: 1.50,
             started_at: Instant::now(),
@@ -576,10 +574,6 @@ mod tests {
             // 2026-06-23 fix: typed per-kind counters empty;
             // first rejection seeds a new bucket.
             consecutive_lint_rejections_by_kind: std::collections::HashMap::new(),
-            // 2026-06-23 fix (anti-pattern 3): no pending handoff
-            // artifacts in the test fixture; stall detector only
-            // arms for artifacts accepted after this field is wired.
-            pending_handoff_artifacts: std::collections::HashSet::new(),
             // U3 (plan 2026-06-23-004): rejection stall 检测窗口
             // 在 test fixture 中保持空。
             stall_detector_rejection_window: Vec::new(),

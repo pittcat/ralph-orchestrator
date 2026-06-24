@@ -378,6 +378,11 @@ pub struct EventLoop {
 /// `handoff_path` field. Used to feed the
 /// `HandoffAcceptedInputs.provided_handoff_path` field of
 /// [`crate::state::StateLedger::commit_handoff_artifact`].
+///
+/// U3: only call site is the A4 hook that writes the
+/// `HandoffAcceptedInputs` ledger entry. The helper itself
+/// stays until U4 cleans up `HandoffAcceptedInputs` and the
+/// ledger commit path.
 fn extract_handoff_path_from_payload(payload: Option<&str>) -> Option<String> {
     let p = payload?;
     let value: serde_json::Value = serde_json::from_str(p).ok()?;
@@ -3482,21 +3487,10 @@ impl EventLoop {
         // Non-ralph hat requested
         if self.config.event_loop.execution_mode == HatExecutionMode::Isolated {
             // Isolated mode: build focused prompt for this hat only.
-            // 2026-06-18-002 U6 (KTD-16): take pending **once** at
-            // the top so both `events_context` below and
-            // `prepend_hat_handoff_from_pending` see the same
-            // payload (the `take_pending` API removes by hat_id,
-            // so the second call would otherwise return empty).
             let mut events = self.bus.take_pending(&hat_id.clone());
             let mut human_events = self.bus.take_human_pending();
             events.append(&mut human_events);
 
-            // 2026-06-18-002 U6: capture the handoff path **before**
-            // `events` is consumed by `events_context` so
-            // `prepend_hat_handoff_from_pending` (called later in
-            // the pipeline) can still resolve `handoff_path` from
-            // this batch.
-            let pending_for_handoff: Vec<ralph_proto::Event> = events.clone();
             let (guidance_events, regular_events): (Vec<_>, Vec<_>) = events
                 .into_iter()
                 .partition(|e| e.topic.as_str() == "human.guidance");
@@ -3613,19 +3607,6 @@ impl EventLoop {
             // Apply prepend pipeline (SAME order as coordinator path)
             self.ralph.clear_robot_guidance();
 
-            // 2026-06-18-002 plan: auto-generate upstream handoff emit
-            // instructions from the hat topology, instead of repeating
-            // nearly identical blocks in every hat's preset instructions.
-            // We compute the block here (while `hat` is borrowed) but defer
-            // prepending it until after `prepend_wave_context` so the emit
-            // instructions sit at the very top (R4).
-            let emit_block = crate::hat_handoff::emit_instructions::build_emit_instructions(
-                hat,
-                &self.config.event_loop.hat_handoff,
-                &self.config.event_loop.execution_mode,
-                &self.handoff_index,
-            );
-
             // 2026-06-17-003 U4 / 2026-06-17-005 R5:
             // `## ORCHESTRATOR CONTEXT` block is the canonical
             // view of the run. The block is always emitted
@@ -3639,9 +3620,7 @@ impl EventLoop {
             // and the backward-compat custom-hat path.
             //
             // P1-7 fix: orchestrator context is placed BEFORE
-            // wave context and handoff blocks so the prompt
-            // stack order is:
-            //   ## HAT HANDOFF / emit instructions
+            // wave context so the prompt stack order is:
             //   ## WAVE CONTEXT (synthesizer only)
             //   ## ORCHESTRATOR CONTEXT
             //   hat instructions
@@ -3651,21 +3630,6 @@ impl EventLoop {
             // `review-synthesizer`; it is a no-op for any other hat.
             let base_prompt = self.prepend_wave_context(base_prompt, hat_id);
 
-            // R4: prepend emit instructions ABOVE wave context.
-            let base_prompt = match emit_block {
-                Some(block) => format!("{block}\n\n{base_prompt}"),
-                None => base_prompt,
-            };
-            // 2026-06-18-002 plan U6 (KTD-6): `## HAT HANDOFF` block
-            // is inserted at the very top so the navigation block
-            // sits above emit instructions and wave header.
-            // Fail-closed: missing/unreadable file → no block + diagnostic.
-            // We pass `pending_for_handoff` (cloned at the top of
-            // the isolated branch) instead of re-taking from the bus
-            // because `events_context` already consumed the live
-            // pending queue.
-            let base_prompt =
-                self.prepend_hat_handoff_from_pending(base_prompt, hat_id, &pending_for_handoff);
             // R3: surface ephemeral relocations so the agent stops
             // recreating runtime artefacts inside the source tree.
             let base_prompt = self.prepend_ephemeral_relocations(base_prompt);
@@ -4811,75 +4775,6 @@ impl EventLoop {
         format!("{}{prompt}", ctx.to_prompt_block())
     }
 
-    /// 2026-06-18-002 plan U6 (KTD-16): prepend the `## HAT HANDOFF`
-    /// navigation block. Fail-closed: missing/unreadable file →
-    /// no block + diagnostic event. Skip when disabled or in
-    /// coordinator mode or when the hat is `ralph`.
-    /// 2026-06-18-005 U7: 删除死代码 `prepend_hat_handoff` 包装
-    /// (只有 `prepend_hat_handoff_from_pending` 是真实调用点,
-    /// 见 `build_prompt` 内的 isolated path)。
-    fn prepend_hat_handoff_from_pending(
-        &mut self,
-        prompt: String,
-        hat_id: &HatId,
-        pending: &[ralph_proto::Event],
-    ) -> String {
-        use crate::hat_handoff::inject;
-        if !self.config.event_loop.hat_handoff.enabled {
-            return prompt;
-        }
-        if !matches!(
-            self.config.event_loop.execution_mode,
-            crate::config::HatExecutionMode::Isolated
-        ) {
-            return prompt;
-        }
-        if hat_id.as_str() == "ralph" {
-            return prompt;
-        }
-
-        let handoff_path = crate::hat_handoff::payload::find_in_pending(pending);
-        let workspace_root = self.config.core.workspace_root.as_path();
-        match inject::build_block(
-            workspace_root,
-            &self.config.event_loop.hat_handoff,
-            handoff_path.as_deref(),
-        ) {
-            Some(block) => {
-                // 2026-06-18-001 plan U4: 注入成功时记录 tracing +
-                // 供 `ralph diagnose` 读取的 last_injected_hat_handoff_path。
-                // 让 operator 与 agent 都能确认"本 turn 真的把 handoff 块
-                // 注入到了 prompt"。
-                tracing::info!(
-                    target: "ralph::hat_handoff",
-                    hat_id = %hat_id.as_str(),
-                    handoff_path = handoff_path.as_deref().unwrap_or(""),
-                    "injected ## HAT HANDOFF block into prompt"
-                );
-                format!("{block}{prompt}")
-            }
-            None => {
-                if handoff_path.is_some() {
-                    tracing::warn!(
-                        target: "ralph::hat_handoff",
-                        hat_id = %hat_id.as_str(),
-                        handoff_path = handoff_path.as_deref().unwrap_or(""),
-                        "## HAT HANDOFF inject failed: file missing or unreadable"
-                    );
-                    self.bus.publish(ralph_proto::Event::new(
-                        "event.hat_handoff.inject_failed",
-                        format!(
-                            "{{\"hat\":\"{}\",\"reason\":\"file_missing_or_unreadable\",\"handoff_path\":\"{}\"}}",
-                            hat_id.as_str(),
-                            handoff_path.as_deref().unwrap_or(""),
-                        ),
-                    ));
-                }
-                prompt
-            }
-        }
-    }
-
     /// 2026-06-18-001 plan U6: prepend `## RECENT REJECTIONS` 块。
     /// 复用 `LoopState::format_rejection_digest_block`,空 digest
     /// 时返回空字符串,no-op 行为。
@@ -4944,18 +4839,7 @@ impl EventLoop {
             return prompt;
         }
         let snap = if let Some(p) = self.state.state_projection.as_ref() {
-            // 2026-06-18-005 U3 (R3): 把 handoff 状态折进 snapshot。
-            crate::runtime_state::RuntimeStateSnapshot::build(
-                p,
-                Some(crate::runtime_state::HandoffSnapshotState {
-                    enabled: self.config.event_loop.hat_handoff.enabled
-                        && matches!(
-                            self.config.event_loop.execution_mode,
-                            crate::config::HatExecutionMode::Isolated
-                        ),
-                    current_seq: self.state.hat_handoff_seq,
-                }),
-            )
+            crate::runtime_state::RuntimeStateSnapshot::build(p)
         } else {
             crate::runtime_state::RuntimeStateSnapshot::disabled_stub()
         };
@@ -5122,9 +5006,6 @@ impl EventLoop {
             return false;
         }
         if self.config.event_loop.execution_mode == HatExecutionMode::Coordinator {
-            return false;
-        }
-        if !self.config.event_loop.hat_handoff.enabled {
             return false;
         }
         // Plan 2026-06-20-001 KTD-7 / RISK-6 circuit breaker.
@@ -5748,10 +5629,6 @@ impl EventLoop {
         success: bool,
     ) -> Option<TerminationReason> {
         self.state.iteration += 1;
-        // 2026-06-18-002 U1 (KTD-12): reset handoff seq on iteration
-        // boundary so the same hat→hat path within a new iteration
-        // starts again from seq=1.
-        self.state.hat_handoff_seq = 0;
         self.state.last_hat = Some(hat_id.clone());
 
         // WRC-U4 (2026-06-12-003 / KTD-13 / hook 3): drain
@@ -6561,12 +6438,12 @@ impl EventLoop {
         // ONLY short-circuits on `required_fields` missing —
         // the heavier d623c09 checks (terminal monotonicity,
         // semantic gate, recovery) keep running afterwards. The
-        // fail-fast is opt-in: the same gate is skipped when
-        // `hat_handoff.enabled == false`, when the execution_mode
-        // is `Coordinator`, and when the engine budget env
-        // `RALPH_SERIAL_LINT_MODE=off` is set. Disabling the
-        // engine gate does NOT disable the d623c09 gates — the
-        // engine is a fail-fast addition, not a replacement.
+        // fail-fast is opt-in: the same gate is skipped when the
+        // execution_mode is `Coordinator`, and when the engine
+        // budget env `RALPH_SERIAL_LINT_MODE=off` is set.
+        // Disabling the engine gate does NOT disable the d623c09
+        // gates — the engine is a fail-fast addition, not a
+        // replacement.
         //
         // Phase 2 (U11-T2) moved event-policy validation into the
         // unified `ValidationPipeline` (`rules_event_policy::EventPolicyRule`).
@@ -7473,471 +7350,6 @@ impl EventLoop {
         }
         // --- End state machine validation ---
 
-        // --- Hat-handoff gate (2026-06-18-002 plan U5, KTD-4; P0-1 + P0-2 fix) ---
-        // Inserted **between state machine and state_projection** so
-        // a reject does not poison the projector with a handoff
-        // that the agent will have to re-emit. The gate is a
-        // **minimum-surprise passthrough** when `hat_handoff.enabled`
-        // is false (T15/T20 coverage): events flow through, the
-        // tracker is untouched, no diagnostic is published.
-        //
-        // When enabled in `isolated` mode, the gate is **fail-closed**:
-        // every macro-edge emit is validated end-to-end (filename +
-        // seq + from/to + U3 structure + U4 publishes_check), and a
-        // reject drops the event from the batch so the downstream
-        // `state_projection` and `bus.publish` never see it. The agent
-        // must re-emit with a fixed handoff file to progress.
-        if self.config.event_loop.hat_handoff.enabled
-            && matches!(
-                self.config.event_loop.execution_mode,
-                crate::config::HatExecutionMode::Isolated
-            )
-        {
-            use crate::hat_handoff::gate::{self, GateDecision, GateInputs};
-            let mut rejected_diagnostics: Vec<ralph_proto::Event> = Vec::new();
-            events.retain(|ev| {
-                let from_hat = ev.hat.as_deref().unwrap_or("");
-                if from_hat.is_empty() {
-                    return true;
-                }
-                let handoff_path = ev
-                    .payload
-                    .as_deref()
-                    .and_then(crate::hat_handoff::payload::extract_handoff_path);
-                let downstream_publishes: Vec<String> =
-                    self.preset_hats_publishes(from_hat, &ev.topic);
-                let inputs = GateInputs {
-                    config: &self.config.event_loop.hat_handoff,
-                    execution_mode: self.config.event_loop.execution_mode.clone(),
-                    index: &self.handoff_index,
-                    from_hat,
-                    topic: &ev.topic,
-                    iteration: self.state.iteration,
-                    current_seq: self.state.hat_handoff_seq,
-                    handoff_path: handoff_path.as_deref(),
-                    downstream_publishes: &downstream_publishes,
-                    repo_root: self.config.core.workspace_root.as_path(),
-                    skip_seq_check: false,
-                    // 2026-06-18-001 plan U1: runtime gate 始终不跳过
-                    // owner 校验——从 event.hat 一定能拿到真实 from_hat。
-                    skip_filename_owner_check: false,
-                };
-                // 2026-06-18-005 U6: tri-state read result so
-                // gate can distinguish not_found vs read_fail.
-                //
-                // 2026-06-23 fix plan U2 (CB-1): SSOT-first read
-                // via gate::read_handoff_ssot_first. If the SSOT-
-                // derived handoff file exists and is readable,
-                // the gate's `Accept` will already emit the SSOT
-                // basename — so we MUST feed it the SSOT path's
-                // content, not the agent-submitted path. Otherwise
-                // an agent that misnames the file (seq=3 when
-                // seq=2 is expected) hits `HandoffFilenameMismatch`
-                // Reject instead of being recovered. Pre-empts the
-                // 30-day 6-recurrence bug.
-                let consumer_hat_for_ssot = self
-                    .handoff_index
-                    .consumer_of(&ev.topic)
-                    .unwrap_or(from_hat);
-                let (effective_handoff_path, file_content) =
-                    gate::read_handoff_ssot_first(
-                        self.config.core.workspace_root.as_path(),
-                        &inputs,
-                        handoff_path.as_deref(),
-                        consumer_hat_for_ssot,
-                    );
-                // If we overrode the handoff_path, rebuild inputs
-                // so the gate sees the SSOT path (otherwise the
-                // seq/iter check inside the gate would still
-                // mismatch against the SSOT path's basename).
-                let inputs = if effective_handoff_path.as_deref() != handoff_path.as_deref() {
-                    let mut inputs_override = inputs.clone();
-                    inputs_override.handoff_path = effective_handoff_path.as_deref();
-                    inputs_override
-                } else {
-                    inputs
-                };
-                match gate::evaluate_event(&inputs, &file_content) {
-                    GateDecision::NotRequired => true,
-                    GateDecision::Accept { .. } => {
-                        self.state.hat_handoff_seq += 1;
-                        true
-                    }
-                    GateDecision::Reject {
-                        kind,
-                        reason_code,
-                        message,
-                        ..
-                    } => {
-                        // U11-T4: when the gate rejects because the
-                        // handoff file is missing
-                        // (`REASON_CODE_HAT_HANDOFF_FILE_NOT_FOUND`),
-                        // try to auto-generate the artifact via the
-                        // unified ledger's `commit_handoff_artifact`.
-                        // The ledger's U5 regenerate policy writes a
-                        // skeleton to the canonical path
-                        // (`prepare_with_dedup`) when
-                        // `provided_handoff_path` is `None`, so the
-                        // loop no longer rejects the event outright.
-                        //
-                        // If auto-generation succeeds, treat the
-                        // event as accepted (bump seq, keep in batch)
-                        // and log the recovery. If it fails, fall
-                        // through to the standard rejection path
-                        // (digest + diagnostic + task.resume).
-                        if reason_code
-                            == crate::hat_handoff::gate::REASON_CODE_HAT_HANDOFF_FILE_NOT_FOUND
-                        {
-                            if let Some(ref mut ledger) = self.state.state_ledger {
-                                // Consumer (downstream hat) is
-                                // needed to derive the canonical
-                                // artifact path. Fall back to
-                                // `from_hat` when the index has no
-                                // entry (coordinator mode / ad-hoc
-                                // topic), matching the A4 hook's
-                                // tolerance at line 8685+.
-                                let consumer_hat = self
-                                    .handoff_index
-                                    .consumer_of(&ev.topic)
-                                    .unwrap_or(from_hat);
-                                let inputs = crate::state::HandoffAcceptedInputs {
-                                    // from = emit hat (ev.hat), to = downstream (consumer_hat)
-                                    from: ev
-                                        .hat
-                                        .clone()
-                                        .unwrap_or_else(|| "unknown".into())
-                                        .into(),
-                                    to: consumer_hat.to_string().into(),
-                                    iteration: self.state.iteration,
-                                    current_seq: self.state.hat_handoff_seq,
-                                    topic: ev.topic.clone(),
-                                    provided_handoff_path: None,
-                                };
-                                match ledger.commit_handoff_artifact(&inputs) {
-                                    Ok(outcome) => {
-                                        if let Some(path) = outcome.handoff_path {
-                                            tracing::info!(
-                                                handoff_path = %path,
-                                                from_hat = %from_hat,
-                                                topic = %ev.topic,
-                                                "U11-T4: auto-generated handoff artifact for macro-edge missing path; event accepted"
-                                            );
-                                        }
-                                        self.state.hat_handoff_seq += 1;
-                                        return true;
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            error = %e,
-                                            from_hat = %from_hat,
-                                            topic = %ev.topic,
-                                            "U11-T4: auto-generation failed; falling back to rejection"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-
-                        // KTD-5: cancel the pending record we set at
-                        // policy-accept time so it doesn't escalate.
-                        let event_id = format!("{}:{}", ev.ts, ev.topic);
-                        self.state.handoff_tracker.cancel_pending(&event_id);
-                        // 2026-06-23 fix (mechanism review layer 2,
-                        // P0-B): typed per-kind counter. The `kind`
-                        // field is captured above so the runtime
-                        // gate can drive typed escalation (drift
-                        // finding, circuit breaker, plan.blocked)
-                        // without scanning the message string.
-                        // U1 (plan 2026-06-23-004): typed 计数器消费侧
-                        // 接 escalation,按 KTD-1 阶梯触发 drift_finding /
-                        // circuit_breaker_trip / plan.blocked。
-                        let typed_count = self.state.record_typed_lint_rejection(kind);
-                        if let Some(action) =
-                            crate::event_loop::rejection::RejectionEscalator::check(kind, typed_count)
-                        {
-                            use crate::event_loop::rejection::EscalationAction;
-                            let (topic_str, payload_str) = match action {
-                                EscalationAction::DriftFinding { kind: k, count } => (
-                                    "drift_finding",
-                                    format!(
-                                        "{{\"kind\":\"{}\",\"count\":{count},\"from_hat\":\"{from_hat}\",\"topic\":\"{}\"}}",
-                                        k.reason_code(),
-                                        ev.topic
-                                    ),
-                                ),
-                                EscalationAction::CircuitBreakerTrip { kind: k, count } => (
-                                    "loop.circuit_breaker_trip",
-                                    format!(
-                                        "{{\"kind\":\"{}\",\"count\":{count},\"from_hat\":\"{from_hat}\",\"topic\":\"{}\"}}",
-                                        k.reason_code(),
-                                        ev.topic
-                                    ),
-                                ),
-                                EscalationAction::PlanBlocked { kind: k, count } => (
-                                    "plan.blocked",
-                                    format!(
-                                        "{{\"kind\":\"{}\",\"count\":{count},\"from_hat\":\"{from_hat}\",\"topic\":\"{}\"}}",
-                                        k.reason_code(),
-                                        ev.topic
-                                    ),
-                                ),
-                            };
-                            let escalation_event =
-                                ralph_proto::Event::new(topic_str, payload_str);
-                            self.state.record_event(&escalation_event);
-                            rejected_diagnostics.push(escalation_event);
-                        }
-                        // 2026-06-18-001 plan U6: 累加到 digest,
-                        // 让 agent 在下一轮 prompt 中看到拒收摘要
-                        self.state.record_rejection_digest(
-                            reason_code,
-                            &message,
-                            &ev.topic,
-                            &ev.ts,
-                        );
-                        let diag = ralph_proto::Event::new(
-                            "diagnostic.hat_handoff.rejected",
-                            format!(
-                                "{{\"reason_code\":\"{reason_code}\",\"message\":\"{}\",\"from_hat\":\"{from_hat}\",\"topic\":\"{}\"}}",
-                                message.replace('"', "'"),
-                                ev.topic,
-                            ),
-                        );
-                        // 2026-06-18 P0-2: record the diagnostic in
-                        // seen_topics so the fail-closed wiring is
-                        // observable to BDD scenarios and downstream
-                        // monitors. The diagnostic is a side-effect of
-                        // the gate, not an event that survived the
-                        // gate, so we record it explicitly here.
-                        self.state.record_event(&diag);
-                        rejected_diagnostics.push(diag);
-
-                        // 2026-06-18-005 U5 (R2): 通过 Rejection
-                        // 系统向 emit hat 发 `task.resume`,使拒收
-                        // 进入标准 retry 预算 + recovery envelope。
-                        // retry_key 包含 stage+reason_code+from_hat+topic,
-                        // 不会与其它 rejection 合并。
-                        let rejection = crate::event_loop::rejection::Rejection {
-                            stage: crate::event_loop::rejection::RejectionStage::HatHandoff,
-                            source_hat: Some(from_hat.to_string()),
-                            business_hat: Some(from_hat.to_string()),
-                            topic: ev.topic.clone(),
-                            violation: message.clone(),
-                            retry_key: format!(
-                                "hat_handoff:{from_hat}:{}:{reason_code}",
-                                ev.topic
-                            ),
-                            retry_eligible: true,
-                            non_retryable_reason: None,
-                            target_hat: Some(from_hat.to_string()),
-                            original_event_id: Some(event_id.clone()),
-                            original_ts: Some(ev.ts.clone()),
-                            // 2026-06-23 fix plan U5 (CB-2): typed kind
-                            // from gate Reject so the resume payload
-                            // carries `kind` for the consumer's
-                            // typed dispatch (plan 2026-06-23-004 U4).
-                            kind: Some(kind),
-                        };
-                        let resume_payload =
-                            crate::event_loop::rejection::build_task_resume_payload(
-                                &rejection,
-                                &[],
-                                &[],
-                                None,
-                                ev.payload.as_deref(),
-                                None,
-                            );
-                        let resume_evt = ralph_proto::Event::new(
-                            "task.resume",
-                            resume_payload,
-                        )
-                        .with_target(ralph_proto::HatId::new(from_hat));
-                        // 2026-06-23 fix plan U4 (CB-8): dead-letter
-                        // diagnostic when no hat in the registry
-                        // subscribes to `task.resume`. Without this,
-                        // a misconfigured preset (forgetting the
-                        // CB-4 trigger registration) silently
-                        // consumes the resume event into a void —
-                        // operators see nothing. Emit
-                        // `loop.diagnostic.task_resume_dead_letter`
-                        // with the target hat so the stall
-                        // detector / `ralph doctor` can flag it.
-                        if !self.registry.has_subscriber("task.resume") {
-                            let dead_letter = ralph_proto::Event::new(
-                                "loop.diagnostic.task_resume_dead_letter",
-                                format!(
-                                    "{{\"reason\":\"no_consumer_for_target_hat\",\"target_hat\":\"{from_hat}\",\"topic\":\"{topic}\"}}",
-                                    topic = ev.topic,
-                                ),
-                            );
-                            warn!(
-                                target_hat = %from_hat,
-                                topic = %ev.topic,
-                                "task.resume has no consumer in registry — emitting dead-letter diagnostic"
-                            );
-                            self.state.record_event(&dead_letter);
-                            rejected_diagnostics.push(dead_letter);
-                        }
-                        // 2026-06-23 fix plan U4 (CB-7): typed
-                        // dispatch via `CoordinatorDispatcher`. The
-                        // consecutive counter uses
-                        // `typed_lint_rejection_count(kind)` —
-                        // the same counter that feeds
-                        // `EscalationAction::DriftFinding` etc.,
-                        // so escalation and dispatch stay in sync.
-                        // At threshold (3) → `PlanBlocked` → emit
-                        // `plan.blocked` so the operator is alerted
-                        // (instead of silently consuming the
-                        // dead-letter).
-                        //
-                        // 2026-06-23 fix plan P1-4 (CB-7 plan.blocked
-                        // 与 task.resume 双发互斥):when dispatch returns
-                        // `PlanBlocked`, we MUST NOT also emit
-                        // `task.resume` — the loop would land on a
-                        // dead-letter `task.resume` AND the
-                        // `plan.blocked` event in the same tick,
-                        // double-firing the same root cause and
-                        // contaminating the terminal state
-                        // projection. Use an explicit match on
-                        // `CoordinatorAction` to keep one
-                        // emit-side clean: PlanBlocked → only
-                        // `plan.blocked`; everything else → only
-                        // `task.resume` (+ dead-letter diagnostic).
-                        let consecutive = self
-                            .state
-                            .typed_lint_rejection_count(kind);
-                        let action = crate::event_loop::rejection::CoordinatorDispatcher::dispatch(
-                            kind,
-                            consecutive,
-                        );
-                        use crate::event_loop::rejection::CoordinatorAction as A;
-                        match action {
-                            A::PlanBlocked { kind: blocked_kind, count } => {
-                                warn!(
-                                    kind = %blocked_kind.reason_code(),
-                                    count,
-                                    from_hat = %from_hat,
-                                    topic = %ev.topic,
-                                    "coordinator dead-letter: {} consecutive task.resume — emitting plan.blocked (skipping task.resume, CB-7 P1-4 mutex)",
-                                    count,
-                                );
-                                // 2026-06-23 fix plan U4 (CB-7 obs):
-                                // persist the dead-letter to
-                                // `.ralph/recovery.jsonl` so the
-                                // operator / `ralph doctor` can see
-                                // the cumulative count even when
-                                // stdout logs rotate. Reason code
-                                // `task_resume_dead_letter` is
-                                // distinct from the gate's
-                                // `hat_handoff_filename_mismatch` so
-                                // downstream tools can filter the
-                                // terminal state separately from the
-                                // per-iteration rejections.
-                                let dead_letter_envelope =
-                                    crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
-                                        .source(crate::diagnosis::DiagnosisSource::LoopStale)
-                                        .severity(crate::diagnosis::DiagnosisSeverity::Error)
-                                        .topic(&ev.topic)
-                                        .reason_code("task_resume_dead_letter")
-                                        .message(format!(
-                                            "coordinator dead-letter after {count} consecutive task.resume (kind={}); emitting plan.blocked",
-                                            blocked_kind.reason_code()
-                                        ))
-                                        .outcome(crate::diagnosis::DiagnosisOutcome::Failed)
-                                        .source_hat(from_hat)
-                                        .safe_target(false)
-                                        .build();
-                                let dead_letter_entry = crate::diagnosis::RecoveryJournalEntry::from_envelope(
-                                    dead_letter_envelope,
-                                    Vec::new(),
-                                );
-                                if let Ok(line) = serde_json::to_string(&dead_letter_entry) {
-                                    let recovery_path = self
-                                        .config
-                                        .core
-                                        .workspace_root
-                                        .join(".ralph/recovery.jsonl");
-                                    if let Some(parent) = recovery_path.parent() {
-                                        // Surface directory-creation failures via
-                                        // tracing (not `let _ =`) so the
-                                        // operator can see why the dead-letter
-                                        // audit is missing. A missing parent
-                                        // is usually a disk-permission issue.
-                                        if let Err(e) = std::fs::create_dir_all(parent) {
-                                            warn!(
-                                                target: "ralph::event_loop::dead_letter",
-                                                recovery_path = %recovery_path.display(),
-                                                error = %e,
-                                                "failed to create .ralph/ directory for dead-letter recovery.jsonl; \
-                                                 the dead-letter audit will be missing from this run — \
-                                                 fix disk permissions and replay the run to recover audit"
-                                            );
-                                        }
-                                    }
-                                    match std::fs::OpenOptions::new()
-                                        .create(true)
-                                        .append(true)
-                                        .open(&recovery_path)
-                                    {
-                                        Ok(mut f) => {
-                                            use std::io::Write as _;
-                                            if let Err(e) = writeln!(f, "{}", line) {
-                                                warn!(
-                                                    target: "ralph::event_loop::dead_letter",
-                                                    recovery_path = %recovery_path.display(),
-                                                    error = %e,
-                                                    "failed to write dead-letter entry to recovery.jsonl; \
-                                                     the dead-letter audit is incomplete for this run"
-                                                );
-                                            }
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                target: "ralph::event_loop::dead_letter",
-                                                recovery_path = %recovery_path.display(),
-                                                error = %e,
-                                                "failed to open recovery.jsonl for dead-letter write; \
-                                                 the dead-letter audit is missing from this run — \
-                                                 fix disk permissions and replay"
-                                            );
-                                        }
-                                    }
-                                }
-                                let blocked_event = ralph_proto::Event::new(
-                                    "plan.blocked",
-                                    format!(
-                                        "{{\"reason\":\"hat_handoff_repeated_rejection\",\"kind\":\"{kind}\",\"count\":{count}}}",
-                                        kind = blocked_kind.reason_code(),
-                                    ),
-                                );
-                                self.state.record_event(&blocked_event);
-                                rejected_diagnostics.push(blocked_event);
-                                // CB-7 P1-4 mutex: do NOT emit
-                                // task.resume on PlanBlocked path —
-                                // return early to keep the resume
-                                // record_event below out of the
-                                // rejected_diagnostics list.
-                                return false;
-                            }
-                            A::ReEmitWorkReady
-                            | A::FixPayloadSchema
-                            | A::FixEmitTarget => {
-                                // Normal path: emit task.resume +
-                                // dead-letter diagnostic only (already
-                                // emitted above when no subscriber).
-                                self.state.record_event(&resume_evt);
-                                rejected_diagnostics.push(resume_evt);
-                                false
-                            }
-                        }
-                    }
-                }
-            });
-            for diag in rejected_diagnostics {
-                self.bus.publish(diag);
-            }
-        }
-
         // --- State projection (U1 of 2026-06-17-003 plan): ---
         // SP-R8 mandates that the projector runs **after** the
         // state machine has accepted the batch and **before** the
@@ -8398,7 +7810,12 @@ impl EventLoop {
                                     .into(),
                                 to: consumer.into(),
                                 iteration: self.state.iteration,
-                                current_seq: self.state.hat_handoff_seq,
+                                // U3: macro-edge seq tracking removed from `LoopState`;
+                                // `HandoffAcceptedInputs.current_seq` is still
+                                // required by the U4 ledger shape and will go
+                                // away with U4. Pass 0 here — the field is dead
+                                // data in the interim.
+                                current_seq: 0,
                                 topic: accepted.topic.clone(),
                                 provided_handoff_path: extract_handoff_path_from_payload(
                                     accepted.payload.as_deref(),
@@ -9700,9 +9117,8 @@ impl EventLoop {
             // 2026-06-23 fix plan U7 (CB-5): only advance the
             // iter counter when this iteration actually accepted
             // at least one event. A no-progress turn (all
-            // rejected, e.g. `hat_handoff_*` rejection cascade)
-            // must NOT bump the iter counter — that would create
-            // a divergent ledger where iter N points at
+            // rejected) must NOT bump the iter counter — that
+            // would create a divergent ledger where iter N points at
             // `events.jsonl` lines from a different iteration.
             //
             // The `loop.batch_sync` source tag distinguishes the
