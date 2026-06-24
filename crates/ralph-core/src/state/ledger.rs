@@ -29,7 +29,6 @@
 //! `EventLoop::commit_terminal_delta`):
 //! - `RejectionRecorded` (FIX-9, `correction/mod.rs:346`) —
 //!   consumed by the retry budget on resume.
-//! - `HandoffAccepted` (A4, `event_loop/mod.rs:8701, 9025`).
 //! - `CompletionRequested` / `CompletionHonored` /
 //!   `CancellationRequested` (P1-2) — terminal markers; without
 //!   per-event commit, a mid-flight crash loses the
@@ -53,29 +52,6 @@
 //! the "would replay miss this without it" test. Anything that
 //! the projector's disk-side writes or the events.jsonl tail
 //! already preserves is redundant.
-//!
-//! ## U5: `commit_handoff_artifact` (macro-edge auto-generate)
-//!
-//! macro-edge `*.handoff.accepted` 事件被 engine gate accept 后,
-//! runtime 调用 [`StateLedger::commit_handoff_artifact`] 把
-//! `HandoffAccepted` delta 写入 commit log,并在 `handoff_path`
-//! 缺失时自动调用 `hat_handoff::allocator::prepare_with_dedup`
-//! 写盘一份通过 validator 的 skeleton。生成的 path 写回 commit
-//! `delta.handoff_path`,随 EventBus publish 一起对外可见。
-//!
-//! U5 行为锁定:
-//! - `feature_enabled = false` → `commit_handoff_artifact` 是 no-op,
-//!   返回 `Commit::empty`,与 U1 行为一致。
-//! - `handoff_path == None` → 调用 `prepare_with_dedup` 写盘 +
-//!   返回 path,validator 校验后 commit;validator 失败则降级为
-//!   None + 记录 `commit_log` 失败项(策略 U5:不阻断,仅记录)。
-//! - `handoff_path == Some(path)` 且文件不存在或 validator 失败
-//!   → 降级为「重新 generate」(regenerate 策略),覆盖原 path
-//!   指向的同名文件为新 skeleton(如果文件已存在 → 复用
-//!   `prepare_with_dedup` 的「已存在即返回」语义,不覆盖)。
-//!
-//! 仍保留 `commit()` 主流程不动;U5 集成通过单独 API 完成,避免
-//! 影响 U1 的 16 个测试。
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -157,36 +133,6 @@ pub enum LedgerError {
         "ledger bypass active: `commit()` refused because `snapshot_mut` borrow is still alive; close the borrow before committing"
     )]
     BypassActive,
-}
-
-/// 2026-06-21-002 plan U5: `commit_handoff_artifact` 的入参。
-///
-/// 由 `event_loop` 在 `*.handoff.accepted` 事件被 engine gate
-/// accept 后构造;ledger 负责写盘(缺失时)+ validator 校验 +
-/// 落 commit。
-#[derive(Debug, Clone)]
-pub struct HandoffAcceptedInputs {
-    /// Emit hat(宏观边的 from)。
-    pub from: ralph_proto::HatId,
-    /// Downstream hat(宏观边的 to)。
-    pub to: ralph_proto::HatId,
-    /// 当前 iteration(用于 path 文件名)。
-    pub iteration: u32,
-    /// 当前 hat_handoff_seq(供 path 分配)。
-    pub current_seq: u32,
-    /// 事件 topic(用于 skeleton 渲染)。
-    pub topic: String,
-    /// Agent 提供的 path(None 触发自动生成,U5 走 prepare_with_dedup)。
-    pub provided_handoff_path: Option<String>,
-}
-
-/// 2026-06-21-002 plan U5: `commit_handoff_artifact` 的返回。
-#[derive(Debug, Clone)]
-pub struct HandoffCommitOutcome {
-    /// 落 commit 的 record(可能因为 feature 关闭是 `Commit::empty`)。
-    pub commit: Commit,
-    /// 最终落 commit 的 `handoff_path`(`None` 当 `feature_enabled` 关)。
-    pub handoff_path: Option<String>,
 }
 
 impl StateLedger {
@@ -537,144 +483,6 @@ impl StateLedger {
         let _ = last_good_line;
         Ok(snapshot)
     }
-
-    /// 2026-06-21-002 plan U5: 自动生成 handoff artifact 并落 commit。
-    ///
-    /// 流程:
-    /// 1. `feature_enabled == false` → 返回 `Commit::empty` +
-    ///    `handoff_path = None`(与 U1 行为一致)。
-    /// 2. `provided_handoff_path` 为 `None` → 调用
-    ///    `hat_handoff::allocator::prepare_with_dedup` 写盘
-    ///    一份 skeleton,获取 repo-relative path。
-    /// 3. `provided_handoff_path` 为 `Some(path)`:
-    ///    - 文件已存在且 `validate_artifact` 通过 → 复用
-    ///      `path`。
-    ///    - 文件缺失或 `validate_artifact` 失败 → **regenerate
-    ///      策略**:把 `provided_handoff_path` 视作 hint,改用
-    ///      `prepare_with_dedup` 重新生成(path 由 iteration +
-    ///      current_seq 决定,与 hint 解耦)。
-    /// 4. 把最终的 `handoff_path` 写入 `CommitDelta::HandoffAccepted`,
-    ///    调 `commit()` 落 commit log。
-    ///
-    /// 注意:本方法**只负责** ledger 集成;engine gate 的
-    /// accept / reject 逻辑在 `event_loop::mod.rs` 里走
-    /// `hat_handoff::gate::evaluate_event`,与本函数解耦。
-    pub fn commit_handoff_artifact(
-        &mut self,
-        inputs: &HandoffAcceptedInputs,
-    ) -> Result<HandoffCommitOutcome, LedgerError> {
-        if !self.feature_enabled {
-            return Ok(HandoffCommitOutcome {
-                commit: Commit::empty(),
-                handoff_path: None,
-            });
-        }
-        // 1) 决定最终 handoff_path。
-        let final_path = resolve_handoff_path(&self.workspace, inputs)?;
-        // 2) 构造 delta 并落 commit。
-        let delta = CommitDelta::HandoffAccepted {
-            from: inputs.from.clone(),
-            to: inputs.to.clone(),
-            handoff_path: Some(final_path.clone()),
-        };
-        let commit = self.commit(delta, Some(inputs.topic.clone()))?;
-        Ok(HandoffCommitOutcome {
-            commit,
-            handoff_path: Some(final_path),
-        })
-    }
-}
-
-/// 2026-06-21-002 plan U5: 决定最终 handoff_path 的纯函数。
-///
-/// 1. `provided == None` → `prepare_with_dedup` 写盘 +
-///    返回 path。
-/// 2. `provided == Some(path)` 且 `validate_artifact` 通过
-///    → 复用 `path`。
-/// 3. `provided == Some(path)` 但 `validate_artifact` 失败
-///    → 走 **regenerate** 策略:用 `write_skeleton(force=true)`
-///    写到 canonical path 并返回。
-///
-/// **regenerate 写盘策略** 锁定:
-/// - 如果旧文件存在(由 agent 写就的非法内容),被覆盖为新
-///   skeleton(skeleton 通过 validator)。
-/// - 如果旧文件不存在,直接写。
-/// - 文件路径使用 canonical = `compute` 推导出的
-///   `{iter}-{seq+1}-{from}-{to}.md`,而非 agent 的 `provided`
-///   hint(避免 seq 漂移)。
-fn resolve_handoff_path(
-    workspace: &Path,
-    inputs: &HandoffAcceptedInputs,
-) -> Result<String, LedgerError> {
-    use crate::hat_handoff::allocator::{self, PrepareInputs};
-
-    let prepare_inputs = PrepareInputs {
-        iteration: inputs.iteration,
-        current_seq: inputs.current_seq,
-        from: inputs.from.as_str(),
-        to: inputs.to.as_str(),
-        topic: &inputs.topic,
-    };
-    let computed = allocator::compute(&prepare_inputs);
-
-    // 分支 1: provided == None → 直接 allocate(dedup)。
-    let provided = match inputs.provided_handoff_path.as_deref() {
-        Some(p) if !p.is_empty() => p,
-        _ => {
-            let outcome = allocator::prepare_with_dedup(workspace, &prepare_inputs)?;
-            // P2-#8 (002-adversarial-review): surface the
-            // auto-generated handoff path to operators so
-            // silent file creation is visible. Without this
-            // the agent never sees the file unless it reads
-            // the ledger or its commit topic.
-            tracing::info!(
-                canonical = outcome.handoff_path.as_str(),
-                from = inputs.from.as_str(),
-                to = inputs.to.as_str(),
-                topic = inputs.topic.as_str(),
-                "U5: auto-generated handoff skeleton (no agent-provided path)"
-            );
-            return Ok(outcome.handoff_path);
-        }
-    };
-
-    // 分支 2: provided == Some → 先 validate,通过则复用。
-    if crate::hat_handoff::validator::validate_artifact(
-        workspace,
-        provided,
-        inputs.from.as_str(),
-        inputs.to.as_str(),
-    )
-    .is_ok()
-    {
-        tracing::debug!(
-            provided = provided,
-            from = inputs.from.as_str(),
-            to = inputs.to.as_str(),
-            "U5: reusing agent-provided handoff_path (validator passed)"
-        );
-        return Ok(provided.to_string());
-    }
-
-    // 分支 3: 降级为 regenerate。覆盖写入 canonical path
-    // (而不是 provided hint),保证 filename 形状稳定 + 内容合法。
-    //
-    // P2-#8 (002-adversarial-review): escalate to `error!`
-    // because we are about to overwrite an agent-written file
-    // that the validator rejected. Downgrading this to
-    // `warn!` would make the destructive overwrite look
-    // routine; `error!` makes the action visible in default
-    // `tracing_subscriber` output (RUST_LOG=info hides it
-    // only if the operator explicitly opts in).
-    tracing::error!(
-        provided = provided,
-        canonical = computed.handoff_path.as_str(),
-        from = inputs.from.as_str(),
-        to = inputs.to.as_str(),
-        "U5: provided handoff_path failed validation; regenerating canonical artifact and OVERWRITING provided path with skeleton"
-    );
-    allocator::write_skeleton(workspace, &computed.handoff_path, &computed.skeleton, true)?;
-    Ok(computed.handoff_path)
 }
 
 /// Atomic-write helper for the on-disk JSONL commit log.

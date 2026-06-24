@@ -577,7 +577,6 @@ impl StateProjector {
             // ledger is already the source of truth for them.
             CommitDelta::RejectionRecorded { .. }
             | CommitDelta::RejectionBudgetTripped { .. }
-            | CommitDelta::HandoffAccepted { .. }
             | CommitDelta::WorkflowPhaseAdvanced { .. }
             | CommitDelta::CounterChanged { .. }
             | CommitDelta::SeenTopic { .. }
@@ -592,7 +591,6 @@ impl StateProjector {
             | CommitDelta::TaskBlockCounted { .. }
             | CommitDelta::TaskAbandoned { .. }
             | CommitDelta::ReviewStepUpdated { .. }
-            | CommitDelta::HandoffTrackerUpdated { .. }
             | CommitDelta::FlowLifecycleUpdated { .. }
             | CommitDelta::RejectionDigestUpdated { .. } => {
                 debug!(

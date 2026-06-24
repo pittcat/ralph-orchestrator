@@ -129,14 +129,6 @@ pub enum CommitDelta {
         terminal_reason: String,
     },
 
-    /// A `*.handoff.accepted` event was processed.
-    HandoffAccepted {
-        from: HatId,
-        to: HatId,
-        #[serde(default)]
-        handoff_path: Option<String>,
-    },
-
     /// A workflow chain advanced to a new phase.
     WorkflowPhaseAdvanced {
         chain_name: String,
@@ -210,14 +202,6 @@ pub enum CommitDelta {
         synth_terminal: Option<String>,
     },
 
-    /// Per-loop handoff deadline tracker mutation.
-    HandoffTrackerUpdated {
-        event_id: String,
-        accepted: bool,
-        #[serde(default)]
-        escalation_reason: Option<String>,
-    },
-
     /// FlowLifecycle registry mutation.
     FlowLifecycleUpdated { flow_unit_id: String, phase: String },
 
@@ -273,8 +257,6 @@ pub enum TaskTransition {
 pub enum CounterKind {
     /// `LedgerSnapshot::iteration`.
     Iteration,
-    /// `LedgerSnapshot::hat_handoff_seq`.
-    HatHandoffSeq,
     /// `LedgerSnapshot::consecutive_failures`.
     ConsecutiveFailures,
     /// `LedgerSnapshot::consecutive_blocked`.
@@ -316,7 +298,6 @@ impl CounterKind {
     pub fn from_str_lossy(s: &str) -> Self {
         match s {
             "iteration" => Self::Iteration,
-            "hat_handoff_seq" => Self::HatHandoffSeq,
             "consecutive_failures" => Self::ConsecutiveFailures,
             "consecutive_blocked" => Self::ConsecutiveBlocked,
             "abandoned_task_redispatches" => Self::AbandonedTaskRedispatches,
@@ -339,7 +320,6 @@ impl CounterKind {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Iteration => "iteration",
-            Self::HatHandoffSeq => "hat_handoff_seq",
             Self::ConsecutiveFailures => "consecutive_failures",
             Self::ConsecutiveBlocked => "consecutive_blocked",
             Self::AbandonedTaskRedispatches => "abandoned_task_redispatches",

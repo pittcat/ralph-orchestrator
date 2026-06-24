@@ -27,9 +27,8 @@ use ralph_proto::HatId;
 use tempfile::TempDir;
 
 use super::commit::{CommitDelta, CounterKind, TaskTransition};
-use super::ledger::{HandoffAcceptedInputs, LEDGER_RELATIVE_PATH, StateLedger, read_commit_log};
+use super::ledger::{LEDGER_RELATIVE_PATH, StateLedger, read_commit_log};
 use super::snapshot::LedgerSnapshot;
-use crate::hat_handoff::HAT_HANDOFF_DIR;
 use crate::task::Task;
 
 /// Build a workspace rooted at a tempdir, suitable for ledger
@@ -743,11 +742,6 @@ fn apply_delta_is_exhaustive() {
         terminal_reason: "exhausted".to_string(),
     });
 
-    snap.apply_delta(&CommitDelta::HandoffAccepted {
-        from: HatId::from("a"),
-        to: HatId::from("b"),
-        handoff_path: Some("/tmp/x".to_string()),
-    });
     snap.apply_delta(&CommitDelta::WorkflowPhaseAdvanced {
         chain_name: "chain".to_string(),
         instance_key: Some("inst".to_string()),
@@ -795,11 +789,6 @@ fn apply_delta_is_exhaustive() {
         synth_pass: true,
         synth_terminal: Some("review.passed".to_string()),
     });
-    snap.apply_delta(&CommitDelta::HandoffTrackerUpdated {
-        event_id: "e1".to_string(),
-        accepted: true,
-        escalation_reason: None,
-    });
     snap.apply_delta(&CommitDelta::FlowLifecycleUpdated {
         flow_unit_id: "w1".to_string(),
         phase: "Closed".to_string(),
@@ -827,7 +816,6 @@ fn counter_change_updates_each_field() {
 
     let counters: &[(&str, i64)] = &[
         ("iteration", 7),
-        ("hat_handoff_seq", 3),
         ("consecutive_failures", 2),
         ("consecutive_blocked", 4),
         ("abandoned_task_redispatches", 1),
@@ -850,7 +838,6 @@ fn counter_change_updates_each_field() {
     }
 
     assert_eq!(snap.iteration, 7);
-    assert_eq!(snap.hat_handoff_seq, 3);
     assert_eq!(snap.consecutive_failures, 2);
     assert_eq!(snap.consecutive_blocked, 4);
     assert_eq!(snap.abandoned_task_redispatches, 1);
@@ -976,184 +963,9 @@ fn seen_topic_dedup() {
 }
 
 // ---------------------------------------------------------------------------
-// U5: `commit_handoff_artifact` API
+// U5: hat_handoff ledger API was deleted in U4; see
+// docs/plans/2026-06-23-006-refactor-remove-hat-handoff-plan.md
 // ---------------------------------------------------------------------------
-
-fn handoff_inputs(
-    from: &str,
-    to: &str,
-    iteration: u32,
-    current_seq: u32,
-    topic: &str,
-    provided: Option<&str>,
-) -> HandoffAcceptedInputs {
-    HandoffAcceptedInputs {
-        from: HatId::from(from),
-        to: HatId::from(to),
-        iteration,
-        current_seq,
-        topic: topic.to_string(),
-        provided_handoff_path: provided.map(|s| s.to_string()),
-    }
-}
-
-#[test]
-fn u5_commit_handoff_artifact_auto_generates_when_missing() {
-    let (_dir, mut ledger) = fresh_ledger();
-    let inputs = handoff_inputs("executor", "review-coordinator", 3, 1, "work.done", None);
-    let outcome = ledger
-        .commit_handoff_artifact(&inputs)
-        .expect("commit_handoff_artifact must succeed");
-    // handoff_path 已写回 delta
-    let handoff_path = outcome.handoff_path.expect("path must be set");
-    assert!(handoff_path.starts_with(HAT_HANDOFF_DIR));
-    // delta 落 commit log
-    assert_eq!(outcome.commit.sequence, 1);
-    if let CommitDelta::HandoffAccepted {
-        handoff_path: logged,
-        ..
-    } = &outcome.commit.delta
-    {
-        assert_eq!(logged.as_deref(), Some(handoff_path.as_str()));
-    } else {
-        panic!(
-            "expected HandoffAccepted delta, got: {:?}",
-            outcome.commit.delta
-        );
-    }
-    // 文件已写盘
-    let abs = ledger.workspace().join(&handoff_path);
-    assert!(abs.exists(), "artifact must exist on disk: {abs:?}");
-    let body = std::fs::read_to_string(&abs).unwrap();
-    assert!(body.contains("# Handoff: executor → review-coordinator"));
-    assert!(body.contains("## next"));
-}
-
-#[test]
-fn u5_commit_handoff_artifact_reuses_existing_valid_path() {
-    let dir = workspace();
-    let mut ledger = StateLedger::new(dir.path(), true);
-
-    // 先手写一份合法的 handoff 文件。
-    let rel = ".ralph/agent/hat-handoff/3-2-executor-review_coordinator.md";
-    let abs = dir.path().join(rel);
-    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
-    let body = "# Handoff: executor → review-coordinator\n\
-                ## context\nfoo\n\n\
-                ## changed\nbar\n\n\
-                ## verify\nbaz\n\n\
-                ## next\n**动作**: emit LOOP_COMPLETE after review\n**阻塞**: 无\n\n\
-                ## notes\n无\n";
-    std::fs::write(&abs, body).unwrap();
-
-    let inputs = handoff_inputs(
-        "executor",
-        "review-coordinator",
-        3,
-        1,
-        "work.done",
-        Some(rel),
-    );
-    let outcome = ledger
-        .commit_handoff_artifact(&inputs)
-        .expect("must succeed");
-    // 复用现有 path,不覆盖。
-    assert_eq!(outcome.handoff_path.as_deref(), Some(rel));
-    let read_back = std::fs::read_to_string(&abs).unwrap();
-    assert_eq!(read_back, body, "existing file must not be overwritten");
-}
-
-#[test]
-fn u5_commit_handoff_artifact_regenerates_on_invalid_path() {
-    let dir = workspace();
-    let mut ledger = StateLedger::new(dir.path(), true);
-
-    // 手写一份不合法的 handoff 文件(缺 ## verify)。
-    let bad = ".ralph/agent/hat-handoff/3-2-executor-review_coordinator.md";
-    let bad_abs = dir.path().join(bad);
-    std::fs::create_dir_all(bad_abs.parent().unwrap()).unwrap();
-    std::fs::write(
-        &bad_abs,
-        "# Handoff: executor → review-coordinator\n\
-         ## context\nx\n\n\
-         ## changed\ny\n\n\
-         ## next\n**动作**: emit work.done\n**阻塞**: 无\n",
-    )
-    .unwrap();
-
-    let inputs = handoff_inputs(
-        "executor",
-        "review-coordinator",
-        3,
-        1,
-        "work.done",
-        Some(bad),
-    );
-    let outcome = ledger
-        .commit_handoff_artifact(&inputs)
-        .expect("regenerate must succeed");
-    // 重新生成 path,落 commit 时用 allocator 的 path
-    // (= 同一 iteration + current_seq + from + to 组合下的 path),
-    // 替换原 bad 路径指向的同名文件。
-    let final_path = outcome.handoff_path.expect("path must be set");
-    assert_eq!(final_path, bad);
-    // 文件已被替换为合法 skeleton
-    let read_back = std::fs::read_to_string(&bad_abs).unwrap();
-    assert!(read_back.contains("## verify"));
-    assert!(read_back.contains("## next"));
-    assert!(read_back.contains("**动作**:"));
-}
-
-#[test]
-fn u5_commit_handoff_artifact_dedup_iteration_seq_topic() {
-    let dir = workspace();
-    let mut ledger = StateLedger::new(dir.path(), true);
-    let inputs = handoff_inputs("executor", "review-coordinator", 3, 1, "work.done", None);
-    let r1 = ledger
-        .commit_handoff_artifact(&inputs)
-        .expect("first commit must succeed");
-    // 重复 commit 同一组合:应得到同一 path 且不报错。
-    let r2 = ledger
-        .commit_handoff_artifact(&inputs)
-        .expect("second commit must succeed");
-    assert_eq!(r1.handoff_path, r2.handoff_path);
-    // commit log 仍然记录两次(每次都是独立 commit),
-    // 但 disk artifact 不会被覆盖(由 prepare_with_dedup 保证)。
-    let abs = dir.path().join(r1.handoff_path.as_ref().unwrap());
-    assert!(abs.exists());
-    let body = std::fs::read_to_string(&abs).unwrap();
-    assert!(body.contains("## next"));
-}
-
-#[test]
-fn u5_commit_handoff_artifact_feature_disabled_noop() {
-    let dir = workspace();
-    let mut ledger = StateLedger::new(dir.path(), false);
-    let inputs = handoff_inputs("executor", "review-coordinator", 3, 1, "work.done", None);
-    let outcome = ledger
-        .commit_handoff_artifact(&inputs)
-        .expect("feature off must not fail");
-    assert!(matches!(outcome.commit.delta, CommitDelta::NoOp));
-    assert!(outcome.handoff_path.is_none());
-    // 文件不应该被创建
-    let handoff_dir = dir.path().join(HAT_HANDOFF_DIR);
-    assert!(!handoff_dir.exists(), "feature off must not write artifact");
-}
-
-#[test]
-fn apply_delta_records_handoff_accepted_audit_entry() {
-    let mut snap = LedgerSnapshot::cold_start();
-    let delta = CommitDelta::HandoffAccepted {
-        from: HatId::new("executor".to_string()),
-        to: HatId::new("reviewer".to_string()),
-        handoff_path: Some(".ralph/agent/hat-handoff/test.md".to_string()),
-    };
-    snap.apply_delta(&delta);
-
-    assert_eq!(snap.handoff_accepted_log.len(), 1);
-    assert_eq!(snap.handoff_accepted_log[0].from.as_str(), "executor");
-    assert_eq!(snap.handoff_accepted_log[0].to.as_str(), "reviewer");
-}
 
 #[test]
 fn apply_delta_records_review_step_update() {
@@ -1189,21 +1001,6 @@ fn apply_delta_records_review_step_update() {
 }
 
 #[test]
-fn apply_delta_records_handoff_tracker_update() {
-    let mut snap = LedgerSnapshot::cold_start();
-    let delta = CommitDelta::HandoffTrackerUpdated {
-        event_id: "evt-001".to_string(),
-        accepted: true,
-        escalation_reason: None,
-    };
-    snap.apply_delta(&delta);
-
-    assert_eq!(snap.handoff_tracker_log.len(), 1);
-    assert_eq!(snap.handoff_tracker_log[0].event_id, "evt-001");
-    assert!(snap.handoff_tracker_log[0].accepted);
-}
-
-#[test]
 fn apply_delta_records_flow_lifecycle_update() {
     let mut snap = LedgerSnapshot::cold_start();
     let delta = CommitDelta::FlowLifecycleUpdated {
@@ -1215,25 +1012,6 @@ fn apply_delta_records_flow_lifecycle_update() {
     assert_eq!(snap.flow_lifecycle_log.len(), 1);
     assert_eq!(snap.flow_lifecycle_log[0].flow_unit_id, "flow-1");
     assert_eq!(snap.flow_lifecycle_log[0].phase, "active");
-}
-
-#[test]
-fn u5_commit_handoff_artifact_validator_integration() {
-    let dir = workspace();
-    let mut ledger = StateLedger::new(dir.path(), true);
-    let inputs = handoff_inputs("executor", "review-coordinator", 3, 1, "work.done", None);
-    let outcome = ledger
-        .commit_handoff_artifact(&inputs)
-        .expect("commit must succeed");
-    // 落 commit 后,artfiact 必须通过 validator。
-    let path = outcome.handoff_path.as_ref().unwrap();
-    let result = crate::hat_handoff::validator::validate_artifact(
-        ledger.workspace(),
-        path,
-        "executor",
-        "review-coordinator",
-    );
-    result.unwrap_or_else(|e| panic!("validator must accept generated artifact: {e}"));
 }
 
 // ---------------------------------------------------------------------------

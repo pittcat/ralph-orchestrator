@@ -70,7 +70,7 @@ pub struct RejectionRecord {
     /// U6 (plan 2026-06-23-004): typed kind 字段。
     ///
     /// 与 `reason_code` 冗余存储但语义不同:
-    /// - `reason_code` 是历史 grep 兼容字符串(`hat_handoff_filename_mismatch` 等)
+    /// - `reason_code` 是历史 grep 兼容字符串(`origin:missing_field` 等)
     /// - `kind` 是 typed 字段(`RejectionKind::reason_code()` SSOT 化),
     ///   消费方可按 kind 做 typed 分桶聚合,无需字符串匹配。
     ///
@@ -408,42 +408,6 @@ mod tests {
         use crate::preset::engine::gates::RejectionKind;
 
         #[test]
-        fn factory_method_ssot_kind_matches_reason_code() {
-            // from_typed_rejection: kind 与 reason_code 必从同一 kind SSOT 派生
-            let r = RejectionRecord::from_typed_rejection(
-                "executor",
-                "work.ready",
-                RejectionKind::HandoffFilenameMismatch,
-                3,
-            );
-            assert_eq!(
-                r.kind.as_deref(),
-                Some("hat_handoff_filename_mismatch")
-            );
-            assert_eq!(
-                r.reason_code, "hat_handoff_filename_mismatch",
-                "kind and reason_code MUST come from the same RejectionKind SSOT"
-            );
-        }
-
-        #[test]
-        fn factory_method_covers_all_hat_handoff_kinds() {
-            for kind in [
-                RejectionKind::HandoffFilenameMismatch,
-                RejectionKind::HandoffStructureInvalid,
-                RejectionKind::HandoffIllegalEmitTopic,
-            ] {
-                let r = RejectionRecord::from_typed_rejection(
-                    "executor",
-                    "work.ready",
-                    kind,
-                    1,
-                );
-                assert_eq!(r.kind.as_deref(), Some(kind.reason_code()));
-            }
-        }
-
-        #[test]
         fn legacy_record_without_kind_deserializes_with_none() {
             // 反序列化兼容:老 envelope(无 kind 字段)能反序列化,kind = None。
             let dir = TempDir::new().unwrap();
@@ -462,43 +426,6 @@ mod tests {
         }
 
         #[test]
-        fn typed_kind_serializes_for_grep() {
-            // 消费侧可以按 kind grep:`jq 'select(.kind == "hat_handoff_filename_mismatch")'`
-            let r = RejectionRecord::from_typed_rejection(
-                "executor",
-                "work.ready",
-                RejectionKind::HandoffFilenameMismatch,
-                5,
-            );
-            let s = serde_json::to_string(&r).unwrap();
-            assert!(s.contains("\"kind\":\"hat_handoff_filename_mismatch\""));
-        }
-
-        #[test]
-        fn append_and_read_round_trip_preserves_kind() {
-            let dir = TempDir::new().unwrap();
-            let r = RejectionRecord::from_typed_rejection(
-                "executor",
-                "work.ready",
-                RejectionKind::HandoffStructureInvalid,
-                2,
-            );
-            append_rejection(dir.path(), &r).unwrap();
-            let records = read_rejection_log(dir.path()).unwrap();
-            assert_eq!(records.len(), 1);
-            assert_eq!(
-                records[0].kind.as_deref(),
-                Some("hat_handoff_structure_invalid")
-            );
-        }
-
-        /// 2026-06-23 fix plan U6 (CB-3): legacy reason_code strings
-        /// (from `extract_reason_code(&violation)` in
-        /// `correction/mod.rs`) MUST round-trip through
-        /// `from_reason_code_or_legacy` and surface the typed
-        /// kind. Known kinds set `kind=Some(_)`; unknown strings
-        /// fall back to `kind=None`.
-        #[test]
         fn from_reason_code_or_legacy_typed_kind_for_known_reason_codes() {
             for reason in [
                 "missing_field",
@@ -506,9 +433,6 @@ mod tests {
                 "upstream_state",
                 "handoff_artifact",
                 "pre_check",
-                "hat_handoff_filename_mismatch",
-                "hat_handoff_structure_invalid",
-                "hat_handoff_illegal_emit_topic",
             ] {
                 let r = RejectionRecord::from_reason_code_or_legacy(
                     "executor",
@@ -597,47 +521,18 @@ mod tests {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).unwrap();
             }
-            let typed = b"{\"ts\":\"2026-06-23T00:00:00Z\",\"hat\":\"a\",\"topic\":\"x\",\"reason_code\":\"hat_handoff_filename_mismatch\",\"kind\":\"hat_handoff_filename_mismatch\",\"retry_count\":1,\"terminal_reason\":null}\n";
+            let typed = b"{\"ts\":\"2026-06-23T00:00:00Z\",\"hat\":\"a\",\"topic\":\"x\",\"reason_code\":\"origin:missing_field\",\"kind\":\"origin:missing_field\",\"retry_count\":1,\"terminal_reason\":null}\n";
             fs::write(&path, typed).unwrap();
             let status = RejectionRecord::classify_legacy_envelope(dir.path(), 0).unwrap();
             match status {
                 Some(LegacyKindStatus::Typed(kind)) => {
                     assert_eq!(
                         kind,
-                        crate::preset::engine::gates::RejectionKind::HandoffFilenameMismatch
+                        crate::preset::engine::gates::RejectionKind::MissingField
                     );
                 }
                 other => panic!(
                     "P1-3: typed envelope MUST classify as Typed(_), got {other:?}"
-                ),
-            }
-        }
-
-        /// 2026-06-23 fix plan P1-3 (CB-3 legacy envelope compat):
-        /// legacy envelope without `kind` field but with a known
-        /// reason_code (e.g. `hat_handoff_structure_invalid`)
-        /// MUST classify as `LegacyFromReasonCode` — caller can
-        /// either rebuild the typed record or pass it through.
-        #[test]
-        fn legacy_envelope_without_kind_but_known_reason_classifies_legacy() {
-            use std::fs;
-            let dir = TempDir::new().unwrap();
-            let path = recovery_log_path(dir.path());
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).unwrap();
-            }
-            let legacy_known = b"{\"ts\":\"2026-06-23T00:00:00Z\",\"hat\":\"a\",\"topic\":\"x\",\"reason_code\":\"hat_handoff_structure_invalid\",\"retry_count\":1,\"terminal_reason\":null}\n";
-            fs::write(&path, legacy_known).unwrap();
-            let status = RejectionRecord::classify_legacy_envelope(dir.path(), 0).unwrap();
-            match status {
-                Some(LegacyKindStatus::LegacyFromReasonCode(kind)) => {
-                    assert_eq!(
-                        kind,
-                        crate::preset::engine::gates::RejectionKind::HandoffStructureInvalid
-                    );
-                }
-                other => panic!(
-                    "P1-3: legacy envelope with known reason_code MUST classify as LegacyFromReasonCode, got {other:?}"
                 ),
             }
         }

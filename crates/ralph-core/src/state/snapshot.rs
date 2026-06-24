@@ -76,8 +76,6 @@ pub struct LedgerSnapshot {
     pub current_isolated_hat: Option<HatId>,
 
     // ---- runtime counters ---------------------------------------
-    /// hat→hat handoff sequence within the current iteration.
-    pub hat_handoff_seq: u32,
     /// Consecutive failures.
     pub consecutive_failures: u32,
     /// Cumulative cost in USD.
@@ -253,35 +251,6 @@ pub struct LedgerSnapshot {
     /// the storage only.
     pub last_drift_action: Option<String>,
 
-    // ---- handoff accepted audit log (B1) ----------------------
-    /// Per-`HandoffAccepted` delta, recorded with the wall-clock
-    /// timestamp so replay can rebuild an equivalent audit trail
-    /// (the in-memory `HandoffTracker` is `Instant`-keyed and
-    /// therefore not replayable from disk; this is the durable
-    /// mirror).
-    ///
-    /// B1 (002-adversarial-review): the previous
-    /// `apply_delta` for `HandoffAccepted` was a no-op, so the
-    /// commit log recorded the event but the snapshot stayed
-    /// empty after `replay_from_disk`. The runtime kept working
-    /// because the live `LoopState::handoff_tracker` was
-    /// mutated by the legacy path; replay lost the audit trail.
-    /// The new path appends an immutable record here on every
-    /// `HandoffAccepted` so the audit trail survives cold start.
-    pub handoff_accepted_log: Vec<AcceptedHandoffRecord>,
-
-    // ---- handoff tracker audit log (B3) ----------------------
-    /// Per-`HandoffTrackerUpdated` delta. Mirrors the audit
-    /// shape used by `handoff_accepted_log`; tracks the
-    /// `event_id` and `accepted` flag (plus the optional
-    /// `escalation_reason` for failures) so cold start can
-    /// reconstruct which event ids were ever accepted and which
-    /// were escalated. The live `HandoffTracker` (in
-    /// `LoopState`) remains the source of truth for **pending**
-    /// handoffs because it is `Instant`-keyed; this log is the
-    /// replayable audit trail.
-    pub handoff_tracker_log: Vec<HandoffTrackerUpdateRecord>,
-
     // ---- flow lifecycle audit log (B4) -----------------------
     /// Per-`FlowLifecycleUpdated` delta, capturing the
     /// `(flow_unit_id, phase)` tuple in order. The live
@@ -299,30 +268,6 @@ pub struct FlowLifecycleUpdateRecord {
     pub flow_unit_id: String,
     pub phase: String,
     pub recorded_at_ts: String,
-}
-
-/// One `HandoffTrackerUpdated` delta, captured in
-/// [`LedgerSnapshot::handoff_tracker_log`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HandoffTrackerUpdateRecord {
-    pub event_id: String,
-    pub accepted: bool,
-    pub escalation_reason: Option<String>,
-    pub recorded_at_ts: String,
-}
-
-/// One accepted handoff. Stored in
-/// [`LedgerSnapshot::handoff_accepted_log`]; the
-/// `accepted_at_ts` is the wall-clock equivalent of the
-/// `Instant::now()` call the runtime uses to seed
-/// `HandoffTracker::on_handoff_accepted` — the tracker is
-/// `Instant`-keyed and therefore not replayable, this log is.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcceptedHandoffRecord {
-    pub from: HatId,
-    pub to: HatId,
-    pub handoff_path: Option<String>,
-    pub accepted_at_ts: String,
 }
 
 /// Serialized form of an obligation trigger event. We do not
@@ -431,27 +376,6 @@ impl LedgerSnapshot {
                 // The runner consumes the trip directly off the
                 // commit log; the snapshot is not mutated.
             }
-            CommitDelta::HandoffAccepted {
-                from,
-                to,
-                handoff_path,
-            } => {
-                // B1 (002-adversarial-review): record an
-                // immutable audit entry. The legacy
-                // `HandoffTracker::on_handoff_accepted` path is
-                // still wired by the runtime (the tracker
-                // remains the source of truth for *pending*
-                // handoffs), but the snapshot's audit log is
-                // the only thing that survives `replay_from_disk`
-                // — the tracker is `Instant`-keyed so it cannot
-                // be rebuilt from disk state.
-                self.handoff_accepted_log.push(AcceptedHandoffRecord {
-                    from: from.clone(),
-                    to: to.clone(),
-                    handoff_path: handoff_path.clone(),
-                    accepted_at_ts: chrono::Utc::now().to_rfc3339(),
-                });
-            }
             CommitDelta::WorkflowPhaseAdvanced {
                 chain_name,
                 instance_key,
@@ -517,25 +441,6 @@ impl LedgerSnapshot {
                     *synth_pass,
                     synth_terminal.as_deref(),
                 );
-            }
-            CommitDelta::HandoffTrackerUpdated {
-                event_id,
-                accepted,
-                escalation_reason,
-            } => {
-                // B3 (002-adversarial-review): record the
-                // audit entry. The live `HandoffTracker`
-                // remains the source of truth for pending
-                // handoffs (`Instant`-keyed; not replayable);
-                // this log is the durable mirror so a cold
-                // start knows which event ids were ever
-                // accepted/escalated.
-                self.handoff_tracker_log.push(HandoffTrackerUpdateRecord {
-                    event_id: event_id.clone(),
-                    accepted: *accepted,
-                    escalation_reason: escalation_reason.clone(),
-                    recorded_at_ts: chrono::Utc::now().to_rfc3339(),
-                });
             }
             CommitDelta::FlowLifecycleUpdated {
                 flow_unit_id,
@@ -614,9 +519,9 @@ impl LedgerSnapshot {
         &self.handoff_tracker
     }
 
-    /// Mutable access to the embedded `HandoffTracker`. U2 calls
-    /// this from `apply_from_ledger` when rebuilding the tracker
-    /// from a `CommitDelta::HandoffTrackerUpdated` diff.
+    /// Mutable access to the embedded `HandoffTracker`. The
+    /// legacy delta-driven path is gone (U4); callers mutate
+    /// the tracker directly via the runtime.
     pub fn handoff_tracker_mut(&mut self) -> &mut HandoffTracker {
         &mut self.handoff_tracker
     }
@@ -710,7 +615,6 @@ fn apply_counter_change(snap: &mut LedgerSnapshot, counter: &CounterKind, new_va
     };
     match counter {
         CounterKind::Iteration => snap.iteration = v as u32,
-        CounterKind::HatHandoffSeq => snap.hat_handoff_seq = v as u32,
         CounterKind::ConsecutiveFailures => snap.consecutive_failures = v as u32,
         CounterKind::ConsecutiveBlocked => snap.consecutive_blocked = v as u32,
         CounterKind::AbandonedTaskRedispatches => snap.abandoned_task_redispatches = v as u32,
