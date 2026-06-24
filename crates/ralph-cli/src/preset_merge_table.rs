@@ -31,5 +31,4 @@ pub const SSOT_SECTION_TARGETS: &[(&str, &[&str])] = &[
     ("verdict_gate", &["event_loop", "verdict_gate"]),
     ("workflow_contract", &["event_loop", "workflow_contract"]),
     ("state_projection", &["event_loop", "state_projection"]),
-    ("hat_handoff", &["event_loop", "hat_handoff"]),
 ];
