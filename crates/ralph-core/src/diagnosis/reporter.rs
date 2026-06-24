@@ -343,8 +343,6 @@ pub struct LedgerSummary {
     pub escalation_commits: u32,
     /// Number of `CommitDelta::TaskLifecycle` commits.
     pub task_lifecycle_commits: u32,
-    /// Number of `CommitDelta::HandoffAccepted` commits.
-    pub handoff_commits: u32,
     /// True when the commit log could not be read because of a
     /// parse error (replay stopped at the first bad line).  The
     /// caller can then fall back to the legacy session view.
@@ -495,9 +493,6 @@ fn read_ledger_summary(workspace: &Path) -> LedgerSummary {
             crate::state::CommitDelta::TaskLifecycle { .. }
             | crate::state::CommitDelta::TaskInserted { .. } => {
                 summary.task_lifecycle_commits = summary.task_lifecycle_commits.saturating_add(1);
-            }
-            crate::state::CommitDelta::HandoffAccepted { .. } => {
-                summary.handoff_commits = summary.handoff_commits.saturating_add(1);
             }
             _ => {}
         }
@@ -820,10 +815,6 @@ pub fn render_diagnosis_report_markdown(report: &DiagnosisReport) -> String {
                 "- task lifecycle: {}\n",
                 report.ledger_summary.task_lifecycle_commits
             ));
-            out.push_str(&format!(
-                "- handoff accepted: {}\n",
-                report.ledger_summary.handoff_commits
-            ));
         } else {
             out.push_str("- total commits: 0 (commit log could not be parsed)\n");
         }
@@ -866,7 +857,6 @@ pub fn render_diagnosis_report_json(report: &DiagnosisReport) -> Value {
             "rejection_commits": report.ledger_summary.rejection_commits,
             "escalation_commits": report.ledger_summary.escalation_commits,
             "task_lifecycle_commits": report.ledger_summary.task_lifecycle_commits,
-            "handoff_commits": report.ledger_summary.handoff_commits,
             "corruption": report.ledger_summary.corruption,
             "warnings": report.ledger_summary.warnings,
         },
