@@ -735,7 +735,6 @@ const ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS: &[&str] = &[
 /// (Differs from [`ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS`], where preset wins.)
 const PRESET_OPT_IN_WHEN_OPERATOR_OMITS: &[&str] = &[
     "state_projection",
-    "hat_handoff",
     // 2026-06-18-004 U2: ce-executor-serial suppresses guidance-in-prompt.
     "suppress_human_guidance",
     // 2026-06-17-002: step_handoff progress ↔ task gate.
@@ -1506,103 +1505,12 @@ event_loop:
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // 2026-06-19 fix: preset `event_loop.hat_handoff` must fall through
-    // to the merged config when the operator's ralph.yml has NOT
-    // declared `hat_handoff` (mirrors the `state_projection` opt-in
-    // pattern at lines ~895-920). Without this, every preset that opts
-    // into the hat→hat roadmap handoff (ce-executor-serial / serial /
-    // wave) is silently downgraded to `HatHandoffConfig::default()`
-    // (`enabled: false`) because `hat_handoff` is not in
-    // `ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS`. Symptom:
-    // `.ralph/agent/hat-handoff/` never appears, and
-    // `## HAT HANDOFF EMIT REQUIREMENTS` is never prepended to the
-    // upstream hat prompt.
-    #[test]
-    fn merge_hats_overlay_preserves_preset_hat_handoff_when_operator_omits_it() {
-        let core: Value = serde_yaml::from_str(
-            r"
-event_loop:
-  max_runtime_seconds: 28800
-  completion_promise: LOOP_COMPLETE
-  max_iterations: 500
-  prompt_file: PROMPT.md
-hats:
-  coordinator:
-    backend: claude
-",
-        )
-        .unwrap();
-
-        let hats: Value = serde_yaml::from_str(
-            r"
-event_loop:
-  execution_mode: isolated
-  hat_handoff:
-    enabled: true
-hats:
-  coordinator:
-    name: Coordinator
-",
-        )
-        .unwrap();
-
-        let merged = merge_hats_overlay(core, hats).unwrap();
-        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
-
-        // Operator's event_loop keys must survive.
-        assert_eq!(config.event_loop.max_runtime_seconds, 28800);
-        assert_eq!(config.event_loop.max_iterations, 500);
-        assert_eq!(config.event_loop.completion_promise, "LOOP_COMPLETE");
-        // Whitelisted key from preset still wins.
-        assert!(matches!(
-            config.event_loop.execution_mode,
-            ralph_core::config::HatExecutionMode::Isolated
-        ));
-        // The fix: preset's hat_handoff survives when operator omits it.
-        assert!(
-            config.event_loop.hat_handoff.enabled,
-            "preset hat_handoff.enabled=true must survive merge when operator omits it"
-        );
-    }
-
-    #[test]
-    fn merge_hats_overlay_lets_operator_override_preset_hat_handoff() {
-        // If the operator EXPLICITLY sets `hat_handoff` in ralph.yml,
-        // the operator's value wins (mirrors `state_projection` opt-in
-        // semantics: explicit operator decision is authoritative).
-        let core: Value = serde_yaml::from_str(
-            r"
-event_loop:
-  hat_handoff:
-    enabled: false
-hats:
-  coordinator:
-    backend: claude
-",
-        )
-        .unwrap();
-
-        let hats: Value = serde_yaml::from_str(
-            r"
-event_loop:
-  hat_handoff:
-    enabled: true
-hats:
-  coordinator:
-    name: Coordinator
-",
-        )
-        .unwrap();
-
-        let merged = merge_hats_overlay(core, hats).unwrap();
-        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
-
-        assert!(
-            !config.event_loop.hat_handoff.enabled,
-            "operator's explicit hat_handoff.enabled=false must override preset"
-        );
-    }
-
+    // 2026-06-19 fix (deleted by 2026-06-23-006 U5): the two
+    // `merge_hats_overlay_*_hat_handoff_*` tests asserted the
+    // opt-in semantics for the now-removed `hat_handoff`
+    // config block. With the block gone the merges degenerate
+    // to the existing `state_projection` / `suppress_human_guidance`
+    // paths exercised by the test below.
     #[test]
     fn merge_hats_overlay_preserves_preset_opt_in_event_loop_keys_when_operator_omits_them() {
         // bold-heron (2026-06-19): ce-executor-serial declares these keys

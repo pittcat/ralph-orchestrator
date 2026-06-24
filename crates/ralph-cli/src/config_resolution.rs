@@ -55,17 +55,21 @@ pub(crate) fn default_core_value() -> Result<Value> {
         // `event_loop` so `merge_hats_overlay` can detect "operator
         // omitted" via `contains_key`. Without this, the default
         // placeholders (e.g. `state_projection: {enabled: false,
-        // actions: {}}`, `hat_handoff: {enabled: false}`,
-        // `suppress_human_guidance: false`) survive
+        // actions: {}}`, `suppress_human_guidance: false`) survive
         // `default_core_value()` and make the `!contains_key` guard
         // in `merge_hats_overlay` always true on those keys, silently
         // dropping the preset opt-in (perky-maple + bold-heron
         // regressions). Operator's explicit declaration still wins
         // because `merge_yaml_values` keeps the operator's value
         // when declared; only the default placeholder is stripped.
+        //
+        // 2026-06-23-006 U5: removed `"hat_handoff"` — the
+        // `EventLoopConfig.hat_handoff` field no longer exists,
+        // so any pre-existing `hat_handoff:` block in ralph.yml
+        // is silently dropped by serde's `deny_unknown_fields`-off
+        // default.
         const PRESET_OPT_IN_KEYS: &[&str] = &[
             "state_projection",
-            "hat_handoff",
             "suppress_human_guidance",
             "workflow_contract",
             "ephemeral_isolation",
@@ -286,7 +290,6 @@ event_loop:
 
         for key in [
             "state_projection",
-            "hat_handoff",
             "suppress_human_guidance",
             "workflow_contract",
             "ephemeral_isolation",

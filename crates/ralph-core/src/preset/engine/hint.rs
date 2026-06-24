@@ -27,6 +27,10 @@ use super::gates::RejectionKind;
 /// (KTD-4). The linter carries the classification forward to
 /// the resume hint so the prompt can route the agent to the
 /// correct owner.
+///
+/// 2026-06-23-006 U5: the `HandoffArtifact` variant was removed
+/// together with the `hat_handoff` config block; it is no
+/// longer produced by any rejection kind.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LintFailureClass {
@@ -39,9 +43,6 @@ pub enum LintFailureClass {
     /// Topic emitted by a hat that does not own it. Routes back
     /// to the source hat to discourage cross-hat publishing.
     TopicOwnership,
-    /// Handoff artifact missing required sections / `## next` marker.
-    /// Routes back to the source hat so the agent can regenerate.
-    HandoffArtifact,
 }
 
 impl LintFailureClass {
@@ -54,10 +55,7 @@ impl LintFailureClass {
     /// then re-reads it).
     pub fn from_reason(reason: &str) -> Self {
         let lower = reason.to_ascii_lowercase();
-        // Check artifact first — its `## next` token is unique.
-        if lower.contains("artifact") || lower.contains("## next") {
-            Self::HandoffArtifact
-        } else if lower.contains("topic")
+        if lower.contains("topic")
             && (lower.contains("ownership")
                 || lower.contains("deny")
                 || lower.contains("unauthorized"))
@@ -92,7 +90,6 @@ impl LintResumeTarget {
             LintFailureClass::PayloadError => Self::SourceHat,
             LintFailureClass::UpstreamStateMissing => Self::PlanGate,
             LintFailureClass::TopicOwnership => Self::SourceHat,
-            LintFailureClass::HandoffArtifact => Self::SourceHat,
         }
     }
 }
@@ -165,20 +162,12 @@ mod tests {
         assert_eq!(hint.target, LintResumeTarget::PlanGate);
     }
 
-    #[test]
-    fn artifact_routes_to_source() {
-        let hint =
-            LintResumeHint::from_reason("review.passed", "## next marker missing in artifact");
-        assert_eq!(hint.class, LintFailureClass::HandoffArtifact);
-        assert_eq!(hint.target, LintResumeTarget::SourceHat);
-    }
-
     /// P1-1: the typed constructor picks the right class
     /// *regardless* of the message text. A missing-field
     /// rejection whose message accidentally contains the
-    /// word "artifact" is still classified as a payload error,
-    /// not a handoff artifact error. This is the regression
-    /// that the old `from_reason` could not catch.
+    /// word "artifact" is still classified as a payload error.
+    /// This is the regression that the old `from_reason` could
+    /// not catch.
     #[test]
     fn p1_1_typed_rejection_ignores_message_keywords() {
         let hint = LintResumeHint::from_typed_rejection(
@@ -191,19 +180,6 @@ mod tests {
             LintFailureClass::PayloadError,
             "missing-field rejection must stay a payload error even when the message mentions 'artifact'"
         );
-        assert_eq!(hint.target, LintResumeTarget::SourceHat);
-    }
-
-    /// P1-1: a handoff-artifact rejection whose message
-    /// mentions "topic" still classifies as HandoffArtifact.
-    #[test]
-    fn p1_1_typed_rejection_classifies_by_kind_not_text() {
-        let hint = LintResumeHint::from_typed_rejection(
-            "review.passed",
-            RejectionKind::HandoffArtifact,
-            "artifact body missing ## next marker; topic route unchanged",
-        );
-        assert_eq!(hint.class, LintFailureClass::HandoffArtifact);
         assert_eq!(hint.target, LintResumeTarget::SourceHat);
     }
 
