@@ -1519,16 +1519,17 @@ fn test_ce_executor_bootstrap_recovery_scenario() {
 
 #[test]
 fn test_ce_executor_serial_review_scenario() {
-    // 4-dim serial review chain: review-coordinator walks one dimension per
-    // turn (review.dimension.ready → review.dimension.done × 4), then emits
-    // review.dimensions.complete to wake the synthesizer. The chain length
-    // (4 ready/done pairs + 1 close + downstream) is the wire-level contract
-    // that distinguishes the serial preset from the parallel wave variant.
-    // If a future edit re-introduces a wave dispatcher or collapses the
-    // per-dim hops, the topic count and order assertions in
-    // `expected.events` will fire before integration tests do.
+    // 2026-06-24 P0-2/P0-3 rewrite: 2-dim serial review chain (no
+    // plan-gate, no review.passed). The old 4-dim + review.passed +
+    // plan-gate + queue.advance topology was stale and silently passed
+    // via the `run_scenario` stub runner. Now uses
+    // `run_workflow_guard_scenario` (real EventLoop runner) which
+    // asserts on the actual events emitted, catching topology drift.
+    // If a future edit re-introduces the old 4-dim topology or the
+    // review.passed/queue.advance events, the `expected.events` +
+    // `expected.absent_events` assertions in the yml will fire.
     let yaml = load_scenario("tests/scenarios/ce_executor_serial_review.yml");
-    run_scenario(yaml);
+    run_workflow_guard_scenario(yaml);
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1760,30 +1761,35 @@ fn test_u9_cli_runtime_parity_scenario() {
 
 #[test]
 fn test_ce_executor_serial_review_silent_reviewer_recovers_scenario() {
+    // 2026-06-24 P0-2/P0-3 rewrite: 2-dim topology with DR silence +
+    // recovery. Now uses `run_workflow_guard_scenario` (real EventLoop
+    // runner) so the `expected.events` + `expected.absent_events`
+    // assertions actually fire on topology drift.
     let yaml =
         load_scenario("tests/scenarios/ce_executor_serial_review_silent_reviewer_recovers.yml");
-    run_scenario(yaml);
+    run_workflow_guard_scenario(yaml);
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// 2026-06-18-004 plan U4 (R1, R6): fix → re-review → review.passed →
-// plan-gate handoff for ce-executor-serial.
+// 2026-06-24 P0-2/P0-3 rewrite: fix → re-test → 2-dim re-review →
+// review.complete for ce-executor-serial.
 //
-// Pins the wire-level contract end-to-end: after `fix.applied(fix_round=1)`
-// is accepted, `review-coordinator` walks a fresh 4-dim sequence, the
-// 2nd `review.dimensions.complete` carries `fix_round=1`, and
-// `review-synthesizer` emits `review.passed`. `plan-gate` then
-// dispatches `queue.advance` + (single-step plan) `plan.complete`.
+// Pins the wire-level contract end-to-end: after `test.failed` the
+// fixer emits `fix.applied(fix_round=1)`, validator re-runs tests
+// (`test.passed`), then review-coordinator walks a fresh 2-dim
+// sequence, review-synthesizer emits `review.complete` (not
+// review.passed), and coordinator emits `plan.complete`.
 //
-// This is the structural smoke alarm for U0/U1/U3/U5: any future
-// change that closes the re-review window or breaks the plan-gate
-// handoff must fail this BDD before integration tests do.
+// This is the structural smoke alarm for the new 10-hat topology:
+// any future change that re-introduces review.passed/queue.advance
+// or closes the fix recovery window must fail this BDD before
+// integration tests do.
 // ──────────────────────────────────────────────────────────────────────
 
 #[test]
 fn test_ce_executor_serial_fix_applied_rereview_scenario() {
     let yaml = load_scenario("tests/scenarios/ce_executor_serial_fix_applied_rereview.yml");
-    run_scenario(yaml);
+    run_workflow_guard_scenario(yaml);
 }
 
 // ──────────────────────────────────────────────────────────────────────

@@ -751,15 +751,6 @@ const PRESET_OPT_IN_WHEN_OPERATOR_OMITS: &[&str] = &[
     // because the merge-hats-overlay strip sees the key as
     // present.
     "max_residuals",
-    // 2026-06-24: review_terminal_coherence_exempt_consumers is opt-in
-    // so the preset's `plan-gate` dual-subscribe exemption survives the
-    // operator-omits-this-key path. Without this entry, KTD-RTC
-    // (2026-06-23-004 plan U1) lint `check_reviewer_dual_subscribe`
-    // is silent-dropped by `merge_hats_overlay` and the runtime
-    // configuration has `exempt_consumers = None`, causing every
-    // ce-executor-serial boot to trip the lint gate. Operators can
-    // extend the list in their project's ralph.yml.
-    "review_terminal_coherence_exempt_consumers",
 ];
 
 fn hats_disallowed_keys(mapping: &Mapping) -> Vec<String> {
@@ -1668,50 +1659,6 @@ hats:
     }
 
     #[test]
-    fn merge_hats_overlay_preserves_review_terminal_coherence_exempt_consumers() {
-        // 2026-06-24: KTD-RTC (2026-06-23-004 plan U1) added
-        // `review_terminal_coherence_exempt_consumers` to the preset's
-        // `event_loop` block. The lint `check_reviewer_dual_subscribe`
-        // (crates/ralph-core/src/preset_lint/review_terminal_coherence.rs)
-        // reads this field from the runtime `RalphConfig.event_loop` to
-        // exempt legitimate dual subscribers (e.g. `plan-gate` branches
-        // on the `verdict` payload field regardless of which terminal
-        // carries it). Without an entry in PRESET_OPT_IN_WHEN_OPERATOR_OMITS
-        // the field is silent-dropped at `merge_hats_overlay` time and
-        // the lint fails every boot of `ce-executor-serial`. This test
-        // pins the post-merge contract.
-        let core: Value = serde_yaml::from_str(
-            r"
-event_loop:
-  completion_promise: LOOP_COMPLETE
-",
-        )
-        .unwrap();
-
-        let hats: Value = serde_yaml::from_str(
-            r"
-event_loop:
-  review_terminal_coherence_exempt_consumers:
-    - plan-gate
-",
-        )
-        .unwrap();
-
-        let merged = merge_hats_overlay(core, hats).unwrap();
-        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
-
-        assert_eq!(
-            config
-                .event_loop
-                .review_terminal_coherence_exempt_consumers,
-            Some(vec!["plan-gate".to_string()]),
-            "preset review_terminal_coherence_exempt_consumers must survive \
-             merge_hats_overlay when operator omits it (KTD-RTC exemption list \
-             is a preset-level policy, not operator policy)"
-        );
-    }
-
-    #[test]
     fn merge_hats_overlay_preserves_required_events_from_hats() {
         let core: Value = serde_yaml::from_str(
             r"
@@ -2060,51 +2007,6 @@ hats:
                 "preset action `{topic}` must survive the production-path merge"
             );
         }
-    }
-
-    /// 2026-06-24 KTD-RTC e2e guard: production-path regression test
-    /// for `event_loop.review_terminal_coherence_exempt_consumers`.
-    ///
-    /// The hand-written-core sibling test (line 1636) only exercises the
-    /// merge logic with a from-scratch `core:` Value, so it cannot catch
-    /// a regression in `default_core_value()` itself. This test mirrors
-    /// the production path (`default_core_value()` → `merge_hats_overlay`
-    /// → `RalphConfig`) so that any future change to the
-    /// `PRESET_OPT_IN_WHEN_OPERATOR_OMITS` strip list in
-    /// `default_core_value()` is immediately caught: a missing
-    /// `review_terminal_coherence_exempt_consumers` strip turns the
-    /// placeholder into a `Value::Null` that satisfies the
-    /// `!contains_key` guard, silently dropping the preset's opt-in and
-    /// causing the `check_reviewer_dual_subscribe` lint to fail every
-    /// `ce-executor-serial` boot for operators who do not redeclare the
-    /// field in `ralph.yml`.
-    #[test]
-    fn merge_hats_overlay_preserves_review_terminal_coherence_exempt_consumers_via_default_core_value() {
-        let core = crate::config_resolution::default_core_value()
-            .expect("default_core_value must succeed");
-        let hats: Value = serde_yaml::from_str(
-            r"
-event_loop:
-  review_terminal_coherence_exempt_consumers:
-    - plan-gate
-hats:
-  coordinator: {name: Coordinator}
-",
-        )
-        .unwrap();
-
-        let merged = merge_hats_overlay(core, hats).unwrap();
-        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
-
-        assert_eq!(
-            config.event_loop.review_terminal_coherence_exempt_consumers,
-            Some(vec!["plan-gate".to_string()]),
-            "production-path merge (default_core_value -> merge_hats_overlay -> RalphConfig) \
-             must keep the preset's `event_loop.review_terminal_coherence_exempt_consumers` \
-             alive (KTD-RTC e2e guard); without this assertion a regression in the \
-             PRESET_OPT_IN_WHEN_OPERATOR_OMITS strip list silently drops the opt-in for \
-             any operator who does not hand-declare the field in ralph.yml"
-        );
     }
 
     /// 2026-06-24 KTD-Drift e2e guard: production-path regression test

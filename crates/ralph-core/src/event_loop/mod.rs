@@ -8428,7 +8428,7 @@ impl EventLoop {
                                 self.state.work_done_seen_tasks.insert(key);
                             }
                         }
-                        "queue.advance" | "review.failed" | "fix.applied" => {
+                        "fix.applied" => {
                             if let Some(p) = accepted.payload.as_deref()
                                 && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
                             {
@@ -8443,41 +8443,62 @@ impl EventLoop {
                                     .map(String::from);
                                 if let (Some(pn), Some(st)) = (&plan_name, &step) {
                                     self.state.prune_work_done_bucket(pn, st);
-                                    // 2026-06-23-004 plan U3 KTD-RTC
-                                    // (mechanism review 2026-06-24, P0):
-                                    // step boundary also resets the
-                                    // per-step review terminal
-                                    // tracker so the next step's
-                                    // drift detection starts clean.
-                                    // Without this reset, a
-                                    // `review.passed` observed in
-                                    // step N would mask any
-                                    // `review.complete` without
-                                    // `review.passed` in step N+1.
-                                    // `queue.advance` / `review.failed` /
-                                    // `fix.applied` are the only
-                                    // three step-close events; the
-                                    // unified reset here is the
-                                    // canonical hook.
-                                    self.state.reset_review_terminal_track();
-                                    if accepted.topic == "fix.applied" {
-                                        let task_id = obj
-                                            .get("task_id")
-                                            .and_then(|v| v.as_str())
-                                            .map(String::from);
-                                        if let Some(ti) = task_id.as_deref() {
-                                            if let Some(ref mut policy_state) =
-                                                self.state.policy_runtime_state
-                                            {
-                                                policy_state.prune_review_dimension_ready_bucket(
+                                    let task_id = obj
+                                        .get("task_id")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from);
+                                    if let Some(ti) = task_id.as_deref() {
+                                        // 2026-06-24 P1-2: increment the
+                                        // fix-round counter. When the hard
+                                        // cap is reached, emit fix.exhausted
+                                        // so the executor gets a rewrite
+                                        // chance and the shipper can route
+                                        // to terminal.
+                                        let new_count =
+                                            self.state.increment_fix_round(pn, st, ti);
+                                        if new_count >= LoopState::FIX_ROUND_HARD_CAP {
+                                            warn!(
+                                                plan = %pn,
+                                                step = %st,
+                                                task = %ti,
+                                                count = new_count,
+                                                "fix-round hard cap reached; emitting fix.exhausted"
+                                            );
+                                            let exhausted_payload = serde_json::json!({
+                                                "plan_name": pn,
+                                                "fix_round": new_count,
+                                                "task_id": ti,
+                                                "task_key": obj.get("task_key").and_then(|v| v.as_str()).unwrap_or(""),
+                                                "step": st,
+                                                "reason": format!(
+                                                    "fix budget exhausted (max {} rounds)",
+                                                    LoopState::FIX_ROUND_HARD_CAP
+                                                ),
+                                            });
+                                            self.bus.publish(Event::new(
+                                                "fix.exhausted",
+                                                exhausted_payload.to_string(),
+                                            ));
+                                        }
+                                        if let Some(ref mut policy_state) =
+                                            self.state.policy_runtime_state
+                                        {
+                                            policy_state.prune_review_dimension_ready_bucket(
+                                                pn, st, ti,
+                                            );
+                                            policy_state
+                                                .prune_review_dimensions_complete_bucket(
                                                     pn, st, ti,
                                                 );
-                                                policy_state
-                                                    .prune_review_dimensions_complete_bucket(
-                                                        pn, st, ti,
-                                                    );
-                                                policy_state.prune_work_done_bucket(pn, st);
-                                            }
+                                            policy_state.prune_work_done_bucket(pn, st);
+                                            // 2026-06-24 P1-3: prune the new
+                                            // `work.ready` / `test.passed` /
+                                            // `test.failed` buckets so the
+                                            // next round's emits land without
+                                            // colliding with the prior round's
+                                            // entries.
+                                            policy_state.prune_work_ready_bucket(pn, st);
+                                            policy_state.prune_test_result_buckets(pn, st, ti);
                                         }
                                     }
                                 }
@@ -9466,87 +9487,6 @@ impl EventLoop {
             self.state.record_event(event);
             self.state
                 .record_verdict_if_match(event, verdict_topics_slice);
-
-            // 2026-06-23-004 plan U3 KTD-RTC: per-step review
-            // terminal coherence. When `review.complete` fires
-            // without a prior `review.passed` in the same step, the
-            // synthesizer has drifted onto the
-            // `pass_with_residuals` branch without publishing the
-            // canonical pass terminal. This is the structural
-            // failure mode that produced
-            // `ce-executor-serial-primary-20260623-152241`. We log a
-            // recovery envelope here so the operator sees the drift
-            // in the diagnostics, and inject a deterministic
-            // correction so the next prompt asks review-synthesizer
-            // to publish the missing `review.passed` (with
-            // `verdict=pass` and `skip_reason=dimensions_complete`)
-            // before the workflow advances. The static lint
-            // `preset.review_terminal_dual_subscribe` is the
-            // primary prevention; this runtime hook is the safety
-            // net for presets that have not yet been migrated.
-            if event.topic.as_str() == "review.passed" || event.topic.as_str() == "review.complete"
-            {
-                // 2026-06-24 plan U1: pass KTD-RTC exemption list so
-                // mirror publishers (e.g. `plan-gate` forwarding
-                // `review.complete` after consuming `review.passed`)
-                // are exempt from drift detection.
-                let exempt_consumers: Vec<String> = self
-                    .config
-                    .event_loop
-                    .review_terminal_coherence_exempt_consumers
-                    .clone()
-                    .unwrap_or_default();
-                let source_hat_owned: Option<String> = event
-                    .source
-                    .as_ref()
-                    .map(|h| h.to_string());
-                let source_hat_str_for_drift: Option<&str> =
-                    source_hat_owned.as_deref();
-                let drift = self.state.record_review_terminal_observation(
-                    event.topic.as_str(),
-                    source_hat_str_for_drift,
-                    &exempt_consumers,
-                );
-                if drift {
-                    warn!(
-                        topic = %event.topic,
-                        "Review terminal drift: review.complete fired without a prior review.passed for this step. Injecting deterministic correction."
-                    );
-                    let source_hat_str = event
-                        .source
-                        .as_ref()
-                        .map(|h| h.to_string())
-                        .unwrap_or_default();
-                    let envelope = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
-                        .source(crate::diagnosis::DiagnosisSource::PayloadContract)
-                        .severity(crate::diagnosis::DiagnosisSeverity::Warning)
-                        .iteration(self.state.iteration)
-                        .source_hat(source_hat_str)
-                        .target_hat("review-synthesizer".to_string())
-                        .topic(event.topic.to_string())
-                        .reason_code("review_terminal_drift")
-                        .message(
-                            "review.complete fired without review.passed for this step; \
-                             synthesizer likely drifted onto pass_with_residuals branch \
-                             without publishing canonical pass terminal. Next prompt will \
-                             request review.passed re-emit."
-                                .to_string(),
-                        )
-                        .safe_target(true)
-                        .build();
-                    self.record_recovery_envelope(&envelope, Vec::new());
-                    Self::inject_completion_correction(
-                        &mut self.state,
-                        "review_terminal_drift",
-                        "review.complete fired without a prior review.passed for this step. \
-                         Re-emit review.passed (verdict=pass, skip_reason=dimensions_complete) \
-                         for the current plan step, OR publish plan.blocked with reason \
-                         'review_terminal_drift' so the manager can intervene. \
-                         The downstream verdict_gate (REVIEW_COMPLETE.additional_topics) will \
-                         reject any LOOP_COMPLETE until the verdict is consistent.",
-                    );
-                }
-            }
 
             // U3: Update hat lifecycle tracker for accepted events.
             // Find the source hat for this event and update the tracker.

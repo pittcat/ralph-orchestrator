@@ -1,81 +1,65 @@
 # ce_executor_serial_review_silent_reviewer_recovers: silent DR recovery variant
 #
-# 2026-06-17-004 plan U6 (T6.1): BDD scenario variant for the noble-peacock
-# recovery shape. Mirrors the wire-level sequence from the noble-peacock run
-# (`docs/report/2026-06-17-ce-executor-serial-noble-peacock-review-chain-stalled-diagnosis.md`),
-# but in scenario-runnable form: DR is silent on its first activation, then
-# emits `review.dimension.done` on the second activation. The orchestrator's
-# recovery wiring (task.resume injection, `last_activation_events` replay)
-# is what allows the second activation to carry the `review.dimension.ready`
-# context forward.
+# 2026-06-24 P0-2/P0-3 rewrite: mirrors the new 2-dim topology from
+# ce_executor_serial_review.yml, but inserts a silent turn after the
+# first review.dimension.ready (correctness) to exercise the
+# orchestrator's task.resume + trigger replay recovery wiring.
 #
-# This scenario differs from `ce_executor_serial_review.yml` in one
-# critical way: the dimension-reviewer is given an extra iteration to emit
-# (the mock returns a "still thinking" response in iter 4, then `done` in
-# iter 5). The wire-level contract is:
+# Wire-level chain (single-step plan, no fix, with DR silence):
+#   work.start → work.ready → work.done → test.passed
+#   → review.start
+#   → review.dimension.ready (correctness)
+#   → [iter 6: DR silent, no event]
+#   → [iter 7: DR emits review.dimension.done — recovery succeeded]
+#   → review.dimension.ready (testing) → review.dimension.done
+#   → review.dimensions.complete (fix_round=0)
+#   → review.complete (fix_plan_file="null", verdict=pass, fix_round=0)
+#   → plan.complete (verdict=pass)
+#   → REVIEW_COMPLETE (pass)
+#   → report.done → LOOP_COMPLETE
 #
-#   work.start → work.ready → work.done
-#     → review.dimension.ready (correctness)
-#     → [iter 4: DR silent, no event]
-#     → [iter 5: DR emits review.dimension.done — recovery succeeded]
-#     → review.dimension.ready (testing)
-#     → review.dimension.done (testing)
-#     → review.dimension.ready (maintainability)
-#     → review.dimension.done (maintainability)
-#     → review.dimension.ready (requirements)
-#     → review.dimension.done (requirements)
-#     → review.dimensions.complete
-#     → review.passed
-#     → queue.advance
-#     → plan.complete
-#     → LOOP_COMPLETE
-#
-# The scenario tests ONLY the wire shape: 4 review.dimension.ready/done
-# pairs (the first one is the recovered pair), sequence closure, and
-# downstream terminal. It does NOT assert internal state of the recovery
-# wiring (that lives in `ce_executor_recovery.rs` and `integration_emit_policy.rs`).
+# Asserts: 2 review.dimension.ready/done pairs (the first one is the
+# recovered pair), review.complete (not review.passed), no queue.advance.
 
 name: ce_executor_serial_review_silent_reviewer_recovers
-description: Serial review chain with silent first-activation DR that recovers on second activation (noble-peacock U6 variant)
+description: 2-dim serial review chain with silent first-activation DR that recovers on second activation
 
 config:
   prompt_file: PROMPT.md
-  max_iterations: 18
+  max_iterations: 20
   hats:
     coordinator:
       subscribes_to:
         - work.start
+        - test.passed
+        - review.complete
+        - work.failed
       publishes:
         - work.ready
-        - work.failed
+        - review.start
+        - plan.complete
+        - plan.blocked
     executor:
       subscribes_to:
         - work.ready
-        - fix.plan.ready
       publishes:
         - work.done
         - work.failed
-    # review-coordinator kicks the first dimension after work.done.
-    # 2026-06-17-004 plan U1 (R3): review.passed is owned by
-    # review-synthesizer only. review-coordinator publishes
-    # review.dimension.ready and review.dimensions.complete; on the
-    # empty-diff fast path the synthesizer emits
-    # review.passed(skip_reason=dimensions_complete).
-    review-coordinator:
+    validator:
       subscribes_to:
         - work.done
         - fix.applied
+      publishes:
+        - test.passed
+        - test.failed
+    review-coordinator:
+      subscribes_to:
+        - review.start
         - review.dimension.done
         - review.dimension.failed
       publishes:
         - review.dimension.ready
         - review.dimensions.complete
-    # dimension-reviewer handles one dimension per activation. The mock
-    # will deliberately be silent on the first activation (correctness)
-    # and emit `review.dimension.done` on the second — this is the U6
-    # recovery shape (the orchestrator's task.resume + trigger replay
-    # is what carries the ready context forward to the second
-    # activation).
     dimension-reviewer:
       subscribes_to:
         - review.dimension.ready
@@ -86,20 +70,7 @@ config:
       subscribes_to:
         - review.dimensions.complete
       publishes:
-        - review.passed
-        - review.failed
         - review.complete
-        - plan.blocked
-    plan-gate:
-      subscribes_to:
-        - review.passed
-        - review.complete
-        - work.failed
-      publishes:
-        - queue.advance
-        - work.ready
-        - plan.complete
-        - plan.blocked
     shipper:
       subscribes_to:
         - plan.complete
@@ -112,116 +83,225 @@ config:
       publishes:
         - report.done
         - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "work.start"
+    completion_promise: "LOOP_COMPLETE"
+    required_events: ["report.done"]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.ready:
+          required_fields:
+            - plan_name
+            - plan_path
+            - task_id
+            - task_key
+            - step
+            - complexity
+          payload: json_object
+        work.done:
+          required_fields:
+            - plan_name
+            - plan_path
+            - task_id
+            - task_key
+            - step
+            - commit_count
+            - changed_lines
+          payload: json_object
+        test.passed:
+          required_fields:
+            - plan_name
+            - task_id
+            - task_key
+            - step
+            - tests_run
+            - tests_passed
+          payload: json_object
+        review.start:
+          required_fields:
+            - plan_name
+            - task_id
+            - task_key
+          payload: json_object
+        review.dimension.ready:
+          required_fields:
+            - dimension
+            - focus
+            - depth
+            - diff_base
+            - intent_summary
+            - changed_files
+            - plan_name
+            - task_id
+            - task_key
+            - step
+          payload: json_object
+        review.dimension.done:
+          required_fields:
+            - dimension
+            - findings_count
+            - findings_file
+            - plan_name
+            - task_id
+            - task_key
+            - step
+          payload: json_object
+        review.dimensions.complete:
+          required_fields:
+            - plan_name
+            - task_id
+            - task_key
+            - step
+            - dimensions
+            - fix_round
+          payload: json_object
+        review.complete:
+          required_fields:
+            - plan_name
+            - fix_round
+            - fix_plan_file
+            - verdict
+            - residual_findings_count
+            - findings_summary
+            - task_id
+            - task_key
+            - step
+            - findings_count
+          payload: json_object
+        plan.complete:
+          required_fields:
+            - plan_name
+            - completed_steps
+            - task_id
+            - task_key
+            - verdict
+            - final_findings_count
+            - fix_round
+          payload: json_object
 
-# 17 mock responses. iter 4 is the silent DR turn (empty body) and iter
-# 5 is the recovery turn where DR emits `review.dimension.done`. The
-# remaining 12 responses mirror the base serial scenario for the
-# remaining 3 dimensions + close + transport events.
 mock_responses:
   # 0. coordinator parses plan
-  - |
-    <event topic="work.start" plan_name="plan-sr" plan_path="docs/plans/sr.md" task_id="t1" task_key="k1" step="step-01">
-    Plan parsed.
-    </event>
-  # 1. coordinator's first work.ready (bootstrap)
-  - |
-    <event topic="work.ready" plan_name="plan-sr" plan_path="docs/plans/sr.md" task_id="t1" task_key="k1" step="step-01" complexity="small">
-    Work ready.
-    </event>
+  - text: |
+      <event topic="work.start">
+      {"plan_name":"plan-sr","plan_path":"docs/plans/sr.md","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: coordinator
+  # 1. coordinator emits work.ready
+  - text: |
+      <event topic="work.ready">
+      {"plan_name":"plan-sr","plan_path":"docs/plans/sr.md","task_id":"t1","task_key":"k1","step":"step-01","complexity":"small"}
+      </event>
+    hat: coordinator
   # 2. executor completes
-  - |
-    <event topic="work.done" plan_name="plan-sr" plan_path="docs/plans/sr.md" task_id="t1" task_key="k1" step="step-01" commit_count="1" changed_lines="10">
-    Implementation done.
-    </event>
-  # 3. review-coordinator kicks the first dimension (correctness)
-  - |
-    <event topic="review.dimension.ready" plan_name="plan-sr" plan_path="docs/plans/sr.md" task_id="t1" task_key="k1" step="step-01" dimension="correctness" focus="logic correctness" depth="standard" diff_base="HEAD~1" intent_summary="Serial preset" changed_files="src/foo.rs">
-    First dimension.
-    </event>
-  # 4. dimension-reviewer is SILENT on first activation (recovery scenario)
-  - |
-
-  # 5. dimension-reviewer recovers and emits review.dimension.done (correctness)
-  - |
-    <event topic="review.dimension.done" plan_name="plan-sr" plan_path="docs/plans/sr.md" task_id="t1" task_key="k1" step="step-01" dimension="correctness" findings_count="0" findings_file=".agents/scratchpad/ce-executor/plan-sr/findings-correctness-t1.json">
-    Correctness done (after recovery).
-    </event>
-  # 6. review-coordinator kicks the second dimension (testing)
-  - |
-    <event topic="review.dimension.ready" plan_name="plan-sr" plan_path="docs/plans/sr.md" task_id="t1" task_key="k1" step="step-01" dimension="testing" focus="test coverage" depth="standard" diff_base="HEAD~1" intent_summary="Serial preset" changed_files="src/foo.rs">
-    Second dimension.
-    </event>
-  # 7. dimension-reviewer completes testing
-  - |
-    <event topic="review.dimension.done" plan_name="plan-sr" plan_path="docs/plans/sr.md" task_id="t1" task_key="k1" step="step-01" dimension="testing" findings_count="0" findings_file=".agents/scratchpad/ce-executor/plan-sr/findings-testing-t1.json">
-    Testing done.
-    </event>
-  # 8. review-coordinator kicks the third dimension (maintainability)
-  - |
-    <event topic="review.dimension.ready" plan_name="plan-sr" plan_path="docs/plans/sr.md" task_id="t1" task_key="k1" step="step-01" dimension="maintainability" focus="structure" depth="standard" diff_base="HEAD~1" intent_summary="Serial preset" changed_files="src/foo.rs">
-    Third dimension.
-    </event>
-  # 9. dimension-reviewer completes maintainability
-  - |
-    <event topic="review.dimension.done" plan_name="plan-sr" plan_path="docs/plans/sr.md" task_id="t1" task_key="k1" step="step-01" dimension="maintainability" findings_count="0" findings_file=".agents/scratchpad/ce-executor/plan-sr/findings-maintainability-t1.json">
-    Maintainability done.
-    </event>
-  # 10. review-coordinator kicks the fourth dimension (requirements)
-  - |
-    <event topic="review.dimension.ready" plan_name="plan-sr" plan_path="docs/plans/sr.md" task_id="t1" task_key="k1" step="step-01" dimension="requirements" focus="R-ID fulfillment" depth="standard" diff_base="HEAD~1" intent_summary="Serial preset" changed_files="src/foo.rs">
-    Fourth dimension.
-    </event>
-  # 11. dimension-reviewer completes requirements
-  - |
-    <event topic="review.dimension.done" plan_name="plan-sr" plan_path="docs/plans/sr.md" task_id="t1" task_key="k1" step="step-01" dimension="requirements" findings_count="0" findings_file=".agents/scratchpad/ce-executor/plan-sr/findings-requirements-t1.json">
-    Requirements done.
-    </event>
-  # 12. review-coordinator closes the sequence
-  - |
-    <event topic="review.dimensions.complete" plan_name="plan-sr" plan_path="docs/plans/sr.md" task_id="t1" task_key="k1" step="step-01" dimensions='[{"dimension":"correctness","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-correctness-t1.json"},{"dimension":"testing","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-testing-t1.json"},{"dimension":"maintainability","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-maintainability-t1.json"},{"dimension":"requirements","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-requirements-t1.json"}]'>
-    Sequence closed.
-    </event>
-  # 13. review-synthesizer passes
-  - |
-    <event topic="review.passed" plan_name="plan-sr" plan_path="docs/plans/sr.md" task_id="t1" task_key="k1" step="step-01" findings_count="0" fix_round="0" verdict="pass" skip_reason="dimensions_complete">
-    All 4 dimensions passed.
-    </event>
-  # 14. plan-gate advances
-  - |
-    <event topic="queue.advance" plan_name="plan-sr" completed_step="step-01" next_step="step-02" reviewed_task_id="t1" reviewed_task_key="k1">
-    Advance.
-    </event>
-  # 15. plan-gate emits plan.complete
-  - |
-    <event topic="plan.complete" plan_name="plan-sr" completed_steps="[step-01]" task_id="t1" task_key="k1" verdict="pass">
-    Plan complete.
-    </event>
-  # 16. shipper REVIEW_COMPLETE → reporter → LOOP_COMPLETE
-  - |
-    <event topic="LOOP_COMPLETE" plan_name="plan-sr" reason="serial-review success (with DR recovery)">
-    Done.
-    </event>
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-sr","plan_path":"docs/plans/sr.md","task_id":"t1","task_key":"k1","step":"step-01","commit_count":1,"changed_lines":10}
+      </event>
+    hat: executor
+  # 3. validator emits test.passed
+  - text: |
+      <event topic="test.passed">
+      {"plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01","tests_run":5,"tests_passed":5}
+      </event>
+    hat: validator
+  # 4. coordinator emits review.start
+  - text: |
+      <event topic="review.start">
+      {"plan_name":"plan-sr","task_id":"t1","task_key":"k1"}
+      </event>
+    hat: coordinator
+  # 5. review-coordinator kicks correctness
+  - text: |
+      <event topic="review.dimension.ready">
+      {"dimension":"correctness","focus":"logic correctness","depth":"standard","diff_base":"HEAD~1","intent_summary":"2-dim review","changed_files":"src/foo.rs","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: review-coordinator
+  # 6. dimension-reviewer is SILENT on first activation (recovery scenario)
+  - text: ""
+    hat: dimension-reviewer
+  # 7. dimension-reviewer recovers and emits review.dimension.done (correctness)
+  - text: |
+      <event topic="review.dimension.done">
+      {"dimension":"correctness","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-correctness-t1.json","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: dimension-reviewer
+  # 8. review-coordinator kicks testing
+  - text: |
+      <event topic="review.dimension.ready">
+      {"dimension":"testing","focus":"test coverage","depth":"standard","diff_base":"HEAD~1","intent_summary":"2-dim review","changed_files":"src/foo.rs","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: review-coordinator
+  # 9. dimension-reviewer completes testing
+  - text: |
+      <event topic="review.dimension.done">
+      {"dimension":"testing","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-testing-t1.json","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: dimension-reviewer
+  # 10. review-coordinator closes the sequence
+  - text: |
+      <event topic="review.dimensions.complete">
+      {"plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01","fix_round":0,"dimensions":[{"dimension":"correctness","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-correctness-t1.json"},{"dimension":"testing","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-testing-t1.json"}]}
+      </event>
+    hat: review-coordinator
+  # 11. review-synthesizer emits review.complete (pass, no fix plan)
+  - text: |
+      <event topic="review.complete">
+      {"plan_name":"plan-sr","fix_round":0,"fix_plan_file":"null","verdict":"pass","residual_findings_count":0,"findings_summary":"no findings","task_id":"t1","task_key":"k1","step":"step-01","findings_count":0}
+      </event>
+    hat: review-synthesizer
+  # 12. coordinator emits plan.complete (verdict=pass)
+  - text: |
+      <event topic="plan.complete">
+      {"plan_name":"plan-sr","completed_steps":["step-01"],"task_id":"t1","task_key":"k1","verdict":"pass","final_findings_count":0,"fix_round":0}
+      </event>
+    hat: coordinator
+  # 13. shipper emits REVIEW_COMPLETE
+  - text: |
+      <event topic="REVIEW_COMPLETE">
+      {"plan_name":"plan-sr","verdict":"pass","pass_or_fail":"pass","residual_findings_summary":"none"}
+      </event>
+    hat: shipper
+  # 14. reporter emits report.done
+  - text: |
+      <event topic="report.done">
+      {"plan_name":"plan-sr","status":"completed"}
+      </event>
+    hat: reporter
+  # 15. reporter emits LOOP_COMPLETE (separate turn for clean completion check)
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      {"plan_name":"plan-sr","reason":"2-dim review success (with DR recovery)"}
+      </event>
+    hat: reporter
 
 expected:
-  iterations: 17
+  iterations: 16
   events:
-    - topic: work.start
     - topic: work.ready
     - topic: work.done
-    # The 4 serial review hops — the first one is the recovered pair
+    - topic: test.passed
+    - topic: review.start
+    # 2-dim serial review hops — the first one is the recovered pair
     # (DR silent on first activation, emits done on second).
-    - topic: review.dimension.ready
-    - topic: review.dimension.done
-    - topic: review.dimension.ready
-    - topic: review.dimension.done
     - topic: review.dimension.ready
     - topic: review.dimension.done
     - topic: review.dimension.ready
     - topic: review.dimension.done
     # Sequence closure + downstream terminal
     - topic: review.dimensions.complete
-    - topic: review.passed
-    - topic: queue.advance
+    - topic: review.complete
     - topic: plan.complete
-    - topic: LOOP_COMPLETE
+    - topic: REVIEW_COMPLETE
+    - topic: report.done
+  absent_events:
+    - topic: review.passed
+    - topic: review.failed
+    - topic: queue.advance
+    - topic: plan.blocked
+    - topic: fix.applied
+    - topic: fix.exhausted
   completion: true

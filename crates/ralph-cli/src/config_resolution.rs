@@ -75,16 +75,6 @@ pub(crate) fn default_core_value() -> Result<Value> {
             // the preset opt-in (8 for ce-executor-serial) survives
             // `merge_hats_overlay`.
             "max_residuals",
-            // 2026-06-24: review_terminal_coherence_exempt_consumers
-            // is Option<Vec<String>>-typed so the default serialises
-            // to Value::Null under
-            // `event_loop.review_terminal_coherence_exempt_consumers`.
-            // Without this strip, the KTD-RTC
-            // (`plan-gate` dual-subscribe exemption) opt-in is
-            // silently dropped at `merge_hats_overlay` time and the
-            // lint `check_reviewer_dual_subscribe` fails every
-            // `ce-executor-serial` boot.
-            "review_terminal_coherence_exempt_consumers",
         ];
         if let Some(event_loop) = mapping
             .get_mut(&Value::String("event_loop".to_string()))
@@ -271,9 +261,7 @@ event_loop:
     /// `Option<...>`-typed fields default to `Value::Null` in the
     /// serialised core value, the `contains_key` check is always
     /// true, and the preset opt-in is silently dropped
-    /// (perky-maple + bold-heron pattern, plus the new
-    /// `review_terminal_coherence_exempt_consumers`
-    /// regression found in 2026-06-24). This test pins the
+    /// (perky-maple + bold-heron pattern). This test pins the
     /// post-strip contract: the key is absent from the default
     /// core value, and a preset overlay correctly inserts it.
     ///
@@ -303,7 +291,6 @@ event_loop:
             "workflow_contract",
             "ephemeral_isolation",
             "enforce_current_unit",
-            "review_terminal_coherence_exempt_consumers",
         ] {
             let key_value = Value::String(key.to_string());
             assert!(

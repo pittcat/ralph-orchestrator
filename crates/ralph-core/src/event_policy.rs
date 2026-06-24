@@ -302,6 +302,28 @@ pub struct PolicyRuntimeState {
     /// `0` when the payload omits `fix_round` so legacy emitters
     /// still get deduped.
     pub review_dimensions_complete_seen_keys: HashSet<String>,
+    /// 2026-06-24 P1-3: dedup set for `work.ready` events. Key
+    /// format: `{plan_name}::{step}::{task_id}`. A 2nd
+    /// `work.ready` with the same key (same task, same step) is
+    /// rejected as `DuplicateWorkDone` so the agent stops
+    /// re-announcing an already-started unit. Pruned on
+    /// step-boundary events (`fix.applied` / step close) so a
+    /// legitimate re-emit after a fix round is allowed.
+    pub work_ready_seen_keys: HashSet<String>,
+    /// 2026-06-24 P1-3: dedup set for `test.passed` events. Key
+    /// format: `{plan_name}::{step}::{task_id}::{fix_round}`.
+    /// The `fix_round` segment distinguishes re-test rounds so
+    /// a `fix.applied`-pruned bucket allows a 2nd `test.passed`
+    /// to land for a new fix round without colliding with the
+    /// prior round's entry. Missing `fix_round` falls through
+    /// (mirrors `review.dimensions.complete` U6 KTD4 behavior)
+    /// so the schema validator reports `missing_required_field`
+    /// instead of hiding the failure behind `DuplicateWorkDone`.
+    pub test_passed_seen_keys: HashSet<String>,
+    /// 2026-06-24 P1-3: dedup set for `test.failed` events. Key
+    /// format mirrors `test_passed_seen_keys`. Same fall-through
+    /// rule for missing/non-numeric `fix_round`.
+    pub test_failed_seen_keys: HashSet<String>,
 }
 
 impl PolicyRuntimeState {
@@ -369,6 +391,33 @@ impl PolicyRuntimeState {
     ) {
         let prefix = format!("{plan_name}::{step}::{task_id}::");
         self.review_dimensions_complete_seen_keys
+            .retain(|key| !key.starts_with(&prefix));
+    }
+
+    /// 2026-06-24 P1-3: prune the `work_ready_seen_keys` entries
+    /// that belong to a given `(plan_name, step)` bucket. Called
+    /// on `fix.applied` / step close so a legitimate re-emit
+    /// after a fix round is allowed. Mirrors
+    /// `prune_work_done_bucket` (same key shape).
+    pub fn prune_work_ready_bucket(&mut self, plan_name: &str, step: &str) {
+        let prefix = format!("{plan_name}::{step}::");
+        self.work_ready_seen_keys
+            .retain(|key| !key.starts_with(&prefix));
+    }
+
+    /// 2026-06-24 P1-3: prune the `test_passed_seen_keys` /
+    /// `test_failed_seen_keys` entries that belong to a given
+    /// `(plan_name, step, task_id)` bucket across ALL
+    /// `fix_round` values. Called when `fix.applied` is
+    /// policy-accepted so the next round's `test.passed` /
+    /// `test.failed` (carrying `fix_round=N+1`) lands without
+    /// colliding with the previous round's entry. Mirrors
+    /// `prune_review_dimensions_complete_bucket`.
+    pub fn prune_test_result_buckets(&mut self, plan_name: &str, step: &str, task_id: &str) {
+        let prefix = format!("{plan_name}::{step}::{task_id}::");
+        self.test_passed_seen_keys
+            .retain(|key| !key.starts_with(&prefix));
+        self.test_failed_seen_keys
             .retain(|key| !key.starts_with(&prefix));
     }
 
@@ -475,6 +524,13 @@ impl PolicyRuntimeState {
                     // prior round's
                     // `fix_round=N` entry.
                     state.prune_review_dimensions_complete_bucket(pn, st, ti);
+                    // 2026-06-24 P1-3: prune the new
+                    // `work.ready` / `test.passed` /
+                    // `test.failed` buckets so the next
+                    // round's emits land without colliding
+                    // with the prior round's entries.
+                    state.prune_work_ready_bucket(pn, st);
+                    state.prune_test_result_buckets(pn, st, ti);
                 }
             }
             // U5 (2026-06-18-004 plan, R4): replay prior
@@ -497,6 +553,50 @@ impl PolicyRuntimeState {
                         .insert(format!("{pn}::{st}::{ti}::{fix_round}"));
                 }
             }
+            // 2026-06-24 P1-3: replay prior `work.ready` events
+            // so the in-batch mirror reflects the dedup key
+            // shape `{plan}::{step}::{task_id}`. Without this,
+            // the very next `process_output` batch after a loop
+            // rehydrate would accept a duplicate `work.ready`
+            // for the same `(plan, step, task)`.
+            if event.topic == "work.ready"
+                && let Some(obj) = Self::payload_object(event.payload.as_deref())
+            {
+                let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+                let step = obj.get("step").and_then(|v| v.as_str());
+                let task_id = obj.get("task_id").and_then(|v| v.as_str());
+                if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
+                    state
+                        .work_ready_seen_keys
+                        .insert(format!("{pn}::{st}::{ti}"));
+                }
+            }
+            // 2026-06-24 P1-3: replay prior `test.passed` /
+            // `test.failed` events so the in-batch mirror
+            // reflects the dedup key shape
+            // `{plan}::{step}::{task_id}::{fix_round}`. Missing
+            // or non-numeric `fix_round` falls through (mirrors
+            // the live accept-site U6 KTD4 rule) so the schema
+            // validator reports the precise error on rehydrate.
+            if (event.topic == "test.passed" || event.topic == "test.failed")
+                && let Some(obj) = Self::payload_object(event.payload.as_deref())
+            {
+                let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+                let step = obj.get("step").and_then(|v| v.as_str());
+                let task_id = obj.get("task_id").and_then(|v| v.as_str());
+                let fix_round = match obj.get("fix_round") {
+                    Some(Value::Number(n)) => n.as_u64(),
+                    _ => None,
+                };
+                if let (Some(pn), Some(st), Some(ti), Some(fr)) = (plan_name, step, task_id, fix_round) {
+                    let key = format!("{pn}::{st}::{ti}::{fr}");
+                    if event.topic == "test.passed" {
+                        state.test_passed_seen_keys.insert(key);
+                    } else {
+                        state.test_failed_seen_keys.insert(key);
+                    }
+                }
+            }
             // U1 (2026-06-18-004 plan, KTD1, symmetry fix):
             // `queue.advance` and `review.failed` are the other
             // step-boundary events that should clear the
@@ -512,6 +612,9 @@ impl PolicyRuntimeState {
                     .and_then(|v| v.as_str());
                 if let (Some(pn), Some(st)) = (plan_name, step) {
                     state.prune_work_done_bucket(pn, st);
+                    // 2026-06-24 P1-3: mirror the live
+                    // accept-site behavior for `work.ready`.
+                    state.prune_work_ready_bucket(pn, st);
                 }
             }
         }
@@ -997,6 +1100,104 @@ pub fn validate_event_with_hat(
         // no `DuplicateWorkDone` rejection. The downstream schema
         // validator is responsible for emitting the precise
         // `missing_required_field` / `type_mismatch` message.
+    }
+
+    // 2026-06-24 P1-3: duplicate `work.ready` detection. The
+    // dedup key is `(plan_name, step, task_id)` — same shape as
+    // `work.done`. A 2nd `work.ready` with the same key is
+    // rejected as `RejectWithResume` so the agent stops
+    // re-announcing an already-started unit. The check fires
+    // before schema/terminal layers so a duplicate is a
+    // duplicate regardless of state. Pruned on `fix.applied` /
+    // step close so a legitimate re-emit after a fix round is
+    // allowed.
+    if topic == "work.ready"
+        && let Some(p) = payload
+        && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+    {
+        let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+        let step = obj.get("step").and_then(|v| v.as_str());
+        let task_id = obj.get("task_id").and_then(|v| v.as_str());
+        if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
+            let dedup_key = format!("{pn}::{st}::{ti}");
+            if state.work_ready_seen_keys.contains(&dedup_key) {
+                let finding = PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::DuplicateWorkDone {
+                        key: dedup_key.clone(),
+                        hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                    },
+                    message: format!(
+                        "duplicate_work_ready: work.ready for key '{dedup_key}' was already accepted. \
+                         Wait for fix.applied / step close before re-sending work.ready \
+                         for the same (plan_name, step, task_id)."
+                    ),
+                };
+                return PolicyDecision::RejectWithResume(finding);
+            }
+            state.work_ready_seen_keys.insert(dedup_key);
+        }
+    }
+
+    // 2026-06-24 P1-3: duplicate `test.passed` / `test.failed`
+    // detection. The dedup key is
+    // `(plan_name, step, task_id, fix_round)` — same shape as
+    // `review.dimensions.complete`. A 2nd emit with the same
+    // key is rejected as `RejectWithResume`. The `fix_round`
+    // segment distinguishes re-test rounds so a
+    // `fix.applied`-pruned bucket allows a 2nd `test.passed` /
+    // `test.failed` to land for a new fix round without
+    // colliding with the prior round's entry.
+    //
+    // Mirrors the U6 KTD4 rule: missing or non-numeric
+    // `fix_round` falls through without recording the dedup
+    // key, so the schema validator reports
+    // `missing_required_field` (or `type_mismatch`) instead of
+    // the dedup layer hiding the failure behind
+    // `DuplicateWorkDone`.
+    if (topic == "test.passed" || topic == "test.failed")
+        && let Some(p) = payload
+        && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+    {
+        let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+        let step = obj.get("step").and_then(|v| v.as_str());
+        let task_id = obj.get("task_id").and_then(|v| v.as_str());
+        let fix_round = match obj.get("fix_round") {
+            Some(Value::Number(n)) => n.as_u64(),
+            _ => None,
+        };
+        if let (Some(pn), Some(st), Some(ti), Some(fr)) = (plan_name, step, task_id, fix_round) {
+            let dedup_key = format!("{pn}::{st}::{ti}::{fr}");
+            let seen = if topic == "test.passed" {
+                state.test_passed_seen_keys.contains(&dedup_key)
+            } else {
+                state.test_failed_seen_keys.contains(&dedup_key)
+            };
+            if seen {
+                let finding = PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::DuplicateWorkDone {
+                        key: dedup_key.clone(),
+                        hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                    },
+                    message: format!(
+                        "duplicate_test_result: {topic} for key '{dedup_key}' was already accepted \
+                         for the same fix_round. After fix.applied the next round must use \
+                         fix_round=N+1 before re-sending {topic}."
+                    ),
+                };
+                return PolicyDecision::RejectWithResume(finding);
+            }
+            if topic == "test.passed" {
+                state.test_passed_seen_keys.insert(dedup_key);
+            } else {
+                state.test_failed_seen_keys.insert(dedup_key);
+            }
+        }
+        // else: missing/non-numeric `fix_round` or missing
+        // `plan_name`/`step`/`task_id` → no dedup mirror write.
+        // The schema validator reports the precise
+        // `missing_required_field` / `type_mismatch` error.
     }
 
     // WAC-U7 R10 (2026-06-12-002): null payloads on the
@@ -4444,5 +4645,202 @@ mod tests {
             finding.violation_type,
             ViolationType::SemanticGateViolation { .. }
         ));
+    }
+
+    // -------------------------------------------------------------------------
+    // 2026-06-24 P1-3: `work.ready` / `test.passed` / `test.failed` dedup
+    //
+    // Mirrors the U4 `work.done` and U5 `review.dimensions.complete`
+    // dedup patterns. `work.ready` key is `(plan, step, task_id)`;
+    // `test.passed` / `test.failed` key is
+    // `(plan, step, task_id, fix_round)`.
+    // -------------------------------------------------------------------------
+
+    fn work_ready_payload(plan: &str, step: &str, task: &str) -> String {
+        format!(
+            r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","task_key":"k"}}"#
+        )
+    }
+
+    fn test_result_payload(plan: &str, step: &str, task: &str, fix_round: u64) -> String {
+        format!(
+            r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","fix_round":{fix_round},"tests_run":10,"tests_passed":10}}"#
+        )
+    }
+
+    #[test]
+    fn p1_3_duplicate_work_ready_first_accepted() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = work_ready_payload("p1", "step-01", "t1");
+        let decision = validate_event("work.ready", Some(&payload), &config, &mut state);
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "First work.ready for a new (plan, step, task) tuple must be accepted"
+        );
+        assert!(state.work_ready_seen_keys.contains("p1::step-01::t1"));
+    }
+
+    #[test]
+    fn p1_3_duplicate_work_ready_second_rejected() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = work_ready_payload("p1", "step-01", "t1");
+
+        let first = validate_event("work.ready", Some(&payload), &config, &mut state);
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let second = validate_event("work.ready", Some(&payload), &config, &mut state);
+        assert!(
+            matches!(
+                second,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
+                    ..
+                }) if key == "p1::step-01::t1"
+            ),
+            "Second work.ready for same key must be rejected with DuplicateWorkDone, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn p1_3_duplicate_work_ready_different_step_accepted() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+
+        let p1 = work_ready_payload("p1", "step-01", "t1");
+        let first = validate_event("work.ready", Some(&p1), &config, &mut state);
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let p2 = work_ready_payload("p1", "step-02", "t1");
+        let second = validate_event("work.ready", Some(&p2), &config, &mut state);
+        assert_eq!(
+            second,
+            PolicyDecision::Accept,
+            "work.ready for a different step must be accepted"
+        );
+    }
+
+    #[test]
+    fn p1_3_duplicate_test_passed_same_fix_round_rejected() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = test_result_payload("p1", "step-01", "t1", 0);
+
+        let first = validate_event("test.passed", Some(&payload), &config, &mut state);
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let second = validate_event("test.passed", Some(&payload), &config, &mut state);
+        assert!(
+            matches!(
+                second,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
+                    ..
+                }) if key == "p1::step-01::t1::0"
+            ),
+            "Second test.passed for same fix_round must be rejected, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn p1_3_duplicate_test_failed_same_fix_round_rejected() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = test_result_payload("p1", "step-01", "t1", 0);
+
+        let first = validate_event("test.failed", Some(&payload), &config, &mut state);
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let second = validate_event("test.failed", Some(&payload), &config, &mut state);
+        assert!(
+            matches!(
+                second,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
+                    ..
+                }) if key == "p1::step-01::t1::0"
+            ),
+            "Second test.failed for same fix_round must be rejected, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn p1_3_test_passed_different_fix_round_accepted() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+
+        let p1 = test_result_payload("p1", "step-01", "t1", 0);
+        let first = validate_event("test.passed", Some(&p1), &config, &mut state);
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let p2 = test_result_payload("p1", "step-01", "t1", 1);
+        let second = validate_event("test.passed", Some(&p2), &config, &mut state);
+        assert_eq!(
+            second,
+            PolicyDecision::Accept,
+            "test.passed with a different fix_round must be accepted"
+        );
+    }
+
+    #[test]
+    fn p1_3_test_passed_missing_fix_round_skips_dedup() {
+        // Mirrors U6 KTD4: missing `fix_round` falls through so
+        // the schema validator reports `missing_required_field`.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload =
+            r#"{"plan_name":"p1","step":"step-01","task_id":"t1","tests_run":10,"tests_passed":10}"#;
+
+        let first = validate_event("test.passed", Some(payload), &config, &mut state);
+        assert_eq!(
+            first,
+            PolicyDecision::Accept,
+            "Missing fix_round must NOT be dedup-rejected"
+        );
+        assert!(
+            state.test_passed_seen_keys.is_empty(),
+            "Missing fix_round must NOT populate the dedup mirror"
+        );
+    }
+
+    #[test]
+    fn p1_3_fix_applied_prunes_test_result_buckets() {
+        let mut state = PolicyRuntimeState::default();
+        state
+            .test_passed_seen_keys
+            .insert("p1::step-01::t1::0".into());
+        state
+            .test_failed_seen_keys
+            .insert("p1::step-01::t1::0".into());
+        state
+            .test_passed_seen_keys
+            .insert("p1::step-01::t2::0".into());
+
+        state.prune_test_result_buckets("p1", "step-01", "t1");
+
+        assert!(!state.test_passed_seen_keys.contains("p1::step-01::t1::0"));
+        assert!(!state.test_failed_seen_keys.contains("p1::step-01::t1::0"));
+        // Sibling task t2 is preserved
+        assert!(state.test_passed_seen_keys.contains("p1::step-01::t2::0"));
+    }
+
+    #[test]
+    fn p1_3_fix_applied_prunes_work_ready_bucket() {
+        let mut state = PolicyRuntimeState::default();
+        state.work_ready_seen_keys.insert("p1::step-01::t1".into());
+        state.work_ready_seen_keys.insert("p1::step-01::t2".into());
+        state.work_ready_seen_keys.insert("p1::step-02::t1".into());
+
+        state.prune_work_ready_bucket("p1", "step-01");
+
+        assert!(!state.work_ready_seen_keys.contains("p1::step-01::t1"));
+        assert!(!state.work_ready_seen_keys.contains("p1::step-01::t2"));
+        // Different step preserved
+        assert!(state.work_ready_seen_keys.contains("p1::step-02::t1"));
     }
 }

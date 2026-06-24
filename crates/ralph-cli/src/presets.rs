@@ -1303,6 +1303,48 @@ mod tests {
         }
     }
 
+    /// 2026-06-24 P1-4: shipper must route `plan.blocked` by `reason`.
+    /// Recoverable reasons (loop_stalled_max_iterations /
+    /// steward_escalation / review_terminal_drift) run verification
+    /// 1-2 and may publish REVIEW_COMPLETE with pass_or_fail=pass.
+    /// Hard-fail reasons (executor failed / work_failed /
+    /// fix_exhausted / dimension_failed / all_dimensions_failed)
+    /// always publish REVIEW_COMPLETE with pass_or_fail=fail.
+    #[test]
+    fn test_ce_executor_serial_shipper_plan_blocked_routes_by_reason() {
+        let preset = get_preset("ce-executor-serial")
+            .expect("ce-executor-serial preset must be embedded");
+        let content: &str = preset.content.as_ref();
+        // Shipper instructions must contain the reason-based routing block.
+        assert!(
+            content.contains("reason-based routing"),
+            "shipper instructions must mention reason-based routing for plan.blocked"
+        );
+        // Recoverable reasons must be listed.
+        assert!(
+            content.contains("loop_stalled_max_iterations")
+                && content.contains("steward_escalation"),
+            "shipper must list recoverable reasons for plan.blocked"
+        );
+        // Hard-fail reasons must be listed.
+        assert!(
+            content.contains("executor failed")
+                && content.contains("fix_exhausted")
+                && content.contains("dimension_failed"),
+            "shipper must list hard-fail reasons for plan.blocked"
+        );
+        // Recoverable path must allow pass_or_fail=pass.
+        assert!(
+            content.contains("pass_or_fail: \"pass\""),
+            "shipper must allow pass_or_fail=pass for recoverable plan.blocked reasons"
+        );
+        // Hard-fail path must still emit pass_or_fail=fail.
+        assert!(
+            content.contains("pass_or_fail: \"fail\""),
+            "shipper must emit pass_or_fail=fail for hard-fail plan.blocked reasons"
+        );
+    }
+
     #[test]
     fn test_ce_executor_reporter_defensive_plan_check() {
         // R8: Reporter instructions must contain a defensive plan completion check.

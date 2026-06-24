@@ -164,7 +164,7 @@ pub const FINDING_WORK_DONE_ACTION_CHAIN_ORDER: &str = "preset.state_projection_
 /// Always `Error` severity. The dual-review chain (2026-06-24)
 /// generalized this from `review.*` only to all pairs in
 /// `MUTUALLY_EXCLUSIVE_TERMINAL_PAIRS` (see
-/// `crates/ralph-core/src/preset_lint/review_terminal_coherence.rs`).
+/// `crates/ralph-core/src/preset_lint/mod.rs`).
 pub const FINDING_TERMINAL_DUAL_SUBSCRIBE: &str = "preset.terminal_dual_subscribe";
 
 /// A hat that emits ONE topic of a mutually exclusive terminal pair

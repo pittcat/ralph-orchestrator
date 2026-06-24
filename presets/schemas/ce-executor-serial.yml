@@ -254,6 +254,18 @@ schemas:
     payload: json_object
 
   plan.blocked:
+    # 2026-06-24 P1-4: `reason` drives shipper routing.
+    # Recoverable reasons (shipper runs verification 1-2; if both
+    # pass → REVIEW_COMPLETE pass_or_fail=pass, verdict=pass_with_residuals):
+    #   - loop_stalled_max_iterations (progress-steward gave up)
+    #   - steward_escalation (progress-steward escalated)
+    #   - review_terminal_drift (legacy; kept for forward-compat)
+    # Hard-fail reasons (shipper → REVIEW_COMPLETE pass_or_fail=fail):
+    #   - executor failed: <detail> (coordinator on work.failed)
+    #   - work_failed
+    #   - fix budget exhausted / fix_exhausted (fixer hard cap)
+    #   - dimension_failed / all_dimensions_failed (review dimension)
+    #   - any other reason not listed as recoverable
     required_fields:
       - reason
     payload: json_object

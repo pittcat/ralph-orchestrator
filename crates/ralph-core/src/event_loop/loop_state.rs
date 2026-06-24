@@ -303,24 +303,6 @@ pub struct LoopState {
     /// seen.
     pub last_upstream_verdict_payload: Option<String>,
 
-    /// 2026-06-23-004 plan U3 KTD-RTC runtime gate: has the
-    /// canonical `review.passed` terminal been observed for the
-    /// current plan step? Reset when a new step's `work.ready` is
-    /// admitted (see `reset_review_terminal_track`).
-    ///
-    /// The runtime check is: when `review.complete` fires but
-    /// `review_passed_seen_for_step` is false, the synthesizer
-    /// drifted onto the `pass_with_residuals` branch without ever
-    /// publishing the canonical pass terminal. This is the
-    /// `ce-executor-serial-primary-20260623-152241` failure mode.
-    pub review_passed_seen_for_step: bool,
-
-    /// 2026-06-23-004 plan U3 KTD-RTC runtime gate: has the
-    /// residual `review.complete` terminal been observed for the
-    /// current plan step? Reset alongside
-    /// `review_passed_seen_for_step`.
-    pub review_complete_seen_for_step: bool,
-
     /// Signature of the most recent completion rejection (for stale-breaker).
     pub completion_rejection_signature: Option<String>,
 
@@ -488,6 +470,15 @@ pub struct LoopState {
     /// (the pruning fires on step boundaries, not on every
     /// `review.failed`).
     pub work_done_seen_tasks: HashSet<String>,
+
+    /// 2026-06-24 P1-2: per-(plan, step, task) fix-round counter.
+    /// Hard cap is `FIX_ROUND_HARD_CAP` (10). When the counter
+    /// reaches the cap, subsequent `fix.applied` events for the
+    /// same key are rejected and `fix.exhausted` is emitted to the
+    /// bus. This is the Rust-side enforcement of the fixer
+    /// instructions' "max 10 fix rounds" contract — the agent-side
+    /// limit is advisory; this is the hard gate.
+    pub fix_round_counts: HashMap<String, u32>,
 
     /// 2026-06-17-004 U2 (R3): per-hat first-activation timestamp
     /// for the current loop lifetime.  The `HatActivationClock` is
@@ -723,14 +714,8 @@ impl Default for LoopState {
             bootstrap_failed: false,
             recoverable_exhaustion_buffer: Vec::new(),
             work_done_seen_tasks: HashSet::new(),
-            // 2026-06-23-004 plan U3 KTD-RTC: review terminal
-            // tracker. Both flags start false; they flip to true
-            // when the corresponding event is admitted, and reset
-            // when a new step's `work.ready` is admitted (see
-            // `record_review_terminal_observation` /
-            // `reset_review_terminal_track`).
-            review_passed_seen_for_step: false,
-            review_complete_seen_for_step: false,
+            // 2026-06-24 P1-2: fix-round counter starts empty.
+            fix_round_counts: HashMap::new(),
             // 2026-06-17-003 U1: state projector is lazily
             // initialised by the first enabled iteration; the
             // cache is empty until then.
@@ -1122,6 +1107,46 @@ impl LoopState {
         format!("{plan_name}::{step}::{task_id}")
     }
 
+    // ── 2026-06-24 P1-2: fix-round hard cap (Rust-side enforcement) ──
+
+    /// Hard cap on fix rounds per (plan, step, task). Matches the
+    /// fixer instructions' "max 10 fix rounds" advisory limit.
+    /// This is the runtime hard gate — the agent-side limit is
+    /// advisory and can be exceeded by a misbehaving agent.
+    pub const FIX_ROUND_HARD_CAP: u32 = 10;
+
+    /// Build a fix-round counter key from a (plan, step, task_id) triple.
+    pub fn fix_round_key(plan_name: &str, step: &str, task_id: &str) -> String {
+        format!("{plan_name}::{step}::{task_id}")
+    }
+
+    /// Current fix-round count for a (plan, step, task). Starts at 0.
+    pub fn fix_round_count(&self, plan_name: &str, step: &str, task_id: &str) -> u32 {
+        let key = Self::fix_round_key(plan_name, step, task_id);
+        self.fix_round_counts.get(&key).copied().unwrap_or(0)
+    }
+
+    /// Increment the fix-round counter for a (plan, step, task).
+    /// Returns the new count after increment.
+    pub fn increment_fix_round(&mut self, plan_name: &str, step: &str, task_id: &str) -> u32 {
+        let key = Self::fix_round_key(plan_name, step, task_id);
+        let count = self.fix_round_counts.entry(key).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// Returns true when the fix-round counter has reached the hard cap.
+    pub fn fix_round_exhausted(&self, plan_name: &str, step: &str, task_id: &str) -> bool {
+        self.fix_round_count(plan_name, step, task_id) >= Self::FIX_ROUND_HARD_CAP
+    }
+
+    /// Prune the fix-round counter for a (plan, step) bucket.
+    /// Called on step-close to free memory.
+    pub fn prune_fix_round_bucket(&mut self, plan_name: &str, step: &str) {
+        let prefix = format!("{plan_name}::{step}::");
+        self.fix_round_counts.retain(|key, _| !key.starts_with(&prefix));
+    }
+
     /// 2026-06-23 fix (mechanism review layer 3, anti-pattern 3):
     /// register a freshly-accepted handoff artifact as pending
     /// downstream consumption. Called from the runtime gate's
@@ -1308,73 +1333,6 @@ impl LoopState {
                 self.last_upstream_verdict_payload = Some(event.payload.clone());
             }
         }
-    }
-
-    /// 2026-06-23-004 plan U3 KTD-RTC: record an observation of a
-    /// review terminal event (`review.passed` or `review.complete`).
-    ///
-    /// Returns `true` if this observation detected a **drift**:
-    /// `review.complete` fired while `review.passed` was NOT observed
-    /// for the same step. The caller MUST treat `true` as a hard gate
-    /// and refuse to advance the workflow — the synthesizer has
-    /// drifted onto the `pass_with_residuals` branch without publishing
-    /// the canonical pass terminal, which is the
-    /// `ce-executor-serial-primary-20260623-152241` failure mode.
-    ///
-    /// **2026-06-24 plan U1 — KTD-RTC exemption awareness**:
-    /// when `review.complete` is published by a hat in
-    /// `exempt_consumers` (e.g. `plan-gate` mirroring the canonical
-    /// `review.passed`/`review.failed` after consuming it), drift
-    /// detection is suppressed — the mirror is structurally
-    /// guaranteed to follow a real pass/fail in the same step
-    /// because the owner is a dual-subscribe consumer. Without this,
-    /// the exemption list (`review_terminal_coherence_exempt_consumers`)
-    /// would only silence the lint layer but the runtime drift gate
-    /// would still fire — the `ralph-e2e primary-20260624-032505`
-    /// failure mode that this fix closes.
-    ///
-    /// The flag is per-step: a new `work.ready` admission calls
-    /// [`Self::reset_review_terminal_track`] and clears both.
-    pub fn record_review_terminal_observation(
-        &mut self,
-        topic: &str,
-        source_hat: Option<&str>,
-        exempt_consumers: &[String],
-    ) -> bool {
-        match topic {
-            "review.passed" => {
-                self.review_passed_seen_for_step = true;
-                false
-            }
-            "review.complete" => {
-                self.review_complete_seen_for_step = true;
-                // 2026-06-24 plan U1: KTD-RTC mirror exemption.
-                // `plan-gate` (and any other dual-subscribe consumer
-                // in the exemption list) publishes `review.complete`
-                // as a mirror after consuming `review.passed` /
-                // `review.failed`. The pair is structurally
-                // guaranteed; the drift detector should NOT flag it.
-                if let Some(hat) = source_hat {
-                    if exempt_consumers.iter().any(|h| h == hat) {
-                        return false;
-                    }
-                }
-                if !self.review_passed_seen_for_step {
-                    return true;
-                }
-                false
-            }
-            _ => false,
-        }
-    }
-
-    /// 2026-06-23-004 plan U3 KTD-RTC: clear the per-step review
-    /// terminal flags. Call when a new step is admitted
-    /// (`work.ready` is published, or the projector auto-creates the
-    /// next step's runtime task).
-    pub fn reset_review_terminal_track(&mut self) {
-        self.review_passed_seen_for_step = false;
-        self.review_complete_seen_for_step = false;
     }
 
     /// Computes a composite progress fingerprint capturing all meaningful progress signals.
@@ -1677,124 +1635,6 @@ mod tests {
         );
     }
 
-    // ── 2026-06-23-004 plan U3 KTD-RTC: review terminal coherence ──
-
-    /// Healthy sequence: review.passed first, then review.complete.
-    /// The runtime gate must NOT flag this — `pass_with_residuals`
-    /// is a legitimate branch AFTER the canonical pass has been
-    /// published.
-    #[test]
-    fn review_terminal_passed_then_complete_is_clean() {
-        let mut state = LoopState::new();
-        let no_exempt: Vec<String> = vec![];
-        assert!(!state.record_review_terminal_observation("review.passed", None, &no_exempt));
-        assert!(!state.record_review_terminal_observation("review.complete", None, &no_exempt));
-    }
-
-    /// Drift sequence: review.complete fires WITHOUT a prior
-    /// review.passed. The runtime gate MUST flag this — it is the
-    /// `ce-executor-serial-primary-20260623-152241` failure mode.
-    #[test]
-    fn review_terminal_complete_without_passed_is_drift() {
-        let mut state = LoopState::new();
-        let no_exempt: Vec<String> = vec![];
-        assert!(
-            state.record_review_terminal_observation("review.complete", None, &no_exempt),
-            "review.complete without review.passed must report drift"
-        );
-    }
-
-    /// Per-step isolation: after `reset_review_terminal_track`, a
-    /// new step's `review.complete` without `review.passed` is
-    /// again drift-detected.
-    #[test]
-    fn review_terminal_reset_clears_per_step_flags() {
-        let mut state = LoopState::new();
-        let no_exempt: Vec<String> = vec![];
-        state.record_review_terminal_observation("review.passed", None, &no_exempt);
-        state.record_review_terminal_observation("review.complete", None, &no_exempt);
-        // Step 1: both observed → no drift.
-        state.reset_review_terminal_track();
-        // Step 2: review.complete without prior review.passed →
-        // drift detected again.
-        assert!(state.record_review_terminal_observation("review.complete", None, &no_exempt));
-    }
-
-    /// Unrelated topics must not affect the per-step tracker.
-    #[test]
-    fn review_terminal_unrelated_topics_do_not_drift() {
-        let mut state = LoopState::new();
-        let no_exempt: Vec<String> = vec![];
-        assert!(!state.record_review_terminal_observation("work.done", None, &no_exempt));
-        assert!(!state.record_review_terminal_observation("plan.blocked", None, &no_exempt));
-        assert!(!state.record_review_terminal_observation("review.dimension.done", None, &no_exempt));
-        // And the legitimate pass → complete path is still clean.
-        assert!(!state.record_review_terminal_observation("review.passed", None, &no_exempt));
-        assert!(!state.record_review_terminal_observation("review.complete", None, &no_exempt));
-    }
-
-    /// Mechanism review 2026-06-24 (P0 regression): without an
-    /// explicit reset at the step boundary, a `review.passed`
-    /// observed in step N would silently mask the drift
-    /// detection in step N+1 (a `review.complete` without a
-    /// prior `review.passed` would no longer report drift
-    /// because `review_passed_seen_for_step` would still be
-    /// `true` from the previous step). This test pins the
-    /// invariant that `reset_review_terminal_track` must be
-    /// called between steps — the production call site lives
-    /// in `event_loop/mod.rs` at the step-close branch
-    /// (`queue.advance` / `review.failed` / `fix.applied`).
-    #[test]
-    fn review_terminal_must_be_reset_between_steps() {
-        let mut state = LoopState::new();
-        let no_exempt: Vec<String> = vec![];
-        // Step 1: legitimate pass → complete. No drift.
-        state.record_review_terminal_observation("review.passed", None, &no_exempt);
-        assert!(!state.record_review_terminal_observation("review.complete", None, &no_exempt));
-        // Step boundary: production code calls
-        // `reset_review_terminal_track` from the step-close
-        // branch (see `event_loop/mod.rs` queue.advance handler).
-        // If the call site is removed, this test still passes
-        // because it calls reset explicitly — the test pins the
-        // invariant that the API exists and clears both flags.
-        state.reset_review_terminal_track();
-        assert!(!state.review_passed_seen_for_step);
-        assert!(!state.review_complete_seen_for_step);
-        // Step 2: a fresh `review.complete` without a prior
-        // `review.passed` must again report drift, proving the
-        // reset actually clears the per-step state.
-        assert!(
-            state.record_review_terminal_observation("review.complete", None, &no_exempt),
-            "after reset, review.complete without review.passed must report drift"
-        );
-    }
-
-    /// 2026-06-24 plan U1 — KTD-RTC mirror exemption. When
-    /// `review.complete` is published by a hat listed in the
-    /// exemption list (e.g. `plan-gate` mirroring the canonical
-    /// `review.passed` after consuming it), drift detection is
-    /// suppressed even if `review.passed` was not directly
-    /// observed. This pins the invariant that the exemption list
-    /// is honored at the runtime drift gate, not just at the
-    /// preset lint layer.
-    #[test]
-    fn review_terminal_complete_from_exempt_consumer_is_not_drift() {
-        let mut state = LoopState::new();
-        let exempt = vec!["plan-gate".to_string()];
-        // plan-gate publishes review.complete without prior review.passed
-        // (because the source hat was the previous iteration's
-        // review-synthesizer and we observed via the mirror only).
-        assert!(
-            !state.record_review_terminal_observation("review.complete", Some("plan-gate"), &exempt),
-            "review.complete from an exempt consumer must NOT report drift"
-        );
-        // But a non-exempt hat still gets drift-detected.
-        assert!(
-            state.record_review_terminal_observation("review.complete", Some("review-synthesizer"), &exempt),
-            "review.complete from a non-exempt consumer without prior review.passed MUST report drift"
-        );
-    }
-
     // -------------------------------------------------------------------------
     // WorkflowProgress tests
     // -------------------------------------------------------------------------
@@ -2075,6 +1915,68 @@ mod tests {
         let mut state = LoopState::new();
         state.prune_work_done_bucket("p1", "step-01");
         assert!(state.work_done_seen_tasks.is_empty());
+    }
+
+    // ── 2026-06-24 P1-2: fix-round hard cap tests ──
+
+    #[test]
+    fn fix_round_hard_cap_is_ten() {
+        assert_eq!(LoopState::FIX_ROUND_HARD_CAP, 10);
+    }
+
+    #[test]
+    fn fix_round_count_starts_at_zero() {
+        let state = LoopState::new();
+        assert_eq!(state.fix_round_count("p1", "step-01", "t1"), 0);
+        assert!(!state.fix_round_exhausted("p1", "step-01", "t1"));
+    }
+
+    #[test]
+    fn fix_round_increment_advances_counter() {
+        let mut state = LoopState::new();
+        assert_eq!(state.increment_fix_round("p1", "step-01", "t1"), 1);
+        assert_eq!(state.increment_fix_round("p1", "step-01", "t1"), 2);
+        assert_eq!(state.fix_round_count("p1", "step-01", "t1"), 2);
+    }
+
+    #[test]
+    fn fix_round_exhausted_at_cap() {
+        let mut state = LoopState::new();
+        for _ in 0..LoopState::FIX_ROUND_HARD_CAP {
+            state.increment_fix_round("p1", "step-01", "t1");
+        }
+        assert!(state.fix_round_exhausted("p1", "step-01", "t1"));
+        // A different task in the same step is NOT exhausted
+        assert!(!state.fix_round_exhausted("p1", "step-01", "t2"));
+    }
+
+    #[test]
+    fn fix_round_prune_clears_step() {
+        let mut state = LoopState::new();
+        state.increment_fix_round("p1", "step-01", "t1");
+        state.increment_fix_round("p1", "step-01", "t2");
+        state.increment_fix_round("p1", "step-02", "t1");
+
+        state.prune_fix_round_bucket("p1", "step-01");
+
+        // step-01 entries are gone
+        assert_eq!(state.fix_round_count("p1", "step-01", "t1"), 0);
+        assert_eq!(state.fix_round_count("p1", "step-01", "t2"), 0);
+        // step-02 entry is preserved
+        assert_eq!(state.fix_round_count("p1", "step-02", "t1"), 1);
+    }
+
+    #[test]
+    fn fix_round_key_is_namespaced_per_plan_step_task() {
+        // Different plans / steps / tasks have independent counters
+        let mut state = LoopState::new();
+        state.increment_fix_round("p1", "step-01", "t1");
+        state.increment_fix_round("p1", "step-01", "t1");
+        state.increment_fix_round("p2", "step-01", "t1");
+
+        assert_eq!(state.fix_round_count("p1", "step-01", "t1"), 2);
+        assert_eq!(state.fix_round_count("p2", "step-01", "t1"), 1);
+        assert_eq!(state.fix_round_count("p1", "step-02", "t1"), 0);
     }
 
     // ── 2026-06-18-001 plan U6: rejection digest ──────────

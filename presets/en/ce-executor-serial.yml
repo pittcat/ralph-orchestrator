@@ -76,13 +76,6 @@ event_loop:
   # cannot silently enable diagnostics, artifact writes, or prompt
   # injection. Operators must enable it in their project ralph.yml under
   # the top-level `telemetry:` key, or set RALPH_DIAGNOSTICS=1.
-  #
-  # 2026-06-24 plan U1: review-synthesizer now only emits `review.complete`
-  # (no `review.passed` / `review.failed` pair). The
-  # `review_terminal_coherence` lint's `REVIEW_PAIR` check no longer
-  # applies — there is no mutually exclusive terminal pair in this
-  # architecture. The exempt list is empty by design.
-  review_terminal_coherence_exempt_consumers: []
   completion_promise: "LOOP_COMPLETE"
   required_events: ["report.done"]
   starting_event: "work.start"
@@ -1753,9 +1746,20 @@ hats:
             - `final_findings_count`, `residual_findings_summary`: pass through unchanged
 
       On `plan.blocked`:
-      - Publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"` and `verdict: "fail"`.
-      - Include the reason in `residual_findings_summary`.
-      - Do NOT disguise it as pass.
+      - **2026-06-24 P1-4 — reason-based routing**:
+        - Read `reason` from the `plan.blocked` payload.
+        - **Recoverable reasons** (the work itself may be sound; the block was triggered by a loop-level stall or steward escalation, NOT by a unit/review/fix failure):
+          - `loop_stalled_max_iterations`
+          - `steward_escalation`
+          - `review_terminal_drift` (legacy; kept for forward-compat with older recovery journals)
+          For recoverable reasons: run checks 1-2 (test suite + build/lint/typecheck). If BOTH pass, publish `REVIEW_COMPLETE` with `pass_or_fail: "pass"`, `verdict: "pass_with_residuals"`, and `residual_findings_summary: "plan.blocked with recoverable reason '<reason>'; verification passed"`. If either check fails, fall through to the hard-fail path.
+        - **Hard-fail reasons** (the unit, review, or fix pipeline itself broke; verification cannot rescue it):
+          - `executor failed: <detail>` (coordinator emitted on `work.failed`)
+          - `work_failed`
+          - `fix budget exhausted` / `fix_exhausted` (fixer hit the Rust-side hard cap)
+          - `dimension_failed` / `all_dimensions_failed` (review dimension could not complete)
+          - any other reason not listed as recoverable
+          For hard-fail reasons: publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"` and `verdict: "fail"`. Include the reason in `residual_findings_summary`. Do NOT disguise it as pass.
 
       ### Event Publishing guardrail
       - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit REVIEW_COMPLETE --json '{...}'` only.
