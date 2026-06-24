@@ -68,7 +68,6 @@ fn make_event(topic: &str, payload: &str, hat: Option<&str>) -> Event {
 fn rule_phase_classification_matches_pipeline() {
     use crate::validation::rules_event_policy::EventPolicyRule;
     use crate::validation::rules_execution_contract::ExecutionContractRule;
-    use crate::validation::rules_hat_handoff::HatHandoffRule;
     use crate::validation::rules_origin::OriginRule;
     use crate::validation::rules_publisher::PublisherRule;
     use crate::validation::rules_required_fields::RequiredFieldsRule;
@@ -82,7 +81,6 @@ fn rule_phase_classification_matches_pipeline() {
         &RequiredFieldsRule,
         &EventPolicyRule,
         &StepHandoffRule,
-        &HatHandoffRule,
     ];
     let post: Vec<&dyn ValidationRule> = vec![&ExecutionContractRule, &WorkflowGuardRule];
 
@@ -98,7 +96,6 @@ fn rule_phase_classification_matches_pipeline() {
 fn rule_names_match_stage_constants() {
     use crate::validation::rules_event_policy::EventPolicyRule;
     use crate::validation::rules_execution_contract::ExecutionContractRule;
-    use crate::validation::rules_hat_handoff::HatHandoffRule;
     use crate::validation::rules_origin::OriginRule;
     use crate::validation::rules_publisher::PublisherRule;
     use crate::validation::rules_required_fields::RequiredFieldsRule;
@@ -113,7 +110,6 @@ fn rule_names_match_stage_constants() {
         (&EventPolicyRule, ValidationStage::EventPolicy),
         (&ExecutionContractRule, ValidationStage::ExecutionContract),
         (&StepHandoffRule, ValidationStage::StepHandoff),
-        (&HatHandoffRule, ValidationStage::HatHandoff),
         (&WorkflowGuardRule, ValidationStage::WorkflowGuard),
     ];
     for (rule, stage) in cases {
@@ -126,12 +122,12 @@ fn rule_names_match_stage_constants() {
 // ============================================================
 
 #[test]
-fn pipeline_from_config_contains_eight_rules() {
+fn pipeline_from_config_contains_seven_rules() {
     let config = minimal_config();
     let view = ProtocolView::from_event_loop(&config);
     let pipeline = ValidationPipeline::from_config(&view, &config);
-    // 6 pre + 2 post = 8 rules total.
-    assert_eq!(pipeline.pre_commit_rules.len(), 6);
+    // 5 pre + 2 post = 7 rules total.
+    assert_eq!(pipeline.pre_commit_rules.len(), 5);
     assert_eq!(pipeline.post_commit_rules.len(), 2);
 }
 
@@ -312,21 +308,6 @@ fn step_handoff_rule_accepts_aligned_state() {
 }
 
 // ============================================================
-// HatHandoffRule
-// ============================================================
-
-#[test]
-fn hat_handoff_rule_accepts_non_macro_topic() {
-    use crate::validation::rules_hat_handoff::HatHandoffRule;
-    let view = ProtocolView::from_event_loop(&minimal_config());
-    let mut snap = minimal_snapshot();
-    let mut ctx = ValidationContext::new(&mut snap);
-    let event = make_event("some.topic", r#"{}"#, None);
-    let result = HatHandoffRule.validate(&view, &mut ctx, &event);
-    assert!(result.accepted, "{result:?}");
-}
-
-// ============================================================
 // ExecutionContractRule
 // ============================================================
 
@@ -481,7 +462,6 @@ fn reason_code_prefixes_match_stages() {
         ("event_policy", &["event_policy:"]),
         ("execution_contract", &["execution_contract:", "contract:"]),
         ("step_handoff", &["step_handoff:"]),
-        ("hat_handoff", &["hat_handoff:"]),
         ("workflow_guard", &["workflow_guard:"]),
     ];
     let pairs = [
@@ -506,10 +486,6 @@ fn reason_code_prefixes_match_stages() {
         (
             ReasonCode::STEP_HANDOFF_MISMATCH_PREFIX,
             ValidationStage::StepHandoff,
-        ),
-        (
-            ReasonCode::HAT_HANDOFF_MISSING_PATH,
-            ValidationStage::HatHandoff,
         ),
         (
             ReasonCode::WORKFLOW_GUARD_OUT_OF_ORDER,
@@ -548,8 +524,7 @@ fn validate_with_preview_accepts_well_formed_work_done() {
     // rule accepts (default permissive); required-fields rule
     // accepts; execution-contract rule accepts (no contracts
     // configured); workflow-guard rule accepts. The
-    // step-handoff / hat-handoff rules accept non-gated /
-    // non-macro topics respectively.
+    // step-handoff rule accepts non-gated topics.
     assert!(report.accepted, "expected accepted, got {report:?}");
     assert!(report.post_commit.is_empty() == false);
 }

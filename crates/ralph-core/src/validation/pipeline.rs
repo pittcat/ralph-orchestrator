@@ -41,7 +41,6 @@ pub enum RulePhase {
 /// Every gate in the existing event-loop stack
 /// (`event_origin::validate_event_origin`, the engine
 /// `required_fields` check, `execution_contract`,
-/// `hat_handoff::gate::evaluate_event`,
 /// `step_handoff::progress_task_gate`,
 /// `workflow guard`) is wrapped as a `ValidationRule`
 /// in [`super::rules_*`]. The trait stays intentionally narrow
@@ -169,7 +168,6 @@ impl ValidationPipeline {
     ) -> Self {
         use super::rules_event_policy::EventPolicyRule;
         use super::rules_execution_contract::ExecutionContractRule;
-        use super::rules_hat_handoff::HatHandoffRule;
         use super::rules_origin::OriginRule;
         use super::rules_publisher::PublisherRule;
         use super::rules_required_fields::RequiredFieldsRule;
@@ -187,7 +185,6 @@ impl ValidationPipeline {
             Arc::new(RequiredFieldsRule),
             Arc::new(EventPolicyRule),
             Arc::new(StepHandoffRule),
-            Arc::new(HatHandoffRule),
         ];
         let post_commit_rules: Vec<Arc<dyn ValidationRule>> =
             vec![Arc::new(ExecutionContractRule), Arc::new(WorkflowGuardRule)];

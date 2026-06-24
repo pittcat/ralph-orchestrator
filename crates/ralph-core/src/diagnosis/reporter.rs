@@ -690,11 +690,6 @@ fn suggested_remediation_for(stage: &str, reason_class: &str) -> String {
              `ralph emit` line"
                 .to_string()
         }
-        ("hat_handoff", _) => {
-            "the macro-edge `*.handoff.accepted` event failed the gate; rerun with a valid \
-             handoff file"
-                .to_string()
-        }
         _ => "inspect the originating event payload and the preset's contract for the topic"
             .to_string(),
     }
@@ -3045,10 +3040,6 @@ mod tests {
         assert_eq!(
             validation_stage_to_source("step_handoff"),
             "step_handoff_gate"
-        );
-        assert_eq!(
-            validation_stage_to_source("hat_handoff"),
-            "hat_handoff_gate"
         );
         // Unknown stages fall back to "unknown" rather than
         // panicking — the caller still gets a usable report.

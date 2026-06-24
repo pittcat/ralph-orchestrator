@@ -9,7 +9,7 @@
 //! (e.g. event-policy dedup) can update runtime state while remaining
 //! composable.  Read-only rules use [`ValidationContext::snapshot`].
 //! Stage names (`origin`, `publisher`, `required_fields`,
-//! `execution_contract`, `step_handoff`, `hat_handoff`,
+//! `execution_contract`, `step_handoff`,
 //! `workflow_guard`, `event_policy`) are preserved as
 //! `ValidationRule::name()` values so `reason_code` strings remain
 //! stable for downstream tooling (`ralph diagnose`, recovery envelopes,
@@ -23,7 +23,7 @@
 //! - **PreCommit** rules run with the **current** snapshot. They
 //!   answer questions that only depend on configuration + the
 //!   event itself (origin guard, publisher, required fields,
-//!   hat-handoff, step-handoff, event-policy).
+//!   step-handoff, event-policy).
 //! - **PostCommit** rules run with the **projected** snapshot. They
 //!   answer questions that need the post-state (execution
 //!   contract, workflow guard).
@@ -38,7 +38,6 @@ mod pipeline;
 mod result;
 mod rules_event_policy;
 mod rules_execution_contract;
-mod rules_hat_handoff;
 mod rules_origin;
 mod rules_publisher;
 mod rules_required_fields;

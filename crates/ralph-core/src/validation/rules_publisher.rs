@@ -37,8 +37,8 @@ impl ValidationRule for PublisherRule {
     ) -> ValidationResult {
         // The protocol view's `topic_publisher_allowed` is the
         // lint-mode surface: permissive when no graph is loaded,
-        // strict when the view carries the SSOT hat_handoff
-        // allow-list. The U3 implementation already routes the
+        // strict when the view carries the SSOT allow-list.
+        // The U3 implementation already routes the
         // SSOT signals (control / diagnostic / exempt / macro)
         // through it; this rule simply defers.
         //
