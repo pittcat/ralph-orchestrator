@@ -161,8 +161,8 @@ impl HandoffTracker {
     }
 
     /// 2026-06-18-002 plan U5 (KTD-5): cancel a pending handoff
-    /// by its `event_id`. Used by the hat_handoff gate to roll
-    /// back the policy-accept `on_handoff_accepted` record when
+    /// by its `event_id`. Used to roll back the policy-accept
+    /// record when
     /// the gate rejects the same event for missing/invalid
     /// handoff content (phantom pending protection).
     ///

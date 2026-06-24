@@ -258,8 +258,7 @@ fn parse_completed_entry(line: &str) -> Option<String> {
 ///
 /// 2026-06-23 fix: renamed from `GateDecision` to
 /// `TaskProgressDecision` to remove the name collision with
-/// `crate::preset::engine::gates::GateDecision` and
-/// `crate::hat_handoff::gate::GateDecision`. Both enums share
+/// `crate::preset::engine::gates::GateDecision`. Both enums share
 /// the suffix `GateDecision` but model semantically different
 /// decisions; using the same name across crates made it easy
 /// to extend one enum's variant set and forget to update

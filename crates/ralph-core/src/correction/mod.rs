@@ -66,7 +66,7 @@ pub struct CorrectionContext {
     /// `reason` field — keep it stable across releases.
     pub reason_code: String,
     /// Pipeline stage that rejected the event (`origin`,
-    /// `policy`, `hat_handoff`, etc.).
+    /// `policy`, `step_handoff`, etc.).
     pub stage: String,
     /// Topic the rejected event tried to publish.  The agent
     /// uses this to locate the payload field that needs fixing.

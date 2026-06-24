@@ -8,7 +8,7 @@
 
 ## 什么是 serial preset 的协议 SSOT
 
-`ce-executor-serial` 的运行时协议(每个 topic 的 `required_fields` / `verdict_gate` / `workflow_contract` / `state_projection` / `hat_handoff` / `execution_contracts`)不再散落在三个地方:
+`ce-executor-serial` 的运行时协议(每个 topic 的 `required_fields` / `verdict_gate` / `workflow_contract` / `state_projection` / `execution_contracts`)不再散落在三个地方:
 
 | 旧位置 | 新位置 |
 |---|---|
@@ -35,7 +35,6 @@
    - `event_loop.verdict_gate`: review-time fail field 配置
    - `event_loop.workflow_contract.step_handoff.progress_task_gate`: step handoff flags
    - `event_loop.state_projection.actions.<topic>`: 投影动作(`close_task` / `mark_step_completed` / …),顺序即语义
-   - `event_loop.hat_handoff`: artifact 规则 / linter 配置 / macro & exempt topics
 
 完整的 Merge 映射表见 [`docs/plans/2026-06-20-001-feat-serial-preset-precheck-as-linter-plan.md`](../plans/2026-06-20-001-feat-serial-preset-precheck-as-linter-plan.md) 的 §"Merge 映射表"。
 
@@ -78,33 +77,11 @@
    cargo nextest run -p ralph-core --test scenarios serial_lint
    ```
 
-### 场景 B:改 hat_handoff 的 macro 列表
-
-例: 把 `queue.advance` 加入 macro edge(强制要求 handoff_path)。
-
-1. 编辑 `presets/schemas/ce-executor-serial.yml`:
-   ```yaml
-   event_loop:
-     hat_handoff:
-       macro_topics:
-         - work.done
-         - review.passed
-         - queue.advance    # ← 新增
-   ```
-
-2. `cargo build`。
-
-3. 验证:
-   ```bash
-   ralph emit --schema queue.advance
-   ```
-   `is_macro_edge` 必须是 `true`,`hat_handoff.macro_topics` 必须包含新条目。
-
-### 场景 C:加新 topic(扩展协议)
+### 场景 B:加新 topic(扩展协议)
 
 1. 在 `presets/schemas/ce-executor-serial.yml` 加顶层 topic 键 + `event_policy.schemas` 段(若需要 execution contract 增量约束,加 `execution_contracts.rules.<topic>`)。
 
-2. 如果新 topic 是 macro edge,加入 `event_loop.hat_handoff.macro_topics` + 写到 `event_loop.workflow_contract.handoff_topic_seeds`。
+2. 如果新 topic 是 macro edge,写到 `event_loop.workflow_contract.handoff_topic_seeds`。
 
 3. `cargo build`。
 
@@ -144,8 +121,7 @@ ralph emit --schema work.done
   "verdict_gate": { ... },
   "workflow_contract": { ... },
   "state_projection": { ... },
-  "execution_contracts": { ... },
-  "hat_handoff": { ... }
+  "execution_contracts": { ... }
 }
 ```
 

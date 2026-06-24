@@ -327,5 +327,4 @@ rg "work\.ready" crates/ presets/ --type rust
 - **创建**: 2026-06-23,`2026-06-23-005` plan U0
 - **关联**:
   - 上游: `2026-06-23-004-fix-ce-executor-serial-mechanism-close-loop-plan.md`(typed kind typed counter)
-  - 上游: `docs/solutions/integration-issues/hat_handoff_filename_mismatch_recurrence.md`(30 天 6 次复发档案)
 - **维护**: 任何 `task.resume` / `enrich_*` / `dispatch` / `audit` 类改动前,先 grep 本清单核对;新增双胞胎函数对时,按本格式添加 entry
