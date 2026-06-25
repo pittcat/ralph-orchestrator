@@ -516,7 +516,7 @@ RObot:
   timeout_seconds: 120
 ```
 
-启用后，agent 可以发 `human.interact` 事件向人提问，Ralph 会通过 Telegram 阻塞等待响应。常用配置和测试见 `ralph.bot.yml`。
+启用后，agent 可以发 `human.interact` 事件向人提问，Ralph 会通过 Telegram 阻塞等待响应。
 
 ### `skills`
 
@@ -652,7 +652,6 @@ ralph run -c ralph.yml -H builtin:debug -p "排查某个问题"
 | `ralph.yml` | 当前项目默认开发工作流，Pi 后端，planner/builder/reviewer/finalizer | `ralph run -c ralph.yml -P PROMPT.md` |
 | `ralph.qa.yml` | 事件循环、TUI、路由、backpressure、配置解析等高风险改动的 QA 工作流 | `ralph run -H ralph.qa.yml -p "QA event loop changes"` |
 | `ralph.reviewer.yml` | 回归感知 PR 审查，会用 worktree 隔离 checkout 并跑测试 | `ralph run -H ralph.reviewer.yml -p "Review PR #207"` |
-| `ralph.bot.yml` | Telegram human-in-the-loop 测试配置 | `ralph run -c ralph.bot.yml -p "test human in the loop"` |
 | `ralph.e2e.yml` | E2E 测试开发/修复专用，使用独立 scratchpad | `ralph run -c ralph.e2e.yml -p ".ralph/specs/e2e-test-fixes.spec.md"` |
 | `ralph.pi.yml` | Pi backend 示例，使用 Kiro/Claude Opus 参数 | `ralph run -c ralph.pi.yml -p "..."` |
 | `ralph.roo.yml` | Roo backend 示例，使用 Bedrock/Claude 参数 | `ralph run -c ralph.roo.yml -p "..."` |
@@ -886,7 +885,6 @@ ralph run -c ralph.yml -H presets/wave-review.yml -p "审查认证模块的 Rust
 ralph bot onboard --telegram
 ralph bot status
 ralph bot test
-ralph run -c ralph.bot.yml -p "Help the human"
 ```
 
 ## 常见状态文件

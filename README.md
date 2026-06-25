@@ -151,7 +151,6 @@ Quick onboarding (Telegram):
 ralph bot onboard --telegram   # guided setup (token + chat id)
 ralph bot status               # verify config
 ralph bot test                 # send a test message
-ralph run -c ralph.bot.yml -p  "Help the human"
 ```
 
 ```yaml
