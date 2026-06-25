@@ -221,6 +221,42 @@ event_loop:
     enabled: true
     mode: enforce
     on_violation: reject_with_resume
+    # Topics the policy gates. terminal_topics are the legitimate
+    # loop-end signals; business_topics are the topics that, after
+    # terminal, indicate the loop is being driven past its end.
+    # Both lists MUST be present for completion_after_terminal to
+    # fire (see event_policy.rs:check_completion_guard).
+    terminal_topics:
+      - "LOOP_COMPLETE"
+    business_topics:
+      # Coordinator → shipper/reporter chain (the loop's exit path).
+      - "plan.complete"
+      - "plan.blocked"
+      - "REVIEW_COMPLETE"
+      - "report.done"
+      # Per-hatter exit-path events that, if accepted after
+      # completion, would re-trigger downstream hats.
+      - "work.ready"
+      - "work.done"
+      - "test.passed"
+      - "test.failed"
+      - "review.start"
+      - "review.complete"
+      - "fix.applied"
+      - "fix.exhausted"
+    # 2026-06-25: prevent post-completion re-runs.
+    # After LOOP_COMPLETE is honored, the loop MUST stay quiet —
+    # any business event must be rejected, and a duplicate
+    # LOOP_COMPLETE itself must be rejected. Without these guards,
+    # any hat re-prompted by task.resume after completion will trigger
+    # a second shipper/reporter cycle, doubling event log + handoffs.
+    # Observed in ralph-e2e primary-20260624-153613: 2x REVIEW_COMPLETE /
+    # 2x report.done / 2x LOOP_COMPLETE after coordinator published
+    # plan.blocked post-completion.
+    completion_after_terminal:
+      duplicate_terminal: reject
+      business_after_completion: reject
+      write_diagnostic_event: true
     # Force every `ralph emit` to pre-validate against this event_policy
     # schema BEFORE writing to the events file. The `--no-policy-check`
     # escape hatch is removed — there is no other way to write a
