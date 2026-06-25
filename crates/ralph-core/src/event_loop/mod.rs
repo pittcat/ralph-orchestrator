@@ -14,6 +14,30 @@ pub mod audit;
 #[cfg(test)]
 mod tests;
 
+// 2026-06-10-003 U1 scaffold: 10 target submodules (filled in U3-U6).
+// Each placeholder is intentionally empty; `pub use xxx::*` re-exports
+// are wired in the corresponding unit to keep the public API stable.
+pub mod diagnostics;
+pub mod dispatch;
+pub mod lifecycle;
+pub mod policy;
+pub mod process;
+pub mod prompt;
+pub mod termination_impl;
+pub mod types;
+pub mod wave;
+pub mod workflow_guard;
+
+// 2026-06-10-003 U1 scaffold: 6 follow-up placeholders for modules that
+// already exceed the R1 red-line (loop_state / rejection / review_step_state).
+// NOT `pub use`d from `event_loop::mod` — see plan v14.
+mod flow_lifecycle;
+mod loop_state_active;
+mod loop_state_history;
+mod rejection_envelope;
+mod rejection_payload;
+mod review_step_gate;
+
 pub use loop_state::{
     LINT_CIRCUIT_BREAKER_LIMIT, LoopState, RejectionDigestEntry, U2_REJECTION_RETRY_LIMIT,
     WorkflowProgress,
