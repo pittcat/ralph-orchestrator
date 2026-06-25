@@ -13,7 +13,7 @@
 # - Executor: TDD implementation — write/update tests first, then implement, run unit tests
 # - Validator: Runs full test suite (auto-discovers test entry point), publishes test.passed / test.failed
 # - Fixer: Diagnoses and fixes test failures (merged debug-resolver: locate max 10 + fix max 10)
-# - review-coordinator: Walks fixed 2-dimension sequence (correctness → testing), one dimension per turn
+# - review-coordinator: Walks fixed 5-dimension sequence (correctness → testing → maintainability → project-standards → adversarial), one dimension per turn
 # - dimension-reviewer: Reviews a single dimension, emits review.dimension.done / review.dimension.failed
 # - review-synthesizer: Reads per-dimension findings, writes fix-plan file, emits review.complete with fix_plan_file
 # - Shipper: Final validation, plan status update, final commit
@@ -895,7 +895,7 @@ hats:
 
   review-coordinator:
     name: "🔍 Review Coordinator (Serial)"
-    description: "Overall review sequence state machine. On review.start, walks the 2-dimension sequence (correctness → testing); advances one dimension per turn; emits review.dimensions.complete when all dimensions finish."
+    description: "Overall review sequence state machine. On review.start, walks the 5-dimension sequence (correctness → testing → maintainability → project-standards → adversarial); advances one dimension per turn; emits review.dimensions.complete when all dimensions finish."
     # 2026-06-24 plan U1: review runs only once after all units complete
     # - review.start → initialize sequence, emit first review.dimension.ready
     # - review.dimension.done/failed → advance to next dimension or close the sequence
@@ -916,9 +916,12 @@ hats:
       On review.start, walk the dimension sequence, one dimension per turn.
 
       ### Sequence contract (HARD RULE)
-      The sequence is **always** 2 dimensions in this fixed order:
+      The sequence is **always** 5 dimensions in this fixed order:
       1. `correctness`
       2. `testing`
+      3. `maintainability`
+      4. `project-standards`
+      5. `adversarial`
 
       No adaptive dimension selection. No conditional extras.
 
@@ -932,8 +935,11 @@ hats:
         "step": "<string>",
         "fix_round": 0,
         "dimensions": [
-          {"dimension": "correctness", "status": "pending", "findings_file": null, "reason": null},
-          {"dimension": "testing",     "status": "pending", "findings_file": null, "reason": null}
+          {"dimension": "correctness",       "status": "pending", "findings_file": null, "reason": null},
+          {"dimension": "testing",           "status": "pending", "findings_file": null, "reason": null},
+          {"dimension": "maintainability",   "status": "pending", "findings_file": null, "reason": null},
+          {"dimension": "project-standards", "status": "pending", "findings_file": null, "reason": null},
+          {"dimension": "adversarial",       "status": "pending", "findings_file": null, "reason": null}
         ]
       }
       ```
@@ -945,7 +951,7 @@ hats:
       **Corruption recovery (HARD RULE)**: if `review-sequence.json`
       fails JSON parse, or the file is missing, treat the sequence as
       empty. Initialize a fresh sequence for this plan / task / step
-      using the same 2-dim contract.
+      using the same 5-dim contract.
 
       ### Read State
       - From `review.start` payload: `plan_name`, `task_id`, `task_key`
@@ -1018,7 +1024,7 @@ hats:
       For each activation:
       1. Load `review-sequence.json`. If it does not exist for the
          current `(plan_name, task_id, step)`, initialize a fresh
-         2-dim sequence (status: pending for all 2) and write it
+         5-dim sequence (status: pending for all 5) and write it
          atomically.
       2. Walk the sequence in order. Find the first `status: "pending"`
          dimension.
@@ -1027,7 +1033,7 @@ hats:
          sequence closure — covers BOTH the normal post-walk close
          AND the 2026-06-17-004 plan U1 empty-diff fast path):
          - The `dimensions` array carries one entry per sequence row,
-           in the original 2-dim order. Each entry has `dimension`
+           in the original 5-dim order. Each entry has `dimension`
            (string) and `status` (`"done"` or `"failed"`).
          - For a normal close: every entry with `status: "done"`
            carries `findings_file` (string); every entry with
@@ -1054,8 +1060,8 @@ hats:
            - `focus`: short string describing the dimension focus
            - `depth`: `"standard"` for every dimension in the serial
              path. The wave preset's `quick`/`standard`/`deep` for
-             `adversarial` does not apply because `adversarial` is
-             not in the 2-dim set.
+             `adversarial` does not apply because the serial preset
+             keeps every dimension at `standard` regardless of name.
            - `diff_base`: string (resolved diff base from Scope Detection)
            - `intent_summary`: string (2-3 sentence intent)
            - `changed_files`: string[] (changed file paths)
@@ -1088,8 +1094,11 @@ hats:
            dimension) and continue the walk.
 
       ### Per-dimension focus strings (copy-pasteable)
-      - `correctness` → `"Logic correctness, edge cases, error propagation, state machine consistency"`
-      - `testing`     → `"Test coverage gaps, brittle assertions, behavioral changes without test additions"`
+      - `correctness`       → `"Logic correctness, edge cases, error propagation, state machine consistency"`
+      - `testing`           → `"Test coverage gaps, brittle assertions, behavioral changes without test additions"`
+      - `maintainability`   → `"Coupling, complexity, naming, dead code, abstraction debt — adapted from ce-code-review ce-maintainability-reviewer"`
+      - `project-standards` → `"AGENTS.md/CLAUDE.md compliance, frontmatter, citations, portability — adapted from ce-code-review ce-project-standards-reviewer"`
+      - `adversarial`       → `"Hidden side effects, compat breaks, edge/concurrency, unsafe paths, misleading names, test sufficiency, maintenance cost, rollback safety"`
 
       ### Per-dimension emission
       - Emit `review.dimension.ready` via `ralph emit`:
@@ -1116,12 +1125,15 @@ hats:
           "step": "<step>",
           "fix_round": "<0 for first round; increment after each fixer.applied accept>",
           "dimensions": [
-            {"dimension": "correctness", "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-correctness-<task>.json"},
-            {"dimension": "testing",     "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-testing-<task>.json"}
+            {"dimension": "correctness",       "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-correctness-<task>.json"},
+            {"dimension": "testing",           "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-testing-<task>.json"},
+            {"dimension": "maintainability",   "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-maintainability-<task>.json"},
+            {"dimension": "project-standards", "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-project-standards-<task>.json"},
+            {"dimension": "adversarial",       "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-adversarial-<task>.json"}
           ]
         }' --source dimension-reviewer
         ```
-      - `fix_round` MUST match the value carried by `review.dimension.ready` payloads in the same sequence (it stays constant across the 2-dim walk). After `fix.applied(fix_round=N)` is accepted, the next round MUST use `fix_round: N+1` and emit a fresh `review.dimension.ready` first — NEVER re-emit `review.dimensions.complete` with the same `fix_round` (U5 dedup rejects it).
+      - `fix_round` MUST match the value carried by `review.dimension.ready` payloads in the same sequence (it stays constant across the 5-dim walk). After `fix.applied(fix_round=N)` is accepted, the next round MUST use `fix_round: N+1` and emit a fresh `review.dimension.ready` first — NEVER re-emit `review.dimensions.complete` with the same `fix_round` (U5 dedup rejects it).
       - Do NOT use `ralph wave emit` — there is no wave in this preset.
       - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
       - **HARD RULE — never assume `ralph emit` succeeded.** This preset enables strict policy precheck (`event_policy.require_policy_check_for_cli_emit: true`, `allow_unsafe_cli_emit: false`), so an emit with missing required fields is rejected BEFORE the event is written. If the CLI exits non-zero, the event did NOT happen — no record was appended to jsonl. Always re-run with `--output json` and parse the response to fix the payload. Never proceed as if the event succeeded; the runner will hard-gate you on `missing_event_gate` instead.
@@ -1144,7 +1156,7 @@ hats:
         update `.agents/scratchpad/<plan>/progress.md` with
         `Active Sequence: dim=<dim> (N/M)` so operators
         and downstream hats can see the in-flight dimension.
-        Use the sequence index (1-based) and total (always 2).
+        Use the sequence index (1-based) and total (always 5).
       - After the synthesizer fires (`review.passed` /
         `review.failed` / `plan.blocked`), clear the line back
         to `Active Sequence: (none)` in the same progress.md edit.
@@ -1155,7 +1167,7 @@ hats:
       - MUST decide walk vs pass per the HARD RULE above (commit_count / changed_lines / untracked / diff state), NOT based on intent or trust in the executor
       - MUST NOT emit `review.passed` from this hat — `review.passed` is owned exclusively by `review-synthesizer`. The empty-diff fast path is now `review.dimensions.complete` (with all rows `status: done`, `findings_file: null`); the synthesizer then emits `review.passed(skip_reason=dimensions_complete)`. Any attempt to call `ralph emit review.passed --hat review-coordinator` is rejected by the CLI precheck (`isolated_scope_violation`) and the topic-deny rule.
       - MUST NOT emit `review.dimension.ready` for more than one dimension per turn (single-event boundary)
-      - MUST walk the sequence in the fixed order (correctness → testing)
+      - MUST walk the sequence in the fixed order (correctness → testing → maintainability → project-standards → adversarial)
       - MUST write `review-sequence.json` atomically (temp + rename) — no Read+Write race window
       - MUST accept a minimal `review.dimension.failed` payload (only `dimension` + `reason` required by contract) and continue the walk — do NOT block on missing fields
 
