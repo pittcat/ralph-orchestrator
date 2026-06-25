@@ -31,15 +31,12 @@ for _ralph_fn in \
   _ralph_wave_emit_args \
   _ralph_loops_subcmd \
   _ralph_hats_subcmd \
-  _ralph_bot_subcmd \
   _ralph_memory_subcmd \
   _ralph_memory_args \
   _ralph_task_subcmd \
   _ralph_task_args \
   _ralph_skill_subcmd \
-  _ralph_skill_args \
-  _ralph_interact_subcmd \
-  _ralph_interact_args; do
+  _ralph_skill_args; do
   unfunction "$_ralph_fn" 2>/dev/null || true
 done
 unset _ralph_fn
@@ -112,7 +109,6 @@ _RALPH_COMMANDS=(
   "tui:Attach TUI to a running ralph-api server"
   "web:Run web dashboard"
   "mcp:Run Ralph as an MCP server over stdio"
-  "bot:Manage Telegram bot setup and testing"
   "completions:Generate shell completions"
   "help:Show help for a command"
 )
@@ -124,7 +120,6 @@ _RALPH_TOOLS_COMMANDS=(
   "memory:Manage persistent memories"
   "task:Manage work items"
   "skill:Load and manage skills"
-  "interact:Interact with human via Telegram"
 )
 
 # =============================================================================
@@ -185,17 +180,6 @@ _RALPH_PRESET_TEMPLATES=(
 )
 
 # =============================================================================
-# Bot Subcommands
-# =============================================================================
-_RALPH_BOT_CMDS=(
-  "onboard:Interactive setup wizard for Telegram bot"
-  "status:Check current bot configuration status"
-  "test:Send a test message to verify bot works"
-  "token:Manage bot tokens"
-  "daemon:Run as persistent daemon listening on Telegram"
-)
-
-# =============================================================================
 # MCP Subcommands
 # =============================================================================
 _RALPH_MCP_CMDS=(
@@ -236,13 +220,6 @@ _RALPH_TASK_CMDS=(
 _RALPH_SKILL_CMDS=(
   "list:List available skills"
   "load:Load skill by name"
-)
-
-# =============================================================================
-# Interact Subcommands
-# =============================================================================
-_RALPH_INTERACT_CMDS=(
-  "progress:Send non-blocking progress update"
 )
 
 # =============================================================================
@@ -333,9 +310,6 @@ _ralph() {
         mcp)
           _describe 'mcp command' _RALPH_MCP_CMDS
           ;;
-        bot)
-          _describe 'bot command' _RALPH_BOT_CMDS
-          ;;
         completions)
           _ralph_completions_args
           ;;
@@ -357,9 +331,6 @@ _ralph() {
           ;;
         preset)
           _ralph_preset_subcmd ${words[2]} ${words[CURRENT]}
-          ;;
-        bot)
-          _ralph_bot_subcmd ${words[2]}
           ;;
       esac
       ;;
@@ -720,9 +691,6 @@ _ralph_tools_subcmd() {
     skill)
       _ralph_skill_subcmd
       ;;
-    interact)
-      _ralph_interact_subcmd
-      ;;
   esac
 }
 
@@ -780,20 +748,6 @@ _ralph_hats_subcmd() {
   case $subcmd in
     show)
       _arguments '1:Hat name:_default'
-      ;;
-  esac
-}
-
-# =============================================================================
-# Bot Subcommand Dispatcher
-# =============================================================================
-(( $+functions[_ralph_bot_subcmd] )) ||
-_ralph_bot_subcmd() {
-  local subcmd=$1
-
-  case $subcmd in
-    test)
-      _arguments '1:Message:_default'
       ;;
   esac
 }
@@ -940,41 +894,6 @@ _ralph_skill_args() {
   case $subcmd in
     load)
       _arguments '1:skill name:_default'
-      ;;
-  esac
-}
-
-# =============================================================================
-# Interact Subcommands
-# =============================================================================
-(( $+functions[_ralph_interact_subcmd] )) ||
-_ralph_interact_subcmd() {
-  local -a interact_cmds
-  interact_cmds=($_RALPH_INTERACT_CMDS)
-
-  local curcontext="$curcontext" state line
-  typeset -A opt_args
-
-  _arguments -C \
-    '1:subcommand:->subcmd'
-
-  case $state in
-    subcmd)
-      _describe 'interact subcommand' interact_cmds
-      ;;
-  esac
-}
-
-# =============================================================================
-# Interact Sub-Subcommand Arguments
-# =============================================================================
-(( $+functions[_ralph_interact_args] )) ||
-_ralph_interact_args() {
-  local subcmd=$1
-
-  case $subcmd in
-    progress)
-      _arguments '1:message:_default'
       ;;
   esac
 }

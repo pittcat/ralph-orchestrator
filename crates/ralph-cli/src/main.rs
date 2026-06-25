@@ -15,7 +15,6 @@
 //! - Work item tracking via `ralph task`
 
 mod backend_support;
-mod bot;
 mod cli;
 mod commands;
 mod config_resolution;
@@ -24,7 +23,6 @@ mod doctor;
 mod hats;
 mod hooks;
 mod init;
-mod interact;
 mod loop_runner;
 mod loops;
 mod mcp;
@@ -155,9 +153,6 @@ enum Commands {
 
     /// Run Ralph as an MCP server over stdio
     Mcp(mcp::McpArgs),
-
-    /// Manage Telegram bot setup and testing
-    Bot(bot::BotArgs),
 
     /// Manage and validate presets
     Preset(commands::preset::PresetArgs),
@@ -473,15 +468,6 @@ async fn main() -> Result<()> {
         Some(Commands::Tui(args)) => commands::tui::tui_command(args).await,
         Some(Commands::Web(args)) => web::execute(args).await,
         Some(Commands::Mcp(args)) => mcp::execute(args).await,
-        Some(Commands::Bot(args)) => {
-            bot::execute(
-                args,
-                &config_sources,
-                hats_source.as_ref(),
-                cli.color.should_use_colors(),
-            )
-            .await
-        }
         Some(Commands::Preset(args)) => {
             commands::preset::execute(
                 &config_sources,
@@ -548,20 +534,6 @@ mod tests {
         let cli =
             Cli::try_parse_from(["ralph", "run", "-H", "builtin:debug"]).expect("CLI parse failed");
         assert_eq!(cli.hats.as_deref(), Some("builtin:debug"));
-    }
-
-    #[test]
-    fn test_bot_daemon_parses_global_config_flag() {
-        let cli = Cli::try_parse_from(["ralph", "bot", "daemon", "-c", "ralph.bot.yml"])
-            .expect("CLI parse failed");
-
-        assert!(cli.config.iter().any(|value| value == "ralph.bot.yml"));
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Bot(crate::bot::BotArgs {
-                command: crate::bot::BotCommands::Daemon(_),
-            }))
-        ));
     }
 
     #[test]

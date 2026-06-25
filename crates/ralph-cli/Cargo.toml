@@ -34,7 +34,6 @@ path = "src/main.rs"
 ralph-proto.workspace = true
 ralph-core.workspace = true
 ralph-adapters.workspace = true
-ralph-telegram.workspace = true
 ralph-tui.workspace = true
 ralph-api.workspace = true
 

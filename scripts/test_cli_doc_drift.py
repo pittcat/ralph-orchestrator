@@ -181,29 +181,7 @@ Options:
 """
 
 RALPH_TOOLS_INTERACT_PROGRESS_HELP = """\
-Send a non-blocking progress message via Telegram
-
-Usage: ralph tools interact progress [OPTIONS] <MESSAGE>
-
-Arguments:
-  <MESSAGE>
-          Progress message text
-
-Options:
-  -h, --help
-          Print help (see a summary with '-h')
-
-  -c, --config <CONFIG>
-          Core configuration source
-
-  -H, --hats <HATS>
-          Hat collection source
-
-  -v, --verbose
-          Verbose output
-
-      --color <COLOR>
-          Color output mode
+(no longer applicable; ralph tools interact was removed)
 """
 
 

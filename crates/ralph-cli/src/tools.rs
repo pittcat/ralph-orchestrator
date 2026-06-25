@@ -8,12 +8,10 @@
 //! - `memory`: Persistent memories for accumulated learning
 //! - `task`: Work item tracking (beads-lite)
 //! - `skill`: Load skill content on demand
-//! - `interact`: Human-in-the-loop communication (progress updates, notifications)
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use crate::interact;
 use crate::memory;
 use crate::skill_cli;
 use crate::task_cli;
@@ -35,9 +33,6 @@ pub enum ToolsCommands {
 
     /// Load and manage skills
     Skill(skill_cli::SkillArgs),
-
-    /// Interact with human via Telegram (progress updates, notifications)
-    Interact(interact::InteractArgs),
 }
 
 /// Execute a tools command.
@@ -46,6 +41,5 @@ pub async fn execute(args: ToolsArgs, use_colors: bool) -> Result<()> {
         ToolsCommands::Memory(memory_args) => memory::execute(memory_args, use_colors),
         ToolsCommands::Task(task_args) => task_cli::execute(task_args, use_colors),
         ToolsCommands::Skill(skill_args) => skill_cli::execute(skill_args),
-        ToolsCommands::Interact(interact_args) => interact::execute(interact_args).await,
     }
 }
