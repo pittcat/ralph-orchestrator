@@ -108,7 +108,8 @@ schemas:
 
   # 2026-06-24 plan U2: review.start emitted by coordinator when all
   # units + fix-units complete. Triggers review-coordinator to begin
-  # the 2-dimension review sequence (correctness → testing).
+  # the 5-dimension review sequence
+  # (correctness → testing → maintainability → project-standards → adversarial).
   review.start:
     required_fields:
       - plan_name
