@@ -407,14 +407,14 @@ fn pipeline_records_protocol_view_feature_flag() {
     // opts out. This test uses the test-override atomic on
     // `protocol::set_protocol_view_enabled_for_test` so it stays
     // safe under the workspace `forbid(unsafe_code)` lint
-    // (the env-var read in `from_event_loop_with_index_for_env`
+    // (the env-var read in `from_event_loop_with_feature_for_env`
     // is short-circuited when the override is set).
 
     // Default-on: override is `true` (test override defaults to
     // the new U11-T7 default-on semantics) or unset, both yield
     // the unified view.
     reset_protocol_view_enabled_for_test();
-    let view_default = ProtocolView::from_event_loop_with_index_for_env(&config, None);
+    let view_default = ProtocolView::from_event_loop_with_feature_for_env(&config);
     let pipeline_default = ValidationPipeline::from_config(&view_default, &config);
     assert!(
         pipeline_default.feature_enabled,
@@ -423,7 +423,7 @@ fn pipeline_records_protocol_view_feature_flag() {
 
     // Explicit off via the test override.
     set_protocol_view_enabled_for_test(false);
-    let view_off = ProtocolView::from_event_loop_with_index_for_env(&config, None);
+    let view_off = ProtocolView::from_event_loop_with_feature_for_env(&config);
     let pipeline_off = ValidationPipeline::from_config(&view_off, &config);
     assert!(
         !pipeline_off.feature_enabled,
@@ -435,7 +435,7 @@ fn pipeline_records_protocol_view_feature_flag() {
 
     // Explicit on via `_and_feature(_, _, true)` still wins
     // (this is the env-agnostic path, no override needed).
-    let view_on = ProtocolView::from_event_loop_with_index_and_feature(&config, None, true);
+    let view_on = ProtocolView::from_event_loop_with_feature(&config, true);
     let pipeline_on = ValidationPipeline::from_config(&view_on, &config);
     assert!(
         pipeline_on.feature_enabled,

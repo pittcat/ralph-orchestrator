@@ -416,7 +416,7 @@ pub fn check_alignment_with_snapshot(
 /// convenience for legacy callers that do not yet participate in
 /// the snapshot pipeline.
 #[deprecated(
-    since = "U4c (2026-06-21-002)",
+    since = "0.1.0",
     note = "prefer check_alignment_with_snapshot (pure, no disk I/O)"
 )]
 pub fn check_progress_task_alignment(

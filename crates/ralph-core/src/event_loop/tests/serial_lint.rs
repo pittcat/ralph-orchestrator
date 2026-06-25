@@ -33,8 +33,6 @@ event_loop:
   execution_mode: isolated
   completion_promise: LOOP_COMPLETE
   starting_event: "task.start"
-  hat_handoff:
-    enabled: true
   event_policy:
     enabled: true
     mode: enforce
@@ -406,17 +404,17 @@ fn plan_blocked_skips_task_resume_emit() {
     // `record_typed_lint_rejection` is the only public API
     // exposed on LoopState — the test verifies dispatch wires
     // up correctly when the counter crosses the threshold.
-    let kind = crate::preset::engine::gates::RejectionKind::HandoffFilenameMismatch;
+    let kind = crate::preset::engine::gates::RejectionKind::MissingField;
     event_loop.state.record_typed_lint_rejection(kind);
     event_loop.state.record_typed_lint_rejection(kind);
     // Counter is now 2; the 3rd rejection (after we emit the
     // bad event) should trip the PlanBlocked dispatch path.
 
-    // Write a malformed handoff event (work.done with no
-    // plan_name/step) to trigger a hat_handoff gate rejection.
-    // We can't directly inspect the bus after process_events,
-    // but the gate rejects on missing_required_field — which
-    // is NOT a typed kind. So we use the typed counter to
+    // Write a malformed payload event (work.done with no
+    // plan_name/step) to trigger an engine-gate missing-field
+    // rejection. We can't directly inspect the bus after
+    // process_events, but the gate rejects on missing_required_field —
+    // which is NOT a typed kind. So we use the typed counter to
     // assert dispatch logic instead.
     let consecutive_before = event_loop.state.typed_lint_rejection_count(kind);
     assert_eq!(consecutive_before, 2, "counter must be 2 before trip");

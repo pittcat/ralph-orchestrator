@@ -1,9 +1,9 @@
 ---
 title: 全量删除 hat_handoff 功能
 type: refactor
-status: active
+status: completed
 date: 2026-06-23
-updated: 2026-06-24
+updated: 2026-06-25
 origin: docs/brainstorms/2026-06-18-isolated-hat-handoff-requirements.md
 related:
   - docs/plans/2026-06-24-001-refactor-ce-executor-serial-tdd-validator-plan.md
@@ -683,3 +683,18 @@ hat_handoff:
 - **当前 preset 配置：** `presets/schemas/ce-executor-serial.yml`、`presets/en/ce-executor-serial.yml`
 - **相关代码模块：** `crates/ralph-core/src/hat_handoff/`、`crates/ralph-core/src/event_loop/`、`crates/ralph-core/src/validation/`、`crates/ralph-core/src/state/`、`crates/ralph-cli/src/`
 - **关联 plan（须先完成）：** `docs/plans/2026-06-24-001-refactor-ce-executor-serial-tdd-validator-plan.md`（ce-executor-serial preset 重写 11→10-hat + TDD + validator + 总体 review；本计划与它在多个下游文件上重叠，详见 KTD7 与「范围边界」下游重叠表）
+
+---
+
+## 完成记录
+
+- **完成日期：** 2026-06-25
+- **最终验证：** `./scripts/run-tests.sh` 全绿、`cargo clippy` 无新增错误
+- **主要收尾工作：**
+  - 删除 `crates/ralph-cli/src/policy_check.rs` 中未删净的 `hat_handoff_tests` 模块
+  - 清理 `crates/ralph-cli/src/commands/emit.rs` 中 dead lint / hat-handoff 相关代码
+  - 删除 `crates/ralph-core/tests/scenarios/` 下 hat_handoff 专用 BDD 场景与 plan-gate 冲突场景
+  - 将 `RejectionKind::Handoff*` 测试引用迁移到现有 variant（MissingField / TopicOwnership / ContractViolation）
+  - 修复 `RejectionKind::from_reason_code` 遗漏新 variant 的映射
+  - 删除 `ralph-tools-handoff` 相关 skill 测试断言
+  - 执行 U9 残留扫描，确认 `step_handoff` / session `handoff_path` / `HandoffTracker` 等合法命中外无 hat_handoff 专用残留

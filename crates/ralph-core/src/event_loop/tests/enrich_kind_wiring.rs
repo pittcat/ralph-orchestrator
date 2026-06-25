@@ -32,12 +32,7 @@ fn enrich_task_resume_payload_carries_typed_kind_when_provided() {
 
 #[test]
 fn enrich_task_resume_payload_kind_none_falls_back_to_reason() {
-    let payload = enrich_task_resume_payload(
-        "out-of-scope",
-        "out-of-scope",
-        Some("ralph"),
-        None,
-    );
+    let payload = enrich_task_resume_payload("out-of-scope", "out-of-scope", Some("ralph"), None);
     let v: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
     // Fallback mirrors reason_code (legacy behaviour preserved).
     assert_eq!(v["kind"], "out_of_scope");
@@ -84,8 +79,7 @@ fn enrich_three_new_kinds_round_trip_via_reason_code() {
         (RejectionKind::StallNoEvents, "stall_no_events"),
         (RejectionKind::ContractViolation, "contract_violation"),
     ] {
-        let payload =
-            enrich_task_resume_payload("hint", "hint", Some("h"), Some(kind));
+        let payload = enrich_task_resume_payload("hint", "hint", Some("h"), Some(kind));
         let v: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
         assert_eq!(
             v["kind"], expected_reason,
@@ -102,11 +96,13 @@ fn enrich_three_new_kinds_round_trip_via_reason_code() {
 #[test]
 fn enrich_completion_rejection_kinds_round_trip() {
     for (kind, expected_reason) in [
-        (RejectionKind::PersistentLoopActive, "persistent_loop_active"),
+        (
+            RejectionKind::PersistentLoopActive,
+            "persistent_loop_active",
+        ),
         (RejectionKind::OpenTasksBlocking, "open_tasks_blocking"),
     ] {
-        let payload =
-            enrich_task_resume_payload("hint", "hint", Some("h"), Some(kind));
+        let payload = enrich_task_resume_payload("hint", "hint", Some("h"), Some(kind));
         let v: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
         assert_eq!(
             v["kind"], expected_reason,
@@ -140,7 +136,6 @@ fn completion_rejection_payloads_have_typed_kind_field() {
         None,
         Some(RejectionKind::OpenTasksBlocking),
     );
-    let v2: serde_json::Value =
-        serde_json::from_str(&open_tasks_payload).expect("valid JSON");
+    let v2: serde_json::Value = serde_json::from_str(&open_tasks_payload).expect("valid JSON");
     assert_eq!(v2["kind"], "open_tasks_blocking");
 }

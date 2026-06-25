@@ -55,11 +55,7 @@ impl AuditDispatcher {
     /// the caller has already decided what severity to apply via
     /// `AuditSeverity`; the dispatcher's job is to perform the
     /// side-effects consistently across all audit classes.
-    pub fn dispatch(
-        severity: AuditSeverity,
-        ctx: AuditContext,
-        consecutive_failures: &mut u32,
-    ) {
+    pub fn dispatch(severity: AuditSeverity, ctx: AuditContext, consecutive_failures: &mut u32) {
         match severity {
             AuditSeverity::Warn => {
                 tracing::warn!(

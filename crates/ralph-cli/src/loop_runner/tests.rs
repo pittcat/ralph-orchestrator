@@ -8616,11 +8616,11 @@ fn test_u3_t3_5_enrich_with_stage_helper() {
     // the caller passes `None` (legacy behaviour).
     //
     // 2026-06-23-005 U1: also assert the new typed `kind` field.
+    use ralph_core::RejectionKind;
     use ralph_core::event_loop::rejection::task_resume_payload_has_required_fields;
     use ralph_core::event_loop::rejection::{
         RejectionStage, enrich_task_resume_payload_with_stage,
     };
-    use ralph_core::RejectionKind;
 
     // Case 1: explicit stage + typed kind → JSON has `stage` AND `kind` fields.
     let p1 = enrich_task_resume_payload_with_stage(

@@ -19,15 +19,6 @@
 //! new hash is stable across `cargo update` / `cargo build`
 //! cycles on the same source.
 //!
-//! ## 2026-06-23-006 U5: hat_handoff removal
-//!
-//! The `hat_handoff` config block, macro-edge resolution, and
-//! the dedicated `is_macro_edge*` family were removed as part
-//! of the U5 plan. Macro-edge semantics were only meaningful
-//! for the (now removed) `hat_handoff` gate; callers that
-//! previously inspected `is_macro_edge` should rely on the
-//! gate's structural field check instead.
-
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::config::execution_contracts::{ExecutionContractRule, ExecutionContractsConfig};
@@ -126,10 +117,7 @@ impl ProtocolView {
     /// falls back to the pre-U3 resolution path. This is the
     /// conservative default (KTD-8): the migration to the
     /// unified view is opt-in until U4/U5 validate it.
-    pub fn from_event_loop_with_feature(
-        config: &EventLoopConfig,
-        feature_enabled: bool,
-    ) -> Self {
+    pub fn from_event_loop_with_feature(config: &EventLoopConfig, feature_enabled: bool) -> Self {
         // EventLoopConfig stores `event_policy` and `workflow_contract`
         // as `Option<T>`; fall back to empty defaults when absent so
         // the view is always populated.
@@ -148,10 +136,8 @@ impl ProtocolView {
         // P2-4: SHA-256 (stable across Rust versions). The previous
         // `DefaultHasher` was Rust-version-dependent and produced
         // false-positive drift warnings after `cargo update`.
-        let protocol_hash = compute_protocol_hash(
-            &effective_required_fields,
-            workflow_guards.as_ref(),
-        );
+        let protocol_hash =
+            compute_protocol_hash(&effective_required_fields, workflow_guards.as_ref());
 
         Self {
             effective_required_fields,
@@ -319,9 +305,7 @@ pub fn payload_field_set(payload: &Value) -> HashSet<String> {
 
 #[cfg(test)]
 mod tests {
-    //! Tests for the stable protocol hash (P2-4) and the
-    //! remaining KTD-8 surface after U5 (2026-06-23-006)
-    //! removed the hat_handoff macro-edge logic.
+    //! Tests for the stable protocol hash (P2-4) and the KTD-8 surface.
     use super::*;
     use crate::config::RalphConfig;
     use serial_test::serial;
@@ -367,10 +351,20 @@ event_loop:
     /// changes (drift detection is meaningful).
     #[test]
     fn protocol_hash_changes_with_content() {
+        use crate::config::workflow_guards::{
+            WorkflowChain, WorkflowChainMode, WorkflowGuardsConfig,
+        };
         let cfg = minimal_config();
         let v1 = ProtocolView::from_event_loop(&cfg.event_loop);
         let mut cfg2 = cfg.clone();
-        cfg2.event_loop.workflow_guards = Some(Default::default());
+        cfg2.event_loop.workflow_guards = Some(WorkflowGuardsConfig {
+            chains: vec![WorkflowChain {
+                name: "main".to_string(),
+                topics: vec!["work.start".to_string(), "work.ready".to_string()],
+                mode: WorkflowChainMode::Strict,
+                correlation: None,
+            }],
+        });
         let v2 = ProtocolView::from_event_loop(&cfg2.event_loop);
         assert_ne!(
             v1.protocol_hash, v2.protocol_hash,

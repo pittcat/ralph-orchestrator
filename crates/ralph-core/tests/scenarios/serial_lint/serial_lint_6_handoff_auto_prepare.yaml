@@ -1,6 +1,6 @@
-# serial_lint_6: R7-6 / R22 / B4 — handoff auto-prepare 消费 pending hint
+# serial_lint_6: R7-6 / R22 / B4 — cross-hat consume pending hint
 #
-# 验证 `pending_lint_resume` hint 跨越 hat-handoff 边界仍然保留:
+# 验证 `pending_lint_resume` hint 跨越 hat 边界仍然保留:
 # 由 source hat（executor）播种的 hint,被**下一个** hat 的
 # build_prompt 消费,无论 `next_hat()` 选中哪个 hat。
 #
@@ -8,12 +8,19 @@
 # 单 hat 拓扑；scenario 6 验证 2-hat 拓扑,消费 hat 与 source hat
 # 不同。
 #
-# 2026-06-20-002 plan U5:handoff-coverage 两个场景之一,与
-# serial_lint_7（handoff_seeds_coverage）配对——后者检查驱动
-# auto-prepare hook 的 seeds。
+# 2026-06-23-006 plan U7:删除了 `hat_handoff:` 配置块（已被
+# 2026-06-23-006 U5 移除 `EventLoopConfig.hat_handoff` 字段）,
+# 并移除了 `.ralph/agent/hat-handoff/1-1-executor-reviewer.md`
+# fixture 文件——该 fixture 仅在 hat_handoff gate 启用时供
+# macro-edge 路径读取,engine gate 路径（assert_state harness
+# 测的核心）不依赖该 fixture。
+#
+# 2026-06-20-002 plan U5:本场景保留并改写;原 scenario 7
+# (handoff_seeds_coverage) 已被 U7 整文件删除（依赖 hat_handoff
+# gate;2-hat 拓扑 smoke 由 `isolated_multi_hat.yml` 覆盖）。
 
 name: serial_lint_6_handoff_auto_prepare
-description: pending_lint_resume hint 跨 hat-handoff 仍保留,由下一个 hat 的 build_prompt 消费
+description: pending_lint_resume hint 跨 hat 边界仍保留,由下一个 hat 的 build_prompt 消费
 
 config:
   prompt_file: PROMPT.md
@@ -35,8 +42,6 @@ config:
     execution_mode: isolated
     starting_event: "task.start"
     completion_promise: "LOOP_COMPLETE"
-    hat_handoff:
-      enabled: true
     event_policy:
       enabled: true
       mode: enforce
@@ -47,26 +52,6 @@ config:
             - plan_name
             - step
             - commit_count
-
-fixture_files:
-  - path: .ralph/agent/hat-handoff/1-1-executor-reviewer.md
-    content: |
-      # Handoff: executor → reviewer
-      ## context
-      test scenario handoff artifact
-
-      ## changed
-      none
-
-      ## verify
-      verify
-
-      ## next
-      **动作**: review
-      **阻塞**: none
-
-      ## notes
-      test
 
 mock_responses:
   # iter 1:由 executor emit task.start,唤醒整个拓扑。
@@ -95,7 +80,7 @@ mock_responses:
   # rejection 之后 engine gate accept 路径未受影响。
   - text: |
       <event topic="work.done">
-      {"plan_name":"plan-s","step":"step-02","commit_count":2,"handoff_path":".ralph/agent/hat-handoff/1-1-executor-reviewer.md"}
+      {"plan_name":"plan-s","step":"step-02","commit_count":2}
       </event>
     hat: executor
   # iter 5:由 reviewer emit review.done,展示拓扑可端到端
@@ -118,7 +103,7 @@ expected:
     - at_iteration: 2
       pending_lint_resume:
         topic: work.done
-        reason_contains: "handoff_path"
+        reason_contains: "missing"
     # iter 3:hint 被下一次 build_prompt 消费。
   # 被选 hat 为 `ralph`（isolated 模式下最小 2-hat 拓扑的
   # round-robin 胜出者——dispatch 说明见 smoke 场景）。

@@ -11,7 +11,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use super::TerminationReason;
-use super::termination::{TerminationTrigger, TRIGGER_QUEUE_CAPACITY};
+use super::termination::{TRIGGER_QUEUE_CAPACITY, TerminationTrigger};
 use crate::flow_lifecycle::FlowLifecycleRegistry;
 
 /// Maximum number of times the same rejection key may be retried
@@ -972,7 +972,7 @@ impl LoopState {
     ///
     /// The follow-up plan `2026-06-21-001 U4` consumes this
     /// signal to:
-    ///   - kind `HandoffFilenameMismatch` × 2 → `drift_finding`
+    ///   - kind `MissingField` × 2 → `drift_finding`
     ///   - kind `*` × 3 → `loop.circuit_breaker_trip`
     ///   - kind `*` × 4 → `plan.blocked(reason=...)`.
     ///
@@ -1113,7 +1113,8 @@ impl LoopState {
     /// Called on step-close to free memory.
     pub fn prune_fix_round_bucket(&mut self, plan_name: &str, step: &str) {
         let prefix = format!("{plan_name}::{step}::");
-        self.fix_round_counts.retain(|key, _| !key.starts_with(&prefix));
+        self.fix_round_counts
+            .retain(|key, _| !key.starts_with(&prefix));
     }
 
     /// U4 (2026-06-17-003 plan): prune the dedup-set entries that
@@ -1458,10 +1459,10 @@ mod detect_rejection_stall_kind_tests {
     fn below_threshold_returns_none() {
         let mut state = LoopState::new();
         for _ in 0..(REJECTION_WINDOW_THRESHOLD - 1) {
-            state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
+            state.record_typed_lint_rejection(RejectionKind::MissingField);
         }
         assert_eq!(
-            state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch),
+            state.typed_lint_rejection_count(RejectionKind::MissingField),
             REJECTION_WINDOW_THRESHOLD - 1
         );
         assert!(detect_rejection_stall_kind(&state).is_none());
@@ -1471,11 +1472,11 @@ mod detect_rejection_stall_kind_tests {
     fn at_threshold_returns_first_handoff_kind() {
         let mut state = LoopState::new();
         for _ in 0..REJECTION_WINDOW_THRESHOLD {
-            state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
+            state.record_typed_lint_rejection(RejectionKind::MissingField);
         }
         assert_eq!(
             detect_rejection_stall_kind(&state),
-            Some(RejectionKind::HandoffFilenameMismatch)
+            Some(RejectionKind::MissingField)
         );
     }
 
@@ -1490,15 +1491,15 @@ mod detect_rejection_stall_kind_tests {
         // 5 rounds (well past the threshold) — the primary-20260622-182705
         // case was filename_mismatch × 6.
         for _ in 0..5 {
-            state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
+            state.record_typed_lint_rejection(RejectionKind::MissingField);
         }
         assert_eq!(
-            state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch),
+            state.typed_lint_rejection_count(RejectionKind::MissingField),
             5
         );
         assert_eq!(
             detect_rejection_stall_kind(&state),
-            Some(RejectionKind::HandoffFilenameMismatch),
+            Some(RejectionKind::MissingField),
             "kind helper surfaces the actionable Handoff* kind"
         );
     }
@@ -2043,24 +2044,24 @@ mod tests {
     fn typed_lint_rejection_count_buckets_per_kind() {
         let mut state = LoopState::new();
         // Same kind twice — counter accumulates in ONE bucket.
-        let n1 = state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
-        let n2 = state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
+        let n1 = state.record_typed_lint_rejection(RejectionKind::MissingField);
+        let n2 = state.record_typed_lint_rejection(RejectionKind::MissingField);
         assert_eq!(n1, 1);
         assert_eq!(n2, 2);
         assert_eq!(
-            state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch),
+            state.typed_lint_rejection_count(RejectionKind::MissingField),
             2,
             "second rejection of the same kind MUST land in the same bucket"
         );
         // Different kind — independent bucket.
-        state.record_typed_lint_rejection(RejectionKind::HandoffStructureInvalid);
+        state.record_typed_lint_rejection(RejectionKind::TopicOwnership);
         assert_eq!(
-            state.typed_lint_rejection_count(RejectionKind::HandoffStructureInvalid),
+            state.typed_lint_rejection_count(RejectionKind::TopicOwnership),
             1,
             "different kind MUST land in its own bucket; do NOT collapse across kinds"
         );
         assert_eq!(
-            state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch),
+            state.typed_lint_rejection_count(RejectionKind::MissingField),
             2,
             "first bucket MUST stay independent of the second"
         );
@@ -2069,24 +2070,24 @@ mod tests {
     #[test]
     fn typed_lint_rejection_clear_isolated_per_kind() {
         let mut state = LoopState::new();
-        state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
-        state.record_typed_lint_rejection(RejectionKind::HandoffStructureInvalid);
-        state.record_typed_lint_rejection(RejectionKind::HandoffIllegalEmitTopic);
+        state.record_typed_lint_rejection(RejectionKind::MissingField);
+        state.record_typed_lint_rejection(RejectionKind::TopicOwnership);
+        state.record_typed_lint_rejection(RejectionKind::ContractViolation);
         assert_eq!(
-            state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch),
+            state.typed_lint_rejection_count(RejectionKind::MissingField),
             1
         );
-        state.clear_typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch);
+        state.clear_typed_lint_rejection_count(RejectionKind::MissingField);
         assert_eq!(
-            state.typed_lint_rejection_count(RejectionKind::HandoffFilenameMismatch),
+            state.typed_lint_rejection_count(RejectionKind::MissingField),
             0
         );
         assert_eq!(
-            state.typed_lint_rejection_count(RejectionKind::HandoffStructureInvalid),
+            state.typed_lint_rejection_count(RejectionKind::TopicOwnership),
             1
         );
         assert_eq!(
-            state.typed_lint_rejection_count(RejectionKind::HandoffIllegalEmitTopic),
+            state.typed_lint_rejection_count(RejectionKind::ContractViolation),
             1,
             "clearing one bucket MUST NOT clear the others"
         );
@@ -2099,13 +2100,13 @@ mod tests {
         // string. This guards against a future drift between the
         // typed kind enum and the legacy reason_code strings.
         let mut state = LoopState::new();
-        state.record_typed_lint_rejection(RejectionKind::HandoffFilenameMismatch);
-        state.record_typed_lint_rejection(RejectionKind::HandoffStructureInvalid);
-        state.record_typed_lint_rejection(RejectionKind::HandoffIllegalEmitTopic);
+        state.record_typed_lint_rejection(RejectionKind::MissingField);
+        state.record_typed_lint_rejection(RejectionKind::TopicOwnership);
+        state.record_typed_lint_rejection(RejectionKind::ContractViolation);
         assert!(
             state
                 .consecutive_lint_rejections_by_kind
-                .contains_key(RejectionKind::HandoffFilenameMismatch.reason_code()),
+                .contains_key(RejectionKind::MissingField.reason_code()),
             "typed counter MUST key on RejectionKind::reason_code() for legacy SSOT compatibility"
         );
     }

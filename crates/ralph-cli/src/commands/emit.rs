@@ -9,10 +9,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use ralph_core::config::HatExecutionMode;
 use ralph_core::emit_schema_hint::fix_hint_for_hat_topic;
-use ralph_core::preset::engine::lint_mirror::{build_lint_mirror_block, build_lint_resume_block};
-use ralph_core::preset::engine::{
-    LintOutcome, LintPaths, LintResumeHint, ProtocolView, lint_emit_with_timeout,
-};
+use ralph_core::preset::engine::ProtocolView;
 use ralph_core::{
     RalphConfig, UrgentSteerStore, ViolationType,
     diagnosis::{
@@ -203,178 +200,6 @@ pub fn should_policy_check_emit(args: &EmitArgs, config: Option<&RalphConfig>) -
 pub fn looks_like_json(payload: &str) -> bool {
     let trimmed = payload.trim_start();
     trimmed.starts_with('{') || trimmed.starts_with('[')
-}
-
-/// Decide whether the engine-backed linter (U4) should run for this
-/// `ralph emit`. Opt-in: lint is on when `hat_handoff.enabled` is
-/// true AND the execution_mode is not `coordinator`. The
-/// `RALPH_SERIAL_LINT_MODE=off` env var is the KTD-7 circuit
-/// breaker — it disables only the lint phase, not the policy /
-/// scope / handoff gates that lint runs *after*.
-///
-/// When `config` is `None` (no `ralph.yml` discoverable), the
-/// linter is skipped — a preset-less workspace does not have a
-/// protocol view to lint against, and the existing
-/// `unsafe-no-policy-check` path already handles unconfigured
-/// emits.
-fn should_run_lint(config: Option<&RalphConfig>) -> bool {
-    if std::env::var("RALPH_SERIAL_LINT_MODE")
-        .map(|v| v.eq_ignore_ascii_case("off"))
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    let Some(cfg) = config else {
-        return false;
-    };
-    if cfg.event_loop.execution_mode == HatExecutionMode::Coordinator {
-        return false;
-    }
-    false // 2026-06-23-006 plan U7: hat_handoff.enabled 字段已删除，lint auto-prepare 已禁用
-}
-
-/// Apply the linter's outcome to the in-flight emit.
-///
-///   * `Accept` — payload passes through unchanged.
-///   * `AcceptAfterAutoPrepare` — the linter synchronously wrote a
-///     handoff artifact and mutated the payload; we trust the
-///     engine's updated `Value` (R22 / B4 fix).
-///   * `Reject(hint)` — write `.ralph/pending_lint_resume.json`,
-///     print `## LINT FAILED` + `## LINT RESUME REQUIRED`, and
-///     return `Err` so the event never lands in `events.jsonl`.
-///     No recovery entry is written (R9).
-///   * `Timeout(reason)` — same fail-closed path with a
-///     `## LINT TIMEOUT` block (R14 / KTD-9).
-fn handle_lint_outcome(
-    outcome: LintOutcome,
-    workspace_root: &Path,
-    view: &ProtocolView,
-    topic: &str,
-    hat: Option<&str>,
-    payload: serde_json::Value,
-) -> Result<serde_json::Value> {
-    match outcome {
-        LintOutcome::Accept => Ok(payload),
-        LintOutcome::Reject(hint) => {
-            // 2026-06-23 fix plan P0 (CB-6): also write
-            // recovery.jsonl (in addition to the in-loop
-            // `pending_lint_resume` path that R9 preserved) so
-            // the operator can correlate the lint rejection
-            // with the gate rejection via the unified audit
-            // log. Pre-CB-6, gate ran before lint and wrote
-            // recovery.jsonl on missing-required-field
-            // rejections; with the reordered pipeline (lint
-            // first to let auto-prepare fill `handoff_path`),
-            // lint is the one that catches the missing-fields
-            // case, so the audit write has to follow.
-            let _ = write_pending_lint_resume(workspace_root, topic, &hint);
-            // Mirror the gate-rejection recovery envelope
-            // shape so the audit log uses the same SSOT
-            // vocabulary (reason_code, source, source_hat,
-            // topic) for both gate and lint rejections.
-            {
-                use ralph_core::{PolicyFinding, ViolationType};
-                let kind_label = format!("{:?}", hint.class);
-                let finding = PolicyFinding {
-                    violation_type: ViolationType::SemanticGateViolation {
-                        gate: "lint".to_string(),
-                        context: kind_label,
-                    },
-                    topic: topic.to_string(),
-                    message: format!("{} (reason_code: lint_reject)", hint.reason),
-                };
-                record_cli_emit_rejection(workspace_root, topic, hat.as_deref(), &finding);
-            }
-            print_lint_failure_blocks(view, &hint);
-            Err(lint_failure_exit_code(&hint))
-        }
-        LintOutcome::Timeout(reason) => {
-            // R14 / KTD-9: lint overrun is treated as a rejection so
-            // the agent sees the same fail-closed path. The hint
-            // uses `HandoffArtifact` because the timeout class is
-            // closer to "unknown / non-deterministic" than to a
-            // payload error; the resume block still routes back to
-            // the source hat. Operators can correlate with the
-            // `reason` string.
-            let hint = LintResumeHint::from_reason(topic, &reason);
-            let _ = write_pending_lint_resume(workspace_root, topic, &hint);
-            // Mirror the lint-reject audit write (see Reject
-            // branch above for rationale).
-            {
-                use ralph_core::{PolicyFinding, ViolationType};
-                let finding = PolicyFinding {
-                    violation_type: ViolationType::SemanticGateViolation {
-                        gate: "lint".to_string(),
-                        context: "timeout".to_string(),
-                    },
-                    topic: topic.to_string(),
-                    message: format!("{} (reason_code: lint_timeout)", reason),
-                };
-                record_cli_emit_rejection(workspace_root, topic, hat.as_deref(), &finding);
-            }
-            eprintln!(
-                "## LINT TIMEOUT\n\
-                 topic: `{topic}`\n\
-                 reason: {reason}\n\
-                 \n\
-                 The lint phase exceeded its 200ms budget and is fail-\
-                 closed. The event is NOT written to events.jsonl. \
-                 Re-run `ralph emit` once the underlying cause is \
-                 resolved.\n"
-            );
-            print_lint_failure_blocks(view, &hint);
-            Err(lint_failure_exit_code(&hint))
-        }
-    }
-}
-
-/// Persist the lint hint so the loop's next `build_prompt` call
-/// CLI emit does NOT persist the lint hint to disk (reviewer P0
-/// finding #2 — cross-process hand-off was broken end-to-end).
-/// The hint now flows purely through the in-loop
-/// `engine_required_field_filter` path: when `ralph emit` rejects
-/// an event, the hint is printed to stderr and the process exits
-/// non-zero. The agent that retries gets a fresh prompt without
-/// any stale resume state because the next `ralph emit` call
-/// re-runs the engine gate from scratch. Plan R13 / KTD-8 is
-/// satisfied by the in-loop path (`event_loop/mod.rs`); the CLI
-/// is a fast-feedback channel only.
-///
-/// If a future feature needs cross-process resume state, route
-/// the file through a dedicated `PendingLintResumeStore` type
-/// that owns both read and write — do NOT reintroduce the
-/// dangling write here.
-#[allow(dead_code)]
-fn write_pending_lint_resume(
-    _workspace_root: &Path,
-    _topic: &str,
-    _hint: &LintResumeHint,
-) -> std::io::Result<()> {
-    Ok(())
-}
-
-/// Print `## LINT FAILED` + `## LINT MIRROR` + `## LINT RESUME
-/// REQUIRED` for the agent. Mirrored from `lint_mirror.rs` so the
-/// output is the same in CLI emit failure and in `build_prompt`
-/// injection — operators and agents see a single canonical
-/// format (R12).
-fn print_lint_failure_blocks(view: &ProtocolView, hint: &LintResumeHint) {
-    eprintln!("## LINT FAILED");
-    eprintln!();
-    eprint!("{}", build_lint_mirror_block(view, hint));
-    eprint!("{}", build_lint_resume_block(hint));
-}
-
-/// Convert a lint rejection into a non-zero anyhow exit so the
-/// shell can detect failure without parsing `## LINT FAILED`.
-fn lint_failure_exit_code(hint: &LintResumeHint) -> anyhow::Error {
-    anyhow::anyhow!(
-        "Event rejected by lint (class={:?}, target={:?}): {}\n\
-         See `## LINT FAILED` above for the canonical failure block.",
-        hint.class,
-        hint.target,
-        hint.reason
-    )
 }
 
 /// Write a recovery envelope to `.ralph/recovery.jsonl` when the CLI
@@ -1032,48 +857,6 @@ fn emit_command_with_root_and_hats(
         args.payload
     };
 
-    // 2026-06-23 fix plan P0 (CB-6) was originally a hard
-    // reject for hand-filled `handoff_path`, but the
-    // "agent used `ralph tools handoff prepare` then
-    // emitted" path is a legitimate re-emit flow exercised
-    // by `tests/integration_emit_policy.rs`. The actual
-    // root cause was a different bug — `auto_handoff_prepare`
-    // wrote a non-SSOT 1-segment filename
-    // (`auto_{topic}.md`) that the runtime gate's
-    // `parse_filename` could not accept. That is fixed
-    // in `linter.rs` (always use
-    // `allocator::compute_filename` SSOT). The fail-closed
-    // backstop for stale hand-filled paths is the runtime
-    // gate's `read_handoff_ssot_first` (gate.rs:154), which
-    // re-derives the filename from the gate-side
-    // HandoffIndex when the agent path is stale. No CLI
-    // guard is needed.
-
-    // 2026-06-18-002 plan U7: CLI mirror of the runtime
-    // hat-handoff gate. Disabled by default; opt-in via
-    // `event_loop.hat_handoff.enabled`.
-    //
-    // 2026-06-23 fix plan P0 (CB-6): when the lint phase
-    // will run, defer the gate check until *after* lint so
-    // the lint auto-prepare (R22) can fill a missing
-    // `handoff_path` before the gate sees it. The previous
-    // order (gate before lint) caused the gate to reject
-    // agents that hand-omitted `handoff_path` even though
-    // the lint phase would have computed the SSOT 4-segment
-    // filename. With this reordering, the missing-path case
-    // is recovered by the lint phase, and the hand-filled
-    // stale case is recovered by the runtime gate's
-    // `read_handoff_ssot_first` rescue.
-    //
-    // When lint is off, the gate runs first (preserves the
-    // pre-CB-6 behavior for `RALPH_SERIAL_LINT_MODE=off`
-    // callers, e.g. integration tests of the policy
-    // surface itself).
-    // 2026-06-23-006 plan U1: hat-handoff pre-lint gate removed.
-    // The CLI mirror of the runtime gate has been deleted; emit
-    // path now relies on the unified validation pipeline
-    // (event_policy / origin / scope / dimension gates) only.
-
     // Build the event record
     // We use serde_json directly to ensure proper escaping
     let payload_value = if args.json && !payload.is_empty() {
@@ -1091,74 +874,6 @@ fn emit_command_with_root_and_hats(
     } else {
         serde_json::Value::String(payload)
     };
-
-    // U4 (plan 2026-06-20-001, R8–R13, R22): engine-backed precheck
-    // linter. Runs *after* policy / scope / dimension / handoff gates
-    // (so a topic that fails the legacy gates still gets the
-    // operator-facing message it always has) and *before* the event
-    // is written to disk. The lint phase:
-    //   1. builds a `ProtocolView` from the loaded event_loop config
-    //   2. mirrors the gate against the same protocol the loop uses
-    //      (KTD-10 — no duplicate field tables in Rust)
-    //   3. on macro edges lacking `handoff_path`, synchronously
-    //      prepares the handoff artifact and re-emits (R22 / B4 fix)
-    //   4. on rejection: writes `LoopState.pending_lint_resume`,
-    //      prints `## LINT FAILED` + `## LINT RESUME REQUIRED`, and
-    //      refuses to write to the events file (R9, R13, KTD-8)
-    //   5. on timeout (>200ms p95): same fail-closed path (R14,
-    //      KTD-9). The runtime check is post-hoc; full fail-closed
-    //      JoinHandle wrap is tracked as F-PS-006.
-    //
-    // Lint is opt-in: only when `hat_handoff.enabled == true` AND
-    // the resolved execution_mode is not `coordinator` (the
-    // coordinator preset routes through Ralph's hatless prompt and
-    // doesn't need per-event lint backpressure). The
-    // `RALPH_SERIAL_LINT_MODE=off` env var is the KTD-7 circuit
-    // breaker — set it to disable only the lint phase without
-    // rolling back the policy / scope / handoff gates (which lint
-    // does not replace).
-    let payload_value = if should_run_lint(config.as_ref()) {
-        // P0-1: pass the HandoffIndex so the engine's macro-edge
-        // set matches the runtime's `requires_handoff` exactly.
-        // Without this, R22 auto_prepare missed the default
-        // unique-consumer edges (work.ready, work.done).
-        let config_ref = config.as_ref().unwrap();
-        let view = ProtocolView::from_event_loop_with_feature(&config_ref.event_loop, false);
-        // P0-2: pass workspace paths so auto-prepare artifact
-        // lands under the loop's own directory.
-        let paths = LintPaths::under_handoff_dir(workspace_root.clone());
-        // Plan R22: lint_emit now takes &mut Value so the
-        // orchestrator can synchronously inject `handoff_path`
-        // for macro edges lacking one.
-        let mut payload_mut = payload_value;
-        let outcome = lint_emit_with_timeout(&view, &paths, &topic, &mut payload_mut);
-        match handle_lint_outcome(outcome, &workspace_root, &view, &topic, hat.as_deref(), payload_mut) {
-            Ok(v) => v,
-            Err(e) => return Err(e),
-        }
-    } else {
-        payload_value
-    };
-
-    // Post-lint gate check: rerun the CLI mirror of the
-    // runtime hat-handoff gate on the lint-mutated payload.
-    // The lint phase may have injected `handoff_path`
-    // (auto-prepare R22) or kept the agent's hand-filled
-    // path; in both cases the gate should now find a valid
-    // path. Recovery.jsonl is still written via
-    // `record_cli_emit_rejection` for any remaining
-    // rejection (e.g. path-jail violation, parse_filename
-    // mismatch on a hand-filled stale path that the agent
-    // is responsible for — the runtime gate's
-    // `read_handoff_ssot_first` rescue handles this at
-    // runtime, so this CLI mirror is just a fast-feedback
-    // channel).
-    if let Some(cfg) = config.as_ref() {
-        // 2026-06-23-006 plan U1: post-lint hat-handoff gate removed.
-        // The lint phase no longer runs (see U5/U3), so this
-        // block is intentionally a no-op pending U5 deletion.
-        let _ = cfg;
-    }
 
     let mut record = serde_json::json!({
         "topic": args.topic,
@@ -2851,7 +2566,7 @@ event_loop:
     //
     // The handler short-circuits to a read-only JSON dump of the
     // embedded protocol view (KTD-10) before any policy / scope /
-    // handoff gate runs. These tests pin that contract: no events
+    // gate runs. These tests pin that contract: no events
     // file is touched, no policy decision is required, the output
     // is valid JSON carrying `protocol_hash` and the requested
     // topic's `required_fields`.
@@ -2859,8 +2574,8 @@ event_loop:
 
     /// Minimal preset fixture mirroring the section layout that
     /// `build.rs` produces for `ce-executor-serial`. We only need
-    /// `event_policy.schemas.work.done` + `hat_handoff` to exercise
-    /// the macro-edge + required-fields surfaces.
+    /// `event_policy.schemas.work.done` to exercise the
+    /// required-fields surface.
     const SCHEMA_FIXTURE_YAML: &str = r#"
 event_loop:
   execution_mode: isolated
@@ -2873,16 +2588,6 @@ event_loop:
           - plan_name
           - task_id
           - task_key
-  hat_handoff:
-    enabled: true
-    auto_prepare_on_macro_edge: true
-    macro_topics:
-      - work.done
-    exempt_topics: []
-    artifact:
-      required_sections: 2
-      require_next_marker: true
-      max_bytes: 65536
 "#;
 
     fn setup_schema_workspace(tmp: &TempDir, yaml: &str) -> PathBuf {
@@ -2928,11 +2633,10 @@ event_loop:
     }
 
     /// (2) Required fields for the topic come from the embedded
-    /// `event_policy.schemas`, and `is_macro_edge` reflects
-    /// `hat_handoff.macro_topics`. Operators use these to confirm
+    /// `event_policy.schemas`. Operators use these to confirm
     /// drift between the authoring YAML and the embedded copy.
     #[test]
-    fn test_emit_schema_view_reflects_required_fields_and_macro_edge() {
+    fn test_emit_schema_view_reflects_required_fields() {
         let tmp = TempDir::new().expect("temp dir");
         let workspace = setup_schema_workspace(&tmp, SCHEMA_FIXTURE_YAML);
         let _events_file = workspace.join(".ralph/events.jsonl");
@@ -2962,7 +2666,7 @@ event_loop:
         assert!(required.contains("task_key"));
         assert_eq!(required.len(), 3);
 
-        assert_eq!(value["is_macro_edge"], serde_json::Value::Bool(true));
+        assert_eq!(value["is_macro_edge"], serde_json::Value::Bool(false));
         assert!(value["protocol_hash"].as_str().is_some());
         assert!(
             !value["protocol_hash"].as_str().unwrap().is_empty(),
@@ -2996,8 +2700,8 @@ event_loop:
             required.is_empty(),
             "unknown topic must yield empty required_fields, got: {required:?}"
         );
-        // is_macro_edge should be false because the topic is not in
-        // the macro list and not in the exempt list.
+        // is_macro_edge is kept in the output for backwards compatibility
+        // but is always false; macro-edge semantics were removed.
         assert_eq!(value["is_macro_edge"], serde_json::Value::Bool(false));
     }
 
@@ -3202,7 +2906,6 @@ event_loop:
 /// The view is a JSON-serialisable snapshot of the embedded protocol
 /// SSOT for one topic. Operators and agents use it to verify:
 ///   * which fields the gate will require for `TOPIC`
-///   * whether `TOPIC` is a macro edge (handoff required)
 ///   * the stable protocol hash, so a drift between the authoring
 ///     `presets/schemas/<name>.yml` and the embedded copy is detectable
 ///     without rebuilding
@@ -3252,15 +2955,14 @@ pub mod schema_view {
         let mut out = serde_json::json!({
             "topic": topic,
             "protocol_hash": view.protocol_hash,
-            "is_macro_edge": false, // 2026-06-23-006 plan U7: is_macro_edge 方法已删除
+            "is_macro_edge": false, // kept for backwards compatibility; macro-edge semantics removed
             "required_fields": required_fields,
             "all_topics": payload_keys,
         });
 
         // Protocol-wide sections. Each is `null` when absent so the
         // operator can see at a glance whether the loaded config
-        // enables the corresponding gate / projection / handoff
-        // machinery.
+        // enables the corresponding gate / projection machinery.
         let obj = out.as_object_mut().expect("json!() returns object");
 
         if let Some(vg) = &view.verdict_gate {
@@ -3298,8 +3000,6 @@ pub mod schema_view {
         } else {
             obj.insert("execution_contracts".to_string(), serde_json::Value::Null);
         }
-
-        // 2026-06-23-006 plan U7: view.hat_handoff 字段已删除 (hat-handoff 功能已下线)
 
         Ok(out)
     }

@@ -7,15 +7,6 @@
 //! (KTD-8/R15), so an event the linter rejects will also be
 //! rejected by the runtime gate — fail-closed twice.
 //!
-//! ## 2026-06-23-006 U5: hat_handoff removal
-//!
-//! `auto_handoff_prepare` and the `RALPH_HAT_HANDOFF_SEQ` env
-//! read were removed together with the `hat_handoff` config
-//! block. The macro-edge auto-prepare path was the only
-//! consumer of `LintPaths::output_dir`; the `LintPaths` struct
-//! is retained for future lint-side artifacts and is currently
-//! `workspace_root` only.
-//!
 //! ## Thread concurrency (P1-2 fix)
 //!
 //! `lint_emit_with_timeout` runs on a dedicated OS thread per
@@ -37,12 +28,6 @@ use super::protocol::ProtocolView;
 /// Filesystem paths used by the linter. Populated by the CLI
 /// emit caller (which knows the loop workspace) or by tests
 /// (which point at a tempdir).
-///
-/// 2026-06-23-006 U5: `output_dir` was previously the
-/// handoff-artifact directory used by the now-removed
-/// `auto_handoff_prepare`. The field is kept for future
-/// lint-side artifacts; callers that only need `workspace_root`
-/// can ignore it.
 #[derive(Debug, Clone)]
 pub struct LintPaths {
     pub workspace_root: PathBuf,
@@ -50,15 +35,13 @@ pub struct LintPaths {
 }
 
 impl LintPaths {
-    /// Convenience constructor. With `hat_handoff` removed
-    /// the `output_dir` defaults to the conventional
-    /// `.ralph/agent/hat-handoff/` path so existing callers
-    /// keep their previous behaviour; future lint artifacts
-    /// may reuse or override the field.
-    pub fn under_handoff_dir(workspace_root: PathBuf) -> Self {
+    /// Convenience constructor. The `output_dir` defaults to a
+    /// neutral lint artifacts directory; future lint artifacts may
+    /// reuse or override the field.
+    pub fn under_lint_dir(workspace_root: PathBuf) -> Self {
         Self {
             workspace_root,
-            output_dir: PathBuf::from(".ralph/agent/hat-handoff"),
+            output_dir: PathBuf::from(".ralph/agent/lint"),
         }
     }
 }
@@ -88,8 +71,7 @@ pub static TEST_LINT_SLEEP_MICROS: std::sync::atomic::AtomicU64 =
 /// whole loop.
 ///
 /// `num_cpus * 2` is a deliberately conservative upper bound —
-/// the linter is CPU-light (gate + macro check + optional
-/// `auto_handoff_prepare` write); more than `num_cpus * 2`
+/// the linter is CPU-light; more than `num_cpus * 2`
 /// concurrent workers means we are overwhelming something
 /// downstream of the linter (disk, network) and we want the
 /// pressure to back-propagate as a `Timeout` rather than as
@@ -223,12 +205,9 @@ pub enum LintOutcome {
 
 /// Run lint on a single emit. Reads protocol from `view` only —
 /// the runtime gate is consulted separately on the inbound path.
-///
-/// 2026-06-23-006 U5: removed the `hat_handoff` macro-edge
-/// auto-prepare path (R22); the linter now just runs the
-/// unified `run_gates` and translates its decision to a
-/// `LintOutcome`. `paths` is kept for the future lint-side
-/// artifact use case but is currently unused.
+/// The linter runs the unified `run_gates` and translates its
+/// decision to a `LintOutcome`. `paths` is kept for the future
+/// lint-side artifact use case but is currently unused.
 pub fn lint_emit(
     view: &ProtocolView,
     _paths: &LintPaths,
@@ -356,7 +335,7 @@ mod tests {
     /// the real filesystem.
     fn test_paths() -> LintPaths {
         let temp = tempfile::tempdir().expect("tempdir");
-        LintPaths::under_handoff_dir(temp.path().to_path_buf())
+        LintPaths::under_lint_dir(temp.path().to_path_buf())
     }
 
     #[test]

@@ -62,12 +62,6 @@ pub(crate) fn default_core_value() -> Result<Value> {
         // regressions). Operator's explicit declaration still wins
         // because `merge_yaml_values` keeps the operator's value
         // when declared; only the default placeholder is stripped.
-        //
-        // 2026-06-23-006 U5: removed `"hat_handoff"` — the
-        // `EventLoopConfig.hat_handoff` field no longer exists,
-        // so any pre-existing `hat_handoff:` block in ralph.yml
-        // is silently dropped by serde's `deny_unknown_fields`-off
-        // default.
         const PRESET_OPT_IN_KEYS: &[&str] = &[
             "state_projection",
             "suppress_human_guidance",

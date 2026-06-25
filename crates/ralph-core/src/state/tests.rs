@@ -962,11 +962,6 @@ fn seen_topic_dedup() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// U5: hat_handoff ledger API was deleted in U4; see
-// docs/plans/2026-06-23-006-refactor-remove-hat-handoff-plan.md
-// ---------------------------------------------------------------------------
-
 #[test]
 fn apply_delta_records_review_step_update() {
     let mut snap = LedgerSnapshot::cold_start();

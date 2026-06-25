@@ -28,7 +28,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::config::{StateProjectionAction, StateProjectionConfig};
 use crate::event_reader::Event;
-use crate::runtime_state::{HandoffSnapshotState, RuntimeStateSnapshot};
+use crate::runtime_state::RuntimeStateSnapshot;
 use crate::state::{CommitDelta, LedgerSnapshot, StateLedger, TaskTransition};
 use crate::step_handoff::ProgressSnapshot;
 use crate::task::{Task, TaskStatus};
@@ -527,13 +527,7 @@ fn runtime_state_snapshot_uses_ledger_snapshot_when_wired() {
     ctx.set_ledger_snapshot(snap);
 
     let proj = StateProjector::new(ctx);
-    let snap = RuntimeStateSnapshot::build(
-        &proj,
-        Some(HandoffSnapshotState {
-            enabled: false,
-            current_seq: 0,
-        }),
-    );
+    let snap = RuntimeStateSnapshot::build(&proj);
     // P1-3: the dual-source accessor now reads the wired
     // `LedgerSnapshot` (preferred over the empty cache
     // mirror), so the legacy `RuntimeStateSnapshot::build`
@@ -895,7 +889,7 @@ fn u11_t9_sync_to_ledger_snapshot_picks_up_projector_progress_cache() {
         &ProtocolView::from_event_loop(&EventLoopConfig::default()),
         &EventLoopConfig::default(),
     );
-    assert_eq!(pipeline.pre_commit_rules.len(), 6);
+    assert_eq!(pipeline.pre_commit_rules.len(), 5);
     let queue_advance = Event {
         topic: "queue.advance".to_string(),
         payload: Some(

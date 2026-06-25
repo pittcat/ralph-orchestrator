@@ -15,7 +15,7 @@ use crate::preset::engine::protocol::ProtocolView;
 
 use super::context::ValidationContext;
 use super::pipeline::{RulePhase, ValidationRule};
-use super::result::{ReasonCode, ValidationResult, ValidationStage};
+use super::result::{ValidationResult, ValidationStage};
 
 /// `PublisherRule` — pre-commit publisher check.
 pub struct PublisherRule;
@@ -31,7 +31,7 @@ impl ValidationRule for PublisherRule {
 
     fn validate(
         &self,
-        protocol_view: &ProtocolView,
+        _protocol_view: &ProtocolView,
         _ctx: &mut ValidationContext<'_>,
         event: &Event,
     ) -> ValidationResult {

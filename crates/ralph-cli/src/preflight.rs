@@ -936,7 +936,7 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
             if let Some(key_str) = key.as_str() {
                 if PRESET_OPT_IN_WHEN_OPERATOR_OMITS.contains(&key_str) {
                     // Perky-maple (state_projection) and bold-heron
-                    // (hat_handoff) regressions: keys outside
+                    // regressions: keys outside
                     // ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS were warned
                     // then dropped, falling back to framework defaults.
                     if !event_loop_mapping.contains_key(&key) {
@@ -1505,12 +1505,9 @@ event_loop:
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // 2026-06-19 fix (deleted by 2026-06-23-006 U5): the two
-    // `merge_hats_overlay_*_hat_handoff_*` tests asserted the
-    // opt-in semantics for the now-removed `hat_handoff`
-    // config block. With the block gone the merges degenerate
-    // to the existing `state_projection` / `suppress_human_guidance`
-    // paths exercised by the test below.
+    // 2026-06-19 fix: the deleted merge tests degenerated to the
+    // existing `state_projection` / `suppress_human_guidance` paths
+    // exercised by the test below.
     #[test]
     fn merge_hats_overlay_preserves_preset_opt_in_event_loop_keys_when_operator_omits_them() {
         // bold-heron (2026-06-19): ce-executor-serial declares these keys

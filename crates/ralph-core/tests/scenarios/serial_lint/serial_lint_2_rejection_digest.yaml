@@ -8,15 +8,19 @@
 # assert_state_harness_smoke.yaml 的说明）。
 #
 # 因此为驱动 digest,我们通过 emit 一个 source hat 在 hat registry
-# 中未知的 `work.done` 来触发 *policy* rejection。
-# hat_handoff_gate 识别未知 source 并 emit
-# `diagnostic.hat_handoff.rejected`,同时以 reason_code
-# `hat_handoff_source_mismatch` 调用 `record_rejection_digest`。
+# 中未知的 `work.done` 来触发 *policy* rejection。origin guard
+# 识别未知 source 并以 reason_code
+# `policy_source_mismatch` 调用 `record_rejection_digest`。
 #
 # 2026-06-20-002 plan U4:本场景是
 # `assert_state.rejection_digest_contains` 的负载级 harness 覆盖。
-# 若未来重构停止从 hat_handoff_gate reject 路径调用
+# 若未来重构停止从 origin-guard reject 路径调用
 # `record_rejection_digest`,本场景会立即失败。
+#
+# 2026-06-23-006 plan U7:删除了 `hat_handoff:` 配置块（已被
+# 2026-06-23-006 U5 移除 `EventLoopConfig.hat_handoff` 字段）;
+# origin guard（event_loop::filter_events_by_origin）接管了原来
+# hat_handoff_gate 的"识别未知 source hat"职责,本场景语义不变。
 #
 # engine gate 要求 JSON payload,详见 smoke 场景说明。
 
@@ -45,13 +49,6 @@ config:
     execution_mode: coordinator
     starting_event: "task.start"
     completion_promise: "LOOP_COMPLETE"
-    # Note:hat_handoff.enabled=true 一般也会激活 engine gate,
-    # 但 engine gate 检查要求 `execution_mode != Coordinator`,
-    # 故本场景的 coordinator 模式关闭 engine gate。这是有意
-    # 的:本场景验证的是 origin-guard rejection,不是 engine-gate
-    # rejection。
-    hat_handoff:
-      enabled: true
     event_policy:
       enabled: true
       mode: enforce
@@ -70,10 +67,9 @@ mock_responses:
       </event>
     hat: executor
   # iter 2:以 `hat: outsider` emit work.done。
-  # hat_handoff_gate（event_loop::hat_handoff_gate reject 分支）
-  # 识别未知 source hat,emit `diagnostic.hat_handoff.rejected`,
-  # 同时以 reason_code `hat_handoff_source_mismatch` 调用
-  # `record_rejection_digest`。
+  # origin guard（event_loop::filter_events_by_origin reject 分支）
+  # 识别未知 source hat,同时以 reason_code
+  # `policy_source_mismatch` 调用 `record_rejection_digest`。
   - text: |
       <event topic="work.done">
       {"plan_name":"plan-s","step":"step-01","commit_count":1}

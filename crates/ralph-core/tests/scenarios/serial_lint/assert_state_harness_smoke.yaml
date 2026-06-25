@@ -29,12 +29,6 @@ config:
     execution_mode: isolated
     starting_event: "task.start"
     completion_promise: "LOOP_COMPLETE"
-    # Required by `EventLoop::should_run_engine_gate`:
-    # the engine gate only runs when both execution_mode is
-    # NOT Coordinator AND hat_handoff is enabled. Without this
-    # `pending_lint_resume` would never be seeded.
-    hat_handoff:
-      enabled: true
     event_policy:
       enabled: true
       mode: enforce

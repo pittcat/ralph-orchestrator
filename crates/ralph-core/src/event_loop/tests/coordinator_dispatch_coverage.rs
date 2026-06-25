@@ -11,7 +11,7 @@
 //!   exercises both the per-kind branch at count < threshold and the
 //!   dead-letter path at count >= threshold).
 //! - `StallNoEvents`: count >= 3 → `PlanBlocked` (matches the existing
-//!   HandoffIllegalEmitTopic threshold).
+//!   ContractViolation threshold).
 //! - `ContractViolation`: count < threshold → `FixPayloadSchema` (typed
 //!   branch; count >= threshold → `PlanBlocked` dead-letter).
 //!
@@ -117,14 +117,12 @@ fn all_six_new_kinds_are_dispatched_by_kind_arm() {
     // We can detect this by checking that the action differs from the
     // default ReEmitWorkReady for at least one of the test inputs — for
     // ContractViolation, it must be FixPayloadSchema instead.
-    let contract_action =
-        CoordinatorDispatcher::dispatch(RejectionKind::ContractViolation, 1);
+    let contract_action = CoordinatorDispatcher::dispatch(RejectionKind::ContractViolation, 1);
     assert!(
         matches!(contract_action, CoordinatorAction::FixPayloadSchema),
         "ContractViolation must route to FixPayloadSchema, NOT the _ => ReEmitWorkReady fallback"
     );
-    let missing_event_action =
-        CoordinatorDispatcher::dispatch(RejectionKind::MissingEventGate, 1);
+    let missing_event_action = CoordinatorDispatcher::dispatch(RejectionKind::MissingEventGate, 1);
     assert!(
         matches!(missing_event_action, CoordinatorAction::ReEmitWorkReady),
         "MissingEventGate must route to ReEmitWorkReady"

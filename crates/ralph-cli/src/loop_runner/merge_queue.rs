@@ -181,11 +181,7 @@ pub fn process_pending_merges_with_command(repo_root: &Path, ralph_cmd: &OsStr) 
         let pid = child.id();
         match child.wait() {
             Ok(status) => {
-                debug!(
-                    pid = pid,
-                    ?status,
-                    "merge-ralph exited"
-                );
+                debug!(pid = pid, ?status, "merge-ralph exited");
             }
             Err(e) => {
                 warn!(

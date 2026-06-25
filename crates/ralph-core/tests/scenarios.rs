@@ -34,19 +34,19 @@ struct ScenarioYaml {
     /// (the LLM's emitted text) or a `{text, hat}` object. The
     /// `hat` field, when present, is stamped on every event parsed
     /// from the response as the JSONL `hat` field. The runtime
-    /// handoff gate (`event_loop::hat_handoff_gate from_hat check`)
-    /// requires a non-empty `from_hat` to evaluate macro edges,
-    /// so scenarios that exercise the gate need to set `hat` on
-    /// their mock events.
+    /// origin guard (`event_loop::filter_events_by_origin`) uses
+    /// `from_hat` to evaluate whether the emitting hat is in the
+    /// hat registry; scenarios that exercise the origin guard need
+    /// to set `hat` on their mock events.
     #[serde(default, deserialize_with = "deserialize_mock_responses")]
     mock_responses: Vec<MockResponseYaml>,
     #[serde(default)]
     checkpoints: Vec<CheckpointYaml>,
     expected: ExpectedYaml,
     /// 2026-06-18-002 plan U9: scenario fixture files written to the
-    /// temp workspace root **before** the run starts. Used by
-    /// hat-handoff scenarios to pre-stage `.ralph/agent/hat-handoff/*.md`
-    /// files so the gate's file-read step finds them.
+    /// temp workspace root **before** the run starts. General fixture
+    /// mechanism for any scenario that needs files pre-staged (e.g.
+    /// `.ralph/agent/step-handoff/*.md` for step_handoff scenarios).
     #[serde(default)]
     fixture_files: Vec<FixtureFileYaml>,
 }
@@ -93,7 +93,7 @@ where
 #[derive(Debug, Deserialize)]
 struct FixtureFileYaml {
     /// Path relative to the workspace root (e.g.
-    /// `.ralph/agent/hat-handoff/1-2-a-b.md`).
+    /// `.ralph/agent/step-handoff/1-2-a-b.md`).
     path: String,
     content: String,
 }
@@ -132,8 +132,8 @@ struct ExpectedYaml {
     completion: bool,
     /// 2026-06-18-002 plan U8 (KTD-17): assert that for a given
     /// `hat`, the last prompt the runner built contains every
-    /// substring. Used by hat-handoff scenarios to verify
-    /// `## HAT HANDOFF` injection end-to-end. Empty list = no
+    /// substring. Used by step_handoff scenarios to verify
+    /// `## STEP HANDOFF` injection end-to-end. Empty list = no
     /// prompt assertions.
     #[serde(default)]
     prompt_contains: Vec<PromptContainsYaml>,
@@ -932,8 +932,6 @@ fn test_plan_gate_dual_publish_handoff() {
     run_workflow_guard_scenario(yaml);
 }
 
-// 2026-06-23-006 plan U7: hat-handoff BDD scenarios removed (功能已删除).
-
 // 2026-06-20-001 plan U6: serial-lint BDD scenarios were
 // considered but deferred. The first iteration (commit
 // 0083f5b) shipped 3 YAML scenarios + 3 #[test] functions, but
@@ -988,261 +986,18 @@ fn test_plan_gate_dual_publish_third_blocked() {
     run_workflow_guard_scenario(yaml);
 }
 
-#[test]
-fn test_progress_task_mismatch_gate_blocks_queue_advance() {
-    // 2026-06-17-002 U4: pre-handoff gate rejects `queue.advance`
-    // when `.ralph/agent/progress.md` and `.ralph/agent/tasks.jsonl`
-    // disagree, and injects `plan.blocked` so plan-gate can remediate
-    // on the next iteration. This scenario wires the gate end-to-end
-    // through the real EventLoop.
-    let yaml = load_scenario("tests/scenarios/step_handoff/progress_task_mismatch.yml");
-    run_progress_task_mismatch_scenario(yaml);
-}
+// 2026-06-23-006 plan U7 (P0-2): removed
+// `test_progress_task_mismatch_gate_blocks_queue_advance` — its
+// scenario `tests/scenarios/step_handoff/progress_task_mismatch.yml`
+// embedded `plan-gate` topology deleted by 2026-06-24-001 plan U5.
 
-#[test]
-fn test_state_projection_work_done_updates_progress() {
-    // 2026-06-17-003 U3 / U6: end-to-end check that the state
-    // projector writes both `.ralph/agent/tasks.jsonl` and
-    // `.ralph/agent/progress.md` on `work.done`, and that the
-    // subsequent `queue.advance` passes the U4
-    // `progress_task_gate` because the ledgers now agree.
-    //
-    // The scenario runs in coordinator mode (the workflow guard
-    // scenario runner has a single routing hat, plan-gate, that
-    // subscribes to every relevant topic). A regression that
-    // drops the projector or breaks the progress write would
-    // surface as a `plan.blocked` injection — the
-    // `absent_events` check below would fail.
-    let yaml = load_scenario(
-        "tests/scenarios/step_handoff/state_projection_work_done_updates_progress.yml",
-    );
-    run_workflow_guard_scenario(yaml);
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// 2026-06-17-002 plan U8: Multi-step E2E / BDD handoff coverage
-//
-// These scenarios exercise the full ce-executor-serial handoff
-// topology end-to-end through the real EventLoop. They complement
-// the per-unit Rust tests by pinning the wire flow that the runtime
-// contract aggregator and isolated mode dispatch guarantee:
-//   - step_advance_u1_to_u2: plan-gate dual-publishes
-//     (queue.advance, work.ready) in one turn; executor wakes on
-//     work.ready priority dispatch (KTD-12 / WAC-U4) and emits
-//     work.done; loop completes via plan-gate (collapsed terminal).
-//   - fix_exhausted_reaches_plan_gate: U1 multi-consumer whitelist
-//     routes `fix.exhausted` to BOTH debug-resolver (primary) and
-//     plan-gate (escalation). Plan-gate emits `plan.blocked` so the
-//     manager report chain still surfaces the failure.
-//   - debug_exhausted_reaches_plan_gate: U1 multi-consumer whitelist
-//     routes `debug.exhausted` to BOTH shipper (primary) and
-//     plan-gate (escalation). Plan-gate emits `plan.blocked` for
-//     redundancy with shipper's REVIEW_COMPLETE path.
-// ──────────────────────────────────────────────────────────────────────
-
-#[test]
-fn test_step_advance_u1_to_u2_handoff_under_30s() {
-    // 2026-06-17-002 U8: end-to-end U1→U2 step advance via dual-publish.
-    // The <30s target is satisfied by the scenario's 3-iteration budget;
-    // the assertion is on topology wire flow (queue.advance + work.ready
-    // both accepted, executor wakes, work.done accepted, loop completes).
-    let yaml = load_scenario("tests/scenarios/step_handoff/step_advance_u1_to_u2.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_fix_exhausted_reaches_plan_gate() {
-    // 2026-06-24 fix: fix.exhausted now has a SINGLE consumer (debug-resolver).
-    // plan-gate no longer subscribes to it. This scenario asserts plan.blocked
-    // is NOT emitted when fix.exhausted fires.
-    let yaml = load_scenario("tests/scenarios/step_handoff/fix_exhausted_reaches_plan_gate.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_debug_exhausted_reaches_plan_gate() {
-    // 2026-06-24 fix: debug.exhausted now has a SINGLE consumer (shipper).
-    // plan-gate no longer subscribes to it. This scenario asserts plan.blocked
-    // is NOT emitted when debug.exhausted fires.
-    let yaml = load_scenario("tests/scenarios/step_handoff/debug_exhausted_reaches_plan_gate.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// U4 (2026-06-17-002 plan) scenario runner: seeds the workspace
-/// `.ralph/agent/progress.md` and `.ralph/agent/tasks.jsonl` to
-/// establish a progress/task mismatch, then runs the YAML scenario
-/// through the real EventLoop. The seeded files deliberately disagree
-/// (task is closed but the step is missing from progress.md Completed
-/// Steps) so the pre-handoff gate MUST reject `queue.advance`.
-fn run_progress_task_mismatch_scenario(yaml: ScenarioYaml) {
-    use std::io::Write;
-
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ralph_dir = temp_dir.path().join(".ralph");
-    let agent_dir = ralph_dir.join("agent");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    let events_path = ralph_dir.join("events.jsonl");
-
-    // Seed `.ralph/agent/progress.md` with step-02 as Current Step
-    // but step-01 listed under Completed Steps (NOT step-01 as a
-    // completed entry — the mismatch is on the task side).
-    let progress_path = agent_dir.join("progress.md");
-    std::fs::write(
-        &progress_path,
-        "## Current Step\nstep-02\n\n## Completed Steps\n- step-02\n",
-    )
-    .unwrap();
-
-    // Seed `.ralph/agent/tasks.jsonl` with a closed task whose title
-    // is step-01 — this is the "task closed but progress.md does NOT
-    // list step-01 under Completed Steps" mismatch the gate must
-    // detect.
-    let tasks_path = agent_dir.join("tasks.jsonl");
-    let task_json = serde_json::json!({
-        "id": "task-step-01",
-        "title": "step-01",
-        "status": "closed",
-        "priority": 3,
-        "blocked_by": [],
-        "created": "2026-06-17T00:00:00Z",
-        "closed": "2026-06-17T00:01:00Z",
-    });
-    let mut tasks_file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&tasks_path)
-        .unwrap();
-    writeln!(tasks_file, "{}", task_json).unwrap();
-
-    // Build RalphConfig from the YAML config section
-    let mut config = RalphConfig::default();
-    config.max_iterations = Some(yaml.config.max_iterations);
-    config.prompt_file = Some(yaml.config.prompt_file);
-    // Seed `workspace_root` so the gate reads files from temp_dir.
-    config.core.workspace_root = temp_dir.path().to_path_buf();
-    // Turn the gate ON — the YAML does not declare this block to keep
-    // the scenario focused on the runtime gate, but the test must
-    // explicitly opt in for the gate to fire.
-    let mut wc = ralph_core::config::WorkflowContractConfig::default();
-    wc.step_handoff.progress_task_gate = true;
-    config.event_loop.workflow_contract = Some(wc);
-
-    // Parse hats if present (inject map key as name if missing)
-    if !yaml.config.hats.is_null() {
-        if let Ok(hat_map) = serde_yaml::from_value::<
-            std::collections::HashMap<String, serde_yaml::Value>,
-        >(yaml.config.hats.clone())
-        {
-            let mut hats = std::collections::HashMap::new();
-            for (hat_id, mut hat_value) in hat_map {
-                if let Some(map) = hat_value.as_mapping_mut() {
-                    if !map.contains_key(&serde_yaml::Value::String("name".to_string())) {
-                        map.insert(
-                            serde_yaml::Value::String("name".to_string()),
-                            serde_yaml::Value::String(hat_id.clone()),
-                        );
-                    }
-                }
-                let hat_config: HatConfig = serde_yaml::from_value(hat_value).unwrap_or_else(|e| {
-                    panic!("Failed to parse hat config for '{}': {}", hat_id, e)
-                });
-                hats.insert(hat_id, hat_config);
-            }
-            config.hats = hats;
-        }
-    }
-    if !yaml.config.event_loop.is_null() {
-        let mut el: ralph_core::EventLoopConfig = serde_yaml::from_value(yaml.config.event_loop)
-            .unwrap_or_else(|e| panic!("Failed to parse event_loop config: {}", e));
-        // Preserve the workflow_contract we set above unless the YAML
-        // declares its own.
-        if el.workflow_contract.is_none() {
-            el.workflow_contract = config.event_loop.workflow_contract.clone();
-        }
-        config.event_loop = el;
-    }
-
-    let context = LoopContext::primary(temp_dir.path().to_path_buf());
-
-    let mut event_loop = EventLoop::with_context(config, context);
-    event_loop.initialize("Test");
-
-    let parser = EventParser::new();
-
-    for response in &yaml.mock_responses {
-        if let Some(hat) = event_loop.next_hat() {
-            let hat = hat.clone();
-            let _ = event_loop.build_prompt(&hat);
-            let _ = event_loop.process_output(&hat, "", true);
-        }
-
-        let events = parser.parse(&response.text);
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&events_path)
-                .unwrap();
-            for event in &events {
-                let mut entry = serde_json::json!({
-                    "topic": event.topic,
-                    "payload": event.payload,
-                    "ts": "2024-01-01T00:00:00Z",
-                });
-                if let Some(ref hat) = response.hat {
-                    entry["hat"] = serde_json::Value::String(hat.clone());
-                }
-                writeln!(file, "{}", entry).unwrap();
-            }
-        }
-
-        let _result = event_loop.process_events_from_jsonl();
-    }
-
-    // Verify all expected events were seen (accepted) at least once
-    for expected_event in &yaml.expected.events {
-        assert!(
-            event_loop
-                .state()
-                .seen_topics
-                .contains(&expected_event.topic),
-            "{}: Expected event '{}' to be seen (accepted), but it was not recorded. Seen topics: {:?}",
-            yaml.name,
-            expected_event.topic,
-            event_loop.state().seen_topics
-        );
-    }
-
-    // Verify completion
-    if yaml.expected.completion {
-        let reason = event_loop.check_completion_event();
-        assert!(
-            reason.is_some(),
-            "{}: Expected LOOP_COMPLETE to be accepted, but it was rejected or not present",
-            yaml.name
-        );
-    } else {
-        let reason = event_loop.check_completion_event();
-        assert!(
-            reason.is_none(),
-            "{}: Expected LOOP_COMPLETE to be rejected, but got {:?}",
-            yaml.name,
-            reason
-        );
-    }
-
-    assert_eq!(
-        yaml.mock_responses.len(),
-        yaml.expected.iterations,
-        "{}: Expected {} iterations, but scenario has {} mock responses",
-        yaml.name,
-        yaml.expected.iterations,
-        yaml.mock_responses.len()
-    );
-
-    println!("✓ {} passed", yaml.description);
-}
+// 2026-06-23-006 plan U7 (P0-2): removed
+// `test_state_projection_work_done_updates_progress`,
+// `test_step_advance_u1_to_u2_handoff_under_30s`,
+// `test_fix_exhausted_reaches_plan_gate`,
+// `test_debug_exhausted_reaches_plan_gate` — their scenarios
+// embedded `plan-gate` / `debug-resolver` hat topology, deleted by
+// 2026-06-24-001 plan U5.
 
 #[test]
 fn test_workflow_activation_contract_re_emit_trap() {
@@ -1560,15 +1315,15 @@ fn test_serial_lint_6_handoff_auto_prepare() {
     run_workflow_guard_scenario(yaml);
 }
 
-#[test]
-fn test_serial_lint_7_handoff_seeds_coverage() {
-    let yaml =
-        load_scenario("tests/scenarios/serial_lint/serial_lint_7_handoff_seeds_coverage.yaml");
-    run_workflow_guard_scenario(yaml);
-}
+// 2026-06-23-006 plan U7 (P0-1): removed
+// `test_serial_lint_7_handoff_seeds_coverage` — its scenario
+// `serial_lint_7_handoff_seeds_coverage.yaml` declared
+// `hat_handoff:` block + 5 hat_handoff references, dependent on
+// hat_handoff_gate (now removed by U5). 2-hat topology smoke is
+// covered by `isolated_multi_hat.yml`.
 
 // ──────────────────────────────────────────────────────────────────────
-// 2026-06-20-002 plan U6: serial_lint scenarios 8-11 (boundary
+// 2026-06-20-002 plan U6: serial_lint scenarios 8-10 (boundary
 // + replay). Scenario 8 is the SC-1 (CI) acceptance
 // scenario for the 12U plan; it chains the contract
 // invariants from scenarios 1-5 in a single 8-iteration run.
@@ -1591,11 +1346,10 @@ fn test_serial_lint_10_circuit_breaker() {
     run_workflow_guard_scenario(yaml);
 }
 
-#[test]
-fn test_serial_lint_11_isolated_unaffected() {
-    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_11_isolated_unaffected.yaml");
-    run_workflow_guard_scenario(yaml);
-}
+// 2026-06-23-006 plan U7 (P0-1): removed
+// `test_serial_lint_11_isolated_unaffected` — its scenario tested
+// "isolated mode is unaffected" via hat_handoff_gate being bypassed;
+// hat_handoff is deleted, no need to pin the bypass.
 
 // ──────────────────────────────────────────────────────────────────────
 // 2026-06-21-002 plan U9: deterministic-correction BDD scenarios
@@ -1669,14 +1423,11 @@ fn test_u9_correction_three_escalation_scenario() {
     run_workflow_guard_scenario(yaml);
 }
 
-/// U9 BDD #3: hat-handoff artifact auto-generation —
-/// `## HAT HANDOFF` appears in the next hat's prompt without
-/// a manual `--prepare-handoff` step.
-#[test]
-fn test_u9_handoff_auto_generate_scenario() {
-    let yaml = load_scenario("tests/scenarios/handoff_auto_generate.yml");
-    run_workflow_guard_scenario(yaml);
-}
+// 2026-06-23-006 plan U7 (P0-1): removed
+// `test_u9_handoff_auto_generate_scenario` — its scenario
+// `handoff_auto_generate.yml` declared `hat_handoff:` block
+// (line 38) + multiple hat_handoff references; hat_handoff is
+// removed by U5, no `## HAT HANDOFF` prompt injection anymore.
 
 /// U9 BDD #4: `ralph diagnose --from-ledger` runtime surface —
 /// workspace `.ralph/recovery.jsonl` carries a U7a rejection
@@ -1689,16 +1440,12 @@ fn test_u9_diagnose_from_ledger_scenario() {
     run_workflow_guard_scenario(yaml);
 }
 
-/// U9 BDD #5: CLI/runtime parity — the runtime rejection's
-/// `reason_code` (unified validation pipeline prefix) matches
-/// the CLI emit side's `ralph emit --policy-check` output
-/// (covered in `policy_check_handoff.rs` T4.1-T4.4).
-#[test]
-fn test_u9_cli_runtime_parity_scenario() {
-    enable_deterministic_correction_for_test();
-    let yaml = load_scenario("tests/scenarios/cli_runtime_parity.yml");
-    run_workflow_guard_scenario(yaml);
-}
+// 2026-06-23-006 plan U7 (P0-1): removed
+// `test_u9_cli_runtime_parity_scenario` — its scenario
+// `cli_runtime_parity.yml` declared 6 hat_handoff references
+// testing that the runtime rejection's `reason_code` matches
+// the CLI emit side; the hat_handoff_gate was the source of that
+// reason_code path, removed by U5.
 
 // ──────────────────────────────────────────────────────────────────────
 // 2026-06-17-004 plan U6 (T6.1): silent DR recovery variant

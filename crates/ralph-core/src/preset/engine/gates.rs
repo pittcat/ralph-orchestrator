@@ -169,6 +169,11 @@ impl RejectionKind {
             "topic_ownership" => Some(Self::TopicOwnership),
             "upstream_state" => Some(Self::UpstreamState),
             "pre_check" => Some(Self::PreCheck),
+            "missing_event_gate" => Some(Self::MissingEventGate),
+            "stall_no_events" => Some(Self::StallNoEvents),
+            "contract_violation" => Some(Self::ContractViolation),
+            "persistent_loop_active" => Some(Self::PersistentLoopActive),
+            "open_tasks_blocking" => Some(Self::OpenTasksBlocking),
             _ => None,
         }
     }

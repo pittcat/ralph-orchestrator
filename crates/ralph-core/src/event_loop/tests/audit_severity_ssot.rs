@@ -84,7 +84,11 @@ fn fail_severity_uses_typed_kind_for_log_correlation() {
         details: "audit detail".to_string(),
     };
     let mut cf = 0u32;
-    AuditDispatcher::dispatch(AuditSeverity::Fail { add_failures: 1 }, ctx.clone(), &mut cf);
+    AuditDispatcher::dispatch(
+        AuditSeverity::Fail { add_failures: 1 },
+        ctx.clone(),
+        &mut cf,
+    );
     assert_eq!(cf, 1);
     assert_eq!(ctx.kind, RejectionKind::MissingEventGate);
 }

@@ -13,12 +13,10 @@
 //! Reference: `docs/plans/2026-06-23-005-fix-ce-executor-serial-hard-gate-half-edge-recovery-plan.md`
 //! U3 / R4 / R8 / AE-3.
 
-use crate::event_loop::rejection::{CoordinatorAction, CoordinatorDispatcher};
-use crate::event_loop::termination::{
-    DeadLetterSource, TerminationTrigger, trigger_to_reason,
-};
-use crate::preset::engine::gates::RejectionKind;
 use crate::TerminationReason;
+use crate::event_loop::rejection::{CoordinatorAction, CoordinatorDispatcher};
+use crate::event_loop::termination::{DeadLetterSource, TerminationTrigger, trigger_to_reason};
+use crate::preset::engine::gates::RejectionKind;
 
 #[test]
 fn missing_event_gate_dead_letter_routes_to_dead_letter_trigger() {
@@ -68,10 +66,7 @@ fn contract_violation_dead_letter_at_threshold_routes_to_dead_letter_trigger() {
 fn all_three_dead_letter_sources_serialize_to_typed_reason() {
     // R14: typed enum serialization — no string concatenation.
     let triggers = [
-        (
-            RejectionKind::MissingEventGate,
-            DeadLetterSource::HardGate,
-        ),
+        (RejectionKind::MissingEventGate, DeadLetterSource::HardGate),
         (
             RejectionKind::StallNoEvents,
             DeadLetterSource::StallRecovery,

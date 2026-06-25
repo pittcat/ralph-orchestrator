@@ -74,7 +74,7 @@ impl SkillRegistry {
     }
 
     /// Register built-in skills (ralph-tools, ralph-tools-tasks, ralph-tools-memories, robot-interaction,
-    /// ralph-tools-emit, ralph-tools-wave, ralph-tools-cmdref, ralph-tools-handoff).
+    /// ralph-tools-emit, ralph-tools-wave, ralph-tools-cmdref).
     fn register_builtins(&mut self) -> Result<()> {
         self.register_builtin("ralph-tools", RALPH_TOOLS_SKILL_RAW)?;
         self.register_builtin("ralph-tools-tasks", RALPH_TOOLS_TASKS_SKILL_RAW)?;
@@ -375,22 +375,6 @@ mod tests {
         assert!(registry.get("ralph-tools-emit").is_some());
         assert!(registry.get("ralph-tools-wave").is_some());
         assert!(registry.get("ralph-tools-cmdref").is_some());
-        assert!(registry.get("ralph-tools-handoff").is_some());
-    }
-
-    #[test]
-    fn test_handoff_skill_is_not_auto_injected_by_default() {
-        // plan 004 U3 KTD3: ralph-tools-handoff is on-demand only, must NOT
-        // appear in auto_inject_skills even when registered.
-        let mut registry = SkillRegistry::new(None);
-        registry.register_builtins().unwrap();
-
-        let auto = registry.auto_inject_skills(None);
-        assert!(
-            auto.iter().all(|s| s.name != "ralph-tools-handoff"),
-            "ralph-tools-handoff must not be auto-injected; got: {:?}",
-            auto.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
-        );
     }
 
     #[test]

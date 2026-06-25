@@ -45,8 +45,6 @@ event_loop:
   execution_mode: isolated
   completion_promise: LOOP_COMPLETE
   starting_event: "work.start"
-  hat_handoff:
-    enabled: true
   event_policy:
     enabled: true
     mode: observe

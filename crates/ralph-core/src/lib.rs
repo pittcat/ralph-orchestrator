@@ -87,8 +87,8 @@ mod text;
 mod urgent_steer;
 pub mod utils;
 /// U4 unified validation pipeline — wraps origin / publisher /
-/// required-fields / step-handoff / hat-handoff / execution-
-/// contract / workflow-guard as stateless [`ValidationRule`]s.
+/// required-fields / step-handoff / execution-contract /
+/// workflow-guard as stateless [`ValidationRule`]s.
 pub mod validation;
 pub mod wave_context;
 pub mod wave_detection;
@@ -132,7 +132,6 @@ pub use event_loop::{
         rejection_from_origin, resolve_target_hat,
     },
 };
-pub use preset::engine::gates::RejectionKind;
 pub use event_origin::{
     HumanInteractValidation, RALPH_CONTROL_TOPICS, TRUSTED_HUMAN_RESPONSE_SOURCE,
     is_orchestrator_control_topic, is_orchestrator_diagnostic_topic, is_trusted_human_response,
@@ -198,6 +197,7 @@ pub use preflight::{
     AcceptanceCriterion, CheckResult, CheckStatus, PreflightCheck, PreflightReport,
     PreflightRunner, extract_acceptance_criteria, extract_all_criteria, extract_criteria_from_file,
 };
+pub use preset::engine::gates::RejectionKind;
 pub mod runtime_state;
 pub use preset_validator::{
     TopologyError, TopologyErrorKind, TopologyValidationResult, validate_preset_topology,

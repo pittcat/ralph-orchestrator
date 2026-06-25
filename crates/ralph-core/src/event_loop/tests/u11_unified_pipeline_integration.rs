@@ -13,11 +13,7 @@ use crate::validation::{ValidationContext, ValidationPipeline};
 
 #[test]
 fn pre_commit_pipeline_accepts_legal_event() {
-    let view = ProtocolView::from_event_loop_with_index_and_feature(
-        &EventLoopConfig::default(),
-        None,
-        true,
-    );
+    let view = ProtocolView::from_event_loop_with_feature(&EventLoopConfig::default(), true);
     let mut snapshot = LedgerSnapshot::cold_start();
     let pipeline = ValidationPipeline::from_config(&view, &EventLoopConfig::default());
 
@@ -48,11 +44,7 @@ fn pre_commit_pipeline_accepts_legal_event() {
 
 #[test]
 fn pre_commit_pipeline_returns_one_result_per_rule() {
-    let view = ProtocolView::from_event_loop_with_index_and_feature(
-        &EventLoopConfig::default(),
-        None,
-        true,
-    );
+    let view = ProtocolView::from_event_loop_with_feature(&EventLoopConfig::default(), true);
     let mut snapshot = LedgerSnapshot::cold_start();
     let pipeline = ValidationPipeline::from_config(&view, &EventLoopConfig::default());
 

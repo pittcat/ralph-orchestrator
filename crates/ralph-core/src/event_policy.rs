@@ -588,7 +588,9 @@ impl PolicyRuntimeState {
                     Some(Value::Number(n)) => n.as_u64(),
                     _ => None,
                 };
-                if let (Some(pn), Some(st), Some(ti), Some(fr)) = (plan_name, step, task_id, fix_round) {
+                if let (Some(pn), Some(st), Some(ti), Some(fr)) =
+                    (plan_name, step, task_id, fix_round)
+                {
                     let key = format!("{pn}::{st}::{ti}::{fr}");
                     if event.topic == "test.passed" {
                         state.test_passed_seen_keys.insert(key);
@@ -4808,9 +4810,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn work_ready_payload(plan: &str, step: &str, task: &str) -> String {
-        format!(
-            r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","task_key":"k"}}"#
-        )
+        format!(r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","task_key":"k"}}"#)
     }
 
     fn test_result_payload(plan: &str, step: &str, task: &str, fix_round: u64) -> String {
@@ -4944,8 +4944,7 @@ mod tests {
         // the schema validator reports `missing_required_field`.
         let config = test_config();
         let mut state = PolicyRuntimeState::default();
-        let payload =
-            r#"{"plan_name":"p1","step":"step-01","task_id":"t1","tests_run":10,"tests_passed":10}"#;
+        let payload = r#"{"plan_name":"p1","step":"step-01","task_id":"t1","tests_run":10,"tests_passed":10}"#;
 
         let first = validate_event("test.passed", Some(payload), &config, &mut state);
         assert_eq!(

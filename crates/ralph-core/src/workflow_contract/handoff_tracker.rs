@@ -160,11 +160,10 @@ impl HandoffTracker {
         self.pending.insert(entry.event_id.clone(), entry);
     }
 
-    /// 2026-06-18-002 plan U5 (KTD-5): cancel a pending handoff
-    /// by its `event_id`. Used to roll back the policy-accept
-    /// record when
-    /// the gate rejects the same event for missing/invalid
-    /// handoff content (phantom pending protection).
+    /// Cancel a pending handoff by its `event_id`. Used to roll
+    /// back the policy-accept record when the gate rejects the
+    /// same event for missing/invalid payload (phantom pending
+    /// protection).
     ///
     /// Returns `true` if a pending entry was removed.
     pub fn cancel_pending(&mut self, event_id: &str) -> bool {

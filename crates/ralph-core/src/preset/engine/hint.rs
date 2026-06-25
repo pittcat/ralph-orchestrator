@@ -28,9 +28,6 @@ use super::gates::RejectionKind;
 /// the resume hint so the prompt can route the agent to the
 /// correct owner.
 ///
-/// 2026-06-23-006 U5: the `HandoffArtifact` variant was removed
-/// together with the `hat_handoff` config block; it is no
-/// longer produced by any rejection kind.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LintFailureClass {
@@ -173,7 +170,7 @@ mod tests {
         let hint = LintResumeHint::from_typed_rejection(
             "work.done",
             RejectionKind::MissingField,
-            "missing required fields: handoff_path, commit_sha (an artifact of the run)",
+            "missing required fields: plan_name, commit_sha (an artifact of the run)",
         );
         assert_eq!(
             hint.class,

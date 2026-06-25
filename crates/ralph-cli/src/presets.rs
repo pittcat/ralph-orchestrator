@@ -1312,8 +1312,8 @@ mod tests {
     /// always publish REVIEW_COMPLETE with pass_or_fail=fail.
     #[test]
     fn test_ce_executor_serial_shipper_plan_blocked_routes_by_reason() {
-        let preset = get_preset("ce-executor-serial")
-            .expect("ce-executor-serial preset must be embedded");
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset must be embedded");
         let content: &str = preset.content.as_ref();
         // Shipper instructions must contain the reason-based routing block.
         assert!(
@@ -2252,5 +2252,4 @@ mod tests {
         assert!(!is_tier_0_wac_preset("not-a-real-preset"));
         assert!(!is_tier_0_wac_preset("autoresearch")); // Tier-2
     }
-
 }

@@ -372,10 +372,6 @@ pub struct EventLoop {
     ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation,
 }
 
-/// (已删除) A4 (002-adversarial-review) `extract_handoff_path_from_payload`
-/// helper — 2026-06-23-006 plan U3 移除 hat-handoff artifact ledger 路径，
-/// 该函数无调用方，整段删除。
-
 /// A2 (002-adversarial-review): build the unified
 /// `ValidationPipeline` once per batch. The pipeline is always
 /// constructed; the legacy per-rule gate stack has been removed.
@@ -519,10 +515,7 @@ pub struct RecoverableExhaustion {
 /// Appended AFTER `### GUARDRAILS` so the hat's own instructions
 /// remain authoritative for workflow order. Block is always emitted
 /// (even with default 8) so the hat learns where to look.
-pub(crate) fn append_runtime_config_block(
-    base_prompt: String,
-    max_residuals: u32,
-) -> String {
+pub(crate) fn append_runtime_config_block(base_prompt: String, max_residuals: u32) -> String {
     format!(
         "{base_prompt}\n\n## RUNTIME CONFIG\n\
          The following values are resolved at loop start and apply to this iteration:\n\
@@ -3559,10 +3552,7 @@ impl EventLoop {
             // and lives at the END of the hat prompt so the hat's own
             // workflow order (in `### GUARDRAILS`) stays authoritative.
             let base_prompt =
-                append_runtime_config_block(
-                    base_prompt,
-                    self.config.event_loop.max_residuals,
-                );
+                append_runtime_config_block(base_prompt, self.config.event_loop.max_residuals);
 
             // Inject the cached `human.guidance` text as a `## ROBOT GUIDANCE`
             // block so isolated hats (whose `build_custom_hat` template does
@@ -3687,10 +3677,7 @@ impl EventLoop {
         // read the runtime-resolved `max_fix_rounds`. Appended BEFORE
         // `inject_phase_into_prompt` so the phase block (if any) sits
         // just above RUNTIME CONFIG at the tail of the prompt.
-        let base = append_runtime_config_block(
-            base,
-            self.config.event_loop.max_residuals,
-        );
+        let base = append_runtime_config_block(base, self.config.event_loop.max_residuals);
         let with_phase = self.inject_phase_into_prompt(base);
         let with_diagnosis = self.apply_runtime_diagnosis_prompt(with_phase, hat_id);
         // R5 (2026-06-17-005 fix plan): the
@@ -6305,25 +6292,6 @@ impl EventLoop {
         self.process_parse_result(result)
     }
 
-    /// 2026-06-18-002 plan U5: look up the downstream hat's
-    /// declared `publishes` list for the gate's R15 topic check.
-    /// `from_hat` is unused for this lookup — the gate resolves the
-    /// downstream via `HandoffIndex::consumer_of(topic)`.
-    fn preset_hats_publishes(&self, _from_hat: &str, _topic: &str) -> Vec<String> {
-        // Resolution happens via `HandoffIndex::consumer_of` in
-        // the gate, which only needs the index. The downstream's
-        // publishes are looked up here from the preset `hats` map.
-        let consumer = match self.handoff_index.consumer_of(_topic) {
-            Some(c) => c,
-            None => return Vec::new(),
-        };
-        self.config
-            .hats
-            .get(consumer)
-            .map(|h| h.publishes.clone())
-            .unwrap_or_default()
-    }
-
     /// Inner event processing that operates on an already-parsed `ParseResult`.
     ///
     /// This is the single source of truth for event validation, backpressure,
@@ -7444,7 +7412,9 @@ impl EventLoop {
                 .as_ref()
                 .map(|l| l.snapshot().clone())
                 .unwrap_or_else(crate::state::LedgerSnapshot::cold_start);
-            let view = crate::preset::engine::protocol::ProtocolView::from_event_loop(&self.config.event_loop);
+            let view = crate::preset::engine::protocol::ProtocolView::from_event_loop(
+                &self.config.event_loop,
+            );
 
             // Pass LoopState's policy runtime state / review-step tracker into
             // the context as overrides so the event-policy rule mutates the
@@ -7771,9 +7741,6 @@ impl EventLoop {
                             event_id.clone(),
                             std::time::Instant::now(),
                         );
-                        if let Some(ref mut ledger) = self.state.state_ledger {
-                            let _ = ledger; // U3: hat_handoff artifact removed; ledger 不再接收 handoff-specific commit
-                        }
                     }
 
                     match accepted.topic.as_str() {
@@ -7816,8 +7783,7 @@ impl EventLoop {
                                         // so the executor gets a rewrite
                                         // chance and the shipper can route
                                         // to terminal.
-                                        let new_count =
-                                            self.state.increment_fix_round(pn, st, ti);
+                                        let new_count = self.state.increment_fix_round(pn, st, ti);
                                         if new_count >= LoopState::FIX_ROUND_HARD_CAP {
                                             warn!(
                                                 plan = %pn,
@@ -7845,13 +7811,11 @@ impl EventLoop {
                                         if let Some(ref mut policy_state) =
                                             self.state.policy_runtime_state
                                         {
-                                            policy_state.prune_review_dimension_ready_bucket(
+                                            policy_state
+                                                .prune_review_dimension_ready_bucket(pn, st, ti);
+                                            policy_state.prune_review_dimensions_complete_bucket(
                                                 pn, st, ti,
                                             );
-                                            policy_state
-                                                .prune_review_dimensions_complete_bucket(
-                                                    pn, st, ti,
-                                                );
                                             policy_state.prune_work_done_bucket(pn, st);
                                             // 2026-06-24 P1-3: prune the new
                                             // `work.ready` / `test.passed` /

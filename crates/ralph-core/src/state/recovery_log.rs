@@ -214,8 +214,7 @@ pub enum LegacyKindStatus {
 fn classify_record(record: &RejectionRecord) -> Option<LegacyKindStatus> {
     // Strict path: typed kind field present.
     if let Some(kind_str) = record.kind.as_deref() {
-        if let Some(kind) =
-            crate::preset::engine::gates::RejectionKind::from_reason_code(kind_str)
+        if let Some(kind) = crate::preset::engine::gates::RejectionKind::from_reason_code(kind_str)
         {
             return Some(LegacyKindStatus::Typed(kind));
         }
@@ -234,7 +233,9 @@ fn classify_record(record: &RejectionRecord) -> Option<LegacyKindStatus> {
     }
     // Unknown reason_code — this is the silent-loss path the
     // CB-3 fix is designed to surface.
-    Some(LegacyKindStatus::UnknownReasonCode(record.reason_code.clone()))
+    Some(LegacyKindStatus::UnknownReasonCode(
+        record.reason_code.clone(),
+    ))
 }
 
 /// Resolve the workspace-rooted path of the rejection log.
@@ -405,8 +406,6 @@ mod tests {
     // U6 (plan 2026-06-23-004): typed kind envelope 测试。
     mod recovery_envelope_typed {
         use super::*;
-        use crate::preset::engine::gates::RejectionKind;
-
         #[test]
         fn legacy_record_without_kind_deserializes_with_none() {
             // 反序列化兼容:老 envelope(无 kind 字段)能反序列化,kind = None。
@@ -431,8 +430,12 @@ mod tests {
                 "missing_field",
                 "topic_ownership",
                 "upstream_state",
-                "handoff_artifact",
                 "pre_check",
+                "missing_event_gate",
+                "stall_no_events",
+                "contract_violation",
+                "persistent_loop_active",
+                "open_tasks_blocking",
             ] {
                 let r = RejectionRecord::from_reason_code_or_legacy(
                     "executor",
@@ -521,7 +524,7 @@ mod tests {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).unwrap();
             }
-            let typed = b"{\"ts\":\"2026-06-23T00:00:00Z\",\"hat\":\"a\",\"topic\":\"x\",\"reason_code\":\"origin:missing_field\",\"kind\":\"origin:missing_field\",\"retry_count\":1,\"terminal_reason\":null}\n";
+            let typed = b"{\"ts\":\"2026-06-23T00:00:00Z\",\"hat\":\"a\",\"topic\":\"x\",\"reason_code\":\"missing_field\",\"kind\":\"missing_field\",\"retry_count\":1,\"terminal_reason\":null}\n";
             fs::write(&path, typed).unwrap();
             let status = RejectionRecord::classify_legacy_envelope(dir.path(), 0).unwrap();
             match status {
@@ -531,9 +534,7 @@ mod tests {
                         crate::preset::engine::gates::RejectionKind::MissingField
                     );
                 }
-                other => panic!(
-                    "P1-3: typed envelope MUST classify as Typed(_), got {other:?}"
-                ),
+                other => panic!("P1-3: typed envelope MUST classify as Typed(_), got {other:?}"),
             }
         }
     }

@@ -704,15 +704,14 @@ pub fn enrich_task_resume_payload_with_stage(
 ///
 /// ## KTD-1 阈值表
 ///
-/// | RejectionKind                 | threshold | action                |
-/// |-------------------------------|-----------|-----------------------|
-/// | HandoffFilenameMismatch       | 3         | DriftFinding          |
-/// | HandoffFilenameMismatch       | 5         | CircuitBreakerTrip    |
-/// | HandoffStructureInvalid       | 2         | DriftFinding          |
-/// | HandoffStructureInvalid       | 4         | PlanBlocked           |
-/// | HandoffIllegalEmitTopic       | 2         | DriftFinding          |
-/// | HandoffIllegalEmitTopic       | 4         | PlanBlocked           |
+/// | RejectionKind    | threshold | action         |
+/// |------------------|-----------|----------------|
+/// | MissingEventGate | 1         | DriftFinding   |
+/// | StallNoEvents    | 2         | DriftFinding   |
+/// | StallNoEvents    | 3         | PlanBlocked    |
+/// | ContractViolation| 1         | DriftFinding   |
 ///
+/// 其他 kind 不在升级链中(typed 计数器仍记录,但消费侧不动作)。
 /// 返回 `None` 表示该次拒绝无需升级(尚未达到阶梯)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscalationAction {
@@ -770,9 +769,10 @@ impl RejectionEscalator {
 /// 的 typed kind dispatch。
 ///
 /// 接收 `task.resume` 携带的 `RejectionKind`,按 kind 路由到对应修复策略:
-/// - `HandoffFilenameMismatch` → 重新 emit work.ready(用 allocator SSOT 派生)
-/// - `HandoffStructureInvalid` → 修复 payload schema 后重发
-/// - `HandoffIllegalEmitTopic` → 改 emit target 后重发
+/// - `MissingEventGate` / `StallNoEvents` / `PersistentLoopActive` /
+///   `OpenTasksBlocking` / `MissingField` / `TopicOwnership` / ... → 重新 emit
+///   work.ready(让源 hat 再试一次)
+/// - `ContractViolation` → 修复 payload schema 后重发
 ///
 /// 死信兜底:连续 N=3 次同 kind task.resume 仍未消费 → emit `plan.blocked`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -854,119 +854,67 @@ mod tests {
 
         #[test]
         fn escalation_thresholds_match_ktd_1() {
-            // HandoffFilenameMismatch: 3 → drift_finding, 5 → circuit_breaker_trip
+            // MissingEventGate: 1 → drift_finding (typed hard-gate path).
             assert_eq!(
-                super::super::RejectionEscalator::check(
-                    RejectionKind::HandoffFilenameMismatch,
-                    1
-                ),
-                None
-            );
-            assert_eq!(
-                super::super::RejectionEscalator::check(
-                    RejectionKind::HandoffFilenameMismatch,
-                    2
-                ),
+                super::super::RejectionEscalator::check(RejectionKind::MissingEventGate, 0),
                 None
             );
             assert!(matches!(
-                super::super::RejectionEscalator::check(
-                    RejectionKind::HandoffFilenameMismatch,
-                    3
-                ),
+                super::super::RejectionEscalator::check(RejectionKind::MissingEventGate, 1),
                 Some(super::super::EscalationAction::DriftFinding { .. })
-            ));
-            assert_eq!(
-                super::super::RejectionEscalator::check(
-                    RejectionKind::HandoffFilenameMismatch,
-                    4
-                ),
-                Some(super::super::EscalationAction::DriftFinding {
-                    kind: RejectionKind::HandoffFilenameMismatch,
-                    count: 4,
-                })
-            );
-            assert!(matches!(
-                super::super::RejectionEscalator::check(
-                    RejectionKind::HandoffFilenameMismatch,
-                    5
-                ),
-                Some(super::super::EscalationAction::CircuitBreakerTrip { .. })
             ));
         }
 
         #[test]
-        fn structure_invalid_triggers_at_2_and_4() {
-            // HandoffStructureInvalid: 2 → drift_finding, 4 → plan.blocked
+        fn stall_no_events_triggers_at_2_and_plan_blocks_at_3() {
+            // StallNoEvents: 1 → none, 2 → drift_finding, 3+ → plan.blocked.
             assert_eq!(
-                super::super::RejectionEscalator::check(
-                    RejectionKind::HandoffStructureInvalid,
-                    1
-                ),
+                super::super::RejectionEscalator::check(RejectionKind::StallNoEvents, 1),
                 None
             );
             assert!(matches!(
-                super::super::RejectionEscalator::check(
-                    RejectionKind::HandoffStructureInvalid,
-                    2
-                ),
+                super::super::RejectionEscalator::check(RejectionKind::StallNoEvents, 2),
                 Some(super::super::EscalationAction::DriftFinding { .. })
             ));
             assert!(matches!(
-                super::super::RejectionEscalator::check(
-                    RejectionKind::HandoffStructureInvalid,
-                    4
-                ),
+                super::super::RejectionEscalator::check(RejectionKind::StallNoEvents, 3),
                 Some(super::super::EscalationAction::PlanBlocked { .. })
             ));
         }
 
         #[test]
-        fn illegal_emit_topic_triggers_at_2_and_4() {
-            // HandoffIllegalEmitTopic: 2 → drift_finding, 4 → plan.blocked
+        fn contract_violation_triggers_at_1() {
+            // ContractViolation: 1+ → drift_finding.
             assert_eq!(
-                super::super::RejectionEscalator::check(
-                    RejectionKind::HandoffIllegalEmitTopic,
-                    1
-                ),
+                super::super::RejectionEscalator::check(RejectionKind::ContractViolation, 0),
                 None
             );
             assert!(matches!(
-                super::super::RejectionEscalator::check(
-                    RejectionKind::HandoffIllegalEmitTopic,
-                    2
-                ),
+                super::super::RejectionEscalator::check(RejectionKind::ContractViolation, 1),
                 Some(super::super::EscalationAction::DriftFinding { .. })
             ));
             assert!(matches!(
-                super::super::RejectionEscalator::check(
-                    RejectionKind::HandoffIllegalEmitTopic,
-                    4
-                ),
-                Some(super::super::EscalationAction::PlanBlocked { .. })
+                super::super::RejectionEscalator::check(RejectionKind::ContractViolation, 4),
+                Some(super::super::EscalationAction::DriftFinding { .. })
             ));
         }
 
         #[test]
-        fn kind_isolation_filename_does_not_pollute_structure() {
-            // HandoffFilenameMismatch 累计 5 次不影响 HandoffStructureInvalid
-            // (后者的 counter 仍为 0,不应触发)。
+        fn kind_isolation_does_not_cross_pollute() {
+            // MissingEventGate 累计 5 次不影响 StallNoEvents counter 0.
             assert_eq!(
-                super::super::RejectionEscalator::check(
-                    RejectionKind::HandoffStructureInvalid,
-                    0
-                ),
+                super::super::RejectionEscalator::check(RejectionKind::StallNoEvents, 0),
                 None
             );
-            // HandoffStructureInvalid 累计 3 次也只到自己阈值
-            // (2 → drift_finding,3 → 仍是 drift_finding,4 → plan.blocked)。
-            assert!(matches!(
-                super::super::RejectionEscalator::check(
-                    RejectionKind::HandoffStructureInvalid,
-                    3
-                ),
-                Some(super::super::EscalationAction::DriftFinding { .. })
-            ));
+            // 不在升级链中的 kind(MissingField/TopicOwnership/...) 任何 count 都不触发.
+            assert_eq!(
+                super::super::RejectionEscalator::check(RejectionKind::MissingField, 5),
+                None
+            );
+            assert_eq!(
+                super::super::RejectionEscalator::check(RejectionKind::TopicOwnership, 5),
+                None
+            );
         }
     }
 
@@ -1117,9 +1065,9 @@ mod tests {
             &ExecutionContractFinding {
                 topic: "work.ready".into(),
                 kind: ExecutionContractViolationKind::MissingPayloadField {
-                    field: "handoff_path".into(),
+                    field: "task_id".into(),
                 },
-                message: "missing handoff_path".into(),
+                message: "missing task_id".into(),
                 source_hat: Some("coordinator".into()),
             },
             Some("coordinator".into()),
@@ -1127,11 +1075,11 @@ mod tests {
         );
         // Inject typed kind (in real code the gate Reject arm in
         // event_loop passes the typed kind here, CB-2 wires it).
-        r.kind = Some(crate::preset::engine::gates::RejectionKind::HandoffFilenameMismatch);
+        r.kind = Some(crate::preset::engine::gates::RejectionKind::MissingField);
         let payload_str = build_task_resume_payload(&r, &[], &[], None, None, None);
         let v: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
         assert_eq!(
-            v["kind"], "hat_handoff_filename_mismatch",
+            v["kind"], "missing_field",
             "typed kind's reason_code() MUST surface as payload `kind` field"
         );
         // And the legacy `reason` field stays the same so existing
@@ -1341,8 +1289,7 @@ mod tests {
         assert_eq!(v2["kind"], "out_of_scope"); // fallback mirrors reason
 
         // Empty target_hat → also defaults to "ralph".
-        let payload3 =
-            enrich_task_resume_payload("RECOVERY hint", "out-of-scope", Some(""), None);
+        let payload3 = enrich_task_resume_payload("RECOVERY hint", "out-of-scope", Some(""), None);
         let v3: serde_json::Value = serde_json::from_str(&payload3).unwrap();
         assert_eq!(v3["target_hat"], "ralph");
 
@@ -1442,28 +1389,19 @@ mod tests {
 
         #[test]
         fn dispatch_routes_by_kind() {
-            // AE4 (反模式 4): ralph emit task.resume(kind=HandoffFilenameMismatch)
-            // → coordinator dispatch 路由到 ReEmitWorkReady。
+            // AE4 (反模式 4): ralph emit task.resume 按 kind 路由。
+            // 除 ContractViolation 走 FixPayloadSchema 外,其余默认 ReEmitWorkReady。
             assert_eq!(
-                CoordinatorDispatcher::dispatch(
-                    RejectionKind::HandoffFilenameMismatch,
-                    1
-                ),
+                CoordinatorDispatcher::dispatch(RejectionKind::MissingField, 1),
                 CoordinatorAction::ReEmitWorkReady
             );
             assert_eq!(
-                CoordinatorDispatcher::dispatch(
-                    RejectionKind::HandoffStructureInvalid,
-                    1
-                ),
-                CoordinatorAction::FixPayloadSchema
+                CoordinatorDispatcher::dispatch(RejectionKind::TopicOwnership, 1),
+                CoordinatorAction::ReEmitWorkReady
             );
             assert_eq!(
-                CoordinatorDispatcher::dispatch(
-                    RejectionKind::HandoffIllegalEmitTopic,
-                    1
-                ),
-                CoordinatorAction::FixEmitTarget
+                CoordinatorDispatcher::dispatch(RejectionKind::ContractViolation, 1),
+                CoordinatorAction::FixPayloadSchema
             );
         }
 
@@ -1471,25 +1409,22 @@ mod tests {
         fn dead_letter_kicks_in_at_3() {
             // 死信兜底:连续 3 次同 kind → emit plan.blocked
             let action = CoordinatorDispatcher::dispatch(
-                RejectionKind::HandoffFilenameMismatch,
+                RejectionKind::MissingField,
                 COORDINATOR_DEAD_LETTER_THRESHOLD,
             );
             assert!(matches!(
                 action,
                 CoordinatorAction::PlanBlocked {
-                    kind: RejectionKind::HandoffFilenameMismatch,
+                    kind: RejectionKind::MissingField,
                     count: COORDINATOR_DEAD_LETTER_THRESHOLD,
                 }
             ));
             // 4 次同样进入死信
-            let action = CoordinatorDispatcher::dispatch(
-                RejectionKind::HandoffStructureInvalid,
-                4,
-            );
+            let action = CoordinatorDispatcher::dispatch(RejectionKind::TopicOwnership, 4);
             assert!(matches!(
                 action,
                 CoordinatorAction::PlanBlocked {
-                    kind: RejectionKind::HandoffStructureInvalid,
+                    kind: RejectionKind::TopicOwnership,
                     count: 4,
                 }
             ));
@@ -1497,40 +1432,28 @@ mod tests {
 
         #[test]
         fn dispatch_does_not_cross_pollute_kinds() {
-            // filename × 1 → ReEmitWorkReady,不影响 structure
+            // MissingField × 1 → ReEmitWorkReady
             assert_eq!(
-                CoordinatorDispatcher::dispatch(
-                    RejectionKind::HandoffFilenameMismatch,
-                    1
-                ),
+                CoordinatorDispatcher::dispatch(RejectionKind::MissingField, 1),
                 CoordinatorAction::ReEmitWorkReady
             );
-            // 结构错误与文件名错误用各自 dispatch path
+            // ContractViolation 走独立的 FixPayloadSchema path
             assert_eq!(
-                CoordinatorDispatcher::dispatch(
-                    RejectionKind::HandoffStructureInvalid,
-                    1
-                ),
+                CoordinatorDispatcher::dispatch(RejectionKind::ContractViolation, 1),
                 CoordinatorAction::FixPayloadSchema
             );
         }
 
         #[test]
         fn threshold_boundary_below_3_does_not_dead_letter() {
-            // 1 / 2 次都不应触发死信
+            // 1 / 2 次都不应触发死信,ContractViolation 走 FixPayloadSchema
             assert_eq!(
-                CoordinatorDispatcher::dispatch(
-                    RejectionKind::HandoffIllegalEmitTopic,
-                    1
-                ),
-                CoordinatorAction::FixEmitTarget
+                CoordinatorDispatcher::dispatch(RejectionKind::ContractViolation, 1),
+                CoordinatorAction::FixPayloadSchema
             );
             assert_eq!(
-                CoordinatorDispatcher::dispatch(
-                    RejectionKind::HandoffIllegalEmitTopic,
-                    2
-                ),
-                CoordinatorAction::FixEmitTarget
+                CoordinatorDispatcher::dispatch(RejectionKind::ContractViolation, 2),
+                CoordinatorAction::FixPayloadSchema
             );
         }
 
@@ -1547,10 +1470,9 @@ mod tests {
         #[test]
         fn dead_letter_envelope_carries_kind_and_count() {
             use crate::diagnosis::{
-                DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource,
-                RecoveryDiagnosisEnvelope,
+                DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope,
             };
-            let kind = RejectionKind::HandoffFilenameMismatch;
+            let kind = RejectionKind::MissingField;
             let count: u32 = 3;
             let envelope = RecoveryDiagnosisEnvelope::builder()
                 .source(DiagnosisSource::LoopStale)
@@ -1566,11 +1488,10 @@ mod tests {
                 .safe_target(false)
                 .build();
             // The reason_code is the new SSOT — distinct from
-            // the gate's `hat_handoff_filename_mismatch` so
-            // downstream tools can filter the terminal state
-            // separately from the per-iteration rejections.
+            // the per-iteration rejection kind so downstream tools
+            // can filter the terminal state separately.
             assert_eq!(envelope.reason_code, "task_resume_dead_letter");
-            assert!(envelope.message.contains("kind=hat_handoff_filename_mismatch"));
+            assert!(envelope.message.contains("kind=missing_field"));
             assert!(envelope.message.contains("3 consecutive"));
             // Serialized form must include the kind/count
             // payload so operators reading recovery.jsonl can
