@@ -27,6 +27,9 @@ pub mod policy;
 pub mod process;
 pub mod prompt;
 pub mod termination_impl;
+// U5b: termination text formatting free function SSOT 转发。
+// impl EventLoop 方法留到后续 U 阶段处理。
+pub use termination_impl::{format_duration, termination_status_text};
 pub mod types;
 pub mod wave;
 pub mod workflow_guard;
@@ -8874,58 +8877,6 @@ pub struct UserPrompt {
     pub id: String,
     /// The prompt/question text
     pub text: String,
-}
-
-/// Formats a duration as human-readable string.
-fn format_duration(d: Duration) -> String {
-    let total_secs = d.as_secs();
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
-
-    if hours > 0 {
-        format!("{}h {}m {}s", hours, minutes, seconds)
-    } else if minutes > 0 {
-        format!("{}m {}s", minutes, seconds)
-    } else {
-        format!("{}s", seconds)
-    }
-}
-
-/// Returns a human-readable status based on termination reason.
-fn termination_status_text(reason: &TerminationReason) -> &'static str {
-    match reason {
-        TerminationReason::CompletionPromise => "All tasks completed successfully.",
-        TerminationReason::MaxIterations => "Stopped at iteration limit.",
-        TerminationReason::MaxRuntime => "Stopped at runtime limit.",
-        TerminationReason::MaxCost => "Stopped at cost limit.",
-        TerminationReason::ConsecutiveFailures => "Too many consecutive failures.",
-        TerminationReason::LoopThrashing => {
-            "Loop thrashing detected - same hat repeatedly blocked."
-        }
-        TerminationReason::LoopStale => {
-            "Stale loop detected - same topic emitted 3+ times consecutively."
-        }
-        TerminationReason::ValidationFailure => "Too many consecutive malformed JSONL events.",
-        TerminationReason::Stopped => "Manually stopped.",
-        TerminationReason::Interrupted => "Interrupted by signal.",
-        TerminationReason::RestartRequested => "Restarting by human request.",
-        TerminationReason::WorkspaceGone => "Workspace directory removed externally.",
-        TerminationReason::Cancelled => "Cancelled gracefully (human rejection or timeout).",
-        TerminationReason::PayloadContractViolation => "Payload contract violation - loop paused.",
-        TerminationReason::RecoveryExhausted { .. } => {
-            "Recovery responder exhausted retry window - loop paused."
-        }
-        TerminationReason::ReviewFailed { .. } => {
-            "Review verdict failed and propagated to final mirror - loop terminated."
-        }
-        TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
-            "Isolated scope violation circuit breaker tripped - loop terminated."
-        }
-        TerminationReason::RecoverablePayloadExhausted { .. } => {
-            "Recoverable-payload budget exhausted - loop terminated."
-        }
-    }
 }
 
 /// 2026-06-16-001 U5: stall detection and progress-steward wake
