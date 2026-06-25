@@ -1,11 +1,9 @@
 use super::*;
 
-/// Start a loop from an external caller (e.g., the bot daemon).
+/// Start a loop from an external caller (e.g., a daemon integration).
 ///
 /// Loads config from `ralph.yml`, applies the given prompt, acquires the
-/// loop lock, and runs the orchestration loop headlessly. The caller is
-/// responsible for Telegram interaction — the spawned loop has `robot.enabled`
-/// disabled to prevent a second Telegram poller from conflicting.
+/// loop lock, and runs the orchestration loop headlessly.
 ///
 /// Returns `Ok(TerminationReason)` on completion or `Err` on fatal errors.
 pub async fn start_loop(
@@ -26,11 +24,6 @@ pub async fn start_loop(
     // Apply the prompt
     config.event_loop.prompt = Some(prompt);
     config.event_loop.prompt_file = String::new();
-
-    // Keep robot.enabled as-is from config. When the daemon starts a loop,
-    // the loop's own TelegramService handles all Telegram interaction
-    // (commands, guidance, responses, check-ins). The daemon stops polling
-    // while the loop runs, so there's no conflict.
 
     // Force autonomous headless mode (no TUI, no interactive)
     config.cli.default_mode = "autonomous".to_string();
@@ -98,56 +91,12 @@ pub async fn start_loop(
         // errors would surface as plain `anyhow::Error` to the caller
         // and the process would exit 1 — swallowing the 78 / 2 contract
         // that `commands/run.rs` already preserves via
-        // `run_loop_result_exit_code`. The bot caller (`bot.rs`) also
-        // maps the same errors; doing it here is idempotent because
-        // both call sites use `std::process::exit` and the second call
-        // is unreachable.
+        // `run_loop_result_exit_code`. Doing it here is idempotent
+        // because both call sites use `std::process::exit` and the
+        // second call is unreachable.
         if let Some(code) = crate::commands::run::run_loop_result_exit_code(&e) {
             std::process::exit(code);
         }
         e
     })
-}
-
-/// Creates a robot service (Telegram) for human-in-the-loop communication.
-///
-/// Called by `run_loop_impl` when `robot.enabled` is true and this is the primary loop.
-/// Returns `None` if the service cannot be created or started.
-pub fn create_robot_service(
-    config: &RalphConfig,
-    context: &LoopContext,
-) -> Option<Box<dyn ralph_proto::RobotService>> {
-    let workspace_root = context.workspace().to_path_buf();
-    let bot_token = config.robot.resolve_bot_token();
-    let api_url = config.robot.resolve_api_url();
-    let timeout_secs = config.robot.timeout_seconds.unwrap_or(300);
-    let loop_id = context
-        .loop_id()
-        .map(String::from)
-        .unwrap_or_else(|| "main".to_string());
-
-    match ralph_telegram::TelegramService::new(
-        workspace_root,
-        bot_token,
-        api_url,
-        timeout_secs,
-        loop_id,
-    ) {
-        Ok(service) => {
-            if let Err(e) = service.start() {
-                warn!(error = %e, "Failed to start robot service");
-                return None;
-            }
-            info!(
-                bot_token = %service.bot_token_masked(),
-                timeout_secs = service.timeout_secs(),
-                "Robot human-in-the-loop service active"
-            );
-            Some(Box::new(service))
-        }
-        Err(e) => {
-            warn!(error = %e, "Failed to create robot service");
-            None
-        }
-    }
 }

@@ -921,14 +921,6 @@ async fn run_loop_impl_inner(
     // (including the recovery events we publish later).
     drift_engine.install_observer(&mut event_loop);
 
-    // Inject robot service (Telegram) for human-in-the-loop communication
-    if config.robot.enabled
-        && ctx.is_primary()
-        && let Some(service) = create_robot_service(&config, &ctx)
-    {
-        event_loop.set_robot_service(service);
-    }
-
     // Capture the robot service shutdown flag so signal handlers can interrupt wait_for_response()
     let robot_shutdown = event_loop.robot_shutdown_flag();
 
