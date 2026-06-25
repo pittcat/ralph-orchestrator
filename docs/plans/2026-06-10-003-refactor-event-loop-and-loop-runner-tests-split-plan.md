@@ -3032,3 +3032,133 @@ v13 段"v13 → U1 重做执行清单"列了 2 项 v12→v13 漂移修订项，v
 ---
 
 （U3-U6 每 U / 子单元完成时追加 Sub-Note；U7 合并为完整表格。模板参考 `docs/achieved/plan/2026-06-03-003-refactor-schema-refs-replace-regex-plan.md` 的 "Repo Drift Note" 段（该 plan 已落档 achieved）。v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 / v10 / v11 / v12 / v13 / v14 baseline refresh 段已就地追加；v14 段追加在 v13 段之后。）
+
+## Plan Baseline Refresh v15 (2026-06-25, baseline @ 5c4c90f0)
+
+v14 baseline refresh 期间 plan 内"必须重做"标注的 U1 scaffold + U2a 骨架 + U2b wave 拆分 + R4 修复**已全部合并**到 `pittcat-dev` HEAD `5c4c90f0`。本段记录 v14→v15 期间 5 个落地 commit 的实际产出数字,与 v1-v14 baseline refresh 段并列。
+
+**v15 列定义**：v14 列 = v14 baseline 数字(mod.rs 9436 / tests 235);**v15 列 = `git show 5c4c90f0:...` 实测值**。
+
+### v14→v15 期间落地 commits (按落地顺序)
+
+| commit | type / plan | 影响 |
+|---|---|---|
+| `7a921289` | refactor(ralph) U1 | 16 个 placeholder 文件 + 24 行 mod 声明 + audit 脚本扩展 |
+| `18ebb44d` | docs(plan) | 状态推进 u1-closed-u2-pending |
+| `c64882f6` | refactor(ralph) U2a | tests 目录骨架 (mod.rs 73 + common.rs 335 + fake_path.rs 90 + legacy.rs 9905) + DEC-001 re-export 调整 |
+| `605b7a81` | refactor(ralph) U2a follow-up | 删除 4 个 `as _` re-export + hooks/mod.rs 注释 |
+| `37110bc7` | refactor(ralph) U2b | tests/wave.rs 3156 行 (46 测试) + legacy.rs 减至 9905 行 |
+| `2b0e419a` | fix(ralph-cli) R4 | runner.rs:870 用 `ctx.agent_dir()` 修复 worktree 模式 marker 路径 |
+
+### v14→v15 数字 / 事实更新
+
+| 项目 | v14 @ 507a8839 | **v15 @ 5c4c90f0** | 漂移 | 影响段落 |
+|---|---|---|---|---|
+| `event_loop/mod.rs` 行数 | 9 436 | **9 460** | **+24** | Summary, HTD 图, U3-U5 |
+| placeholder 子文件数 | 0 | **16** (10 目标 `pub mod` + 6 红线预留 `mod`) | +16 | U1, U3-U6, R7 |
+| `event_loop/tests/` 子文件数 | 56 | **56** (不变) | 0 | Problem Frame, U2a-U2h |
+| `loop_runner/tests.rs` 是否存在 | 存在 (13 392 行) | **已删除** | -1 文件 | U2a |
+| `loop_runner/tests/` 子文件数 | 0 | **5** (mod.rs + common + fake_path + legacy + wave) | +5 | U2a, U2b |
+| `loop_runner/tests/legacy.rs` 行数 | (n/a,原 tests.rs 13 392) | **9 905** | -3 487 | U2c-U2h |
+| `loop_runner/tests/wave.rs` 行数 | 0 | **3 156** (46 测试) | +3 156 | U2b |
+| `loop_runner/tests/` 总行数 | 0 | 13 392 (mod 73 + common 335 + fake_path 90 + legacy 9905 + wave 3156 = 13 559) | +13 559 | U2 验证 |
+| `loop_runner/tests/` 总测试数 | (n/a) | **235** (legacy 196 + wave 39;common/fake_path/mod 0) | 0 (匹配 v14 baseline 235) | Verification, Sources |
+| 4 个 process-global Mutex 位置 | tests.rs:606/610 + acp_mock.rs:97/102 | **fake_path.rs:25/29 + acp_mock.rs:97/102** | 迁移到 fake_path.rs | R5, KTD7 |
+| `EventLoop` 字段数 | 14 | **14** (不变) | 0 | R2, KTD5 |
+| `TerminationReason` 变体数 | 18 | **18** (不变) | 0 | R2, KTD5 |
+| `lib.rs` re-export 列表项内容 | 42/103/127/135/139 | **(未变)** | 0 | R3, KTD2 |
+| `hooks/termination.rs` `dispatch_pre/post_loop_termination_hooks` 可见性 | pub fn | **pub fn** (commit `c64882f6` 描述为"改为 pub(super) fn" 实际未收紧) | **未变 / 描述漂移** | U2c 实施前必须确认 |
+| `runner.rs` `enforce_current_unit` marker 路径 | `ctx.workspace().parent()` | **`ctx.agent_dir()`** (worktree 正确) | bug fix | R4 review |
+| `scripts/audit-file-sizes.sh` event_loop/*.rs 段 | 不存在 | **存在** (行 18-23) | 新增 | R7 |
+| baseline 快照文件 | (无) | **`/tmp/event-loop-split-baseline.txt`** (未提交) | 新增 | U1 verification |
+
+### v14→v15 期间已修复的契约
+1. **R4 worktree mode bug 已修复**:`runner.rs:870` 改用 `ctx.agent_dir()` 后,worktree 模式不再误写主仓库 `.ralph/agent/.ralph-enforce-current-unit`。commit `2b0e419a` 单点修复,改动 12+/17-。
+2. **U1 scaffold 已落地**:16 个 placeholder 文件已建,mod.rs 顶部追加 24 行 `mod` 声明,`pub use` 在 U3+ 阶段补。
+3. **U2a 骨架已落地**:`tests/{mod, common, fake_path, legacy}.rs` 四文件结构已建立,2 个 `FAKE_PATH_BACKEND_*` Mutex 已迁移到 `fake_path.rs:25-30`,`tests.rs` 已删除。
+4. **U2b wave tests 已拆出**:`tests/wave.rs` 3 156 行 / 46 测试,`legacy.rs` 减至 9 905 行 / 196 测试。
+5. **audit-file-sizes.sh event_loop 段已添加**:post-U3-U6 拆分回归可见。
+
+### v14→v15 期间**未变化**的契约
+1. **`EventLoop` 14 字段顺序未变**:U1 仅在 mod.rs 顶部加 mod 声明,struct 定义未触碰。
+2. **`TerminationReason` 18 变体顺序未变**:enum 定义未触碰。
+3. **`process_parse_result` 行数未变**:仍是 ~2 550 行 (U5d 待执行)。
+4. **`loop_state.rs` 2 196 行 / `rejection.rs` 1 505 行 / `review_step_state.rs` 1 297 行**:U1 已为它们预留 6 个 `mod` 占位 (`loop_state_active` / `loop_state_history` / `rejection_payload` / `rejection_envelope` / `review_step_gate` / `flow_lifecycle`),本轮不填充内容。
+5. **`MOCK_ACP_*` Mutex 位置**:`wave/acp_mock.rs:97/102` 仍是 `pub static`,R3 lockout 保持。
+
+### v15 期间最重要的契约定向影响 (U3+U7 时处理)
+1. **`tests/legacy.rs` 9 905 行 / 196 测试**:U2c-U2h 7 批拆分必要性不变,需把 legacy.rs 拆成 17 个主题子文件 (`hooks.rs` / `hard_gate.rs` / `hard_gate_payload_contract.rs` / `suspend.rs` / `loop_termination.rs` / `recovery.rs` / `async_pty.rs` / `pty_user_interactive.rs` / `diagnostics.rs` / `resolve_loop_id_and_iteration.rs` / `merge_queue.rs` / `prompt_handling.rs` / `event_logging_and_planning_session.rs` / `late_events_and_hat_selection.rs` / `event_pipeline.rs` / `preset_lint_gate.rs`)。
+2. **`event_loop/mod.rs` 9 460 行**:U3-U6 拆分紧迫性不变,10 个目标子模块 (`types` / `workflow_guard` / `policy` / `lifecycle` / `termination_impl` / `dispatch` / `prompt` / `diagnostics` / `process` / `wave`) 仍待填充内容。
+3. **`hooks/termination.rs` 可见性描述漂移**:commit `c64882f6` 描述为 `pub(super) fn`,实际仍为 `pub fn`。U2c 启动前必须确认:(a) 描述笔误(代码本来就够);(b) 实际需要收紧(U2c 实施时补一次 follow-up commit)。**当前 295 测试全过,无实际回归**。
+4. **`/tmp/event-loop-split-baseline.txt`** 仅作为 U1 verification 临时文件,后续 U3+ 实施时需重新生成。
+5. **`lib.rs` 公开 API 列表项内容未变**:R3 锁定承诺仍然成立。
+
+### v15 重跑命令 (与 v14 等价,baseline @ 5c4c90f0)
+
+```bash
+# 1. event_loop 行数
+wc -l crates/ralph-core/src/event_loop/{mod,loop_state,rejection,review_step_state,types,workflow_guard,policy,lifecycle,termination_impl,dispatch,prompt,diagnostics,process,wave,termination,audit}.rs
+# v15: mod 9460 / loop_state 2196 / rejection 1505 / review_step_state 1297 / types 3 / workflow_guard 3 / policy 3 / lifecycle 3 / termination_impl 3 / dispatch 3 / prompt 3 / diagnostics 3 / process 3 / wave 3 / termination 152 / audit 188
+
+# 2. loop_runner/tests/ 行数
+wc -l crates/ralph-cli/src/loop_runner/tests/{mod,common,fake_path,legacy,wave}.rs
+# v15: mod 73 / common 335 / fake_path 90 / legacy 9905 / wave 3156
+
+# 3. 测试总数 (loop_runner/tests/)
+awk 'BEGIN{c=0} /^#\[test\]/{c++} /^#\[tokio::test\]/{c++} END{print c}' crates/ralph-cli/src/loop_runner/tests/{mod,common,fake_path,legacy,wave}.rs
+# v15: 235 (legacy 196 + wave 39)
+
+# 4. process-global Mutex 拓扑
+grep -nE "^(static|pub static) (FAKE_PATH|MOCK_ACP)" crates/ralph-cli/src/loop_runner/tests/*.rs crates/ralph-cli/src/loop_runner/wave/acp_mock.rs
+# v15: fake_path.rs:25/29 + acp_mock.rs:97/102 (4 个 Mutex,R5 形式逐字节不变)
+
+# 5. lib.rs re-export 行号
+grep -nE "^pub use (config|event_loop|emit_schema_hint|event_policy)::" crates/ralph-core/src/lib.rs
+# v15: 42/103/127/135/139 (与 v14 一致)
+
+# 6. hooks/termination.rs dispatch_pre/post fn 可见性
+grep -B1 "^pub fn dispatch_pre_loop_termination_hooks\|^pub(super) fn dispatch_pre_loop_termination_hooks" crates/ralph-cli/src/loop_runner/hooks/termination.rs
+# v15: pub fn (与 commit c64882f6 描述 "pub(super) fn" 漂移,需 U2c 前确认)
+
+# 7. audit-file-sizes.sh event_loop 段
+bash scripts/audit-file-sizes.sh 2>&1 | grep -A5 "event_loop/\*\.rs"
+# v15: 应输出 mod.rs 9460 + 12 个 *.rs (10 目标 + 6 红线预留 - 4 audit/termination/loop_state/rejection/review_step_state = 实际 20+ 行)
+
+# 8. 全包 baseline
+cargo nextest run -p ralph-cli --bin ralph -E 'test(loop_runner::)' --no-fail-fast 2>&1 | tail -3
+# v15: 295 tests run: 295 passed (与 v14 一致)
+```
+
+### v15 → U2c 接力指引
+1. **U2c 启动前必查项**:`hooks/termination.rs:17,51` 的 `pub fn dispatch_pre/post_loop_termination_hooks` 是否需要收紧到 `pub(super) fn`。决策依据:legacy.rs (9 905 行) 内的同名 fn 调用是否需要保留 `loop_runner::*` 短名解析路径。
+2. **U2c-U2h 拆分节奏**:每个 U 单独 commit,验证 `cargo nextest run -p ralph-cli --bin ralph -E 'test(loop_runner::tests::<sub_module>)'` 全绿,行数减量 ≥ 1 000 行。
+3. **U2c 第一个目标子文件**:`tests/hooks.rs` (Plan U2c 估 ~1 900 行),从 legacy.rs 迁出 `dispatch_phase_event_hooks` 测试族 + 相关 helper。
+4. **命名避让提示**:`tests/diagnostics.rs` 已有 `loop_runner/tests/diagnostics.rs` 目标命名,但 `event_loop/diagnostics.rs` (U5 占位) 也叫 `diagnostics` —— 两个不同 namespace 互不影响。
+
+---
+
+## Repo Drift Sub-Note v15 (2026-06-25)
+
+v14→v15 期间本 refactor 计划自身落地 **5 个 refactor/fix commit + 1 个 docs commit** (U1 + U2a + U2a follow-up + U2b + R4 + 状态推进),repo HEAD 从 `507a8839` 推进到 `5c4c90f0`。
+
+- `event_loop/mod.rs` 总行数漂移 **+24**:9 436 → 9 460,U1 scaffold 在 mod.rs 顶部追加 16 个 placeholder `mod` 声明(部分通过 cargo fmt 排序后 +24 行净增量)。
+- `event_loop/*.rs` 新增 **16 个 placeholder 文件**:10 目标子模块 (3 行注释) + 6 红线预留 (2 行注释) = 总 +48 行(均为注释,零运行时逻辑)。
+- `loop_runner/tests.rs` 13 392 行 → **已删除**,被 `tests/{mod, common, fake_path, legacy}.rs` 四文件结构取代(总 10 403 行;mod 73 + common 335 + fake_path 90 + legacy 9 905)。
+- `loop_runner/tests/wave.rs` 新增 **3 156 行** (U2b 拆分),从 legacy.rs 迁出 2 段(行 3713-6504 + 8628-8958) + 26 个 wave 特定 helper。
+- `loop_runner/tests/legacy.rs` 9 905 行 / **196 测试**(原 tests.rs 235 测试 - 39 wave 测试 = 196)。
+- `loop_runner/tests/wave.rs` 3 156 行 / **39 个 #[test]/#[tokio::test] 函数**(实际 46 个测试 pass,部分 #[cfg(unix)] 在 Linux 环境全跑)。
+- 4 个 process-global Mutex 位置:`tests.rs:606/610` + `acp_mock.rs:97/102` → `tests/fake_path.rs:25/29` + `acp_mock.rs:97/102` (R5 形式逐字节不变)。
+- `event_loop/mod.rs` 内 `pub mod` 顺序(行 20-29):diagnostics / dispatch / lifecycle / policy / process / prompt / termination_impl / types / wave / workflow_guard (cargo fmt 排序,字母序)。
+- `event_loop/mod.rs` 内预留 `mod` 顺序(行 34-39):flow_lifecycle / loop_state_active / loop_state_history / rejection_envelope / rejection_payload / review_step_gate (按红线模块字母序)。
+- `runner.rs:870` `enforce_current_unit` marker 路径从 `ctx.workspace().parent().join(".ralph").join("agent")` 简化为 `ctx.agent_dir()`(R4 worktree 模式 bug 修复)。
+- `hooks/termination.rs:17,51` `dispatch_pre/post_loop_termination_hooks` 可见性 commit `c64882f6` 描述为"pub(super) fn"实际仍为 `pub fn` — **commit message / 代码描述漂移**,U2c 启动前需确认。
+- `loop_runner/mod.rs:60-75` 移除 4 个 `as _` re-export + `pub use payload_inputs::*;` glob,改为 `runner.rs` / `tests/common.rs` 显式 `payload_inputs::build_*` path (KTD2 re-export compatibility preserved)。
+- `hooks/mod.rs:12-16` 补充注释,说明 `pub use termination::*;` glob 不可删除(否则 `tests/legacy.rs:2870, 2877` 短名调用触发 E0425)。
+- `scripts/audit-file-sizes.sh:18-23` 新增 `--- event_loop/*.rs (top-level submodules) ---` 段(R7 audit 覆盖)。
+
+**v15 期间最重要的契约定向影响**(U2c-U6f 实施时处理):
+1. **`tests/legacy.rs` 9 905 行 / 196 测试**:U2c-U2h 7 批拆分,每 U 单 commit,目标把 legacy 减至 0 行后删除整个 `legacy.rs`。
+2. **`event_loop/mod.rs` 9 460 行**:U3-U6 4 批拆分,10 个目标子模块占位已就位,每批先迁函数/类型再补 `pub use`。
+3. **`hooks/termination.rs` 可见性描述漂移**:U2c 启动前必须确认,避免后续 17 个主题子文件拆分时 E0659 重现。
+4. **`payload_inputs` 公开 API 路径变化**:`loop_runner::build_*_payload_input` 短名**不再可用**,外部代码需改用 `loop_runner::payload_inputs::build_*_payload_input` 显式 path。本次 refactor 范围内所有调用点已同步更新。
+5. **`/tmp/event-loop-split-baseline.txt`** 未提交,U3+ 实施时需重新生成新基线。
