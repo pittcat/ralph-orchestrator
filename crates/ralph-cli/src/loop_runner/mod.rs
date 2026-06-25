@@ -59,22 +59,16 @@ pub use late_events::*;
 pub use merge_queue::*;
 pub use output_parsing::*;
 pub use paths::*;
-// DEC-001:`pub use payload_inputs::*;` glob 暴露会让 `loop_runner::tests::legacy`
-// `use super::super::*;` 引入与 `tests/common.rs` 同名包装 fn 歧义(E0659)。
-// 改为精确 `pub use payload_inputs::build_*_payload_input as _;` 形式。
-// `loop_runner::*` 仍可访问这些 fn(供 legacy.rs 内的 `super::super::*` 不再引入,
-// `runner.rs` 内调用改为 `payload_inputs::build_*_payload_input(...)` 显式 path)。
-// `tests/common.rs` 内同名包装 fn 在 `loop_runner::tests::legacy` 命名空间下唯一。
+// DEC-001/DEC-002:`pub use payload_inputs::*;` glob 暴露会让 `loop_runner::tests::legacy`
+// `use super::super::*;` 引入与 `tests/common.rs` 同名包装 fn 歧义(E0659)。runner.rs 内
+// 全部 `build_*_payload_input` 调用已改用 `payload_inputs::*` 显式 path(commit `c64882f6`),
+// 无需 re-export。这里**不**做 `pub use payload_inputs::*;` glob,保持外部访问唯一路径:
+//   - `loop_runner::payload_inputs::build_*_payload_input` (供 tests/common.rs / runner.rs)
+//   - 不暴露 `loop_runner::build_*_payload_input` 短名(避免 E0659)
 //
 // 注:`dispatch_pre/post_loop_termination_hooks` 通过 `pub use hooks::*;` 在
 // `loop_runner::*` glob 暴露,本身不在 `payload_inputs::*` 内。runner.rs 内调用
-// 不需要 `as _` 处理(由 `pub use hooks::*;` 继续生效)。
-pub use payload_inputs::{
-    build_iteration_start_payload_input as _,
-    build_loop_start_payload_input as _,
-    build_loop_termination_payload_input as _,
-    build_plan_created_payload_input as _,
-};
+// 不需要处理(由 `pub use hooks::*;` 继续生效)。
 pub use prompt::*;
 pub use suspend::*;
 pub use wave::*;
