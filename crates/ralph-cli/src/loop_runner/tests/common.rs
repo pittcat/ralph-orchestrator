@@ -7,9 +7,9 @@
 // 即 sibling 子文件(`fake_path` / 后续 `wave` / `hooks` 等)与原 `tests.rs` 内
 // `#[test]` 函数都能直接调用。
 
+use super::super::wave::{MOCK_ACP_EXECUTION_SERIAL, MOCK_ACP_EXECUTIONS, MockAcpExecution};
 use super::*;
 use ralph_core::diagnostics::HookRunTelemetryEntry;
-use super::super::wave::{MOCK_ACP_EXECUTION_SERIAL, MOCK_ACP_EXECUTIONS, MockAcpExecution};
 
 // ──────────────────────────────────────────────────────────────────────
 // dispatch_test_event_loop* (3 个 + 1 个 yaml 变种)

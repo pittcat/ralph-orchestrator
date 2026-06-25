@@ -34,7 +34,10 @@ static FAKE_PATH_BACKEND_BIN: std::sync::LazyLock<std::sync::Mutex<Option<std::p
 // 间接访问,保持 Mutex 字面 `static FAKE_PATH_BACKEND_BIN: ...` 形式不动。
 #[cfg(unix)]
 pub(super) fn read_fake_path_backend_bin() -> Option<std::path::PathBuf> {
-    FAKE_PATH_BACKEND_BIN.lock().ok().and_then(|guard| guard.clone())
+    FAKE_PATH_BACKEND_BIN
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
 }
 
 #[cfg(unix)]

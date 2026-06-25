@@ -1,5 +1,5 @@
-use super::super::*;
 use super::super::payload_inputs;
+use super::super::*;
 pub fn loop_termination_phase_events(
     reason: &TerminationReason,
 ) -> (HookPhaseEvent, HookPhaseEvent) {

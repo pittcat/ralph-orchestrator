@@ -60,11 +60,14 @@ use std::sync::Mutex;
 // 子模块拆分拓扑(KTD3):
 // - `common`: 真正跨子文件共享的 helper,`pub(super)` 暴露
 // - `fake_path`: fake-PATH 后端安装 helper + 2 个 `FAKE_PATH_BACKEND_*` private `static` Mutex
-// - U2b-U2h 后续子单元逐步追加
+// - `wave`(U2b): wave / acp / MockAcpExecution / forced_test_wave_pty_failure 测试 +
+//   wave 特定 helper(`make_test_wave` / `make_worker_event` / `emit_wave_validation_marker` 等),
+//   从原 `legacy.rs` 段 1(行 3713-6504)+ 段 2(行 8628-8958)迁出
+// - `legacy`: U2b 后剩余非 wave 测试(hard_gate / hooks / suspend / merge_queue / late_events /
+//   diagnostics / preset_lint / pipeline 等)
+// - 后续 U2c-U2h 按主题逐步拆出
 
 mod common;
 mod fake_path;
-// U2a 阶段:`legacy` 容纳原 `tests.rs` 未迁移的 `#[test]` 函数与 hook-specific helper。
-// 后续 U2b-U2h 按主题逐步从 `legacy` 拆出到 `wave` / `hooks` / `hard_gate` 等子模块。
-// 待 U2h 完成后 `legacy` 文件可整体删除。
 mod legacy;
+mod wave;
