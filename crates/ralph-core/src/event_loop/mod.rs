@@ -51,6 +51,12 @@ pub use rejection::{
     enrich_task_resume_payload, extract_reason_code, rejection_from_origin, resolve_target_hat,
     task_resume_payload_has_required_fields,
 };
+// U3: re-export the type declarations that were moved from mod.rs to
+// `types.rs`. The `pub use` preserves the existing public API path
+// (`event_loop::TerminationReason`, etc.) so downstream consumers see
+// no change. `WorkflowGuardRejection` stays module-private and is
+// only `pub(super)` in `types.rs`.
+pub use types::{EventLoop, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason};
 
 use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
 
@@ -85,35 +91,16 @@ use crate::state_machine::{StateMachineDecision, StateMachineRuntimeState};
 
 use crate::text::floor_char_boundary;
 use ralph_proto::{Event, EventBus, Hat, HatId};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
+// U3: `WorkflowGuardRejection` is `pub(super)` in `types.rs` (it stays
+// module-private because nothing outside `event_loop` constructs it).
+// Bring it into the `mod.rs` namespace so the `impl EventLoop` blocks
+// can name it without a fully qualified path.
+use self::types::WorkflowGuardRejection;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
-
-/// Result of processing events from JSONL.
-#[derive(Debug, Clone)]
-pub struct ProcessedEvents {
-    /// Whether any valid events were found and published.
-    pub had_events: bool,
-    /// Whether any events were present at the contract validation layer (passed or rejected).
-    pub had_raw_events: bool,
-    /// Whether any events were rejected by origin, policy, payload, or
-    /// execution-contract validation.
-    pub had_rejected_events: bool,
-    /// Whether any published events matched the semantic `plan.*` topic family.
-    pub had_plan_events: bool,
-    /// Whether any events lacked specific hat subscribers (orphans handled by Ralph).
-    pub has_orphans: bool,
-    /// Events accepted by runtime validation and published to the bus.
-    pub accepted_events: Vec<Event>,
-    /// Findings from execution contract rejections (U5).
-    pub contract_rejections: Vec<ExecutionContractFinding>,
-    /// U6: payload contract violation detected at runtime (if any).
-    /// When present, the loop must pause and emit a structured diagnostic.
-    pub payload_contract_violation: Option<crate::payload_contract::PayloadContractViolation>,
-}
 
 impl Default for ProcessedEvents {
     fn default() -> Self {
@@ -128,140 +115,6 @@ impl Default for ProcessedEvents {
             payload_contract_violation: None,
         }
     }
-}
-
-/// Result of processing events from JSONL with wave events partitioned out.
-#[derive(Debug)]
-pub struct ProcessedEventsWithWaves {
-    /// Normal event processing results.
-    pub processed: ProcessedEvents,
-    /// Wave events extracted before normal processing (have wave_id set).
-    pub wave_events: Vec<crate::event_reader::Event>,
-    /// U1 (2026-06-13-001): policy rejections collected from the wave
-    /// partition. Every wave event that the event policy rejected
-    /// (e.g. a `review.wave.ready` missing the required `depth` field)
-    /// is exposed here so the runner can:
-    /// 1. Skip the `missing_event_gate` (the agent DID try to emit).
-    /// 2. Inject a schema-level guidance payload naming the missing
-    ///    field instead of a generic "you forgot to emit" message.
-    /// 3. Surface a recovery envelope so `ralph diagnose` can attribute
-    ///    the failed fan-out to a policy contract failure, not a missing
-    ///    emission.
-    pub wave_policy_rejections: Vec<crate::event_policy::PolicyRejection>,
-    /// U1 (2026-06-13-001): number of wave-partition events that entered
-    /// policy validation. This is the "raw" wave count after the origin
-    /// guard and topic-format check, immediately before the policy
-    /// validator. It is captured so the recovery envelope's `evidence`
-    /// can distinguish "all N rejected" from "N rejected out of M" —
-    /// critical for the `wave_dispatch_blocked` R7 envelope shape.
-    pub wave_raw_count: usize,
-}
-
-/// Reason the event loop terminated.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TerminationReason {
-    /// Completion promise was detected in output.
-    CompletionPromise,
-    /// Maximum iterations reached.
-    MaxIterations,
-    /// Maximum runtime exceeded.
-    MaxRuntime,
-    /// Maximum cost exceeded.
-    MaxCost,
-    /// Too many consecutive failures.
-    ConsecutiveFailures,
-    /// Loop thrashing detected (repeated blocked events).
-    LoopThrashing,
-    /// Stale loop detected (same topic emitted 3+ times consecutively).
-    LoopStale,
-    /// Too many consecutive malformed JSONL lines in events file.
-    ValidationFailure,
-    /// Manually stopped.
-    Stopped,
-    /// Interrupted by signal (SIGINT/SIGTERM).
-    Interrupted,
-    /// Restart requested via the .ralph/restart-requested signal file
-    /// (written by `ralph loops stop` or external tooling).
-    RestartRequested,
-    /// Workspace directory (worktree) was removed externally.
-    WorkspaceGone,
-    /// Loop was cancelled gracefully via loop.cancel event (human rejection, timeout).
-    Cancelled,
-    /// U6: runtime payload contract violation caused the loop to pause.
-    PayloadContractViolation,
-    /// U6: recovery responder's retry window exhausted for a tracked
-    /// diagnosis key. The responder produced a `TerminationHint` of
-    /// severity `Error` or `Critical` and the runner promoted the
-    /// hint into a real termination. The carried `retry_key` and
-    /// `reason` are the values the responder produced so the
-    /// summary report can point operators to the diagnosis.
-    RecoveryExhausted {
-        /// The retry key the responder flagged as exhausted. Empty
-        /// when the responder produced a key-less hint (e.g. a
-        /// payload-contract-shaped Final escalation).
-        retry_key: String,
-        /// The free-form reason the responder attached to the
-        /// hint. Surfaced in `loop.terminate` payload and in
-        /// `summary.md`.
-        reason: String,
-    },
-    /// P0-C (2026-06-10): fail-path auto-termination. Triggered when
-    /// the verdict gate has observed a failing verdict (`fail_field ==
-    /// fail_value`) AND the verdict has propagated to the LAST
-    /// configured topic in the gate's mirror chain (i.e. either
-    /// `gate.topic` alone, or the final entry in `gate.additional_topics`).
-    ///
-    /// This closes the "loop hangs after a failing review" gap: the
-    /// verdict gate forbids `LOOP_COMPLETE` on fail (by design, to
-    /// prevent a rogue completion from masking the failure), but until
-    /// this fix there was no other exit signal — the loop would burn
-    /// iterations forever. Now the runner exits with a clear reason
-    /// once the fail verdict has reached the workflow's final
-    /// downstream mirror event (e.g. `report.done` for ce-executor).
-    ReviewFailed {
-        /// The topic where the fail verdict was last observed.
-        /// Surfaced in `loop.terminate` payload for operators.
-        topic: String,
-    },
-    /// 2026-06-14-004 plan U2: isolated-scope circuit breaker.
-    /// Triggered when the same (hat, topic) pair crosses the
-    /// `U2_REJECTION_RETRY_LIMIT` threshold (4th attempt), meaning
-    /// the hat keeps emitting an out-of-scope topic despite receiving
-    /// `task.resume` guidance 3 times already.  This is a hard stop
-    /// that prevents the loop from spiraling forever.
-    ScopeViolationCircuitBreakerTripped {
-        /// The hat that keeps emitting out-of-scope events.
-        hat: String,
-        /// The topic the hat is not allowed to publish.
-        topic: String,
-        /// The violation count (how many times this (hat, topic) was rejected).
-        violation_count: u32,
-        /// Topics the hat IS allowed to publish (from registry config).
-        allowed_topics: Vec<String>,
-    },
-    /// Unit 2 (2026-06-16-002 plan) recoverable-payload budget
-    /// exhausted.  Distinct from `PayloadContractViolation` (which
-    /// terminates the loop on the **first** non-recoverable contract
-    /// violation) and from `ScopeViolationCircuitBreakerTripped`
-    /// (which only fires for the isolated-scope sub-path).  This
-    /// variant fires when the recoverable set
-    /// (`PayloadTypeMismatch` / `MissingRequiredField` /
-    /// `TopicDenied`) has been retried past the bounded budget for
-    /// the SAME `(hat, topic, reason_class)` triple (the 4th
-    /// attempt).
-    RecoverablePayloadExhausted {
-        /// Hat that kept emitting the bad payload past the budget.
-        hat: String,
-        /// Topic the hat was emitting.
-        topic: String,
-        /// Reason class the budget was burned on
-        /// (`payload_type_mismatch` / `missing_required_field` /
-        /// `topic_denied`).
-        reason_class: String,
-        /// Post-increment count (always `> U2_REJECTION_RETRY_LIMIT`).
-        count: u32,
-    },
 }
 
 impl TerminationReason {
@@ -332,61 +185,6 @@ impl TerminationReason {
     pub fn is_success(&self) -> bool {
         matches!(self, TerminationReason::CompletionPromise)
     }
-}
-
-/// Result of workflow guard completion validation.
-#[derive(Debug)]
-struct WorkflowGuardRejection {
-    /// Human-readable message describing the incomplete instance.
-    message: String,
-}
-
-/// The main event loop orchestrator.
-pub struct EventLoop {
-    config: RalphConfig,
-    registry: HatRegistry,
-    bus: EventBus,
-    state: LoopState,
-    instruction_builder: InstructionBuilder,
-    ralph: HatlessRalph,
-    /// Cached human guidance messages that should persist across iterations.
-    robot_guidance: Vec<String>,
-    /// Event reader for consuming events from JSONL file.
-    /// Made pub(crate) to allow tests to override the path.
-    pub(crate) event_reader: EventReader,
-    diagnostics: crate::diagnostics::DiagnosticsCollector,
-    /// Loop context for path resolution (None for legacy single-loop mode).
-    loop_context: Option<LoopContext>,
-    /// Skill registry for the current loop.
-    skill_registry: SkillRegistry,
-    /// WAC-U3 / WAC-U5 (2026-06-12-002): handoff priority index,
-    /// built once at construction. The dispatcher's priority pass
-    /// consults `index.consumer_of(topic)` on every selection
-    /// tick. `None` when the config is in coordinator mode or
-    /// the index is empty (no priority-eligible handoffs).
-    handoff_index: crate::workflow_contract::HandoffIndex,
-    /// U6: Recovery responder — aggregates per-`retry_key` state and
-    /// decides whether the next prompt should fold a soft alert, the
-    /// runner should publish a targeted `task.resume`, or the loop
-    /// should surface a `TerminationHint`. The responder is
-    /// in-memory only; it never touches the diagnostics loggers
-    /// directly.
-    recovery_responder: RecoveryResponder,
-    /// U3: Activation lifecycle tracker — tracks each hat activation from
-    /// activate → observe_accepted_event → complete. Write APIs are called
-    /// by the event loop; read API (`active_activations`) is consumed only
-    /// by the `ralph diagnose` reporter (U4). Decision paths must NOT read
-    /// the tracker to avoid implicit feedback loops.
-    hat_lifecycle_tracker: ActivationLifecycleTracker<SystemTimeClock>,
-
-    /// R3 (2026-06-14-003 plan): ephemeral file isolation engine.
-    /// Used by `process_output` to relocate agent-written runtime
-    /// artefacts (scratchpad.md / tmp*.md) out of source trees into
-    /// `.ralph/agent/scratchpad-{loop_id}.md`.  The engine is
-    /// opt-in: callers must enable `EventLoopConfig.ephemeral_isolation`
-    /// for it to fire.  The field is owned by `EventLoop` so the
-    /// per-iteration cache (mtime/size sentinel) survives across calls.
-    ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation,
 }
 
 /// A2 (002-adversarial-review): build the unified
