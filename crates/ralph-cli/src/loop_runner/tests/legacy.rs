@@ -1,53 +1,41 @@
-use super::*;
-use crate::test_support::CwdGuard;
+// U2a: legacy test body。
+//
+// 包含原 `loop_runner/tests.rs` 在 U2a 阶段**未迁移**的 `#[test]` 函数与少量
+// hook-specific helper(`hook_spec_*` / `recording_hook` / `payload_recording_hook` /
+// `hook_engine_with_events`)。后续 U2b-U2h 按主题逐步拆出到 `tests/{wave,hooks,...}.rs`。
+//
+// 跨子文件共享 helper(从原 tests.rs 770-1018 迁出)已迁移到 `tests/common.rs`。
+// 2 个 `FAKE_PATH_BACKEND_*` private static Mutex 与 fake_path 安装 helper 已迁移到
+// `tests/fake_path.rs`。`install_mock_acp_executions` / `MockAcpExecutionGuard` 已迁到
+// `common.rs`(后续 U2b 拆 wave.rs 时再迁走)。
+//
+// 本文件命名空间 = `loop_runner::tests::legacy`,原 tests.rs 内 helper / type 引用
+// `super::*` 解析为 `loop_runner::*`。为保持原行为,`use super::super::*;` 重新导出
+// `loop_runner::*` 到本文件作用域,等价于原 tests.rs 顶部的 `use super::*;`。
+//
+// DEC-001:见 `tests/common.rs` 注释。`use super::super::*;` 会引入
+// `loop_runner::payload_inputs` 的同名 6 个 fn(`build_*_payload_input` /
+// `dispatch_*_loop_termination_hooks`)。`tests/common.rs` 内的同名包装 fn
+// 必须在 legacy.rs 命名空间下唯一,才能让 `#[test]` 内的 `build_*_payload_input(...)`
+// 调用解析到 `common.rs` 的包装版本。本文件用 `use super::common::{...};` 显式
+// 引入这 6 个 fn 的 `common.rs` 版本,**覆盖** glob 引入的 `super::super::*` 同名 fn。
+// Rust 名称解析规则:更精确的非 glob use 优先于 glob use 引入的同名项。
+
+use super::super::*;
 use ralph_core::HatRegistry;
-use ralph_core::planning_session::{ConversationEntry, ConversationType};
 use ralph_proto::{Hat, Topic};
+use crate::test_support::CwdGuard;
+use ralph_core::planning_session::{ConversationEntry, ConversationType};
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::sync::Arc;
-use std::sync::Mutex;
-
-// ──────────────────────────────────────────────────────────────────────
-// Test execution requirements (Unit 4 of plan 2026-06-06-001, follow-up
-// to Unit 3's "5 pre-existing test failures" note):
-//
-// These tests touch four **process-global** `Mutex` / `LazyLock` singletons
-// declared further down in this file:
-//
-//   - MOCK_ACP_EXECUTIONS           (mock ACP backend queue)
-//   - MOCK_ACP_EXECUTION_SERIAL     (mock ACP execution guard)
-//   - FAKE_PATH_BACKEND_SERIAL      (fake-PATH backend installation guard)
-//   - FAKE_PATH_BACKEND_BIN         (fake-PATH backend bin dir)
-//
-// The locks are intentionally process-global because the wave / FAKE_PATH
-// test scaffolding is shared across many test functions and serializing
-// within the binary process keeps the wave fixtures consistent.
-//
-// Consequence: under **plain `cargo test` (default test-threads)**, the
-// 5xx+ tests in this binary run in parallel inside a single OS process
-// and **share the same Mutexes**. A panic in one test poisons the
-// `FAKE_PATH_BACKEND_SERIAL` Mutex; every subsequent test that goes
-// through `install_fake_path_backends(...)` then panics on
-// `PoisonError { .. }`. Similarly, time-sensitive tests like
-// `test_process_pending_merges_redirects_subprocess_output_to_log_file`
-// use a 500ms sleep to wait for the sub-process to flush its log file;
-// under parallel load the sub-process can take longer, producing
-// spurious failures. None of these are real bugs.
-//
-// The project's `scripts/run-tests.sh` and the `nextest` profile
-// (`.config/nextest.toml`) put this entire binary in the `cli-serial`
-// test group with `max-threads = 1`, which sidesteps both problems.
-//
-// **Run via `./scripts/run-tests.sh` or `cargo nextest run -p ralph-cli --bin ralph`.**
-// If you must run with raw `cargo test`, pass `--test-threads=1`:
-//
-//     cargo test -p ralph-cli --bin ralph -- --test-threads=1
-//
-// Do NOT add `#[ignore]` to the wave / FAKE_PATH tests as a "fix" for
-// the parallel-load failures: they are real tests of the production
-// runner code path, and skipping them defeats the regression guard.
-// ──────────────────────────────────────────────────────────────────────
+use std::sync::{Arc, Mutex};
+// 同时引入 `common` 命名空间(给 `common::dispatch_*_loop_termination_hooks` 显式
+// path 用)与 glob(给 `build_*_payload_input` / `suspend_outcome` /
+// `block_on_test_future` 等 short-name 调用用)。`use super::common;` 引入 namespace,
+// `use super::common::*;` 引入所有 pub(super) items。两者并存允许两种风格混用。
+use super::common;
+use super::common::*;
+use super::fake_path::*;
 
 // ──────────────────────────────────────────────────────────────────────
 // U5: payload contract hard gate
@@ -591,101 +579,6 @@ fn test_prepare_tui_iteration_seeds_max_iterations() {
 }
 
 #[cfg(unix)]
-fn write_fake_executable(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join(name);
-    let script = format!("#!/bin/sh\n{}\n", body);
-    std::fs::write(&path, script).expect("write script");
-    let mut perms = std::fs::metadata(&path).expect("metadata").permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod");
-    path
-}
-
-#[cfg(unix)]
-static FAKE_PATH_BACKEND_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
-
-#[cfg(unix)]
-static FAKE_PATH_BACKEND_BIN: std::sync::LazyLock<std::sync::Mutex<Option<std::path::PathBuf>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
-
-#[cfg(unix)]
-struct FakePathBackendsGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
-    _temp_dir: tempfile::TempDir,
-    installed_paths: Vec<std::path::PathBuf>,
-}
-
-#[cfg(unix)]
-impl Drop for FakePathBackendsGuard {
-    fn drop(&mut self) {
-        for path in &self.installed_paths {
-            let _ = std::fs::remove_file(path);
-        }
-        *FAKE_PATH_BACKEND_BIN
-            .lock()
-            .expect("fake PATH backend bin lock") = None;
-    }
-}
-
-#[cfg(unix)]
-fn install_fake_path_backends(backends: &[(&str, &str)]) -> FakePathBackendsGuard {
-    let guard = FAKE_PATH_BACKEND_SERIAL
-        .lock()
-        .expect("fake PATH backend serial lock");
-    let temp_dir = tempfile::tempdir().expect("fake backend temp dir");
-    let bin_dir = temp_dir.path().join("bin");
-    std::fs::create_dir_all(&bin_dir).expect("fake backend bin dir");
-
-    let mut installed_paths = Vec::with_capacity(backends.len());
-    for (name, body) in backends {
-        let path = bin_dir.join(name);
-        assert!(
-            !path.exists(),
-            "expected fake backend slot to be free: {}",
-            path.display()
-        );
-        installed_paths.push(write_fake_executable(&bin_dir, name, body));
-    }
-    *FAKE_PATH_BACKEND_BIN
-        .lock()
-        .expect("fake PATH backend bin lock") = Some(bin_dir.clone());
-
-    FakePathBackendsGuard {
-        _guard: guard,
-        _temp_dir: temp_dir,
-        installed_paths,
-    }
-}
-
-#[cfg(test)]
-struct MockAcpExecutionGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
-}
-
-#[cfg(test)]
-impl Drop for MockAcpExecutionGuard {
-    fn drop(&mut self) {
-        MOCK_ACP_EXECUTIONS
-            .lock()
-            .expect("mock ACP execution queue")
-            .clear();
-    }
-}
-
-#[cfg(test)]
-fn install_mock_acp_executions(executions: Vec<MockAcpExecution>) -> MockAcpExecutionGuard {
-    let guard = MOCK_ACP_EXECUTION_SERIAL
-        .lock()
-        .expect("mock ACP execution serial lock");
-    *MOCK_ACP_EXECUTIONS
-        .lock()
-        .expect("mock ACP execution queue") = executions.into_iter().collect();
-    MockAcpExecutionGuard { _guard: guard }
-}
-
-#[cfg(unix)]
 fn hook_spec_with_command_and_on_error_and_suspend_mode(
     name: &str,
     command: Vec<String>,
@@ -764,257 +657,6 @@ fn hook_engine_with_events(
         ..ralph_core::HooksConfig::default()
     };
     HookEngine::new(&hooks_config)
-}
-
-#[cfg(unix)]
-fn dispatch_test_event_loop(workspace_root: &Path) -> EventLoop {
-    let mut config = RalphConfig::default();
-    config.core.workspace_root = workspace_root.to_path_buf();
-    EventLoop::new(config)
-}
-
-#[cfg(unix)]
-fn dispatch_test_event_loop_with_context(workspace_root: &Path) -> (EventLoop, LoopContext) {
-    let mut config = RalphConfig::default();
-    config.core.workspace_root = workspace_root.to_path_buf();
-    let context = LoopContext::primary(workspace_root.to_path_buf());
-    let event_loop = EventLoop::with_context(config, context.clone());
-    (event_loop, context)
-}
-
-fn dispatch_test_event_loop_from_yaml_with_context(
-    workspace_root: &Path,
-    yaml: &str,
-) -> (EventLoop, LoopContext) {
-    let mut config: RalphConfig = serde_yaml::from_str(yaml).expect("parse config");
-    config.core.workspace_root = workspace_root.to_path_buf();
-    let context = LoopContext::primary(workspace_root.to_path_buf());
-    let event_loop = EventLoop::with_context(config, context.clone());
-    (event_loop, context)
-}
-
-#[cfg(unix)]
-fn dispatch_test_event_loop_with_diagnostics(workspace_root: &Path) -> EventLoop {
-    let mut config = RalphConfig::default();
-    config.core.workspace_root = workspace_root.to_path_buf();
-    let diagnostics =
-        ralph_core::diagnostics::DiagnosticsCollector::with_enabled(workspace_root, true)
-            .expect("create diagnostics collector");
-    EventLoop::with_diagnostics(config, diagnostics)
-}
-
-#[cfg(unix)]
-fn read_hook_run_telemetry_entries(workspace_root: &Path) -> Vec<HookRunTelemetryEntry> {
-    let diagnostics_root = workspace_root.join(".ralph").join("diagnostics");
-    let mut session_dirs: Vec<_> = std::fs::read_dir(&diagnostics_root)
-        .expect("read diagnostics root")
-        .filter_map(Result::ok)
-        .collect();
-    session_dirs.sort_by_key(|entry| entry.path());
-
-    let latest_session = session_dirs
-        .last()
-        .expect("at least one diagnostics session should exist");
-    let hook_runs_path = latest_session.path().join("hook-runs.jsonl");
-    let content = std::fs::read_to_string(&hook_runs_path).expect("read hook-runs.jsonl");
-
-    content
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("parse hook run telemetry entry"))
-        .collect()
-}
-
-#[cfg(unix)]
-fn read_hook_log(log_path: &Path) -> Vec<String> {
-    std::fs::read_to_string(log_path)
-        .expect("read hook log")
-        .lines()
-        .map(str::to_string)
-        .collect()
-}
-
-#[cfg(unix)]
-fn read_hook_payload_log(log_path: &Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(log_path)
-        .expect("read hook payload log")
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).expect("parse hook payload JSON"))
-        .collect()
-}
-
-fn suspend_outcome_with_mode(
-    phase_event: HookPhaseEvent,
-    hook_name: &str,
-    suspend_mode: HookSuspendMode,
-) -> HookDispatchOutcome {
-    HookDispatchOutcome {
-        phase_event,
-        hook_name: hook_name.to_string(),
-        disposition: HookDisposition::Suspend,
-        suspend_mode,
-        failure: Some(HookDispatchFailure::HookRunFailed {
-            exit_code: Some(41),
-            timed_out: false,
-        }),
-
-        mutation_parse_outcome: HookMutationParseOutcome::Disabled,
-    }
-}
-
-fn suspend_outcome(phase_event: HookPhaseEvent, hook_name: &str) -> HookDispatchOutcome {
-    suspend_outcome_with_mode(phase_event, hook_name, HookSuspendMode::WaitForResume)
-}
-
-fn block_on_test_future<F>(future: F) -> F::Output
-where
-    F: std::future::Future,
-{
-    tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("build tokio runtime")
-        .block_on(future)
-}
-
-fn empty_hook_metadata() -> serde_json::Map<String, serde_json::Value> {
-    serde_json::Map::new()
-}
-
-fn build_loop_start_payload_input(
-    loop_id: &str,
-    ctx: &LoopContext,
-    max_iterations: u32,
-    iteration_current: u32,
-    active_hat: Option<String>,
-) -> HookPayloadBuilderInput {
-    super::build_loop_start_payload_input(
-        loop_id,
-        ctx,
-        max_iterations,
-        iteration_current,
-        active_hat,
-        &empty_hook_metadata(),
-    )
-}
-
-fn build_iteration_start_payload_input(
-    loop_id: &str,
-    ctx: &LoopContext,
-    max_iterations: u32,
-    iteration_current: u32,
-    active_hat: Option<String>,
-    selected_hat: Option<String>,
-    selected_task: Option<String>,
-) -> HookPayloadBuilderInput {
-    super::build_iteration_start_payload_input(
-        loop_id,
-        ctx,
-        max_iterations,
-        iteration_current,
-        active_hat,
-        selected_hat,
-        selected_task,
-        &empty_hook_metadata(),
-    )
-}
-
-fn build_plan_created_payload_input(
-    loop_id: &str,
-    ctx: &LoopContext,
-    max_iterations: u32,
-    iteration_current: u32,
-    active_hat: Option<String>,
-    selected_hat: Option<String>,
-    selected_task: Option<String>,
-) -> HookPayloadBuilderInput {
-    super::build_plan_created_payload_input(
-        loop_id,
-        ctx,
-        max_iterations,
-        iteration_current,
-        active_hat,
-        selected_hat,
-        selected_task,
-        &empty_hook_metadata(),
-    )
-}
-
-fn build_loop_termination_payload_input(
-    loop_id: &str,
-    ctx: &LoopContext,
-    max_iterations: u32,
-    iteration_current: u32,
-    active_hat: Option<String>,
-    selected_hat: Option<String>,
-    selected_task: Option<String>,
-    termination_reason: &TerminationReason,
-) -> HookPayloadBuilderInput {
-    super::build_loop_termination_payload_input(
-        loop_id,
-        ctx,
-        max_iterations,
-        iteration_current,
-        active_hat,
-        selected_hat,
-        selected_task,
-        termination_reason,
-        &empty_hook_metadata(),
-    )
-}
-
-async fn dispatch_pre_loop_termination_hooks(
-    event_loop: &EventLoop,
-    hooks_dispatch_enabled: bool,
-    loop_id: &str,
-    hook_engine: &HookEngine,
-    hook_executor: &HookExecutor,
-    suspend_state_store: &SuspendStateStore,
-    ctx: &LoopContext,
-    max_iterations: u32,
-    reason: TerminationReason,
-) -> Result<TerminationReason> {
-    let mut accumulated_hook_metadata = serde_json::Map::new();
-    super::dispatch_pre_loop_termination_hooks(
-        event_loop,
-        hooks_dispatch_enabled,
-        loop_id,
-        hook_engine,
-        hook_executor,
-        suspend_state_store,
-        ctx,
-        max_iterations,
-        &mut accumulated_hook_metadata,
-        reason,
-    )
-    .await
-}
-
-async fn dispatch_post_loop_termination_hooks(
-    event_loop: &EventLoop,
-    hooks_dispatch_enabled: bool,
-    loop_id: &str,
-    hook_engine: &HookEngine,
-    hook_executor: &HookExecutor,
-    suspend_state_store: &SuspendStateStore,
-    ctx: &LoopContext,
-    max_iterations: u32,
-    reason: TerminationReason,
-) -> Result<TerminationReason> {
-    let mut accumulated_hook_metadata = serde_json::Map::new();
-    super::dispatch_post_loop_termination_hooks(
-        event_loop,
-        hooks_dispatch_enabled,
-        loop_id,
-        hook_engine,
-        hook_executor,
-        suspend_state_store,
-        ctx,
-        max_iterations,
-        &mut accumulated_hook_metadata,
-        reason,
-    )
-    .await
 }
 
 #[cfg(unix)]
@@ -1129,7 +771,7 @@ fn test_ac13_mutation_disabled_json_output_is_inert_for_accumulator_and_downstre
         &hook_engine,
         &hook_executor,
         HookPhaseEvent::PreLoopStart,
-        super::build_loop_start_payload_input(
+        super::super::payload_inputs::build_loop_start_payload_input(
             "loop-test",
             &loop_ctx,
             5,
@@ -1158,7 +800,7 @@ fn test_ac13_mutation_disabled_json_output_is_inert_for_accumulator_and_downstre
         &hook_engine,
         &hook_executor,
         HookPhaseEvent::PostLoopStart,
-        super::build_loop_start_payload_input(
+        super::super::payload_inputs::build_loop_start_payload_input(
             "loop-test",
             &loop_ctx,
             5,
@@ -1223,7 +865,7 @@ fn test_ac14_mutation_enabled_updates_only_namespaced_metadata_in_downstream_pay
         &hook_engine,
         &hook_executor,
         HookPhaseEvent::PreLoopStart,
-        super::build_loop_start_payload_input(
+        super::super::payload_inputs::build_loop_start_payload_input(
             "loop-test",
             &loop_ctx,
             5,
@@ -1258,7 +900,7 @@ fn test_ac14_mutation_enabled_updates_only_namespaced_metadata_in_downstream_pay
         &hook_engine,
         &hook_executor,
         HookPhaseEvent::PostLoopStart,
-        super::build_loop_start_payload_input(
+        super::super::payload_inputs::build_loop_start_payload_input(
             "loop-test",
             &loop_ctx,
             5,
@@ -2114,7 +1756,7 @@ fn test_loop_termination_lifecycle_hooks_dispatch_complete_and_error_boundaries(
     let loop_ctx = LoopContext::primary(temp_dir.path().to_path_buf());
     let suspend_state_store = SuspendStateStore::new(temp_dir.path());
 
-    let completed_reason = block_on_test_future(dispatch_pre_loop_termination_hooks(
+    let completed_reason = block_on_test_future(common::dispatch_pre_loop_termination_hooks(
         &event_loop,
         true,
         "loop-test",
@@ -2126,7 +1768,7 @@ fn test_loop_termination_lifecycle_hooks_dispatch_complete_and_error_boundaries(
         TerminationReason::CompletionPromise,
     ))
     .expect("pre.loop.complete dispatch should succeed");
-    let completed_reason = block_on_test_future(dispatch_post_loop_termination_hooks(
+    let completed_reason = block_on_test_future(common::dispatch_post_loop_termination_hooks(
         &event_loop,
         true,
         "loop-test",
@@ -2140,7 +1782,7 @@ fn test_loop_termination_lifecycle_hooks_dispatch_complete_and_error_boundaries(
     .expect("post.loop.complete dispatch should succeed");
     assert_eq!(completed_reason, TerminationReason::CompletionPromise);
 
-    let error_reason = block_on_test_future(dispatch_pre_loop_termination_hooks(
+    let error_reason = block_on_test_future(common::dispatch_pre_loop_termination_hooks(
         &event_loop,
         true,
         "loop-test",
@@ -2152,7 +1794,7 @@ fn test_loop_termination_lifecycle_hooks_dispatch_complete_and_error_boundaries(
         TerminationReason::MaxRuntime,
     ))
     .expect("pre.loop.error dispatch should succeed");
-    let error_reason = block_on_test_future(dispatch_post_loop_termination_hooks(
+    let error_reason = block_on_test_future(common::dispatch_post_loop_termination_hooks(
         &event_loop,
         true,
         "loop-test",
@@ -4516,11 +4158,7 @@ fn missing_global_wave_backend() -> CliBackend {
         env_vars: vec![],
     };
 
-    if let Some(bin_dir) = FAKE_PATH_BACKEND_BIN
-        .lock()
-        .expect("fake PATH backend bin lock")
-        .clone()
-    {
+    if let Some(bin_dir) = read_fake_path_backend_bin() {
         let existing_path = std::env::var("PATH").unwrap_or_default();
         let path_value = if existing_path.is_empty() {
             bin_dir.display().to_string()

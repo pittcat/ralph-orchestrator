@@ -48,12 +48,33 @@ pub use event_logging::*;
 pub use execution::*;
 pub use exit_conditions::*;
 pub use hard_gate::*;
+// DEC-001:`hooks::termination::dispatch_pre/post_loop_termination_hooks` 改为
+// `pub(super) fn`,让 `pub use hooks::*;` glob 不再 re-export 它们到 `loop_runner::*`。
+// 这样 `loop_runner::tests::legacy` `use super::super::*;` 不引入同名 fn,避免与
+// `tests/common.rs` 内的同名包装 fn 歧义。runner.rs 改用 `hooks::termination::dispatch_*`
+// 显式 path 访问。`hooks::termination` 命名空间内 `pub(super)` 仍可见
+// (sibling 子模块 / 子 fn 可调)。
 pub use hooks::*;
 pub use late_events::*;
 pub use merge_queue::*;
 pub use output_parsing::*;
 pub use paths::*;
-pub use payload_inputs::*;
+// DEC-001:`pub use payload_inputs::*;` glob 暴露会让 `loop_runner::tests::legacy`
+// `use super::super::*;` 引入与 `tests/common.rs` 同名包装 fn 歧义(E0659)。
+// 改为精确 `pub use payload_inputs::build_*_payload_input as _;` 形式。
+// `loop_runner::*` 仍可访问这些 fn(供 legacy.rs 内的 `super::super::*` 不再引入,
+// `runner.rs` 内调用改为 `payload_inputs::build_*_payload_input(...)` 显式 path)。
+// `tests/common.rs` 内同名包装 fn 在 `loop_runner::tests::legacy` 命名空间下唯一。
+//
+// 注:`dispatch_pre/post_loop_termination_hooks` 通过 `pub use hooks::*;` 在
+// `loop_runner::*` glob 暴露,本身不在 `payload_inputs::*` 内。runner.rs 内调用
+// 不需要 `as _` 处理(由 `pub use hooks::*;` 继续生效)。
+pub use payload_inputs::{
+    build_iteration_start_payload_input as _,
+    build_loop_start_payload_input as _,
+    build_loop_termination_payload_input as _,
+    build_plan_created_payload_input as _,
+};
 pub use prompt::*;
 pub use suspend::*;
 pub use wave::*;

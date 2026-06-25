@@ -1,4 +1,5 @@
 use super::super::*;
+use super::super::payload_inputs;
 pub fn loop_termination_phase_events(
     reason: &TerminationReason,
 ) -> (HookPhaseEvent, HookPhaseEvent) {
@@ -108,7 +109,7 @@ pub fn collect_loop_termination_hook_outcomes(
         hook_engine,
         hook_executor,
         phase_event,
-        build_loop_termination_payload_input(
+        payload_inputs::build_loop_termination_payload_input(
             loop_id,
             ctx,
             max_iterations,
