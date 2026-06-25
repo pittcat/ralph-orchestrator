@@ -1,7 +1,7 @@
 ---
 title: "feat: ce-executor-serial 终审扩展为 5 维度并赋予 Coordinator 计划修正自主性"
 type: feat
-status: active
+status: u6-closed-u7-pending
 date: 2026-06-25
 origin: docs/brainstorms/2026-06-25-ce-executor-serial-review-dimensions-and-coordinator-autonomy.md
 ---

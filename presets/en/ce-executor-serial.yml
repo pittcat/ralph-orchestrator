@@ -560,10 +560,75 @@ hats:
       ### Constraints
       - MUST NOT implement code
       - MUST NOT create future-step tasks (trivial mode excepted)
-      - MUST NOT modify the plan file
+      - MUST NOT modify the plan file (original plan is **read-only**; see Same-Plan Learning & Plan Amendment Protocol below for the only sanctioned mechanism — amendments go to `plan-amendments.md`, not the plan)
       - MUST complete all file creation and task creation before publishing `work.ready`
       - **MUST NOT publish events for any hat other than coordinator** (work.ready / review.start / plan.complete / plan.blocked only)
       - **MUST NOT create, switch, or rename branches** — see Branch / Worktree Policy above
+      - **MUST NOT call `ce-plan` skill or any other plan-regenerating skill** — Coordinator composes amendments locally from scratchpad artifacts; invoking a plan-regeneration skill would risk altering the original plan file (a HARD RULE violation) and would also exceed this preset's role boundary.
+
+      ### Same-Plan Learning & Plan Amendment Protocol (2026-06-25 plan 001 U7 — R6/R7/R8/R10/R11/R12)
+      The Coordinator may, on its own initiative, **split / merge / reorder** Implementation Units when doing so is justified by observed patterns within the same plan. Target, acceptance criteria, scope boundaries, and Requirements Trace are **inviolable** — amendments may only reshape how Units are sequenced or partitioned, never what the plan must achieve.
+
+      #### Inputs to read on every activation
+      Before deciding whether an amendment is warranted, read the following artifacts (all under the current plan's scratchpad unless noted):
+      - `.ralph/agent/memories.md` — cross-iteration memories accumulated by all hats on this plan.
+      - `.ralph/agent/decisions.md` — Coordinator + executor decisions recorded under the Confidence Protocol.
+      - `.agents/scratchpad/ce-executor/{plan_name}/fix-log.md` — what the fixer already tried (avoid replaying the same dead-end fix paths).
+      - `.agents/scratchpad/ce-executor/{plan_name}/findings.md` — review findings from the most recent review wave (when present).
+      - `.agents/scratchpad/ce-executor/{plan_name}/plan-amendments.md` — prior amendments (if any) so new ones compose with existing Change Mapping.
+      - Recent event payloads available in the prompt context (e.g. `## RECENT EVENTS` block, `.ralph/events.jsonl` tail) — focus on:
+        - `test.failed.payload.failures` / `test_errors` — recurring failure clusters.
+        - `review.dimension.done.payload.findings_count` / `findings_file` — repeated finding patterns per dimension.
+        - `review.complete.payload.verdict` / `fix_plan_file` — overall review outcome.
+
+      #### Pattern recognition heuristic
+      Consider an amendment when ANY of these signals appears at least twice in the inputs above for the same target file, unit, or failure mode:
+      - The same file is named in `test.failed` payloads across consecutive iterations.
+      - The same review-dimension finding (or near-duplicate) recurs in `findings.md` after a prior `fix.applied`.
+      - A unit's `**Verification:**` block keeps failing its stated criteria despite multiple fix attempts.
+      - The current unit's scope (Files / Approach) demonstrably exceeds the executor's typical one-iteration budget (heuristic: ≥ 5 files, or a `**Files:**` list spanning multiple crates).
+      - An Implementation Unit appears so small (e.g. a single renaming) that dispatching it as its own task would burn more iterations on overhead than on the change itself.
+
+      #### Confidence protocol
+      Score the amendment decision on the same 0–100 scale used elsewhere in this preset:
+      - **> 80 (autonomous amendment):** record `DEC-NNN` in `.ralph/agent/decisions.md` (Confidence column carries the score), then write the amendment per the schema below and dispatch the next unit normally.
+      - **50 – 80 (record and proceed):** record `DEC-NNN` with the chosen Option and Reasoning, but **do not** amend the unit sequence. Continue with the original plan ordering. The DEC entry itself is the artifact for future activations to revisit.
+      - **< 50 (stop and request user):** publish `work.failed` with `reason: "amendment confidence < 50: <summary>"` and stop. There is no acceptable safe default in this regime — pausing is the safe default.
+
+      #### Amendment file schema
+      All amendments go to `.agents/scratchpad/ce-executor/{plan_name}/plan-amendments.md` (do **not** create per-amendment files). Each amendment follows this structure:
+
+      ```markdown
+      ### AMEND-NNN — <short title>
+      - **Trigger**: <which input(s) above justified this amendment>
+      - **Confidence**: <0-100>
+      - **Effective From Step**: <step-NN or fix-NN>
+      - **Requirements (R-IDs)**: R<id>, ...
+      - **Change Mapping**:
+        - 原始 U<orig> → 新 U<new> (拆分 | 合并 | 重排 — pick exactly one per line)
+      - **Implementation Units** (one block per new U):
+        - ### U<new>. <title>
+          - **Goal**: ...
+          - **Files**: ...
+          - **Approach**: ...
+          - **Test scenarios**: ...
+          - **Verification**: ...
+      - **Verification (overall)**: ...
+      ```
+
+      After appending the amendment, also update the scratchpad `plan.md` (the derived mirror under `.agents/scratchpad/ce-executor/{plan_name}/`) to reflect the new step ordering. The **original** plan file at `docs/plans/...` is never touched.
+
+      #### Sub-unit keys (R4 carve-out)
+      When an amendment splits a Unit into sub-units, use keys that match the existing R4 carve-out so the runtime collapses them to the same base:
+      - `ce-executor:{plan_name}:step-{NN}:u{N}a-impl`
+      - `ce-executor:{plan_name}:step-{NN}:u{N}b-impl`
+      - `ce-executor:{plan_name}:step-{NN}:u{N}c-impl`
+      The `step` field stays as `step-{NN}`; only the key suffix distinguishes sub-units. Example: `ce-executor:my-plan:step-03:u3a-interface` and `...:u3b-implementation`.
+
+      #### Work contract
+      - **No new event topic.** Amendments are conveyed through the existing `work.ready` payload via an optional field `amendment_path` (path to `plan-amendments.md`, may be omitted when no amendment was made). Omitting the field is the normal path; the runtime does not require it.
+      - **MUST NOT** mutate the original plan file. The amendment file is the only sanctioned artifact for reshaping Units.
+      - **MUST** record every confidence-graded decision in `decisions.md` (≥ 50 band) before publishing the next `work.ready`.
 
       ### Plan Frontmatter Status Discipline (HARD RULE)
       - After every unit closure (i.e. when a `test.passed` lands and the corresponding runtime task is `closed`), the **next** coordinator activation MUST update the plan's YAML frontmatter `status` field before publishing the next `work.ready`.

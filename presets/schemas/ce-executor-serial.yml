@@ -47,6 +47,14 @@
 #   - test.passed  — validator emits when full test suite passes
 #   - test.failed  — validator emits when full test suite fails
 #   - review.start — coordinator emits to trigger overall review after all units done
+#
+# 2026-06-25 plan 001 U7: coordinator gained a Same-Plan Learning & Plan
+# Amendment Protocol (see `presets/en/ce-executor-serial.yml` →
+# `coordinator.instructions`). The amendment flow uses ONLY existing
+# topics — `work.ready` may carry an optional `amendment_path` payload
+# field, but `required_fields` is unchanged. No new topics are
+# introduced; original plan files remain read-only; amendments land in
+# `.agents/scratchpad/ce-executor/{plan_name}/plan-amendments.md`.
 
 schemas:
   work.ready:
