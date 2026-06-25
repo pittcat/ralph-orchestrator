@@ -1,7 +1,7 @@
 ---
 title: 拆分 event_loop/mod.rs 与 loop_runner/tests.rs（零回归分模块）
 type: refactor
-status: draft-after-v14
+status: u1-closed-u2-pending
 date: 2026-06-10
 baseline_refreshed: 2026-06-25
 baseline_head: 507a8839

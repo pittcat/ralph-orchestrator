@@ -929,7 +929,7 @@ async fn run_loop_impl_inner(
         &hook_engine,
         &hook_executor,
         HookPhaseEvent::PreLoopStart,
-        build_loop_start_payload_input(
+        payload_inputs::build_loop_start_payload_input(
             &loop_id,
             &ctx,
             config.event_loop.max_iterations,
@@ -963,7 +963,7 @@ async fn run_loop_impl_inner(
             &hook_engine,
             &hook_executor,
             HookPhaseEvent::PostLoopStart,
-            build_loop_start_payload_input(
+            payload_inputs::build_loop_start_payload_input(
                 &loop_id,
                 &ctx,
                 config.event_loop.max_iterations,
@@ -1886,7 +1886,7 @@ async fn run_loop_impl_inner(
         };
 
     if let Some(reason) = pending_suspend_termination_reason.take() {
-        let reason = dispatch_pre_loop_termination_hooks(
+        let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
             &event_loop,
             hooks_dispatch_enabled,
             &loop_id,
@@ -1908,7 +1908,7 @@ async fn run_loop_impl_inner(
             Some(event_loop.registry().current_phase().to_string()),
         );
 
-        let reason = dispatch_post_loop_termination_hooks(
+        let reason = hooks::termination::dispatch_post_loop_termination_hooks(
             &event_loop,
             hooks_dispatch_enabled,
             &loop_id,
@@ -1992,7 +1992,7 @@ async fn run_loop_impl_inner(
                 );
                 let _ = killpg(pgid, Signal::SIGKILL);
             }
-            let reason = dispatch_pre_loop_termination_hooks(
+            let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
                 &loop_id,
@@ -2014,7 +2014,7 @@ async fn run_loop_impl_inner(
                 Some(event_loop.registry().current_phase().to_string()),
             );
 
-            let reason = dispatch_post_loop_termination_hooks(
+            let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
                 &loop_id,
@@ -2159,7 +2159,7 @@ async fn run_loop_impl_inner(
         }
         let hint_reason = drift_engine.check_termination_hint(&event_loop);
         if let Some(reason) = event_loop.check_termination().or(hint_reason) {
-            let reason = dispatch_pre_loop_termination_hooks(
+            let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
                 &loop_id,
@@ -2182,7 +2182,7 @@ async fn run_loop_impl_inner(
                 Some(event_loop.registry().current_phase().to_string()),
             );
 
-            let reason = dispatch_post_loop_termination_hooks(
+            let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
                 &loop_id,
@@ -2224,7 +2224,7 @@ async fn run_loop_impl_inner(
                 &hook_engine,
                 &hook_executor,
                 HookPhaseEvent::PreIterationStart,
-                build_iteration_start_payload_input(
+                payload_inputs::build_iteration_start_payload_input(
                     &loop_id,
                     &ctx,
                     config.event_loop.max_iterations,
@@ -2248,7 +2248,7 @@ async fn run_loop_impl_inner(
             )
             .await?
             {
-                let reason = dispatch_pre_loop_termination_hooks(
+                let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                     &event_loop,
                     hooks_dispatch_enabled,
                     &loop_id,
@@ -2270,7 +2270,7 @@ async fn run_loop_impl_inner(
                     Some(event_loop.registry().current_phase().to_string()),
                 );
 
-                let reason = dispatch_post_loop_termination_hooks(
+                let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                     &event_loop,
                     hooks_dispatch_enabled,
                     &loop_id,
@@ -2325,7 +2325,7 @@ async fn run_loop_impl_inner(
                         continue;
                     }
                     Some(LateEventRecovery::Terminate(reason)) => {
-                        let reason = dispatch_pre_loop_termination_hooks(
+                        let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                             &event_loop,
                             hooks_dispatch_enabled,
                             &loop_id,
@@ -2347,7 +2347,7 @@ async fn run_loop_impl_inner(
                             Some(event_loop.registry().current_phase().to_string()),
                         );
 
-                        let reason = dispatch_post_loop_termination_hooks(
+                        let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                             &event_loop,
                             hooks_dispatch_enabled,
                             &loop_id,
@@ -2390,7 +2390,7 @@ async fn run_loop_impl_inner(
                         "Fallback recovery exhausted after {} attempts, terminating",
                         MAX_FALLBACK_ATTEMPTS
                     );
-                    let reason = dispatch_pre_loop_termination_hooks(
+                    let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                         &event_loop,
                         hooks_dispatch_enabled,
                         &loop_id,
@@ -2412,7 +2412,7 @@ async fn run_loop_impl_inner(
                         Some(event_loop.registry().current_phase().to_string()),
                     );
 
-                    let reason = dispatch_post_loop_termination_hooks(
+                    let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                         &event_loop,
                         hooks_dispatch_enabled,
                         &loop_id,
@@ -2517,7 +2517,7 @@ async fn run_loop_impl_inner(
 
                 // Fallback not possible (no planner hat or doesn't subscribe to task.resume)
                 warn!("No hats with pending events and fallback not available, terminating");
-                let reason = dispatch_pre_loop_termination_hooks(
+                let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                     &event_loop,
                     hooks_dispatch_enabled,
                     &loop_id,
@@ -2540,7 +2540,7 @@ async fn run_loop_impl_inner(
                     Some(event_loop.registry().current_phase().to_string()),
                 );
 
-                let reason = dispatch_post_loop_termination_hooks(
+                let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                     &event_loop,
                     hooks_dispatch_enabled,
                     &loop_id,
@@ -2595,7 +2595,7 @@ async fn run_loop_impl_inner(
             &hook_engine,
             &hook_executor,
             HookPhaseEvent::PostIterationStart,
-            build_iteration_start_payload_input(
+            payload_inputs::build_iteration_start_payload_input(
                 &loop_id,
                 &ctx,
                 config.event_loop.max_iterations,
@@ -2619,7 +2619,7 @@ async fn run_loop_impl_inner(
         )
         .await?
         {
-            let reason = dispatch_pre_loop_termination_hooks(
+            let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
                 &loop_id,
@@ -2641,7 +2641,7 @@ async fn run_loop_impl_inner(
                 Some(event_loop.registry().current_phase().to_string()),
             );
 
-            let reason = dispatch_post_loop_termination_hooks(
+            let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
                 &loop_id,
@@ -3021,7 +3021,7 @@ async fn run_loop_impl_inner(
                     let _ = killpg(pgid, Signal::SIGKILL);
                 }
 
-                let reason = dispatch_pre_loop_termination_hooks(
+                let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                     &event_loop,
                     hooks_dispatch_enabled,
                     &loop_id,
@@ -3038,7 +3038,7 @@ async fn run_loop_impl_inner(
                 let terminate_event = event_loop.publish_terminate_event(&reason);
                 log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event, Some(event_loop.registry().current_phase().to_string()));
 
-                let reason = dispatch_post_loop_termination_hooks(
+                let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                     &event_loop,
                     hooks_dispatch_enabled,
                     &loop_id,
@@ -3079,7 +3079,7 @@ async fn run_loop_impl_inner(
         }
 
         if let Some(reason) = outcome.termination {
-            let reason = dispatch_pre_loop_termination_hooks(
+            let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
                 &loop_id,
@@ -3101,7 +3101,7 @@ async fn run_loop_impl_inner(
                 Some(event_loop.registry().current_phase().to_string()),
             );
 
-            let reason = dispatch_post_loop_termination_hooks(
+            let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
                 &loop_id,
@@ -3226,7 +3226,7 @@ async fn run_loop_impl_inner(
                 );
             }
 
-            let reason = dispatch_pre_loop_termination_hooks(
+            let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
                 &loop_id,
@@ -3249,7 +3249,7 @@ async fn run_loop_impl_inner(
                 Some(event_loop.registry().current_phase().to_string()),
             );
 
-            let reason = dispatch_post_loop_termination_hooks(
+            let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
                 &loop_id,
@@ -3304,7 +3304,7 @@ async fn run_loop_impl_inner(
                 &hook_engine,
                 &hook_executor,
                 HookPhaseEvent::PrePlanCreated,
-                build_plan_created_payload_input(
+                payload_inputs::build_plan_created_payload_input(
                     &loop_id,
                     &ctx,
                     config.event_loop.max_iterations,
@@ -3328,7 +3328,7 @@ async fn run_loop_impl_inner(
             )
             .await?
             {
-                let reason = dispatch_pre_loop_termination_hooks(
+                let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                     &event_loop,
                     hooks_dispatch_enabled,
                     &loop_id,
@@ -3350,7 +3350,7 @@ async fn run_loop_impl_inner(
                     Some(event_loop.registry().current_phase().to_string()),
                 );
 
-                let reason = dispatch_post_loop_termination_hooks(
+                let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                     &event_loop,
                     hooks_dispatch_enabled,
                     &loop_id,
@@ -3837,7 +3837,7 @@ async fn run_loop_impl_inner(
                 &hook_engine,
                 &hook_executor,
                 HookPhaseEvent::PostPlanCreated,
-                build_plan_created_payload_input(
+                payload_inputs::build_plan_created_payload_input(
                     &loop_id,
                     &ctx,
                     config.event_loop.max_iterations,
@@ -3861,7 +3861,7 @@ async fn run_loop_impl_inner(
             )
             .await?
             {
-                let reason = dispatch_pre_loop_termination_hooks(
+                let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                     &event_loop,
                     hooks_dispatch_enabled,
                     &loop_id,
@@ -3883,7 +3883,7 @@ async fn run_loop_impl_inner(
                     Some(event_loop.registry().current_phase().to_string()),
                 );
 
-                let reason = dispatch_post_loop_termination_hooks(
+                let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                     &event_loop,
                     hooks_dispatch_enabled,
                     &loop_id,
@@ -4285,7 +4285,7 @@ async fn run_loop_impl_inner(
                 config.event_loop.completion_promise
             );
 
-            let reason = dispatch_pre_loop_termination_hooks(
+            let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
                 &loop_id,
@@ -4307,7 +4307,7 @@ async fn run_loop_impl_inner(
                 Some(event_loop.registry().current_phase().to_string()),
             );
 
-            let reason = dispatch_post_loop_termination_hooks(
+            let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
                 &loop_id,
@@ -4355,7 +4355,7 @@ async fn run_loop_impl_inner(
                     config.event_loop.completion_promise
                 );
 
-                let reason = dispatch_pre_loop_termination_hooks(
+                let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                     &event_loop,
                     hooks_dispatch_enabled,
                     &loop_id,
@@ -4377,7 +4377,7 @@ async fn run_loop_impl_inner(
                     Some(event_loop.registry().current_phase().to_string()),
                 );
 
-                let reason = dispatch_post_loop_termination_hooks(
+                let reason = hooks::termination::dispatch_post_loop_termination_hooks(
                     &event_loop,
                     hooks_dispatch_enabled,
                     &loop_id,

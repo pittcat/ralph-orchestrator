@@ -48,12 +48,27 @@ pub use event_logging::*;
 pub use execution::*;
 pub use exit_conditions::*;
 pub use hard_gate::*;
+// DEC-001:`hooks::termination::dispatch_pre/post_loop_termination_hooks` 改为
+// `pub(super) fn`,让 `pub use hooks::*;` glob 不再 re-export 它们到 `loop_runner::*`。
+// 这样 `loop_runner::tests::legacy` `use super::super::*;` 不引入同名 fn,避免与
+// `tests/common.rs` 内的同名包装 fn 歧义。runner.rs 改用 `hooks::termination::dispatch_*`
+// 显式 path 访问。`hooks::termination` 命名空间内 `pub(super)` 仍可见
+// (sibling 子模块 / 子 fn 可调)。
 pub use hooks::*;
 pub use late_events::*;
 pub use merge_queue::*;
 pub use output_parsing::*;
 pub use paths::*;
-pub use payload_inputs::*;
+// DEC-001/DEC-002:`pub use payload_inputs::*;` glob 暴露会让 `loop_runner::tests::legacy`
+// `use super::super::*;` 引入与 `tests/common.rs` 同名包装 fn 歧义(E0659)。runner.rs 内
+// 全部 `build_*_payload_input` 调用已改用 `payload_inputs::*` 显式 path(commit `c64882f6`),
+// 无需 re-export。这里**不**做 `pub use payload_inputs::*;` glob,保持外部访问唯一路径:
+//   - `loop_runner::payload_inputs::build_*_payload_input` (供 tests/common.rs / runner.rs)
+//   - 不暴露 `loop_runner::build_*_payload_input` 短名(避免 E0659)
+//
+// 注:`dispatch_pre/post_loop_termination_hooks` 通过 `pub use hooks::*;` 在
+// `loop_runner::*` glob 暴露,本身不在 `payload_inputs::*` 内。runner.rs 内调用
+// 不需要处理(由 `pub use hooks::*;` 继续生效)。
 pub use prompt::*;
 pub use suspend::*;
 pub use wave::*;
