@@ -1501,15 +1501,20 @@ hats:
       ### Mode-Aware Demotion
       Some findings are real but do not warrant primary-findings attention. Route them to soft buckets (testing_gaps, residual_risks).
 
+      The 5-dimension sequence (`correctness`, `testing`, `maintainability`, `project-standards`, `adversarial`) splits into two demotion-tiers:
+      - **Soft-demotion eligible dimensions**: `testing`, `maintainability`. P2/P3 advisory findings contributed ONLY by these dimensions may demote.
+      - **Red-Team / standards dimensions**: `project-standards`, `adversarial`. P0/P1 findings from these dimensions NEVER demote — they always stay in primary findings, because suppressing a Red-Team or standards signal would defeat the purpose of the gate. Even P2/P3 advisory findings contributed by these dimensions keep their default routing (demotion is still possible only when ALL contributing dimensions are in the soft tier, not when ANY Red-Team / standards dimension is among the contributors).
+
       A finding qualifies for demotion when ALL of these hold:
       - Severity is P2 or P3 (P0 and P1 always stay in primary findings)
       - `autofix_class` is `advisory` (concrete-fix findings stay in primary)
-      - ALL contributing dimensions are `testing` (if `correctness` also flagged this finding, cross-reviewer corroboration is present → keep in primary)
+      - ALL contributing dimensions are in the soft-demotion tier (`testing` or `maintainability`) — if any other dimension (`correctness`, `project-standards`, `adversarial`) also flagged this finding, cross-reviewer corroboration is present → keep in primary
 
       When a finding qualifies:
-      - If `testing` dimension → append `file:line — title` to `testing_gaps`
+      - If `testing` dimension is among contributors → append `file:line — title` to `testing_gaps`
+      - Else (only `maintainability` is a contributor) → append `file:line — title` to `residual_risks`
       - Remove the finding from primary findings set
-      - Record demotion count for Coverage
+      - Record demotion count for Coverage, broken down by destination bucket
 
       ### Confidence Gate
       - After promotion and demotion, suppress remaining findings below anchor 75
@@ -1566,10 +1571,19 @@ hats:
 
       ### Per-Sequence Coverage
       Unlike the wave preset, the serial path has no `wave_id` /
-      `wave_total` to track. Coverage just needs to report the
-      per-dim `status` from the `review.dimensions.complete` payload
-      and the per-dim finding counts. The `aggregator counter` is
-      the `dimensions` array length — never count a different
+      `wave_total` to track. Coverage MUST report status and findings
+      count for each of the 5 dimensions in the fixed sequence
+      `correctness`, `testing`, `maintainability`, `project-standards`,
+      `adversarial`. For every dimension entry in the
+      `review.dimensions.complete` payload, Coverage records:
+      - `dimension` — the dimension name (one of the 5 fixed)
+      - `status` — from the per-dim entry (`done` / `failed` / `skipped`)
+      - `findings_count` — count from the per-dim findings file (0 if
+        `status != done` or `findings_file` is null/missing)
+      - `bucket` — primary / testing_gaps / residual_risks / suppressed / dropped
+      - `severity_breakdown` — P0/P1/P2/P3 counts within primary findings
+      The `aggregator counter` is the `dimensions` array length
+      (always 5 in the serial preset) — never count a different
       stream (e.g. `review.dimension.done` events in jsonl) because
       a previous review's stale events would corrupt the count.
 
