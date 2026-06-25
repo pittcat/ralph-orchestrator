@@ -9,7 +9,6 @@ use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 /// Status of a preflight check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

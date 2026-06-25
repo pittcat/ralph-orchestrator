@@ -11,11 +11,10 @@ Detailed module path index. For high-level architecture + isolation policy, see 
 ## Crate Map
 
 ```
-ralph-proto    → Foundation types: Event, Hat, HatId, Topic, EventBus, RobotService
+ralph-proto    → Foundation types: Event, Hat, HatId, Topic, EventBus
 ralph-core     → Orchestration logic, event loop, state machine, hats, memories, tasks, hooks, skills
 ralph-adapters → Backend adapters (Claude, Kiro, Gemini, Codex, Amp, Copilot CLI, OpenCode)
-ralph-cli      → CLI entry point, commands (run, plan, task, loops, web, mcp, wave, bot)
-ralph-telegram → Telegram bot for human-in-the-loop communication
+ralph-cli      → CLI entry point, commands (run, plan, task, loops, web, mcp, wave)
 ralph-tui      → Terminal UI (ratatui-based)
 ralph-e2e      → End-to-end test framework (scenarios, mock CLI, reporters)
 ralph-api      → Rust RPC API server for web dashboard backend
@@ -69,9 +68,8 @@ CLI Config → HaBackend → auto_detect → CliExecutor / PtyExecutor → Strea
 | Lock coordination | `crates/ralph-core/src/worktree.rs`, `loop_lock.rs`, `file_lock.rs` | Git-worktree + lockfiles |
 | Loop registry | `crates/ralph-core/src/loop_registry.rs` | Tracked loops across worktrees |
 | Merge queue | `crates/ralph-core/src/merge_queue.rs` | Event-sourced queue |
-| Config | `crates/ralph-core/src/config/` | v1/v2 compat; `robot.rs` for RObot |
-| CLI commands | `crates/ralph-cli/src/` | `commands/`, `cli/`, `loops.rs`, `task_cli.rs`, `wave.rs`, `bot.rs`, `web.rs`, `mcp.rs`, `init.rs`, `hats.rs`, `presets.rs`, `hooks.rs`, `tools.rs`, `doctor.rs` |
-| Telegram | `crates/ralph-telegram/src/` | bot, service, state, handler |
+| Config | `crates/ralph-core/src/config/` | v1/v2 compat |
+| CLI commands | `crates/ralph-cli/src/` | `commands/`, `cli/`, `loops.rs`, `task_cli.rs`, `wave.rs`, `web.rs`, `mcp.rs`, `init.rs`, `hats.rs`, `presets.rs`, `hooks.rs`, `tools.rs`, `doctor.rs` |
 | Wave | `crates/ralph-core/src/wave_tracker.rs`, `wave_detection.rs`, `wave_prompt.rs`; CLI in `crates/ralph-cli/src/wave.rs`; loop dispatch in `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` | Intra-loop parallelism |
 | Adapters | `crates/ralph-adapters/src/` | `cli_backend.rs`, `cli_executor.rs`, `pty_executor.rs`, `auto_detect.rs`, stream parsers |
 | Preflight | `crates/ralph-core/src/preflight.rs` | Acceptance criteria extraction / validation |
@@ -82,7 +80,7 @@ CLI Config → HaBackend → auto_detect → CliExecutor / PtyExecutor → Strea
 | E2E | `crates/ralph-e2e/src/` | scenarios, mock CLI, reporter |
 | BDD scenarios | `crates/ralph-core/tests/scenarios/` | YAML integration scenarios |
 | Smoke fixtures | `crates/ralph-core/tests/fixtures/` | Recorded JSONL for replay |
-| Proto types | `crates/ralph-proto/src/` | `Event`, `Hat`, `HatId`, `Topic`, `EventBus`, `RobotService`, `DaemonAdapter`, `FrameCapture`, `UxEvent` |
+| Proto types | `crates/ralph-proto/src/` | `Event`, `Hat`, `HatId`, `Topic`, `EventBus`, `FrameCapture`, `UxEvent` |
 
 ## Key Files (.ralph/ artifacts)
 
@@ -93,7 +91,6 @@ CLI Config → HaBackend → auto_detect → CliExecutor / PtyExecutor → Strea
 | `.ralph/loop.lock` | Contains PID + prompt of primary loop |
 | `.ralph/loops.json` | Registry of all tracked loops. `worktree_path: Option<String>` + `workspace: String` — `None`/`Some(_)` is the canonical primary-vs-worktree signal. Lives only in the main repo. |
 | `.ralph/merge-queue.jsonl` | Event-sourced merge queue |
-| `.ralph/telegram-state.json` | Telegram bot state (chat ID, pending questions) |
 | `.ralph/diagnostics/<timestamp>/` | Per-session logs (behind `RALPH_DIAGNOSTICS=1`) |
 | `docs/solutions/` | Documented solutions (YAML frontmatter: `module`, `tags`, `problem_type`) |
 | `docs/guide/harness-extensions.md` | User guide for Harness 4 extension mechanisms |

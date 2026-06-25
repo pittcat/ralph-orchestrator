@@ -123,26 +123,25 @@ fn main() {
 
     let mut copied = 0usize;
     for name in &names {
-        if name.is_empty() {
-            panic!("build.rs: manifest contains an empty preset name");
-        }
-        if name.contains('/') || name.contains('\\') || name.contains("..") {
-            panic!(
-                "build.rs: manifest preset name `{}` is not a bare basename",
-                name
-            );
-        }
+        assert!(
+            !name.is_empty(),
+            "build.rs: manifest contains an empty preset name"
+        );
+        assert!(
+            !(name.contains('/') || name.contains('\\') || name.contains("..")),
+            "build.rs: manifest preset name `{}` is not a bare basename",
+            name
+        );
         let src = en_dir.join(format!("{}.yml", name));
         let dest_file = dest.join(format!("{}.yml", name));
-        if !src.is_file() {
-            panic!(
-                "build.rs: manifest lists `{}` but presets/en/{}.yml does not exist \
-                 (looked at {}). Add the file or remove the name from manifest.yml.",
-                name,
-                name,
-                src.display()
-            );
-        }
+        assert!(
+            src.is_file(),
+            "build.rs: manifest lists `{}` but presets/en/{}.yml does not exist \
+             (looked at {}). Add the file or remove the name from manifest.yml.",
+            name,
+            name,
+            src.display()
+        );
         println!("cargo:rerun-if-changed={}", src.display());
 
         // Schema SSOT merge (plan 2026-06-16-002 Unit 1). When a
@@ -222,14 +221,26 @@ fn parse_embedded_names(text: &str) -> Result<Vec<String>, String> {
         if line.is_empty() {
             continue;
         }
-        if !in_embedded {
+        if in_embedded {
+            let stripped = line.trim_start();
+            if let Some(item) = stripped.strip_prefix("- ") {
+                let n = item.trim().trim_matches('"').trim_matches('\'');
+                if n.is_empty() {
+                    return Err(format!("line {}: empty entry in `embedded:` list", idx + 1));
+                }
+                names.push(n.to_string());
+            } else if !stripped.is_empty() {
+                // Another top-level key — the embedded block has ended.
+                in_embedded = false;
+            }
+        } else {
             // Look for "embedded:" at the start of a line (allowing leading spaces).
             let stripped = line.trim_start();
-            if stripped.starts_with("embedded:") {
+            if let Some(rest) = stripped.strip_prefix("embedded:") {
                 found_embedded_key = true;
                 in_embedded = true;
                 // Allow `embedded: [a, b, c]` flow-style too.
-                let rest = stripped["embedded:".len()..].trim();
+                let rest = rest.trim();
                 if let Some(inner) = rest.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
                     for n in inner.split(',') {
                         let n = n.trim().trim_matches('"').trim_matches('\'');
@@ -244,18 +255,6 @@ fn parse_embedded_names(text: &str) -> Result<Vec<String>, String> {
             // Any other top-level key terminates the search.
             if !line.starts_with(' ') && !line.starts_with('\t') && line.contains(':') {
                 return Err(format!("line {}: unexpected key `{}`", idx + 1, line));
-            }
-        } else {
-            let stripped = line.trim_start();
-            if stripped.starts_with("- ") {
-                let n = stripped[2..].trim().trim_matches('"').trim_matches('\'');
-                if n.is_empty() {
-                    return Err(format!("line {}: empty entry in `embedded:` list", idx + 1));
-                }
-                names.push(n.to_string());
-            } else if !stripped.is_empty() {
-                // Another top-level key — the embedded block has ended.
-                in_embedded = false;
             }
         }
     }

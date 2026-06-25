@@ -170,5 +170,3 @@ pub(super) fn setup_loop_with_workflow_guards() -> EventLoop {
 
     EventLoop::new(config)
 }
-
-

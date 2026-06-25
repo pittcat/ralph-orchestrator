@@ -51,10 +51,11 @@ use std::sync::Arc;
 // Shared CLI infrastructure layer (U4 step-01 extraction).
 #[cfg(test)]
 use crate::cli::OutputFormat;
+#[cfg(test)]
+use crate::cli::load_config_with_overrides;
 use crate::cli::{
     ColorMode, ConfigSource, HatsSource, apply_config_overrides, default_config_path,
-    ensure_scratchpad_directory, install_panic_hook, load_config_with_overrides,
-    resolve_path_from_workspace, resolve_workspace_root,
+    install_panic_hook, resolve_path_from_workspace, resolve_workspace_root,
 };
 use ralph_core::diagnostics::DiagnosticsCollector;
 

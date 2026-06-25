@@ -1,10 +1,10 @@
 ---
-description: Parallel Loops / Waves / RObot (Telegram) / Smoke / E2E / Presets feature flag reference
-globs: ["**/presets/**/*.yml", "**/presets/index.json", "**/presets/manifest.yml", "**/crates/ralph-cli/src/wave.rs", "**/crates/ralph-telegram/**/*.rs", "**/.e2e-tests/**"]
+description: Parallel Loops / Waves / Smoke / E2E / Presets feature flag reference
+globs: ["**/presets/**/*.yml", "**/presets/index.json", "**/presets/manifest.yml", "**/crates/ralph-cli/src/wave.rs", "**/.e2e-tests/**"]
 alwaysApply: false
 ---
 
-# Feature Flags & Workflows (Parallel Loops / Waves / RObot / Smoke / E2E)
+# Feature Flags & Workflows (Parallel Loops / Waves / Smoke / E2E)
 
 ## Parallel Loops
 
@@ -92,41 +92,6 @@ cargo run -p ralph-e2e -- --list             # List scenarios
 ```
 
 Reports generated in `.e2e-tests/`.
-
-## RObot (Human-in-the-Loop)
-
-Ralph supports human interaction during orchestration via Telegram. Agents ask questions; humans send proactive guidance.
-
-### Configuration
-
-```yaml
-# ralph.yml
-RObot:
-  enabled: true
-  timeout_seconds: 300    # How long to block waiting for response
-  telegram:
-    bot_token: "your-token"  # Or RALPH_TELEGRAM_BOT_TOKEN env var
-```
-
-### Event Types
-
-| Event / Command | Direction | Purpose |
-|-------|-----------|---------|
-| `human.interact` | Agent → Human | Agent asks a question; loop blocks until response or timeout |
-| `human.response` | Human → Agent | Reply to `human.interact` question |
-| `human.guidance` | Human → Agent | Proactive guidance injected as `## ROBOT GUIDANCE` in prompt |
-| `ralph tools interact progress` | Agent → Human | Non-blocking progress notification via Telegram (no event, direct send) |
-
-### How It Works
-
-- Telegram bot starts only on the **primary loop** (holds `.ralph/loop.lock`)
-- When agent emits `human.interact`, event loop sends question via Telegram and **blocks**
-- Responses publish as `human.response` events on the bus
-- Proactive messages become `human.guidance` events, squashed into numbered list in prompt
-- Send failures retry with exponential backoff (3 attempts); if all fail → treated as timeout
-- Parallel loops route via reply-to, `@loop-id` prefix, or default to primary
-
-See `crates/ralph-telegram/README.md` for setup instructions.
 
 ## Specs & Tasks
 

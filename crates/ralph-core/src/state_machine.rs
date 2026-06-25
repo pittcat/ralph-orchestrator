@@ -802,8 +802,7 @@ mod tests {
         let mut state = StateMachineRuntimeState::new();
         let config = make_experiment_config();
 
-        let decision =
-            state.validate_event("human.guidance", Some("guidance content"), &config);
+        let decision = state.validate_event("human.guidance", Some("guidance content"), &config);
 
         match decision {
             StateMachineDecision::Accept { instance_key, .. } => {

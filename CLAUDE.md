@@ -10,14 +10,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > **⚠️ HARD RULE 1: 测试入口必须用 `cargo nextest run` 系列**(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`)。**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`——根因是 `crates/ralph-cli/src/loop_runner/tests.rs:14-49` 的 4 个 process-global Mutex + 时间敏感测试(`std::thread::sleep(500ms)`)。Nextest 的 process-per-test 隔离 Mutex 是第一道保险。允许的例外:① `cargo test --doc` 跑 doctest;② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` 强制 flake 兜底（走单线程,仅用于竞态/时序 flake 恢复,不是默认路径）;④ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。详见 `docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`。
 >
-> **⚠️ HARD RULE 2: 默认走并发,确需串行时显式配置**。`ralph-cli` 整个包走 cli-serial 串行(`.config/nextest.toml:17-18, 20-22`,根因:Mutex + sleep CPU 抢占,2026-06-13 已验证不能放开);其他 7 个包(`ralph-proto` / `ralph-core` / `ralph-adapters` / `ralph-telegram` / `ralph-tui` / `ralph-api` / `ralph-bench` / `ralph-e2e`)走 nextest 默认并发(`test-threads = num-cpus`)。**两件事必须同时改**(sleep 改为事件驱动等待 + 4 个静态量改 per-test 隔离)才能放开 ralph-cli 并发,不在本轮范围。
+> **⚠️ HARD RULE 2: 默认走并发,确需串行时显式配置**。`ralph-cli` 整个包走 cli-serial 串行(`.config/nextest.toml:17-18, 20-22`,根因:Mutex + sleep CPU 抢占,2026-06-13 已验证不能放开);其他 6 个包(`ralph-proto` / `ralph-core` / `ralph-adapters` / `ralph-tui` / `ralph-api` / `ralph-bench` / `ralph-e2e`)走 nextest 默认并发(`test-threads = num-cpus`)。**两件事必须同时改**(sleep 改为事件驱动等待 + 4 个静态量改 per-test 隔离)才能放开 ralph-cli 并发,不在本轮范围。
 
 ### 并行 vs 串行分级速查表
 
 | 范围 | 并行/串行 | 触发命令 |
 |---|---|---|
 | `ralph-cli` 全包 | **串行** | `cargo nextest run -p ralph-cli --bin ralph -- <substring>` |
-| 其他 7 个包 | **并行** | `cargo nextest run -p <pkg> -- <substring>` |
+| 其他 6 个包 | **并行** | `cargo nextest run -p <pkg> -- <substring>` |
 | 单包内单测 | 走包级规则 | 同上 |
 | Doctest | 单独跑 | `cargo test --workspace --exclude ralph-e2e --doc` |
 | E2E | 单进程 CLI | `cargo run -p ralph-e2e -- --mock` |
@@ -27,7 +27,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 详细分级 + 根因参见 `.cursor/rules/architecture-modules.mdc`("Code Locations" + 顶部 `ralph-cli` 串行配置)。
 
 ```bash
-# 全 workspace 并行(ralph-cli 串行,其他 7 包并行)——CI 推荐入口
+# 全 workspace 并行(ralph-cli 串行,其他 6 包并行)——CI 推荐入口
 ./scripts/run-tests.sh
 
 # 子集(全部走 nextest,继承包级规则)
@@ -78,16 +78,15 @@ BDD scenarios (YAML, exercise real runtime paths) live in `crates/ralph-core/tes
 > **详细模块路径 / 代码位置表**:`.cursor/rules/architecture-modules.mdc`(自动按 `**/*.rs` glob 加载)
 > **多 hat 隔离 / Agent Output Governance (R1-R6) / preset 单一事实源**:`.cursor/rules/multi-hat-isolation.mdc`
 > **可观测性(Runtime Diagnosis U0-U8 + Doctor) / 诊断**:`.cursor/rules/observability.mdc`
-> **Parallel Loops / Waves / RObot / Smoke / E2E / Specs & Tasks**:`.cursor/rules/feature-flags.mdc`
+> **Parallel Loops / Waves / Smoke / E2E / Specs & Tasks**:`.cursor/rules/feature-flags.mdc`
 
 ### Crate Map (Top-Level)
 
 ```
-ralph-proto → Foundation types: Event, Hat, HatId, Topic, EventBus, RobotService
+ralph-proto → Foundation types: Event, Hat, HatId, Topic, EventBus
 ralph-core → Orchestration logic, event loop, state machine, hats, memories, tasks, hooks, skills
 ralph-adapters → Backend adapters (Claude, Kiro, Gemini, Codex, Amp, Copilot CLI, OpenCode)
-ralph-cli → CLI entry point, commands (run, plan, task, loops, web, mcp, wave, bot)
-ralph-telegram → Telegram bot for human-in-the-loop
+ralph-cli → CLI entry point, commands (run, plan, task, loops, web, mcp, wave)
 ralph-tui → Terminal UI (ratatui-based)
 ralph-e2e → End-to-end test framework
 ralph-api → Rust RPC API server for web dashboard backend
@@ -187,12 +186,12 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
   改完跑全量校验:`./scripts/run-tests.sh`(含 preset_lint + WAC + scenarios + SSOT byte-equality)。
 - Design docs and specs go in `.ralph/specs` and one-off code tasks and bug fixes go in `.ralph/tasks`
 - **`DEVELOPMENT.md` 已弃用**:它描述的是旧 `specs/` 目录规范,已被 `.ralph/specs/` 取代;请遵循本文件「Specs & Tasks」段的规范。
-- **不要手动编辑 `.ralph/` 下的运行时状态文件**(`loop.lock` / `events.jsonl` / `agent/memories.md` / `agent/tasks.jsonl` / `loops.json` / `merge-queue.jsonl` / `telegram-state.json` / `diagnostics/`)。这些由 loop 自己维护;手工改动会与 in-flight 状态错位。确实需要重置时,先停掉所有相关 loop 再用对应 CLI(如 `ralph loops clean`)清理。
+- **不要手动编辑 `.ralph/` 下的运行时状态文件**(`loop.lock` / `events.jsonl` / `agent/memories.md` / `agent/tasks.jsonl` / `loops.json` / `merge-queue.jsonl` / `diagnostics/`)。这些由 loop 自己维护;手工改动会与 in-flight 状态错位。确实需要重置时,先停掉所有相关 loop 再用对应 CLI(如 `ralph loops clean`)清理。
 - **所有中文输出规则**:无论使用哪个 skill 进行操作,所有面向人类的输出——包括但不限于计划文档、设计文档、需求文档、实施计划、任务文件、报告、总结、注释说明、代码 review 意见、PR 描述等——都必须使用中文撰写。不影响:文件名、代码中的字符串字面量、代码注释中的技术标识符(如变量名、函数名、crate 名)、命令行输出块。这条规则优先于任何 skill 内置的语言默认值。
 - **CLAUDE.md 与 AGENTS.md 同步规则**:这两个文件必须保持内容完全一致。修改其中一个时,必须同步更新另一个(推荐 `cp CLAUDE.md AGENTS.md`),确保不会出现差异。
 - **测试入口强制 nextest(HARD RULE 1 + 2)**:
   - **HARD RULE 1**:本项目所有测试入口必须是 `cargo nextest run` 系列(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`),**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`。根因是 `crates/ralph-cli/src/loop_runner/tests.rs:14-49` 的 4 个 process-global Mutex + 时间敏感测试。允许的例外:① `cargo test --doc` 跑 doctest;② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。
-  - **HARD RULE 2**:默认走并发,确需串行时显式配置。**能用并行的必须用并行**(快是默认值,不是可选优化)。具体分级见「Build & Test」段「并行 vs 串行分级速查表」——`ralph-cli` 整个包走 cli-serial 串行(根因:Mutex + sleep CPU 抢占,2026-06-13 已验证不能放开);其他 7 个包全部走 nextest 默认并发(`test-threads = num-cpus`)。
+  - **HARD RULE 2**:默认走并发,确需串行时显式配置。**能用并行的必须用并行**(快是默认值,不是可选优化)。具体分级见「Build & Test」段「并行 vs 串行分级速查表」——`ralph-cli` 整个包走 cli-serial 串行(根因:Mutex + sleep CPU 抢占,2026-06-13 已验证不能放开);其他 6 个包全部走 nextest 默认并发(`test-threads = num-cpus`)。
   - **修改任一规则须先确认所有 IDE/hook/CI 入口已切到 nextest**,并跑 3+1 验证(ralph-cli 子集 3 跑 + 全 workspace 1 跑)。
 
 <!-- rtk-instructions v2 -->

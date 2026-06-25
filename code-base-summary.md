@@ -45,7 +45,6 @@ graph TB
         CLI["ralph-cli<br/>CLI Entry Point"]
         TUI["ralph-tui<br/>Terminal UI"]
         WEB["Web Dashboard<br/>React + Vite"]
-        TEL["ralph-telegram<br/>Telegram Bot"]
     end
 
     subgraph "API Layer"
@@ -95,13 +94,12 @@ graph TB
 
 ```
 ralph-orchestrator/
-├── crates/                 # Rust workspace (9 crates)
+├── crates/                 # Rust workspace (8 crates)
 │   ├── ralph-proto/        # Protocol definitions, shared types, traits
 │   ├── ralph-core/         # Event loop, hats, memories, tasks, hooks, coordination
 │   ├── ralph-adapters/     # Backend integrations (Claude, Kiro, Gemini, etc.)
 │   ├── ralph-cli/          # CLI entry point, all user-facing commands
 │   ├── ralph-tui/          # Terminal UI (ratatui-based, 3 operating modes)
-│   ├── ralph-telegram/     # Telegram bot for human-in-the-loop
 │   ├── ralph-api/          # REST/WebSocket API server (Axum)
 │   ├── ralph-e2e/          # End-to-end test framework
 │   └── ralph-bench/        # Benchmarking
@@ -126,7 +124,7 @@ ralph-orchestrator/
 
 ### ralph-proto — Protocol Definitions
 
-Foundational types used across all crates: [`Event`](crates/ralph-proto/src/event.rs), [`EventBus`](crates/ralph-proto/src/event_bus.rs), [`Hat`](crates/ralph-proto/src/hat.rs), [`Topic`](crates/ralph-proto/src/topic.rs), [`RpcCommand`/`RpcEvent`](crates/ralph-proto/src/json_rpc.rs), [`RobotService`](crates/ralph-proto/src/robot.rs) trait, [`DaemonAdapter`](crates/ralph-proto/src/daemon.rs) trait, [`UxEvent`](crates/ralph-proto/src/ux_event.rs).
+Foundational types used across all crates: [`Event`](crates/ralph-proto/src/event.rs), [`EventBus`](crates/ralph-proto/src/event_bus.rs), [`Hat`](crates/ralph-proto/src/hat.rs), [`Topic`](crates/ralph-proto/src/topic.rs), [`RpcCommand`/`RpcEvent`](crates/ralph-proto/src/json_rpc.rs), [`UxEvent`](crates/ralph-proto/src/ux_event.rs).
 
 ### ralph-core — Orchestration Engine
 
@@ -147,15 +145,11 @@ Executes AI coding assistants: [`CliBackend`](crates/ralph-adapters/src/cli_back
 
 ### ralph-cli — CLI Entry Point
 
-All user-facing commands: `run`, `init`, `plan`, `code-task`, `tools`, `loops`, `hats`, `events`, `clean`, `emit`, `bot`, `web`, `tui`, `hooks`, `preflight`, `doctor`, `completions`. Implements subprocess TUI mode (two-process architecture).
+All user-facing commands: `run`, `init`, `plan`, `code-task`, `tools`, `loops`, `hats`, `events`, `clean`, `emit`, `web`, `tui`, `hooks`, `preflight`, `doctor`, `completions`. Implements subprocess TUI mode (two-process architecture).
 
 ### ralph-tui — Terminal UI
 
 Three operating modes: in-process (EventBus observer), RPC client (HTTP/WS to ralph-api), subprocess RPC (JSON-lines over stdin/stdout). Built with ratatui + crossterm.
-
-### ralph-telegram — Telegram Bot
-
-Bidirectional human-in-the-loop: `human.interact` (agent asks question, loop blocks), `human.response` (human replies), `human.guidance` (proactive guidance). Implements `RobotService` trait via `TelegramService`.
 
 ### ralph-api — REST/WebSocket Server
 
@@ -191,7 +185,7 @@ When the primary loop lock is held, Ralph spawns parallel loops in git worktrees
 
 ### Hook Lifecycle
 
-Hooks fire at 12 lifecycle points (pre/post for: loop.start, iteration.start, plan.created, human.interact, loop.complete, loop.error). Failure modes: `warn` (continue), `block` (stop), `suspend` (pause and await recovery).
+Hooks fire at 10 lifecycle points (pre/post for: loop.start, iteration.start, plan.created, loop.complete, loop.error). Failure modes: `warn` (continue), `block` (stop), `suspend` (pause and await recovery).
 
 ---
 
@@ -207,8 +201,6 @@ Newline-delimited JSON for IPC between loop and frontends.
 
 ### Key Rust Traits
 
-- **`RobotService`** (`ralph-proto`): Human-in-the-loop communication (send question, wait response, send checkin)
-- **`DaemonAdapter`** (`ralph-proto`): Persistent bot daemon (run_daemon)
 - **`FrameCapture`** (`ralph-proto`): Terminal output capture for recording/replay
 - **`HookExecutorContract`** (`ralph-core`): Hook command execution
 
@@ -310,7 +302,7 @@ Configuration uses a split model:
 
 Supports both v1 (flat: `agent: claude`, `max_iterations: 100`) and v2 (nested: `cli.backend`, `event_loop.max_iterations`) formats with automatic normalization.
 
-Key config sections: `event_loop` (iterations, runtime, cost limits, completion_promise), `cli` (backend, prompt_mode), `core` (scratchpad, specs_dir, guardrails), `hats` (custom hat definitions), `hooks` (lifecycle hooks), `memories` (inject mode, budget, filters), `tasks` (enabled), `skills` (directories, overrides), `features` (parallel, auto_merge, preflight), `RObot` (Telegram integration).
+Key config sections: `event_loop` (iterations, runtime, cost limits, completion_promise), `cli` (backend, prompt_mode), `core` (scratchpad, specs_dir, guardrails), `hats` (custom hat definitions), `hooks` (lifecycle hooks), `memories` (inject mode, budget, filters), `tasks` (enabled), `skills` (directories, overrides), `features` (parallel, auto_merge, preflight).
 
 ---
 

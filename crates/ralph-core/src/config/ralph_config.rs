@@ -849,10 +849,7 @@ features:
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.features.preflight.enabled);
         assert!(config.features.preflight.strict);
-        assert_eq!(
-            config.features.preflight.skip,
-            vec!["git".to_string()]
-        );
+        assert_eq!(config.features.preflight.skip, vec!["git".to_string()]);
     }
 
     #[test]

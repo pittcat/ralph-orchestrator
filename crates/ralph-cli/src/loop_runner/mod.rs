@@ -20,7 +20,6 @@ mod payload_inputs;
 mod preset_lint_gate;
 mod prompt;
 mod runner;
-mod start_loop;
 mod suspend;
 pub mod wave;
 
@@ -44,8 +43,6 @@ pub(crate) use runner::{
     build_termination_diagnostics, persist_starting_event_to_events_file,
     write_termination_diagnostics,
 };
-pub use start_loop::start_loop;
-
 // Re-export all other module items for internal use and test access
 pub use event_logging::*;
 pub use execution::*;
@@ -58,7 +55,6 @@ pub use output_parsing::*;
 pub use paths::*;
 pub use payload_inputs::*;
 pub use prompt::*;
-pub use start_loop::*;
 pub use suspend::*;
 pub use wave::*;
 
