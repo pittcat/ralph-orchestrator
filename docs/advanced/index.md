@@ -38,7 +38,6 @@ ralph-orchestrator/
 │   ├── ralph-proto/     # Protocol types
 │   ├── ralph-core/      # Orchestration engine
 │   ├── ralph-adapters/  # CLI backends
-│   ├── ralph-telegram/  # Telegram bot for human-in-the-loop
 │   ├── ralph-tui/       # Terminal UI
 │   ├── ralph-cli/       # Binary entry point
 │   ├── ralph-e2e/       # End-to-end testing

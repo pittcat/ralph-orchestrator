@@ -581,7 +581,7 @@ Optional runtime capabilities.
 | `preflight.skip` | list | `[]` | Skip checks by name (for example `hooks`, `git`) |
 
 When `features.preflight.enabled: true`, `ralph run` uses the default preflight suite:
-`config`, `hooks`, `backend`, `telegram`, `git`, `paths`, `tools`, and `specs`.
+`config`, `hooks`, `backend`, `git`, `paths`, `tools`, and `specs`.
 
 ### hooks
 
@@ -602,9 +602,12 @@ Supported v1 lifecycle phase-event keys under `hooks.events`:
 - `pre.loop.start`, `post.loop.start`
 - `pre.iteration.start`, `post.iteration.start`
 - `pre.plan.created`, `post.plan.created`
-- `pre.human.interact`, `post.human.interact`
 - `pre.loop.complete`, `post.loop.complete`
 - `pre.loop.error`, `post.loop.error`
+
+> **Note:** The `pre.human.interact` / `post.human.interact` keys are not
+> listed because the human-in-the-loop channel is retired; using those keys
+> in a `hooks.events` block will be rejected by the hook config validator.
 
 Hook spec (`HookSpec`) fields:
 

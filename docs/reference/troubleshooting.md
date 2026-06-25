@@ -211,26 +211,13 @@ hats:
 
 #### RObot Config
 
-**Problem**: `RObot config error: RObot.timeout_seconds - timeout_seconds is required when RObot is enabled`
+> **Removed in the 2026-06-25 refactor (plan 2026-06-25-001).** The `RObot` block
+> no longer exists; if your `ralph.yml` still declares it, the field is rejected as
+> `unknown field` on the next run. Strip the block.
 
-**Solutions**:
-
-1. Set the required fields:
-
-   ```yaml
-   RObot:
-     enabled: true
-     timeout_seconds: 300
-     telegram:
-       bot_token: "..." # or set RALPH_TELEGRAM_BOT_TOKEN
-   ```
-
-2. Or disable RObot if you don't need human-in-the-loop:
-
-   ```yaml
-   RObot:
-     enabled: false
-   ```
+For runtime-diagnosis recovery (3-strike escalation, completion-correction injection,
+drift journals), see `docs/guide/runtime-diagnosis.md` and the surviving
+`human.guidance` / `task.resume` channel.
 
 #### Multi-Hat Isolation Policy Violation
 

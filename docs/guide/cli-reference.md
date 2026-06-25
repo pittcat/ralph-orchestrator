@@ -143,7 +143,6 @@ Default check names:
 - `config`
 - `hooks`
 - `backend`
-- `telegram`
 - `git`
 - `paths`
 - `tools`
@@ -418,22 +417,6 @@ Notes:
 - Launch it from an MCP client configuration, not an interactive terminal workflow.
 - The server exposes Ralph control-plane methods as MCP tools, including polling stream tools such as `stream_next`.
 
-### ralph bot
-
-Manage Telegram bot setup and testing.
-
-```bash
-ralph bot [OPTIONS] <COMMAND>
-```
-
-**Subcommands:**
-
-- `onboard [--token <TOKEN>] [--chat-id <CHAT_ID>] [--timeout <SECONDS>]`
-- `status`
-- `test [MESSAGE]`
-- `token set <TOKEN> [--config <path>]`
-- `daemon`
-
 ### ralph wave
 
 Dispatch wave events for parallel hat execution.
@@ -499,10 +482,6 @@ ralph tools task <SUBCOMMAND>
 ```bash
 ralph tools skill <SUBCOMMAND>
 ```
-
-#### ralph tools interact
-
-Interact with human via Telegram progress/proactiveness hooks.
 
 ### ralph completions
 

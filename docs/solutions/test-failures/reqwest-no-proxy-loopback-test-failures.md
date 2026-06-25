@@ -26,7 +26,6 @@ tags:
 related_components:
   - ralph-cli
   - ralph-tui
-  - ralph-telegram
 ---
 
 # reqwest 默认从 HTTP_PROXY 走代理导致 127.0.0.1 集成测试 connection closed
@@ -131,5 +130,4 @@ NO_PROXY = { value = "127.0.0.1,localhost,::1", force = true }
 - 备查清单（修其他 ralph-* crate 的测试时若复现同样错误，先回查本文件）：
   - `ralph-cli`：loop_runner 子测试 + wave dispatcher
   - `ralph-tui`：mock backend 集成
-  - `ralph-telegram`：本地 mock HTTP server
   - `ralph-e2e`：live API 测试（看是否需要类似保护）

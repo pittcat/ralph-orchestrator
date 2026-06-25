@@ -45,7 +45,8 @@ three independent failure modes compounded into a 41-minute cancelled run:
 3. **Automated recovery impersonating human guidance**: `missing_event_gate`
    and the "claimed but no event written" hard-gate injected
    `human.guidance` (free-form text) into the events file. `human.guidance`
-   is reserved for human/operator input (Telegram RObot or manual emit),
+   is reserved for human/operator input (the runtime diagnosis engine
+   writes it; operators can also `ralph emit human.guidance` manually),
    and the agent cannot act on it as a recovery hint.
 
 A fourth minor mode: `compute_recovery_status` used a substring match on
@@ -292,8 +293,9 @@ flowchart LR
   mechanism. The `pending_recovery_hat` pin keeps the next iteration
   focused on the gated hat.
 - **U4** removes a `human.guidance` subscription that the serial
-  preset does not consume (no RObot/Telegram). The schema is retained
-  for operator use, just not subscribed by the steward.
+  preset does not consume (no human-in-the-loop channel). The schema is
+  retained for the runtime diagnosis engine and operator use, just not
+  subscribed by the steward.
 - **U5** dedups the `review-coordinator` repeat-ready bug at the
   policy layer. Reuses `DuplicateWorkDone` variant so the recovery
   path is identical to `work.done` dedup.

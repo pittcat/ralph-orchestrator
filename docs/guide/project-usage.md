@@ -160,8 +160,6 @@ hook 失败时由 `on_error` 决定 Ralph 怎么处理：
 | `post.iteration.start` | 每一轮启动后 | 轻量审计、记录当前 active hat |
 | `pre.plan.created` | 检测到 `plan.*` 事件、处理前 | 计划拦截、计划质量检查 |
 | `post.plan.created` | `plan.*` 事件处理后 | 计划归档、外部审阅、生成 follow-up |
-| `pre.human.interact` | 处理 `human.interact` 前 | 记录 agent 即将问人的问题、通知外部系统 |
-| `post.human.interact` | `human.interact` 处理后 | 记录人的响应、审计决策 |
 | `pre.loop.complete` | 成功终止前 | 完成前门禁、最终通知准备 |
 | `post.loop.complete` | 成功终止后 | 成功通知、总结、知识沉淀 |
 | `pre.loop.error` | 失败终止前 | 失败前门禁、保存关键状态 |
@@ -176,7 +174,7 @@ hook 失败时由 `on_error` 决定 Ralph 怎么处理：
 | 长任务成功后生成总结 | `post.loop.complete` + `on_error: warn` |
 | 长任务失败后保留现场 | `post.loop.error` + `on_error: warn` |
 | 捕获计划文档 | `post.plan.created` |
-| 审计人机交互 | `pre.human.interact` 和 `post.human.interact` |
+| 审计人机交互 | （human-in-the-loop 已退役；改用 `pre.loop.error` + `post.loop.error` 配合 `human.guidance` 事件做事后审计） |
 
 不建议把重型逻辑放进 `pre.iteration.start` 或 `post.iteration.start`。这两个 hook 每轮都会跑，适合轻量监控，不适合长时间检索、生成文档或网络重任务。
 
@@ -302,13 +300,12 @@ core:
 |---|---|---|
 | 环境守卫 | `pre.loop.start` + `on_error: block` | 适合检查 token、CLI、依赖、服务端口 |
 | 启动通知 | `post.loop.start` + `on_error: warn` | 不要阻塞主 loop |
-| 完成通知 | `post.loop.complete` + `on_error: warn` | 可发送 Slack、Telegram、桌面通知 |
+| 完成通知 | `post.loop.complete` + `on_error: warn` | 可发送 Slack、桌面通知 |
 | 失败通知 | `post.loop.error` + `on_error: warn` | 附带 loop id 和 workspace 方便排查 |
 | 知识检索 | `pre.loop.start` + `akr prime` | 生成 `knowledge-context`，由 context file + guardrail 引导 agent 读取 |
 | 知识沉淀 | `post.loop.complete/error` + `akr review` | 成功和失败都可能有长期价值 |
 | 失败归档 | `post.loop.error` | 保存 events、summary、handoff、日志位置 |
 | 计划审阅 | `post.plan.created` | 捕获 plan 事件，交给外部工具审查 |
-| 人机交互审计 | `pre.human.interact` / `post.human.interact` | 记录问题、响应和决策背景 |
 | 预算或心跳 | `pre.iteration.start` | 必须轻量，避免拖慢每轮执行 |
 
 ### 验证 hooks 配置
@@ -508,15 +505,22 @@ tasks:
 
 ### `RObot`
 
-`RObot` 是 Telegram human-in-the-loop 配置。
+> **Removed.** The `RObot` block, the human-in-the-loop channel, and the
+> `human.interact` / `human.response` event topics are all gone — human-in-the-loop
+> is retired. If your `ralph.yml` still declares a `RObot:` block, the field is
+> rejected as `unknown` on the next run; strip the block.
 
-```yaml
-RObot:
-  enabled: false
-  timeout_seconds: 120
-```
+For recovery-time guidance when an iteration crosses a drift / correction threshold
+(3-strike escalation, completion-correction injection, etc.), the runtime diagnosis
+engine still publishes `human.guidance` to the bus, and `task.resume` is injected into
+PENDING EVENTS whenever policy / origin / contract rejects a payload. See
+`docs/solutions/integration-issues/ce-executor-serial-precheck-recovery-alignment-2026-06-17.md`
+for the surviving recovery flow.
 
-启用后，agent 可以发 `human.interact` 事件向人提问，Ralph 会通过 Telegram 阻塞等待响应。
+> The `ralph run` loop continues to honour `.ralph/stop-requested` and
+> `.ralph/restart-requested` signal files written by `ralph loops stop` or external
+> tooling — that file-based stop/restart path is independent of the removed
+> human-in-the-loop channel.
 
 ### `skills`
 
@@ -879,14 +883,6 @@ ralph run -c ralph.yml -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
 ralph run -c ralph.yml -H presets/wave-review.yml -p "审查认证模块的 Rust、前端和文档风险"
 ```
 
-### Telegram 人机协同
-
-```bash
-ralph bot onboard --telegram
-ralph bot status
-ralph bot test
-```
-
 ## 常见状态文件
 
 Ralph 会在 `.ralph/` 下写运行状态。
@@ -898,7 +894,6 @@ Ralph 会在 `.ralph/` 下写运行状态。
 | `.ralph/loop.lock` | 主 loop 锁，包含 PID 和 prompt |
 | `.ralph/loops.json` | 多 loop 注册表 |
 | `.ralph/merge-queue.jsonl` | worktree loop 的 merge 队列 |
-| `.ralph/telegram-state.json` | Telegram bot 状态 |
 | `.ralph/diagnostics/` | 开启 diagnostics 后的结构化日志 |
 
 不要提交这些临时运行状态文件，除非某个文档或测试明确要求。
@@ -976,7 +971,6 @@ ralph run -c ralph.yml -H .ralph/hats/my-workflow.yml -p "实现一个小功能"
 | 流程卡住 | 上一轮是否忘记 `ralph emit`，是否需要 `default_publishes` |
 | preset 没生效 | 是否用了 `-c builtin:name`，新用法应是 `-H builtin:name` |
 | 后端没启动 | `cli.backend` 是否安装和登录，必要时跑 `ralph doctor` |
-| Telegram 不工作 | `RObot.enabled`、`timeout_seconds`、`RALPH_TELEGRAM_BOT_TOKEN` 是否正确 |
 | wave 没并行 | 目标 hat 是否设置 `concurrency > 1` |
 | 完成后不退出 | `completion_promise` 是否和实际输出或事件一致 |
 

@@ -5,8 +5,13 @@
 Ralph's security-related utilities are distributed across crates. Common safeguards:
 
 - **Safe CLI execution** via `ralph_adapters::CliExecutor` (no shell invocation)
-- **Secret masking** via `ralph_telegram::TelegramService::bot_token_masked`
-- **Output escaping** via `ralph_telegram::escape_html`
+- **Secret masking** via `ralph_adapters::redact_token` (when integrating custom adapters that accept tokens)
+- **Output escaping** for hook payloads via the standard library's `html_escape` crate (operator-supplied Slack / webhook integrations)
+
+> **Note:** Earlier versions of this page documented secret-masking and HTML-escape
+> helpers that were tied to the human-in-the-loop channel. That channel is retired;
+> the recovery story now lives in `docs/guide/runtime-diagnosis.md` and the
+> `human.guidance` / `task.resume` event topics.
 
 ## Safe CLI Execution
 
@@ -35,35 +40,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Mask Secrets in Logs
+## Mask Secrets in Adapter Configuration
 
-When integrating Telegram, `TelegramService::bot_token_masked` keeps logs safe
-by exposing only the prefix/suffix of the token.
+When wiring a custom adapter (for example a private backend or a webhook sink) that
+accepts a bearer token, prefer explicit token redaction in diagnostic output rather than
+embedding the token in `tracing` fields.
 
 ```rust
-use ralph_telegram::TelegramService;
-use std::path::PathBuf;
+fn redact_token(token: &str) -> String {
+    if token.len() <= 8 {
+        return "<redacted>".to_string();
+    }
+    let prefix = &token[..4];
+    let suffix = &token[token.len() - 4..];
+    format!("{prefix}…{suffix}")
+}
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let service = TelegramService::new(
-        PathBuf::from("."),
-        Some("1234567890:abcdefg_hijklmnop".to_string()),
-        None, // api_url
-        300,
-        "loop-1".to_string(),
-    )?;
-
-    println!("token={}", service.bot_token_masked());
-    Ok(())
+fn main() {
+    let token = "1234567890:abcdefg_hijklmnop";
+    println!("token={}", redact_token(token));
 }
 ```
 
-## Escape HTML for Telegram Output
+## Escape HTML for Hook Payloads
 
-Telegram's HTML parse mode requires escaping special characters.
+Hook payloads that are routed to HTML-aware sinks (for example a custom Slack or
+webhook notifier) need to escape `&`, `<`, `>`, and quotes. The same pattern applies
+whenever operator-supplied strings cross an HTML boundary.
 
 ```rust
-use ralph_telegram::escape_html;
+fn escape_html(raw: &str) -> String {
+    raw.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
 
 fn main() {
     let raw = "<task> & details";
