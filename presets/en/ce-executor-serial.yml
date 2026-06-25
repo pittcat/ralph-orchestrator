@@ -1392,6 +1392,16 @@ hats:
       - **Behavioral changes with no test additions**: diff modifies behavior but adds/modifies no test files.
       Do NOT flag: missing tests for trivial getters/setters, test style preferences, coverage percentages, missing tests for unchanged code.
 
+      #### WAVE_DIMENSION == "maintainability"
+      Read-only review only. You MUST NOT modify any source file. Your `disallowed_tools: ["Edit"]` is intentional — keep this dimension strictly observational; surface findings as the `review.dimension.done` payload and do NOT call `Edit` / `Write` / `MultiEdit` even if a tool appears available.
+      Check:
+      - **Coupling**: new hidden dependencies between modules — e.g. shared mutable state, implicit ordering assumptions, modules that "just know" about each other's internals. A change in one file unexpectedly requires edits in several others.
+      - **Complexity**: functions or methods that do too much (long, deeply nested, multiple responsibilities); control flow that is hard to follow; cyclomatic complexity spikes. Flag concrete locations with file:line, not generic advice.
+      - **Naming**: identifiers whose names do not reflect behaviour. `get_xxx` that mutates, `is_xxx` that performs IO, `process`/`handle`/`do_thing` that hides a specific action, abbreviations that diverge from project glossary.
+      - **Dead code**: unused functions, unreferenced constants, unreachable branches, commented-out code, feature flags that no longer gate anything, debug `println!`/`eprintln!`/`dbg!` left in.
+      - **Abstraction debt**: premature or leaky abstractions (a trait/interface whose only impl is the caller; wrapper layers that add no behaviour; generic parameters that are always instantiated with one type; abstractions that exist "for future flexibility" with no current consumer).
+      Do NOT flag: pure style preferences, missing doc comments, naming taste without behaviour impact, "this could be a one-liner" rewrites, refactors that are not justified by a concrete defect listed above.
+
   review-synthesizer:
     name: "🧩 Review Synthesizer (Serial)"
     description: "Overall review synthesizer. Reads all per-dimension findings, writes a fix-plan markdown file to scratchpad, publishes review.complete with fix_plan_file path."
