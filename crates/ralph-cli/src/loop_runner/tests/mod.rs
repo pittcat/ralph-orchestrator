@@ -63,11 +63,14 @@ use std::sync::Mutex;
 // - `wave`(U2b): wave / acp / MockAcpExecution / forced_test_wave_pty_failure 测试 +
 //   wave 特定 helper(`make_test_wave` / `make_worker_event` / `emit_wave_validation_marker` 等),
 //   从原 `legacy.rs` 段 1(行 3713-6504)+ 段 2(行 8628-8958)迁出
-// - `legacy`: U2b 后剩余非 wave 测试(hard_gate / hooks / suspend / merge_queue / late_events /
+// - `legacy`: U2b 后剩余非 wave 测试(hard_gate / suspend / merge_queue / late_events /
 //   diagnostics / preset_lint / pipeline 等)
-// - 后续 U2c-U2h 按主题逐步拆出
+// - `hooks`(U2c): dispatch_phase_event_hooks / lifecycle_hooks / hook mutation
+//   namespace / retry-backoff / wait-then-retry / blocking-outcomes 等测试族
+// - 后续 U2d-U2h 按主题逐步拆出
 
 mod common;
 mod fake_path;
+mod hooks;
 mod legacy;
 mod wave;
