@@ -1402,6 +1402,16 @@ hats:
       - **Abstraction debt**: premature or leaky abstractions (a trait/interface whose only impl is the caller; wrapper layers that add no behaviour; generic parameters that are always instantiated with one type; abstractions that exist "for future flexibility" with no current consumer).
       Do NOT flag: pure style preferences, missing doc comments, naming taste without behaviour impact, "this could be a one-liner" rewrites, refactors that are not justified by a concrete defect listed above.
 
+      #### WAVE_DIMENSION == "project-standards"
+      Read-only review only. You MUST NOT modify any source file. Your `disallowed_tools: ["Edit"]` is intentional — keep this dimension strictly observational; surface findings as the `review.dimension.done` payload and do NOT call `Edit` / `Write` / `MultiEdit` even if a tool appears available.
+      Check:
+      - **CLAUDE.md / AGENTS.md compliance**: new commands, subcommands, hard rules, or workflows added in this diff that are not reflected in `CLAUDE.md` / `AGENTS.md` (or whichever the repo uses as the agent contract). If the repo has neither, downgrade this section to `N/A — no agent-contract document present` and skip; do NOT invent compliance findings.
+      - **Documentation frontmatter consistency**: spec / plan / handoff markdown files whose `status`, `plan_name`, or other frontmatter keys drift from the rest of the repo's conventions (for example, one file uses `Status: active` while siblings use `Status: archived`, or `plan_name` does not match the file basename). Compare against siblings in the same directory before flagging.
+      - **Citation and reference integrity**: code or docs added in this diff that cite other files (e.g. `foo.rs:NN-MM`, `docs/.../*.md#section`) where the cited line range no longer points at the claimed code, the file was renamed, or the section anchor moved. Re-verify by `sed -n`/Read; flag with the actual current location.
+      - **Portability**: hard-coded absolute paths, machine-specific identifiers (`/Users/<name>/...`, hostnames, UUIDs that are not part of an external API), or shell commands that assume a specific shell/OS — in scripts, `Cargo.toml` metadata, fixtures, or test data. Distinguish from intentional portable paths (for example, `${workspaceRoot}` / `~/.config/...`).
+      - **Standards-file presence**: if the repository has a `STANDARDS.md`, `CONVENTIONS.md`, `STYLE.md`, or similar (not `CLAUDE.md`/`AGENTS.md` — those are covered above), surface drift between this diff and that file. If none exist, downgrade this section to `skip — no secondary standards file`.
+      Do NOT flag: stylistic preferences that are not in the repo's documented conventions, missing doc comments, opinions about wording in non-normative prose, or compliance claims that you cannot verify by reading the cited source in this iteration (mark those as `confidence <= 50` rather than blocking).
+
   review-synthesizer:
     name: "🧩 Review Synthesizer (Serial)"
     description: "Overall review synthesizer. Reads all per-dimension findings, writes a fix-plan markdown file to scratchpad, publishes review.complete with fix_plan_file path."
