@@ -109,6 +109,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 **反模式 / 注意事项：**
 - 🔴 `--continue` 仅在未启用 memories/tasks 的 legacy scratchpad 模式下有效。
 - 🔴 `--worktree` 创建的隔离目录不会自动合并回主分支（可用 `--no-auto-merge` 控制）。
+- 🔴 **Worktree 复用规则（先检查 + 模糊匹配,严禁盲目创建）**:调用 `--worktree` / `EnterWorktree` / `git worktree add` 前**必须先跑 `git worktree list`**(不能跳过、不能凭印象判断),对结果做**模糊匹配**——只要 worktree 路径或分支名中包含本 plan 的 basename(如 `2026-06-25-002-feat-profiles-for-preset-role-tuning-plan`)就算匹配。命名约定:`<plan-basename>-<adjective-noun>`,模糊匹配允许后缀随机词不同。**有匹配则直接 `cd` 进去复用,严禁创建**;只有确认无匹配时,才按命名约定创建。
 
 ---
 
