@@ -31,9 +31,9 @@ const RALPH_TOOLS_WAVE_SKILL_RAW: &str = include_str!("../data/ralph-tools-wave.
 
 /// Built-in ralph-tools-cmdref skill content (skill/run/other-commands reference).
 ///
-/// U8 (2026-06-25 refactor) removed the `ralph tools interact` and `ralph bot`
-/// sections from the cmdref file because the underlying `ralph-telegram` crate
-/// was deleted in U1; see plan 2026-06-25-001.
+/// 2026-06-25 refactor: removed the `ralph tools interact` and `ralph bot`
+/// sections from the cmdref file together with the `ralph-telegram` crate;
+/// see plan 2026-06-25-001.
 const RALPH_TOOLS_CMDREF_SKILL_RAW: &str = include_str!("../data/ralph-tools-cmdref.md");
 
 /// Registry of all available skills for the current loop.
@@ -81,10 +81,9 @@ impl SkillRegistry {
     /// Register built-in skills (ralph-tools, ralph-tools-tasks, ralph-tools-memories,
     /// ralph-tools-emit, ralph-tools-wave, ralph-tools-cmdref).
     ///
-    /// U8 (2026-06-25 refactor): `robot-interaction` was removed because its
+    /// 2026-06-25 refactor: `robot-interaction` was removed because its
     /// only content was `human.interact` / `human.guidance` Telegram guidance
-    /// and the `ralph-telegram` crate was deleted in U1; see plan
-    /// 2026-06-25-001.
+    /// and the `ralph-telegram` crate was deleted; see plan 2026-06-25-001.
     fn register_builtins(&mut self) -> Result<()> {
         self.register_builtin("ralph-tools", RALPH_TOOLS_SKILL_RAW)?;
         self.register_builtin("ralph-tools-tasks", RALPH_TOOLS_TASKS_SKILL_RAW)?;

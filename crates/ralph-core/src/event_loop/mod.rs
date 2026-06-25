@@ -1193,7 +1193,9 @@ impl EventLoop {
             return Some(reason);
         }
 
-        // Check for stop signal from Telegram /stop or CLI stop-requested
+        // Check for stop signal from .ralph/stop-requested (written by `ralph loops stop`
+        // or external tooling — the Telegram /stop producer was removed with `ralph-telegram`
+        // in the 2026-06-25 refactor; the signal-file mechanism survives)
         let stop_path =
             std::path::Path::new(&self.config.core.workspace_root).join(".ralph/stop-requested");
         if stop_path.exists() {
@@ -3972,8 +3974,11 @@ impl EventLoop {
     ///
     /// Injection order:
     /// 1. Memory data + ralph-tools skill (special case: loads memory data from store, applies budget)
-    /// 2. RObot interaction skill (gated by `robot.enabled`)
-    /// 3. Other auto-inject skills from the registry (wrapped in XML tags)
+    /// 2. Other auto-inject skills from the registry (wrapped in XML tags)
+    ///
+    /// Note (2026-06-25 refactor): the former step 2 was "RObot interaction skill (gated by
+    /// `robot.enabled`)", which was removed together with the `ralph-telegram` crate; the
+    /// `human.guidance` / `task.resume` recovery channel is unrelated and preserved.
     fn prepend_auto_inject_skills(&self, prompt: String) -> String {
         let mut prefix = String::new();
 
@@ -4109,10 +4114,10 @@ impl EventLoop {
         for skill in self.skill_registry.auto_inject_skills(None) {
             // Skip built-in skills handled above
             //
-            // U8 (2026-06-25): `robot-interaction` was removed because its
+            // 2026-06-25 refactor: `robot-interaction` was removed because its
             // only content was `human.interact` / `human.guidance` Telegram
-            // guidance; the `ralph-telegram` crate was deleted in U1 (see plan
-            // 2026-06-25-001).
+            // guidance; the `ralph-telegram` crate was deleted (see plan
+            // 2026-06-25-001). No other Telegram-specific skills remain.
             if matches!(
                 skill.name.as_str(),
                 "ralph-tools" | "ralph-tools-tasks" | "ralph-tools-memories"

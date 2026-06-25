@@ -654,9 +654,10 @@ fn u2_human_guidance_reaches_target_prompt_without_publisher_authority() {
 
     event_loop.initialize("guidance test");
 
-    // Inject guidance through the real EventLoop seam. This is what
-    // the RObot service does at runtime when a human types into
-    // Telegram.
+    // Inject guidance through the real EventLoop seam — this exercises the
+    // runtime diagnosis engine's `human.guidance` recovery channel
+    // (preserved by the 2026-06-25 refactor; the old Telegram-driven RObot
+    // producer was removed together with `ralph-telegram`).
     event_loop.inject_human_guidance(["Focus on edge cases in branch b"]);
 
     // Build a prompt for the planner and check the guidance text

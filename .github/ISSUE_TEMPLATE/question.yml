@@ -20,7 +20,7 @@ body:
         - "Hat presets / workflows"
         - "Backend configuration"
         - "Quality gates / scoring"
-        - "RObot / human-in-the-loop"
+        - "Runtime diagnosis / human guidance"
         - "Other"
     validations:
       required: true

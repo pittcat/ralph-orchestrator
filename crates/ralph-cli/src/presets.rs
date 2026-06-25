@@ -1046,11 +1046,13 @@ mod tests {
 
     /// U4 (2026-06-17-003 plan): the `progress-steward` hat in the
     /// serial preset must trigger on `loop.stalled` ONLY. The serial
-    /// preset does not consume `human.guidance` (no RObot/Telegram);
-    /// the topic schema is retained for operator/manual emit, but the
-    /// steward must not subscribe. The 2026-06-17-003 plan records
-    /// this as the U4 product decision — automated recovery flows
-    /// through `task.resume`, not `human.guidance`.
+    /// preset does not consume `human.guidance`; the topic schema is
+    /// retained for operator/manual emit, but the steward must not
+    /// subscribe. The 2026-06-17-003 plan records this as the U4
+    /// product decision — automated recovery flows through
+    /// `task.resume`, not `human.guidance`. (The 2026-06-25 refactor
+    /// removed the Telegram-driven RObot producer; this assertion
+    /// predates that refactor and remains valid.)
     #[test]
     fn test_ce_executor_serial_progress_steward_only_loop_stalled() {
         let preset =
@@ -1068,7 +1070,7 @@ mod tests {
         assert!(
             !steward.triggers.contains(&"human.guidance".to_string()),
             "ce-executor-serial progress-steward must NOT trigger on human.guidance \
-             (no RObot/Telegram in this preset; automated recovery uses task.resume — U4)"
+             (no Telegram channel; automated recovery uses task.resume — U4)"
         );
     }
 

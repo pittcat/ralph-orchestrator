@@ -34,7 +34,7 @@ body:
         - "Hat presets / workflows"
         - "Backend integrations"
         - "Quality gates / scoring"
-        - "RObot / human-in-the-loop"
+        - "Runtime diagnosis / human guidance"
         - "Docs"
         - "Other"
     validations:

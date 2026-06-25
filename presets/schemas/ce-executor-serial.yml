@@ -344,12 +344,12 @@ schemas:
       - reason
     payload: json_object
 
-  # 2026-06-16-001 U5: RObot/Telegram human guidance topic.
+  # 2026-06-16-001 U5: `human.guidance` runtime diagnosis engine topic.
   #
   # The `human.guidance` schema is retained so an operator can still
-  # emit it manually from a Telegram/RObot context. The serial preset's
-  # `progress-steward` does NOT subscribe to this topic — it is
-  # auto-woken on `loop.stalled` only. The 2026-06-17-003 plan
+  # emit it manually (TUI, CLI, or external tooling). The serial
+  # preset's `progress-steward` does NOT subscribe to this topic —
+  # it is auto-woken on `loop.stalled` only. The 2026-06-17-003 plan
   # (merry-lotus follow-up) records the product decision: automated
   # recovery flows through `task.resume` (structured), not
   # `human.guidance` (free-form, reserved for humans).

@@ -52,10 +52,10 @@ Status: **Addressed** — all listed findings were remediated in this pass via c
 
 ## Bugs / Behavioral Issues
 
-8. **`ralph bot onboard --telegram` is a placeholder-like flag**
+8. **`ralph bot onboard --telegram` is a placeholder-like flag** *(resolved by 2026-06-25 refactor)*
    - `--telegram` defaults true, and `--no-telegram` is explicitly rejected as unsupported.
    - Why this matters: exposes a flag without actual use and creates a dead affordance.
-   - Evidence: `crates/ralph-cli/src/bot.rs:169-173`.
+   - Resolution: the entire `ralph bot` command (and the `ralph-telegram` crate behind it) was removed in the 2026-06-25 refactor (plan 2026-06-25-001). The placeholder flag is gone with the rest of the surface.
 
 9. **Environment variable docs for CLI are stale: `RALPH_CONFIG` and `NO_COLOR` are documented but not implemented**
    - `rg` shows no `RALPH_CONFIG` handling in `crates/ralph-cli/src`.

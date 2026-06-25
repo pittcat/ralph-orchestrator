@@ -425,7 +425,8 @@ pub struct LoopState {
     /// coordinator's prompt and `prepend_scratchpad` strips any
     /// `### HUMAN GUIDANCE` blocks from the scratchpad snapshot.
     /// Reset to `false` whenever `work.start` / `task.start` is
-    /// published, mirroring the RObot guidance lifecycle.
+    /// published, mirroring the runtime diagnosis engine's
+    /// `human.guidance` / `task.resume` recovery-channel lifecycle.
     pub bootstrap_complete: bool,
 
     /// Unit 3 (2026-06-16-002 plan): `true` once the coordinator has

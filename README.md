@@ -141,32 +141,11 @@ Ralph implements the [Ralph Wiggum technique](https://ghuntley.com/ralph/) — a
 - **Memories & Tasks** — Persistent learning and runtime work tracking
 - **4 Supported Builtins** — `autoresearch`, `ce-executor-serial`, `debug`, and `merge-loop`, with more patterns documented as examples
 
-## RObot (Human-in-the-Loop)
+## Human Guidance & Recovery
 
-Ralph supports human interaction during orchestration via Telegram. Agents can ask questions and block until answered; humans can send proactive guidance at any time.
+Human guidance flows through the **runtime diagnosis engine** via the `human.guidance` event topic, which is published when a Warning crosses the 3-strike escalation threshold or when the correction module decides human judgment is required. The `task.resume` event is the parallel recovery channel. If you need to steer a running loop interactively, the `ralph loops stop` command writes `.ralph/stop-requested` / `.ralph/restart-requested` signal files, which the event loop reads and acts on.
 
-Quick onboarding (Telegram):
-
-```bash
-ralph bot onboard --telegram   # guided setup (token + chat id)
-ralph bot status               # verify config
-ralph bot test                 # send a test message
-```
-
-```yaml
-# ralph.yml
-RObot:
-  enabled: true
-  telegram:
-    bot_token: "your-token"  # Or RALPH_TELEGRAM_BOT_TOKEN env var
-```
-
-- **Agent questions** — Agents emit `human.interact` events; the loop blocks until a response arrives or times out
-- **Proactive guidance** — Send messages anytime to steer the agent mid-loop
-- **Parallel loop routing** — Messages route via reply-to, `@loop-id` prefix, or default to primary
-- **Telegram commands** — `/status`, `/tasks`, `/restart` for real-time loop visibility
-
-See the [Telegram guide](https://mikeyobrien.github.io/ralph-orchestrator/guide/telegram/) for setup instructions.
+> **Removed in the 2026-06-25 refactor (plan 2026-06-25-001).** The Telegram-based `RObot` block, the `ralph bot` command, the `ralph tools interact` command, and the `human.interact` / `human.response` event topics are all gone — human-in-the-loop is retired. Recovery guidance and operator steering use the runtime diagnosis engine / signal files described above.
 
 ## Documentation
 
@@ -221,17 +200,13 @@ Claude Code, Kiro, Gemini CLI, Codex, Amp, Copilot CLI, and OpenCode.
 **What is the "hat system"?**
 Ralph uses specialized personas (hats) that coordinate through events. Each hat has a specific role — for example, the `ce-executor-serial` preset uses coordinator, executor, reviewer, fixer, shipper, and reporter hats — enabling structured multi-step task execution.
 
-### RObot (Human-in-the-Loop)
+### Human Guidance & Recovery
 
-**What is RObot?**
-RObot enables human interaction during orchestration via Telegram. Agents can ask questions and block until answered; humans can send proactive guidance mid-loop.
+**How does Ralph surface recovery guidance?**
+The runtime diagnosis engine publishes `human.guidance` events to the bus when a Warning crosses the 3-strike escalation threshold or when the correction module determines human judgment is required. The `task.resume` event is the parallel recovery channel. The signal-file mechanism (`.ralph/stop-requested` / `.ralph/restart-requested`, written by `ralph loops stop`) lets external tooling steer a running loop.
 
-**How do I set up Telegram integration?**
-```bash
-ralph bot onboard --telegram   # guided setup
-ralph bot status               # verify config
-ralph bot test                 # send a test message
-```
+**What about the old Telegram-based RObot integration?**
+It was retired in the 2026-06-25 refactor. The `RObot` config block, the `ralph bot` command, the `ralph tools interact` command, and the `human.interact` / `human.response` event topics are all gone. Use the runtime diagnosis engine / `ralph loops stop` for operator steering.
 
 ### Web Dashboard
 

@@ -606,8 +606,11 @@ Supported v1 lifecycle phase-event keys under `hooks.events`:
 - `pre.loop.error`, `post.loop.error`
 
 > **Note:** The `pre.human.interact` / `post.human.interact` keys are not
-> listed because the human-in-the-loop channel is retired; using those keys
-> in a `hooks.events` block will be rejected by the hook config validator.
+> listed because the human-in-the-loop channel was retired in the
+> 2026-06-25 refactor; using those keys in a `hooks.events` block will be
+> rejected by the hook config validator. The `human.guidance` /
+> `task.resume` runtime-diagnosis recovery events have no hook surface
+> by design.
 
 Hook spec (`HookSpec`) fields:
 

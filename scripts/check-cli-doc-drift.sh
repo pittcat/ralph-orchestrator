@@ -160,7 +160,6 @@ declare -A COMMANDS_TO_DOCS=(
   ["tools memory init"]="ralph-tools-memories.md|Memory Commands"
   ["tools skill list"]="ralph-tools-cmdref.md|ralph tools skill"
   ["tools skill load"]="ralph-tools-cmdref.md|ralph tools skill"
-  ["tools interact progress"]="ralph-tools-cmdref.md|ralph tools interact"
   ["run"]="ralph-tools-cmdref.md|ralph run"
   ["preflight"]="ralph-tools-cmdref.md|其他命令"
   ["doctor"]="ralph-tools-cmdref.md|其他命令"
@@ -174,7 +173,6 @@ declare -A COMMANDS_TO_DOCS=(
   ["tui"]="ralph-tools-cmdref.md|其他命令"
   ["web"]="ralph-tools-cmdref.md|其他命令"
   ["mcp"]="ralph-tools-cmdref.md|其他命令"
-  ["bot"]="ralph-tools-cmdref.md|其他命令"
   ["completions"]="ralph-tools-cmdref.md|其他命令"
 )
 
