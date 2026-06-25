@@ -921,9 +921,6 @@ async fn run_loop_impl_inner(
     // (including the recovery events we publish later).
     drift_engine.install_observer(&mut event_loop);
 
-    // Capture the robot service shutdown flag so signal handlers can interrupt wait_for_response()
-    let robot_shutdown = event_loop.robot_shutdown_flag();
-
     let hooks_dispatch_enabled = config.hooks.enabled && !config.hooks.events.is_empty();
     let hook_engine = HookEngine::new(&config.hooks);
     let hook_executor = HookExecutor::new();
@@ -1458,13 +1455,9 @@ async fn run_loop_impl_inner(
 
     // Spawn task to listen for SIGINT (Ctrl+C)
     let interrupt_tx_sigint = interrupt_tx.clone();
-    let robot_shutdown_sigint = robot_shutdown.clone();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             debug!("Interrupt received (SIGINT), terminating immediately...");
-            if let Some(ref flag) = robot_shutdown_sigint {
-                flag.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
             let _ = interrupt_tx_sigint.send(true);
         }
     });
@@ -1473,16 +1466,12 @@ async fn run_loop_impl_inner(
     #[cfg(unix)]
     {
         let interrupt_tx_sigterm = interrupt_tx.clone();
-        let robot_shutdown_sigterm = robot_shutdown.clone();
         tokio::spawn(async move {
             let mut sigterm =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                     .expect("Failed to register SIGTERM handler");
             sigterm.recv().await;
             debug!("SIGTERM received, terminating immediately...");
-            if let Some(ref flag) = robot_shutdown_sigterm {
-                flag.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
             let _ = interrupt_tx_sigterm.send(true);
         });
     }
@@ -1491,15 +1480,11 @@ async fn run_loop_impl_inner(
     #[cfg(unix)]
     {
         let interrupt_tx_sighup = interrupt_tx.clone();
-        let robot_shutdown_sighup = robot_shutdown.clone();
         tokio::spawn(async move {
             let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
                 .expect("Failed to register SIGHUP handler");
             sighup.recv().await;
             warn!("SIGHUP received (terminal closed), terminating immediately...");
-            if let Some(ref flag) = robot_shutdown_sighup {
-                flag.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
             let _ = interrupt_tx_sighup.send(true);
         });
     }
@@ -3402,104 +3387,6 @@ async fn run_loop_impl_inner(
             }
         }
 
-        let pending_human_interact_context = event_loop
-            .pending_human_interact_context_in_jsonl()
-            .inspect_err(|e| {
-                warn!(
-                    error = %e,
-                    "Failed to inspect unread JSONL events for human.interact boundary"
-                )
-            })
-            .ok()
-            .flatten();
-
-        if let Some(human_interact_context) = pending_human_interact_context {
-            let pre_human_interact_outcomes = dispatch_phase_event_hooks(
-                &event_loop,
-                hooks_dispatch_enabled,
-                &loop_id,
-                &hook_engine,
-                &hook_executor,
-                HookPhaseEvent::PreHumanInteract,
-                build_human_interact_payload_input(
-                    &loop_id,
-                    &ctx,
-                    config.event_loop.max_iterations,
-                    event_loop.state().iteration,
-                    Some(display_hat.as_str().to_string()),
-                    Some(display_hat.as_str().to_string()),
-                    None,
-                    Some(human_interact_context),
-                    &accumulated_hook_metadata,
-                ),
-            );
-            merge_accumulated_hook_metadata_from_outcomes(
-                &mut accumulated_hook_metadata,
-                &pre_human_interact_outcomes,
-            );
-            fail_if_blocking_human_interact_outcomes(&pre_human_interact_outcomes)?;
-
-            if let Some(reason) = wait_for_resume_if_suspended(
-                &pre_human_interact_outcomes,
-                &loop_id,
-                &suspend_state_store,
-            )
-            .await?
-            {
-                let reason = dispatch_pre_loop_termination_hooks(
-                    &event_loop,
-                    hooks_dispatch_enabled,
-                    &loop_id,
-                    &hook_engine,
-                    &hook_executor,
-                    &suspend_state_store,
-                    &ctx,
-                    config.event_loop.max_iterations,
-                    &mut accumulated_hook_metadata,
-                    reason,
-                )
-                .await?;
-
-                let terminate_event = event_loop.publish_terminate_event(&reason);
-                log_terminate_event(
-                    &mut event_logger,
-                    event_loop.state().iteration,
-                    &terminate_event,
-                    Some(event_loop.registry().current_phase().to_string()),
-                );
-
-                let reason = dispatch_post_loop_termination_hooks(
-                    &event_loop,
-                    hooks_dispatch_enabled,
-                    &loop_id,
-                    &hook_engine,
-                    &hook_executor,
-                    &suspend_state_store,
-                    &ctx,
-                    config.event_loop.max_iterations,
-                    &mut accumulated_hook_metadata,
-                    reason,
-                )
-                .await?;
-
-                handle_termination(
-                    &reason,
-                    event_loop.state(),
-                    &config.core.scratchpad.path,
-                    &loop_history,
-                    &loop_context,
-                    auto_merge,
-                    &prompt_content,
-                    None,
-                );
-                if let Some(handle) = tui_handle.take() {
-                    let _ = handle.await;
-                }
-                finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
-                return Ok(reason);
-            }
-        }
-
         // Read events from JSONL, partitioning wave events from regular events.
         //
         // U2 (2026-06-13-001): capture `wave_policy_rejections` (and
@@ -3940,96 +3827,6 @@ async fn run_loop_impl_inner(
                 Err(e) => {
                     warn!(error = %e, "Phase transition script failed — continuing in warmup");
                 }
-            }
-        }
-
-        if let Some(human_interact_context) = processed_events
-            .as_ref()
-            .and_then(|events| events.human_interact_context.clone())
-        {
-            let post_human_interact_outcomes = dispatch_phase_event_hooks(
-                &event_loop,
-                hooks_dispatch_enabled,
-                &loop_id,
-                &hook_engine,
-                &hook_executor,
-                HookPhaseEvent::PostHumanInteract,
-                build_human_interact_payload_input(
-                    &loop_id,
-                    &ctx,
-                    config.event_loop.max_iterations,
-                    event_loop.state().iteration,
-                    Some(display_hat.as_str().to_string()),
-                    Some(display_hat.as_str().to_string()),
-                    None,
-                    Some(human_interact_context),
-                    &accumulated_hook_metadata,
-                ),
-            );
-            merge_accumulated_hook_metadata_from_outcomes(
-                &mut accumulated_hook_metadata,
-                &post_human_interact_outcomes,
-            );
-            fail_if_blocking_human_interact_outcomes(&post_human_interact_outcomes)?;
-
-            if let Some(reason) = wait_for_resume_if_suspended(
-                &post_human_interact_outcomes,
-                &loop_id,
-                &suspend_state_store,
-            )
-            .await?
-            {
-                let reason = dispatch_pre_loop_termination_hooks(
-                    &event_loop,
-                    hooks_dispatch_enabled,
-                    &loop_id,
-                    &hook_engine,
-                    &hook_executor,
-                    &suspend_state_store,
-                    &ctx,
-                    config.event_loop.max_iterations,
-                    &mut accumulated_hook_metadata,
-                    reason,
-                )
-                .await?;
-
-                let terminate_event = event_loop.publish_terminate_event(&reason);
-                log_terminate_event(
-                    &mut event_logger,
-                    event_loop.state().iteration,
-                    &terminate_event,
-                    Some(event_loop.registry().current_phase().to_string()),
-                );
-
-                let reason = dispatch_post_loop_termination_hooks(
-                    &event_loop,
-                    hooks_dispatch_enabled,
-                    &loop_id,
-                    &hook_engine,
-                    &hook_executor,
-                    &suspend_state_store,
-                    &ctx,
-                    config.event_loop.max_iterations,
-                    &mut accumulated_hook_metadata,
-                    reason,
-                )
-                .await?;
-
-                handle_termination(
-                    &reason,
-                    event_loop.state(),
-                    &config.core.scratchpad.path,
-                    &loop_history,
-                    &loop_context,
-                    auto_merge,
-                    &prompt_content,
-                    None,
-                );
-                if let Some(handle) = tui_handle.take() {
-                    let _ = handle.await;
-                }
-                finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
-                return Ok(reason);
             }
         }
 

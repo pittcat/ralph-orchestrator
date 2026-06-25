@@ -60,12 +60,11 @@ use crate::skill_registry::SkillRegistry;
 use crate::state_machine::{StateMachineDecision, StateMachineRuntimeState};
 
 use crate::text::floor_char_boundary;
-use ralph_proto::{CheckinContext, Event, EventBus, Hat, HatId, RobotService};
+use ralph_proto::{Event, EventBus, Hat, HatId};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -81,9 +80,6 @@ pub struct ProcessedEvents {
     pub had_rejected_events: bool,
     /// Whether any published events matched the semantic `plan.*` topic family.
     pub had_plan_events: bool,
-    /// Structured context for the first processed `human.interact` event,
-    /// including the question payload and post-dispatch outcome metadata.
-    pub human_interact_context: Option<Value>,
     /// Whether any events lacked specific hat subscribers (orphans handled by Ralph).
     pub has_orphans: bool,
     /// Events accepted by runtime validation and published to the bus.
@@ -102,7 +98,6 @@ impl Default for ProcessedEvents {
             had_raw_events: false,
             had_rejected_events: false,
             had_plan_events: false,
-            human_interact_context: None,
             has_orphans: false,
             accepted_events: Vec::new(),
             contract_rejections: Vec::new(),
@@ -162,7 +157,8 @@ pub enum TerminationReason {
     Stopped,
     /// Interrupted by signal (SIGINT/SIGTERM).
     Interrupted,
-    /// Restart requested via Telegram `/restart` command.
+    /// Restart requested via the .ralph/restart-requested signal file
+    /// (written by `ralph loops stop` or external tooling).
     RestartRequested,
     /// Workspace directory (worktree) was removed externally.
     WorkspaceGone,
@@ -339,9 +335,6 @@ pub struct EventLoop {
     loop_context: Option<LoopContext>,
     /// Skill registry for the current loop.
     skill_registry: SkillRegistry,
-    /// Robot service for human-in-the-loop communication.
-    /// Injected externally when `human.enabled` is true and this is the primary loop.
-    robot_service: Option<Box<dyn RobotService>>,
     /// WAC-U3 / WAC-U5 (2026-06-12-002): handoff priority index,
     /// built once at construction. The dispatcher's priority pass
     /// consults `index.consumer_of(topic)` on every selection
@@ -758,7 +751,6 @@ impl EventLoop {
             diagnostics,
             loop_context: Some(context),
             skill_registry,
-            robot_service: None,
             handoff_index: crate::workflow_contract::HandoffIndex::from_config(&config),
             recovery_responder: RecoveryResponder::new(Arc::new(
                 config.telemetry.runtime_diagnosis.clone(),
@@ -898,7 +890,6 @@ impl EventLoop {
             diagnostics,
             loop_context: None,
             skill_registry,
-            robot_service: None,
             recovery_responder: RecoveryResponder::new(Arc::new(
                 config.telemetry.runtime_diagnosis.clone(),
             )),
@@ -906,17 +897,6 @@ impl EventLoop {
             ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
             handoff_index: crate::workflow_contract::HandoffIndex::from_config(&config),
         }
-    }
-
-    /// Injects a robot service for human-in-the-loop communication.
-    ///
-    /// Call this after construction to enable `human.interact` event handling,
-    /// periodic check-ins, and question/response flow. The service is typically
-    /// created by the CLI layer (e.g., `TelegramService`) and injected here,
-    /// keeping the core event loop decoupled from any specific communication
-    /// platform.
-    pub fn set_robot_service(&mut self, service: Box<dyn RobotService>) {
-        self.robot_service = Some(service);
     }
 
     /// Returns the loop context, if one was provided.
@@ -1490,7 +1470,7 @@ impl EventLoop {
             return Some(TerminationReason::Stopped);
         }
 
-        // Check for restart signal from Telegram /restart command
+        // Check for restart signal from external tooling (e.g. `ralph loops stop`)
         let restart_path =
             std::path::Path::new(&self.config.core.workspace_root).join(".ralph/restart-requested");
         if restart_path.exists() {
@@ -2321,10 +2301,10 @@ impl EventLoop {
         self.bus.has_pending()
     }
 
-    /// Checks if any pending events are human-related (human.response, human.guidance).
+    /// Checks if any pending events are human guidance events.
     ///
-    /// Used to skip cooldown delays when a human event is next, since we don't
-    /// want to artificially delay the response to a human interaction.
+    /// Used to skip cooldown delays when a human guidance event is next, since
+    /// we don't want to artificially delay the response to a human interaction.
     pub fn has_pending_human_events(&self) -> bool {
         self.bus.has_human_pending()
     }
@@ -2359,19 +2339,6 @@ impl EventLoop {
             .events
             .iter()
             .any(|event| event.topic.starts_with("plan.")))
-    }
-
-    /// Returns structured context for the first unread `human.interact` event,
-    /// if one is present in JSONL without consuming reader state.
-    pub fn pending_human_interact_context_in_jsonl(&self) -> std::io::Result<Option<Value>> {
-        let result = self.event_reader.peek_new_events()?;
-        Ok(result
-            .events
-            .iter()
-            .find(|event| event.topic == "human.interact")
-            .map(|event| {
-                Self::parse_human_interact_context(event.payload.as_deref().unwrap_or_default())
-            }))
     }
 
     /// Gets the topics a hat is allowed to publish.
@@ -4282,10 +4249,7 @@ impl EventLoop {
         // 1. Memory data + ralph-tools skill — special case with data loading
         self.inject_memories_and_tools_skill(&mut prefix);
 
-        // 2. RObot interaction skill — gated by robot.enabled
-        self.inject_robot_skill(&mut prefix);
-
-        // 3. Other auto-inject skills from the registry
+        // 2. Other auto-inject skills from the registry
         self.inject_custom_auto_skills(&mut prefix);
 
         if prefix.is_empty() {
@@ -4406,27 +4370,6 @@ impl EventLoop {
                 skill.content.trim()
             ));
             debug!("Injected ralph-tools-memories skill from registry");
-        }
-    }
-
-    /// Injects the RObot interaction skill content into the prefix.
-    ///
-    /// Gated by `robot.enabled`. Teaches agents how and when to interact
-    /// with humans via `human.interact` events.
-    fn inject_robot_skill(&self, prefix: &mut String) {
-        if !self.config.robot.enabled {
-            return;
-        }
-
-        if let Some(skill) = self.skill_registry.get("robot-interaction") {
-            if !prefix.is_empty() {
-                prefix.push_str("\n\n");
-            }
-            prefix.push_str(&format!(
-                "<robot-skill>\n{}\n</robot-skill>",
-                skill.content.trim()
-            ));
-            debug!("Injected robot interaction skill from registry");
         }
     }
 
@@ -5775,32 +5718,6 @@ impl EventLoop {
         // see a consistent view of "what has been accepted this turn".
         self.state.isolated_turn_business_event_accepted = false;
 
-        // Periodic robot check-in
-        if let Some(interval_secs) = self.config.robot.checkin_interval_seconds
-            && let Some(ref robot_service) = self.robot_service
-        {
-            let elapsed = self.state.elapsed();
-            let interval = std::time::Duration::from_secs(interval_secs);
-            let last = self
-                .state
-                .last_checkin_at
-                .map(|t| t.elapsed())
-                .unwrap_or(elapsed);
-
-            if last >= interval {
-                let context = self.build_checkin_context(hat_id);
-                match robot_service.send_checkin(self.state.iteration, elapsed, Some(&context)) {
-                    Ok(_) => {
-                        self.state.last_checkin_at = Some(std::time::Instant::now());
-                        debug!(iteration = self.state.iteration, "Sent robot check-in");
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Failed to send robot check-in");
-                    }
-                }
-            }
-        }
-
         // Log iteration started
         self.diagnostics.log_orchestration(
             self.state.iteration,
@@ -6032,17 +5949,6 @@ impl EventLoop {
         Ok(open.is_empty())
     }
 
-    /// Builds a [`CheckinContext`] with current loop state for robot check-ins.
-    fn build_checkin_context(&self, hat_id: &HatId) -> CheckinContext {
-        let (open_tasks, closed_tasks) = self.count_tasks();
-        CheckinContext {
-            current_hat: Some(hat_id.as_str().to_string()),
-            open_tasks,
-            closed_tasks,
-            cumulative_cost: self.state.cumulative_cost,
-        }
-    }
-
     /// Counts open and closed tasks from the task store.
     ///
     /// Returns `(open_count, closed_count)`. "Open" means non-terminal tasks,
@@ -6148,38 +6054,6 @@ impl EventLoop {
         }
     }
 
-    fn parse_human_interact_context(payload: &str) -> Value {
-        let mut context = match serde_json::from_str::<Value>(payload) {
-            Ok(Value::Object(map)) => map,
-            Ok(value) => {
-                let mut map = Map::new();
-                map.insert("question".to_string(), value);
-                map
-            }
-            Err(_) => {
-                let mut map = Map::new();
-                map.insert("question".to_string(), Value::String(payload.to_string()));
-                map
-            }
-        };
-
-        if !context.contains_key("question") {
-            context.insert("question".to_string(), Value::String(payload.to_string()));
-        }
-
-        Value::Object(context)
-    }
-
-    fn is_restart_request_payload(payload: &str) -> bool {
-        let payload = payload.to_ascii_lowercase();
-        payload.contains("restart yourself") || payload.contains("restart ralph")
-    }
-
-    fn is_restart_request_event(event: &Event) -> bool {
-        matches!(event.topic.as_str(), "human.response" | "user.prompt")
-            && Self::is_restart_request_payload(&event.payload)
-    }
-
     /// Checks if all started guarded workflow instances have reached a terminal phase.
     ///
     /// Returns `Some(WorkflowGuardRejection)` if any instance is incomplete, `None` if all are terminal.
@@ -6241,37 +6115,6 @@ impl EventLoop {
         None
     }
 
-    fn mark_restart_requested(&self, source: &str) {
-        let restart_path =
-            std::path::Path::new(&self.config.core.workspace_root).join(".ralph/restart-requested");
-
-        if let Some(parent) = restart_path.parent()
-            && let Err(err) = std::fs::create_dir_all(parent)
-        {
-            warn!(
-                error = %err,
-                path = %parent.display(),
-                "Failed to create restart-requested parent directory"
-            );
-            return;
-        }
-
-        if let Err(err) = std::fs::write(&restart_path, source) {
-            warn!(
-                error = %err,
-                path = %restart_path.display(),
-                "Failed to write restart-requested signal"
-            );
-            return;
-        }
-
-        info!(
-            source,
-            path = %restart_path.display(),
-            "Restart requested from human text"
-        );
-    }
-
     /// Processes events from JSONL and routes orphaned events to Ralph.
     ///
     /// Also handles backpressure for malformed JSONL lines by:
@@ -6280,8 +6123,7 @@ impl EventLoop {
     /// 3. Resetting counter when valid events are parsed
     ///
     /// Returns [`ProcessedEvents`] indicating whether events were found, whether
-    /// semantic `plan.*` topics were published, structured `human.interact`
-    /// context/outcome metadata, and whether any were orphans that Ralph should
+    /// semantic `plan.*` topics were published, and whether any were orphans that Ralph should
     /// handle.
     pub fn process_events_from_jsonl(&mut self) -> std::io::Result<ProcessedEvents> {
         let result = self.event_reader.read_new_events()?;
@@ -6441,7 +6283,6 @@ impl EventLoop {
                 had_raw_events: false,
                 had_rejected_events: false,
                 had_plan_events: false,
-                human_interact_context: None,
                 has_orphans: false,
                 accepted_events: Vec::new(),
                 contract_rejections: Vec::new(),
@@ -8605,201 +8446,6 @@ impl EventLoop {
             self.state.last_blocked_hat = None;
         }
 
-        // Handle human.interact blocking behavior:
-        // When a human.interact event is detected and robot service is active,
-        // send the question and block until human.response or timeout.
-        let mut response_event = None;
-        let mut human_interact_context = None;
-        let ask_human_idx = validated_events
-            .iter()
-            .position(|e| e.topic == "human.interact".into());
-
-        if let Some(idx) = ask_human_idx {
-            let ask_event = &validated_events[idx];
-            let payload = ask_event.payload.clone();
-
-            // P5: validate the human.interact payload before blocking. An
-            // empty/whitespace or malformed JSON payload is rejected up front
-            // so the loop does not block on a question that would never
-            // resolve. Inject a `human.timeout` so the agent sees a clear
-            // error and continues.
-            if let Err(reason) =
-                crate::event_origin::validate_human_interact_payload(Some(&payload))
-            {
-                warn!(
-                    payload = %payload,
-                    reason = %reason,
-                    "Rejecting human.interact with invalid payload before blocking"
-                );
-                self.diagnostics.log_error(
-                    self.state.iteration,
-                    "human.interact",
-                    crate::diagnostics::DiagnosticError::ValidationFailure {
-                        rule: "human_interact_payload".to_string(),
-                        message: format!("invalid human.interact payload: {reason}"),
-                        evidence: payload.clone(),
-                    },
-                );
-                let mut err_context = Map::new();
-                err_context.insert(
-                    "outcome".to_string(),
-                    Value::String("invalid_payload".to_string()),
-                );
-                err_context.insert("error".to_string(), Value::String(reason.clone()));
-                human_interact_context = Some(Value::Object(err_context));
-                response_event = Some(Event::new(
-                    "human.timeout",
-                    format!(
-                        "Invalid human.interact payload: {reason}. Original payload: {payload}"
-                    ),
-                ));
-            } else {
-                let mut context = match Self::parse_human_interact_context(&payload) {
-                    Value::Object(map) => map,
-                    _ => Map::new(),
-                };
-
-                if let Some(ref robot_service) = self.robot_service {
-                    info!(
-                        payload = %payload,
-                        "human.interact event detected — sending question via robot service"
-                    );
-
-                    // Send the question (includes retry with exponential backoff)
-                    let send_ok = match robot_service.send_question(&payload) {
-                        Ok(_message_id) => true,
-                        Err(e) => {
-                            warn!(
-                                error = %e,
-                                "Failed to send human.interact question after retries — treating as timeout"
-                            );
-                            // Log to diagnostics
-                            self.diagnostics.log_error(
-                                self.state.iteration,
-                                "telegram",
-                                crate::diagnostics::DiagnosticError::TelegramSendError {
-                                    operation: "send_question".to_string(),
-                                    error: e.to_string(),
-                                    retry_count: 3,
-                                },
-                            );
-                            context.insert(
-                                "outcome".to_string(),
-                                Value::String("send_failure".to_string()),
-                            );
-                            context.insert("error".to_string(), Value::String(e.to_string()));
-                            false
-                        }
-                    };
-
-                    // Block: poll events file for human.response
-                    // Per spec, even on send failure we treat as timeout (continue without blocking)
-                    if send_ok {
-                        // Read the active events path from the current-events marker,
-                        // falling back to the default events.jsonl if not available.
-                        let events_path = self
-                            .loop_context
-                            .as_ref()
-                            .and_then(|ctx| {
-                                std::fs::read_to_string(ctx.current_events_marker())
-                                    .ok()
-                                    .map(|s| ctx.workspace().join(s.trim()))
-                            })
-                            .or_else(|| {
-                                std::fs::read_to_string(".ralph/current-events")
-                                    .ok()
-                                    .map(|s| PathBuf::from(s.trim()))
-                            })
-                            .unwrap_or_else(|| {
-                                self.loop_context
-                                    .as_ref()
-                                    .map(|ctx| ctx.events_path())
-                                    .unwrap_or_else(|| PathBuf::from(".ralph/events.jsonl"))
-                            });
-
-                        match robot_service.wait_for_response(&events_path) {
-                            Ok(Some(response)) => {
-                                info!(
-                                    response = %response,
-                                    "Received human.response — continuing loop"
-                                );
-                                context.insert(
-                                    "outcome".to_string(),
-                                    Value::String("response".to_string()),
-                                );
-                                context.insert(
-                                    "response".to_string(),
-                                    Value::String(response.clone()),
-                                );
-                                // Create a human.response event to inject into the bus
-                                response_event = Some(Event::new("human.response", &response));
-                            }
-                            Ok(None) => {
-                                warn!(
-                                    timeout_secs = robot_service.timeout_secs(),
-                                    "Human response timeout — injecting human.timeout event"
-                                );
-                                context.insert(
-                                    "outcome".to_string(),
-                                    Value::String("timeout".to_string()),
-                                );
-                                context.insert(
-                                    "timeout_seconds".to_string(),
-                                    Value::from(robot_service.timeout_secs()),
-                                );
-                                let timeout_event = Event::new(
-                                    "human.timeout",
-                                    format!(
-                                        "No response after {}s. Original question: {}",
-                                        robot_service.timeout_secs(),
-                                        payload
-                                    ),
-                                );
-                                response_event = Some(timeout_event);
-                            }
-                            Err(e) => {
-                                warn!(
-                                    error = %e,
-                                    "Error waiting for human response — injecting human.timeout event"
-                                );
-                                context.insert(
-                                    "outcome".to_string(),
-                                    Value::String("wait_error".to_string()),
-                                );
-                                context.insert("error".to_string(), Value::String(e.to_string()));
-                                let timeout_event = Event::new(
-                                    "human.timeout",
-                                    format!(
-                                        "Error waiting for response: {}. Original question: {}",
-                                        e, payload
-                                    ),
-                                );
-                                response_event = Some(timeout_event);
-                            }
-                        }
-                    }
-                } else {
-                    debug!(
-                        "human.interact event detected but no robot service active — passing through"
-                    );
-                    context.insert(
-                        "outcome".to_string(),
-                        Value::String("no_robot_service".to_string()),
-                    );
-                }
-
-                human_interact_context = Some(Value::Object(context));
-            }
-        }
-
-        let restart_requested = validated_events.iter().any(Self::is_restart_request_event)
-            || response_event
-                .as_ref()
-                .is_some_and(Self::is_restart_request_event);
-        if restart_requested {
-            self.mark_restart_requested("human_text");
-        }
-
         // Track whether any events will be published (before the loop consumes them).
         let had_events = !validated_events.is_empty();
         let had_plan_events = validated_events
@@ -8928,29 +8574,6 @@ impl EventLoop {
             self.bus.publish(event);
         }
 
-        // Publish human.response event if one was received during blocking
-        if let Some(response) = response_event {
-            let verdict_topics = self.verdict_gate_topics();
-            let verdict_topics_slice = verdict_topics.as_deref();
-            self.state.record_event(&response);
-            self.state
-                .record_verdict_if_match(&response, verdict_topics_slice);
-            info!(
-                topic = %response.topic,
-                "Publishing human.response event from robot service"
-            );
-            if let Some(ref projection_config) = self.config.core.event_projection
-                && projection_config.enabled
-            {
-                crate::event_projection::apply_projection(
-                    &response,
-                    &projection_config.rules,
-                    &self.config.core.workspace_root,
-                );
-            }
-            self.bus.publish(response);
-        }
-
         // --- U3: Invariant assertion checks ---
         if self.config.core.invariant_assertions {
             let control_prefixes = ["event.", "human."];
@@ -9060,7 +8683,6 @@ impl EventLoop {
             had_raw_events,
             had_rejected_events,
             had_plan_events,
-            human_interact_context,
             has_orphans,
             accepted_events: accepted_log_events,
             contract_rejections,
@@ -9371,7 +8993,7 @@ impl EventLoop {
         // --- End isolated scope enforcement for wave events ---
 
         // Delegate regular events to the full pipeline (backpressure, scope
-        // enforcement, human.interact, plan detection, etc.)
+        // enforcement, plan detection, etc.)
         let regular_result = crate::event_reader::ParseResult {
             events: regular_events,
             malformed: result.malformed,
@@ -9403,9 +9025,6 @@ impl EventLoop {
     ///
     /// Returns the event for logging purposes.
     pub fn publish_terminate_event(&mut self, reason: &TerminationReason) -> Event {
-        // Stop the robot service if it was running
-        self.stop_robot_service();
-
         let elapsed = self.state.elapsed();
         let duration_str = format_duration(elapsed);
 
@@ -9466,23 +9085,6 @@ impl EventLoop {
             }
         }
         self.bus.publish(event);
-    }
-
-    /// Returns the robot service's shutdown flag, if active.
-    ///
-    /// Signal handlers can set this flag to interrupt `wait_for_response()`
-    /// without waiting for the full timeout.
-    pub fn robot_shutdown_flag(&self) -> Option<Arc<AtomicBool>> {
-        self.robot_service.as_ref().map(|s| s.shutdown_flag())
-    }
-
-    /// Stops the robot service if it's running.
-    ///
-    /// Called during loop termination to cleanly shut down the communication backend.
-    fn stop_robot_service(&mut self) {
-        if let Some(service) = self.robot_service.take() {
-            service.stop();
-        }
     }
 
     // -------------------------------------------------------------------------

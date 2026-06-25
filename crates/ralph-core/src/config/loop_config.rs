@@ -160,7 +160,7 @@ pub struct EventLoopConfig {
     /// When true, LOOP_COMPLETE does not terminate the loop.
     ///
     /// Instead of exiting, the loop injects a `task.resume` event and continues
-    /// idling until new work arrives (human guidance, Telegram commands, etc.).
+    /// idling until new work arrives (human guidance, recovery commands, etc.).
     /// The loop will only terminate on hard limits (max_iterations, max_runtime,
     /// max_cost), consecutive failures, or explicit interrupt/stop.
     #[serde(default)]
@@ -311,8 +311,8 @@ pub struct EventLoopConfig {
     /// stops the guidance from reaching the prompt of the active
     /// hat. Used by `ce-executor-serial` to prevent the perky-maple
     /// P1-2 probe storm where the executor went into a 6-round
-    /// emit-probing spiral after `human.guidance` injection. TUI /
-    /// Telegram ingestion is unchanged.
+    /// emit-probing spiral after `human.guidance` injection. TUI
+    /// guidance injection is unchanged.
     ///
     /// Default: `false`. Opt-in per preset.
     #[serde(default)]

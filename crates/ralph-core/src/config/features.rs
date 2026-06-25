@@ -31,7 +31,7 @@ pub struct PreflightConfig {
 ///   preflight:
 ///     enabled: false      # Opt-in: run preflight checks before `ralph run`
 ///     strict: false       # Treat warnings as failures
-///     skip: ["telegram"]  # Skip specific checks by name
+///     skip: ["git"]      # Skip specific checks by name
 ///   loop_naming:
 ///     format: human-readable  # or "timestamp" for legacy format
 ///     max_length: 50

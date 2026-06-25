@@ -31,7 +31,6 @@ mod hat_backend;
 mod hat_exhaustion;
 mod hat_lifecycle_integration;
 mod hat_lifecycle_jsonl_e2e;
-mod human_timeout;
 mod incident_fixture;
 mod initialization;
 mod isolated_complex_regression;
@@ -48,7 +47,6 @@ mod r5_hard_gate_routing;
 mod recovery_envelope_u7_u8;
 mod replay_light_integration;
 mod review_step_gate;
-mod robot_skill;
 // 2026-06-23 T2: `## RUNTIME CONFIG` block injection for `max_residuals`.
 // See `runtime_config_block.rs`.
 mod runtime_config_block;

@@ -803,7 +803,7 @@ mod tests {
         let config = make_experiment_config();
 
         let decision =
-            state.validate_event("human.interact", Some(r#"{"question": "hi"}"#), &config);
+            state.validate_event("human.guidance", Some("guidance content"), &config);
 
         match decision {
             StateMachineDecision::Accept { instance_key, .. } => {

@@ -56,25 +56,6 @@ pub fn fail_if_blocking_plan_created_outcomes(outcomes: &[HookDispatchOutcome]) 
     Err(anyhow::anyhow!(reason))
 }
 
-pub fn fail_if_blocking_human_interact_outcomes(outcomes: &[HookDispatchOutcome]) -> Result<()> {
-    let Some(blocking_outcome) = outcomes
-        .iter()
-        .find(|outcome| outcome.disposition == HookDisposition::Block)
-    else {
-        return Ok(());
-    };
-
-    let reason = format_blocking_hook_reason(blocking_outcome);
-    error!(
-        phase_event = %blocking_outcome.phase_event,
-        hook_name = %blocking_outcome.hook_name,
-        reason = %reason,
-        "Lifecycle hook blocked human.interact boundary"
-    );
-
-    Err(anyhow::anyhow!(reason))
-}
-
 pub fn fail_if_blocking_loop_termination_outcomes(outcomes: &[HookDispatchOutcome]) -> Result<()> {
     let Some(blocking_outcome) = outcomes
         .iter()

@@ -318,7 +318,7 @@ impl DriftEngine {
     /// | Severity | Action |
     /// |---|---|
     /// | `Critical` / `Error` | Promote to `TerminationReason::RecoveryExhausted` — the loop terminates |
-    /// | `Warning` | Emit a `human.guidance` event so the operator / RObot can intervene — the loop continues |
+    /// | `Warning` | Emit a `human.guidance` event so the operator can intervene — the loop continues |
     /// | `Info` | No active action — the soft alert is enough |
     ///
     /// Callers should always pair this with
@@ -369,11 +369,11 @@ impl DriftEngine {
         // bootstrap window we must NOT publish any
         // `human.guidance` event.  The build_prompt guard already
         // drops the events on the consumer side, but emitting
-        // them at all would (a) be visible to RObot / Telegram
-        // and (b) inflate the bus for downstream readers.  Skip
-        // the call entirely while `in_bootstrap_phase()` is
-        // true; the Warning hint stays in the responder and
-        // will fire naturally once `bootstrap_complete` flips.
+        // them at all would inflate the bus for downstream
+        // readers.  Skip the call entirely while
+        // `in_bootstrap_phase()` is true; the Warning hint stays
+        // in the responder and will fire naturally once
+        // `bootstrap_complete` flips.
         if event_loop.in_bootstrap_phase() {
             return false;
         }
@@ -396,10 +396,10 @@ impl DriftEngine {
         let payload = format!(
             "RECOVERY-FINAL-WARNING\nretry_key={retry_key}\nreason={reason}\niteration={current_iteration}\n"
         );
-        // `human.guidance` is the existing in-band topic used
-        // by the RObot integration. RObot / Telegram relay
-        // operators see it and can intervene. The bus accepts
-        // it without targeting a specific hat.
+        // `human.guidance` is the in-band recovery topic. The
+        // bus accepts it without targeting a specific hat; the
+        // orchestrator's recovery responder routes it to the
+        // targeted hat.
         let event = Event::new("human.guidance", payload);
         event_loop.bus().publish(event);
         self.last_guidance_iteration = current_iteration;

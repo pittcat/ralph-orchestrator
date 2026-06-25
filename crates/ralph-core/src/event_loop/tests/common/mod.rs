@@ -3,8 +3,6 @@
 use super::*;
 
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 /// P2 finding #8: shared `init_git_workspace` helper. Both
 /// `isolated_complex_regression.rs` and the ralph-cli `loop_runner`
@@ -173,66 +171,4 @@ pub(super) fn setup_loop_with_workflow_guards() -> EventLoop {
     EventLoop::new(config)
 }
 
-pub(super) struct MockRobotService {
-    pub timeout: u64,
-    pub should_timeout: bool,
-}
 
-impl ralph_proto::RobotService for MockRobotService {
-    fn send_question(&self, _payload: &str) -> anyhow::Result<i32> {
-        Ok(1)
-    }
-    fn wait_for_response(&self, _events_path: &Path) -> anyhow::Result<Option<String>> {
-        if self.should_timeout {
-            Ok(None)
-        } else {
-            Ok(Some("approved".to_string()))
-        }
-    }
-    fn send_checkin(
-        &self,
-        _: u32,
-        _: Duration,
-        _: Option<&ralph_proto::CheckinContext>,
-    ) -> anyhow::Result<i32> {
-        Ok(0)
-    }
-    fn timeout_secs(&self) -> u64 {
-        self.timeout
-    }
-    fn shutdown_flag(&self) -> Arc<AtomicBool> {
-        Arc::new(AtomicBool::new(false))
-    }
-    fn stop(self: Box<Self>) {}
-}
-
-pub(super) struct RestartRequestRobotService;
-
-impl ralph_proto::RobotService for RestartRequestRobotService {
-    fn send_question(&self, _payload: &str) -> anyhow::Result<i32> {
-        Ok(1)
-    }
-
-    fn wait_for_response(&self, _events_path: &Path) -> anyhow::Result<Option<String>> {
-        Ok(Some("Please restart yourself now".to_string()))
-    }
-
-    fn send_checkin(
-        &self,
-        _: u32,
-        _: Duration,
-        _: Option<&ralph_proto::CheckinContext>,
-    ) -> anyhow::Result<i32> {
-        Ok(0)
-    }
-
-    fn timeout_secs(&self) -> u64 {
-        5
-    }
-
-    fn shutdown_flag(&self) -> Arc<AtomicBool> {
-        Arc::new(AtomicBool::new(false))
-    }
-
-    fn stop(self: Box<Self>) {}
-}

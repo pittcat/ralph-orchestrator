@@ -2062,10 +2062,6 @@ mod tests {
             check_completion_honored("task.resume", &config, &state),
             None
         );
-        assert_eq!(
-            check_completion_honored("human.response", &config, &state),
-            None
-        );
     }
 
     #[test]
@@ -2325,10 +2321,8 @@ mod tests {
 
     #[test]
     fn test_is_system_topic_human_prefix() {
-        assert!(is_system_topic("human.interact"));
-        assert!(is_system_topic("human.response"));
         assert!(is_system_topic("human.guidance"));
-        assert!(!is_system_topic("humanx.interact")); // no dot after prefix
+        assert!(!is_system_topic("humanx.guidance")); // no dot after prefix
     }
 
     #[test]

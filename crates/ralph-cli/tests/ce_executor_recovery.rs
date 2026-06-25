@@ -249,12 +249,12 @@ fn wave_results_must_carry_wave_correlation_metadata() {
 
 #[test]
 fn unknown_hat_always_origin_rejected() {
-    // R1 defense in depth: even control topics like human.interact
+    // R1 defense in depth: even control topics like human.guidance
     // must reject unknown hat sources (anti-spoofing).
     let registry = ce_executor_registry();
     let event = JsonlEvent {
-        topic: "human.interact".into(),
-        payload: Some("{\"question\":\"?\"}".into()),
+        topic: "human.guidance".into(),
+        payload: Some("guidance content".into()),
         ts: "2026-06-06T00:00:00Z".into(),
         hat: Some("ghost-hat".into()),
         triggered: None,

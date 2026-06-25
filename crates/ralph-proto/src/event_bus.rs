@@ -394,20 +394,20 @@ mod tests {
         let hat = Hat::new("ralph", "Ralph").subscribe("*");
         bus.register(hat);
 
-        bus.publish(Event::new("human.interact", "question"));
-        bus.publish(Event::new("human.response", "hello"));
+        bus.publish(Event::new("system.tick", "tick"));
+        bus.publish(Event::new("debug.step", "step"));
         bus.publish(Event::new("human.guidance", "note"));
 
-        assert_eq!(bus.peek_human_pending().len(), 3);
+        assert_eq!(bus.peek_human_pending().len(), 1);
         assert_eq!(
             bus.peek_pending(&HatId::new("ralph"))
                 .map(|events| events.len())
                 .unwrap_or(0),
-            0
+            2
         );
 
         let taken = bus.take_human_pending();
-        assert_eq!(taken.len(), 3);
+        assert_eq!(taken.len(), 1);
         assert!(!bus.has_human_pending());
     }
 

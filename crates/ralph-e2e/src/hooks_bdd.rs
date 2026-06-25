@@ -1146,14 +1146,6 @@ fn evaluate_ac_02(
                         "\"post.plan.created\" => Some(Self::PostPlanCreated),",
                     ),
                     (
-                        "pre.human.interact phase-event parses",
-                        "\"pre.human.interact\" => Some(Self::PreHumanInteract),",
-                    ),
-                    (
-                        "post.human.interact phase-event parses",
-                        "\"post.human.interact\" => Some(Self::PostHumanInteract),",
-                    ),
-                    (
                         "pre.loop.complete phase-event parses",
                         "\"pre.loop.complete\" => Some(Self::PreLoopComplete),",
                     ),
@@ -1250,14 +1242,6 @@ fn evaluate_ac_03(
                     (
                         "post.plan.created serde key exists",
                         "#[serde(rename = \"post.plan.created\")]",
-                    ),
-                    (
-                        "pre.human.interact serde key exists",
-                        "#[serde(rename = \"pre.human.interact\")]",
-                    ),
-                    (
-                        "post.human.interact serde key exists",
-                        "#[serde(rename = \"post.human.interact\")]",
                     ),
                     (
                         "pre.loop.complete serde key exists",

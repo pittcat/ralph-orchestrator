@@ -197,10 +197,6 @@ pub struct LoopState {
     /// Hats for which `<hat_id>.exhausted` has been emitted.
     pub exhausted_hats: HashSet<HatId>,
 
-    /// When the last Telegram check-in message was sent.
-    /// `None` means no check-in has been sent yet.
-    pub last_checkin_at: Option<Instant>,
-
     /// Hat IDs that were active in the last iteration.
     /// Used to inject `default_publishes` when agent writes no events.
     pub last_active_hat_ids: Vec<HatId>,
@@ -636,7 +632,6 @@ impl Default for LoopState {
             isolated_turn_business_event_accepted: false,
             hat_activation_counts: HashMap::new(),
             exhausted_hats: HashSet::new(),
-            last_checkin_at: None,
             last_active_hat_ids: Vec::new(),
             last_activation_events: Vec::new(),
             seen_topics: HashSet::new(),
@@ -1308,10 +1303,7 @@ impl LoopState {
                 | "event.completion.ignored"
                 | "event.isolation.boundary_violation"
                 | "event.step_handoff.gate_rejected"
-                | "human.interact"
-                | "human.response"
                 | "human.guidance"
-                | "human.timeout"
                 | "loop.cancel"
                 | "build.task.abandoned"
         ) || topic.ends_with(".exhausted")

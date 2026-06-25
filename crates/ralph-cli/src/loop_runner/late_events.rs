@@ -32,15 +32,12 @@ pub fn poll_for_late_events(
             return Ok(LateEventRecovery::PendingWork);
         }
 
-        let observed_events = processed.had_events
-            || processed.has_orphans
-            || processed.human_interact_context.is_some();
+        let observed_events = processed.had_events || processed.has_orphans;
 
         if observed_events {
             debug!(
                 had_events = processed.had_events,
                 has_orphans = processed.has_orphans,
-                had_human_interact = processed.human_interact_context.is_some(),
                 "Late JSONL drain found events but no new pending work"
             );
             return Ok(LateEventRecovery::NoLateEvents);

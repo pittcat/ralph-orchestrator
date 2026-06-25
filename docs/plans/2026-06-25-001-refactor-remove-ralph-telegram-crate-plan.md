@@ -1,7 +1,7 @@
 ---
 title: 'refactor: Remove ralph-telegram crate and RobotService / human.interact path (keep human.guidance)'
 type: refactor
-status: active
+status: u3-closed-u4-pending
 date: 2026-06-25
 deepened: 2026-06-25
 ---

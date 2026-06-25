@@ -222,17 +222,13 @@ hats:
     let events_path = temp_dir.path().join("events.jsonl");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
-    // human.interact without hat should still work
-    write_event_to_jsonl(&events_path, "human.interact", "What now?");
+    // task.resume without hat should still work (control topic)
+    write_event_to_jsonl(&events_path, "task.resume", "continue");
     let result = event_loop.process_events_from_jsonl().unwrap();
 
     assert!(
         result.had_events,
         "Control topic without hat should be accepted"
-    );
-    assert!(
-        result.human_interact_context.is_some(),
-        "human.interact should produce interaction context"
     );
 }
 

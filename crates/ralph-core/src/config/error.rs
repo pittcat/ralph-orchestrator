@@ -42,12 +42,7 @@ pub enum ConfigError {
     MissingDescription { hat: String },
 
     #[error(
-        "RObot config error: {field} - {hint}\nSee: docs/reference/troubleshooting.md#robot-config"
-    )]
-    RobotMissingField { field: String, hint: String },
-
-    #[error(
-        "Invalid hooks phase-event '{phase_event}'. Supported v1 phase-events: pre.loop.start, post.loop.start, pre.iteration.start, post.iteration.start, pre.plan.created, post.plan.created, pre.human.interact, post.human.interact, pre.loop.complete, post.loop.complete, pre.loop.error, post.loop.error.\nFix: use one of the supported keys under hooks.events."
+        "Invalid hooks phase-event '{phase_event}'. Supported v1 phase-events: pre.loop.start, post.loop.start, pre.iteration.start, post.iteration.start, pre.plan.created, post.plan.created, pre.loop.complete, post.loop.complete, pre.loop.error, post.loop.error.\nFix: use one of the supported keys under hooks.events."
     )]
     InvalidHookPhaseEvent { phase_event: String },
 

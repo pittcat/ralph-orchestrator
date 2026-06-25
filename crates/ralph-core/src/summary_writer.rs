@@ -497,7 +497,6 @@ mod tests {
             isolated_turn_business_event_accepted: false,
             hat_activation_counts: std::collections::HashMap::new(),
             exhausted_hats: std::collections::HashSet::new(),
-            last_checkin_at: None,
             last_active_hat_ids: Vec::new(),
             last_activation_events: Vec::new(),
             seen_topics: std::collections::HashSet::new(),

@@ -940,29 +940,6 @@ fn build_plan_created_payload_input(
     )
 }
 
-fn build_human_interact_payload_input(
-    loop_id: &str,
-    ctx: &LoopContext,
-    max_iterations: u32,
-    iteration_current: u32,
-    active_hat: Option<String>,
-    selected_hat: Option<String>,
-    selected_task: Option<String>,
-    human_interact: Option<serde_json::Value>,
-) -> HookPayloadBuilderInput {
-    super::build_human_interact_payload_input(
-        loop_id,
-        ctx,
-        max_iterations,
-        iteration_current,
-        active_hat,
-        selected_hat,
-        selected_task,
-        human_interact,
-        &empty_hook_metadata(),
-    )
-}
-
 fn build_loop_termination_payload_input(
     loop_id: &str,
     ctx: &LoopContext,
@@ -2109,141 +2086,6 @@ fn test_plan_created_lifecycle_hooks_dispatch_only_for_semantic_plan_batches() {
 
 #[cfg(unix)]
 #[test]
-fn test_human_interact_lifecycle_hooks_dispatch_with_post_outcome_context() {
-    use std::io::Write;
-
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let (mut event_loop, loop_ctx) = dispatch_test_event_loop_with_context(temp_dir.path());
-    let events_path = loop_ctx.events_path();
-    std::fs::create_dir_all(events_path.parent().expect("events path parent"))
-        .expect("create events directory");
-
-    let mut events_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&events_path)
-        .expect("open events file");
-    writeln!(
-        events_file,
-        r#"{{"topic":"human.interact","payload":"Need approval?","ts":"2024-01-01T00:00:00Z"}}"#
-    )
-    .expect("write human.interact event");
-    events_file.flush().expect("flush human.interact event");
-
-    let log_path = temp_dir.path().join("human-interact-hook-payloads.jsonl");
-    let mut events = std::collections::HashMap::new();
-    events.insert(
-        HookPhaseEvent::PreHumanInteract,
-        vec![payload_recording_hook("pre-human-interact", &log_path)],
-    );
-    events.insert(
-        HookPhaseEvent::PostHumanInteract,
-        vec![payload_recording_hook("post-human-interact", &log_path)],
-    );
-    let hook_engine = hook_engine_with_events(events);
-    let hook_executor = HookExecutor::new();
-
-    let pending_context = event_loop
-        .pending_human_interact_context_in_jsonl()
-        .expect("peek pending human.interact context")
-        .expect("pending human.interact context should exist");
-    assert_eq!(
-        pending_context["question"],
-        serde_json::json!("Need approval?")
-    );
-    assert!(
-        pending_context.get("outcome").is_none(),
-        "pre human.interact context should not include an outcome"
-    );
-
-    let pre_outcomes = dispatch_phase_event_hooks(
-        &event_loop,
-        true,
-        "loop-test",
-        &hook_engine,
-        &hook_executor,
-        HookPhaseEvent::PreHumanInteract,
-        build_human_interact_payload_input(
-            "loop-test",
-            &loop_ctx,
-            5,
-            event_loop.state().iteration,
-            Some("planner".to_string()),
-            Some("planner".to_string()),
-            None,
-            Some(pending_context),
-        ),
-    );
-    assert!(fail_if_blocking_human_interact_outcomes(&pre_outcomes).is_ok());
-
-    let processed = event_loop
-        .process_events_from_jsonl()
-        .expect("process human.interact batch");
-    let post_context = processed
-        .human_interact_context
-        .expect("processed context should include human.interact outcome");
-    assert_eq!(
-        post_context["question"],
-        serde_json::json!("Need approval?")
-    );
-    assert_eq!(
-        post_context["outcome"],
-        serde_json::json!("no_robot_service")
-    );
-
-    let post_outcomes = dispatch_phase_event_hooks(
-        &event_loop,
-        true,
-        "loop-test",
-        &hook_engine,
-        &hook_executor,
-        HookPhaseEvent::PostHumanInteract,
-        build_human_interact_payload_input(
-            "loop-test",
-            &loop_ctx,
-            5,
-            event_loop.state().iteration,
-            Some("planner".to_string()),
-            Some("planner".to_string()),
-            None,
-            Some(post_context),
-        ),
-    );
-    assert!(fail_if_blocking_human_interact_outcomes(&post_outcomes).is_ok());
-
-    let payloads = read_hook_payload_log(&log_path);
-    assert_eq!(payloads.len(), 2);
-    assert_eq!(
-        payloads[0]["phase_event"],
-        serde_json::json!("pre.human.interact")
-    );
-    assert_eq!(
-        payloads[0]["context"]["human_interact"]["question"],
-        serde_json::json!("Need approval?")
-    );
-    assert!(
-        payloads[0]["context"]["human_interact"]
-            .get("outcome")
-            .is_none(),
-        "pre.human.interact payload should not include outcome"
-    );
-
-    assert_eq!(
-        payloads[1]["phase_event"],
-        serde_json::json!("post.human.interact")
-    );
-    assert_eq!(
-        payloads[1]["context"]["human_interact"]["question"],
-        serde_json::json!("Need approval?")
-    );
-    assert_eq!(
-        payloads[1]["context"]["human_interact"]["outcome"],
-        serde_json::json!("no_robot_service")
-    );
-}
-
-#[cfg(unix)]
-#[test]
 fn test_loop_termination_lifecycle_hooks_dispatch_complete_and_error_boundaries() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let log_path = temp_dir.path().join("loop-termination-hook-payloads.jsonl");
@@ -3377,77 +3219,6 @@ fn test_fail_if_blocking_iteration_start_outcomes_surfaces_failure_context() {
     let blocked_exec_message = blocked_exec_error.to_string();
     assert!(blocked_exec_message.contains("block-exec-hook"));
     assert!(blocked_exec_message.contains("post.iteration.start"));
-    assert!(blocked_exec_message.contains("hook execution failed: spawn failed"));
-}
-
-#[test]
-fn test_fail_if_blocking_human_interact_outcomes_allows_non_blocking_dispositions() {
-    let outcomes = vec![
-        HookDispatchOutcome {
-            phase_event: HookPhaseEvent::PreHumanInteract,
-            hook_name: "warn-hook".to_string(),
-            disposition: HookDisposition::Warn,
-            suspend_mode: HookSuspendMode::WaitForResume,
-            failure: Some(HookDispatchFailure::HookRunFailed {
-                exit_code: Some(9),
-                timed_out: false,
-            }),
-
-            mutation_parse_outcome: HookMutationParseOutcome::Disabled,
-        },
-        HookDispatchOutcome {
-            phase_event: HookPhaseEvent::PostHumanInteract,
-            hook_name: "pass-hook".to_string(),
-            disposition: HookDisposition::Pass,
-            suspend_mode: HookSuspendMode::WaitForResume,
-            failure: None,
-
-            mutation_parse_outcome: HookMutationParseOutcome::Disabled,
-        },
-    ];
-
-    assert!(fail_if_blocking_human_interact_outcomes(&outcomes).is_ok());
-}
-
-#[test]
-fn test_fail_if_blocking_human_interact_outcomes_surfaces_failure_context() {
-    let blocked_timeout_outcomes = vec![HookDispatchOutcome {
-        phase_event: HookPhaseEvent::PostHumanInteract,
-        hook_name: "block-timeout-hook".to_string(),
-        disposition: HookDisposition::Block,
-        suspend_mode: HookSuspendMode::WaitForResume,
-        failure: Some(HookDispatchFailure::HookRunFailed {
-            exit_code: None,
-            timed_out: true,
-        }),
-
-        mutation_parse_outcome: HookMutationParseOutcome::Disabled,
-    }];
-
-    let blocked_timeout_error = fail_if_blocking_human_interact_outcomes(&blocked_timeout_outcomes)
-        .expect_err("block disposition should fail human.interact boundary");
-    let blocked_timeout_message = blocked_timeout_error.to_string();
-    assert!(blocked_timeout_message.contains("block-timeout-hook"));
-    assert!(blocked_timeout_message.contains("post.human.interact"));
-    assert!(blocked_timeout_message.contains("hook timed out"));
-
-    let blocked_exec_outcomes = vec![HookDispatchOutcome {
-        phase_event: HookPhaseEvent::PreHumanInteract,
-        hook_name: "block-exec-hook".to_string(),
-        disposition: HookDisposition::Block,
-        suspend_mode: HookSuspendMode::WaitForResume,
-        failure: Some(HookDispatchFailure::HookExecutionError {
-            message: "spawn failed".to_string(),
-        }),
-
-        mutation_parse_outcome: HookMutationParseOutcome::Disabled,
-    }];
-
-    let blocked_exec_error = fail_if_blocking_human_interact_outcomes(&blocked_exec_outcomes)
-        .expect_err("block disposition should fail human.interact boundary");
-    let blocked_exec_message = blocked_exec_error.to_string();
-    assert!(blocked_exec_message.contains("block-exec-hook"));
-    assert!(blocked_exec_message.contains("pre.human.interact"));
     assert!(blocked_exec_message.contains("hook execution failed: spawn failed"));
 }
 
@@ -9119,7 +8890,7 @@ fn test_contract_rejection_satisfies_any_valid_or_rejected() {
         had_raw_events: true,
         had_rejected_events: true,
         had_plan_events: false,
-        human_interact_context: None,
+
         has_orphans: false,
         accepted_events: vec![],
         contract_rejections: vec![ralph_core::execution_contract::ExecutionContractFinding {
@@ -9181,7 +8952,7 @@ hats:
         had_raw_events: false,
         had_rejected_events: false,
         had_plan_events: false,
-        human_interact_context: None,
+
         has_orphans: false,
         accepted_events: vec![],
         contract_rejections: vec![],
@@ -9201,7 +8972,7 @@ hats:
         had_raw_events: true,
         had_rejected_events: true,
         had_plan_events: false,
-        human_interact_context: None,
+
         has_orphans: false,
         accepted_events: vec![],
         contract_rejections: vec![],
@@ -10595,7 +10366,7 @@ hats:
         had_raw_events: true,
         had_rejected_events: true,
         had_plan_events: false,
-        human_interact_context: None,
+
         has_orphans: false,
         accepted_events: vec![],
         contract_rejections: vec![finding.clone()],
@@ -10720,7 +10491,7 @@ fn u4_handle_execution_contract_rejections_writes_envelope_when_no_safe_target()
         had_raw_events: true,
         had_rejected_events: true,
         had_plan_events: false,
-        human_interact_context: None,
+
         has_orphans: false,
         accepted_events: vec![],
         contract_rejections: vec![finding],

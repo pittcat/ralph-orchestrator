@@ -133,9 +133,7 @@ pub use event_loop::{
     },
 };
 pub use event_origin::{
-    HumanInteractValidation, RALPH_CONTROL_TOPICS, TRUSTED_HUMAN_RESPONSE_SOURCE,
-    is_orchestrator_control_topic, is_orchestrator_diagnostic_topic, is_trusted_human_response,
-    validate_human_interact_payload,
+    RALPH_CONTROL_TOPICS, is_orchestrator_control_topic, is_orchestrator_diagnostic_topic,
 };
 pub use event_parser::EventParser;
 pub use event_policy::{

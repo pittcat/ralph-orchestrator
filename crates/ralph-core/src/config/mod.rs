@@ -18,7 +18,6 @@ mod loop_config;
 mod memories;
 mod preflight_ext;
 mod ralph_config;
-pub(crate) mod robot;
 mod skills;
 mod state_files;
 pub(crate) mod state_machine;
@@ -62,7 +61,6 @@ pub use multi_hat_policy::{
     MULTI_HAT_ISOLATION_LIMIT, MultiHatPolicyViolation, evaluate_multi_hat_isolation,
 };
 pub use preflight_ext::{HookStage, PreflightExtensionsConfig, PreflightHook};
-pub use robot::RobotConfig;
 pub use skills::{SkillOverride, SkillsConfig};
 pub use state_files::{StateFileEntry, StateFileFormat, StateFilesConfig};
 pub use state_machine::{BusinessAfterTerminalAction, DuplicateTerminalAction, StateMachineConfig};
@@ -222,10 +220,6 @@ pub struct RalphConfig {
     #[serde(default)]
     pub agent_doc_sync: AgentDocSyncConfig,
 
-    /// RObot (Ralph-Orchestrator bot) configuration for Telegram-based interaction.
-    #[serde(default, rename = "RObot")]
-    pub robot: RobotConfig,
-
     // ─────────────────────────────────────────────────────────────────────────
     // PRESET LINT FIELDS (U1 of plan 2026-06-08-003)
     // ─────────────────────────────────────────────────────────────────────────
@@ -298,8 +292,6 @@ impl Default for RalphConfig {
             telemetry: TelemetryConfig::default(),
             // Agent doc sync
             agent_doc_sync: AgentDocSyncConfig::default(),
-            // RObot (Ralph-Orchestrator bot)
-            robot: RobotConfig::default(),
             // Preset lint (U1 of plan 2026-06-08-003)
             topic_owners: HashMap::new(),
             topic_format_whitelist: Vec::new(),

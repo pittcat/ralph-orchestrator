@@ -2165,7 +2165,6 @@ hats:
             "LOOP_COMPLETE",
             "loop.cancel",
             "task.resume",
-            "human.interact",
             "human.guidance",
         ] {
             assert!(

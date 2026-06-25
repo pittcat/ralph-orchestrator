@@ -110,7 +110,6 @@ impl PreflightRunner {
                 Box::new(ConfigValidCheck),
                 Box::new(HooksValidationCheck),
                 Box::new(BackendAvailableCheck),
-                Box::new(TelegramTokenCheck),
                 Box::new(GitCleanCheck),
                 Box::new(PathsExistCheck),
                 Box::new(ToolsInPathCheck::default()),
@@ -141,7 +140,6 @@ impl PreflightRunner {
         checks.push(Box::new(EventFilterValidCheck));
         checks.push(Box::new(HooksValidationCheck));
         checks.push(Box::new(BackendAvailableCheck));
-        checks.push(Box::new(TelegramTokenCheck));
         checks.push(Box::new(GitCleanCheck));
         checks.push(Box::new(PathsExistCheck));
         checks.push(Box::new(ToolsInPathCheck::default()));
@@ -574,36 +572,6 @@ impl PreflightCheck for BackendAvailableCheck {
         }
 
         check_named_backend(self.name(), config, backend)
-    }
-}
-
-struct TelegramTokenCheck;
-
-#[async_trait]
-impl PreflightCheck for TelegramTokenCheck {
-    fn name(&self) -> &'static str {
-        "telegram"
-    }
-
-    async fn run(&self, config: &RalphConfig) -> CheckResult {
-        if !config.robot.enabled {
-            return CheckResult::pass(self.name(), "RObot disabled (skipping)");
-        }
-
-        let Some(token) = config.robot.resolve_bot_token() else {
-            return CheckResult::fail(
-                self.name(),
-                "Telegram token missing",
-                "Set RALPH_TELEGRAM_BOT_TOKEN or configure RObot.telegram.bot_token",
-            );
-        };
-
-        match telegram_get_me(&token).await {
-            Ok(info) => {
-                CheckResult::pass(self.name(), format!("Bot token valid (@{})", info.username))
-            }
-            Err(err) => CheckResult::fail(self.name(), "Telegram token invalid", format!("{err}")),
-        }
     }
 }
 
@@ -1065,47 +1033,6 @@ pub fn extract_all_criteria(
     Ok(results)
 }
 
-#[derive(Debug)]
-struct TelegramBotInfo {
-    username: String,
-}
-
-async fn telegram_get_me(token: &str) -> anyhow::Result<TelegramBotInfo> {
-    let url = format!("https://api.telegram.org/bot{}/getMe", token);
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(&url)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|err| anyhow::anyhow!("Network error calling Telegram API: {err}"))?;
-
-    let status = resp.status();
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|err| anyhow::anyhow!("Failed to parse Telegram API response: {err}"))?;
-
-    if !status.is_success() || body.get("ok") != Some(&serde_json::Value::Bool(true)) {
-        let description = body
-            .get("description")
-            .and_then(|value| value.as_str())
-            .unwrap_or("Unknown error");
-        anyhow::bail!("Telegram API error: {description}");
-    }
-
-    let result = body
-        .get("result")
-        .ok_or_else(|| anyhow::anyhow!("Missing 'result' in Telegram response"))?;
-    let username = result
-        .get("username")
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown_bot")
-        .to_string();
-
-    Ok(TelegramBotInfo { username })
-}
-
 fn check_auto_backend(name: &str, config: &RalphConfig) -> CheckResult {
     let priority = config.get_agent_priority();
     if priority.is_empty() {
@@ -1484,17 +1411,6 @@ mod tests {
         assert!(root.join("nested").exists());
         assert!(root.join("nested/specs").exists());
         assert_eq!(result.status, CheckStatus::Warn);
-    }
-
-    #[tokio::test]
-    async fn telegram_check_skips_when_disabled() {
-        let config = RalphConfig::default();
-        let check = TelegramTokenCheck;
-
-        let result = check.run(&config).await;
-
-        assert_eq!(result.status, CheckStatus::Pass);
-        assert!(result.label.contains("skipping"));
     }
 
     #[tokio::test]

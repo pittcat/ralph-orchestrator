@@ -359,10 +359,10 @@ pub const LOOP_RUNNER_INTERNAL_TOPICS: &[&str] = &[
     // `progress-steward` hat subscribes, but the topic has no
     // publisher in the hat graph (the runner is the publisher).
     "loop.stalled",
-    // 2026-06-16-001 U5: `human.guidance` is produced by the RObot
-    // (Telegram) channel, not by any hat. The
-    // `progress-steward` hat subscribes so an operator's proactive
-    // guidance can wake the fallback path.
+    // 2026-06-16-001 U5: `human.guidance` is produced by the
+    // runtime diagnosis engine as a recovery channel, not by any
+    // hat. The `progress-steward` hat subscribes so an operator's
+    // proactive guidance can wake the fallback path.
     "human.guidance",
     // 2026-06-16-001 U5: `task.resume` is produced by the loop
     // runner as a recovery signal (U3 freshness filter, U5
@@ -403,7 +403,6 @@ fn config_error_id(err: &ConfigError) -> &'static str {
         ConfigError::CustomBackendRequiresCommand => "config.custom_backend_requires_command",
         ConfigError::ReservedTrigger { .. } => "config.reserved_trigger",
         ConfigError::MissingDescription { .. } => "config.missing_description",
-        ConfigError::RobotMissingField { .. } => "config.robot_missing_field",
         ConfigError::InvalidHookPhaseEvent { .. } => "config.invalid_hook_phase_event",
         ConfigError::HookValidation { .. } => "config.hook_validation",
         ConfigError::UnsupportedHookField { .. } => "config.unsupported_hook_field",
@@ -509,9 +508,6 @@ fn config_error_finding(err: &ConfigError) -> RuntimeContractFinding {
         }
         ConfigError::MissingDescription { hat } => {
             finding = finding.with_detail("hat", hat.clone());
-        }
-        ConfigError::RobotMissingField { field, hint: _ } => {
-            finding = finding.with_detail("field", field.clone());
         }
         ConfigError::InvalidHookPhaseEvent { phase_event } => {
             finding = finding.with_detail("phase_event", phase_event.clone());

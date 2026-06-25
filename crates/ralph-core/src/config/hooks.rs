@@ -93,10 +93,6 @@ pub enum HookPhaseEvent {
     PrePlanCreated,
     #[serde(rename = "post.plan.created")]
     PostPlanCreated,
-    #[serde(rename = "pre.human.interact")]
-    PreHumanInteract,
-    #[serde(rename = "post.human.interact")]
-    PostHumanInteract,
     #[serde(rename = "pre.loop.complete")]
     PreLoopComplete,
     #[serde(rename = "post.loop.complete")]
@@ -117,8 +113,6 @@ impl HookPhaseEvent {
             "post.iteration.start" => Self::PostIterationStart,
             "pre.plan.created" => Self::PrePlanCreated,
             "post.plan.created" => Self::PostPlanCreated,
-            "pre.human.interact" => Self::PreHumanInteract,
-            "post.human.interact" => Self::PostHumanInteract,
             "pre.loop.complete" => Self::PreLoopComplete,
             "post.loop.complete" => Self::PostLoopComplete,
             "pre.loop.error" => Self::PreLoopError,
@@ -141,8 +135,6 @@ impl HookPhaseEvent {
             Self::PostIterationStart => "post.iteration.start",
             Self::PrePlanCreated => "pre.plan.created",
             Self::PostPlanCreated => "post.plan.created",
-            Self::PreHumanInteract => "pre.human.interact",
-            Self::PostHumanInteract => "post.human.interact",
             Self::PreLoopComplete => "pre.loop.complete",
             Self::PostLoopComplete => "post.loop.complete",
             Self::PreLoopError => "pre.loop.error",

@@ -212,9 +212,6 @@ impl RalphConfig {
             });
         }
 
-        // Validate RObot config
-        self.robot.validate()?;
-
         // Validate telemetry / runtime-diagnosis config (U1). Soft
         // warnings (e.g. enabled=false && write_artifacts=true) are
         // returned through the same channel as other warnings; hard
@@ -801,7 +798,6 @@ impl RalphConfig {
 /// ```
 #[cfg(test)]
 mod tests {
-    use super::robot::TelegramBotConfig;
     use super::*;
 
     #[test]
@@ -848,14 +844,14 @@ features:
   preflight:
     enabled: true
     strict: true
-    skip: ["telegram", "git"]
+    skip: ["git"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.features.preflight.enabled);
         assert!(config.features.preflight.strict);
         assert_eq!(
             config.features.preflight.skip,
-            vec!["telegram".to_string(), "git".to_string()]
+            vec!["git".to_string()]
         );
     }
 
@@ -2311,209 +2307,6 @@ hooks:
             ConfigError::UnsupportedHookField { field, .. }
             if field == "hooks.events.pre.loop.start[0].scope"
         ));
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // ROBOT CONFIG TESTS
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_robot_config_defaults_disabled() {
-        let config = RalphConfig::default();
-        assert!(!config.robot.enabled);
-        assert!(config.robot.timeout_seconds.is_none());
-        assert!(config.robot.telegram.is_none());
-    }
-
-    #[test]
-    fn test_robot_config_absent_parses_as_default() {
-        // Existing configs without RObot: section should still parse
-        let yaml = r"
-agent: claude
-";
-        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(!config.robot.enabled);
-        assert!(config.robot.timeout_seconds.is_none());
-    }
-
-    #[test]
-    fn test_robot_config_valid_full() {
-        let yaml = r#"
-RObot:
-  enabled: true
-  timeout_seconds: 300
-  telegram:
-    bot_token: "123456:ABC-DEF"
-"#;
-        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.robot.enabled);
-        assert_eq!(config.robot.timeout_seconds, Some(300));
-        let telegram = config.robot.telegram.as_ref().unwrap();
-        assert_eq!(telegram.bot_token, Some("123456:ABC-DEF".to_string()));
-
-        // Validation should pass
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_robot_config_disabled_skips_validation() {
-        // Disabled RObot config should pass validation even with missing fields
-        let yaml = r"
-RObot:
-  enabled: false
-";
-        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(!config.robot.enabled);
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_robot_config_enabled_missing_timeout_fails() {
-        let yaml = r#"
-RObot:
-  enabled: true
-  telegram:
-    bot_token: "123456:ABC-DEF"
-"#;
-        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let result = config.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ConfigError::RobotMissingField { field, .. }
-                if field == "RObot.timeout_seconds"),
-            "Expected RobotMissingField for timeout_seconds, got: {:?}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_robot_config_enabled_missing_timeout_and_token_fails_on_timeout_first() {
-        // Both timeout and token are missing, but timeout is checked first
-        let robot = RobotConfig {
-            enabled: true,
-            timeout_seconds: None,
-            checkin_interval_seconds: None,
-            telegram: None,
-        };
-        let result = robot.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ConfigError::RobotMissingField { field, .. }
-                if field == "RObot.timeout_seconds"),
-            "Expected timeout validation failure first, got: {:?}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_robot_config_resolve_bot_token_from_config() {
-        // Config has a token — resolve_bot_token returns it
-        // (env var behavior is tested separately via integration tests since
-        // forbid(unsafe_code) prevents env var manipulation in unit tests)
-        let config = RobotConfig {
-            enabled: true,
-            timeout_seconds: Some(300),
-            checkin_interval_seconds: None,
-            telegram: Some(TelegramBotConfig {
-                bot_token: Some("config-token".to_string()),
-                api_url: None,
-            }),
-        };
-
-        // When RALPH_TELEGRAM_BOT_TOKEN is not set, config token is returned
-        // (Can't set/unset env vars in tests due to forbid(unsafe_code))
-        let resolved = config.resolve_bot_token();
-        // The result depends on whether RALPH_TELEGRAM_BOT_TOKEN is set in the
-        // test environment. We can at least assert it's Some.
-        assert!(resolved.is_some());
-    }
-
-    #[test]
-    fn test_robot_config_resolve_bot_token_none_without_config() {
-        // No config token and no telegram section
-        let config = RobotConfig {
-            enabled: true,
-            timeout_seconds: Some(300),
-            checkin_interval_seconds: None,
-            telegram: None,
-        };
-
-        // Without env var AND without config token, resolve returns None
-        // (unless RALPH_TELEGRAM_BOT_TOKEN happens to be set in test env)
-        let resolved = config.resolve_bot_token();
-        if std::env::var("RALPH_TELEGRAM_BOT_TOKEN").is_err() {
-            assert!(resolved.is_none());
-        }
-    }
-
-    #[test]
-    fn test_robot_config_validate_with_config_token() {
-        // Validation passes when bot_token is in config
-        let robot = RobotConfig {
-            enabled: true,
-            timeout_seconds: Some(300),
-            checkin_interval_seconds: None,
-            telegram: Some(TelegramBotConfig {
-                bot_token: Some("test-token".to_string()),
-                api_url: None,
-            }),
-        };
-        assert!(robot.validate().is_ok());
-    }
-
-    #[test]
-    fn test_robot_config_validate_missing_telegram_section() {
-        // No telegram section at all and no env var → fails
-        // (Skip if env var happens to be set)
-        if std::env::var("RALPH_TELEGRAM_BOT_TOKEN").is_ok() {
-            return;
-        }
-
-        let robot = RobotConfig {
-            enabled: true,
-            timeout_seconds: Some(300),
-            checkin_interval_seconds: None,
-            telegram: None,
-        };
-        let result = robot.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ConfigError::RobotMissingField { field, .. }
-                if field == "RObot.telegram.bot_token"),
-            "Expected bot_token validation failure, got: {:?}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_robot_config_validate_empty_bot_token() {
-        // telegram section present but bot_token is None
-        // (Skip if env var happens to be set)
-        if std::env::var("RALPH_TELEGRAM_BOT_TOKEN").is_ok() {
-            return;
-        }
-
-        let robot = RobotConfig {
-            enabled: true,
-            timeout_seconds: Some(300),
-            checkin_interval_seconds: None,
-            telegram: Some(TelegramBotConfig {
-                bot_token: None,
-                api_url: None,
-            }),
-        };
-        let result = robot.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ConfigError::RobotMissingField { field, .. }
-                if field == "RObot.telegram.bot_token"),
-            "Expected bot_token validation failure, got: {:?}",
-            err
-        );
     }
 
     #[test]

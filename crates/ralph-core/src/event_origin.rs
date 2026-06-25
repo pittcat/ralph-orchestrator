@@ -18,8 +18,8 @@ use tracing::{debug, warn};
 /// Topics that are allowed from JSONL without hat provenance.
 ///
 /// These are orchestration control topics that agents legitimately emit through
-/// the event file (human.interact for blocking questions, task.resume for recovery).
-/// They are not preset business topics and do not require hat publish scope.
+/// the event file (task.resume for recovery). They are not preset business
+/// topics and do not require hat publish scope.
 ///
 /// Note: `event.malformed`, `event.scope_violation`, and similar diagnostics are
 /// created by Ralph code and published directly to the bus — they should not need
@@ -33,8 +33,6 @@ pub const RALPH_CONTROL_TOPICS: &[&str] = &[
     "LOOP_COMPLETE",
     "loop.cancel",
     "loop.start",
-    "human.interact",
-    "human.response",
     "human.guidance",
     // U1: keep parity with `is_jsonl_control_topic` so the ralph-pseudo-hat
     // guard (origin guard and CLI emit guard) agrees on what `ralph` is
@@ -75,7 +73,7 @@ pub fn is_orchestrator_control_topic(topic: &str, cancellation_topic: &str) -> b
     let cancellation_lc = cancellation_topic.to_ascii_lowercase();
     matches!(
         topic_lc.as_str(),
-        "human.interact" | "human.guidance" | "task.resume" | "build.task.abandoned"
+        "human.guidance" | "task.resume" | "build.task.abandoned"
     ) || (!cancellation_lc.is_empty() && topic_lc == cancellation_lc)
 }
 
@@ -193,11 +191,6 @@ pub fn is_anonymous_business_topic(
     true
 }
 
-/// Source identifier stamped on `human.response` events produced by the trusted
-/// in-process channel of an active Robot service (e.g., Telegram). The waiter
-/// rejects JSONL events without this marker when a Robot service is active.
-pub const TRUSTED_HUMAN_RESPONSE_SOURCE: &str = "robot-trusted";
-
 /// 控制主题判断（P1-12 未来兼容）。
 ///
 /// 除了精确匹配 `RALPH_CONTROL_TOPICS` 中的主题外，任何以 `ralph.`
@@ -205,68 +198,6 @@ pub const TRUSTED_HUMAN_RESPONSE_SOURCE: &str = "robot-trusted";
 /// 旧版本无需更新常量列表即可识别。
 pub fn is_ralph_control_topic(topic: &str) -> bool {
     RALPH_CONTROL_TOPICS.contains(&topic) || topic.starts_with("ralph.")
-}
-
-/// Returns `true` when the event is a `human.response` carrying the trusted
-/// in-process source marker. Events without this marker are treated as forged
-/// and ignored by the trusted waiter path.
-pub fn is_trusted_human_response(event: &JsonlEvent) -> bool {
-    event.topic == "human.response"
-        && event.source.as_deref() == Some(TRUSTED_HUMAN_RESPONSE_SOURCE)
-}
-
-/// Result of validating a `human.interact` payload before it is sent.
-///
-/// The waiter path is required to send a non-empty question; if the agent
-/// produced an empty or malformed payload, the question is rejected before
-/// any blocking wait happens.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HumanInteractValidation {
-    /// Payload is a plain string and the trimmed question is non-empty.
-    Plain { question: String },
-    /// Payload is a JSON object with a non-empty `question` string field.
-    Json { question: String },
-}
-
-/// Validates a `human.interact` payload.
-///
-/// - Plain strings: trimmed value must be non-empty.
-/// - JSON objects: must contain a `question` string field whose trimmed value
-///   is non-empty.
-///
-/// Returns `Ok(validation)` describing the shape, or `Err(reason)` explaining
-/// why the payload was rejected. Used by the event loop to refuse to block
-/// on an empty question.
-pub fn validate_human_interact_payload(
-    payload: Option<&str>,
-) -> Result<HumanInteractValidation, String> {
-    let raw = payload.unwrap_or("");
-    let trimmed = raw.trim();
-
-    if trimmed.starts_with('{') {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if let Some(question) = value.get("question").and_then(|q| q.as_str()) {
-                let q = question.trim();
-                if !q.is_empty() {
-                    return Ok(HumanInteractValidation::Json {
-                        question: q.to_string(),
-                    });
-                }
-                return Err(
-                    "human.interact JSON payload missing non-empty `question` field".to_string(),
-                );
-            }
-            return Err("human.interact JSON payload missing `question` field".to_string());
-        }
-    }
-
-    if trimmed.is_empty() {
-        return Err("human.interact payload is empty or whitespace".to_string());
-    }
-
-    Ok(HumanInteractValidation::Plain {
-        question: trimmed.to_string(),
-    })
 }
 
 /// Result of origin validation for a JSONL event.
@@ -557,7 +488,7 @@ hats:
     publishes: ["work.done"]
 "#,
         );
-        let event = make_event("human.interact", Some("executor"));
+        let event = make_event("task.resume", Some("executor"));
         assert_eq!(
             validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Accepted
@@ -651,24 +582,6 @@ hats:
     }
 
     #[test]
-    fn test_no_hat_human_interact_accepted() {
-        let registry = registry_with_hats(
-            r#"
-hats:
-  executor:
-    name: "Executor"
-    triggers: ["task.*"]
-    publishes: ["work.done"]
-"#,
-        );
-        let event = make_event("human.interact", None);
-        assert_eq!(
-            validate_event_origin(&event, &registry, "", ""),
-            OriginCheck::Accepted
-        );
-    }
-
-    #[test]
     fn test_no_hat_task_resume_accepted() {
         let registry = registry_with_hats(
             r#"
@@ -687,7 +600,7 @@ hats:
     }
 
     #[test]
-    fn test_unknown_hat_human_interact_rejected() {
+    fn test_no_hat_human_guidance_accepted() {
         let registry = registry_with_hats(
             r#"
 hats:
@@ -697,16 +610,10 @@ hats:
     publishes: ["work.done"]
 "#,
         );
-        // Even though human.interact is a control topic, an unknown hat
-        // trying to emit it should be rejected.
-        let event = make_event("human.interact", Some("strategist"));
+        let event = make_event("human.guidance", None);
         assert_eq!(
             validate_event_origin(&event, &registry, "", ""),
-            OriginCheck::Rejected {
-                topic: "human.interact".to_string(),
-                hat: Some("strategist".to_string()),
-                reason: "unknown hat rejected"
-            }
+            OriginCheck::Accepted
         );
     }
 
@@ -832,7 +739,7 @@ hats:
         );
         // Unknown hat cannot publish anything — fail-closed.
         assert!(!registry.can_publish(&HatId::new("ghost"), "work.done"));
-        assert!(!registry.can_publish(&HatId::new("ghost"), "human.interact"));
+        assert!(!registry.can_publish(&HatId::new("ghost"), "task.resume"));
     }
 
     #[test]
@@ -1115,10 +1022,6 @@ hats:
     fn test_p1_2_control_topic_case_insensitive_match() {
         // Lowercase baseline (no change in behavior).
         assert!(is_orchestrator_control_topic(
-            "human.interact",
-            "loop.cancel"
-        ));
-        assert!(is_orchestrator_control_topic(
             "human.guidance",
             "loop.cancel"
         ));
@@ -1129,10 +1032,6 @@ hats:
         ));
 
         // Uppercase — same control topics, different case.
-        assert!(is_orchestrator_control_topic(
-            "HUMAN.INTERACT",
-            "loop.cancel"
-        ));
         assert!(is_orchestrator_control_topic(
             "Human.Guidance",
             "loop.cancel"
