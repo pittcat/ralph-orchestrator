@@ -71,6 +71,8 @@ use std::sync::Mutex;
 
 mod common;
 mod fake_path;
+mod hard_gate;
+mod hard_gate_payload_contract;
 mod hooks;
 mod legacy;
 mod wave;
