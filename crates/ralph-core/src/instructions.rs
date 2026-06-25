@@ -231,7 +231,6 @@ Keep temporary artifacts where later steps can still inspect them, such as a rep
 If a command fails, a dependency is missing, or you become blocked, you MUST record a `fix` memory with `ralph tools memory add`.
 If the issue is not resolved in the same iteration, you MUST fail or reopen the relevant runtime task before stopping.
 If your confidence is 80 or below on a consequential decision, you MUST document it in `.ralph/agent/decisions.md`.
-If this turn is likely to run longer than a few minutes, you SHOULD send a non-blocking progress update with `ralph tools interact progress`.
 
 ### 1. EXECUTE
 {role_instructions}
@@ -300,7 +299,6 @@ mod tests {
         assert!(instructions.contains("`ralph tools memory search`"));
         assert!(instructions.contains("`ralph tools memory add`"));
         assert!(instructions.contains(".ralph/agent/decisions.md"));
-        assert!(instructions.contains("ralph tools interact progress"));
 
         // Numbered execute phase with RFC2119
         assert!(instructions.contains("### 1. EXECUTE"));

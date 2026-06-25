@@ -123,19 +123,6 @@ fn test_agent_reference_skill_load_emit_shows_error_recovery() {
 }
 
 #[test]
-fn test_agent_reference_skill_load_cmdref_shows_interact_ref() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let temp_path = temp_dir.path();
-
-    let stdout = ralph_skill_ok(temp_path, &["load", "ralph-tools-cmdref"]);
-    // Must mention ralph tools interact progress reference
-    assert!(
-        stdout.contains("ralph tools interact progress") || stdout.contains("ralph tools interact"),
-        "ralph-tools-cmdref must mention interact command; got: {stdout}"
-    );
-}
-
-#[test]
 fn test_agent_reference_skill_load_all_three_refs_works() {
     // Load all three skill refs individually in a clean workspace
     let temp_dir = TempDir::new().expect("temp dir");

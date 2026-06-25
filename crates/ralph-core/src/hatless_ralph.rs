@@ -732,7 +732,6 @@ You MUST mark it in progress with `ralph tools task start <id>` before implement
 You MUST run tests and verify the implementation works.
 If the target is runnable or user-facing, you MUST exercise it with the strongest available harness (Playwright, tmux, real CLI/API) before committing.
 You SHOULD try at least one realistic failure-path or adversarial input during verification.
-If this turn is likely to take more than a few minutes, you SHOULD send `ralph tools interact progress`.
 You MUST commit after verification passes - one commit per task.
 You SHOULD run `git diff --cached` to review staged changes before committing.
 You MUST close the task with `ralph tools task close <id>` AFTER commit.
