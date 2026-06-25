@@ -70,45 +70,6 @@ ralph tools skill load ralph-tools | head -n 10
 
 ---
 
-## `ralph tools interact`
-
-通过 Telegram 与人交互（进度更新、通知）。
-
-> interact 命令没有 root 和 format 选项。
-
-### `ralph tools interact progress`
-
-发送非阻塞的进度更新消息。
-
-**语法：**
-```bash
-ralph tools interact progress [OPTIONS] <MESSAGE>
-```
-
-**参数：**
-
-| 参数 | 类型 | 必需 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| `<MESSAGE>` | string | 是 | — | 要发送的消息 |
-
-**Guards（P9 operation-guard）：**
-- 空消息或纯空格消息会被拒绝（退出码 2）。
-- 超过 2000 字符的消息会被拒绝（退出码 2）。
-- 每条被接受的消息末尾会自动附加 `[via Ralph agent]`，以便人类区分 agent 通知与人工消息。
-- 速率限制为每 5 秒一条，通过进程内互斥锁和跨进程 marker 文件（`.ralph/agent/progress-marker`）双重 enforcing。被限速的调用退出码 75。
-
-**反模式 / 注意事项：**
-- 🔴 `ralph tools interact progress` 是非阻塞的；如果需要阻塞等待人类回复，使用 `ralph emit human.interact`。
-
-**校验：**
-```bash
-# 发送后检查退出码；成功为 0，被限速为 75，被拒绝为 2
-ralph tools interact progress "Step 3/5 complete"
-echo "Exit code: $?"
-```
-
----
-
 ## `ralph run`
 
 启动主编排循环。
@@ -169,8 +130,9 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `ralph tui` | 启动 TUI 观测模式 |
 | `ralph web` | 启动 Web 仪表板（前后端） |
 | `ralph mcp` | MCP 服务器模式 |
-| `ralph bot` | 启动 Telegram bot |
 | `ralph completions` | 生成 shell 补全脚本 |
+
+> U8 (2026-06-25): `ralph bot` 已随 `ralph-telegram` crate 一起删除;运行时不再提供人工通道。`human.guidance` / `task.resume` 恢复通道保留(由 runtime diagnosis engine 产出)。
 
 > 低频命令的独有参数可通过 `ralph <cmd> --help` 查看。全量参考见 `docs/guide/`。
 

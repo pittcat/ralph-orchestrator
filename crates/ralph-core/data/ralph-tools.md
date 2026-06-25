@@ -43,7 +43,8 @@ metadata:
 | `ralph tools task` | 任务管理 | 已注入（`ralph-tools-tasks` skill，仅当 `tasks.enabled`） |
 | `ralph tools memory` | 记忆管理 | 已注入（`ralph-tools-memories` skill，仅当 `memories.enabled`） |
 | `ralph tools skill` | 加载 skill | `ralph tools skill load ralph-tools-cmdref` |
-| `ralph tools interact` | Telegram 通知 | `ralph tools skill load ralph-tools-cmdref` |
+
+> U8 (2026-06-25): `ralph tools interact` 与 `ralph bot` 已随 `ralph-telegram` crate 一起删除;运行时不再提供人工通道(`human.guidance` / `task.resume` 恢复通道保留)。
 
 ### 顶层命令（按需加载对应 skill）
 

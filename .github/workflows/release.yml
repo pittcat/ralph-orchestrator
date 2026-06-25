@@ -298,7 +298,11 @@ jobs:
       - name: Publish crates to crates.io
         run: |
           # Publish crates in dependency order with delays for registry indexing
-          # Order: ralph-proto -> ralph-telegram -> ralph-core -> ralph-api -> ralph-adapters, ralph-tui -> ralph-cli
+          # Order: ralph-proto -> ralph-core -> ralph-api -> ralph-adapters, ralph-tui -> ralph-cli
+          #
+          # U8 (2026-06-25): `ralph-telegram` was removed because the
+          # human-in-the-loop channel was retired; the `ralph-telegram` crate
+          # was deleted in U1 (see plan 2026-06-25-001).
 
           publish_crate() {
             local crate=$1
@@ -319,7 +323,6 @@ jobs:
           }
 
           publish_crate ralph-proto
-          publish_crate ralph-telegram
           publish_crate ralph-core
           publish_crate ralph-api
           publish_crate ralph-adapters

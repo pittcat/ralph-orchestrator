@@ -10,7 +10,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
-/// Built-in ralph-tools skill content (shared: interact, skill, output format commands).
+/// Built-in ralph-tools skill content (shared: skill, output format commands).
+///
+/// U8 (2026-06-25 refactor) removed `ralph tools interact`; the old wording
+/// `interact, skill, output format commands` is stale but the comment is left
+/// generic because nothing else documents the scope.
 const RALPH_TOOLS_SKILL_RAW: &str = include_str!("../data/ralph-tools.md");
 
 /// Built-in ralph-tools-tasks skill content (task commands and workflows).
@@ -19,16 +23,17 @@ const RALPH_TOOLS_TASKS_SKILL_RAW: &str = include_str!("../data/ralph-tools-task
 /// Built-in ralph-tools-memories skill content (memory commands, decision journal, workflows).
 const RALPH_TOOLS_MEMORIES_SKILL_RAW: &str = include_str!("../data/ralph-tools-memories.md");
 
-/// Built-in RObot interaction skill content.
-const ROBOT_INTERACTION_SKILL_RAW: &str = include_str!("../data/robot-interaction-skill.md");
-
 /// Built-in ralph-tools-emit skill content (ralph emit command reference).
 const RALPH_TOOLS_EMIT_SKILL_RAW: &str = include_str!("../data/ralph-tools-emit.md");
 
 /// Built-in ralph-tools-wave skill content (ralph wave command reference).
 const RALPH_TOOLS_WAVE_SKILL_RAW: &str = include_str!("../data/ralph-tools-wave.md");
 
-/// Built-in ralph-tools-cmdref skill content (skill/interact/run/other-commands reference).
+/// Built-in ralph-tools-cmdref skill content (skill/run/other-commands reference).
+///
+/// U8 (2026-06-25 refactor) removed the `ralph tools interact` and `ralph bot`
+/// sections from the cmdref file because the underlying `ralph-telegram` crate
+/// was deleted in U1; see plan 2026-06-25-001.
 const RALPH_TOOLS_CMDREF_SKILL_RAW: &str = include_str!("../data/ralph-tools-cmdref.md");
 
 /// Registry of all available skills for the current loop.
@@ -73,13 +78,17 @@ impl SkillRegistry {
         Ok(())
     }
 
-    /// Register built-in skills (ralph-tools, ralph-tools-tasks, ralph-tools-memories, robot-interaction,
+    /// Register built-in skills (ralph-tools, ralph-tools-tasks, ralph-tools-memories,
     /// ralph-tools-emit, ralph-tools-wave, ralph-tools-cmdref).
+    ///
+    /// U8 (2026-06-25 refactor): `robot-interaction` was removed because its
+    /// only content was `human.interact` / `human.guidance` Telegram guidance
+    /// and the `ralph-telegram` crate was deleted in U1; see plan
+    /// 2026-06-25-001.
     fn register_builtins(&mut self) -> Result<()> {
         self.register_builtin("ralph-tools", RALPH_TOOLS_SKILL_RAW)?;
         self.register_builtin("ralph-tools-tasks", RALPH_TOOLS_TASKS_SKILL_RAW)?;
         self.register_builtin("ralph-tools-memories", RALPH_TOOLS_MEMORIES_SKILL_RAW)?;
-        self.register_builtin("robot-interaction", ROBOT_INTERACTION_SKILL_RAW)?;
         // 按需加载: emit / wave / cmdref 由 ralph-tools.md 速查表链接引导加载
         // (plan 004 U3)
         self.register_builtin("ralph-tools-emit", RALPH_TOOLS_EMIT_SKILL_RAW)?;
@@ -371,7 +380,9 @@ mod tests {
         assert!(registry.get("ralph-tools").is_some());
         assert!(registry.get("ralph-tools-tasks").is_some());
         assert!(registry.get("ralph-tools-memories").is_some());
-        assert!(registry.get("robot-interaction").is_some());
+        // U8 (2026-06-25): `robot-interaction` builtin was removed; only the
+        // ralph-tools-* family remains in the skill registry.
+        assert!(registry.get("robot-interaction").is_none());
         assert!(registry.get("ralph-tools-emit").is_some());
         assert!(registry.get("ralph-tools-wave").is_some());
         assert!(registry.get("ralph-tools-cmdref").is_some());
@@ -624,7 +635,9 @@ mod tests {
         assert!(index.contains("## SKILLS"));
         assert!(index.contains("| Skill | Description | Load Command |"));
         assert!(index.contains("ralph-tools"));
-        assert!(index.contains("robot-interaction"));
+        // U8 (2026-06-25): `robot-interaction` was removed; ensure the index
+        // no longer mentions it.
+        assert!(!index.contains("robot-interaction"));
         assert!(index.contains("`ralph tools skill load"));
     }
 

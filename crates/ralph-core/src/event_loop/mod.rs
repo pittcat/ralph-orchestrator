@@ -4377,9 +4377,14 @@ impl EventLoop {
     fn inject_custom_auto_skills(&self, prefix: &mut String) {
         for skill in self.skill_registry.auto_inject_skills(None) {
             // Skip built-in skills handled above
+            //
+            // U8 (2026-06-25): `robot-interaction` was removed because its
+            // only content was `human.interact` / `human.guidance` Telegram
+            // guidance; the `ralph-telegram` crate was deleted in U1 (see plan
+            // 2026-06-25-001).
             if matches!(
                 skill.name.as_str(),
-                "ralph-tools" | "ralph-tools-tasks" | "ralph-tools-memories" | "robot-interaction"
+                "ralph-tools" | "ralph-tools-tasks" | "ralph-tools-memories"
             ) {
                 continue;
             }

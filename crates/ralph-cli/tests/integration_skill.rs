@@ -86,7 +86,10 @@ fn test_skill_list_includes_builtins() {
     let stdout = ralph_skill_ok(temp_path, &["list", "--format", "quiet"]);
     let lines: Vec<&str> = stdout.lines().collect();
     assert!(lines.contains(&"ralph-tools"));
-    assert!(lines.contains(&"robot-interaction"));
+    // U8 (2026-06-25 refactor): `robot-interaction` builtin was removed
+    // because the underlying `ralph-telegram` crate was deleted in U1; see
+    // plan 2026-06-25-001.
+    assert!(!lines.contains(&"robot-interaction"));
     // T5c (plan U5): 3 个新 builtin skill 也必须出现在 list 中
     assert!(lines.contains(&"ralph-tools-emit"));
     assert!(lines.contains(&"ralph-tools-wave"));
