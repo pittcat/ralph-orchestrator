@@ -20,6 +20,9 @@ mod tests;
 pub mod diagnostics;
 pub mod dispatch;
 pub mod lifecycle;
+// U5a: EventLoop 生命周期相关 free function SSOT 转发。
+// impl EventLoop 方法留到 U5b-U5e 阶段。
+pub use lifecycle::build_state_ledger_from_env;
 pub mod policy;
 pub mod process;
 pub mod prompt;
@@ -9147,15 +9150,4 @@ fn is_rejection_stale(
     }
     let age = now_unix.saturating_sub(source_unix);
     age > ttl_seconds as i64
-}
-
-/// U2 (plan 2026-06-21-002): construct a `StateLedger` rooted at
-/// `workspace`. The ledger is always enabled; the legacy in-memory
-/// projection caches have been removed.
-fn build_state_ledger_from_env(workspace: &std::path::Path) -> crate::state::StateLedger {
-    debug!(
-        workspace = %workspace.display(),
-        "wiring fresh StateLedger into LoopState"
-    );
-    crate::state::StateLedger::new(workspace, true)
 }
