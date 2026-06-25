@@ -867,23 +867,18 @@ async fn run_loop_impl_inner(
     // task_cli helper consults as a fallback when the env var is
     // not set.  The file is removed on loop teardown.
     if event_loop.enforce_current_unit_active() {
-        if let Some(workspace) = ctx.workspace().parent() {
-            let marker = workspace
-                .join(".ralph")
-                .join("agent")
-                .join(".ralph-enforce-current-unit");
-            if let Some(parent) = marker.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(&marker)
-            {
-                use std::io::Write as _;
-                let _ = writeln!(f, "1");
-            }
+        let marker = ctx.agent_dir().join(".ralph-enforce-current-unit");
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&marker)
+        {
+            use std::io::Write as _;
+            let _ = writeln!(f, "1");
         }
         tracing::info!(
             "R4 single-U contract active (enforce_current_unit=true): \
