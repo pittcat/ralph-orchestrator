@@ -185,6 +185,71 @@ pub enum TerminationReason {
         /// Post-increment count (always `> U2_REJECTION_RETRY_LIMIT`).
         count: u32,
     },
+    /// 2026-06-26 plan U1: completion-correction gave up. Two flavours:
+    /// a recoverable rejection (missing required event, etc.) that
+    /// burned through the bounded retry budget, or a structural
+    /// rejection (verdict fail / workflow-guard reject) that bypasses
+    /// the budget and goes straight to a structured stop. The
+    /// `StuckSource` enum disambiguates the two so the runner /
+    /// summary report can group / display them correctly.
+    ///
+    /// This variant replaces the previous "blind correction injection
+    /// on every rejection" path: the same rejection can now be
+    /// classified once and either be allowed `U2_REJECTION_RETRY_LIMIT`
+    /// correction rounds, or be hard-stopped on first sight.
+    CompletionStuck(Box<CompletionStuck>),
+}
+
+/// 2026-06-26 plan U1: shared shape of a "we tried, the agent did
+/// not recover" termination. Used by `CompletionStuck` and surfaced
+/// in `loop.terminate` payload for operator reporting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CompletionStuck {
+    /// Where the stuck came from — drives the runner's
+    /// grouping / next-step display.
+    pub source: StuckSource,
+    /// The retry key the rejection digest recorded. Operators can
+    /// grep this against `rejection_digest.jsonl` to find the
+    /// underlying rejection entries.
+    pub retry_key: String,
+    /// Total correction / reject attempts the loop spent on this
+    /// key. For `RejectionDigestExhausted` this is
+    /// `> U2_REJECTION_RETRY_LIMIT`; for `StructuralRejection`
+    /// it is `1` (the first refusal was enough).
+    pub attempts: u32,
+    /// The free-form reason the rejection envelope attached. Shown
+    /// verbatim in the loop.terminate payload and in summary.md
+    /// so the operator can see what the agent last failed to
+    /// satisfy.
+    pub last_reason: String,
+}
+
+/// 2026-06-26 plan U1: classification of completion-rejection
+/// sources. Used by `CompletionStuck.source` to drive the runner
+/// grouping / display logic and to make it impossible for a
+/// structural rejection to silently consume the recoverable retry
+/// budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StuckSource {
+    /// Recoverable rejection (e.g. `missing_required_event`) hit
+    /// the `U2_REJECTION_RETRY_LIMIT` budget for the same retry
+    /// key. The agent is given a clear "this is your last attempt"
+    /// signal before this variant is produced.
+    RejectionDigestExhausted,
+    /// Structural rejection (e.g. `verdict_fail`,
+    /// `workflow_guard_rejection`): the failure mode is not
+    /// agent-recoverable and correction injection is suppressed.
+    /// Surfacing this is the explicit "stop retrying, escalate to
+    /// the operator" signal.
+    StructuralRejection,
+    /// The `MissingEventGate` obligation-based hard gate tripped
+    /// after a hat failed to emit its expected business events
+    /// within the grace window even after a `task.resume` was
+    /// injected. Distinct from the rejection-digest path so the
+    /// runner can route the two to different summary sections.
+    MissingEventGate,
 }
 
 /// Result of workflow guard completion validation.

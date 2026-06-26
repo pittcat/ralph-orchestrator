@@ -1664,6 +1664,13 @@ async fn run_loop_impl_inner(
                     TerminationReason::RecoverablePayloadExhausted { .. } => {
                         "recoverable_payload_exhausted"
                     }
+                    // 2026-06-26 plan U1: completion-rejection budget
+                    // exhausted (recoverable) OR structural rejection.
+                    // Same string across the two so operators can grep
+                    // for `completion_stuck`; the structured
+                    // `source` field on the payload carries the
+                    // classification.
+                    TerminationReason::CompletionStuck(_) => "completion_stuck",
                 };
 
                 if matches!(reason, TerminationReason::Interrupted) {

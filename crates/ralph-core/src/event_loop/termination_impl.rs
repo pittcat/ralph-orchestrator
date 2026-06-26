@@ -61,5 +61,13 @@ pub fn termination_status_text(reason: &TerminationReason) -> &'static str {
         TerminationReason::RecoverablePayloadExhausted { .. } => {
             "Recoverable-payload budget exhausted - loop terminated."
         }
+        // 2026-06-26 plan U1: completion-rejection budget exhausted
+        // (recoverable) OR structural rejection. The two are
+        // disambiguated by the structured `source` field on the
+        // payload; the human-readable text is the same so the
+        // operator drills into the payload for details.
+        TerminationReason::CompletionStuck(_) => {
+            "Completion stuck - correction budget exhausted or structural rejection."
+        }
     }
 }

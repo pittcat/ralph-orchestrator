@@ -391,6 +391,11 @@ impl SummaryWriter {
             TerminationReason::RecoverablePayloadExhausted { .. } => {
                 "Failed: recoverable-payload budget exhausted"
             }
+            // 2026-06-26 plan U1: completion-rejection budget exhausted
+            // (recoverable) OR structural rejection routed to a hard
+            // stop. The summary uses the `source` field for
+            // disambiguation when the operator drills in.
+            TerminationReason::CompletionStuck(_) => "Failed: completion stuck (see last_reason)",
         }
     }
 

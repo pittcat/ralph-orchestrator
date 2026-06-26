@@ -31,6 +31,7 @@ pub mod termination_impl;
 // impl EventLoop 方法留到后续 U 阶段处理。
 pub use termination_impl::{format_duration, termination_status_text};
 pub mod types;
+pub mod verdict;
 pub mod wave;
 pub mod workflow_guard;
 
@@ -71,6 +72,13 @@ pub use policy::{build_unified_validation_pipeline, publish_correction_via_conte
 // no change. `WorkflowGuardRejection` stays module-private and is
 // only `pub(super)` in `types.rs`.
 pub use types::{EventLoop, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason};
+// 2026-06-26 plan U1: typed verdict SSOT — used by `verdict_payload_is_fail`
+// and `check_completion_event` to share the same Pass / PassWithResiduals /
+// Fail semantics as the shipper and reporter prompts.
+pub use verdict::{Verdict, VerdictParseError};
+// 2026-06-26 plan U1: completion-correction exhaust + structural-rejection
+// sources, surfaced through `TerminationReason::CompletionStuck`.
+pub use types::{CompletionStuck, StuckSource};
 
 use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
 
@@ -153,6 +161,11 @@ impl TerminationReason {
             | TerminationReason::ReviewFailed { .. }
             | TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => 1,
             TerminationReason::RecoverablePayloadExhausted { .. } => 1,
+            // 2026-06-26 plan U1: completion-rejection budget exhausted
+            // (recoverable) OR structural rejection routed to a hard
+            // stop. Both are non-zero exits — the operator must see
+            // the loop end and consult `loop.terminate.last_reason`.
+            | TerminationReason::CompletionStuck(_) => 1,
             TerminationReason::MaxIterations
             | TerminationReason::MaxRuntime
             | TerminationReason::MaxCost => 2,
@@ -192,6 +205,12 @@ impl TerminationReason {
             TerminationReason::RecoverablePayloadExhausted { .. } => {
                 "recoverable_payload_exhausted"
             }
+            // 2026-06-26 plan U1: completion correction budget exhausted
+            // OR structural rejection. The string is the same
+            // (`completion_stuck`) so the operator can grep for it
+            // across the log; the structured `source` field on the
+            // payload carries the classification.
+            TerminationReason::CompletionStuck(_) => "completion_stuck",
         }
     }
 
