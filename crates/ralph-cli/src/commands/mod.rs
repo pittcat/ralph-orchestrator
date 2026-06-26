@@ -5,6 +5,7 @@ pub mod diagnose;
 pub mod emit;
 pub mod events;
 pub mod init;
+pub mod inspect;
 pub mod plan;
 pub mod preset;
 pub mod resume;
