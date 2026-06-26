@@ -165,6 +165,13 @@ tasks:
   # task. Used by the P2 cross-hat authorization guard.
   coordinator_hats: []                 # e.g. ["coordinator", "executor"]
 
+# Runtime profile overlays (v1) — append markdown fragments to matching
+# hat instructions at startup. CLI `--profile` flags are appended after
+# this list; `--no-default-profiles` suppresses only this list.
+profiles:
+  default: repo:strict, user:my-style  # String form (comma-separated)
+  # default: [repo:strict, user:my-style]  # YAML sequence form (equivalent)
+
 # Optional features
 features:
   parallel: true                        # Allow worktree loops when primary lock is held
@@ -639,6 +646,60 @@ Minimal runnable example:
 - Config: [`examples/hooks/minimal/ralph.hooks.yml`](https://github.com/mikeyobrien/ralph-orchestrator/blob/main/examples/hooks/minimal/ralph.hooks.yml)
 - Scripts: [`examples/hooks/scripts/env-guard.sh`](https://github.com/mikeyobrien/ralph-orchestrator/blob/main/examples/hooks/scripts/env-guard.sh), [`examples/hooks/scripts/notify.sh`](https://github.com/mikeyobrien/ralph-orchestrator/blob/main/examples/hooks/scripts/notify.sh)
 - Validate: `ralph hooks validate -c examples/hooks/minimal/ralph.hooks.yml`
+
+### profiles
+
+运行时 profile overlay 的默认激活列表。Profile 是一种把同 preset 在不同场景下切成不同「风格」的轻量机制——把差异片段按 markdown 文件组织在 `ralph-profiles/<name>/<preset>/<hat>.md`(repo 级)或 `~/.config/ralph/profiles/<name>/<preset>/<hat>.md`(user 级),运行时按激活顺序追加到对应 hat 的 `instructions` 末尾。
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `default` | string or string list | `[]` | 默认激活的 profile spec 列表;每个 spec 形如 `<scope>:<name>`(`scope` ∈ `repo` / `user`)。可以是逗号分隔字符串,也可以是 YAML 字符串序列——两者等价。CLI `--profile` 标志按出现顺序追加到本列表之后;`--no-default-profiles` 仅关闭本列表。 |
+
+**示例**(两种形式等价):
+
+```yaml
+# 逗号分隔字符串(便于在单行表达)
+profiles:
+  default: repo:strict, user:my-style
+```
+
+```yaml
+# YAML 序列(便于多行注释与排序)
+profiles:
+  default:
+    - repo:strict       # 团队共享的严格验证风格
+    - user:my-style     # 个人偏好片段
+```
+
+**作用域与路径解析**:
+
+- `repo:<name>` → `<project-root>/ralph-profiles/<name>/`
+- `user:<name>` → `$XDG_CONFIG_HOME/ralph/profiles/<name>/`(优先),否则 `~/.config/ralph/profiles/<name>/`
+- 在 `--worktree` 子进程中,repo profile 的 `<project-root>` 由 `RALPH_WORKSPACE_ROOT` 或 `config.core.workspace_root` 解析为主仓库根目录,避免被解析到 worktree 路径下。
+
+**片段加载语义**(与 `ralph run --help` 同源):
+
+- 仅加载 `<dir>/<preset>/<hat>.md` 形式的 `.md` 文件;同一 profile 内按文件名升序加载;多个 profile 按激活顺序拼接。
+- 缺失当前 preset 子目录时打 warning 并跳过;片段对应 hat 不在当前 preset 中时打 warning 并忽略。
+- profile 目录不存在(`--profile` 显式指定或 `profiles.default` 中)时,**立即报错**并给出完整路径——可用 `--no-default-profiles` 绕过 `profiles.default`。
+- profile name 必须非空、不含路径分隔符或 `..`,校验失败立即报错。
+- 仅修改 `HatConfig.instructions`,不触碰 topology、backend、event_loop 等结构字段(R15 不变性)。
+
+**应用时机**:
+
+profile 在 `load_config_for_preflight` 返回后、`config.validate()` 与 `run_auto_preflight` 之前生效,因此 preflight、validate、event loop 看到的 instructions 完全一致。
+
+**预览**:
+
+- 不修改配置的只读预览见 `ralph inspect profiles [--profile ...] [--format human|json]`。
+- 详细目录结构与典型用法见 [Profiles 概念说明](../concepts/profiles.md)。
+
+**v1 范围**:
+
+- 仅追加 hat instructions;不支持覆盖 backend / event_loop / topology。
+- 仅精确匹配 profile / preset / hat-id;不支持通配符或正则。
+- 不支持继承或嵌套;不支持 `-c profiles.default=...` 形式的 CLI 覆盖。
+- 不提供 `ralph profile create/init` 等脚手架命令。
 
 ### hats
 
