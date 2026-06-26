@@ -317,6 +317,158 @@ event_loop:
       - {hat_id: ralph, topic: test.failed}
       - {hat_id: ralph, topic: plan.complete}
       - {hat_id: ralph, topic: plan.blocked}
+      - {hat_id: executor, topic: review.start}
+      - {hat_id: validator, topic: review.start}
+      - {hat_id: review-coordinator, topic: review.start}
+      - {hat_id: dimension-reviewer, topic: review.start}
+      - {hat_id: review-synthesizer, topic: review.start}
+      - {hat_id: fixer, topic: review.start}
+      - {hat_id: shipper, topic: review.start}
+      - {hat_id: reporter, topic: review.start}
+      - {hat_id: executor, topic: plan.blocked}
+      - {hat_id: validator, topic: plan.blocked}
+      - {hat_id: review-coordinator, topic: plan.blocked}
+      - {hat_id: dimension-reviewer, topic: plan.blocked}
+      - {hat_id: review-synthesizer, topic: plan.blocked}
+      - {hat_id: fixer, topic: plan.blocked}
+      - {hat_id: shipper, topic: plan.blocked}
+      - {hat_id: reporter, topic: plan.blocked}
+      - {hat_id: executor, topic: work.ready}
+      - {hat_id: review-coordinator, topic: work.ready}
+      - {hat_id: dimension-reviewer, topic: work.ready}
+      - {hat_id: review-synthesizer, topic: work.ready}
+      - {hat_id: shipper, topic: work.ready}
+      - {hat_id: reporter, topic: work.ready}
+      - {hat_id: executor, topic: plan.complete}
+      - {hat_id: validator, topic: plan.complete}
+      - {hat_id: review-coordinator, topic: plan.complete}
+      - {hat_id: dimension-reviewer, topic: plan.complete}
+      - {hat_id: review-synthesizer, topic: plan.complete}
+      - {hat_id: fixer, topic: plan.complete}
+      - {hat_id: shipper, topic: plan.complete}
+      - {hat_id: reporter, topic: plan.complete}
+      - {hat_id: progress-steward, topic: plan.complete}
+      - {hat_id: coordinator, topic: work.failed}
+      - {hat_id: validator, topic: work.failed}
+      - {hat_id: review-coordinator, topic: work.failed}
+      - {hat_id: dimension-reviewer, topic: work.failed}
+      - {hat_id: review-synthesizer, topic: work.failed}
+      - {hat_id: fixer, topic: work.failed}
+      - {hat_id: shipper, topic: work.failed}
+      - {hat_id: reporter, topic: work.failed}
+      - {hat_id: progress-steward, topic: work.failed}
+      - {hat_id: coordinator, topic: work.done}
+      - {hat_id: review-coordinator, topic: work.done}
+      - {hat_id: dimension-reviewer, topic: work.done}
+      - {hat_id: review-synthesizer, topic: work.done}
+      - {hat_id: shipper, topic: work.done}
+      - {hat_id: reporter, topic: work.done}
+      - {hat_id: progress-steward, topic: work.done}
+      - {hat_id: coordinator, topic: test.failed}
+      - {hat_id: review-coordinator, topic: test.failed}
+      - {hat_id: dimension-reviewer, topic: test.failed}
+      - {hat_id: review-synthesizer, topic: test.failed}
+      - {hat_id: fixer, topic: test.failed}
+      - {hat_id: shipper, topic: test.failed}
+      - {hat_id: reporter, topic: test.failed}
+      - {hat_id: progress-steward, topic: test.failed}
+      - {hat_id: coordinator, topic: test.passed}
+      - {hat_id: review-coordinator, topic: test.passed}
+      - {hat_id: dimension-reviewer, topic: test.passed}
+      - {hat_id: review-synthesizer, topic: test.passed}
+      - {hat_id: fixer, topic: test.passed}
+      - {hat_id: shipper, topic: test.passed}
+      - {hat_id: reporter, topic: test.passed}
+      - {hat_id: progress-steward, topic: test.passed}
+      - {hat_id: coordinator, topic: review.dimension.ready}
+      - {hat_id: executor, topic: review.dimension.ready}
+      - {hat_id: validator, topic: review.dimension.ready}
+      - {hat_id: fixer, topic: review.dimension.ready}
+      - {hat_id: shipper, topic: review.dimension.ready}
+      - {hat_id: reporter, topic: review.dimension.ready}
+      - {hat_id: coordinator, topic: review.dimensions.complete}
+      - {hat_id: executor, topic: review.dimensions.complete}
+      - {hat_id: validator, topic: review.dimensions.complete}
+      - {hat_id: fixer, topic: review.dimensions.complete}
+      - {hat_id: shipper, topic: review.dimensions.complete}
+      - {hat_id: reporter, topic: review.dimensions.complete}
+      - {hat_id: coordinator, topic: review.dimension.done}
+      - {hat_id: executor, topic: review.dimension.done}
+      - {hat_id: validator, topic: review.dimension.done}
+      - {hat_id: review-synthesizer, topic: review.dimension.done}
+      - {hat_id: fixer, topic: review.dimension.done}
+      - {hat_id: shipper, topic: review.dimension.done}
+      - {hat_id: reporter, topic: review.dimension.done}
+      - {hat_id: progress-steward, topic: review.dimension.done}
+      - {hat_id: coordinator, topic: review.dimension.failed}
+      - {hat_id: executor, topic: review.dimension.failed}
+      - {hat_id: validator, topic: review.dimension.failed}
+      - {hat_id: review-synthesizer, topic: review.dimension.failed}
+      - {hat_id: fixer, topic: review.dimension.failed}
+      - {hat_id: shipper, topic: review.dimension.failed}
+      - {hat_id: reporter, topic: review.dimension.failed}
+      - {hat_id: progress-steward, topic: review.dimension.failed}
+      - {hat_id: coordinator, topic: review.complete}
+      - {hat_id: executor, topic: review.complete}
+      - {hat_id: validator, topic: review.complete}
+      - {hat_id: fixer, topic: review.complete}
+      - {hat_id: shipper, topic: review.complete}
+      - {hat_id: reporter, topic: review.complete}
+      - {hat_id: progress-steward, topic: review.complete}
+      - {hat_id: coordinator, topic: fix.exhausted}
+      - {hat_id: executor, topic: fix.exhausted}
+      - {hat_id: validator, topic: fix.exhausted}
+      - {hat_id: review-coordinator, topic: fix.exhausted}
+      - {hat_id: dimension-reviewer, topic: fix.exhausted}
+      - {hat_id: review-synthesizer, topic: fix.exhausted}
+      - {hat_id: shipper, topic: fix.exhausted}
+      - {hat_id: reporter, topic: fix.exhausted}
+      - {hat_id: progress-steward, topic: fix.exhausted}
+      - {hat_id: coordinator, topic: fix.applied}
+      - {hat_id: executor, topic: fix.applied}
+      - {hat_id: validator, topic: fix.applied}
+      - {hat_id: review-coordinator, topic: fix.applied}
+      - {hat_id: dimension-reviewer, topic: fix.applied}
+      - {hat_id: review-synthesizer, topic: fix.applied}
+      - {hat_id: shipper, topic: fix.applied}
+      - {hat_id: reporter, topic: fix.applied}
+      - {hat_id: progress-steward, topic: fix.applied}
+      - {hat_id: coordinator, topic: REVIEW_COMPLETE}
+      - {hat_id: executor, topic: REVIEW_COMPLETE}
+      - {hat_id: validator, topic: REVIEW_COMPLETE}
+      - {hat_id: review-coordinator, topic: REVIEW_COMPLETE}
+      - {hat_id: dimension-reviewer, topic: REVIEW_COMPLETE}
+      - {hat_id: review-synthesizer, topic: REVIEW_COMPLETE}
+      - {hat_id: fixer, topic: REVIEW_COMPLETE}
+      - {hat_id: reporter, topic: REVIEW_COMPLETE}
+      - {hat_id: progress-steward, topic: REVIEW_COMPLETE}
+      - {hat_id: coordinator, topic: report.done}
+      - {hat_id: executor, topic: report.done}
+      - {hat_id: validator, topic: report.done}
+      - {hat_id: review-coordinator, topic: report.done}
+      - {hat_id: dimension-reviewer, topic: report.done}
+      - {hat_id: review-synthesizer, topic: report.done}
+      - {hat_id: fixer, topic: report.done}
+      - {hat_id: shipper, topic: report.done}
+      - {hat_id: progress-steward, topic: report.done}
+      - {hat_id: coordinator, topic: LOOP_COMPLETE}
+      - {hat_id: executor, topic: LOOP_COMPLETE}
+      - {hat_id: validator, topic: LOOP_COMPLETE}
+      - {hat_id: review-coordinator, topic: LOOP_COMPLETE}
+      - {hat_id: dimension-reviewer, topic: LOOP_COMPLETE}
+      - {hat_id: review-synthesizer, topic: LOOP_COMPLETE}
+      - {hat_id: fixer, topic: LOOP_COMPLETE}
+      - {hat_id: shipper, topic: LOOP_COMPLETE}
+      - {hat_id: progress-steward, topic: LOOP_COMPLETE}
+      - {hat_id: coordinator, topic: task.resume}
+      - {hat_id: executor, topic: task.resume}
+      - {hat_id: validator, topic: task.resume}
+      - {hat_id: review-coordinator, topic: task.resume}
+      - {hat_id: dimension-reviewer, topic: task.resume}
+      - {hat_id: review-synthesizer, topic: task.resume}
+      - {hat_id: fixer, topic: task.resume}
+      - {hat_id: shipper, topic: task.resume}
+      - {hat_id: reporter, topic: task.resume}
     # U4: enable plan_name equality validation — work.done plan_name
     # must match the current_plan_name from work.ready.
     plan_name_equality_required: true
@@ -364,6 +516,8 @@ hats:
     # - all units + fix-units complete → plan.complete
     triggers: ["work.start", "task.resume", "test.passed", "review.complete", "work.failed"]
     publishes: ["work.ready", "review.start", "plan.complete", "plan.blocked"]
+    # 2026-06-26 plan U7: self-declared emit scope.
+    exempt_topics: ["plan.blocked", "plan.complete", "review.start", "work.ready"]
     default_publishes: "plan.blocked"
     terminal_events: ["work.ready", "review.start", "plan.complete", "plan.blocked"]
     # 2026-06-26: restrict coordinator prompt visibility to its own triggers.
@@ -662,6 +816,8 @@ hats:
     # - fix.exhausted → fixer could not fix; executor gets rewrite opportunity (max 10)
     triggers: ["work.ready", "fix.exhausted"]
     publishes: ["work.done", "work.failed"]
+    # 2026-06-26 plan U7: self-declared emit scope.
+    exempt_topics: ["work.done", "work.failed"]
     terminal_events: ["work.done", "work.failed"]
     event_filter:
       enabled: true
@@ -908,6 +1064,8 @@ hats:
     # - fix.applied → run full test suite (re-run after fixer applies) → test.passed / test.failed
     triggers: ["work.done", "fix.applied"]
     publishes: ["test.passed", "test.failed"]
+    # 2026-06-26 plan U7: self-declared emit scope.
+    exempt_topics: ["test.failed", "test.passed"]
     terminal_events: ["test.passed", "test.failed"]
     event_filter:
       enabled: true
@@ -988,6 +1146,8 @@ hats:
     # - review.dimension.done/failed → advance to next dimension or close the sequence
     triggers: ["review.start", "review.dimension.done", "review.dimension.failed"]
     publishes: ["review.dimension.ready", "review.dimensions.complete"]
+    # 2026-06-26 plan U7: self-declared emit scope.
+    exempt_topics: ["review.dimension.ready", "review.dimensions.complete"]
     terminal_events: ["review.dimension.ready", "review.dimensions.complete"]
     event_filter:
       enabled: true
@@ -1269,6 +1429,8 @@ hats:
     description: "Reviews a single dimension. Emits review.dimension.done with the findings file, or review.dimension.failed with the reason. No concurrency, no wave dispatcher."
     triggers: ["review.dimension.ready"]
     publishes: ["review.dimension.done", "review.dimension.failed"]
+    # 2026-06-26 plan U7: self-declared emit scope.
+    exempt_topics: ["review.dimension.done", "review.dimension.failed"]
     terminal_events: ["review.dimension.done", "review.dimension.failed"]
     event_filter:
       enabled: true
@@ -1530,6 +1692,8 @@ hats:
     # repo-relative path to a fix-plan markdown file written to the plan's
     # scratchpad; the coordinator reads it and creates fix-unit tasks.
     publishes: ["review.complete"]
+    # 2026-06-26 plan U7: self-declared emit scope.
+    exempt_topics: ["review.complete"]
     terminal_events: ["review.complete"]
     event_filter:
       enabled: true
@@ -1777,6 +1941,8 @@ hats:
     # - fix.exhausted → executor rewrite opportunity (max 10)
     triggers: ["test.failed"]
     publishes: ["fix.applied", "fix.exhausted"]
+    # 2026-06-26 plan U7: self-declared emit scope.
+    exempt_topics: ["fix.applied", "fix.exhausted"]
     terminal_events: ["fix.applied", "fix.exhausted"]
     event_filter:
       enabled: true
@@ -1875,6 +2041,8 @@ hats:
     # (debug-resolver removed; debug.exhausted no longer exists)
     triggers: ["plan.complete", "plan.blocked"]
     publishes: ["REVIEW_COMPLETE"]
+    # 2026-06-26 plan U7: self-declared emit scope.
+    exempt_topics: ["REVIEW_COMPLETE"]
     default_publishes: "REVIEW_COMPLETE"
     terminal_events: ["REVIEW_COMPLETE"]
     event_filter:
@@ -1992,6 +2160,8 @@ hats:
     description: "Generates manager-facing completion report."
     triggers: ["REVIEW_COMPLETE"]
     publishes: ["report.done", "LOOP_COMPLETE"]
+    # 2026-06-26 plan U7: self-declared emit scope.
+    exempt_topics: ["LOOP_COMPLETE", "report.done"]
     default_publishes: "report.done"
     terminal_events: ["report.done", "LOOP_COMPLETE"]
     event_filter:

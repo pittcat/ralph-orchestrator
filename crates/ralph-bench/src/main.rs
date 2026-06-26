@@ -546,6 +546,12 @@ fn format_termination_reason(reason: &TerminationReason) -> String {
         TerminationReason::RecoverablePayloadExhausted { .. } => {
             "RecoverablePayloadExhausted".to_string()
         }
+        // 2026-06-26 plan U1: completion-correction budget
+        // exhausted or structural rejection. Surfaced on the
+        // bench report's `termination_reason` column for
+        // post-mortem analysis. The literal matches the
+        // variant name so dashboards keep parsing it.
+        TerminationReason::CompletionStuck(_) => "CompletionStuck".to_string(),
     }
 }
 

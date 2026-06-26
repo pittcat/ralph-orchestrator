@@ -9,7 +9,9 @@
 //! - AutoResearch workflow guards
 
 use ralph_core::testing::{MockBackend, Scenario, ScenarioRunner};
-use ralph_core::{EventLoop, EventParser, HatConfig, LoopContext, RalphConfig};
+use ralph_core::{
+    EventLoop, EventParser, HatConfig, LoopContext, RalphConfig, TerminationReason,
+};
 use serde::Deserialize;
 use std::fs;
 
@@ -610,8 +612,24 @@ fn run_scenario_with_snapshots(
 
                 if checkpoint.completion_rejected {
                     let reason = event_loop.check_completion_event();
+                    // 2026-06-26 plan U6: verdict_fail is a
+                    // structural rejection — the loop returns
+                    // `Some(TerminationReason::CompletionStuck(
+                    //   source: StructuralRejection, ...))`
+                    // on the first attempt instead of
+                    // suppressing completion silently. The BDD
+                    // contract here is "LOOP_COMPLETE is not
+                    // honoured as `CompletionPromise`" — both
+                    // `None` (gate open, no termination yet)
+                    // and a structural `CompletionStuck` satisfy
+                    // it. Recoverable rejection is still
+                    // `None` (correction block queued).
+                    let completion_honoured = matches!(
+                        reason,
+                        Some(TerminationReason::CompletionPromise)
+                    );
                     assert!(
-                        reason.is_none(),
+                        !completion_honoured,
                         "{}: After response {}, expected LOOP_COMPLETE to be rejected, but got {:?}",
                         yaml.name,
                         idx + 1,

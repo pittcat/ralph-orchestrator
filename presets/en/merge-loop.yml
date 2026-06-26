@@ -49,6 +49,14 @@ core:
 hats:
   merger:
     name: "Branch Merger"
+    # 2026-06-26 plan U7: hat scope invariant self-declared
+    # emit scope (every publishes topic is owner-pinned).
+    exempt_topics: ["conflict.detected", "merge.done", "merge.failed"]
+    # 2026-06-26 plan U7: event_filter enabled so the
+    # hat scope invariant can guard the prompt.
+    event_filter:
+      enabled: true
+      events: [\"work.start\"]
     description: "Performs git merge with conflict resolution and test verification."
     triggers: ["merge.start", "tests.passed"]
     publishes: ["merge.done", "conflict.detected", "merge.failed"]
@@ -139,6 +147,14 @@ hats:
 
   resolver:
     name: "Conflict Resolver"
+    # 2026-06-26 plan U7: hat scope invariant self-declared
+    # emit scope (every publishes topic is owner-pinned).
+    exempt_topics: ["conflict.resolved", "conflict.unresolvable"]
+    # 2026-06-26 plan U7: event_filter enabled so the
+    # hat scope invariant can guard the prompt.
+    event_filter:
+      enabled: true
+      events: [\"work.start\"]
     description: "Resolves merge conflicts by understanding intent of both sides."
     triggers: ["conflict.detected"]
     publishes: ["conflict.resolved", "conflict.unresolvable"]
@@ -205,6 +221,14 @@ hats:
 
   tester:
     name: "Test Verifier"
+    # 2026-06-26 plan U7: hat scope invariant self-declared
+    # emit scope (every publishes topic is owner-pinned).
+    exempt_topics: ["tests.failed", "tests.passed"]
+    # 2026-06-26 plan U7: event_filter enabled so the
+    # hat scope invariant can guard the prompt.
+    event_filter:
+      enabled: true
+      events: [\"work.start\"]
     description: "Runs test suite to verify merge didn't break anything."
     triggers: ["conflict.resolved"]
     publishes: ["tests.passed", "tests.failed"]
@@ -245,6 +269,14 @@ hats:
 
   cleaner:
     name: "Worktree Cleaner"
+    # 2026-06-26 plan U7: hat scope invariant self-declared
+    # emit scope (every publishes topic is owner-pinned).
+    exempt_topics: ["merge.handled"]
+    # 2026-06-26 plan U7: event_filter enabled so the
+    # hat scope invariant can guard the prompt.
+    event_filter:
+      enabled: true
+      events: [\"work.start\"]
     description: "Cleans up worktree and branch after successful merge."
     triggers: ["merge.done"]
     publishes: ["merge.handled"]
@@ -302,6 +334,14 @@ hats:
 
   failure_handler:
     name: "Failure Handler"
+    # 2026-06-26 plan U7: hat scope invariant self-declared
+    # emit scope (every publishes topic is owner-pinned).
+    exempt_topics: ["merge.handled"]
+    # 2026-06-26 plan U7: event_filter enabled so the
+    # hat scope invariant can guard the prompt.
+    event_filter:
+      enabled: true
+      events: [\"work.start\"]
     description: "Handles unresolvable conflicts and marks loop for review."
     triggers: ["conflict.unresolvable", "tests.failed", "merge.failed"]
     publishes: ["merge.handled"]

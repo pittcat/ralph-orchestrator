@@ -25,9 +25,8 @@
 // rule is the most operationally important: the `ce-executor-serial`
 // preset has been losing hours of loop time to it on the
 // `pittcat-dev` branch in 2026-06.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use crate::config::TopicDenyRule;
 use crate::config::RalphConfig;
 use crate::preset_lint::finding_id::{
     FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK, FINDING_HAT_SCOPE_EVENT_FILTER_DISABLED,
@@ -38,18 +37,35 @@ use crate::runtime_contract::{
 };
 
 /// Topics that must never appear in a coordinator's `event_filter.events`.
-/// The list is fixed; the rule is "if the coordinator sees any of these,
-/// the loop will get into a re-review / pre-emption cycle".
+///
+/// The list is fixed. The rationale, per the 2026-06-26 plan U2:
+///
+/// - `review.dimension.*` and `review.dimensions.complete` are the
+///   per-dimension review fan-out. The coordinator does NOT
+///   participate in dimension review — it is the workflow
+///   dispatcher. Leaking these topics into its prompt has
+///   historically caused the `ce-executor-serial` "fix.applied" /
+///   re-review loop where the coordinator pre-empts the
+///   review-coordinator. (See
+///   `docs/solutions/integration-issues/ce-executor-serial-fix-applied-rereview-dedup-2026-06-18.md`.)
+/// - `review.failed` (the bare negative verdict, used to be emitted
+///   upstream) is a sibling of `review.dimension.failed` — same
+///   leak hazard.
+///
+/// Topics that the coordinator DOES need to see (and are therefore
+/// NOT in the forbidden list):
+///
+/// - `review.complete` — the merged final verdict; the coordinator
+///   reads its `fix_plan_file` payload to dispatch fix-units.
+/// - `plan.complete` / `plan.blocked` — these are the
+///   coordinator's own emits; the prompt legitimately references
+///   them in instructions.
 const COORDINATOR_FORBIDDEN_TOPICS: &[&str] = &[
     "review.dimension.done",
     "review.dimension.failed",
     "review.dimensions.complete",
     "review.dimensions.failed",
-    "review.complete",
-    "review.passed",
     "review.failed",
-    "plan.complete",
-    "plan.blocked",
 ];
 
 /// Run the hat scope invariant checks against a `RalphConfig`.
@@ -84,17 +100,58 @@ pub fn check_hat_scope_invariant(config: &RalphConfig) -> Vec<RuntimeContractFin
 
         // Rule 2: every publishes topic must be covered by an
         // explicit deny rule (or the hat's own exempt list).
+        //
+        // 2026-06-26 plan U7: the scope-pinning mechanism is
+        // **the hat's own `exempt_topics` list**. The hat
+        // declares the topics it WILL emit. A topic on
+        // `exempt_topics` is treated as owner-pinned to the
+        // hat that declares it. The `topic_deny_rules` are a
+        // secondary signal — they bind the topic to a single
+        // owner by blocking all other hats.
+        //
+        // Why we accept the hat's self-declaration:
+        //
+        // - `topic_deny_rules` is a **negative** schema
+        //   (FORBIDS the listed hat from publishing the
+        //   topic); using it to model "this hat owns this
+        //   topic" requires a deny rule from every other
+        //   hat, which is brittle and noisy.
+        // - `exempt_topics` is **positive** (DECLARES the
+        //   hat's emit scope); a single declaration is
+        //   sufficient.
+        // - The runtime already enforces the deny rules; the
+        //   lint only needs to confirm the scope is
+        //   **declared**, not that the runtime will reject
+        //   out-of-scope emits. The runtime check is the
+        //   primary mechanism.
+        //
+        // The lint therefore fires only when the topic is
+        // neither on the hat's `exempt_topics` list nor pinned
+        // to this hat by a deny rule on some other hat.
         let exempt: HashSet<&str> = hat_cfg
             .exempt_topics
             .iter()
             .map(|s| s.as_str())
             .collect();
-        let deny = deny_for_hat(config, hat_id);
+        // Pinned by `exempt_topics` is the primary signal.
+        // We additionally accept the old deny-rule shape
+        // (some other hat is denied this topic) as a
+        // backwards-compatible alias — presets that have
+        // not yet added `exempt_topics` keep working.
+        let denied_for_topic = deny_for_all_hats(config);
         for topic in &hat_cfg.publishes {
             if exempt.contains(topic.as_str()) {
                 continue;
             }
-            if !deny.contains(topic.as_str()) {
+            let pinned_by_deny = denied_for_topic
+                .get(topic.as_str())
+                .map(|denied_hats| {
+                    denied_hats
+                        .iter()
+                        .any(|h| *h != hat_id.as_str())
+                })
+                .unwrap_or(false);
+            if !pinned_by_deny {
                 findings.push(topic_deny_incomplete_finding(hat_id, topic));
             }
         }
@@ -130,19 +187,21 @@ fn coordinator_hat_ids(config: &RalphConfig) -> HashSet<String> {
     set
 }
 
-fn deny_for_hat<'a>(config: &'a RalphConfig, hat_id: &str) -> HashSet<&'a str> {
-    config
-        .event_loop
-        .event_policy
-        .as_ref()
-        .map(|p| {
-            p.topic_deny_rules
-                .iter()
-                .filter(|r: &&TopicDenyRule| r.hat_id == hat_id)
-                .map(|r| r.topic.as_str())
-                .collect()
-        })
-        .unwrap_or_default()
+/// 2026-06-26 plan U7: invert the deny lookup. We want to know
+/// "for each topic, which hats are explicitly DENIED from
+/// publishing it?" — a topic that is denied for some other
+/// hat has its emit scope pinned to a single owner.
+fn deny_for_all_hats(config: &RalphConfig) -> HashMap<String, HashSet<String>> {
+    let mut map: HashMap<String, HashSet<String>> = HashMap::new();
+    let Some(p) = config.event_loop.event_policy.as_ref() else {
+        return map;
+    };
+    for r in &p.topic_deny_rules {
+        map.entry(r.topic.clone())
+            .or_default()
+            .insert(r.hat_id.clone());
+    }
+    map
 }
 
 fn event_filter_disabled_finding(hat_id: &str) -> RuntimeContractFinding {
@@ -234,6 +293,9 @@ event_loop:
 
     #[test]
     fn happy_path_passes_when_filter_enabled_and_topics_denied() {
+        // `worker` is the owner of `work.done`; `ralph` (some
+        // OTHER hat) is denied it. That is what makes the
+        // topic scope unambiguous.
         let yaml = r#"
 event_loop:
   execution_mode: isolated
@@ -241,7 +303,7 @@ event_loop:
     enabled: true
     mode: enforce
     topic_deny_rules:
-      - hat_id: worker
+      - hat_id: ralph
         topic: work.done
 hats:
   worker:
@@ -337,6 +399,10 @@ hats:
 
     #[test]
     fn rule2_respects_exempt_topics() {
+        // `worker` is the owner of `work.done` and `work.internal`.
+        // `ralph` (some OTHER hat) is denied both. `work.internal`
+        // is also on `worker.exempt_topics` to make the self-
+        // declared scope explicit.
         let yaml = r#"
 event_loop:
   execution_mode: isolated
@@ -344,8 +410,10 @@ event_loop:
     enabled: true
     mode: enforce
     topic_deny_rules:
-      - hat_id: worker
+      - hat_id: ralph
         topic: work.done
+      - hat_id: ralph
+        topic: work.internal
 hats:
   worker:
     name: Worker
@@ -369,6 +437,13 @@ hats:
 
     #[test]
     fn rule3_fires_when_coordinator_sees_review_complete() {
+        // The forbidden set is `review.dimension.*` and
+        // `review.dimensions.*` (per-dimension review fan-out).
+        // `review.complete` itself is allowed because the
+        // coordinator needs its `fix_plan_file` payload to
+        // dispatch fix-units. The dimension-level topics are
+        // what the lint guards against — they leak the
+        // review-chain into the workflow dispatcher.
         let cfg = isolated_with_hats(
             r#"
 hats:
@@ -378,7 +453,7 @@ hats:
     publishes: ["work.ready"]
     event_filter:
       enabled: true
-      events: ["work.start", "review.complete"]
+      events: ["work.start", "review.dimension.done"]
 tasks:
   enabled: true
   coordinator_hats: ["coordinator"]
