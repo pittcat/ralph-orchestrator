@@ -576,7 +576,7 @@ hats:
       - `.agents/scratchpad/ce-executor/{plan_name}/fix-log.md` — what the fixer already tried (avoid replaying the same dead-end fix paths).
       - `.agents/scratchpad/ce-executor/{plan_name}/findings.md` — review findings from the most recent review wave (when present).
       - `.agents/scratchpad/ce-executor/{plan_name}/plan-amendments.md` — prior amendments (if any) so new ones compose with existing Change Mapping.
-      - Recent event payloads available in the prompt context (e.g. `## RECENT EVENTS` block, `.ralph/events.jsonl` tail) — focus on:
+      - Recent event payloads made available by the runtime in the prompt context (e.g. the `## RECENT EVENTS` block) — focus on:
         - `test.failed.payload.failures` / `test_errors` — recurring failure clusters.
         - `review.dimension.done.payload.findings_count` / `findings_file` — repeated finding patterns per dimension.
         - `review.complete.payload.verdict` / `fix_plan_file` — overall review outcome.
@@ -593,7 +593,7 @@ hats:
       Score the amendment decision on the same 0–100 scale used elsewhere in this preset:
       - **> 80 (autonomous amendment):** record `DEC-NNN` in `.ralph/agent/decisions.md` (Confidence column carries the score), then write the amendment per the schema below and dispatch the next unit normally.
       - **50 – 80 (record and proceed):** record `DEC-NNN` with the chosen Option and Reasoning, but **do not** amend the unit sequence. Continue with the original plan ordering. The DEC entry itself is the artifact for future activations to revisit.
-      - **< 50 (stop and request user):** publish `work.failed` with `reason: "amendment confidence < 50: <summary>"` and stop. There is no acceptable safe default in this regime — pausing is the safe default.
+      - **< 50 (stop and request user):** publish `plan.blocked` with `reason: "amendment confidence < 50: <summary>"` and stop. The Coordinator does not own `work.failed`; plan.blocked is the correct terminal for halting the plan when the amendment cannot proceed autonomously.
 
       #### Amendment file schema
       All amendments go to `.agents/scratchpad/ce-executor/{plan_name}/plan-amendments.md` (do **not** create per-amendment files). Each amendment follows this structure:
@@ -1073,7 +1073,7 @@ hats:
       - `git diff <base>..HEAD` (or `git diff <base>` fallback) is empty
       - the sequence is empty (no `pending` dimensions remain) — this is the normal post-synthesis case where the synthesizer already closed the previous sequence
 
-      **Empty-diff ownership (HARD RULE — 2026-06-17-004 plan U1, R3)**: the empty-diff path closes the sequence with `review.dimensions.complete`, NOT `review.passed`. `review.passed` is owned exclusively by `review-synthesizer`; the synthesizer will read the `dimensions` array you emit (every row `status: done` and `findings_file: null`), see no findings, and emit `review.passed(skip_reason=dimensions_complete)`. The topic-deny rules + `publishes` scope both reject `review-coordinator → review.passed` at the CLI precheck. When in doubt, choose walk.
+      **Empty-diff ownership (HARD RULE — 2026-06-17-004 plan U1, R3)**: the empty-diff path closes the sequence with `review.dimensions.complete`. `review.complete` is owned exclusively by `review-synthesizer`; the synthesizer will read the `dimensions` array you emit (every row `status: done` and `findings_file: null`), see no findings, and emit `review.complete` with `fix_plan_file: "null"` and `verdict: "pass"`. The topic-deny rules + `publishes` scope both reject `review-coordinator → review.complete` at the CLI precheck. When in doubt, choose walk.
 
       Write shared diff to `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch` (filename retained from the wave preset for compat with downstream tooling).
 
@@ -1111,11 +1111,11 @@ hats:
            `git diff <base>..HEAD` is empty): emit the array with
            every row `status: "done"` and `findings_file: null`. The
            synthesizer reads the payload, sees no findings, and
-           emits `review.passed(skip_reason=dimensions_complete)`
-           — `review.passed` is owned by `review-synthesizer`, not
-           this hat. The CLI precheck (`publishes` scope +
-           `topic_deny_rules`) refuses `review-coordinator →
-           review.passed`.
+           emits `review.complete` with `fix_plan_file: "null"` and
+           `verdict: "pass"` — `review.complete` is owned by
+           `review-synthesizer`, not this hat. The CLI precheck
+           (`publishes` scope + `topic_deny_rules`) refuses
+           `review-coordinator → review.complete`.
          - `plan_name`, `task_id`, `task_key`, `step`: copy from
            triggering event payload.
          - Stop — do not emit anything else this turn.
@@ -1146,7 +1146,7 @@ hats:
          `review.dimension.ready` against an empty diff would still
          keep the contract intact because the dimension-reviewer
          handles its own finding-or-not decision. Do NOT emit
-         `review.passed` from this hat (ownership belongs to
+         `review.complete` from this hat (ownership belongs to
          `review-synthesizer`).
       6. If a `review.dimension.done` or `review.dimension.failed`
          event just arrived:
@@ -1222,15 +1222,15 @@ hats:
         `Active Sequence: dim=<dim> (N/M)` so operators
         and downstream hats can see the in-flight dimension.
         Use the sequence index (1-based) and total (always 5).
-      - After the synthesizer fires (`review.passed` /
-        `review.failed` / `plan.blocked`), clear the line back
+      - After the synthesizer fires (`review.complete`) or the
+        plan is blocked (`plan.blocked`), clear the line back
         to `Active Sequence: (none)` in the same progress.md edit.
 
       ### Constraints
       - MUST NOT review code directly
       - MUST NOT start fixing issues
       - MUST decide walk vs pass per the HARD RULE above (commit_count / changed_lines / untracked / diff state), NOT based on intent or trust in the executor
-      - MUST NOT emit `review.passed` from this hat — `review.passed` is owned exclusively by `review-synthesizer`. The empty-diff fast path is now `review.dimensions.complete` (with all rows `status: done`, `findings_file: null`); the synthesizer then emits `review.passed(skip_reason=dimensions_complete)`. Any attempt to call `ralph emit review.passed --hat review-coordinator` is rejected by the CLI precheck (`isolated_scope_violation`) and the topic-deny rule.
+      - MUST NOT emit `review.complete` from this hat — `review.complete` is owned exclusively by `review-synthesizer`. The empty-diff fast path is now `review.dimensions.complete` (with all rows `status: done`, `findings_file: null`); the synthesizer then emits `review.complete` with `fix_plan_file: "null"` and `verdict: "pass"`. Any attempt to call `ralph emit review.complete --hat review-coordinator` is rejected by the CLI precheck (`isolated_scope_violation`) and the topic-deny rule.
       - MUST NOT emit `review.dimension.ready` for more than one dimension per turn (single-event boundary)
       - MUST walk the sequence in the fixed order (correctness → testing → maintainability → project-standards → adversarial)
       - MUST write `review-sequence.json` atomically (temp + rename) — no Read+Write race window
