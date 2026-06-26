@@ -1350,8 +1350,9 @@ mod tests {
     /// profile tree — but on platforms where symlinks are allowed
     /// we cover that path in `resolve_rejects_symlinked_fragment`.
     /// Here we just assert the warning pipeline is wired by
-    /// exercising the `OsStringExt` path on Unix only.
-    #[cfg(unix)]
+    /// exercising the `OsStringExt` path on Linux only: macOS/APFS
+    /// rejects invalid UTF-8 filenames at creation time (errno 92).
+    #[cfg(target_os = "linux")]
     #[test]
     fn resolve_warns_on_non_utf8_filename() {
         use std::ffi::OsString;
