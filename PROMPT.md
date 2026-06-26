@@ -1,6 +1,5 @@
 
-Implement dev plan: docs/plans/2026-06-25-002-feat-profiles-for-preset-role-tuning-plan.md
-
+Implement dev plan: docs/plans/2026-06-25-001-feat-ce-executor-serial-5dim-coordinator-amendments-plan.md
 ### Note
 
 注意每个角色要各司其职,不能越权
