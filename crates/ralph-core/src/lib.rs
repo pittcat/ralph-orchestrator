@@ -106,10 +106,11 @@ pub use config::{
     EventFilterMode, EventLoopConfig, EventMetadata, EventPolicyConfig, EventPolicyMode,
     EventProjectionConfig, EventSchema, FeaturesConfig, HatBackend, HatConfig, HookStage,
     InjectMode, MalformedJsonlPolicy, MemoriesConfig, MemoriesFilter, OnErrorPolicy, PayloadType,
-    Phase, PhaseConfig, PreflightExtensionsConfig, PreflightHook, ProjectionMode, ProjectionRule,
-    RalphConfig, RuntimeDiagnosisConfig, ScratchpadConfig, SkillOverride, SkillsConfig,
-    StateFileEntry, StateFileFormat, StateFilesConfig, StepHandoffConfig, TelemetryConfig,
-    TriggerContext, TriggerPredicate, ViolationAction, WarmupConfig, obligation_satisfied,
+    Phase, PhaseConfig, PreflightExtensionsConfig, PreflightHook, ProfileScope, ProfileSpec,
+    ProfilesConfig, ProjectionMode, ProjectionRule, RalphConfig, RuntimeDiagnosisConfig,
+    ScratchpadConfig, SkillOverride, SkillsConfig, StateFileEntry, StateFileFormat,
+    StateFilesConfig, StepHandoffConfig, TelemetryConfig, TriggerContext, TriggerPredicate,
+    ViolationAction, WarmupConfig, obligation_satisfied,
 };
 
 // Re-export loop_name types (also available via FeaturesConfig.loop_naming)

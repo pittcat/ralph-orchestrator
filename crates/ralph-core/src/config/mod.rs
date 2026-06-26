@@ -30,6 +30,9 @@ pub(crate) mod workflow_guards;
 
 pub mod multi_hat_policy;
 mod state_projection;
+// U1 of plan 2026-06-25-002: `profiles.default` config block. Pure data
+// types + deserialization — no FS access, no fragment loading (U2).
+pub mod profiles;
 
 pub use agent_doc_sync::{AgentDocSyncConfig, OnErrorPolicy};
 pub use cli::{CliConfig, TuiConfig};
@@ -61,6 +64,7 @@ pub use multi_hat_policy::{
     MULTI_HAT_ISOLATION_LIMIT, MultiHatPolicyViolation, evaluate_multi_hat_isolation,
 };
 pub use preflight_ext::{HookStage, PreflightExtensionsConfig, PreflightHook};
+pub use profiles::{ProfileScope, ProfileSpec, ProfilesConfig};
 pub use skills::{SkillOverride, SkillsConfig};
 pub use state_files::{StateFileEntry, StateFileFormat, StateFilesConfig};
 pub use state_machine::{BusinessAfterTerminalAction, DuplicateTerminalAction, StateMachineConfig};
@@ -220,6 +224,13 @@ pub struct RalphConfig {
     #[serde(default)]
     pub agent_doc_sync: AgentDocSyncConfig,
 
+    /// Profile overlays (U1 of plan 2026-06-25-002). The `default` list
+    /// activates whenever `ralph run` starts; the CLI `--profile` flags
+    /// stack on top of it (U3 / U4). Omitting `profiles:` from
+    /// `ralph.yml` is a no-op — the field defaults to an empty list.
+    #[serde(default)]
+    pub profiles: ProfilesConfig,
+
     // ─────────────────────────────────────────────────────────────────────────
     // PRESET LINT FIELDS (U1 of plan 2026-06-08-003)
     // ─────────────────────────────────────────────────────────────────────────
@@ -292,6 +303,8 @@ impl Default for RalphConfig {
             telemetry: TelemetryConfig::default(),
             // Agent doc sync
             agent_doc_sync: AgentDocSyncConfig::default(),
+            // Profile overlays (U1 of plan 2026-06-25-002)
+            profiles: ProfilesConfig::default(),
             // Preset lint (U1 of plan 2026-06-08-003)
             topic_owners: HashMap::new(),
             topic_format_whitelist: Vec::new(),
