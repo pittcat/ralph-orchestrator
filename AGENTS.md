@@ -126,7 +126,7 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 - **HatlessRalph** (`hatless_ralph.rs`): Hat topology, event subscription matching, hat selection algorithm
 - **HatRegistry**: Manages hat discovery, registration, subscription
 - Presets support Chinese (`*-zh.yml`) variants and chainable configurations
-- Builtin presets: `autoresearch`, `ce-executor-serial` (10-hat: TDD executor + validator + 总体 review), `ce-executor-lite` (template), `debug`, `merge-loop`(裸 `ce-executor` 已删除:所有 plan-driven 执行请使用 `ce-executor-serial`;仅作模板时可使用 `ce-executor-lite`)
+- Builtin presets: `autoresearch`, `ce-executor-serial` (10-hat: TDD executor + validator + 6-dim overall review: goal-alignment → correctness → testing → maintainability → project-standards → adversarial), `ce-executor-lite` (template), `debug`, `merge-loop`(裸 `ce-executor` 已删除:所有 plan-driven 执行请使用 `ce-executor-serial`;仅作模板时可使用 `ce-executor-lite`)
 - `presets/index.json` is the user-facing preset manifest
 
 **`presets/manifest.yml` 是 builtin preset 的 single source of truth**(`crates/ralph-cli/build.rs` 和 `crates/ralph-cli/src/presets.rs` 都从这里读取并在不一致时 panic)。新增/重命名/删除一个 builtin preset 必须**同步改 4 处**:

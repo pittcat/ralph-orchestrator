@@ -1,40 +1,42 @@
 # ce_executor_serial_review_silent_reviewer_recovers: silent DR recovery variant
 #
-# 2026-06-25 plan U9: extends the 2026-06-24 P0-2/P0-3 scenario from
-# 2-dim (correctness → testing) to the 5-dim serial sequence
-# (correctness → testing → maintainability → project-standards → adversarial),
-# matching the 2026-06-25 plan `feat(preset): U1 5-dim` commit which
+# 2026-06-26 plan U9: extends the 2026-06-25 U1 scenario from
+# 5-dim (correctness → testing → maintainability → project-standards → adversarial)
+# to the 6-dim serial sequence
+# (goal-alignment → correctness → testing → maintainability → project-standards → adversarial),
+# matching the 2026-06-26 plan `feat(preset): U8 6-dim goal-alignment` commit which
 # updated review-coordinator / dimension-reviewer / review-synthesizer.
 #
-# The silent-DR recovery variant mirrors the new 5-dim topology from
+# The silent-DR recovery variant mirrors the new 6-dim topology from
 # ce_executor_serial_review.yml, but inserts a silent turn after the
-# first review.dimension.ready (correctness) to exercise the
+# first review.dimension.ready (goal-alignment) to exercise the
 # orchestrator's task.resume + trigger replay recovery wiring.
 #
 # Wire-level chain (single-step plan, no fix, with DR silence):
 #   work.start → work.ready → work.done → test.passed
 #   → review.start
-#   → review.dimension.ready (correctness)
+#   → review.dimension.ready (goal-alignment)
 #   → [iter 6: DR silent, no event]
 #   → [iter 7: DR emits review.dimension.done — recovery succeeded]
+#   → review.dimension.ready (correctness)        → review.dimension.done
 #   → review.dimension.ready (testing)            → review.dimension.done
 #   → review.dimension.ready (maintainability)    → review.dimension.done
 #   → review.dimension.ready (project-standards)  → review.dimension.done
 #   → review.dimension.ready (adversarial)        → review.dimension.done
-#   → review.dimensions.complete (fix_round=0, dimensions=5)
+#   → review.dimensions.complete (fix_round=0, dimensions=6)
 #   → review.complete (fix_plan_file="null", verdict=pass, fix_round=0)
 #   → plan.complete (verdict=pass)
 #   → REVIEW_COMPLETE (pass)
 #   → report.done → LOOP_COMPLETE
 #
-# Asserts: 5 review.dimension.ready/done pairs (the first one is the
+# Asserts: 6 review.dimension.ready/done pairs (the first one is the
 # recovered pair), review.complete (not review.passed), no queue.advance.
 # Any future regression that drops a dimension (e.g. silently collapsing
 # back to 2-dim) fails this BDD via the `expected.events` count
-# mismatch when paired with the 22-iteration total.
+# mismatch when paired with the 24-iteration total.
 
 name: ce_executor_serial_review_silent_reviewer_recovers
-description: 5-dim serial review chain with silent first-activation DR that recovers on second activation
+description: 6-dim serial review chain with silent first-activation DR that recovers on second activation
 
 config:
   prompt_file: PROMPT.md
@@ -226,115 +228,129 @@ mock_responses:
       {"plan_name":"plan-sr","task_id":"t1","task_key":"k1"}
       </event>
     hat: coordinator
-  # 5. review-coordinator kicks correctness
+  # 5. review-coordinator kicks goal-alignment
   - text: |
       <event topic="review.dimension.ready">
-      {"dimension":"correctness","focus":"Logic correctness, edge cases, error propagation, state machine consistency","depth":"standard","diff_base":"HEAD~1","intent_summary":"5-dim review","changed_files":"src/foo.rs","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
+      {"dimension":"goal-alignment","focus":"Goal-to-plan-to-code alignment: core objective traceability, logical gaps, missing or divergent implementation steps","depth":"standard","diff_base":"HEAD~1","intent_summary":"6-dim review","changed_files":"src/foo.rs","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: review-coordinator
   # 6. dimension-reviewer is SILENT on first activation (recovery scenario)
   - text: ""
     hat: dimension-reviewer
-  # 7. dimension-reviewer recovers and emits review.dimension.done (correctness)
+  # 7. dimension-reviewer recovers and emits review.dimension.done (goal-alignment)
+  - text: |
+      <event topic="review.dimension.done">
+      {"dimension":"goal-alignment","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-goal-alignment-t1.json","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: dimension-reviewer
+  # 8. review-coordinator kicks correctness
+  - text: |
+      <event topic="review.dimension.ready">
+      {"dimension":"correctness","focus":"Logic correctness, edge cases, error propagation, state machine consistency","depth":"standard","diff_base":"HEAD~1","intent_summary":"6-dim review","changed_files":"src/foo.rs","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: review-coordinator
+  # 9. dimension-reviewer completes correctness
   - text: |
       <event topic="review.dimension.done">
       {"dimension":"correctness","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-correctness-t1.json","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: dimension-reviewer
-  # 8. review-coordinator kicks testing
+  # 10. review-coordinator kicks testing
   - text: |
       <event topic="review.dimension.ready">
-      {"dimension":"testing","focus":"Test coverage gaps, brittle assertions, behavioral changes without test additions","depth":"standard","diff_base":"HEAD~1","intent_summary":"5-dim review","changed_files":"src/foo.rs","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
+      {"dimension":"testing","focus":"Test coverage gaps, brittle assertions, behavioral changes without test additions","depth":"standard","diff_base":"HEAD~1","intent_summary":"6-dim review","changed_files":"src/foo.rs","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: review-coordinator
-  # 9. dimension-reviewer completes testing
+  # 11. dimension-reviewer completes testing
   - text: |
       <event topic="review.dimension.done">
       {"dimension":"testing","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-testing-t1.json","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: dimension-reviewer
-  # 10. review-coordinator kicks maintainability
+  # 12. review-coordinator kicks maintainability
   - text: |
       <event topic="review.dimension.ready">
-      {"dimension":"maintainability","focus":"Coupling, complexity, naming, dead code, abstraction debt — adapted from ce-code-review ce-maintainability-reviewer","depth":"standard","diff_base":"HEAD~1","intent_summary":"5-dim review","changed_files":"src/foo.rs","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
+      {"dimension":"maintainability","focus":"Coupling, complexity, naming, dead code, abstraction debt — adapted from ce-code-review ce-maintainability-reviewer","depth":"standard","diff_base":"HEAD~1","intent_summary":"6-dim review","changed_files":"src/foo.rs","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: review-coordinator
-  # 11. dimension-reviewer completes maintainability
+  # 13. dimension-reviewer completes maintainability
   - text: |
       <event topic="review.dimension.done">
       {"dimension":"maintainability","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-maintainability-t1.json","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: dimension-reviewer
-  # 12. review-coordinator kicks project-standards
+  # 14. review-coordinator kicks project-standards
   - text: |
       <event topic="review.dimension.ready">
-      {"dimension":"project-standards","focus":"AGENTS.md/CLAUDE.md compliance, frontmatter, citations, portability — adapted from ce-code-review ce-project-standards-reviewer","depth":"standard","diff_base":"HEAD~1","intent_summary":"5-dim review","changed_files":"src/foo.rs","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
+      {"dimension":"project-standards","focus":"AGENTS.md/CLAUDE.md compliance, frontmatter, citations, portability — adapted from ce-code-review ce-project-standards-reviewer","depth":"standard","diff_base":"HEAD~1","intent_summary":"6-dim review","changed_files":"src/foo.rs","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: review-coordinator
-  # 13. dimension-reviewer completes project-standards
+  # 15. dimension-reviewer completes project-standards
   - text: |
       <event topic="review.dimension.done">
       {"dimension":"project-standards","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-project-standards-t1.json","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: dimension-reviewer
-  # 14. review-coordinator kicks adversarial
+  # 16. review-coordinator kicks adversarial
   - text: |
       <event topic="review.dimension.ready">
-      {"dimension":"adversarial","focus":"Hidden side effects, compat breaks, edge/concurrency, unsafe paths, misleading names, test sufficiency, maintenance cost, rollback safety","depth":"standard","diff_base":"HEAD~1","intent_summary":"5-dim review","changed_files":"src/foo.rs","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
+      {"dimension":"adversarial","focus":"Hidden side effects, compat breaks, edge/concurrency, unsafe paths, misleading names, test sufficiency, maintenance cost, rollback safety","depth":"standard","diff_base":"HEAD~1","intent_summary":"6-dim review","changed_files":"src/foo.rs","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: review-coordinator
-  # 15. dimension-reviewer completes adversarial
+  # 17. dimension-reviewer completes adversarial
   - text: |
       <event topic="review.dimension.done">
       {"dimension":"adversarial","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-adversarial-t1.json","plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: dimension-reviewer
-  # 16. review-coordinator closes the sequence (5-dim closure, fix_round=0)
+  # 18. review-coordinator closes the sequence (6-dim closure, fix_round=0)
   - text: |
       <event topic="review.dimensions.complete">
-      {"plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01","fix_round":0,"dimensions":[{"dimension":"correctness","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-correctness-t1.json"},{"dimension":"testing","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-testing-t1.json"},{"dimension":"maintainability","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-maintainability-t1.json"},{"dimension":"project-standards","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-project-standards-t1.json"},{"dimension":"adversarial","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-adversarial-t1.json"}]}
+      {"plan_name":"plan-sr","task_id":"t1","task_key":"k1","step":"step-01","fix_round":0,"dimensions":[{"dimension":"goal-alignment","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-goal-alignment-t1.json"},{"dimension":"correctness","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-correctness-t1.json"},{"dimension":"testing","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-testing-t1.json"},{"dimension":"maintainability","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-maintainability-t1.json"},{"dimension":"project-standards","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-project-standards-t1.json"},{"dimension":"adversarial","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-sr/findings-adversarial-t1.json"}]}
       </event>
     hat: review-coordinator
-  # 17. review-synthesizer emits review.complete (pass, no fix plan)
+  # 19. review-synthesizer emits review.complete (pass, no fix plan)
   - text: |
       <event topic="review.complete">
       {"plan_name":"plan-sr","fix_round":0,"fix_plan_file":"null","verdict":"pass","residual_findings_count":0,"findings_summary":"no findings","task_id":"t1","task_key":"k1","step":"step-01","findings_count":0}
       </event>
     hat: review-synthesizer
-  # 18. coordinator emits plan.complete (verdict=pass)
+  # 20. coordinator emits plan.complete (verdict=pass)
   - text: |
       <event topic="plan.complete">
       {"plan_name":"plan-sr","completed_steps":["step-01"],"task_id":"t1","task_key":"k1","verdict":"pass","final_findings_count":0,"fix_round":0}
       </event>
     hat: coordinator
-  # 19. shipper emits REVIEW_COMPLETE
+  # 21. shipper emits REVIEW_COMPLETE
   - text: |
       <event topic="REVIEW_COMPLETE">
       {"plan_name":"plan-sr","verdict":"pass","pass_or_fail":"pass","residual_findings_summary":"none"}
       </event>
     hat: shipper
-  # 20. reporter emits report.done
+  # 22. reporter emits report.done
   - text: |
       <event topic="report.done">
       {"plan_name":"plan-sr","status":"completed"}
       </event>
     hat: reporter
-  # 21. reporter emits LOOP_COMPLETE (separate turn for clean completion check)
+  # 23. reporter emits LOOP_COMPLETE (separate turn for clean completion check)
   - text: |
       <event topic="LOOP_COMPLETE">
-      {"plan_name":"plan-sr","reason":"5-dim review success (with DR recovery)"}
+      {"plan_name":"plan-sr","reason":"6-dim review success (with DR recovery)"}
       </event>
     hat: reporter
 
 expected:
-  iterations: 22
+  iterations: 24
   events:
     - topic: work.ready
     - topic: work.done
     - topic: test.passed
     - topic: review.start
-    # 5-dim serial review hops — the first one is the recovered pair
+    # 6-dim serial review hops — the first one is the recovered pair
     # (DR silent on first activation, emits done on second).
+    - topic: review.dimension.ready
+    - topic: review.dimension.done
     - topic: review.dimension.ready
     - topic: review.dimension.done
     - topic: review.dimension.ready

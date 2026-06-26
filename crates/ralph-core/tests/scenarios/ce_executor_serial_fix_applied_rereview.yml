@@ -1,13 +1,14 @@
 # ce_executor_serial_fix_applied_rereview: fix → re-test → re-review → review.complete
 #
-# 2026-06-25 plan U9: extends the 2026-06-24 P0-2/P0-3 scenario from
-# 2-dim (correctness → testing) to the 5-dim serial sequence
-# (correctness → testing → maintainability → project-standards → adversarial),
-# matching the 2026-06-25 plan `feat(preset): U1 5-dim` commit which
+# 2026-06-26 plan U9: extends the 2026-06-25 U1 scenario from
+# 5-dim (correctness → testing → maintainability → project-standards → adversarial)
+# to the 6-dim serial sequence
+# (goal-alignment → correctness → testing → maintainability → project-standards → adversarial),
+# matching the 2026-06-26 plan `feat(preset): U8 6-dim goal-alignment` commit which
 # updated review-coordinator / dimension-reviewer / review-synthesizer.
 #
 # Aligns with the 10-hat production topology (TDD executor + validator
-# + 5-dim review + no plan-gate). The old 4-dim + review.passed/
+# + 6-dim review + no plan-gate). The old 4-dim + review.passed/
 # review.failed + plan-gate + queue.advance topology was stale and
 # silently passed via the `run_scenario` stub.
 #
@@ -16,27 +17,28 @@
 #   → fix.applied (fix_round=1)
 #   → test.passed (re-run after fix)
 #   → review.start
+#   → review.dimension.ready (goal-alignment)     → review.dimension.done
 #   → review.dimension.ready (correctness)        → review.dimension.done
 #   → review.dimension.ready (testing)            → review.dimension.done
 #   → review.dimension.ready (maintainability)    → review.dimension.done
 #   → review.dimension.ready (project-standards)  → review.dimension.done
 #   → review.dimension.ready (adversarial)        → review.dimension.done
-#   → review.dimensions.complete (fix_round=1, dimensions=5)
+#   → review.dimensions.complete (fix_round=1, dimensions=6)
 #   → review.complete (fix_plan_file="null", verdict=pass, fix_round=1)
 #   → plan.complete (verdict=pass, fix_round=1)
 #   → REVIEW_COMPLETE (pass)
 #   → report.done → LOOP_COMPLETE
 #
 # Asserts: test.failed → fix.applied → test.passed recovery path,
-# 5-dim review (not 4-dim), review.complete (not review.passed),
+# 6-dim review (not 4-dim), review.complete (not review.passed),
 # no queue.advance, no plan-gate, no fix.exhausted. Any future
 # regression that drops a dimension (e.g. silently collapsing back
 # to 2-dim) fails this BDD via the `expected.events` count mismatch
-# when paired with the 23-iteration total.
+# when paired with the 25-iteration total.
 
 name: ce_executor_serial_fix_applied_rereview
 description: |
-  ce-executor-serial fix → re-test → 5-dim re-review → review.complete
+  ce-executor-serial fix → re-test → 6-dim re-review → review.complete
   (single-step plan, one fix round). Pins the new 10-hat topology
   end-to-end with stub events.
 
@@ -270,105 +272,117 @@ mock_responses:
       {"plan_name":"plan-r","task_id":"t1","task_key":"k1"}
       </event>
     hat: coordinator
-  # 7. review-coordinator kicks correctness
+  # 7. review-coordinator kicks goal-alignment
   - text: |
       <event topic="review.dimension.ready">
-      {"dimension":"correctness","focus":"Logic correctness, edge cases, error propagation, state machine consistency","depth":"standard","diff_base":"HEAD","intent_summary":"5-dim post-fix review","changed_files":"src/foo.rs","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
+      {"dimension":"goal-alignment","focus":"Goal-to-plan-to-code alignment: core objective traceability, logical gaps, missing or divergent implementation steps","depth":"standard","diff_base":"HEAD","intent_summary":"6-dim post-fix review","changed_files":"src/foo.rs","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: review-coordinator
-  # 8. dimension-reviewer completes correctness
+  # 8. dimension-reviewer completes goal-alignment
+  - text: |
+      <event topic="review.dimension.done">
+      {"dimension":"goal-alignment","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-r/findings-goal-alignment-t1.json","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: dimension-reviewer
+  # 9. review-coordinator kicks correctness
+  - text: |
+      <event topic="review.dimension.ready">
+      {"dimension":"correctness","focus":"Logic correctness, edge cases, error propagation, state machine consistency","depth":"standard","diff_base":"HEAD","intent_summary":"6-dim post-fix review","changed_files":"src/foo.rs","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: review-coordinator
+  # 10. dimension-reviewer completes correctness
   - text: |
       <event topic="review.dimension.done">
       {"dimension":"correctness","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-r/findings-correctness-t1.json","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: dimension-reviewer
-  # 9. review-coordinator kicks testing
+  # 11. review-coordinator kicks testing
   - text: |
       <event topic="review.dimension.ready">
-      {"dimension":"testing","focus":"Test coverage gaps, brittle assertions, behavioral changes without test additions","depth":"standard","diff_base":"HEAD","intent_summary":"5-dim post-fix review","changed_files":"src/foo.rs","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
+      {"dimension":"testing","focus":"Test coverage gaps, brittle assertions, behavioral changes without test additions","depth":"standard","diff_base":"HEAD","intent_summary":"6-dim post-fix review","changed_files":"src/foo.rs","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: review-coordinator
-  # 10. dimension-reviewer completes testing
+  # 12. dimension-reviewer completes testing
   - text: |
       <event topic="review.dimension.done">
       {"dimension":"testing","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-r/findings-testing-t1.json","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: dimension-reviewer
-  # 11. review-coordinator kicks maintainability
+  # 13. review-coordinator kicks maintainability
   - text: |
       <event topic="review.dimension.ready">
-      {"dimension":"maintainability","focus":"Coupling, complexity, naming, dead code, abstraction debt — adapted from ce-code-review ce-maintainability-reviewer","depth":"standard","diff_base":"HEAD","intent_summary":"5-dim post-fix review","changed_files":"src/foo.rs","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
+      {"dimension":"maintainability","focus":"Coupling, complexity, naming, dead code, abstraction debt — adapted from ce-code-review ce-maintainability-reviewer","depth":"standard","diff_base":"HEAD","intent_summary":"6-dim post-fix review","changed_files":"src/foo.rs","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: review-coordinator
-  # 12. dimension-reviewer completes maintainability
+  # 14. dimension-reviewer completes maintainability
   - text: |
       <event topic="review.dimension.done">
       {"dimension":"maintainability","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-r/findings-maintainability-t1.json","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: dimension-reviewer
-  # 13. review-coordinator kicks project-standards
+  # 15. review-coordinator kicks project-standards
   - text: |
       <event topic="review.dimension.ready">
-      {"dimension":"project-standards","focus":"AGENTS.md/CLAUDE.md compliance, frontmatter, citations, portability — adapted from ce-code-review ce-project-standards-reviewer","depth":"standard","diff_base":"HEAD","intent_summary":"5-dim post-fix review","changed_files":"src/foo.rs","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
+      {"dimension":"project-standards","focus":"AGENTS.md/CLAUDE.md compliance, frontmatter, citations, portability — adapted from ce-code-review ce-project-standards-reviewer","depth":"standard","diff_base":"HEAD","intent_summary":"6-dim post-fix review","changed_files":"src/foo.rs","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: review-coordinator
-  # 14. dimension-reviewer completes project-standards
+  # 16. dimension-reviewer completes project-standards
   - text: |
       <event topic="review.dimension.done">
       {"dimension":"project-standards","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-r/findings-project-standards-t1.json","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: dimension-reviewer
-  # 15. review-coordinator kicks adversarial
+  # 17. review-coordinator kicks adversarial
   - text: |
       <event topic="review.dimension.ready">
-      {"dimension":"adversarial","focus":"Hidden side effects, compat breaks, edge/concurrency, unsafe paths, misleading names, test sufficiency, maintenance cost, rollback safety","depth":"standard","diff_base":"HEAD","intent_summary":"5-dim post-fix review","changed_files":"src/foo.rs","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
+      {"dimension":"adversarial","focus":"Hidden side effects, compat breaks, edge/concurrency, unsafe paths, misleading names, test sufficiency, maintenance cost, rollback safety","depth":"standard","diff_base":"HEAD","intent_summary":"6-dim post-fix review","changed_files":"src/foo.rs","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: review-coordinator
-  # 16. dimension-reviewer completes adversarial
+  # 18. dimension-reviewer completes adversarial
   - text: |
       <event topic="review.dimension.done">
       {"dimension":"adversarial","findings_count":0,"findings_file":".agents/scratchpad/ce-executor/plan-r/findings-adversarial-t1.json","plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: dimension-reviewer
-  # 17. review-coordinator closes the sequence (5-dim closure, fix_round=1)
+  # 19. review-coordinator closes the sequence (6-dim closure, fix_round=1)
   - text: |
       <event topic="review.dimensions.complete">
-      {"plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01","fix_round":1,"dimensions":[{"dimension":"correctness","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-correctness-t1.json"},{"dimension":"testing","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-testing-t1.json"},{"dimension":"maintainability","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-maintainability-t1.json"},{"dimension":"project-standards","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-project-standards-t1.json"},{"dimension":"adversarial","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-adversarial-t1.json"}]}
+      {"plan_name":"plan-r","task_id":"t1","task_key":"k1","step":"step-01","fix_round":1,"dimensions":[{"dimension":"goal-alignment","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-goal-alignment-t1.json"},{"dimension":"correctness","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-correctness-t1.json"},{"dimension":"testing","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-testing-t1.json"},{"dimension":"maintainability","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-maintainability-t1.json"},{"dimension":"project-standards","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-project-standards-t1.json"},{"dimension":"adversarial","status":"done","findings_file":".agents/scratchpad/ce-executor/plan-r/findings-adversarial-t1.json"}]}
       </event>
     hat: review-coordinator
-  # 18. review-synthesizer emits review.complete (pass, no fix plan, fix_round=1)
+  # 20. review-synthesizer emits review.complete (pass, no fix plan, fix_round=1)
   - text: |
       <event topic="review.complete">
       {"plan_name":"plan-r","fix_round":1,"fix_plan_file":"null","verdict":"pass","residual_findings_count":0,"findings_summary":"no findings","task_id":"t1","task_key":"k1","step":"step-01","findings_count":0}
       </event>
     hat: review-synthesizer
-  # 19. coordinator emits plan.complete (verdict=pass, fix_round=1)
+  # 21. coordinator emits plan.complete (verdict=pass, fix_round=1)
   - text: |
       <event topic="plan.complete">
       {"plan_name":"plan-r","completed_steps":["step-01"],"task_id":"t1","task_key":"k1","verdict":"pass","final_findings_count":0,"fix_round":1}
       </event>
     hat: coordinator
-  # 20. shipper emits REVIEW_COMPLETE
+  # 22. shipper emits REVIEW_COMPLETE
   - text: |
       <event topic="REVIEW_COMPLETE">
       {"plan_name":"plan-r","verdict":"pass","pass_or_fail":"pass","residual_findings_summary":"none"}
       </event>
     hat: shipper
-  # 21. reporter emits report.done
+  # 23. reporter emits report.done
   - text: |
       <event topic="report.done">
       {"plan_name":"plan-r","status":"completed"}
       </event>
     hat: reporter
-  # 22. reporter emits LOOP_COMPLETE (separate turn for clean completion check)
+  # 24. reporter emits LOOP_COMPLETE (separate turn for clean completion check)
   - text: |
       <event topic="LOOP_COMPLETE">
-      {"plan_name":"plan-r","reason":"fix-applied re-test + 5-dim re-review success"}
+      {"plan_name":"plan-r","reason":"fix-applied re-test + 6-dim re-review success"}
       </event>
     hat: reporter
 
 expected:
-  iterations: 23
+  iterations: 25
   events:
     - topic: work.ready
     - topic: work.done
@@ -376,8 +390,10 @@ expected:
     - topic: test.failed
     - topic: fix.applied
     - topic: test.passed
-    # 5-dim review
+    # 6-dim review
     - topic: review.start
+    - topic: review.dimension.ready
+    - topic: review.dimension.done
     - topic: review.dimension.ready
     - topic: review.dimension.done
     - topic: review.dimension.ready
