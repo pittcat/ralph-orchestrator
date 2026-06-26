@@ -155,7 +155,7 @@ pub async fn inspect_profiles_command(
     // them so the JSON shape matches the CLI entries.
     let defaults = config.profiles.default.clone();
 
-    let specs = collect_active_profile_specs_for_inspect(&config, &args)?;
+    let specs = crate::commands::profile_args::collect_active_profile_specs(&config, &args)?;
 
     let workspace_root = std::env::var("RALPH_WORKSPACE_ROOT")
         .map(PathBuf::from)
@@ -225,41 +225,26 @@ pub async fn inspect_profiles_command(
     emit_view(&view, args.format, use_colors)
 }
 
-/// Collect the ordered list of active [`ProfileSpec`]s for an
-/// `ralph inspect profiles` invocation.
-///
-/// Mirrors [`crate::commands::run::collect_active_profile_specs`] but
-/// takes the inspect-specific arg shape. We deliberately re-implement
-/// the body rather than fabricate a synthetic [`crate::commands::run::RunArgs`]
-/// because the inspect command should not pretend to be a run command
-/// (the two diverge on every other field, e.g. `--dry-run`,
-/// `--no-tui`, `--worktree`, etc.).
-fn collect_active_profile_specs_for_inspect(
-    config: &RalphConfig,
-    args: &InspectProfilesArgs,
-) -> Result<Vec<ProfileSpec>, ralph_core::profiles::ProfilesError> {
-    // Inline the helper body because `collect_active_profile_specs`
-    // expects `&RunArgs` and we don't want to fabricate one. The body
-    // is short and the semantic contract is "defaults first (unless
-    // suppressed), then CLI flags in argv order" — exactly the same as
-    // `RunArgs`. This is the same activation order U3 / U4 use for
-    // `ralph run`, so the `ralph inspect profiles` preview matches the
-    // actual `ralph run` invocation byte-for-byte.
-    let mut specs = Vec::new();
-    if !args.no_default_profiles {
-        specs.extend(config.profiles.default.iter().cloned());
+/// `InspectProfilesArgs` implements [`crate::commands::profile_args::ProfileArgs`]
+/// so the activation-order merge lives in exactly one place (shared with
+/// `ralph run`). The trait impl below keeps `ralph inspect profiles` and
+/// `ralph run` byte-for-byte aligned: both consume the same defaults +
+/// CLI flag merge via [`crate::commands::profile_args::collect_active_profile_specs`].
+impl crate::commands::profile_args::ProfileArgs for InspectProfilesArgs {
+    fn profile_specs(&self) -> &[String] {
+        &self.profiles
     }
-    for raw in &args.profiles {
-        specs.push(ralph_core::profiles::parse_profile_spec(raw)?);
+    fn no_default_profiles(&self) -> bool {
+        self.no_default_profiles
     }
-    Ok(specs)
 }
 
 /// Mirrors [`crate::commands::run::derive_preset_name`] but lives here
 /// because `derive_preset_name` is private to `commands::run` and we
 /// cannot re-export it without restructuring the run module's API
-/// surface. Behaviour is intentionally identical — both helpers share
-/// the same test contract (see `tests::derive_preset_name_*`).
+/// surface. Behaviour is intentionally identical and the inspect-side
+/// copy is unit-tested directly (see `derive_preset_name_for_inspect_*`
+/// tests below) so the two helpers can't drift silently.
 fn derive_preset_name_for_inspect(
     hats_source: Option<&HatsSource>,
 ) -> Result<Option<String>> {
@@ -642,7 +627,7 @@ mod tests {
             format: InspectProfilesFormat::Human,
         };
         let active =
-            collect_active_profile_specs_for_inspect(&config, &args).expect("collect");
+            crate::commands::profile_args::collect_active_profile_specs(&config, &args).expect("collect");
         assert_eq!(active.len(), 2);
         assert_eq!(active[0].to_string(), "repo:base");
         assert_eq!(active[1].to_string(), "user:extra");
@@ -661,7 +646,7 @@ mod tests {
             format: InspectProfilesFormat::Human,
         };
         let active =
-            collect_active_profile_specs_for_inspect(&config, &args).expect("collect");
+            crate::commands::profile_args::collect_active_profile_specs(&config, &args).expect("collect");
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].to_string(), "user:extra");
     }
@@ -675,7 +660,7 @@ mod tests {
             format: InspectProfilesFormat::Human,
         };
         let active =
-            collect_active_profile_specs_for_inspect(&config, &args).expect("collect");
+            crate::commands::profile_args::collect_active_profile_specs(&config, &args).expect("collect");
         assert!(active.is_empty());
     }
 
@@ -690,7 +675,7 @@ mod tests {
             no_default_profiles: false,
             format: InspectProfilesFormat::Human,
         };
-        let err = collect_active_profile_specs_for_inspect(&config, &args).unwrap_err();
+        let err = crate::commands::profile_args::collect_active_profile_specs(&config, &args).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("bad-spec"), "expected offending spec in error, got {msg}");
     }
@@ -1004,8 +989,11 @@ mod tests {
         run_args.no_default_profiles = false;
 
         let inspect_specs =
-            collect_active_profile_specs_for_inspect(&config, &inspect_args).expect("inspect");
-        let run_specs = collect_active_profile_specs(&config, &run_args).expect("run");
+            crate::commands::profile_args::collect_active_profile_specs(&config, &inspect_args)
+                .expect("inspect");
+        let run_specs =
+            crate::commands::profile_args::collect_active_profile_specs(&config, &run_args)
+                .expect("run");
         assert_eq!(inspect_specs, run_specs);
 
         // And the --no-default-profiles branch must agree.
@@ -1014,8 +1002,11 @@ mod tests {
         let mut run_args = run_args;
         run_args.no_default_profiles = true;
         let inspect_specs =
-            collect_active_profile_specs_for_inspect(&config, &inspect_args).expect("inspect");
-        let run_specs = collect_active_profile_specs(&config, &run_args).expect("run");
+            crate::commands::profile_args::collect_active_profile_specs(&config, &inspect_args)
+                .expect("inspect");
+        let run_specs =
+            crate::commands::profile_args::collect_active_profile_specs(&config, &run_args)
+                .expect("run");
         assert_eq!(inspect_specs, run_specs);
         assert_eq!(inspect_specs.len(), 1);
         assert_eq!(inspect_specs[0].to_string(), "user:extra");

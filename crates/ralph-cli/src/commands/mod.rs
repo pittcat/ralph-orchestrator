@@ -8,6 +8,7 @@ pub mod init;
 pub mod inspect;
 pub mod plan;
 pub mod preset;
+pub mod profile_args;
 pub mod resume;
 pub mod run;
 pub mod tui;

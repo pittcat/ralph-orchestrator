@@ -140,6 +140,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `ralph web` | 启动 Web 仪表板（前后端） |
 | `ralph mcp` | MCP 服务器模式 |
 | `ralph completions` | 生成 shell 补全脚本 |
+| `ralph inspect` | 只读诊断命名空间（含 `inspect profiles`，用于预览 profile overlay 解析） |
 
 > U8 (2026-06-25): `ralph bot` 已随 `ralph-telegram` crate 一起删除;运行时不再提供人工通道。`human.guidance` / `task.resume` 恢复通道保留(由 runtime diagnosis engine 产出)。
 

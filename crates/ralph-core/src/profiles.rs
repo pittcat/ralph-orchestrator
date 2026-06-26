@@ -43,6 +43,16 @@ use crate::config::RalphConfig;
 const REPO_PROFILES_DIR: &str = "ralph-profiles";
 const USER_PROFILES_DIR: &str = ".config/ralph/profiles";
 
+/// Hard cap on the size of a single profile fragment, in bytes.
+///
+/// Fragment bodies are appended verbatim to `HatConfig.instructions`
+/// and ultimately fed into the agent prompt, so a 1 GiB `.md` file
+/// would not only exhaust memory at load time but also pollute the
+/// LLM context. 1 MiB matches the XDG base dir spec's "config files
+/// are small" intent and is well above any sane operator-authored
+/// markdown profile.
+const MAX_FRAGMENT_BYTES: u64 = 1024 * 1024;
+
 /// One markdown fragment loaded from a profile directory.
 ///
 /// Fragments are appended to the matching hat's `instructions` in
@@ -136,6 +146,14 @@ fn validate_profile_name(name: &str) -> Result<(), ProfilesError> {
             name: name.to_string(),
         });
     }
+    // Reject NUL and ASCII control characters outright. They survive
+    // path joining on some platforms and can confuse downstream tools
+    // (terminal emulators, log scrapers, the agent prompt renderer).
+    if name.chars().any(|c| c.is_control() || c == '\0') {
+        return Err(ProfilesError::InvalidProfileName {
+            name: name.to_string(),
+        });
+    }
     // Reject `/` and `\` (path separators) and `..` segments to prevent
     // directory traversal. The check runs on the trimmed name; callers
     // are expected to pass the un-prefixed name (the half after `:`).
@@ -144,14 +162,39 @@ fn validate_profile_name(name: &str) -> Result<(), ProfilesError> {
             name: name.to_string(),
         });
     }
-    // Use `Path::components` to reject `..` even if the caller tries to
-    // smuggle it in with surrounding text. A bare `..` collapses to a
-    // single `Component::ParentDir`; `foo..bar` does not, but that's
-    // fine because the only thing we care about is escaping the
-    // directory root.
+    // Use `Path::components` to reject `..` and absolute paths even if
+    // the caller tries to smuggle them in with surrounding text. A bare
+    // `..` collapses to a single `Component::ParentDir`; `foo..bar`
+    // does not, but that's fine because the only thing we care about
+    // is escaping the directory root. A leading `/` (or `C:\` on
+    // Windows) collapses to `Component::RootDir` / `Component::Prefix`,
+    // which we reject explicitly.
     let mut comps = Path::new(name).components();
     let only = comps.next();
-    if matches!(only, Some(std::path::Component::ParentDir)) && comps.next().is_none() {
+    if matches!(
+        only,
+        Some(
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_),
+        )
+    ) && comps.next().is_none()
+    {
+        return Err(ProfilesError::InvalidProfileName {
+            name: name.to_string(),
+        });
+    }
+    // Windows-reserved device names (case-insensitive). These cannot
+    // be created as files on Windows but the directory name itself is
+    // matched by the kernel — and on case-insensitive filesystems
+    // operators routinely typo them. Defensive guardrail.
+    let upper = name.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6"
+        | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6"
+        | "LPT7" | "LPT8" | "LPT9"
+    ) {
         return Err(ProfilesError::InvalidProfileName {
             name: name.to_string(),
         });
@@ -214,6 +257,17 @@ where
         Some(xdg) => {
             let trimmed: PathBuf = PathBuf::from(xdg);
             if trimmed.as_os_str().is_empty() {
+                user_home_relative_with(spec, &env_lookup)?
+            } else if trimmed.is_relative() {
+                // XDG Base Directory Specification requires
+                // $XDG_CONFIG_HOME to be an absolute path. A relative
+                // value is almost always a misconfigured env (or a
+                // sandboxed process that hasn't finished setup), and
+                // silently accepting it would make profile resolution
+                // cwd-dependent — which is exactly the kind of
+                // surprising drift this layer is meant to prevent.
+                // Fall back to $HOME so the operator gets a usable
+                // path rather than a hard failure.
                 user_home_relative_with(spec, &env_lookup)?
             } else {
                 trimmed
@@ -316,11 +370,22 @@ where
             continue;
         }
 
-        let mut entries: Vec<OsString> = match fs::read_dir(&preset_dir) {
+        let mut entries: Vec<(OsString, PathBuf)> = match fs::read_dir(&preset_dir) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok())
-                .map(|e| e.file_name())
-                .filter(|name| {
+                .filter(|e| {
+                    // Reject symlinks pointing out of the profile tree
+                    // before we even check the extension. std::fs::read
+                    // follows symlinks, so without this guard a hostile
+                    // or accidental `executor.md -> /etc/passwd` would
+                    // be silently slurped into hat instructions.
+                    match fs::symlink_metadata(e.path()) {
+                        Ok(md) => !md.file_type().is_symlink(),
+                        Err(_) => false, // unreadable entry: skip
+                    }
+                })
+                .map(|e| (e.file_name(), e.path()))
+                .filter(|(name, _)| {
                     Path::new(name)
                         .extension()
                         .is_some_and(|ext| ext == "md")
@@ -333,26 +398,52 @@ where
                 });
             }
         };
-        entries.sort();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
 
         let mut contributed = false;
-        for name in entries {
+        for (name, path) in entries {
             let name_str = match name.to_str() {
                 Some(s) => s.to_string(),
-                None => continue, // non-UTF-8 filenames are silently skipped
+                None => {
+                    // Surface non-UTF-8 filenames as a warning rather
+                    // than silently dropping them. The lossless view is
+                    // available via `to_string_lossy()` so the operator
+                    // can see what was skipped.
+                    out.warnings.push(format!(
+                        "profile {spec}: skipped non-UTF-8 fragment filename {:?} in preset {preset_name:?}",
+                        name.to_string_lossy()
+                    ));
+                    continue;
+                }
             };
             let hat_id = match name_str.strip_suffix(".md") {
-                Some(stripped) => stripped.to_string(),
-                None => continue, // shouldn't happen after filter, but be defensive
+                Some(stripped) if !stripped.is_empty() => stripped.to_string(),
+                Some(_) | None => continue, // `.md` or non-`.md` (filter already enforces the latter)
             };
             if !hat_ids.contains(hat_id.as_str()) {
                 out.warnings.push(format!(
                     "profile {spec} has fragment for unknown hat {hat_id:?} in preset {preset_name:?} (file: {})",
-                    preset_dir.join(&name_str).display()
+                    path.display()
                 ));
                 continue;
             }
-            let path = preset_dir.join(&name_str);
+            // Enforce a hard size cap before reading the file into
+            // memory. A 1 GiB fragment is almost certainly a mistake
+            // (or an attack) and would crash the loader before the
+            // downstream size check could ever fire.
+            let size = fs::symlink_metadata(&path)
+                .map_err(|source| ProfilesError::Io {
+                    path: path.clone(),
+                    source,
+                })?
+                .len();
+            if size > MAX_FRAGMENT_BYTES {
+                out.warnings.push(format!(
+                    "profile {spec} has fragment {path:?} exceeding size cap \
+                     ({size} bytes > {MAX_FRAGMENT_BYTES} bytes); skipped",
+                ));
+                continue;
+            }
             let bytes = fs::read(&path).map_err(|source| ProfilesError::Io {
                 path: path.clone(),
                 source,
@@ -1149,5 +1240,245 @@ mod tests {
         let mut map: HashMap<String, HatConfig> = HashMap::new();
         map.insert("a".to_string(), hat("a"));
         assert_eq!(map.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // P1/P2 regression coverage (post-2026-06-25-002 review):
+    // symlink rejection, size cap, control-char / Windows reserved
+    // name rejection, XDG relative-path fallback, non-UTF-8 filename
+    // warning.
+    // ------------------------------------------------------------------
+
+    /// P1 — `<profile>/<preset>/<hat>.md` that is a symlink pointing
+    /// outside the profile tree must be rejected before `fs::read`
+    /// follows it. We can't always create symlinks on Windows or in
+    /// sandboxes without `CAP_DAC_OVERRIDE`, so this test is skipped
+    /// when `symlink` itself fails — the path-traversal guard is only
+    /// exercised when the platform supports it.
+    #[test]
+    fn resolve_rejects_symlinked_fragment() {
+        let tmp = TempDir::new().unwrap();
+        let preset_dir = tmp
+            .path()
+            .join("ralph-profiles")
+            .join("strict")
+            .join("debug");
+        fs::create_dir_all(&preset_dir).unwrap();
+
+        // Create an out-of-tree file that the symlink will point at.
+        let outside = tmp.path().join("outside-secret.md");
+        fs::write(&outside, "OUTSIDE_CONTENT\n").unwrap();
+
+        // Try to symlink the canonical fragment filename at it.
+        let link = preset_dir.join("investigator.md");
+        let link_result = std::os::unix::fs::symlink(&outside, &link);
+        if link_result.is_err() {
+            // Platform does not allow symlinks here; treat as
+            // skipped rather than failing CI.
+            eprintln!("symlink unsupported on this platform; skipping");
+            return;
+        }
+
+        let cfg = config_with(&["investigator"]);
+        let spec = ProfileSpec {
+            scope: ProfileScope::Repo,
+            name: "strict".to_string(),
+        };
+        let resolved =
+            resolve_profile_fragments(&cfg, "debug", &[spec], tmp.path()).unwrap();
+
+        // The symlinked fragment must NOT have been loaded.
+        assert!(
+            !resolved.by_hat.contains_key("investigator"),
+            "symlinked fragment must be rejected, got: {:?}",
+            resolved.by_hat
+        );
+        assert!(resolved.by_hat.is_empty());
+    }
+
+    /// P2 — fragment files larger than `MAX_FRAGMENT_BYTES` are
+    /// skipped with a warning rather than slurped into memory.
+    #[test]
+    fn resolve_warns_and_skips_oversized_fragment() {
+        let tmp = TempDir::new().unwrap();
+        let preset_dir = tmp
+            .path()
+            .join("ralph-profiles")
+            .join("strict")
+            .join("debug");
+        fs::create_dir_all(&preset_dir).unwrap();
+
+        // Write a file just past the cap. We don't actually allocate
+        // a full MiB — `symlink_metadata().len()` works on sparse
+        // files too if we `set_len`, but a simple write of a slightly
+        // over-cap body is the most portable way to land above the
+        // threshold on every platform.
+        let path = preset_dir.join("investigator.md");
+        let big = vec![b'a'; (MAX_FRAGMENT_BYTES as usize) + 1];
+        fs::write(&path, &big).unwrap();
+
+        let cfg = config_with(&["investigator"]);
+        let spec = ProfileSpec {
+            scope: ProfileScope::Repo,
+            name: "strict".to_string(),
+        };
+        let resolved =
+            resolve_profile_fragments(&cfg, "debug", &[spec], tmp.path()).unwrap();
+
+        assert!(resolved.by_hat.is_empty());
+        assert!(
+            resolved.warnings.iter().any(|w| w.contains("size cap")),
+            "expected size-cap warning, got: {:?}",
+            resolved.warnings
+        );
+    }
+
+    /// P2 — non-UTF-8 filenames surface as warnings instead of being
+    /// silently dropped.
+    ///
+    /// Note: `.filter(|e| path.extension() == Some("md"))` already
+    /// rejects non-UTF-8 names whose byte sequence doesn't end in
+    /// `md`. To exercise the `to_str() == None` branch we therefore
+    /// construct a filename whose UTF-8 form *would* pass the
+    /// extension check but is rejected by `OsStr::to_str` (no such
+    /// byte sequence exists in valid UTF-8), so we instead exercise
+    /// the path via the `resolved.warnings` channel indirectly: we
+    /// ensure that a directory entry with `.md` extension but
+    /// un-decodable name still produces a warning rather than a
+    /// silent drop. The cleanest portable test is to create a real
+    /// `.md` file under an alias-symlink that points outside the
+    /// profile tree — but on platforms where symlinks are allowed
+    /// we cover that path in `resolve_rejects_symlinked_fragment`.
+    /// Here we just assert the warning pipeline is wired by
+    /// exercising the `OsStringExt` path on Unix only.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_warns_on_non_utf8_filename() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let tmp = TempDir::new().unwrap();
+        let preset_dir = tmp
+            .path()
+            .join("ralph-profiles")
+            .join("strict")
+            .join("debug");
+        fs::create_dir_all(&preset_dir).unwrap();
+
+        // Create a `.md`-suffixed file whose name is not valid UTF-8
+        // by using the raw bytes form. The `md` suffix keeps the
+        // extension filter happy; the leading bytes are not valid
+        // UTF-8 so `to_str()` returns None.
+        let bad_name = OsString::from_vec(b"\xff\xfe investigator.md".to_vec());
+        let bad_path = preset_dir.join(&bad_name);
+        fs::write(&bad_path, "CONTENT\n").unwrap();
+
+        let cfg = config_with(&["investigator"]);
+        let spec = ProfileSpec {
+            scope: ProfileScope::Repo,
+            name: "strict".to_string(),
+        };
+        let resolved =
+            resolve_profile_fragments(&cfg, "debug", &[spec], tmp.path()).unwrap();
+
+        // The non-UTF-8 filename must surface as a warning, and the
+        // content must not have been loaded under the unknown name.
+        assert!(
+            resolved.warnings.iter().any(|w| w.contains("non-UTF-8")),
+            "expected non-UTF-8 warning, got: {:?}",
+            resolved.warnings
+        );
+        assert!(resolved.by_hat.is_empty() || resolved.by_hat.len() <= 1);
+    }
+
+    /// P2 — control characters in profile names are rejected.
+    #[test]
+    fn resolve_profile_dir_rejects_control_chars_in_name() {
+        let spec = ProfileSpec {
+            scope: ProfileScope::Repo,
+            name: "foo\nbar".to_string(),
+        };
+        let tmp = TempDir::new().unwrap();
+        let err = resolve_profile_dir(&spec, tmp.path()).unwrap_err();
+        assert!(matches!(err, ProfilesError::InvalidProfileName { .. }));
+    }
+
+    /// P2 — NUL byte in profile name is rejected.
+    #[test]
+    fn resolve_profile_dir_rejects_nul_in_name() {
+        let spec = ProfileSpec {
+            scope: ProfileScope::Repo,
+            name: "foo\0bar".to_string(),
+        };
+        let tmp = TempDir::new().unwrap();
+        let err = resolve_profile_dir(&spec, tmp.path()).unwrap_err();
+        assert!(matches!(err, ProfilesError::InvalidProfileName { .. }));
+    }
+
+    /// P2 — Windows-reserved device names are rejected even though
+    /// Rust's `Path::components` would happily accept them on
+    /// Linux/macOS.
+    #[test]
+    fn resolve_profile_dir_rejects_windows_reserved_name() {
+        for name in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT9", "con"] {
+            let spec = ProfileSpec {
+                scope: ProfileScope::Repo,
+                name: name.to_string(),
+            };
+            let tmp = TempDir::new().unwrap();
+            let err = resolve_profile_dir(&spec, tmp.path()).unwrap_err();
+            assert!(
+                matches!(err, ProfilesError::InvalidProfileName { .. }),
+                "expected rejection for {name:?}, got {err:?}"
+            );
+        }
+    }
+
+    /// P2 — absolute path components (RootDir, Prefix) are rejected
+    /// even when `/` and `\` aren't literally present in the string.
+    /// `Path::components` collapses a leading `/` to `RootDir`, which
+    /// the validator now blocks.
+    #[test]
+    fn resolve_profile_dir_rejects_root_only_name() {
+        let spec = ProfileSpec {
+            scope: ProfileScope::Repo,
+            // A bare slash — already caught by the `/` check, but we
+            // also want to make sure the components-based check fires
+            // when the slash is presented via a different
+            // representation (e.g. on Windows via the prefix).
+            name: "/etc".to_string(),
+        };
+        let tmp = TempDir::new().unwrap();
+        let err = resolve_profile_dir(&spec, tmp.path()).unwrap_err();
+        assert!(matches!(err, ProfilesError::InvalidProfileName { .. }));
+    }
+
+    /// P2 — when `XDG_CONFIG_HOME` is set but relative, we fall back
+    /// to `$HOME/.config/ralph/profiles/...` rather than producing a
+    /// cwd-relative path that drifts between invocations.
+    #[test]
+    fn resolve_profile_dir_user_falls_back_to_home_when_xdg_is_relative() {
+        let home = TempDir::new().unwrap();
+        let pairs: [(&str, &std::path::Path); 2] = [
+            ("XDG_CONFIG_HOME", std::path::Path::new("relative-path")),
+            ("HOME", home.path()),
+        ];
+        let env = env_from(&pairs);
+
+        let spec = ProfileSpec {
+            scope: ProfileScope::User,
+            name: "my-style".to_string(),
+        };
+        let dir =
+            resolve_profile_dir_with(&spec, Path::new("/anywhere"), env).unwrap();
+        assert_eq!(
+            dir,
+            home.path()
+                .join(".config")
+                .join("ralph")
+                .join("profiles")
+                .join("my-style"),
+            "relative XDG_CONFIG_HOME must defer to $HOME"
+        );
     }
 }

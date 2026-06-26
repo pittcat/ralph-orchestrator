@@ -257,38 +257,24 @@ pub struct RunArgs {
 
 /// Collect the ordered list of active [`ProfileSpec`]s for a `ralph run`
 /// invocation, given the parsed [`RalphConfig`] and the user-supplied
-/// [`RunArgs`].
-///
-/// Activation order (per plan R10):
-///
-/// 1. `config.profiles.default` (operator-supplied ralph.yml defaults) — only
-///    included when `args.no_default_profiles` is `false`.
-/// 2. Each entry in `args.profiles` (CLI `--profile` flags), in argv order.
-///
-/// Both lists are validated via [`parse_profile_spec`]; the first malformed
-/// entry (from either source) is surfaced as a [`ProfilesError::InvalidSpec`]
-/// carrying the original literal — that lets `ralph run` and `ralph inspect
-/// profiles` report the offending token verbatim.
-///
-/// This helper is **pure**: it does not touch the filesystem and never
-/// resolves `<profile>/<preset>/<hat>.md` paths. U4 owns the apply step
-/// (after `normalize()`, before `validate()`); U5 owns the inspect-side
-/// resolution that reuses this same helper for spec collection.
+/// [`RunArgs`]. Thin wrapper over the shared helper that lives in
+/// [`crate::commands::profile_args`]; `RunArgs` implements
+/// [`crate::commands::profile_args::ProfileArgs`] so the merge logic
+/// is shared byte-for-byte with `ralph inspect profiles`.
 pub(crate) fn collect_active_profile_specs(
     config: &RalphConfig,
     args: &RunArgs,
 ) -> Result<Vec<ProfileSpec>, ProfilesError> {
-    let mut specs = Vec::new();
-    if !args.no_default_profiles {
-        // `ProfilesConfig::default` already filters empty entries, so we can
-        // blindly clone the operator-supplied list. Cloning keeps `config`
-        // borrowed immutably, which matches the helper signature.
-        specs.extend(config.profiles.default.iter().cloned());
+    crate::commands::profile_args::collect_active_profile_specs(config, args)
+}
+
+impl crate::commands::profile_args::ProfileArgs for RunArgs {
+    fn profile_specs(&self) -> &[String] {
+        &self.profiles
     }
-    for raw in &args.profiles {
-        specs.push(parse_profile_spec(raw)?);
+    fn no_default_profiles(&self) -> bool {
+        self.no_default_profiles
     }
-    Ok(specs)
 }
 
 /// Compute the active preset name from the resolved hats source, used by
@@ -362,15 +348,22 @@ pub(crate) fn apply_active_profiles(
     let preset_name = match derive_preset_name(hats_source)? {
         Some(name) => name,
         None => {
-            // `None` hats source: nothing to anchor against. Specs are
-            // collected but cannot be resolved. Emit a warning rather
-            // than erroring out so a partially-configured operator
-            // environment still completes.
-            eprintln!(
-                "warning: --profile specs requested but no preset is active \
-                 (no -H/--hats source); skipping profile resolution"
+            // `None` hats source with active specs is a hard error:
+            // the operator explicitly asked for a profile overlay
+            // (via `profiles.default` or `--profile`) but supplied no
+            // `-H/--hats` anchor, so we cannot resolve a
+            // `<repo>/ralph-profiles/<name>/<preset>/` tree against
+            // it. A warning is not enough — silently no-op'ing would
+            // let the operator run ralph with a profile that "looks
+            // configured" but never lands in any hat. Bail with a
+            // clear, actionable error so the misconfiguration surfaces
+            // immediately.
+            anyhow::bail!(
+                "--profile specs requested but no preset is active \
+                 (no -H/--hats source); either pass `-H <preset>` \
+                 or set `hats` / `-H` to a builtin or local hats file. \
+                 Use `ralph inspect profiles` to preview the resolution."
             );
-            return Ok(());
         }
     };
 
@@ -3788,7 +3781,13 @@ hats:
     /// 行为契约:返回 Ok,且 config 不变(空 preset 名时
     /// `apply_profile_fragments` 视为空 preset,无片段可加)。
     #[test]
-    fn apply_active_profiles_none_hats_with_active_specs_is_noop() {
+    fn apply_active_profiles_none_hats_with_active_specs_returns_error() {
+        // P1 regression (post-2026-06-25-002 review): None hats
+        // source with active specs must surface as a hard error,
+        // not silently no-op. Operators who configure
+        // `profiles.default` or pass `--profile repo:strict` and
+        // forget `-H` must learn about the misconfiguration
+        // immediately rather than at first-hat-activation time.
         let tmp = tempfile::tempdir().expect("tempdir");
         write_repo_profile_fragment(tmp.path(), "strict", "debug", "executor", "ignored");
 
@@ -3802,9 +3801,16 @@ hats:
         let mut args = default_run_args();
         args.profiles = vec!["repo:strict".to_string()];
 
-        apply_active_profiles(&mut config, &args, None, tmp.path()).expect("apply");
+        let err = apply_active_profiles(&mut config, &args, None, tmp.path())
+            .expect_err("apply must fail when no preset is active");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--profile specs requested") && msg.contains("no preset"),
+            "expected actionable error message, got: {msg}"
+        );
 
-        // 应当保持原状(没匹配到任何 hat 片段)。
+        // The error must short-circuit before any fragment is
+        // appended — config stays untouched.
         assert_eq!(config.hats["executor"].instructions, "baseline");
     }
 
