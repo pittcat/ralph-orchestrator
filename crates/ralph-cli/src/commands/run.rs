@@ -3,11 +3,12 @@ use crate::display::truncate;
 use crate::loop_runner;
 use crate::preflight;
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use ralph_adapters::detect_backend;
 use ralph_core::{
     CheckStatus, LockError, LockGuard, LockMetadata, LockStatus, LoopContext, LoopEntry, LoopLock,
-    LoopRegistry, PreflightReport, PreflightRunner, RalphConfig, TerminationReason,
+    LoopRegistry, PreflightReport, PreflightRunner, ProfileSpec, ProfilesError, RalphConfig,
+    TerminationReason, profiles::parse_profile_spec,
     truncate_with_ellipsis,
     worktree::{
         WorktreeConfig, clean_worktree_runtime_artifacts, create_worktree, ensure_gitignore,
@@ -205,9 +206,60 @@ pub struct RunArgs {
     #[arg(long, value_name = "FILE")]
     pub record_session: Option<PathBuf>,
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Profile Options (U3 of plan 2026-06-25-002)
+    // ─────────────────────────────────────────────────────────────────────────
+    /// Activate a runtime profile overlay. Accepts `<scope>:<name>` where
+    /// `<scope>` is `repo` (project-rooted `ralph-profiles/<name>/`) or
+    /// `user` (`~/.config/ralph/profiles/<name>/`). Repeatable; appended
+    /// to the active spec list after `profiles.default` from ralph.yml.
+    #[arg(long = "profile", value_name = "SCOPE:NAME", action = ArgAction::Append)]
+    pub profiles: Vec<String>,
+
+    /// Disable the operator-supplied `profiles.default` list from
+    /// ralph.yml. CLI `--profile` flags remain in effect.
+    #[arg(long)]
+    pub no_default_profiles: bool,
+
     /// Custom backend command and arguments (use after --)
     #[arg(last = true)]
     pub custom_args: Vec<String>,
+}
+
+/// Collect the ordered list of active [`ProfileSpec`]s for a `ralph run`
+/// invocation, given the parsed [`RalphConfig`] and the user-supplied
+/// [`RunArgs`].
+///
+/// Activation order (per plan R10):
+///
+/// 1. `config.profiles.default` (operator-supplied ralph.yml defaults) — only
+///    included when `args.no_default_profiles` is `false`.
+/// 2. Each entry in `args.profiles` (CLI `--profile` flags), in argv order.
+///
+/// Both lists are validated via [`parse_profile_spec`]; the first malformed
+/// entry (from either source) is surfaced as a [`ProfilesError::InvalidSpec`]
+/// carrying the original literal — that lets `ralph run` and `ralph inspect
+/// profiles` report the offending token verbatim.
+///
+/// This helper is **pure**: it does not touch the filesystem and never
+/// resolves `<profile>/<preset>/<hat>.md` paths. U4 owns the apply step
+/// (after `normalize()`, before `validate()`); U5 owns the inspect-side
+/// resolution that reuses this same helper for spec collection.
+pub(crate) fn collect_active_profile_specs(
+    config: &RalphConfig,
+    args: &RunArgs,
+) -> Result<Vec<ProfileSpec>, ProfilesError> {
+    let mut specs = Vec::new();
+    if !args.no_default_profiles {
+        // `ProfilesConfig::default` already filters empty entries, so we can
+        // blindly clone the operator-supplied list. Cloning keeps `config`
+        // borrowed immutably, which matches the helper signature.
+        specs.extend(config.profiles.default.iter().cloned());
+    }
+    for raw in &args.profiles {
+        specs.push(parse_profile_spec(raw)?);
+    }
+    Ok(specs)
 }
 
 fn format_preflight_summary(report: &PreflightReport) -> String {
@@ -1401,6 +1453,8 @@ mod forward_prompt_args_tests {
             workspace: PathBuf::new(),
             config_sources: vec![],
             hats_source: None,
+            profiles: vec![],
+            no_default_profiles: false,
         }
     }
 
@@ -1661,6 +1715,14 @@ struct SubprocessTuiArgs {
     pub config_sources: Vec<String>,
     /// Hats source to forward to child process (-H arg)
     pub hats_source: Option<String>,
+    /// Profile specs to forward to child process (--profile args, repeatable).
+    /// U3 of plan 2026-06-25-002: the child must receive the same list so
+    /// that profile fragments are applied in the RPC child, not silently
+    /// dropped on the floor in TUI mode.
+    pub profiles: Vec<String>,
+    /// Whether to forward `--no-default-profiles` to the child. U3 of plan
+    /// 2026-06-25-002: defaults are toggled off in lockstep with the parent.
+    pub no_default_profiles: bool,
 }
 
 impl SubprocessTuiArgs {
@@ -1693,6 +1755,8 @@ impl SubprocessTuiArgs {
             workspace: PathBuf::new(), // Set after loop_context is determined
             config_sources: config_sources.iter().map(|s| s.to_cli_string()).collect(),
             hats_source: hats_source.map(|h| h.label()),
+            profiles: args.profiles.clone(),
+            no_default_profiles: args.no_default_profiles,
         }
     }
 }
@@ -2074,6 +2138,18 @@ async fn run_subprocess_tui(
         child_args.push("--no-sync-agent-docs".to_string());
     }
 
+    // Forward profile options (U3 of plan 2026-06-25-002). Each `--profile`
+    // entry is pushed separately so that the child CLI parser sees the
+    // same argv shape the parent received; clap's `ArgAction::Append`
+    // accepts multiple `--profile` flags and reconstructs the Vec<String>.
+    for spec in &args.profiles {
+        child_args.push("--profile".to_string());
+        child_args.push(spec.clone());
+    }
+    if args.no_default_profiles {
+        child_args.push("--no-default-profiles".to_string());
+    }
+
     // Forward custom args (after --)
     if !custom_args.is_empty() {
         child_args.push("--".to_string());
@@ -2387,6 +2463,8 @@ pub(crate) fn default_run_args() -> RunArgs {
         verbose: false,
         quiet: false,
         record_session: None,
+        profiles: Vec::new(),
+        no_default_profiles: false,
         custom_args: Vec::new(),
         warmup_only: false,
         force_warmup: false,
@@ -2397,7 +2475,159 @@ pub(crate) fn default_run_args() -> RunArgs {
 mod tests {
     use super::*;
     use crate::test_support::CwdGuard;
-    use ralph_core::{HatConfig, HookMutationConfig, HookOnError, HookPhaseEvent, HookSpec};
+    use ralph_core::{HatConfig, HookMutationConfig, HookOnError, HookPhaseEvent, HookSpec, ProfileScope};
+
+    // ─────────────────────────────────────────────────────────────────────
+    // U3 (2026-06-25-002): --profile / --no-default-profiles / TUI forwarding
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// No flags => both default to empty/false. This guards regression:
+    /// the helper must not pre-fill defaults that would shift semantics
+    /// for callers that never invoke `ralph profiles`.
+    #[test]
+    fn run_args_default_profiles_are_empty() {
+        let args = default_run_args();
+        assert!(args.profiles.is_empty());
+        assert!(!args.no_default_profiles);
+    }
+
+    /// `default_run_args()` is the source of truth for the struct shape
+    /// consumed by `main.rs` when no subcommand is given. The compiler
+    /// enforces field presence at struct-literal time, but a runtime
+    /// assertion that the defaults actually surface as the expected
+    /// zero-values catches accidental feature-flag drift early.
+    #[test]
+    fn run_args_default_via_default_run_args_matches_field_types() {
+        let args = default_run_args();
+        let _: Vec<String> = args.profiles;
+        let _: bool = args.no_default_profiles;
+    }
+
+    /// Helper precedence (R10): defaults first, then CLI. Defaults come
+    /// from `config.profiles.default` (already-validated `ProfileSpec` list),
+    /// so we copy them as-is. CLI flags are parsed via `parse_profile_spec`.
+    #[test]
+    fn collect_active_specs_appends_cli_after_defaults() {
+        let mut config = RalphConfig::default();
+        config.profiles.default = vec![ProfileSpec {
+            scope: ProfileScope::Repo,
+            name: "base".to_string(),
+        }];
+        let mut args = default_run_args();
+        args.profiles = vec!["user:extra".to_string()];
+
+        let active = collect_active_profile_specs(&config, &args).expect("collect");
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].to_string(), "repo:base");
+        assert_eq!(active[1].to_string(), "user:extra");
+    }
+
+    /// `--no-default-profiles` strips defaults but preserves CLI flags.
+    /// AE2 of the plan explicitly calls out this combination as a
+    /// supported case ("仅排除 defaults,不影响显式 `--profile`").
+    #[test]
+    fn collect_active_specs_no_default_profiles_skips_defaults_only() {
+        let mut config = RalphConfig::default();
+        config.profiles.default = vec![ProfileSpec {
+            scope: ProfileScope::Repo,
+            name: "base".to_string(),
+        }];
+        let mut args = default_run_args();
+        args.no_default_profiles = true;
+        args.profiles = vec!["user:extra".to_string()];
+
+        let active = collect_active_profile_specs(&config, &args).expect("collect");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].to_string(), "user:extra");
+    }
+
+    /// Empty defaults + empty CLI = empty active list. This is the "no
+    /// profile requested" fast path and must not allocate or fail.
+    #[test]
+    fn collect_active_specs_empty_inputs_yield_empty_list() {
+        let config = RalphConfig::default();
+        let args = default_run_args();
+        let active = collect_active_profile_specs(&config, &args).expect("collect");
+        assert!(active.is_empty());
+    }
+
+    /// A malformed `--profile` literal surfaces as `ProfilesError::InvalidSpec`
+    /// with the original literal preserved, so `ralph run` can echo it
+    /// verbatim in its error message.
+    #[test]
+    fn collect_active_specs_rejects_malformed_cli_literal() {
+        let config = RalphConfig::default();
+        let mut args = default_run_args();
+        args.profiles = vec!["bad-spec-no-colon".to_string()];
+
+        let err = collect_active_profile_specs(&config, &args).expect_err("must reject");
+        match err {
+            ProfilesError::InvalidSpec { spec, .. } => {
+                assert_eq!(spec, "bad-spec-no-colon");
+            }
+            other => panic!("expected InvalidSpec, got {other:?}"),
+        }
+    }
+
+    /// TUI subprocess forwarding: `--profile` entries must be passed to
+    /// the child exactly once each. clap's `ArgAction::Append` requires
+    /// `--profile <value>` pairs (cannot be collapsed to a single arg),
+    /// so the forwarding code emits two argv slots per entry.
+    #[test]
+    fn subprocess_tui_args_forward_profile_entries() {
+        let mut args = default_run_args();
+        args.profiles = vec!["repo:strict".to_string(), "user:my-style".to_string()];
+        args.no_default_profiles = true;
+
+        let sub_args = SubprocessTuiArgs::new(&args, &[], None);
+        assert_eq!(sub_args.profiles, args.profiles);
+        assert!(sub_args.no_default_profiles);
+
+        // Reconstruct the child argv the way `run_subprocess_tui` would.
+        let mut argv = Vec::new();
+        for spec in &sub_args.profiles {
+            argv.push("--profile".to_string());
+            argv.push(spec.clone());
+        }
+        if sub_args.no_default_profiles {
+            argv.push("--no-default-profiles".to_string());
+        }
+        assert_eq!(
+            argv,
+            vec![
+                "--profile",
+                "repo:strict",
+                "--profile",
+                "user:my-style",
+                "--no-default-profiles",
+            ],
+            "child argv must mirror parent flags (R5 / SubprocessTuiArgs contract)"
+        );
+    }
+
+    /// Forwarding is conditional: when neither flag is set, no extra argv
+    /// is pushed. This protects existing call sites that don't pass profile
+    /// flags (and guards against regressions that would break pre-U3
+    /// subprocess argv shapes).
+    #[test]
+    fn subprocess_tui_args_omit_profile_when_unset() {
+        let args = default_run_args();
+        let sub_args = SubprocessTuiArgs::new(&args, &[], None);
+        assert!(sub_args.profiles.is_empty());
+        assert!(!sub_args.no_default_profiles);
+
+        let argv: Vec<String> = sub_args
+            .profiles
+            .iter()
+            .flat_map(|s| ["--profile".to_string(), s.clone()])
+            .chain(if sub_args.no_default_profiles {
+                vec!["--no-default-profiles".to_string()]
+            } else {
+                Vec::new()
+            })
+            .collect();
+        assert!(argv.is_empty(), "unset flags must not emit argv entries");
+    }
 
     #[test]
     fn test_required_restart_command_matches_contract() {

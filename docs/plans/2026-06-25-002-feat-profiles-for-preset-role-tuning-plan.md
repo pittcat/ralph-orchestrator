@@ -1,7 +1,7 @@
 ---
 title: 为 Preset 增加运行时 Profile 片段叠加机制
 type: feat
-status: u1-closed-u2-closed-u3-splitting-pending
+status: u3-closed-u4-pending
 date: 2026-06-25
 origin: docs/brainstorms/2026-06-25-profiles-for-preset-role-tuning-requirements.md
 execution_posture: test-first
