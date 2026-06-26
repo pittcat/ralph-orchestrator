@@ -3003,6 +3003,45 @@ impl EventLoop {
                     self.state.record_hat_activation(hat_id);
                 }
 
+                // 2026-06-26 plan U4: push a fresh obligation for each
+                // active hat. The MissingEventGate (U4) now consults
+                // the obligation queue instead of the activation
+                // clock. `terminal_events` (if non-empty) is the
+                // set of topics that count as "the hat has
+                // fulfilled its trigger obligation" — for hats
+                // without an explicit `terminal_events` list we
+                // fall back to `publishes`. Hats with neither
+                // receive no obligation (no contract to enforce).
+                for hat_id in &active_hat_ids {
+                    if let Some(hat_cfg) = self.registry.get_config(hat_id).cloned() {
+                        let expected = if !hat_cfg.terminal_events.is_empty() {
+                            hat_cfg.terminal_events.clone()
+                        } else if !hat_cfg.publishes.is_empty() {
+                            hat_cfg.publishes.clone()
+                        } else {
+                            continue;
+                        };
+                        // The trigger topic is the first regular
+                        // event whose topic is in this hat's
+                        // configured `triggers`. Falls back to the
+                        // first regular event's topic if no exact
+                        // match — preserves the old record path.
+                        let trigger_topic: String = regular_events
+                            .iter()
+                            .find(|e| hat_cfg.triggers.iter().any(|t| t == e.topic.as_str()))
+                            .map(|e| e.topic.to_string())
+                            .or_else(|| {
+                                regular_events.first().map(|e| e.topic.to_string())
+                            })
+                            .unwrap_or_default();
+                        self.state.push_hat_obligation(
+                            hat_id.clone(),
+                            trigger_topic.to_string(),
+                            expected,
+                        );
+                    }
+                }
+
                 // U3: Record activation lifecycle for each active hat.
                 // For each hat activation, create an ActivationKey and activate the tracker.
                 // The trigger topic is the first regular event whose topic matches
@@ -8448,6 +8487,33 @@ impl EventLoop {
             contract_rejections,
             payload_contract_violation,
         })
+    }
+
+    /// 2026-06-26 plan U4: discharge hat obligations for any accepted
+    /// business event. Centralised here so the obligation queue is
+    /// kept in lock-step with the bus — every accepted event
+    /// immediately removes the obligation for the hat that emitted
+    /// it (if the topic was one the hat owed).
+    ///
+    /// Returns the number of obligations discharged, mostly useful
+    /// for the diagnostics collector. The discharge is idempotent:
+    /// if no obligation is open, `discharge_hat_obligation` is a
+    /// silent no-op (the emit is a side-effect, not the expected
+    /// business event).
+    pub fn discharge_obligations_for_accepted(&mut self, events: &[Event]) -> usize {
+        let mut discharged = 0;
+        for event in events {
+            let Some(hat_id) = event.source.as_ref() else {
+                continue;
+            };
+            if self
+                .state
+                .discharge_hat_obligation(hat_id, event.topic.as_str())
+            {
+                discharged += 1;
+            }
+        }
+        discharged
     }
 
     /// Process events from JSONL, partitioning wave events from regular events.

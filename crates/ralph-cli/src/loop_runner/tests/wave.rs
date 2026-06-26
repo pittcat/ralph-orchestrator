@@ -281,6 +281,9 @@ fn make_test_wave_with_timeout_and_payload(
             aggregate: None,
             scratchpad: None,
             event_filter: None,
+            // 2026-06-26 plan U2: test fixture does not exercise
+            // the exempt list; default empty.
+            exempt_topics: vec![],
             phase_triggers: None,
             ignore_payload_fields: vec![],
             obligations: vec![],

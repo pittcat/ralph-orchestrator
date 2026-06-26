@@ -61,20 +61,51 @@ pub fn should_gate_missing_events(
         return false;
     };
 
-    // 2026-06-17-004 U2 (R3): HatActivationClock defer.  When the
-    // elapsed time since the hat's last activation is less than
-    // the resolved grace window, suppress the gate entirely.  The
-    // hat may legitimately be in its first model warm-up turn
-    // (e.g. `dimension-reviewer` running under an isolated
-    // backend with `timeout: 1800`).
     let grace_secs = resolve_missing_event_grace_secs(
         config,
         None, // preset default — TODO: wire in U3 follow-up
         event_loop.config().cli.idle_timeout_secs,
     );
+    let grace_duration = std::time::Duration::from_secs(u64::from(grace_secs));
+
+    // 2026-06-26 plan U4: obligation-based precedence.
+    //
+    // The old code consulted `hat_activation_at` and gated the
+    // check on `elapsed >= grace_secs`. That clock got refreshed
+    // every `record_hat_activation` call and could be tricked by
+    // `task.resume` (which reactivated the hat and reset the
+    // timestamp) — a stuck hat could hide behind a refreshed
+    // clock and never trip the gate.
+    //
+    // The new model uses the U3 `HatObligation` queue: the gate
+    // fires ONLY when the hat has an open obligation that has
+    // overstayed its grace window. `task.resume` re-arms the
+    // existing obligation (it does NOT create a new one and does
+    // NOT refresh `created_at`) so a stuck hat cannot hide.
+    //
+    // The clock model is kept as a fallback for the first-ever
+    // activation (no obligation pushed yet) and for hats whose
+    // `terminal_events` is empty.
+    if let Some(overdue) = event_loop
+        .state()
+        .overdue_obligation(hat_id, grace_duration)
+    {
+        // Trace so operators see WHY the gate fired — without
+        // this, the obligation's `redispatch_count` is invisible.
+        tracing::debug!(
+            hat = %hat_id,
+            trigger = %overdue.trigger_topic,
+            redispatches = overdue.redispatch_count,
+            "MissingEventGate: obligation overdue (U4)"
+        );
+        return true;
+    }
+    // No overdue obligation — fall through to the legacy
+    // activation-clock check. The obligation queue is the
+    // primary signal; the clock is the secondary.
     if grace_secs > 0
         && let Some(elapsed) = event_loop.state().hat_activation_elapsed(hat_id)
-        && elapsed < std::time::Duration::from_secs(u64::from(grace_secs))
+        && elapsed < grace_duration
     {
         return false;
     }

@@ -1072,6 +1072,9 @@ mod tests {
             concurrency: 1,
             aggregate: None,
             event_filter: None,
+            // 2026-06-26 plan U2: doctor test fixture does not
+            // exercise the exempt list; default empty.
+            exempt_topics: vec![],
             phase_triggers: None,
             obligations: vec![],
             trigger_multi_consumer_topics: HashSet::new(),

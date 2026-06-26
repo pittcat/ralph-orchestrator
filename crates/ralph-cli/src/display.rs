@@ -288,6 +288,13 @@ pub fn print_termination(
         TerminationReason::RecoverablePayloadExhausted { .. } => {
             (RED, "⏸", "Recoverable payload budget exhausted")
         }
+        // 2026-06-26 plan U1: completion-correction budget exhausted
+        // or structural rejection. Same glyph as
+        // `RecoverablePayloadExhausted` so the operator's eye
+        // does not have to learn a new symbol.
+        TerminationReason::CompletionStuck(_) => {
+            (RED, "⏸", "Completion stuck (correction exhausted or structural rejection)")
+        }
     };
 
     let separator = "-".repeat(58);

@@ -1764,6 +1764,13 @@ async fn run_loop_impl_inner(
                         TerminationReason::RecoverablePayloadExhausted { .. } => {
                             "recoverable payload budget exhausted"
                         }
+                        // 2026-06-26 plan U1: completion-correction
+                        // budget exhausted or structural rejection.
+                        // Treated like the other fail-closed reasons
+                        // for the merge-queue needs-review label.
+                        TerminationReason::CompletionStuck(_) => {
+                            "completion stuck (correction exhausted or structural rejection)"
+                        }
                     };
                     if let Err(e) = queue.mark_needs_review(loop_id, reason_str) {
                         warn!(loop_id = %loop_id, error = %e, "Failed to mark merge as needs-review");
