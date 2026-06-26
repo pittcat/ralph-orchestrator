@@ -651,6 +651,96 @@ pub fn find_reusable_worktree(
     Ok(best.map(|(_, w)| w))
 }
 
+/// Find a reusable worktree by its exact loop/worktree name.
+///
+/// This is the precise-match counterpart to [`find_reusable_worktree`].
+/// It is used when the operator passes `--worktree-name <name>` together
+/// with `--reuse-worktree`: we look for a registry entry whose loop ID
+/// or worktree directory name equals `name`, verify the loop is no longer
+/// alive, and cross-check the directory against `git worktree list`.
+///
+/// Returns `Ok(Some(_))` if a matching, reusable worktree is found;
+/// `Ok(None)` if no such worktree exists or the directory is gone;
+/// `Err(_)` if the worktree is still in use by a live loop.
+pub fn find_reusable_worktree_by_name(
+    repo_root: impl AsRef<Path>,
+    name: &str,
+) -> Result<Option<ReusableWorktree>, WorktreeError> {
+    if name.is_empty() {
+        return Ok(None);
+    }
+
+    let repo_root = repo_root.as_ref();
+    let worktree_path = repo_root.join(".worktrees").join(name);
+
+    if !worktree_path.is_dir() {
+        return Ok(None);
+    }
+
+    // Cross-validate against git's view of worktrees.
+    let known_paths: HashSet<PathBuf> = match list_worktrees(repo_root) {
+        Ok(list) => list
+            .into_iter()
+            .map(|wt| canonicalize_for_compare(&wt.path))
+            .collect(),
+        Err(_) => HashSet::new(),
+    };
+    let candidate_canonical = canonicalize_for_compare(&worktree_path);
+    if !known_paths.is_empty() && !known_paths.contains(&candidate_canonical) {
+        tracing::debug!(
+            "Skipping reusable worktree {}: not in git worktree list",
+            worktree_path.display()
+        );
+        return Ok(None);
+    }
+
+    let registry_path = repo_root.join(".ralph").join("loops.json");
+    if registry_path.exists() {
+        let entries: Vec<LoopEntry> = read_loop_registry_entries(&registry_path)?;
+        for entry in entries {
+            let wt_path = match &entry.worktree_path {
+                Some(p) => PathBuf::from(p),
+                None => continue,
+            };
+
+            let loop_id = match wt_path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            if loop_id != name && entry.id != name {
+                continue;
+            }
+
+            if entry.is_alive() {
+                return Err(WorktreeError::Git(format!(
+                    "Worktree {} is still in use by a running loop (PID {}).",
+                    name, entry.pid
+                )));
+            }
+
+            return Ok(Some(ReusableWorktree {
+                path: worktree_path.clone(),
+                branch: format!("ralph/{name}"),
+                loop_id: name.to_string(),
+                started: entry.started,
+                head: get_head_commit(&worktree_path).ok(),
+            }));
+        }
+    }
+
+    // Directory exists and is git-known, but there is no registry entry
+    // (e.g. a manually created worktree). We still allow reuse.
+    let head = get_head_commit(&worktree_path).ok();
+    Ok(Some(ReusableWorktree {
+        path: worktree_path,
+        branch: format!("ralph/{name}"),
+        loop_id: name.to_string(),
+        started: chrono::Utc::now(),
+        head,
+    }))
+}
+
 /// Canonicalize a path for cross-validation against `git worktree list`
 /// output.
 ///
@@ -1769,6 +1859,51 @@ branch refs/heads/ralph/loop-1
 
         let result = find_reusable_worktree(temp_dir.path(), "").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_reusable_worktree_by_name_happy_path() {
+        let temp_dir = TempDir::new().unwrap();
+        init_git_repo(temp_dir.path());
+
+        let config = WorktreeConfig::default();
+        let worktree = create_worktree(temp_dir.path(), "my-exact-name", &config).unwrap();
+
+        register_completed_entry(
+            temp_dir.path(),
+            "my-exact-name",
+            &worktree.path,
+            Utc::now() - chrono::Duration::seconds(60),
+        );
+
+        let result = find_reusable_worktree_by_name(temp_dir.path(), "my-exact-name").unwrap();
+        let reusable = result.expect("expected a reusable worktree");
+        assert_eq!(reusable.loop_id, "my-exact-name");
+        assert_eq!(reusable.path, worktree.path);
+    }
+
+    #[test]
+    fn test_find_reusable_worktree_by_name_live_entry_errors() {
+        let temp_dir = TempDir::new().unwrap();
+        init_git_repo(temp_dir.path());
+
+        let config = WorktreeConfig::default();
+        let worktree = create_worktree(temp_dir.path(), "my-exact-name", &config).unwrap();
+
+        let registry = crate::loop_registry::LoopRegistry::new(temp_dir.path());
+        let entry = crate::loop_registry::LoopEntry::with_id(
+            "my-exact-name",
+            "running prompt",
+            Some(worktree.path.to_string_lossy().to_string()),
+            worktree.path.to_string_lossy().to_string(),
+        );
+        registry.register(entry).unwrap();
+
+        let result = find_reusable_worktree_by_name(temp_dir.path(), "my-exact-name");
+        assert!(
+            result.is_err(),
+            "a still-running worktree must not be reusable by name"
+        );
     }
 
     // -------------------------------------------------------------------------

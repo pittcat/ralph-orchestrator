@@ -93,6 +93,9 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `--no-tui` | flag | 否 | — | 禁用 TUI 观测模式 |
 | `-a, --autonomous` | flag | 否 | — | 强制自主模式 |
 | `--worktree` | flag | 否 | — | 创建隔离的 git worktree（强制关闭 auto-merge） |
+| `--reuse-worktree` | flag | 否 | — | 复用已完成的 worktree；必须与 `--plan` 或 `--worktree-name` 一起使用 |
+| `--plan <PLAN_FILE>` | path | 否 | — | 显式 plan 文件；其 basename 用作 worktree 命名前缀 |
+| `--worktree-name <NAME>` | string | 否 | — | 显式 worktree 名称（与 `--plan` 互斥） |
 | `--no-auto-merge` | flag | 否 | — | 跳过循环结束后的自动合并（worktree 模式下也适用） |
 | `--record-session <FILE>` | path | 否 | — | 录制会话到 JSONL（用于 smoke 测试） |
 | `--exclusive` | flag | 否 | — | 使用工作树排他锁，防止并行循环冲突 |
@@ -109,7 +112,12 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 **反模式 / 注意事项：**
 - 🔴 `--continue` 仅在未启用 memories/tasks 的 legacy scratchpad 模式下有效。
 - 🔴 `--worktree` 创建的隔离目录不会自动合并回主分支（可用 `--no-auto-merge` 控制）。
-- 🔴 **Worktree 复用规则（先检查 + 模糊匹配,严禁盲目创建）**:调用 `--worktree` / `EnterWorktree` / `git worktree add` 前**必须先跑 `git worktree list`**(不能跳过、不能凭印象判断),对结果做**模糊匹配**——只要 worktree 路径或分支名中包含本 plan 的 basename(如 `2026-06-25-002-feat-profiles-for-preset-role-tuning-plan`)就算匹配。命名约定:`<plan-basename>-<adjective-noun>`,模糊匹配允许后缀随机词不同。**有匹配则直接 `cd` 进去复用,严禁创建**;只有确认无匹配时,才按命名约定创建。
+- 🔴 **Worktree 复用必须显式**: `--reuse-worktree` 现在要求同时提供 `--plan <plan.md>` 或 `--worktree-name <name>`，不再从 prompt 文本中自动猜测 plan 路径（该行为已废弃）。推荐做法：
+  ```bash
+  ralph -H builtin:ce-executor-serial run --worktree --reuse-worktree \
+    --plan docs/plans/2026-06-25-002-feat-profiles-for-preset-role-tuning-plan.md
+  ```
+- 🔴 `--plan` 与 `--worktree-name` 互斥； `--worktree-name` 会精确匹配 `.worktrees/<NAME>/`，而 `--plan` 使用 plan 文件的 basename 作为前缀并按前缀匹配。
 
 ---
 
@@ -149,7 +157,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `progress: message length N exceeds max M` | 消息 > 2000 字符 | 拆分消息或用更简洁的描述 |
 | 退出码 75 (progress) | 5 秒内重复发送（速率限制）| 等待 5 秒后重试 |
 | `--prompt-file` 不存在 | `ralph run -P` 指向不存在的路径 | 检查路径；或用 `-p` 内联提示 |
-| `Worktree path conflict` | `--worktree` 路径已被其他循环占用 | 用 `--loop-id` 指定新 ID，或清理已结束的 worktree |
+| `Worktree path conflict` | `--worktree` 路径已被其他循环占用 | 使用 `--reuse-worktree --worktree-name <NAME>` 复用，或换 `--worktree-name` / `--plan` |
 | `preflight failed` | 配置或环境未通过预检 | 查看 `ralph preflight` 输出；常见修复：缺少 `.ralph/`，事件文件不可写 |
 | `doctor: check X failed` | 环境检查未过 | 按 `ralph doctor` 的修复建议逐项处理 |
 | 任何命令失败 | 通用恢复 | 1. `ralph <cmd> --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |

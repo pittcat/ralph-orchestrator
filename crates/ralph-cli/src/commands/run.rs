@@ -11,7 +11,7 @@ use ralph_core::{
     truncate_with_ellipsis,
     worktree::{
         WorktreeConfig, clean_worktree_runtime_artifacts, create_worktree, ensure_gitignore,
-        find_reusable_worktree, remove_worktree,
+        find_reusable_worktree, find_reusable_worktree_by_name, remove_worktree,
     },
 };
 use std::io::IsTerminal;
@@ -159,6 +159,35 @@ pub struct RunArgs {
     /// different concurrency regimes).
     #[arg(long, requires = "worktree", conflicts_with = "exclusive")]
     pub reuse_worktree: bool,
+
+    /// Explicit plan file path.
+    ///
+    /// When provided, Ralph uses the plan file's basename (without the
+    /// `.md`/`.html` extension) as the worktree name prefix instead of
+    /// trying to extract a plan path from the prompt text. This avoids
+    /// fragile parsing when the prompt contains trailing punctuation,
+    /// Chinese characters, or other extra text.
+    ///
+    /// If neither `-p/--prompt` nor `-P/--prompt-file` is given, the
+    /// plan file is also used as the prompt source (equivalent to
+    /// `-P <plan>`).
+    #[arg(long, value_name = "PATH")]
+    pub plan: Option<PathBuf>,
+
+    /// Explicit worktree name to use with `--worktree`.
+    ///
+    /// When provided, Ralph creates or reuses a worktree with exactly
+    /// this name (under `.worktrees/<name>/`) instead of deriving one
+    /// from the prompt or plan file. Use with `--reuse-worktree` to
+    /// reuse an existing worktree of the same name.
+    #[arg(
+        long,
+        value_name = "NAME",
+        requires = "worktree",
+        conflicts_with = "plan",
+        conflicts_with = "exclusive"
+    )]
+    pub worktree_name: Option<String>,
 
     // ─────────────────────────────────────────────────────────────────────────
     // Phase Options (Warmup/Production Two-Phase Loop)
@@ -400,6 +429,7 @@ fn spawn_worktree_loop(
     workspace_root: &Path,
     prompt_summary: &str,
     file_name_prefix: Option<&str>,
+    explicit_loop_id: Option<&str>,
     loop_naming: &ralph_core::LoopNamingConfig,
     pending_worktree_registration: &mut Option<LoopEntry>,
 ) -> Result<(LoopContext, Option<LockGuard>), anyhow::Error> {
@@ -408,7 +438,17 @@ fn spawn_worktree_loop(
     // Generate loop ID from the most identifiable source + unique suffix.
     // Prompt files use their file name so worktrees can be mapped back to plans.
     let name_generator = ralph_core::LoopNameGenerator::from_config(loop_naming);
-    let loop_id = if let Some(prefix) = file_name_prefix {
+    let loop_id = if let Some(name) = explicit_loop_id {
+        // Explicit --worktree-name: use it exactly, failing fast if it
+        // already exists (the caller is responsible for reuse checks).
+        if ralph_core::worktree_exists(workspace_root, name, &worktree_config) {
+            anyhow::bail!(
+                "Worktree already exists: {}. Use --reuse-worktree to reuse it, or choose a different name.",
+                name
+            );
+        }
+        name.to_string()
+    } else if let Some(prefix) = file_name_prefix {
         name_generator.generate_unique_with_prefix(prefix, |name| {
             ralph_core::worktree_exists(workspace_root, name, &worktree_config)
         })
@@ -512,6 +552,7 @@ fn handle_active_lock(
             workspace_root,
             prompt_summary,
             file_name_prefix,
+            None,
             loop_naming,
             pending_worktree_registration,
         )
@@ -520,70 +561,38 @@ fn handle_active_lock(
 
 fn worktree_file_name_prefix(
     prompt_file: &str,
-    prompt_summary: &str,
-    workspace_root: &Path,
+    _prompt_summary: &str,
+    plan_file: Option<&Path>,
 ) -> Option<String> {
-    if let Some(stem) = plan_file_stem_from_text(prompt_summary) {
-        return Some(stem);
+    // Explicit --plan takes precedence: derive prefix from the plan's
+    // basename. This is the recommended way to name worktrees because
+    // it is deterministic and does not depend on fragile prompt-text
+    // parsing.
+    if let Some(plan) = plan_file {
+        if let Some(stem) = plan
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            return Some(stem.to_string());
+        }
     }
 
+    // Fallback: if a non-default prompt file was provided explicitly
+    // (-P), use its basename as the worktree prefix. We intentionally
+    // do NOT scan prompt text for embedded plan paths any more — that
+    // behavior was fragile and has been removed.
     if prompt_file.is_empty() {
         return None;
     }
 
     let prompt_path = Path::new(prompt_file);
-    let prompt_path = if prompt_path.is_absolute() {
-        prompt_path.to_path_buf()
-    } else {
-        workspace_root.join(prompt_path)
-    };
-
-    if !prompt_path.exists() {
-        return None;
-    }
-
-    if let Ok(prompt_content) = std::fs::read_to_string(&prompt_path)
-        && let Some(stem) = plan_file_stem_from_text(&prompt_content)
-    {
-        return Some(stem);
-    }
-
-    prompt_path
+    let stem = prompt_path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .filter(|stem| !stem.trim().is_empty())
-        .filter(|stem| stem.to_ascii_lowercase() != "prompt")
-        .map(std::string::ToString::to_string)
-}
-
-fn plan_file_stem_from_text(text: &str) -> Option<String> {
-    text.split_whitespace()
-        .filter_map(plan_path_candidate)
-        .find_map(|path| {
-            Path::new(&path)
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|stem| !stem.trim().is_empty())
-                .map(std::string::ToString::to_string)
-        })
-}
-
-fn plan_path_candidate(token: &str) -> Option<String> {
-    let token = token.trim_matches(|c: char| {
-        c.is_ascii_punctuation() && c != '/' && c != '.' && c != '-' && c != '_' && c != ':'
-    });
-    let candidate = token
-        .find("plan:")
-        .map(|idx| &token[idx + "plan:".len()..])
-        .unwrap_or(token)
-        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == ')' || c == ']');
-
-    let lower = candidate.to_ascii_lowercase();
-    if (lower.ends_with(".md") || lower.ends_with(".html")) && candidate.contains('/') {
-        Some(candidate.to_string())
-    } else {
-        None
-    }
+        .filter(|stem| stem.to_ascii_lowercase() != "prompt")?;
+    Some(stem.to_string())
 }
 
 pub async fn run_command(
@@ -627,6 +636,11 @@ pub async fn run_command(
     } else if let Some(path) = args.prompt_file {
         config.event_loop.prompt_file = path.to_string_lossy().to_string();
         config.event_loop.prompt = None; // Clear inline
+    } else if let Some(plan_path) = &args.plan {
+        // --plan serves as the prompt source when no explicit prompt
+        // argument is given, while also driving the worktree prefix.
+        config.event_loop.prompt_file = plan_path.to_string_lossy().to_string();
+        config.event_loop.prompt = None;
     }
     if let Some(max_iter) = args.max_iterations {
         config.event_loop.max_iterations = max_iter;
@@ -785,7 +799,7 @@ pub async fn run_command(
     let worktree_file_name_prefix = worktree_file_name_prefix(
         &config.event_loop.prompt_file,
         &prompt_summary,
-        workspace_root,
+        args.plan.as_deref(),
     );
 
     let mut pending_worktree_registration: Option<LoopEntry> = None;
@@ -818,10 +832,14 @@ pub async fn run_command(
         // "create new worktree" path so the user is not blocked.
         if args.reuse_worktree {
             debug!("Reusing worktree for explicit --worktree --reuse-worktree mode");
-            let reuse_result = find_reusable_worktree(
-                workspace_root,
-                worktree_file_name_prefix.as_deref().unwrap_or(""),
-            );
+            let reuse_result = if let Some(name) = &args.worktree_name {
+                find_reusable_worktree_by_name(workspace_root, name)
+            } else {
+                find_reusable_worktree(
+                    workspace_root,
+                    worktree_file_name_prefix.as_deref().unwrap_or(""),
+                )
+            };
             match reuse_result {
                 Ok(Some(reusable)) => {
                     info!(
@@ -871,6 +889,16 @@ pub async fn run_command(
                     (reused_ctx, None)
                 }
                 Ok(None) => {
+                    // The deprecated "scan prompt text for plan path"
+                    // fallback has been removed. Reuse now requires an
+                    // explicit --plan or --worktree-name so the match is
+                    // deterministic.
+                    if args.worktree_name.is_none() && worktree_file_name_prefix.is_none() {
+                        anyhow::bail!(
+                            "--reuse-worktree requires an explicit --plan or --worktree-name. \
+                             Prompt-text plan detection has been removed because it was fragile."
+                        );
+                    }
                     info!(
                         "No reusable worktree found for prefix '{}', creating new worktree",
                         worktree_file_name_prefix.as_deref().unwrap_or("")
@@ -879,6 +907,7 @@ pub async fn run_command(
                         workspace_root,
                         &prompt_summary,
                         worktree_file_name_prefix.as_deref(),
+                        args.worktree_name.as_deref(),
                         &config.features.loop_naming,
                         &mut pending_worktree_registration,
                     )?;
@@ -898,6 +927,7 @@ pub async fn run_command(
                 workspace_root,
                 &prompt_summary,
                 worktree_file_name_prefix.as_deref(),
+                args.worktree_name.as_deref(),
                 &config.features.loop_naming,
                 &mut pending_worktree_registration,
             )?;
@@ -1359,6 +1389,16 @@ fn forward_prompt_args(args: &SubprocessTuiArgs, parent_cwd: &Path) -> Vec<Strin
         } else {
             out.push(prompt_file.to_string_lossy().to_string());
         }
+    } else if let Some(ref plan) = args.plan {
+        // --plan doubles as the prompt source when -p/-P are absent.
+        // Anchor relative paths to the parent cwd in worktree mode so
+        // the child can find the plan file from its own cwd.
+        out.push("--plan".to_string());
+        if args.worktree_path.is_some() && !plan.is_absolute() {
+            out.push(parent_cwd.join(plan).to_string_lossy().into_owned());
+        } else {
+            out.push(plan.to_string_lossy().to_string());
+        }
     } else if args.worktree_path.is_some() {
         // U2 (2026-06-14-002): Default PROMPT.md has been synced to worktree root.
         // Forward a relative path so the child reads from its own cwd (worktree).
@@ -1378,11 +1418,13 @@ mod forward_prompt_args_tests {
     fn make_args(
         prompt_text: Option<&str>,
         prompt_file: Option<&Path>,
+        plan: Option<&Path>,
         worktree_path: Option<&Path>,
     ) -> SubprocessTuiArgs {
         SubprocessTuiArgs {
             prompt_text: prompt_text.map(str::to_string),
             prompt_file: prompt_file.map(PathBuf::from),
+            plan: plan.map(PathBuf::from),
             backend: None,
             max_iterations: None,
             completion_promise: None,
@@ -1414,7 +1456,7 @@ mod forward_prompt_args_tests {
         let tmp = tempfile::tempdir().unwrap();
         // No PROMPT.md needed in parent cwd — sync happens in spawn_worktree_loop
         let wt = PathBuf::from("/tmp/fake-worktree");
-        let args = make_args(None, None, Some(&wt));
+        let args = make_args(None, None, None, Some(&wt));
 
         let out = forward_prompt_args(&args, tmp.path());
         assert_eq!(
@@ -1433,7 +1475,7 @@ mod forward_prompt_args_tests {
         let tmp = tempfile::tempdir().unwrap();
         // No PROMPT.md in parent cwd — simulating sync failure
         let wt = PathBuf::from("/tmp/fake-worktree");
-        let args = make_args(None, None, Some(&wt));
+        let args = make_args(None, None, None, Some(&wt));
 
         let out = forward_prompt_args(&args, tmp.path());
         assert_eq!(
@@ -1453,7 +1495,7 @@ mod forward_prompt_args_tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("PROMPT.md"), "x").unwrap();
 
-        let args = make_args(None, None, None);
+        let args = make_args(None, None, None, None);
         let out = forward_prompt_args(&args, tmp.path());
         assert!(
             out.is_empty(),
@@ -1470,7 +1512,7 @@ mod forward_prompt_args_tests {
         fs::write(tmp.path().join("PROMPT.md"), "ignored").unwrap();
         let wt = PathBuf::from("/tmp/fake-worktree");
 
-        let args = make_args(Some("inline wins"), None, Some(&wt));
+        let args = make_args(Some("inline wins"), None, None, Some(&wt));
         let out = forward_prompt_args(&args, tmp.path());
         assert_eq!(out, vec!["-p".to_string(), "inline wins".to_string()]);
     }
@@ -1486,7 +1528,7 @@ mod forward_prompt_args_tests {
         fs::write(&prompt_path, "custom prompt").unwrap();
         let wt = PathBuf::from("/tmp/fake-worktree");
 
-        let args = make_args(None, Some(Path::new("CUSTOM.md")), Some(&wt));
+        let args = make_args(None, Some(Path::new("CUSTOM.md")), None, Some(&wt));
         let out = forward_prompt_args(&args, tmp.path());
         assert_eq!(
             out,
@@ -1503,7 +1545,7 @@ mod forward_prompt_args_tests {
         fs::write(&abs_prompt, "abs").unwrap();
         let wt = PathBuf::from("/tmp/fake-worktree");
 
-        let args = make_args(None, Some(&abs_prompt), Some(&wt));
+        let args = make_args(None, Some(&abs_prompt), None, Some(&wt));
         let out = forward_prompt_args(&args, tmp.path());
         assert_eq!(
             out,
@@ -1517,9 +1559,42 @@ mod forward_prompt_args_tests {
     /// break user's relative -P expectations outside worktree mode.
     #[test]
     fn primary_relative_prompt_file_forwarded_verbatim() {
-        let args = make_args(None, Some(Path::new("REL.md")), None);
+        let args = make_args(None, Some(Path::new("REL.md")), None, None);
         let out = forward_prompt_args(&args, Path::new("/anywhere"));
         assert_eq!(out, vec!["-P".to_string(), "REL.md".to_string()]);
+    }
+
+    /// `--plan` is forwarded when neither -p nor -P is set. In worktree
+    /// mode relative paths are anchored at the parent cwd so the child
+    /// can find the plan file from its own cwd.
+    #[test]
+    fn plan_forwarded_as_prompt_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan_path = tmp.path().join("plans").join("my-plan.md");
+        fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        fs::write(&plan_path, "plan content").unwrap();
+        let wt = PathBuf::from("/tmp/fake-worktree");
+
+        let args = make_args(None, None, Some(&plan_path), Some(&wt));
+        let out = forward_prompt_args(&args, tmp.path());
+        assert_eq!(
+            out,
+            vec!["--plan".to_string(), plan_path.to_string_lossy().into_owned()]
+        );
+    }
+
+    /// `-p` takes precedence over `--plan`.
+    #[test]
+    fn inline_prompt_takes_precedence_over_plan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan_path = tmp.path().join("plans").join("my-plan.md");
+        fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        fs::write(&plan_path, "plan content").unwrap();
+        let wt = PathBuf::from("/tmp/fake-worktree");
+
+        let args = make_args(Some("inline wins"), None, Some(&plan_path), Some(&wt));
+        let out = forward_prompt_args(&args, tmp.path());
+        assert_eq!(out, vec!["-p".to_string(), "inline wins".to_string()]);
     }
 
     // ── U4: sync_prompt_to_worktree regression tests ───────────────────────
@@ -1633,6 +1708,7 @@ mod run_loop_result_exit_code_tests {
 struct SubprocessTuiArgs {
     pub prompt_text: Option<String>,
     pub prompt_file: Option<PathBuf>,
+    pub plan: Option<PathBuf>,
     pub backend: Option<String>,
     pub max_iterations: Option<u32>,
     pub completion_promise: Option<String>,
@@ -1675,6 +1751,7 @@ impl SubprocessTuiArgs {
         Self {
             prompt_text: args.prompt_text.clone(),
             prompt_file: args.prompt_file.clone(),
+            plan: args.plan.clone(),
             backend: args.backend.clone(),
             max_iterations: args.max_iterations,
             completion_promise: args.completion_promise.clone(),
@@ -2382,6 +2459,8 @@ pub(crate) fn default_run_args() -> RunArgs {
         worktree: false,
         worktree_path: None,
         reuse_worktree: false,
+        plan: None,
+        worktree_name: None,
         skip_preflight: true,
         no_sync_agent_docs: false,
         verbose: false,
@@ -2426,16 +2505,10 @@ mod tests {
 
     #[test]
     fn test_worktree_file_name_prefix_uses_prompt_file_stem() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let prompt_path = temp_dir
-            .path()
-            .join("custom-drift-auto-calibration-prompt.md");
-        std::fs::write(&prompt_path, "Implement something").unwrap();
-
         let source = worktree_file_name_prefix(
-            prompt_path.to_str().unwrap(),
+            "custom-drift-auto-calibration-prompt.md",
             "Implement something",
-            temp_dir.path(),
+            None,
         );
 
         assert_eq!(
@@ -2446,55 +2519,53 @@ mod tests {
 
     #[test]
     fn test_worktree_file_name_prefix_returns_none_without_prompt_file() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let source = worktree_file_name_prefix("", "Implement something", temp_dir.path());
+        let source = worktree_file_name_prefix("", "Implement something", None);
 
         assert_eq!(source, None);
     }
 
     #[test]
-    fn test_worktree_file_name_prefix_uses_inline_plan_path() {
+    fn test_worktree_file_name_prefix_ignores_default_prompt_file() {
+        // Default PROMPT.md must not influence worktree naming; otherwise
+        // every run with the default prompt would collide or require
+        // fragile text parsing.
+        let source = worktree_file_name_prefix("PROMPT.md", "[no prompt]", None);
+
+        assert_eq!(source, None);
+    }
+
+    #[test]
+    fn test_worktree_file_name_prefix_uses_explicit_plan_file() {
         let temp_dir = tempfile::tempdir().unwrap();
+        let plan_path = temp_dir
+            .path()
+            .join("docs")
+            .join("plans")
+            .join("2026-06-25-002-feat-profiles-for-preset-role-tuning-plan.md");
+        std::fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        std::fs::write(&plan_path, "Implement something").unwrap();
+
+        let source = worktree_file_name_prefix("PROMPT.md", "[no prompt]", Some(&plan_path));
+
+        assert_eq!(
+            source.as_deref(),
+            Some("2026-06-25-002-feat-profiles-for-preset-role-tuning-plan")
+        );
+    }
+
+    #[test]
+    fn test_worktree_file_name_prefix_plan_file_takes_precedence_over_prompt_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plan_path = temp_dir.path().join("explicit-plan.md");
+        std::fs::write(&plan_path, "Implement something").unwrap();
+
         let source = worktree_file_name_prefix(
-            "PROMPT.md",
-            "Implement dev plan:docs/plans/2026-06-04-004-feat-drift-auto-calibration-plan.md",
-            temp_dir.path(),
+            "custom-prompt.md",
+            "[no prompt]",
+            Some(&plan_path),
         );
 
-        assert_eq!(
-            source.as_deref(),
-            Some("2026-06-04-004-feat-drift-auto-calibration-plan")
-        );
-    }
-
-    #[test]
-    fn test_worktree_file_name_prefix_ignores_task_md_and_uses_prompt_file_content() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            temp_dir.path().join("task.md"),
-            "Implement dev plan:docs/plans/2026-06-04-004-feat-from-task-md-plan.md",
-        )
-        .unwrap();
-        std::fs::write(
-            temp_dir.path().join("PROMPT.md"),
-            "Implement dev plan:docs/plans/2026-06-04-004-feat-from-prompt-md-plan.md",
-        )
-        .unwrap();
-
-        let source = worktree_file_name_prefix("PROMPT.md", "[no prompt]", temp_dir.path());
-
-        assert_eq!(
-            source.as_deref(),
-            Some("2026-06-04-004-feat-from-prompt-md-plan")
-        );
-    }
-
-    #[test]
-    fn test_worktree_file_name_prefix_ignores_missing_default_prompt_file() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let source = worktree_file_name_prefix("PROMPT.md", "[no prompt]", temp_dir.path());
-
-        assert_eq!(source, None);
+        assert_eq!(source.as_deref(), Some("explicit-plan"));
     }
 
     #[tokio::test]

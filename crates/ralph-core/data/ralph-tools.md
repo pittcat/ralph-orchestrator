@@ -17,7 +17,11 @@ metadata:
 2. **emit 后必须校验** — 确认事件已写入事件文件
 3. **task/memory 操作后必须确认状态** — 用 `--format json` + `jq` 验证
 4. **失败时先查 `--help`** — 不要猜测参数，文档可能已更新
-5. **Worktree 复用规则（先检查 + 模糊匹配,严禁盲目创建）**:调用 `--worktree` / `EnterWorktree` / `git worktree add` 前**必须先跑 `git worktree list`**(不能跳过、不能凭印象判断),对结果做**模糊匹配**——只要 worktree 路径或分支名中包含本 plan 的 basename(如 `2026-06-25-002-feat-profiles-for-preset-role-tuning-plan`)就算匹配。命名约定:`<plan-basename>-<adjective-noun>`,模糊匹配允许后缀随机词不同。**有匹配则直接 `cd` 进去复用,严禁创建**;只有确认无匹配时,才按命名约定创建。详细反模式见 `ralph tools skill load ralph-tools-cmdref` 的 `--worktree` 段。
+5. **Worktree 复用规则（显式参数,严禁盲目创建）**:使用 `--worktree --reuse-worktree` 时必须同时给出 `--plan <plan.md>` 或 `--worktree-name <name>`。Ralph 会按 plan 的 basename 或精确名称查找 `.ralph/loops.json` 与 `git worktree list` 中已完成的 worktree 并自动复用;**严禁**不看参数就 `EnterWorktree` / `git worktree add` 创建新 worktree。旧版"从 prompt 文本自动猜测 plan 路径"的行为已废弃。推荐示例:
+   ```bash
+   ralph -H builtin:ce-executor-serial run --worktree --reuse-worktree \
+     --plan docs/plans/2026-06-25-002-feat-profiles-for-preset-role-tuning-plan.md
+   ```
 
 ## 收到 `task.resume` 时（policy / origin / contract 拒收后自动注入）
 
@@ -58,7 +62,7 @@ metadata:
 
 > **按需加载需要 hat 上下文**：`ralph tools skill load` 在 agent 上下文中要求 `RALPH_CURRENT_HAT` 已设置（`crates/ralph-cli/src/skill_cli.rs:78-87`），否则会以非零退出。如加载失败，先检查 `echo $RALPH_CURRENT_HAT` 是否非空。
 
-> 🔴 **Worktree 复用索引**:调用 `ralph run --worktree` / `EnterWorktree` / `git worktree add` 前**必须先 `git worktree list` 做模糊匹配**(详见本 skill 核心规则 #5)。完整反模式 + 命名约定见 `ralph tools skill load ralph-tools-cmdref` 的 `--worktree` 参数段。
+> 🔴 **Worktree 复用索引**:复用已有 worktree 时，通过 `ralph run --worktree --reuse-worktree --plan <plan.md>` 或 `--worktree-name <name>` 让 Ralph 自动匹配；不再要求手工 `git worktree list` 模糊匹配(详见本 skill 核心规则 #5)。完整参数与反模式见 `ralph tools skill load ralph-tools-cmdref` 的 `--worktree` 参数段。
 
 ## 事件文件解析优先级（`ralph emit` 完整规则）
 

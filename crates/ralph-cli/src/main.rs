@@ -501,6 +501,8 @@ async fn main() -> Result<()> {
                 worktree: false,
                 worktree_path: None,
                 reuse_worktree: false,
+                plan: None,
+                worktree_name: None,
                 skip_preflight: false,
                 no_sync_agent_docs: false,
                 verbose: false,

@@ -1,8 +1,9 @@
 ---
 title: ralph run --worktree 支持复用已有 worktree
 type: feat
-status: active
+status: completed
 date: 2026-06-14
+completed: 2026-06-26
 origin: docs/brainstorms/2026-06-14-worktree-reuse-requirements.md
 ---
 
@@ -75,6 +76,13 @@ origin: docs/brainstorms/2026-06-14-worktree-reuse-requirements.md
 - **清理失败即退出：** 避免在脏状态下启动 loop。
 - **子进程不复用/不重复清理：** 父进程完成复用与清理后，子进程通过 `--worktree-path` 进入；子进程分支仅验证路径存在并构造 `LoopContext::worktree()`，与现有行为一致。
 
+## Implementation Notes
+
+- 新增 `--plan <plan.md>` 参数，使用 plan 文件 basename（去掉 `.md`/`.html`）作为 worktree name prefix，替代了从 prompt 文本中猜测 plan 路径的脆弱逻辑。
+- 新增 `--worktree-name <name>` 参数，允许按精确名称复用或创建 worktree；与 `--reuse-worktree` 配合时走精确匹配，不再做模糊 basename 匹配。
+- `--reuse-worktree` 在未找到匹配时，如果既没有 `--plan` 也没有 `--worktree-name`，会直接报错而非回退新建，避免不确定行为。
+- `AGENTS.md` / `CLAUDE.md` 的 HARD RULE 3 已同步更新：要求显式 `--plan` 或 `--worktree-name`，禁止 prompt 文本猜测。
+
 ---
 
 ## Open Questions
@@ -93,7 +101,7 @@ origin: docs/brainstorms/2026-06-14-worktree-reuse-requirements.md
 
 ## Implementation Units
 
-- [ ] U1. **core: 复用 worktree 查找与匹配**
+- [x] U1. **core: 复用 worktree 查找与匹配**
 
 **Goal:** 提供根据 loop name prefix 查找可复用 worktree 的能力。
 
@@ -132,7 +140,7 @@ origin: docs/brainstorms/2026-06-14-worktree-reuse-requirements.md
 
 ---
 
-- [ ] U2. **core: worktree 运行时产物清理**
+- [x] U2. **core: worktree 运行时产物清理**
 
 **Goal:** 在复用 worktree 后清理所有 Ralph 运行时产物，保留共享 symlink 与上下文文件。
 
@@ -183,7 +191,7 @@ origin: docs/brainstorms/2026-06-14-worktree-reuse-requirements.md
 
 ---
 
-- [ ] U3. **cli: `--reuse-worktree` flag 与复用路径接入**
+- [x] U3. **cli: `--reuse-worktree` flag 与复用路径接入**
 
 **Goal:** 在 CLI 参数和 `run_command` 流程中接入复用逻辑。
 
@@ -235,7 +243,7 @@ origin: docs/brainstorms/2026-06-14-worktree-reuse-requirements.md
 
 ---
 
-- [ ] U4. **cli: 帮助文本与使用文档更新**
+- [x] U4. **cli: 帮助文本与使用文档更新**
 
 **Goal:** 让用户知道 `--reuse-worktree` 的存在与行为边界。
 
