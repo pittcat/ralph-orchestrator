@@ -366,6 +366,18 @@ hats:
     publishes: ["work.ready", "review.start", "plan.complete", "plan.blocked"]
     default_publishes: "plan.blocked"
     terminal_events: ["work.ready", "review.start", "plan.complete", "plan.blocked"]
+    # 2026-06-26: restrict coordinator prompt visibility to its own triggers.
+    # Prevents isolated-mode coordinator from seeing review-chain events
+    # (e.g. review.dimension.*) that it must never emit.
+    event_filter:
+      enabled: true
+      events:
+        - work.start
+        - task.resume
+        - test.passed
+        - test.failed
+        - review.complete
+        - work.failed
     instructions: |
       ## EXECUTION MODE — Plan Parsing, Unit Advancement, and Review Triggering
 
@@ -632,7 +644,7 @@ hats:
 
       ### Plan Frontmatter Status Discipline (HARD RULE)
       - After every unit closure (i.e. when a `test.passed` lands and the corresponding runtime task is `closed`), the **next** coordinator activation MUST update the plan's YAML frontmatter `status` field before publishing the next `work.ready`.
-      - Allowed `status` enum values (kept in sync with `crates/ralph-cli/src/doctor.rs` `ALLOWED_PLAN_STATUSES`):
+      - Allowed `status` enum values are enforced by `ralph doctor plan-sync`; the doctor command is the source of truth (treat its error output / `ALLOWED_PLAN_STATUSES` listing as the canonical set):
         - `draft` — plan written but no U dispatched
         - `active` — at least one U in flight, no U stalled
         - `stalled-after-u0` … `stalled-after-u8` — most recent closed U is the one named
@@ -651,6 +663,11 @@ hats:
     triggers: ["work.ready", "fix.exhausted"]
     publishes: ["work.done", "work.failed"]
     terminal_events: ["work.done", "work.failed"]
+    event_filter:
+      enabled: true
+      events:
+        - work.ready
+        - fix.exhausted
     instructions: |
       ## EXECUTOR MODE — TDD Plan-Driven Task Execution
 
@@ -892,6 +909,11 @@ hats:
     triggers: ["work.done", "fix.applied"]
     publishes: ["test.passed", "test.failed"]
     terminal_events: ["test.passed", "test.failed"]
+    event_filter:
+      enabled: true
+      events:
+        - work.done
+        - fix.applied
     instructions: |
       ## VALIDATOR MODE — Full Test Suite Execution
 
@@ -967,6 +989,12 @@ hats:
     triggers: ["review.start", "review.dimension.done", "review.dimension.failed"]
     publishes: ["review.dimension.ready", "review.dimensions.complete"]
     terminal_events: ["review.dimension.ready", "review.dimensions.complete"]
+    event_filter:
+      enabled: true
+      events:
+        - review.start
+        - review.dimension.done
+        - review.dimension.failed
     obligations:
       - on_trigger: "review.start"
         must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
@@ -1242,6 +1270,10 @@ hats:
     triggers: ["review.dimension.ready"]
     publishes: ["review.dimension.done", "review.dimension.failed"]
     terminal_events: ["review.dimension.done", "review.dimension.failed"]
+    event_filter:
+      enabled: true
+      events:
+        - review.dimension.ready
     # 2026-06-17-004 U2 (R2): lock the reviewer to a read-only source-code role;
     # allow Bash for echo/grep/cat read-only probing, but forbid
     # cargo/ralph emit etc. — verification is the executor/shipper's
@@ -1499,6 +1531,10 @@ hats:
     # scratchpad; the coordinator reads it and creates fix-unit tasks.
     publishes: ["review.complete"]
     terminal_events: ["review.complete"]
+    event_filter:
+      enabled: true
+      events:
+        - review.dimensions.complete
     instructions: |
       ## REVIEW SYNTHESIZER MODE — Merge, Deduplicate, Calibrate, Validate, and Route
 
@@ -1742,6 +1778,10 @@ hats:
     triggers: ["test.failed"]
     publishes: ["fix.applied", "fix.exhausted"]
     terminal_events: ["fix.applied", "fix.exhausted"]
+    event_filter:
+      enabled: true
+      events:
+        - test.failed
     instructions: |
       ## FIXER MODE — Diagnose and Fix Test Failures
 
@@ -1837,6 +1877,11 @@ hats:
     publishes: ["REVIEW_COMPLETE"]
     default_publishes: "REVIEW_COMPLETE"
     terminal_events: ["REVIEW_COMPLETE"]
+    event_filter:
+      enabled: true
+      events:
+        - plan.complete
+        - plan.blocked
     instructions: |
       ## SHIPPER MODE — Final Validation, Plan Completion, and Delivery
 
@@ -1949,6 +1994,10 @@ hats:
     publishes: ["report.done", "LOOP_COMPLETE"]
     default_publishes: "report.done"
     terminal_events: ["report.done", "LOOP_COMPLETE"]
+    event_filter:
+      enabled: true
+      events:
+        - REVIEW_COMPLETE
     obligations:
       - on_trigger: "REVIEW_COMPLETE"
         must_emit_any_of: ["report.done"]
@@ -2136,6 +2185,10 @@ hats:
       - "review.dimensions.complete"
       - "task.resume"
       - "plan.blocked"
+    event_filter:
+      enabled: true
+      events:
+        - loop.stalled
     instructions: |
       ## PROGRESS STEWARD MODE — Read state, decide, emit ONE recovery event
 
