@@ -564,6 +564,8 @@ mod tests {
             state_projection: None,
             // 2026-06-17-004 U2 (R3): per-hat activation clock.
             hat_activation_at: std::collections::HashMap::new(),
+            // 2026-06-26 plan U3: empty obligation queue at cold start.
+            hat_obligations: std::collections::VecDeque::new(),
             // 2026-06-17-004 U3 (R4+R5): obligation-trigger
             // snapshot for the missing-event gate. Empty by default.
             pending_obligation_triggers: Vec::new(),

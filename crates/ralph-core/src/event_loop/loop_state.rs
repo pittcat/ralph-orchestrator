@@ -145,6 +145,29 @@ pub struct RejectionDigestEntry {
     pub last_topic: String,
 }
 
+/// 2026-06-26 plan U3: per-hat trigger-emit obligation, the unit of
+/// the obligation-based MissingEventGate (U4).
+///
+/// An obligation is created the moment a hat is selected to execute
+/// in response to a trigger topic, and is discharged when the hat
+/// emits one of its `expected_topics` (typically its `publishes` set
+/// or whatever the preset declared as terminal business events for
+/// the hat). `task.resume` does **not** create a new obligation —
+/// it re-dispatches the existing one and increments
+/// `redispatch_count`, so a stuck hat that just got resumed cannot
+/// hide behind a refreshed clock.
+///
+/// `created_at` is `Instant` so grace-window checks do not depend
+/// on wall-clock / system time changes.
+#[derive(Debug, Clone)]
+pub struct HatObligation {
+    pub hat_id: HatId,
+    pub trigger_topic: String,
+    pub expected_topics: Vec<String>,
+    pub created_at: Instant,
+    pub redispatch_count: u32,
+}
+
 /// Current state of the event loop.
 #[derive(Debug)]
 pub struct LoopState {
@@ -484,6 +507,23 @@ pub struct LoopState {
     /// (returns `false`) regardless of the obligation/legacy path.
     pub hat_activation_at: HashMap<HatId, Instant>,
 
+    /// 2026-06-26 plan U3: outstanding trigger-emit obligations,
+    /// one per active hat. The MissingEventGate (U4) consults this
+    /// queue to decide when a hat has overstayed its grace window
+    /// without producing the business events it was triggered to
+    /// produce. `task.resume` does **not** push a new obligation —
+    /// it re-dispatches the existing one (see
+    /// [`LoopState::redispatch_hat_obligation`]). The clock
+    /// (`created_at`) is the trigger timestamp; the resume does not
+    /// refresh it, so a stuck hat cannot hide behind "just got
+    /// resumed" forever.
+    ///
+    /// `VecDeque` so we can pop from the front (FIFO) when a hat's
+    /// obligation is discharged; bounded in practice because each
+    /// hat has at most one outstanding obligation at a time (push
+    /// replaces any prior open obligation for the same `hat_id`).
+    pub hat_obligations: VecDeque<HatObligation>,
+
     /// 2026-06-17-004 U3 (R4+R5): snapshot of the trigger events
     /// that activated the most recent hat.  Populated when the
     /// gate is about to inject a `task.resume` for a hat that
@@ -693,6 +733,12 @@ impl Default for LoopState {
             // missing-event gate grace window. Empty by default;
             // the loop populates entries as hats are activated.
             hat_activation_at: HashMap::new(),
+            // 2026-06-26 plan U3: cold start with no outstanding
+            // obligations. The event loop pushes entries when a
+            // hat is triggered; the obligation is discharged when
+            // the hat emits one of its `expected_topics` (see
+            // `push_hat_obligation` / `discharge_hat_obligation`).
+            hat_obligations: VecDeque::new(),
             // 2026-06-17-004 U3 (R4+R5): empty obligation-trigger
             // snapshot. Populated by the missing-event hard gate
             // before injecting the resume JSON; drained by the
@@ -1141,6 +1187,83 @@ impl LoopState {
     pub fn record_hat_activation(&mut self, hat_id: &HatId) {
         self.hat_activation_at
             .insert(hat_id.clone(), Instant::now());
+    }
+
+    /// 2026-06-26 plan U3: push a fresh hat obligation. If the same
+    /// hat already has an outstanding obligation it is **replaced**
+    /// — a hat can only owe one obligation at a time, and a
+    /// subsequent trigger supersedes the old one. The clock is set
+    /// to `now` so the grace window starts at the trigger, not at
+    /// the most recent resume.
+    pub fn push_hat_obligation(
+        &mut self,
+        hat_id: HatId,
+        trigger_topic: String,
+        expected_topics: Vec<String>,
+    ) {
+        self.hat_obligations
+            .retain(|o| o.hat_id != hat_id);
+        self.hat_obligations.push_back(HatObligation {
+            hat_id,
+            trigger_topic,
+            expected_topics,
+            created_at: Instant::now(),
+            redispatch_count: 0,
+        });
+    }
+
+    /// 2026-06-26 plan U3: discharge the obligation for `hat_id` if
+    /// `emitted_topic` is one of the expected topics. Returns
+    /// `true` when the obligation was found and removed, `false`
+    /// when no matching obligation exists (caller can use that as
+    /// "the emit was a side-effect, not the expected business
+    /// event"). Non-expected emits leave the obligation open.
+    pub fn discharge_hat_obligation(
+        &mut self,
+        hat_id: &HatId,
+        emitted_topic: &str,
+    ) -> bool {
+        let Some(pos) = self.hat_obligations.iter().position(|o| {
+            o.hat_id == *hat_id && o.expected_topics.iter().any(|t| t == emitted_topic)
+        }) else {
+            return false;
+        };
+        self.hat_obligations.remove(pos);
+        true
+    }
+
+    /// 2026-06-26 plan U3: a `task.resume` is NOT a new obligation.
+    /// It re-arms the existing one (increment `redispatch_count`)
+    /// so the loop and the operator can see "the hat was already
+    /// stuck and was resumed; the clock did not get reset". If no
+    /// open obligation exists, the call is a no-op (the runner
+    /// should normally have created the obligation when the hat
+    /// was first triggered).
+    pub fn redispatch_hat_obligation(&mut self, hat_id: &HatId) {
+        if let Some(o) = self
+            .hat_obligations
+            .iter_mut()
+            .find(|o| o.hat_id == *hat_id)
+        {
+            o.redispatch_count = o.redispatch_count.saturating_add(1);
+        }
+    }
+
+    /// 2026-06-26 plan U3: is there an open obligation for `hat_id`
+    /// that has overstayed its grace window? Returns the obligation
+    /// reference (without modifying the queue) so the caller can
+    /// log the `trigger_topic` / `redispatch_count` on the
+    /// escalation. Returns `None` when the gate should NOT fire
+    /// (no obligation, or the obligation is still inside its grace
+    /// window).
+    pub fn overdue_obligation(
+        &self,
+        hat_id: &HatId,
+        grace_duration: Duration,
+    ) -> Option<&HatObligation> {
+        self.hat_obligations
+            .iter()
+            .find(|o| o.hat_id == *hat_id && o.created_at.elapsed() >= grace_duration)
     }
 
     /// 2026-06-17-004 U2 (R3): how long since the hat was last
@@ -2192,6 +2315,168 @@ mod tests {
         fn empty_window_does_not_stall() {
             let state = LoopState::default();
             assert!(!detect_rejection_stall(&state));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // HatObligation tests (2026-06-26 plan U3)
+    // -------------------------------------------------------------------------
+
+    mod obligation {
+        use super::LoopState;
+        use ralph_proto::HatId;
+        use std::time::Duration;
+
+        fn hat(name: &str) -> HatId {
+            HatId::new(name.to_string())
+        }
+
+        #[test]
+        fn push_then_discharge_clears_obligation() {
+            let mut state = LoopState::default();
+            state.push_hat_obligation(
+                hat("dimension-reviewer"),
+                "review.dimension.ready".to_string(),
+                vec!["review.dimension.done".to_string()],
+            );
+            assert_eq!(state.hat_obligations.len(), 1);
+
+            let discharged =
+                state.discharge_hat_obligation(&hat("dimension-reviewer"), "review.dimension.done");
+            assert!(discharged, "expected obligation to be discharged");
+            assert!(
+                state.hat_obligations.is_empty(),
+                "obligation should be removed after discharge"
+            );
+        }
+
+        #[test]
+        fn discharge_with_unexpected_topic_leaves_obligation_open() {
+            let mut state = LoopState::default();
+            state.push_hat_obligation(
+                hat("dimension-reviewer"),
+                "review.dimension.ready".to_string(),
+                vec!["review.dimension.done".to_string()],
+            );
+            // Side-effect emit (e.g. a progress event) is not the
+            // expected business event — the obligation must stay open.
+            let discharged = state.discharge_hat_obligation(
+                &hat("dimension-reviewer"),
+                "dimension-reviewer.heartbeat",
+            );
+            assert!(!discharged, "side-effect emit must not discharge");
+            assert_eq!(state.hat_obligations.len(), 1);
+        }
+
+        #[test]
+        fn redispatch_does_not_refresh_clock() {
+            let mut state = LoopState::default();
+            state.push_hat_obligation(
+                hat("dimension-reviewer"),
+                "review.dimension.ready".to_string(),
+                vec!["review.dimension.done".to_string()],
+            );
+            let original_created_at = state.hat_obligations[0].created_at;
+
+            state.redispatch_hat_obligation(&hat("dimension-reviewer"));
+            state.redispatch_hat_obligation(&hat("dimension-reviewer"));
+
+            let o = &state.hat_obligations[0];
+            assert_eq!(o.redispatch_count, 2, "redispatch must increment");
+            assert_eq!(
+                o.created_at, original_created_at,
+                "redispatch must NOT refresh created_at"
+            );
+        }
+
+        #[test]
+        fn overdue_returns_none_within_grace_window() {
+            let mut state = LoopState::default();
+            state.push_hat_obligation(
+                hat("dimension-reviewer"),
+                "review.dimension.ready".to_string(),
+                vec!["review.dimension.done".to_string()],
+            );
+            // A 10s grace window — the obligation was just created
+            // so it must NOT be considered overdue.
+            assert!(state
+                .overdue_obligation(&hat("dimension-reviewer"), Duration::from_secs(10))
+                .is_none());
+        }
+
+        #[test]
+        fn overdue_returns_some_after_grace_window() {
+            // Build a state with an obligation that was created
+            // `grace + 1ms` ago so we can assert the gate fires
+            // without sleeping. We push a zero-grace and then
+            // sleep just long enough to cross it.
+            let mut state = LoopState::default();
+            state.push_hat_obligation(
+                hat("dimension-reviewer"),
+                "review.dimension.ready".to_string(),
+                vec!["review.dimension.done".to_string()],
+            );
+            // 1ms grace window — `created_at.elapsed() >= 1ms`
+            // is almost always true on a modern clock after a
+            // few instructions, so this test does not need
+            // real-time sleep.
+            std::thread::sleep(Duration::from_millis(2));
+            let overdue = state
+                .overdue_obligation(&hat("dimension-reviewer"), Duration::from_millis(1));
+            assert!(
+                overdue.is_some(),
+                "obligation past grace must be considered overdue"
+            );
+        }
+
+        #[test]
+        fn obligations_for_different_hats_are_independent() {
+            let mut state = LoopState::default();
+            state.push_hat_obligation(
+                hat("a"),
+                "trig.a".to_string(),
+                vec!["a.done".to_string()],
+            );
+            state.push_hat_obligation(
+                hat("b"),
+                "trig.b".to_string(),
+                vec!["b.done".to_string()],
+            );
+            assert_eq!(state.hat_obligations.len(), 2);
+
+            // Discharging hat `a` must not affect hat `b`.
+            let discharged = state.discharge_hat_obligation(&hat("a"), "a.done");
+            assert!(discharged);
+            assert_eq!(state.hat_obligations.len(), 1);
+            assert_eq!(state.hat_obligations[0].hat_id, hat("b"));
+        }
+
+        #[test]
+        fn push_for_same_hat_replaces_existing_obligation() {
+            let mut state = LoopState::default();
+            state.push_hat_obligation(
+                hat("a"),
+                "trig.1".to_string(),
+                vec!["a.done".to_string()],
+            );
+            // A second trigger for the same hat must replace the
+            // open obligation rather than accumulate two — a hat
+            // can only owe one obligation at a time.
+            state.push_hat_obligation(
+                hat("a"),
+                "trig.2".to_string(),
+                vec!["a.done".to_string()],
+            );
+            assert_eq!(state.hat_obligations.len(), 1);
+            assert_eq!(state.hat_obligations[0].trigger_topic, "trig.2");
+        }
+
+        #[test]
+        fn redispatch_with_no_open_obligation_is_noop() {
+            let mut state = LoopState::default();
+            // No obligation pushed. redispatch must be silent.
+            state.redispatch_hat_obligation(&hat("a"));
+            assert!(state.hat_obligations.is_empty());
         }
     }
 }
