@@ -1187,9 +1187,12 @@ mod tests {
     /// U4: ce-executor-serial uses a lightweight 2-dimension review
     /// sequence (correctness → testing). The review-coordinator's
     /// instructions must not still reference the old 4-dim set
-    /// (maintainability / requirements).
+    /// U1: ce-executor-serial 终审已扩展为 5 维度 (correctness → testing →
+    /// maintainability → project-standards → adversarial). 此 guard 必须
+    /// 跟随 plan R1 同步更新,以断言新的 5 维度固定顺序契约(2026-06-25 plan
+    /// `2026-06-25-001-feat-ce-executor-serial-5dim-coordinator-amendments-plan`)。
     #[test]
-    fn test_ce_executor_serial_review_sequence_is_two_dimensions() {
+    fn test_ce_executor_serial_review_sequence_is_five_dimensions() {
         let preset =
             get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
         let config =
@@ -1200,23 +1203,27 @@ mod tests {
             .expect("ce-executor-serial must define a 'review-coordinator' hat");
         let instructions = coordinator.instructions.as_str();
 
-        // Sequence contract must list exactly the two dimensions in order.
-        assert!(
-            instructions.contains("1. `correctness`"),
-            "review-coordinator instructions must list correctness as the first dimension"
-        );
-        assert!(
-            instructions.contains("2. `testing`"),
-            "review-coordinator instructions must list testing as the second dimension"
-        );
-        assert!(
-            !instructions.contains("`maintainability`"),
-            "review-coordinator instructions must NOT reference the removed maintainability dimension"
-        );
-        assert!(
-            !instructions.contains("`requirements`"),
-            "review-coordinator instructions must NOT reference the removed requirements dimension"
-        );
+        // Sequence contract must list exactly the five dimensions in fixed order.
+        let ordered_markers = [
+            "1. `correctness`",
+            "2. `testing`",
+            "3. `maintainability`",
+            "4. `project-standards`",
+            "5. `adversarial`",
+        ];
+        let mut prev_idx = 0usize;
+        for marker in &ordered_markers {
+            let idx = instructions.find(marker).unwrap_or_else(|| {
+                panic!(
+                    "review-coordinator instructions must contain `{marker}` for the 5-dimension sequence contract"
+                )
+            });
+            assert!(
+                idx >= prev_idx,
+                "review-coordinator instructions must list dimensions in fixed order; `{marker}` appeared before its predecessor"
+            );
+            prev_idx = idx;
+        }
     }
 
     /// U4: ce-executor-serial must validate end-to-end (ambiguous routing

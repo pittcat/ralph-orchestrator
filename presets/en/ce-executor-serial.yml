@@ -13,7 +13,7 @@
 # - Executor: TDD implementation — write/update tests first, then implement, run unit tests
 # - Validator: Runs full test suite (auto-discovers test entry point), publishes test.passed / test.failed
 # - Fixer: Diagnoses and fixes test failures (merged debug-resolver: locate max 10 + fix max 10)
-# - review-coordinator: Walks fixed 2-dimension sequence (correctness → testing), one dimension per turn
+# - review-coordinator: Walks fixed 5-dimension sequence (correctness → testing → maintainability → project-standards → adversarial), one dimension per turn
 # - dimension-reviewer: Reviews a single dimension, emits review.dimension.done / review.dimension.failed
 # - review-synthesizer: Reads per-dimension findings, writes fix-plan file, emits review.complete with fix_plan_file
 # - Shipper: Final validation, plan status update, final commit
@@ -560,10 +560,75 @@ hats:
       ### Constraints
       - MUST NOT implement code
       - MUST NOT create future-step tasks (trivial mode excepted)
-      - MUST NOT modify the plan file
+      - MUST NOT modify the plan file (original plan is **read-only**; see Same-Plan Learning & Plan Amendment Protocol below for the only sanctioned mechanism — amendments go to `plan-amendments.md`, not the plan)
       - MUST complete all file creation and task creation before publishing `work.ready`
       - **MUST NOT publish events for any hat other than coordinator** (work.ready / review.start / plan.complete / plan.blocked only)
       - **MUST NOT create, switch, or rename branches** — see Branch / Worktree Policy above
+      - **MUST NOT call `ce-plan` skill or any other plan-regenerating skill** — Coordinator composes amendments locally from scratchpad artifacts; invoking a plan-regeneration skill would risk altering the original plan file (a HARD RULE violation) and would also exceed this preset's role boundary.
+
+      ### Same-Plan Learning & Plan Amendment Protocol (2026-06-25 plan 001 U7 — R6/R7/R8/R10/R11/R12)
+      The Coordinator may, on its own initiative, **split / merge / reorder** Implementation Units when doing so is justified by observed patterns within the same plan. Target, acceptance criteria, scope boundaries, and Requirements Trace are **inviolable** — amendments may only reshape how Units are sequenced or partitioned, never what the plan must achieve.
+
+      #### Inputs to read on every activation
+      Before deciding whether an amendment is warranted, read the following artifacts (all under the current plan's scratchpad unless noted):
+      - `.ralph/agent/memories.md` — cross-iteration memories accumulated by all hats on this plan.
+      - `.ralph/agent/decisions.md` — Coordinator + executor decisions recorded under the Confidence Protocol.
+      - `.agents/scratchpad/ce-executor/{plan_name}/fix-log.md` — what the fixer already tried (avoid replaying the same dead-end fix paths).
+      - `.agents/scratchpad/ce-executor/{plan_name}/findings.md` — review findings from the most recent review wave (when present).
+      - `.agents/scratchpad/ce-executor/{plan_name}/plan-amendments.md` — prior amendments (if any) so new ones compose with existing Change Mapping.
+      - Recent event payloads available in the prompt context (e.g. `## RECENT EVENTS` block, `.ralph/events.jsonl` tail) — focus on:
+        - `test.failed.payload.failures` / `test_errors` — recurring failure clusters.
+        - `review.dimension.done.payload.findings_count` / `findings_file` — repeated finding patterns per dimension.
+        - `review.complete.payload.verdict` / `fix_plan_file` — overall review outcome.
+
+      #### Pattern recognition heuristic
+      Consider an amendment when ANY of these signals appears at least twice in the inputs above for the same target file, unit, or failure mode:
+      - The same file is named in `test.failed` payloads across consecutive iterations.
+      - The same review-dimension finding (or near-duplicate) recurs in `findings.md` after a prior `fix.applied`.
+      - A unit's `**Verification:**` block keeps failing its stated criteria despite multiple fix attempts.
+      - The current unit's scope (Files / Approach) demonstrably exceeds the executor's typical one-iteration budget (heuristic: ≥ 5 files, or a `**Files:**` list spanning multiple crates).
+      - An Implementation Unit appears so small (e.g. a single renaming) that dispatching it as its own task would burn more iterations on overhead than on the change itself.
+
+      #### Confidence protocol
+      Score the amendment decision on the same 0–100 scale used elsewhere in this preset:
+      - **> 80 (autonomous amendment):** record `DEC-NNN` in `.ralph/agent/decisions.md` (Confidence column carries the score), then write the amendment per the schema below and dispatch the next unit normally.
+      - **50 – 80 (record and proceed):** record `DEC-NNN` with the chosen Option and Reasoning, but **do not** amend the unit sequence. Continue with the original plan ordering. The DEC entry itself is the artifact for future activations to revisit.
+      - **< 50 (stop and request user):** publish `work.failed` with `reason: "amendment confidence < 50: <summary>"` and stop. There is no acceptable safe default in this regime — pausing is the safe default.
+
+      #### Amendment file schema
+      All amendments go to `.agents/scratchpad/ce-executor/{plan_name}/plan-amendments.md` (do **not** create per-amendment files). Each amendment follows this structure:
+
+      ```markdown
+      ### AMEND-NNN — <short title>
+      - **Trigger**: <which input(s) above justified this amendment>
+      - **Confidence**: <0-100>
+      - **Effective From Step**: <step-NN or fix-NN>
+      - **Requirements (R-IDs)**: R<id>, ...
+      - **Change Mapping**:
+        - 原始 U<orig> → 新 U<new> (拆分 | 合并 | 重排 — pick exactly one per line)
+      - **Implementation Units** (one block per new U):
+        - ### U<new>. <title>
+          - **Goal**: ...
+          - **Files**: ...
+          - **Approach**: ...
+          - **Test scenarios**: ...
+          - **Verification**: ...
+      - **Verification (overall)**: ...
+      ```
+
+      After appending the amendment, also update the scratchpad `plan.md` (the derived mirror under `.agents/scratchpad/ce-executor/{plan_name}/`) to reflect the new step ordering. The **original** plan file at `docs/plans/...` is never touched.
+
+      #### Sub-unit keys (R4 carve-out)
+      When an amendment splits a Unit into sub-units, use keys that match the existing R4 carve-out so the runtime collapses them to the same base:
+      - `ce-executor:{plan_name}:step-{NN}:u{N}a-impl`
+      - `ce-executor:{plan_name}:step-{NN}:u{N}b-impl`
+      - `ce-executor:{plan_name}:step-{NN}:u{N}c-impl`
+      The `step` field stays as `step-{NN}`; only the key suffix distinguishes sub-units. Example: `ce-executor:my-plan:step-03:u3a-interface` and `...:u3b-implementation`.
+
+      #### Work contract
+      - **No new event topic.** Amendments are conveyed through the existing `work.ready` payload via an optional field `amendment_path` (path to `plan-amendments.md`, may be omitted when no amendment was made). Omitting the field is the normal path; the runtime does not require it.
+      - **MUST NOT** mutate the original plan file. The amendment file is the only sanctioned artifact for reshaping Units.
+      - **MUST** record every confidence-graded decision in `decisions.md` (≥ 50 band) before publishing the next `work.ready`.
 
       ### Plan Frontmatter Status Discipline (HARD RULE)
       - After every unit closure (i.e. when a `test.passed` lands and the corresponding runtime task is `closed`), the **next** coordinator activation MUST update the plan's YAML frontmatter `status` field before publishing the next `work.ready`.
@@ -895,7 +960,7 @@ hats:
 
   review-coordinator:
     name: "🔍 Review Coordinator (Serial)"
-    description: "Overall review sequence state machine. On review.start, walks the 2-dimension sequence (correctness → testing); advances one dimension per turn; emits review.dimensions.complete when all dimensions finish."
+    description: "Overall review sequence state machine. On review.start, walks the 5-dimension sequence (correctness → testing → maintainability → project-standards → adversarial); advances one dimension per turn; emits review.dimensions.complete when all dimensions finish."
     # 2026-06-24 plan U1: review runs only once after all units complete
     # - review.start → initialize sequence, emit first review.dimension.ready
     # - review.dimension.done/failed → advance to next dimension or close the sequence
@@ -916,9 +981,12 @@ hats:
       On review.start, walk the dimension sequence, one dimension per turn.
 
       ### Sequence contract (HARD RULE)
-      The sequence is **always** 2 dimensions in this fixed order:
+      The sequence is **always** 5 dimensions in this fixed order:
       1. `correctness`
       2. `testing`
+      3. `maintainability`
+      4. `project-standards`
+      5. `adversarial`
 
       No adaptive dimension selection. No conditional extras.
 
@@ -932,8 +1000,11 @@ hats:
         "step": "<string>",
         "fix_round": 0,
         "dimensions": [
-          {"dimension": "correctness", "status": "pending", "findings_file": null, "reason": null},
-          {"dimension": "testing",     "status": "pending", "findings_file": null, "reason": null}
+          {"dimension": "correctness",       "status": "pending", "findings_file": null, "reason": null},
+          {"dimension": "testing",           "status": "pending", "findings_file": null, "reason": null},
+          {"dimension": "maintainability",   "status": "pending", "findings_file": null, "reason": null},
+          {"dimension": "project-standards", "status": "pending", "findings_file": null, "reason": null},
+          {"dimension": "adversarial",       "status": "pending", "findings_file": null, "reason": null}
         ]
       }
       ```
@@ -945,7 +1016,7 @@ hats:
       **Corruption recovery (HARD RULE)**: if `review-sequence.json`
       fails JSON parse, or the file is missing, treat the sequence as
       empty. Initialize a fresh sequence for this plan / task / step
-      using the same 2-dim contract.
+      using the same 5-dim contract.
 
       ### Read State
       - From `review.start` payload: `plan_name`, `task_id`, `task_key`
@@ -1018,7 +1089,7 @@ hats:
       For each activation:
       1. Load `review-sequence.json`. If it does not exist for the
          current `(plan_name, task_id, step)`, initialize a fresh
-         2-dim sequence (status: pending for all 2) and write it
+         5-dim sequence (status: pending for all 5) and write it
          atomically.
       2. Walk the sequence in order. Find the first `status: "pending"`
          dimension.
@@ -1027,7 +1098,7 @@ hats:
          sequence closure — covers BOTH the normal post-walk close
          AND the 2026-06-17-004 plan U1 empty-diff fast path):
          - The `dimensions` array carries one entry per sequence row,
-           in the original 2-dim order. Each entry has `dimension`
+           in the original 5-dim order. Each entry has `dimension`
            (string) and `status` (`"done"` or `"failed"`).
          - For a normal close: every entry with `status: "done"`
            carries `findings_file` (string); every entry with
@@ -1054,8 +1125,8 @@ hats:
            - `focus`: short string describing the dimension focus
            - `depth`: `"standard"` for every dimension in the serial
              path. The wave preset's `quick`/`standard`/`deep` for
-             `adversarial` does not apply because `adversarial` is
-             not in the 2-dim set.
+             `adversarial` does not apply because the serial preset
+             keeps every dimension at `standard` regardless of name.
            - `diff_base`: string (resolved diff base from Scope Detection)
            - `intent_summary`: string (2-3 sentence intent)
            - `changed_files`: string[] (changed file paths)
@@ -1088,8 +1159,11 @@ hats:
            dimension) and continue the walk.
 
       ### Per-dimension focus strings (copy-pasteable)
-      - `correctness` → `"Logic correctness, edge cases, error propagation, state machine consistency"`
-      - `testing`     → `"Test coverage gaps, brittle assertions, behavioral changes without test additions"`
+      - `correctness`       → `"Logic correctness, edge cases, error propagation, state machine consistency"`
+      - `testing`           → `"Test coverage gaps, brittle assertions, behavioral changes without test additions"`
+      - `maintainability`   → `"Coupling, complexity, naming, dead code, abstraction debt — adapted from ce-code-review ce-maintainability-reviewer"`
+      - `project-standards` → `"AGENTS.md/CLAUDE.md compliance, frontmatter, citations, portability — adapted from ce-code-review ce-project-standards-reviewer"`
+      - `adversarial`       → `"Hidden side effects, compat breaks, edge/concurrency, unsafe paths, misleading names, test sufficiency, maintenance cost, rollback safety"`
 
       ### Per-dimension emission
       - Emit `review.dimension.ready` via `ralph emit`:
@@ -1116,12 +1190,15 @@ hats:
           "step": "<step>",
           "fix_round": "<0 for first round; increment after each fixer.applied accept>",
           "dimensions": [
-            {"dimension": "correctness", "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-correctness-<task>.json"},
-            {"dimension": "testing",     "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-testing-<task>.json"}
+            {"dimension": "correctness",       "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-correctness-<task>.json"},
+            {"dimension": "testing",           "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-testing-<task>.json"},
+            {"dimension": "maintainability",   "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-maintainability-<task>.json"},
+            {"dimension": "project-standards", "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-project-standards-<task>.json"},
+            {"dimension": "adversarial",       "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-adversarial-<task>.json"}
           ]
         }' --source dimension-reviewer
         ```
-      - `fix_round` MUST match the value carried by `review.dimension.ready` payloads in the same sequence (it stays constant across the 2-dim walk). After `fix.applied(fix_round=N)` is accepted, the next round MUST use `fix_round: N+1` and emit a fresh `review.dimension.ready` first — NEVER re-emit `review.dimensions.complete` with the same `fix_round` (U5 dedup rejects it).
+      - `fix_round` MUST match the value carried by `review.dimension.ready` payloads in the same sequence (it stays constant across the 5-dim walk). After `fix.applied(fix_round=N)` is accepted, the next round MUST use `fix_round: N+1` and emit a fresh `review.dimension.ready` first — NEVER re-emit `review.dimensions.complete` with the same `fix_round` (U5 dedup rejects it).
       - Do NOT use `ralph wave emit` — there is no wave in this preset.
       - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
       - **HARD RULE — never assume `ralph emit` succeeded.** This preset enables strict policy precheck (`event_policy.require_policy_check_for_cli_emit: true`, `allow_unsafe_cli_emit: false`), so an emit with missing required fields is rejected BEFORE the event is written. If the CLI exits non-zero, the event did NOT happen — no record was appended to jsonl. Always re-run with `--output json` and parse the response to fix the payload. Never proceed as if the event succeeded; the runner will hard-gate you on `missing_event_gate` instead.
@@ -1144,7 +1221,7 @@ hats:
         update `.agents/scratchpad/<plan>/progress.md` with
         `Active Sequence: dim=<dim> (N/M)` so operators
         and downstream hats can see the in-flight dimension.
-        Use the sequence index (1-based) and total (always 2).
+        Use the sequence index (1-based) and total (always 5).
       - After the synthesizer fires (`review.passed` /
         `review.failed` / `plan.blocked`), clear the line back
         to `Active Sequence: (none)` in the same progress.md edit.
@@ -1155,7 +1232,7 @@ hats:
       - MUST decide walk vs pass per the HARD RULE above (commit_count / changed_lines / untracked / diff state), NOT based on intent or trust in the executor
       - MUST NOT emit `review.passed` from this hat — `review.passed` is owned exclusively by `review-synthesizer`. The empty-diff fast path is now `review.dimensions.complete` (with all rows `status: done`, `findings_file: null`); the synthesizer then emits `review.passed(skip_reason=dimensions_complete)`. Any attempt to call `ralph emit review.passed --hat review-coordinator` is rejected by the CLI precheck (`isolated_scope_violation`) and the topic-deny rule.
       - MUST NOT emit `review.dimension.ready` for more than one dimension per turn (single-event boundary)
-      - MUST walk the sequence in the fixed order (correctness → testing)
+      - MUST walk the sequence in the fixed order (correctness → testing → maintainability → project-standards → adversarial)
       - MUST write `review-sequence.json` atomically (temp + rename) — no Read+Write race window
       - MUST accept a minimal `review.dimension.failed` payload (only `dimension` + `reason` required by contract) and continue the walk — do NOT block on missing fields
 
@@ -1380,6 +1457,38 @@ hats:
       - **Behavioral changes with no test additions**: diff modifies behavior but adds/modifies no test files.
       Do NOT flag: missing tests for trivial getters/setters, test style preferences, coverage percentages, missing tests for unchanged code.
 
+      #### WAVE_DIMENSION == "maintainability"
+      Read-only review only. You MUST NOT modify any source file. Your `disallowed_tools: ["Edit"]` is intentional — keep this dimension strictly observational; surface findings as the `review.dimension.done` payload and do NOT call `Edit` / `Write` / `MultiEdit` even if a tool appears available.
+      Check:
+      - **Coupling**: new hidden dependencies between modules — e.g. shared mutable state, implicit ordering assumptions, modules that "just know" about each other's internals. A change in one file unexpectedly requires edits in several others.
+      - **Complexity**: functions or methods that do too much (long, deeply nested, multiple responsibilities); control flow that is hard to follow; cyclomatic complexity spikes. Flag concrete locations with file:line, not generic advice.
+      - **Naming**: identifiers whose names do not reflect behaviour. `get_xxx` that mutates, `is_xxx` that performs IO, `process`/`handle`/`do_thing` that hides a specific action, abbreviations that diverge from project glossary.
+      - **Dead code**: unused functions, unreferenced constants, unreachable branches, commented-out code, feature flags that no longer gate anything, debug `println!`/`eprintln!`/`dbg!` left in.
+      - **Abstraction debt**: premature or leaky abstractions (a trait/interface whose only impl is the caller; wrapper layers that add no behaviour; generic parameters that are always instantiated with one type; abstractions that exist "for future flexibility" with no current consumer).
+      Do NOT flag: pure style preferences, missing doc comments, naming taste without behaviour impact, "this could be a one-liner" rewrites, refactors that are not justified by a concrete defect listed above.
+
+      #### WAVE_DIMENSION == "project-standards"
+      Read-only review only. You MUST NOT modify any source file. Your `disallowed_tools: ["Edit"]` is intentional — keep this dimension strictly observational; surface findings as the `review.dimension.done` payload and do NOT call `Edit` / `Write` / `MultiEdit` even if a tool appears available.
+      Check:
+      - **CLAUDE.md / AGENTS.md compliance**: new commands, subcommands, hard rules, or workflows added in this diff that are not reflected in `CLAUDE.md` / `AGENTS.md` (or whichever the repo uses as the agent contract). If the repo has neither, downgrade this section to `N/A — no agent-contract document present` and skip; do NOT invent compliance findings.
+      - **Documentation frontmatter consistency**: spec / plan / handoff markdown files whose `status`, `plan_name`, or other frontmatter keys drift from the rest of the repo's conventions (for example, one file uses `Status: active` while siblings use `Status: archived`, or `plan_name` does not match the file basename). Compare against siblings in the same directory before flagging.
+      - **Citation and reference integrity**: code or docs added in this diff that cite other files (e.g. `foo.rs:NN-MM`, `docs/.../*.md#section`) where the cited line range no longer points at the claimed code, the file was renamed, or the section anchor moved. Re-verify by `sed -n`/Read; flag with the actual current location.
+      - **Portability**: hard-coded absolute paths, machine-specific identifiers (`/Users/<name>/...`, hostnames, UUIDs that are not part of an external API), or shell commands that assume a specific shell/OS — in scripts, `Cargo.toml` metadata, fixtures, or test data. Distinguish from intentional portable paths (for example, `${workspaceRoot}` / `~/.config/...`).
+      - **Standards-file presence**: if the repository has a `STANDARDS.md`, `CONVENTIONS.md`, `STYLE.md`, or similar (not `CLAUDE.md`/`AGENTS.md` — those are covered above), surface drift between this diff and that file. If none exist, downgrade this section to `skip — no secondary standards file`.
+      Do NOT flag: stylistic preferences that are not in the repo's documented conventions, missing doc comments, opinions about wording in non-normative prose, or compliance claims that you cannot verify by reading the cited source in this iteration (mark those as `confidence <= 50` rather than blocking).
+
+      #### WAVE_DIMENSION == "adversarial"
+      Red-Team gate. Read-only review only. You MUST NOT modify any source file. Your `disallowed_tools: ["Edit"]` is intentional — keep this dimension strictly observational; surface findings as the `review.dimension.done` payload and do NOT call `Edit` / `Write` / `MultiEdit` even if a tool appears available. As the LAST dimension in the 5-dimension sequence, treat each finding as a release-blocker unless you can point at concrete evidence the risk is contained.
+      Check:
+      - **Hidden side effects**: functions that mutate state outside what their name implies, write to globals/statics or to caller-owned parameters, register/unregister handlers, or depend on an implicit call ordering that is not enforced by the type system. A `validate_*` that mutates, a `compute_*` that caches, a `close_*` that triggers background cleanup — all of these count.
+      - **Compatibility breaks**: public API semantics that change in observable ways (return type, error type, trait contract, async vs sync, panic vs Result); on-disk or on-wire formats (JSONL, file headers, config keys) that older readers cannot parse; downstream crates / configs / scripts that compile against the new symbol set but fail at runtime. Backward-compat shims that are present in the diff but undocumented also count.
+      - **Boundary and concurrency**: empty/zero-length/max/overflow inputs that the diff assumes cannot happen; TOCTOU windows between check and use; shared state without synchronisation; locks held across `.await` / `I/O` / non-trivial work; resource exhaustion (unbounded channels, growing collections, file descriptor leaks). Try to construct an input that pushes the new code down an untested path.
+      - **Security paths**: inputs that are not sufficiently validated (path traversal, SQL/template injection, command injection, deserialisation of untrusted data into typed structures); sensitive data (tokens, paths, PII) leaking into logs, error messages, telemetry, or panic messages; permission / authz checks that can be bypassed by direct function call instead of the gated entry point.
+      - **Misleading names**: identifiers that promise one behaviour and deliver another (`get_*` that mutates, `is_*` that performs I/O, `*_safe` / `*_checked` that are neither, `*_async` that is sometimes sync). Names that diverge from the project glossary, or abbreviations that look like standard terms but mean something else.
+      - **Test sufficiency**: tests that only assert "did not throw" / truthiness / call counts instead of behaviour; error paths that have no test; brittle mocks that re-implement the unit under test; missing regression test for a fixed bug; snapshot tests pinned to internals. Tests that pass only because of order-dependent shared state also count.
+      - **Maintenance cost and rollback safety**: magic numbers, hard-coded paths, copy-pasted logic that should be parameterised; comments that say *what* but not *why*; modules that violate single-responsibility and have grown by accretion; new dependencies (crates, binaries) without a clear payoff; in production, can the change be safely reverted (feature flag, staged rollout, dual-write, idempotent migration)?
+      Do NOT flag: pure style preferences, missing doc comments, opinions about variable naming taste, "this could be a one-liner" rewrites, or pre-existing issues that are not introduced by this diff. Findings you cannot back up with a concrete file:line or reproducible input should be marked `confidence <= 50` and must not block the release on their own.
+
   review-synthesizer:
     name: "🧩 Review Synthesizer (Serial)"
     description: "Overall review synthesizer. Reads all per-dimension findings, writes a fix-plan markdown file to scratchpad, publishes review.complete with fix_plan_file path."
@@ -1457,15 +1566,20 @@ hats:
       ### Mode-Aware Demotion
       Some findings are real but do not warrant primary-findings attention. Route them to soft buckets (testing_gaps, residual_risks).
 
+      The 5-dimension sequence (`correctness`, `testing`, `maintainability`, `project-standards`, `adversarial`) splits into two demotion-tiers:
+      - **Soft-demotion eligible dimensions**: `testing`, `maintainability`. P2/P3 advisory findings contributed ONLY by these dimensions may demote.
+      - **Red-Team / standards dimensions**: `project-standards`, `adversarial`. P0/P1 findings from these dimensions NEVER demote — they always stay in primary findings, because suppressing a Red-Team or standards signal would defeat the purpose of the gate. Even P2/P3 advisory findings contributed by these dimensions keep their default routing (demotion is still possible only when ALL contributing dimensions are in the soft tier, not when ANY Red-Team / standards dimension is among the contributors).
+
       A finding qualifies for demotion when ALL of these hold:
       - Severity is P2 or P3 (P0 and P1 always stay in primary findings)
       - `autofix_class` is `advisory` (concrete-fix findings stay in primary)
-      - ALL contributing dimensions are `testing` (if `correctness` also flagged this finding, cross-reviewer corroboration is present → keep in primary)
+      - ALL contributing dimensions are in the soft-demotion tier (`testing` or `maintainability`) — if any other dimension (`correctness`, `project-standards`, `adversarial`) also flagged this finding, cross-reviewer corroboration is present → keep in primary
 
       When a finding qualifies:
-      - If `testing` dimension → append `file:line — title` to `testing_gaps`
+      - If `testing` dimension is among contributors → append `file:line — title` to `testing_gaps`
+      - Else (only `maintainability` is a contributor) → append `file:line — title` to `residual_risks`
       - Remove the finding from primary findings set
-      - Record demotion count for Coverage
+      - Record demotion count for Coverage, broken down by destination bucket
 
       ### Confidence Gate
       - After promotion and demotion, suppress remaining findings below anchor 75
@@ -1522,10 +1636,19 @@ hats:
 
       ### Per-Sequence Coverage
       Unlike the wave preset, the serial path has no `wave_id` /
-      `wave_total` to track. Coverage just needs to report the
-      per-dim `status` from the `review.dimensions.complete` payload
-      and the per-dim finding counts. The `aggregator counter` is
-      the `dimensions` array length — never count a different
+      `wave_total` to track. Coverage MUST report status and findings
+      count for each of the 5 dimensions in the fixed sequence
+      `correctness`, `testing`, `maintainability`, `project-standards`,
+      `adversarial`. For every dimension entry in the
+      `review.dimensions.complete` payload, Coverage records:
+      - `dimension` — the dimension name (one of the 5 fixed)
+      - `status` — from the per-dim entry (`done` / `failed` / `skipped`)
+      - `findings_count` — count from the per-dim findings file (0 if
+        `status != done` or `findings_file` is null/missing)
+      - `bucket` — primary / testing_gaps / residual_risks / suppressed / dropped
+      - `severity_breakdown` — P0/P1/P2/P3 counts within primary findings
+      The `aggregator counter` is the `dimensions` array length
+      (always 5 in the serial preset) — never count a different
       stream (e.g. `review.dimension.done` events in jsonl) because
       a previous review's stale events would corrupt the count.
 
