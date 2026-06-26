@@ -201,8 +201,9 @@ pub use merge_queue::{
     merge_needs_steering, smart_merge_summary,
 };
 pub use plan_baseline::{
-    PlanBaselineError, derive_plan_id, ensure_plan_baseline, ensure_plan_baseline_from_head,
-    plan_baseline_path, read_plan_baseline, write_plan_baseline_from_head,
+    PlanBaselineError, derive_baseline_key, derive_plan_id, ensure_plan_baseline,
+    ensure_plan_baseline_from_head, plan_baseline_path, read_plan_baseline,
+    write_plan_baseline_from_head,
 };
 pub use planning_session::{
     ConversationEntry, ConversationType, PlanningSession, PlanningSessionError, SessionMetadata,

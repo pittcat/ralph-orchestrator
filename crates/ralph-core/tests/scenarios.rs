@@ -9,9 +9,7 @@
 //! - AutoResearch workflow guards
 
 use ralph_core::testing::{MockBackend, Scenario, ScenarioRunner};
-use ralph_core::{
-    EventLoop, EventParser, HatConfig, LoopContext, RalphConfig, TerminationReason,
-};
+use ralph_core::{EventLoop, EventParser, HatConfig, LoopContext, RalphConfig, TerminationReason};
 use serde::Deserialize;
 use std::fs;
 
@@ -624,10 +622,8 @@ fn run_scenario_with_snapshots(
                     // and a structural `CompletionStuck` satisfy
                     // it. Recoverable rejection is still
                     // `None` (correction block queued).
-                    let completion_honoured = matches!(
-                        reason,
-                        Some(TerminationReason::CompletionPromise)
-                    );
+                    let completion_honoured =
+                        matches!(reason, Some(TerminationReason::CompletionPromise));
                     assert!(
                         !completion_honoured,
                         "{}: After response {}, expected LOOP_COMPLETE to be rejected, but got {:?}",

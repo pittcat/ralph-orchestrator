@@ -167,8 +167,12 @@ pub enum VerdictParseError {
 impl fmt::Display for VerdictParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            VerdictParseError::MalformedJson(msg) => write!(f, "verdict payload not valid JSON: {msg}"),
-            VerdictParseError::MissingField(name) => write!(f, "verdict payload missing field `{name}`"),
+            VerdictParseError::MalformedJson(msg) => {
+                write!(f, "verdict payload not valid JSON: {msg}")
+            }
+            VerdictParseError::MissingField(name) => {
+                write!(f, "verdict payload missing field `{name}`")
+            }
             VerdictParseError::MissingResidualCount => {
                 write!(
                     f,
@@ -244,7 +248,12 @@ mod tests {
     fn parses_fail_with_reason() {
         let payload = r#"{"verdict":"fail","reason":"tests broke"}"#;
         let v = Verdict::from_payload(payload, "verdict", None).unwrap();
-        assert_eq!(v, Verdict::Fail { reason: "tests broke".to_string() });
+        assert_eq!(
+            v,
+            Verdict::Fail {
+                reason: "tests broke".to_string()
+            }
+        );
         assert!(v.is_fail());
     }
 
@@ -311,7 +320,10 @@ mod tests {
             "pass_with_residuals"
         );
         assert_eq!(
-            Verdict::Fail { reason: "x".to_string() }.to_string(),
+            Verdict::Fail {
+                reason: "x".to_string()
+            }
+            .to_string(),
             "fail"
         );
     }

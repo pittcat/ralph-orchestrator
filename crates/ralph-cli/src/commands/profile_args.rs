@@ -15,9 +15,9 @@
 //!
 //! [`collect_active_profile_specs`]: crate::commands::profile_args::collect_active_profile_specs
 
+use ralph_core::RalphConfig;
 use ralph_core::config::profiles::ProfileSpec;
 use ralph_core::profiles::ProfilesError;
-use ralph_core::RalphConfig;
 
 /// CLI args that drive profile overlay activation.
 ///

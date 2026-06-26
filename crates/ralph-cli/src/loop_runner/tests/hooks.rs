@@ -14,7 +14,6 @@ use super::common;
 use super::common::*;
 use super::fake_path::*;
 
-
 #[cfg(unix)]
 fn hook_spec_with_command_and_on_error_and_suspend_mode(
     name: &str,

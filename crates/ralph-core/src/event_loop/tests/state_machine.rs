@@ -190,8 +190,8 @@ fn test_verdict_gate_rejects_loop_complete_when_payload_is_fail() {
         fail_field: "pass_or_fail".to_string(),
         fail_value: "fail".to_string(),
         additional_topics: Vec::new(),
-    verdict_field: None,
-    residual_count_field: None,
+        verdict_field: None,
+        residual_count_field: None,
     });
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -439,8 +439,8 @@ fn test_verdict_gate_accepts_loop_complete_when_payload_is_pass() {
         fail_field: "pass_or_fail".to_string(),
         fail_value: "fail".to_string(),
         additional_topics: Vec::new(),
-    verdict_field: None,
-    residual_count_field: None,
+        verdict_field: None,
+        residual_count_field: None,
     });
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -513,8 +513,8 @@ fn test_verdict_gate_additional_topic_blocks_loop_complete_on_fail() {
         fail_field: "pass_or_fail".to_string(),
         fail_value: "fail".to_string(),
         additional_topics: vec!["report.done".to_string()],
-    verdict_field: None,
-    residual_count_field: None,
+        verdict_field: None,
+        residual_count_field: None,
     });
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -553,4 +553,3 @@ fn test_verdict_gate_additional_topic_blocks_loop_complete_on_fail() {
         "verdict_fail on additional topic must be a structural stuck; got {reason:?}"
     );
 }
-

@@ -618,8 +618,7 @@ mod tests {
     /// profiles --help` smoke-test the plan lists under U5 acceptance.
     #[test]
     fn test_cli_inspect_profiles_parses_top_level() {
-        let cli =
-            Cli::try_parse_from(["ralph", "inspect", "profiles"]).expect("CLI parse failed");
+        let cli = Cli::try_parse_from(["ralph", "inspect", "profiles"]).expect("CLI parse failed");
         let args = match cli.command.expect("inspect subcommand") {
             Commands::Inspect(args) => args,
             other => panic!("expected Inspect, got {other:?}"),

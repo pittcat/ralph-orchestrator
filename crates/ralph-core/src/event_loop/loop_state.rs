@@ -1210,8 +1210,7 @@ impl LoopState {
         trigger_topic: String,
         expected_topics: Vec<String>,
     ) {
-        self.hat_obligations
-            .retain(|o| o.hat_id != hat_id);
+        self.hat_obligations.retain(|o| o.hat_id != hat_id);
         self.hat_obligations.push_back(HatObligation {
             hat_id,
             trigger_topic,
@@ -1227,11 +1226,7 @@ impl LoopState {
     /// when no matching obligation exists (caller can use that as
     /// "the emit was a side-effect, not the expected business
     /// event"). Non-expected emits leave the obligation open.
-    pub fn discharge_hat_obligation(
-        &mut self,
-        hat_id: &HatId,
-        emitted_topic: &str,
-    ) -> bool {
+    pub fn discharge_hat_obligation(&mut self, hat_id: &HatId, emitted_topic: &str) -> bool {
         let Some(pos) = self.hat_obligations.iter().position(|o| {
             o.hat_id == *hat_id && o.expected_topics.iter().any(|t| t == emitted_topic)
         }) else {
@@ -2408,9 +2403,11 @@ mod tests {
             );
             // A 10s grace window — the obligation was just created
             // so it must NOT be considered overdue.
-            assert!(state
-                .overdue_obligation(&hat("dimension-reviewer"), Duration::from_secs(10))
-                .is_none());
+            assert!(
+                state
+                    .overdue_obligation(&hat("dimension-reviewer"), Duration::from_secs(10))
+                    .is_none()
+            );
         }
 
         #[test]
@@ -2430,8 +2427,8 @@ mod tests {
             // few instructions, so this test does not need
             // real-time sleep.
             std::thread::sleep(Duration::from_millis(2));
-            let overdue = state
-                .overdue_obligation(&hat("dimension-reviewer"), Duration::from_millis(1));
+            let overdue =
+                state.overdue_obligation(&hat("dimension-reviewer"), Duration::from_millis(1));
             assert!(
                 overdue.is_some(),
                 "obligation past grace must be considered overdue"
@@ -2441,16 +2438,8 @@ mod tests {
         #[test]
         fn obligations_for_different_hats_are_independent() {
             let mut state = LoopState::default();
-            state.push_hat_obligation(
-                hat("a"),
-                "trig.a".to_string(),
-                vec!["a.done".to_string()],
-            );
-            state.push_hat_obligation(
-                hat("b"),
-                "trig.b".to_string(),
-                vec!["b.done".to_string()],
-            );
+            state.push_hat_obligation(hat("a"), "trig.a".to_string(), vec!["a.done".to_string()]);
+            state.push_hat_obligation(hat("b"), "trig.b".to_string(), vec!["b.done".to_string()]);
             assert_eq!(state.hat_obligations.len(), 2);
 
             // Discharging hat `a` must not affect hat `b`.
@@ -2463,19 +2452,11 @@ mod tests {
         #[test]
         fn push_for_same_hat_replaces_existing_obligation() {
             let mut state = LoopState::default();
-            state.push_hat_obligation(
-                hat("a"),
-                "trig.1".to_string(),
-                vec!["a.done".to_string()],
-            );
+            state.push_hat_obligation(hat("a"), "trig.1".to_string(), vec!["a.done".to_string()]);
             // A second trigger for the same hat must replace the
             // open obligation rather than accumulate two — a hat
             // can only owe one obligation at a time.
-            state.push_hat_obligation(
-                hat("a"),
-                "trig.2".to_string(),
-                vec!["a.done".to_string()],
-            );
+            state.push_hat_obligation(hat("a"), "trig.2".to_string(), vec!["a.done".to_string()]);
             assert_eq!(state.hat_obligations.len(), 1);
             assert_eq!(state.hat_obligations[0].trigger_topic, "trig.2");
         }

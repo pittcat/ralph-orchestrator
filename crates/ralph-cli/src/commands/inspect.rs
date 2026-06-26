@@ -26,9 +26,9 @@ use crate::preflight;
 use crate::{ConfigSource, HatsSource};
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use ralph_core::RalphConfig;
 use ralph_core::config::profiles::ProfileSpec;
 use ralph_core::profiles::ResolvedProfileFragments;
-use ralph_core::RalphConfig;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -174,7 +174,8 @@ pub async fn inspect_profiles_command(
             fragments: Vec::new(),
             warnings: Vec::new(),
             note: Some(
-                "no profiles active (set ralph.yml `profiles.default` or pass --profile)".to_string(),
+                "no profiles active (set ralph.yml `profiles.default` or pass --profile)"
+                    .to_string(),
             ),
         };
         return emit_view(&view, args.format, use_colors);
@@ -245,9 +246,7 @@ impl crate::commands::profile_args::ProfileArgs for InspectProfilesArgs {
 /// surface. Behaviour is intentionally identical and the inspect-side
 /// copy is unit-tested directly (see `derive_preset_name_for_inspect_*`
 /// tests below) so the two helpers can't drift silently.
-fn derive_preset_name_for_inspect(
-    hats_source: Option<&HatsSource>,
-) -> Result<Option<String>> {
+fn derive_preset_name_for_inspect(hats_source: Option<&HatsSource>) -> Result<Option<String>> {
     match hats_source {
         None => Ok(None),
         Some(HatsSource::Builtin(name)) => Ok(Some(name.clone())),
@@ -477,9 +476,9 @@ fn ensure_dir(path: &Path) {
 mod tests {
     use super::*;
     use clap::Parser;
-    use ralph_core::config::profiles::ProfileSpec;
-    use ralph_core::config::hat::HatConfig;
     use ralph_core::ProfileScope;
+    use ralph_core::config::hat::HatConfig;
+    use ralph_core::config::profiles::ProfileSpec;
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -509,12 +508,9 @@ mod tests {
         // is the same: `InspectArgs` is the `command: Option<InspectCommands>`
         // argument shape embedded under `Commands::Inspect` in `main.rs`,
         // so we strip the leading "inspect" token and parse the rest.
-        let parsed = InspectArgs::try_parse_from(["inspect", "profiles"])
-            .expect("CLI parse failed");
-        let profiles_args = match parsed
-            .command
-            .expect("profiles subcommand")
-        {
+        let parsed =
+            InspectArgs::try_parse_from(["inspect", "profiles"]).expect("CLI parse failed");
+        let profiles_args = match parsed.command.expect("profiles subcommand") {
             InspectCommands::Profiles(p) => p,
         };
         assert!(profiles_args.profiles.is_empty());
@@ -544,12 +540,8 @@ mod tests {
 
     #[test]
     fn cli_parses_inspect_profiles_no_default_profiles() {
-        let parsed = InspectArgs::try_parse_from([
-            "inspect",
-            "profiles",
-            "--no-default-profiles",
-        ])
-        .expect("CLI parse failed");
+        let parsed = InspectArgs::try_parse_from(["inspect", "profiles", "--no-default-profiles"])
+            .expect("CLI parse failed");
         let profiles_args = match parsed.command.expect("profiles subcommand") {
             InspectCommands::Profiles(p) => p,
         };
@@ -558,13 +550,8 @@ mod tests {
 
     #[test]
     fn cli_parses_inspect_profiles_json_format() {
-        let parsed = InspectArgs::try_parse_from([
-            "inspect",
-            "profiles",
-            "--format",
-            "json",
-        ])
-        .expect("CLI parse failed");
+        let parsed = InspectArgs::try_parse_from(["inspect", "profiles", "--format", "json"])
+            .expect("CLI parse failed");
         let profiles_args = match parsed.command.expect("profiles subcommand") {
             InspectCommands::Profiles(p) => p,
         };
@@ -603,7 +590,10 @@ mod tests {
         let src = HatsSource::Remote("https://example.com/hats.yml".to_string());
         let err = derive_preset_name_for_inspect(Some(&src)).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("remote"), "expected remote-mention in error, got {msg}");
+        assert!(
+            msg.contains("remote"),
+            "expected remote-mention in error, got {msg}"
+        );
         assert!(
             msg.contains("https://example.com/hats.yml"),
             "expected URL echoed in error, got {msg}"
@@ -626,8 +616,8 @@ mod tests {
             no_default_profiles: false,
             format: InspectProfilesFormat::Human,
         };
-        let active =
-            crate::commands::profile_args::collect_active_profile_specs(&config, &args).expect("collect");
+        let active = crate::commands::profile_args::collect_active_profile_specs(&config, &args)
+            .expect("collect");
         assert_eq!(active.len(), 2);
         assert_eq!(active[0].to_string(), "repo:base");
         assert_eq!(active[1].to_string(), "user:extra");
@@ -645,8 +635,8 @@ mod tests {
             no_default_profiles: true,
             format: InspectProfilesFormat::Human,
         };
-        let active =
-            crate::commands::profile_args::collect_active_profile_specs(&config, &args).expect("collect");
+        let active = crate::commands::profile_args::collect_active_profile_specs(&config, &args)
+            .expect("collect");
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].to_string(), "user:extra");
     }
@@ -659,8 +649,8 @@ mod tests {
             no_default_profiles: false,
             format: InspectProfilesFormat::Human,
         };
-        let active =
-            crate::commands::profile_args::collect_active_profile_specs(&config, &args).expect("collect");
+        let active = crate::commands::profile_args::collect_active_profile_specs(&config, &args)
+            .expect("collect");
         assert!(active.is_empty());
     }
 
@@ -675,9 +665,13 @@ mod tests {
             no_default_profiles: false,
             format: InspectProfilesFormat::Human,
         };
-        let err = crate::commands::profile_args::collect_active_profile_specs(&config, &args).unwrap_err();
+        let err = crate::commands::profile_args::collect_active_profile_specs(&config, &args)
+            .unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("bad-spec"), "expected offending spec in error, got {msg}");
+        assert!(
+            msg.contains("bad-spec"),
+            "expected offending spec in error, got {msg}"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -743,21 +737,13 @@ mod tests {
         }];
         let tmp = TempDir::new().unwrap();
         // Repo profile dir = <workspace_root>/ralph-profiles/<name>/<preset>/.
-        let preset_dir = tmp
-            .path()
-            .join("ralph-profiles")
-            .join("base")
-            .join("debug");
+        let preset_dir = tmp.path().join("ralph-profiles").join("base").join("debug");
         write_fragment(&preset_dir, "investigator", "INVESTIGATOR_NOTES\n");
 
         let config = config_with_hats(&["investigator"]);
-        let resolved = ralph_core::profiles::resolve_profile_fragments(
-            &config,
-            "debug",
-            &specs,
-            tmp.path(),
-        )
-        .expect("resolve must succeed");
+        let resolved =
+            ralph_core::profiles::resolve_profile_fragments(&config, "debug", &specs, tmp.path())
+                .expect("resolve must succeed");
 
         let view = build_view(&defaults, &specs, "debug", &resolved);
         assert!(view.active);
@@ -812,13 +798,9 @@ mod tests {
             scope: ProfileScope::Repo,
             name: "strict".to_string(),
         }];
-        let resolved = ralph_core::profiles::resolve_profile_fragments(
-            &config,
-            "debug",
-            &specs,
-            tmp.path(),
-        )
-        .expect("resolve must succeed");
+        let resolved =
+            ralph_core::profiles::resolve_profile_fragments(&config, "debug", &specs, tmp.path())
+                .expect("resolve must succeed");
 
         let defaults: Vec<ProfileSpec> = Vec::new();
         let view = build_view(&defaults, &specs, "debug", &resolved);
@@ -845,15 +827,14 @@ mod tests {
             scope: ProfileScope::Repo,
             name: "nope".to_string(),
         }];
-        let err = ralph_core::profiles::resolve_profile_fragments(
-            &config,
-            "debug",
-            &specs,
-            tmp.path(),
-        )
-        .expect_err("missing dir must error");
+        let err =
+            ralph_core::profiles::resolve_profile_fragments(&config, "debug", &specs, tmp.path())
+                .expect_err("missing dir must error");
         let msg = format!("{err}");
-        assert!(msg.contains("nope"), "expected profile name in error, got {msg}");
+        assert!(
+            msg.contains("nope"),
+            "expected profile name in error, got {msg}"
+        );
         assert!(
             msg.contains("ralph-profiles"),
             "expected repo path segment in error, got {msg}"
@@ -937,13 +918,9 @@ mod tests {
             scope: ProfileScope::Repo,
             name: "strict".to_string(),
         }];
-        let resolved = ralph_core::profiles::resolve_profile_fragments(
-            &config,
-            "debug",
-            &specs,
-            tmp.path(),
-        )
-        .expect("resolve must succeed");
+        let resolved =
+            ralph_core::profiles::resolve_profile_fragments(&config, "debug", &specs, tmp.path())
+                .expect("resolve must succeed");
 
         let defaults: Vec<ProfileSpec> = Vec::new();
         let view = build_view(&defaults, &specs, "debug", &resolved);
@@ -958,7 +935,10 @@ mod tests {
         assert_eq!(frags[0]["hat_id"], serde_json::json!("investigator"));
         assert_eq!(frags[0]["preview"], serde_json::json!("PREVIEW"));
         assert!(
-            frags[0]["path"].as_str().unwrap().contains("investigator.md"),
+            frags[0]["path"]
+                .as_str()
+                .unwrap()
+                .contains("investigator.md"),
             "path must include the fragment file name"
         );
         // `note` is `skip_serializing_if = "Option::is_none"`, so it

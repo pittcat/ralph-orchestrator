@@ -37,8 +37,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::config::profiles::{ProfileScope, ProfileSpec, ProfileSpecParseError};
 use crate::config::RalphConfig;
+use crate::config::profiles::{ProfileScope, ProfileSpec, ProfileSpecParseError};
 
 const REPO_PROFILES_DIR: &str = "ralph-profiles";
 const USER_PROFILES_DIR: &str = ".config/ralph/profiles";
@@ -83,13 +83,17 @@ pub enum ProfilesError {
         #[source]
         source: ProfileSpecParseError,
     },
-    #[error("invalid profile name {name:?}: must be non-empty, contain no whitespace, '/', or '..' segments")]
+    #[error(
+        "invalid profile name {name:?}: must be non-empty, contain no whitespace, '/', or '..' segments"
+    )]
     InvalidProfileName { name: String },
     #[error("profile directory not found: {path} (profile spec: {spec})")]
     ProfileDirNotFound { path: PathBuf, spec: String },
     #[error("profile {spec}: preset subdirectory not found: {path}")]
     PresetDirNotFound { path: PathBuf, spec: String },
-    #[error("profile {spec}: HOME environment variable is not set; cannot resolve user profile directory")]
+    #[error(
+        "profile {spec}: HOME environment variable is not set; cannot resolve user profile directory"
+    )]
     HomeNotSet { spec: String },
     #[error("I/O error reading profile fragment {path}: {source}")]
     Io {
@@ -191,9 +195,28 @@ fn validate_profile_name(name: &str) -> Result<(), ProfilesError> {
     let upper = name.to_ascii_uppercase();
     if matches!(
         upper.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6"
-        | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6"
-        | "LPT7" | "LPT8" | "LPT9"
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
     ) {
         return Err(ProfilesError::InvalidProfileName {
             name: name.to_string(),
@@ -236,9 +259,7 @@ where
 {
     validate_profile_name(&spec.name)?;
     match spec.scope {
-        ProfileScope::Repo => Ok(workspace_root
-            .join(REPO_PROFILES_DIR)
-            .join(&spec.name)),
+        ProfileScope::Repo => Ok(workspace_root.join(REPO_PROFILES_DIR).join(&spec.name)),
         ProfileScope::User => resolve_user_profile_dir_with(spec, &spec.name, env_lookup),
     }
 }
@@ -278,10 +299,7 @@ where
     Ok(base.join(USER_PROFILES_DIR).join(name))
 }
 
-fn user_home_relative_with<F>(
-    spec: &ProfileSpec,
-    env_lookup: &F,
-) -> Result<PathBuf, ProfilesError>
+fn user_home_relative_with<F>(spec: &ProfileSpec, env_lookup: &F) -> Result<PathBuf, ProfilesError>
 where
     F: Fn(&str) -> Option<std::ffi::OsString>,
 {
@@ -334,7 +352,13 @@ pub fn resolve_profile_fragments(
     specs: &[ProfileSpec],
     workspace_root: &Path,
 ) -> Result<ResolvedProfileFragments, ProfilesError> {
-    resolve_profile_fragments_with(config, preset_name, specs, workspace_root, default_env_lookup)
+    resolve_profile_fragments_with(
+        config,
+        preset_name,
+        specs,
+        workspace_root,
+        default_env_lookup,
+    )
 }
 
 /// Test-friendly variant of [`resolve_profile_fragments`]. See
@@ -385,11 +409,7 @@ where
                     }
                 })
                 .map(|e| (e.file_name(), e.path()))
-                .filter(|(name, _)| {
-                    Path::new(name)
-                        .extension()
-                        .is_some_and(|ext| ext == "md")
-                })
+                .filter(|(name, _)| Path::new(name).extension().is_some_and(|ext| ext == "md"))
                 .collect(),
             Err(source) => {
                 return Err(ProfilesError::Io {
@@ -448,10 +468,11 @@ where
                 path: path.clone(),
                 source,
             })?;
-            let content = String::from_utf8(bytes).map_err(|source| ProfilesError::NonUtf8File {
-                path: path.clone(),
-                source,
-            })?;
+            let content =
+                String::from_utf8(bytes).map_err(|source| ProfilesError::NonUtf8File {
+                    path: path.clone(),
+                    source,
+                })?;
             contributed = true;
             out.by_hat
                 .entry(hat_id.clone())
@@ -494,7 +515,13 @@ pub fn apply_profile_fragments(
     specs: &[ProfileSpec],
     workspace_root: &Path,
 ) -> Result<Vec<String>, ProfilesError> {
-    apply_profile_fragments_with(config, preset_name, specs, workspace_root, default_env_lookup)
+    apply_profile_fragments_with(
+        config,
+        preset_name,
+        specs,
+        workspace_root,
+        default_env_lookup,
+    )
 }
 
 /// Test-friendly variant of [`apply_profile_fragments`]. See
@@ -509,7 +536,8 @@ pub fn apply_profile_fragments_with<F>(
 where
     F: Fn(&str) -> Option<std::ffi::OsString> + Copy,
 {
-    let resolved = resolve_profile_fragments_with(config, preset_name, specs, workspace_root, env_lookup)?;
+    let resolved =
+        resolve_profile_fragments_with(config, preset_name, specs, workspace_root, env_lookup)?;
     for (hat_id, fragments) in &resolved.by_hat {
         let Some(hat) = config.hats.get_mut(hat_id) else {
             // Should be unreachable: resolve_profile_fragments filters
@@ -688,18 +716,15 @@ mod tests {
     fn resolve_profile_dir_user_uses_xdg_when_set() {
         let xdg = TempDir::new().unwrap();
         let home_fallback = std::path::PathBuf::from("/tmp/home-fallback");
-        let pairs: [(&str, &std::path::Path); 2] = [
-            ("XDG_CONFIG_HOME", xdg.path()),
-            ("HOME", &home_fallback),
-        ];
+        let pairs: [(&str, &std::path::Path); 2] =
+            [("XDG_CONFIG_HOME", xdg.path()), ("HOME", &home_fallback)];
         let env = env_from(&pairs);
 
         let spec = ProfileSpec {
             scope: ProfileScope::User,
             name: "my-style".to_string(),
         };
-        let dir =
-            resolve_profile_dir_with(&spec, Path::new("/should/not/be/used"), env).unwrap();
+        let dir = resolve_profile_dir_with(&spec, Path::new("/should/not/be/used"), env).unwrap();
         assert_eq!(
             dir,
             xdg.path()
@@ -720,8 +745,7 @@ mod tests {
             scope: ProfileScope::User,
             name: "my-style".to_string(),
         };
-        let dir =
-            resolve_profile_dir_with(&spec, Path::new("/should/not/be/used"), env).unwrap();
+        let dir = resolve_profile_dir_with(&spec, Path::new("/should/not/be/used"), env).unwrap();
         assert_eq!(
             dir,
             home.path()
@@ -738,8 +762,7 @@ mod tests {
             scope: ProfileScope::User,
             name: "my-style".to_string(),
         };
-        let err =
-            resolve_profile_dir_with(&spec, Path::new("/anywhere"), env_empty()).unwrap_err();
+        let err = resolve_profile_dir_with(&spec, Path::new("/anywhere"), env_empty()).unwrap_err();
         assert!(matches!(err, ProfilesError::HomeNotSet { .. }));
     }
 
@@ -748,10 +771,12 @@ mod tests {
         // XDG_CONFIG_HOME unset, HOME = "" → user_home_relative
         // returns HomeNotSet. Build a closure that supplies the empty
         // string for HOME.
-        let env = |key: &str| if key == "HOME" {
-            Some(OsString::new())
-        } else {
-            None
+        let env = |key: &str| {
+            if key == "HOME" {
+                Some(OsString::new())
+            } else {
+                None
+            }
         };
 
         let spec = ProfileSpec {
@@ -782,7 +807,11 @@ mod tests {
         let resolved =
             resolve_profile_fragments(&cfg, "ce-executor-serial", &[spec], tmp.path()).unwrap();
 
-        assert!(resolved.warnings.is_empty(), "warnings: {:?}", resolved.warnings);
+        assert!(
+            resolved.warnings.is_empty(),
+            "warnings: {:?}",
+            resolved.warnings
+        );
         let frags = resolved.by_hat.get("executor").expect("executor fragments");
         assert_eq!(frags.len(), 1);
         assert_eq!(frags[0].content, "### strict override\n");
@@ -853,10 +882,8 @@ mod tests {
     fn resolve_user_profile_with_xdg_config_home() {
         let xdg = TempDir::new().unwrap();
         let home_fallback = std::path::PathBuf::from("/tmp/should-not-be-used");
-        let pairs: [(&str, &std::path::Path); 2] = [
-            ("XDG_CONFIG_HOME", xdg.path()),
-            ("HOME", &home_fallback),
-        ];
+        let pairs: [(&str, &std::path::Path); 2] =
+            [("XDG_CONFIG_HOME", xdg.path()), ("HOME", &home_fallback)];
         let env = env_from(&pairs);
 
         let profile_dir = xdg
@@ -965,7 +992,12 @@ mod tests {
         // Two warnings: unknown hat + contributed no fragments.
         assert_eq!(resolved.warnings.len(), 2);
         assert!(resolved.warnings.iter().any(|w| w.contains("unknown hat")));
-        assert!(resolved.warnings.iter().any(|w| w.contains("contributed no fragments")));
+        assert!(
+            resolved
+                .warnings
+                .iter()
+                .any(|w| w.contains("contributed no fragments"))
+        );
     }
 
     // ------------------------------------------------------------------
@@ -981,8 +1013,8 @@ mod tests {
             scope: ProfileScope::Repo,
             name: "strict".to_string(),
         };
-        let err = resolve_profile_fragments(&cfg, "ce-executor-serial", &[spec], tmp.path())
-            .unwrap_err();
+        let err =
+            resolve_profile_fragments(&cfg, "ce-executor-serial", &[spec], tmp.path()).unwrap_err();
         match err {
             ProfilesError::ProfileDirNotFound { path, .. } => {
                 assert!(path.ends_with("ralph-profiles/strict"));
@@ -1039,8 +1071,7 @@ mod tests {
 
         let hat = &cfg.hats["investigator"];
         assert_eq!(
-            hat.instructions,
-            "ORIGINAL_INSTRUCTIONS\nSTRICT_RULES\n",
+            hat.instructions, "ORIGINAL_INSTRUCTIONS\nSTRICT_RULES\n",
             "instructions must be newline-separated"
         );
     }
@@ -1124,9 +1155,7 @@ mod tests {
             hat.triggers = vec!["work.ready".to_string()];
             hat.publishes = vec!["work.done".to_string()];
             hat.terminal_events = vec!["work.done".to_string()];
-            hat.backend = Some(crate::config::hat::HatBackend::Named(
-                "claude".to_string(),
-            ));
+            hat.backend = Some(crate::config::hat::HatBackend::Named("claude".to_string()));
             hat.backend_args = Some(vec!["--model".to_string(), "opus".to_string()]);
             hat.default_publishes = Some("work.done".to_string());
             hat.max_activations = Some(7);
@@ -1152,8 +1181,10 @@ mod tests {
         // instructions intentionally changed.
         assert_ne!(after.instructions, snapshot.instructions);
         assert_eq!(after.extra_instructions, snapshot.extra_instructions);
-        assert_eq!(after.backend.as_ref().map(|b| format!("{b:?}")),
-                   snapshot.backend.as_ref().map(|b| format!("{b:?}")));
+        assert_eq!(
+            after.backend.as_ref().map(|b| format!("{b:?}")),
+            snapshot.backend.as_ref().map(|b| format!("{b:?}"))
+        );
         assert_eq!(after.backend_args, snapshot.backend_args);
         assert_eq!(after.default_publishes, snapshot.default_publishes);
         assert_eq!(after.max_activations, snapshot.max_activations);
@@ -1195,8 +1226,7 @@ mod tests {
     #[test]
     fn apply_with_no_active_specs_is_a_noop() {
         let mut cfg = config_with(&["investigator"]);
-        cfg.hats.get_mut("investigator").unwrap().instructions =
-            "UNCHANGED".to_string();
+        cfg.hats.get_mut("investigator").unwrap().instructions = "UNCHANGED".to_string();
         let warnings =
             apply_profile_fragments(&mut cfg, "debug", &[], Path::new("/anywhere")).unwrap();
         assert!(warnings.is_empty());
@@ -1206,8 +1236,8 @@ mod tests {
     #[test]
     fn resolve_with_no_active_specs_is_empty() {
         let cfg = config_with(&["investigator"]);
-        let resolved = resolve_profile_fragments(&cfg, "debug", &[], Path::new("/anywhere"))
-            .unwrap();
+        let resolved =
+            resolve_profile_fragments(&cfg, "debug", &[], Path::new("/anywhere")).unwrap();
         assert!(resolved.by_hat.is_empty());
         assert!(resolved.warnings.is_empty());
     }
@@ -1284,8 +1314,7 @@ mod tests {
             scope: ProfileScope::Repo,
             name: "strict".to_string(),
         };
-        let resolved =
-            resolve_profile_fragments(&cfg, "debug", &[spec], tmp.path()).unwrap();
+        let resolved = resolve_profile_fragments(&cfg, "debug", &[spec], tmp.path()).unwrap();
 
         // The symlinked fragment must NOT have been loaded.
         assert!(
@@ -1322,8 +1351,7 @@ mod tests {
             scope: ProfileScope::Repo,
             name: "strict".to_string(),
         };
-        let resolved =
-            resolve_profile_fragments(&cfg, "debug", &[spec], tmp.path()).unwrap();
+        let resolved = resolve_profile_fragments(&cfg, "debug", &[spec], tmp.path()).unwrap();
 
         assert!(resolved.by_hat.is_empty());
         assert!(
@@ -1379,8 +1407,7 @@ mod tests {
             scope: ProfileScope::Repo,
             name: "strict".to_string(),
         };
-        let resolved =
-            resolve_profile_fragments(&cfg, "debug", &[spec], tmp.path()).unwrap();
+        let resolved = resolve_profile_fragments(&cfg, "debug", &[spec], tmp.path()).unwrap();
 
         // The non-UTF-8 filename must surface as a warning, and the
         // content must not have been loaded under the unknown name.
@@ -1470,8 +1497,7 @@ mod tests {
             scope: ProfileScope::User,
             name: "my-style".to_string(),
         };
-        let dir =
-            resolve_profile_dir_with(&spec, Path::new("/anywhere"), env).unwrap();
+        let dir = resolve_profile_dir_with(&spec, Path::new("/anywhere"), env).unwrap();
         assert_eq!(
             dir,
             home.path()

@@ -165,7 +165,7 @@ impl TerminationReason {
             // (recoverable) OR structural rejection routed to a hard
             // stop. Both are non-zero exits — the operator must see
             // the loop end and consult `loop.terminate.last_reason`.
-            | TerminationReason::CompletionStuck(_) => 1,
+            TerminationReason::CompletionStuck(_) => 1,
             TerminationReason::MaxIterations
             | TerminationReason::MaxRuntime
             | TerminationReason::MaxCost => 2,
@@ -1446,8 +1446,8 @@ impl EventLoop {
                 // recoverable budget on a failure mode that is not
                 // recoverable. Surface the stuck signal so the
                 // operator sees the loop end with a clear reason.
-                return Some(TerminationReason::CompletionStuck(
-                    Box::new(crate::event_loop::types::CompletionStuck {
+                return Some(TerminationReason::CompletionStuck(Box::new(
+                    crate::event_loop::types::CompletionStuck {
                         source: crate::event_loop::types::StuckSource::StructuralRejection,
                         retry_key: format!("verdict_fail:{}", gate.topic),
                         attempts: 1,
@@ -1457,8 +1457,8 @@ impl EventLoop {
                             field = gate.fail_field,
                             value = gate.fail_value,
                         ),
-                    }),
-                ));
+                    },
+                )));
             }
         }
 
@@ -1743,14 +1743,14 @@ impl EventLoop {
         // gate, the runner, and the summary report all use the
         // same number.
         if retry_count > U2_REJECTION_RETRY_LIMIT {
-            return Some(TerminationReason::CompletionStuck(
-                Box::new(crate::event_loop::types::CompletionStuck {
+            return Some(TerminationReason::CompletionStuck(Box::new(
+                crate::event_loop::types::CompletionStuck {
                     source: crate::event_loop::types::StuckSource::RejectionDigestExhausted,
                     retry_key: retry_key.clone(),
                     attempts: retry_count,
                     last_reason: format!("{reason_hint}: {free_form}"),
-                }),
-            ));
+                },
+            )));
         }
 
         // `emit_correction_context` is the U7a entry point: it
@@ -1813,11 +1813,8 @@ impl EventLoop {
             // `crate::config::loop_config`).
             const DEFAULT_MAX_RESIDUALS: u32 = 8;
             let max_residuals = Some(DEFAULT_MAX_RESIDUALS);
-            let verdict = Verdict::from_payload(
-                payload,
-                verdict_field,
-                gate.residual_count_field.as_deref(),
-            );
+            let verdict =
+                Verdict::from_payload(payload, verdict_field, gate.residual_count_field.as_deref());
             match verdict {
                 Ok(v) => v.resolve(max_residuals).is_fail(),
                 Err(_) => {
@@ -3132,9 +3129,7 @@ impl EventLoop {
                             .iter()
                             .find(|e| hat_cfg.triggers.iter().any(|t| t == e.topic.as_str()))
                             .map(|e| e.topic.to_string())
-                            .or_else(|| {
-                                regular_events.first().map(|e| e.topic.to_string())
-                            })
+                            .or_else(|| regular_events.first().map(|e| e.topic.to_string()))
                             .unwrap_or_default();
                         self.state.push_hat_obligation(
                             hat_id.clone(),

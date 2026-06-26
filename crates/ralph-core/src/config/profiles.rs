@@ -204,18 +204,14 @@ where
                         // Sequence of strings — split each entry on `:`.
                         let trimmed = s.trim();
                         if !trimmed.is_empty() {
-                            out.push(
-                                ProfileSpec::parse_str(trimmed).map_err(Error::custom)?,
-                            );
+                            out.push(ProfileSpec::parse_str(trimmed).map_err(Error::custom)?);
                         }
                         while let Some(next) = seq.next_element::<String>()? {
                             let trimmed = next.trim();
                             if trimmed.is_empty() {
                                 continue;
                             }
-                            out.push(
-                                ProfileSpec::parse_str(trimmed).map_err(Error::custom)?,
-                            );
+                            out.push(ProfileSpec::parse_str(trimmed).map_err(Error::custom)?);
                         }
                     }
                     serde_yaml::Value::Mapping(_) => {
@@ -263,9 +259,7 @@ fn parse_comma_separated(s: &str) -> Result<Vec<ProfileSpec>, ProfileSpecParseEr
 /// `serde_yaml::to_value(&ProfilesConfig { default: [...] })` produces a
 /// sequence of mapping nodes. `ProfileSpec`'s `Deserialize` impl parses
 /// a single string (`<scope>:<name>`), so we can't reuse it here.
-fn spec_from_mapping(
-    value: serde_yaml::Value,
-) -> Result<ProfileSpec, ProfileSpecParseError> {
+fn spec_from_mapping(value: serde_yaml::Value) -> Result<ProfileSpec, ProfileSpecParseError> {
     use serde_yaml::Value;
     let mapping = match value {
         Value::Mapping(m) => m,

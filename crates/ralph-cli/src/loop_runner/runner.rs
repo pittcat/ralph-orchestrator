@@ -1,7 +1,7 @@
 use super::*;
 use ralph_core::diagnosis::TerminationHint;
 use ralph_core::{
-    PolicyRejection, ProcessedEvents, derive_plan_id, ensure_plan_baseline_from_head,
+    PolicyRejection, ProcessedEvents, derive_baseline_key, ensure_plan_baseline_from_head,
     get_head_sha, read_plan_baseline,
 };
 use std::path::Path;
@@ -1583,25 +1583,43 @@ async fn run_loop_impl_inner(
 
     // Persist and load the plan-level baseline SHA. This is the git HEAD at
     // plan start and is the review diff base for plan-driven presets. For
-    // worktree mode it was already recorded when the worktree was created; the
-    // call below is defensive. For primary (non-worktree) mode we scope the
-    // baseline file by the derived plan id so multiple plans in the same
-    // workspace do not share a baseline.
+    // worktree mode it was recorded when the worktree was created; for primary
+    // (non-worktree) mode we scope the baseline file by a key derived from the
+    // plan/prompt source so unrelated plans do not share a baseline.
     let plan_id = if ctx.is_primary() {
-        derive_plan_id(&config.event_loop.prompt_file, None)
+        derive_baseline_key(
+            &config.event_loop.prompt_file,
+            None,
+            config.event_loop.prompt.as_deref(),
+            Some(ctx.workspace()),
+        )
     } else {
         None
     };
-    if let Err(e) = ensure_plan_baseline_from_head(ctx.workspace(), plan_id.as_deref()) {
+
+    // Only create a new baseline for primary loops. Worktree baselines are
+    // anchored at worktree creation time; recreating them on reuse would
+    // silently re-anchor the review diff base to the current HEAD if the file
+    // was ever lost.
+    if ctx.is_primary() {
+        if let Err(e) = ensure_plan_baseline_from_head(ctx.workspace(), plan_id.as_deref()) {
+            warn!(
+                workspace = %ctx.workspace().display(),
+                plan_id = ?plan_id,
+                error = %e,
+                "Failed to ensure plan baseline"
+            );
+        }
+    }
+
+    let persisted_baseline = read_plan_baseline(ctx.workspace(), plan_id.as_deref());
+    if persisted_baseline.is_none() && !ctx.is_primary() {
         warn!(
-            workspace = %ctx.workspace().display(),
-            plan_id = ?plan_id,
-            error = %e,
-            "Failed to ensure plan baseline"
+            worktree = %ctx.workspace().display(),
+            "No persisted plan baseline found in worktree; falling back to current HEAD as review diff base"
         );
     }
-    let plan_baseline_sha = read_plan_baseline(ctx.workspace(), plan_id.as_deref())
-        .or_else(|| get_head_sha(ctx.workspace()).ok());
+    let plan_baseline_sha = persisted_baseline.or_else(|| get_head_sha(ctx.workspace()).ok());
     event_loop.set_plan_baseline_sha(plan_baseline_sha);
 
     // Helper closure to handle termination (writes summary, prints status, records history)

@@ -158,11 +158,7 @@ pub fn check_hat_scope_invariant(config: &RalphConfig) -> Vec<RuntimeContractFin
         // The lint therefore fires only when the topic is
         // neither on the hat's `exempt_topics` list nor pinned
         // to this hat by a deny rule on some other hat.
-        let exempt: HashSet<&str> = hat_cfg
-            .exempt_topics
-            .iter()
-            .map(|s| s.as_str())
-            .collect();
+        let exempt: HashSet<&str> = hat_cfg.exempt_topics.iter().map(|s| s.as_str()).collect();
         // Pinned by `exempt_topics` is the primary signal.
         // We additionally accept the old deny-rule shape
         // (some other hat is denied this topic) as a
@@ -175,11 +171,7 @@ pub fn check_hat_scope_invariant(config: &RalphConfig) -> Vec<RuntimeContractFin
             }
             let pinned_by_deny = denied_for_topic
                 .get(topic.as_str())
-                .map(|denied_hats| {
-                    denied_hats
-                        .iter()
-                        .any(|h| *h != hat_id.as_str())
-                })
+                .map(|denied_hats| denied_hats.iter().any(|h| *h != hat_id.as_str()))
                 .unwrap_or(false);
             if !pinned_by_deny {
                 findings.push(topic_deny_incomplete_finding(hat_id, topic));
@@ -202,12 +194,7 @@ pub fn check_hat_scope_invariant(config: &RalphConfig) -> Vec<RuntimeContractFin
 }
 
 fn coordinator_hat_ids(config: &RalphConfig) -> HashSet<String> {
-    let mut set: HashSet<String> = config
-        .tasks
-        .coordinator_hats
-        .iter()
-        .cloned()
-        .collect();
+    let mut set: HashSet<String> = config.tasks.coordinator_hats.iter().cloned().collect();
     // Convention: any hat named `coordinator` (the implicit default
     // role) is always a coordinator, even if `tasks.coordinator_hats`
     // is not configured.
@@ -403,12 +390,7 @@ hats:
         assert!(
             findings
                 .iter()
-                .any(|f| {
-                    f.id == *format!(
-                        "lint.{}",
-                        FINDING_HAT_SCOPE_EVENT_FILTER_DISABLED
-                    )
-                }),
+                .any(|f| { f.id == *format!("lint.{}", FINDING_HAT_SCOPE_EVENT_FILTER_DISABLED) }),
             "expected event_filter_disabled finding, got: {findings:#?}"
         );
     }
@@ -428,12 +410,7 @@ hats:
         assert!(
             findings
                 .iter()
-                .any(|f| {
-                    f.id == *format!(
-                        "lint.{}",
-                        FINDING_HAT_SCOPE_EVENT_FILTER_DISABLED
-                    )
-                }),
+                .any(|f| { f.id == *format!("lint.{}", FINDING_HAT_SCOPE_EVENT_FILTER_DISABLED) }),
             "omitted event_filter must also fire rule 1"
         );
     }
@@ -492,8 +469,7 @@ hats:
         let findings = check_hat_scope_invariant(&cfg);
         let ids: Vec<_> = findings.iter().map(|f| f.id.clone()).collect();
         assert!(
-            !ids
-                .iter()
+            !ids.iter()
                 .any(|id| *id == *format!("lint.{}", FINDING_HAT_SCOPE_TOPIC_DENY_INCOMPLETE)),
             "exempt topic must not fire rule 2: {ids:#?}"
         );
@@ -525,14 +501,9 @@ tasks:
         );
         let findings = check_hat_scope_invariant(&cfg);
         assert!(
-            findings
-                .iter()
-                .any(|f| {
-                    f.id == *format!(
-                        "lint.{}",
-                        FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK
-                    )
-                }),
+            findings.iter().any(|f| {
+                f.id == *format!("lint.{}", FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK)
+            }),
             "expected coordinator_review_leak finding, got: {findings:#?}"
         );
     }
@@ -557,8 +528,7 @@ hats:
         let findings = check_hat_scope_invariant(&cfg);
         let ids: Vec<_> = findings.iter().map(|f| f.id.clone()).collect();
         assert!(
-            !ids
-                .iter()
+            !ids.iter()
                 .any(|id| *id == *format!("lint.{}", FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK)),
             "non-coordinator must not trigger rule 3: {ids:#?}"
         );
@@ -579,7 +549,10 @@ hats:
 "#;
         let cfg: RalphConfig = serde_yaml::from_str(yaml).expect("coordinator mode parses");
         let findings = check_hat_scope_invariant(&cfg);
-        assert!(findings.is_empty(), "coordinator mode must skip: {findings:#?}");
+        assert!(
+            findings.is_empty(),
+            "coordinator mode must skip: {findings:#?}"
+        );
     }
 
     #[test]
@@ -613,10 +586,7 @@ hats:
         assert!(
             findings
                 .iter()
-                .any(|f| f.id == *format!(
-                    "lint.{}",
-                    FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN
-                )),
+                .any(|f| f.id == *format!("lint.{}", FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN)),
             "expected verdict_field_unknown warning, got: {findings:#?}"
         );
     }
@@ -650,10 +620,9 @@ hats:
             let cfg: RalphConfig = serde_yaml::from_str(&yaml).expect("parses");
             let findings = check_hat_scope_invariant(&cfg);
             assert!(
-                !findings.iter().any(|f| f.id == *format!(
-                    "lint.{}",
-                    FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN
-                )),
+                !findings
+                    .iter()
+                    .any(|f| f.id == *format!("lint.{}", FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN)),
                 "known alias `{vf}` must NOT warn, got: {findings:#?}"
             );
         }

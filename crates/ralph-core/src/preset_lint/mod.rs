@@ -58,8 +58,8 @@ pub use finding_id::{
 // `2026-06-12-003-feat-wac-rollout-completion-plan.md` (WRC-U1) and
 // `2026-06-12-002-feat-workflow-activation-contract-plan.md`
 // (KTD-2: WAC always-on, severity by strictness).
-pub use multi_hat::check_multi_hat_isolation;
 pub use hat_scope_invariant::check_hat_scope_invariant;
+pub use multi_hat::check_multi_hat_isolation;
 pub use ownership::{check_owner_references, check_ownership_rules};
 pub use state_projection::check_work_done_action_chain_order;
 pub use topic_format::{

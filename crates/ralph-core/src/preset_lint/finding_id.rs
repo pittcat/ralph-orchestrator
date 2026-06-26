@@ -237,5 +237,4 @@ pub const FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK: &str =
 /// `Warn` severity — the operator may legitimately use a custom
 /// name (the lint cannot verify upstream payload consistency);
 /// the warning forces the operator to acknowledge the footgun.
-pub const FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN: &str =
-    "preset.hat_scope_verdict_field_unknown";
+pub const FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN: &str = "preset.hat_scope_verdict_field_unknown";

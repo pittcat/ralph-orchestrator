@@ -1033,15 +1033,9 @@ pub async fn run_command(
                         .generate_context_file(&reusable.branch, &prompt_summary)
                         .context("Failed to refresh context file in reused worktree")?;
                     // The plan baseline was recorded when the worktree was first
-                    // created. Defensively ensure it still exists; if it was lost,
-                    // current HEAD is the best available fallback.
-                    if let Err(e) = ensure_plan_baseline_from_head(reused_ctx.workspace(), None) {
-                        warn!(
-                            worktree = %reused_ctx.workspace().display(),
-                            error = %e,
-                            "Failed to ensure plan baseline in reused worktree"
-                        );
-                    }
+                    // created. Do NOT recreate it here: if it was lost we want the
+                    // runner to warn and fall back to current HEAD rather than
+                    // silently re-anchor the review diff base.
                     // PROMPT.md sync (mirrors the create path) so
                     // the agent reads its prompt from the worktree.
                     sync_prompt_to_worktree(workspace_root, &reusable.path);
@@ -1757,7 +1751,10 @@ mod forward_prompt_args_tests {
         let out = forward_prompt_args(&args, tmp.path());
         assert_eq!(
             out,
-            vec!["--plan".to_string(), plan_path.to_string_lossy().into_owned()]
+            vec![
+                "--plan".to_string(),
+                plan_path.to_string_lossy().into_owned()
+            ]
         );
     }
 
@@ -2678,7 +2675,9 @@ pub(crate) fn default_run_args() -> RunArgs {
 mod tests {
     use super::*;
     use crate::test_support::CwdGuard;
-    use ralph_core::{HatConfig, HookMutationConfig, HookOnError, HookPhaseEvent, HookSpec, ProfileScope};
+    use ralph_core::{
+        HatConfig, HookMutationConfig, HookOnError, HookPhaseEvent, HookSpec, ProfileScope,
+    };
 
     // ─────────────────────────────────────────────────────────────────────
     // U3 (2026-06-25-002): --profile / --no-default-profiles / TUI forwarding
@@ -2913,11 +2912,7 @@ mod tests {
         let plan_path = temp_dir.path().join("explicit-plan.md");
         std::fs::write(&plan_path, "Implement something").unwrap();
 
-        let source = worktree_file_name_prefix(
-            "custom-prompt.md",
-            "[no prompt]",
-            Some(&plan_path),
-        );
+        let source = worktree_file_name_prefix("custom-prompt.md", "[no prompt]", Some(&plan_path));
 
         assert_eq!(source.as_deref(), Some("explicit-plan"));
     }
@@ -3725,8 +3720,7 @@ hats:
         config
             .hats
             .insert("executor".to_string(), HatConfig::default());
-        config.hats.get_mut("executor").unwrap().instructions =
-            "基线 instructions".to_string();
+        config.hats.get_mut("executor").unwrap().instructions = "基线 instructions".to_string();
 
         let mut args = default_run_args();
         args.profiles = vec!["repo:strict".to_string()];
@@ -3787,7 +3781,9 @@ hats:
         let err = apply_active_profiles(
             &mut config,
             &args,
-            Some(&HatsSource::Remote("https://example.com/preset.yml".to_string())),
+            Some(&HatsSource::Remote(
+                "https://example.com/preset.yml".to_string(),
+            )),
             tmp.path(),
         )
         .expect_err("must reject");
@@ -3817,8 +3813,7 @@ hats:
         config
             .hats
             .insert("executor".to_string(), HatConfig::default());
-        config.hats.get_mut("executor").unwrap().instructions =
-            "baseline".to_string();
+        config.hats.get_mut("executor").unwrap().instructions = "baseline".to_string();
 
         let mut args = default_run_args();
         args.profiles = vec!["repo:strict".to_string()];
@@ -3962,7 +3957,11 @@ hats:
         )
         .expect("apply");
 
-        assert!(config.hats["executor"].instructions.contains("WORKSPACE_ROOT"));
+        assert!(
+            config.hats["executor"]
+                .instructions
+                .contains("WORKSPACE_ROOT")
+        );
     }
 
     /// `HatsSource::File(path)` 且 path 无扩展名:file_stem() 应等于完整文件名。
