@@ -4609,9 +4609,36 @@ impl EventLoop {
         let resume_blocks = std::mem::take(&mut self.state.prompt_context.resume_blocks);
         let mut pc = std::mem::take(&mut self.state.prompt_context);
         pc.resume_blocks = resume_blocks;
-        let block = pc.render_all_blocks();
-        // Re-install the remaining prompt_context so the
-        // correction queue persists across iterations.
+        // 2026-06-26 plan U6: drain `correction_blocks` after
+        // rendering. The previous "queue persists across
+        // iterations" behaviour caused the prompt to grow on
+        // every iteration as the same correction was re-rendered,
+        // which is exactly the path that the plan warns about
+        // under "correction_blocks 必须 consume-on-use". We
+        // consume-on-use: render the correction block once,
+        // then drop the queue. If the rejection is persistent
+        // (the agent does not act on the correction), the next
+        // iteration's `inject_completion_correction` call will
+        // either re-queue a new correction (under the budget)
+        // or surface `CompletionStuck(RejectionDigestExhausted)`
+        // when the budget is exhausted.
+        let correction_block = pc.render_correction_block();
+        pc.correction_blocks.clear();
+        let resume_block = pc.render_resume_block();
+        let block = {
+            let mut s = String::new();
+            if !correction_block.is_empty() {
+                s.push_str(&correction_block);
+                s.push('\n');
+            }
+            if !resume_block.is_empty() {
+                s.push_str(&resume_block);
+                s.push('\n');
+            }
+            s
+        };
+        // Re-install the remaining prompt_context (resume_blocks
+        // preserved; correction_blocks already empty).
         self.state.prompt_context = pc;
         if block.is_empty() {
             prompt
