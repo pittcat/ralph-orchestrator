@@ -262,6 +262,101 @@ pub(crate) fn collect_active_profile_specs(
     Ok(specs)
 }
 
+/// Compute the active preset name from the resolved hats source, used by
+/// [`apply_active_profiles`] to anchor profile directory lookups.
+///
+/// - `Builtin(name)` → `name` (e.g. `"debug"`)
+/// - `File(path)` → `path.file_stem()` (e.g. `"hats.yml"` → `"hats"`)
+/// - `Remote(_)` → `Err` (profile resolution cannot match a remote preset
+///   against a `<repo>/ralph-profiles/<name>/<preset>/` tree)
+/// - `None` → `Ok(None)` (no preset name available; caller must fall back
+///   to a warning rather than attempting to resolve fragments)
+fn derive_preset_name(hats_source: Option<&HatsSource>) -> anyhow::Result<Option<String>> {
+    match hats_source {
+        None => Ok(None),
+        Some(HatsSource::Builtin(name)) => Ok(Some(name.clone())),
+        Some(HatsSource::File(path)) => Ok(Some(
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "failed to derive preset name from hats file path '{}'",
+                        path.display()
+                    )
+                })?
+                .to_string(),
+        )),
+        Some(HatsSource::Remote(url)) => Err(anyhow::anyhow!(
+            "profile fragments cannot be resolved for remote hats source '{}'; \
+             use a builtin preset or a local file path instead",
+            url
+        )),
+    }
+}
+
+/// Apply active profile fragments to `config` for the current `ralph run`
+/// invocation. Called from `run_command` immediately after
+/// [`preflight::load_config_for_preflight`] returns and before
+/// `config.validate()` / `run_auto_preflight`, so the rest of the pipeline
+/// (event loop, preflight report, scratchpad templates) sees the merged
+/// instructions.
+///
+/// Contract (per plan 2026-06-25-002 R10/R11/R14):
+///
+/// 1. Collects active specs via [`collect_active_profile_specs`] (defaults
+///    first, then CLI `--profile` flags, honoring `--no-default-profiles`).
+/// 2. Derives the preset name from `hats_source` and bails out early with
+///    a clear error if a remote hats source was used with active specs.
+/// 3. When no preset name is available (`None` source) and specs are
+///    non-empty, the helper is a no-op: we cannot anchor a `<repo>/ralph-
+///    profiles/<name>/<preset>/` lookup against an unknown preset, so the
+///    operator has nothing to merge against.
+/// 4. Resolves fragments via
+///    [`ralph_core::profiles::apply_profile_fragments`] and streams
+///    warnings to stderr.
+///
+/// The `workspace_root` is supplied by the caller (production: main repo
+/// root resolved from `RALPH_WORKSPACE_ROOT` or `LoopContext`) so the
+/// helper does not depend on `current_dir()` — this avoids drift when the
+/// process was spawned inside a `--worktree` checkout.
+pub(crate) fn apply_active_profiles(
+    config: &mut RalphConfig,
+    args: &RunArgs,
+    hats_source: Option<&HatsSource>,
+    workspace_root: &Path,
+) -> anyhow::Result<()> {
+    let specs = collect_active_profile_specs(config, args)?;
+    if specs.is_empty() {
+        return Ok(());
+    }
+
+    let preset_name = match derive_preset_name(hats_source)? {
+        Some(name) => name,
+        None => {
+            // `None` hats source: nothing to anchor against. Specs are
+            // collected but cannot be resolved. Emit a warning rather
+            // than erroring out so a partially-configured operator
+            // environment still completes.
+            eprintln!(
+                "warning: --profile specs requested but no preset is active \
+                 (no -H/--hats source); skipping profile resolution"
+            );
+            return Ok(());
+        }
+    };
+
+    let warnings = ralph_core::profiles::apply_profile_fragments(
+        config,
+        &preset_name,
+        &specs,
+        workspace_root,
+    )?;
+    for warning in &warnings {
+        eprintln!("{warning}");
+    }
+    Ok(())
+}
+
 fn format_preflight_summary(report: &PreflightReport) -> String {
     let icons: Vec<String> = report
         .checks
@@ -647,6 +742,20 @@ pub async fn run_command(
     prebuilt_diagnostics: Option<Arc<ralph_core::diagnostics::DiagnosticsCollector>>,
 ) -> Result<()> {
     let mut config = preflight::load_config_for_preflight(config_sources, hats_source).await?;
+
+    // Apply profile fragments (plan 2026-06-25-002 U4).
+    //
+    // Insertion point: immediately after `load_config_for_preflight`
+    // returns (so `config.normalize()` has already merged `extra_instructions`)
+    // and before any CLI overrides / `config.validate()` / `run_auto_preflight`.
+    // Resolving the workspace root from `RALPH_WORKSPACE_ROOT` keeps profile
+    // lookups anchored at the main repo even when this process was spawned
+    // from a `--worktree` checkout (where `current_dir()` would point inside
+    // the worktree).
+    let profile_workspace_root = std::env::var("RALPH_WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| config.core.workspace_root.clone());
+    apply_active_profiles(&mut config, &args, hats_source, &profile_workspace_root)?;
 
     // Handle --continue mode: check scratchpad exists before proceeding
     let resume = args.continue_mode;
@@ -3491,5 +3600,295 @@ hats:
             wait_or_terminate_child(&mut child, child_id, Duration::from_secs(5), "quick_exit")
                 .await;
         assert!(status.expect("child should exit").success());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // U4 (2026-06-25-002): 在 ralph run 流程中应用 profile
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Helper:在 `<tmp>/ralph-profiles/<name>/<preset>/<hat>.md` 写入片段。
+    fn write_repo_profile_fragment(
+        root: &Path,
+        name: &str,
+        preset: &str,
+        hat_id: &str,
+        body: &str,
+    ) -> PathBuf {
+        let dir = root.join("ralph-profiles").join(name).join(preset);
+        std::fs::create_dir_all(&dir).expect("create profile dir");
+        let path = dir.join(format!("{hat_id}.md"));
+        std::fs::write(&path, body).expect("write fragment");
+        path
+    }
+
+    /// Happy path: `Builtin("debug")` 的 hats source + 存在的 repo profile
+    /// + 对应 hat id 片段 → config.hats["executor"].instructions 末尾追加片段内容
+    /// (R10/R11/R14)。
+    #[test]
+    fn apply_active_profiles_builtin_hats_appends_repo_fragment() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_repo_profile_fragment(
+            tmp.path(),
+            "strict",
+            "debug",
+            "executor",
+            "附加片段:严格模式",
+        );
+
+        let mut config = RalphConfig::default();
+        config
+            .hats
+            .insert("executor".to_string(), HatConfig::default());
+        config.hats.get_mut("executor").unwrap().instructions =
+            "基线 instructions".to_string();
+
+        let mut args = default_run_args();
+        args.profiles = vec!["repo:strict".to_string()];
+
+        apply_active_profiles(
+            &mut config,
+            &args,
+            Some(&HatsSource::Builtin("debug".to_string())),
+            tmp.path(),
+        )
+        .expect("apply");
+
+        let hat = config.hats.get("executor").expect("executor hat");
+        assert!(hat.instructions.contains("基线 instructions"));
+        assert!(hat.instructions.contains("附加片段:严格模式"));
+        // 片段必须追加在末尾,不能覆盖。
+        let pos_base = hat.instructions.find("基线 instructions").unwrap();
+        let pos_extra = hat.instructions.find("附加片段:严格模式").unwrap();
+        assert!(pos_extra > pos_base, "fragment must append, not prepend");
+    }
+
+    /// `HatsSource::File(path)` → preset 名取 path 的 file stem(去掉扩展名)。
+    /// 这条对自定义 hats 配置文件很重要,profile 目录按 preset 命名存放。
+    #[test]
+    fn apply_active_profiles_file_hats_uses_file_stem_as_preset_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_repo_profile_fragment(tmp.path(), "strict", "my-custom-preset", "executor", "X");
+
+        let mut config = RalphConfig::default();
+        config
+            .hats
+            .insert("executor".to_string(), HatConfig::default());
+
+        let mut args = default_run_args();
+        args.profiles = vec!["repo:strict".to_string()];
+
+        let hats_file = tmp.path().join("my-custom-preset.yaml");
+        apply_active_profiles(
+            &mut config,
+            &args,
+            Some(&HatsSource::File(hats_file)),
+            tmp.path(),
+        )
+        .expect("apply");
+
+        assert!(config.hats["executor"].instructions.contains('X'));
+    }
+
+    /// `HatsSource::Remote(url)` + active specs → 返回错误(不让 `--profile`
+    /// 静默配错),提示不能用于 remote preset。
+    #[test]
+    fn apply_active_profiles_remote_hats_with_active_specs_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut config = RalphConfig::default();
+        let mut args = default_run_args();
+        args.profiles = vec!["repo:strict".to_string()];
+
+        let err = apply_active_profiles(
+            &mut config,
+            &args,
+            Some(&HatsSource::Remote("https://example.com/preset.yml".to_string())),
+            tmp.path(),
+        )
+        .expect_err("must reject");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("remote") || msg.contains("Remote"),
+            "error must mention remote source, got: {msg}"
+        );
+    }
+
+    /// `HatsSource::None` + active specs → 不报错,也不修改 instructions;
+    /// 只需确保不会 panic,因为没有 preset 名可推就找不到 profile 目录。
+    /// 行为契约:返回 Ok,且 config 不变(空 preset 名时
+    /// `apply_profile_fragments` 视为空 preset,无片段可加)。
+    #[test]
+    fn apply_active_profiles_none_hats_with_active_specs_is_noop() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_repo_profile_fragment(tmp.path(), "strict", "debug", "executor", "ignored");
+
+        let mut config = RalphConfig::default();
+        config
+            .hats
+            .insert("executor".to_string(), HatConfig::default());
+        config.hats.get_mut("executor").unwrap().instructions =
+            "baseline".to_string();
+
+        let mut args = default_run_args();
+        args.profiles = vec!["repo:strict".to_string()];
+
+        apply_active_profiles(&mut config, &args, None, tmp.path()).expect("apply");
+
+        // 应当保持原状(没匹配到任何 hat 片段)。
+        assert_eq!(config.hats["executor"].instructions, "baseline");
+    }
+
+    /// 空 active specs(无 CLI,无 defaults)→ helper 是 no-op,不报错。
+    /// 这是 fast path,绝大多数 `ralph run` 走这条。
+    #[test]
+    fn apply_active_profiles_empty_specs_is_noop() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut config = RalphConfig::default();
+        let args = default_run_args();
+
+        apply_active_profiles(
+            &mut config,
+            &args,
+            Some(&HatsSource::Builtin("debug".to_string())),
+            tmp.path(),
+        )
+        .expect("apply");
+
+        assert!(config.hats.is_empty(), "no specs => no changes");
+    }
+
+    /// Profile 应用发生在 `normalize()` 之后:`extra_instructions` 必须先被
+    /// `normalize()` 合并到 instructions,然后 profile 片段再追加到末尾。
+    /// 这条断言验证 helper 调用顺序正确(在 load_config_for_preflight 之后)。
+    #[test]
+    fn apply_active_profiles_appends_after_extra_instructions() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_repo_profile_fragment(tmp.path(), "strict", "debug", "executor", "PROFILE");
+
+        let mut config = RalphConfig::default();
+        let mut hat = HatConfig::default();
+        hat.extra_instructions = vec!["EXTRA".to_string()];
+        hat.instructions = "BASE".to_string();
+        config.hats.insert("executor".to_string(), hat);
+
+        // 模拟 normalize() 已经跑过(extra_instructions 已 drain 到 instructions)
+        config.normalize();
+
+        let mut args = default_run_args();
+        args.profiles = vec!["repo:strict".to_string()];
+
+        apply_active_profiles(
+            &mut config,
+            &args,
+            Some(&HatsSource::Builtin("debug".to_string())),
+            tmp.path(),
+        )
+        .expect("apply");
+
+        let final_instr = &config.hats["executor"].instructions;
+        assert!(final_instr.contains("BASE"));
+        assert!(final_instr.contains("EXTRA"));
+        assert!(final_instr.contains("PROFILE"));
+        // PROFILE 必须在 EXTRA 之后(应用顺序):normalize() 先,然后 apply。
+        let pos_extra = final_instr.find("EXTRA").unwrap();
+        let pos_profile = final_instr.find("PROFILE").unwrap();
+        assert!(
+            pos_profile > pos_extra,
+            "profile must append after normalize() merged extra_instructions"
+        );
+    }
+
+    /// 显式 `--profile repo:nope` 但目录不存在 → 提前返回错误,错误信息含路径,
+    /// 不进入后续 event loop。R14 的硬契约:用户拼错名字时立即看到。
+    #[test]
+    fn apply_active_profiles_missing_repo_dir_returns_error_with_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut config = RalphConfig::default();
+        config
+            .hats
+            .insert("executor".to_string(), HatConfig::default());
+
+        let mut args = default_run_args();
+        args.profiles = vec!["repo:nope".to_string()];
+
+        let err = apply_active_profiles(
+            &mut config,
+            &args,
+            Some(&HatsSource::Builtin("debug".to_string())),
+            tmp.path(),
+        )
+        .expect_err("missing dir must error");
+
+        let msg = format!("{err}");
+        let expected_path = tmp.path().join("ralph-profiles").join("nope");
+        assert!(
+            msg.contains(expected_path.to_str().unwrap()),
+            "error must include path {:?}, got: {msg}",
+            expected_path
+        );
+    }
+
+    /// 解析 profile 目录时,workspace_root 是调用方传入的值(模拟
+    /// `RALPH_WORKSPACE_ROOT` 路径);不在子进程错位。helper 必须接受外部传入
+    /// 的 base 路径而不自行依赖 `current_dir()`,这正是为了让 `--worktree`
+    /// 子进程场景下 repo profile 仍指向主仓库根目录。
+    #[test]
+    fn apply_active_profiles_uses_caller_supplied_workspace_root() {
+        let caller_root = tempfile::tempdir().expect("tempdir");
+        let mut other_root = caller_root.path().to_path_buf();
+        other_root.push("nested-subdir");
+        std::fs::create_dir_all(&other_root).expect("nested");
+
+        write_repo_profile_fragment(
+            caller_root.path(),
+            "strict",
+            "debug",
+            "executor",
+            "WORKSPACE_ROOT",
+        );
+
+        let mut config = RalphConfig::default();
+        config
+            .hats
+            .insert("executor".to_string(), HatConfig::default());
+
+        let mut args = default_run_args();
+        args.profiles = vec!["repo:strict".to_string()];
+
+        // 传入 caller_root(而非 other_root),验证 helper 不会偷用 current_dir
+        apply_active_profiles(
+            &mut config,
+            &args,
+            Some(&HatsSource::Builtin("debug".to_string())),
+            caller_root.path(),
+        )
+        .expect("apply");
+
+        assert!(config.hats["executor"].instructions.contains("WORKSPACE_ROOT"));
+    }
+
+    /// `HatsSource::File(path)` 且 path 无扩展名:file_stem() 应等于完整文件名。
+    #[test]
+    fn apply_active_profiles_file_hats_without_extension_uses_full_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_repo_profile_fragment(tmp.path(), "strict", "noext", "executor", "Y");
+
+        let mut config = RalphConfig::default();
+        config
+            .hats
+            .insert("executor".to_string(), HatConfig::default());
+
+        let mut args = default_run_args();
+        args.profiles = vec!["repo:strict".to_string()];
+
+        let hats_file = tmp.path().join("noext");
+        apply_active_profiles(
+            &mut config,
+            &args,
+            Some(&HatsSource::File(hats_file)),
+            tmp.path(),
+        )
+        .expect("apply");
+
+        assert!(config.hats["executor"].instructions.contains('Y'));
     }
 }
