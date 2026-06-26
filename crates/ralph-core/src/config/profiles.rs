@@ -62,6 +62,12 @@ pub struct ProfileSpec {
     pub name: String,
 }
 
+impl std::fmt::Display for ProfileSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.scope, self.name)
+    }
+}
+
 impl ProfileSpec {
     /// Parse a single `<scope>:<name>` literal into a [`ProfileSpec`].
     ///
