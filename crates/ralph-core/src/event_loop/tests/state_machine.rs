@@ -207,22 +207,32 @@ fn test_verdict_gate_rejects_loop_complete_when_payload_is_fail() {
     write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
     let _ = event_loop.process_events_from_jsonl();
     let reason = event_loop.check_completion_event();
-    assert_eq!(
-        reason, None,
-        "verdict gate should reject LOOP_COMPLETE when review.complete carries pass_or_fail=fail"
-    );
-    // P0-2 (2026-06-23-003 plan): completion rejection now routes
-    // through the deterministic-correction path. The rejection
-    // signal lives in `state.prompt_context.correction_blocks`
-    // (rendered into the next prompt as `## ORCHESTRATOR CORRECTION`)
-    // instead of being published on the EventBus as `task.resume`.
+    // 2026-06-26 plan U6: verdict_fail is a structural rejection
+    // — it does NOT inject a correction block; instead it
+    // surfaces CompletionStuck(StructuralRejection) on the first
+    // attempt so the operator sees the loop end with a clear
+    // reason instead of burning the recoverable retry budget.
     assert!(
-        !event_loop
+        matches!(
+            &reason,
+            Some(TerminationReason::CompletionStuck(stuck))
+                if stuck.source == crate::event_loop::StuckSource::StructuralRejection
+                    && stuck.retry_key == "verdict_fail:review.complete"
+        ),
+        "verdict_fail must be a structural stuck; got {reason:?}"
+    );
+    // The structural-rejection path MUST NOT inject a correction
+    // block — the verdict is already published and the agent
+    // cannot change it. The whole point of U6 is to stop
+    // burning the recoverable retry budget on non-recoverable
+    // failures.
+    assert!(
+        event_loop
             .state()
             .prompt_context
             .correction_blocks
             .is_empty(),
-        "completion rejection must inject a CorrectionContext into state.prompt_context (P0-2)"
+        "structural verdict_fail must NOT inject a correction block"
     );
 }
 
@@ -306,17 +316,26 @@ fn test_typed_verdict_pass_with_residuals_above_threshold_fails() {
 
     let _ = event_loop.process_events_from_jsonl();
     let reason = event_loop.check_completion_event();
-    assert_eq!(
-        reason, None,
-        "typed verdict `pass_with_residuals` (12 > max=8) must downgrade to Fail; gate must reject (reason=None), got {reason:?}"
+    // 2026-06-26 plan U6: typed verdict `pass_with_residuals`
+    // that resolves to Fail is a structural rejection — the
+    // gate returns CompletionStuck(StructuralRejection) on the
+    // first attempt and does NOT inject a correction block.
+    assert!(
+        matches!(
+            &reason,
+            Some(TerminationReason::CompletionStuck(stuck))
+                if stuck.source == crate::event_loop::StuckSource::StructuralRejection
+                    && stuck.retry_key == "verdict_fail:review.complete"
+        ),
+        "typed verdict downgrade to Fail must be a structural stuck; got {reason:?}"
     );
     assert!(
-        !event_loop
+        event_loop
             .state()
             .prompt_context
             .correction_blocks
             .is_empty(),
-        "completion rejection must inject a CorrectionContext"
+        "structural rejection must NOT inject a correction block"
     );
 }
 
@@ -350,9 +369,17 @@ fn test_typed_verdict_explicit_fail_rejects() {
 
     let _ = event_loop.process_events_from_jsonl();
     let reason = event_loop.check_completion_event();
-    assert_eq!(
-        reason, None,
-        "typed verdict `fail` must reject LOOP_COMPLETE (reason=None); got {reason:?}"
+    // 2026-06-26 plan U6: explicit `fail` is structural — no
+    // correction, CompletionStuck(StructuralRejection) on the
+    // first attempt.
+    assert!(
+        matches!(
+            &reason,
+            Some(TerminationReason::CompletionStuck(stuck))
+                if stuck.source == crate::event_loop::StuckSource::StructuralRejection
+                    && stuck.retry_key == "verdict_fail:review.complete"
+        ),
+        "typed verdict `fail` must be a structural stuck; got {reason:?}"
     );
 }
 
@@ -511,22 +538,19 @@ fn test_verdict_gate_additional_topic_blocks_loop_complete_on_fail() {
 
     let _ = event_loop.process_events_from_jsonl();
     let reason = event_loop.check_completion_event();
-    assert_eq!(
-        reason, None,
-        "verdict gate should reject LOOP_COMPLETE when report.done carries pass_or_fail=fail"
-    );
-    // P0-2 (2026-06-23-003 plan): completion rejection now routes
-    // through the deterministic-correction path. The rejection
-    // signal lives in `state.prompt_context.correction_blocks`
-    // (rendered into the next prompt as `## ORCHESTRATOR CORRECTION`)
-    // instead of being published on the EventBus as `task.resume`.
+    // 2026-06-26 plan U6: structural rejection from the
+    // additional-topic gate. The fail landed on `report.done`
+    // (one of the configured `additional_topics`), so the gate
+    // still classifies it as a structural stuck and skips the
+    // correction budget.
     assert!(
-        !event_loop
-            .state()
-            .prompt_context
-            .correction_blocks
-            .is_empty(),
-        "completion rejection must inject a CorrectionContext into state.prompt_context (P0-2)"
+        matches!(
+            &reason,
+            Some(TerminationReason::CompletionStuck(stuck))
+                if stuck.source == crate::event_loop::StuckSource::StructuralRejection
+                    && stuck.retry_key == "verdict_fail:REVIEW_COMPLETE"
+        ),
+        "verdict_fail on additional topic must be a structural stuck; got {reason:?}"
     );
 }
 

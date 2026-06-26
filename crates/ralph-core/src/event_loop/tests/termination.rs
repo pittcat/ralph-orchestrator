@@ -590,22 +590,25 @@ fn u6_verdict_gate_rejects_loop_complete_on_upstream_fail() {
     let _ = event_loop.process_events_from_jsonl();
 
     let reason = event_loop.check_completion_event();
-    assert_eq!(
-        reason, None,
+    // 2026-06-26 plan U6: verdict_fail is structural -
+    // CompletionStuck(StructuralRejection) on the first
+    // attempt, no correction block injected.
+    assert!(
+        matches!(
+            &reason,
+            Some(TerminationReason::CompletionStuck(stuck))
+                if stuck.source == crate::event_loop::StuckSource::StructuralRejection
+                    && stuck.retry_key == "verdict_fail:REVIEW_COMPLETE"
+        ),
         "verdict gate must reject LOOP_COMPLETE on upstream fail"
     );
-    // P0-2 (2026-06-23-003 plan): completion rejection now routes
-    // through the deterministic-correction path. The rejection
-    // signal lives in `state.prompt_context.correction_blocks`
-    // (rendered into the next prompt as `## ORCHESTRATOR CORRECTION`)
-    // instead of being published on the EventBus as `task.resume`.
     assert!(
-        !event_loop
+        event_loop
             .state()
             .prompt_context
             .correction_blocks
             .is_empty(),
-        "completion rejection must inject a CorrectionContext into state.prompt_context (P0-2)"
+        "structural rejection must NOT inject a correction block"
     );
 }
 
@@ -646,22 +649,24 @@ fn u6_verdict_gate_rejects_loop_complete_on_report_done_fail() {
     let _ = event_loop.process_events_from_jsonl();
 
     let reason = event_loop.check_completion_event();
-    assert_eq!(
-        reason, None,
+    // 2026-06-26 plan U6: verdict_fail is structural -
+    // CompletionStuck(StructuralRejection) on the first attempt.
+    assert!(
+        matches!(
+            &reason,
+            Some(TerminationReason::CompletionStuck(stuck))
+                if stuck.source == crate::event_loop::StuckSource::StructuralRejection
+                    && stuck.retry_key == "verdict_fail:REVIEW_COMPLETE"
+        ),
         "verdict gate must reject LOOP_COMPLETE when report.done carries fail"
     );
-    // P0-2 (2026-06-23-003 plan): completion rejection now routes
-    // through the deterministic-correction path. The rejection
-    // signal lives in `state.prompt_context.correction_blocks`
-    // (rendered into the next prompt as `## ORCHESTRATOR CORRECTION`)
-    // instead of being published on the EventBus as `task.resume`.
     assert!(
-        !event_loop
+        event_loop
             .state()
             .prompt_context
             .correction_blocks
             .is_empty(),
-        "completion rejection must inject a CorrectionContext into state.prompt_context (P0-2)"
+        "structural rejection must NOT inject a correction block"
     );
 }
 
@@ -727,22 +732,26 @@ fn u6_verdict_gate_fake_pass_on_report_done_after_upstream_fail() {
     write_event_to_jsonl(&events_path, "LOOP_COMPLETE", r#"{"plan_name":"p"}"#);
     let _ = event_loop.process_events_from_jsonl();
     let reason = event_loop.check_completion_event();
+    // 2026-06-26 plan U6: structural rejection on the
+    // upstream fail even when a downstream fake pass tries
+    // to mask it. No correction injected, CompletionStuck
+    // on the first attempt.
     assert!(
-        reason.is_none(),
+        matches!(
+            &reason,
+            Some(TerminationReason::CompletionStuck(stuck))
+                if stuck.source == crate::event_loop::StuckSource::StructuralRejection
+                    && stuck.retry_key == "verdict_fail:REVIEW_COMPLETE"
+        ),
         "verdict gate must reject LOOP_COMPLETE when upstream verdict was fail, got {reason:?}"
     );
-    // P0-2 (2026-06-23-003 plan): completion rejection now routes
-    // through the deterministic-correction path. The rejection
-    // signal lives in `state.prompt_context.correction_blocks`
-    // (rendered into the next prompt as `## ORCHESTRATOR CORRECTION`)
-    // instead of being published on the EventBus as `task.resume`.
     assert!(
-        !event_loop
+        event_loop
             .state()
             .prompt_context
             .correction_blocks
             .is_empty(),
-        "completion rejection must inject a CorrectionContext into state.prompt_context (P0-2)"
+        "structural rejection must NOT inject a correction block"
     );
 }
 

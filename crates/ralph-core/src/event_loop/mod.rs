@@ -1376,11 +1376,13 @@ impl EventLoop {
                      Use loop.cancel to abort the workflow instead.",
                     missing
                 );
-                Self::inject_completion_correction(
+                if let Some(stuck) = Self::inject_completion_correction(
                     &mut self.state,
                     "missing_required_events",
                     &free_form,
-                );
+                ) {
+                    return Some(stuck);
+                }
                 return None;
             }
         }
@@ -1427,15 +1429,26 @@ impl EventLoop {
                 self.state.completion_requested = false;
 
                 // U11-T8 / P0-2 (2026-06-23-003 plan): deterministic
-                // correction.  Replaces the legacy `task.resume`
-                // injection.
-                let free_form = format!(
-                    "LOOP_COMPLETE rejected: most recent {} event has {}={}. \
-                     The workflow has not passed final review. Use loop.cancel to abort instead.",
-                    gate.topic, gate.fail_field, gate.fail_value
-                );
-                Self::inject_completion_correction(&mut self.state, "verdict_fail", &free_form);
-                return None;
+                // 2026-06-26 plan U6: structural rejection — do
+                // NOT inject a correction block. The agent cannot
+                // change the verdict (it is already published) and
+                // injecting a correction would just spend the
+                // recoverable budget on a failure mode that is not
+                // recoverable. Surface the stuck signal so the
+                // operator sees the loop end with a clear reason.
+                return Some(TerminationReason::CompletionStuck(
+                    Box::new(crate::event_loop::types::CompletionStuck {
+                        source: crate::event_loop::types::StuckSource::StructuralRejection,
+                        retry_key: format!("verdict_fail:{}", gate.topic),
+                        attempts: 1,
+                        last_reason: format!(
+                            "verdict fail on {topic} ({field}={value})",
+                            topic = gate.topic,
+                            field = gate.fail_field,
+                            value = gate.fail_value,
+                        ),
+                    }),
+                ));
             }
         }
 
@@ -1466,11 +1479,13 @@ impl EventLoop {
             // U11-T8 / P0-2 (2026-06-23-003 plan): deterministic
             // correction.  Replaces the legacy `task.resume`
             // injection.
-            Self::inject_completion_correction(
+            if let Some(stuck) = Self::inject_completion_correction(
                 &mut self.state,
                 "workflow_guard_incomplete",
                 &free_form,
-            );
+            ) {
+                return Some(stuck);
+            }
             return None;
         }
 
@@ -1664,7 +1679,21 @@ impl EventLoop {
     /// carry.  The per-key retry counter is read from the unified
     /// ledger so escalation (R11) tracks the same number the
     /// legacy wire-format path used.
-    fn inject_completion_correction(state: &mut LoopState, reason_hint: &str, free_form: &str) {
+    ///
+    /// 2026-06-26 plan U6: returns
+    /// `Some(TerminationReason::CompletionStuck)` when the retry
+    /// budget for this `retry_key` is exhausted (>= 3). The caller
+    /// must surface the stuck signal instead of looping again. The
+    /// structural-rejection path
+    /// (e.g. `verdict_fail` in `check_completion_event`) does NOT
+    /// call this helper — it goes straight to
+    /// `CompletionStuck(StructuralRejection)` so a structural
+    /// failure never silently burns the recoverable budget.
+    fn inject_completion_correction(
+        state: &mut LoopState,
+        reason_hint: &str,
+        free_form: &str,
+    ) -> Option<TerminationReason> {
         let topic = ralph_proto::LOOP_COMPLETE.to_string();
         let mut rejection = crate::event_loop::rejection::Rejection {
             stage: crate::event_loop::rejection::RejectionStage::Policy,
@@ -1696,6 +1725,24 @@ impl EventLoop {
             .map(|entry| entry.count as u32)
             .unwrap_or(1u32);
 
+        // 2026-06-26 plan U6: bounded recovery. After 3 attempts
+        // for the same retry key, stop injecting corrections and
+        // surface a `CompletionStuck(RejectionDigestExhausted)`
+        // termination so the operator sees the loop end. The
+        // budget matches `U2_REJECTION_RETRY_LIMIT` (3) so the
+        // gate, the runner, and the summary report all use the
+        // same number.
+        if retry_count > U2_REJECTION_RETRY_LIMIT {
+            return Some(TerminationReason::CompletionStuck(
+                Box::new(crate::event_loop::types::CompletionStuck {
+                    source: crate::event_loop::types::StuckSource::RejectionDigestExhausted,
+                    retry_key: retry_key.clone(),
+                    attempts: retry_count,
+                    last_reason: format!("{reason_hint}: {free_form}"),
+                }),
+            ));
+        }
+
         // `emit_correction_context` is the U7a entry point: it
         // commits a `RejectionRecorded` delta to the unified ledger
         // (when wired up) and pushes the `CorrectionContext` into
@@ -1720,6 +1767,9 @@ impl EventLoop {
             topic = %topic,
             "P0-2: injected completion rejection into state.prompt_context (replaces task.resume)"
         );
+        // 2026-06-26 plan U6: correction queued; budget not
+        // exhausted yet — caller should keep the loop alive.
+        None
     }
 
     /// Returns true if the verdict event payload resolves to a
