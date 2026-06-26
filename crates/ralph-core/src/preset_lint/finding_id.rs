@@ -226,3 +226,16 @@ pub const FINDING_HAT_SCOPE_TOPIC_DENY_INCOMPLETE: &str = "preset.hat_scope_topi
 /// Always `Error` severity.
 pub const FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK: &str =
     "preset.hat_scope_coordinator_review_leak";
+
+/// 2026-06-26 Root-Cause Review P1 #2: warn the operator when
+/// `verdict_gate.verdict_field` is set to a name that is not
+/// the well-known `verdict` / `pass_or_fail` alias. The gate
+/// silently treats any payload that does not carry the
+/// configured field as "not failing", so a typo here masks
+/// `verdict_fail` upstream.
+///
+/// `Warn` severity — the operator may legitimately use a custom
+/// name (the lint cannot verify upstream payload consistency);
+/// the warning forces the operator to acknowledge the footgun.
+pub const FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN: &str =
+    "preset.hat_scope_verdict_field_unknown";

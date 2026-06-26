@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use crate::config::RalphConfig;
 use crate::preset_lint::finding_id::{
     FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK, FINDING_HAT_SCOPE_EVENT_FILTER_DISABLED,
-    FINDING_HAT_SCOPE_TOPIC_DENY_INCOMPLETE,
+    FINDING_HAT_SCOPE_TOPIC_DENY_INCOMPLETE, FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN,
 };
 use crate::runtime_contract::{
     FindingSeverity, FindingSource, FindingStage, RuntimeContractFinding,
@@ -79,6 +79,16 @@ const COORDINATOR_FORBIDDEN_TOPICS: &[&str] = &[
 /// plan). Coordinator-mode presets opt out of the strict scope
 /// contract because their `event_filter` is a soft hint, not a
 /// gating boundary.
+///
+/// 2026-06-26 Root-Cause Review P1 #1: a coordinator-mode multi-hat
+/// preset would bypass the entire hat-scope invariant. The
+/// current `multi_hat` lint forces every 4+ hat preset to
+/// `isolated` (see [`crate::preset_lint::check_multi_hat_isolation`]),
+/// so a coordinator-mode preset is by construction ≤3 hats and
+/// the `event_filter` field is conventionally a no-op there. We
+/// keep this rule isolated-only in this iteration; promoting
+/// the check to coordinator mode is `Deferred to Follow-Up Work`
+/// in the 2026-06-26 plan.
 pub fn check_hat_scope_invariant(config: &RalphConfig) -> Vec<RuntimeContractFinding> {
     use crate::config::HatExecutionMode;
     let isolated = matches!(config.event_loop.execution_mode, HatExecutionMode::Isolated);
@@ -88,6 +98,26 @@ pub fn check_hat_scope_invariant(config: &RalphConfig) -> Vec<RuntimeContractFin
 
     let mut findings = Vec::new();
     let coordinator_hats = coordinator_hat_ids(config);
+
+    // 2026-06-26 Root-Cause Review P1 #2: when a preset opts
+    // into the typed Verdict path (`verdict_field: Some(...)`),
+    // the typed parser returns `MissingField` for every payload
+    // that does not carry that exact field. The gate treats
+    // that as "not failing" — i.e. `verdict_fail` is silently
+    // swallowed if the upstream emit uses a different field
+    // name. We do a sanity check here: the configured
+    // `verdict_field` MUST equal `verdict` or `pass_or_fail`
+    // (the two known aliases), or the lint reports it. A
+    // custom field name is allowed but the lint cannot verify
+    // it (it is the operator's responsibility to keep the
+    // upstream payload in sync).
+    if let Some(gate) = &config.event_loop.verdict_gate {
+        if let Some(vf) = gate.verdict_field.as_deref() {
+            if vf != "verdict" && vf != "pass_or_fail" {
+                findings.push(verdict_field_known_alias_finding(vf));
+            }
+        }
+    }
 
     for (hat_id, hat_cfg) in &config.hats {
         let is_coordinator = coordinator_hats.contains(hat_id);
@@ -269,6 +299,40 @@ fn coordinator_review_leak_finding(hat_id: &str, topic: &str) -> RuntimeContract
     .with_action_hint(format!(
         "Remove `{topic}` from `hats.{hat_id}.event_filter.events`; the \
          coordinator dispatches the workflow, it does not react to verdicts"
+    ))
+}
+
+/// 2026-06-26 Root-Cause Review P1 #2: warn the operator when
+/// `verdict_gate.verdict_field` is configured to a name that
+/// the typed `Verdict::from_payload` parser does not
+/// understand. The two known aliases are `verdict` and
+/// `pass_or_fail`. Anything else is a footgun: the gate
+/// falls through to "not failing" for any payload that
+/// does not carry the configured field, which silently
+/// masks a `verdict_fail` upstream.
+fn verdict_field_known_alias_finding(field: &str) -> RuntimeContractFinding {
+    let id = format!("lint.{}", FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN);
+    RuntimeContractFinding::try_new_core(
+        id,
+        FindingSource::Lint,
+        FindingSeverity::Warn,
+        FindingStage::Authoring,
+        format!(
+            "verdict_gate.verdict_field is `{field}` which is not one of the \
+             known aliases (`verdict` / `pass_or_fail`). Upstream payloads that \
+             do not carry the `{field}` field will be treated as 'not failing' \
+             by the typed Verdict parser — a typo here silently masks \
+             verdict_fail. If `{field}` is intentional, ensure every payload \
+             on `{}` and `additional_topics` carries it.",
+            field
+        ),
+    )
+    .expect("Lint source is not the reserved Preflight source")
+    .with_detail("verdict_field", field.to_string())
+    .with_action_hint(format!(
+        "Rename `verdict_gate.verdict_field` to `verdict` (preferred) or \
+         `pass_or_fail` (legacy). Custom names are accepted but the lint \
+         cannot verify upstream payload consistency."
     ))
 }
 
@@ -516,5 +580,82 @@ hats:
         let cfg: RalphConfig = serde_yaml::from_str(yaml).expect("coordinator mode parses");
         let findings = check_hat_scope_invariant(&cfg);
         assert!(findings.is_empty(), "coordinator mode must skip: {findings:#?}");
+    }
+
+    #[test]
+    fn rule_p1_2_warns_when_verdict_field_not_known_alias() {
+        // 2026-06-26 Root-Cause Review P1 #2: a typo in
+        // `verdict_gate.verdict_field` would silently mask
+        // verdict_fail (the typed parser returns MissingField
+        // for any payload without the field, which the gate
+        // treats as "not failing"). The lint must surface
+        // this footgun as a Warn.
+        let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  verdict_gate:
+    topic: "REVIEW_COMPLETE"
+    fail_field: "pass_or_fail"
+    fail_value: "fail"
+    verdict_field: "verdicts"  # typo
+hats:
+  worker:
+    name: Worker
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    exempt_topics: ["work.done"]
+"#;
+        let cfg: RalphConfig = serde_yaml::from_str(yaml).expect("parses");
+        let findings = check_hat_scope_invariant(&cfg);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == *format!(
+                    "lint.{}",
+                    FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN
+                )),
+            "expected verdict_field_unknown warning, got: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn rule_p1_2_silent_on_known_aliases() {
+        // `verdict` and `pass_or_fail` are the two known
+        // aliases — neither should warn.
+        for vf in ["verdict", "pass_or_fail"] {
+            let yaml = format!(
+                r#"
+event_loop:
+  execution_mode: isolated
+  verdict_gate:
+    topic: "REVIEW_COMPLETE"
+    fail_field: "pass_or_fail"
+    fail_value: "fail"
+    verdict_field: "{}"
+hats:
+  worker:
+    name: Worker
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    exempt_topics: ["work.done"]
+"#,
+                vf
+            );
+            let cfg: RalphConfig = serde_yaml::from_str(&yaml).expect("parses");
+            let findings = check_hat_scope_invariant(&cfg);
+            assert!(
+                !findings.iter().any(|f| f.id == *format!(
+                    "lint.{}",
+                    FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN
+                )),
+                "known alias `{vf}` must NOT warn, got: {findings:#?}"
+            );
+        }
     }
 }
