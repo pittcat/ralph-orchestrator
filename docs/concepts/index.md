@@ -12,6 +12,7 @@ Ralph is built around a few key ideas:
 4. **[Coordination Patterns](coordination-patterns.md)** — Multi-agent workflow architectures
 5. **[Memories & Tasks](memories-and-tasks.md)** — Persistent learning and runtime work tracking
 6. **[Backpressure](backpressure.md)** — Quality gates that reject incomplete work
+7. **[Profiles](profiles.md)** — Runtime overlay snippets for the same preset, scoped to repo or user
 
 ## The Core Philosophy
 

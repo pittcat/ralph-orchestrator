@@ -158,6 +158,9 @@ enum Commands {
     /// Manage and validate presets
     Preset(commands::preset::PresetArgs),
 
+    /// Inspect Ralph runtime state without modifying it (read-only diagnostics)
+    Inspect(commands::inspect::InspectArgs),
+
     /// Generate shell completions
     Completions(commands::completions::CompletionsArgs),
 
@@ -478,6 +481,15 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Some(Commands::Inspect(args)) => {
+            commands::inspect::execute(
+                &config_sources,
+                hats_source.as_ref(),
+                args,
+                cli.color.should_use_colors(),
+            )
+            .await
+        }
         Some(Commands::Completions(args)) => commands::completions::completions_command(args),
         Some(Commands::Diagnose(args)) => commands::diagnose::diagnose_command(cli.color, args),
         None => {
@@ -508,6 +520,8 @@ async fn main() -> Result<()> {
                 verbose: false,
                 quiet: false,
                 record_session: None,
+                profiles: Vec::new(),
+                no_default_profiles: false,
                 custom_args: Vec::new(),
                 warmup_only: false,
                 force_warmup: false,
@@ -537,6 +551,122 @@ mod tests {
         let cli =
             Cli::try_parse_from(["ralph", "run", "-H", "builtin:debug"]).expect("CLI parse failed");
         assert_eq!(cli.hats.as_deref(), Some("builtin:debug"));
+    }
+
+    // ── U3 (2026-06-25-002): --profile / --no-default-profiles parsing ──
+
+    /// `ralph run --profile repo:x --profile user:y` parses both literals
+    /// into `args.profiles` in argv order. clap's `ArgAction::Append`
+    /// collects every `--profile` flag without deduplication.
+    #[test]
+    fn test_cli_run_parses_repeated_profile_flag() {
+        let cli = Cli::try_parse_from([
+            "ralph",
+            "run",
+            "--profile",
+            "repo:strict",
+            "--profile",
+            "user:my-style",
+        ])
+        .expect("CLI parse failed");
+        let args = match cli.command.expect("run subcommand") {
+            Commands::Run(args) => args,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        assert_eq!(
+            args.profiles,
+            vec!["repo:strict".to_string(), "user:my-style".to_string()],
+            "--profile must collect both flags in argv order"
+        );
+        assert!(!args.no_default_profiles);
+    }
+
+    /// `--no-default-profiles` parses to `true`; absent flag defaults to
+    /// `false`. Both flags coexist: `--no-default-profiles` only suppresses
+    /// the `profiles.default` list from ralph.yml, not the CLI list.
+    #[test]
+    fn test_cli_run_parses_no_default_profiles_flag() {
+        let cli = Cli::try_parse_from(["ralph", "run", "--no-default-profiles"])
+            .expect("CLI parse failed");
+        let args = match cli.command.expect("run subcommand") {
+            Commands::Run(args) => args,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        assert!(args.no_default_profiles);
+        assert!(args.profiles.is_empty());
+    }
+
+    /// Default `ralph run` (no flags) leaves both profile-related fields
+    /// at their zero values. This guards against regression: a clap
+    /// `default_value_t` or hidden default that pre-fills either field
+    /// would shift semantics for users who never touched profiles.
+    #[test]
+    fn test_cli_run_default_has_empty_profiles() {
+        let cli = Cli::try_parse_from(["ralph", "run"]).expect("CLI parse failed");
+        let args = match cli.command.expect("run subcommand") {
+            Commands::Run(args) => args,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        assert!(args.profiles.is_empty());
+        assert!(!args.no_default_profiles);
+    }
+
+    // ── U5 (2026-06-25-002): ralph inspect profiles parsing ──
+
+    /// Top-level `ralph inspect profiles` parses into `Commands::Inspect`
+    /// with the `profiles` subcommand. Required for the `ralph inspect
+    /// profiles --help` smoke-test the plan lists under U5 acceptance.
+    #[test]
+    fn test_cli_inspect_profiles_parses_top_level() {
+        let cli =
+            Cli::try_parse_from(["ralph", "inspect", "profiles"]).expect("CLI parse failed");
+        let args = match cli.command.expect("inspect subcommand") {
+            Commands::Inspect(args) => args,
+            other => panic!("expected Inspect, got {other:?}"),
+        };
+        let profiles_args = match args.command.expect("profiles subcommand") {
+            crate::commands::inspect::InspectCommands::Profiles(p) => p,
+        };
+        assert!(profiles_args.profiles.is_empty());
+        assert!(!profiles_args.no_default_profiles);
+        assert_eq!(
+            profiles_args.format,
+            crate::commands::inspect::InspectProfilesFormat::Human
+        );
+    }
+
+    /// `ralph inspect profiles --profile repo:strict --format json`
+    /// collects every `--profile` literal in argv order and accepts the
+    /// `--format json` switch.
+    #[test]
+    fn test_cli_inspect_profiles_repeated_profile_and_json_format() {
+        let cli = Cli::try_parse_from([
+            "ralph",
+            "inspect",
+            "profiles",
+            "--profile",
+            "repo:strict",
+            "--profile",
+            "user:my-style",
+            "--format",
+            "json",
+        ])
+        .expect("CLI parse failed");
+        let args = match cli.command.expect("inspect subcommand") {
+            Commands::Inspect(args) => args,
+            other => panic!("expected Inspect, got {other:?}"),
+        };
+        let profiles_args = match args.command.expect("profiles subcommand") {
+            crate::commands::inspect::InspectCommands::Profiles(p) => p,
+        };
+        assert_eq!(
+            profiles_args.profiles,
+            vec!["repo:strict".to_string(), "user:my-style".to_string()]
+        );
+        assert_eq!(
+            profiles_args.format,
+            crate::commands::inspect::InspectProfilesFormat::Json
+        );
     }
 
     #[test]

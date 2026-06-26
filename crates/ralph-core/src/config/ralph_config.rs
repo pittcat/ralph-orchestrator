@@ -3911,4 +3911,172 @@ event_loop:
             .collect();
         assert_eq!(empty_warnings.len(), 2, "both hats should warn: {result:?}");
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PROFILES CONFIG TESTS (U1 of plan 2026-06-25-002)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// AC: `profiles.default` accepts a comma-separated string and is
+    /// deserialized into a list of [`ProfileSpec`] with the `scope:`
+    /// `name` shape preserved. Whitespace around each spec is trimmed.
+    #[test]
+    fn test_profiles_default_comma_separated_string() {
+        let yaml = r#"
+profiles:
+  default: "repo:strict, user:my-style"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert_eq!(config.profiles.default.len(), 2);
+        assert_eq!(config.profiles.default[0].scope, ProfileScope::Repo);
+        assert_eq!(config.profiles.default[0].name, "strict");
+        assert_eq!(config.profiles.default[1].scope, ProfileScope::User);
+        assert_eq!(config.profiles.default[1].name, "my-style");
+    }
+
+    /// AC: `profiles.default` also accepts a YAML sequence form so users
+    /// can use either style. Both must yield the same parsed list.
+    #[test]
+    fn test_profiles_default_yaml_sequence() {
+        let yaml = r#"
+profiles:
+  default:
+    - repo:strict
+    - user:my-style
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert_eq!(config.profiles.default.len(), 2);
+        assert_eq!(config.profiles.default[0].scope, ProfileScope::Repo);
+        assert_eq!(config.profiles.default[0].name, "strict");
+        assert_eq!(config.profiles.default[1].scope, ProfileScope::User);
+        assert_eq!(config.profiles.default[1].name, "my-style");
+    }
+
+    /// AC: extra whitespace around each spec in the comma-separated form
+    /// must be trimmed away silently so users can format for readability
+    /// without errors.
+    #[test]
+    fn test_profiles_default_comma_trims_whitespace() {
+        let yaml = r#"
+profiles:
+  default: "  repo:strict  ,   user:my-style  "
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert_eq!(config.profiles.default.len(), 2);
+        assert_eq!(config.profiles.default[0].name, "strict");
+        assert_eq!(config.profiles.default[1].name, "my-style");
+    }
+
+    /// AC: omitting the `profiles:` section entirely is the backwards-
+    /// compat path for existing `ralph.yml` files. The default value must
+    /// be an empty list with no parse error.
+    #[test]
+    fn test_profiles_section_absent_uses_defaults() {
+        let yaml = r"
+agent: claude
+event_loop:
+  completion_promise: DONE
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert!(config.profiles.default.is_empty());
+        assert_eq!(config.profiles, ProfilesConfig::default());
+    }
+
+    /// AC: explicitly empty `profiles.default` (empty string or empty
+    /// sequence) must parse to an empty list — same shape as omitting the
+    /// section. Both YAML forms (`""` and `[]`) are accepted.
+    #[test]
+    fn test_profiles_default_empty_string_and_empty_sequence() {
+        let yaml_string = r#"
+profiles:
+  default: ""
+"#;
+        let cfg_string: RalphConfig =
+            serde_yaml::from_str(yaml_string).expect("parse empty string");
+        assert!(cfg_string.profiles.default.is_empty());
+
+        let yaml_seq = r"
+profiles:
+  default: []
+";
+        let cfg_seq: RalphConfig = serde_yaml::from_str(yaml_seq).expect("parse empty seq");
+        assert!(cfg_seq.profiles.default.is_empty());
+    }
+
+    /// AC: round-trip — `serde_yaml::to_value` then `from_value` must
+    /// produce an identical [`ProfilesConfig`] value. This guards against
+    /// custom deserializer drift in either direction.
+    #[test]
+    fn test_profiles_config_roundtrip() {
+        let original = ProfilesConfig {
+            default: vec![
+                ProfileSpec {
+                    scope: ProfileScope::Repo,
+                    name: "strict".to_string(),
+                },
+                ProfileSpec {
+                    scope: ProfileScope::User,
+                    name: "my-style".to_string(),
+                },
+            ],
+        };
+        let value = serde_yaml::to_value(&original).expect("serialize");
+        let restored: ProfilesConfig = serde_yaml::from_value(value).expect("deserialize");
+        assert_eq!(restored, original);
+    }
+
+    /// AC: legacy `ralph.yml` (no `profiles` block, no other unusual
+    /// fields) continues to parse after U1 — the new field must be
+    /// additive and never break backwards compatibility.
+    #[test]
+    fn test_profiles_backward_compat_no_profiles_block() {
+        let yaml = r#"
+cli:
+  backend: claude
+hats:
+  planner:
+    name: "Planner"
+    description: "Plans tasks"
+    triggers: ["plan.start"]
+"#;
+        let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_ok(),
+            "legacy config without `profiles:` must still parse, got: {:?}",
+            result.err()
+        );
+        let cfg = result.unwrap();
+        assert!(cfg.profiles.default.is_empty());
+    }
+
+    /// AC: invalid scope values (anything other than `repo` or `user`)
+    /// are rejected at parse time — they must surface as a serde YAML
+    /// error rather than silently mapping to a wrong scope.
+    #[test]
+    fn test_profiles_default_invalid_scope_rejected() {
+        let yaml = r#"
+profiles:
+  default: "team:strict"
+"#;
+        let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "invalid scope 'team' must be rejected at parse time"
+        );
+    }
+
+    /// AC: spec entries missing the `<name>` portion (e.g. `repo:` with
+    /// no name) are rejected at parse time so misformatted configs
+    /// surface early instead of producing empty-name specs.
+    #[test]
+    fn test_profiles_default_missing_name_rejected() {
+        let yaml = r#"
+profiles:
+  default: "repo:"
+"#;
+        let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "spec 'repo:' with empty name must be rejected"
+        );
+    }
 }

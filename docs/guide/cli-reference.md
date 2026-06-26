@@ -102,8 +102,84 @@ ralph run [OPTIONS]
 | `--no-auto-merge` | Skip automatic merge after worktree loops complete |
 | `--skip-preflight` | Skip auto preflight checks (even when `features.preflight.enabled: true`) |
 | `--record-session <FILE>` | Record session JSONL |
+| `--profile <SCOPE:NAME>` | Activate a runtime profile overlay. `<scope>` is `repo` (project-rooted `ralph-profiles/<name>/`) or `user` (`~/.config/ralph/profiles/<name>/`, honouring `$XDG_CONFIG_HOME`). Repeatable; CLI `--profile` flags are appended after the `profiles.default` list from `ralph.yml`. Fragments are appended (in activation order) to each matching hat's `instructions` after `normalize()` completes. See [Profiles 概念说明](concepts/profiles.md) 了解目录布局、示例与 `--no-default-profiles` 的语义。 |
+| `--no-default-profiles` | Disable the operator-supplied `profiles.default` list from `ralph.yml`; CLI `--profile` flags remain in effect. |
 | `-q, --quiet` | Suppress streaming output |
 | `--continue` | Resume from existing state |
+
+### ralph inspect
+
+只读诊断命名空间,用于在不启动 loop 的前提下预览运行时解析结果。
+**不修改任何运行时状态**——所有 inspect 子命令仅读取并打印结构化报告。
+
+> 与 `ralph preset`(模板管理与生成)语义不同:
+> `inspect` 只读;`preset` 读写。`inspect profiles` 仅预览 profile 片段的解析结果,不修改 `RalphConfig`;若要真正生效,请配合 `ralph run` / `ralph plan` 使用。
+
+```bash
+ralph inspect [SUBCOMMAND]
+```
+
+**子命令:**
+
+- `profiles [--profile <SCOPE:NAME>]... [--no-default-profiles] [--format human|json]` — 预览 profile overlay 解析结果
+
+### ralph inspect profiles
+
+预览运行时 profile overlay 的解析结果,无需启动 loop。
+
+```bash
+ralph inspect profiles [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--profile <SCOPE:NAME>` | 与 `ralph run` 相同的 `--profile` 语义,用于预览单个 spec;可重复;与 `ralph.yml` 中的 `profiles.default` 合并顺序一致。 |
+| `--no-default-profiles` | 与 `ralph run` 相同的语义,仅在本次预览中禁用 `profiles.default`。 |
+| `--format <human\|json>` | 输出格式。`human`(默认)按 profile → preset → hat 列出每个解析到的片段路径与首行预览;`json` 输出结构化对象,字段稳定,适合脚本消费。 |
+
+**行为**:
+
+- 调用 `load_config_for_preflight` 获取 `RalphConfig`,从 `hats_source` 推导 active preset 名(`builtin:<name>` 取 `<name>`;`<file>.yml` 取 file stem;`HatsSource::Remote` + 任意 active spec 返回清晰错误)。
+- 解析所有 active profile 目录,枚举 `<dir>/<preset>/<hat>.md` 片段,展示每段路径、首行预览(最多 60 字符)与 warnings(preset 子目录缺失、孤儿 hat 等)。
+- **不修改 `RalphConfig`**——纯只读预览。
+- 工作树路径:在 `--worktree` 子进程中,repo profile 仍从主仓库根目录(`RALPH_WORKSPACE_ROOT` 或 `config.core.workspace_root`)解析,不会被解析到 worktree 路径下。
+
+**Examples:**
+
+```bash
+# 预览 repo profile 的解析结果(无任何 active spec)
+ralph inspect profiles -H builtin:debug --profile repo:strict
+
+# 同时叠加 user profile + JSON 输出
+ralph inspect profiles -H builtin:debug \
+  --profile repo:strict --profile user:my-style --format json
+
+# 忽略 ralph.yml 中的 profiles.default,只预览 CLI 显式指定的 profile
+ralph inspect profiles -H builtin:debug --profile user:my-style --no-default-profiles
+```
+
+**JSON 输出形态**(稳定):
+
+```json
+{
+  "preset": "debug",
+  "profiles": [
+    {"spec": "repo:strict", "scope": "repo", "name": "strict"},
+    {"spec": "user:my-style", "scope": "user", "name": "my-style"}
+  ],
+  "fragments": [
+    {
+      "profile": "repo:strict",
+      "path": "/abs/path/to/ralph-profiles/strict/debug/investigator.md",
+      "hat": "investigator",
+      "preview": "You are a strict bug investigator..."
+    }
+  ],
+  "warnings": ["profile 'repo:strict' has no preset subdir 'debug'"]
+}
+```
 
 ### ralph init
 

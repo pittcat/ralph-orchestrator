@@ -66,6 +66,12 @@ pub mod preflight;
 pub mod preset;
 pub mod preset_lint;
 pub mod preset_validator;
+/// Runtime profile overlay loader (U2 of plan 2026-06-25-002). Parses
+/// `<scope>:<name>` specs, resolves them under the repo or user XDG
+/// config root, reads `<profile>/<preset>/<hat-id>.md` fragments, and
+/// appends them to `RalphConfig.hats[hat].instructions`. U1 (the
+/// `profiles.default` config block) lives in `crate::config::profiles`.
+pub mod profiles;
 pub mod runtime_contract;
 #[cfg(feature = "recording")]
 mod session_player;
@@ -106,10 +112,16 @@ pub use config::{
     EventFilterMode, EventLoopConfig, EventMetadata, EventPolicyConfig, EventPolicyMode,
     EventProjectionConfig, EventSchema, FeaturesConfig, HatBackend, HatConfig, HookStage,
     InjectMode, MalformedJsonlPolicy, MemoriesConfig, MemoriesFilter, OnErrorPolicy, PayloadType,
-    Phase, PhaseConfig, PreflightExtensionsConfig, PreflightHook, ProjectionMode, ProjectionRule,
-    RalphConfig, RuntimeDiagnosisConfig, ScratchpadConfig, SkillOverride, SkillsConfig,
-    StateFileEntry, StateFileFormat, StateFilesConfig, StepHandoffConfig, TelemetryConfig,
-    TriggerContext, TriggerPredicate, ViolationAction, WarmupConfig, obligation_satisfied,
+    Phase, PhaseConfig, PreflightExtensionsConfig, PreflightHook, ProfileScope, ProfileSpec,
+    ProfilesConfig, ProjectionMode, ProjectionRule, RalphConfig, RuntimeDiagnosisConfig,
+    ScratchpadConfig, SkillOverride, SkillsConfig, StateFileEntry, StateFileFormat,
+    StateFilesConfig, StepHandoffConfig, TelemetryConfig, TriggerContext, TriggerPredicate,
+    ViolationAction, WarmupConfig, obligation_satisfied,
+};
+pub use profiles::{
+    ProfileFragment, ProfilesError, ResolvedProfileFragments, apply_profile_fragments,
+    apply_profile_fragments_with, parse_profile_spec, resolve_profile_dir,
+    resolve_profile_dir_with, resolve_profile_fragments, resolve_profile_fragments_with,
 };
 
 // Re-export loop_name types (also available via FeaturesConfig.loop_naming)

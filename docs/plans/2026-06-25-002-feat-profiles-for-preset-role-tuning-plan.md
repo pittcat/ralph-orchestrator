@@ -1,7 +1,7 @@
 ---
 title: 为 Preset 增加运行时 Profile 片段叠加机制
 type: feat
-status: active
+status: u5-closed-u6-pending
 date: 2026-06-25
 origin: docs/brainstorms/2026-06-25-profiles-for-preset-role-tuning-requirements.md
 execution_posture: test-first
@@ -332,7 +332,7 @@ graph LR
 
 ---
 
-- [ ] U5. **新增 `ralph inspect profiles` 命令**
+- [x] U5. **新增 `ralph inspect profiles` 命令**
 
 **目标:** 让用户能在不启动 loop 的情况下预览 profile 解析结果、片段路径与 warnings。
 

@@ -26,6 +26,9 @@ for _ralph_fn in \
   _ralph_tui_args \
   _ralph_web_args \
   _ralph_completions_args \
+  _ralph_inspect_subcmd \
+  _ralph_inspect_profiles_args \
+  _ralph_profile_spec \
   _ralph_tools_subcmd \
   _ralph_wave_subcmd \
   _ralph_wave_emit_args \
@@ -106,6 +109,7 @@ _RALPH_COMMANDS=(
   "loops:Manage parallel loops"
   "hats:Manage configured hats"
   "preset:Manage and validate presets"
+  "inspect:Read-only diagnostic commands (e.g. preview profile overlay resolution)"
   "tui:Attach TUI to a running ralph-api server"
   "web:Run web dashboard"
   "mcp:Run Ralph as an MCP server over stdio"
@@ -301,6 +305,9 @@ _ralph() {
         preset)
           _describe 'preset command' _RALPH_PRESET_CMDS
           ;;
+        inspect)
+          _ralph_inspect_subcmd
+          ;;
         tui)
           _ralph_tui_args
           ;;
@@ -331,6 +338,13 @@ _ralph() {
           ;;
         preset)
           _ralph_preset_subcmd ${words[2]} ${words[CURRENT]}
+          ;;
+        inspect)
+          case ${words[2]} in
+            profiles)
+              _ralph_inspect_profiles_args
+              ;;
+          esac
           ;;
       esac
       ;;
@@ -410,6 +424,8 @@ _ralph_run_args() {
     '-v[Enable verbose output]'
     '-q[Suppress streaming output]'
     '--record-session+[Record session to JSONL]:file:_files'
+    '--profile+[Activate runtime profile overlay <scope>:<name>; see _ralph_profile_spec]:spec:_ralph_profile_spec'
+    '--no-default-profiles[Disable profiles.default from ralph.yml; CLI --profile remains in effect]'
     '*:custom args:_default'
   )
 
@@ -517,6 +533,44 @@ _ralph_preflight_args() {
 (( $+functions[_ralph_hooks_args] )) ||
 _ralph_hooks_args() {
   _describe 'hooks command' _RALPH_HOOKS_CMDS
+}
+
+# =============================================================================
+# Inspect Command Arguments
+# =============================================================================
+# `ralph inspect` is a read-only diagnostic namespace. Completion intentionally
+# mirrors `ralph run` for the `--profile` / `--no-default-profiles` pair so the
+# preview command accepts exactly the same spec syntax as the runtime command.
+_RALPH_INSPECT_CMDS=(
+  "profiles:Preview profile overlay resolution (does not modify RalphConfig)"
+)
+
+_ralph_profile_spec() {
+  # `--profile` value is a literal `<scope>:<name>` where scope is `repo`
+  # or `user`. We use compadd (not _describe) because values contain a colon
+  # and may need exact-match completion for the user-typed name portion.
+  # The two prefixes (`repo:` / `user:`) are offered as starting hints;
+  # free-form text after the colon is allowed (matches clap's parser).
+  _values 'profile spec' \
+    'repo:[project-rooted profile]:name' \
+    'user:[~/.config/ralph/profiles/<name>]:name'
+}
+
+(( $+functions[_ralph_inspect_subcmd] )) ||
+_ralph_inspect_subcmd() {
+  _describe 'inspect command' _RALPH_INSPECT_CMDS
+}
+
+(( $+functions[_ralph_inspect_profiles_args] )) ||
+_ralph_inspect_profiles_args() {
+  local -a inspect_profiles_opts
+  inspect_profiles_opts=(
+    '--profile+[Activate runtime profile overlay <scope>:<name>]:spec:_ralph_profile_spec'
+    '--no-default-profiles[Disable profiles.default from ralph.yml; CLI --profile remains in effect]'
+    '--format+[Output format]:format:(human json)'
+    '-v[Verbose output]'
+  )
+  _arguments $inspect_profiles_opts
 }
 
 # =============================================================================
