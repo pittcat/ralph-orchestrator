@@ -617,8 +617,18 @@ impl StateProjector {
     /// matches [`RuntimeStateSnapshot::to_prompt_block`] (defined
     /// in `runtime_state.rs`) so the prompt is byte-identical
     /// between the legacy and U2 paths.
-    pub fn build_orchestrator_context_from_ledger(&self, snapshot: &LedgerSnapshot) -> String {
-        self::orchestrator_context::build_block(snapshot, &self.ctx.config)
+    pub fn build_orchestrator_context_from_ledger(
+        &self,
+        snapshot: &LedgerSnapshot,
+        loop_start_sha: Option<&str>,
+        plan_baseline_sha: Option<&str>,
+    ) -> String {
+        self::orchestrator_context::build_block(
+            snapshot,
+            &self.ctx.config,
+            loop_start_sha,
+            plan_baseline_sha,
+        )
     }
 
     /// U11-T9 (P0-3 follow-up): push the projector's in-memory

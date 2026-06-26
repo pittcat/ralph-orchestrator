@@ -528,6 +528,7 @@ mod tests {
             stall_detector_had_events: false,
             last_rejection_fingerprint: 0,
             loop_start_sha: None,
+            plan_baseline_sha: None,
             rejection_retry_counts: std::collections::HashMap::new(),
             scope_violation_circuit_breaker_tripped: None,
             rejection_last_iteration: std::collections::HashMap::new(),

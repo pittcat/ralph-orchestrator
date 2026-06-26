@@ -371,6 +371,14 @@ pub struct LoopState {
     /// loop runner could not resolve HEAD at startup).
     pub loop_start_sha: Option<String>,
 
+    /// The git HEAD SHA at the moment the plan was first started.
+    ///
+    /// This is the review diff base for plan-driven presets. It is
+    /// persisted across `--reuse-worktree` and `--continue` so that
+    /// review always scopes from plan start rather than from an
+    /// arbitrary rerun. `None` when the SHA was not recorded.
+    pub plan_baseline_sha: Option<String>,
+
     /// Per-step review terminal tracker for plan-gate hard enforcement (U1).
     pub review_step_tracker: super::review_step_state::ReviewStepTracker,
 
@@ -701,6 +709,7 @@ impl Default for LoopState {
             stall_detector_had_events: false,
             last_rejection_fingerprint: 0,
             loop_start_sha: None,
+            plan_baseline_sha: None,
             rejection_retry_counts: HashMap::new(),
             scope_violation_circuit_breaker_tripped: None,
             rejection_last_iteration: HashMap::new(),

@@ -820,6 +820,16 @@ impl EventLoop {
         self.state.loop_start_sha = sha;
     }
 
+    /// Set the persisted plan baseline SHA.
+    ///
+    /// This is the git HEAD at plan start. It is injected into the
+    /// `## ORCHESTRATOR CONTEXT` block so plan-driven presets can scope
+    /// review diffs from the plan's origin rather than from an arbitrary
+    /// rerun.
+    pub fn set_plan_baseline_sha(&mut self, sha: Option<String>) {
+        self.state.plan_baseline_sha = sha;
+    }
+
     /// Maximum consecutive hard-gate triggers before the loop terminates.
     pub const HARD_GATE_MAX: u32 = 3;
 
@@ -4667,11 +4677,16 @@ impl EventLoop {
         if hat_id.as_str() == "ralph" {
             return prompt;
         }
-        let snap = if let Some(p) = self.state.state_projection.as_ref() {
+        let mut snap = if let Some(p) = self.state.state_projection.as_ref() {
             crate::runtime_state::RuntimeStateSnapshot::build(p)
         } else {
             crate::runtime_state::RuntimeStateSnapshot::disabled_stub()
         };
+        // Inject git baseline SHAs from loop state. These are recorded by
+        // the runner at loop start and are not part of the state projector's
+        // ledgers.
+        snap.loop_start_sha = self.state.loop_start_sha.clone();
+        snap.plan_baseline_sha = self.state.plan_baseline_sha.clone();
         format!("{}{prompt}", snap.to_prompt_block())
     }
 

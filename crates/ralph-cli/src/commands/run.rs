@@ -8,7 +8,8 @@ use ralph_adapters::detect_backend;
 use ralph_core::{
     CheckStatus, LockError, LockGuard, LockMetadata, LockStatus, LoopContext, LoopEntry, LoopLock,
     LoopRegistry, PreflightReport, PreflightRunner, ProfileSpec, ProfilesError, RalphConfig,
-    TerminationReason, profiles::parse_profile_spec,
+    TerminationReason, ensure_plan_baseline_from_head,
+    profiles::parse_profile_spec,
     truncate_with_ellipsis,
     worktree::{
         WorktreeConfig, clean_worktree_runtime_artifacts, create_worktree, ensure_gitignore,
@@ -634,6 +635,17 @@ fn spawn_worktree_loop(
         .generate_context_file(&worktree.branch, prompt_summary)
         .context("Failed to generate context file in worktree")?;
 
+    // Record the plan baseline SHA at worktree creation time. This is the
+    // review diff base for the plan; it must survive --reuse-worktree and
+    // --continue so review always scopes from plan start.
+    if let Err(e) = ensure_plan_baseline_from_head(context.workspace(), None) {
+        warn!(
+            worktree = %context.workspace().display(),
+            error = %e,
+            "Failed to record plan baseline in worktree"
+        );
+    }
+
     // Register this loop after preflight succeeds so failed runs
     // don't leave stale registry entries behind.
     let entry = LoopEntry::with_id(
@@ -1020,6 +1032,16 @@ pub async fn run_command(
                     reused_ctx
                         .generate_context_file(&reusable.branch, &prompt_summary)
                         .context("Failed to refresh context file in reused worktree")?;
+                    // The plan baseline was recorded when the worktree was first
+                    // created. Defensively ensure it still exists; if it was lost,
+                    // current HEAD is the best available fallback.
+                    if let Err(e) = ensure_plan_baseline_from_head(reused_ctx.workspace(), None) {
+                        warn!(
+                            worktree = %reused_ctx.workspace().display(),
+                            error = %e,
+                            "Failed to ensure plan baseline in reused worktree"
+                        );
+                    }
                     // PROMPT.md sync (mirrors the create path) so
                     // the agent reads its prompt from the worktree.
                     sync_prompt_to_worktree(workspace_root, &reusable.path);

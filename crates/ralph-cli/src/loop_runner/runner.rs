@@ -1,6 +1,9 @@
 use super::*;
 use ralph_core::diagnosis::TerminationHint;
-use ralph_core::{PolicyRejection, ProcessedEvents};
+use ralph_core::{
+    PolicyRejection, ProcessedEvents, derive_plan_id, ensure_plan_baseline_from_head,
+    get_head_sha, read_plan_baseline,
+};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -1577,6 +1580,29 @@ async fn run_loop_impl_inner(
     // `diff_or_commit` cannot distinguish "loop produced a new commit" from
     // "the repository merely has commits from prior history".
     event_loop.set_loop_start_sha(base_commit.clone());
+
+    // Persist and load the plan-level baseline SHA. This is the git HEAD at
+    // plan start and is the review diff base for plan-driven presets. For
+    // worktree mode it was already recorded when the worktree was created; the
+    // call below is defensive. For primary (non-worktree) mode we scope the
+    // baseline file by the derived plan id so multiple plans in the same
+    // workspace do not share a baseline.
+    let plan_id = if ctx.is_primary() {
+        derive_plan_id(&config.event_loop.prompt_file, None)
+    } else {
+        None
+    };
+    if let Err(e) = ensure_plan_baseline_from_head(ctx.workspace(), plan_id.as_deref()) {
+        warn!(
+            workspace = %ctx.workspace().display(),
+            plan_id = ?plan_id,
+            error = %e,
+            "Failed to ensure plan baseline"
+        );
+    }
+    let plan_baseline_sha = read_plan_baseline(ctx.workspace(), plan_id.as_deref())
+        .or_else(|| get_head_sha(ctx.workspace()).ok());
+    event_loop.set_plan_baseline_sha(plan_baseline_sha);
 
     // Helper closure to handle termination (writes summary, prints status, records history)
     let handle_termination =

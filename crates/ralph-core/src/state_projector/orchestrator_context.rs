@@ -27,7 +27,12 @@ const ORCHESTRATOR_CONTEXT_HEADING: &str = "## ORCHESTRATOR CONTEXT";
 /// `RuntimeStateSnapshot::to_prompt_block()` produces, so
 /// `runtime_state_injection.rs` integration tests remain valid
 /// when the loop switches to the U2 read path.
-pub(crate) fn build_block(snapshot: &LedgerSnapshot, config: &StateProjectionConfig) -> String {
+pub(crate) fn build_block(
+    snapshot: &LedgerSnapshot,
+    config: &StateProjectionConfig,
+    loop_start_sha: Option<&str>,
+    plan_baseline_sha: Option<&str>,
+) -> String {
     let tasks = snapshot.tasks();
     let progress = snapshot.progress();
     let mut buf = String::new();
@@ -69,6 +74,16 @@ pub(crate) fn build_block(snapshot: &LedgerSnapshot, config: &StateProjectionCon
         );
     }
     render_open_tasks(&mut buf, tasks);
+    if let Some(sha) = plan_baseline_sha {
+        let _ = writeln!(buf, "- plan_baseline_sha: {sha}");
+    } else {
+        let _ = writeln!(buf, "- plan_baseline_sha: (none)");
+    }
+    if let Some(sha) = loop_start_sha {
+        let _ = writeln!(buf, "- loop_start_sha: {sha}");
+    } else {
+        let _ = writeln!(buf, "- loop_start_sha: (none)");
+    }
     let _ = writeln!(buf);
     buf
 }
@@ -177,18 +192,20 @@ mod tests {
         snap.progress.current_step = Some("step-01".to_string());
         snap.progress.completed_steps.push("step-00".to_string());
 
-        let block = build_block(&snap, &StateProjectionConfig::default());
+        let block = build_block(&snap, &StateProjectionConfig::default(), None, None);
         assert!(block.starts_with("## ORCHESTRATOR CONTEXT"));
         assert!(block.contains("plan_name: demo-plan"));
         assert!(block.contains("current_step: step-01"));
         assert!(block.contains("step-00"));
         assert!(block.contains("t-1"));
+        assert!(block.contains("plan_baseline_sha: (none)"));
+        assert!(block.contains("loop_start_sha: (none)"));
     }
 
     #[test]
     fn build_block_handles_empty_snapshot() {
         let snap = LedgerSnapshot::cold_start();
-        let block = build_block(&snap, &StateProjectionConfig::default());
+        let block = build_block(&snap, &StateProjectionConfig::default(), None, None);
         assert!(block.contains("plan_name: (none)"));
         assert!(block.contains("current_step: (none)"));
         assert!(block.contains("completed_steps: (none)"));
@@ -202,8 +219,21 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let block = build_block(&snap, &cfg);
+        let block = build_block(&snap, &cfg, None, None);
         assert!(block.contains("State projection is **disabled**"));
+    }
+
+    #[test]
+    fn build_block_renders_git_baselines() {
+        let snap = LedgerSnapshot::cold_start();
+        let block = build_block(
+            &snap,
+            &StateProjectionConfig::default(),
+            Some("loopsha1234567890123456789012345678901234567"),
+            Some("plansha12345678901234567890123456789012345678"),
+        );
+        assert!(block.contains("plan_baseline_sha: plansha12345678901234567890123456789012345678"));
+        assert!(block.contains("loop_start_sha: loopsha1234567890123456789012345678901234567"));
     }
 
     #[test]

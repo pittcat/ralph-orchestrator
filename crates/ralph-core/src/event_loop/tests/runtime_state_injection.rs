@@ -310,3 +310,29 @@ hats:
         "event.state_projection.rejected must be published for missing-pointer work.ready",
     );
 }
+
+/// Plan baseline SHA is injected into `## ORCHESTRATOR CONTEXT` from loop state.
+#[test]
+fn isolated_build_prompt_includes_git_baselines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+    let mut event_loop = isolated_event_loop_with_task(dir.path());
+    event_loop.set_plan_baseline_sha(Some(
+        "plansha12345678901234567890123456789012345678".to_string(),
+    ));
+    event_loop.set_loop_start_sha(Some(
+        "loopsha1234567890123456789012345678901234567".to_string(),
+    ));
+
+    let hat_id = HatId::new("builder");
+    let prompt = event_loop.build_prompt(&hat_id).expect("prompt");
+
+    assert!(
+        prompt.contains("plan_baseline_sha: plansha12345678901234567890123456789012345678"),
+        "prompt must include plan_baseline_sha; got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("loop_start_sha: loopsha1234567890123456789012345678901234567"),
+        "prompt must include loop_start_sha; got:\n{prompt}"
+    );
+}

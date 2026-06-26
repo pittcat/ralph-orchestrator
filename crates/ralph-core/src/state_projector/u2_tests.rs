@@ -390,7 +390,7 @@ fn build_orchestrator_context_from_ledger_matches_legacy_shape() {
     progress.completed_steps.push("step-01".to_string());
     snap.progress = progress;
 
-    let block = proj.build_orchestrator_context_from_ledger(&snap);
+    let block = proj.build_orchestrator_context_from_ledger(&snap, None, None);
     assert!(block.starts_with("## ORCHESTRATOR CONTEXT"));
     assert!(block.contains("plan_name: demo"));
     assert!(block.contains("current_step: step-02"));

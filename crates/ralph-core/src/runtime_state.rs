@@ -44,6 +44,11 @@ pub struct RuntimeStateSnapshot {
     /// wave context (mirrors the `WaveContext` model in
     /// `wave_context.rs`).
     pub wave: Option<WaveSummary>,
+    /// The git HEAD SHA at the moment the loop was started.
+    pub loop_start_sha: Option<String>,
+    /// The git HEAD SHA at the moment the plan was first started.
+    /// This is the review diff base for plan-driven presets.
+    pub plan_baseline_sha: Option<String>,
     /// True when state projection is disabled for this run; the
     /// agent is told so it does not invent its own ledger.
     pub projection_disabled: bool,
@@ -99,6 +104,8 @@ impl RuntimeStateSnapshot {
             //            duplicate until U4 spike picks
             //            one. Both blocks remain
             //            available side-by-side.
+            loop_start_sha: None,
+            plan_baseline_sha: None,
             projection_disabled: !ctx.config.enabled,
         }
     }
@@ -115,6 +122,8 @@ impl RuntimeStateSnapshot {
             completed_steps: Vec::new(),
             open_tasks: Vec::new(),
             wave: None,
+            loop_start_sha: None,
+            plan_baseline_sha: None,
             projection_disabled: true,
         }
     }
@@ -168,6 +177,16 @@ impl RuntimeStateSnapshot {
             for task in &self.open_tasks {
                 let _ = writeln!(buf, "  - {} [{}] {}", task.id, task.status, task.title);
             }
+        }
+        if let Some(sha) = &self.plan_baseline_sha {
+            let _ = writeln!(buf, "- plan_baseline_sha: {sha}");
+        } else {
+            let _ = writeln!(buf, "- plan_baseline_sha: (none)");
+        }
+        if let Some(sha) = &self.loop_start_sha {
+            let _ = writeln!(buf, "- loop_start_sha: {sha}");
+        } else {
+            let _ = writeln!(buf, "- loop_start_sha: (none)");
         }
         if let Some(wave) = &self.wave {
             let _ = writeln!(
@@ -241,6 +260,8 @@ pub fn snapshot_from_disk(workspace: &Path) -> RuntimeStateSnapshot {
         completed_steps: progress.completed_steps,
         open_tasks: open_task_summaries(&tasks),
         wave: None,
+        loop_start_sha: None,
+        plan_baseline_sha: None,
         projection_disabled: true,
     }
 }
@@ -306,6 +327,8 @@ mod tests {
                 status: "open".to_string(),
             }],
             wave: None,
+            loop_start_sha: None,
+            plan_baseline_sha: None,
             projection_disabled: false,
         };
         let block = snap.to_prompt_block();
@@ -314,6 +337,20 @@ mod tests {
         assert!(block.contains("current_step: step-04"));
         assert!(block.contains("step-01, step-02"));
         assert!(block.contains("t-1"));
+        assert!(block.contains("plan_baseline_sha: (none)"));
+        assert!(block.contains("loop_start_sha: (none)"));
+    }
+
+    #[test]
+    fn prompt_block_renders_git_baselines() {
+        let snap = RuntimeStateSnapshot {
+            plan_baseline_sha: Some("plansha12345678901234567890123456789012345678".to_string()),
+            loop_start_sha: Some("loopsha1234567890123456789012345678901234567".to_string()),
+            ..RuntimeStateSnapshot::default()
+        };
+        let block = snap.to_prompt_block();
+        assert!(block.contains("plan_baseline_sha: plansha12345678901234567890123456789012345678"));
+        assert!(block.contains("loop_start_sha: loopsha1234567890123456789012345678901234567"));
     }
 
     #[test]

@@ -57,6 +57,7 @@ pub mod memory_parser;
 mod memory_store;
 pub mod merge_queue;
 pub mod payload_contract;
+pub mod plan_baseline;
 pub mod planning_session;
 pub mod preflight;
 /// `preset::engine` — preset-agnostic execution engine (plan
@@ -198,6 +199,10 @@ pub use merge_queue::{
     MergeButtonState, MergeEntry, MergeEvent, MergeEventType, MergeOption, MergeQueue,
     MergeQueueError, MergeState, SteeringDecision, merge_button_state, merge_execution_summary,
     merge_needs_steering, smart_merge_summary,
+};
+pub use plan_baseline::{
+    PlanBaselineError, derive_plan_id, ensure_plan_baseline, ensure_plan_baseline_from_head,
+    plan_baseline_path, read_plan_baseline, write_plan_baseline_from_head,
 };
 pub use planning_session::{
     ConversationEntry, ConversationType, PlanningSession, PlanningSessionError, SessionMetadata,
