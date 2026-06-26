@@ -1,308 +1,307 @@
-# Backpressure
+# 反压(Backpressure)
 
-Backpressure is Ralph's mechanism for enforcing quality gates. Instead of prescribing how to do something, you define gates that reject incomplete work.
+反压是 Ralph 用于强制质量门禁的机制。它不去规定"怎么做",而是定义"什么算合格",把不合格的工作挡回去。
 
-## The Concept
+## 核心思想
 
-> "Don't prescribe how; create gates that reject bad work." — Tenet #2
+> "不要规定怎么做;要建立把不合格工作挡回去的门。" —— 第二信条
 
-Traditional approach (prescription):
-
-```
-1. First, write the function
-2. Then, write the tests
-3. Then, run the tests
-4. Then, fix any failures
-5. Then, run the linter
-```
-
-Backpressure approach:
+传统方式(规定做法):
 
 ```
-Implement the feature.
-Evidence required: tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass
-Optional (warning-only): mutants: pass (>=70%)
-Optional (fail blocks): specs: pass
+1. 先写函数
+2. 再写测试
+3. 然后跑测试
+4. 然后修复任何失败
+5. 然后跑 lint
 ```
 
-The AI figures out the "how" — it's smart enough. Your job is defining "what success looks like."
+反压方式:
 
-## How It Works
+```
+实现功能。
+所需证据:tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass
+可选(仅警告):mutants: pass (>=70%)
+可选(失败会阻塞):specs: pass
+```
 
-### In Hat Instructions
+AI 自己想办法"怎么做"——它够聪明。你的工作是定义"什么算成功"。
+
+## 工作原理
+
+### 在 Hat 指令中
 
 ```yaml
 hats:
   builder:
     instructions: |
-      Implement the assigned task.
+      实现分配的任务。
 
-      ## Backpressure Requirements
+      ## 反压要求
 
-      Before emitting build.done, you MUST have:
-      - tests: pass (run `cargo test`)
-      - lint: pass (run `cargo clippy`)
-      - typecheck: pass (run `cargo check`)
-      - audit: pass (run `cargo audit`)
-      - coverage: pass (run `cargo tarpaulin` or equivalent)
-      - mutants: pass (run `just mutants-baseline`) # warning-only
+      在发出 build.done 之前,你必须已经满足:
+      - tests: pass(运行 `cargo test`)
+      - lint: pass(运行 `cargo clippy`)
+      - typecheck: pass(运行 `cargo check`)
+      - audit: pass(运行 `cargo audit`)
+      - coverage: pass(运行 `cargo tarpaulin` 或等效工具)
+      - mutants: pass(运行 `just mutants-baseline`)# 仅警告
 
-      Include evidence in your event:
+      在事件中带上证据:
       ```
       ralph emit "build.done" "tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass, mutants: pass (82%)"
       ```
 ```
 
-### In Event Payloads
+### 在事件载荷中
 
-Events carry evidence of backpressure satisfaction:
+事件必须携带反压达标的证据:
 
 ```bash
-# Good: Evidence included
+# 好:带证据
 ralph emit "build.done" "tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass, mutants: pass (82%)"
 
-# Bad: No evidence
-ralph emit "build.done" "I think it works"
+# 坏:无证据
+ralph emit "build.done" "我觉得能跑"
 ```
 
-### Verification by Other Hats
+### 由其它 Hat 验证
 
-A reviewer hat can verify backpressure:
+可以让一个审查类 hat 去核验反压:
 
 ```yaml
 hats:
   reviewer:
     triggers: ["build.done"]
     instructions: |
-      Verify the builder's claims:
-      1. Check the event payload for evidence
-      2. Re-run tests if evidence seems insufficient
-      3. Reject if backpressure not satisfied
+      核验 builder 的声明:
+      1. 检查事件载荷里的证据
+      2. 如果证据看起来不够,重新跑一遍测试
+      3. 反压未达标则拒绝
 
-      If verified:
+      通过:
         ralph emit "review.approved" "evidence verified"
-      If not:
+      拒绝:
         ralph emit "review.rejected" "tests actually failing"
 ```
 
-## Types of Backpressure
+## 反压的类型
 
-### Technical Gates
+### 技术门
 
-| Gate | Command | What It Catches |
+| 门 | 命令 | 拦截什么 |
 |------|---------|-----------------|
-| Tests | `cargo test`, `npm test` | Regressions, bugs |
-| Lint | `cargo clippy`, `eslint` | Code quality issues |
-| Typecheck | `cargo check`, `tsc` | Type errors |
-| Audit | `cargo audit`, `npm audit` | Known vulnerabilities |
-| Format | `cargo fmt --check` | Style violations |
-| Build | `cargo build` | Compilation errors |
-| Mutation | `just mutants-baseline` (baseline), `just mutants-hooks-gate` (CI gate) | Untested logic gaps; hooks rollout gate enforces threshold + critical no-`MISS` invariants |
-| Specs | Verify acceptance criteria | Spec criteria not met by tests (optional, fail blocks) |
+| Tests | `cargo test`、`npm test` | 回归、Bug |
+| Lint | `cargo clippy`、`eslint` | 代码质量问题 |
+| Typecheck | `cargo check`、`tsc` | 类型错误 |
+| Audit | `cargo audit`、`npm audit` | 已知漏洞 |
+| Format | `cargo fmt --check` | 风格违规 |
+| Build | `cargo build` | 编译错误 |
+| Mutation | `just mutants-baseline`(基线)、`just mutants-hooks-gate`(CI 门) | 未被测试覆盖的逻辑空缺;hooks 灰度门同时强制阈值与关键路径无 `MISS` 的硬不变量 |
+| Specs | 验证验收标准 | 测试未覆盖的规格点(可选,失败会阻塞) |
 
-### Repository Mutation Baseline
+### 仓库变异测试基线
 
-For this repository, the mutation tooling baseline is **cargo-mutants**, invoked via:
+本仓库的变异测试基线工具为 **cargo-mutants**,通过以下命令调用:
 
 ```bash
 just mutants-baseline
 ```
 
-This command is scoped to hooks-critical modules and expands to:
+该命令作用域限于 hooks 关键模块,展开后等价于:
 
 ```bash
 cargo mutants --file crates/ralph-core/src/hooks/executor.rs --file crates/ralph-core/src/hooks/engine.rs --file crates/ralph-core/src/preflight.rs --file crates/ralph-cli/src/loop_runner.rs
 ```
 
-Mutation target scope:
+变异目标范围:
 - `crates/ralph-core/src/hooks/executor.rs`
 - `crates/ralph-core/src/hooks/engine.rs`
 - `crates/ralph-core/src/preflight.rs`
-- `crates/ralph-cli/src/loop_runner.rs` (hook disposition + suspend control path)
+- `crates/ralph-cli/src/loop_runner.rs`(hook disposition + suspend 控制路径)
 
-Global mutation quality parsing remains anchored at **>=70%** via
-`QualityReport::MUTATION_THRESHOLD` in
-`crates/ralph-core/src/event_parser.rs`.
+全局变异质量门槛仍锚定 **>=70%**,由
+`crates/ralph-core/src/event_parser.rs` 中的
+`QualityReport::MUTATION_THRESHOLD` 定义。
 
-For the scoped hooks rollout, baseline calibration is documented in
-`docs/06-analysis/hooks-mutation-baseline-2026-03-01.md` and sets an initial
-operational gate of **>=55%** (`caught / (caught + missed)`), with timeouts and
-critical-path no-survivor checks enforced separately.
+针对 hooks 灰度的局部基线,校准结果记录于
+`docs/06-analysis/hooks-mutation-baseline-2026-03-01.md`,把运行期门槛设为
+**>=55%**(`caught / (caught + missed)`);超时与关键路径无存活变异体的检查另行强制。
 
-The enforced hooks mutation CI gate is:
+强制执行的 hooks 变异 CI 门为:
 
 ```bash
 just mutants-hooks-gate
 ```
 
-`mutants-hooks-gate` runs `scripts/hooks-mutation-gate.sh` and:
+`mutants-hooks-gate` 调用 `scripts/hooks-mutation-gate.sh`,其行为:
 
-- enforces `>= HOOKS_MUTATION_THRESHOLD` operational score,
-- hard-fails on any `MISS` in `crates/ralph-cli/src/loop_runner.rs:3467-3560,3623-3635`,
-- reports `TIMEOUT` + `unviable` classes separately,
-- writes actionable artifacts to `.artifacts/hooks-mutation/` for CI upload.
+- 强制 `>= HOOKS_MUTATION_THRESHOLD` 的运行期得分;
+- 在 `crates/ralph-cli/src/loop_runner.rs:3467-3560,3623-3635` 范围内,任何 `MISS` 直接硬失败;
+- 单独报告 `TIMEOUT` 与 `unviable` 类别;
+- 把可操作的产物写入 `.artifacts/hooks-mutation/` 以供 CI 上传。
 
-### Behavioral Gates
+### 行为门
 
-For subjective criteria, use LLM-as-judge:
+对主观性标准,使用 LLM-as-judge:
 
 ```yaml
 hats:
   quality_judge:
     triggers: ["code.written"]
     instructions: |
-      Evaluate the code quality:
-      - Is it readable?
-      - Are names meaningful?
-      - Is complexity justified?
+      评估代码质量:
+      - 是否可读?
+      - 命名是否表意?
+      - 复杂度是否合理?
 
-      Pass or fail with explanation.
+      通过或拒绝,并给出解释。
 ```
 
-### Documentation Gates
+### 文档门
 
 ```yaml
 hats:
   doc_reviewer:
     triggers: ["feature.done"]
     instructions: |
-      Check documentation:
-      - [ ] README updated
-      - [ ] API docs complete
-      - [ ] Examples work
+      检查文档:
+      - [ ] README 已更新
+      - [ ] API 文档完整
+      - [ ] 示例可运行
 
-      Reject if documentation is missing.
+      文档缺失即拒绝。
 ```
 
-## Implementing Backpressure
+## 反压的落地
 
-### In Guardrails
+### 在 Guardrails 里
 
-Global rules injected into every prompt:
+注入到每个 prompt 的全局规则:
 
 ```yaml
 core:
   guardrails:
-    - "Tests must pass before declaring done"
-    - "Never skip linting"
-    - "All public functions need doc comments"
+    - "声明完成前测试必须通过"
+    - "永远不要跳过 lint"
+    - "所有公开函数必须写 doc 注释"
 ```
 
-### In Hat Instructions
+### 在 Hat 指令里
 
-Per-hat requirements:
+每个 hat 的具体要求:
 
 ```yaml
 hats:
   builder:
     instructions: |
-      After implementing:
-      1. Run `cargo test`
-      2. Run `cargo clippy`
-      3. Only emit build.done if both pass
+      实现完成后:
+      1. 运行 `cargo test`
+      2. 运行 `cargo clippy`
+      3. 只有两者都通过才发出 build.done
 ```
 
-### In Event Design
+### 在事件设计里
 
-Events that require evidence:
+需要带证据的事件:
 
 ```yaml
-# Instead of just "done" events
+# 不要只发 "done" 事件
 publishes: ["build.done"]
 
-# Consider "done with evidence" patterns
-# The payload structure enforces evidence
+# 考虑 "done with evidence" 的形式
+# 载荷结构本身强制要求带证据
 ```
 
-## Backpressure Flow
+## 反压流程
 
 ```mermaid
 flowchart TD
-    A[Build Complete?] --> B{Tests Pass?}
-    B -->|No| C[Fix & Retry]
+    A[构建完成?] --> B{测试通过?}
+    B -->|否| C[修复并重试]
     C --> A
-    B -->|Yes| D{Lint Pass?}
-    D -->|No| C
-    D -->|Yes| E{Typecheck Pass?}
-    E -->|No| C
-    E -->|Yes| F[Emit build.done with evidence]
+    B -->|是| D{Lint 通过?}
+    D -->|否| C
+    D -->|是| E{类型检查通过?}
+    E -->|否| C
+    E -->|是| F[带证据发出 build.done]
 ```
 
-## Common Patterns
+## 常见模式
 
-### All-or-Nothing
+### 全有或全无
 
-Everything must pass:
+所有项必须通过:
 
 ```bash
 cargo test && cargo clippy && cargo fmt --check && \
   ralph emit "build.done" "all checks pass"
 ```
 
-### Gradual Gates
+### 渐进式门
 
-Different levels of strictness:
+不同严格度:
 
 ```yaml
-# First iteration: just tests
+# 第一轮:只跑测试
 evidence: "tests: pass"
 
-# Later iteration: full checks
+# 后续轮次:全部检查
 evidence: "tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass (>=80%)"
 ```
 
-### Escape Hatches
+### 例外开口
 
-For exceptional cases:
+用于特殊情况:
 
 ```yaml
 instructions: |
-  Normally, all tests must pass.
+  默认情况下,所有测试都必须通过。
 
-  Exception: If a test is flaky (fails intermittently),
-  document it and proceed. Add a memory:
+  例外:若某测试 flaky(间歇性失败),
+  记下来并继续。补一条记忆:
   ralph tools memory add "Flaky test: test_network_timeout" -t fix
 ```
 
-## Anti-Patterns
+## 反模式
 
-### No Backpressure
+### 无反压
 
 ```yaml
-# Bad: No quality requirements
+# 坏:没有任何质量要求
 instructions: |
-  Implement the feature and emit build.done.
+  实现这个功能并发出 build.done。
 ```
 
-### Fake Evidence
+### 假证据
 
 ```yaml
-# Bad: Evidence not verified
-ralph emit "build.done" "tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass"  # Didn't actually run tests
+# 坏:声称有证据但其实没跑
+ralph emit "build.done" "tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass"  # 实际并未跑测试
 ```
 
-### Too Many Gates
+### 门过多
 
 ```yaml
-# Bad: Overwhelming requirements
+# 坏:要求过载
 instructions: |
-  Must pass: unit tests, integration tests, e2e tests,
-  lint, typecheck, format, security scan, performance
-  benchmark, accessibility audit, i18n check...
+  必须通过:单元测试、集成测试、端到端测试、
+  lint、typecheck、format、安全扫描、性能
+  基准、可访问性审计、国际化检查……
 ```
 
-Keep backpressure focused on what matters.
+反压要聚焦在真正重要的事情上。
 
-## Best Practices
+## 最佳实践
 
-1. **Start with tests** — The most fundamental gate
-2. **Add lint for quality** — Catches common issues
-3. **Include evidence** — Don't just claim, prove
-4. **Verify claims** — Use reviewer hats
-5. **Keep it achievable** — Too strict blocks progress
+1. **从测试开始** —— 最基础的门槛
+2. **加 lint 保质量** —— 拦截常见问题
+3. **带证据** —— 不只是声明,要去证明
+4. **核验声明** —— 用审查类 hat
+5. **保持可达** —— 太严会卡死进度
 
-## Next Steps
+## 下一步
 
-- See [Creating Custom Hats](../advanced/custom-hats.md) for hat design
-- Explore [Presets](../guide/presets.md) with built-in backpressure
-- Learn about [Testing & Validation](../advanced/testing.md)
+- 参见[创建自定义 Hat](../advanced/custom-hats.md)了解 hat 设计
+- 探索带内置反压的 [Presets](../guide/presets.md)
+- 学习[测试与验证](../advanced/testing.md)
