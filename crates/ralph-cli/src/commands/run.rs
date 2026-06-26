@@ -747,15 +747,66 @@ fn worktree_file_name_prefix(
     Some(stem.to_string())
 }
 
+/// Resolve a `--plan` argument to an existing plan file path.
+///
+/// Operators often omit the `.md` extension or the `docs/plans/` prefix.
+/// Without resolution the path is forwarded verbatim to the child RPC
+/// process, which fails to find the file and exits; in TUI mode the
+/// error is hidden in the child's stderr log, so the parent TUI appears
+/// to "flash crash". This helper makes `--plan <basename>` work by
+/// trying a few common variations before giving up.
+///
+/// Resolution order (anchored at `workspace_root`):
+/// 1. Use the path as-is if it already points to a file.
+/// 2. If it lacks the `.md` extension, try `<path>.md`.
+/// 3. If the basename lacks `.md`, try `docs/plans/<basename>.md`.
+/// 4. Return the original path unchanged so the normal "file not found"
+///    error path still fires with the operator-supplied value.
+fn resolve_plan_arg(plan: &Path, workspace_root: &Path) -> PathBuf {
+    // 1. Exact match.
+    let candidate = workspace_root.join(plan);
+    if candidate.is_file() {
+        return plan.to_path_buf();
+    }
+
+    // 2. Try adding `.md` to the provided path.
+    let with_md = plan.with_extension("md");
+    let candidate_with_md = workspace_root.join(&with_md);
+    if candidate_with_md.is_file() {
+        return with_md;
+    }
+
+    // 3. Try `docs/plans/<basename>.md` for bare plan names.
+    if let Some(name) = plan.file_name() {
+        let docs_plans = Path::new("docs").join("plans").join(name).with_extension("md");
+        let candidate_docs_plans = workspace_root.join(&docs_plans);
+        if candidate_docs_plans.is_file() {
+            return docs_plans;
+        }
+    }
+
+    // No resolution found: preserve the original path so the caller
+    // reports the exact value the operator typed.
+    plan.to_path_buf()
+}
+
 pub async fn run_command(
     config_sources: &[ConfigSource],
     hats_source: Option<&HatsSource>,
     verbose: bool,
     color_mode: ColorMode,
-    args: RunArgs,
+    mut args: RunArgs,
     prebuilt_diagnostics: Option<Arc<ralph_core::diagnostics::DiagnosticsCollector>>,
 ) -> Result<()> {
     let mut config = preflight::load_config_for_preflight(config_sources, hats_source).await?;
+
+    // Resolve `--plan` to an existing file before anything else uses it.
+    // This prevents the child RPC process from failing with a hidden
+    // "prompt file not found" error when the operator omits `.md` or
+    // the `docs/plans/` prefix.
+    if let Some(plan) = args.plan.as_deref() {
+        args.plan = Some(resolve_plan_arg(plan, &config.core.workspace_root));
+    }
 
     // Apply profile fragments (plan 2026-06-25-002 U4).
     //
@@ -2915,6 +2966,75 @@ mod tests {
         let source = worktree_file_name_prefix("custom-prompt.md", "[no prompt]", Some(&plan_path));
 
         assert_eq!(source.as_deref(), Some("explicit-plan"));
+    }
+
+    #[test]
+    fn resolve_plan_arg_uses_exact_path_when_it_exists() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plan_path = temp_dir.path().join("my-plan.md");
+        std::fs::write(&plan_path, "content").unwrap();
+
+        let resolved = resolve_plan_arg(Path::new("my-plan.md"), temp_dir.path());
+
+        assert_eq!(resolved, PathBuf::from("my-plan.md"));
+    }
+
+    #[test]
+    fn resolve_plan_arg_adds_md_extension_when_missing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plan_path = temp_dir.path().join("my-plan.md");
+        std::fs::write(&plan_path, "content").unwrap();
+
+        let resolved = resolve_plan_arg(Path::new("my-plan"), temp_dir.path());
+
+        assert_eq!(resolved, PathBuf::from("my-plan.md"));
+    }
+
+    #[test]
+    fn resolve_plan_arg_finds_bare_name_under_docs_plans() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plan_path = temp_dir
+            .path()
+            .join("docs")
+            .join("plans")
+            .join("2026-06-26-001-feat-ralph-lint-precheck-adaptation-plan.md");
+        std::fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        std::fs::write(&plan_path, "content").unwrap();
+
+        let resolved = resolve_plan_arg(
+            Path::new("2026-06-26-001-feat-ralph-lint-precheck-adaptation-plan"),
+            temp_dir.path(),
+        );
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("docs/plans/2026-06-26-001-feat-ralph-lint-precheck-adaptation-plan.md")
+        );
+    }
+
+    #[test]
+    fn resolve_plan_arg_adds_md_to_relative_docs_plans_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plan_path = temp_dir
+            .path()
+            .join("docs")
+            .join("plans")
+            .join("my-plan.md");
+        std::fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        std::fs::write(&plan_path, "content").unwrap();
+
+        let resolved = resolve_plan_arg(Path::new("docs/plans/my-plan"), temp_dir.path());
+
+        assert_eq!(resolved, PathBuf::from("docs/plans/my-plan.md"));
+    }
+
+    #[test]
+    fn resolve_plan_arg_preserved_original_when_nothing_matches() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let resolved = resolve_plan_arg(Path::new("missing-plan"), temp_dir.path());
+
+        assert_eq!(resolved, PathBuf::from("missing-plan"));
     }
 
     #[tokio::test]
