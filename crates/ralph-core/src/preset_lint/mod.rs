@@ -25,6 +25,7 @@ use crate::runtime_contract::{
 
 pub mod coordinator;
 pub mod finding_id;
+pub mod hat_scope_invariant;
 pub mod multi_hat;
 pub mod ownership;
 pub mod schema_parity;
@@ -58,6 +59,7 @@ pub use finding_id::{
 // `2026-06-12-002-feat-workflow-activation-contract-plan.md`
 // (KTD-2: WAC always-on, severity by strictness).
 pub use multi_hat::check_multi_hat_isolation;
+pub use hat_scope_invariant::check_hat_scope_invariant;
 pub use ownership::{check_owner_references, check_ownership_rules};
 pub use state_projection::check_work_done_action_chain_order;
 pub use topic_format::{
@@ -353,6 +355,13 @@ pub fn run_preset_lint(
     let wac_findings =
         run_workflow_activation_contract(config, wac_strict, source_is_builtin_embedded);
     findings.extend(lint_findings_to_contract_findings(&wac_findings));
+
+    // 2026-06-26 plan U2: hat scope invariant — three rules
+    // (event_filter enabled / topic_deny_rules coverage /
+    // coordinator review-chain leak). Fires only in isolated
+    // mode; severity is `Error` for all three rules (structural
+    // invariants, not style warnings).
+    findings.extend(check_hat_scope_invariant(config));
 
     // Plan 2026-06-20-001 U1 KTD-3: state_projection work.done action
     // chain order assertion. Always-on — order is semantic; the

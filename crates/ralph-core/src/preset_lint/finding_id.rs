@@ -190,3 +190,39 @@ pub const FINDING_REVIEW_TERMINAL_DUAL_SUBSCRIBE: &str = "preset.terminal_dual_s
 #[deprecated(note = "use FINDING_TERMINAL_PUBLISHER_INCOMPLETE")]
 pub const FINDING_REVIEW_TERMINAL_PUBLISHER_INCOMPLETE: &str =
     "preset.terminal_publisher_incomplete";
+
+// ──────────────────────────────────────────────────────────────────────────
+// 2026-06-26 plan U2: hat scope invariant finding IDs
+// ──────────────────────────────────────────────────────────────────────────
+
+/// 2026-06-26 plan U2: in isolated mode, a hat declared with
+/// `event_filter.enabled = false` (or with the field omitted) loses
+/// the prompt-side scope enforcement — the agent can see topics the
+/// hat is not allowed to react to. Always `Error` severity in
+/// isolated mode; the rule does NOT fire in coordinator mode where
+/// `event_filter` is intentionally a soft hint.
+///
+/// Refs: docs/plans/2026-06-26-001-fix-ce-executor-serial-four-recurrences-plan.md
+/// R1 (Hat 作用域不变量).
+pub const FINDING_HAT_SCOPE_EVENT_FILTER_DISABLED: &str = "preset.hat_scope_event_filter_disabled";
+
+/// 2026-06-26 plan U2: a hat publishes a topic that has no entry in
+/// the preset's `topic_deny_rules` and is not on the hat's exempt
+/// list. Without an explicit deny rule the topic can be emitted
+/// from any context, bypassing the scope invariant that the
+/// `publishes` set is meant to enforce. Always `Error` severity.
+pub const FINDING_HAT_SCOPE_TOPIC_DENY_INCOMPLETE: &str = "preset.hat_scope_topic_deny_incomplete";
+
+/// 2026-06-26 plan U2: a coordinator hat (one listed in
+/// `tasks.coordinator_hats` or the implicit `coordinator` role)
+/// declares `event_filter.events` containing any of the
+/// `review.*` / `plan.complete` / `plan.blocked` chain topics.
+/// The coordinator must NOT see the review chain (its job is to
+/// dispatch the workflow, not to react to the verdict) — leaking
+/// these topics into its prompt has historically caused the
+/// `ce-executor-serial` "fix.applied" / re-review loop where the
+/// coordinator pre-empts the reviewer.
+///
+/// Always `Error` severity.
+pub const FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK: &str =
+    "preset.hat_scope_coordinator_review_leak";

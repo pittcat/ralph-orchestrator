@@ -525,6 +525,15 @@ pub struct HatConfig {
     #[serde(default)]
     pub event_filter: Option<EventFilterConfig>,
 
+    /// 2026-06-26 plan U2: topics this hat is **explicitly allowed**
+    /// to publish even when the lint invariant would otherwise flag
+    /// them. The list is consumed by the `hat_scope_invariant` lint
+    /// (rule 2) so a hat can declare an escape hatch for topics that
+    /// are too operational to put under `topic_deny_rules` (e.g.
+    /// `work.internal`).
+    #[serde(default)]
+    pub exempt_topics: Vec<String>,
+
     /// Phase-aware triggers: map from phase name to list of trigger topics.
     ///
     /// When present, the hat subscribes to the triggers of the current phase
@@ -625,6 +634,8 @@ impl Default for HatConfig {
             concurrency: 1,
             aggregate: None,
             event_filter: None,
+            // 2026-06-26 plan U2: default no exempt list.
+            exempt_topics: Vec::new(),
             phase_triggers: None,
             ignore_payload_fields: Vec::new(),
             obligations: Vec::new(),
@@ -849,6 +860,10 @@ mod tests {
             concurrency: 1,
             aggregate: None,
             event_filter: None,
+            // 2026-06-26 plan U2: test helper does not exercise
+            // the exempt list; default empty mirrors the
+            // production default.
+            exempt_topics: Vec::new(),
             phase_triggers: None,
             ignore_payload_fields: Vec::new(),
             obligations,
