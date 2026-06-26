@@ -480,6 +480,29 @@ pub struct VerdictGateConfig {
     /// unchanged.
     #[serde(default)]
     pub additional_topics: Vec<String>,
+
+    /// 2026-06-26 plan U5: optional override of the typed
+    /// `Verdict::from_payload` field name. When `None`, the gate
+    /// keeps the legacy binary match (only `fail_field ==
+    /// fail_value` trips the gate). When `Some(name)`, the gate
+    /// parses the payload as a typed `Verdict` and applies
+    /// [`Verdict::resolve`] with `max_residuals` to decide pass vs
+    /// fail — `pass_with_residuals` becomes a real intermediate
+    /// state instead of an alias for fail.
+    ///
+    /// The default in newer presets is `"verdict"`; older presets
+    /// that still use `pass_or_fail` keep `None` and the binary
+    /// match is preserved.
+    #[serde(default)]
+    pub verdict_field: Option<String>,
+
+    /// 2026-06-26 plan U5: optional override of the residual-count
+    /// field name read by `Verdict::from_payload` when the verdict
+    /// is `pass_with_residuals`. The default is
+    /// `"final_findings_count"`. Ignored when `verdict_field` is
+    /// `None` (legacy binary match path).
+    #[serde(default)]
+    pub residual_count_field: Option<String>,
 }
 
 /// Orchestration phase enum.

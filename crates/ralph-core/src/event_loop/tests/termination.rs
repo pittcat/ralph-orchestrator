@@ -459,6 +459,8 @@ fn test_review_failed_triggers_when_verdict_propagates_to_last_mirror() {
         fail_field: "pass_or_fail".to_string(),
         fail_value: "fail".to_string(),
         additional_topics: vec!["report.done".to_string()],
+    verdict_field: None,
+    residual_count_field: None,
     });
 
     let mut event_loop = EventLoop::new(config);
@@ -490,6 +492,8 @@ fn test_review_failed_does_not_trigger_on_upstream_only() {
         fail_field: "pass_or_fail".to_string(),
         fail_value: "fail".to_string(),
         additional_topics: vec!["report.done".to_string()],
+    verdict_field: None,
+    residual_count_field: None,
     });
 
     let mut event_loop = EventLoop::new(config);
@@ -518,6 +522,8 @@ fn test_review_failed_does_not_trigger_on_pass_verdict() {
         fail_field: "pass_or_fail".to_string(),
         fail_value: "fail".to_string(),
         additional_topics: vec!["report.done".to_string()],
+    verdict_field: None,
+    residual_count_field: None,
     });
 
     let mut event_loop = EventLoop::new(config);
@@ -568,6 +574,8 @@ fn u6_verdict_gate_rejects_loop_complete_on_upstream_fail() {
         fail_field: "pass_or_fail".to_string(),
         fail_value: "fail".to_string(),
         additional_topics: vec!["report.done".to_string()],
+    verdict_field: None,
+    residual_count_field: None,
     });
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -621,6 +629,8 @@ fn u6_verdict_gate_rejects_loop_complete_on_report_done_fail() {
         fail_field: "pass_or_fail".to_string(),
         fail_value: "fail".to_string(),
         additional_topics: vec!["report.done".to_string()],
+    verdict_field: None,
+    residual_count_field: None,
     });
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -675,6 +685,8 @@ fn u6_verdict_gate_fake_pass_on_report_done_after_upstream_fail() {
         fail_field: "pass_or_fail".to_string(),
         fail_value: "fail".to_string(),
         additional_topics: vec!["report.done".to_string()],
+    verdict_field: None,
+    residual_count_field: None,
     });
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -752,6 +764,8 @@ fn u6_verdict_gate_allows_loop_complete_on_pass() {
         fail_field: "pass_or_fail".to_string(),
         fail_value: "fail".to_string(),
         additional_topics: vec!["report.done".to_string()],
+    verdict_field: None,
+    residual_count_field: None,
     });
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -788,6 +802,8 @@ fn u6_verdict_payload_is_fail_contract() {
         fail_field: "pass_or_fail".to_string(),
         fail_value: "fail".to_string(),
         additional_topics: vec!["report.done".to_string()],
+    verdict_field: None,
+    residual_count_field: None,
     };
 
     // fail — auto-terminates with ReviewFailed on the last mirror.

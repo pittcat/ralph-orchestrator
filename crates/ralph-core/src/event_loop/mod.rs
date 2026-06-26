@@ -1722,21 +1722,63 @@ impl EventLoop {
         );
     }
 
-    /// Returns true if the verdict event payload contains `gate.fail_field == gate.fail_value`.
+    /// Returns true if the verdict event payload resolves to a
+    /// `Fail` verdict, either via the typed `Verdict::from_payload`
+    /// path (when `gate.verdict_field` is configured) or via the
+    /// legacy binary `fail_field == fail_value` match (when
+    /// `verdict_field` is `None`).
     ///
-    /// Used by `check_completion_event` to enforce a verdict gate: the most recent
-    /// event matching the configured verdict topic must not carry a failing verdict.
-    /// Returns false when the payload is not valid JSON or the field is absent —
-    /// absence is treated as "not failing" because the gate is opt-in and only
-    /// trips on an explicit `fail` value.
+    /// The typed path is the 2026-06-26 plan U5 contract: it
+    /// recognises `pass` / `pass_with_residuals` / `fail` as three
+    /// distinct terminal states and applies `max_residuals` to
+    /// promote or downgrade `pass_with_residuals`. The legacy
+    /// path is preserved so presets that have not yet opted into
+    /// the new field keep working unchanged.
+    ///
+    /// Returns false on:
+    /// - payload not valid JSON,
+    /// - verdict field missing (legacy path: absence == not failing
+    ///   because the gate is opt-in and only trips on an explicit
+    ///   `fail` value),
+    /// - payload that fails to parse as a typed `Verdict` (treated
+    ///   as "not failing" so a transient shape mismatch does not
+    ///   silently kill the loop; the operator can grep
+    ///   `verdict_parse_error` in the diagnostics if the
+    ///   mismatch persists).
     fn verdict_payload_is_fail(payload: &str, gate: &crate::config::VerdictGateConfig) -> bool {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
-            return false;
-        };
-        value
-            .get(&gate.fail_field)
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| s == gate.fail_value)
+        if let Some(verdict_field) = gate.verdict_field.as_deref() {
+            // Typed Verdict path. Threshold defaults to 8 to
+            // match the ralph-e2e `primary-20260624-032505`
+            // case (see `default_max_residuals` in
+            // `crate::config::loop_config`).
+            const DEFAULT_MAX_RESIDUALS: u32 = 8;
+            let max_residuals = Some(DEFAULT_MAX_RESIDUALS);
+            let verdict = Verdict::from_payload(
+                payload,
+                verdict_field,
+                gate.residual_count_field.as_deref(),
+            );
+            match verdict {
+                Ok(v) => v.resolve(max_residuals).is_fail(),
+                Err(_) => {
+                    tracing::debug!(
+                        verdict_field,
+                        "verdict payload did not parse as typed Verdict; \
+                         treating as not failing"
+                    );
+                    false
+                }
+            }
+        } else {
+            // Legacy binary match: `fail_field == fail_value`.
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+                return false;
+            };
+            value
+                .get(&gate.fail_field)
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s == gate.fail_value)
+        }
     }
 
     /// Initializes the loop by publishing the start event.
