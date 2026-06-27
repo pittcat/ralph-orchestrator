@@ -5,6 +5,7 @@
 pub mod loop_state;
 pub mod rejection;
 pub mod review_step_state;
+pub mod stage_pipeline;
 // 2026-06-23-005 U3: typed TerminationTrigger SSOT (KTD-7 + R11).
 // See `event_loop::termination` for the typed enum + reason mapper.
 pub mod termination;
