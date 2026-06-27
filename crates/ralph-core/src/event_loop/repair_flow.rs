@@ -18,14 +18,26 @@
 //!
 //! ```
 //! use ralph_core::event_loop::repair_flow::{
-//!     RepairAction, RepairBudget, RepairState, RepairStateMachine,
+//!     RepairAction, RepairBudget, RepairState, RepairStateMachine, RepairTransitionResult,
 //! };
 //!
 //! let mut sm = RepairStateMachine::new(RepairBudget::default());
-//! sm.try_transition(RepairAction::BeginDiagnosis).unwrap();
-//! sm.try_transition(RepairAction::BeginFix).unwrap();
-//! sm.try_transition(RepairAction::BeginVerify).unwrap();
-//! sm.try_transition(RepairAction::Close).unwrap();
+//! assert!(matches!(
+//!     sm.try_transition(RepairAction::BeginDiagnosis),
+//!     RepairTransitionResult::Accepted
+//! ));
+//! assert!(matches!(
+//!     sm.try_transition(RepairAction::BeginFix),
+//!     RepairTransitionResult::Accepted
+//! ));
+//! assert!(matches!(
+//!     sm.try_transition(RepairAction::BeginVerify),
+//!     RepairTransitionResult::Accepted
+//! ));
+//! assert!(matches!(
+//!     sm.try_transition(RepairAction::Close),
+//!     RepairTransitionResult::Accepted
+//! ));
 //! assert_eq!(sm.state(), RepairState::Closed);
 //! ```
 
