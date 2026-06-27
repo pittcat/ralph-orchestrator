@@ -15,7 +15,7 @@
 //! shared (immutably) across all `check` calls.
 
 use crate::event_loop::flow_declaration::{is_partial_state, FlowDeclaration, FlowStepDecl};
-use crate::event_loop::stage_pipeline::{EmitStage, FlowStep, StageContext, StageReject};
+use crate::event_loop::stage_pipeline::{EmitStage, StageContext, StageReject};
 use ralph_proto::Event;
 
 /// Topics that the verdict gate (U9.5) handles; the

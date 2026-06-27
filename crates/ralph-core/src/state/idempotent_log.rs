@@ -68,7 +68,6 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use {
     nix::fcntl::{Flock, FlockArg, OFlag},
-    std::os::unix::io::AsRawFd,
 };
 
 /// One transition entry inside `IdempotentRecord._transitions`.
