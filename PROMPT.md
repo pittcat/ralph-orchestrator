@@ -1,5 +1,5 @@
 
-Implement dev plan:docs/plans/2026-06-25-002-feat-profiles-for-preset-role-tuning-plan.md，参考代码:/home/chaowen/Dev/agent_tools/autoloop
+Implement dev plan:@docs/plans/2026-06-27-001-feat-ralph-orchestrator-mechanism-foundation-plan.md
 
 ### Note
 

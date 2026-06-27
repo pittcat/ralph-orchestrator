@@ -1,5 +1,4 @@
-/Users/pittcat/Dev/Rust/ralph-orchestrator/.worktrees/2026-06-25-001-feat-ce-executor-serial-5dim-coordinator-amendments-plan-nimble-teak/.ralph
-/Users/pittcat/Dev/Rust/ralph-orchestrator/.worktrees/2026-06-25-002-feat-profiles-for-preset-role-tuning-plan-zippy-otter/.ralph
+/Users/pittcat/Dev/agent_tools/universal-autoresearch/.worktrees/2026-06-26-001-feat-ralph-lint-precheck-adaptation-plan/.ralph
 presets/en/ce-executor-serial.yml
 
 
