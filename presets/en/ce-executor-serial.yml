@@ -83,6 +83,10 @@ mechanism:
           - fix.applied (if test.failed)
           - fix.exhausted (if fix.exhausted)
         terminal_when: all_done
+        on_partial:
+          all_done: plan.complete
+          any_failed: plan.blocked(reason="unit_failed")
+          partial_units_done: plan.blocked(reason="partial_units_done")
       - id: review_walk
         kind: sequence
         allowed_emits:
@@ -127,6 +131,12 @@ mechanism:
 topic_format_whitelist:
   - LOOP_COMPLETE
   - REVIEW_COMPLETE
+  # 2026-06-27 mechanism foundation: repair-bucket topics are
+  # intentionally lowercase_underscore so the orchestrator can
+  # route them through the legacy-progress-steward path; the
+  # topic-format lint is whitelisted here rather than renaming
+  # the topic so the Plan v1.1 §U2 surface contract holds.
+  - task.relocate_legacy
 
 tasks:
   enabled: true

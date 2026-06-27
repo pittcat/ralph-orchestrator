@@ -1376,6 +1376,7 @@ hats:
                 &config,
                 ralph_core::preset_lint::LintStrictness::Strict,
                 false,
+                None,
             )
             .iter()
             .all(|finding| finding.id != "lint.preset.multi_hat_requires_isolated")
@@ -2081,7 +2082,7 @@ hats:
         let merged = merge_hats_overlay(core, hats).unwrap();
         let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
 
-        let findings = run_preset_lint(&config, LintStrictness::Strict, false);
+        let findings = run_preset_lint(&config, LintStrictness::Strict, false, None);
 
         // The lint's purpose here is to surface
         // `invalid_topic_format` warnings. The merged whitelist MUST

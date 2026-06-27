@@ -565,6 +565,7 @@ pub(crate) async fn build_report(
             &config,
             &registry,
             strictness,
+            None,
         ),
     )
 }

@@ -1618,6 +1618,7 @@ fn test_preset_static_lint_scenario() {
         &config,
         &registry,
         strictness,
+        None,
     );
 
     // AE1: valid preset must pass strict lint.
@@ -1752,6 +1753,7 @@ fn test_multi_hat_isolation_lint_bdd_4_hat_default_fails() {
         &config,
         &registry,
         strictness,
+        None,
     );
 
     // 4 hats, default Coordinator mode → aggregator must fail.

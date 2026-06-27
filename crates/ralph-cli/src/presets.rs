@@ -2019,6 +2019,7 @@ mod tests {
                 &config,
                 &registry,
                 strictness,
+                Some(preset.content),
             );
 
             if report.passed {
@@ -2079,6 +2080,7 @@ mod tests {
                 &config,
                 &registry,
                 strictness,
+                Some(preset.content),
             );
             assert!(
                 report.passed,
@@ -2140,6 +2142,7 @@ mod tests {
                 &config,
                 &registry,
                 strictness,
+                Some(preset.content),
             );
             if report.passed {
                 continue;
@@ -2219,6 +2222,7 @@ mod tests {
                 &config,
                 &registry,
                 RuntimeContractStrictness::preset_check_strict(),
+                Some(preset.content),
             );
             let wac_errors: Vec<_> = report
                 .findings

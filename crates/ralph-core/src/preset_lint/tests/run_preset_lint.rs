@@ -23,7 +23,7 @@ event_loop:
   completion_promise: "LOOP_COMPLETE"
 "#;
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-    let findings = run_preset_lint(&config, LintStrictness::Default, false);
+    let findings = run_preset_lint(&config, LintStrictness::Default, false, None);
     let invalid = findings
         .iter()
         .find(|f| f.id == "lint.preset.invalid_topic_format");
@@ -65,7 +65,7 @@ event_loop:
   completion_promise: "LOOP_COMPLETE"
 "#;
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-    let findings = run_preset_lint(&config, LintStrictness::Default, false);
+    let findings = run_preset_lint(&config, LintStrictness::Default, false, None);
     // No findings at all (Pass findings are filtered out).
     assert!(
         findings.is_empty(),
@@ -92,7 +92,7 @@ event_loop:
   completion_promise: "LOOP_COMPLETE"
 "#;
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-    let findings_strict = run_preset_lint(&config, LintStrictness::Strict, false);
+    let findings_strict = run_preset_lint(&config, LintStrictness::Strict, false, None);
     let owner_err = findings_strict
         .iter()
         .find(|f| f.id == "lint.preset.owner_unknown_hat");
@@ -100,7 +100,7 @@ event_loop:
     assert_eq!(owner_err.unwrap().severity, FindingSeverity::Error);
 
     // Default: owner_unknown_hat is always Error (not affected by strictness).
-    let findings_default = run_preset_lint(&config, LintStrictness::Default, false);
+    let findings_default = run_preset_lint(&config, LintStrictness::Default, false, None);
     let owner_err_default = findings_default
         .iter()
         .find(|f| f.id == "lint.preset.owner_unknown_hat");
@@ -129,8 +129,8 @@ event_loop:
   completion_promise: "LOOP_COMPLETE"
 "#;
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-    let findings1 = run_preset_lint(&config, LintStrictness::Default, false);
-    let findings2 = run_preset_lint(&config, LintStrictness::Default, false);
+    let findings1 = run_preset_lint(&config, LintStrictness::Default, false, None);
+    let findings2 = run_preset_lint(&config, LintStrictness::Default, false, None);
     assert_eq!(findings1.len(), findings2.len());
     for (a, b) in findings1.iter().zip(findings2.iter()) {
         assert_eq!(a.id, b.id);
@@ -183,7 +183,7 @@ fn find_multi_hat_finding<'a>(
 fn u1_three_hats_default_mode_run_preset_lint_passes_multi_hat_policy() {
     let yaml = yaml_with_n_hats(3, "");
     let config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
-    let findings = run_preset_lint(&config, LintStrictness::Default, false);
+    let findings = run_preset_lint(&config, LintStrictness::Default, false, None);
     assert!(
         find_multi_hat_finding(&findings).is_none(),
         "3 hats default mode must not produce multi-hat finding, got: {findings:?}"
@@ -196,7 +196,7 @@ fn u1_three_hats_default_mode_run_preset_lint_passes_multi_hat_policy() {
 fn u1_four_hats_default_mode_run_preset_lint_produces_error_with_details() {
     let yaml = yaml_with_n_hats(4, "");
     let config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
-    let findings = run_preset_lint(&config, LintStrictness::Default, false);
+    let findings = run_preset_lint(&config, LintStrictness::Default, false, None);
     let finding = find_multi_hat_finding(&findings)
         .expect("4 hats default mode must produce multi-hat finding");
     assert_eq!(finding.severity, FindingSeverity::Error);
@@ -234,8 +234,8 @@ fn u1_four_hats_explicit_coordinator_run_preset_lint_matches_default() {
     let config_default: RalphConfig = serde_yaml::from_str(&yaml_default).unwrap();
     let config_explicit: RalphConfig = serde_yaml::from_str(&yaml_explicit).unwrap();
 
-    let default_findings = run_preset_lint(&config_default, LintStrictness::Default, false);
-    let explicit_findings = run_preset_lint(&config_explicit, LintStrictness::Default, false);
+    let default_findings = run_preset_lint(&config_default, LintStrictness::Default, false, None);
+    let explicit_findings = run_preset_lint(&config_explicit, LintStrictness::Default, false, None);
 
     let default =
         find_multi_hat_finding(&default_findings).expect("default must produce multi-hat finding");
@@ -253,7 +253,7 @@ fn u1_four_hats_explicit_coordinator_run_preset_lint_matches_default() {
 fn u1_four_hats_isolated_mode_run_preset_lint_passes() {
     let yaml = yaml_with_n_hats(4, "execution_mode: isolated");
     let config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
-    let findings = run_preset_lint(&config, LintStrictness::Default, false);
+    let findings = run_preset_lint(&config, LintStrictness::Default, false, None);
     assert!(
         find_multi_hat_finding(&findings).is_none(),
         "4 hats isolated mode must not produce multi-hat finding, got: {findings:?}"
@@ -313,7 +313,7 @@ hats:
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(config.hats.len(), 8, "fixture must declare 8 hats");
 
-    let findings = run_preset_lint(&config, LintStrictness::Default, false);
+    let findings = run_preset_lint(&config, LintStrictness::Default, false, None);
     let finding = find_multi_hat_finding(&findings)
         .expect("8 hats default mode must produce multi-hat finding");
     assert_eq!(finding.severity, FindingSeverity::Error);
@@ -327,8 +327,8 @@ fn u1_lint_strictness_does_not_change_multi_hat_severity() {
     let yaml = yaml_with_n_hats(4, "");
     let config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
 
-    let default_findings = run_preset_lint(&config, LintStrictness::Default, false);
-    let strict_findings = run_preset_lint(&config, LintStrictness::Strict, false);
+    let default_findings = run_preset_lint(&config, LintStrictness::Default, false, None);
+    let strict_findings = run_preset_lint(&config, LintStrictness::Strict, false, None);
 
     let default = find_multi_hat_finding(&default_findings)
         .expect("default strictness must produce multi-hat finding");
@@ -359,7 +359,7 @@ fn u1_lint_strictness_does_not_change_multi_hat_severity() {
 fn u1_runtime_contract_finding_shape_preserved() {
     let yaml = yaml_with_n_hats(5, "");
     let config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
-    let findings = run_preset_lint(&config, LintStrictness::Default, false);
+    let findings = run_preset_lint(&config, LintStrictness::Default, false, None);
     let finding = find_multi_hat_finding(&findings)
         .expect("5 hats default mode must produce multi-hat finding");
     assert_eq!(finding.source, crate::runtime_contract::FindingSource::Lint);

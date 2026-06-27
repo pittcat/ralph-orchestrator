@@ -3233,6 +3233,7 @@ tasks:
                 &config,
                 ralph_core::preset_lint::LintStrictness::Strict,
                 false,
+                None,
             );
             assert!(
                 findings
@@ -3259,6 +3260,7 @@ tasks:
         &config,
         ralph_core::preset_lint::LintStrictness::Strict,
         false,
+        None,
     );
     let loop_complete_findings: Vec<_> = findings
         .iter()

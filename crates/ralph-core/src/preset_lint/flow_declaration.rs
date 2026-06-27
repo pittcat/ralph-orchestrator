@@ -95,19 +95,35 @@ pub fn check_flow_declaration(raw_yaml: &str) -> Result<Vec<LintFinding>, FlowPa
         }
     }
 
-    // 2. terminal_emits must include LOOP_COMPLETE.
-    if !decl.terminal_emits.iter().any(|t| t == "LOOP_COMPLETE") {
+    // 2. terminal_emits must include the runtime's
+    //    `event_loop.completion_promise` so the verdict gate
+    //    and the flow declaration agree on what terminates
+    //    the loop. We accept either an explicit
+    //    `LOOP_COMPLETE` (the default completion promise)
+    //    or the per-preset `completion_promise` value.
+    let raw_value: serde_yaml::Value =
+        serde_yaml::from_str(raw_yaml).unwrap_or(serde_yaml::Value::Null);
+    let completion_promise = raw_value
+        .get("event_loop")
+        .and_then(|el| el.get("completion_promise"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("LOOP_COMPLETE");
+    if !decl
+        .terminal_emits
+        .iter()
+        .any(|t| t == completion_promise)
+    {
         let mut f = LintFinding::new(
             FINDING_FLOW_TERMINAL_EMIT_MISSING,
             format!(
-                "flow declaration `terminal_emits` ({:?}) does not contain `LOOP_COMPLETE`",
-                decl.terminal_emits
+                "flow declaration `terminal_emits` ({:?}) does not contain `{}` (the preset's completion_promise)",
+                decl.terminal_emits, completion_promise
             ),
         );
-        f.action_hint = Some(
-            "add `LOOP_COMPLETE` to `terminal_emits` (the runtime verdict gate locks this set)"
-                .to_string(),
-        );
+        f.action_hint = Some(format!(
+            "add `{}` to `terminal_emits` (the runtime verdict gate locks this set)",
+            completion_promise
+        ));
         findings.push(f);
     }
 
@@ -174,6 +190,7 @@ fn collect_known_topics(raw_yaml: &str) -> std::collections::HashSet<String> {
     }
 
     if let Ok(value) = serde_yaml::from_str::<Value>(raw_yaml) {
+        // 1. Event-policy schemas declare payload contracts.
         if let Some(schemas) = value
             .get("event_loop")
             .and_then(|el| el.get("event_policy"))
@@ -183,6 +200,42 @@ fn collect_known_topics(raw_yaml: &str) -> std::collections::HashSet<String> {
             for (topic, _rule) in schemas {
                 if let Some(topic) = topic.as_str() {
                     set.insert(topic.to_string());
+                }
+            }
+        }
+
+        // 2. Top-level `topic_format_whitelist` declares
+        //    operator-approved topics (e.g. legacy
+        //    `task.relocate_legacy` in `ce-executor-serial`).
+        //    Including them here lets the flow declaration
+        //    lint allow the same set the topic-format lint
+        //    allows, so the two stay in lockstep.
+        if let Some(whitelist) = value
+            .get("topic_format_whitelist")
+            .and_then(|w| w.as_sequence())
+        {
+            for topic in whitelist {
+                if let Some(t) = topic.as_str() {
+                    set.insert(t.to_string());
+                }
+            }
+        }
+
+        // 3. Hat `publishes:` declarations — a topic that
+        //    some hat is contractually allowed to emit is
+        //    by definition a known topic. This keeps
+        //    `flow.allowed_emits` in lockstep with the hat
+        //    topology without forcing the operator to add
+        //    the topic to a schema or whitelist just to
+        //    silence the lint.
+        if let Some(hats) = value.get("hats").and_then(|h| h.as_mapping()) {
+            for (_hat_id, hat) in hats {
+                if let Some(publishes) = hat.get("publishes").and_then(|p| p.as_sequence()) {
+                    for topic in publishes {
+                        if let Some(t) = topic.as_str() {
+                            set.insert(t.to_string());
+                        }
+                    }
                 }
             }
         }

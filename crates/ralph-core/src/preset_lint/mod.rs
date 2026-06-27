@@ -303,6 +303,7 @@ pub fn run_preset_lint(
     config: &RalphConfig,
     strictness: LintStrictness,
     source_is_builtin_embedded: bool,
+    raw_yaml: Option<&str>,
 ) -> Vec<RuntimeContractFinding> {
     let mut findings: Vec<RuntimeContractFinding> = Vec::new();
 
@@ -416,10 +417,24 @@ pub fn run_preset_lint(
     // (2026-06-27 plan U10). Custom presets are checked when they
     // already have a `mechanism:` key but missing declarations are not
     // retroactively enforced so existing operator presets keep working.
-    let raw_yaml = serde_yaml::to_string(config).unwrap_or_default();
-    let has_mechanism_block = raw_yaml.lines().any(|line| line.trim_start().starts_with("mechanism:"));
+    //
+    // 2026-06-27 wiring follow-up: prefer the raw_yaml the caller
+    // supplied (when running strict_lint against embedded presets
+    // or freshly parsed operator files). The typed-config round
+    // trip drops fields `RalphConfig` does not model — the
+    // `mechanism:` block is one of those, so the flow-declaration
+    // check needs the unaltered text. Fall back to
+    // `serde_yaml::to_string(config)` when no raw text is
+    // available (e.g. callers that synthesise `RalphConfig`
+    // programmatically).
+    let raw_yaml_owned = raw_yaml
+        .map(str::to_string)
+        .unwrap_or_else(|| serde_yaml::to_string(config).unwrap_or_default());
+    let has_mechanism_block = raw_yaml_owned
+        .lines()
+        .any(|line| line.trim_start().starts_with("mechanism:"));
     if source_is_builtin_embedded || has_mechanism_block {
-        match flow_declaration::check_flow_declaration(&raw_yaml) {
+        match flow_declaration::check_flow_declaration(&raw_yaml_owned) {
             Ok(flow_findings) => findings.extend(lint_findings_to_contract_findings(&flow_findings)),
             Err(e) => {
                 // Parse-level error from `mechanism.flow` is surfaced as a

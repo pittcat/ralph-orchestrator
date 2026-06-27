@@ -1,5 +1,50 @@
 topic_format_whitelist:
 - DEBUG_COMPLETE
+# 2026-06-27 mechanism foundation U10: declared flow covering the
+# debug cycle. `DEBUG_COMPLETE` is the completion_promise so
+# `terminal_emits` carries it. Allowed emits mirror the hat
+# publishes; the lint then surfaces required-event topology
+# issues separately (and exempts `autoresearch` / `debug` per
+# `topology_exempt` in `test_all_embedded_presets_pass_strict_lint`).
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [DEBUG_COMPLETE]
+    steps:
+      - id: debug_cycle
+        kind: sequence
+        # 2026-06-27 mechanism foundation U10: only hat-emitted
+        # topics are listed. The hat publishes in this preset
+        # are `hypothesis.test`, `hypothesis.confirmed`,
+        # `hypothesis.rejected`, `fix.propose`, `fix.applied`,
+        # `fix.blocked`, `fix.verified`, `fix.failed` — those
+        # are the only ones the runtime should accept as
+        # business events inside this step. `debug.start` is
+        # operator-prompted (not hat-emitted) and
+        # `DEBUG_COMPLETE` is the completion_promise terminal
+        # — both intentionally omitted so the
+        # `flow_unknown_emit_rejected` lint does not require
+        # schema entries for protocol-token / operator
+        # surfaces.
+        allowed_emits:
+          - hypothesis.test
+          - hypothesis.confirmed
+          - hypothesis.rejected
+          - fix.propose
+          - fix.applied
+          - fix.blocked
+          - fix.verified
+          - fix.failed
+        body:
+          - debug.start
+          - hypothesis.test
+          - hypothesis.confirmed
+          - fix.propose
+          - fix.applied
+          - fix.verified
+          - DEBUG_COMPLETE
+        emit_when: linear
 tasks:
   enabled: false
 event_loop:

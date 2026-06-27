@@ -370,6 +370,16 @@ pub const LOOP_RUNNER_INTERNAL_TOPICS: &[&str] = &[
     // here so the required-topic lint does not flag it as
     // "no publisher / no subscriber in the hat graph".
     "task.resume",
+    // 2026-06-27 mechanism foundation U2: repair-bucket topics.
+    // These are produced/consumed by the `RepairDispatchStage`
+    // (U7) and the orchestrator's recovery envelope writer (U8),
+    // not by any user-facing hat. Listing them here exempts them
+    // from the strict topology lint without weakening the
+    // "operator-declared topology" surface.
+    "repair.budget.exhausted",
+    "repair.close",
+    "task.relocate",
+    "task.relocate_legacy",
 ];
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -983,11 +993,20 @@ pub struct RuntimeContractAggregator;
 impl RuntimeContractAggregator {
     /// Run all preset contract checks in order and return a fully
     /// assembled `RuntimeContractReport`.
+    ///
+    /// `raw_yaml` is the original YAML the lint was loaded
+    /// from. It is forwarded to the flow-declaration check so the
+    /// lint sees the `mechanism:` block as written, rather than a
+    /// re-serialised `RalphConfig` that drops unmodelled fields.
+    /// Pass `None` for tests / callers that build the config
+    /// programmatically; the flow-declaration check then runs
+    /// against `serde_yaml::to_string(config)` as a fallback.
     pub fn aggregate(
         source_label: impl Into<String>,
         config: &crate::config::RalphConfig,
         registry: &HatRegistry,
         strictness: RuntimeContractStrictness,
+        raw_yaml: Option<&str>,
     ) -> RuntimeContractReport {
         let mut report = RuntimeContractReport::new(source_label, strictness);
 
@@ -1038,7 +1057,12 @@ impl RuntimeContractAggregator {
         // short-circuit subsequent topology/payload/orphan checks,
         // so callers see all authoring issues in one report.
         let builtin_source = source_label_is_builtin_embedded(&report.source_label);
-        for finding in run_preset_lint(config, LintStrictness::Strict, builtin_source) {
+        for finding in run_preset_lint(
+            config,
+            LintStrictness::Strict,
+            builtin_source,
+            raw_yaml,
+        ) {
             report.add_finding(finding);
         }
 
@@ -1761,6 +1785,7 @@ mod tests {
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert!(report.passed, "empty config should pass: {:?}", report);
         assert_eq!(
@@ -1807,6 +1832,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert!(
             report.passed,
@@ -1841,6 +1867,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert!(!report.passed);
         let topology = report
@@ -1877,6 +1904,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert!(!report.passed);
         let topology = report
@@ -1914,6 +1942,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert!(!report.passed);
         let topology = report.findings.iter().find(|f| {
@@ -1963,6 +1992,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert!(!report.passed);
         let topology = report.findings.iter().find(|f| {
@@ -2004,6 +2034,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         let orphan = report
             .findings
@@ -2047,6 +2078,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert!(
             report
@@ -2080,6 +2112,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert!(
             report
@@ -2122,6 +2155,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert!(
             report
@@ -2162,6 +2196,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         let orphan = report
             .findings
@@ -2210,6 +2245,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert!(
             report.passed,
@@ -2260,6 +2296,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::preset_check_strict(),
+            None,
         );
         assert!(
             !report.passed,
@@ -2313,6 +2350,7 @@ hats:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert!(!report.passed);
         let payload = report.findings.iter().find(|f| {
@@ -2354,6 +2392,7 @@ hats:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert!(
             non_strict.passed,
@@ -2370,6 +2409,7 @@ hats:
                 payload_strict: false,
                 fail_on_warnings: true,
             },
+            None,
         );
         assert!(
             !strict.passed,
@@ -2395,6 +2435,7 @@ hats:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert!(!report.passed);
         // Exactly one finding, and it is a config error.
@@ -2421,6 +2462,7 @@ hats:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         assert_eq!(report.source_label, "builtin:ce-executor-serial");
     }
@@ -2461,6 +2503,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         let value: serde_json::Value = serde_json::to_value(&report).expect("serialize report");
         let obj = value
@@ -2525,6 +2568,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::preset_check_strict(),
+            None,
         );
         assert!(
             report
@@ -2695,6 +2739,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::preset_check_strict(),
+            None,
         );
         let required_codes: Vec<&str> = report
             .findings
@@ -2743,6 +2788,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::preset_check_strict(),
+            None,
         );
         let lint_findings: Vec<&RuntimeContractFinding> = report
             .findings
@@ -2795,6 +2841,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         // No lint ERROR or WARN findings for LOOP_COMPLETE.
         let bad_lint: Vec<&RuntimeContractFinding> = report
@@ -2852,6 +2899,7 @@ hats:
             &config,
             &registry,
             RuntimeContractStrictness::preset_check_strict(),
+            None,
         );
         let has_lint = report
             .findings
@@ -2902,6 +2950,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         let lint_ids: Vec<&str> = report
             .findings
@@ -2960,6 +3009,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::default(),
+            None,
         );
         let ownership_warns: Vec<&RuntimeContractFinding> = non_strict
             .findings
@@ -2983,6 +3033,7 @@ event_loop:
             &config,
             &registry,
             RuntimeContractStrictness::preset_check_strict(),
+            None,
         );
         let ownership_errs: Vec<&RuntimeContractFinding> = strict
             .findings

@@ -1,5 +1,38 @@
 topic_format_whitelist:
 - LOOP_COMPLETE
+# 2026-06-27 mechanism foundation U10: declared flow covering the
+# experiment-research loop. `LOOP_COMPLETE` is the completion
+# promise so `terminal_emits` carries it. Allowed emits mirror
+# the hat publishes; the lint then surfaces required-event
+# topology issues separately (autoresearch is in the
+# `topology_exempt` set so its multi-branch completion paths
+# don't fail the strict gate).
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: experiment_cycle
+        kind: sequence
+        # 2026-06-27 mechanism foundation U10: only hat-emitted
+        # topics. `experiment.start` is operator-prompted and
+        # intentionally omitted; `LOOP_COMPLETE` is the
+        # completion_promise terminal and stays in
+        # `terminal_emits` (above) but is omitted here. The
+        # remaining topics mirror the hat publishes in this
+        # preset.
+        allowed_emits:
+          - experiment.planned
+          - experiment.ready
+          - experiment.measured
+          - experiment.scored
+          - experiment.evaluated
+        body:
+          - experiment.start
+          - experiment.evaluated
+          - LOOP_COMPLETE
+        emit_when: linear
 tasks:
   enabled: false
 event_loop:

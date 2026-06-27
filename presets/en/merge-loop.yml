@@ -17,6 +17,47 @@
 topic_format_whitelist:
   - MERGE_COMPLETE
 
+# 2026-06-27 mechanism foundation U10: declared flow with one
+# branch step that owns the merge-handled terminal. The merge
+# loop's `merge.handled` is the completion_promise, so the
+# terminal_emits list is just that one event.
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [merge.handled]
+    steps:
+      - id: merge_cycle
+        kind: sequence
+        # 2026-06-27 mechanism foundation U10: only the hat-emitted
+        # topics from `merger` / `resolver` / `tester` /
+        # `cleaner` / `failure_handler` are listed. The
+        # startup-only `merge.start` is left out so the
+        # `flow_unknown_emit_rejected` lint does not require a
+        # schema entry for an operator-provided prompt
+        # surface. The completion_promise `merge.handled`
+        # stays in `terminal_emits` (above) but is omitted
+        # from allowed_emits because the runtime verdict
+        # gate accepts it as a terminal topic.
+        allowed_emits:
+          - merge.done
+          - merge.failed
+          - conflict.detected
+          - conflict.resolved
+          - conflict.unresolvable
+          - tests.passed
+          - tests.failed
+        body:
+          - merge.start
+          - merge.done
+          - conflict.detected
+          - conflict.resolved
+          - conflict.unresolvable
+          - tests.passed
+          - tests.failed
+          - merge.handled
+        emit_when: linear
+
 tasks:
   enabled: false
 

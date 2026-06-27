@@ -2464,7 +2464,7 @@ impl PreflightCheck for PresetContractCheck {
         let registry = HatRegistry::from_runtime_config(config);
         let strictness = RuntimeContractStrictness::default();
         let report =
-            RuntimeContractAggregator::aggregate("preflight", config, &registry, strictness);
+            RuntimeContractAggregator::aggregate("preflight", config, &registry, strictness, None);
 
         if report.passed {
             if report.warnings == 0 {
