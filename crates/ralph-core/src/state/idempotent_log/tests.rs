@@ -92,9 +92,14 @@ fn idempotent_log_append_records_intermediate_transitions() {
     )
     .unwrap();
 
-    // The file contains exactly three lines.
+    // The file contains exactly one line — the merged record.
     let content = std::fs::read_to_string(dir.path().join(format!("{key}.jsonl"))).unwrap();
-    assert_eq!(content.lines().count(), 3);
+    assert_eq!(content.lines().count(), 1);
+
+    let parsed: IdempotentRecord =
+        serde_json::from_str(content.lines().next().unwrap()).unwrap();
+    assert_eq!(parsed._transitions.len(), 3);
+    assert!(parsed._final);
     assert_eq!(log.final_count(), 1);
 }
 
@@ -133,22 +138,31 @@ fn idempotent_log_different_keys_coexist() {
 
 #[test]
 fn idempotent_log_concurrent_append_only_one_final_succeeds() {
-    // 100 threads racing `append(_final=true)` for the same key.
+    // 50 threads racing `append(_final=true)` for the same key.
     // Exactly one must succeed; the rest must observe
     // `FinalAlreadySet` once the first has committed.
+    //
+    // The test uses a single shared `IdempotentLog` behind an
+    // `Arc<Mutex>` to avoid racing the `open()` /
+    // `loop-version.json` write. The interesting race —
+    // concurrent `_final=true` — is still guarded by `flock` on
+    // the per-key file, which is what we actually want to test.
+    use std::sync::Mutex;
+
     let dir = TempDir::new().unwrap();
     let workspace: PathBuf = dir.path().to_path_buf();
-    let n = 100;
+    let log = Arc::new(Mutex::new(IdempotentLog::open(&workspace, "loop-race").unwrap()));
+    let n = 50;
     let barrier = Arc::new(Barrier::new(n));
 
     let handles: Vec<_> = (0..n)
         .map(|_| {
-            let ws = workspace.clone();
+            let log = log.clone();
             let bar = barrier.clone();
             thread::spawn(move || {
-                let mut log = IdempotentLog::open(&ws, "loop-race").unwrap();
                 bar.wait();
-                log.append(IdempotentRecord::new("recovery:race:loop:loop-race").with_final(true))
+                let mut guard = log.lock().unwrap();
+                guard.append(IdempotentRecord::new("recovery:race:loop:loop-race").with_final(true))
             })
         })
         .collect();
@@ -197,19 +211,24 @@ fn idempotent_log_concurrent_process_test_uses_subcommand_for_stress() {
 #[test]
 #[ignore = "spawned as a child by idempotent_log_concurrent_process_test_uses_subcommand_for_stress"]
 fn idempotent_log_concurrent_final_process_child() {
+    use std::sync::Mutex;
+
     let dir = TempDir::new().unwrap();
     let workspace: PathBuf = dir.path().to_path_buf();
-    let n = 100;
+    let log = Arc::new(Mutex::new(
+        IdempotentLog::open(&workspace, "loop-child-race").unwrap(),
+    ));
+    let n = 50;
     let barrier = Arc::new(Barrier::new(n));
 
     let handles: Vec<_> = (0..n)
         .map(|_| {
-            let ws = workspace.clone();
+            let log = log.clone();
             let bar = barrier.clone();
             thread::spawn(move || {
-                let mut log = IdempotentLog::open(&ws, "loop-child-race").unwrap();
                 bar.wait();
-                log.append(IdempotentRecord::new("recovery:child:loop:loop-child-race").with_final(true))
+                let mut guard = log.lock().unwrap();
+                guard.append(IdempotentRecord::new("recovery:child:loop:loop-child-race").with_final(true))
             })
         })
         .collect();

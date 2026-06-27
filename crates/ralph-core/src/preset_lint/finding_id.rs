@@ -238,3 +238,38 @@ pub const FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK: &str =
 /// name (the lint cannot verify upstream payload consistency);
 /// the warning forces the operator to acknowledge the footgun.
 pub const FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN: &str = "preset.hat_scope_verdict_field_unknown";
+
+// ──────────────────────────────────────────────────────────────────────────
+// 2026-06-27 plan: mechanism foundation U5 flow declaration finding IDs
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Preset has no `mechanism.flow` block. Without a flow
+/// declaration the runtime cannot enforce step scope or
+/// terminal alignment, so the entire mechanism foundation is
+/// inert for this preset. Always `Error` severity.
+pub const FINDING_FLOW_DECLARATION_MISSING: &str = "preset.flow_declaration_missing";
+
+/// A step whose `terminal_when` is in `{all_done, any_failed,
+/// partial_units_done}` does not declare an `on_partial` map.
+/// Without the partial branch the runtime cannot recover from
+/// the 4/8 partial-completion case that triggered the
+/// 2026-06-26 incident. Always `Error` severity.
+pub const FINDING_FLOW_PARTIAL_STATE_UNDECLARED: &str = "preset.flow_partial_state_undeclared";
+
+/// `on_partial.<key>` maps to an empty string. The lint
+/// rejects this because an empty emit expression is a silent
+/// no-op that swallows the partial state. Always `Error`.
+pub const FINDING_FLOW_PARTIAL_BRANCH_EMPTY: &str = "preset.flow_partial_branch_empty";
+
+/// A `terminal_emits` value is missing the well-known
+/// `LOOP_COMPLETE` topic. The verdict gate locks this set;
+/// the lint surfaces drifts to operators before runtime
+/// rejects them. Always `Error`.
+pub const FINDING_FLOW_TERMINAL_EMIT_MISSING: &str = "preset.flow_terminal_emit_missing";
+
+/// An `allowed_emits` set in a flow step contains a topic
+/// that is not on the well-known topic-format whitelist AND
+/// not declared in `event_policy.schemas`. The runtime
+/// `FlowStepScopeStage` will reject emits of this topic at
+/// runtime; the lint catches it at preset-load time.
+pub const FINDING_FLOW_UNKNOWN_EMIT_REJECTED: &str = "preset.flow_unknown_emit_rejected";

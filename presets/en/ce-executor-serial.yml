@@ -50,6 +50,80 @@
 #   - No debug-resolver: fixer merges diagnosis + fix capability
 #   - No per-step review: review runs once after all units complete
 
+# 2026-06-27 mechanism foundation U10: declarative flow metadata.
+# The runtime reads `mechanism.flow` at preset-load time and
+# passes it to `FlowStepScopeStage` (U9) and `VerdictGateStage`
+# (U9.5). The lint in `preset_lint::flow_declaration` checks
+# this block at preset-authoring time. The `repair_budget`,
+# `enforce_schema`, and `state_idempotency` keys wire U1, U2,
+# U4 / U8 respectively.
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: unit_loop
+        kind: foreach
+        over: plan.units
+        allowed_emits:
+          - work.ready
+          - work.done
+          - work.failed
+          - test.passed
+          - test.failed
+          - fix.applied
+          - fix.exhausted
+        body:
+          - work.ready
+          - work.done
+          - work.failed
+          - test.passed
+          - test.failed
+          - fix.applied (if test.failed)
+          - fix.exhausted (if fix.exhausted)
+        terminal_when: all_done
+      - id: review_walk
+        kind: sequence
+        allowed_emits:
+          - review.start
+          - review.dimension.ready
+          - review.dimension.done
+          - review.dimension.failed
+          - review.dimensions.complete
+          - review.complete
+        body:
+          - review.start
+          - review.dimension.ready
+          - review.dimension.done
+          - review.complete
+        emit_when: unit_loop.terminal == all_done
+      - id: plan_end
+        kind: branch
+        allowed_emits:
+          - plan.complete
+          - plan.blocked
+        on_partial:
+          all_done: plan.complete
+          any_failed: plan.blocked(reason="unit_failed")
+          partial_units_done: plan.blocked(reason="partial_units_done")
+        on_review_passed: plan.complete
+        on_review_failed: plan.blocked(reason="review_failed")
+        on_residual: plan.complete(verdict="pass_with_residuals")
+      - id: ship
+        kind: sequence
+        allowed_emits:
+          - REVIEW_COMPLETE
+          - report.done
+          - LOOP_COMPLETE
+        body:
+          - REVIEW_COMPLETE
+          - report.done
+          - LOOP_COMPLETE
+  repair_budget: 3
+  enforce_schema: hard
+  state_idempotency: required
+
 topic_format_whitelist:
   - LOOP_COMPLETE
   - REVIEW_COMPLETE

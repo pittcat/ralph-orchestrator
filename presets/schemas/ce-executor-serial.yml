@@ -344,6 +344,40 @@ schemas:
       - kind
     payload: json_object
 
+  # 2026-06-27 mechanism foundation U7/U10: repair stream topics.
+  # All repair topics must include `task_key` (P1-2) so the
+  # `stall_recovery_counts` index in `loop_state` can clear the
+  # right counter on `repair.close`.
+  task.relocate:
+    required_fields:
+      - task_key
+      - task_id
+      - target_loop_id
+      - reason
+    payload: json_object
+
+  task.relocate_legacy:
+    required_fields:
+      - task_key
+      - target_loop_id
+      - reason
+    payload: json_object
+
+  repair.budget.exhausted:
+    required_fields:
+      - task_key
+      - retry_key
+      - exhausted_after
+      - reason
+    payload: json_object
+
+  repair.close:
+    required_fields:
+      - task_key
+      - retry_key
+      - reason
+    payload: json_object
+
   # 2026-06-16-001 U5: diagnostic topic emitted when the loop
   # has stalled (no accepted business event for
   # `max_steward_iterations` consecutive turns). Routes to

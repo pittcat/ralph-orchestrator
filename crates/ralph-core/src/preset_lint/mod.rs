@@ -25,6 +25,7 @@ use crate::runtime_contract::{
 
 pub mod coordinator;
 pub mod finding_id;
+pub mod flow_declaration;
 pub mod hat_scope_invariant;
 pub mod multi_hat;
 pub mod ownership;
@@ -37,9 +38,13 @@ pub mod workflow_activation;
 mod tests;
 
 pub use coordinator::check_coordinator_rules;
+pub use flow_declaration::check_flow_declaration;
 pub use finding_id::{
     FINDING_ACTIVATION_EGRESS_MISSING, FINDING_COORDINATOR_MISSING,
-    FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH, FINDING_HANDOFF_PAIRING_BROKEN,
+    FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH, FINDING_FLOW_DECLARATION_MISSING,
+    FINDING_FLOW_PARTIAL_BRANCH_EMPTY, FINDING_FLOW_PARTIAL_STATE_UNDECLARED,
+    FINDING_FLOW_TERMINAL_EMIT_MISSING, FINDING_FLOW_UNKNOWN_EMIT_REJECTED,
+    FINDING_HANDOFF_PAIRING_BROKEN,
     FINDING_HANDOFF_SEED_DERIVED_CONFLICT, FINDING_INVALID_TOPIC_FORMAT,
     FINDING_MISSING_TOPIC_OWNER, FINDING_MULTI_HAT_REQUIRES_ISOLATED, FINDING_OWNER_NOT_PUBLISHER,
     FINDING_OWNER_UNKNOWN_HAT, FINDING_RE_EMIT_TRAP, FINDING_TASK_PUBLISHER_NOT_COORDINATED,
@@ -147,6 +152,22 @@ pub struct LintFinding {
 }
 
 impl LintFinding {
+    /// Build a new `LintFinding` from a public caller — used
+    /// by the U5 `flow_declaration` lint module, which lives
+    /// in a sibling directory and needs to construct findings
+    /// without going through the `error()` shorthand.
+    pub fn new(id: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            id,
+            severity: LintSeverity::Error,
+            message: message.into(),
+            topic: None,
+            hat: None,
+            owner: None,
+            action_hint: None,
+        }
+    }
+
     pub(crate) fn error(id: &'static str, message: impl Into<String>) -> Self {
         Self {
             id,
@@ -389,6 +410,34 @@ pub fn run_preset_lint(
     // `check_publishes_have_schema` for runtime surfacing.
     let schema_parity_findings = schema_parity::check_publishes_have_schema(config, strictness);
     findings.extend(lint_findings_to_contract_findings(&schema_parity_findings));
+
+    // 2026-06-27 mechanism foundation U5: flow declaration lint.
+    // Builtin presets are required to carry a `mechanism.flow` block
+    // (2026-06-27 plan U10). Custom presets are checked when they
+    // already have a `mechanism:` key but missing declarations are not
+    // retroactively enforced so existing operator presets keep working.
+    let raw_yaml = serde_yaml::to_string(config).unwrap_or_default();
+    let has_mechanism_block = raw_yaml.lines().any(|line| line.trim_start().starts_with("mechanism:"));
+    if source_is_builtin_embedded || has_mechanism_block {
+        match flow_declaration::check_flow_declaration(&raw_yaml) {
+            Ok(flow_findings) => findings.extend(lint_findings_to_contract_findings(&flow_findings)),
+            Err(e) => {
+                // Parse-level error from `mechanism.flow` is surfaced as a
+                // single lint finding so the operator can see why the
+                // declaration is unusable.
+                let id = format!("lint.{}", FINDING_FLOW_DECLARATION_MISSING);
+                let finding = RuntimeContractFinding::try_new_core(
+                    id,
+                    FindingSource::Lint,
+                    FindingSeverity::Error,
+                    FindingStage::Authoring,
+                    format!("mechanism.flow declaration could not be parsed: {e}"),
+                )
+                .expect("lint findings never use the reserved Preflight source");
+                findings.push(finding);
+            }
+        }
+    }
 
     // Sort by id, then topic for deterministic output.
     findings.sort_by(|a, b| {

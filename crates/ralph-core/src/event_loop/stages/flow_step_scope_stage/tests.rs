@@ -1,0 +1,148 @@
+use super::*;
+use crate::event_loop::flow_declaration::FlowDeclaration;
+use crate::event_loop::stage_pipeline::{
+    EmitStage, FlowStep, RepairStateMachine, StageContext,
+};
+use ralph_proto::Event;
+
+const FLOW_YAML: &str = r#"
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: unit_loop
+        kind: foreach
+        allowed_emits: [work.ready, work.done, work.failed]
+        terminal_when: all_done
+      - id: review_walk
+        kind: sequence
+        allowed_emits: [review.start, review.complete]
+      - id: plan_end
+        kind: branch
+        allowed_emits: [plan.complete, plan.blocked]
+        terminal_when: partial_units_done
+        on_partial:
+          all_done: plan.complete
+          any_failed: plan.blocked(reason="unit_failed")
+          partial_units_done: plan.blocked(reason="4_of_8_partial")
+"#;
+
+fn flow() -> FlowDeclaration {
+    FlowDeclaration::from_yaml(FLOW_YAML).unwrap()
+}
+
+fn ctx_for(step_id: &str) -> StageContext<'static> {
+    let repair: &'static RepairStateMachine = Box::leak(Box::new(RepairStateMachine));
+    StageContext::new(FlowStep::new(step_id), "loop-1", 1, repair)
+}
+
+fn ev(topic: &str, payload: &str) -> Event {
+    Event::new(topic, payload)
+}
+
+#[test]
+fn flow_step_scope_accepts_event_in_allowed_emits() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev("work.ready", "{}");
+    assert!(stage.check(&ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn flow_step_scope_rejects_event_outside_allowed_emits() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev("plan.complete", "{}");
+    let err = stage.check(&ctx_for("unit_loop"), &e).unwrap_err();
+    assert_eq!(err.reason_code, "flow_unknown_emit");
+}
+
+#[test]
+fn flow_step_scope_allows_terminal_topic_through_to_verdict_gate() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev("LOOP_COMPLETE", "{}");
+    assert!(stage.check(&ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn flow_step_scope_accepts_partial_state_event_with_matching_reason() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev(
+        "plan.blocked",
+        r#"{"reason":"4_of_8_partial_continue_to_review"}"#,
+    );
+    assert!(stage.check(&ctx_for("plan_end"), &e).is_ok());
+}
+
+#[test]
+fn flow_step_scope_rejects_partial_state_event_with_empty_reason() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev("plan.blocked", r#"{"reason":""}"#);
+    let err = stage.check(&ctx_for("plan_end"), &e).unwrap_err();
+    assert_eq!(err.reason_code, "flow_partial_state_undeclared");
+}
+
+#[test]
+fn flow_step_scope_rejects_partial_state_event_with_wrong_reason_pattern() {
+    let stage = FlowStepScopeStage::new(flow());
+    // `partial_units_done` branch requires `partial` substring.
+    let e = ev("plan.blocked", r#"{"reason":"i_give_up"}"#);
+    let err = stage.check(&ctx_for("plan_end"), &e).unwrap_err();
+    assert_eq!(err.reason_code, "reason_pattern_mismatch");
+}
+
+#[test]
+fn flow_step_scope_skips_partial_check_for_non_plan_topics() {
+    let stage = FlowStepScopeStage::new(flow());
+    // `work.done` is in allowed_emits and the step has a
+    // partial-state terminal_when — but work.done is not a
+    // plan.* topic, so the partial pattern check does not
+    // fire.
+    let e = ev("work.done", r#"{"task_id":"abc"}"#);
+    assert!(stage.check(&ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn flow_step_scope_skips_check_when_step_id_not_in_flow() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev("plan.complete", "{}");
+    // `ctx_for("does_not_exist")` is not in the flow — the
+    // stage must not block. The `flow_declaration_missing`
+    // lint is the operator's signal.
+    assert!(stage.check(&ctx_for("does_not_exist"), &e).is_ok());
+}
+
+#[test]
+fn reason_pattern_partial_units_done_requires_partial_substring() {
+    assert!(reason_matches_partial_pattern(
+        "partial_units_done",
+        "4_of_8_partial"
+    ));
+    assert!(reason_matches_partial_pattern(
+        "partial_units_done",
+        "PARTIAL_UNITS_DONE"
+    ));
+    assert!(!reason_matches_partial_pattern(
+        "partial_units_done",
+        "all_done"
+    ));
+}
+
+#[test]
+fn reason_pattern_any_failed_requires_unit_failed_or_any_failed() {
+    assert!(reason_matches_partial_pattern("any_failed", "unit_failed"));
+    assert!(reason_matches_partial_pattern("any_failed", "any_failed"));
+    assert!(!reason_matches_partial_pattern("any_failed", "partial"));
+}
+
+#[test]
+fn extract_reason_returns_empty_string_for_null() {
+    let r = extract_reason(r#"{"reason":null}"#);
+    assert_eq!(r, Some(String::new()));
+}
+
+#[test]
+fn extract_reason_returns_none_for_non_object() {
+    assert_eq!(extract_reason("\"hi\""), None);
+    assert_eq!(extract_reason("not-json"), None);
+}

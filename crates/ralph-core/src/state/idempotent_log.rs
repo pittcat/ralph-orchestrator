@@ -192,30 +192,56 @@ impl IdempotentLog {
     /// - a call with a different loop_id bumps the version and
     ///   is the caller's signal that archive (U11) must run
     ///   first.
+    ///
+    /// Concurrent callers may briefly observe a missing or
+    /// partially written `loop-version.json`; `open` retries the
+    /// read up to 5 times with a small sleep before treating the
+    /// file as fresh.
     pub fn open(workspace: &Path, loop_id: &str) -> Result<Self, IdempotentError> {
         fs::create_dir_all(workspace)?;
 
         let version_path = workspace.join(LOOP_VERSION_FILE);
-        let expected_version = if version_path.exists() {
-            let persisted: PersistedVersion =
-                serde_json::from_str(&fs::read_to_string(&version_path)?)?;
-            if persisted.loop_id == loop_id {
-                persisted.version
-            } else {
-                persisted.version + 1
+
+        let mut expected_version: Option<u64> = None;
+        for attempt in 0..5 {
+            if version_path.exists() {
+                let raw = fs::read_to_string(&version_path)?;
+                if !raw.trim().is_empty() {
+                    match serde_json::from_str::<PersistedVersion>(&raw) {
+                        Ok(persisted) => {
+                            expected_version = Some(if persisted.loop_id == loop_id {
+                                persisted.version
+                            } else {
+                                persisted.version + 1
+                            });
+                            break;
+                        }
+                        Err(_) => {
+                            // Partial write from a concurrent caller —
+                            // fall through to retry.
+                        }
+                    }
+                }
             }
-        } else {
-            1
-        };
+            if attempt < 4 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+
+        let expected_version = expected_version.unwrap_or(1);
 
         let new_persisted = PersistedVersion {
             loop_id: loop_id.to_string(),
             version: expected_version,
         };
-        fs::write(
-            &version_path,
-            serde_json::to_string_pretty(&new_persisted)? + "\n",
-        )?;
+        let serialised = serde_json::to_string_pretty(&new_persisted)? + "\n";
+
+        // Write the version file atomically too — otherwise a
+        // half-written file breaks the next `open`.
+        let nonce = std::process::id();
+        let tmp = version_path.with_extension(format!("json.tmp.{nonce}"));
+        fs::write(&tmp, &serialised)?;
+        fs::rename(&tmp, &version_path)?;
 
         Ok(Self {
             workspace: workspace.to_path_buf(),
@@ -237,21 +263,23 @@ impl IdempotentLog {
         &self.workspace
     }
 
-    /// Append `record` to the per-key JSONL file
+    /// Append or update `record` under the per-key JSONL file
     /// `{workspace}/{key}.jsonl`.
     ///
     /// The protocol:
     ///
     /// 1. Acquire an OS-level exclusive lock on the key file
     ///    (`flock` on Unix; rejected with `NoOsLock` on Windows).
-    /// 2. Read the last line of the file (if any). If it is
+    /// 2. Read the existing record (if any). If it is
     ///    `_final=true`, refuse with `FinalAlreadySet`.
-    /// 3. Write the record to a sibling `.{nonce}.tmp` file,
-    ///    `fsync`, then `rename` over the key file.
-    /// 4. Release the lock (RAII on `Flock`).
+    /// 3. Merge the new transitions into the existing record
+    ///    (or use the new record if there is no existing one).
+    /// 4. Write the merged record to a sibling `.{nonce}.tmp`
+    ///    file, `fsync`, then `rename` over the key file.
+    /// 5. Release the lock (RAII on `Flock`).
     ///
     /// The in-memory index is updated **after** the rename so
-    /// a crash between steps 3 and 4 leaves the disk as the
+    /// a crash between steps 4 and 5 leaves the disk as the
     /// source of truth and the next `open` rebuilds the index.
     pub fn append(&mut self, mut record: IdempotentRecord) -> Result<(), IdempotentError> {
         if record._idempotency_key.is_empty() {
@@ -268,8 +296,9 @@ impl IdempotentLog {
         // 1. Acquire OS lock.
         let _guard = acquire_exclusive_lock(&key_path)?;
 
-        // 2. Read existing last record (if any).
-        if let Some(existing) = read_last_record(&key_path)? {
+        // 2. Read existing record (if any).
+        let existing = read_last_record(&key_path)?;
+        let merged = if let Some(existing) = existing {
             if existing._final {
                 return Err(IdempotentError::FinalAlreadySet(
                     record._idempotency_key.clone(),
@@ -280,13 +309,16 @@ impl IdempotentLog {
                     record._idempotency_key.clone(),
                 ));
             }
-        }
+            merge_records(existing, record)
+        } else {
+            record
+        };
 
         // 3. Atomic write.
-        write_atomic(&key_path, &record)?;
+        write_atomic(&key_path, &merged)?;
 
         // 4. Update in-memory index.
-        self.index.insert(record._idempotency_key.clone(), record);
+        self.index.insert(merged._idempotency_key.clone(), merged);
 
         Ok(())
     }
@@ -372,6 +404,9 @@ fn read_last_record(path: &Path) -> Result<Option<IdempotentRecord>, IdempotentE
         return Ok(None);
     }
     let content = fs::read_to_string(path)?;
+    // Each per-key file holds exactly one record (merged on
+    // every append). Reading the last non-empty line is the
+    // authoritative shape.
     let last_non_empty = content
         .lines()
         .rev()
@@ -380,6 +415,23 @@ fn read_last_record(path: &Path) -> Result<Option<IdempotentRecord>, IdempotentE
         None => Ok(None),
         Some(line) => Ok(Some(serde_json::from_str(line)?)),
     }
+}
+
+/// Merge `new` into `existing`: keep `existing`'s
+/// `_idempotency_key`, `_version`, and `_created_at`, then
+/// concatenate the new transitions. If `new._final` is true the
+/// merged record becomes final; otherwise it inherits the
+/// existing `_final` value (typically `false`). The payload is
+/// always the new one — the most recent write wins for the
+/// payload, but the transition log is monotonic.
+fn merge_records(existing: IdempotentRecord, new: IdempotentRecord) -> IdempotentRecord {
+    let mut merged = existing;
+    merged._transitions.extend(new._transitions);
+    if new._final {
+        merged._final = true;
+    }
+    merged.payload = new.payload;
+    merged
 }
 
 /// RAII guard that releases the OS-level file lock on drop.

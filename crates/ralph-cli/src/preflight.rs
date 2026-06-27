@@ -688,6 +688,12 @@ const ALLOWED_HATS_TOP_LEVEL: &[&str] = &[
     // matching counterweight (removes the `coord_join_mode: parallel`
     // placeholder so the !contains_key guard fires correctly).
     "telemetry",
+    // 2026-06-27 mechanism foundation U10: builtin presets declare
+    // `mechanism.flow` + `repair_budget` + `enforce_schema` +
+    // `state_idempotency` to opt into the stage pipeline. The block is
+    // hat-driven: it controls runtime gates, not operator resources or
+    // budgets, so it must survive the overlay merge.
+    "mechanism",
 ];
 // Event-loop keys that a hat collection overlay is allowed to provide.
 //

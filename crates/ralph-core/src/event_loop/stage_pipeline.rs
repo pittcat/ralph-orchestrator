@@ -20,6 +20,7 @@
 //! 4. `FlowStepScopeStage` — flow step / allowed_emits check.
 //! 5. `VerdictGateStage` — terminal emit alignment.
 
+use crate::event_loop::flow_declaration::FlowDeclaration;
 use ralph_proto::Event;
 
 /// A single stage in the emit pipeline.
@@ -126,6 +127,19 @@ impl StagePipeline {
     /// Create a pipeline from the given stages, preserving order.
     pub fn new(stages: Vec<Box<dyn EmitStage>>) -> Self {
         Self { stages }
+    }
+
+    /// Build the locked default pipeline for the mechanism
+    /// foundation (U0). Order is fixed by the plan; changing it
+    /// breaks the `assert_stage_order!` macro and the
+    /// `stage_pipeline_order_*` tests.
+    pub fn with_default_stages(flow: FlowDeclaration) -> Self {
+        Self::new(vec![
+            Box::new(crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage::default()),
+            Box::new(crate::event_loop::stages::emit_schema_gate_stage::EmitSchemaGateStage::with_defaults()),
+            Box::new(crate::event_loop::stages::flow_step_scope_stage::FlowStepScopeStage::new(flow.clone())),
+            Box::new(crate::event_loop::stages::verdict_gate_stage::VerdictGateStage::new(flow)),
+        ])
     }
 
     /// Run the event through every stage in order.  The first

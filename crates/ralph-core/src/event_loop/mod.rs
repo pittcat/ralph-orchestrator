@@ -8,6 +8,16 @@ pub mod review_step_state;
 // 2026-06-27 mechanism foundation U1: hard required-fields check at
 // emit time. Pure-logic core; `EmitSchemaGateStage` (U6) wraps it.
 pub mod emit_schema_gate;
+// 2026-06-27 mechanism foundation U5: declarative flow
+// parser (steps / allowed_emits / terminal_emits / on_partial).
+// The lint in `preset_lint::flow_declaration` and the
+// `FlowStepScopeStage` (U9) both consume the same type.
+pub mod flow_declaration;
+// 2026-06-27 mechanism foundation U8: thin wiring layer from
+// the existing task_store / diagnosis / drift consumers to the
+// U4 `IdempotentLog`. The runtime opts in by setting
+// `mechanism.state_idempotency: required` in the preset.
+pub mod idempotent_wiring;
 // 2026-06-27 mechanism foundation U3: legacy task loop_id backfill.
 // Pure file-I/O; sits next to `relocate_legacy_tasks` so U7 can
 // invoke it from `RepairDispatchStage` without crossing module
@@ -17,6 +27,11 @@ pub mod legacy_task_relocate;
 // machine + per-task budget. `RepairDispatchStage` (U7) wraps it.
 pub mod repair_flow;
 pub mod stage_pipeline;
+// 2026-06-27 mechanism foundation U6+ wiring stages. Each
+// U-* wiring unit lives in `event_loop::stages` as its own
+// submodule. Order matches the locked pipeline order; do
+// not reorder without updating `assert_stage_order!`.
+pub mod stages;
 // 2026-06-23-005 U3: typed TerminationTrigger SSOT (KTD-7 + R11).
 // See `event_loop::termination` for the typed enum + reason mapper.
 pub mod termination;

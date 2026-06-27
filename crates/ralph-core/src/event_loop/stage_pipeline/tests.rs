@@ -169,6 +169,27 @@ fn stage_pipeline_skeleton_locked_order_matches() {
 }
 
 #[test]
+fn stage_pipeline_order_default_matches_locked_emit_order() {
+    use crate::event_loop::flow_declaration::FlowDeclaration;
+
+    let flow = FlowDeclaration::from_yaml(r#"
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: unit_loop
+        allowed_emits: [work.ready]
+"#).unwrap();
+    let pipeline = StagePipeline::with_default_stages(flow);
+    assert_eq!(
+        pipeline.names(),
+        vec!["RepairDispatch", "EmitSchemaGate", "FlowStepScope", "VerdictGate"]
+    );
+}
+
+#[test]
 fn stage_pipeline_skeleton_wrong_order_fails_at_runtime() {
     let pipeline = StagePipeline::new(vec![
         Box::new(RepairDispatchStage),
