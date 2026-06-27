@@ -5,6 +5,17 @@
 pub mod loop_state;
 pub mod rejection;
 pub mod review_step_state;
+// 2026-06-27 mechanism foundation U1: hard required-fields check at
+// emit time. Pure-logic core; `EmitSchemaGateStage` (U6) wraps it.
+pub mod emit_schema_gate;
+// 2026-06-27 mechanism foundation U3: legacy task loop_id backfill.
+// Pure file-I/O; sits next to `relocate_legacy_tasks` so U7 can
+// invoke it from `RepairDispatchStage` without crossing module
+// boundaries.
+pub mod legacy_task_relocate;
+// 2026-06-27 mechanism foundation U2: independent repair state
+// machine + per-task budget. `RepairDispatchStage` (U7) wraps it.
+pub mod repair_flow;
 pub mod stage_pipeline;
 // 2026-06-23-005 U3: typed TerminationTrigger SSOT (KTD-7 + R11).
 // See `event_loop::termination` for the typed enum + reason mapper.

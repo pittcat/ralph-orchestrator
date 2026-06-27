@@ -38,6 +38,10 @@ mod ledger;
 /// diagnostics `recovery.jsonl` line shape but lives at the
 /// workspace root so it survives `RALPH_DIAGNOSTICS=0`.
 pub mod recovery_log;
+/// 2026-06-27 mechanism foundation U4: idempotent JSONL log
+/// writer (atomic rename + OS file lock). Wired into
+/// task_store / diagnosis / drift consumers in U8.
+pub mod idempotent_log;
 mod snapshot;
 
 pub use commit::{Commit, CommitDelta, CounterKind, TaskTransition};
