@@ -42,6 +42,11 @@ pub enum ArchiveError {
 /// archive is created. If the persisted `loop_id` equals the
 /// current one, the function is a no-op (resume case).
 ///
+/// Called from `EventLoop::new` (via `with_context_and_diagnostics`)
+/// exactly once at loop start, **before** `IdempotentLog::open` writes
+/// the new `loop-version.json`. Best-effort: callers warn on error
+/// and continue (the loop must not panic on archive failure).
+///
 /// The caller is expected to call `IdempotentLog::open` after
 /// this, which will write the new `loop-version.json` with the
 /// bumped version.

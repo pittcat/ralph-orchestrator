@@ -186,12 +186,48 @@ impl DriftEngine {
         let snapshots = observer.drain(observer_capacity());
         let mut produced = 0;
         let session_id = event_loop.diagnostics().session_id();
+        // U8 (2026-06-27 mechanism foundation): pull the loop_id
+        // out of the idempotent log before we touch the
+        // diagnostics collector. The log's `loop_id()` accessor
+        // returns the empty string for a disabled log, which
+        // tells the wiring layer to skip the write entirely —
+        // matches the "JSONL only" fallback for tests that never
+        // open an IdempotentLog. Borrow checker: snapshot the
+        // string up front so the later `event_loop.idempotent_log().lock()`
+        // does not conflict with the `event_loop.diagnostics()`
+        // call below.
+        let loop_id = event_loop
+            .idempotent_log()
+            .lock()
+            .map(|log| log.loop_id().to_string())
+            .unwrap_or_default();
         for snap in snapshots {
             let findings = self.detector.observe(snap);
             for finding in findings {
                 produced += 1;
                 let envelope = finding_to_envelope(&finding, session_id.clone());
                 let _ = event_loop.record_recovery_envelope(&envelope, Vec::new());
+                // U8: route through the idempotent log first
+                // (when one is configured) and fall back to the
+                // legacy JSONL writer. The idempotent path is
+                // a no-op for a disabled log; the JSONL writer
+                // is also a no-op when the diagnostics
+                // collector is disabled. Both writes are
+                // best-effort: errors are swallowed via the
+                // helper's own `tracing::warn!`.
+                if !loop_id.is_empty() {
+                    if let Ok(mut log) = event_loop.idempotent_log().lock() {
+                        let payload = match serde_json::to_value(&finding) {
+                            Ok(v) => v,
+                            Err(_) => serde_json::Value::Null,
+                        };
+                        event_loop.diagnostics().log_drift_via_idempotent(
+                            &mut log,
+                            &finding.finding_id,
+                            payload,
+                        );
+                    }
+                }
                 event_loop
                     .diagnostics()
                     .log_drift(finding_to_journal_entry(&finding));
@@ -256,6 +292,14 @@ impl DriftEngine {
         }
         let current_iteration = event_loop.state().iteration;
         let keys: Vec<String> = event_loop.recovery_responder().tracked_retry_keys_list();
+        // U8: snapshot the idempotent-log loop_id up front so the
+        // wiring path can branch without re-locking the log on
+        // every per-key iteration.
+        let idempotent_loop_id = event_loop
+            .idempotent_log()
+            .lock()
+            .map(|log| log.loop_id().to_string())
+            .unwrap_or_default();
         let mut updates = Vec::new();
         for key in keys {
             let prior_outcome = match event_loop.recovery_responder().outcome_for(&key) {
@@ -280,6 +324,25 @@ impl DriftEngine {
                 let envelope =
                     build_outcome_envelope(&key, current_iteration, severity, new_outcome, topic);
                 let notes = vec![format!("outcome updated to {new_outcome:?}")];
+                // U8: idempotent path first when a log is
+                // configured, then the legacy JSONL fallback.
+                // The lock is short-lived: we drop the
+                // `MutexGuard` before the `event_loop.diagnostics()`
+                // borrow so the borrow checker is happy.
+                if !idempotent_loop_id.is_empty() {
+                    if let Ok(mut log) = event_loop.idempotent_log().lock() {
+                        let payload = match serde_json::to_value(&envelope) {
+                            Ok(v) => v,
+                            Err(_) => serde_json::Value::Null,
+                        };
+                        event_loop.diagnostics().log_recovery_via_idempotent(
+                            &mut log,
+                            &key,
+                            payload,
+                            /* is_final = */ true,
+                        );
+                    }
+                }
                 event_loop
                     .diagnostics()
                     .log_recovery(RecoveryJournalEntry::from_envelope(envelope.clone(), notes));

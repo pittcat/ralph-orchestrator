@@ -2603,3 +2603,47 @@ fn evaluate_prompt_injects(
         &snap.prompt[..snap.prompt.len().min(400)]
     );
 }
+
+// =====================================================================
+// 2026-06-27 mechanism foundation: 5 BDD wiring scenarios (U6/U7/U8/U9/U9.5)
+// =====================================================================
+
+#[test]
+fn test_mechanism_plan_blocked_reason_required() {
+    let yaml = load_scenario(
+        "tests/scenarios/mechanism/foundation/plan_blocked_reason_required.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_mechanism_repair_budget_exhausted_blocks_plan() {
+    let yaml = load_scenario(
+        "tests/scenarios/mechanism/foundation/repair_budget_exhausted_blocks_plan.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_mechanism_diagnosis_count_matches_final_state() {
+    let yaml = load_scenario(
+        "tests/scenarios/mechanism/foundation/diagnosis_count_matches_final_state.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_mechanism_flow_unknown_emit_rejected() {
+    let yaml = load_scenario(
+        "tests/scenarios/mechanism/foundation/flow_unknown_emit_rejected.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_mechanism_verdict_gate_terminal_alignment() {
+    let yaml = load_scenario(
+        "tests/scenarios/mechanism/foundation/verdict_gate_terminal_alignment.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}

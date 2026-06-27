@@ -1,0 +1,72 @@
+# flow_unknown_emit_rejected: U9 — FlowStepScopeStage rejects emit outside allowed_emits
+
+name: flow_unknown_emit_rejected
+description: "U9 wiring: FlowStepScopeStage rejects emit whose topic is not in the current step's allowed_emits."
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - plan.complete
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "work.start"
+    completion_promise: "LOOP_COMPLETE"
+    mechanism:
+      flow:
+        type: declared
+        version: 1
+        terminal_emits: [LOOP_COMPLETE]
+        steps:
+          - id: unit_loop
+            kind: foreach
+            allowed_emits:
+              - work.ready
+              - work.done
+              - work.failed
+              - test.passed
+              - test.failed
+            terminal_when: all_done
+          - id: plan_end
+            kind: branch
+            allowed_emits:
+              - plan.complete
+              - plan.blocked
+          - id: ship
+            kind: sequence
+            allowed_emits:
+              - REVIEW_COMPLETE
+              - report.done
+              - LOOP_COMPLETE
+
+mock_responses:
+  - text: |
+      <event topic="work.start">
+      {"plan_name":"u9-bdd","plan_path":"docs/plans/u9.md","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="plan.complete">
+      {"plan_name":"u9-bdd","completed_steps":["step-01"],"task_id":"t1","task_key":"k1","verdict":"pass","final_findings_count":0,"fix_round":0}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="work.ready">
+      {"plan_name":"u9-bdd","plan_path":"docs/plans/u9.md","task_id":"t1","task_key":"k1","step":"step-01","complexity":"small"}
+      </event>
+    hat: coordinator
+
+expected:
+  iterations: 3
+  events:
+    - topic: work.start
+    - topic: work.ready
+  absent_events:
+    - topic: plan.complete
+    - topic: LOOP_COMPLETE
+  completion: false

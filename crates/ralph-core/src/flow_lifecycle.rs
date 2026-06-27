@@ -445,6 +445,19 @@ impl FlowLifecycleRegistry {
             }
         });
     }
+
+    /// U6 (2026-06-27 mechanism foundation): best-effort
+    /// accessor returning the id of the most-recently active
+    /// flow unit's first step. Falls back to "unit_loop"
+    /// when no non-terminal record is registered.
+    pub fn current_step_id(&self) -> &str {
+        for record in self.records.values() {
+            if !record.phase.is_terminal() {
+                return record.source_topic.as_str();
+            }
+        }
+        "unit_loop"
+    }
 }
 
 /// Returns the legal successor phases for `current`.

@@ -33,6 +33,13 @@ pub struct TaskStore {
     /// `ce-executor-serial` preset opts in via
     /// `EventLoopConfig.enforce_current_unit`.
     enforce_current_unit: bool,
+    /// U8 (2026-06-27 mechanism foundation): cache of the loop
+    /// id used by [`Self::save_with_idempotent_log`] so we can
+    /// build the canonical `task:{task_id}:loop:{loop_id}`
+    /// idempotency keys without re-reading the tasks. Defaults
+    /// to `None`; the runtime sets it via
+    /// [`Self::set_loop_id_for_idempotent_log`].
+    loop_id_for_idempotent_log: Option<String>,
 }
 
 /// Parses a JSONL line into a Task, logging a warning on failure.
@@ -77,6 +84,7 @@ impl TaskStore {
             tasks,
             lock,
             enforce_current_unit: false,
+            loop_id_for_idempotent_log: None,
         })
     }
 
@@ -111,6 +119,80 @@ impl TaskStore {
                 content + "\n"
             },
         )
+    }
+
+    /// U8 (2026-06-27 mechanism foundation): idempotent variant of
+    /// [`Self::save`]. Writes the canonical JSONL snapshot first
+    /// (same semantics as `save`) and then routes every task
+    /// through the shared `IdempotentLog` under the canonical
+    /// `task:{task_id}:loop:{loop_id}` key.
+    ///
+    /// The on-disk JSONL remains the authoritative "list of
+    /// tasks" view (legacy readers, projector, etc.). The
+    /// idempotent log is the cross-process, cross-restart
+    /// dedup view that survives loop-version bumps and protects
+    /// against the 2026-06-26 "two records claim `_final=true`"
+    /// bug class.
+    ///
+    /// Failures of the idempotent path are surfaced via
+    /// `tracing::warn!` and DO NOT roll back the JSONL write —
+    /// the orchestration main path must not block on a
+    /// best-effort side channel.
+    pub fn save_with_idempotent_log(
+        &self,
+        log: &mut crate::state::idempotent_log::IdempotentLog,
+        loop_id: &str,
+    ) -> io::Result<()> {
+        // 1. Snapshot to JSONL first so legacy readers see the
+        // freshest list even if the idempotent log rejects some
+        // writes (e.g. an already-finalised key).
+        self.save()?;
+        if log.loop_id().is_empty() {
+            // Disabled log — `IdempotentLog::append` would be a
+            // no-op anyway, so skip the per-task wiring overhead.
+            return Ok(());
+        }
+        // 2. Route every task through the idempotent log.
+        //    `is_final` is `true` for tasks in a terminal status
+        //    so subsequent writes for the same task id are
+        //    rejected by the IdempotentLog.
+        for task in &self.tasks {
+            let is_final = task.status.is_terminal();
+            let payload = match serde_json::to_value(task) {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "ralph_core::task_store",
+                        task_id = %task.id,
+                        error = %err,
+                        "task serialization failed for idempotent log; skipping",
+                    );
+                    continue;
+                }
+            };
+            if let Err(err) =
+                crate::event_loop::idempotent_wiring::write_task(log, &task.id, loop_id, payload, is_final)
+            {
+                tracing::warn!(
+                    target: "ralph_core::task_store",
+                    task_id = %task.id,
+                    error = %err,
+                    "idempotent log write for task failed; continuing without blocking the loop",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// U8 (2026-06-27 mechanism foundation): cache the loop_id
+    /// the runtime wants [`Self::save_with_idempotent_log`] to
+    /// use. Idempotent; safe to call from the EventLoop
+    /// bootstrap path. The cached value is read by callers that
+    /// invoke the no-arg convenience path that derives the
+    /// `loop_id` argument from this field instead of accepting
+    /// it as a parameter.
+    pub fn set_loop_id_for_idempotent_log(&mut self, loop_id: impl Into<String>) {
+        self.loop_id_for_idempotent_log = Some(loop_id.into());
     }
 
     /// Reloads tasks from disk, useful after external modifications.

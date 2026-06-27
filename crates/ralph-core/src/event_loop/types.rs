@@ -19,6 +19,7 @@ use crate::diagnosis::RecoveryResponder;
 use crate::diagnostics::DiagnosticsCollector;
 use crate::ephemeral_isolation::EphemeralIsolation;
 use crate::event_loop::loop_state::LoopState;
+use crate::event_loop::stage_pipeline::StagePipeline;
 use crate::execution_contract::ExecutionContractFinding;
 use crate::hat_lifecycle::{ActivationLifecycleTracker, SystemTimeClock};
 use crate::hat_registry::HatRegistry;
@@ -26,6 +27,7 @@ use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
 use crate::loop_context::LoopContext;
 use crate::skill_registry::SkillRegistry;
+use crate::state::idempotent_log::IdempotentLog;
 use crate::workflow_contract::HandoffIndex;
 use ralph_proto::{Event, EventBus};
 use serde::{Deserialize, Serialize};
@@ -314,4 +316,10 @@ pub struct EventLoop {
     /// for it to fire.  The field is owned by `EventLoop` so the
     /// per-iteration cache (mtime/size sentinel) survives across calls.
     pub(crate) ephemeral_isolation: EphemeralIsolation,
+    /// U8: idempotent JSONL log.
+    pub(crate) idempotent_log: std::sync::Mutex<IdempotentLog>,
+    /// U6: emit-time stage pipeline.
+    pub(crate) stage_pipeline: StagePipeline,
+    /// U6: owned per-loop repair state machine placeholder.
+    pub(crate) repair_state_machine: crate::event_loop::stage_pipeline::RepairStateMachine,
 }

@@ -1,0 +1,40 @@
+# plan_blocked_reason_required: U6 — EmitSchemaGate rejects plan.blocked with empty `reason`
+
+name: plan_blocked_reason_required
+description: "U6 wiring: EmitSchemaGate rejects plan.blocked with empty reason before it enters the main EventBus."
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 2
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - plan.blocked
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "work.start"
+    completion_promise: "LOOP_COMPLETE"
+
+mock_responses:
+  - text: |
+      <event topic="work.start">
+      {"plan_name":"u6-bdd","plan_path":"docs/plans/u6.md","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="plan.blocked">
+      {"reason":""}
+      </event>
+    hat: coordinator
+
+expected:
+  iterations: 2
+  events:
+    - topic: work.start
+  absent_events:
+    - topic: plan.blocked
+    - topic: LOOP_COMPLETE
+  completion: false

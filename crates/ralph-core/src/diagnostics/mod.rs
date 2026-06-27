@@ -605,6 +605,86 @@ impl DiagnosticsCollector {
         }
     }
 
+    /// U8 (2026-06-27 mechanism foundation): idempotent variant of
+    /// `log_recovery`. Routes the entry through the shared
+    /// `IdempotentLog` (under the per-`retry_key`+`loop_id` key
+    /// shape) so the recovery signal survives process restarts and
+    /// cannot be overwritten by a stale `_final=true` from a
+    /// previous loop on the same workspace.
+    ///
+    /// `is_final` flips the record's `_final` bit. When `true`,
+    /// subsequent writes for the same `retry_key` are rejected by
+    /// `IdempotentLog` — that is the entire point of the wiring
+    /// (it stops the 2026-06-26 "two records claim `_final=true`"
+    /// class of bug from happening).
+    ///
+    /// Internal I/O errors are emitted via `tracing::warn!` and
+    /// swallowed — the existing `log_recovery` semantics that
+    /// never block the orchestration main path are preserved.
+    /// The caller must hold the `MutexGuard` from
+    /// `EventLoop::idempotent_log()` because `IdempotentLog::append`
+    /// requires `&mut self`.
+    pub fn log_recovery_via_idempotent(
+        &self,
+        log: &mut crate::state::idempotent_log::IdempotentLog,
+        retry_key: &str,
+        payload: serde_json::Value,
+        is_final: bool,
+    ) {
+        use crate::event_loop::idempotent_wiring as wiring;
+        // Borrow checker: snapshot `loop_id` first so the mutable
+        // borrow for `write_recovery` doesn't conflict with the
+        // immutable `log.loop_id()` call.
+        let loop_id = log.loop_id().to_string();
+        if let Err(err) = wiring::write_recovery(log, retry_key, &loop_id, payload, is_final) {
+            tracing::warn!(
+                target: "ralph_core::diagnostics",
+                retry_key = retry_key,
+                error = %err,
+                "idempotent log write for recovery entry failed; continuing without blocking the loop",
+            );
+        }
+    }
+
+    /// U8 (2026-06-27 mechanism foundation): idempotent variant of
+    /// `log_drift`. Routes the finding through the shared
+    /// `IdempotentLog` under the canonical `drift:{finding_id}:loop:{loop_id}`
+    /// key. Drift records are advisory and always
+    /// `_final=true` from creation, so a repeated write for the
+    /// same finding_id surfaces as `FinalAlreadySet` and is
+    /// silently swallowed (it is the expected outcome, not an
+    /// error).
+    ///
+    /// Same error / lifetime contract as
+    /// [`Self::log_recovery_via_idempotent`].
+    pub fn log_drift_via_idempotent(
+        &self,
+        log: &mut crate::state::idempotent_log::IdempotentLog,
+        finding_id: &str,
+        payload: serde_json::Value,
+    ) {
+        use crate::event_loop::idempotent_wiring as wiring;
+        let loop_id = log.loop_id().to_string();
+        match wiring::write_drift(log, finding_id, &loop_id, payload) {
+            Ok(()) => {}
+            Err(crate::event_loop::idempotent_wiring::WiringError::Idempotent(
+                crate::state::idempotent_log::IdempotentError::FinalAlreadySet(_),
+            )) => {
+                // Already finalised by an earlier observation; this
+                // is the expected outcome for drift findings, not
+                // a real error.
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    finding_id = finding_id,
+                    error = %err,
+                    "idempotent log write for drift entry failed; continuing without blocking the loop",
+                );
+            }
+        }
+    }
+
     /// Persist a `diagnosis-summary.json` seed file in the session
     /// directory.
     ///

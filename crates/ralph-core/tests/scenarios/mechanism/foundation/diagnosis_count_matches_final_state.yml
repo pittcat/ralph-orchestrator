@@ -1,0 +1,41 @@
+# diagnosis_count_matches_final_state: U8 — diagnosis summary count equals final record count
+
+name: diagnosis_count_matches_final_state
+description: "U8 wiring: diagnosis-summary.json.recovery_count equals count of _final=true records."
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 1
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - work.ready
+  event_loop:
+    execution_mode: isolated
+    starting_event: "work.start"
+    completion_promise: "LOOP_COMPLETE"
+
+fixture_files:
+  - path: .ralph/recovery.jsonl
+    content: |
+      {"_idempotency_key":"recovery:r1:loop:u8","_version":1,"_final":true,"reason_code":"semantic_gate_violation","ts":"2024-01-01T00:00:00Z"}
+      {"_idempotency_key":"recovery:r2:loop:u8","_version":1,"_final":true,"reason_code":"missing_required_fields","ts":"2024-01-01T00:00:01Z"}
+      {"_idempotency_key":"recovery:r3:loop:u8","_version":1,"_final":true,"reason_code":"verdict_gate_misalignment","ts":"2024-01-01T00:00:02Z"}
+      {"_idempotency_key":"recovery:r4:loop:u8","_version":1,"_final":false,"reason_code":"in_progress","_transitions":[{"from":null,"to":"detected"}],"ts":"2024-01-01T00:00:03Z"}
+
+mock_responses:
+  - text: |
+      <event topic="work.start">
+      {"plan_name":"u8-bdd","plan_path":"docs/plans/u8.md","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: coordinator
+
+expected:
+  iterations: 1
+  events:
+    - topic: work.start
+  absent_events:
+    - topic: LOOP_COMPLETE
+  completion: false

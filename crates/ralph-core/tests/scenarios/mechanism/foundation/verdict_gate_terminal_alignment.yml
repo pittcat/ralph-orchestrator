@@ -1,0 +1,107 @@
+# verdict_gate_terminal_alignment: U9.5 — VerdictGate only terminates on terminal_emits
+
+name: verdict_gate_terminal_alignment
+description: "U9.5 wiring: VerdictGateStage only flags terminal_emits (locked to [LOOP_COMPLETE])."
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - work.ready
+    executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+    validator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - test.passed
+    shipper:
+      subscribes_to:
+        - test.passed
+      publishes:
+        - report.done
+    reporter:
+      subscribes_to:
+        - report.done
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "work.start"
+    completion_promise: "LOOP_COMPLETE"
+    required_events: ["report.done"]
+    mechanism:
+      flow:
+        type: declared
+        version: 1
+        terminal_emits: [LOOP_COMPLETE]
+        steps:
+          - id: unit_loop
+            kind: foreach
+            allowed_emits:
+              - work.ready
+              - work.done
+              - work.failed
+              - test.passed
+              - test.failed
+            terminal_when: all_done
+          - id: review_walk
+            kind: sequence
+            allowed_emits:
+              - review.start
+              - review.dimension.ready
+              - review.dimension.done
+              - review.complete
+          - id: plan_end
+            kind: branch
+            allowed_emits:
+              - plan.complete
+              - plan.blocked
+          - id: ship
+            kind: sequence
+            allowed_emits:
+              - REVIEW_COMPLETE
+              - report.done
+              - LOOP_COMPLETE
+
+mock_responses:
+  - text: |
+      <event topic="work.start">
+      {"plan_name":"u95-bdd","plan_path":"docs/plans/u95.md","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="work.ready">
+      {"plan_name":"u95-bdd","plan_path":"docs/plans/u95.md","task_id":"t1","task_key":"k1","step":"step-01","complexity":"small"}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="report.done">
+      {"plan_name":"u95-bdd","report_path":"r.md","awaiting_decision":false,"pass_or_fail":"pass","verdict":"pass"}
+      </event>
+    hat: shipper
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      {"plan_name":"u95-bdd","reason":"verdict_gate_terminal_alignment"}
+      </event>
+    hat: reporter
+
+expected:
+  iterations: 4
+  events:
+    - topic: work.start
+    - topic: work.ready
+    - topic: report.done
+    - topic: LOOP_COMPLETE
+  absent_events:
+    - topic: REVIEW_COMPLETE
+    - topic: plan.complete
+    - topic: plan.blocked
+  completion: true

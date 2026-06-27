@@ -69,3 +69,13 @@ mod wave_policy_rejection;
 mod wave_recovery_timeout;
 mod wave_results;
 mod workflow_guard;
+/// U11 (2026-06-27 mechanism foundation): `archive_state_for_loop`
+/// wired into `EventLoop::with_context_and_diagnostics` so worktree
+/// reuse archives previous-loop `.ralph/*.jsonl` before
+/// `IdempotentLog::open` writes the new `loop-version.json`.
+mod u11_wiring;
+
+/// U6 (2026-06-27-001 plan): StagePipeline is wired into
+/// EventLoop::publish_event so every hat emit passes through
+/// the locked default stages before reaching the event bus.
+mod u6_wiring;

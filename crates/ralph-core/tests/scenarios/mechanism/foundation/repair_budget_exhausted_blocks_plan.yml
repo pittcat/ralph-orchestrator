@@ -1,0 +1,61 @@
+# repair_budget_exhausted_blocks_plan: U7 — repair budget gate escalates to plan.blocked
+
+name: repair_budget_exhausted_blocks_plan
+description: "U7 wiring: 3 failed repair cycles exhaust the budget → RepairDispatchStage escalates to plan.blocked."
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    progress-steward:
+      subscribes_to:
+        - work.start
+      publishes:
+        - task.relocate_legacy
+        - plan.blocked
+    shipper:
+      subscribes_to:
+        - plan.blocked
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "work.start"
+    completion_promise: "LOOP_COMPLETE"
+
+mock_responses:
+  - text: |
+      <event topic="work.start">
+      {"plan_name":"u7-bdd","plan_path":"docs/plans/u7.md","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: progress-steward
+  - text: |
+      <event topic="task.relocate_legacy">
+      {"task_key":"k1","task_key_prefix":"u7-bdd","target_loop_id":"loop-u7","reason":"legacy_relocate_attempt_1"}
+      </event>
+    hat: progress-steward
+  - text: |
+      <event topic="task.relocate_legacy">
+      {"task_key":"k1","task_key_prefix":"u7-bdd","target_loop_id":"loop-u7","reason":"legacy_relocate_attempt_2"}
+      </event>
+    hat: progress-steward
+  - text: |
+      <event topic="task.relocate_legacy">
+      {"task_key":"k1","task_key_prefix":"u7-bdd","target_loop_id":"loop-u7","reason":"legacy_relocate_attempt_3"}
+      </event>
+    hat: progress-steward
+  - text: |
+      <event topic="task.relocate_legacy">
+      {"task_key":"k1","task_key_prefix":"u7-bdd","target_loop_id":"loop-u7","reason":"legacy_relocate_attempt_4"}
+      </event>
+    hat: progress-steward
+
+expected:
+  iterations: 5
+  events:
+    - topic: work.start
+    - topic: plan.blocked
+  absent_events:
+    - topic: LOOP_COMPLETE
+    - topic: task.relocate_legacy
+  completion: false

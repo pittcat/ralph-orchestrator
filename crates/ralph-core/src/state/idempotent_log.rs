@@ -171,6 +171,16 @@ const LOOP_VERSION_FILE: &str = "loop-version.json";
 
 /// Idempotent JSONL writer for a single (workspace, loop_id)
 /// pair. Constructed via `IdempotentLog::open`.
+///
+/// A `disabled` log is a zero-cost placeholder used by callers
+/// that do not have a workspace / loop_id yet (most unit tests
+/// and the default `EventLoop` construction path). All write
+/// operations become no-ops; `replay` and `final_count` return
+/// empty answers; `loop_id()` / `workspace()` / `version()`
+/// return the empty values. This lets the type satisfy
+/// `Default::default()` and lets callers construct an
+/// `IdempotentLog` field without knowing the workspace at
+/// compile time.
 pub struct IdempotentLog {
     workspace: PathBuf,
     loop_id: String,
@@ -179,9 +189,40 @@ pub struct IdempotentLog {
     /// authoritative; the file is the source of truth, and the
     /// OS lock guards the read-modify-write.
     index: HashMap<String, IdempotentRecord>,
+    /// `true` ⇒ all write paths short-circuit. U8 wiring tests
+    /// construct the log via `IdempotentLog::default()` before a
+    /// workspace is known, so the default-constructed instance
+    /// MUST be a no-op rather than panic. The runtime callers
+    /// that have a workspace use `IdempotentLog::open(...)`
+    /// which sets `disabled = false`.
+    disabled: bool,
+}
+
+impl Default for IdempotentLog {
+    /// Returns a disabled, zero-cost log. Pair with
+    /// [`IdempotentLog::open`] once a workspace / loop_id is
+    /// available — or keep the disabled log if the caller only
+    /// needs a placeholder field.
+    fn default() -> Self {
+        Self::disabled()
+    }
 }
 
 impl IdempotentLog {
+    /// Build a disabled, no-op log. All `append` / `replay`
+    /// operations are zero-cost no-ops. Use [`Self::open`] when
+    /// the workspace and loop_id are known.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            workspace: PathBuf::new(),
+            loop_id: String::new(),
+            version: 0,
+            index: HashMap::new(),
+            disabled: true,
+        }
+    }
+
     /// Open or resume the log for the given loop. Reads or
     /// writes `.ralph/loop-version.json` so that:
     ///
@@ -247,6 +288,7 @@ impl IdempotentLog {
             loop_id: loop_id.to_string(),
             version: expected_version,
             index: HashMap::new(),
+            disabled: false,
         })
     }
 
@@ -281,6 +323,9 @@ impl IdempotentLog {
     /// a crash between steps 4 and 5 leaves the disk as the
     /// source of truth and the next `open` rebuilds the index.
     pub fn append(&mut self, mut record: IdempotentRecord) -> Result<(), IdempotentError> {
+        if self.disabled {
+            return Ok(());
+        }
         if record._idempotency_key.is_empty() {
             return Err(IdempotentError::MissingIdempotencyKey);
         }
@@ -326,6 +371,9 @@ impl IdempotentLog {
     /// indexed in memory. Used by the diagnosis summary path
     /// (U8) to avoid scanning JSONL on every read.
     pub fn final_count(&self) -> usize {
+        if self.disabled {
+            return 0;
+        }
         self.index.values().filter(|r| r._final).count()
     }
 
@@ -339,6 +387,9 @@ impl IdempotentLog {
     /// not in whatever process-local state happened to be
     /// alive when the last write occurred.
     pub fn replay(&mut self) -> Result<usize, IdempotentError> {
+        if self.disabled {
+            return Ok(0);
+        }
         self.index.clear();
         for entry in fs::read_dir(&self.workspace)? {
             let entry = entry?;
@@ -364,6 +415,9 @@ impl IdempotentLog {
     /// Read every `_final=true` record from the in-memory
     /// index. Used by the summary path.
     pub fn final_records(&self) -> Vec<IdempotentRecord> {
+        if self.disabled {
+            return Vec::new();
+        }
         self.index
             .values()
             .filter(|r| r._final)

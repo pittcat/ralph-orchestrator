@@ -320,6 +320,32 @@ fn filter_human_guidance_blocks(content: &str) -> String {
     out
 }
 
+/// Minimal FlowDeclaration YAML used as the fallback when
+/// the preset has no mechanism: block.
+fn minimal_flow_declaration_yaml() -> &'static str {
+    r#"mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: []
+    steps: []
+"#
+}
+
+/// U6: build the default emit-time stage pipeline from the
+/// loaded RalphConfig. Falls back to a minimal declared flow
+/// when the preset has no mechanism: block.
+fn build_stage_pipeline_from_config(config: &crate::config::RalphConfig) -> crate::event_loop::stage_pipeline::StagePipeline {
+    use crate::event_loop::flow_declaration::FlowDeclaration;
+    use crate::event_loop::stage_pipeline::StagePipeline;
+    let parsed_yaml = serde_yaml::to_string(config).unwrap_or_default();
+    let flow = FlowDeclaration::from_yaml(&parsed_yaml).unwrap_or_else(|_| {
+        FlowDeclaration::from_yaml(minimal_flow_declaration_yaml())
+            .expect("minimal flow declaration YAML is always valid")
+    });
+    StagePipeline::with_default_stages(flow)
+}
+
 /// Validates events against configured workflow guards is implemented by
 /// [`crate::validation::rules_workflow_guard::WorkflowGuardRule`], invoked
 /// from the unified pre-commit / post-commit loop in
@@ -403,6 +429,7 @@ impl EventLoop {
     }
 
     /// Creates a new event loop with explicit loop context and diagnostics.
+    // U11 wiring: archive_state_for_loop 在 new() 路径调用
     pub fn with_context_and_diagnostics(
         mut config: RalphConfig,
         context: LoopContext,
@@ -415,6 +442,16 @@ impl EventLoop {
                  Scratchpad is the only continuity mechanism in solo mode — forcing enabled."
             );
             config.core.scratchpad.enabled = true;
+        }
+
+        // U11 wiring: archive previous-loop state on worktree reuse (best-effort).
+        if let Some(loop_id) = context.loop_id() {
+            use crate::event_loop::stages::archive_version_stage::archive_state_for_loop;
+            match archive_state_for_loop(&context.ralph_dir(), loop_id) {
+                Ok(Some(dir)) => info!("Archived previous-loop state to {}", dir.display()),
+                Ok(None) => debug!("No previous loop state to archive"),
+                Err(e) => warn!("archive_state_for_loop failed (continuing): {e}"),
+            }
         }
 
         let registry = HatRegistry::from_runtime_config(&config);
@@ -534,6 +571,9 @@ impl EventLoop {
             )),
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
             ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
+            idempotent_log: std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled()),
+            stage_pipeline: build_stage_pipeline_from_config(&config),
+            repair_state_machine: crate::event_loop::stage_pipeline::RepairStateMachine::default(),
         }
     }
 
@@ -673,6 +713,9 @@ impl EventLoop {
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
             ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
             handoff_index: crate::workflow_contract::HandoffIndex::from_config(&config),
+            idempotent_log: std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled()),
+            stage_pipeline: build_stage_pipeline_from_config(&config),
+            repair_state_machine: crate::event_loop::stage_pipeline::RepairStateMachine::default(),
         }
     }
 
@@ -743,6 +786,22 @@ impl EventLoop {
     /// `DiagnosticsCollector` API rather than hand-rolling file writes.
     pub fn diagnostics(&self) -> &crate::diagnostics::DiagnosticsCollector {
         &self.diagnostics
+    }
+
+    /// U8 (2026-06-27 mechanism foundation): accessor for the
+    /// loop-scoped idempotent log. Wiring paths in
+    /// `task_store::save_with_idempotent_log`,
+    /// `drift::engine::drain_observer`,
+    /// `drift::engine::check_recovery_for_iteration`, and
+    /// `DiagnosticsCollector::log_*_via_idempotent` lock this
+    /// mutex before calling `IdempotentLog::append`. A disabled
+    /// log (constructed when the workspace was not writable at
+    /// startup) makes every write path short-circuit, so the
+    /// caller's expected type is always `&Mutex<IdempotentLog>`
+    /// regardless of whether the operator opted into
+    /// `mechanism.state_idempotency: required`.
+    pub fn idempotent_log(&self) -> &std::sync::Mutex<crate::state::idempotent_log::IdempotentLog> {
+        &self.idempotent_log
     }
 
     /// Returns a reference to the activation lifecycle tracker.
@@ -9066,7 +9125,97 @@ impl EventLoop {
                 }
             }
         }
+
+        // U6 (2026-06-27 mechanism foundation): every event
+        // that survives the ralph-boundary check must also
+        // pass through the locked emit-time stage pipeline
+        // before reaching the bus. Rejections are routed to
+        // record_recovery_envelope instead of the bus so the
+        // gate's recovery signal is observable in
+        // recovery.jsonl.
+        let stage_ctx = self.build_stage_context_for(&event);
+        if let Err(reject) = self.stage_pipeline.run(&stage_ctx, &event) {
+            self.record_stage_rejection(&event, &reject);
+            return;
+        }
+
         self.bus.publish(event);
+    }
+
+    /// U6 (2026-06-27 mechanism foundation): build the
+    /// StageContext consumed by every stage in the emit-time
+    /// pipeline. Reads the loop id from loop_context, the
+    /// current step id from FlowLifecycleRegistry (falling
+    /// back to "unit_loop"), and the expected version from
+    /// the shared idempotent log. StageContext borrows a
+    /// static RepairStateMachine stub; every stage currently
+    /// ignores it.
+    fn build_stage_context_for(
+        &self,
+        event: &Event,
+    ) -> crate::event_loop::stage_pipeline::StageContext<'static> {
+        use crate::event_loop::stage_pipeline::{
+            FlowStep, RepairStateMachine, StageContext,
+        };
+        let loop_id = self
+            .loop_context()
+            .and_then(|c| c.loop_id())
+            .unwrap_or("default")
+            .to_string();
+        let step_id = self.state.flow_lifecycle.current_step_id().to_string();
+        let expected_version = self
+            .idempotent_log
+            .lock()
+            .map(|log| log.version())
+            .unwrap_or(0);
+        let _ = event;
+        let stub: &'static RepairStateMachine = &RepairStateMachine;
+        StageContext::new(FlowStep::new(step_id), loop_id, expected_version, stub)
+    }
+
+    /// U6 (2026-06-27 mechanism foundation): turn a stage
+    /// pipeline rejection into a RecoveryDiagnosisEnvelope and
+    /// route it through record_recovery_envelope so the
+    /// gate's signal lands in recovery.jsonl and is
+    /// aggregated by ralph diagnose. CliEmit is reused
+    /// because the emit-time gate runs at the same logical
+    /// boundary as the CLI precheck.
+    fn record_stage_rejection(
+        &mut self,
+        event: &Event,
+        reject: &crate::event_loop::stage_pipeline::StageReject,
+    ) {
+        use crate::diagnosis::{DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef};
+        const PAYLOAD_PREVIEW_CHARS: usize = 200;
+        let payload_preview: String = event
+            .payload
+            .chars()
+            .take(PAYLOAD_PREVIEW_CHARS)
+            .collect();
+        let mut builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+            .source(DiagnosisSource::CliEmit)
+            .severity(DiagnosisSeverity::Warning)
+            .topic(event.topic.as_str())
+            .source_hat(event.source.as_ref().map(|h| h.as_str()).unwrap_or(""))
+            .reason_code(reject.reason_code.clone())
+            .message(format!(
+                "stage '{}' rejected event: {} (missing_fields={:?})",
+                reject.stage_name, reject.reason_code, reject.missing_fields
+            ))
+            .evidence(EvidenceRef::new(
+                EvidenceKind::Field,
+                reject.stage_name,
+                Some(payload_preview),
+            ));
+        if let Some(iter) = self.state.iteration.checked_add(0) {
+            builder = builder.iteration(iter);
+        }
+        let envelope = builder.build();
+        let notes = vec![format!(
+            "stage_pipeline rejection: stage={} reason={} topic={}",
+            reject.stage_name, reject.reason_code, event.topic
+        )];
+        let _ = self.record_recovery_envelope(&envelope, notes);
     }
 
     // -------------------------------------------------------------------------
