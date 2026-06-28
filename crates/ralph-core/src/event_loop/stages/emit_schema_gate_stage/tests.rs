@@ -83,6 +83,7 @@ fn required_fields_from_loop_config_gates_preset_review_complete() {
 event_loop:
   event_policy:
     enabled: true
+    mode: enforce
     schemas:
       review.complete:
         required_fields: [fix_plan_file, verdict, plan_name]
