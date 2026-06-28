@@ -40,6 +40,8 @@ mod objective;
 mod origin_guard;
 mod payload_types;
 mod persistent_mode;
+// 2026-06-28 P1-1: budget-exhaustion escalation test.
+mod p1_1_plan_blocked_escalation;
 // 2026-06-23-005 U3: typed dead-letter termination path (R4+R8+AE-3).
 mod plan_blocked_termination;
 mod progress_steward;

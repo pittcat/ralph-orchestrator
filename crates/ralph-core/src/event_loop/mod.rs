@@ -426,7 +426,12 @@ fn minimal_flow_declaration_yaml() -> &'static str {
 /// `mechanism:` subtree the parser expects. The
 /// fallback to the minimal flow declaration
 /// remains for presets that have not opted in.
-fn build_stage_pipeline_from_config(config: &crate::config::RalphConfig) -> crate::event_loop::stage_pipeline::StagePipeline {
+fn build_stage_pipeline_from_config(
+    config: &crate::config::RalphConfig,
+) -> (
+    crate::event_loop::stage_pipeline::StagePipeline,
+    std::collections::HashMap<String, u32>,
+) {
     use crate::event_loop::flow_declaration::FlowDeclaration;
     use crate::event_loop::stage_pipeline::StagePipeline;
     let flow_yaml = config
@@ -459,7 +464,18 @@ fn build_stage_pipeline_from_config(config: &crate::config::RalphConfig) -> crat
             FlowDeclaration::from_yaml(minimal_flow_declaration_yaml())
                 .expect("minimal flow declaration YAML is always valid")
         });
-    StagePipeline::with_default_stages_for_loop_config(flow_yaml, Some(&config.event_loop))
+    // U12 wiring (P0-1, 2026-06-27 review): mirror
+    // `total_units` per step so `drive_step_close_progress`
+    // can resolve the total without walking the
+    // trait-object pipeline. Steps without `total_units`
+    // are absent from the map → stage stays fail-open.
+    let step_totals: std::collections::HashMap<String, u32> = flow_yaml
+        .steps
+        .iter()
+        .filter_map(|s| s.total_units.map(|n| (s.id.clone(), n)))
+        .collect();
+    let pipeline = StagePipeline::with_default_stages_for_loop_config(flow_yaml, Some(&config.event_loop));
+    (pipeline, step_totals)
 }
 
 /// Validates events against configured workflow guards is implemented by
@@ -782,6 +798,8 @@ impl EventLoop {
             }
         };
 
+        let (stage_pipeline, flow_step_totals) = build_stage_pipeline_from_config(&config);
+
         Ok(Self {
             config: config.clone(),
             registry,
@@ -801,7 +819,8 @@ impl EventLoop {
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
             ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
             idempotent_log,
-            stage_pipeline: build_stage_pipeline_from_config(&config),
+            stage_pipeline,
+            flow_step_totals,
             // P1-5 (2026-06-27 adversarial review):
             // per-task repair state machine registry.
             repair_state_machines: std::collections::HashMap::new(),
@@ -927,6 +946,8 @@ impl EventLoop {
         state.handoff_tracker = crate::workflow_contract::HandoffTracker::new()
             .with_default_timeout(std::time::Duration::from_secs(handoff_timeout));
 
+        let (stage_pipeline, flow_step_totals) = build_stage_pipeline_from_config(&config);
+
         Self {
             config: config.clone(),
             registry,
@@ -939,23 +960,15 @@ impl EventLoop {
             diagnostics,
             loop_context: None,
             skill_registry,
+            handoff_index: crate::workflow_contract::HandoffIndex::from_config(&config),
             recovery_responder: RecoveryResponder::new(Arc::new(
                 config.telemetry.runtime_diagnosis.clone(),
             )),
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
             ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
-            handoff_index: crate::workflow_contract::HandoffIndex::from_config(&config),
-            // P0-2 (2026-06-27 adversarial review): the
-            // `with_context_and_diagnostics` path is the
-            // production entry point; it now opens the
-            // idempotent log for real (see below). The
-            // `with_diagnostics` path is the
-            // test-internal entry point and stays
-            // disabled because tests inject their own
-            // `IdempotentLog` via `idempotent_log` access
-            // when they need to assert on it.
             idempotent_log: std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled()),
-            stage_pipeline: build_stage_pipeline_from_config(&config),
+            stage_pipeline,
+            flow_step_totals,
             // P1-5 (2026-06-27 adversarial review):
             // per-task repair state machine registry.
             // The map is empty on construction; the
@@ -9068,6 +9081,13 @@ impl EventLoop {
             // decision points (see `commit_terminal_delta`).
         }
 
+        // U12 wiring (P0-1, 2026-06-27 review): refresh the
+        // step-close progress registry after every parsed
+        // batch so the next emit is checked against the
+        // latest `done`/`total`. Idempotent and a no-op
+        // when the step did not opt into `total_units`.
+        self.drive_step_close_progress();
+
         Ok(ProcessedEvents {
             had_events,
             had_raw_events,
@@ -9078,6 +9098,49 @@ impl EventLoop {
             contract_rejections,
             payload_contract_violation,
         })
+    }
+
+    /// U12 wiring (P0-1, 2026-06-27 review): drive the
+    /// `StepCloseObligationStage` progress registry
+    /// after each `process_parse_result` batch.
+    ///
+    /// Strategy: count `work.done` emits in
+    /// `seen_topics` as `done`, and look up `total` from
+    /// `flow.steps[i].total_units`. If the current step
+    /// does not declare `total_units`, the call is a
+    /// no-op (the stage stays fail-open — the pre-U12
+    /// behaviour for presets that did not opt in).
+    ///
+    /// Idempotent: the underlying
+    /// `StepCloseObligationStage::update_progress` is
+    /// itself idempotent and rejects counter regressions
+    /// silently (see the stage rustdoc).
+    fn drive_step_close_progress(&mut self) {
+        let step_id = self.state.flow_lifecycle.current_step_id().to_string();
+        if step_id.is_empty() {
+            return;
+        }
+        let total_units = match self.flow_step_total_units(&step_id) {
+            Some(n) => n,
+            None => return,
+        };
+
+        let done = self
+            .state
+            .seen_topics
+            .iter()
+            .filter(|t| t.as_str() == "work.done")
+            .count() as u32;
+        self.stage_pipeline
+            .update_step_close_progress(&step_id, done, total_units);
+    }
+
+    /// Resolve `FlowDeclaration.steps[i].total_units` for
+    /// the step whose id matches `step_id`. Returns
+    /// `None` when the step is not declared or did not
+    /// opt into `total_units`.
+    fn flow_step_total_units(&self, step_id: &str) -> Option<u32> {
+        self.flow_step_totals.get(step_id).copied()
     }
 
     /// 2026-06-26 plan U4: discharge hat obligations for any accepted
@@ -9770,7 +9833,13 @@ impl EventLoop {
     /// aggregated by ralph diagnose. CliEmit is reused
     /// because the emit-time gate runs at the same logical
     /// boundary as the CLI precheck.
-    fn record_stage_rejection(
+    ///
+    /// P1-1 (2026-06-28 review): the method is
+    /// `pub(crate)` so the P1-1 integration test can
+    /// synthesise a budget-exhaustion rejection and
+    /// assert that the `plan.blocked` escalation is
+    /// published on the bus.
+    pub(crate) fn record_stage_rejection(
         &mut self,
         event: &Event,
         reject: &crate::event_loop::stage_pipeline::StageReject,
@@ -9806,6 +9875,43 @@ impl EventLoop {
             reject.stage_name, reject.reason_code, event.topic
         )];
         let _ = self.record_recovery_envelope(&envelope, notes);
+
+        // P1-1 (2026-06-28 review): when the
+        // rejection comes from a budget exhaustion on
+        // the repair stream, escalate to a synthesised
+        // `plan.blocked` so the operator sees the
+        // reason without grepping `recovery.jsonl`.
+        // The escalation reuses the same `bus.publish`
+        // path as the three existing `plan.blocked`
+        // emitters (waves, step-handoff, stall
+        // detector) so it lands on the main bus without
+        // re-entering the stage pipeline.
+        if reject.reason_code.starts_with("repair_unrecoverable_after_") {
+            let blocked_payload = serde_json::json!({
+                "reason": reject.reason_code,
+                "topic": event.topic.as_str(),
+                "stage": reject.stage_name,
+                "loop_id": self.loop_id_label(),
+            });
+            self.bus
+                .publish(ralph_proto::Event::new("plan.blocked", blocked_payload.to_string()));
+            debug!(
+                topic = %event.topic,
+                reason = %reject.reason_code,
+                "P1-1: synthesised plan.blocked after repair budget exhaustion"
+            );
+        }
+    }
+
+    /// Resolve the loop id label used by the P1-1
+    /// `plan.blocked` escalation. Returns the context's
+    /// loop id when available, otherwise the literal
+    /// `"default"` (mirrors `write_loop_termination_record`).
+    fn loop_id_label(&self) -> String {
+        self.loop_context()
+            .and_then(|c| c.loop_id())
+            .unwrap_or("default")
+            .to_string()
     }
 
     // -------------------------------------------------------------------------

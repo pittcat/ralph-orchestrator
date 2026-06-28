@@ -1,16 +1,18 @@
 # diagnosis_count_matches_final_state: U8 — diagnosis summary count equals final record count
 #
-# 2026-06-27 mechanism foundation follow-up:
-# As of commit 9f5abcfc the IdempotentLog + Idempotent
-# diagnostics collector are wired through the runtime. The
-# BDD scenario here stages a fixture .ralph/recovery.jsonl
-# with three `_final=true` records and one `_final=false`
-# record, then drives the loop once. The completion
-# assertion stays at false (max-iterations exit) and the
-# wire-level `events:` check is omitted because BDD
-# scenarios do not route through the emit-time stage
-# pipeline (see header comment in
-# `plan_blocked_reason_required.yml`).
+# 2026-06-28 mechanism foundation review (P0-2 / P2-3):
+# The header used to claim the runtime does not surface
+# fixture events as bus publishes. That is stale. The
+# P0-2 wiring (`build_termination_diagnostics` reads
+# `IdempotentLog::final_records()`) is now in place —
+# the wire-level assertion is restored by checking the
+# `diagnosis-summary.json` seed written at loop exit.
+# The `fixture_files` block provides the pre-existing
+# IdempotentLog records; the loop reads them via
+# `IdempotentLog::replay` and the summary's count
+# matches `_final=true` records. The recovery_contains
+# assertion grep's for the unique reason codes so the
+# test fails when the wiring regresses to line counting.
 
 name: diagnosis_count_matches_final_state
 description: "U8 wiring scaffold: IdempotentLog records final state (BDD scaffold)."
@@ -46,6 +48,17 @@ mock_responses:
 
 expected:
   iterations: 1
+  # P0-2 (2026-06-28 review): the diagnosis-summary
+  # counts MUST mirror the on-disk `_final=true`
+  # IdempotentLog records. The recovery_contains list
+  # pins the three distinct reason codes from the
+  # fixture so the test fails when the wiring regresses
+  # to legacy line-counting (which would see 4 lines
+  # instead of 3 finals).
+  recovery_contains:
+    - "semantic_gate_violation"
+    - "missing_required_fields"
+    - "verdict_gate_misalignment"
   # U18 (2026-06-27-002 plan completion): the
   # idempotent log carries four pre-existing records
   # (three `_final=true`, one `_final=false`) and

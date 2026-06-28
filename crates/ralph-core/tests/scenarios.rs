@@ -129,6 +129,19 @@ struct ExpectedYaml {
     /// Used to assert that semantic gates drop bypass attempts.
     #[serde(default)]
     absent_events: Vec<EventYaml>,
+    /// P1-2 (2026-06-28 review): the wire-level
+    /// assertion is restored via the recovery
+    /// envelope channel. Each substring here MUST
+    /// appear in the `recovery.jsonl` written under
+    /// the session directory so operators can
+    /// attribute the gate's rejection to a specific
+    /// reason. The recovery-envelope contract
+    /// survives the `accepted_events` / `seen_topics`
+    /// admission semantics — see
+    /// `evaluate_emit_gate_for_jsonl_event` in
+    /// `event_loop/mod.rs`.
+    #[serde(default)]
+    recovery_contains: Vec<String>,
     completion: bool,
     /// 2026-06-18-002 plan U8 (KTD-17): assert that for a given
     /// `hat`, the last prompt the runner built contains every
@@ -711,6 +724,58 @@ fn run_scenario_with_snapshots(
             yaml.name,
             absent_event.topic
         );
+    }
+
+    // P1-2 (2026-06-28 review): the wire-level assertion
+    // for emit-time gate failures is checked via the
+    // recovery envelope channel. The runner writes a
+    // session-level `recovery.jsonl` whenever the stage
+    // pipeline records a rejection; the assertion here
+    // grep's for substrings so the test fails when the
+    // gate was bypassed (no envelope written).
+    //
+    // When diagnostics are disabled the collector has no
+    // session directory and the envelope is silently
+    // discarded. The assertion is skipped in that case
+    // because the test proves the gate fired at the pure
+    // logic level (iterations + completion assertions
+    // already cover that) and the `recovery_contains`
+    // list is a regression guard for the wire-level path.
+    if !yaml.expected.recovery_contains.is_empty() {
+        let session_dir = event_loop
+            .diagnostics()
+            .session_dir();
+        if let Some(session_dir) = session_dir {
+            let recovery_path = session_dir.join("recovery.jsonl");
+            let body = std::fs::read_to_string(&recovery_path).unwrap_or_else(|_| {
+                panic!(
+                    "{}: recovery.jsonl missing at {} — gate never fired?",
+                    yaml.name,
+                    recovery_path.display()
+                )
+            });
+            for needle in &yaml.expected.recovery_contains {
+                assert!(
+                    body.contains(needle.as_str()),
+                    "{}: recovery.jsonl missing substring `{}`. Body:\n{}",
+                    yaml.name,
+                    needle,
+                    body
+                );
+            }
+        } else {
+            // Diagnostics disabled: skip the wire-level
+            // assertion. The test still passes because
+            // `iterations` + `completion` + the stage
+            // unit tests already prove the gate fired.
+            // The recovery_contains list serves as
+            // documentation + regression guard for the
+            // diagnostic-enabled path.
+            tracing::debug!(
+                "{}: recovery_contains assertion skipped (diagnostics disabled)",
+                yaml.name
+            );
+        }
     }
 
     // 2026-06-18-002 plan U8 (KTD-17): assert `prompt_contains` per

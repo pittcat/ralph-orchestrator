@@ -48,6 +48,17 @@ pub trait EmitStage: Send {
     /// dispatcher (`StagePipeline::run`) takes `&mut StageContext`
     /// for the same reason.
     fn check(&self, ctx: &mut StageContext, event: &Event) -> Result<(), StageReject>;
+
+    /// U12 (P0-1, 2026-06-27 review): provide a
+    /// mutable `Any`-typed view so the
+    /// `StagePipeline::update_step_close_progress`
+    /// helper can downcast to a concrete stage
+    /// without forcing every implementor to expose
+    /// `&mut self` through the trait. Stages that do
+    /// not need this hook return `None`.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
 }
 
 /// Rejection returned by an [`EmitStage`] when an event must not enter
@@ -298,6 +309,37 @@ impl StagePipeline {
             }
         }
         false
+    }
+
+    /// U12 wiring (P0-1, 2026-06-27 review): drive the
+    /// `StepCloseObligationStage` progress registry
+    /// without breaking the `EmitStage` trait (which is
+    /// intentionally `&self`-bound on `check`).
+    ///
+    /// Walks the stages list, downcasts each `Box<dyn
+    /// EmitStage>` to a concrete
+    /// `StepCloseObligationStage` (only present when the
+    /// pipeline was built via `with_default_stages_*`),
+    /// and calls `update_progress` on the first match.
+    /// No-op when the stage is absent or the downcast
+    /// fails — that matches the pre-U12 fail-open
+    /// semantics for callers that did not opt in.
+    pub fn update_step_close_progress(&mut self, step_id: &str, done: u32, total: u32) {
+        for stage in self.stages.iter_mut() {
+            if stage.name() == "StepCloseObligation" {
+                if let Some(typed) = stage
+                    .as_any_mut()
+                    .and_then(|a| {
+                        a.downcast_mut::<
+                            crate::event_loop::stages::step_close_obligation_stage::StepCloseObligationStage,
+                        >()
+                    })
+                {
+                    typed.update_progress(step_id, done, total);
+                }
+                return;
+            }
+        }
     }
 }
 

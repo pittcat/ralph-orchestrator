@@ -1,15 +1,15 @@
 # plan_blocked_reason_required: U6 — emit-time schema gate rejects plan.blocked with empty `reason`
 #
-# 2026-06-27 mechanism foundation completion (002 plan, U14):
-# After U3 wired `process_events_from_jsonl` through the
-# U1 emit-gate facade, the wire-level assertions can be
-# restored. The schema gate rejects `plan.blocked(reason="")`
-# BEFORE the event reaches the bus, so:
-#   - `absent_events: [plan.blocked]` confirms the
-#     empty-reason event was rejected (the bus never
-#     saw it).
-#   - `recovery.jsonl` must contain a `missing_required_fields`
-#     envelope so operators can attribute the rejection.
+# 2026-06-28 mechanism foundation review (P1-2 / P2-3):
+# The header used to claim the BDD runner does not route
+# through the emit-time stage pipeline. That is stale —
+# `evaluate_emit_gate_for_jsonl_event` (event_loop/mod.rs)
+# IS called from `process_parse_result` for every JSONL
+# event. The wire-level assertion is therefore restored
+# at the recovery-envelope layer: the empty-reason
+# `plan.blocked` event is rejected before reaching the
+# bus and the rejection is recorded in the session's
+# `recovery.jsonl` with `reason_code: missing_required_fields`.
 
 name: plan_blocked_reason_required
 description: "U14 wiring: stage pipeline rejects plan.blocked with empty reason."
@@ -43,17 +43,17 @@ mock_responses:
 
 expected:
   iterations: 2
-  # U14 (2026-06-27-002 plan completion): after the
-  # publish-time gate is wired (U3), the
-  # `plan.blocked(reason="")` event survives `accepted_events`
-  # (so the lifecycle tracker still records it) but is
-  # rejected at the bus-publish layer. The BDD contract is
-  # now pinned at the **recovery envelope** level rather
-  # than `absent_events: [plan.blocked]` because the
-  # pre-U3 invariant (`plan.blocked` not in `seen_topics`)
-  # no longer holds — the event is *seen* by the tracker
-  # but the rejection envelope is what operators use to
-  # attribute the failure. The recovery.jsonl
-  # assertion is verified by the loop_runner integration
-  # test in `u2_publish_emit_gate.rs`.
+  # P1-2 (2026-06-28 review): the wire-level assertion
+  # is restored. The schema gate rejects the
+  # empty-reason `plan.blocked` BEFORE it reaches the
+  # bus, so we assert the rejection was actually
+  # recorded via the recovery envelope channel
+  # rather than `absent_events` (the
+  # `AcceptMainBus` arm of
+  # `evaluate_emit_gate_for_jsonl_event` admits the
+  # event to `seen_topics` for lifecycle tracking,
+  # so absent_events checks against `seen_topics`
+  # would be a false positive).
+  recovery_contains:
+    - "missing_required_fields"
   completion: false

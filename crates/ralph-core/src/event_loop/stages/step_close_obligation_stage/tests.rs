@@ -114,3 +114,51 @@ fn step_not_in_flow_means_no_obligation() {
     // progress is recorded.
     assert!(stage.check(&mut ctx, &event).is_ok());
 }
+
+// P0-1 (2026-06-28 review): the
+// `StagePipeline::update_step_close_progress` helper
+// routes through `EmitStage::as_any_mut` to drive the
+// concrete `StepCloseObligationStage`. Verify the
+// wiring end-to-end: building the locked-default
+// pipeline must accept `update_progress` calls and
+// the stage must then reject an out-of-band emit.
+#[test]
+fn pipeline_update_step_close_progress_drives_stage() {
+    use crate::event_loop::stage_pipeline::StagePipeline;
+
+    let flow_yaml = r#"
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: []
+    steps:
+      - id: unit_loop
+        total_units: 8
+        allowed_emits:
+          - work.done
+        terminal_when: partial_units_done
+        on_partial:
+          partial: plan.blocked(reason="4_of_8_partial")
+"#;
+    let flow =
+        crate::event_loop::flow_declaration::FlowDeclaration::from_yaml(flow_yaml).expect("flow");
+    let mut pipeline = StagePipeline::with_default_stages(flow);
+
+    // Drive 4/8 progress.
+    pipeline.update_step_close_progress("unit_loop", 4, 8);
+
+    let mut sm = crate::event_loop::repair_flow::RepairStateMachine::default();
+    let mut ctx = StageContext::for_test_machine(FlowStep::new("unit_loop"), "loop-1", 0, &mut sm);
+    // The wiring must now reject an emit that does not
+    // satisfy `on_partial.partial`.
+    let bad = Event::new("work.done", r#"{"task_id":"t1"}"#);
+    let result = pipeline.run(&mut ctx, &bad);
+    assert!(
+        result.is_err(),
+        "P0-1: stage pipeline must reject out-of-band emit after update_progress"
+    );
+    let reject = result.unwrap_err();
+    assert_eq!(reject.stage_name, "StepCloseObligation");
+    assert_eq!(reject.reason_code, "step_close_obligation_violated");
+}

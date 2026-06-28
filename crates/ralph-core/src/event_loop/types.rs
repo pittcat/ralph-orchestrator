@@ -320,6 +320,16 @@ pub struct EventLoop {
     pub(crate) idempotent_log: std::sync::Mutex<IdempotentLog>,
     /// U6: emit-time stage pipeline.
     pub(crate) stage_pipeline: StagePipeline,
+    /// U12 wiring (P0-1, 2026-06-27 review):
+    /// per-step `total_units` mirror populated from
+    /// the `mechanism.flow.steps[i].total_units`
+    /// declaration at loop construction time. Used by
+    /// `EventLoop::drive_step_close_progress` to feed
+    /// the `StepCloseObligationStage` without forcing
+    /// a stage-walk on every batch. Empty map =
+    /// pre-U12 fail-open behaviour (the stage stays
+    /// silent because no step opted in).
+    pub(crate) flow_step_totals: std::collections::HashMap<String, u32>,
     /// P1-5 (2026-06-27 adversarial review): owned
     /// per-loop **per-task** repair state machine
     /// registry. Keyed by `task_key` (extracted from

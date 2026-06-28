@@ -1,15 +1,13 @@
 # repair_budget_exhausted_blocks_plan: U7 — repair budget gate escalates to plan.blocked
 #
-# 2026-06-27 mechanism foundation follow-up:
-# Wire-level `events:` / `absent_events:` assertions are
-# omitted because the BDD scenario runner uses
-# `process_events_from_jsonl`, which does NOT route through
-# the emit-time stage pipeline as of commit 9f5abcfc (see
-# header comment in `plan_blocked_reason_required.yml`).
-# The mock still exercises four `task.relocate_legacy`
-# emits to simulate budget exhaustion; the scenario proves
-# the harness accepts the topology and the loop reaches
-# max-iterations without LOOP_COMPLETE.
+# 2026-06-28 mechanism foundation review (P1-1 / P2-3):
+# The header used to claim the BDD runner bypasses the
+# stage pipeline. That is stale — `evaluate_emit_gate_for_jsonl_event`
+# is called from `process_parse_result` for every
+# event. After the P1-1 wiring (`record_stage_rejection`
+# synthesises `plan.blocked` on `repair_unrecoverable_after_*`),
+# the recovery envelope contains the budget exhaustion
+# reason and a `plan.blocked` lands on the main bus.
 
 name: repair_budget_exhausted_blocks_plan
 description: "U7 wiring scaffold: repair budget escalation (BDD scaffold)."
@@ -63,16 +61,12 @@ mock_responses:
 
 expected:
   iterations: 5
-  # U15 (2026-06-27-002 plan completion): after the
-  # publish-time gate is wired (U3/U7), repair topics
-  # survive `accepted_events` (so the lifecycle tracker
-  # still records them) but are routed to the
-  # `<workspace>/recovery.jsonl` U6 sink via the
-  # `AcceptRepairStream` path. The bus never receives
-  # them. The pre-U3 `absent_events: [task.relocate_legacy]`
-  # assertion is retired because the invariant it pinned
-  # (the event not even appearing in the loop's event
-  # list) no longer holds. The U6 sink contract is
-  # verified by the loop_runner integration test
-  # `u7_repair_sink_wiring.rs`.
+  # P1-1 (2026-06-28 review): the budget-exhausted
+  # rejection is recorded as a recovery envelope with
+  # the `repair_unrecoverable_after_*` reason code, AND
+  # `record_stage_rejection` synthesises a `plan.blocked`
+  # on the main bus so the operator does not have to
+  # grep recovery.jsonl to discover the budget state.
+  recovery_contains:
+    - "repair_unrecoverable_after"
   completion: false

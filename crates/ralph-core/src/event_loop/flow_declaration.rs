@@ -68,6 +68,19 @@ pub struct FlowStepDecl {
     /// (see `is_partial_state`).
     #[serde(default)]
     pub on_partial: std::collections::BTreeMap<String, String>,
+    /// U12 (2026-06-27-002 plan completion) — total
+    /// number of units the step is expected to drive
+    /// (e.g. 8 in the 4/8 partial scenario). When set,
+    /// `StepCloseObligationStage` becomes live: the
+    /// runtime drives
+    /// `update_progress(step_id, done, total)` from
+    /// `work.done` emit counts, and the stage rejects
+    /// emits that don't satisfy
+    /// `on_partial` while `done < total`. Backwards
+    /// compatible: omitted = stage stays fail-open
+    /// (the pre-U12 behaviour).
+    #[serde(default)]
+    pub total_units: Option<u32>,
 }
 
 /// Top-level flow declaration.

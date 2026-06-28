@@ -147,6 +147,14 @@ impl EmitStage for StepCloseObligationStage {
             "step_close_obligation_violated",
         ))
     }
+
+    // U12 wiring (P0-1, 2026-06-27 review): expose a
+    // mutable `Any` view so `StagePipeline` can drive
+    // `update_progress` without forcing `check` to take
+    // `&mut self`.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
 }
 
 #[cfg(test)]

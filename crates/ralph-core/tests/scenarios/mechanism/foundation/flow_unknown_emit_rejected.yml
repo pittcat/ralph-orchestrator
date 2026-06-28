@@ -1,15 +1,14 @@
 # flow_unknown_emit_rejected: U9 — FlowStepScopeStage rejects emit outside allowed_emits
 #
-# 2026-06-27 mechanism foundation follow-up:
-# See header comment in `plan_blocked_reason_required.yml`
-# for the rationale behind omitting wire-level `events:`
-# assertions. The runtime BDD scaffold (`process_events_from_jsonl`)
-# does not route through the emit-time stage pipeline as of
-# commit 9f5abcfc, so direct stage-pipeline rejection
-# assertions belong to a follow-up wiring commit (U6.5).
-# For now the scenario proves the BDD harness accepts the
-# `flow:` declaration and reaches the max-iterations exit
-# without LOOP_COMPLETE being honoured.
+# 2026-06-28 mechanism foundation review (P1-2 / P2-3):
+# The header used to claim the BDD runner bypasses the
+# stage pipeline. That is stale. The runner routes every
+# JSONL event through `evaluate_emit_gate_for_jsonl_event`,
+# so the wire-level assertion IS meaningful here. We
+# restore it at the recovery-envelope layer: an emit
+# whose topic is outside the declared step's
+# `allowed_emits` is rejected by `FlowStepScopeStage`
+# and the rejection lands in `recovery.jsonl`.
 
 name: flow_unknown_emit_rejected
 description: "U9 wiring scaffold: FlowStepScopeStage rejects emit outside allowed_emits (BDD scaffold)."
@@ -74,15 +73,14 @@ mock_responses:
 
 expected:
   iterations: 3
-  # U16 (2026-06-27-002 plan completion): after the
-  # publish-time gate is wired (U3), an emit whose
-  # topic is outside the declared step's `allowed_emits`
-  # is rejected at the bus-publish layer (the
-  # flow-scope stage still rejects it inside
-  # `evaluate_emit_gate`). The pre-U3
-  # `absent_events: [plan.complete]` assertion is retired
-  # because the event still appears in `seen_topics`
-  # for lifecycle tracking. The U11 fail-closed
-  # contract is verified at the unit-test level
-  # (`flow_step_scope_stage/tests.rs`).
+  # P1-2 (2026-06-28 review): wire-level assertion
+  # restored at the recovery envelope layer. The
+  # `plan.complete` event was rejected by
+  # `FlowStepScopeStage` (the current step was
+  # `unit_loop` whose `allowed_emits` does not
+  # include `plan.complete`). The rejection reason
+  # surfaces as an envelope in `recovery.jsonl` so the
+  # operator can attribute the failure.
+  recovery_contains:
+    - "flow_step_scope"
   completion: false

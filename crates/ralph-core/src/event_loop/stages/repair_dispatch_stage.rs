@@ -43,11 +43,39 @@ pub const REPAIR_TOPICS: &[&str] = &[
     "repair.close",
 ];
 
+/// P1-4 (2026-06-28 review): `task.resume` is NOT
+/// routed through the repair sink (it carries the
+/// recovery payload to the targeted hat on the main
+/// `EventBus`), but the 2026-06-26 incident showed it
+/// still needs to consume the per-task repair budget
+/// so a hat that fails to ack a `task.resume` does not
+/// keep the loop burning through retries indefinitely.
+///
+/// The set below is consumed by
+/// `RepairDispatchStage::check` to advance the budget
+/// while keeping the event on the main bus. New
+/// topics that need budget tracking without stream
+/// routing should be added here, NOT to
+/// `REPAIR_TOPICS`.
+pub const REPAIR_BUDGET_TRACKED_TOPICS: &[&str] = &[
+    "task.resume",
+];
+
 /// `true` if `topic` is on the repair stream. Used by the
 /// pipeline dispatcher to route the event to the repair sink
 /// instead of the main `EventBus`.
 pub fn is_repair_topic(topic: &str) -> bool {
     REPAIR_TOPICS.contains(&topic)
+}
+
+/// `true` if `topic` is on the main bus but should
+/// still consume the per-task repair budget (P1-4).
+/// Distinct from `is_repair_topic` — those events are
+/// routed to the repair sink; these stay on the main
+/// bus but advance the budget so we do not starve the
+/// operator of `plan.blocked` once the budget is gone.
+pub fn is_budget_tracked_topic(topic: &str) -> bool {
+    REPAIR_BUDGET_TRACKED_TOPICS.contains(&topic)
 }
 
 /// U5 (2026-06-27-002 plan completion): map a repair
@@ -62,10 +90,22 @@ pub fn is_repair_topic(topic: &str) -> bool {
 pub fn repair_action_for(topic: &str, _payload: &Value) -> RepairAction {
     match topic {
         "repair.close" => RepairAction::Close,
-        // Everything else on the repair stream enters
-        // diagnosis. The `BeginDiagnosis` action is
-        // idempotent so subsequent retry topics on the
-        // same task consume the budget via `Retry`.
+        // P1-4 (2026-06-28 review): `task.resume` is
+        // a `Retry`-class event — every emit must
+        // consume one unit of the per-task budget so a
+        // hat that fails to ack cannot keep the loop
+        // burning retries indefinitely. The
+        // `RepairDispatchStage` advances the machine
+        // to `Diagnosing` on the first contact and
+        // from then on every `task.resume` is a
+        // `Retry` that consumes budget.
+        //
+        // NOTE: the stage actually issues both the
+        // initial `BeginDiagnosis` and the
+        // budget-consuming `Retry`. The `BeginDiagnosis`
+        // arm below is therefore a no-op for topics
+        // that we map to `Retry`; the stage detects the
+        // `Detected` state and routes accordingly.
         _ => RepairAction::BeginDiagnosis,
     }
 }
@@ -87,7 +127,9 @@ impl EmitStage for RepairDispatchStage {
     }
 
     fn check(&self, ctx: &mut StageContext, event: &Event) -> Result<(), StageReject> {
-        if !is_repair_topic(event.topic.as_str()) {
+        if !is_repair_topic(event.topic.as_str())
+            && !is_budget_tracked_topic(event.topic.as_str())
+        {
             // Non-repair events pass through unchanged.
             // No budget is consumed.
             return Ok(());
@@ -108,23 +150,43 @@ impl EmitStage for RepairDispatchStage {
             .unwrap_or_else(|| "_loop_default".to_string());
         let payload: Value = serde_json::from_str(event.payload.as_str())
             .unwrap_or(Value::Object(Default::default()));
-        let action = repair_action_for(event.topic.as_str(), &payload);
+        // P1-4: budget-tracked topics (e.g. `task.resume`)
+        // are emitted on the main bus but must consume the
+        // per-task `RepairAction::Retry` budget. The
+        // mapping depends on the machine state:
+        //   - `Detected` → `BeginDiagnosis` (first
+        //     contact is free; no budget consumed).
+        //   - `Diagnosing` / `Fixing` / `Verifying` →
+        //     `Retry` (consumes one unit of budget).
+        //   - `Closed` → leave the action as-is; the
+        //     machine surfaces `IllegalTransition`.
         let machine = ctx
             .repair_states
             .entry(task_key)
             .or_insert_with(RepairStateMachine::default);
-        match machine.try_transition(action) {
-            RepairTransitionResult::Accepted => {
-                // The pipeline dispatcher reads
-                // `is_repair_topic` after a successful run;
-                // we must not return Err for repair
-                // events because Err means "reject and
-                // write recovery envelope", which would
-                // lose the event entirely. Return Ok so
-                // the dispatcher routes the event to the
-                // repair sink.
-                Ok(())
+        let action = if is_budget_tracked_topic(event.topic.as_str()) {
+            use crate::event_loop::repair_flow::RepairState;
+            match machine.state() {
+                RepairState::Detected => RepairAction::BeginDiagnosis,
+                RepairState::Diagnosing
+                | RepairState::Fixing
+                | RepairState::Verifying => RepairAction::Retry,
+                RepairState::Closed => RepairAction::Close,
             }
+        } else {
+            repair_action_for(event.topic.as_str(), &payload)
+        };
+        match machine.try_transition(action) {
+            // P1-4 (2026-06-28 review): budget-tracked
+            // topics (currently just `task.resume`)
+            // return Ok so the dispatcher routes the
+            // event to the MAIN bus, not the repair
+            // sink. The repair stream is for events
+            // that consent to the isolated handler;
+            // `task.resume` carries a payload that
+            // the targeted hat consumes via
+            // `EventBus.take_pending`.
+            RepairTransitionResult::Accepted => Ok(()),
             RepairTransitionResult::BudgetExhausted(exhausted) => {
                 // U5: budget exhausted. Return Reject so
                 // the dispatcher writes a stage-rejection
@@ -134,6 +196,14 @@ impl EmitStage for RepairDispatchStage {
                 // stable so the BDD scenario
                 // `repair_budget_exhausted_blocks_plan`
                 // (U15) can assert it verbatim.
+                //
+                // P1-4: for `task.resume` the same
+                // budget exhaustion still rejects the
+                // event — the downstream
+                // `record_stage_rejection` path (P1-1)
+                // synthesises a `plan.blocked` to
+                // surface the budget exhaustion to the
+                // operator.
                 Err(StageReject::new(self.name(), exhausted.reason_code)
                     .with_missing_fields(vec![
                         format!("retries_consumed={}", exhausted.retries_consumed),
