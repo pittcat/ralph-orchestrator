@@ -938,6 +938,7 @@ impl EventLoop {
             // right scope without relying solely on the U3
             // defensive bypass.
             current_plan_step: initial_current_plan_step(&config),
+            terminal_event_emitted: false,
         })
     }
 
@@ -1090,6 +1091,7 @@ impl EventLoop {
             repair_state_machines: std::collections::HashMap::new(),
             repair_stream_pending: 0,
             current_plan_step: initial_current_plan_step(&config),
+            terminal_event_emitted: false,
         }
     }
 
@@ -2942,6 +2944,34 @@ impl EventLoop {
             .entry(stall_key.clone())
             .and_modify(|c| *c += 1)
             .or_insert(1);
+
+        // 2026-06-28 plan U8 (R5): final-threshold self-stop.
+        // Even when U6's `RepairStateMachine` did not consume
+        // the budget (e.g. the budget was set high, or the
+        // machine was reset by a Close), the per-key stall
+        // counter must still emit a terminal `plan.blocked`
+        // when it crosses `STALL_FINAL_THRESHOLD`. This is a
+        // safety net: the loop's self-stop is the only
+        // contract that survives a misconfigured preset.
+        const STALL_FINAL_THRESHOLD: u32 = 10;
+        if stall_count_value >= STALL_FINAL_THRESHOLD {
+            if !self.terminal_event_emitted {
+                let payload = format!(
+                    r#"{{"reason":"stall_recovery_exhausted","task_key":"{}","stall_count":{}}}"#,
+                    stall_key, stall_count_value,
+                );
+                let blocked =
+                    Event::new("plan.blocked", payload).with_target(HatId::new("ralph"));
+                self.record_repair_event(&blocked);
+                self.terminal_event_emitted = true;
+            }
+            debug!(
+                stall_count = stall_count_value,
+                stall_key = %stall_key,
+                "U8: stall_recovery final threshold reached — loop self-stops"
+            );
+            return true;
+        }
 
         // 2026-06-28 plan U6 (R6): drive the per-task
         // `RepairStateMachine` from the stall hot path so

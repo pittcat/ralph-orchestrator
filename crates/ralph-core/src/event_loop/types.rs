@@ -363,4 +363,11 @@ pub struct EventLoop {
     /// not declare a `mechanism.flow` (legacy / solo
     /// presets) — the bypass in U3 covers that path.
     pub(crate) current_plan_step: String,
+    /// 2026-06-28 plan U8 (R5): per-loop flag that
+    /// suppresses duplicate `plan.blocked` / `LOOP_COMPLETE`
+    /// emissions once a self-stop path has fired. Set when
+    /// the stall final threshold fires or the
+    /// `RepairStateMachine` reports `BudgetExhausted`.
+    /// Reset only by loop construction (one shot per run).
+    pub(crate) terminal_event_emitted: bool,
 }
