@@ -89,8 +89,9 @@ pub use loop_state::{
 #[allow(unused_imports)]
 pub use rejection::{
     NonRetryableReason, Rejection, RejectionStage, build_task_resume_payload,
-    enrich_task_resume_payload, extract_reason_code, rejection_from_origin, resolve_target_hat,
-    task_resume_payload_has_required_fields,
+    enrich_task_resume_payload, enrich_task_resume_payload_full,
+    enrich_task_resume_payload_with_stage, extract_reason_code, rejection_from_origin,
+    resolve_target_hat, task_resume_payload_has_required_fields,
 };
 // U4b (2026-06-10-003 plan, v14): re-export the policy / payload_contract
 // helper free functions moved from this file into `policy.rs`. The
@@ -614,6 +615,54 @@ impl EventLoop {
                 }
             }
 
+            // 2026-06-28-002 U5: mirror the existing
+            // `.ralph/agent/tasks.jsonl` snapshot into the
+            // idempotent log so U8's `_idempotency_key` /
+            // `_final` fields land on every pre-existing task
+            // before the first `save()` of the new run.
+            // Failures are logged at WARN level — the JSONL
+            // remains the source of truth and the bootstrap
+            // path must not block on a best-effort side channel.
+            {
+                use crate::state::idempotent_log::IdempotentLog;
+                use crate::task_store::TaskStore;
+                let tasks_path = context.tasks_path();
+                match TaskStore::load(&tasks_path) {
+                    Ok(mut store) => {
+                        match IdempotentLog::open(
+                            &context.workspace().join(".ralph"),
+                            loop_id,
+                        ) {
+                            Ok(log) => {
+                                let arc =
+                                    std::sync::Arc::new(std::sync::Mutex::new(log));
+                                if let Err(e) =
+                                    store.save_with_shared_log(arc, loop_id)
+                                {
+                                    warn!(
+                                        loop_id = %loop_id,
+                                        tasks_path = %tasks_path.display(),
+                                        error = %e,
+                                        "U5: mirroring existing tasks into idempotent log \
+                                         failed; continuing without blocking the loop start"
+                                    );
+                                }
+                            }
+                            Err(e) => warn!(
+                                loop_id = %loop_id,
+                                error = %e,
+                                "U5: IdempotentLog::open for mirror failed; skipping task mirror"
+                            ),
+                        }
+                    }
+                    Err(e) => debug!(
+                        tasks_path = %tasks_path.display(),
+                        error = %e,
+                        "U5: existing tasks.jsonl not yet present; nothing to mirror"
+                    ),
+                }
+            }
+
             // U8 (2026-06-27-002 plan completion):
             // backfill `loop_id` on every legacy task
             // record left behind by the pre-mechanism
@@ -799,6 +848,28 @@ impl EventLoop {
         };
 
         let (stage_pipeline, flow_step_totals) = build_stage_pipeline_from_config(&config);
+
+        // 2026-06-28-002 U5 P0 fix: after the bootstrap mirror
+        // (above) writes per-task idempotent records to disk via a
+        // transient log, the EventLoop's main `idempotent_log` is
+        // freshly opened and its in-memory index is empty —
+        // without `replay()`, `final_count` / `final_records` /
+        // any `_final`-based gate sees zero records. Call
+        // `replay()` once so the mirror records surface in the
+        // main log. Best-effort: a replay failure is logged at
+        // WARN level and the loop still starts (the JSONL
+        // tasks.jsonl remains the source of truth).
+        {
+            if let Ok(mut log) = idempotent_log.lock() {
+                if let Err(e) = log.replay() {
+                    warn!(
+                        error = %e,
+                        "U5: IdempotentLog::replay after bootstrap mirror failed; \
+                         mirror records will be invisible to the main log until next save"
+                    );
+                }
+            }
+        }
 
         Ok(Self {
             config: config.clone(),
@@ -2835,11 +2906,18 @@ impl EventLoop {
             // U2 (2026-06-17-003 plan): wrap the free-form message
             // in a JSON object carrying the schema-required
             // `reason` and `target_hat` fields.
-            let structured_payload = enrich_task_resume_payload(
+            // 2026-06-28-002 U3: stamp the hard_target's allowed
+            // publish topics so the resumed agent sees the legal
+            // emit surface and the isolated scope check sees the
+            // same list.
+            let hard_target_publishes = self.get_hat_publishes(&hard_target);
+            let structured_payload = enrich_task_resume_payload_full(
                 &payload,
                 reason_str,
                 Some(hard_target.as_str()),
+                None,
                 Some(RejectionKind::StallNoEvents),
+                &hard_target_publishes,
             );
             debug!(
                 stall_count = stall_count_value,
@@ -2886,11 +2964,17 @@ impl EventLoop {
                     // U2 (2026-06-17-003 plan): wrap the free-form
                     // message in a JSON object carrying the
                     // schema-required `reason` and `target_hat` fields.
-                    let structured_payload = enrich_task_resume_payload(
+                    // 2026-06-28-002 U3: stamp `allowed_topics` so
+                    // the agent's resumed emit is constrained to
+                    // its own publishes (e.g. coordinator gets
+                    // `work.ready` but NOT `work.start`).
+                    let structured_payload = enrich_task_resume_payload_full(
                         &payload,
                         "stall_no_events",
                         Some(hat_id.as_str()),
+                        None,
                         Some(RejectionKind::StallNoEvents),
+                        &publishes,
                     );
 
                     debug!(
@@ -2916,11 +3000,17 @@ impl EventLoop {
                     // U2 (2026-06-17-003 plan): wrap the free-form
                     // message in a JSON object carrying the
                     // schema-required `reason` and `target_hat` fields.
-                    let structured_payload = enrich_task_resume_payload(
+                    // 2026-06-28-002 U3: stamp `allowed_topics` for
+                    // the ralph hat so the resumed iteration
+                    // honours its own publishes.
+                    let ralph_publishes = self.get_hat_publishes(&HatId::new("ralph"));
+                    let structured_payload = enrich_task_resume_payload_full(
                         &payload,
                         "stall_no_events",
                         Some("ralph"),
+                        None,
                         Some(RejectionKind::StallNoEvents),
+                        &ralph_publishes,
                     );
                     debug!(
                         "Injecting fallback event to recover - triggering Ralph with task.resume"
@@ -9139,8 +9229,54 @@ impl EventLoop {
     /// the step whose id matches `step_id`. Returns
     /// `None` when the step is not declared or did not
     /// opt into `total_units`.
+    ///
+    /// 2026-06-28-002 U6: fix-unit steps (`fix-{NN}`) that
+    /// did not declare `total_units` fall back to the
+    /// `tasks.jsonl` record count for matching fix-units.
+    /// Without this, `StepCloseObligationStage` stays
+    /// fail-open for fix-unit flows because the registry
+    /// never knows the total. Non-fix steps retain the
+    /// pre-U6 strict `None` semantics so other presets are
+    /// not affected.
     fn flow_step_total_units(&self, step_id: &str) -> Option<u32> {
-        self.flow_step_totals.get(step_id).copied()
+        if let Some(n) = self.flow_step_totals.get(step_id).copied() {
+            return Some(n);
+        }
+        if step_id.starts_with("fix-") {
+            return self.count_fix_unit_tasks(step_id);
+        }
+        None
+    }
+
+    /// 2026-06-28-002 U6: count `tasks.jsonl` records whose
+    /// task_key matches the fix-unit shape
+    /// `ce-executor:*:{step_id}:*` so the step-close progress
+    /// stage can satisfy its total even when the preset omits
+    /// `total_units` in `FlowDeclaration.steps[i]`.
+    fn count_fix_unit_tasks(&self, step_id: &str) -> Option<u32> {
+        use crate::task_store::TaskStore;
+        let path = self.tasks_path();
+        let store = match TaskStore::load(&path) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+        let prefix = format!("ce-executor:");
+        let needle = format!(":{step_id}:");
+        let count = store
+            .all()
+            .iter()
+            .filter(|t| {
+                t.key
+                    .as_deref()
+                    .map(|k| k.starts_with(&prefix) && k.contains(&needle))
+                    .unwrap_or(false)
+            })
+            .count() as u32;
+        if count == 0 {
+            None
+        } else {
+            Some(count)
+        }
     }
 
     /// 2026-06-26 plan U4: discharge hat obligations for any accepted

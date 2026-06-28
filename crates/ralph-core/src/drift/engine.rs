@@ -60,8 +60,8 @@ use ralph_proto::{Event, HatId};
 use crate::config::execution_contracts::ExecutionContractsConfig;
 use crate::config::{DriftConfig, EventPolicyConfig, HatConfig, RuntimeDiagnosisConfig};
 use crate::diagnosis::{
-    AcceptedEventEvidence, DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind,
-    EvidenceRef, RecoveryDiagnosisEnvelope, RecoveryJournalEntry, TerminationHint,
+    AcceptedEventEvidence, DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EscalationLevel,
+    EvidenceKind, EvidenceRef, RecoveryDiagnosisEnvelope, RecoveryJournalEntry, TerminationHint,
 };
 use crate::diagnostics::OrchestrationEvent;
 use crate::event_loop::{EventLoop, TerminationReason};
@@ -378,11 +378,12 @@ impl DriftEngine {
     /// produce a Final hint on every iteration and the loop would
     /// silently drift forever. The severity drives the action:
     ///
-    /// | Severity | Action |
-    /// |---|---|
-    /// | `Critical` / `Error` | Promote to `TerminationReason::RecoveryExhausted` — the loop terminates |
-    /// | `Warning` | Emit a `human.guidance` event so the operator can intervene — the loop continues |
-    /// | `Info` | No active action — the soft alert is enough |
+    /// | Level | Severity | Action |
+    /// |---|---|---|
+    /// | `Final` | any | Promote to `TerminationReason::RecoveryExhausted` — the loop terminates (2026-06-28-002 U2) |
+    /// | non-Final | `Critical` / `Error` | Promote to `TerminationReason::RecoveryExhausted` — the loop terminates |
+    /// | non-Final | `Warning` | Emit a `human.guidance` event so the operator can intervene — the loop continues |
+    /// | non-Final | `Info` | No active action — the soft alert is enough |
     ///
     /// Callers should always pair this with
     /// [`Self::check_final_human_guidance`] so the Warning path is
@@ -393,6 +394,16 @@ impl DriftEngine {
             return None;
         }
         let hint: &TerminationHint = event_loop.recovery_responder().peek_termination_hint()?;
+        // 2026-06-28-002 U2: any Final-escalation hint terminates
+        // the loop regardless of severity. A Warning-severity Final
+        // hint means "retry window exhausted, no safe target" —
+        // continuing the loop would only burn iterations.
+        if hint.level == EscalationLevel::Final {
+            return Some(TerminationReason::RecoveryExhausted {
+                retry_key: hint.retry_key.clone().unwrap_or_default(),
+                reason: hint.reason.clone(),
+            });
+        }
         match hint.severity {
             DiagnosisSeverity::Critical | DiagnosisSeverity::Error => {
                 Some(TerminationReason::RecoveryExhausted {
@@ -501,7 +512,24 @@ fn publish_hard_recovery_event(
         action.attempt,
         severity,
     );
-    let event = Event::new("task.resume", payload).with_target(action.target_hat.clone());
+    // 2026-06-28-002 U3: stamp the target hat's `publishes` onto
+    // the recovery event so the resumed agent knows the legal
+    // emit surface. Use the shared `enrich_task_resume_payload_full`
+    // helper so the envelope shape matches every other
+    // `task.resume` synthesised by the loop (stall_no_events,
+    // persistent mode, open tasks blocking). One canonical
+    // shape avoids downstream consumers having to special-case
+    // drift-engine hard recovery vs every other path.
+    let allowed_topics = event_loop.get_hat_publishes(&action.target_hat);
+    let structured_payload = crate::event_loop::enrich_task_resume_payload_full(
+        &payload,
+        "recovery_hard",
+        Some(action.target_hat.as_str()),
+        None,
+        None,
+        &allowed_topics,
+    );
+    let event = Event::new("task.resume", structured_payload).with_target(action.target_hat.clone());
     // Publish through the existing route so all observers
     // (including the drift observer) see the recovery event.
     event_loop.bus().publish(event);
@@ -954,19 +982,113 @@ mod tests {
             DiagnosisSource::StallRecovery,
         );
         let _ = event_loop.recovery_responder_mut().record_finding(&env, 1);
-        // Warning Final does NOT promote to termination.
+        // 2026-06-28-002 U2: Final level now terminates the loop
+        // regardless of severity. The Warning branch keeps its
+        // human.guidance side-effect so the operator sees the
+        // reason before the loop exits, but the loop is no longer
+        // allowed to drift forever on Warning hints.
         let term = engine.check_termination_hint(&event_loop);
-        assert!(term.is_none(), "Warning must not terminate, got: {term:?}");
-        // It DOES publish human.guidance so the operator can
-        // intervene. The bus is wired but nothing observes
-        // the event in this unit test, so we only check the
-        // return value.
+        assert!(
+            matches!(
+                term,
+                Some(crate::event_loop::TerminationReason::RecoveryExhausted { .. })
+            ),
+            "U2: Warning Final hint must promote to RecoveryExhausted, got: {term:?}"
+        );
+        // It ALSO publishes human.guidance so the operator can
+        // see the reason in the bus before the loop terminates.
         let published = engine.check_final_human_guidance(&mut event_loop);
         assert!(published, "Warning Final must publish human.guidance");
         // A second call in the same iteration is a no-op so
         // the bus is not spammed.
         let published2 = engine.check_final_human_guidance(&mut event_loop);
         assert!(!published2, "same iteration must not re-publish");
+    }
+
+    /// 2026-06-28-002 U2: a Warning-severity Final hint MUST
+    /// terminate the loop. The previous behaviour (rely solely on
+    /// severity) caused Warning-severity Final hints to drift
+    /// forever — `RECOVERY-FINAL-WARNING` events fired but the
+    /// loop kept running. With U2, the Final `level` stamped on
+    /// the hint forces `check_termination_hint` to return
+    /// `RecoveryExhausted` regardless of severity.
+    #[test]
+    fn u2_final_warning_hint_terminates_loop() {
+        let diag = diagnosis_config(true, 1, 1);
+        let config = make_config_with_diagnosis(Arc::clone(&diag));
+        let mut event_loop = crate::event_loop::EventLoop::new(config);
+        event_loop.initialize("u2_final_warning");
+        event_loop.state_mut().bootstrap_complete = true;
+        let mut engine = DriftEngine::enabled(
+            Arc::clone(&diag),
+            RequiredFields::new(),
+            DeclaredEdges::new(),
+        );
+        engine.begin_iteration(&mut event_loop, 1);
+        event_loop.set_iteration_for_test(1);
+
+        let env = envelope_for(
+            "k:coordinator:*:plan_gate_review_not_terminal",
+            1,
+            DiagnosisSeverity::Warning,
+            false,
+            None,
+            DiagnosisSource::StallRecovery,
+        );
+        let decision = event_loop.recovery_responder_mut().record_finding(&env, 1);
+        // Sanity: retry_window=1 already exhausted on first
+        // observation so the level must be Final.
+        assert_eq!(decision.level, EscalationLevel::Final);
+        // Termination MUST fire even with Warning severity.
+        let term = engine.check_termination_hint(&event_loop);
+        assert!(
+            matches!(
+                term,
+                Some(crate::event_loop::TerminationReason::RecoveryExhausted { .. })
+            ),
+            "U2: Warning-severity Final hint must promote to RecoveryExhausted, got: {term:?}"
+        );
+    }
+
+    /// 2026-06-28-002 U2: Info-severity Final hint also terminates.
+    /// The Final level is the canonical "no more retries" signal;
+    /// severity only changes what action the human-visible path
+    /// takes (Critical → fast trip, Warning → guidance + trip,
+    /// Info → log + trip). All three severities share the same
+    /// Final-level termination semantics.
+    #[test]
+    fn u2_final_info_hint_terminates_loop() {
+        let diag = diagnosis_config(true, 1, 1);
+        let config = make_config_with_diagnosis(Arc::clone(&diag));
+        let mut event_loop = crate::event_loop::EventLoop::new(config);
+        event_loop.initialize("u2_final_info");
+        event_loop.state_mut().bootstrap_complete = true;
+        let mut engine = DriftEngine::enabled(
+            Arc::clone(&diag),
+            RequiredFields::new(),
+            DeclaredEdges::new(),
+        );
+        engine.begin_iteration(&mut event_loop, 1);
+        event_loop.set_iteration_for_test(1);
+
+        let env = envelope_for(
+            "k:executor:*:missing_required_fields",
+            1,
+            DiagnosisSeverity::Info,
+            false,
+            None,
+            DiagnosisSource::StallRecovery,
+        );
+        let decision = event_loop.recovery_responder_mut().record_finding(&env, 1);
+        assert_eq!(decision.level, EscalationLevel::Final);
+        let term = engine.check_termination_hint(&event_loop);
+        assert!(
+            matches!(
+                term,
+                Some(crate::event_loop::TerminationReason::RecoveryExhausted { .. })
+            ),
+            "U2: Info-severity Final hint must promote to RecoveryExhausted, got: {term:?}"
+        );
     }
 
     /// Unit 3 (2026-06-16-002 plan) companion test:

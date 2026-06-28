@@ -7,8 +7,13 @@ use tempfile::TempDir;
 fn archive_noop_on_first_run() {
     let dir = TempDir::new().unwrap();
     let archive = archive_state_for_loop(dir.path(), "loop-a").unwrap();
+    // 2026-06-28-002 U4: first run now writes the initial
+    // `loop-version.json` marker (no archive directory is
+    // created, but the marker file must be on disk). The
+    // `archive_noop_on_first_run` semantics shift from "do
+    // nothing" to "do nothing besides write the initial marker".
     assert!(archive.is_none());
-    assert!(!dir.path().join("loop-version.json").exists());
+    assert!(dir.path().join("loop-version.json").exists());
 }
 
 #[test]
@@ -95,4 +100,42 @@ fn archive_subdirectories_also_moved() {
     // into `archive/<id>/subdir/tasks.jsonl`.
     assert!(archive.join("tasks.jsonl").exists());
     assert!(archive.join("subdir").join("tasks.jsonl").exists());
+}
+#[test]
+fn u4_fresh_workspace_writes_initial_loop_version_json() {
+    // 2026-06-28-002 U4: fresh workspace (no loop-version.json)
+    // must now write the initial version marker so downstream
+    // U11/U13 stages can verify archive correctness.
+    let dir = TempDir::new().unwrap();
+    // Sanity: workspace is empty.
+    assert!(!dir.path().join("loop-version.json").exists());
+
+    let result = archive_state_for_loop(dir.path(), "loop-fresh").unwrap();
+    // No archive is created on first run, but the marker file
+    // must be on disk.
+    assert!(result.is_none(), "first run returns no archive directory");
+    let version_path = dir.path().join("loop-version.json");
+    assert!(
+        version_path.exists(),
+        "U4: fresh workspace must now write loop-version.json on first run"
+    );
+    let persisted: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&version_path).unwrap()).unwrap();
+    assert_eq!(persisted["loop_id"], "loop-fresh");
+    assert_eq!(persisted["version"], 1);
+}
+
+#[test]
+fn u4_repeat_first_loop_id_does_not_rewrite_version() {
+    // Calling archive twice on the same fresh loop_id must NOT
+    // overwrite the marker with a higher version — `archive_state_for_loop`
+    // is a no-op when the persisted loop_id matches.
+    let dir = TempDir::new().unwrap();
+    let _ = archive_state_for_loop(dir.path(), "loop-stable").unwrap();
+    let first_content =
+        fs::read_to_string(dir.path().join("loop-version.json")).unwrap();
+    let _ = archive_state_for_loop(dir.path(), "loop-stable").unwrap();
+    let second_content =
+        fs::read_to_string(dir.path().join("loop-version.json")).unwrap();
+    assert_eq!(first_content, second_content);
 }

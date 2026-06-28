@@ -202,6 +202,12 @@ pub struct TerminationHint {
     /// Severity that triggered the hint. The runner may use this to
     /// weight the hint (e.g. only final-escalate on Critical).
     pub severity: DiagnosisSeverity,
+    /// 2026-06-28-002 U2: escalation level that produced this hint.
+    /// When `level == EscalationLevel::Final`, the hint is the
+    /// terminal signal regardless of severity — a Warning-severity
+    /// Final hint means the retry window was exhausted with no safe
+    /// target and the loop MUST terminate.
+    pub level: EscalationLevel,
 }
 
 /// Per-retry-key state.
@@ -523,6 +529,11 @@ impl RecoveryResponder {
                     reason: reason.clone(),
                     retry_key: Some(retry_key.clone()),
                     severity,
+                    // 2026-06-28-002 U2: stamp the Final level
+                    // so `check_termination_hint` can promote
+                    // Warning-severity Final hints to
+                    // `RecoveryExhausted`.
+                    level: EscalationLevel::Final,
                 });
                 decision.reason = Some(reason);
                 decision.target_hat = target_hat;

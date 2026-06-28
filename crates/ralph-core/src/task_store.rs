@@ -15,9 +15,11 @@
 //! `with_exclusive_lock()` for read-modify-write operations that need atomicity.
 
 use crate::file_lock::FileLock;
+use crate::state::idempotent_log::IdempotentLog;
 use crate::task::{Task, TaskStatus};
 use std::io;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 /// A store for managing tasks with JSONL persistence and file locking.
@@ -40,6 +42,12 @@ pub struct TaskStore {
     /// to `None`; the runtime sets it via
     /// [`Self::set_loop_id_for_idempotent_log`].
     loop_id_for_idempotent_log: Option<String>,
+    /// 2026-06-28-002 U5: shared `IdempotentLog` handle. When
+    /// `Some`, every successful `save()` also routes every task
+    /// through the log so the `_idempotency_key` /
+    /// `_final` fields land on the same iteration. `None`
+    /// preserves the legacy JSONL-only write path.
+    shared_idempotent_log: Option<Arc<Mutex<IdempotentLog>>>,
 }
 
 /// Parses a JSONL line into a Task, logging a warning on failure.
@@ -85,6 +93,7 @@ impl TaskStore {
             lock,
             enforce_current_unit: false,
             loop_id_for_idempotent_log: None,
+            shared_idempotent_log: None,
         })
     }
 
@@ -92,6 +101,15 @@ impl TaskStore {
     ///
     /// Creates parent directories if they don't exist.
     /// Uses an exclusive lock to prevent concurrent writes.
+    ///
+    /// 2026-06-28-002 U5: when an `IdempotentLog` is attached
+    /// via [`Self::attach_idempotent_log`], the JSONL write
+    /// is followed by an idempotent-record write for every task
+    /// so the canonical `task:{task_id}:loop:{loop_id}` index
+    /// stays in sync with the on-disk JSONL. The JSONL remains
+    /// the source of truth; the idempotent log is the dedup
+    /// index that protects against the 2026-06-26
+    /// "two records claim `_final=true`" bug class.
     pub fn save(&self) -> io::Result<()> {
         let _guard = self.lock.exclusive()?;
 
@@ -118,7 +136,81 @@ impl TaskStore {
             } else {
                 content + "\n"
             },
-        )
+        )?;
+
+        // 2026-06-28-002 U5: hot-path idempotent write. We only
+        // take this branch when the runtime has attached a
+        // shared log AND `loop_id_for_idempotent_log` is set
+        // (otherwise the legacy no-loop bootstrap path is
+        // untouched). IdempotentLog failures are logged but
+        // never block the JSONL write — the runtime must not
+        // stall on a best-effort side channel.
+        if let (Some(log_arc), Some(loop_id)) = (
+            self.shared_idempotent_log.as_ref(),
+            self.loop_id_for_idempotent_log.as_deref(),
+        ) {
+            if let Ok(mut log) = log_arc.lock() {
+                if !log.loop_id().is_empty() {
+                    for task in &self.tasks {
+                        let is_final = task.status.is_terminal();
+                        let payload = match serde_json::to_value(task) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                tracing::warn!(
+                                    target: "ralph_core::task_store",
+                                    task_id = %task.id,
+                                    error = %err,
+                                    "task serialization failed for hot-path idempotent log; skipping",
+                                );
+                                continue;
+                            }
+                        };
+                        if let Err(err) =
+                            crate::event_loop::idempotent_wiring::write_task(
+                                &mut log, &task.id, loop_id, payload, is_final,
+                            )
+                        {
+                            tracing::warn!(
+                                target: "ralph_core::task_store",
+                                task_id = %task.id,
+                                error = %err,
+                                "hot-path idempotent log write failed; continuing without blocking the loop",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 2026-06-28-002 U5: register the runtime-owned
+    /// `IdempotentLog` so every `save()` mirrors into the log.
+    /// The store holds an `Arc<Mutex<_>>` so the same log can be
+    /// shared with `EventLoop::idempotent_log` without
+    /// lifetime entanglement. Idempotent — repeat calls
+    /// overwrite the previous handle.
+    pub fn attach_idempotent_log(&mut self, log: Arc<Mutex<IdempotentLog>>) {
+        self.shared_idempotent_log = Some(log);
+    }
+
+    /// 2026-06-28-002 U5: one-shot convenience for the
+    /// EventLoop bootstrap path. Registers the shared log, sets
+    /// the canonical loop_id, then performs `save()`. After this
+    /// call, subsequent `save()` calls on the same store will
+    /// route every task through the idempotent log without any
+    /// further wiring — so callers that operate on the store
+    /// directly (e.g. `ralph tools task create`) inherit the
+    /// hot-path behaviour automatically.
+    pub fn save_with_shared_log(
+        &mut self,
+        log: Arc<Mutex<IdempotentLog>>,
+        loop_id: &str,
+    ) -> io::Result<()> {
+        self.attach_idempotent_log(log);
+        self.set_loop_id_for_idempotent_log(loop_id);
+        self.save()
     }
 
     /// U8 (2026-06-27 mechanism foundation): idempotent variant of
@@ -1107,5 +1199,72 @@ mod tests {
         candidate.blocked_by = vec![blocker_id];
 
         assert!(store.invalid_blockers(&candidate).is_empty());
+    }
+
+    // 2026-06-28-002 U5: hot-path idempotent write. When a shared
+    // log + loop_id are attached, every `save()` mirrors each
+    // task into the log so the canonical `_idempotency_key` /
+    // `_final` fields land on the same iteration as the JSONL
+    // snapshot.
+    #[test]
+    fn u5_attach_idempotent_log_routes_save_through_log() {
+        use crate::state::idempotent_log::IdempotentLog;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tasks.jsonl");
+        let mut store = TaskStore::load(&path).unwrap();
+        let log = IdempotentLog::open(tmp.path(), "loop-hot").unwrap();
+        let arc = std::sync::Arc::new(std::sync::Mutex::new(log));
+
+        // Insert two tasks: one terminal, one open.
+        let mut t1 = Task::new("Open task".to_string(), 1);
+        t1.loop_id = Some("loop-hot".into());
+        let t1_id = t1.id.clone();
+        let mut t2 = Task::new("Closed task".to_string(), 1);
+        t2.status = crate::task::TaskStatus::Closed;
+        t2.loop_id = Some("loop-hot".into());
+        let t2_id = t2.id.clone();
+        store.add(t1);
+        store.add(t2);
+
+        // Hot-path save.
+        store.save_with_shared_log(arc.clone(), "loop-hot").unwrap();
+
+        // JSONL still has both records.
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains(&t1_id));
+        assert!(body.contains(&t2_id));
+
+        // Probe the in-memory log directly via the shared Arc —
+        // the IdempotentLog index is in-memory so re-opening
+        // would lose non-finalised records.
+        let log_guard = arc.lock().unwrap();
+        let finals = log_guard.final_records();
+        assert!(
+            finals.iter().any(|r| r._idempotency_key.contains(&t2_id)),
+            "terminal task must produce a `_final=true` idempotent record, got: {finals:?}"
+        );
+        // At least one `_final=true` record must exist (the
+        // closed task); the open task also gets a record, but
+        // the IdempotentLog index exposes `final_count` only
+        // — the open task record is verified by the JSONL
+        // assertion above.
+        assert!(
+            log_guard.final_count() >= 1,
+            "U5: at least the closed task must produce a final idempotent record"
+        );
+    }
+
+    #[test]
+    fn u5_save_without_attach_keeps_legacy_jsonl_only_path() {
+        // No attach — `save()` must still work and write the
+        // JSONL. The hot-path branch is opt-in.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tasks.jsonl");
+        let mut store = TaskStore::load(&path).unwrap();
+        let task = Task::new("Legacy".to_string(), 1);
+        store.add(task);
+        store.save().unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("Legacy"));
     }
 }

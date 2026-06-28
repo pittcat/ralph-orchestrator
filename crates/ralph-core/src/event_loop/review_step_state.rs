@@ -161,6 +161,57 @@ fn plan_gate_finding(topic: &str, reason: &str) -> PolicyFinding {
 }
 
 impl ReviewStepTracker {
+    /// 2026-06-28-002 U1: 解析 fix-plan 文件中 `### U{N}.` 形式的标题，
+    /// 为每个 `fix-{NN}` step 预填 `synth_terminal` + `synth_pass`。
+    /// 失败（文件不存在 / 解析失败）静默忽略 —— plan_gate 的豁免
+    /// 已经在 `plan.complete` step=`fix-*` 分支生效，这里只是给
+    /// tracker 提供更早的"已填好"状态，便于下游做诊断与后续
+    /// `is_wave_closed` 查询。
+    fn prefill_fix_steps_from_plan(&mut self, plan_path: &str) {
+        let Ok(content) = std::fs::read_to_string(plan_path) else {
+            return;
+        };
+        let mut found = Vec::new();
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("### U") {
+                continue;
+            }
+            // 期望形式：`### U{N}. <title>` 或 `### U{N} <title>`
+            let after_marker = trimmed.trim_start_matches("### U");
+            let digits: String = after_marker
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(n) = digits.parse::<u32>()
+                && n > 0
+            {
+                found.push(format!("fix-{n:02}"));
+            }
+        }
+        if found.is_empty() {
+            return;
+        }
+        // 拿到已存在的任意 step_key（plan_name + task_id）作为模板，
+        // 为新 prefill 的 fix-{NN} 复制 plan_name + task_id。
+        let (plan_name, task_id) = match self.steps.keys().next() {
+            Some(k) => (k.plan_name.clone(), k.task_id.clone()),
+            None => return,
+        };
+        for fix_step in found {
+            let key = StepKey {
+                plan_name: plan_name.clone(),
+                task_id: task_id.clone(),
+                step: fix_step,
+            };
+            let state = self.steps.entry(key).or_default();
+            if state.synth_terminal.is_none() {
+                state.synth_terminal = Some("review.complete".to_string());
+                state.synth_pass = true;
+                state.open_wave_id = None;
+            }
+        }
+    }
     /// Semantic gates that run after schema validation (U1/U3).
     pub fn check_semantic_gates(&self, event: &JsonlEvent) -> Option<PolicyFinding> {
         let hat = event.hat.as_deref().unwrap_or("");
@@ -256,6 +307,15 @@ impl ReviewStepTracker {
             let obj = serde_json::from_str::<Value>(p).ok()?;
             let plan_name = obj.get("plan_name")?.as_str()?;
             let task_id = obj.get("task_id")?.as_str()?;
+            // 2026-06-28-002 U1: fix-unit 流程走 `review.complete(fix_plan_file)`
+            // 而不是 review.passed/review.complete 的逐 step terminal。
+            // coordinator 在 `plan.complete` 时携带 `step="fix-{NN}"`，
+            // 我们直接放行，避免 plan_gate 死锁。
+            if let Some(step) = obj.get("step").and_then(|v| v.as_str())
+                && step.starts_with("fix-")
+            {
+                return None;
+            }
             let matching: Vec<_> = self
                 .steps
                 .iter()
@@ -346,6 +406,21 @@ impl ReviewStepTracker {
                 state.synth_terminal = Some(topic.to_string());
                 state.synth_pass = pass;
                 state.open_wave_id = None;
+                // 2026-06-28-002 U1: `review.complete` 携带非空
+                // `fix_plan_file` 时，按 fix-plan 中的 `### U{N}.`
+                // 数量预填每个 fix-{NN} step 的 synth_terminal。
+                // 这条路径独立于当前 step_key —— fix-unit 的
+                // review.complete 通常以 `step="fix-NN"` 落盘，
+                // 但 fix-plan 才是真正的"全部 U 编号"事实源。
+                if topic == "review.complete"
+                    && let Some(p) = event.payload.as_deref()
+                    && let Ok(Value::Object(obj)) = serde_json::from_str(p)
+                    && let Some(plan_path) = obj.get("fix_plan_file").and_then(|v| v.as_str())
+                    && plan_path != "null"
+                    && !plan_path.is_empty()
+                {
+                    self.prefill_fix_steps_from_plan(plan_path);
+                }
             }
             "review.failed" => {
                 state.failed_pending_fix = true;

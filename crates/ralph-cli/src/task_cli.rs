@@ -118,6 +118,17 @@ pub struct EnsureArgs {
     #[arg(long)]
     pub blocked_by: Option<String>,
 
+    /// 2026-06-28-002 U8: auto-derive the canonical fix-unit key
+    /// from `plan:fix_step:slug` (e.g. `myplan:fix-02:patch-foo`)
+    /// AND pin the owner to `coordinator`. The coordinator then
+    /// uses the returned task_id in subsequent `work.ready`
+    /// emits so `work.done` no longer collides with the legacy
+    /// `task-fix-01-placeholder` contract. Mutually exclusive
+    /// with `--key`: pass either `--key` OR `--for-fix-unit`,
+    /// never both.
+    #[arg(long, value_name = "PLAN:FIX_STEP:SLUG")]
+    pub for_fix_unit: Option<String>,
+
     /// Output format
     #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
     pub format: OutputFormat,
@@ -600,12 +611,42 @@ fn ensure_task_with_args(
     coordinator_hats: &[String],
     use_colors: bool,
 ) -> Result<()> {
-    let task = add_common_task_fields(
-        Task::new(args.title.clone(), args.priority).with_key(Some(args.key.clone())),
+    // 2026-06-28-002 U8: `--for-fix-unit plan:fix_step:slug` builds
+    // the canonical fix-unit task and pins the owner to
+    // `coordinator`. The returned task_id is then used in the
+    // follow-up `work.ready` emit so `work.done` no longer
+    // collides with the legacy `task-fix-01-placeholder`
+    // contract. When the flag is set we ignore the `--key`
+    // argument to avoid silent double-sourcing of the key.
+    let derived_key = if let Some(spec) = args.for_fix_unit.as_deref() {
+        let mut parts = spec.split(':');
+        let plan = parts.next().unwrap_or("").to_string();
+        let fix_step = parts.next().unwrap_or("").to_string();
+        let slug = parts.next().unwrap_or("").to_string();
+        if plan.is_empty() || fix_step.is_empty() || slug.is_empty() || parts.next().is_some() {
+            bail!(
+                "--for-fix-unit expects exactly 3 colon-separated segments: \
+                 PLAN:FIX_STEP:SLUG, got '{spec}'"
+            );
+        }
+        Some(format!("ce-executor:{plan}:{fix_step}:{slug}"))
+    } else {
+        None
+    };
+    let key_value = derived_key.clone().unwrap_or_else(|| args.key.clone());
+    let mut task = add_common_task_fields(
+        Task::new(args.title.clone(), args.priority).with_key(Some(key_value)),
         ctx,
         args.description.clone(),
         args.blocked_by.clone(),
     );
+    // 2026-06-28-002 U8: pin the owner to `coordinator` so the
+    // legacy execution contract (`TaskWrongLoop` / loop scope)
+    // validates the follow-up `work.ready` / `work.done`
+    // payload against the canonical fix-unit hat.
+    if args.for_fix_unit.is_some() {
+        task = task.with_owner_hat(Some("coordinator".to_string()));
+    }
     validate_owner_hat_id(&task, coordinator_hats)?;
     let key = task.key.clone().expect("ensure key should be set");
     let loop_id = task.loop_id.clone();
@@ -1297,6 +1338,7 @@ mod tests {
             priority: 2,
             description: None,
             blocked_by: blocked_by.map(|s| s.to_string()),
+            for_fix_unit: None,
             format: OutputFormat::Quiet,
         }
     }

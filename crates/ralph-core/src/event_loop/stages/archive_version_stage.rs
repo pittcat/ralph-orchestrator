@@ -60,7 +60,29 @@ pub fn archive_state_for_loop(
 
     let version_path = workspace.join("loop-version.json");
     if !version_path.exists() {
-        // First run in this workspace — nothing to archive.
+        // 2026-06-28-002 U4: first run used to return `Ok(None)`
+        // and never wrote `loop-version.json`. That made U11 a
+        // permanent no-op on fresh workspaces because
+        // `IdempotentLog::open` was the only other writer, and
+        // it was gated behind `state_idempotency: required`.
+        // We now write the initial `{"loop_id": ..., "version": 1}`
+        // marker here so downstream stages see the canonical
+        // version file regardless of whether idempotent log
+        // is enabled.
+        // Ensure the parent directory exists — a fresh worktree
+        // does not have `.ralph/` until the loop starts.
+        if let Some(parent) = version_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let initial = serde_json::json!({
+            "loop_id": current_loop_id,
+            "version": 1,
+        });
+        fs::write(&version_path, serde_json::to_string_pretty(&initial).map_err(|e| {
+            ArchiveError::Io(io::Error::other(format!(
+                "failed to serialise initial loop-version.json: {e}"
+            )))
+        })?)?;
         return Ok(None);
     }
 

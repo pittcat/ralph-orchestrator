@@ -733,7 +733,64 @@ pub fn run_policy_check_unified(
     let mut ctx = ValidationContext::new(&mut snapshot);
     let mut projected_ctx = ValidationContext::new(&mut projected);
     let report = pipeline.validate_with_preview(&view, &mut ctx, &mut projected_ctx, &event);
-    Ok(report_from_validation(&report, topic, hat, &workspace_root))
+    let final_report = report_from_validation(&report, topic, hat, &workspace_root);
+
+    // 2026-06-28-002 U7: when the unified pipeline rejects the
+    // event, mirror the rejection into `.ralph/recovery.jsonl`
+    // as a `repair_dispatch` envelope so the recovery stream
+    // aggregator (downstream of `record_repair_event`) sees the
+    // CLI emit path. Without this, CLI `ralph emit` failures
+    // bypass U6/U7/U9.5/U12 entirely because the pipeline
+    // result was a CLI-only side-effect. We append best-effort:
+    // a missing `recovery.jsonl` is not fatal, and a write
+    // failure is logged at WARN level.
+    if !report.accepted {
+        append_cli_reject_to_recovery(&workspace_root, topic, hat, payload, &report);
+    }
+
+    Ok(final_report)
+}
+
+/// 2026-06-28-002 U7: append a `repair_dispatch` envelope to
+/// `.ralph/recovery.jsonl` when the unified pipeline rejects a
+/// CLI emit. Delegates to `record_repair_event` so the envelope
+/// shape is identical to the loop's internal repair stream —
+/// downstream consumers (e.g. `ralph diagnose`) do not need to
+/// special-case CLI rejects. Best-effort: a write failure is
+/// logged at WARN level.
+fn append_cli_reject_to_recovery(
+    workspace_root: &Path,
+    topic: &str,
+    hat: Option<&str>,
+    payload: Option<&str>,
+    report: &ralph_core::validation::ValidationReport,
+) {
+    use ralph_proto::{Event, HatId};
+    let event = Event {
+        topic: ralph_proto::Topic::from(topic),
+        payload: payload.unwrap_or("").to_string(),
+        source: hat.map(|h| HatId::new(h)),
+        target: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+    if let Err(e) = ralph_core::event_loop::repair_stream_sink::record_repair_event(
+        &event,
+        &workspace_root.join(".ralph"),
+    ) {
+        tracing::warn!(
+            target: "ralph_cli::policy_check",
+            workspace_root = %workspace_root.display(),
+            error = %e,
+            "U7: failed to append CLI reject to recovery.jsonl via repair_stream_sink; \
+             continuing without blocking the CLI"
+        );
+    }
+    // Suppress unused-variable warning when the report is no longer
+    // inspected after delegation.
+    let _ = report;
 }
 
 #[cfg(test)]

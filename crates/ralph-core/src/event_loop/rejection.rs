@@ -659,6 +659,32 @@ pub fn enrich_task_resume_payload_with_stage(
     stage: Option<RejectionStage>,
     kind: Option<RejectionKind>,
 ) -> String {
+    enrich_task_resume_payload_full(
+        free_form_message,
+        reason_hint,
+        target_hat,
+        stage,
+        kind,
+        &[],
+    )
+}
+
+/// 2026-06-28-002 U3: full-control variant of
+/// `enrich_task_resume_payload_with_stage` that lets the caller
+/// stamp `allowed_topics` onto the payload. The fallback stall
+/// injection path and the drift engine's hard-recovery publishing
+/// path both use this variant to surface the target hat's
+/// `publishes` list, so the resumed agent knows which topics are
+/// in scope and the `isolated_publish_allowed` scope check sees
+/// the same list.
+pub fn enrich_task_resume_payload_full(
+    free_form_message: &str,
+    reason_hint: &str,
+    target_hat: Option<&str>,
+    stage: Option<RejectionStage>,
+    kind: Option<RejectionKind>,
+    allowed_topics: &[String],
+) -> String {
     let reason_code = extract_reason_code(reason_hint);
     let target_hat_value = target_hat
         .filter(|h| !h.is_empty())
@@ -678,20 +704,27 @@ pub fn enrich_task_resume_payload_with_stage(
         }
     }
     // 2026-06-23-005 U1 (R1+R2): typed kind SSOT.
-    //
-    // When caller passes `Some(kind)`, surface the kind's
-    // `reason_code()` string as the typed `kind` field on the
-    // payload. When `None` (legacy paths: topic-format, payload-
-    // contract), fall back to the `reason` string (which mirrors
-    // `violation` substring). Mirrors `build_task_resume_payload`'s
-    // R2 contract: every `task.resume` payload in the system
-    // carries a typed `kind` field so the schema validator sees
-    // 100% field completeness.
     if let serde_json::Value::Object(ref mut map) = obj {
         let kind_value = kind
             .map(|k| serde_json::Value::String(k.reason_code().to_string()))
             .unwrap_or_else(|| serde_json::Value::String(reason_code.to_string()));
         map.insert("kind".into(), kind_value);
+    }
+    // 2026-06-28-002 U3: surface the target hat's allowed
+    // publish topics. The legacy path leaves this empty so the
+    // existing `task.resume` consumers see no change.
+    if !allowed_topics.is_empty()
+        && let serde_json::Value::Object(ref mut map) = obj
+    {
+        map.insert(
+            "allowed_topics".into(),
+            serde_json::Value::Array(
+                allowed_topics
+                    .iter()
+                    .map(|s| serde_json::Value::String(s.clone()))
+                    .collect(),
+            ),
+        );
     }
     obj.to_string()
 }
@@ -846,6 +879,64 @@ mod tests {
     use super::*;
     use crate::event_origin::OriginCheck;
     use crate::execution_contract::{ExecutionContractFinding, ExecutionContractViolationKind};
+
+    // 2026-06-28-002 U3: `enrich_task_resume_payload_full`
+    // stamps the target hat's publishes onto the payload as
+    // `allowed_topics` so the resumed agent knows the legal emit
+    // surface and the isolated scope check sees the same list.
+    #[test]
+    fn u3_enrich_full_stamps_allowed_topics() {
+        let allowed = vec![
+            "work.ready".to_string(),
+            "plan.complete".to_string(),
+            "plan.blocked".to_string(),
+        ];
+        let payload = enrich_task_resume_payload_full(
+            "RECOVERY: previous iteration by hat `coordinator` did not publish an event.",
+            "stall_no_events",
+            Some("coordinator"),
+            None,
+            Some(crate::preset::engine::gates::RejectionKind::StallNoEvents),
+            &allowed,
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let topics = v["allowed_topics"]
+            .as_array()
+            .expect("allowed_topics must be present")
+            .iter()
+            .filter_map(|s| s.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            topics,
+            vec!["work.ready", "plan.complete", "plan.blocked"],
+            "coordinator's allowed_topics must equal its publishes"
+        );
+        // Sanity: coordinator must NOT see work.start (executor-only).
+        assert!(
+            !topics.contains(&"work.start"),
+            "coordinator must not be allowed to emit work.start, got: {topics:?}"
+        );
+    }
+
+    #[test]
+    fn u3_enrich_full_omits_allowed_topics_when_empty() {
+        // Backward compatibility: when no allowed_topics is
+        // supplied the JSON envelope MUST NOT carry the field, so
+        // legacy readers that look for it see no change.
+        let payload = enrich_task_resume_payload_full(
+            "RECOVERY",
+            "stall_no_events",
+            Some("ralph"),
+            None,
+            Some(crate::preset::engine::gates::RejectionKind::StallNoEvents),
+            &[],
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert!(
+            v.get("allowed_topics").is_none(),
+            "empty allowed_topics must not be serialised, got: {payload}"
+        );
+    }
 
     // U1 (plan 2026-06-23-004): 12 个 typed rejection escalation case
     // (4 kind × 3 threshold band),SSOT 化阶梯触发链。
