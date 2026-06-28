@@ -1,10 +1,10 @@
-/Users/pittcat/Dev/agent_tools/universal-autoresearch/.worktrees/2026-06-26-001-feat-ralph-lint-precheck-adaptation-plan/.ralph
-presets/en/ce-executor-serial.yml
+中间产物目录:/Users/pittcat/Dev/Rust/ralph-e2e/.ralph
+preset文件： presets/en/ce-executor-serial.yml
 
 
 上面分别是中间产物，还有这一个运行的 preset。然后就是说，目前我观察到的情况是，这个东西又没有按照编排的流程去走，然后又他妈搞乱了，搞乱了之后，然后这些修复机制又他妈失效了。又没把这个东西给，拨回到原来的轨道上面继续运行。所以说我现在需要你帮我去定位。是什么原因导致了？就是说。这目前的情况是编排机制有问题？还是修复机制失效？还是说 R A L P H 这一个就是说自身的 bug。
 
-你参考的代码就是参考这个，pittcat-dev 里面的代码，Worktree 里面，你只需要去参考中间产物就行了。
+你参考的代码就是参考pittcat-dev 里面的代码
 # Ralph Loop Preset 运行链路诊断 Prompt
 
 > 角色：Ralph Loop 和任意 preset 运行链路诊断专家
@@ -110,4 +110,4 @@ presets/en/ce-executor-serial.yml
 3. **所有证据必须标注具体文件路径和行号 / 事件 ID**，不允许模糊描述。
 4. **历史文档分析不可省略**，必须输出历史问题知识库，即使本次未发现直接关联。
 5. **主 Agent 只做汇总和格式整理**，不重新分析原始数据。
-6. **代码审查以主仓为准，Worktree 仅作运行时产物参考。** 分析代码逻辑时必须回到主仓库（当前工作目录）的源码；Worktree 只用于查看中间运行产物，核心目的是通过产物反推主仓编排逻辑是否存在缺陷，并同步检查 RALPH 机制基座本身是否存在问题。
+6. **代码审查以主仓为准，中间产物目录仅作运行时产物参考。** 分析代码逻辑时必须回到主仓库（当前工作目录）的源码；只用于查看中间运行产物，核心目的是通过产物反推主仓编排逻辑是否存在缺陷，并同步检查 RALPH 机制基座本身是否存在问题。
