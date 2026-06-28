@@ -824,23 +824,57 @@ impl EventLoop {
         let idempotent_log = match context.loop_id() {
             Some(loop_id) => {
                 let ralph_dir = context.ralph_dir();
+                // 2026-06-28 plan U7 (R7): branches on
+                // `mechanism.state_idempotency`:
+                //   - `required` + loop_id: open is HARD. Failure
+                //     surfaces as `Err` so the runner exits and
+                //     does not start a loop with `IdempotentLog::disabled()`.
+                //   - `disabled` + loop_id: still allow disabled
+                //     (legacy / opt-out presets).
+                //   - `required` without loop_id: also Err — the
+                //     caller asked for required but the legacy
+                //     primary loop path has no loop_id.
+                let required = self_is_state_idempotency_required(&config);
                 match crate::state::idempotent_log::IdempotentLog::open(&ralph_dir, loop_id) {
                     Ok(log) => std::sync::Mutex::new(log),
+                    Err(e) if required => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!(
+                                "U7: IdempotentLog::open failed for required-state_idempotency preset \
+                                 (loop_id={loop_id}, ralph_dir={}): {e}. \
+                                 Refusing to fall back to a disabled log; the loop will not start.",
+                                ralph_dir.display(),
+                            ),
+                        ));
+                    }
                     Err(e) => {
                         warn!(
                             loop_id = %loop_id,
                             ralph_dir = %ralph_dir.display(),
                             error = %e,
-                            "P0-2: IdempotentLog::open failed; falling back to disabled log. \
-                             Recovery / drift / task writes will be no-ops this run."
+                            "IdempotentLog::open failed for non-required preset; \
+                             falling back to disabled log."
                         );
                         std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled())
                     }
                 }
             }
             None => {
+                // No loop_id: legacy primary loop. Required
+                // without loop_id is a misconfiguration.
+                let required = self_is_state_idempotency_required(&config);
+                if required {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "U7: state_idempotency is `required` but the loop context has no loop_id. \
+                         Refusing to start a required-idempotency loop without a loop_id; \
+                         provide a LoopContext or set `state_idempotency: disabled`."
+                            .to_string(),
+                    ));
+                }
                 debug!(
-                    "P0-2: loop context has no loop_id; using disabled idempotent log \
+                    "loop context has no loop_id; using disabled idempotent log \
                      (the legacy primary loop runs without a loop_id)."
                 );
                 std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled())
@@ -10465,6 +10499,21 @@ fn is_rejection_stale(
 // fail-open signal — the `FlowStepScopeStage` accepts the
 // event and `build_stage_context_for` falls back to
 // `state.flow_lifecycle.current_step_id()`.
+/// 2026-06-28 plan U7 (R7): helper to decide whether the
+/// preset treats `state_idempotency: required` as a hard
+/// constraint. Pulled out so both the `loop_id`-present and
+/// `loop_id`-absent branches in `with_context_and_diagnostics`
+/// agree on the policy without re-reading the YAML twice.
+fn self_is_state_idempotency_required(config: &RalphConfig) -> bool {
+    config
+        .event_loop
+        .mechanism
+        .as_ref()
+        .and_then(|m| m.flow.as_ref())
+        .map(|f| f.state_idempotency == "required")
+        .unwrap_or(false)
+}
+
 fn initial_current_plan_step(config: &RalphConfig) -> String {
     config
         .event_loop
