@@ -30,6 +30,7 @@ pub mod idempotent_wiring;
 pub mod legacy_task_relocate;
 // 2026-06-27 mechanism foundation U2: independent repair state
 // machine + per-task budget. `RepairDispatchStage` (U7) wraps it.
+pub mod recovery_finalizer;
 pub mod repair_flow;
 pub mod repair_stream_sink;
 pub mod stage_pipeline;
