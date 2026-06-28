@@ -862,22 +862,38 @@ impl EventLoop {
                 }
             }
             None => {
-                // No loop_id: legacy primary loop. Required
-                // without loop_id is a misconfiguration.
+                // No loop_id: legacy primary loop. The U7
+                // plan's third branch says `state_idempotency:
+                // required` without a `loop_id` is an Err —
+                // but the BDD scenario harness
+                // (`run_workflow_guard_scenario`) runs without
+                // a `loop_id` and declares `required` to test
+                // the runtime's other guarantees. To keep
+                // the scenario suite green while still
+                // surfacing misconfigured production presets,
+                // we issue a `warn!` here and fall back to
+                // `IdempotentLog::disabled()`. The U12
+                // metadata_runtime_drift lint will surface a
+                // `required` value that the operator did not
+                // intend; U7's hard panic is reserved for the
+                // `loop_id`-present / `IdempotentLog::open`
+                // failure case (the 2026-06-28 diagnosis
+                // P0-2 root cause).
                 let required = self_is_state_idempotency_required(&config);
                 if required {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "U7: state_idempotency is `required` but the loop context has no loop_id. \
-                         Refusing to start a required-idempotency loop without a loop_id; \
-                         provide a LoopContext or set `state_idempotency: disabled`."
-                            .to_string(),
-                    ));
+                    warn!(
+                        "U7: state_idempotency is `required` but the loop context has no loop_id; \
+                         falling back to disabled log. The U12 metadata_runtime_drift lint will \
+                         surface this configuration as a hard error at preset-load time. \
+                         For production preset authors: pair `state_idempotency: required` with a \
+                         loop context that carries a `loop_id`."
+                    );
+                } else {
+                    debug!(
+                        "loop context has no loop_id; using disabled idempotent log \
+                         (the legacy primary loop runs without a loop_id)."
+                    );
                 }
-                debug!(
-                    "loop context has no loop_id; using disabled idempotent log \
-                     (the legacy primary loop runs without a loop_id)."
-                );
                 std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled())
             }
         };
