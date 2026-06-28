@@ -273,3 +273,15 @@ pub const FINDING_FLOW_TERMINAL_EMIT_MISSING: &str = "preset.flow_terminal_emit_
 /// `FlowStepScopeStage` will reject emits of this topic at
 /// runtime; the lint catches it at preset-load time.
 pub const FINDING_FLOW_UNKNOWN_EMIT_REJECTED: &str = "preset.flow_unknown_emit_rejected";
+
+// ──────────────────────────────────────────────────────────────────────────
+// 2026-06-28 plan U12: metadata-runtime drift
+// ──────────────────────────────────────────────────────────────────────────
+
+/// `mechanism.*` value disagrees with the runtime's accepted
+/// set (e.g. `state_idempotency: maybe`,
+/// `enforce_schema: soft`, `repair_budget: 0`). Surfaced as
+/// `Error` so the preset fails to load — U7 makes the runtime
+/// half of this contract a hard panic, U12 makes the
+/// preset-half a hard lint.
+pub const FINDING_METADATA_RUNTIME_DRIFT: &str = "preset.metadata_runtime_drift";

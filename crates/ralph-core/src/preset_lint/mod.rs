@@ -27,6 +27,7 @@ pub mod coordinator;
 pub mod finding_id;
 pub mod flow_declaration;
 pub mod hat_scope_invariant;
+pub mod metadata_runtime_drift;
 pub mod multi_hat;
 pub mod ownership;
 pub mod schema_parity;
@@ -64,6 +65,7 @@ pub use finding_id::{
 // `2026-06-12-002-feat-workflow-activation-contract-plan.md`
 // (KTD-2: WAC always-on, severity by strictness).
 pub use hat_scope_invariant::check_hat_scope_invariant;
+pub use metadata_runtime_drift::check_metadata_runtime_drift;
 pub use multi_hat::check_multi_hat_isolation;
 pub use ownership::{check_owner_references, check_ownership_rules};
 pub use state_projection::check_work_done_action_chain_order;
@@ -397,6 +399,15 @@ pub fn run_preset_lint(
     findings.extend(lint_findings_to_contract_findings(
         &check_work_done_action_chain_order(config),
     ));
+
+    // 2026-06-28 plan U12 (R12): metadata-runtime drift. Validates
+    // that the preset's `mechanism.*` block
+    // (`state_idempotency`, `enforce_schema`, `repair_budget`) uses
+    // values the runtime actually supports. U7 makes the runtime
+    // half of the contract a hard panic; this lint closes the
+    // preset half so the failure surfaces at preset-load time
+    // rather than mid-run.
+    findings.extend(check_metadata_runtime_drift(config));
 
     // Plan 001 §4.5 R1: every hat `publishes` topic must have a schema
     // entry under `event_policy.schemas`. Without this gate, the CLI
