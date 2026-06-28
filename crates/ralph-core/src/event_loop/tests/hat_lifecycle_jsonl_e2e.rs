@@ -20,6 +20,7 @@
 //! the activation leaked.
 
 use super::*;
+use super::common::*;
 use ralph_proto::HatId;
 
 /// Minimal event-loop config used by every test in this file.
@@ -85,7 +86,21 @@ fn append_jsonl_event(events_path: &std::path::Path, topic: &str, _source: Optio
 fn make_loop(temp: &tempfile::TempDir) -> EventLoop {
     let config = build_lifecycle_config(temp.path());
     let ctx = LoopContext::primary(temp.path().to_path_buf());
-    EventLoop::with_context(config, ctx)
+    let mut event_loop = EventLoop::with_context(config, ctx);
+    // U11 fail-closed: the lifecycle config drives work.* through
+    // process_events_from_jsonl, which now routes every business topic
+    // through the stage pipeline. Install a unit_loop flow that
+    // admits the executor's emits.
+    install_admitting_flow(
+        &mut event_loop,
+        &[
+            "work.start",
+            "work.done",
+            "progress.update",
+            "task.complete",
+        ],
+    );
+    event_loop
 }
 
 /// Pre-activates the executor via the public tracker API so we can

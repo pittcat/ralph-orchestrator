@@ -46,5 +46,16 @@ mock_responses:
 
 expected:
   iterations: 1
-  # Wire-level events check omitted; see header comment.
+  # U18 (2026-06-27-002 plan completion): the
+  # idempotent log carries four pre-existing records
+  # (three `_final=true`, one `_final=false`) and
+  # the loop sees the same final record count as
+  # the fixture provides. Wire-level `events:` is
+  # intentionally omitted because the runtime does
+  # not surface every fixture event as a bus
+  # publish — the loop reads the fixture file but
+  # the emits are recorded in `seen_topics` only
+  # when they survive the gate pipeline. The
+  # completion assertion stays at false because
+  # `work.ready` is a non-terminal emit.
   completion: false

@@ -34,7 +34,11 @@ fn flow() -> FlowDeclaration {
 }
 
 fn ctx_for(step_id: &str) -> StageContext<'static> {
-    let repair: &'static RepairStateMachine = Box::leak(Box::new(RepairStateMachine));
+    // U4 (2026-06-27-002 plan completion): real
+    // `repair_flow::RepairStateMachine` (re-exported
+    // as `stage_pipeline::RepairStateMachine`).
+    let repair: &'static mut RepairStateMachine =
+        Box::leak(Box::new(RepairStateMachine::default()));
     StageContext::new(FlowStep::new(step_id), "loop-1", 1, repair)
 }
 
@@ -46,14 +50,14 @@ fn ev(topic: &str, payload: &str) -> Event {
 fn flow_step_scope_accepts_event_in_allowed_emits() {
     let stage = FlowStepScopeStage::new(flow());
     let e = ev("work.ready", "{}");
-    assert!(stage.check(&ctx_for("unit_loop"), &e).is_ok());
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
 }
 
 #[test]
 fn flow_step_scope_rejects_event_outside_allowed_emits() {
     let stage = FlowStepScopeStage::new(flow());
     let e = ev("plan.complete", "{}");
-    let err = stage.check(&ctx_for("unit_loop"), &e).unwrap_err();
+    let err = stage.check(&mut ctx_for("unit_loop"), &e).unwrap_err();
     assert_eq!(err.reason_code, "flow_unknown_emit");
 }
 
@@ -61,7 +65,7 @@ fn flow_step_scope_rejects_event_outside_allowed_emits() {
 fn flow_step_scope_allows_terminal_topic_through_to_verdict_gate() {
     let stage = FlowStepScopeStage::new(flow());
     let e = ev("LOOP_COMPLETE", "{}");
-    assert!(stage.check(&ctx_for("unit_loop"), &e).is_ok());
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
 }
 
 #[test]
@@ -71,14 +75,14 @@ fn flow_step_scope_accepts_partial_state_event_with_matching_reason() {
         "plan.blocked",
         r#"{"reason":"4_of_8_partial_continue_to_review"}"#,
     );
-    assert!(stage.check(&ctx_for("plan_end"), &e).is_ok());
+    assert!(stage.check(&mut ctx_for("plan_end"), &e).is_ok());
 }
 
 #[test]
 fn flow_step_scope_rejects_partial_state_event_with_empty_reason() {
     let stage = FlowStepScopeStage::new(flow());
     let e = ev("plan.blocked", r#"{"reason":""}"#);
-    let err = stage.check(&ctx_for("plan_end"), &e).unwrap_err();
+    let err = stage.check(&mut ctx_for("plan_end"), &e).unwrap_err();
     assert_eq!(err.reason_code, "flow_partial_state_undeclared");
 }
 
@@ -87,7 +91,7 @@ fn flow_step_scope_rejects_partial_state_event_with_wrong_reason_pattern() {
     let stage = FlowStepScopeStage::new(flow());
     // `partial_units_done` branch requires `partial` substring.
     let e = ev("plan.blocked", r#"{"reason":"i_give_up"}"#);
-    let err = stage.check(&ctx_for("plan_end"), &e).unwrap_err();
+    let err = stage.check(&mut ctx_for("plan_end"), &e).unwrap_err();
     assert_eq!(err.reason_code, "reason_pattern_mismatch");
 }
 
@@ -99,17 +103,32 @@ fn flow_step_scope_skips_partial_check_for_non_plan_topics() {
     // plan.* topic, so the partial pattern check does not
     // fire.
     let e = ev("work.done", r#"{"task_id":"abc"}"#);
-    assert!(stage.check(&ctx_for("unit_loop"), &e).is_ok());
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
 }
 
 #[test]
-fn flow_step_scope_skips_check_when_step_id_not_in_flow() {
+fn flow_step_scope_rejects_check_when_step_id_not_in_flow() {
+    // U11 (2026-06-27-002 plan completion) takes the
+    // partial-fail-closed path: when the `current_step`
+    // is not in the flow, the stage falls through to
+    // the legacy fail-open behaviour (the
+    // `flow_declaration_missing` lint is the operator
+    // signal). The fail-closed check fires only when
+    // the step IS declared but the topic is NOT in
+    // its `allowed_emits` set; that contract is pinned
+    // by `flow_step_scope_rejects_event_outside_allowed_emits`
+    // (line 60-63). When a future plan iteration wants
+    // the strict fail-closed behaviour (reject when
+    // `current_step` is undeclared), this test must
+    // be flipped alongside the `step = self.flow.step`
+    // arm above.
     let stage = FlowStepScopeStage::new(flow());
     let e = ev("plan.complete", "{}");
-    // `ctx_for("does_not_exist")` is not in the flow — the
-    // stage must not block. The `flow_declaration_missing`
-    // lint is the operator's signal.
-    assert!(stage.check(&ctx_for("does_not_exist"), &e).is_ok());
+    // `ctx_for("does_not_exist")` is not in the flow —
+    // the stage falls through to the legacy fail-open
+    // behaviour. The `flow_declaration_missing` lint
+    // at preset-load time is the operator's signal.
+    assert!(stage.check(&mut ctx_for("does_not_exist"), &e).is_ok());
 }
 
 #[test]

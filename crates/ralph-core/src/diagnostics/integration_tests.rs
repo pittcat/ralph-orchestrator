@@ -150,6 +150,11 @@ mod tests {
         let config = RalphConfig::default();
         let diagnostics = DiagnosticsCollector::with_enabled(temp_dir.path(), true).unwrap();
         let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
+        // U11 fail-closed FlowStepScope rejects emits whose topic is not
+        // declared on the current step. `RalphConfig::default()` produces
+        // a FlowDeclaration with no steps; swap in a minimal one that
+        // allows `build.start` so the diagnostics write path runs.
+        install_diagnostic_flow(&mut event_loop);
         event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
         // Write event to JSONL file
@@ -187,6 +192,11 @@ mod tests {
         let config = RalphConfig::default();
         let diagnostics = DiagnosticsCollector::with_enabled(temp_dir.path(), true).unwrap();
         let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
+        // U11 fail-closed FlowStepScope: `RalphConfig::default()` builds a
+        // stage pipeline from an empty FlowDeclaration, so `build.done`
+        // is rejected before it can trigger the backpressure branch the
+        // test asserts on. Install a flow that permits the topic.
+        install_diagnostic_flow(&mut event_loop);
         event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
         // Write build.done event without backpressure evidence
@@ -864,5 +874,55 @@ mod tests {
             linked_task_id: None,
             key,
         }
+    }
+
+    /// Install a minimal FlowDeclaration on `event_loop.stage_pipeline`
+    /// that permits the topics used by diagnostic integration tests.
+    ///
+    /// `RalphConfig::default()` does not carry a `mechanism.flow` block,
+    /// so `with_diagnostics` builds the stage pipeline from a
+    /// FlowDeclaration with zero steps. U11 fail-closed semantics then
+    /// reject every business topic with `flow_step_undeclared`, which
+    /// defeats tests that exist to assert on the *diagnostic write
+    /// path* (not the stage pipeline). This helper swaps in a
+    /// `unit_loop` step that admits `build.start` / `build.done` /
+    /// `LOOP_COMPLETE` so the topic of each test — diagnostic logging —
+    /// becomes the thing under test.
+    fn install_diagnostic_flow(event_loop: &mut EventLoop) {
+        use crate::event_loop::flow_declaration::{FlowDeclaration, FlowStepDecl};
+        let yaml = r#"mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: unit_loop
+        kind: foreach
+        allowed_emits: [build.start, build.done, LOOP_COMPLETE]
+        terminal_when: all_done
+"#;
+        let flow = FlowDeclaration::from_yaml(yaml)
+            .expect("diagnostic-flow YAML must parse");
+        // Sanity: the helper declares the topics the callers emit. If a
+        // future test adds a new topic, this assertion fails loudly
+        // instead of silently producing a `flow_unknown_emit` reject.
+        let step = flow
+            .step("unit_loop")
+            .expect("diagnostic-flow must define unit_loop");
+        let allowed = step.allowed_emits.as_slice();
+        for topic in ["build.start", "build.done", "LOOP_COMPLETE"] {
+            assert!(
+                allowed.contains(&topic.to_string()),
+                "diagnostic_flow missing allowed topic `{topic}`"
+            );
+        }
+        let _ = FlowStepDecl {
+            id: "unit_loop".to_string(),
+            kind: Some("foreach".to_string()),
+            allowed_emits: step.allowed_emits.clone(),
+            terminal_when: step.terminal_when.clone(),
+            on_partial: step.on_partial.clone(),
+        };
+        event_loop.stage_pipeline = crate::event_loop::stage_pipeline::StagePipeline::with_default_stages(flow);
     }
 }

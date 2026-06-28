@@ -511,7 +511,7 @@ fn test_object_payload_events_from_jsonl_converted_to_string() {
     assert!(pending.is_some(), "Event should be on the bus");
     let events = pending.unwrap();
     let event = events.iter().find(|e| e.topic.as_str() == "task.done");
-    assert!(event.is_some(), "build.done event should exist on bus");
+    assert!(event.is_some(), "task.done event should exist on bus");
     let payload = &event.unwrap().payload;
     assert!(
         payload.contains("status") && payload.contains("ok"),

@@ -81,7 +81,7 @@ fn make_emit_only_pipeline(flow: FlowDeclaration) -> StagePipeline {
 /// 用 `Box::leak` 制造一个 `'static` 引用 — `Default` 出来的 sm 不持有
 /// OS 资源，泄漏一次（每次测试）的内存可忽略（每测试 ≤ 1 个引用）。
 fn make_ctx(step_id: &str, loop_id: &str) -> StageContext<'static> {
-    let sm: &'static RepairStateMachine = Box::leak(Box::new(RepairStateMachine::default()));
+    let sm: &'static mut RepairStateMachine = Box::leak(Box::new(RepairStateMachine::default()));
     StageContext::new(FlowStep::new(step_id), loop_id, 1, sm)
 }
 
@@ -116,8 +116,6 @@ fn wiring_composition_emit_to_eventbus() {
         "locked stage order (baseline = 4 stages)"
     );
 
-    let ctx = make_ctx("unit_loop", "loop-comp-1");
-
     // 1. Dispatcher 路由契约：repair topic 在 pipeline.run 之前被拦截，
     //    不会被 FlowStepScope 拒绝（task.relocate_legacy 不在
     //    unit_loop.allowed_emits 中，但 dispatcher 不让它进 pipeline）。
@@ -149,7 +147,8 @@ fn wiring_composition_emit_to_eventbus() {
         "work.done",
         json!({"task_id": "t-1", "loop_id": "loop-comp-1"}),
     );
-    assert!(pipeline.run(&ctx, &work_done).is_ok());
+    let mut ctx = make_ctx("unit_loop", "loop-comp-1");
+    assert!(pipeline.run(&mut ctx, &work_done).is_ok());
 
     let mut bus = EventBus::new();
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -177,13 +176,13 @@ fn wiring_composition_emit_to_eventbus() {
 fn wiring_composition_partial_state() {
     let flow = make_yaml_flow(FLOW_YAML);
     let pipeline = make_emit_only_pipeline(flow);
-    let ctx = make_ctx("unit_loop", "loop-partial-ok");
+    let mut ctx = make_ctx("unit_loop", "loop-partial-ok");
 
     let event = make_event(
         "plan.blocked",
         json!({"reason": "4_of_8_partial_done"}),
     );
-    let result = pipeline.run(&ctx, &event);
+    let result = pipeline.run(&mut ctx, &event);
     assert!(
         result.is_ok(),
         "plan.blocked with partial reason must be accepted (got {result:?})"
@@ -199,13 +198,13 @@ fn wiring_composition_partial_state() {
 fn wiring_composition_partial_state_reject() {
     let flow = make_yaml_flow(FLOW_YAML);
     let pipeline = make_emit_only_pipeline(flow);
-    let ctx = make_ctx("unit_loop", "loop-partial-bad");
+    let mut ctx = make_ctx("unit_loop", "loop-partial-bad");
 
     let event = make_event(
         "plan.blocked",
         json!({"reason": "i_give_up"}),
     );
-    let result = pipeline.run(&ctx, &event);
+    let result = pipeline.run(&mut ctx, &event);
     let reject = result.expect_err("reason mismatch must produce StageReject");
     assert_eq!(reject.stage_name, "FlowStepScope");
     assert_eq!(
@@ -255,13 +254,13 @@ fn wiring_composition_budget_exhausted_to_blocked() {
     //    含 partial 又含 budget 关键字的 reason。
     let flow = make_yaml_flow(FLOW_YAML);
     let pipeline = make_emit_only_pipeline(flow);
-    let ctx = make_ctx("unit_loop", "loop-budget");
+    let mut ctx = make_ctx("unit_loop", "loop-budget");
 
     let blocked = make_event(
         "plan.blocked",
         json!({"reason": "partial_repair_unrecoverable_after_0_retries"}),
     );
-    let result = pipeline.run(&ctx, &blocked);
+    let result = pipeline.run(&mut ctx, &blocked);
     assert!(
         result.is_ok(),
         "plan.blocked with budget reason must pass all 3 stages (got {result:?})"
@@ -428,9 +427,9 @@ fn wiring_composition_verdict_gate_terminal_alignment() {
     // flow-scope 才是拒绝入口）。LOOP_COMPLETE 是 verdict_gate_topic
     // （FlowStepScopeStage 白名单），所以走 pipeline.run 也会通过。
     let pipeline = make_emit_only_pipeline(make_yaml_flow(FLOW_YAML));
-    let ctx = make_ctx("unit_loop", "loop-verdict");
+    let mut ctx = make_ctx("unit_loop", "loop-verdict");
     assert!(
-        pipeline.run(&ctx, &terminal).is_ok(),
+        pipeline.run(&mut ctx, &terminal).is_ok(),
         "LOOP_COMPLETE must pass all 3 emit stages"
     );
 }
@@ -448,12 +447,12 @@ fn wiring_composition_verdict_gate_terminal_alignment() {
 fn wiring_composition_schema_hash_drift_detected() {
     let flow = make_yaml_flow(FLOW_YAML);
     let pipeline = make_emit_only_pipeline(flow);
-    let ctx = make_ctx("unit_loop", "loop-schema-drift");
+    let mut ctx = make_ctx("unit_loop", "loop-schema-drift");
 
     // `plan.blocked` schema 要求 `reason`，但 payload 缺字段。
     let bad = make_event("plan.blocked", json!({}));
     let reject = pipeline
-        .run(&ctx, &bad)
+        .run(&mut ctx, &bad)
         .expect_err("missing reason must be rejected");
     assert_eq!(reject.stage_name, "EmitSchemaGate");
     assert_eq!(reject.reason_code, "missing_required_fields");
@@ -466,7 +465,7 @@ fn wiring_composition_schema_hash_drift_detected() {
     // 同一 topic，`reason=null` 也算缺字段。
     let null_reason = make_event("plan.blocked", json!({"reason": null}));
     let reject_null = pipeline
-        .run(&ctx, &null_reason)
+        .run(&mut ctx, &null_reason)
         .expect_err("null reason must be rejected");
     assert_eq!(reject_null.stage_name, "EmitSchemaGate");
     assert_eq!(reject_null.reason_code, "missing_required_fields");
@@ -475,7 +474,7 @@ fn wiring_composition_schema_hash_drift_detected() {
     // 或 flow_partial_state_undeclared 取决于 path）。
     let empty_reason = make_event("plan.blocked", json!({"reason": ""}));
     let reject_empty = pipeline
-        .run(&ctx, &empty_reason)
+        .run(&mut ctx, &empty_reason)
         .expect_err("empty reason must be rejected by EmitSchemaGate or FlowStepScope");
     assert!(
         reject_empty.stage_name == "EmitSchemaGate"

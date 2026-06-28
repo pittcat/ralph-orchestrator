@@ -2649,3 +2649,16 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     );
     run_workflow_guard_scenario(yaml);
 }
+
+/// U19 (2026-06-27-002 plan completion): replay the
+/// 2026-06-26 diagnostic scenario. The loop must NOT
+/// silently burn the budget on a 4/8 partial + silence
+/// emit chain (U12 obligation + U5 budget gate +
+/// U7/U15 repair stream).
+#[test]
+fn test_mechanism_scenario_replay_2026_06_26() {
+    let yaml = load_scenario(
+        "tests/scenarios/mechanism/foundation/scenario_replay_2026_06_26.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}

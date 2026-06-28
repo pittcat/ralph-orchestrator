@@ -453,11 +453,16 @@ execution_contracts:
 # R2: Verdict gate configuration (REVIEW_COMPLETE fails the loop if
 # pass_or_fail == "fail"). Mirrors what ce-executor-serial declares
 # inline; bringing it into SSOT removes a hand-maintained inline copy.
+#
+# U9 (2026-06-27-002 plan completion): `additional_topics` is
+# removed. The legacy `report.done` → `TerminationReason
+# ::ReviewFailed` auto-terminate path is retired; only
+# `LOOP_COMPLETE` now terminates the dispatcher (U10).
 verdict_gate:
   topic: "REVIEW_COMPLETE"
   fail_field: "pass_or_fail"
   fail_value: "fail"
-  additional_topics: ["report.done"]
+  additional_topics: []
 
 # R2 / R19: Workflow contract — seeds, step_handoff.
 # `handoff_topic_seeds` is the SSOT list that `HandoffIndex` checks

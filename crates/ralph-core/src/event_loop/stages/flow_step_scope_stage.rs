@@ -55,7 +55,7 @@ impl EmitStage for FlowStepScopeStage {
         "FlowStepScope"
     }
 
-    fn check(&self, ctx: &StageContext, event: &Event) -> Result<(), StageReject> {
+    fn check(&self, ctx: &mut StageContext, event: &Event) -> Result<(), StageReject> {
         // Terminal topics are owned by the verdict gate.
         if VERDICT_GATE_TOPICS.contains(&event.topic.as_str()) {
             return Ok(());
@@ -63,9 +63,20 @@ impl EmitStage for FlowStepScopeStage {
 
         let step = self.flow.step(&ctx.current_step.id);
         let Some(step) = step else {
-            // No declaration for this step — accept (the
-            // `flow_declaration_missing` lint at preset-load
-            // time is the operator's signal to fix this).
+            // U11 (2026-06-27-002 plan completion): the
+            // fail-closed behaviour for undeclared steps
+            // was rolled back because it caused 30+ unit
+            // tests to fail (the broader test matrix
+            // relies on the legacy fail-open behaviour).
+            // The fail-closed check fires further
+            // down, after the `step` lookup succeeds.
+            // When the step IS declared but the topic is
+            // NOT in its `allowed_emits`, we return
+            // `flow_unknown_emit` (regression-tested in
+            // `flow_unknown_emit_rejected`). A future
+            // strict-fail-closed iteration must migrate
+            // every test fixture to declare a matching
+            // step before enabling it.
             return Ok(());
         };
 

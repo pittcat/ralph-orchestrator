@@ -63,5 +63,16 @@ mock_responses:
 
 expected:
   iterations: 5
-  # Wire-level events check omitted; see header comment.
+  # U15 (2026-06-27-002 plan completion): after the
+  # publish-time gate is wired (U3/U7), repair topics
+  # survive `accepted_events` (so the lifecycle tracker
+  # still records them) but are routed to the
+  # `<workspace>/recovery.jsonl` U6 sink via the
+  # `AcceptRepairStream` path. The bus never receives
+  # them. The pre-U3 `absent_events: [task.relocate_legacy]`
+  # assertion is retired because the invariant it pinned
+  # (the event not even appearing in the loop's event
+  # list) no longer holds. The U6 sink contract is
+  # verified by the loop_runner integration test
+  # `u7_repair_sink_wiring.rs`.
   completion: false

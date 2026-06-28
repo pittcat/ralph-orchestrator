@@ -48,7 +48,6 @@ config:
     execution_mode: isolated
     starting_event: "work.start"
     completion_promise: "LOOP_COMPLETE"
-    required_events: ["report.done"]
     mechanism:
       flow:
         type: declared
@@ -107,7 +106,20 @@ mock_responses:
 
 expected:
   iterations: 4
-  # Wire-level events check omitted; see header comment.
-  # Completion stays at true: the mock emits LOOP_COMPLETE
-  # and the completion_promise accepts it.
+  # U17 (2026-06-27-002 plan completion): after U9,
+  # the legacy `verdict_gate.additional_topics`
+  # mirror is retired. `report.done` is no longer
+  # an auto-termination signal. The loop reaches
+  # `LOOP_COMPLETE` only via the explicit terminal
+  # emit at iteration 4. Completion stays at
+  # true: the mock emits `LOOP_COMPLETE` and the
+  # completion promise accepts it. The `seen_topics`
+  # assertion is intentionally omitted because
+  # `report.done` is emitted by a hat whose
+  # `current_step` is not declared in this
+  # scenario's `unit_loop` flow step, so the
+  # fail-closed flow-scope stage (U11) rejects it.
+  # The end-to-end contract — `LOOP_COMPLETE`
+  # terminates the loop — is still pinned via
+  # `completion: true`.
   completion: true

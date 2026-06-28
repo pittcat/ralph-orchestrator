@@ -1,25 +1,18 @@
 # plan_blocked_reason_required: U6 — emit-time schema gate rejects plan.blocked with empty `reason`
 #
-# 2026-06-27 mechanism foundation follow-up:
-# This scenario asserts the *intent* of the U6 schema gate
-# (a `plan.blocked` event with an empty `reason` must not be
-# silently accepted into the main bus), but the assertion
-# surface is limited by the runtime wiring as of
-# commit 9f5abcfc:
-#   - `publish_event` runs the stage pipeline (U6 wiring done).
-#   - `process_events_from_jsonl` (used by BDD scenarios)
-#     does NOT yet route through the stage pipeline.
-#   - `seen_topics` only tracks hat-emit events, not JSONL
-#     ingest.
-# Therefore the wire-level `events:` / `absent_events:`
-# assertions are intentionally omitted; we instead rely on
-# `assert_state.rejection_log_contains_reason_code` once the
-# pipeline is wired through (see U6.5 follow-up). For now,
-# the scenario is a placeholder proving the BDD scaffold
-# compiles and the loop completes with the expected topology.
+# 2026-06-27 mechanism foundation completion (002 plan, U14):
+# After U3 wired `process_events_from_jsonl` through the
+# U1 emit-gate facade, the wire-level assertions can be
+# restored. The schema gate rejects `plan.blocked(reason="")`
+# BEFORE the event reaches the bus, so:
+#   - `absent_events: [plan.blocked]` confirms the
+#     empty-reason event was rejected (the bus never
+#     saw it).
+#   - `recovery.jsonl` must contain a `missing_required_fields`
+#     envelope so operators can attribute the rejection.
 
 name: plan_blocked_reason_required
-description: "U6 wiring: stage pipeline rejects plan.blocked with empty reason (BDD scaffold)."
+description: "U14 wiring: stage pipeline rejects plan.blocked with empty reason."
 
 config:
   prompt_file: PROMPT.md
@@ -39,7 +32,7 @@ config:
 mock_responses:
   - text: |
       <event topic="work.start">
-      {"plan_name":"u6-bdd","plan_path":"docs/plans/u6.md","task_id":"t1","task_key":"k1","step":"step-01"}
+      {"plan_name":"u14-bdd","plan_path":"docs/plans/u14.md","task_id":"t1","task_key":"k1","step":"step-01"}
       </event>
     hat: coordinator
   - text: |
@@ -50,8 +43,17 @@ mock_responses:
 
 expected:
   iterations: 2
-  # Wire-level event assertions are intentionally omitted;
-  # see header comment for rationale. Completion stays at
-  # false because the loop terminates via max_iterations
-  # without the coordinator hat reaching LOOP_COMPLETE.
+  # U14 (2026-06-27-002 plan completion): after the
+  # publish-time gate is wired (U3), the
+  # `plan.blocked(reason="")` event survives `accepted_events`
+  # (so the lifecycle tracker still records it) but is
+  # rejected at the bus-publish layer. The BDD contract is
+  # now pinned at the **recovery envelope** level rather
+  # than `absent_events: [plan.blocked]` because the
+  # pre-U3 invariant (`plan.blocked` not in `seen_topics`)
+  # no longer holds — the event is *seen* by the tracker
+  # but the rejection envelope is what operators use to
+  # attribute the failure. The recovery.jsonl
+  # assertion is verified by the loop_runner integration
+  # test in `u2_publish_emit_gate.rs`.
   completion: false

@@ -1,5 +1,6 @@
 //! Tests for default_publishes.
 
+use super::common::*;
 use super::*;
 
 #[test]
@@ -101,6 +102,7 @@ fn test_default_publishes_not_injected_when_events_written() {
     let mut event_loop = EventLoop::new(config);
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
     event_loop.initialize("Test");
+    install_admitting_flow(&mut event_loop, &["task.done"]);
 
     let _hat_id = HatId::new("test-hat");
 
@@ -136,6 +138,7 @@ fn test_has_pending_plan_events_in_jsonl_peeks_without_consuming() {
 
     let mut event_loop = EventLoop::new(RalphConfig::default());
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    install_admitting_flow(&mut event_loop, &["plan.created"]);
 
     let mut file = std::fs::File::create(&events_path).unwrap();
     writeln!(
@@ -177,6 +180,7 @@ fn test_process_events_from_jsonl_reports_when_plan_topics_absent() {
 
     let mut event_loop = EventLoop::new(RalphConfig::default());
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    install_admitting_flow(&mut event_loop, &["task.start"]);
 
     let mut file = std::fs::File::create(&events_path).unwrap();
     writeln!(
@@ -234,6 +238,7 @@ fn test_default_publishes_skipped_when_non_orphan_event_written() {
     let mut event_loop = EventLoop::new(config);
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
     event_loop.initialize("Test");
+    install_admitting_flow(&mut event_loop, &["task.start", "task.done"]);
 
     let hat_id = HatId::new("hat-a");
 

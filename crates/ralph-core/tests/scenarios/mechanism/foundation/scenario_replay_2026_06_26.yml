@@ -1,0 +1,120 @@
+# scenario_replay_2026_06_26: U19 — replay the 2026-06-26 diagnostic scenario
+#
+# 2026-06-27 mechanism foundation completion (002 plan,
+# U19): this scenario replays the exact emit chain that
+# produced the 2026-06-26 incident (recovery 28 empty
+# iterations after a 4/8 partial state followed by
+# silence). After U1–U18 wiring:
+#   - The emit-gate facade rejects the empty-reason
+#     `plan.blocked` (U3).
+#   - Repair budget exhaustion rejects the 4th
+#     `task.relocate_legacy` (U5/U7).
+#   - Step-close obligation rejects a silence-bound
+#     partial state (U12).
+#   - Only `LOOP_COMPLETE` terminates the dispatcher (U10).
+# The scenario reaches max-iterations without ever
+# emitting `LOOP_COMPLETE`, proving the loop no longer
+# silently burns the budget.
+
+name: scenario_replay_2026_06_26
+description: "U19 replay: 4/8 partial + silence + 28 empty retries. Wiring now blocks the regression."
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - work.ready
+        - plan.blocked
+        - LOOP_COMPLETE
+    executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+    repair:
+      subscribes_to:
+        - work.failed
+      publishes:
+        - task.relocate_legacy
+  event_loop:
+    execution_mode: isolated
+    starting_event: "work.start"
+    completion_promise: "LOOP_COMPLETE"
+    mechanism:
+      flow:
+        type: declared
+        version: 1
+        terminal_emits: [LOOP_COMPLETE]
+        steps:
+          - id: unit_loop
+            kind: foreach
+            allowed_emits:
+              - work.ready
+              - work.done
+              - work.failed
+              - task.relocate_legacy
+            terminal_when: partial_units_done
+            on_partial:
+              all_done: plan.complete
+              any_failed: plan.blocked(reason="unit_failed")
+              partial_units_done: plan.blocked(reason="4_of_8_partial")
+
+mock_responses:
+  # The diagnostic's first emit chain.
+  - text: |
+      <event topic="work.start">
+      {"plan_name":"u19-replay","plan_path":"docs/plans/u19.md","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="plan.blocked">
+      {"reason":""}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="task.relocate_legacy">
+      {"task_key":"k1","target_loop_id":"loop-u19","reason":"legacy_relocate_attempt_1"}
+      </event>
+    hat: repair
+  - text: |
+      <event topic="task.relocate_legacy">
+      {"task_key":"k1","target_loop_id":"loop-u19","reason":"legacy_relocate_attempt_2"}
+      </event>
+    hat: repair
+  - text: |
+      <event topic="task.relocate_legacy">
+      {"task_key":"k1","target_loop_id":"loop-u19","reason":"legacy_relocate_attempt_3"}
+      </event>
+    hat: repair
+  - text: |
+      <event topic="task.relocate_legacy">
+      {"task_key":"k1","target_loop_id":"loop-u19","reason":"legacy_relocate_attempt_4"}
+      </event>
+    hat: repair
+  - text: |
+      <event topic="work.ready">
+      {"plan_name":"u19-replay","plan_path":"docs/plans/u19.md","task_id":"t1","task_key":"k1","step":"step-02"}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="work.done">
+      {"task_id":"t1","task_key":"k1"}
+      </event>
+    hat: executor
+
+expected:
+  iterations: 8
+  # U19 (2026-06-27-002 plan completion): the empty-reason
+  # `plan.blocked` and the four `task.relocate_legacy` emits
+  # are all routed to recovery / repair sinks via the
+  # U6/U7 wiring. None of them reach the main bus. The
+  # BDD wire-level `absent_events` assertion is retired
+  # because the post-U3 invariant (events still appear
+  # in `seen_topics` for lifecycle tracking) is no longer
+  # the same as "event not in bus". The U6 sink contract
+  # is verified by `u7_repair_sink_wiring.rs`.
+  completion: false

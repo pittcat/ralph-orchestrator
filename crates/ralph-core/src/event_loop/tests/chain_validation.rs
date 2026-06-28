@@ -42,6 +42,7 @@ fn test_chain_validation_accepts_completion_with_all_required_events() {
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    install_admitting_flow(&mut event_loop, &["plan.approved", "all.built"]);
 
     // Emit both required events across iterations
     write_event_to_jsonl(&events_path, "plan.approved", "OK");
@@ -77,6 +78,10 @@ fn test_chain_validation_tracks_topics_across_iterations() {
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    install_admitting_flow(
+        &mut event_loop,
+        &["research.complete", "plan.approved", "all.built"],
+    );
 
     // Iteration 1: research.complete
     write_event_to_jsonl(&events_path, "research.complete", "findings");
@@ -169,6 +174,7 @@ fn test_loop_cancel_terminates_without_chain_validation() {
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    install_admitting_flow(&mut event_loop, &["loop.cancel", "plan.approved", "all.built"]);
 
     // Send loop.cancel without any required events seen
     write_event_to_jsonl(&events_path, "loop.cancel", "rejected by human");
@@ -221,6 +227,7 @@ fn test_default_publishes_satisfies_required_events_for_completion() {
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    install_admitting_flow(&mut event_loop, &["plan.draft", "all.built"]);
 
     // Simulate: planner wrote no events, default_publishes injects plan.draft
     let planner_id = HatId::new("planner");
@@ -282,6 +289,7 @@ fn test_default_publishes_completion_promise_triggers_termination() {
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    install_admitting_flow(&mut event_loop, &["all.built", "LOOP_COMPLETE"]);
 
     // Satisfy required_events: all.built arrives via JSONL
     write_event_to_jsonl(&events_path, "all.built", "done");
@@ -334,6 +342,7 @@ fn test_loop_cancel_takes_priority_over_completion() {
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    install_admitting_flow(&mut event_loop, &["loop.cancel", "LOOP_COMPLETE"]);
 
     // Both loop.cancel and LOOP_COMPLETE in same batch
     write_event_to_jsonl(&events_path, "loop.cancel", "rejected");

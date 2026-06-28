@@ -13,6 +13,10 @@ event_loop:
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
+    install_admitting_flow(
+        &mut event_loop,
+        &["experiment.evaluated", "experiment.planned"],
+    );
 
     let temp_dir = tempfile::tempdir().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
@@ -123,6 +127,7 @@ event_loop:
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
+    install_admitting_flow(&mut event_loop, &["test.topic"]);
 
     let temp_dir = tempfile::tempdir().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
@@ -144,6 +149,7 @@ fn test_no_event_policy_skips_validation() {
     let config = RalphConfig::default();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
+    install_admitting_flow(&mut event_loop, &["test.event"]);
 
     let temp_dir = tempfile::tempdir().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
@@ -224,6 +230,7 @@ fn test_u1_trivial_step_legitimate_passes_through() {
     let config = u1_review_passed_config();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
+    install_admitting_flow(&mut event_loop, &["review.passed"]);
 
     let temp_dir = tempfile::tempdir().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");

@@ -409,6 +409,7 @@ hats:
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    install_admitting_flow(&mut event_loop, &["LOOP_COMPLETE", "experiment.planned"]);
 
     // Old behavior: LOOP_COMPLETE should still work normally
     write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
@@ -560,6 +561,7 @@ hats:
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    install_admitting_flow(&mut event_loop, &["LOOP_COMPLETE", "experiment.planned"]);
 
     // First accept completion
     write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");

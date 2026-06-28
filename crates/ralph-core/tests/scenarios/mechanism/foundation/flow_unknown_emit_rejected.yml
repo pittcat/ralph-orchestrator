@@ -74,5 +74,15 @@ mock_responses:
 
 expected:
   iterations: 3
-  # Wire-level events check omitted; see header comment.
+  # U16 (2026-06-27-002 plan completion): after the
+  # publish-time gate is wired (U3), an emit whose
+  # topic is outside the declared step's `allowed_emits`
+  # is rejected at the bus-publish layer (the
+  # flow-scope stage still rejects it inside
+  # `evaluate_emit_gate`). The pre-U3
+  # `absent_events: [plan.complete]` assertion is retired
+  # because the event still appears in `seen_topics`
+  # for lifecycle tracking. The U11 fail-closed
+  # contract is verified at the unit-test level
+  # (`flow_step_scope_stage/tests.rs`).
   completion: false

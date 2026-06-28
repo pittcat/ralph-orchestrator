@@ -45,6 +45,17 @@ pub struct VerdictGateStage {
     flow: FlowDeclaration,
 }
 
+/// U10 (2026-06-27-002 plan completion): free-function
+/// form of `VerdictGateStage::is_terminal`. The
+/// `StagePipeline::is_terminal` probe uses this when
+/// the locked-last stage is a `VerdictGateStage` so
+/// the dispatcher can decide whether to write the
+/// loop-termination record without holding a
+/// `VerdictGateStage` instance directly.
+pub fn is_terminal_topic(topic: &str) -> bool {
+    DEFAULT_TERMINAL_EMITS.contains(&topic)
+}
+
 impl VerdictGateStage {
     pub fn new(flow: FlowDeclaration) -> Self {
         Self { flow }
@@ -64,7 +75,7 @@ impl EmitStage for VerdictGateStage {
         "VerdictGate"
     }
 
-    fn check(&self, _ctx: &StageContext, event: &Event) -> Result<(), StageReject> {
+    fn check(&self, _ctx: &mut StageContext, event: &Event) -> Result<(), StageReject> {
         // Topics inside `terminal_emits` pass through. The
         // pipeline dispatcher reads `is_terminal` after a
         // successful `run` to decide whether to write the

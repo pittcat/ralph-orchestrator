@@ -21,6 +21,7 @@
 //! 5. `VerdictGateStage` — terminal emit alignment.
 
 use crate::event_loop::flow_declaration::FlowDeclaration;
+pub use crate::event_loop::repair_flow::RepairStateMachine;
 use ralph_proto::Event;
 
 /// A single stage in the emit pipeline.
@@ -36,7 +37,13 @@ pub trait EmitStage: Send {
     /// to the next stage.  Returning `Err(StageReject)` stops the
     /// pipeline and the event is written to the recovery envelope
     /// instead of the main event bus.
-    fn check(&self, ctx: &StageContext, event: &Event) -> Result<(), StageReject>;
+    ///
+    /// The context is mutable so a stage that needs to advance an
+    /// internal state machine (e.g. U5's `RepairDispatchStage`
+    /// consuming the per-task retry budget) can do so. The pipeline
+    /// dispatcher (`StagePipeline::run`) takes `&mut StageContext`
+    /// for the same reason.
+    fn check(&self, ctx: &mut StageContext, event: &Event) -> Result<(), StageReject>;
 }
 
 /// Rejection returned by an [`EmitStage`] when an event must not enter
@@ -83,9 +90,13 @@ impl FlowStep {
     }
 }
 
-/// Stub for the repair state machine.  Expanded in U2/U7.
-#[derive(Debug, Clone, Default)]
-pub struct RepairStateMachine;
+// U4 (2026-06-27-002 plan completion): the stage
+// pipeline re-exports `repair_flow::RepairStateMachine`
+// so every stage that needs a repair snapshot shares
+// the same type. The original empty stub was removed in
+// U4; any caller that needs a default machine can use
+// `RepairStateMachine::default()` (which yields the
+// 3-retry budget).
 
 /// Context passed to every stage check.
 #[derive(Debug)]
@@ -96,8 +107,16 @@ pub struct StageContext<'a> {
     pub loop_id: String,
     /// Expected state version for idempotent writes.
     pub expected_version: u64,
-    /// Repair state machine snapshot.
-    pub repair_state: &'a RepairStateMachine,
+    /// Repair state machine snapshot. Mutable so the
+    /// `RepairDispatchStage` (U5) can advance the budget
+    /// during `check`.
+    pub repair_state: &'a mut RepairStateMachine,
+    /// Stage pipeline reference for the emit-gate facade
+    /// (U1 / 2026-06-27-002 plan). The facade needs to
+    /// call `pipeline.run` from inside the gate so the
+    /// caller (`publish_event` / `process_parse_result`)
+    /// does not need to thread the pipeline separately.
+    pub pipeline: Option<&'a StagePipeline>,
 }
 
 impl<'a> StageContext<'a> {
@@ -106,13 +125,33 @@ impl<'a> StageContext<'a> {
         current_step: FlowStep,
         loop_id: impl Into<String>,
         expected_version: u64,
-        repair_state: &'a RepairStateMachine,
+        repair_state: &'a mut RepairStateMachine,
     ) -> Self {
         Self {
             current_step,
             loop_id: loop_id.into(),
             expected_version,
             repair_state,
+            pipeline: None,
+        }
+    }
+
+    /// Build a context that carries a pipeline reference
+    /// for the emit-gate facade. Used by `EventLoop` at
+    /// every gate entry point.
+    pub fn with_pipeline(
+        current_step: FlowStep,
+        loop_id: impl Into<String>,
+        expected_version: u64,
+        repair_state: &'a mut RepairStateMachine,
+        pipeline: &'a StagePipeline,
+    ) -> Self {
+        Self {
+            current_step,
+            loop_id: loop_id.into(),
+            expected_version,
+            repair_state,
+            pipeline: Some(pipeline),
         }
     }
 }
@@ -121,6 +160,14 @@ impl<'a> StageContext<'a> {
 #[derive(Default)]
 pub struct StagePipeline {
     stages: Vec<Box<dyn EmitStage>>,
+}
+
+impl std::fmt::Debug for StagePipeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StagePipeline")
+            .field("stage_count", &self.stages.len())
+            .finish()
+    }
 }
 
 impl StagePipeline {
@@ -144,7 +191,7 @@ impl StagePipeline {
 
     /// Run the event through every stage in order.  The first
     /// rejection short-circuits and is returned.
-    pub fn run(&self, ctx: &StageContext, event: &Event) -> Result<(), StageReject> {
+    pub fn run(&self, ctx: &mut StageContext, event: &Event) -> Result<(), StageReject> {
         for stage in &self.stages {
             stage.check(ctx, event)?;
         }
@@ -154,6 +201,33 @@ impl StagePipeline {
     /// Names of the configured stages, in order.
     pub fn names(&self) -> Vec<&'static str> {
         self.stages.iter().map(|s| s.name()).collect()
+    }
+
+    /// U10 (2026-06-27-002 plan completion): true if
+    /// `topic` is in the locked `terminal_emits` set
+    /// (default `[LOOP_COMPLETE]`). The dispatcher
+    /// consults this after a successful `run` to write
+    /// the loop-termination record.
+    ///
+    /// The probe is delegated to the `VerdictGateStage`
+    /// if it is present (the locked-last stage in the
+    /// default pipeline). We look up the stage by
+    /// walking the stages list and calling a
+    /// type-erased probe via a downcast on the trait
+    /// object — but since `VerdictGateStage` is
+    /// concrete, the simplest implementation is to
+    /// check the stage name and call a free function
+    /// that mirrors `VerdictGateStage::is_terminal`'s
+    /// logic.
+    pub fn is_terminal(&self, event: &ralph_proto::Event) -> bool {
+        for stage in &self.stages {
+            if stage.name() == "VerdictGate" {
+                return crate::event_loop::stages::verdict_gate_stage::is_terminal_topic(
+                    event.topic.as_str(),
+                );
+            }
+        }
+        false
     }
 }
 

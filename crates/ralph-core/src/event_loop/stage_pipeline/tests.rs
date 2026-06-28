@@ -22,7 +22,7 @@ impl EmitStage for AcceptCounter {
         self.name
     }
 
-    fn check(&self, _ctx: &StageContext, _event: &Event) -> Result<(), StageReject> {
+    fn check(&self, _ctx: &mut StageContext, _event: &Event) -> Result<(), StageReject> {
         self.counter.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -38,7 +38,7 @@ impl EmitStage for AlwaysReject {
         self.name
     }
 
-    fn check(&self, _ctx: &StageContext, _event: &Event) -> Result<(), StageReject> {
+    fn check(&self, _ctx: &mut StageContext, _event: &Event) -> Result<(), StageReject> {
         Err(StageReject::new(self.name, "always_reject"))
     }
 }
@@ -47,21 +47,21 @@ fn dummy_event() -> Event {
     Event::new("work.ready", "{}")
 }
 
-fn dummy_ctx(repair: &RepairStateMachine) -> StageContext<'_> {
+fn dummy_ctx(repair: &mut RepairStateMachine) -> StageContext<'_> {
     StageContext::new(FlowStep::new("unit_loop"), "loop-1", 1, repair)
 }
 
 #[test]
 fn stage_pipeline_skeleton_empty_accepts_everything() {
-    let repair = RepairStateMachine;
+    let mut repair = RepairStateMachine::default();
     let pipeline = StagePipeline::default();
     let event = dummy_event();
-    assert!(pipeline.run(&dummy_ctx(&repair), &event).is_ok());
+    assert!(pipeline.run(&mut dummy_ctx(&mut repair), &event).is_ok());
 }
 
 #[test]
 fn stage_pipeline_skeleton_three_counters_run_in_order() {
-    let repair = RepairStateMachine;
+    let mut repair = RepairStateMachine::default();
     let a = Arc::new(AtomicUsize::new(0));
     let b = Arc::new(AtomicUsize::new(0));
     let c = Arc::new(AtomicUsize::new(0));
@@ -73,7 +73,7 @@ fn stage_pipeline_skeleton_three_counters_run_in_order() {
     ]);
 
     let event = dummy_event();
-    assert!(pipeline.run(&dummy_ctx(&repair), &event).is_ok());
+    assert!(pipeline.run(&mut dummy_ctx(&mut repair), &event).is_ok());
 
     assert_eq!(a.load(Ordering::SeqCst), 1);
     assert_eq!(b.load(Ordering::SeqCst), 1);
@@ -82,7 +82,7 @@ fn stage_pipeline_skeleton_three_counters_run_in_order() {
 
 #[test]
 fn stage_pipeline_skeleton_reject_short_circuits() {
-    let repair = RepairStateMachine;
+    let mut repair = RepairStateMachine::default();
     let a = Arc::new(AtomicUsize::new(0));
     let b = Arc::new(AtomicUsize::new(0));
     let c = Arc::new(AtomicUsize::new(0));
@@ -94,7 +94,7 @@ fn stage_pipeline_skeleton_reject_short_circuits() {
     ]);
 
     let event = dummy_event();
-    let err = pipeline.run(&dummy_ctx(&repair), &event).unwrap_err();
+    let err = pipeline.run(&mut dummy_ctx(&mut repair), &event).unwrap_err();
 
     assert_eq!(err.stage_name, "Beta");
     assert_eq!(err.reason_code, "always_reject");
@@ -114,7 +114,7 @@ impl EmitStage for ArchiveVersionStage {
     fn name(&self) -> &'static str {
         "ArchiveVersion"
     }
-    fn check(&self, _ctx: &StageContext, _event: &Event) -> Result<(), StageReject> {
+    fn check(&self, _ctx: &mut StageContext, _event: &Event) -> Result<(), StageReject> {
         Ok(())
     }
 }
@@ -123,7 +123,7 @@ impl EmitStage for RepairDispatchStage {
     fn name(&self) -> &'static str {
         "RepairDispatch"
     }
-    fn check(&self, _ctx: &StageContext, _event: &Event) -> Result<(), StageReject> {
+    fn check(&self, _ctx: &mut StageContext, _event: &Event) -> Result<(), StageReject> {
         Ok(())
     }
 }
@@ -132,7 +132,7 @@ impl EmitStage for EmitSchemaGateStage {
     fn name(&self) -> &'static str {
         "EmitSchemaGate"
     }
-    fn check(&self, _ctx: &StageContext, _event: &Event) -> Result<(), StageReject> {
+    fn check(&self, _ctx: &mut StageContext, _event: &Event) -> Result<(), StageReject> {
         Ok(())
     }
 }
@@ -141,7 +141,7 @@ impl EmitStage for FlowStepScopeStage {
     fn name(&self) -> &'static str {
         "FlowStepScope"
     }
-    fn check(&self, _ctx: &StageContext, _event: &Event) -> Result<(), StageReject> {
+    fn check(&self, _ctx: &mut StageContext, _event: &Event) -> Result<(), StageReject> {
         Ok(())
     }
 }
@@ -150,7 +150,7 @@ impl EmitStage for VerdictGateStage {
     fn name(&self) -> &'static str {
         "VerdictGate"
     }
-    fn check(&self, _ctx: &StageContext, _event: &Event) -> Result<(), StageReject> {
+    fn check(&self, _ctx: &mut StageContext, _event: &Event) -> Result<(), StageReject> {
         Ok(())
     }
 }

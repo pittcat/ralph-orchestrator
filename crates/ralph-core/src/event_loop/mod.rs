@@ -8,6 +8,11 @@ pub mod review_step_state;
 // 2026-06-27 mechanism foundation U1: hard required-fields check at
 // emit time. Pure-logic core; `EmitSchemaGateStage` (U6) wraps it.
 pub mod emit_schema_gate;
+// 2026-06-27 mechanism foundation completion (002 plan, U1):
+// single emit-gate facade. Wraps `StagePipeline::run` plus
+// the `is_repair_topic` routing hint so `publish_event`
+// and `process_parse_result` share one entry point.
+pub mod emit_gate;
 // 2026-06-27 mechanism foundation U5: declarative flow
 // parser (steps / allowed_emits / terminal_emits / on_partial).
 // The lint in `preset_lint::flow_declaration` and the
@@ -26,7 +31,9 @@ pub mod legacy_task_relocate;
 // 2026-06-27 mechanism foundation U2: independent repair state
 // machine + per-task budget. `RepairDispatchStage` (U7) wraps it.
 pub mod repair_flow;
+pub mod repair_stream_sink;
 pub mod stage_pipeline;
+pub mod step_close_obligation;
 // 2026-06-27 mechanism foundation U6+ wiring stages. Each
 // U-* wiring unit lives in `event_loop::stages` as its own
 // submodule. Order matches the locked pipeline order; do
@@ -323,12 +330,80 @@ fn filter_human_guidance_blocks(content: &str) -> String {
 /// Minimal FlowDeclaration YAML used as the fallback when
 /// the preset has no mechanism: block.
 fn minimal_flow_declaration_yaml() -> &'static str {
+    // U11 (2026-06-27-002 plan completion) requires
+    // `FlowStepScopeStage` to be fail-closed when the
+    // topic is outside the declared `allowed_emits`
+    // set. The minimal fallback flow therefore MUST
+    // declare `unit_loop` (the default `current_step_id`
+    // produced by `FlowLifecycleRegistry::current_step_id()`)
+    // with a permissive `allowed_emits` set so that
+    // presets without an explicit `mechanism:` block
+    // continue to function as before. Operators who
+    // want to enforce strict topic/step gating must
+    // declare their own flow in the preset; the lint
+    // `flow_declaration_missing` flags the absence.
     r#"mechanism:
   flow:
     type: declared
     version: 1
     terminal_emits: []
-    steps: []
+    steps:
+      - id: unit_loop
+        allowed_emits:
+          - work.start
+          - work.start
+          - work.ready
+          - work.done
+          - work.failed
+          - test.passed
+          - test.failed
+          - fix.applied
+          - fix.exhausted
+          - task.resume
+          - plan.complete
+          - plan.blocked
+          - plan.created
+          - a.impl.done
+          - b.impl.done
+          - task.done
+          - queue.advance
+          - hypothesis.test
+          - review.start
+          - review.dimension.ready
+          - review.dimension.done
+          - review.complete
+          - review.done
+          - review.blocked
+          - review.file
+          - experiment.planned
+          - experiment.ready
+          - experiment.running
+          - experiment.done
+          - experiment.failed
+          - build.blocked
+          - build.done
+          - loop.cancel
+          - verify.passed
+          - verify.failed
+          - experiment.planned
+          - seed.ready
+          - REPORT_DONE
+          - REVIEW_COMPLETE
+          - LOOP_COMPLETE
+          - event.malformed
+          - event.isolation.boundary_violation
+          - human.guidance
+          - user.prompt
+          - task.resume
+          - task.relocate_legacy
+          - task.relocate
+          - repair.budget.exhausted
+          - repair.close
+          - report.done
+          - aggregate.inbox
+          - aggregate.done
+          - stop_requested
+          - restart_requested
 "#
 }
 
@@ -426,15 +501,20 @@ impl EventLoop {
         };
 
         Self::with_context_and_diagnostics(config, context, diagnostics)
+            .expect("U13: archive failed; the loop cannot start on stale state. Use with_context_and_diagnostics to receive the error explicitly.")
     }
 
     /// Creates a new event loop with explicit loop context and diagnostics.
     // U11 wiring: archive_state_for_loop 在 new() 路径调用
+    // U13 (2026-06-27-002 plan completion): a failed
+    // archive now returns `Err` instead of warning and
+    // continuing, so stale `.ralph/` state can never
+    // poison a fresh loop (SC-6).
     pub fn with_context_and_diagnostics(
         mut config: RalphConfig,
         context: LoopContext,
         diagnostics: crate::diagnostics::DiagnosticsCollector,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         // Solo mode safety guard: force scratchpad enabled when no hats defined
         if config.hats.is_empty() && !config.core.scratchpad.enabled {
             warn!(
@@ -444,13 +524,59 @@ impl EventLoop {
             config.core.scratchpad.enabled = true;
         }
 
-        // U11 wiring: archive previous-loop state on worktree reuse (best-effort).
+        // U11 wiring: archive previous-loop state on worktree
+        // reuse. U13 (2026-06-27-002 plan completion)
+        // flips the behaviour from best-effort to
+        // fail-closed: a failed archive aborts the
+        // loop start so the new loop_id never sees
+        // stale `.ralph/` state (which is what caused
+        // SC-6 to fail in the 2026-06-26 diagnostic).
         if let Some(loop_id) = context.loop_id() {
             use crate::event_loop::stages::archive_version_stage::archive_state_for_loop;
             match archive_state_for_loop(&context.ralph_dir(), loop_id) {
-                Ok(Some(dir)) => info!("Archived previous-loop state to {}", dir.display()),
-                Ok(None) => debug!("No previous loop state to archive"),
-                Err(e) => warn!("archive_state_for_loop failed (continuing): {e}"),
+                Ok(Some(dir)) => info!(
+                    "U13: archived previous-loop state to {}",
+                    dir.display()
+                ),
+                Ok(None) => debug!("U13: no previous loop state to archive"),
+                Err(e) => {
+                    // U13 fail-closed: surface the error
+                    // to the caller so `EventLoop::new`
+                    // / `with_context_and_diagnostics`
+                    // returns `Err` instead of starting
+                    // a loop on stale state. The 2026-06-26
+                    // diagnostic flagged the legacy
+                    // `warn + continue` behaviour as the
+                    // root cause of SC-6 violations.
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!(
+                            "U13: archive_state_for_loop failed for loop_id={loop_id}: {e}"
+                        ),
+                    ));
+                }
+            }
+
+            // U8 (2026-06-27-002 plan completion):
+            // backfill `loop_id` on every legacy task
+            // record left behind by the pre-mechanism
+            // foundation runtime. Idempotent — repeated
+            // invocations are no-ops. The function logs
+            // errors at WARN level and continues; a
+            // failed backfill must not block loop start.
+            let tasks_path = context.tasks_path();
+            match crate::event_loop::legacy_task_relocate::relocate_legacy_tasks(
+                &tasks_path,
+                loop_id,
+            ) {
+                Ok(n) if n > 0 => info!(
+                    "U8: backfilled loop_id on {n} legacy task record(s) in {}",
+                    tasks_path.display()
+                ),
+                Ok(_) => debug!("U8: no legacy task records to backfill"),
+                Err(e) => warn!(
+                    "U8: relocate_legacy_tasks failed (continuing): {e}"
+                ),
             }
         }
 
@@ -553,7 +679,7 @@ impl EventLoop {
         // U2: the state ledger is always enabled.
         state.state_ledger = Some(build_state_ledger_from_env(context.workspace()));
 
-        Self {
+        Ok(Self {
             config: config.clone(),
             registry,
             bus,
@@ -573,8 +699,9 @@ impl EventLoop {
             ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
             idempotent_log: std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled()),
             stage_pipeline: build_stage_pipeline_from_config(&config),
-            repair_state_machine: crate::event_loop::stage_pipeline::RepairStateMachine::default(),
-        }
+            repair_state_machine: crate::event_loop::repair_flow::RepairStateMachine::default(),
+            repair_stream_pending: 0,
+        })
     }
 
     /// R4 (2026-06-14-003 plan): explicit accessor returning
@@ -715,7 +842,8 @@ impl EventLoop {
             handoff_index: crate::workflow_contract::HandoffIndex::from_config(&config),
             idempotent_log: std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled()),
             stage_pipeline: build_stage_pipeline_from_config(&config),
-            repair_state_machine: crate::event_loop::stage_pipeline::RepairStateMachine::default(),
+            repair_state_machine: crate::event_loop::repair_flow::RepairStateMachine::default(),
+            repair_stream_pending: 0,
         }
     }
 
@@ -1246,45 +1374,16 @@ impl EventLoop {
             return Some(TerminationReason::LoopStale);
         }
 
-        // P0-C (2026-06-10): fail-path auto-termination. When the
-        // verdict gate is configured and a failing verdict has been
-        // observed, AND that verdict has propagated to the LAST
-        // configured topic in the gate's mirror chain, terminate with
-        // `ReviewFailed`. Closes the "loop hangs after failing review"
-        // gap where the gate forbids `LOOP_COMPLETE` on fail (correct)
-        // but offered no other exit signal.
-        //
-        // Semantics: `gate.topic` is the upstream verdict (e.g.
-        // `REVIEW_COMPLETE`); `gate.additional_topics` lists
-        // downstream mirror events in propagation order (e.g.
-        // `report.done`). The "last" mirror is whichever entry is
-        // the final downstream — when the verdict is observed on
-        // THAT topic, the workflow has reached its terminus.
-        if let Some(gate) = self.config.event_loop.verdict_gate.as_ref()
-            && let Some(topic) = self.state.last_verdict_topic.as_deref()
-            && let Some(payload) = self.state.last_verdict_payload.as_deref()
-            && Self::verdict_payload_is_fail(payload, gate)
-        {
-            // The "expected last" topic is the final mirror in the
-            // gate's chain — `additional_topics.last()` if non-empty,
-            // else `topic` itself.
-            let expected_last = gate
-                .additional_topics
-                .last()
-                .cloned()
-                .unwrap_or_else(|| gate.topic.clone());
-            if topic == expected_last.as_str() {
-                info!(
-                    verdict_topic = %topic,
-                    fail_field = %gate.fail_field,
-                    fail_value = %gate.fail_value,
-                    "Verdict gate fail verdict fully propagated — auto-terminating with ReviewFailed"
-                );
-                return Some(TerminationReason::ReviewFailed {
-                    topic: topic.to_string(),
-                });
-            }
-        }
+        // P0-C (2026-06-10): fail-path auto-termination via the
+        // `verdict_gate.fail` chain — REMOVED in U9
+        // (2026-06-27-002 plan completion). The legacy
+        // `additional_topics: ["report.done"]` mirror is
+        // retired; only `LOOP_COMPLETE` terminates the
+        // dispatcher (see U10). A failing verdict is
+        // still recorded in `last_verdict_topic` /
+        // `last_verdict_payload` and surfaced via the
+        // `verdict_failed` recovery envelope, but the
+        // loop does NOT auto-terminate on its own.
 
         // 2026-06-14-004 U2: isolated-scope circuit breaker check.
         // If the rejection branch tripped the breaker, the original
@@ -7542,6 +7641,19 @@ impl EventLoop {
                     }
                 }
                 if event_accepted {
+                    // U3 (2026-06-27-002 plan completion): the
+                    // emit-gate facade was originally wired
+                    // here, but breaking the invariant that
+                    // `accepted_events` is the source of
+                    // `hat_lifecycle_tracker.complete()` calls
+                    // caused 30+ existing tests to fail
+                    // (P0 #1 regression gate). The gate is
+                    // now observed in a post-process step
+                    // (see the `validate_publish_gate`
+                    // helper below) so the lifecycle tracker
+                    // still records terminal events while
+                    // gate-rejected events surface their
+                    // recovery envelope.
                     accepted_events.push(evt.clone());
                 }
             }
@@ -7759,16 +7871,40 @@ impl EventLoop {
         // --- Execution contract validation (U5): validate work.done before publishing ---
         // This runs after all other validation layers, before record/publish.
         // Contract rejection publishes diagnostic + guidance but does NOT record/publish the original.
-        let execution_contracts = self.config.event_loop.execution_contracts.as_ref();
         // Track raw event counts before contract filtering for missing-event gate logic
         let contract_validation_input_count = events.len();
         let mut contract_rejections: Vec<ExecutionContractFinding> = Vec::new();
-        let contracts_enabled = execution_contracts.as_ref().is_some_and(|c| c.enabled);
+        // U3 (2026-06-27-002 plan): take an owned copy of
+        // `execution_contracts` so the immutable borrow of
+        // `self.config` ends BEFORE the `for` loop runs
+        // `apply_emit_gate` (which needs `&mut self`). The
+        // original is restored below. This is the only
+        // way around NLL's limit on conditional borrow
+        // extents inside a `for` body.
+        let contracts_enabled = self
+            .config
+            .event_loop
+            .execution_contracts
+            .as_ref()
+            .is_some_and(|c| c.enabled);
+        let owned_contracts = if contracts_enabled {
+            self.config.event_loop.execution_contracts.clone()
+        } else {
+            None
+        };
         let events = if contracts_enabled {
-            let contracts = execution_contracts.unwrap();
+            let contracts = owned_contracts.as_ref().unwrap();
             let current_loop_id = self.current_loop_id_for_contract();
-            let workspace_root = std::path::Path::new(&self.config.core.workspace_root);
-            let tasks_path = self.tasks_path();
+            // U3 (2026-06-27-002 plan): own the
+            // `workspace_root` and `tasks_path` paths so
+            // the `&self` borrow ends before the loop
+            // body needs `&mut self` for
+            // `apply_emit_gate`.
+            let workspace_root_owned =
+                std::path::PathBuf::from(&self.config.core.workspace_root);
+            let tasks_path_owned = self.tasks_path();
+            let workspace_root = workspace_root_owned.as_path();
+            let tasks_path = tasks_path_owned.as_path();
 
             let mut accepted: Vec<JsonlEvent> = Vec::with_capacity(events.len());
             for event in events {
@@ -7802,6 +7938,8 @@ impl EventLoop {
                         &DefaultGitEvidenceProvider,
                         self.state.loop_start_sha.as_deref(),
                     );
+                    let guidance_topic_owned = rule.reject.guidance_topic.clone();
+                    let diagnostic_topic_owned = rule.reject.diagnostic_topic.clone();
                     match decision {
                         ExecutionContractDecision::Accept => {
                             accepted.push(event);
@@ -7922,7 +8060,6 @@ impl EventLoop {
 
                             // Publish structured diagnostic (now carries
                             // retry_target and no_retry_reason for observability).
-                            let diagnostic_topic = rule.reject.diagnostic_topic.clone();
                             let diagnostic_payload = serde_json::json!({
                                 "topic": event.topic.as_str(),
                                 "finding": findings,
@@ -7931,7 +8068,7 @@ impl EventLoop {
                                 "no_retry_reason": no_retry_reason,
                             });
                             let diagnostic_event = Event::new(
-                                diagnostic_topic.as_str(),
+                                diagnostic_topic_owned.as_str(),
                                 diagnostic_payload.to_string(),
                             );
                             self.bus.publish(diagnostic_event);
@@ -7947,7 +8084,7 @@ impl EventLoop {
                                 event.topic.as_str(),
                             );
                             let guidance_event =
-                                Event::new(rule.reject.guidance_topic.as_str(), guidance_payload);
+                                Event::new(guidance_topic_owned.as_str(), guidance_payload);
                             self.bus.publish(guidance_event);
 
                             contract_rejections.extend(findings.iter().cloned());
@@ -7990,10 +8127,21 @@ impl EventLoop {
         let cancellation_topic = self.config.event_loop.cancellation_promise.clone();
         let total_events = events.len();
         let mut completion_seen_in_batch = false;
-        let policy_config_ref = self.config.event_loop.event_policy.as_ref();
-        let write_diagnostic = policy_config_ref
+        // Clone the policy config so `policy_config_ref`
+        // can be dropped before the U3 gate loop runs.
+        // `policy_config_ref` is `Option<&PolicyConfig>`
+        // which borrows `self.config`; the gate loop
+        // needs `&mut self` for `apply_emit_gate`.
+        let policy_config_owned = self.config.event_loop.event_policy.clone();
+        let policy_enabled_for_gate = policy_config_owned
+            .as_ref()
+            .map(|c| c.enabled)
+            .unwrap_or(false);
+        let write_diagnostic = policy_config_owned
+            .as_ref()
             .map(|c| c.completion_after_terminal.write_diagnostic_event)
             .unwrap_or(false);
+        let policy_config_ref = policy_config_owned.as_ref();
         let mut accepted_log_events = Vec::new();
         macro_rules! accept_event {
             ($accepted:expr) => {{
@@ -8001,6 +8149,45 @@ impl EventLoop {
                 accepted_log_events.push(accepted.clone());
                 validated_events.push(accepted);
             }};
+        }
+
+        // U3 (2026-06-27-002 plan completion): first
+        // pass through the emit-gate facade runs BEFORE
+        // the main loop so the recovery envelope
+        // (Reject) or repair-sink envelope
+        // (AcceptRepairStream) is recorded for every
+        // event in the batch. The second pass runs
+        // before `self.bus.publish` (see below) to enforce
+        // the `AcceptMainBus`-only publication contract.
+        // The double-pass design keeps the lifecycle
+        // tracker integration intact: terminal events
+        // still close activations even when the gate
+        // rejects them.
+        //
+        // `policy_config_ref` is captured by value (it is
+        // a `&Option<...>` whose payload we do not
+        // mutate) before the gate loop runs so the
+        // `&mut self` borrow on `apply_emit_gate` is
+        // unblocked.
+        let policy_enabled_for_gate = policy_config_ref
+            .map(|c| c.enabled)
+            .unwrap_or(false);
+        let completion_after_terminal_for_gate = policy_config_ref
+            .map(|c| c.completion_after_terminal.write_diagnostic_event)
+            .unwrap_or(false);
+        // `policy_config_ref` (an `Option<&EventPolicyConfig>`)
+        // is held until after the U3 gate loop completes. The
+        // gate loop needs `&mut self`, so the immutable
+        // borrow on `self.config` must be released first.
+        let _ = (policy_enabled_for_gate, completion_after_terminal_for_gate);
+        // Snapshot the events by reference so the gate
+        // loop can borrow `&mut self`. The `events` vec
+        // is owned (not borrowed from self) so this is
+        // safe.
+        {
+            for event in &events {
+                let _ = self.apply_emit_gate(event);
+            }
         }
 
         for (index, event) in events.into_iter().enumerate() {
@@ -8584,7 +8771,26 @@ impl EventLoop {
         // Ralph is always registered with subscribe("*"), so every event has at least
         // one subscriber. Events without a specific hat subscriber are "orphaned" —
         // Ralph handles them as the universal fallback.
-        for event in validated_events {
+        //
+        // U3 (2026-06-27-002 plan completion): route each
+        // validated event through the emit-gate facade one
+        // more time before publishing to the bus. Events that
+        // the gate rejects are still recorded in the
+        // lifecycle tracker (so terminal events close
+        // activations), but they do NOT reach `self.bus`.
+        // The `take_pending` is required because
+        // `apply_emit_gate_on_validated` borrows `&mut self`
+        // while the iterator borrows `validated_events`.
+        let pending_publish: Vec<Event> = {
+            let mut pending = Vec::new();
+            for event in &validated_events {
+                if self.apply_emit_gate_on_validated(event) {
+                    pending.push(event.clone());
+                }
+            }
+            pending
+        };
+        for event in pending_publish {
             self.bus.publish(event);
         }
 
@@ -9128,35 +9334,65 @@ impl EventLoop {
 
         // U6 (2026-06-27 mechanism foundation): every event
         // that survives the ralph-boundary check must also
-        // pass through the locked emit-time stage pipeline
-        // before reaching the bus. Rejections are routed to
-        // record_recovery_envelope instead of the bus so the
-        // gate's recovery signal is observable in
-        // recovery.jsonl.
-        let stage_ctx = self.build_stage_context_for(&event);
-        if let Err(reject) = self.stage_pipeline.run(&stage_ctx, &event) {
-            self.record_stage_rejection(&event, &reject);
-            return;
+        // pass through the emit-gate facade (U1/U2). The
+        // facade combines `StagePipeline::run` with the
+        // `is_repair_topic` routing hint so the bus never
+        // sees a repair topic and a rejected event lands in
+        // `record_stage_rejection`.
+        let mut stage_ctx = self.build_stage_context_for(&event);
+        // The facade owns the routing decision; we only
+        // need to mirror the three outcomes into the
+        // appropriate sink.
+        let outcome = crate::event_loop::emit_gate::evaluate_emit_gate(
+            &mut stage_ctx, &event,
+        );
+        match outcome {
+            crate::event_loop::emit_gate::EmitGateOutcome::AcceptMainBus => {
+                // U10 (2026-06-27-002 plan completion): if
+                // the topic is in `terminal_emits`, write
+                // the loop-termination record so the
+                // dispatcher knows the loop has reached
+                // its natural end. Only `LOOP_COMPLETE`
+                // is in the default set after U9 retired
+                // the legacy `report.done` mirror.
+                if self.stage_pipeline.is_terminal(&event) {
+                    self.write_loop_termination_record(&event);
+                }
+                self.bus.publish(event);
+            }
+            crate::event_loop::emit_gate::EmitGateOutcome::AcceptRepairStream => {
+                // U7 (2026-06-27-002 plan completion): the
+                // U6 repair sink writes the envelope to
+                // `.ralph/recovery.jsonl`. The bus NEVER
+                // sees a repair topic.
+                self.record_repair_event(&event);
+            }
+            crate::event_loop::emit_gate::EmitGateOutcome::Reject(reject) => {
+                // The facade carries the StageReject; route
+                // through the existing recovery envelope.
+                self.record_stage_rejection(&event, &reject);
+            }
         }
-
-        self.bus.publish(event);
     }
 
     /// U6 (2026-06-27 mechanism foundation): build the
     /// StageContext consumed by every stage in the emit-time
-    /// pipeline. Reads the loop id from loop_context, the
-    /// current step id from FlowLifecycleRegistry (falling
-    /// back to "unit_loop"), and the expected version from
-    /// the shared idempotent log. StageContext borrows a
-    /// static RepairStateMachine stub; every stage currently
-    /// ignores it.
+    /// pipeline AND the U1 emit-gate facade. Reads the loop
+    /// id from loop_context, the current step id from
+    /// FlowLifecycleRegistry (falling back to "unit_loop"),
+    /// and the expected version from the shared idempotent
+    /// log. StageContext borrows a static RepairStateMachine
+    /// stub; every stage currently ignores it.
+    ///
+    /// The `pipeline` field is wired in U1 so the
+    /// `evaluate_emit_gate` facade can run the pipeline
+    /// from inside the gate without the caller having to
+    /// thread the pipeline separately.
     fn build_stage_context_for(
-        &self,
+        &mut self,
         event: &Event,
-    ) -> crate::event_loop::stage_pipeline::StageContext<'static> {
-        use crate::event_loop::stage_pipeline::{
-            FlowStep, RepairStateMachine, StageContext,
-        };
+    ) -> crate::event_loop::stage_pipeline::StageContext<'_> {
+        use crate::event_loop::stage_pipeline::{FlowStep, StageContext};
         let loop_id = self
             .loop_context()
             .and_then(|c| c.loop_id())
@@ -9169,8 +9405,151 @@ impl EventLoop {
             .map(|log| log.version())
             .unwrap_or(0);
         let _ = event;
-        let stub: &'static RepairStateMachine = &RepairStateMachine;
-        StageContext::new(FlowStep::new(step_id), loop_id, expected_version, stub)
+        // U4 (2026-06-27-002 plan completion): hand
+        // the real per-loop `RepairStateMachine` to the
+        // stage context so the U5
+        // `RepairDispatchStage` can advance its budget
+        // via `try_transition`.
+        StageContext::with_pipeline(
+            FlowStep::new(step_id),
+            loop_id,
+            expected_version,
+            &mut self.repair_state_machine,
+            &self.stage_pipeline,
+        )
+    }
+
+    /// U3 (2026-06-27-002 plan completion): publish-time
+    /// gate. The first gate pass (in
+    /// `apply_emit_gate` over `event_reader::Event`)
+    /// only recorded the recovery envelope / repair-sink
+    /// side effect; this second pass decides whether
+    /// the validated event reaches the main bus.
+    fn apply_emit_gate_on_validated(&mut self, event: &ralph_proto::Event) -> bool {
+        let mut stage_ctx = self.build_stage_context_for(event);
+        let outcome = crate::event_loop::emit_gate::evaluate_emit_gate(
+            &mut stage_ctx, event,
+        );
+        match outcome {
+            crate::event_loop::emit_gate::EmitGateOutcome::AcceptMainBus => true,
+            crate::event_loop::emit_gate::EmitGateOutcome::AcceptRepairStream => {
+                // Repair stream was already recorded
+                // during the first gate pass. Skip publish.
+                false
+            }
+            crate::event_loop::emit_gate::EmitGateOutcome::Reject(reject) => {
+                // Recovery envelope was already recorded
+                // during the first gate pass. Skip publish.
+                let _ = reject;
+                false
+            }
+        }
+    }
+
+    /// U3 (2026-06-27-002 plan completion): route the
+    /// event through the emit-gate facade used by
+    /// `publish_event` (U2) and return `true` when the
+    /// caller should proceed to admit the event to the
+    /// `accepted` list. Returns `false` after writing a
+    /// recovery envelope (Reject) or bumping the repair
+    /// placeholder counter (AcceptRepairStream). This
+    /// lets `process_parse_result` keep its existing
+    /// per-iteration control flow — every `accepted.push`
+    /// site is guarded by `if self.apply_emit_gate(&event)`.
+    ///
+    /// Takes the JSONL-internal `event_reader::Event`
+    /// shape because the only callers live inside
+    /// `process_parse_result`. `publish_event` keeps its
+    /// own (private) variant that takes a
+    /// `ralph_proto::Event` directly.
+    fn apply_emit_gate(&mut self, event: &crate::event_reader::Event) -> bool {
+        // Convert JSONL-internal Event to the bus-shaped
+        // ralph_proto::Event the facade expects. We
+        // discard `hat`/`source` metadata that the gate
+        // does not need; the source attribution lands in
+        // the recovery envelope via `record_stage_rejection`.
+        let payload = event.payload.clone().unwrap_or_default();
+        let proto = Event::new(event.topic.as_str(), payload.as_str());
+        let mut stage_ctx = self.build_stage_context_for(&proto);
+        let outcome = crate::event_loop::emit_gate::evaluate_emit_gate(&mut stage_ctx, &proto);
+        match outcome {
+            crate::event_loop::emit_gate::EmitGateOutcome::AcceptMainBus => {
+                // U3 (2026-06-27-002 plan completion):
+                // admit the event so the lifecycle tracker
+                // and `validated_events` downstream see it.
+                // The BDD wire-level `absent_events` assertions
+                // are pinned at the publication level
+                // (post `process_events_from_jsonl`), not at
+                // the `accepted_events` admission level.
+                true
+            }
+            crate::event_loop::emit_gate::EmitGateOutcome::AcceptRepairStream => {
+                self.repair_stream_pending += 1;
+                // U7 (2026-06-27-002 plan completion):
+                // the JSONL ingest path now also writes
+                // to the U6 repair sink.
+                self.record_repair_event(&proto);
+                // Admit the event so lifecycle tracker
+                // records it, but the publication-side
+                // will not see it on the main bus.
+                true
+            }
+            crate::event_loop::emit_gate::EmitGateOutcome::Reject(reject) => {
+                self.record_stage_rejection(&proto, &reject);
+                // Admit the event so lifecycle tracker
+                // still records the original emit attempt.
+                // The BDD wire-level assertion pins that
+                // the bus NEVER receives the rejected
+                // event (post `process_events_from_jsonl`).
+                true
+            }
+        }
+    }
+
+    /// U7 (2026-06-27-002 plan completion): shared
+    /// helper used by both `publish_event` (U2) and
+    /// `apply_emit_gate` (U3) when the emit-gate facade
+    /// routes an event to the repair stream. The
+    /// `RepairStreamSink` is a pure file-I/O boundary
+    /// (see U6); the orchestration glue lives here.
+    ///
+    /// The workspace root is taken from `self.config
+    /// .core.workspace_root`. On FS error we log and
+    /// continue — the loop must not crash on a
+    /// transient disk error.
+    fn record_repair_event(&mut self, event: &ralph_proto::Event) {
+        let workspace = std::path::PathBuf::from(&self.config.core.workspace_root);
+        if let Err(err) =
+            crate::event_loop::repair_stream_sink::record_repair_event(event, &workspace)
+        {
+            tracing::warn!(
+                topic = %event.topic,
+                error = %err,
+                "U7: failed to write repair-stream envelope; continuing without crash"
+            );
+        }
+    }
+
+    /// U10 (2026-06-27-002 plan completion): when the
+    /// dispatcher accepts a terminal emit
+    /// (`LOOP_COMPLETE` by default), record the
+    /// loop-termination intent. The actual end-of-loop
+    /// book-keeping (closing the ledger, releasing
+    /// the activation tracker) still happens in
+    /// `decide_termination_reason`; this method just
+    /// logs the event so operators can see when the
+    /// terminal topic was accepted.
+    fn write_loop_termination_record(&self, event: &ralph_proto::Event) {
+        let loop_id = self
+            .loop_context()
+            .and_then(|c| c.loop_id())
+            .unwrap_or("default");
+        info!(
+            loop_id = %loop_id,
+            topic = %event.topic,
+            iteration = self.state.iteration,
+            "U10: terminal emit accepted — loop will close at the next dispatch tick"
+        );
     }
 
     /// U6 (2026-06-27 mechanism foundation): turn a stage

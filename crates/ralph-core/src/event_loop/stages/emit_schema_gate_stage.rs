@@ -72,7 +72,7 @@ impl EmitStage for EmitSchemaGateStage {
         "EmitSchemaGate"
     }
 
-    fn check(&self, _ctx: &StageContext, event: &Event) -> Result<(), StageReject> {
+    fn check(&self, _ctx: &mut StageContext, event: &Event) -> Result<(), StageReject> {
         let required = match self.required.get(event.topic.as_str()) {
             Some(req) if !req.is_empty() => req,
             _ => return Ok(()), // no schema = no gate.

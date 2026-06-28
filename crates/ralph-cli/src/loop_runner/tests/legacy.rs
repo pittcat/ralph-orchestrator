@@ -2596,6 +2596,7 @@ fn build_u8_event_loop(
         ralph_core::diagnostics::DiagnosticsCollector::disabled()
     };
     ralph_core::EventLoop::with_context_and_diagnostics(config, ctx, collector)
+        .expect("U13: archive must succeed for fresh-loop tests")
 }
 
 #[test]

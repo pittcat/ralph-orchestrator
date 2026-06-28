@@ -922,6 +922,19 @@ impl LoopState {
         self.started_at.elapsed()
     }
 
+    /// U8 (2026-06-27-002 plan completion): clear the
+    /// per-task `stall_recovery_counts` entry that
+    /// corresponds to `task_key`. Called when a
+    /// `repair.close` event reaches the orchestration
+    /// layer so the next iteration starts with a fresh
+    /// recovery budget for the same task. Returns
+    /// `true` if an entry was removed, `false` if the
+    /// task had no pending recovery counter (idempotent).
+    pub fn on_repair_close(&mut self, task_key: &str) -> bool {
+        let key = format!("stall:{task_key}");
+        self.stall_recovery_counts.remove(&key).is_some()
+    }
+
     /// 把 `started_at: Instant`（进程内 monotonic clock）映射为
     /// `LedgerSnapshot::started_at_ts` 用的 RFC3339 wall-clock 字符串。
     ///

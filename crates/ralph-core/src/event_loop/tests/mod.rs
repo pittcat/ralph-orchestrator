@@ -79,3 +79,37 @@ mod u11_wiring;
 /// EventLoop::publish_event so every hat emit passes through
 /// the locked default stages before reaching the event bus.
 mod u6_wiring;
+/// U2 (2026-06-27-002 plan): `publish_event` routes
+/// through the single `evaluate_emit_gate` facade.
+mod u2_publish_emit_gate;
+/// U3 (2026-06-27-002 plan): `process_parse_result` /
+/// `process_events_from_jsonl` route through the same
+/// `evaluate_emit_gate` facade so the JSONL ingest path
+/// cannot bypass the gate.
+mod u3_jsonl_emit_gate;
+/// U4 (2026-06-27-002 plan): `stage_pipeline` re-exports
+/// `repair_flow::RepairStateMachine`; the stub is gone.
+mod u4_repair_sm_unify;
+/// U7 (2026-06-27-002 plan): the U6 `RepairStreamSink`
+/// is wired into both `publish_event` and
+/// `process_parse_result`. The bus never receives a
+/// repair topic.
+mod u7_repair_sink_wiring;
+/// U8 (2026-06-27-002 plan): loop start invokes
+/// `relocate_legacy_tasks`; `repair.close` clears the
+/// per-task stall recovery counter.
+mod u8_legacy_relocate_and_close;
+/// U9 (2026-06-27-002 plan): retire legacy
+/// `verdict_gate.additional_topics: ["report.done"]`
+/// from schema + runtime. Only `LOOP_COMPLETE`
+/// terminates the dispatcher.
+mod u9_verdict_legacy_retire;
+/// U10 (2026-06-27-002 plan): `VerdictGate` is the
+/// sole termination dispatcher. The stage pipeline's
+/// `is_terminal` probe writes a loop-termination
+/// record when a `LOOP_COMPLETE` event clears the gate.
+mod u10_verdict_dispatcher;
+/// U13 (2026-06-27-002 plan): archive failures
+/// abort the loop start. `with_context_and_diagnostics`
+/// returns `Err` instead of warning + continuing.
+mod u13_archive_fail_closed;

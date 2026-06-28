@@ -4,7 +4,7 @@ use crate::event_loop::stage_pipeline::{
 };
 
 fn ctx() -> StageContext<'static> {
-    let repair: &'static RepairStateMachine = Box::leak(Box::new(RepairStateMachine));
+    let repair: &'static mut RepairStateMachine = Box::leak(Box::new(RepairStateMachine::default()));
     StageContext::new(FlowStep::new("unit_loop"), "loop-1", 1, repair)
 }
 
@@ -31,14 +31,14 @@ fn repair_dispatch_does_not_recognise_normal_topics() {
 fn repair_dispatch_stage_accepts_repair_events_without_error() {
     let stage = RepairDispatchStage;
     let e = ev("task.relocate_legacy", r#"{"task_key":"abc","target_loop_id":"loop-x","reason":"legacy"}"#);
-    assert!(stage.check(&ctx(), &e).is_ok(), "repair events must not be rejected by the stage");
+    assert!(stage.check(&mut ctx(), &e).is_ok(), "repair events must not be rejected by the stage");
 }
 
 #[test]
 fn repair_dispatch_stage_accepts_non_repair_events() {
     let stage = RepairDispatchStage;
     let e = ev("work.ready", "{}");
-    assert!(stage.check(&ctx(), &e).is_ok(), "non-repair events must pass through");
+    assert!(stage.check(&mut ctx(), &e).is_ok(), "non-repair events must pass through");
 }
 
 #[test]

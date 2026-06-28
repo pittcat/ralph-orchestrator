@@ -321,5 +321,11 @@ pub struct EventLoop {
     /// U6: emit-time stage pipeline.
     pub(crate) stage_pipeline: StagePipeline,
     /// U6: owned per-loop repair state machine placeholder.
-    pub(crate) repair_state_machine: crate::event_loop::stage_pipeline::RepairStateMachine,
+    pub(crate) repair_state_machine: crate::event_loop::repair_flow::RepairStateMachine,
+    /// U2 (2026-06-27-002 plan completion): counter for
+    /// repair-stream events that the emit-gate facade
+    /// routed to the U2 placeholder sink. U6 will replace
+    /// this with a real `RepairStreamSink`; the counter
+    /// remains useful for diagnostics regardless.
+    pub(crate) repair_stream_pending: u64,
 }

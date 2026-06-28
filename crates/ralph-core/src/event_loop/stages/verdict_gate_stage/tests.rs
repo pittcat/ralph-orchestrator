@@ -21,7 +21,7 @@ fn flow() -> FlowDeclaration {
 }
 
 fn ctx() -> StageContext<'static> {
-    let repair: &'static RepairStateMachine = Box::leak(Box::new(RepairStateMachine));
+    let repair: &'static mut RepairStateMachine = Box::leak(Box::new(RepairStateMachine::default()));
     StageContext::new(FlowStep::new("unit_loop"), "loop-1", 1, repair)
 }
 
@@ -33,7 +33,7 @@ fn ev(topic: &str, payload: &str) -> Event {
 fn verdict_gate_accepts_terminal_topic() {
     let stage = VerdictGateStage::new(flow());
     let e = ev("LOOP_COMPLETE", "{}");
-    assert!(stage.check(&ctx(), &e).is_ok());
+    assert!(stage.check(&mut ctx(), &e).is_ok());
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn verdict_gate_accepts_non_terminal_topic() {
     // The verdict gate does not police non-terminal topics.
     let stage = VerdictGateStage::new(flow());
     let e = ev("work.ready", "{}");
-    assert!(stage.check(&ctx(), &e).is_ok());
+    assert!(stage.check(&mut ctx(), &e).is_ok());
 }
 
 #[test]

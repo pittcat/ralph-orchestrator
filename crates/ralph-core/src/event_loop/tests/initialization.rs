@@ -187,6 +187,7 @@ fn test_loop_thrashing_detection() {
     let mut event_loop = EventLoop::new(config);
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
     event_loop.initialize("Test");
+    install_admitting_flow(&mut event_loop, &["build.blocked"]);
 
     // Builder blocks on "Fix bug" three times (should emit build.task.abandoned)
     write_event_to_jsonl(&events_path, "build.blocked", "Fix bug\nCan't compile");
