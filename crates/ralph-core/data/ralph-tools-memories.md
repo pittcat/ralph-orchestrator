@@ -12,17 +12,27 @@ metadata:
 ```bash
 ralph tools memory add "content" -t pattern --tags tag1,tag2
 ralph tools memory add "content" --private    # Hat-scoped (agent context only)
-ralph tools memory list [-t type] [--format FORMAT]
-ralph tools memory search "query" [-t type] [--format FORMAT]
-ralph tools memory prime -t pattern       # Output for context injection
+ralph tools memory list [-t type] [--last N] [--format FORMAT]
+ralph tools memory search "query" [-t type] [--tags TAGS] [--all] [--format FORMAT]
+ralph tools memory prime [-t type] [--tags TAGS] [--recent N] [--budget N] [--format FORMAT]
 ralph tools memory show <mem-id>
 ralph tools memory delete <mem-id>
-ralph tools memory init                   # Initialize memories store
+ralph tools memory init [--force]
 ```
 
-Note: All memory commands accept `--type <TYPE>`, `--format <FORMAT>`, `--root <ROOT>`,
-and global options. Additional flags per command: `memory list` accepts `--last <N>`,
-`memory search` accepts `--all`, `memory prime` accepts `--recent`, `memory init` accepts `--force`.
+### Flags per command
+
+| 子命令 | 可用 flags |
+|--------|-----------|
+| `add` | `-t/--type`, `--tags`, `--private`, `--format`, `--root` |
+| `list` | `-t/--type`, `--last`, `--format`, `--root` |
+| `search` | `-t/--type`, `--tags`, `--all`, `--format`, `--root` |
+| `prime` | `-t/--type`, `--tags`, `--recent`, `--budget`, `--format`, `--root` |
+| `show` | `--format`, `--root` |
+| `delete` | `--root` |
+| `init` | `--force`, `--root` |
+
+> `--root` 是 `ralph tools` 命名空间下所有子命令共享的工作目录选项；`-c/--config`、`-H/--hats`、`-v/--verbose`、`--color` 为全局选项，不在上表重复。
 
 **Memory types:**
 
@@ -43,14 +53,14 @@ Every memory has a `visibility` (`shared` or `private`) and an optional
 - **shared** (default): visible to every caller — human CLI and every hat.
   New memories created without `private` flag are shared. **Agents cannot
   delete or mutate shared memories** — only the human CLI may.
-- **private** (set with `-t private` in agent context): visible only to the
+- **private** (set with `--private` in agent context): visible only to the
   owning hat. The owning hat is taken from `RALPH_CURRENT_HAT`. The CLI
   fails closed if `private` flag is used without an agent context.
 
 | Operation | Human CLI | Agent (owner) | Agent (other) |
 |-----------|-----------|---------------|---------------|
 | `add` (default) | shared | shared | shared |
-| `add -t private` | **rejected** (no agent ctx) | private, owned by current hat | private, owned by current hat |
+| `add --private` | **rejected** (no agent ctx) | private, owned by current hat | private, owned by current hat |
 | `list/show/search/prime` | sees all | sees shared + own private | sees shared + own private |
 | `delete shared` | allowed | **rejected** | **rejected** |
 | `delete private` (any) | allowed | allowed (own) | **rejected** |
@@ -136,7 +146,7 @@ sequential (DEC-001, DEC-002, ...).
 
 Confidence thresholds:
 - **>80**: Proceed autonomously.
-- **50-80**: Proceed, but document the decision in `.ralph/agent/decisions.md`.
+- **50–80**: Proceed, but document the decision in `.ralph/agent/decisions.md`.
 - **<50**: Choose the safest default and document the decision in `.ralph/agent/decisions.md`.
 
 Template fields:

@@ -22,7 +22,7 @@ This skill covers **runtime tasks**. For code tasks, see `/code-task-generator`.
 ralph tools task add "Title" -p 2 -d "description" --blocked-by id1,id2
 ralph tools task ensure --key spec:task-01 "Title" -p 2 -d "description" --blocked-by id1,id2
 ralph tools task list [-s STATUS] [-d DAYS] [-l LIMIT] [-a] [--format table|json|quiet]
-ralph tools task ready [-a]               # Show unblocked tasks
+ralph tools task ready [-a] [--format table|json|quiet]
 ralph tools task start <task-id>
 ralph tools task close <task-id>
 ralph tools task reopen <task-id>
@@ -35,6 +35,17 @@ ralph tools task show <task-id> [--format table|json|quiet]
 **Task key:** optional stable key for idempotent orchestrator-managed tasks (for example `spec:task-01`)
 
 **Priority:** 1-5 (1 = highest, default 3)
+
+### Flags per command
+
+| 子命令 | 可用 flags |
+|--------|-----------|
+| `add` / `ensure` | `-p/--priority`, `-d/--description`, `--blocked-by`, `--format`, `--root` |
+| `list` | `-s/--status`, `-d/--days`, `-l/--limit`, `-a/--all`, `--format`, `--root` |
+| `ready` | `-a/--all`, `--format`, `--root` |
+| `start` / `close` / `fail` / `reopen` / `show` | `--format`（仅 `show`）, `--root` |
+
+> `--root` 是 `ralph tools` 命名空间下所有子命令共享的工作目录选项；`-c/--config`、`-H/--hats`、`-v/--verbose`、`--color` 为全局选项，不在上表重复。
 
 ### Task Rules
 - One task = one testable unit of work (completable in 1-2 iterations)
@@ -71,7 +82,7 @@ points to a real loop), the following rules apply:
 
 ### Single-U Contract（2026-06-14 计划 003 R4 — `ce-executor-serial` only）
 
-**默认关闭**。当 `ce-executor-serial` preset 启动后，`ralph run` 写 `.ralph/agent/.ralph-enforce-current-unit` marker，子进程 `ralph tools task ensure` 检测后激活契约。standalone CLI 用户可设 `RALPH_ENFORCE_CURRENT_UNIT=1` 强制开启。
+**默认关闭**。当 `ce-executor-serial` preset 启动后，`ralph run` 写 `.ralph/agent/.ralph-enforce-current-unit` marker，子进程 `ralph tools task ensure` 检测后激活契约。standalone CLI 用户可设环境变量 `RALPH_ENFORCE_CURRENT_UNIT=1`。
 
 **契约规则**：
 
@@ -79,11 +90,9 @@ points to a real loop), the following rules apply:
 - 同一 `(loop_id, plan_name, step)` 下已 open U1 task，再 ensure `u2-impl` 时：
   - CLI 退出非零，stderr 输出 `rejected by R4 single-U contract: ...`。
   - ensure 返回已存在的 U1 task（id 与 requested key 不一致）。
-- 同 key 重复 ensure 是幂等的（plan 5.3.2 § "R4.5"） — 返回同一 task。
+- 同 key 重复 ensure 是幂等的 — 返回同一 task。
 - 旧 key / 非 `uN-` 形状（`step-99-impl`、`review-bug-impl` 等）**不被 gate** — 这是已知边界，**不要**依赖 R4 保护非 canonical keys。
 - 失败时不要重试同一 key — 切换到下一 U 或关闭冲突 task。
-
-**当前已知 gap（2026-06-14 评估）**：`ralph run` 通过 marker 文件传递契约信号（env var `RALPH_ENFORCE_CURRENT_UNIT` 被 workspace `forbid(unsafe_code)` 阻挡）。在 `ralph run` 启动时 marker 被写入 `.ralph/agent/.ralph-enforce-current-unit`；子进程 `task_cli::execute_ensure` 读 marker 后激活契约。
 
 Configure coordinator hats globally:
 

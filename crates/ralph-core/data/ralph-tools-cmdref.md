@@ -11,18 +11,12 @@ metadata:
 
 ---
 
-## `ralph tools skill`
-
-加载和管理 skill。
-
-> **命名空间选项**：`--root <ROOT>` 只在 `ralph tools` 命名空间下（`memory` / `task` / `skill`）可用，不适用于顶层 `ralph run` / `ralph emit` / `ralph wave emit`。
-> **真·全局选项**（所有子命令可用）：`-c/--config`、`-H/--hats`、`-v/--verbose`、`-q/--quiet`、`--color`。
-> `skill list` 的 `--format` 支持 `table`、`json`、`quiet`（注意：`quiet` 输出 skill 名称，不是 ID）。
-> `skill load` **没有** `format` 选项。
-
-### `ralph tools skill list`
+## `ralph tools skill list`
 
 列出可用的 skill。
+
+> **命名空间选项**：`--root <ROOT>` 只在 `ralph tools` 命名空间下（`memory` / `task` / `skill`）可用。
+> **真·全局选项**：`-c/--config`、`-H/--hats`、`-v/--verbose`、`--color`。
 
 **语法：**
 ```bash
@@ -33,10 +27,10 @@ ralph tools skill list [OPTIONS]
 
 | 参数 | 类型 | 必需 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `--format <FORMAT>` | enum | 否 | `table` | `table` / `json` / `quiet` |
+| `--format <FORMAT>` | enum | 否 | `table` | `table` / `json` / `quiet`（输出 skill 名称） |
 
 **Hat 可见性（P10 operation-guard）：**
-- Agent 上下文下，`list` 和 `load` 只能看到 `hats:` 白名单包含当前 hat 的 skill。隐藏的 skill 既不会列出也无法加载。
+- Agent 上下文下，只能看到 `hats:` 白名单包含当前 hat 的 skill。隐藏的 skill 既不会列出也无法加载。
 - Human CLI 上下文（无 `current_hat`）下，所有 skill 均可见，便于审计和调试。
 - `backends:` 白名单过滤在 hat 可见性之上仍然生效。
 
@@ -45,9 +39,13 @@ ralph tools skill list [OPTIONS]
 ralph tools skill list --format quiet | grep '^ralph-tools$'
 ```
 
-### `ralph tools skill load`
+## `ralph tools skill load`
 
 按名称加载并输出 skill 内容。
+
+> **命名空间选项**：`--root <ROOT>` 只在 `ralph tools` 命名空间下可用。
+> **真·全局选项**：`-c/--config`、`-H/--hats`、`-v/--verbose`、`--color`。
+> `skill load` **没有** `--format` 选项。
 
 **语法：**
 ```bash
@@ -98,6 +96,9 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `--worktree-name <NAME>` | string | 否 | — | 显式 worktree 名称（与 `--plan` 互斥） |
 | `--no-auto-merge` | flag | 否 | — | 跳过循环结束后的自动合并（worktree 模式下也适用） |
 | `--record-session <FILE>` | path | 否 | — | 录制会话到 JSONL（用于 smoke 测试） |
+| `--profile <SCOPE:NAME>` | string | 否 | — | 激活 runtime profile overlay（可重复；在 `profiles.default` 之后追加） |
+| `--no-default-profiles` | flag | 否 | — | 跳过 `ralph.yml` 中的 `profiles.default`，仅保留 CLI `--profile` |
+| `--no-sync-agent-docs` | flag | 否 | — | 跳过启动前对 `CLAUDE.md` / `AGENTS.md` 的 managed block 同步 |
 | `--exclusive` | flag | 否 | — | 使用工作树排他锁，防止并行循环冲突 |
 | `--skip-preflight` | flag | 否 | — | 跳过预检检查 |
 | `--warmup-only` | flag | 否 | — | 仅预热后退出（不执行编排） |
@@ -131,7 +132,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `ralph tutorial` | 启动交互式教程 |
 | `ralph events` | 查看或操作事件文件 |
 | `ralph init` | 初始化 Ralph 工作区 |
-| `ralph clean` | 清理临时文件与诊断日志 |
+| `ralph clean` | 清理 `.ralph/agent` 临时文件；`--diagnostics` 改为清理诊断日志，`--dry-run` 预览不删除 |
 | `ralph plan` | 创建或查看执行计划 |
 | `ralph code-task` | 生成代码任务文件 |
 | `ralph loops` | 查看与管理并行循环 |

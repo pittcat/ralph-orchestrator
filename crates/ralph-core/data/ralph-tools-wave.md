@@ -84,19 +84,6 @@ printf '%s\n' \
 - 🔴 不要使用 `ralph wave emit <topic> --payloads "$PAYLOADS"` 传递多行 JSON；使用 `--payloads-stdin`。
 - 🔴 不要使用 `printf '%s\n' $(cat payloads.jsonl)` 后再 pipe——IFS word splitting 会把单个 JSON object 切成多个 token，触发 U1 的 JSON object 校验失败。直接 `cat payloads.jsonl` 即可。
 
-**校验：**
-```bash
-# U5: 推荐用 --output json 拿 wave_id + events_file，避开 tail/grep 拼装
-wave_id=$(cat payloads.jsonl | ralph wave emit review.wave.ready --payloads-stdin --output json | jq -r .wave_id)
-events_file=$(cat .ralph/current-events)
-
-# 按 wave_id 精确验真（KTD-7），不能用 tail -n "$expected_count"
-expected_count=7
-jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
-  ([. | select(.wave_id == $id)] | length) == $expected
-' "$events_file"
-```
-
 **Schema 预检（U4，2026-06-13）：**
 
 `ralph wave emit` 在 shape 校验之后、写盘之前会先对**整批** payload 做 event policy schema 预检（`crates/ralph-cli/src/policy_check.rs`），与 `ralph run` 循环内统一校验管线 `validation::rules_event_policy::EventPolicyRule` 行为一致：
@@ -148,7 +135,7 @@ jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
 
 > **wave worker 注意事项**：
 >
-> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，`ralph emit` 会将事件写入 **candidate-events**（不是 current-events），与 wave 调度器对 worker 输出的预期一致。`ralph wave emit` 本身在 worker 内被阻止（`crates/ralph-cli/src/wave.rs:128-134`）。
+> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，`ralph emit` 会将事件写入 **candidate-events**（不是 current-events），与 wave 调度器对 worker 输出的预期一致。`ralph wave emit` 本身在 worker 内被阻止（`crates/ralph-cli/src/wave.rs:128-137` `execute_emit` 入口检查）。
 >
 > 2. **candidate-events vs current-events 落点**：
 >    - `ralph wave emit` → 写入 **current-events**（主循环的合并目标，3 级回退：`RALPH_EVENTS_FILE` → `.ralph/current-events` → `.ralph/events.jsonl`）
@@ -156,3 +143,17 @@ jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
 >    - 不要混用：worker 内不要试图设置 `RALPH_EVENTS_FILE` 把结果写到 current-events 绕过 candidate-events——这会被 `ralph emit` 的 allowlist 校验拒绝（参见 `crates/ralph-cli/src/main.rs` 的 `resolve_emit_path`）。
 >
 > 3. **wave_id 共享**：同一 `--payloads` 列表产生的 N 个事件共享同一个 `wave_id` 和 `wave_total`，由 `wave_index`（0..N-1）区分。聚合 hat（`aggregate.mode: wait_for_all`）据此识别同一 wave 的所有结果。
+
+### 校验
+
+```bash
+# U5: 推荐用 --output json 拿 wave_id + events_file，避开 tail/grep 拼装
+wave_id=$(cat payloads.jsonl | ralph wave emit review.wave.ready --payloads-stdin --output json | jq -r .wave_id)
+events_file=$(cat .ralph/current-events)
+
+# 按 wave_id 精确验真（KTD-7），不能用 tail -n "$expected_count"
+expected_count=7
+jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
+  ([. | select(.wave_id == $id)] | length) == $expected
+' "$events_file"
+```

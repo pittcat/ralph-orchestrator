@@ -158,8 +158,8 @@ declare -A COMMANDS_TO_DOCS=(
   ["tools memory show"]="ralph-tools-memories.md|Memory Commands"
   ["tools memory delete"]="ralph-tools-memories.md|Memory Commands"
   ["tools memory init"]="ralph-tools-memories.md|Memory Commands"
-  ["tools skill list"]="ralph-tools-cmdref.md|ralph tools skill"
-  ["tools skill load"]="ralph-tools-cmdref.md|ralph tools skill"
+  ["tools skill list"]="ralph-tools-cmdref.md|ralph tools skill list"
+  ["tools skill load"]="ralph-tools-cmdref.md|ralph tools skill load"
   ["run"]="ralph-tools-cmdref.md|ralph run"
   ["preflight"]="ralph-tools-cmdref.md|其他命令"
   ["doctor"]="ralph-tools-cmdref.md|其他命令"
@@ -176,32 +176,58 @@ declare -A COMMANDS_TO_DOCS=(
   ["completions"]="ralph-tools-cmdref.md|其他命令"
 )
 
-# 提取 doc 文件中指定 section (## <section_name>) 内的 --flag 集合
+# 提取 doc 文件中指定 section (## <section_name>) 内的 --flag 集合。
+# 规则：
+#   1. 只扫描 section 内的 markdown 表格行（| `--flag` | 或 | --flag |）和正文中的 --flag。
+#   2. 跳过 fenced code blocks（``` ... ```）——避免 jq、grep、shell 等第三方工具的 --flag 被误报。
+#   3. 找不到 section 时退化为整文件（按同样规则过滤）。
 extract_section_flags() {
   local doc_file="$1"
   local section_name="$2"
   if [ -z "$section_name" ]; then
-    grep -oE -- '--[a-zA-Z][a-zA-Z0-9-]+' "$doc_file" 2>/dev/null \
-      | sed 's/^--//' | sort -u
+    python3 - "$doc_file" <<'PYEOF'
+import re, sys
+doc_file = sys.argv[1]
+content = open(doc_file).read()
+print('\n'.join(_extract_flags_from_text(content)))
+PYEOF
     return
   fi
   python3 - "$doc_file" "$section_name" <<'PYEOF'
 import re, sys
 doc_file, section_name = sys.argv[1], sys.argv[2]
+
+def _extract_flags_from_text(text):
+    # 1. fenced code blocks 中的内容先挖掉
+    code_block_re = re.compile(r'^```.*?^```', re.MULTILINE | re.DOTALL)
+    text_no_code = code_block_re.sub('', text)
+    flags = set()
+    # 2. markdown 表格中的反引号包裹 flag：| `--foo` | 或 | `-f, --foo` |
+    for line in text_no_code.splitlines():
+        for cell in line.split('|'):
+            cell = cell.strip()
+            m = re.search(r'`--([a-zA-Z][a-zA-Z0-9-]+)`', cell)
+            if m:
+                flags.add(m.group(1))
+            m = re.search(r'(?<![a-zA-Z0-9])--([a-zA-Z][a-zA-Z0-9-]+)(?![a-zA-Z0-9])', cell)
+            if m:
+                flags.add(m.group(1))
+    # 3. 正文中的 --flag（排除行内代码和表格已覆盖的）
+    for m in re.finditer(r'(?<![a-zA-Z0-9`])--([a-zA-Z][a-zA-Z0-9-]+)(?![a-zA-Z0-9])', text_no_code):
+        flags.add(m.group(1))
+    return sorted(flags)
+
 content = open(doc_file).read()
-# 匹配 '## section_name' (允许可选反引号)
 section_re = re.compile(r'^##\s+`?' + re.escape(section_name) + r'`?\s*$', re.MULTILINE)
 sections = list(section_re.finditer(content))
 if not sections:
-    # 退化为整文件
-    print('\n'.join(re.findall(r'--([a-zA-Z][a-zA-Z0-9-]+)', content)))
+    print('\n'.join(_extract_flags_from_text(content)))
     sys.exit(0)
 start = sections[0].end()
 next_section = re.search(r'^##\s', content[start:], re.MULTILINE)
 end = start + next_section.start() if next_section else len(content)
 section_text = content[start:end]
-flags = sorted(set(re.findall(r'--([a-zA-Z][a-zA-Z0-9-]+)', section_text)))
-print('\n'.join(flags))
+print('\n'.join(_extract_flags_from_text(section_text)))
 PYEOF
 }
 
@@ -263,9 +289,11 @@ if [ "$UPDATE_BASELINE" = "1" ]; then
   exit 0
 fi
 
-# 默认输出所有漂移到 stdout
+# 默认只输出 unknown / new 漂移；known drifts 静默（避免共享 section / jq 参数等误报淹没输出）
 for line in "${DRIFT_LINES[@]}"; do
-  echo "$line"
+  if ! is_known_drift "$line"; then
+    echo "$line"
+  fi
 done
 
 # 退出码逻辑
