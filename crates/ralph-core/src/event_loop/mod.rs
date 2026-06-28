@@ -896,6 +896,14 @@ impl EventLoop {
             // per-task repair state machine registry.
             repair_state_machines: std::collections::HashMap::new(),
             repair_stream_pending: 0,
+            // 2026-06-28 plan U4: initialise current_plan_step to
+            // the first declared flow step (when one exists) or
+            // an empty string for legacy / no-flow presets. The
+            // value drives the FlowStepScopeStage `current_step`
+            // lookup so review-chain events can land in the
+            // right scope without relying solely on the U3
+            // defensive bypass.
+            current_plan_step: initial_current_plan_step(&config),
         })
     }
 
@@ -1047,6 +1055,7 @@ impl EventLoop {
             // fresh machine for each new `task_key`.
             repair_state_machines: std::collections::HashMap::new(),
             repair_stream_pending: 0,
+            current_plan_step: initial_current_plan_step(&config),
         }
     }
 
@@ -9717,6 +9726,18 @@ impl EventLoop {
         );
         match outcome {
             crate::event_loop::emit_gate::EmitGateOutcome::AcceptMainBus => {
+                // 2026-06-28 plan U4: a successful accept may
+                // carry the runner into the next plan step.
+                // We advance AFTER publish so the stage_ctx
+                // that just succeeded does not see its own
+                // topic through the new step's scope.
+                if let Some(next) = advance_plan_step(
+                    &self.config,
+                    &self.current_plan_step,
+                    event.topic.as_str(),
+                ) {
+                    self.current_plan_step = next;
+                }
                 // U10 (2026-06-27-002 plan completion): if
                 // the topic is in `terminal_emits`, write
                 // the loop-termination record so the
@@ -9767,7 +9788,17 @@ impl EventLoop {
             .and_then(|c| c.loop_id())
             .unwrap_or("default")
             .to_string();
-        let step_id = self.state.flow_lifecycle.current_step_id().to_string();
+        // 2026-06-28 plan U4: prefer the plan-mode step
+        // (advanced by U4's transition logic) over the
+        // wave-phase fallback. When the preset has no
+        // `mechanism.flow`, `current_plan_step` is the empty
+        // string and the wave-phase value takes over so the
+        // existing tests keep working.
+        let step_id = if !self.current_plan_step.is_empty() {
+            self.current_plan_step.clone()
+        } else {
+            self.state.flow_lifecycle.current_step_id().to_string()
+        };
         let expected_version = self
             .idempotent_log
             .lock()
@@ -10328,4 +10359,180 @@ fn is_rejection_stale(
     }
     let age = now_unix.saturating_sub(source_unix);
     age > ttl_seconds as i64
+}
+
+// 2026-06-28 plan U4: helpers for the plan-mode current_step
+// state machine. Kept at module scope (not on `impl EventLoop`)
+// so tests can exercise them without spinning up a full
+// EventLoop.
+//
+// `initial_current_plan_step` returns the id of the first
+// declared flow step when the preset has a `mechanism.flow`,
+// or an empty string when the preset has no flow declaration
+// (legacy / solo mode). An empty string is the legacy
+// fail-open signal — the `FlowStepScopeStage` accepts the
+// event and `build_stage_context_for` falls back to
+// `state.flow_lifecycle.current_step_id()`.
+fn initial_current_plan_step(config: &RalphConfig) -> String {
+    config
+        .event_loop
+        .mechanism
+        .as_ref()
+        .and_then(|m| m.flow.as_ref())
+        .and_then(|f| f.steps.first())
+        .map(|s| s.id.clone())
+        .unwrap_or_default()
+}
+
+/// 2026-06-28 plan U4: advance the plan-mode `current_plan_step`
+/// after an event has been accepted by the stage pipeline.
+///
+/// Returns `Some(next_step_id)` when the step changes,
+/// `None` when no transition fires (event is not a transition
+/// event, the current step has no successor, or no flow
+/// declaration is loaded).
+///
+/// `current` is the *current* plan step. The function consults
+/// the step's `terminal_when` configuration: when
+/// `terminal_when == "all_done"` (the only branch the
+/// `ce-executor-serial` flow uses), a transition event
+/// is any topic that is in `allowed_emits` AND not the loop's
+/// primary completion topic (`work.done` is the unit's "I'm
+/// done" signal, not a step transition). The next step is
+/// the next entry in `mechanism.flow.steps`.
+///
+/// The mapping keeps the policy in the YAML declaration:
+/// adding a new step in `mechanism.flow.steps` requires no
+/// code change here. The whitelist of "non-transition"
+/// topics is intentionally tiny — only `work.done` is
+/// recognised as a per-unit "still working" signal because
+/// every other allowed emit moves the plan forward.
+pub(crate) fn advance_plan_step(
+    config: &RalphConfig,
+    current: &str,
+    accepted_topic: &str,
+) -> Option<String> {
+    if current.is_empty() {
+        return None;
+    }
+    let flow = config.event_loop.mechanism.as_ref()?.flow.as_ref()?;
+    let steps = &flow.steps;
+    let idx = steps.iter().position(|s| s.id == current)?;
+    let step = &steps[idx];
+    // Per-unit "still working" emits that must not advance the
+    // step. The list is intentionally small: only `work.done`
+    // is the standard completion sentinel for the unit_loop
+    // pattern. A plan that wants different semantics can use
+    // the `terminal_when` field to refine; for now the simple
+    // rule is enough.
+    const NON_TRANSITION_TOPICS: &[&str] = &["work.done", "work.failed", "work.ready"];
+    if NON_TRANSITION_TOPICS.contains(&accepted_topic) {
+        return None;
+    }
+    if !step.allowed_emits.iter().any(|t| t == accepted_topic) {
+        return None;
+    }
+    steps.get(idx + 1).map(|s| s.id.clone())
+}
+
+// 2026-06-28 plan U4: tests for the plan-mode current_step
+// state machine helpers. These run without spinning up the
+// full EventLoop — they exercise the helper directly and
+// confirm the wiring contract.
+
+#[cfg(test)]
+mod u4_current_plan_step_tests {
+    use super::*;
+    use crate::config::{
+        EventLoopConfig, FlowDeclarationConfig, FlowStepConfig, MechanismConfig, RalphConfig,
+    };
+
+    fn flow_config(steps: Vec<(&str, Vec<&str>)>) -> RalphConfig {
+        let step_configs: Vec<FlowStepConfig> = steps
+            .into_iter()
+            .map(|(id, allowed)| FlowStepConfig {
+                id: id.to_string(),
+                kind: None,
+                allowed_emits: allowed.into_iter().map(String::from).collect(),
+                terminal_when: None,
+                on_partial: std::collections::BTreeMap::new(),
+            })
+            .collect();
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop = EventLoopConfig {
+            mechanism: Some(MechanismConfig {
+                flow: Some(FlowDeclarationConfig {
+                    flow_type: "declared".to_string(),
+                    version: 1,
+                    terminal_emits: vec!["LOOP_COMPLETE".to_string()],
+                    steps: step_configs,
+                    ..FlowDeclarationConfig::default()
+                }),
+            }),
+            ..EventLoopConfig::default()
+        };
+        cfg
+    }
+
+    #[test]
+    fn initial_returns_first_step_id() {
+        let cfg = flow_config(vec![("unit_loop", vec!["work.done"])]);
+        assert_eq!(initial_current_plan_step(&cfg), "unit_loop");
+    }
+
+    #[test]
+    fn initial_returns_empty_when_no_flow() {
+        let cfg = RalphConfig::default();
+        assert_eq!(initial_current_plan_step(&cfg), "");
+    }
+
+    #[test]
+    fn advance_on_transition_event() {
+        let cfg = flow_config(vec![
+            ("unit_loop", vec!["work.done", "review.start"]),
+            ("review_walk", vec!["review.complete"]),
+        ]);
+        let next = advance_plan_step(&cfg, "unit_loop", "review.start");
+        assert_eq!(next, Some("review_walk".to_string()));
+    }
+
+    #[test]
+    fn advance_skips_non_transition_event() {
+        let cfg = flow_config(vec![
+            ("unit_loop", vec!["work.done", "review.start"]),
+            ("review_walk", vec!["review.complete"]),
+        ]);
+        // work.done is in allowed_emits but not a transition
+        // event in this flow — staying on unit_loop is correct.
+        let next = advance_plan_step(&cfg, "unit_loop", "work.done");
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn advance_returns_none_at_last_step() {
+        let cfg = flow_config(vec![("ship", vec!["LOOP_COMPLETE"])]);
+        let next = advance_plan_step(&cfg, "ship", "LOOP_COMPLETE");
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn advance_returns_none_with_empty_current() {
+        let cfg = flow_config(vec![("unit_loop", vec!["review.start"])]);
+        let next = advance_plan_step(&cfg, "", "review.start");
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn advance_returns_none_when_current_unknown() {
+        let cfg = flow_config(vec![("unit_loop", vec!["review.start"])]);
+        let next = advance_plan_step(&cfg, "ghost", "review.start");
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn advance_no_flow_returns_none() {
+        let cfg = RalphConfig::default();
+        let next = advance_plan_step(&cfg, "unit_loop", "review.start");
+        assert_eq!(next, None);
+    }
 }

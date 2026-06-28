@@ -350,4 +350,17 @@ pub struct EventLoop {
     /// this with a real `RepairStreamSink`; the counter
     /// remains useful for diagnostics regardless.
     pub(crate) repair_stream_pending: u64,
+    /// 2026-06-28 plan U4: tracked plan-step id for the
+    /// `FlowStepScopeStage` `current_step` lookup.
+    ///
+    /// Unlike `state.flow_lifecycle.current_step_id()`
+    /// (which tracks per-wave phase), this field tracks
+    /// the *plan-mode* step the runner is currently in
+    /// (`unit_loop` → `review_walk` → `plan_end` →
+    /// `ship`). It advances on accept of the
+    /// transition event defined in `mechanism.flow` for
+    /// the active step. Empty string when the preset did
+    /// not declare a `mechanism.flow` (legacy / solo
+    /// presets) — the bypass in U3 covers that path.
+    pub(crate) current_plan_step: String,
 }
