@@ -422,20 +422,34 @@ fn test_finding_dedup_reset_seen_allows_re_emit() {
         required,
         DeclaredEdges::new(),
     );
-    let first = det.observe(snap("t", 1, 0, &[]));
-    let fc_first = first
-        .iter()
-        .filter(|f| f.metric == DriftMetric::FieldCompleteness)
-        .count();
-    assert_eq!(fc_first, 1, "first observation should emit one finding");
-    let second = det.observe(snap("t", 1, 2, &[]));
+    // U1 (2026-06-28 plan): warm-up window < 5 must stay silent.
+    // Push exactly 5 events without dedup so the first one above
+    // the floor can emit a finding.
+    for i in 0..5 {
+        let f = det.observe(snap("t", 1, i, &[]));
+        // The 5th observation crosses the floor and emits the
+        // first finding; capture it for the assertion below.
+        if i == 4 {
+            let fc_first = f
+                .iter()
+                .filter(|x| x.metric == DriftMetric::FieldCompleteness)
+                .count();
+            assert_eq!(
+                fc_first, 1,
+                "the observation that crosses FIELD_COMPLETENESS_MIN_SAMPLES should emit one finding"
+            );
+        }
+    }
+    // Subsequent observations in the same iteration must be
+    // deduped (we never reset the seen set).
+    let second = det.observe(snap("t", 1, 7, &[]));
     let fc_second = second
         .iter()
         .filter(|f| f.metric == DriftMetric::FieldCompleteness)
         .count();
     assert_eq!(fc_second, 0, "second observation should be deduped");
     det.reset_seen();
-    let third = det.observe(snap("t", 1, 3, &[]));
+    let third = det.observe(snap("t", 1, 8, &[]));
     let fc_third = third
         .iter()
         .filter(|f| f.metric == DriftMetric::FieldCompleteness)
@@ -793,6 +807,168 @@ fn test_coord_join_rate_serial_mode_flags_out_of_order() {
         "serial mode must flag when last_from (25) is after last_to (20): got {coord_findings:?}"
     );
     assert!(coord_findings[0].message.contains("mode=serial"));
+}
+
+// ── 2026-06-28 plan U1: field_completeness min_samples guard ────────
+
+#[test]
+fn test_field_completeness_suppressed_below_min_samples() {
+    // U1: window 1..4 events with missing field must NOT produce a finding.
+    let mut required = RequiredFields::new();
+    let mut from_policy = std::collections::HashMap::new();
+    from_policy.insert("warmup".to_string(), vec!["field_x".to_string()]);
+    required.from_policy = from_policy;
+    let mut det = DriftDetector::new_with_sources(
+        DriftConfig {
+            field_completeness_threshold: 0.9,
+            ..drift_config()
+        },
+        required,
+        DeclaredEdges::new(),
+    );
+    // 1 event, field missing → 0/1 = 0% but window < 5 → silent.
+    let findings1 = det.observe(snap("warmup", 1, 0, &[]));
+    assert!(
+        findings1
+            .iter()
+            .all(|f| f.metric != DriftMetric::FieldCompleteness),
+        "window=1 must not emit a field_completeness finding: {findings1:?}"
+    );
+    // 4 events, field missing on all → 0/4 = 0% but window < 5 → silent.
+    for i in 1..4 {
+        let f = det.observe(snap("warmup", 1, i, &[]));
+        assert!(
+            f.iter().all(|x| x.metric != DriftMetric::FieldCompleteness),
+            "window={} must not emit a field_completeness finding: {f:?}",
+            i + 1
+        );
+    }
+    // 5th event, field still missing → 0/5 = 0% < 0.9 threshold → critical finding fires.
+    let findings5 = det.observe(snap("warmup", 1, 5, &[]));
+    let fc = findings5
+        .iter()
+        .find(|f| f.metric == DriftMetric::FieldCompleteness)
+        .expect("window=5 with 0% completeness must emit a finding");
+    assert_eq!(fc.topic.as_deref(), Some("warmup"));
+    assert_eq!(fc.field.as_deref(), Some("field_x"));
+    assert!(fc.observed_value < 0.05);
+}
+
+#[test]
+fn test_field_completeness_fires_at_min_samples_threshold() {
+    // U1: window exactly 5 with field_completeness_ratio > 0.85 (4/5=0.8) < 0.9
+    // threshold → finding.
+    let mut required = RequiredFields::new();
+    let mut from_policy = std::collections::HashMap::new();
+    from_policy.insert("t".to_string(), vec!["k".to_string()]);
+    required.from_policy = from_policy;
+    let mut det = DriftDetector::new_with_sources(
+        DriftConfig {
+            field_completeness_threshold: 0.9,
+            ..drift_config()
+        },
+        required,
+        DeclaredEdges::new(),
+    );
+    for i in 0..4 {
+        det.observe(snap("t", 1, i, &["k"]));
+    }
+    // 5th event, field missing → 4/5=0.8 < 0.9 → critical finding.
+    let findings = det.observe(snap("t", 1, 4, &[]));
+    let fc = findings
+        .iter()
+        .find(|f| f.metric == DriftMetric::FieldCompleteness)
+        .expect("window=5 with 4/5=0.8 must emit a finding below 0.9 threshold");
+    assert!((fc.observed_value - 0.8).abs() < 0.05);
+}
+
+#[test]
+fn test_field_completeness_still_silent_above_threshold_at_min_samples() {
+    // U1: window 5 with 5/5=1.0 (above 0.9 threshold) → no finding.
+    let mut required = RequiredFields::new();
+    let mut from_policy = std::collections::HashMap::new();
+    from_policy.insert("healthy".to_string(), vec!["k".to_string()]);
+    required.from_policy = from_policy;
+    let mut det = DriftDetector::new_with_sources(
+        DriftConfig {
+            field_completeness_threshold: 0.9,
+            ..drift_config()
+        },
+        required,
+        DeclaredEdges::new(),
+    );
+    for i in 0..5 {
+        let f = det.observe(snap("healthy", 1, i, &["k"]));
+        assert!(
+            f.iter().all(|x| x.metric != DriftMetric::FieldCompleteness),
+            "healthy topic must not emit at any window size: {f:?}"
+        );
+    }
+}
+
+// ── 2026-06-28 plan U2: self-observation guard ──────────────────────
+
+#[test]
+fn test_recovery_outcome_update_skipped() {
+    // U2: a snapshot with reason_code="recovery_outcome_update" must
+    // be skipped by the detector (no findings, observed_total unchanged).
+    let mut det = DriftDetector::new(drift_config());
+    let initial_observed = det.observed_total();
+    let snap = snap("work.done", 1, 0, &[]).with_reason_code("recovery_outcome_update");
+    let findings = det.observe(snap);
+    assert!(
+        findings.is_empty(),
+        "recovery_outcome_update must yield no findings: {findings:?}"
+    );
+    assert_eq!(
+        det.observed_total(),
+        initial_observed,
+        "self-observation must not bump observed_total"
+    );
+}
+
+#[test]
+fn test_recovery_outcome_update_does_not_affect_outcome_flip() {
+    // U2: continuous stream of recovery_outcome_update must not
+    // push the detector into the existing primary event window
+    // (a normal work.done still produces a normal finding when
+    // applicable, but the recovery stream is invisible).
+    let mut required = RequiredFields::new();
+    let mut from_policy = std::collections::HashMap::new();
+    from_policy.insert("work.done".to_string(), vec!["task_id".to_string()]);
+    required.from_policy = from_policy;
+    let mut det = DriftDetector::new_with_sources(
+        DriftConfig {
+            field_completeness_threshold: 0.9,
+            ..drift_config()
+        },
+        required,
+        DeclaredEdges::new(),
+    );
+    // 5 primary events missing field.
+    for i in 0..5 {
+        det.observe(snap("work.done", 1, i, &[]));
+    }
+    // 10 self-observation snapshots.
+    for i in 5..15 {
+        det.observe(snap("work.done", 1, i, &[]).with_reason_code("recovery_outcome_update"));
+    }
+    // Reset dedup so the final observe call is allowed to emit a
+    // finding (the warm-up test above exercised the same dedup
+    // path).
+    det.reset_seen();
+    // The window should still have the original 5 primary events
+    // (capacity=100 so no eviction) and emit the same finding.
+    let findings = det.observe(snap("work.done", 1, 100, &["task_id"]));
+    let fc = findings
+        .iter()
+        .find(|f| f.metric == DriftMetric::FieldCompleteness)
+        .expect("self-observation must not poison field_completeness");
+    assert!(fc.observed_value < 0.9);
+    // observed_total must reflect only the 6 primary events
+    // (5 + 1 final) — the 10 self-observation snapshots are
+    // filtered out before the counter is bumped (U2).
+    assert_eq!(det.observed_total(), 6);
 }
 
 // ── Duration/TimeZone import sanity (silence unused warnings) ──────

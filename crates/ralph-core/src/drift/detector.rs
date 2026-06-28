@@ -61,6 +61,16 @@ use super::window::{DriftWindow, EventSnapshot};
 /// on warm-up windows).
 pub const EMIT_CADENCE_MIN_SAMPLES: usize = 5;
 
+/// Minimum number of samples in the topic window before
+/// `field_completeness` is allowed to emit a finding.
+///
+/// 2026-06-28 plan (U1): on a warm-up window the per-`(topic,field)`
+/// ratio is structurally low (e.g. `0/1`, `0/4`) and trips Critical
+/// findings that are not real drift. The floor matches
+/// [`EMIT_CADENCE_MIN_SAMPLES`] so the two metrics use the same
+/// warm-up gate.
+pub const FIELD_COMPLETENESS_MIN_SAMPLES: usize = 5;
+
 /// A single drift finding produced by the detector.
 ///
 /// `DriftFinding` is the detector's *internal* record type. It is
@@ -353,6 +363,16 @@ impl DriftDetector {
     /// per snapshot so multiple `observe` calls within one
     /// iteration collapse into a single finding per metric tuple).
     pub fn observe(&mut self, snapshot: EventSnapshot) -> Vec<DriftFinding> {
+        // 2026-06-28 plan U2: self-observation guard. The drift
+        // engine writes `recovery_outcome_update` envelopes back
+        // into the recovery stream after every finding; without
+        // this filter, the detector would re-observe its own
+        // outcome and flip `Pending <-> Recovered` in a tight
+        // loop. Skip such snapshots entirely — they are not a
+        // primary event the detector should reason about.
+        if snapshot.reason_code.as_deref() == Some("recovery_outcome_update") {
+            return Vec::new();
+        }
         self.observed_total = self.observed_total.saturating_add(1);
         self.last_iteration = snapshot.iteration;
 
@@ -388,6 +408,13 @@ impl DriftDetector {
         };
         let total = window.len();
         if total == 0 {
+            return;
+        }
+        // 2026-06-28 plan U1: warm-up window guard. Below the floor
+        // the ratio is structurally low (e.g. 0/1, 0/4) and would
+        // emit a Critical finding on every warm-up topic. Stay
+        // silent until the window reaches `FIELD_COMPLETENESS_MIN_SAMPLES`.
+        if total < FIELD_COMPLETENESS_MIN_SAMPLES {
             return;
         }
         for field in &required {

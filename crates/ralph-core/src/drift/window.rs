@@ -53,6 +53,17 @@ pub struct EventSnapshot {
     /// Wave correlation id, when the event is part of a wave.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wave_id: Option<String>,
+    /// Recovery envelope reason code, when the snapshot originates
+    /// from a recovery envelope rather than a primary event.
+    /// 2026-06-28 plan U2: the drift engine writes
+    /// `recovery_outcome_update` envelopes back into the recovery
+    /// stream after a finding; without this field, the detector
+    /// would re-observe its own outcome and flip
+    /// `Pending <-> Recovered` in a tight loop. The field is
+    /// `None` for primary events and `Some("...")` for recovery
+    /// envelopes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
 }
 
 impl EventSnapshot {
@@ -67,6 +78,7 @@ impl EventSnapshot {
             iteration,
             timestamp,
             wave_id: None,
+            reason_code: None,
         }
     }
 
@@ -88,6 +100,14 @@ impl EventSnapshot {
     #[must_use]
     pub fn with_wave_id(mut self, wave_id: impl Into<String>) -> Self {
         self.wave_id = Some(wave_id.into());
+        self
+    }
+
+    /// Builder-style setter for `reason_code` (U2: drift self-observation
+    /// guard).
+    #[must_use]
+    pub fn with_reason_code(mut self, reason_code: impl Into<String>) -> Self {
+        self.reason_code = Some(reason_code.into());
         self
     }
 }
