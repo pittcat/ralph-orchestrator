@@ -446,8 +446,15 @@ fn validate_task(
         }
     };
 
-    // task_key field: if configured, must exist and be a string
-    let _task_key_from_payload = if !rule.require_task.key_field.is_empty() {
+    // task_key field: if configured, must exist and be a
+    // string. The presence of a valid `task_key` lets the
+    // projector derive a canonical `from_key:<key>` id when
+    // the agent's `task_id` is empty (2026-06-28 plan U5,
+    // R8: task_id fallback). The variable is also exposed
+    // to the TaskStore lookup below so a `work.done` with
+    // `task_id=""` + matching `task_key` can find the
+    // existing task opened under the projector-derived id.
+    let task_key_from_payload = if !rule.require_task.key_field.is_empty() {
         match map.get(&rule.require_task.key_field) {
             Some(Value::String(s)) => Some(s.as_str()),
             Some(other) => {
@@ -479,6 +486,24 @@ fn validate_task(
         None
     };
 
+    // 2026-06-28 plan U5 (R8): when the agent's `task_id` is
+    // empty AND a valid `task_key` is present, look up the
+    // task under the projector-derived `from_key:<key>` id.
+    // This makes the round-trip (work.ready → work.done with
+    // empty task_id) close the same task record instead of
+    // leaving it open forever.
+    let resolved_task_id: String = if task_id.is_empty() {
+        match task_key_from_payload {
+            Some(key) if !key.is_empty() => format!("from_key:{key}"),
+            // No task_key fallback path — fall through to the
+            // existing reject (already returned above for
+            // empty task_id).
+            _ => task_id.clone(),
+        }
+    } else {
+        task_id.clone()
+    };
+
     // Load the task store — fail-closed: load failure = reject
     let store = match TaskStore::load(tasks_path) {
         Ok(s) => s,
@@ -497,21 +522,48 @@ fn validate_task(
         }
     };
 
-    // Find the task — fail-closed: not found = reject
-    let task = match store.get(&task_id) {
-        Some(t) => t,
-        None => {
-            return Some(ExecutionContractFinding {
-                kind: ExecutionContractViolationKind::TaskNotFound {
-                    task_id: task_id.clone(),
-                },
-                message: format!(
-                    "Task '{}' not found in task store. work.done rejected to prevent false completion.",
-                    task_id
-                ),
-                topic: event.topic.to_string(),
-                ..Default::default()
-            });
+    // Find the task — fail-closed: not found = reject.
+    // 2026-06-28 plan U5 (R8): when `task_id` is empty and
+    // `task_key` is present, look up the task under the
+    // projector-derived `from_key:<key>` id first. If that
+    // fails, retry the original `task_id` so an existing
+    // task under the literal id is still found.
+    let task = if !task_id.is_empty() {
+        match store.get(&task_id) {
+            Some(t) => t,
+            None => {
+                return Some(ExecutionContractFinding {
+                    kind: ExecutionContractViolationKind::TaskNotFound {
+                        task_id: task_id.clone(),
+                    },
+                    message: format!(
+                        "Task '{}' not found in task store. work.done rejected to prevent false completion.",
+                        task_id
+                    ),
+                    topic: event.topic.to_string(),
+                    ..Default::default()
+                });
+            }
+        }
+    } else {
+        // Empty task_id: try the derived id, then fall
+        // through to the original reject.
+        match store.get(&resolved_task_id) {
+            Some(t) => t,
+            None => {
+                return Some(ExecutionContractFinding {
+                    kind: ExecutionContractViolationKind::TaskNotFound {
+                        task_id: resolved_task_id.clone(),
+                    },
+                    message: format!(
+                        "Task '{}' (derived from task_key '{}') not found in task store. work.done rejected to prevent false completion.",
+                        resolved_task_id,
+                        task_key_from_payload.unwrap_or(""),
+                    ),
+                    topic: event.topic.to_string(),
+                    ..Default::default()
+                });
+            }
         }
     };
 

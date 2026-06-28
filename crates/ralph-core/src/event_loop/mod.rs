@@ -2921,6 +2921,13 @@ impl EventLoop {
                 let blocked =
                     Event::new("plan.blocked", payload).with_target(HatId::new("ralph"));
                 self.record_repair_event(&blocked);
+                // 2026-06-29 code-review fix: set the
+                // `terminal_event_emitted` flag so U8's
+                // final-threshold path (also emitting
+                // `plan.blocked`) does not fire a second
+                // time for the same `stall_key`. Mirrors
+                // U8's behaviour at line 2983.
+                self.terminal_event_emitted = true;
                 true
             }
             // Illegal transitions are expected when a previous
