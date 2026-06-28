@@ -2836,6 +2836,127 @@ fn u8_write_termination_diagnostics_drops_violation_reference_when_disabled() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// SC-5: diagnosis summary counts mirror IdempotentLog `_final=true`
+// records (P0-2 / P1-5 review 2026-06-28).
+//
+// The legacy `count_recovery_entries` line-count was retired because
+// the on-disk IdempotentLog is now the authoritative store; counting
+// `.ralph/recovery.jsonl` lines instead would diverge whenever the
+// runtime writes through `idempotent_wiring::write_recovery` /
+// `write_drift` but the legacy CLI journal is absent or stale.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn sc5_build_termination_diagnostics_counts_reflect_idempotent_log() {
+    use ralph_core::event_loop::idempotent_wiring;
+    use ralph_core::state::idempotent_log::IdempotentLog;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let event_loop = build_u8_event_loop(tmp.path().to_path_buf(), true);
+
+    // Seed the IdempotentLog directly through the wiring layer so
+    // we exercise the same path the runtime uses. The 4th record
+    // (`task:open:...`) is NOT final — `from_final_records` must
+    // ignore it.
+    let workspace = tmp.path().join(".ralph");
+    let mut log = IdempotentLog::open(&workspace, "sc5").expect("open idempotent log");
+    idempotent_wiring::write_recovery(
+        &mut log,
+        "r1",
+        "sc5",
+        serde_json::json!({"reason_code": "semantic_gate_violation"}),
+        true,
+    )
+    .unwrap();
+    idempotent_wiring::write_recovery(
+        &mut log,
+        "r2",
+        "sc5",
+        serde_json::json!({"reason_code": "missing_required_fields"}),
+        true,
+    )
+    .unwrap();
+    idempotent_wiring::write_recovery(
+        &mut log,
+        "r3",
+        "sc5",
+        serde_json::json!({"reason_code": "verdict_gate_misalignment"}),
+        true,
+    )
+    .unwrap();
+    idempotent_wiring::write_drift(
+        &mut log,
+        "d1",
+        "sc5",
+        serde_json::json!({"finding": "schema_drift"}),
+    )
+    .unwrap();
+    idempotent_wiring::write_task(
+        &mut log,
+        "open",
+        "sc5",
+        serde_json::json!({"status": "in_progress"}),
+        false,
+    )
+    .unwrap();
+    drop(log);
+
+    // Push the seeded log into the live EventLoop so
+    // `build_termination_diagnostics` reads the same records
+    // through `EventLoop::idempotent_log()`.
+    {
+        let log_mutex = event_loop.idempotent_log();
+        let mut guard = log_mutex.lock().expect("idempotent_log poisoned");
+        *guard = IdempotentLog::open(&workspace, "sc5").expect("reopen");
+        let _ = guard.replay();
+    }
+
+    let (_hint, seed) = build_termination_diagnostics(&event_loop, None)
+        .expect("hint + seed must be Some when diagnostics are enabled");
+
+    assert_eq!(
+        seed.recovery_count, 3,
+        "SC-5: recovery_count must equal the 3 `_final=true` recovery records on disk"
+    );
+    assert_eq!(
+        seed.drift_finding_count, 1,
+        "SC-5: drift_finding_count must equal the 1 `_final=true` drift record on disk"
+    );
+
+    // Notes must surface the SC-5 data source so operators can grep
+    // the same counts via `ralph diagnose` + `jq`.
+    assert!(
+        seed.notes
+            .iter()
+            .any(|n| n.contains("IdempotentLog.final_records()")),
+        "notes must attribute the count source to IdempotentLog; got: {:?}",
+        seed.notes
+    );
+}
+
+#[test]
+fn sc5_build_termination_diagnostics_zero_when_idempotent_log_empty() {
+    // Fresh event loop with no wiring writes — counts must be 0,
+    // not whatever line count the legacy recovery.jsonl happens to
+    // have. This is the regression guard for the bug where
+    // `recovery_count` was a line count of legacy journals.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let event_loop = build_u8_event_loop(tmp.path().to_path_buf(), true);
+
+    let (_hint, seed) = build_termination_diagnostics(&event_loop, None)
+        .expect("hint + seed must be Some when diagnostics are enabled");
+
+    assert_eq!(
+        seed.recovery_count, 0,
+        "fresh loop with no IdempotentLog records must report recovery_count=0"
+    );
+    assert_eq!(
+        seed.drift_finding_count, 0,
+        "fresh loop with no IdempotentLog records must report drift_finding_count=0"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // 2026-06-07 plan Unit 3: 统一 wave 结果格式
 //
 // `merge_wave_results_to_events_file` lives in the binary crate's
@@ -4863,55 +4984,74 @@ fn test_u5_r5_last_reviewed_sha_written_for_real_empty_diff() {
 
 /// T4.1 (Happy path, Covers AE4): 3 cli_emit + 1 missing_event_gate
 /// → `recovery_count == 4`. Both journal paths appear in `notes`.
+///
+/// P0-2 (2026-06-28): The source of truth for counts is now
+/// `IdempotentLog::final_records()`, not legacy `recovery.jsonl`
+/// line counting. This test seeds the IdempotentLog directly
+/// (the same path the runtime uses via `idempotent_wiring`),
+/// then verifies the summary counts match `_final=true` records.
 #[test]
 fn u4_recovery_count_aggregates_workspace_and_session_journals() {
+    use ralph_core::event_loop::idempotent_wiring;
+    use ralph_core::state::idempotent_log::IdempotentLog;
+
     let tmp = tempfile::TempDir::new().unwrap();
     let workspace = tmp.path().to_path_buf();
 
-    // 3 cli_emit rejection envelopes in workspace journal.
-    let workspace_journal = workspace.join(".ralph").join("recovery.jsonl");
-    std::fs::create_dir_all(workspace_journal.parent().unwrap()).unwrap();
-    let cli_emit_entry = "{\"schema_version\":1,\"envelope\":{\"schema_version\":1,\"diagnosis_id\":\"cli-1\",\"iteration\":1,\"source\":\"cli_emit\",\"severity\":\"error\",\"reason_code\":\"policy_denied\",\"message\":\"reject\",\"source_hat\":\"ralph\",\"target_hat\":\"executor\",\"topic\":\"work.done\",\"retry_key\":\"cli_emit:executor:work_done:policy_denied:*\",\"retry_attempt\":0,\"safe_target\":false,\"outcome\":\"failed\",\"timestamp\":\"2026-06-17T10:00:00Z\"},\"iteration\":1,\"timestamp\":\"2026-06-17T10:00:00Z\"}\n";
-    std::fs::write(&workspace_journal, cli_emit_entry.repeat(3)).unwrap();
-
-    // 1 missing_event_gate envelope in the session journal.
-    let event_loop = build_u8_event_loop(workspace.clone(), true);
-    let session_dir = event_loop
-        .diagnostics()
-        .session_dir()
-        .expect("session dir must exist when diagnostics enabled");
-    std::fs::write(
-        session_dir.join("recovery.jsonl"),
-        "{\"schema_version\":1,\"envelope\":{\"schema_version\":1,\"diagnosis_id\":\"sess-1\",\"iteration\":1,\"source\":\"missing_event_gate\",\"severity\":\"error\",\"reason_code\":\"no_emit\",\"message\":\"builder did not emit work.done\",\"source_hat\":\"builder\",\"target_hat\":\"builder\",\"topic\":\"work.done\",\"retry_key\":\"missing_event_gate:builder:work_done:no_emit:*\",\"retry_attempt\":0,\"safe_target\":true,\"outcome\":\"pending\",\"timestamp\":\"2026-06-17T10:01:00Z\"},\"iteration\":1,\"timestamp\":\"2026-06-17T10:01:00Z\"}\n",
+    // Seed 4 `_final=true` IdempotentLog records.
+    let ralph_dir = workspace.join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).unwrap();
+    let mut log = IdempotentLog::open(&ralph_dir, "u4-p0-2").expect("open idempotent log");
+    for i in 0..3 {
+        idempotent_wiring::write_recovery(
+            &mut log,
+            &format!("cli-{i}"),
+            "u4-p0-2",
+            serde_json::json!({"reason_code": "policy_denied"}),
+            true,
+        )
+        .unwrap();
+    }
+    idempotent_wiring::write_recovery(
+        &mut log,
+        "sess-1",
+        "u4-p0-2",
+        serde_json::json!({"reason_code": "no_emit"}),
+        true,
     )
     .unwrap();
+    drop(log);
+
+    let event_loop = build_u8_event_loop(workspace.clone(), true);
+    // Push the seeded log into the EventLoop so
+    // `build_termination_diagnostics` reads the right records.
+    {
+        let log_mutex = event_loop.idempotent_log();
+        let mut guard = log_mutex.lock().expect("idempotent_log poisoned");
+        *guard = IdempotentLog::open(&ralph_dir, "u4-p0-2").expect("reopen");
+        let _ = guard.replay();
+    }
 
     let (_hint, seed) =
         build_termination_diagnostics(&event_loop, None).expect("hint + seed must be Some");
 
     assert_eq!(
         seed.recovery_count, 4,
-        "U4: 3 cli_emit + 1 missing_event_gate → recovery_count must be 4, got {}. notes={:?}",
+        "P0-2: 4 `_final=true` IdempotentLog records → recovery_count must be 4, got {}. notes={:?}",
         seed.recovery_count, seed.notes
     );
-    // Both journal paths must appear in notes for operator visibility.
+    // Notes must surface the SC-5 data source (IdempotentLog)
+    // so operators know the count is authoritative.
     assert!(
         seed.notes
             .iter()
-            .any(|n| n.contains(".ralph/recovery.jsonl") && n.contains("(3 entries)")),
-        "notes must report workspace journal with count, got: {:?}",
-        seed.notes
-    );
-    assert!(
-        seed.notes.iter().any(|n| n.contains("diagnostics/")
-            && n.contains("/recovery.jsonl")
-            && n.contains("(1 entries)")),
-        "notes must report session journal with count, got: {:?}",
+            .any(|n| n.contains("IdempotentLog.final_records()")),
+        "notes must attribute count source to IdempotentLog; got: {:?}",
         seed.notes
     );
 }
 
-/// T4.2 (Edge): no recovery files exist → count is 0, no panic.
+/// T4.2 (Edge): no IdempotentLog final records → count is 0, no panic.
 #[test]
 fn u4_recovery_count_zero_when_no_journals_present() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -4922,20 +5062,15 @@ fn u4_recovery_count_zero_when_no_journals_present() {
 
     assert_eq!(
         seed.recovery_count, 0,
-        "U4: no recovery files → count must be 0, got {}. notes={:?}",
+        "P0-2: no IdempotentLog final records → count must be 0, got {}. notes={:?}",
         seed.recovery_count, seed.notes
     );
-    // Notes still describe both paths so operators know where to look.
-    assert_eq!(seed.notes.len(), 2);
+    // Notes still describe the data source so operators know where to look.
+    assert_eq!(seed.notes.len(), 3);
     assert!(
-        seed.notes[0].contains("(0 entries)"),
-        "workspace note must report 0 entries, got: {}",
+        seed.notes[0].contains("IdempotentLog.final_records()"),
+        "first note must attribute count to IdempotentLog, got: {}",
         seed.notes[0]
-    );
-    assert!(
-        seed.notes[1].contains("(0 entries)"),
-        "session note must report 0 entries, got: {}",
-        seed.notes[1]
     );
 }
 
@@ -4944,24 +5079,44 @@ fn u4_recovery_count_zero_when_no_journals_present() {
 /// in `notes` for the operator (with 0 entries).
 #[test]
 fn u4_recovery_count_falls_back_to_workspace_when_session_empty() {
+    use ralph_core::event_loop::idempotent_wiring;
+    use ralph_core::state::idempotent_log::IdempotentLog;
+
     let tmp = tempfile::TempDir::new().unwrap();
     let workspace = tmp.path().to_path_buf();
 
-    // 2 cli_emit rejections in workspace journal.
-    let workspace_journal = workspace.join(".ralph").join("recovery.jsonl");
-    std::fs::create_dir_all(workspace_journal.parent().unwrap()).unwrap();
-    let cli_emit_entry = "{\"schema_version\":1,\"envelope\":{\"schema_version\":1,\"diagnosis_id\":\"cli-1\",\"iteration\":1,\"source\":\"cli_emit\",\"severity\":\"error\",\"reason_code\":\"policy_denied\",\"message\":\"r\",\"source_hat\":\"ralph\",\"target_hat\":\"executor\",\"topic\":\"work.done\",\"retry_key\":\"cli_emit:executor:work_done:policy_denied:*\",\"retry_attempt\":0,\"safe_target\":false,\"outcome\":\"failed\",\"timestamp\":\"2026-06-17T10:00:00Z\"},\"iteration\":1,\"timestamp\":\"2026-06-17T10:00:00Z\"}\n";
-    std::fs::write(&workspace_journal, cli_emit_entry.repeat(2)).unwrap();
+    // 2 `_final=true` IdempotentLog records (simulating
+    // workspaced-level recovery entries).
+    let ralph_dir = workspace.join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).unwrap();
+    let mut log = IdempotentLog::open(&ralph_dir, "u4-edge").expect("open idempotent log");
+    for i in 0..2 {
+        idempotent_wiring::write_recovery(
+            &mut log,
+            &format!("cli-{i}"),
+            "u4-edge",
+            serde_json::json!({"reason_code": "policy_denied"}),
+            true,
+        )
+        .unwrap();
+    }
+    drop(log);
 
     let event_loop = build_u8_event_loop(workspace.clone(), true);
-    // No session-level recovery.jsonl written.
+    // Push the seeded log into the EventLoop.
+    {
+        let log_mutex = event_loop.idempotent_log();
+        let mut guard = log_mutex.lock().expect("idempotent_log poisoned");
+        *guard = IdempotentLog::open(&ralph_dir, "u4-edge").expect("reopen");
+        let _ = guard.replay();
+    }
 
     let (_hint, seed) =
         build_termination_diagnostics(&event_loop, None).expect("hint + seed must be Some");
 
     assert_eq!(
         seed.recovery_count, 2,
-        "U4: workspace-only journal → recovery_count must equal workspace_count (2), got {}",
+        "P0-2: 2 IdempotentLog final records → recovery_count must equal 2, got {}",
         seed.recovery_count
     );
 }

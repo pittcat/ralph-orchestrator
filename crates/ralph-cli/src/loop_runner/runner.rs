@@ -42,52 +42,56 @@ pub fn agent_wrote_any_valid_or_rejected(
 /// violation reference. The two artifacts are returned as a pair so
 /// the caller can choose to ignore the seed while still appending
 /// the hint, or vice versa.
-/// U4 (2026-06-17-004): count non-empty lines in the two
-/// `recovery.jsonl` journals that coexist in a workspace:
+/// U8 (SC-5): aggregate recovery / drift counts from the
+/// loop-scoped idempotent log instead of counting non-empty
+/// lines in legacy `recovery.jsonl` / `drift.jsonl` journals.
 ///
-/// - **workspace** (`<root>/.ralph/recovery.jsonl`) — appended by
-///   the `ralph emit` CLI precheck (cli_emit / wave_dimension_guard
-///   rejections) and any other CLI-side audit path. Persists
-///   across loops.
-/// - **session** (`<root>/.ralph/diagnostics/<id>/recovery.jsonl`)
-///   — appended by the runtime (missing_event_gate, workflow_guard,
-///   etc.) for the active diagnostics session.
+/// Why this exists: prior to the SC-5 wiring the
+/// `diagnosis-summary.json` `recovery_count` was a line count
+/// of two legacy JSONL files while the authoritative
+/// per-record store is `IdempotentLog` (`recovery:<key>.jsonl`
+/// etc., one record per retry, marked `_final=true` on close).
+/// The two counts diverged whenever the wiring path wrote
+/// through `idempotent_wiring::write_recovery` /
+/// `write_drift` but the legacy CLI journal was still being
+/// read by the summary writer.
 ///
-/// Per KTD-6 we keep both journals in place (no migration) and
-/// expose their combined count + dual-path notes so operators and
-/// `ralph diagnose` see the full picture. Returns `(0, 0)` if
-/// neither file exists — the absence is not a failure.
-///
-/// `workspace_root` is the absolute path to the repo root that
-/// hosts `<root>/.ralph/`; `session_dir` is the absolute path
-/// to the diagnostics session directory (typically
-/// `<root>/.ralph/diagnostics/<id>/`). The workspace journal
-/// lives at `<root>/.ralph/recovery.jsonl`; the session journal
-/// lives at `<session_dir>/recovery.jsonl`. Using `session_dir`
-/// directly (rather than reconstructing it from `session_id`)
-/// keeps the lookup robust against helper paths that nest
-/// `.ralph` differently (e.g. tests that pass
-/// `ctx.workspace().join(".ralph")` as the collector base).
-pub(crate) fn count_recovery_entries(workspace_root: &Path, session_dir: &Path) -> (u32, u32) {
-    let workspace_path = workspace_root.join(".ralph").join("recovery.jsonl");
-    let session_path = session_dir.join("recovery.jsonl");
-    let workspace_count = count_non_empty_lines(&workspace_path);
-    let session_count = count_non_empty_lines(&session_path);
-    (workspace_count, session_count)
-}
-
-/// Count non-blank lines in a JSONL file. Returns 0 on any I/O
-/// error (NotFound, permission denied, malformed UTF-8, ...) so
-/// the absence of a journal never aborts summary generation.
-fn count_non_empty_lines(path: &Path) -> u32 {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return 0,
+/// This helper:
+/// 1. Acquires the IdempotentLog mutex and replays the
+///    on-disk JSONL index (the in-memory index is not
+///    authoritative per `IdempotentLog::replay` rustdoc).
+/// 2. Calls `from_final_records` to bucket the `_final=true`
+///    records by `recovery:` / `drift:` / `task:` key prefix.
+/// 3. Returns the recovered counts alongside the journal
+///    paths so the caller can still surface them in the
+///    summary notes (operators grep both journals).
+fn collect_idempotent_counts(
+    event_loop: &ralph_core::EventLoop,
+) -> (
+    usize, /* recovery_count */
+    usize, /* drift_finding_count */
+    usize, /* task_count (informational only) */
+) {
+    let log_mutex = event_loop.idempotent_log();
+    let mut guard = match log_mutex.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
     };
-    content
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count() as u32
+    // `replay` rebuilds the in-memory index from disk; the
+    // SC-5 measurement command
+    // (`grep -c '"_final":true' .ralph/recovery.jsonl`)
+    // expects the count to mirror what's persisted, not what
+    // happened to be in process-local state.
+    let _ = guard.replay();
+    let finals = guard.final_records();
+    let counts =
+        ralph_core::event_loop::idempotent_wiring::DiagnosisSummary::from_final_records(&finals);
+    drop(guard);
+    (
+        counts.recovery_count,
+        counts.drift_finding_count,
+        counts.task_count,
+    )
 }
 
 pub(crate) fn build_termination_diagnostics(
@@ -103,9 +107,10 @@ pub(crate) fn build_termination_diagnostics(
     // `2026-06-17T22-21-30`, always valid UTF-8 ASCII). The
     // `?` above short-circuits the disabled-collector case; the
     // `expect` here only triggers on a malformed file system,
-    // which the surrounding `count_recovery_entries` would then
-    // also fail to read.
+    // which the surrounding summary path would then also fail
+    // to read.
     let session_dir = event_loop.diagnostics().session_dir()?;
+    let _ = session_dir; // SC-5: counts come from IdempotentLog, not legacy journals
     let session_id = event_loop
         .diagnostics()
         .session_id()
@@ -135,26 +140,28 @@ pub(crate) fn build_termination_diagnostics(
     let state = event_loop.state();
     let now = chrono::Utc::now();
 
-    // U4: aggregate both recovery journals so `recovery_count`
-    // reflects every envelope the operator could grep for.
-    // Prefer the LoopContext's workspace (the actual on-disk root
-    // where `.ralph/` lives and where cli_emit writes its journal);
-    // fall back to the config workspace root for non-context runs.
-    let workspace_root_owned: std::path::PathBuf = event_loop
-        .loop_context()
-        .map(|c| c.workspace().to_path_buf())
-        .unwrap_or_else(|| event_loop.config().core.workspace_root.clone());
-    let workspace_root = workspace_root_owned.as_path();
-    let (workspace_count, session_count) = count_recovery_entries(workspace_root, session_dir);
-    let recovery_count = workspace_count + session_count;
+    // SC-5: derive counts from the loop-scoped idempotent
+    // log rather than scanning legacy `recovery.jsonl`. The
+    // journal paths below still point at the legacy journals
+    // because `ralph diagnose` and operator greps read those
+    // files; the COUNT field is now sourced from the
+    // authoritative IdempotentLog.
+    let (recovery_count, drift_finding_count, _task_count) =
+        collect_idempotent_counts(event_loop);
 
     let mut notes = Vec::new();
     notes.push(format!(
-        "recovery journal: workspace .ralph/recovery.jsonl ({workspace_count} entries)"
+        "recovery count source: IdempotentLog.final_records() (U8 / SC-5); {} final records on disk",
+        recovery_count
     ));
     notes.push(format!(
-        "recovery journal: session .ralph/diagnostics/{session_id}/recovery.jsonl ({session_count} entries)"
+        "drift count source: IdempotentLog.final_records() (U8 / SC-5); {} final findings on disk",
+        drift_finding_count
     ));
+    notes.push(
+        "recovery journal path: .ralph/diagnostics/<session>/recovery.jsonl (legacy, still readable by `ralph diagnose`)"
+            .to_string(),
+    );
 
     let summary = ralph_core::diagnostics::DiagnosisSummary {
         schema_version: ralph_core::diagnostics::DiagnosisSummary::SCHEMA_VERSION,
@@ -170,8 +177,8 @@ pub(crate) fn build_termination_diagnostics(
             ".ralph/diagnostics/{session_id}/orchestration.jsonl"
         )),
         errors_log_path: Some(format!(".ralph/diagnostics/{session_id}/errors.jsonl")),
-        recovery_count,
-        drift_finding_count: 0,
+        recovery_count: recovery_count as u32,
+        drift_finding_count: drift_finding_count as u32,
         notes,
     };
 
