@@ -399,6 +399,16 @@ impl DriftDetector {
     // ── field_completeness ────────────────────────────────────────
 
     fn check_field_completeness(&mut self, topic: &str, out: &mut Vec<DriftFinding>) {
+        // 2026-06-28 plan U13 (R13): `human.guidance` is
+        // suppressed in the ce-executor-serial preset (and any
+        // other no-human preset that opts in). Skipping the
+        // topic here keeps `field_completeness` from raising a
+        // Critical finding every time a hat forgets to emit
+        // `human.guidance` (which is by design — there is no
+        // human to receive it).
+        if topic == "human.guidance" {
+            return;
+        }
         let required = self.required_fields.for_topic(topic);
         if required.is_empty() {
             return;
