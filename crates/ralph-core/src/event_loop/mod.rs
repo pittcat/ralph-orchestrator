@@ -2809,6 +2809,75 @@ impl EventLoop {
         hat.as_str() == "review-synthesizer"
     }
 
+    /// 2026-06-28 plan U6 (R6): drive the per-task
+    /// `RepairStateMachine` from the stall hot path.
+    ///
+    /// The first escalation for a `task_key` lazily creates a
+    /// machine with the preset's `mechanism.repair_budget`
+    /// (defaulting to 3 when no flow is declared). Subsequent
+    /// escalations call `Retry` and consume one unit of the
+    /// budget. When the budget is exhausted, we emit a
+    /// `plan.blocked` envelope with
+    /// `reason="repair_unrecoverable_after_N_retries"` and
+    /// return `true` so the caller skips the `task.resume`
+    /// path.
+    ///
+    /// The machine is keyed by `task_key` (= `stall_key` from
+    /// the caller); different keys have independent budgets.
+    fn drive_repair_state_machine(
+        &mut self,
+        task_key: &str,
+        stall_count: u32,
+    ) -> bool {
+        use crate::event_loop::repair_flow::{
+            RepairAction, RepairBudget, RepairStateMachine, RepairTransitionResult,
+        };
+        // Read the budget from the preset (U12 will lint this).
+        // When no flow is declared we fall back to the
+        // repository-wide default of 3.
+        let max = self
+            .config
+            .event_loop
+            .mechanism
+            .as_ref()
+            .and_then(|m| m.flow.as_ref())
+            .map(|f| f.repair_budget)
+            .unwrap_or(3);
+        let budget = RepairBudget { max };
+        let machine = self
+            .repair_state_machines
+            .entry(task_key.to_string())
+            .or_insert_with(|| RepairStateMachine::new(budget));
+        // First escalation: Detected -> Diagnosing. We use
+        // the budget to gate the upgrade so a preset that
+        // declared `repair_budget: 0` immediately exhausts.
+        let result = if stall_count == 1 {
+            machine.try_transition(RepairAction::BeginDiagnosis)
+        } else {
+            machine.try_transition(RepairAction::Retry)
+        };
+        match result {
+            RepairTransitionResult::BudgetExhausted(exhausted) => {
+                let payload = format!(
+                    r#"{{"reason":"{}","task_key":"{}","retries_consumed":{},"budget":{}}}"#,
+                    exhausted.reason_code,
+                    task_key,
+                    exhausted.retries_consumed,
+                    exhausted.max,
+                );
+                let blocked =
+                    Event::new("plan.blocked", payload).with_target(HatId::new("ralph"));
+                self.record_repair_event(&blocked);
+                true
+            }
+            // Illegal transitions are expected when a previous
+            // stall cycle Closed the machine — treat them as
+            // no-ops, NOT as a budget-exhausted stop.
+            RepairTransitionResult::IllegalTransition { .. } => false,
+            RepairTransitionResult::Accepted => false,
+        }
+    }
+
     /// Injects a fallback event to recover from a stalled loop.
     ///
     /// When no hats have pending events (agent failed to publish), this method
@@ -2839,6 +2908,29 @@ impl EventLoop {
             .entry(stall_key.clone())
             .and_modify(|c| *c += 1)
             .or_insert(1);
+
+        // 2026-06-28 plan U6 (R6): drive the per-task
+        // `RepairStateMachine` from the stall hot path so
+        // `repair_budget` becomes a real hard cap rather than
+        // a metadata decoration. The first escalation
+        // transitions the machine into `Diagnosing`; each
+        // subsequent escalation calls `Retry`. When
+        // `RepairStateMachine` reports `BudgetExhausted`, we
+        // emit a `plan.blocked` envelope and short-circuit so
+        // no `task.resume` is published — the loop's self-stop
+        // path takes over.
+        let budget_exhausted = self.drive_repair_state_machine(
+            &stall_key,
+            stall_count_value,
+        );
+        if budget_exhausted {
+            debug!(
+                stall_count = stall_count_value,
+                stall_key = %stall_key,
+                "U6: repair_budget exhausted — emitting plan.blocked and skipping task.resume"
+            );
+            return true;
+        }
 
         let hard_escalation = stall_count_value >= STALL_HARD_THRESHOLD;
         // Unit 8: wave stall escalation — route to review-coordinator when
