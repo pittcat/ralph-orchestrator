@@ -43,6 +43,8 @@ supersedes:
 
 经全仓扫描,`human.guidance` 在 60+ 文件里出现,**核心身份**是:
 
+**5 个 emit 源(均为 production 写盘路径)**:
+
 | 角色 | 实际行为 | 真实消费者 |
 |---|---|---|
 | correction 3-strike 终态 | `correction/mod.rs:720-738` 同一 retry_key 被拒 ≥ 3 次时发 | **无**(被 `suppress_human_guidance=true` 抑制) |
@@ -50,9 +52,20 @@ supersedes:
 | execution contract reject 解释 | `event_loop/mod.rs:8308-8310` 第 3 件包络 | **无** |
 | TUI "Now" 立即引导 | `ralph-tui/src/state.rs:898-927` 写 events.jsonl | **无**(被抑制) |
 | TUI/RPC "Next" 引导 | `loop_runner/runner.rs:2112-2181` 队列 flush | **无** |
+
+**1 个 inbound 函数**(in-memory 注入路径,非 production 写盘):
+
+| 角色 | 实际行为 | 真实消费者 |
+|---|---|---|
+| `EventLoop::inject_human_guidance` | `event_loop/mod.rs:2555-2569` 测试/特殊 runner 路径 in-memory 注入 | **无** |
+
+**1 个入站路由节点**(消费/路由,非 emit):
+
+| 角色 | 实际行为 | 真实消费者 |
+|---|---|---|
 | `EventBus.human_pending` 入站 | `event_bus.rs:121-126` `human.*` prefix 路由 | **无** |
 
-**全部 6 个 emit 源都没有任何运行时消费者**——但整套机制仍占用代码、配置、测试、drift 告警、prefix 路由,以及 3 份历史解决方案和 1 条 MEMORY 把它当作"真的有救援通道"。
+**全部 5 个 emit 源 + 1 个 inbound 函数 + 1 个入站路由都没有任何运行时消费者**——但整套机制仍占用代码、配置、测试、drift 告警、prefix 路由,以及 3 份历史解决方案和 1 条 MEMORY 把它当作"真的有救援通道"。
 
 ### 自我观察到的"自观测循环"
 
@@ -81,12 +94,12 @@ stall_recovery 升级 → maybe_escalate_to_human_guidance → 发 human.guidanc
 
 ### R2. 把所有 6 个 emit 源改为发终态事件
 
-- **correction 3-strike**(`correction/mod.rs:720-738`):改为 publish `plan.blocked(reason="correction_3_strike_exhausted:<retry_key>")` 而非 `human.guidance`
+- **correction 3-strike**(`correction/mod.rs:720-738`):改为 publish `plan.blocked(reason="correction_3_strike_exhausted", retry_key=<ctx.retry_key>, task_id=<ctx.task_id>)` 而非 `human.guidance`(与 KTD-1 / U2 的 JSON payload 格式一致)
 - **drift Warning Final**(`drift/engine.rs:438-481`):升级 `check_termination_hint` 的 Warning Final 分支(行 401-405)为 `TerminationReason::RecoveryExhausted`,**直接 loop 终止**;删除 `check_final_human_guidance` 整个方法
 - **execution contract reject**(`event_loop/mod.rs:8308-8310`):保留 `ContractRejectConfig.guidance_topic` 字段(向后兼容),但 `default_reject_guidance_topic()` 默认值改为 `plan.blocked`;在 schema doc 明确该字段必须是 orchestrator 终态 topic,不能填 `task.resume` 这类恢复 topic
 - **TUI "Now"**(`ralph-tui/src/state.rs:898-927`):删除 `write_guidance_event` 的 `human.guidance` 写入;TUI Now 模式只写 `urgent_steer_marker`(已存在,不依赖此 topic)
-- **TUI/RPC "Next"**(`loop_runner/runner.rs:2112-2181`):改发 `loop.resume` 事件,经 `loop_runner` 的 `--continue` 注入路径消费
-- **`EventLoop::inject_human_guidance`**(`event_loop/mod.rs:2555-2569`):整函数删除(`pub fn` 出口,见 R1.2)
+- **TUI/RPC "Next"**(`loop_runner/runner.rs:2112-2181`):改为 in-memory prompt injection(类似 `inject_human_guidance` 的 in-memory 路径,但注入到下一轮 build_prompt,不写 events.jsonl)。**不**改发 `loop.resume`(该 topic 在生产代码无消费者,等同 silent drop)
+- **`EventLoop::inject_human_guidance`**(`event_loop/mod.rs:2555-2569`):整函数删除(`pub fn` 出口,见 U9 本计划 U9 的 pub fn 删除项)
 
 ### R3. 删除 scratchpad `### HUMAN GUIDANCE` block 整套机制
 
@@ -184,28 +197,37 @@ stall_recovery 升级 → maybe_escalate_to_human_guidance → 发 human.guidanc
 - `correction/mod.rs:720-738` 把 `Event::new(HUMAN_GUIDANCE, ...)` 改为 `Event::new(PLAN_BLOCKED, json!({"reason": "correction_3_strike_exhausted", "retry_key": ctx.retry_key}))`
 - `event_loop/mod.rs::publish_correction_via_context` 路径不动,只把 3-strike 那一条 publish 改
 
-### KTD-2. drift Warning Final 升级为 `TerminationReason::RecoveryExhausted` 而非 "静默丢弃"
+### KTD-2. drift Warning+Final 升级由 `2026-06-28-002` U2 合并,本计划只删 Warning non-Final 软提醒路径
 
 **理由**:
-- 如果只删 `check_final_human_guidance` 而不把 Warning 升级,Warning Final hint 静默丢失 = 真正的语义损失
-- 2026-06-28-002 plan U2 已合并 Final 任意 severity,只差 Warning Final 这条
-- 与本计划合并做,降低发版成本
+- 2026-06-28-002 plan U2 已合并"Final 任意 severity 升级为 `TerminationReason::RecoveryExhausted`",包括 Warning+Final
+- 2026-06-28-002 走 Final 升级后,`check_final_human_guidance` 只剩 Warning **non-Final** 这条软提醒路径(原设计意图:让 operator 看到连续 Warning 但不立即终止)
+- 本计划在基座层反 KTD-2 之前已决策的"operator 通道已退役",Warning non-Final 软提醒失去接收方
+- 行为变化:**Warning non-Final** 路径从"发 human.guidance 软提醒"变为"完全静默"(无 human.guidance 事件产生);**Warning+Final** 路径行为已由 002 U2 升级(本计划不动)
+- ce-executor-serial `suppress_human_guidance=true` 原本就抑制了 Warning non-Final 软提醒,所以本次删除对实际 runtime 行为 = 0 变化(只是 dead code 清理)
 
 **实施点**:
-- `drift/engine.rs:401-405` `check_termination_hint` 的 Warning Final 分支直接走 `TerminationReason::RecoveryExhausted`
-- `drift/engine.rs:438-481` 整个 `check_final_human_guidance` 方法删
-- `drift/engine.rs` 中 `last_guidance_iteration` 字段删
+- `drift/engine.rs:401-405` 不动(`check_termination_hint` 的 Final 升级已由 002 U2 覆盖)
+- `drift/engine.rs:438-481` 整个 `check_final_human_guidance` 方法删除(只剩 Warning non-Final 的 dead code)
+- `drift/engine.rs` 中 `last_guidance_iteration` 字段删除
+- `loop_runner/runner.rs:2218-2224` 调用点删除
+- 关联测试(行 847, 950, 958-1004, 1095-1133)改测为"Warning non-Final 不再发 human.guidance"
 
-### KTD-3. 保留 `ContractRejectConfig.guidance_topic` 字段(改默认值 = `plan.blocked`)
+### KTD-3. 保留 `ContractRejectConfig.guidance_topic` 字段(改默认值 = `plan.blocked`)+ payload 格式按 target topic 区分
 
 **理由**:
 - 字段是 `pub` 出口 + 用户 YAML 可配置,直接删破坏外部集成
 - 改默认值为 `plan.blocked` 给用户**逃生口**:如果某个 preset 仍想走其它终态 topic,可显式 override
 - schema doc 明确字段语义,避免"听起来像操作员通道"的误解
+- **关键约束**:`plan.blocked` 已有结构化 schema(`flow_lifecycle.rs:1143-1237` 的 `reason` 字段);contract reject 原本发 free-form text 字符串(`"Execution contract rejection for X: ..."`)如果原样发到 `plan.blocked`,会破坏 projector / flow_lifecycle 的 schema 解析
 
 **实施点**:
 - `config/execution_contracts.rs:196-198` `default_reject_guidance_topic()` 返回 `"plan.blocked"`
-- `config/execution_contracts.rs:179-198` `ContractRejectConfig.guidance_topic` 字段保留,但 doc 改为: "Default plan.blocked. Set to a terminal orchestrator topic (e.g. plan.blocked, loop.cancel). Setting to task.resume or human.guidance has no effect as these topics no longer accept guidance."
+- `config/execution_contracts.rs:179-198` `ContractRejectConfig.guidance_topic` 字段保留,doc 改为: "Default plan.blocked. Set to a terminal orchestrator topic (e.g. plan.blocked, loop.cancel). Setting to task.resume or human.guidance has no effect as these topics no longer accept guidance."
+- **`event_loop/mod.rs:8308-8310` contract reject publish 分支检测 target topic**:
+  - 如果 `guidance_topic == "plan.blocked"`,发结构化 JSON `{"reason": "execution_contract_rejected", "topic": event.topic, "task_id": event.task_id, "finding_message": <finding.message>}`
+  - 如果是其它终态 topic(如 `loop.cancel` / `LOOP_COMPLETE`),发 free-form text(原有行为)
+  - **不在两个分支的话**(用户填 task.resume 等恢复 topic),运行时忽略 + warning 日志
 
 ### KTD-4. `suppress_human_guidance` 字段直接删(选项 A),不做改名/反转
 
@@ -214,6 +236,7 @@ stall_recovery 升级 → maybe_escalate_to_human_guidance → 发 human.guidanc
 - 改名(`escalation_blocked: true`)误导用户以为还存在 escalation 文本
 - 字段无意义:删除 topic 后,无"自由文本注入 prompt"可抑制
 - 用户 YAML 直觉更好:删字段后,ce-executor-serial 用户 YAML 直接走默认,无 breaking change
+- **`#[serde(deny_unknown_fields)]` 加在 `LoopConfig` 顶层会破坏 forward-compat**:任何未来字段在 preset YAML 出现时都会 fail,而不是被 `#[serde(default)]` 优雅降级。**改用 field-level deny**:只对 `suppress_human_guidance` / `exempt_from_suppress_human_guidance` 这两个字段 deny,放行其它未知字段(保留 `LoopConfig` 的 forward-compat 行为)
 
 **实施点**:
 - `config/loop_config.rs:339-365` `suppress_human_guidance: bool` 字段整段删,doc 删
@@ -235,7 +258,7 @@ stall_recovery 升级 → maybe_escalate_to_human_guidance → 发 human.guidanc
 
 **实施点**:
 - `ralph-tui/src/state.rs:898-927` `write_guidance_event` 整段函数删(只留 `write_urgent_steer_marker` 路径)
-- `loop_runner/runner.rs:2112-2181` `flush_guidance_queue_to_events_jsonl` 改写为 `flush_resume_queue_to_events_jsonl`,event 改发 `loop.resume` topic
+- `loop_runner/runner.rs:2112-2181` `flush_guidance_queue_to_events_jsonl` **整体删**(不替换为发 `loop.resume`);新增 `apply_guidance_queue_in_memory` 在下一轮 build_prompt 时从内存队列读出注入 prompt 上下文(类似 `inject_human_guidance` 的 in-memory 模式)
 - `rpc_stdin.rs:12, 47, 105-175` `RpcCommand::Guidance` enum variant 保留,只是发出去的 topic 变 `loop.resume`
 
 ### KTD-6. `is_system_topic` 的 `event.` prefix 保留,`human.` prefix 删
@@ -248,18 +271,40 @@ stall_recovery 升级 → maybe_escalate_to_human_guidance → 发 human.guidanc
 - `event_policy.rs:811-813` `is_system_topic` 改:`topic.starts_with("event.")` 单条件
 - `event_bus.rs:121-126` `if event.topic.as_str().starts_with("human.")` 整段删
 
-### KTD-7. 不动 `event.isolation.boundary_violation` envelope 路径
+### KTD-7. 不动 `event.isolation.boundary_violation` envelope 路径(标 `dead code since 2026-06-28`)
 
 **理由**:
 - envelope 的两条触发源(ralph 越权 / isolated hat 越权)独立于 `human.guidance`
 - 删除 `human.guidance` 不影响 envelope 任何路径
 - envelope 本身对"无人工时无人接"是 fail-closed 设计,本计划不动
+- **但 envelope 现在是 dead code**:原诊断报告 §5 P0-#4 唯一触发源是 `coordinator` 越权发 `human.guidance`,本计划删除该 topic 后 envelope 永不再触发
+- **追溯标记**:在 envelope 写入代码(`event_loop/mod.rs:6716-6724, 6800-6876`)加 `// TODO: dead code since 2026-06-28 (human.guidance removed by plan 2026-06-28-005). Either keep as defensive code for future operator channel, or delete in follow-up cleanup.` 注释
+- **未来清理候选**:envelope 路径列在 "Deferred for later" 段
 
 ### KTD-8. 不动 `2026-06-25-001-refactor-remove-ralph-telegram-crate-plan.md` 的 KTD-2
 
 **理由**:
 - 该 KTD-2 显式保留 `human.guidance` 作为基座设计,本计划在基座层反 KTD-2
 - 文档不动,只在本计划引用"本计划在基座层反 KTD-2",让 KTD-2 历史决策与本计划决策同存
+
+### KTD-9. 与 schema SSOT 2026-06-16-001 U5 决策的显式冲突与解决
+
+**冲突描述**:
+- `presets/schemas/ce-executor-serial.yml:390-402`(2026-06-16-001 U5 决策)显式声明 `human.guidance` schema 保留,理由是 "operator can still emit it manually (TUI, CLI, or external tooling)" —— 这是当时的产品决策,把 human.guidance 当作 future operator 通道的预留接口
+- 2026-06-25 删 `ralph-telegram` 后 operator 通道已切断,但 schema 仍保留
+- 本计划在 schema 层删除 `human.guidance` block,等于**反 2026-06-16-001 U5 的产品决策**
+
+**为何本次反转胜出**:
+1. 诊断报告 `2026-06-28-ce-executor-serial-primary-20260628-115810-diagnosis.md` §0.1 / §0.4 明确"`human.guidance` 在本运行模型下无人接,且引发 drift 误报 + isolated_scope_violation 噪音 + 修复机制自观测循环"
+2. 2026-06-25 plan 删 `ralph-telegram` 实际是 operator 通道的"事实退役"——schema 保留是形式遗留
+3. 5 次 30 天内复发的诊断报告(merry-lotus / noble-peacock / warm-tiger / perky-maple / 2026-06-28 primary)都把 human.guidance 当 root cause 之一
+4. 本计划保留"operator 通道"语义给 `task.resume` topic(`docs/api/security.md` 修订,见 R7)
+
+**追溯记录**:
+- 在 schema 删除位置(`presets/schemas/ce-executor-serial.yml:390-402`)留 commit message + git history,标注 "reversed 2026-06-16-001 U5 operator-channel decision; see plan 2026-06-28-005"
+- 本 plan supersedes frontmatter 包含 2026-06-16-001 U5 间接被反转的说明
+
+**对 U1-U11 的影响**:无代码层冲突,仅 schema 层一处 block 删除。
 
 ---
 
@@ -288,7 +333,7 @@ flowchart TB
         A2 -.->|升级为| I2[TerminationReason::RecoveryExhausted<br/>loop 终止]
         A3 -.->|改发| I1
         A4 -.->|只发| J1[urgent_steer_marker]
-        A5 -.->|改发| I3[loop.resume event]
+        A5 -.->|in-memory 注入| I3[apply_guidance_queue_in_memory<br/>下一轮 build_prompt]
         A6 -.->|整函数删| K1[删除]
         I1 -->|终止| L1[shipper/reporter 清理]
         I2 -->|终止| L1
@@ -318,9 +363,8 @@ flowchart LR
         F1 -->|strip| PROMPT1
     end
     subgraph AFTER_SCRATCHPAD["After"]
-        EVT2[loop.resume event] -->|in-memory| R1[loop_runner resume context]
+        EVT2[guidance_next_queue<br/>in-memory 不写盘] -->|next iter| R1[apply_guidance_queue_in_memory]
         R1 -->|next iter| PROMPT2[正常 prompt 构建]
-        PROMPT2 --> PROMPT2
     end
     style EVT1 fill:#fdd
     style S1 fill:#fdd
@@ -339,7 +383,7 @@ flowchart LR
 flowchart TD
     P1[Phase 1: 替代终态设计<br/>U1 drift + U2 correction + U3 contract reject] --> P1_CP{check point:<br/>3 个新测试绿<br/>原 4 个相关测试改测绿}
     P1_CP -->|绿| P2[Phase 2: 输入源清理<br/>U4 TUI + U5 scratchpad + U6 prefix 路由]
-    P2 --> P2_CP{check point:<br/>编译通过<br/>无 dangling<br/>is_orchestrator_control<br/>human.guidance == false}
+    P2 --> P2_CP{check point:<br/>编译通过<br/>无 dangling reference<br/>EventBus.human_pending API 删<br/>filter_human_guidance_blocks 删<br/>推迟到 Phase 3a:<br/>is_orchestrator_control=false}
     P2_CP -->|绿| P3A[Phase 3a: 常量/白名单<br/>U8 HUMAN_GUIDANCE + pub use + 4 预编译白名单]
     P3A --> P3A_CP{check point:<br/>rg 静态扫描<br/>is_orchestrator_control 测试绿}
     P3A_CP -->|绿| P3B[Phase 3b: 配置字段<br/>U7 suppress_human_guidance<br/>+ exempt_from_suppress + serde deny]
@@ -372,8 +416,8 @@ flowchart TD
 | **S2**. correction 改发 plan.blocked | `correction/mod.rs:720-738` | 单独可做 |
 | **S3**. contract reject 改默认值 | `config/execution_contracts.rs:196-198` | 单独可做 |
 | **S4**. TUI Now 删除 | `ralph-tui/src/state.rs:898-927` | 单独可做 |
-| **S5**. TUI Next 改发 loop.resume | `loop_runner/runner.rs:2112-2181` | 单独可做 |
-| **S6**. scratchpad / robot_guidance 整套清 | `event_loop/mod.rs:305-330, 4041-4346` + `hatless_ralph.rs:308-378` | 依赖 S2-S5(否则有 in-memory 残留) |
+| **S5**. TUI Next 改 in-memory 注入 | `loop_runner/runner.rs:2112-2181` | 单独可做 |
+| **S6**. scratchpad / robot_guidance 整套清 | `event_loop/mod.rs:305-329, 4041-4131, 4141-4271, 4274-4346` + `hatless_ralph.rs:308-378` | 依赖 S2-S5(否则有 in-memory 残留) |
 | **S7**. suppress 字段删 | `config/loop_config.rs:339, 378-390` + 多处 | 依赖 S6 |
 | **S8**. prefix 路由删 | `event_bus.rs:121-198` + `event_policy.rs:811-813` | 依赖 S6 |
 | **S9**. 常量 + 预编译列表删 | `topics.rs:41` + `event_origin.rs:36, 76` + `runtime_contract.rs:362-366` + `stages/emit_schema_gate_stage.rs:41` | 依赖 S7-S8 |
@@ -386,23 +430,29 @@ flowchart TD
 
 ## Implementation Units
 
-### U1. Drift engine Warning Final 升级为 RecoveryExhausted
+### U1. Drift engine Warning non-Final 软提醒删除(Warning+Final 已由 002 U2 升级)
 
-- **Goal**: 升级 `drift::check_termination_hint` 的 Warning Final 分支为 `TerminationReason::RecoveryExhausted`,删除 `check_final_human_guidance` 整个方法
-- **Requirements**: R2 第二项
-- **Dependencies**: 无
+- **Goal**: 删除 `drift::check_final_human_guidance` 整个方法 + `last_guidance_iteration` 字段 + `loop_runner` 调用点(Warning+Final 升级为 `RecoveryExhausted` 已由 `2026-06-28-002` U2 合并,本 U 不再重复)
+- **Requirements**: R2 第二项(仅限 non-Final 部分)
+- **Dependencies**: 无(独立可做,但与 `2026-06-28-002` U2 提交需协调:本 U 不能比 002 U2 早合并)
 - **Files**:
-  - `crates/ralph-core/src/drift/engine.rs` (修改行 401-405, 删除行 438-481, 删 `last_guidance_iteration` 字段)
-  - `crates/ralph-core/src/drift/engine.rs` (测试行 847, 950, 958-1004, 1095-1133 改测)
-  - `crates/ralph-cli/src/loop_runner/runner.rs:2218` 删除 `drift_engine.check_final_human_guidance` 调用
-- **Approach**: Warning Final 直接 `return TerminationReason::RecoveryExhausted`;删除 `check_final_human_guidance` 整个方法 + 它的所有 caller
-- **Patterns to follow**: 已有 `check_termination_hint` 的 Error/Critical Final 分支(`engine.rs:401-405`)
+  - `crates/ralph-core/src/drift/engine.rs` (删除行 438-481 整个 `check_final_human_guidance` 方法 + `last_guidance_iteration` 字段)
+  - `crates/ralph-core/src/drift/engine.rs:401-405` (**不动** `check_termination_hint` 的 Final 升级逻辑,该部分属于 2026-06-28-002 U2)
+  - `crates/ralph-core/src/drift/engine.rs:847, 950, 958-1004, 1095-1133` (改测 4 个 `lifecycle_final_warning_publishes_human_guidance` 类测试为"Warning non-Final 不再发 human.guidance")
+  - `crates/ralph-cli/src/loop_runner/runner.rs:2218` (删除 `drift_engine.check_final_human_guidance` 调用)
+- **Approach**:
+  - 实际删除范围:`check_final_human_guidance` 函数本体 + `last_guidance_iteration` 字段 + `loop_runner/runner.rs:2218` 调用点 + 4 个相关测试
+  - **不改** `check_termination_hint` 的 Final 升级逻辑(`engine.rs:401-405` 早返回)——该部分已在 `2026-06-28-002` U2 合并
+  - 行为变化:**Warning non-Final** 路径从"发 human.guidance 软提醒"变为"完全静默"(即不产生任何 human.guidance 事件)。**Warning+Final** 路径已经走 `TerminationReason::RecoveryExhausted`,行为不变
+  - 注意:ce-executor-serial 的 `suppress_human_guidance=true` 原本就抑制了这条路径,所以本次删除对实际 runtime 行为 = 0 变化(只是 dead code 清理)
+- **Patterns to follow**: 与 `correction/mod.rs::maybe_escalate_to_human_guidance` 改为发 `plan.blocked` 的模式类似(见 U2)
 - **Test scenarios**:
-  - Happy: 模拟 3 次 Warning 严重度 final hint,断言 loop 终止原因 = `RecoveryExhausted`
-  - Edge: bootstrap phase 内的 Warning Final 仍不终止(保留原 bootstrap 行为)
-  - Error path: Warning 非 Final 仍继续运行,不升级
-  - Integration: 端到端 scenario `drift_warning_final_triggers_recovery_exhausted` 跑通
-- **Verification**: `cargo nextest run -p ralph-core -- drift test_warning_final_triggers_recovery_exhausted` 通过;原 `lifecycle_final_warning_publishes_human_guidance` 测试删除或改测
+  - Happy: 模拟 3 次 Warning non-Final hint,断言 events.jsonl 不含 `human.guidance` 事件
+  - Happy: 模拟 Warning+Final hint,断言 loop 终止原因 = `RecoveryExhausted`(已由 002 U2 覆盖,本 U 不写重复测试)
+  - Edge: bootstrap phase 内的 Warning non-Final 仍静默(保留原行为)
+  - Error path: Warning non-Final 不再发 `human.guidance` 给 `human_pending` 队列
+  - Integration: 端到端 scenario `drift_warning_non_final_no_longer_publishes_human_guidance` 跑通
+- **Verification**: `cargo nextest run -p ralph-core -- drift test_warning_non_final_no_human_guidance` 通过;`cargo build --workspace` 干净(确认 `check_final_human_guidance` 无 dangling caller)
 
 ### U2. Correction module 3-strike escalation 改发 plan.blocked
 
@@ -410,7 +460,7 @@ flowchart TD
 - **Requirements**: R2 第一项
 - **Dependencies**: U1(语义对齐)
 - **Files**:
-  - `crates/ralph-core/src/correction/mod.rs:706-738` (函数重命名 + 改 publish topic + 改 payload 格式)
+  - `crates/ralph-core/src/correction/mod.rs:720-738` (函数重命名 + 改 publish topic + 改 payload 格式)
   - `crates/ralph-core/src/correction/mod.rs:1154-1173` (测试重命名 + 改测)
   - `crates/ralph-core/src/event_loop/policy.rs:30-123` (调用方同步改)
   - `crates/ralph-core/tests/scenarios/correction_three_escalation.yml` (重命名 + payload 改)
@@ -451,27 +501,27 @@ flowchart TD
   - Error path: 用户 YAML 设 `guidance_topic: "human.guidance"`,运行时忽略 + warning 日志
 - **Verification**: `cargo nextest run -p ralph-core -- execution_contracts test_reject_default_topic_is_plan_blocked` 通过
 
-### U4. TUI Now 模式 + TUI Next 模式改发 loop.resume
+### U4. TUI Now 模式只发 urgent_steer_marker;TUI Next / RPC 改 in-memory prompt injection
 
-- **Goal**: 删除 `write_guidance_event` 的 `human.guidance` 写入,TUI Now 模式只发 `urgent_steer_marker`;TUI Next / RPC 模式改发 `loop.resume`
+- **Goal**: 删除 `write_guidance_event` 的 `human.guidance` 写入;TUI Now 模式只写 `urgent_steer_marker`;TUI Next / RPC 模式改 in-memory prompt injection(经 `apply_guidance_queue_in_memory` 注入下一轮 build_prompt,**不** emit `loop.resume`,因为该 topic 在生产代码无消费者)
 - **Requirements**: R2 第四、五项
 - **Dependencies**: U2(避免 correction escalation 与 TUI 同时发冲突 topic)
 - **Files**:
-  - `crates/ralph-tui/src/state.rs:840-927` (`write_guidance_event` 整段函数删,`urgent_steer_marker` 路径保留)
+  - `crates/ralph-tui/src/state.rs:898-927` (`write_guidance_event` 整段函数删,`urgent_steer_marker` 路径保留)
   - `crates/ralph-tui/src/state.rs:2770-2776` (测试删)
-  - `crates/ralph-cli/src/loop_runner/runner.rs:2112-2181` (`flush_guidance_queue_to_events_jsonl` 改名为 `flush_resume_queue_to_events_jsonl`,topic 改 `loop.resume`)
+  - `crates/ralph-cli/src/loop_runner/runner.rs:2112-2181` (`flush_guidance_queue_to_events_jsonl` 整体删;新增 `apply_guidance_queue_in_memory`)
   - `crates/ralph-cli/src/loop_runner/runner.rs:2218` (drift 调用点已在 U1 删)
   - `crates/ralph-cli/src/loop_runner/tests/legacy.rs:2018, 2111-2124, 2195-2220, 2261-2302` (测试改测)
   - `crates/ralph-cli/src/loop_runner/tests/wave.rs:2847, 3127, 3140` (`inject_wave_policy_rejection_guidance` 测试 + 注释删)
 - **Approach**:
   - TUI `Now` 模式:只调用 `write_urgent_steer_marker`(已存在)
-  - TUI `Next` 模式:发 `loop.resume` event 到 events.jsonl,经 `loop_runner` 的 `--continue` 注入路径消费
-  - RPC `RpcCommand::Guidance` 同样改发 `loop.resume`
+  - TUI `Next` 模式:in-memory 注入下一轮 build_prompt(经 `apply_guidance_queue_in_memory` 路径)
+  - RPC `RpcCommand::Guidance` 同样改 in-memory 注入
 - **Test scenarios**:
   - Happy: TUI Now 模式,触发 `urgent_steer_marker` 写入,不发 human.guidance
-  - Happy: TUI Next 模式,发 `loop.resume` event,下一轮 build_prompt 看到 resume context
-  - Edge: RPC `Guidance` 命令同样发 `loop.resume`
-  - Edge: events.jsonl 没有任何 topic=`human.guidance` 的新写入
+  - Happy: TUI Next 模式,触发 in-memory prompt injection,下一轮 build_prompt 看到 guidance context(events.jsonl 不写 `loop.resume` 也不写 `human.guidance`)
+  - Edge: RPC `Guidance` 命令同样 in-memory 注入
+  - Edge: events.jsonl 没有任何 topic=`human.guidance` 或 `loop.resume` 的新写入(TUI Next 路径不写盘)
 - **Verification**: `cargo nextest run -p ralph-tui -- test_send_guidance_uses_resume` 通过;`cargo nextest run -p ralph-cli --bin ralph -- loop_runner test_resume_queue_flushes_to_loop_resume` 通过
 
 ### U5. Scratchpad + robot_guidance + filter_human_guidance_blocks 整套清
@@ -488,13 +538,14 @@ flowchart TD
   - `crates/ralph-core/src/event_loop/mod.rs:881, 1029` (`robot_guidance: Vec<Event>` 字段初始化删)
   - `crates/ralph-core/src/event_loop/types.rs:282` (同上)
   - `crates/ralph-core/src/event_loop/mod.rs:3372-3375, 3481-3484, 3730-3732` (3 个 partition 路径的 `partition(|e| e.topic.as_str() == "human.guidance")` 删)
-  - `crates/ralph-core/src/hatless_ralph.rs:29, 308-378` (`robot_guidance` 字段 + 3 个 API + build_prompt 注入删)
+  - `crates/ralph-core/src/hatless_ralph.rs:29, 308-378` (`robot_guidance: Vec<String>` 字段 + 3 个 API + build_prompt 注入删;call sites `2787/2812/2845/2877` 同步清理)
 - **Approach**: 函数 + 字段 + 字符串常量("### HUMAN GUIDANCE" / "## ROBOT GUIDANCE")整段删;`prepend_scratchpad` 里的 `suppress_active` 条件改为只 check `gate_closed`
 - **Test scenarios**:
-  - Happy: 编译通过,没有任何 dangling reference
+  - Happy: 编译通过,无 dangling reference
   - Edge: scratchpad 不再含 `### HUMAN GUIDANCE` block
   - Edge: prompt 不再含 `## ROBOT GUIDANCE` block
   - Edge: `hatless_ralph` 没有 `robot_guidance` 字段 / `set_robot_guidance` / `clear_robot_guidance` / `collect_robot_guidance` API
+  - **API 删除验证**: `test_robot_guidance_api_removed` 通过(显式 assert 这些 API 在 `hatless_ralph.rs` 中不存在)
 - **Verification**: `cargo nextest run -p ralph-core -- event_loop::tests` 全部通过,无引用 `human.guidance` 的 dangling 编译错误;`cargo build -p ralph-core` 干净
 
 ### U6. EventBus human_pending 队列 + is_system_topic human. prefix 删
@@ -519,6 +570,7 @@ flowchart TD
   - Edge: 任何发 `human.guidance` 的 event 走 normal hat routing(不进入 human_pending)
   - Edge: `is_system_topic("event.isolation.boundary_violation") == true` 仍为 true
   - Error path: `is_system_topic("human.guidance") == false`(topic 不再存在,但函数仍接受字符串)
+  - **API 删除验证**: `test_human_pending_queue_removed` 通过(显式 assert `EventBus` 不暴露 `human_pending` 相关 API)
 - **Verification**: `cargo nextest run -p ralph-proto -- event_bus` 全部通过;`cargo nextest run -p ralph-core -- event_policy` 全部通过
 
 ### U7. suppress_human_guidance / exempt_from_suppress_human_guidance 配置字段删
@@ -538,7 +590,9 @@ flowchart TD
   - `crates/ralph-core/src/config/loop_config.rs` (新增 `#[serde(deny_unknown_fields)]` 测试:YAML 含 `suppress_human_guidance: true` 必须显式失败)
 - **Approach**:
   - 字段 + 引用整段删
-  - `serde` 加 `#[serde(deny_unknown_fields)]` 在 `LoopConfig` 上,触发 `unknown field 'suppress_human_guidance'` 错误
+  - **不在生产 `LoopConfig` struct 上加 `#[serde(deny_unknown_fields)]`**(会破坏 forward-compat:任何用户 YAML 含未来字段会失败,影响其它 preset 路径)
+  - 替代方案:在 `preflight.rs` 加载 preset YAML 后,显式检测 `suppress_human_guidance` / `exempt_from_suppress_human_guidance` 两个字段是否仍存在;若存在,emit 显式 `unknown field 'suppress_human_guidance'` 错误,提示"该字段已废弃,请删除"
+  - 字段级 deny 实现:用 `serde_yaml::from_str::<LoopConfig>` 时加 `with = "deny_suppress_human_guidance"` 包装,只 deny 这两个字段,放行其它未知字段(保持 forward-compat)
   - preset 加 `unknown field` 错误信息明确指引
 - **Test scenarios**:
   - Happy: ce-executor-serial preset 启动无 `suppress_human_guidance` 字段
@@ -583,6 +637,7 @@ flowchart TD
 - **Files**:
   - `crates/ralph-core/src/event_loop/mod.rs:2555-2569` (`pub fn inject_human_guidance` 整段删)
   - `crates/ralph-core/src/event_loop/tests/guidance_dedup.rs` 整文件删
+  - `crates/ralph-core/src/event_loop/tests/mod.rs:28` `mod guidance_dedup;` 声明同步删(否则 cargo build 报 "file not found for module guidance_dedup")
   - `crates/ralph-core/tests/scenarios/serial_lint/serial_lint_3_steward_guidance_exempt.yaml` 整文件删
   - `crates/ralph-core/tests/scenarios.rs:1365-1370` (`test_serial_lint_3_steward_guidance_exempt` 删)
   - `crates/ralph-core/src/event_loop/tests/initialization.rs:40-177` (4 个 test 删)
@@ -598,8 +653,16 @@ flowchart TD
   - `crates/ralph-cli/tests/ce_executor_recovery.rs:252-256` (改测)
   - `crates/ralph-tui/src/state.rs:2770-2776` (删)
   - `crates/ralph-core/src/event_loop/tests/origin_guard.rs` 等多处 `write_event_to_jsonl(..., "human.guidance", ...)` 改用其它 control topic
+  - `crates/ralph-cli/src/loop_runner/hard_gate.rs:247-358, 538, 562, 747, 766, 953-1060` (整 `inject_hard_gate_guidance` / `inject_hard_gate_guidance_with_triggers` / `inject_missing_event_hard_gate_guidance` / `inject_missing_event_hard_gate_guidance_with_triggers` 4 个函数 + `inject_wave_policy_rejection_guidance` 整段删,同 U4 wave 测试一起)
+  - `crates/ralph-cli/src/loop_runner/hard_gate.rs:496-544, 715-760` 注释修订(删除 "switched from `human.guidance` to `task.resume`" 等历史引用)
+  - `crates/ralph-core/src/event_loop/tests/origin_guard.rs` 等多处 `write_event_to_jsonl(..., "human.guidance", ...)` 改用其它 control topic
   - `crates/ralph-core/src/correction/mod.rs:1154-1173` (改测:U2 已重命名)
   - `crates/ralph-core/src/drift/engine.rs:847, 950, 958-1004, 1095-1133` (改测:U1 已重命名)
+  - `docs/solutions/developer-experience/agent-execution-contract-gates-2026-06-03.md` 3 处 human.guidance 引用(归入 U11 文档修订范围,作 banner 标记)
+  - `docs/advanced/loop-detection.md:298` 修订"System/diagnostic topics"分类描述
+  - `docs/brainstorms/2026-06-16-ce-executor-loop-stability-requirements.md` + `docs/brainstorms/2026-06-13-wave-dispatch-policy-gate-requirements.md` + `docs/brainstorms/2026-06-21-unified-orchestrator-state-requirements.md` (3 份 brainstorm 各 1-2 处 human.guidance 引用,作 deprecation note 而非删除——brainstorm 是历史产品决策)
+
+> **范围说明**:本 plan 全仓扫到 **128 文件**含 `human.guidance` / `human_guidance` / `HUMAN_GUIDANCE` 字面量,`rg` 已全量扫描确认。生产代码层(U1-U9)覆盖 ~36 Rust 文件 + 1 个整测试文件;文档/历史层(U10-U11)覆盖 ~90 份 docs/solutions/ + docs/brainstorms/ + docs/advanced/ + memory/。AC-1 仅校验 crates/ 范围(由 nextest 编译驱动),文档覆盖由 U10/U11/U12 兜底。
 - **Approach**: 整文件删 + 单点测试改测为其它 topic 行为
 - **Test scenarios**:
   - Happy: `cargo nextest run -p ralph-core` 全部通过,无 dangling reference
@@ -642,7 +705,7 @@ flowchart TD
   > ⚠️ **SUPERSEDED 2026-06-28**: `human.guidance` topic 已物理删除(本仓库不再 emit/consume 此 topic)。
   > 原因:无外部人工介入通道,此 topic 永远无人消费,且引发 drift 误报 + isolated_scope_violation 噪音 + 修复机制自观测循环。
   > 替代:correction 3-strike escalation 改发 `plan.blocked(reason=correction_3_strike_exhausted)`;
-  > drift Warning Final 升级为 `TerminationReason::RecoveryExhausted`;TUI 引导改走 `loop.resume`。
+  > drift Warning Final 升级为 `TerminationReason::RecoveryExhausted`;TUI 引导改 in-memory prompt injection。
   > 参见: `docs/plans/2026-06-28-005-refactor-remove-human-guidance-topic-plan.md`。
   ```
 - **Test scenarios**:
@@ -723,7 +786,7 @@ flowchart TD
 - **影响**:小(ce-executor-serial 原本就抑制 human.guidance)
 - **缓解**:
   - 保留 `urgent_steer_marker` 写盘
-  - TUI Next 模式改 `loop.resume` 注入下一轮 prompt
+  - TUI Next 模式:在下一轮 build_prompt 时 in-memory 注入 operator 文本(经 `apply_guidance_queue_in_memory` 路径)
   - U4 测试覆盖两条降级路径
 
 ### 风险 4:大量文件修改可能引入意外 regression
@@ -751,13 +814,9 @@ flowchart TD
 - `cargo build --workspace` 编译干净,无 dangling reference
 - `cargo doc --no-deps` 文档构建无 warning
 
-**AC-1 豁免清单**(机械 `rg` 扫描时允许命中):
-- 本 plan 自身的 before/after 对比代码示例(§KTD-1 / §HTD / §U2 Approach 等位置使用 `HUMAN_GUIDANCE` 字面量是"教学性引用",非生产代码)
-- 4 份 deprecation banner 文档顶部字符串(见 R8)
-- 诊断报告 `docs/report/2026-06-28-ce-executor-serial-primary-20260628-115810-diagnosis.md` §5 P0-#11 / P0-#12 中的历史引用(报告本身是分析"为什么删"的事实基础,不能删引用)
-- 历史 achieved plans (`docs/achieved/plan/2026-06-25-001-refactor-remove-ralph-telegram-crate-plan.md` KTD-2 等)中的产品决策历史
-
-豁免总计 4 类,机械命中数 ≤ 4 份 banner(其它 3 类是 plan / 报告 / 历史档案,不在 crates/ 范围内,不计入)
+**AC-1 豁免清单**(机械 `rg` 扫描 crates/ 范围时允许命中):
+- 4 份 deprecation banner 文档顶部的字符串引用(见 R8)——这些 banner 在 crates/ 范围外,但如果未来某份 banner 被内嵌到 crate 注释/常量定义,仍按"已计划"豁免
+- 说明:plan 自身 before/after 代码示例 + 诊断报告 + 历史 achieved plans 都不在 crates/ 扫描范围内,机械 rg 不会命中,不需要列入豁免
 
 ### AC-2:测试层覆盖
 
@@ -820,7 +879,9 @@ flowchart TD
 - **`2026-06-28-004` plan U13**(serial preset 层禁 `human.guidance`)——在 U1-U11 完成后做,但严格说 U1-U11 已经做了 U13 的所有事,U13 实际只剩"文档 sync"
 - **TUI 紧急干预能力重设计**(新增 `loop.steer.next` topic 等)——产品决策,需要独立 brainstorm
 - **`task.resume` 行为调整**——独立 topic
-- **`event.isolation.boundary_violation` envelope 重设计**——本计划确认它独立于 `human.guidance`,不动
+- **`event.isolation.boundary_violation` envelope 重设计**——本计划确认它独立于 `human.guidance`,但 KTD-7 标了"dead code since 2026-06-28",未来 telemetry 确认 0 fires 后可在后续 plan 删除
+- **U2 3-strike 可恢复性指标**:实施 U2 前先跑 `correction_three_escalation.yml` 历史数据,统计 3-strike 中"下一 iter 用不同 payload 恢复"的比例。如果 > 0(可恢复),plan.blocked 过激,需改 `task.replan` 或 `LOOP_COMPLETE(success=false)`。当前 ce-executor-serial 0% 可恢复(都被 suppress 抑制),所以 plan.blocked 安全——但实施前需重跑该 metric 验证
+- **AC-2 行为契约细化**:当前 7 个测试名是 aspirational,实施时若 file structure 移位,行为契约("跑 scenario X 后 events.jsonl 含 ... ")优先于具体测试名——可由 ce-work 阶段验证
 
 ### Outside this product's identity
 
@@ -850,12 +911,19 @@ flowchart TD
 
 > **commit 顺序 vs S1-S13 编辑顺序**:**两者一致**。S1-S13 表(在 HTD section)是文件内编辑顺序,Phased Delivery 是 commit 顺序——按 phase 切 commit 时,每个 commit 内部仍按 S1-S13 顺序编辑相关文件,避免"中间 commit 状态"broken。
 
+> **最小可提交边界(Minimum Viable Commit)**:Phase 3a / 3b / 3c **不能** 各自独立 ship,必须与 Phase 1+Phase 2 一起提交。理由:`is_orchestrator_control` / `HUMAN_GUIDANCE` 常量(U8)被 U5/U6 路由代码引用;`suppress_human_guidance` 字段(U7)被 `human_guidance_suppressed()` 方法(U7 内)引用;如果 Phase 3a / 3b / 3c 单独 ship,会出现"引用已删但未定义"的 dangling 编译错误。**推荐 ship 边界**:
+> - **Ship 1(Phase 1 + Phase 2 + Phase 3c 减 1)**:U1 + U2 + U3 + U4 + U5 + U6 + U9(无 U7/U8) → 替代终态 + 输入源清理 + 测试文件全清,但常量/字段保留,等下个 commit
+> - **Ship 2(Phase 3a + Phase 3b + 残留测试)**:U7 + U8 + U9 残留 + U10 + U11 + U12 → 常量/字段/文档清理 + 完整验证
+>
+> 两个 commit 各自能编译,中间状态不需要回滚。
+
 ---
 
 ## Documentation Plan
 
 - **AI skill 文档**:`data/ralph-tools.md` + `data/ralph-tools-cmdref.md` 删除 `human.guidance` 历史公告
 - **公共指南**:`docs/api/security.md`, `docs/reference/troubleshooting.md`, `docs/guide/execution-contracts.md`, `docs/guide/project-usage.md` 修订"`human.guidance` 是公共事件"描述
+- **架构参考**:`docs/reference/architecture.md` 新增一段"plan.blocked vs LOOP_COMPLETE 选择规则"(KTD-1 留档):correction 3-strike / drift Warning+Final / execution contract reject 选 `plan.blocked` 而非 `LOOP_COMPLETE(success=false)`,因为 plan.blocked 给 shipper 一次机会执行"已知失败"路径(emit events 给 shipper → reporter),LOOP_COMPLETE 直接终止会跳过该路径。这条决策是 KTD-1 的核心 rationale,需要留档避免未来 maintainer 改回 LOOP_COMPLETE
 - **本计划报告**:`docs/report/2026-06-28-ce-executor-serial-primary-20260628-115810-diagnosis.md` §0.4 / §0.5 / §12 第 4 条已写入"`human.guidance` 是历史负债",本计划是它的实施
 - **MEMORY**:`memory/plan-blocked-recovery-via-human-signoff.md` 加 deprecation banner
 - **Solutions**:`merry-lotus` + `noble-peacock` 两份 solution 加 deprecation banner
@@ -878,4 +946,12 @@ flowchart TD
 
 ## Open Questions
 
-> 无未决问题。4 个决策点已在 §0 范围合成时确认:力度 B(物理删除)/ correction 保留三阶段改输出(A)/ `guidance_dedup.rs` 整文件删(A)/ 历史文档加 banner(A)。详见范围合成阶段 0.7 call-outs。
+> **本 plan 范围合成阶段 0.7 的 4 个决策点已确认**(B 物理删除 / A correction 保留三阶段改输出 / A 删除 guidance_dedup.rs 整文件 / A 历史文档加 banner)。
+
+> **ce-doc-review headless 模式汇总 30 条 findings 的处置**:
+>
+> - **10 条 safe_auto**: 全部已应用(Phase 2 checkpoint 收窄 / R2 reason 格式统一 / 行号对齐 4 处 / R1.2 引用补全 / S6 行号对齐 / U5 U6 显式补 API 删除测试 / AC-1 豁免清单清理 / Problem Frame 表格分离 emit 源和入站 / supersedes frontmatter 注释)
+> - **11 条 gated_auto(高 medium confidence)**: 全部已应用(KTD-3 contract reject payload 格式按 target topic 区分 / KTD-9 schema SSOT 决策冲突显式记录 / U1 实际范围澄清 / KTD-5 改 in-memory injection / U9 补 hard_gate.rs 等遗漏文件 / Phased Delivery 加最小可提交边界 / KTD-4 改 field-level deny / KTD-7 envelope 标 dead code / Documentation Plan 加 KTD-1 留档 / U2 3-strike 可恢复性 metric / AC-2 行为契约备查)
+> - **9 条 manual + fyi**: 实施期核对(U5 `robot_guidance: Vec<String>` 字段类型 / U9 `tests/mod.rs:28` `mod guidance_dedup;` 声明删除 / U3 `config/execution_contracts.rs:179-198` 实际行号重核 / MEMORY.md index 路径实际是 `~/.claude/projects/.../memory/MEMORY.md` 而非 `memory/MEMORY.md` / etc)
+>
+> 30 条 findings 全部已记录;**ce-work 阶段实施时按 Open Questions 核对清单逐项验证**。
