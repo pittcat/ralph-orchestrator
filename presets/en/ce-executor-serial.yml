@@ -600,11 +600,16 @@ hats:
     # - work.failed → executor could not complete the unit; emit plan.blocked
     # - all units + fix-units complete → plan.complete
     triggers: ["work.start", "task.resume", "test.passed", "review.complete", "work.failed"]
-    publishes: ["work.ready", "review.start", "plan.complete", "plan.blocked"]
+    # 2026-06-28 plan U10 (R10): coordinator may emit
+    # `LOOP_COMPLETE(success=false)` to self-stop the loop
+    # when the automated recovery machinery is exhausted
+    # (U6/U8). The success=true path is the natural
+    # `plan.complete → ship → LOOP_COMPLETE` chain.
+    publishes: ["work.ready", "review.start", "plan.complete", "plan.blocked", "LOOP_COMPLETE"]
     # 2026-06-26 plan U7: self-declared emit scope.
-    exempt_topics: ["plan.blocked", "plan.complete", "review.start", "work.ready"]
+    exempt_topics: ["plan.blocked", "plan.complete", "review.start", "work.ready", "LOOP_COMPLETE"]
     default_publishes: "plan.blocked"
-    terminal_events: ["work.ready", "review.start", "plan.complete", "plan.blocked"]
+    terminal_events: ["work.ready", "review.start", "plan.complete", "plan.blocked", "LOOP_COMPLETE"]
     # 2026-06-26: restrict coordinator prompt visibility to its own triggers.
     # Prevents isolated-mode coordinator from seeing review-chain events
     # (e.g. review.dimension.*) that it must never emit.

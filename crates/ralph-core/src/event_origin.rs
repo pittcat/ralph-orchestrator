@@ -40,6 +40,13 @@ pub const RALPH_CONTROL_TOPICS: &[&str] = &[
     // runner injects when a hat stalls — without it the loop would be
     // unable to recover a stalled iteration.
     "task.resume",
+    // 2026-06-28 plan U10 (R10): `plan.blocked` is the loop's
+    // self-stop signal. In an automated (no-human) preset the
+    // `ralph` pseudo-hat is the only entity that can emit
+    // it; `EventOriginGuard` must accept it as a control
+    // topic so the isolated mode scope check does not
+    // reject the loop's own termination.
+    "plan.blocked",
 ];
 
 pub(crate) fn is_jsonl_control_topic(topic: &str, cancellation_topic: &str) -> bool {
@@ -1263,7 +1270,12 @@ hats:
         assert!(!is_ralph_control_topic("work.ready"));
         assert!(!is_ralph_control_topic("work.done"));
         assert!(!is_ralph_control_topic("review.complete"));
-        assert!(!is_ralph_control_topic("plan.blocked"));
+        // 2026-06-28 plan U10 (R10): `plan.blocked` IS a
+        // ralph control topic — it is the loop's self-stop
+        // signal. The legacy assertion was correct for the
+        // pre-U10 world where ralph could not terminate the
+        // loop directly.
+        assert!(is_ralph_control_topic("plan.blocked"));
     }
 
     /// P1-8: cross-reference sanity check — the `RALPH_CONTROL_TOPICS`
