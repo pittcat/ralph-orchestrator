@@ -82,7 +82,13 @@ fn make_emit_only_pipeline(flow: FlowDeclaration) -> StagePipeline {
 /// OS 资源，泄漏一次（每次测试）的内存可忽略（每测试 ≤ 1 个引用）。
 fn make_ctx(step_id: &str, loop_id: &str) -> StageContext<'static> {
     let sm: &'static mut RepairStateMachine = Box::leak(Box::new(RepairStateMachine::default()));
-    StageContext::new(FlowStep::new(step_id), loop_id, 1, sm)
+    // P1-5 (2026-06-27 adversarial review):
+    // `StageContext::for_test_machine` wraps the
+    // single machine in a one-element `HashMap`
+    // under the `_loop_default` key so tests
+    // that don't care about per-task isolation
+    // keep their existing fixture shape.
+    StageContext::for_test_machine(FlowStep::new(step_id), loop_id, 1, sm)
 }
 
 fn make_event(topic: &str, payload: serde_json::Value) -> Event {
@@ -110,10 +116,17 @@ fn wiring_composition_emit_to_eventbus() {
     let flow = make_yaml_flow(FLOW_YAML);
     let pipeline = make_full_pipeline(flow);
     let names = pipeline.names();
+    // P1-4 (2026-06-27 adversarial review): the
+    // locked emit order now also includes
+    // `StepCloseObligation` between
+    // `FlowStepScope` and `VerdictGate`. The
+    // `ArchiveVersion` stage is a loop-start
+    // hook, not an emit stage, so it does not
+    // appear in the runtime pipeline.
     assert_eq!(
         names,
-        vec!["RepairDispatch", "EmitSchemaGate", "FlowStepScope", "VerdictGate"],
-        "locked stage order (baseline = 4 stages)"
+        vec!["RepairDispatch", "EmitSchemaGate", "FlowStepScope", "StepCloseObligation", "VerdictGate"],
+        "locked stage order (baseline = 5 stages)"
     );
 
     // 1. Dispatcher 路由契约：repair topic 在 pipeline.run 之前被拦截，

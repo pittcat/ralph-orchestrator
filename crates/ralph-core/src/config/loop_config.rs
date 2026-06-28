@@ -258,6 +258,26 @@ pub struct EventLoopConfig {
     #[serde(default)]
     pub enforce_current_unit: bool,
 
+    /// P0-3 (2026-06-27 adversarial review): mechanism
+    /// foundation (U5) — declared flow declaration. The
+    /// `EventLoop::build_stage_pipeline_from_config`
+    /// constructor (U6) reads this field to build the
+    /// `FlowDeclaration` that `FlowStepScopeStage`
+    /// (U9) and the lint rule both consume. Mirrors
+    /// the `mechanism:` block at the bottom of
+    /// `presets/en/<name>.yml`; the
+    /// `presets/schemas/<name>.yml` SSOT is the
+    /// authoritative schema. The legacy
+    /// `serde_yaml::to_string(&RalphConfig)` path
+    /// could not surface this field because
+    /// `RalphConfig` had no `mechanism:` block —
+    /// the parser therefore always fell back to the
+    /// minimal-flow YAML, which made
+    /// `FlowStepScopeStage` accept anything (the
+    /// 2026-06-27 review flagged this as a P0).
+    #[serde(default)]
+    pub mechanism: Option<MechanismConfig>,
+
     /// 2026-06-16-001 U5: progress-steward fallback configuration.
     /// When the loop detects that no accepted business event has
     /// advanced for `max_steward_iterations` consecutive turns, it
@@ -444,6 +464,14 @@ impl Default for EventLoopConfig {
             // Presets (e.g. ce-executor-serial → 8) and operators
             // may override via YAML.
             max_residuals: default_max_residuals(),
+            // P0-3 (2026-06-27 adversarial review): the
+            // mechanism foundation opt-in. None by
+            // default so the runtime falls back to the
+            // minimal flow declaration (see
+            // `event_loop::mod::minimal_flow_declaration_yaml`).
+            // Presets that declare a `mechanism:` block
+            // override this via YAML.
+            mechanism: None,
         }
     }
 }
@@ -621,4 +649,88 @@ max_steward_iterations: 3
     // 2026-06-23: T1 — `max_fix_rounds` field removed in 2026-06-24
     // (fixer hardcodes max 10 in instructions; the config field was
     // never enforced by Rust code and contradicted the instructions).
+}
+
+/// P0-3 (2026-06-27 adversarial review): typed
+/// mirror of the `mechanism:` block at the bottom
+/// of `presets/en/<name>.yml`. The runtime reads
+/// this field directly instead of round-tripping
+/// `RalphConfig` through YAML (which silently
+/// dropped the block because the previous
+/// `RalphConfig` had no `mechanism:` field). The
+/// field is optional — presets that have not opted
+/// into the mechanism foundation fall back to the
+/// minimal `FlowDeclaration` (see
+/// `event_loop::mod::minimal_flow_declaration_yaml`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MechanismConfig {
+    /// The flow declaration. Mirrors
+    /// `presets/schemas/<name>.yml`'s `mechanism.flow`
+    /// block. When `None`, the runtime uses the
+    /// minimal flow declaration so legacy presets
+    /// continue to function without changes.
+    pub flow: Option<FlowDeclarationConfig>,
+}
+
+/// P0-3: typed view of a `mechanism.flow`
+/// declaration. Mirrors the SSOT in
+/// `presets/schemas/<name>.yml` and the typed
+/// `FlowDeclaration` in
+/// `event_loop::flow_declaration`. The runtime
+/// converts this into the in-memory
+/// `FlowDeclaration` via
+/// `FlowDeclaration::from_yaml` after wrapping it
+/// in the `mechanism:` key the parser expects.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FlowDeclarationConfig {
+    #[serde(default = "default_flow_type")]
+    pub flow_type: String,
+    #[serde(default = "default_flow_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub terminal_emits: Vec<String>,
+    #[serde(default)]
+    pub steps: Vec<FlowStepConfig>,
+    #[serde(default = "default_repair_budget")]
+    pub repair_budget: u32,
+    #[serde(default = "default_enforce_schema")]
+    pub enforce_schema: String,
+    #[serde(default = "default_state_idempotency")]
+    pub state_idempotency: String,
+}
+
+/// P0-3: typed view of one step in a
+/// `mechanism.flow.steps` list. Mirrors
+/// `event_loop::flow_declaration::FlowStepDecl`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FlowStepConfig {
+    pub id: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub allowed_emits: Vec<String>,
+    #[serde(default)]
+    pub terminal_when: Option<String>,
+    #[serde(default)]
+    pub on_partial: std::collections::BTreeMap<String, String>,
+}
+
+fn default_flow_type() -> String {
+    "declared".to_string()
+}
+
+fn default_flow_version() -> u32 {
+    1
+}
+
+fn default_repair_budget() -> u32 {
+    3
+}
+
+fn default_enforce_schema() -> String {
+    "hard".to_string()
+}
+
+fn default_state_idempotency() -> String {
+    "required".to_string()
 }

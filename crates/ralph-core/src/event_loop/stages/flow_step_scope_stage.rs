@@ -63,21 +63,27 @@ impl EmitStage for FlowStepScopeStage {
 
         let step = self.flow.step(&ctx.current_step.id);
         let Some(step) = step else {
-            // U11 (2026-06-27-002 plan completion): the
-            // fail-closed behaviour for undeclared steps
-            // was rolled back because it caused 30+ unit
-            // tests to fail (the broader test matrix
-            // relies on the legacy fail-open behaviour).
-            // The fail-closed check fires further
-            // down, after the `step` lookup succeeds.
-            // When the step IS declared but the topic is
-            // NOT in its `allowed_emits`, we return
-            // `flow_unknown_emit` (regression-tested in
-            // `flow_unknown_emit_rejected`). A future
-            // strict-fail-closed iteration must migrate
-            // every test fixture to declare a matching
-            // step before enabling it.
-            return Ok(());
+            // P1-6 (2026-06-27 adversarial review):
+            // fail-closed for undeclared steps. The
+            // 2026-06-27-002 plan completion rolled
+            // this back to fail-open because 30+ unit
+            // tests relied on the legacy behaviour,
+            // but the 2026-06-27 adversarial review
+            // flagged it as a P1 — any hat can set
+            // `current_step` to an undeclared id and
+            // bypass `allowed_emits` entirely. The
+            // fail-closed default is restored; the
+            // `minimal_flow_declaration_yaml`
+            // fallback in `EventLoop` now declares
+            // every topic the legacy tests emit so
+            // the migration is invisible to test
+            // fixtures. The reason code is
+            // `flow_step_undeclared` so the BDD
+            // scenario can assert it verbatim.
+            return Err(StageReject::new(
+                self.name(),
+                "flow_step_undeclared",
+            ));
         };
 
         if !allows_topic(step, event.topic.as_str()) {

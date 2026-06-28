@@ -39,7 +39,7 @@ fn ctx_for(step_id: &str) -> StageContext<'static> {
     // as `stage_pipeline::RepairStateMachine`).
     let repair: &'static mut RepairStateMachine =
         Box::leak(Box::new(RepairStateMachine::default()));
-    StageContext::new(FlowStep::new(step_id), "loop-1", 1, repair)
+    StageContext::for_test_machine(FlowStep::new(step_id), "loop-1", 1, repair)
 }
 
 fn ev(topic: &str, payload: &str) -> Event {
@@ -124,11 +124,17 @@ fn flow_step_scope_rejects_check_when_step_id_not_in_flow() {
     // arm above.
     let stage = FlowStepScopeStage::new(flow());
     let e = ev("plan.complete", "{}");
-    // `ctx_for("does_not_exist")` is not in the flow —
-    // the stage falls through to the legacy fail-open
-    // behaviour. The `flow_declaration_missing` lint
-    // at preset-load time is the operator's signal.
-    assert!(stage.check(&mut ctx_for("does_not_exist"), &e).is_ok());
+    // P1-6 (2026-06-27 adversarial review): the
+    // stage is now fail-closed for undeclared
+    // steps — `ctx_for("does_not_exist")` is
+    // not in the flow, so the stage returns
+    // `flow_step_undeclared` and the event is
+    // rejected. The legacy fail-open behaviour
+    // is gone.
+    let reject = stage
+        .check(&mut ctx_for("does_not_exist"), &e)
+        .expect_err("undeclared step must be rejected (P1-6)");
+    assert_eq!(reject.reason_code, "flow_step_undeclared");
 }
 
 #[test]

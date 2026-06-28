@@ -34,12 +34,20 @@
 //! )
 //! .expect("parse minimal flow");
 //! let pipeline = StagePipeline::with_default_stages(flow);
-//! let mut sm = RepairStateMachine::default();
+//! // P1-5 (2026-06-27 adversarial review): the
+//! // stage context now carries a per-task
+//! // `HashMap<String, RepairStateMachine>`
+//! // instead of a single machine. Build a
+//! // one-element `HashMap` so the doctest
+//! // matches the new signature.
+//! let mut states: std::collections::HashMap<String, RepairStateMachine> =
+//!     std::collections::HashMap::new();
+//! states.insert("_loop_default".to_string(), RepairStateMachine::default());
 //! let mut ctx = StageContext::with_pipeline(
 //!     FlowStep::new("work.done"),
 //!     "loop-doc",
 //!     0,
-//!     &mut sm,
+//!     &mut states,
 //!     &pipeline,
 //! );
 //! let event = Event::new("work.done", r#"{"task_id":"t1"}"#);

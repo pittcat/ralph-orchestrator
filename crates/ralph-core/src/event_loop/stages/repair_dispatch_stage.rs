@@ -93,13 +93,27 @@ impl EmitStage for RepairDispatchStage {
             return Ok(());
         }
 
-        // U5: advance the per-task budget via
-        // `try_transition`. The mapping from topic →
-        // action is locked by `repair_action_for`.
+        // P1-5 (2026-06-27 adversarial review):
+        // the per-task `RepairStateMachine` is
+        // keyed by `task_key` extracted from the
+        // payload. A repair event without a
+        // `task_key` is routed to a shared
+        // `_loop_default` machine so the budget
+        // gate still fires (the previous design
+        // shared one machine for every repair
+        // event, which violated R2 per-task
+        // budget). Lazy-initialise the machine
+        // on first use.
+        let task_key = extract_task_key(event)
+            .unwrap_or_else(|| "_loop_default".to_string());
         let payload: Value = serde_json::from_str(event.payload.as_str())
             .unwrap_or(Value::Object(Default::default()));
         let action = repair_action_for(event.topic.as_str(), &payload);
-        match ctx.repair_state.try_transition(action) {
+        let machine = ctx
+            .repair_states
+            .entry(task_key)
+            .or_insert_with(RepairStateMachine::default);
+        match machine.try_transition(action) {
             RepairTransitionResult::Accepted => {
                 // The pipeline dispatcher reads
                 // `is_repair_topic` after a successful run;

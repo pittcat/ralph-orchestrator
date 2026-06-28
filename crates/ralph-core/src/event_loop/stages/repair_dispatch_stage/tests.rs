@@ -1,11 +1,12 @@
 use super::*;
 use crate::event_loop::stage_pipeline::{
-    EmitStage, FlowStep, RepairStateMachine, StageContext,
+    EmitStage, FlowStep, StageContext,
 };
 
 fn ctx() -> StageContext<'static> {
-    let repair: &'static mut RepairStateMachine = Box::leak(Box::new(RepairStateMachine::default()));
-    StageContext::new(FlowStep::new("unit_loop"), "loop-1", 1, repair)
+    let repair: &'static mut RepairStateMachine =
+        Box::leak(Box::new(RepairStateMachine::default()));
+    StageContext::for_test_machine(FlowStep::new("unit_loop"), "loop-1", 1, repair)
 }
 
 fn ev(topic: &str, payload: &str) -> ralph_proto::Event {

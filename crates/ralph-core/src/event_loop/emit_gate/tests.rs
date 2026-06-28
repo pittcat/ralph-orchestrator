@@ -75,18 +75,28 @@ fn empty_pipeline() -> StagePipeline {
 /// `allowed_emits` contains the topic — passing the same
 /// string for both is a common foot-gun for tests that
 /// pre-date U11.
+/// P1-5 (2026-06-27 adversarial review): the helper
+/// now takes `&mut HashMap<String, RepairStateMachine>`
+/// instead of a single machine. Tests that don't care
+/// about per-task isolation use the one-element
+/// `for_test_machine` shim via `StageContext::with_pipeline`
+/// — they pre-populate the registry with a single
+/// `_loop_default` machine. The legacy `sm: &mut
+/// RepairStateMachine` shape is preserved at the call
+/// site by wrapping the `sm` in a one-element `HashMap`
+/// in each test.
 fn ctx_with_pipeline<'a>(
     pipeline: &'a StagePipeline,
     step_id: &'static str,
-    sm: &'a mut RepairStateMachine,
+    states: &'a mut std::collections::HashMap<String, RepairStateMachine>,
 ) -> StageContext<'a> {
-    StageContext::with_pipeline(FlowStep::new(step_id), "u1-test", 0, sm, pipeline)
+    StageContext::with_pipeline(FlowStep::new(step_id), "u1-test", 0, states, pipeline)
 }
 
 #[test]
 fn u1_facade_accept_main_bus_for_complete_work_done() {
     let mut pipeline = default_pipeline();
-    let mut sm = RepairStateMachine::default();
+    let mut sm: std::collections::HashMap<String, RepairStateMachine> = std::collections::HashMap::new();
     let mut ctx = ctx_with_pipeline(&mut pipeline, "unit_loop", &mut sm);
     let event = Event::new("work.done", r#"{"task_id":"t-1"}"#);
     let outcome = evaluate_emit_gate(&mut ctx, &event);
@@ -96,7 +106,7 @@ fn u1_facade_accept_main_bus_for_complete_work_done() {
 #[test]
 fn u1_facade_accept_repair_stream_for_relocate_legacy() {
     let mut pipeline = default_pipeline();
-    let mut sm = RepairStateMachine::default();
+    let mut sm: std::collections::HashMap<String, RepairStateMachine> = std::collections::HashMap::new();
     // `task.relocate_legacy` is a repair topic — the
     // FlowStepScopeStage short-circuits repair topics
     // BEFORE the step lookup (verdict_gate_topics), so
@@ -110,7 +120,7 @@ fn u1_facade_accept_repair_stream_for_relocate_legacy() {
 #[test]
 fn u1_facade_reject_when_required_field_missing() {
     let mut pipeline = default_pipeline();
-    let mut sm = RepairStateMachine::default();
+    let mut sm: std::collections::HashMap<String, RepairStateMachine> = std::collections::HashMap::new();
     let mut ctx = ctx_with_pipeline(&mut pipeline, "plan_end", &mut sm);
     // `plan.blocked` requires `reason` per the default
     // schema gate. Empty payload → Reject.
@@ -128,7 +138,7 @@ fn u1_facade_reject_when_required_field_missing() {
 #[test]
 fn u1_facade_empty_pipeline_accepts_every_event() {
     let mut pipeline = empty_pipeline();
-    let mut sm = RepairStateMachine::default();
+    let mut sm: std::collections::HashMap<String, RepairStateMachine> = std::collections::HashMap::new();
     let mut ctx = ctx_with_pipeline(&mut pipeline, "plan_end", &mut sm);
     // Even a malformed event is accepted when there is
     // no stage to reject it.
@@ -146,7 +156,7 @@ fn u1_facade_repair_topic_with_pipeline_reject_yields_reject() {
         vec!["task_key".to_string()],
     );
     let mut schema_only = StagePipeline::new(vec![Box::new(EmitSchemaGateStage::new(required))]);
-    let mut sm = RepairStateMachine::default();
+    let mut sm: std::collections::HashMap<String, RepairStateMachine> = std::collections::HashMap::new();
     let mut ctx = ctx_with_pipeline(&mut schema_only, "unit_loop", &mut sm);
     let event = Event::new("task.relocate_legacy", r#"{}"#);
     let outcome = evaluate_emit_gate(&mut ctx, &event);
@@ -161,7 +171,7 @@ fn u1_facade_repair_topic_with_pipeline_reject_yields_reject() {
 #[test]
 fn u1_facade_loop_complete_topic_passes_to_main_bus() {
     let mut pipeline = default_pipeline();
-    let mut sm = RepairStateMachine::default();
+    let mut sm: std::collections::HashMap<String, RepairStateMachine> = std::collections::HashMap::new();
     let mut ctx = ctx_with_pipeline(&mut pipeline, "ship", &mut sm);
     // `LOOP_COMPLETE` is in `terminal_emits`; the
     // FlowStepScopeStage and VerdictGate short-circuit

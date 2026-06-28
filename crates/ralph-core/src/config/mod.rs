@@ -56,8 +56,9 @@ pub use hooks::{
     HooksConfig,
 };
 pub use loop_config::{
-    EventLoopConfig, EventSchema, HatAllowedValues, PayloadType, Phase, PhaseConfig,
-    ProgressStewardConfig, VerdictGateConfig, WarmupConfig,
+    EventLoopConfig, EventSchema, FlowDeclarationConfig, FlowStepConfig, HatAllowedValues,
+    MechanismConfig, PayloadType, Phase, PhaseConfig, ProgressStewardConfig, VerdictGateConfig,
+    WarmupConfig,
 };
 pub use memories::{InjectMode, MemoriesConfig, MemoriesFilter};
 pub use multi_hat_policy::{
@@ -111,6 +112,22 @@ pub struct RalphConfig {
     /// If empty, default planner and builder hats are used.
     #[serde(default)]
     pub hats: HashMap<String, HatConfig>,
+
+    /// P0-3 (2026-06-27 adversarial review):
+    /// top-level `mechanism:` block. The
+    /// `FlowStepScopeStage` (U9) and the
+    /// `flow_declaration_missing` lint both
+    /// consume this field; the runtime
+    /// `build_stage_pipeline_from_config`
+    /// reads it via `serde_yaml::to_string`
+    /// (the round-trip now preserves the
+    /// `mechanism:` block because the field
+    /// lives on `RalphConfig`). Optional —
+    /// presets that have not opted in fall
+    /// back to the minimal flow declaration
+    /// (see `event_loop::mod::minimal_flow_declaration_yaml`).
+    #[serde(default)]
+    pub mechanism: Option<MechanismConfig>,
 
     /// Event metadata definitions (optional).
     /// Defines what each event topic means, enabling auto-derived instructions.
@@ -310,6 +327,13 @@ impl Default for RalphConfig {
             topic_format_whitelist: Vec::new(),
             // Config file path (set at load time)
             config_path: None,
+            // P0-3 (2026-06-27 adversarial review):
+            // the mechanism foundation opt-in.
+            // None by default so the runtime falls
+            // back to the minimal flow declaration
+            // (see
+            // `event_loop::mod::minimal_flow_declaration_yaml`).
+            mechanism: None,
         }
     }
 }

@@ -320,8 +320,20 @@ pub struct EventLoop {
     pub(crate) idempotent_log: std::sync::Mutex<IdempotentLog>,
     /// U6: emit-time stage pipeline.
     pub(crate) stage_pipeline: StagePipeline,
-    /// U6: owned per-loop repair state machine placeholder.
-    pub(crate) repair_state_machine: crate::event_loop::repair_flow::RepairStateMachine,
+    /// P1-5 (2026-06-27 adversarial review): owned
+    /// per-loop **per-task** repair state machine
+    /// registry. Keyed by `task_key` (extracted from
+    /// the repair event payload). The previous
+    /// design had a single `RepairStateMachine` for
+    /// the whole loop, which violated R2
+    /// (`per-task budget`): task A's retry would
+    /// exhaust task B's budget. The map is empty
+    /// when no repair events have been seen this
+    /// run; the `RepairDispatchStage` lazily
+    /// initialises a machine for each new
+    /// `task_key`.
+    pub(crate) repair_state_machines:
+        std::collections::HashMap<String, crate::event_loop::repair_flow::RepairStateMachine>,
     /// U2 (2026-06-27-002 plan completion): counter for
     /// repair-stream events that the emit-gate facade
     /// routed to the U2 placeholder sink. U6 will replace

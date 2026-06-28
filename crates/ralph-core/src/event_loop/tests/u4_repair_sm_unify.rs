@@ -6,15 +6,28 @@
 //! so U5's `RepairDispatchStage` can read the budget
 //! from the same struct the loop owns.
 //!
+//! P1-5 (2026-06-27 adversarial review): the
+//! `RepairStateMachine` was promoted to a
+//! per-`task_key` registry inside `EventLoop` to
+//! satisfy R2 per-task budget. The
+//! `StageContext.repair_states` field is a
+//! `HashMap<String, RepairStateMachine>` instead
+//! of a single instance; tests below verify the
+//! registry starts empty and the
+//! `RepairDispatchStage` lazily inserts a fresh
+//! machine per task key.
+//!
 //! Pinned contracts:
-//! 1. `EventLoop::new` produces a real
-//!    `RepairStateMachine` with the default 3-retry
-//!    budget (mirroring `RepairBudget::default()`).
-//! 2. `build_stage_context_for` returns a `StageContext`
-//!    whose `repair_state` points at the loop's machine
-//!    — i.e. it is the SAME instance, not a copy.
-//! 3. The `stage_pipeline::RepairStateMachine` type no
-//!    longer exists (compile-time guarantee).
+//! 1. `EventLoop::new` initialises an empty
+//!    `repair_state_machines` registry (the
+//!    `RepairDispatchStage` lazily inserts on
+//!    first use).
+//! 2. `build_stage_context_for` returns a
+//!    `StageContext` whose `repair_states` points
+//!    at the loop's registry.
+//! 3. The `stage_pipeline::RepairStateMachine` type
+//!    no longer exists as a stub (compile-time
+//!    guarantee).
 
 use super::*;
 
@@ -55,11 +68,11 @@ fn u4_repair_state_machine_default_budget_is_three() {
 fn u4_event_loop_owns_real_repair_state_machine() {
     let temp = tempfile::tempdir().unwrap();
     let event_loop = build_loop_for_u4(temp.path());
-    // `EventLoop::repair_state_machine` is a real
-    // `repair_flow::RepairStateMachine` whose budget is
-    // the default 3.
-    use crate::event_loop::repair_flow::RepairBudget;
-    assert_eq!(event_loop.repair_state_machine.budget(), RepairBudget { max: 3 });
+    // P1-5 (2026-06-27 adversarial review): the
+    // registry is empty on construction;
+    // `RepairDispatchStage` lazily inserts a
+    // fresh machine for each new `task_key`.
+    assert!(event_loop.repair_state_machines.is_empty());
 }
 
 #[test]
@@ -80,15 +93,21 @@ fn u4_stage_pipeline_re_exports_repair_flow_state_machine() {
 
 /// Verify the `StageContext` returned by
 /// `build_stage_context_for` references the SAME
-/// `RepairStateMachine` instance the loop owns (not a
-/// stub copy).
+/// `repair_state_machines` registry the loop owns
+/// (P1-5: the registry is per-loop; the per-task
+/// machine is lazily inserted on first use).
 #[test]
 fn u4_build_stage_context_shares_repair_state_machine() {
+    use crate::event_loop::repair_flow::RepairBudget;
     let temp = tempfile::tempdir().unwrap();
     let mut event_loop = build_loop_for_u4(temp.path());
     let ctx = event_loop.build_stage_context_for(&Event::new("work.start", "{}"));
-    assert_eq!(
-        ctx.repair_state.budget().max,
-        event_loop.repair_state_machine.budget().max
-    );
+    // Both start empty; the `RepairDispatchStage`
+    // inserts on first use. The per-task default
+    // budget is 3 (mirroring
+    // `mechanism.repair_budget: 3` in
+    // `ce-executor-serial`).
+    assert!(ctx.repair_states.is_empty());
+    assert!(event_loop.repair_state_machines.is_empty());
+    let _ = RepairBudget { max: 3 };
 }

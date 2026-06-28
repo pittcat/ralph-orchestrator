@@ -22,7 +22,7 @@ fn flow() -> FlowDeclaration {
 
 fn ctx() -> StageContext<'static> {
     let repair: &'static mut RepairStateMachine = Box::leak(Box::new(RepairStateMachine::default()));
-    StageContext::new(FlowStep::new("unit_loop"), "loop-1", 1, repair)
+    StageContext::for_test_machine(FlowStep::new("unit_loop"), "loop-1", 1, repair)
 }
 
 fn ev(topic: &str, payload: &str) -> Event {

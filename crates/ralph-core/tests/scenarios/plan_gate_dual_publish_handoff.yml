@@ -60,7 +60,7 @@ mock_responses:
     </event>
   - |
     <event topic="work.done">
-    task_id: "task-real-001"
+    {"task_id":"task-real-001"}
     </event>
   - |
     <event topic="LOOP_COMPLETE">

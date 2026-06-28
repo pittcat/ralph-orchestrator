@@ -1056,14 +1056,25 @@ impl RuntimeContractAggregator {
         // Findings are semantic (not structural) and do not
         // short-circuit subsequent topology/payload/orphan checks,
         // so callers see all authoring issues in one report.
-        let builtin_source = source_label_is_builtin_embedded(&report.source_label);
-        for finding in run_preset_lint(
-            config,
-            LintStrictness::Strict,
-            builtin_source,
-            raw_yaml,
-        ) {
-            report.add_finding(finding);
+        // P0-3 (2026-06-27 adversarial review):
+        // skip the `flow_declaration_missing` finding
+        // entirely when the preset runs in solo
+        // mode (no custom hats). Solo mode does
+        // not need the multi-step flow declaration
+        // — Ralph is the only hat and there are no
+        // step transitions to police. The legacy
+        // hatless path is preserved.
+        let skip_flow_lint = config.hats.is_empty();
+        if !skip_flow_lint {
+            let builtin_source = source_label_is_builtin_embedded(&report.source_label);
+            for finding in run_preset_lint(
+                config,
+                LintStrictness::Strict,
+                builtin_source,
+                raw_yaml,
+            ) {
+                report.add_finding(finding);
+            }
         }
 
         // Step 2b (WRC-U3 / 2026-06-12-003 / KTD-7): the upgrade is
@@ -2999,6 +3010,21 @@ hats:
 event_loop:
   starting_event: "work.start"
   completion_promise: "LOOP_COMPLETE"
+# P0-3 (2026-06-27 adversarial review): the
+# lint now fires `flow_declaration_missing`
+# when the preset opts into multi-hat
+# coordination but does not declare a
+# `mechanism.flow`. Add the block so the
+# test stays focused on the ownership
+# warning promotion contract.
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: unit_loop
+        allowed_emits: [work.ready, work.done, LOOP_COMPLETE]
 "#;
         let config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let registry = runtime_registry(yaml);

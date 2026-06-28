@@ -62,6 +62,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use tracing::debug;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -386,6 +387,21 @@ impl IdempotentLog {
     /// guarantees the count is grounded in what's on disk,
     /// not in whatever process-local state happened to be
     /// alive when the last write occurred.
+    ///
+    /// P1-7 (2026-06-27 adversarial review): `replay`
+    /// now tolerates mixed-format JSONL files in the
+    /// workspace directory. The previous implementation
+    /// failed to parse `recovery.jsonl` (which writes
+    /// `RecoveryDiagnosisEnvelope`, not `IdempotentRecord`)
+    /// and returned an error, breaking SC-5. We
+    /// distinguish per-line parse failures: a line that
+    /// deserialises as `IdempotentRecord` is indexed;
+    /// a line that fails is logged at `debug!` and
+    /// skipped (the line still belongs to a different
+    /// subsystem and is recoverable through its own
+    /// reader). Files that fail to open are also
+    /// skipped so a single corrupt file cannot
+    /// break the entire replay.
     pub fn replay(&mut self) -> Result<usize, IdempotentError> {
         if self.disabled {
             return Ok(0);
@@ -400,13 +416,45 @@ impl IdempotentLog {
             if path.file_name().and_then(|s| s.to_str()) == Some(LOOP_VERSION_FILE) {
                 continue;
             }
-            let content = fs::read_to_string(&path)?;
+            // P1-7: skip `recovery.jsonl` outright —
+            // its envelope shape
+            // (`RecoveryDiagnosisEnvelope`) is not
+            // an `IdempotentRecord` and is consumed
+            // by the `ralph diagnose` reader, not by
+            // `IdempotentLog::replay`. The file
+            // remains on disk and is still readable
+            // by its own consumer; the skip is
+            // idempotent across replays.
+            if path.file_name().and_then(|s| s.to_str()) == Some("recovery.jsonl") {
+                continue;
+            }
+            let content = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    debug!(
+                        path = %path.display(),
+                        error = %e,
+                        "P1-7: skipping JSONL file that failed to read during replay"
+                    );
+                    continue;
+                }
+            };
             for line in content.lines() {
                 if line.trim().is_empty() {
                     continue;
                 }
-                let rec: IdempotentRecord = serde_json::from_str(line)?;
-                self.index.insert(rec._idempotency_key.clone(), rec);
+                match serde_json::from_str::<IdempotentRecord>(line) {
+                    Ok(rec) => {
+                        self.index.insert(rec._idempotency_key.clone(), rec);
+                    }
+                    Err(e) => {
+                        debug!(
+                            path = %path.display(),
+                            error = %e,
+                            "P1-7: skipping non-IdempotentRecord line during replay"
+                        );
+                    }
+                }
             }
         }
         Ok(self.index.len())

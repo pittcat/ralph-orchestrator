@@ -1,3 +1,4 @@
+use crate::event_loop::flow_declaration::FlowDeclaration;
 use crate::event_loop::stage_pipeline::{
     EmitStage, FlowStep, RepairStateMachine, StageContext, StagePipeline, StageReject,
 };
@@ -48,7 +49,7 @@ fn dummy_event() -> Event {
 }
 
 fn dummy_ctx(repair: &mut RepairStateMachine) -> StageContext<'_> {
-    StageContext::new(FlowStep::new("unit_loop"), "loop-1", 1, repair)
+    StageContext::for_test_machine(FlowStep::new("unit_loop"), "loop-1", 1, repair)
 }
 
 #[test]
@@ -162,10 +163,25 @@ fn stage_pipeline_skeleton_locked_order_matches() {
         Box::new(RepairDispatchStage),
         Box::new(EmitSchemaGateStage),
         Box::new(FlowStepScopeStage),
+        // P1-4 (2026-06-27 adversarial review):
+        // the locked emit order now also
+        // includes `StepCloseObligation`
+        // between `FlowStepScope` and
+        // `VerdictGate`.
+        Box::new(crate::event_loop::stages::step_close_obligation_stage::StepCloseObligationStage::new(
+            FlowDeclaration::from_yaml("mechanism:\n  flow:\n    type: declared\n    version: 1\n    steps: []\n").unwrap(),
+        )),
         Box::new(VerdictGateStage),
     ]);
 
-    crate::assert_stage_order!(pipeline, [ArchiveVersion, RepairDispatch, EmitSchemaGate, FlowStepScope, VerdictGate]);
+    // P1-4 (2026-06-27 adversarial review): the
+    // locked emit order now also includes
+    // `StepCloseObligation` between
+    // `FlowStepScope` and `VerdictGate`. The
+    // `ArchiveVersion` stage is a loop-start hook,
+    // not an emit stage, so it does not appear in
+    // the runtime pipeline.
+    crate::assert_stage_order!(pipeline, [ArchiveVersion, RepairDispatch, EmitSchemaGate, FlowStepScope, StepCloseObligation, VerdictGate]);
 }
 
 #[test]
@@ -185,7 +201,11 @@ mechanism:
     let pipeline = StagePipeline::with_default_stages(flow);
     assert_eq!(
         pipeline.names(),
-        vec!["RepairDispatch", "EmitSchemaGate", "FlowStepScope", "VerdictGate"]
+        // P1-4 (2026-06-27 adversarial review):
+        // `StepCloseObligation` is now part of
+        // the locked emit order (between
+        // `FlowStepScope` and `VerdictGate`).
+        vec!["RepairDispatch", "EmitSchemaGate", "FlowStepScope", "StepCloseObligation", "VerdictGate"]
     );
 }
 

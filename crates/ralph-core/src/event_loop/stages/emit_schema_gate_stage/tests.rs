@@ -12,7 +12,7 @@ fn ctx() -> StageContext<'static> {
     // `Box::leak` keeps the borrow checker happy
     // without changing the public API.
     let repair: &'static mut RepairStateMachine = Box::leak(Box::new(RepairStateMachine::default()));
-    StageContext::new(FlowStep::new("unit_loop"), "loop-1", 1, repair)
+    StageContext::for_test_machine(FlowStep::new("unit_loop"), "loop-1", 1, repair)
 }
 
 fn ev(topic: &str, payload: &str) -> Event {
@@ -74,6 +74,35 @@ fn emit_schema_gate_stage_accepts_topics_outside_schema() {
     // declare a schema.
     let e = ev("work.ready", "{}");
     assert!(stage.check(&mut ctx(), &e).is_ok());
+}
+
+#[test]
+fn required_fields_from_loop_config_gates_preset_review_complete() {
+    use crate::config::RalphConfig;
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    schemas:
+      review.complete:
+        required_fields: [fix_plan_file, verdict, plan_name]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let required = super::required_fields_from_loop_config(&config.event_loop);
+    let stage = EmitSchemaGateStage::new(required);
+
+    let err = stage
+        .check(&mut ctx(), &ev("review.complete", "{}"))
+        .unwrap_err();
+    assert_eq!(err.reason_code, "missing_required_fields");
+    assert!(err.missing_fields.contains(&"fix_plan_file".to_string()));
+    assert!(err.missing_fields.contains(&"verdict".to_string()));
+
+    // Baseline topics remain gated after the merge.
+    let err = stage
+        .check(&mut ctx(), &ev("plan.blocked", r#"{"reason":null}"#))
+        .unwrap_err();
+    assert_eq!(err.reason_code, "missing_required_fields");
 }
 
 #[test]

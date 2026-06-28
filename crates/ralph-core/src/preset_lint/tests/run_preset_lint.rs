@@ -63,9 +63,28 @@ hats:
 event_loop:
   starting_event: "work.start"
   completion_promise: "LOOP_COMPLETE"
+# P0-3 (2026-06-27 adversarial review): the
+# flow declaration is now consumed at the
+# `mechanism:` top-level key (mirroring the
+# `presets/schemas/<name>.yml` SSOT). The
+# lint `flow_declaration_missing` flags the
+# absence; this fixture opts in to satisfy
+# the lint.
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: unit_loop
+        allowed_emits: [work.ready, work.done, LOOP_COMPLETE]
 "#;
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-    let findings = run_preset_lint(&config, LintStrictness::Default, false, None);
+    // P0-3 (2026-06-27 adversarial review): pass
+    // the raw YAML so the lint sees the
+    // `mechanism:` block (which the typed
+    // `RalphConfig` does not model).
+    let findings = run_preset_lint(&config, LintStrictness::Default, false, Some(yaml));
     // No findings at all (Pass findings are filtered out).
     assert!(
         findings.is_empty(),

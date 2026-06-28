@@ -161,6 +161,18 @@ fn missing_flow_finding(detail: &str) -> LintFinding {
             "{detail}; without it the runtime cannot enforce step scope, partial-state recovery, or terminal alignment"
         ),
     );
+    // P0-3 (2026-06-27 adversarial review): the
+    // `mechanism:` block is opt-in. The
+    // `flow_declaration_missing` finding is a
+    // **warning** by default (operators can
+    // declare the block when they want strict
+    // step-scope enforcement) so legacy
+    // presets continue to pass lint until
+    // they opt in. Strict lint upgrades it
+    // to `Error` via the existing strict
+    // promotion path (see
+    // `preset_lint::LintFinding::promote_to_error_if_strict`).
+    f.severity = crate::preset_lint::LintSeverity::Warn;
     f.action_hint = Some(
         "add a `mechanism:` top-level key with `flow:` sub-key to the preset YAML; see \
          `docs/plans/2026-06-27-001-feat-ralph-orchestrator-mechanism-foundation-plan.md` \

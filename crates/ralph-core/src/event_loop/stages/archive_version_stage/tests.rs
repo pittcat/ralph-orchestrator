@@ -67,7 +67,14 @@ fn archive_errors_on_relative_path() {
 }
 
 #[test]
-fn archive_subdirectories_not_moved() {
+fn archive_subdirectories_also_moved() {
+    // P1-8 (2026-06-27 adversarial review): the
+    // archive now walks every JSONL file under
+    // the workspace, including files in
+    // subdirectories (e.g. `.ralph/agent/`). The
+    // archive directory mirrors the source
+    // structure so the relative path is
+    // preserved.
     let dir = TempDir::new().unwrap();
     fs::write(
         dir.path().join("loop-version.json"),
@@ -78,7 +85,14 @@ fn archive_subdirectories_not_moved() {
     fs::write(dir.path().join("subdir/tasks.jsonl"), "{}\n").unwrap();
     fs::write(dir.path().join("tasks.jsonl"), "{}\n").unwrap();
 
-    archive_state_for_loop(dir.path(), "loop-b").unwrap();
+    let archive = archive_state_for_loop(dir.path(), "loop-b")
+        .unwrap()
+        .expect("archive directory created");
     assert!(!dir.path().join("tasks.jsonl").exists());
-    assert!(dir.path().join("subdir/tasks.jsonl").exists());
+    assert!(!dir.path().join("subdir/tasks.jsonl").exists());
+    // The archive directory mirrors the source
+    // structure: `subdir/tasks.jsonl` is moved
+    // into `archive/<id>/subdir/tasks.jsonl`.
+    assert!(archive.join("tasks.jsonl").exists());
+    assert!(archive.join("subdir").join("tasks.jsonl").exists());
 }

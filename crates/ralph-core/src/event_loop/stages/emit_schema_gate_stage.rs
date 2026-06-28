@@ -22,6 +22,18 @@ use std::collections::HashMap;
 /// preset does not ship one. Mirrors the schema entries in
 /// `presets/schemas/ce-executor-serial.yml` so the stage is
 /// useful out of the box; U10 keeps the SSOT in lockstep.
+///
+/// IMPORTANT: this table is the **generic baseline** gate —
+/// it covers only topics whose payload contract is fixed
+/// across ALL presets (e.g. `work.*`, `test.*`, `fix.*`,
+/// `plan.blocked`, `task.resume`, `human.guidance`,
+/// `review.start`). Preset-specific contracts like
+/// `review.complete` (which requires `fix_plan_file`,
+/// `verdict`, `findings_count`, … in `ce-executor-serial`
+/// but is a free-form topic in the harness FR-1 integration
+/// tests) MUST be injected via
+/// `EmitSchemaGateStage::new(preset_required_fields)` so the
+/// baseline stays permissive for legacy / harness fixtures.
 pub fn default_required_fields() -> HashMap<&'static str, Vec<&'static str>> {
     let mut map: HashMap<&'static str, Vec<&'static str>> = HashMap::new();
     map.insert("plan.blocked", vec!["reason"]);
@@ -34,8 +46,38 @@ pub fn default_required_fields() -> HashMap<&'static str, Vec<&'static str>> {
     map.insert("fix.applied", vec!["task_id"]);
     map.insert("fix.exhausted", vec!["task_id", "reason"]);
     map.insert("review.start", vec!["plan_id"]);
-    map.insert("review.complete", vec!["fix_plan_file", "verdict"]);
     map.insert("plan.complete", vec![]);
+    map
+}
+
+/// Merge generic baseline required-fields with the preset's
+/// `ProtocolView` (same SSOT as the engine gate / preset_lint).
+///
+/// Preset-specific topics such as `review.complete` override the
+/// baseline when the operator has declared `event_policy.schemas`.
+pub(crate) fn required_fields_from_loop_config(
+    config: &crate::config::EventLoopConfig,
+) -> HashMap<String, Vec<String>> {
+    let mut map: HashMap<String, Vec<String>> = default_required_fields()
+        .into_iter()
+        .map(|(topic, fields)| {
+            (
+                topic.to_string(),
+                fields.into_iter().map(String::from).collect(),
+            )
+        })
+        .collect();
+
+    let view = crate::preset::engine::ProtocolView::from_event_loop(config);
+    for (topic, fields) in &view.effective_required_fields {
+        if fields.is_empty() {
+            continue;
+        }
+        map.insert(
+            topic.clone(),
+            fields.iter().cloned().collect(),
+        );
+    }
     map
 }
 

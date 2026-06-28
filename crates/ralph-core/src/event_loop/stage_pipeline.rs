@@ -20,7 +20,11 @@
 //! 4. `FlowStepScopeStage` — flow step / allowed_emits check.
 //! 5. `VerdictGateStage` — terminal emit alignment.
 
+use crate::config::EventLoopConfig;
 use crate::event_loop::flow_declaration::FlowDeclaration;
+use crate::event_loop::stages::emit_schema_gate_stage::{
+    EmitSchemaGateStage, required_fields_from_loop_config,
+};
 pub use crate::event_loop::repair_flow::RepairStateMachine;
 use ralph_proto::Event;
 
@@ -107,10 +111,17 @@ pub struct StageContext<'a> {
     pub loop_id: String,
     /// Expected state version for idempotent writes.
     pub expected_version: u64,
-    /// Repair state machine snapshot. Mutable so the
-    /// `RepairDispatchStage` (U5) can advance the budget
-    /// during `check`.
-    pub repair_state: &'a mut RepairStateMachine,
+    /// P1-5 (2026-06-27 adversarial review):
+    /// per-task repair state machine registry. Keyed
+    /// by `task_key` (the `task_key` field of the
+    /// repair event payload). The
+    /// `RepairDispatchStage` lazily inserts a fresh
+    /// `RepairStateMachine` for any new `task_key`
+    /// and advances the matching machine on each
+    /// transition. The legacy single-machine design
+    /// is gone — task A's retry can no longer
+    /// exhaust task B's budget.
+    pub repair_states: &'a mut std::collections::HashMap<String, RepairStateMachine>,
     /// Stage pipeline reference for the emit-gate facade
     /// (U1 / 2026-06-27-002 plan). The facade needs to
     /// call `pipeline.run` from inside the gate so the
@@ -125,13 +136,13 @@ impl<'a> StageContext<'a> {
         current_step: FlowStep,
         loop_id: impl Into<String>,
         expected_version: u64,
-        repair_state: &'a mut RepairStateMachine,
+        repair_states: &'a mut std::collections::HashMap<String, RepairStateMachine>,
     ) -> Self {
         Self {
             current_step,
             loop_id: loop_id.into(),
             expected_version,
-            repair_state,
+            repair_states,
             pipeline: None,
         }
     }
@@ -143,16 +154,45 @@ impl<'a> StageContext<'a> {
         current_step: FlowStep,
         loop_id: impl Into<String>,
         expected_version: u64,
-        repair_state: &'a mut RepairStateMachine,
+        repair_states: &'a mut std::collections::HashMap<String, RepairStateMachine>,
         pipeline: &'a StagePipeline,
     ) -> Self {
         Self {
             current_step,
             loop_id: loop_id.into(),
             expected_version,
-            repair_state,
+            repair_states,
             pipeline: Some(pipeline),
         }
+    }
+
+    /// P1-5 (2026-06-27 adversarial review): test-only
+    /// helper. Wraps a single `RepairStateMachine` in
+    /// a one-element `HashMap` under the
+    /// `_loop_default` key so tests that don't care
+    /// about per-task isolation can keep their
+    /// existing fixture shape
+    /// (`StageContext::for_test_machine(...)`).
+    /// The `HashMap` is leaked so the returned
+    /// context can carry a stable `'static`-ish
+    /// reference. Tests using this helper are
+    /// expected to run sequentially in a single
+    /// process — leaking is acceptable for
+    /// test-only ergonomics. The helper is
+    /// NOT `#[cfg(test)]` so integration tests in
+    /// `crates/ralph-core/tests/` (which compile
+    /// against the ralph-core lib, not its
+    /// `cfg(test)` tree) can call it.
+    pub fn for_test_machine(
+        current_step: FlowStep,
+        loop_id: impl Into<String>,
+        expected_version: u64,
+        repair: &'a mut RepairStateMachine,
+    ) -> Self {
+        let mut states = std::collections::HashMap::new();
+        states.insert("_loop_default".to_string(), repair.clone());
+        let states = Box::leak(Box::new(states));
+        Self::new(current_step, loop_id, expected_version, states)
     }
 }
 
@@ -180,11 +220,41 @@ impl StagePipeline {
     /// foundation (U0). Order is fixed by the plan; changing it
     /// breaks the `assert_stage_order!` macro and the
     /// `stage_pipeline_order_*` tests.
+    ///
+    /// P1-4 (2026-06-27 adversarial review): the
+    /// pipeline now also includes the U12
+    /// `StepCloseObligationStage` between
+    /// `FlowStepScopeStage` and `VerdictGateStage`.
+    /// Without it the `step_close_obligation` pure
+    /// logic was never wired into the runtime and
+    /// the 2026-06-26 4/8 partial silence
+    /// scenario went unflagged. The stage is
+    /// fail-closed but only fires when the
+    /// operator has called
+    /// `update_progress(step_id, done, total)` —
+    /// legacy presets that do not drive the
+    /// progress registry see the same fail-open
+    /// behaviour as before.
     pub fn with_default_stages(flow: FlowDeclaration) -> Self {
+        Self::with_default_stages_for_loop_config(flow, None)
+    }
+
+    /// Like [`Self::with_default_stages`], but merges preset
+    /// `event_policy.schemas` into `EmitSchemaGateStage` when
+    /// `loop_config` is present (production `EventLoop` path).
+    pub fn with_default_stages_for_loop_config(
+        flow: FlowDeclaration,
+        loop_config: Option<&EventLoopConfig>,
+    ) -> Self {
+        let schema_gate = match loop_config {
+            Some(cfg) => EmitSchemaGateStage::new(required_fields_from_loop_config(cfg)),
+            None => EmitSchemaGateStage::with_defaults(),
+        };
         Self::new(vec![
             Box::new(crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage::default()),
-            Box::new(crate::event_loop::stages::emit_schema_gate_stage::EmitSchemaGateStage::with_defaults()),
+            Box::new(schema_gate),
             Box::new(crate::event_loop::stages::flow_step_scope_stage::FlowStepScopeStage::new(flow.clone())),
+            Box::new(crate::event_loop::stages::step_close_obligation_stage::StepCloseObligationStage::new(flow.clone())),
             Box::new(crate::event_loop::stages::verdict_gate_stage::VerdictGateStage::new(flow)),
         ])
     }

@@ -427,9 +427,56 @@ pub fn run_preset_lint(
     // `serde_yaml::to_string(config)` when no raw text is
     // available (e.g. callers that synthesise `RalphConfig`
     // programmatically).
-    let raw_yaml_owned = raw_yaml
-        .map(str::to_string)
-        .unwrap_or_else(|| serde_yaml::to_string(config).unwrap_or_default());
+    // P0-3 (2026-06-27 adversarial review): when
+    // the caller does not supply `raw_yaml`
+    // (tests / programmatic config builders),
+    // synthesise a `mechanism:` block from
+    // the typed `config.mechanism` field so
+    // the flow-declaration lint still fires
+    // when the preset opted in. When the
+    // caller does supply `raw_yaml`, that
+    // text is used verbatim (it may carry
+    // keys the typed `RalphConfig` does not
+    // model). The synthesised case avoids
+    // double-`mechanism:` blocks: the
+    // typed-config dump already carries the
+    // `mechanism:` key when the field is set,
+    // so the synthesised append is a no-op
+    // in that case.
+    let raw_yaml_owned = match raw_yaml {
+        Some(text) => text.to_string(),
+        None => {
+            let config_yaml = serde_yaml::to_string(config).unwrap_or_default();
+            let config_yaml = if let Some(mechanism) = config.mechanism.as_ref() {
+                if config_yaml.lines().any(|line| line.trim_start().starts_with("mechanism:")) {
+                    // The typed-config dump already
+                    // carries the `mechanism:` key;
+                    // do not double-append.
+                    config_yaml
+                } else {
+                    let mechanism_yaml = serde_yaml::to_string(mechanism).unwrap_or_default();
+                    format!("{config_yaml}mechanism:\n{mechanism_yaml}\n")
+                }
+            } else {
+                // Strip the `mechanism: null` line
+                // that the typed config dump
+                // emits for the default-`None`
+                // field. The synthesised raw
+                // yaml must NOT carry a
+                // `mechanism:` key when the
+                // preset has not opted in,
+                // otherwise the lint flags a
+                // duplicate / missing-field
+                // inconsistency.
+                config_yaml
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("mechanism:"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            config_yaml
+        }
+    };
     let has_mechanism_block = raw_yaml_owned
         .lines()
         .any(|line| line.trim_start().starts_with("mechanism:"));

@@ -88,6 +88,27 @@ pub fn archive_state_for_loop(
     for entry in fs::read_dir(workspace)? {
         let entry = entry?;
         let path = entry.path();
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| ArchiveError::Io(io::Error::other("path has no file name")))?;
+        // P1-8 (2026-06-27 adversarial review):
+        // skip the archive directory itself so a
+        // re-archive on the same workspace does not
+        // re-archive archived files.
+        if path.is_dir() {
+            if file_name == ARCHIVE_DIR {
+                continue;
+            }
+            // Recurse into subdirectories so
+            // `.ralph/agent/*.jsonl` (and any
+            // other JSONL living in a subdir) is
+            // archived too. The relative path is
+            // preserved under the archive
+            // directory so the structure mirrors
+            // the source workspace.
+            archive_dir_recursive(&path, &archive_dir, file_name)?;
+            continue;
+        }
         if !path.is_file() {
             continue;
         }
@@ -97,9 +118,6 @@ pub fn archive_state_for_loop(
         if ext != "jsonl" {
             continue;
         }
-        let file_name = path
-            .file_name()
-            .ok_or_else(|| ArchiveError::Io(io::Error::other("path has no file name")))?;
         let dest = archive_dir.join(file_name);
         fs::rename(&path, &dest)?;
     }
@@ -109,6 +127,52 @@ pub fn archive_state_for_loop(
     // version and loop_id after archive completes.
 
     Ok(Some(archive_dir))
+}
+
+/// P1-8 (2026-06-27 adversarial review): recursive
+/// helper that mirrors a source directory subtree
+/// into the archive directory. The relative path
+/// is preserved so the archive mirrors the source
+/// structure (`workspace/sub/a.jsonl` →
+/// `workspace/archive/<id>/sub/a.jsonl`).
+fn archive_dir_recursive(
+    src: &Path,
+    dest_root: &Path,
+    relative_name: &std::ffi::OsStr,
+) -> Result<(), ArchiveError> {
+    let dest = dest_root.join(relative_name);
+    fs::create_dir_all(&dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| ArchiveError::Io(io::Error::other("path has no file name")))?;
+        if path.is_dir() {
+            // Bound the recursion: skip the
+            // archive directory itself to avoid
+            // re-archiving archived files when
+            // the archive directory is a
+            // subdirectory of the workspace.
+            if file_name == ARCHIVE_DIR {
+                continue;
+            }
+            archive_dir_recursive(&path, &dest, file_name)?;
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if ext != "jsonl" {
+            continue;
+        }
+        let target = dest.join(file_name);
+        fs::rename(&path, &target)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

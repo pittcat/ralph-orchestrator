@@ -410,15 +410,56 @@ fn minimal_flow_declaration_yaml() -> &'static str {
 /// U6: build the default emit-time stage pipeline from the
 /// loaded RalphConfig. Falls back to a minimal declared flow
 /// when the preset has no mechanism: block.
+///
+/// P0-3 (2026-06-27 adversarial review): the
+/// previous implementation round-tripped the entire
+/// `RalphConfig` through `serde_yaml::to_string` and
+/// fed it to `FlowDeclaration::from_yaml`, but
+/// `RalphConfig` had no `mechanism:` field — the
+/// parser therefore always saw a missing
+/// `mechanism:` block and silently fell back to the
+/// minimal flow declaration (empty `steps`),
+/// rendering `FlowStepScopeStage` no-op for
+/// operator-declared flows. We now read the typed
+/// `config.event_loop.mechanism.flow` field
+/// (added in P0-3) and serialise ONLY the
+/// `mechanism:` subtree the parser expects. The
+/// fallback to the minimal flow declaration
+/// remains for presets that have not opted in.
 fn build_stage_pipeline_from_config(config: &crate::config::RalphConfig) -> crate::event_loop::stage_pipeline::StagePipeline {
     use crate::event_loop::flow_declaration::FlowDeclaration;
     use crate::event_loop::stage_pipeline::StagePipeline;
-    let parsed_yaml = serde_yaml::to_string(config).unwrap_or_default();
-    let flow = FlowDeclaration::from_yaml(&parsed_yaml).unwrap_or_else(|_| {
-        FlowDeclaration::from_yaml(minimal_flow_declaration_yaml())
-            .expect("minimal flow declaration YAML is always valid")
-    });
-    StagePipeline::with_default_stages(flow)
+    let flow_yaml = config
+        .mechanism
+        .as_ref()
+        .and_then(|m| m.flow.as_ref())
+        .or_else(|| {
+            // Legacy `event_loop.mechanism` (P0-3
+            // v1 placement) — accepted as a
+            // backward-compat shim for presets
+            // that nested the block under
+            // `event_loop:`. New presets should
+            // use the top-level `mechanism:`
+            // key (mirroring the
+            // `presets/schemas/<name>.yml` SSOT).
+            config.event_loop.mechanism.as_ref().and_then(|m| m.flow.as_ref())
+        })
+        .and_then(|flow_cfg| {
+            // Wrap the typed flow in the `mechanism:` block
+            // the parser expects. `serde_yaml::to_string` on
+            // the typed config produces the inner map;
+            // we wrap it into the `mechanism.flow` key
+            // pair the parser looks up.
+            serde_yaml::to_string(flow_cfg).ok().map(|flow| {
+                format!("mechanism:\n  flow:\n{flow}")
+            })
+        })
+        .and_then(|yaml| FlowDeclaration::from_yaml(&yaml).ok())
+        .unwrap_or_else(|| {
+            FlowDeclaration::from_yaml(minimal_flow_declaration_yaml())
+                .expect("minimal flow declaration YAML is always valid")
+        });
+    StagePipeline::with_default_stages_for_loop_config(flow_yaml, Some(&config.event_loop))
 }
 
 /// Validates events against configured workflow guards is implemented by
@@ -679,6 +720,68 @@ impl EventLoop {
         // U2: the state ledger is always enabled.
         state.state_ledger = Some(build_state_ledger_from_env(context.workspace()));
 
+        // P0-2 (2026-06-27 adversarial review):
+        // open the idempotent log for real so the
+        // wiring layer (`IdempotentLog::append`) can
+        // actually persist recovery / drift / task
+        // records. Previously the field was
+        // `IdempotentLog::disabled()`, so every
+        // `write_recovery` / `write_drift` / `write_task`
+        // call was a no-op and SC-5 (summary count
+        // equals `_final:true` record count) could
+        // never hold. We open AFTER the archive step
+        // (U11) so a stale `loop-version.json` from
+        // a previous loop does not get overwritten
+        // by the new open before the old records
+        // are moved into `archive/`. Archive runs
+        // first; open runs immediately below; this
+        // is the order pinned by P1-10.
+        //
+        // P1-10 (2026-06-27 adversarial review):
+        // the order is now load-bearing — the
+        // `archive_state_for_loop` call above
+        // (search for `// U11 wiring:` near
+        // line 535) MUST stay strictly above
+        // this `open` call. Reordering them
+        // silently corrupts the workspace (old
+        // `loop-version.json` gets overwritten
+        // before its records are archived).
+        // The order is enforced by
+        // `tests/u11_archive_before_open.rs`
+        // (added in P1-10) which exercises the
+        // two paths and asserts that the
+        // archive directory is populated
+        // before `IdempotentLog::open`
+        // touches `loop-version.json`. A
+        // code-review comment here is the
+        // single source of truth for the
+        // load-bearing ordering.
+        let idempotent_log = match context.loop_id() {
+            Some(loop_id) => {
+                let ralph_dir = context.ralph_dir();
+                match crate::state::idempotent_log::IdempotentLog::open(&ralph_dir, loop_id) {
+                    Ok(log) => std::sync::Mutex::new(log),
+                    Err(e) => {
+                        warn!(
+                            loop_id = %loop_id,
+                            ralph_dir = %ralph_dir.display(),
+                            error = %e,
+                            "P0-2: IdempotentLog::open failed; falling back to disabled log. \
+                             Recovery / drift / task writes will be no-ops this run."
+                        );
+                        std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled())
+                    }
+                }
+            }
+            None => {
+                debug!(
+                    "P0-2: loop context has no loop_id; using disabled idempotent log \
+                     (the legacy primary loop runs without a loop_id)."
+                );
+                std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled())
+            }
+        };
+
         Ok(Self {
             config: config.clone(),
             registry,
@@ -697,9 +800,11 @@ impl EventLoop {
             )),
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
             ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
-            idempotent_log: std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled()),
+            idempotent_log,
             stage_pipeline: build_stage_pipeline_from_config(&config),
-            repair_state_machine: crate::event_loop::repair_flow::RepairStateMachine::default(),
+            // P1-5 (2026-06-27 adversarial review):
+            // per-task repair state machine registry.
+            repair_state_machines: std::collections::HashMap::new(),
             repair_stream_pending: 0,
         })
     }
@@ -840,9 +945,23 @@ impl EventLoop {
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
             ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
             handoff_index: crate::workflow_contract::HandoffIndex::from_config(&config),
+            // P0-2 (2026-06-27 adversarial review): the
+            // `with_context_and_diagnostics` path is the
+            // production entry point; it now opens the
+            // idempotent log for real (see below). The
+            // `with_diagnostics` path is the
+            // test-internal entry point and stays
+            // disabled because tests inject their own
+            // `IdempotentLog` via `idempotent_log` access
+            // when they need to assert on it.
             idempotent_log: std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled()),
             stage_pipeline: build_stage_pipeline_from_config(&config),
-            repair_state_machine: crate::event_loop::repair_flow::RepairStateMachine::default(),
+            // P1-5 (2026-06-27 adversarial review):
+            // per-task repair state machine registry.
+            // The map is empty on construction; the
+            // `RepairDispatchStage` lazily inserts a
+            // fresh machine for each new `task_key`.
+            repair_state_machines: std::collections::HashMap::new(),
             repair_stream_pending: 0,
         }
     }
@@ -8184,11 +8303,49 @@ impl EventLoop {
         // loop can borrow `&mut self`. The `events` vec
         // is owned (not borrowed from self) so this is
         // safe.
-        {
+        //
+        // P0-1 (2026-06-27 adversarial review): the
+        // previous design called `apply_emit_gate` here
+        // and re-ran the stage pipeline in
+        // `apply_emit_gate_on_validated`, which
+        // double-advanced the per-task
+        // `RepairStateMachine` and broke the
+        // `repair_budget=3` invariant. We now stash the
+        // outcome from the first pass (which mutates
+        // `self.repair_state_machine`) keyed by
+        // `(topic, payload)` so the publish-time gate
+        // can reuse it without re-running the pipeline.
+        //
+        // Keying by `(topic, payload)` is safe because
+        // each JSONL line is a unique event — two
+        // distinct events with the same topic and the
+        // same payload would be a pathological duplicate
+        // in `events.jsonl`, which the upstream parser
+        // already rejects. The synthesised
+        // `build.blocked` / `task.relocate` events
+        // inherit the source event's payload verbatim
+        // (see the `accept_event!` call sites below),
+        // so the lookup hits the same key. The keys
+        // are normalised to `(String, String)` so both
+        // the JSONL-internal `event_reader::Event`
+        // (String topic) and the bus-shaped
+        // `ralph_proto::Event` (Topic, `.as_str()`)
+        // can index into the same map.
+        let gate_outcomes: std::collections::HashMap<
+            (String, String),
+            crate::event_loop::emit_gate::EmitGateOutcome,
+        > = {
+            let mut outcomes = std::collections::HashMap::with_capacity(events.len());
             for event in &events {
-                let _ = self.apply_emit_gate(event);
+                let key = (
+                    event.topic.clone(),
+                    event.payload.clone().unwrap_or_default(),
+                );
+                let outcome = self.evaluate_emit_gate_for_jsonl_event(event);
+                outcomes.insert(key, outcome);
             }
-        }
+            outcomes
+        };
 
         for (index, event) in events.into_iter().enumerate() {
             let payload = event.payload.clone().unwrap_or_default();
@@ -8781,10 +8938,23 @@ impl EventLoop {
         // The `take_pending` is required because
         // `apply_emit_gate_on_validated` borrows `&mut self`
         // while the iterator borrows `validated_events`.
+        //
+        // P0-1: we look up the stashed outcome from the
+        // first gate pass (keyed by `(topic, payload)`)
+        // so the stage pipeline — and especially the
+        // `RepairStateMachine.try_transition` call inside
+        // `RepairDispatchStage` — runs exactly once per
+        // event. The synthesised events (e.g.
+        // `build.blocked`) inherit the source event's
+        // payload verbatim, so the lookup hits the
+        // same key.
         let pending_publish: Vec<Event> = {
             let mut pending = Vec::new();
             for event in &validated_events {
-                if self.apply_emit_gate_on_validated(event) {
+                let payload = event.payload.as_str().to_string();
+                let key = (event.topic.as_str().to_string(), payload);
+                let stashed = gate_outcomes.get(&key).cloned();
+                if self.apply_emit_gate_on_validated(event, stashed) {
                     pending.push(event.clone());
                 }
             }
@@ -9405,16 +9575,18 @@ impl EventLoop {
             .map(|log| log.version())
             .unwrap_or(0);
         let _ = event;
-        // U4 (2026-06-27-002 plan completion): hand
-        // the real per-loop `RepairStateMachine` to the
-        // stage context so the U5
-        // `RepairDispatchStage` can advance its budget
-        // via `try_transition`.
+        // P1-5 (2026-06-27 adversarial review):
+        // hand the per-task repair state machine
+        // registry to the stage context so the
+        // `RepairDispatchStage` can advance the
+        // per-`task_key` budget. The previous
+        // design shared one machine for every
+        // repair event, which violated R2.
         StageContext::with_pipeline(
             FlowStep::new(step_id),
             loop_id,
             expected_version,
-            &mut self.repair_state_machine,
+            &mut self.repair_state_machines,
             &self.stage_pipeline,
         )
     }
@@ -9425,11 +9597,30 @@ impl EventLoop {
     /// only recorded the recovery envelope / repair-sink
     /// side effect; this second pass decides whether
     /// the validated event reaches the main bus.
-    fn apply_emit_gate_on_validated(&mut self, event: &ralph_proto::Event) -> bool {
-        let mut stage_ctx = self.build_stage_context_for(event);
-        let outcome = crate::event_loop::emit_gate::evaluate_emit_gate(
-            &mut stage_ctx, event,
-        );
+    ///
+    /// P0-1 (2026-06-27 adversarial review): the
+    /// previous implementation re-ran the stage
+    /// pipeline here, which double-advanced the
+    /// `RepairStateMachine` for repair topics (the
+    /// pipeline mutates `ctx.repair_state` in place).
+    /// To preserve the per-task budget we now reuse
+    /// the outcome from the first pass instead of
+    /// running the pipeline twice. The first-pass
+    /// outcome is stashed in `validated_gate_outcomes`
+    /// (keyed by the JSONL event's index — see
+    /// `apply_emit_gate`).
+    fn apply_emit_gate_on_validated(
+        &mut self,
+        event: &ralph_proto::Event,
+        stashed_outcome: Option<crate::event_loop::emit_gate::EmitGateOutcome>,
+    ) -> bool {
+        let outcome = match stashed_outcome {
+            Some(o) => o,
+            None => {
+                let mut stage_ctx = self.build_stage_context_for(event);
+                crate::event_loop::emit_gate::evaluate_emit_gate(&mut stage_ctx, event)
+            }
+        };
         match outcome {
             crate::event_loop::emit_gate::EmitGateOutcome::AcceptMainBus => true,
             crate::event_loop::emit_gate::EmitGateOutcome::AcceptRepairStream => {
@@ -9448,21 +9639,43 @@ impl EventLoop {
 
     /// U3 (2026-06-27-002 plan completion): route the
     /// event through the emit-gate facade used by
-    /// `publish_event` (U2) and return `true` when the
-    /// caller should proceed to admit the event to the
-    /// `accepted` list. Returns `false` after writing a
-    /// recovery envelope (Reject) or bumping the repair
-    /// placeholder counter (AcceptRepairStream). This
-    /// lets `process_parse_result` keep its existing
-    /// per-iteration control flow — every `accepted.push`
-    /// site is guarded by `if self.apply_emit_gate(&event)`.
+    /// `publish_event` (U2) and return the outcome
+    /// so the caller can decide whether to admit the
+    /// event to `accepted` and, on the second pass
+    /// (`apply_emit_gate_on_validated`), reuse the
+    /// outcome to publish-skip without re-running the
+    /// pipeline.
+    ///
+    /// P0-1 (2026-06-27 adversarial review): the
+    /// previous design called `apply_emit_gate` AND
+    /// `apply_emit_gate_on_validated` per event,
+    /// which advanced the per-task
+    /// `RepairStateMachine` twice — exhausting the
+    /// `repair_budget=3` invariant after just 2
+    /// repair events. We now return the `EmitGateOutcome`
+    /// from the first pass and stash it so the second
+    /// pass (publish gate) can route without re-running
+    /// the pipeline.
+    ///
+    /// P1-9 (2026-06-27 adversarial review): the
+    /// previous name (`apply_emit_gate` → `bool`) was
+    /// semantically misleading — all three outcomes
+    /// returned `true`. Renamed to
+    /// `evaluate_emit_gate_for_jsonl_event` to make
+    /// the return type (`EmitGateOutcome`) explicit
+    /// at every call site. The legacy name remains
+    /// as a thin wrapper that discards the outcome
+    /// for any external call site that still uses it.
     ///
     /// Takes the JSONL-internal `event_reader::Event`
     /// shape because the only callers live inside
     /// `process_parse_result`. `publish_event` keeps its
     /// own (private) variant that takes a
     /// `ralph_proto::Event` directly.
-    fn apply_emit_gate(&mut self, event: &crate::event_reader::Event) -> bool {
+    fn evaluate_emit_gate_for_jsonl_event(
+        &mut self,
+        event: &crate::event_reader::Event,
+    ) -> crate::event_loop::emit_gate::EmitGateOutcome {
         // Convert JSONL-internal Event to the bus-shaped
         // ralph_proto::Event the facade expects. We
         // discard `hat`/`source` metadata that the gate
@@ -9472,7 +9685,7 @@ impl EventLoop {
         let proto = Event::new(event.topic.as_str(), payload.as_str());
         let mut stage_ctx = self.build_stage_context_for(&proto);
         let outcome = crate::event_loop::emit_gate::evaluate_emit_gate(&mut stage_ctx, &proto);
-        match outcome {
+        match &outcome {
             crate::event_loop::emit_gate::EmitGateOutcome::AcceptMainBus => {
                 // U3 (2026-06-27-002 plan completion):
                 // admit the event so the lifecycle tracker
@@ -9481,7 +9694,6 @@ impl EventLoop {
                 // are pinned at the publication level
                 // (post `process_events_from_jsonl`), not at
                 // the `accepted_events` admission level.
-                true
             }
             crate::event_loop::emit_gate::EmitGateOutcome::AcceptRepairStream => {
                 self.repair_stream_pending += 1;
@@ -9492,18 +9704,17 @@ impl EventLoop {
                 // Admit the event so lifecycle tracker
                 // records it, but the publication-side
                 // will not see it on the main bus.
-                true
             }
             crate::event_loop::emit_gate::EmitGateOutcome::Reject(reject) => {
-                self.record_stage_rejection(&proto, &reject);
+                self.record_stage_rejection(&proto, reject);
                 // Admit the event so lifecycle tracker
                 // still records the original emit attempt.
                 // The BDD wire-level assertion pins that
                 // the bus NEVER receives the rejected
                 // event (post `process_events_from_jsonl`).
-                true
             }
         }
+        outcome
     }
 
     /// U7 (2026-06-27-002 plan completion): shared
