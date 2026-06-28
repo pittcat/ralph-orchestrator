@@ -1530,6 +1530,20 @@ hats:
   dimension-reviewer:
     name: "🔬 Dimension Reviewer (Serial)"
     description: "Reviews a single dimension. Emits review.dimension.done with the findings file, or review.dimension.failed with the reason. No concurrency, no wave dispatcher."
+    # 2026-06-28 plan U14 (R14): the dimension-reviewer is
+    # FORBIDDEN from editing the plan's frontmatter `status`
+    # field. That update is owned by the loop's projector,
+    # which writes the new `status: u{N}-closed-u{N+1}-pending`
+    # after `test.passed` is accepted. Agents that hand-edit
+    # plan status cause the projector to skip the next
+    # status update (idempotency check) and leave the plan
+    # stuck in a closed-but-not-advanced state.
+    instructions_inline_append: |
+      HARD RULE: Do NOT modify the plan file's frontmatter `status`
+      field. Plan status transitions are managed by the loop's
+      projector in response to `test.passed`. Editing `status`
+      manually is a violation of the preset contract; the
+      projector will overwrite your change on the next emit.
     triggers: ["review.dimension.ready"]
     publishes: ["review.dimension.done", "review.dimension.failed"]
     # 2026-06-26 plan U7: self-declared emit scope.
