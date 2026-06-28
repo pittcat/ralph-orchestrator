@@ -23,6 +23,51 @@ use ralph_proto::Event;
 /// its terminal-alignment check.
 const VERDICT_GATE_TOPICS: &[&str] = &["LOOP_COMPLETE"];
 
+/// 2026-06-28 plan U3: defensive bypass list.
+///
+/// Until U4 (plan-mode `current_step` state machine) lands, the
+/// `current_step` stays pinned to the first declared step (e.g.
+/// `unit_loop`). That means a review-chain hat emitting a
+/// topic that lives in a later step's `allowed_emits` (e.g.
+/// `review-coordinator` emitting `review.dimension.ready`
+/// from `unit_loop`) would hit `flow_unknown_emit` and stall
+/// the loop.
+///
+/// The bypass accepts a small whitelist of `(hat, topic)`
+/// pairs so the review chain can move forward. U4 will replace
+/// most of these naturally once `current_step` actually
+/// advances; the entries that remain are kept as a safety net
+/// for state-machine edge cases (e.g. terminal self-stop
+/// events that the operator is allowed to emit before the
+/// review chain reaches `plan_end`).
+///
+/// The bypass is **temporary** — it does NOT widen scope for
+/// the emitting hat's full `publishes` set, only the listed
+/// topics, and only when the topic is not already in the
+/// current step's `allowed_emits`.
+const DEFENSIVE_BYPASS: &[(&str, &str)] = &[
+    // Coordinator (the runner hat) drives the lifecycle.
+    ("coordinator", "review.start"),
+    ("coordinator", "plan.complete"),
+    // Review chain: each hat emits its own well-defined topic
+    // set, all of which only become valid in a later step.
+    ("review-coordinator", "review.dimension.ready"),
+    ("review-coordinator", "review.dimensions.complete"),
+    ("review-synthesizer", "review.complete"),
+    ("dimension-reviewer", "review.dimension.done"),
+    ("dimension-reviewer", "review.dimension.failed"),
+    // Shipper closes the plan; its terminal event lands
+    // before the verdict gate would accept it.
+    ("shipper", "REVIEW_COMPLETE"),
+    // Self-termination paths: ralph / coordinator are allowed
+    // to admit failure when the recovery machinery is exhausted
+    // (U6, U8, U9, U10). These events are valid regardless of
+    // the current step because they ARE the end of the step.
+    ("ralph", "plan.blocked"),
+    ("ralph", "LOOP_COMPLETE"),
+    ("coordinator", "LOOP_COMPLETE"),
+];
+
 /// Stage that rejects events emitted outside their declared
 /// flow step's `allowed_emits` set. The check has three
 /// parts:
@@ -59,6 +104,20 @@ impl EmitStage for FlowStepScopeStage {
         // Terminal topics are owned by the verdict gate.
         if VERDICT_GATE_TOPICS.contains(&event.topic.as_str()) {
             return Ok(());
+        }
+
+        // 2026-06-28 plan U3: defensive bypass — see DEFENSIVE_BYPASS.
+        // The match is on `(source_hat, topic)`. A missing
+        // `source_hat` (legacy / synthetic events) cannot match
+        // because every bypass entry requires a real hat id.
+        if let Some(source) = event.source.as_ref() {
+            let source_str = source.as_str();
+            if DEFENSIVE_BYPASS
+                .iter()
+                .any(|(hat, topic)| *hat == source_str && *topic == event.topic.as_str())
+            {
+                return Ok(());
+            }
         }
 
         let step = self.flow.step(&ctx.current_step.id);

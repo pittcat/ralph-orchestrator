@@ -171,3 +171,110 @@ fn extract_reason_returns_none_for_non_object() {
     assert_eq!(extract_reason("\"hi\""), None);
     assert_eq!(extract_reason("not-json"), None);
 }
+
+// ── 2026-06-28 plan U3: defensive bypass for review-chain hats ─────
+
+fn ev_with_source(topic: &str, payload: &str, source: &str) -> Event {
+    Event::new(topic, payload).with_source(source)
+}
+
+#[test]
+fn u3_bypass_accepts_coordinator_review_start() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev_with_source("review.start", "{}", "coordinator");
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn u3_bypass_accepts_coordinator_plan_complete() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev_with_source("plan.complete", "{}", "coordinator");
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn u3_bypass_accepts_review_coordinator_dimensions_complete() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev_with_source(
+        "review.dimensions.complete",
+        "{}",
+        "review-coordinator",
+    );
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn u3_bypass_accepts_review_synthesizer_review_complete() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev_with_source("review.complete", "{}", "review-synthesizer");
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn u3_bypass_accepts_dimension_reviewer_dimension_done() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev_with_source("review.dimension.done", "{}", "dimension-reviewer");
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn u3_bypass_accepts_shipper_review_complete() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev_with_source("REVIEW_COMPLETE", "{}", "shipper");
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn u3_bypass_accepts_ralph_plan_blocked() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev_with_source("plan.blocked", r#"{"reason":"x"}"#, "ralph");
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn u3_bypass_accepts_ralph_loop_complete() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev_with_source("LOOP_COMPLETE", r#"{"success":false}"#, "ralph");
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn u3_bypass_accepts_coordinator_loop_complete() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev_with_source("LOOP_COMPLETE", r#"{"success":false}"#, "coordinator");
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn u3_bypass_rejects_unrelated_hat() {
+    // executor emitting review.* — bypass list does NOT include
+    // executor, so the topic falls through to the legacy
+    // flow_unknown_emit reject path.
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev_with_source("review.dimensions.complete", "{}", "executor");
+    let err = stage.check(&mut ctx_for("unit_loop"), &e).unwrap_err();
+    assert_eq!(err.reason_code, "flow_unknown_emit");
+}
+
+#[test]
+fn u3_bypass_rejects_wrong_topic_for_bypassed_hat() {
+    // dimension-reviewer is on the bypass for review.dimension.done
+    // but emitting `task.resume` from `unit_loop` is NOT on the
+    // bypass list, AND `task.resume` is not in unit_loop's
+    // allowed_emits — so the legacy reject path fires.
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev_with_source("task.resume", "{}", "dimension-reviewer");
+    let err = stage.check(&mut ctx_for("unit_loop"), &e).unwrap_err();
+    assert_eq!(err.reason_code, "flow_unknown_emit");
+}
+
+#[test]
+fn u3_bypass_requires_source_hat() {
+    // No source hat — the bypass cannot match, and `unit_loop`
+    // does not allow `review.dimensions.complete`, so the
+    // legacy reject path fires.
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev("review.dimensions.complete", "{}");
+    let err = stage.check(&mut ctx_for("unit_loop"), &e).unwrap_err();
+    assert_eq!(err.reason_code, "flow_unknown_emit");
+}
