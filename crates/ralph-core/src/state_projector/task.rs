@@ -66,8 +66,19 @@ pub(crate) fn project_ensure_task(
     // (ce-executor presets always do). Without this the loop
     // would round-trip through a generated id that the agent
     // can never reproduce, breaking the subsequent `work.done`.
+    // 2026-06-28 plan U5 (R8): when the payload's `task_id`
+    // field is present but empty, fall back to a derived id
+    // from the task_key. This stops the agent's
+    // `task_id=""` mistake from generating a new orphan task
+    // on every retry — the loop will instead close the
+    // existing record that was opened under the same
+    // `task_key`. A non-empty payload `task_id` always wins.
     if let Some(provided_id) = json_pointer(payload, "task_id") {
-        task.id = provided_id.to_string();
+        if !provided_id.is_empty() {
+            task.id = provided_id.to_string();
+        } else if let Some(key) = &task.key {
+            task.id = format!("from_key:{key}");
+        }
     }
     if let Some(plan_name) = json_pointer(payload, "plan_name") {
         task = task.with_description(Some(format!("plan: {plan_name}")));

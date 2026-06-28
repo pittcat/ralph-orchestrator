@@ -398,15 +398,34 @@ fn validate_task(
         });
     };
 
-    // task_id field must exist and be a non-empty string
+    // task_id field must exist and be a non-empty string.
+    // 2026-06-28 plan U5 (R8): reject placeholder
+    // `task_id` values that agents sometimes emit to
+    // "satisfy" the field. The runtime treats them as
+    // missing — the upstream projector (U5) and
+    // execution-contract (here) both reject explicitly
+    // so the audit trail surfaces a stable reason.
     let task_id = match map.get(&rule.require_task.id_field) {
-        Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+        Some(Value::String(s)) if !s.trim().is_empty() => {
+            if s.trim().ends_with("-placeholder") {
+                return Some(ExecutionContractFinding {
+                    kind: ExecutionContractViolationKind::InvalidPayload,
+                    message: format!(
+                        "task_id field '{}' has a placeholder value ('{}'); the loop does not accept placeholder task_ids. Re-emit with a real id (U5, 2026-06-28 plan).",
+                        rule.require_task.id_field, s
+                    ),
+                    topic: event.topic.to_string(),
+                    ..Default::default()
+                });
+            }
+            s.trim().to_string()
+        }
         Some(other) => {
             return Some(ExecutionContractFinding {
                 kind: ExecutionContractViolationKind::InvalidPayload,
                 message: format!(
-                    "task_id field '{}' must be a non-empty string, got: {:?}",
-                    rule.require_task.id_field, other
+                    "task_id field '{}' must be a non-empty string (got empty). Set task_key so the projector can derive one (U5, 2026-06-28 plan).",
+                    rule.require_task.id_field
                 ),
                 topic: event.topic.to_string(),
                 ..Default::default()
@@ -418,7 +437,7 @@ fn validate_task(
                     field: rule.require_task.id_field.clone(),
                 },
                 message: format!(
-                    "work.done payload is missing required task field '{}'",
+                    "work.done payload is missing required task field '{}'. If the agent does not have a real id, set task_key so the projector can derive one (U5, 2026-06-28 plan).",
                     rule.require_task.id_field
                 ),
                 topic: event.topic.to_string(),
@@ -1399,6 +1418,114 @@ mod tests {
             ExecutionContractDecision::Accept => {
                 panic!("Expected rejection for invalid JSON payload")
             }
+        }
+    }
+}
+
+// 2026-06-28 plan U5 (R8) tests for the placeholder rejection
+// and task_id-fallback behaviour. The projector-side fallback
+// (state_projector::task::ensure_task) is exercised in
+// `state_projector::u5_tests` (see `task.rs`).
+#[cfg(test)]
+mod u5_placeholder_tests {
+    use super::*;
+    use crate::config::execution_contracts::TaskCompletionRequirement;
+    use crate::task_store::TaskStore;
+    use std::path::PathBuf;
+
+    fn rule_with_task_field() -> ExecutionContractRule {
+        ExecutionContractRule {
+            require_payload_fields: vec!["task_id".to_string()],
+            require_task: TaskCompletionRequirement {
+                id_field: "task_id".to_string(),
+                key_field: "task_key".to_string(),
+                ..TaskCompletionRequirement::default()
+            },
+            ..ExecutionContractRule::default()
+        }
+    }
+
+    fn tmp_tasks_path() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ralph-u5-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("tasks.jsonl")
+    }
+
+    #[test]
+    fn u5_rejects_placeholder_task_id() {
+        // A task_id ending in `-placeholder` must be rejected
+        // even though it is a non-empty string.
+        let event = Event::new(
+            "work.done",
+            r#"{"task_id":"abc-placeholder","task_key":"k1"}"#,
+        );
+        let finding = validate_task(&event, &rule_with_task_field(), "loop-1", &tmp_tasks_path())
+            .expect("placeholder must be rejected");
+        let msg = format!("{:?}", finding.kind);
+        assert!(
+            matches!(finding.kind, ExecutionContractViolationKind::InvalidPayload),
+            "expected InvalidPayload, got {msg}"
+        );
+        assert!(
+            finding.message.contains("placeholder"),
+            "expected placeholder hint in message, got: {}",
+            finding.message
+        );
+    }
+
+    #[test]
+    fn u5_rejects_empty_task_id_with_hint() {
+        // An empty string is rejected (still a missing field
+        // from the loop's perspective) and the message
+        // mentions the task_key fallback.
+        let event = Event::new("work.done", r#"{"task_id":"","task_key":"k1"}"#);
+        let finding = validate_task(&event, &rule_with_task_field(), "loop-1", &tmp_tasks_path())
+            .expect("empty task_id must be rejected");
+        assert!(matches!(
+            finding.kind,
+            ExecutionContractViolationKind::InvalidPayload
+        ));
+        assert!(
+            finding.message.contains("task_key"),
+            "expected task_key fallback hint: {}",
+            finding.message
+        );
+    }
+
+    #[test]
+    fn u5_accepts_valid_task_id() {
+        // A non-placeholder, non-empty task_id is accepted
+        // when the task exists in the store. The store
+        // file may be empty (the projector creates tasks
+        // on demand) so an unknown id is also acceptable
+        // for the placeholder/empty cases — we just need
+        // to confirm the validator no longer over-rejects
+        // when the field is genuinely present.
+        let path = tmp_tasks_path();
+        let _store = TaskStore::load(&path).unwrap();
+
+        let event = Event::new(
+            "work.done",
+            r#"{"task_id":"real-id-1","task_key":"k1"}"#,
+        );
+        // With an empty store and a real task_id, the
+        // validator will return `TaskNotFound` (which is
+        // *not* the U5 placeholder path). What matters
+        // is that the placeholder/empty branches above
+        // are exclusive: a real id never falls into
+        // them.
+        let finding = validate_task(&event, &rule_with_task_field(), "loop-1", &path);
+        if let Some(f) = finding {
+            assert!(
+                !matches!(f.kind, ExecutionContractViolationKind::InvalidPayload),
+                "real task_id must not hit the InvalidPayload placeholder path: {f:?}"
+            );
         }
     }
 }
