@@ -25,7 +25,7 @@
 #
 # Event Flow:
 #   coordinator → executor (unit-01, TDD) → validator
-#     ├─ test.passed → coordinator → executor (unit-02) → ... → unit-N all done
+#     ├─ test.passed(step-01) [PHASE 1] → coordinator → executor (unit-02) → ... → unit-N all done
 #     │                                    ↓
 #     │                                  coordinator → review.start
 #     │                                  review-coordinator → dimension-reviewer(goal-alignment)
@@ -34,8 +34,10 @@
 #     │                                  → review-coordinator → review-synthesizer
 #     │                                  → review.complete + fix_plan_file
 #     │                                  → coordinator (creates fix-unit tasks)
-#     │                                  → executor (fix-unit) → validator → ...
-#     │                                  → all fix-units done → coordinator → plan.complete
+#     │                                  → executor (fix-unit-01) → validator
+#     │                                  → test.passed(fix-01) [PHASE 2: branch on step prefix!] → coordinator
+#     │                                  → executor (fix-unit-02) → validator → ... → last fix-unit done
+#     │                                  → coordinator → plan.complete (DO NOT emit review.start)
 #     │                                  → shipper → reporter → [LOOP_COMPLETE]
 #     │
 #     └─ test.failed → fixer (diagnose + fix, max 10 locate + 10 fix)
@@ -43,6 +45,14 @@
 #                        │   ├─ test.passed → back to main line
 #                        │   └─ test.failed → fixer (continue)
 #                        └─ fix.exhausted → executor (rewrite chance, max 10) → validator → ...
+#
+# PHASE GATE (CRITICAL): `test.passed` arrives in BOTH phases but with
+# opposite semantics. PHASE 1 (step-NN) advances the plan-unit flow;
+# PHASE 2 (fix-NN) advances the fix-unit flow. Branching on `step`
+# prefix in coordinator's Unit / Fix-Unit Advancement handler is
+# mandatory — see line ~775 for the gate table. Mixing the two
+# branches is the root cause of the 2026-06-24 regression where every
+# fix-unit completion incorrectly triggered a new review.start round.
 #
 # Why this architecture:
 #   - No multi-consumer topics: every event has exactly one subscriber
@@ -593,12 +603,33 @@ core:
 hats:
   coordinator:
     name: "📋 Coordinator"
-    description: "Parses plan files, creates unit tasks, advances next unit on test.passed, triggers review after all units complete."
+    description: "Parses plan files, creates unit tasks, advances units/fix-units by phase, triggers review after all plan units complete."
     # 2026-06-24 plan U1: coordinator directly advances unit flow (plan-gate removed)
     # - test.passed → advance to next unit via work.ready
     # - review.complete → read fix_plan_file, create fix-unit tasks
     # - work.failed → executor could not complete the unit; emit plan.blocked
     # - all units + fix-units complete → plan.complete
+    # PHASE-AWARE TRIGGERS — `test.passed` arrives in two phases with
+    # opposite semantics. Coordinator MUST branch on `step` prefix
+    # BEFORE doing any other work (see Unit / Fix-Unit Advancement).
+    #
+    # PHASE 1 — PLAN UNIT FLOW (steps: step-NN, trivial):
+    #   work.start          → parse plan, create tasks for U1..UN
+    #   test.passed(step-NN) → advance to next plan unit
+    #                         (review.start when last plan unit closes)
+    #   work.failed         → plan.blocked
+    #
+    # PHASE 2 — FIX-UNIT FLOW (steps: fix-NN; only after review.complete):
+    #   review.complete(fix_plan_file=<path>)
+    #                       → create fix-unit tasks, dispatch first fix-unit
+    #   test.passed(fix-NN) → advance to next fix-unit
+    #                         (plan.complete when last fix-unit closes;
+    #                          DO NOT emit review.start — fix-units are
+    #                          the END-of-plan signal, not a request for
+    #                          another review round)
+    #
+    # PHASE 3 — TERMINAL (handled by shipper, do not touch):
+    #   plan.complete / plan.blocked → shipper takes over
     triggers: ["work.start", "task.resume", "test.passed", "review.complete", "work.failed"]
     # 2026-06-28 plan U10 (R10): coordinator may emit
     # `LOOP_COMPLETE(success=false)` to self-stop the loop
@@ -752,13 +783,25 @@ hats:
       - Only after validation passes may you proceed to Event Publishing
 
       ### Unit / Fix-Unit Advancement (test.passed trigger)
-      When `test.passed` arrives, the validator has confirmed the current step's full test suite passes.
-      **HARD RULE — branch on the `step` prefix BEFORE doing anything else.** Mixing
-      the two branches is the root cause of the 2026-06-24 regression where every
-      fix-unit completion incorrectly triggered a new `review.start` round.
 
-      1. Read `progress.md` and `plan.md` to determine the current step and what's next.
-      2. **If `step` starts with `fix-` (fix-unit completion):**
+      **PHASE GATE (HARD RULE — read FIRST, execute SECOND):**
+
+      `test.passed` arrives in TWO phases with opposite semantics.
+      Branch on `step` prefix BEFORE reading progress.md or plan.md:
+
+      | `step` prefix   | Phase     | What you emit                                                              |
+      |-----------------|-----------|----------------------------------------------------------------------------|
+      | `step-NN`       | PLAN UNIT | next plan unit's `work.ready`, OR `review.start` if last plan unit         |
+      | `trivial`       | PLAN UNIT | plan.complete (no further units)                                           |
+      | `fix-NN`        | FIX UNIT  | next fix-unit's `work.ready`, OR `plan.complete` if last fix-unit          |
+
+      **DO NOT** emit `review.start` when `step` starts with `fix-` — that
+      triggers an unwanted second review round. (Historical note: 2026-06-24
+      regression had this exact failure mode; guard against it.)
+
+      After the phase gate, follow the matching branch below.
+
+      #### Branch A — `step` starts with `fix-` (fix-unit completion):
          - Read `fix_plan_file` from the most recent `review.complete` payload (cached in
            `context.md` when the fix-unit was dispatched) to know the fix-plan path.
          - Parse the `## Implementation Units` section of the fix-plan file. Count the
@@ -781,7 +824,8 @@ hats:
              line 2121 to evaluate against undefined values.
            - Stop — do NOT emit `review.start`. A fix-unit's `test.passed` is the
              end-of-plan signal, NOT a request for another review round.
-      3. **Else (plan unit completion — `step` does NOT start with `fix-`):**
+
+      #### Branch B — `step` does NOT start with `fix-` (plan unit / trivial completion):
          - If there is a next plan unit:
            - Create the runtime task for the next unit (if not already created)
            - Publish `work.ready` with payload containing the next unit's `task_id`,
@@ -804,8 +848,21 @@ hats:
          - Read the fix-plan file
          - Parse the `## Implementation Units` section; extract each `### U{N}.` heading and its `**Goal:**`, `**Files:**`, `**Approach:**`, `**Execution note:**`, `**Test scenarios:**`, `**Verification:**` fields
          - For each U-ID, create a runtime task with key format: `ce-executor:{plan_name}:fix-{NN}:{slug}` (NN matches the U-ID number; slug derived from the unit title)
-         - Publish `work.ready` for the FIRST fix-unit (U1) with payload: `plan_path` (set to the fix-plan file path), `plan_name`, `task_id`, `task_key`, `step: "fix-01"`, `complexity: "small"`, `fix_plan_file` (carry forward so the executor knows where to read its U-ID section)
-         - Stop — DO NOT use the generic "unit advancement logic" for subsequent fix-units; the `test.passed` handler above has its OWN fix-unit branch (rule 2) that takes precedence. See the 2026-06-24 P0-A regression comment above for why mixing the two paths is forbidden.
+         - Publish `work.ready` for the FIRST fix-unit (U1) with payload:
+           - `plan_path` (set to the fix-plan file path)
+           - `plan_name`
+           - `task_id`
+           - `task_key`
+           - `step: "fix-01"` — MUST follow the `fix-{NN}` format (zero-padded 2 digits).
+             This is the **phase signal** coordinator branches on in the
+             test.passed handler: `step-NN` / `trivial` = plan unit,
+             `fix-NN` = fix unit. NEVER mix the two — coordinator must
+             see `fix-NN` here so its PHASE 2 branch fires on the
+             next test.passed, not PHASE 1 (which would mis-trigger
+             a second review.start).
+           - `complexity: "small"`
+           - `fix_plan_file` (carry forward so the executor knows where to read its U-ID section)
+         - Stop — DO NOT use the generic "unit advancement logic" for subsequent fix-units; the `test.passed` handler above has its OWN fix-unit branch (Branch A) that takes precedence. See the 2026-06-24 P0-A regression comment above for why mixing the two paths is forbidden.
       4. After all fix-units complete (the fix-unit branch of `test.passed` handles this — see rule 2 above; do not duplicate the logic here).
 
       ### Executor Failure Handling (work.failed trigger)
