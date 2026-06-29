@@ -9757,6 +9757,12 @@ impl EventLoop {
         // when the step did not opt into `total_units`.
         self.drive_step_close_progress();
 
+        // 2026-06-29-007 plan U1b: advance `current_step`
+        // when unit_loop `total_units` reached. Runs after
+        // `drive_step_close_progress` so the step-close
+        // counter is up to date.
+        self.drive_step_transition();
+
         Ok(ProcessedEvents {
             had_events,
             had_raw_events,
@@ -9802,6 +9808,44 @@ impl EventLoop {
             .count() as u32;
         self.stage_pipeline
             .update_step_close_progress(&step_id, done, total_units);
+    }
+
+    /// 2026-06-29-007 plan U1b: drive the `current_step`
+    /// field transition after the unit_loop `total_units`
+    /// have been reached. When `current_step ==
+    /// "unit_loop"` and `work.done` count meets
+    /// `total_units`, advance to `review_walk`. The
+    /// helper is idempotent: re-entry while already on
+    /// `review_walk` (or any non-`unit_loop` step) is a
+    /// no-op.
+    fn drive_step_transition(&mut self) {
+        let step_id = self.state.flow_lifecycle.current_step_id().to_string();
+        if step_id != "unit_loop" {
+            return;
+        }
+        let total_units = match self.flow_step_total_units(&step_id) {
+            Some(n) => n,
+            None => return,
+        };
+        let done = self
+            .state
+            .seen_topics
+            .iter()
+            .filter(|t| t.as_str() == "work.done")
+            .count() as u32;
+        if done < total_units {
+            return;
+        }
+        if let Err(e) = self
+            .state
+            .flow_lifecycle
+            .advance_to("review_walk")
+        {
+            tracing::warn!(
+                error = %e,
+                "flow_lifecycle.advance_to(review_walk) failed; staying on unit_loop"
+            );
+        }
     }
 
     /// Resolve `FlowDeclaration.steps[i].total_units` for

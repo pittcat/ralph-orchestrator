@@ -1,0 +1,90 @@
+# 2026-06-29-007 U1b: flow_lifecycle.current_step transition 触发
+#
+# requires: u2-flow-step-scope-bypass.yml (前置)
+#
+# BDD 覆盖:event_loop 在 unit_loop 阶段收到所有 work.done 后,
+# drive_step_transition 触发 advance_to("review_walk"),
+# 之后 current_step_id() == "review_walk"。
+# 一旦 step 进入 review_walk,review.* 事件走 allowed_emits 路径,
+# 不再需要 DEFENSIVE_BYPASS。
+#
+# 期望:
+# - 2 步 plan 全部 work.done 后,seen_topics 包含 work.done x 2
+# - 无 flow_unknown_emit 记录
+# - U2 的 review 序列仍能完整 emit (走 allowed_emits)
+
+name: u1b_step_transition
+description: U1b - unit_loop 完成 N 步后 advance_to(review_walk) 触发
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 7
+  hats:
+    review-coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - review.dimensions.complete
+      default_publishes: review.dimensions.complete
+    dimension-reviewer:
+      subscribes_to:
+        - review.dimensions.complete
+      publishes:
+        - review.dimension.done
+      default_publishes: review.dimension.done
+    review-synthesizer:
+      subscribes_to:
+        - review.dimension.done
+      publishes:
+        - review.complete
+      default_publishes: review.complete
+
+mock_responses:
+  - |
+    <event topic="work.done">
+    plan_name: "u1b-demo"
+    step: "step-01"
+    task_id: "u1b-task-1"
+    </event>
+  - |
+    <event topic="work.done">
+    plan_name: "u1b-demo"
+    step: "step-02"
+    task_id: "u1b-task-2"
+    </event>
+  - |
+    <event topic="review.dimensions.complete">
+    wave_id: "u1b-wave"
+    dimensions: ["d1"]
+    </event>
+  - |
+    <event topic="review.dimension.done">
+    wave_id: "u1b-wave"
+    dimension: "d1"
+    verdict: ok
+    </event>
+  - |
+    <event topic="review.complete">
+    wave_id: "u1b-wave"
+    verdict: pass
+    </event>
+  - |
+    waiting.
+    </event>
+  - |
+    waiting.
+    </event>
+
+expected:
+  iterations: 7
+  events:
+    - topic: work.done
+    - topic: work.done
+    - topic: review.dimensions.complete
+    - topic: review.dimension.done
+    - topic: review.complete
+  absent_events:
+    - topic: plan.blocked
+  recovery_absent:
+    - "flow_unknown_emit"
+  completion: false

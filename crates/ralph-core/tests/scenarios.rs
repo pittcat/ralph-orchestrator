@@ -2715,6 +2715,18 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-29-007 plan U1b: regression for the
+/// `flow_lifecycle.current_step` field transition
+/// triggered by `drive_step_transition` after
+/// `unit_loop.total_units` is reached. Requires U2
+/// (DEFENSIVE_BYPASS 前置) to be green first so the
+/// review chain can drive itself during unit_loop.
+#[test]
+fn test_u1b_step_transition() {
+    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u1b-step-transition.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U2: regression for the
 /// `FlowStepScopeStage` DEFENSIVE_BYPASS placement
 /// contract. While `current_step == "unit_loop"`, review
