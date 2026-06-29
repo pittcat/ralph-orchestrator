@@ -6076,20 +6076,25 @@ impl EventLoop {
     /// `event.malformed`, `event.scope_violation`). These are audit/diagnostic
     /// events, not hat routing signals.
     fn is_system_event(topic: &str) -> bool {
+        // 2026-06-28-005 plan U3: the previous addition of
+        // `topic == "plan.blocked"` here was reverted because
+        // it broke the legitimate hat-routing path in
+        // `test_ce_executor_plan_blocked_routes_to_shipper_not_reporter`:
+        // the ce-executor-serial preset has a `shipper` hat
+        // with `triggers: ["plan.blocked"]`, and that test
+        // expects the shipper to be the next active hat after
+        // a real `plan.blocked` event. Marking the topic as a
+        // system event short-circuits that routing.
+        //
+        // The original KTD-3 contract-reject concern was that
+        // `plan.blocked` would shadow the targeted retry on
+        // the source hat. That is handled separately by
+        // publishing the targeted retry *before* the guidance
+        // publish (see event_loop/mod.rs around the contract
+        // reject site) and by keeping the publish `with_target`
+        // on the guidance event itself. The system-event guard
+        // is not required.
         topic.starts_with("event.")
-            // 2026-06-28-005: `plan.blocked` is the terminal
-            // orchestrator topic (replaced `human.guidance` as
-            // the contract-reject guidance target). Treat it
-            // like `event.*` for active-hat selection: a hat
-            // subscribing to `plan.*` or `*` (the Ralph
-            // fallback) must not be activated by the contract
-            // path's guidance publish. Without this guard,
-            // changing the default guidance_topic from
-            // `human.guidance` (which was partitioned to a
-            // separate `human_pending` queue and therefore
-            // skipped this loop) to `plan.blocked` would
-            // shadow the targeted retry to the source hat.
-            || topic == "plan.blocked"
     }
 
     fn is_entrypoint_topic(&self, topic: &str) -> bool {
