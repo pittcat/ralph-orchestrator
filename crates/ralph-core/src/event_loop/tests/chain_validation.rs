@@ -174,7 +174,10 @@ fn test_loop_cancel_terminates_without_chain_validation() {
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
-    install_admitting_flow(&mut event_loop, &["loop.cancel", "plan.approved", "all.built"]);
+    install_admitting_flow(
+        &mut event_loop,
+        &["loop.cancel", "plan.approved", "all.built"],
+    );
 
     // Send loop.cancel without any required events seen
     write_event_to_jsonl(&events_path, "loop.cancel", "rejected by human");

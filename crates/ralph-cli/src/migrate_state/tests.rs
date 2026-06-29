@@ -44,10 +44,7 @@ fn migrate_roundtrip_assigns_loop_id() {
 fn migrate_is_idempotent() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("tasks.jsonl");
-    write_jsonl(
-        &path,
-        &[r#"{"task_key":"a","loop_id":null}"#],
-    );
+    write_jsonl(&path, &[r#"{"task_key":"a","loop_id":null}"#]);
     let first = migrate_tasks_file(&path, "loop-mig-2").unwrap();
     assert_eq!(first.migrated, 1);
     let second = migrate_tasks_file(&path, "loop-mig-2").unwrap();
@@ -59,10 +56,7 @@ fn migrate_is_idempotent() {
 fn migrate_preserves_fresh_records_unchanged() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("tasks.jsonl");
-    write_jsonl(
-        &path,
-        &[r#"{"task_key":"a","loop_id":"existing"}"#],
-    );
+    write_jsonl(&path, &[r#"{"task_key":"a","loop_id":"existing"}"#]);
     let report = migrate_tasks_file(&path, "loop-mig-3").unwrap();
     assert_eq!(report.already_current, 1);
     let content = std::fs::read_to_string(&path).unwrap();

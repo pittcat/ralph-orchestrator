@@ -405,9 +405,7 @@ hats:
     // `EventBus` is a writer-side structure that does not
     // expose a public subscribe API; routed events land in
     // each hat's pending queue.
-    let executor_events = event_loop
-        .bus
-        .take_pending(&HatId::new("executor"));
+    let executor_events = event_loop.bus.take_pending(&HatId::new("executor"));
     let task_resume = executor_events
         .iter()
         .find(|e| e.topic.as_str() == "task.resume")

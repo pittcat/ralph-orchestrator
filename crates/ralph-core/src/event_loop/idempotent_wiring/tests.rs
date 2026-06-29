@@ -104,6 +104,12 @@ fn wiring_summary_distinguishes_keys_with_prefix() {
 #[test]
 fn wiring_key_helpers_match_documented_format() {
     assert_eq!(task_key("t1", "loop-1"), "task:t1:loop:loop-1");
-    assert_eq!(recovery_key("retry-1", "loop-1"), "recovery:retry-1:loop:loop-1");
-    assert_eq!(drift_key("finding-1", "loop-1"), "drift:finding-1:loop:loop-1");
+    assert_eq!(
+        recovery_key("retry-1", "loop-1"),
+        "recovery:retry-1:loop:loop-1"
+    );
+    assert_eq!(
+        drift_key("finding-1", "loop-1"),
+        "drift:finding-1:loop:loop-1"
+    );
 }

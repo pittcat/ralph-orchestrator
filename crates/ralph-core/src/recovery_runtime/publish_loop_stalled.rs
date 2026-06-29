@@ -4,27 +4,22 @@
 //!
 //! See plan 2026-06-28-003 §Defense 2, function 3.
 
-use super::{EnvelopeSnapshot, RecoveryAction, RuntimeContext};
 #[cfg(test)]
 use super::EventSnapshot;
+use super::{EnvelopeSnapshot, RecoveryAction, RuntimeContext};
 
 pub fn publish_loop_stalled_business_event(ctx: &RuntimeContext) -> Vec<RecoveryAction> {
     let stall_envelopes: Vec<&EnvelopeSnapshot> = ctx
         .recovery_envelopes
         .iter()
-        .filter(|e| {
-            e.source == "StallRecovery" || e.retry_key.starts_with("stall_recovery:")
-        })
+        .filter(|e| e.source == "StallRecovery" || e.retry_key.starts_with("stall_recovery:"))
         .collect();
 
     if stall_envelopes.is_empty() {
         return Vec::new();
     }
 
-    let already_published = ctx
-        .events
-        .iter()
-        .any(|e| e.topic == "loop.stalled");
+    let already_published = ctx.events.iter().any(|e| e.topic == "loop.stalled");
 
     if already_published {
         return Vec::new();
@@ -62,7 +57,8 @@ mod tests {
     fn publishes_loop_stalled_when_missing() {
         let ctx = RuntimeContext {
             recovery_envelopes: vec![EnvelopeSnapshot {
-                retry_key: "stall_recovery:executor:work_done:handoff_dispatch_timeout:*".to_string(),
+                retry_key: "stall_recovery:executor:work_done:handoff_dispatch_timeout:*"
+                    .to_string(),
                 source: "StallRecovery".to_string(),
                 outcome: "Pending".to_string(),
                 iteration: 5,
@@ -86,7 +82,8 @@ mod tests {
     fn skips_publish_when_loop_stalled_already_exists() {
         let ctx = RuntimeContext {
             recovery_envelopes: vec![EnvelopeSnapshot {
-                retry_key: "stall_recovery:executor:work_done:handoff_dispatch_timeout:*".to_string(),
+                retry_key: "stall_recovery:executor:work_done:handoff_dispatch_timeout:*"
+                    .to_string(),
                 source: "StallRecovery".to_string(),
                 outcome: "Pending".to_string(),
                 iteration: 5,

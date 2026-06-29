@@ -63,20 +63,19 @@ fn normalize_retry_key(key: &str) -> String {
 fn same_hat_topic(a: &str, b: &str) -> bool {
     let a_parts: Vec<&str> = a.split(':').collect();
     let b_parts: Vec<&str> = b.split(':').collect();
-    a_parts.len() >= 3
-        && b_parts.len() >= 3
-        && a_parts[1] == b_parts[1]
-        && a_parts[2] == b_parts[2]
+    a_parts.len() >= 3 && b_parts.len() >= 3 && a_parts[1] == b_parts[1] && a_parts[2] == b_parts[2]
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::EnvelopeSnapshot;
+    use super::*;
 
     #[test]
     fn empty_context_yields_no_action() {
-        assert!(dedupe_stall_recovery_with_missing_event_gate(&RuntimeContext::default()).is_empty());
+        assert!(
+            dedupe_stall_recovery_with_missing_event_gate(&RuntimeContext::default()).is_empty()
+        );
     }
 
     #[test]
@@ -84,7 +83,8 @@ mod tests {
         let ctx = RuntimeContext {
             recovery_envelopes: vec![
                 EnvelopeSnapshot {
-                    retry_key: "stall_recovery:executor:work_done:handoff_dispatch_timeout:*".to_string(),
+                    retry_key: "stall_recovery:executor:work_done:handoff_dispatch_timeout:*"
+                        .to_string(),
                     source: "StallRecovery".to_string(),
                     outcome: "Pending".to_string(),
                     iteration: 5,

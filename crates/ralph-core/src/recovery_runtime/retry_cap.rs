@@ -79,14 +79,10 @@ pub fn get_retry_attempt(ctx: &RuntimeContext, retry_key: &str) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::RetryKeyState;
+    use super::*;
 
-    fn ctx_with(
-        hat: Option<&str>,
-        key: Option<&str>,
-        attempt_count: u32,
-    ) -> RuntimeContext {
+    fn ctx_with(hat: Option<&str>, key: Option<&str>, attempt_count: u32) -> RuntimeContext {
         let retry_key_states = match key {
             Some(k) => vec![RetryKeyState {
                 retry_key: k.to_string(),
@@ -158,7 +154,10 @@ mod tests {
             3,
         );
         assert_eq!(
-            get_retry_attempt(&ctx, "stall_recovery:review-coordinator:review.wave.ready:timeout:*"),
+            get_retry_attempt(
+                &ctx,
+                "stall_recovery:review-coordinator:review.wave.ready:timeout:*"
+            ),
             3
         );
     }

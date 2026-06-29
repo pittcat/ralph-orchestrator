@@ -28,9 +28,7 @@ use crate::runtime_contract::{
 /// the runtime's accepted value sets. Returns one
 /// `RuntimeContractFinding` per mismatch; the caller appends
 /// them to the lint result.
-pub fn check_metadata_runtime_drift(
-    config: &RalphConfig,
-) -> Vec<RuntimeContractFinding> {
+pub fn check_metadata_runtime_drift(config: &RalphConfig) -> Vec<RuntimeContractFinding> {
     let mut findings = Vec::new();
     let Some(mechanism) = config.event_loop.mechanism.as_ref() else {
         // No mechanism block → nothing to validate.
@@ -216,6 +214,10 @@ mod tests {
         let findings = check_metadata_runtime_drift(&cfg);
         // 3 errors: state_idempotency, enforce_schema, repair_budget=0
         assert_eq!(findings.len(), 3);
-        assert!(findings.iter().all(|f| f.severity == FindingSeverity::Error));
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.severity == FindingSeverity::Error)
+        );
     }
 }

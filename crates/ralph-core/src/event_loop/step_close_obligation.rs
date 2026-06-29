@@ -120,7 +120,10 @@ fn parse_directive(branch: &str, directive: &str) -> PartialObligation {
     // `plan.blocked(reason="4_of_8_partial")`. Split
     // on `(` and trim.
     let (topic_part, reason_part) = match directive.split_once('(') {
-        Some((topic, rest)) => (topic.trim().to_string(), rest.trim_end_matches(')').to_string()),
+        Some((topic, rest)) => (
+            topic.trim().to_string(),
+            rest.trim_end_matches(')').to_string(),
+        ),
         None => (directive.trim().to_string(), String::new()),
     };
     // Extract `reason="<pattern>"` from the rest.
@@ -152,7 +155,11 @@ fn extract_reason_pattern(rest: &str) -> String {
 /// - the emit's topic matches one of the obligation's
 ///   `expected_topic` values AND the payload's `reason`
 ///   contains the expected substring.
-pub fn emit_satisfies_obligation(obligation: &Obligation, event_topic: &str, event_payload: &str) -> bool {
+pub fn emit_satisfies_obligation(
+    obligation: &Obligation,
+    event_topic: &str,
+    event_payload: &str,
+) -> bool {
     match obligation {
         Obligation::None => true,
         Obligation::Pending(branches) => branches.iter().any(|b| {

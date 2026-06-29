@@ -63,10 +63,7 @@ impl VerdictGateStage {
 
     /// True if `topic` is in the locked `terminal_emits` set.
     pub fn is_terminal(&self, topic: &str) -> bool {
-        self.flow
-            .terminal_emits
-            .iter()
-            .any(|t| t == topic)
+        self.flow.terminal_emits.iter().any(|t| t == topic)
     }
 }
 

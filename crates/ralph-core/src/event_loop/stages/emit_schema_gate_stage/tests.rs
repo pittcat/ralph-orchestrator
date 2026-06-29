@@ -1,7 +1,5 @@
 use super::*;
-use crate::event_loop::stage_pipeline::{
-    EmitStage, FlowStep, RepairStateMachine, StageContext,
-};
+use crate::event_loop::stage_pipeline::{EmitStage, FlowStep, RepairStateMachine, StageContext};
 use ralph_proto::Event;
 
 fn ctx() -> StageContext<'static> {
@@ -11,7 +9,8 @@ fn ctx() -> StageContext<'static> {
     // from `stage_pipeline`). The lifetime trick with
     // `Box::leak` keeps the borrow checker happy
     // without changing the public API.
-    let repair: &'static mut RepairStateMachine = Box::leak(Box::new(RepairStateMachine::default()));
+    let repair: &'static mut RepairStateMachine =
+        Box::leak(Box::new(RepairStateMachine::default()));
     StageContext::for_test_machine(FlowStep::new("unit_loop"), "loop-1", 1, repair)
 }
 
@@ -115,7 +114,10 @@ fn emit_schema_gate_stage_custom_required_overrides_defaults() {
     // Default-schema topics are no longer gated because we
     // built the stage from a custom table.
     let e = ev("plan.blocked", "{}");
-    assert!(stage.check(&mut ctx(), &e).is_ok(), "custom stage must not fall back to defaults");
+    assert!(
+        stage.check(&mut ctx(), &e).is_ok(),
+        "custom stage must not fall back to defaults"
+    );
 
     // Custom event with missing field is gated.
     let e = ev("custom.event", "{}");

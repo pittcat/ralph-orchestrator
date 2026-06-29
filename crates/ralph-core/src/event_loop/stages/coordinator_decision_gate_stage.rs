@@ -79,10 +79,7 @@ impl EmitStage for CoordinatorDecisionGateStage {
         }
 
         if !self.flag.is_closed() {
-            return Err(StageReject::new(
-                self.name(),
-                "upstream_review_incomplete",
-            ));
+            return Err(StageReject::new(self.name(), "upstream_review_incomplete"));
         }
 
         // Re-borrow the context to ensure ctx is not
@@ -141,10 +138,7 @@ pub fn classify_work_ready(payload: &str) -> PhaseClass {
     match step_value {
         serde_json::Value::String(s) => classify_plain_step_with_last(s, false),
         serde_json::Value::Object(_) => {
-            let step_str = step_value
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let step_str = step_value.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let last = step_value
                 .get("last_in_phase")
                 .and_then(|v| v.as_bool())
@@ -214,8 +208,8 @@ impl CoordinatorDecisionGateStage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event_loop::stage_pipeline::{FlowStep, StageContext};
     use crate::event_loop::repair_flow::RepairStateMachine;
+    use crate::event_loop::stage_pipeline::{FlowStep, StageContext};
 
     fn ctx<'a>(repair: &'a mut RepairStateMachine) -> StageContext<'a> {
         StageContext::for_test_machine(FlowStep::new("review_walk"), "loop-1", 1, repair)
@@ -289,9 +283,15 @@ mod tests {
     #[test]
     fn topic_for_phase_table() {
         assert_eq!(topic_for_phase(PhaseClass::PlanUnitMid), None);
-        assert_eq!(topic_for_phase(PhaseClass::PlanUnitLast), Some("review.start"));
+        assert_eq!(
+            topic_for_phase(PhaseClass::PlanUnitLast),
+            Some("review.start")
+        );
         assert_eq!(topic_for_phase(PhaseClass::FixUnitMid), None);
-        assert_eq!(topic_for_phase(PhaseClass::FixUnitLast), Some("plan.complete"));
+        assert_eq!(
+            topic_for_phase(PhaseClass::FixUnitLast),
+            Some("plan.complete")
+        );
         assert_eq!(topic_for_phase(PhaseClass::Trivial), Some("plan.complete"));
         assert_eq!(topic_for_phase(PhaseClass::Unknown), None);
     }
@@ -300,18 +300,20 @@ mod tests {
     fn rewrite_work_ready_topic_for_last_fix_unit() {
         let mut e = event("work.ready");
         let _ = serde_json::from_str::<serde_json::Value>(&e.payload).unwrap(); // sanity
-        e.payload =
-            r#"{"step":{"id":"fix-02","last_in_phase":true},"task_id":"t"}"#.to_string();
-        assert!(CoordinatorDecisionGateStage::rewrite_work_ready_topic(&mut e));
+        e.payload = r#"{"step":{"id":"fix-02","last_in_phase":true},"task_id":"t"}"#.to_string();
+        assert!(CoordinatorDecisionGateStage::rewrite_work_ready_topic(
+            &mut e
+        ));
         assert_eq!(e.topic.as_str(), "plan.complete");
     }
 
     #[test]
     fn rewrite_work_ready_topic_for_mid_fix_unit_keeps_work_ready() {
         let mut e = event("work.ready");
-        e.payload =
-            r#"{"step":{"id":"fix-01","last_in_phase":false},"task_id":"t"}"#.to_string();
-        assert!(!CoordinatorDecisionGateStage::rewrite_work_ready_topic(&mut e));
+        e.payload = r#"{"step":{"id":"fix-01","last_in_phase":false},"task_id":"t"}"#.to_string();
+        assert!(!CoordinatorDecisionGateStage::rewrite_work_ready_topic(
+            &mut e
+        ));
         assert_eq!(e.topic.as_str(), "work.ready");
     }
 
@@ -334,9 +336,7 @@ mod tests {
         );
         // Object form carries the `last_in_phase` flag.
         assert_eq!(
-            classify_work_ready(
-                r#"{"step":{"id":"fix-02","last_in_phase":true}}"#
-            ),
+            classify_work_ready(r#"{"step":{"id":"fix-02","last_in_phase":true}}"#),
             PhaseClass::FixUnitLast
         );
     }

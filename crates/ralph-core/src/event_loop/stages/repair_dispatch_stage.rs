@@ -57,9 +57,7 @@ pub const REPAIR_TOPICS: &[&str] = &[
 /// topics that need budget tracking without stream
 /// routing should be added here, NOT to
 /// `REPAIR_TOPICS`.
-pub const REPAIR_BUDGET_TRACKED_TOPICS: &[&str] = &[
-    "task.resume",
-];
+pub const REPAIR_BUDGET_TRACKED_TOPICS: &[&str] = &["task.resume"];
 
 /// `true` if `topic` is on the repair stream. Used by the
 /// pipeline dispatcher to route the event to the repair sink
@@ -127,8 +125,7 @@ impl EmitStage for RepairDispatchStage {
     }
 
     fn check(&self, ctx: &mut StageContext, event: &Event) -> Result<(), StageReject> {
-        if !is_repair_topic(event.topic.as_str())
-            && !is_budget_tracked_topic(event.topic.as_str())
+        if !is_repair_topic(event.topic.as_str()) && !is_budget_tracked_topic(event.topic.as_str())
         {
             // Non-repair events pass through unchanged.
             // No budget is consumed.
@@ -146,8 +143,7 @@ impl EmitStage for RepairDispatchStage {
         // event, which violated R2 per-task
         // budget). Lazy-initialise the machine
         // on first use.
-        let task_key = extract_task_key(event)
-            .unwrap_or_else(|| "_loop_default".to_string());
+        let task_key = extract_task_key(event).unwrap_or_else(|| "_loop_default".to_string());
         let payload: Value = serde_json::from_str(event.payload.as_str())
             .unwrap_or(Value::Object(Default::default()));
         // P1-4: budget-tracked topics (e.g. `task.resume`)
@@ -168,9 +164,9 @@ impl EmitStage for RepairDispatchStage {
             use crate::event_loop::repair_flow::RepairState;
             match machine.state() {
                 RepairState::Detected => RepairAction::BeginDiagnosis,
-                RepairState::Diagnosing
-                | RepairState::Fixing
-                | RepairState::Verifying => RepairAction::Retry,
+                RepairState::Diagnosing | RepairState::Fixing | RepairState::Verifying => {
+                    RepairAction::Retry
+                }
                 RepairState::Closed => RepairAction::Close,
             }
         } else {
@@ -204,11 +200,12 @@ impl EmitStage for RepairDispatchStage {
                 // synthesises a `plan.blocked` to
                 // surface the budget exhaustion to the
                 // operator.
-                Err(StageReject::new(self.name(), exhausted.reason_code)
-                    .with_missing_fields(vec![
+                Err(
+                    StageReject::new(self.name(), exhausted.reason_code).with_missing_fields(vec![
                         format!("retries_consumed={}", exhausted.retries_consumed),
                         format!("max={}", exhausted.max),
-                    ]))
+                    ]),
+                )
             }
             RepairTransitionResult::IllegalTransition { from, action: _ } => {
                 // An illegal transition is a programming

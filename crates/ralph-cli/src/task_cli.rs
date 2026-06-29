@@ -223,6 +223,19 @@ fn operation_context_for(root: Option<&PathBuf>) -> OperationContext {
     OperationContext::detect(resolve_workspace_root(root))
 }
 
+/// Reject empty or whitespace-only task ids early with a clear error.
+///
+/// All `ralph tools task` subcommands that take a task id as input call
+/// this guard before touching the store. This prevents the agent from
+/// accidentally passing `""` (e.g. copied from an empty `work.ready`)
+/// and getting the misleading "Task not found" message.
+fn validate_task_id(id: &str) -> Result<()> {
+    if id.trim().is_empty() {
+        bail!("task_id cannot be empty");
+    }
+    Ok(())
+}
+
 /// Authorize a lifecycle mutation on `task` from the given context.
 ///
 /// Returns `Ok(())` when the caller may mutate, `Err` with a clear
@@ -944,6 +957,7 @@ fn start_task_with_context(
     coordinator_hats: &[String],
     use_colors: bool,
 ) -> Result<()> {
+    validate_task_id(task_id)?;
     let snapshot = store
         .get(task_id)
         .cloned()
@@ -989,6 +1003,7 @@ fn close_task_with_context(
     coordinator_hats: &[String],
     use_colors: bool,
 ) -> Result<()> {
+    validate_task_id(task_id)?;
     let snapshot = store
         .get(task_id)
         .cloned()
@@ -1037,6 +1052,7 @@ fn fail_task_with_context(
     coordinator_hats: &[String],
     use_colors: bool,
 ) -> Result<()> {
+    validate_task_id(task_id)?;
     let snapshot = store
         .get(task_id)
         .cloned()
@@ -1066,6 +1082,7 @@ fn fail_task_with_context(
 }
 
 fn execute_show(args: ShowArgs, root: Option<&PathBuf>, use_colors: bool) -> Result<()> {
+    validate_task_id(&args.id)?;
     let path = get_tasks_path(root);
     let store = TaskStore::load(&path).context("Failed to load tasks")?;
 
@@ -1191,6 +1208,7 @@ fn reopen_task_with_context(
     coordinator_hats: &[String],
     use_colors: bool,
 ) -> Result<()> {
+    validate_task_id(task_id)?;
     let snapshot = store
         .get(task_id)
         .cloned()
@@ -1859,5 +1877,48 @@ mod tests {
         let root = temp_dir.path().to_path_buf();
         let hats = load_coordinator_hats(Some(&root));
         assert!(hats.is_empty());
+    }
+
+    // ---- empty task_id guard tests ----
+
+    #[test]
+    fn test_validate_task_id_accepts_non_empty() {
+        assert!(validate_task_id("task-123-abc").is_ok());
+    }
+
+    #[test]
+    fn test_validate_task_id_rejects_empty() {
+        let err = validate_task_id("").expect_err("empty task_id must be rejected");
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_task_id_rejects_whitespace_only() {
+        let err = validate_task_id("   ").expect_err("whitespace-only task_id must be rejected");
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_start_task_with_context_rejects_empty_id() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-a");
+        let mut store = open_store(root);
+        let ctx = ctx_for(root, Some("loop-a"), Some("executor"));
+        let err = start_task_with_context(&mut store, "", &ctx, &["executor".to_string()], false)
+            .expect_err("empty task_id must be rejected");
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_close_task_with_context_rejects_empty_id() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-a");
+        let mut store = open_store(root);
+        let ctx = ctx_for(root, Some("loop-a"), Some("executor"));
+        let err = close_task_with_context(&mut store, "", &ctx, &["executor".to_string()], false)
+            .expect_err("empty task_id must be rejected");
+        assert!(err.to_string().contains("cannot be empty"));
     }
 }

@@ -1,4 +1,4 @@
-use super::{is_partial_state, FlowDeclaration, FlowParseError};
+use super::{FlowDeclaration, FlowParseError, is_partial_state};
 
 const CE_EXECUTOR_SERIAL_FLOW: &str = r#"
 mechanism:

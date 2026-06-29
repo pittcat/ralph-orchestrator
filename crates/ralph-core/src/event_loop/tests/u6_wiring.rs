@@ -47,10 +47,7 @@ hats:
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Publish a complete `work.done` with a `task_id` field.
-    let event = Event::new(
-        "work.done",
-        r#"{"task_id":"task-u6-ok","note":"complete"}"#,
-    );
+    let event = Event::new("work.done", r#"{"task_id":"task-u6-ok","note":"complete"}"#);
     event_loop.publish_event(event);
 }
 

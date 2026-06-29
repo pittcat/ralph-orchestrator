@@ -1758,10 +1758,7 @@ mod u5_placeholder_tests {
         let path = tmp_tasks_path();
         let _store = TaskStore::load(&path).unwrap();
 
-        let event = Event::new(
-            "work.done",
-            r#"{"task_id":"real-id-1","task_key":"k1"}"#,
-        );
+        let event = Event::new("work.done", r#"{"task_id":"real-id-1","task_key":"k1"}"#);
         // With an empty store and a real task_id, the
         // validator will return `TaskNotFound` (which is
         // *not* the U5 placeholder path). What matters

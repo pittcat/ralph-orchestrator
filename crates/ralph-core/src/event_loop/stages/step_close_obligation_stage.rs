@@ -41,7 +41,7 @@
 use crate::event_loop::flow_declaration::FlowDeclaration;
 use crate::event_loop::stage_pipeline::{EmitStage, StageContext, StageReject};
 use crate::event_loop::step_close_obligation::{
-    emit_satisfies_obligation, required_emit, Obligation, StepProgress,
+    Obligation, StepProgress, emit_satisfies_obligation, required_emit,
 };
 use ralph_proto::Event;
 use std::collections::HashMap;
@@ -93,10 +93,10 @@ impl StepCloseObligationStage {
     /// rejected silently (a regression in the
     /// counter would mask an obligation violation).
     pub fn update_progress(&mut self, step_id: &str, done: u32, total: u32) {
-        let entry = self.progress.entry(step_id.to_string()).or_insert(StepProgress {
-            done: 0,
-            total: 0,
-        });
+        let entry = self
+            .progress
+            .entry(step_id.to_string())
+            .or_insert(StepProgress { done: 0, total: 0 });
         if done >= entry.done {
             entry.done = done;
             entry.total = total;

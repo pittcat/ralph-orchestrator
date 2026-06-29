@@ -22,10 +22,10 @@
 
 use crate::config::EventLoopConfig;
 use crate::event_loop::flow_declaration::FlowDeclaration;
+pub use crate::event_loop::repair_flow::RepairStateMachine;
 use crate::event_loop::stages::emit_schema_gate_stage::{
     EmitSchemaGateStage, required_fields_from_loop_config,
 };
-pub use crate::event_loop::repair_flow::RepairStateMachine;
 use ralph_proto::Event;
 
 /// A single stage in the emit pipeline.

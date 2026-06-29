@@ -125,7 +125,13 @@ fn wiring_composition_emit_to_eventbus() {
     // appear in the runtime pipeline.
     assert_eq!(
         names,
-        vec!["RepairDispatch", "EmitSchemaGate", "FlowStepScope", "StepCloseObligation", "VerdictGate"],
+        vec![
+            "RepairDispatch",
+            "EmitSchemaGate",
+            "FlowStepScope",
+            "StepCloseObligation",
+            "VerdictGate"
+        ],
         "locked stage order (baseline = 5 stages)"
     );
 
@@ -149,9 +155,11 @@ fn wiring_composition_emit_to_eventbus() {
         "{\"id\":\"t-1\",\"loop_id\":null,\"title\":\"legacy\"}\n",
     )
     .unwrap();
-    let backfilled =
-        ralph_core::event_loop::legacy_task_relocate::relocate_legacy_tasks(&tasks_path, "loop-comp-1")
-            .unwrap();
+    let backfilled = ralph_core::event_loop::legacy_task_relocate::relocate_legacy_tasks(
+        &tasks_path,
+        "loop-comp-1",
+    )
+    .unwrap();
     assert_eq!(backfilled, 1, "one legacy record must be backfilled");
 
     // 3. work.done 进入 EmitSchemaGate + FlowStepScope + VerdictGate 后
@@ -191,10 +199,7 @@ fn wiring_composition_partial_state() {
     let pipeline = make_emit_only_pipeline(flow);
     let mut ctx = make_ctx("unit_loop", "loop-partial-ok");
 
-    let event = make_event(
-        "plan.blocked",
-        json!({"reason": "4_of_8_partial_done"}),
-    );
+    let event = make_event("plan.blocked", json!({"reason": "4_of_8_partial_done"}));
     let result = pipeline.run(&mut ctx, &event);
     assert!(
         result.is_ok(),
@@ -213,10 +218,7 @@ fn wiring_composition_partial_state_reject() {
     let pipeline = make_emit_only_pipeline(flow);
     let mut ctx = make_ctx("unit_loop", "loop-partial-bad");
 
-    let event = make_event(
-        "plan.blocked",
-        json!({"reason": "i_give_up"}),
-    );
+    let event = make_event("plan.blocked", json!({"reason": "i_give_up"}));
     let result = pipeline.run(&mut ctx, &event);
     let reject = result.expect_err("reason mismatch must produce StageReject");
     assert_eq!(reject.stage_name, "FlowStepScope");
@@ -251,7 +253,10 @@ fn wiring_composition_budget_exhausted_to_blocked() {
     // 1. 验证 repair_flow 模块的 BudgetExhausted reason_code 拼接契约。
     //    budget.max=0：BeginDiagnosis → Diagnosing；然后 Retry 即 budget exhausted。
     let mut sm = RepairStateMachine::new(RepairBudget::new(0));
-    assert!(matches!(sm.try_transition(RepairAction::BeginDiagnosis), RepairTransitionResult::Accepted));
+    assert!(matches!(
+        sm.try_transition(RepairAction::BeginDiagnosis),
+        RepairTransitionResult::Accepted
+    ));
     let exhausted = sm.try_transition(RepairAction::Retry);
     let budget_exhausted = match exhausted {
         RepairTransitionResult::BudgetExhausted(b) => b,
@@ -339,13 +344,16 @@ fn wiring_composition_idempotent_final_under_concurrency() {
     }
 
     assert_eq!(ok, 1, "exactly one writer must succeed (got {ok})");
-    assert_eq!(rejected, n - 1, "all other writers must see FinalAlreadySet (got {rejected})");
+    assert_eq!(
+        rejected,
+        n - 1,
+        "all other writers must see FinalAlreadySet (got {rejected})"
+    );
 
     // On-disk file has exactly one final record.
-    let content = std::fs::read_to_string(
-        workspace.join("recovery:race-100:loop:loop-race-100.jsonl"),
-    )
-    .unwrap();
+    let content =
+        std::fs::read_to_string(workspace.join("recovery:race-100:loop:loop-race-100.jsonl"))
+            .unwrap();
     let line_count = content.lines().filter(|l| !l.trim().is_empty()).count();
     assert_eq!(
         line_count, 1,
@@ -396,7 +404,9 @@ fn wiring_composition_worktree_archive_version_bump() {
         archived_file.display()
     );
     assert!(
-        !workspace.join("recovery:retry-A:loop:loop-A.jsonl").exists(),
+        !workspace
+            .join("recovery:retry-A:loop:loop-A.jsonl")
+            .exists(),
         "old jsonl must be removed from workspace root"
     );
 
@@ -490,8 +500,7 @@ fn wiring_composition_schema_hash_drift_detected() {
         .run(&mut ctx, &empty_reason)
         .expect_err("empty reason must be rejected by EmitSchemaGate or FlowStepScope");
     assert!(
-        reject_empty.stage_name == "EmitSchemaGate"
-            || reject_empty.stage_name == "FlowStepScope",
+        reject_empty.stage_name == "EmitSchemaGate" || reject_empty.stage_name == "FlowStepScope",
         "stage name must be EmitSchemaGate or FlowStepScope; got {}",
         reject_empty.stage_name
     );

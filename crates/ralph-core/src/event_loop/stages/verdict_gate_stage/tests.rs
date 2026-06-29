@@ -1,8 +1,6 @@
 use super::*;
 use crate::event_loop::flow_declaration::FlowDeclaration;
-use crate::event_loop::stage_pipeline::{
-    EmitStage, FlowStep, RepairStateMachine, StageContext,
-};
+use crate::event_loop::stage_pipeline::{EmitStage, FlowStep, RepairStateMachine, StageContext};
 use ralph_proto::Event;
 
 const FLOW_YAML: &str = r#"
@@ -21,7 +19,8 @@ fn flow() -> FlowDeclaration {
 }
 
 fn ctx() -> StageContext<'static> {
-    let repair: &'static mut RepairStateMachine = Box::leak(Box::new(RepairStateMachine::default()));
+    let repair: &'static mut RepairStateMachine =
+        Box::leak(Box::new(RepairStateMachine::default()));
     StageContext::for_test_machine(FlowStep::new("unit_loop"), "loop-1", 1, repair)
 }
 

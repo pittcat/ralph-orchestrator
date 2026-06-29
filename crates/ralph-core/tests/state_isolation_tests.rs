@@ -24,8 +24,7 @@ fn fresh_workspace(label: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = std::env::temp_dir()
-        .join(format!("ralph_state_isolation_{label}_{pid}_{nanos}"));
+    let dir = std::env::temp_dir().join(format!("ralph_state_isolation_{label}_{pid}_{nanos}"));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create workspace");
     dir
@@ -77,8 +76,7 @@ fn state_isolation_archive_moves_recovery_under_new_loop_id() {
     assert!(workspace.join("recovery.jsonl").exists());
 
     // Second run with a different loop_id → archive loop-A.
-    let archived =
-        archive_state_for_loop(&workspace, "loop-B").expect("second archive");
+    let archived = archive_state_for_loop(&workspace, "loop-B").expect("second archive");
     let archive_dir = archived.expect("archive_dir returned");
     assert!(
         archive_dir.exists(),
@@ -103,8 +101,7 @@ fn state_isolation_same_loop_id_does_not_archive() {
     seed_recovery(&workspace, "loop-resume", 2);
 
     // Same loop_id → resume case → no archive.
-    let result =
-        archive_state_for_loop(&workspace, "loop-resume").expect("resume archive");
+    let result = archive_state_for_loop(&workspace, "loop-resume").expect("resume archive");
     assert!(
         result.is_none(),
         "resume on the same loop_id must be a no-op"
@@ -141,10 +138,8 @@ fn state_isolation_idempotent_log_opens_after_archive() {
 
     // Append a non-final record.
     let key = "recovery:r-new:loop:loop-B";
-    log.append(
-        IdempotentRecord::new(key).with_payload(serde_json::json!({"seed": true})),
-    )
-    .expect("append non-final record");
+    log.append(IdempotentRecord::new(key).with_payload(serde_json::json!({"seed": true})))
+        .expect("append non-final record");
     assert_eq!(
         log.final_count(),
         0,

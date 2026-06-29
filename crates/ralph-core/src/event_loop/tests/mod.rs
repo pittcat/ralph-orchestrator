@@ -64,6 +64,11 @@ mod text_fallback;
 /// U11-T2 (plan 2026-06-22-u11-unified-state-production-wiring):
 /// per-event unified `ValidationPipeline` integration tests.
 mod u11_unified_pipeline_integration;
+/// U11 (2026-06-27 mechanism foundation): `archive_state_for_loop`
+/// wired into `EventLoop::with_context_and_diagnostics` so worktree
+/// reuse archives previous-loop `.ralph/*.jsonl` before
+/// `IdempotentLog::open` writes the new `loop-version.json`.
+mod u11_wiring;
 mod wave_context_env_var;
 mod wave_context_injection;
 mod wave_isolated_scope;
@@ -71,16 +76,16 @@ mod wave_policy_rejection;
 mod wave_recovery_timeout;
 mod wave_results;
 mod workflow_guard;
-/// U11 (2026-06-27 mechanism foundation): `archive_state_for_loop`
-/// wired into `EventLoop::with_context_and_diagnostics` so worktree
-/// reuse archives previous-loop `.ralph/*.jsonl` before
-/// `IdempotentLog::open` writes the new `loop-version.json`.
-mod u11_wiring;
 
-/// U6 (2026-06-27-001 plan): StagePipeline is wired into
-/// EventLoop::publish_event so every hat emit passes through
-/// the locked default stages before reaching the event bus.
-mod u6_wiring;
+/// U10 (2026-06-27-002 plan): `VerdictGate` is the
+/// sole termination dispatcher. The stage pipeline's
+/// `is_terminal` probe writes a loop-termination
+/// record when a `LOOP_COMPLETE` event clears the gate.
+mod u10_verdict_dispatcher;
+/// U13 (2026-06-27-002 plan): archive failures
+/// abort the loop start. `with_context_and_diagnostics`
+/// returns `Err` instead of warning + continuing.
+mod u13_archive_fail_closed;
 /// U2 (2026-06-27-002 plan): `publish_event` routes
 /// through the single `evaluate_emit_gate` facade.
 mod u2_publish_emit_gate;
@@ -92,6 +97,10 @@ mod u3_jsonl_emit_gate;
 /// U4 (2026-06-27-002 plan): `stage_pipeline` re-exports
 /// `repair_flow::RepairStateMachine`; the stub is gone.
 mod u4_repair_sm_unify;
+/// U6 (2026-06-27-001 plan): StagePipeline is wired into
+/// EventLoop::publish_event so every hat emit passes through
+/// the locked default stages before reaching the event bus.
+mod u6_wiring;
 /// U7 (2026-06-27-002 plan): the U6 `RepairStreamSink`
 /// is wired into both `publish_event` and
 /// `process_parse_result`. The bus never receives a
@@ -106,12 +115,3 @@ mod u8_legacy_relocate_and_close;
 /// from schema + runtime. Only `LOOP_COMPLETE`
 /// terminates the dispatcher.
 mod u9_verdict_legacy_retire;
-/// U10 (2026-06-27-002 plan): `VerdictGate` is the
-/// sole termination dispatcher. The stage pipeline's
-/// `is_terminal` probe writes a loop-termination
-/// record when a `LOOP_COMPLETE` event clears the gate.
-mod u10_verdict_dispatcher;
-/// U13 (2026-06-27-002 plan): archive failures
-/// abort the loop start. `with_context_and_diagnostics`
-/// returns `Err` instead of warning + continuing.
-mod u13_archive_fail_closed;

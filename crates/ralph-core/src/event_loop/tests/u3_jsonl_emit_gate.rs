@@ -91,9 +91,7 @@ fn u3_jsonl_empty_plan_blocked_rejected_not_in_accepted() {
         .filter(|e| {
             // Re-run the publish-time gate filter.
             let mut stage_ctx = event_loop.build_stage_context_for(e);
-            let outcome = crate::event_loop::emit_gate::evaluate_emit_gate(
-                &mut stage_ctx, e,
-            );
+            let outcome = crate::event_loop::emit_gate::evaluate_emit_gate(&mut stage_ctx, e);
             matches!(
                 outcome,
                 crate::event_loop::emit_gate::EmitGateOutcome::AcceptMainBus
@@ -212,9 +210,7 @@ fn u3_jsonl_repair_topic_routed_to_placeholder_not_accepted() {
         .filter(|e| {
             // Re-run the publish-time gate filter.
             let mut stage_ctx = event_loop.build_stage_context_for(e);
-            let outcome = crate::event_loop::emit_gate::evaluate_emit_gate(
-                &mut stage_ctx, e,
-            );
+            let outcome = crate::event_loop::emit_gate::evaluate_emit_gate(&mut stage_ctx, e);
             matches!(
                 outcome,
                 crate::event_loop::emit_gate::EmitGateOutcome::AcceptMainBus

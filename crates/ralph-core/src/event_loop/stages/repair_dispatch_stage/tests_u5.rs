@@ -18,9 +18,7 @@ use super::*;
 use crate::event_loop::repair_flow::{
     RepairAction, RepairState, RepairStateMachine, RepairTransitionResult,
 };
-use crate::event_loop::stage_pipeline::{
-    FlowStep, RepairStateMachine as PipelineSm, StageContext,
-};
+use crate::event_loop::stage_pipeline::{FlowStep, RepairStateMachine as PipelineSm, StageContext};
 use ralph_proto::Event;
 
 fn ctx_with_budget<'a>(
@@ -49,10 +47,7 @@ fn u5_first_repair_topic_accepted_by_pipeline() {
     // the stage twice with a fresh `sm` and assert
     // via the second `sm`'s state.
     let mut second_sm = RepairStateMachine::default();
-    let outcome = stage.check(
-        &mut ctx_with_budget(&mut sm, "task.relocate_legacy"),
-        &e,
-    );
+    let outcome = stage.check(&mut ctx_with_budget(&mut sm, "task.relocate_legacy"), &e);
     assert!(outcome.is_ok(), "first repair topic must be accepted");
     // Smoke: the second machine is untouched (we
     // did not pass it to the stage) and therefore
@@ -165,7 +160,10 @@ fn u5_budget_exhausted_subsequent_transitions_remain_reject() {
     assert!(matches!(result, RepairTransitionResult::BudgetExhausted(_)));
     // Second attempt — still BudgetExhausted, no panic.
     let result2 = second.try_transition(RepairAction::Retry);
-    assert!(matches!(result2, RepairTransitionResult::BudgetExhausted(_)));
+    assert!(matches!(
+        result2,
+        RepairTransitionResult::BudgetExhausted(_)
+    ));
     // P1-5 (2026-06-27 adversarial review): the
     // stage now consumes a per-task machine from
     // the `repair_states` registry, keyed by
@@ -204,8 +202,12 @@ fn u5_budget_exhausted_subsequent_transitions_remain_reject() {
     );
     let reject = stage_outcome.expect_err("expected stage to reject after exhaustion");
     assert!(
-        reject.reason_code.starts_with("repair_unrecoverable_after_")
-            || reject.reason_code.starts_with("repair_illegal_transition_from_"),
+        reject
+            .reason_code
+            .starts_with("repair_unrecoverable_after_")
+            || reject
+                .reason_code
+                .starts_with("repair_illegal_transition_from_"),
         "got reject reason_code={}",
         reject.reason_code
     );

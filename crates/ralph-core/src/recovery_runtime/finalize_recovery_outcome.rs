@@ -30,11 +30,22 @@ pub fn finalize_recovery_outcome_on_flapping(ctx: &RuntimeContext) -> Vec<Recove
 }
 
 fn is_flapping(history: &[String]) -> bool {
-    let recent: Vec<&str> = history.iter().rev().take(FLAP_WINDOW).map(|s| s.as_str()).collect();
+    let recent: Vec<&str> = history
+        .iter()
+        .rev()
+        .take(FLAP_WINDOW)
+        .map(|s| s.as_str())
+        .collect();
     if recent.len() < FLAP_THRESHOLD + 1 {
         return false;
     }
-    count_flips(&recent.iter().rev().map(|s| s.to_string()).collect::<Vec<_>>()) >= FLAP_THRESHOLD
+    count_flips(
+        &recent
+            .iter()
+            .rev()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+    ) >= FLAP_THRESHOLD
 }
 
 fn count_flips(history: &[String]) -> usize {
@@ -52,8 +63,8 @@ fn count_flips(history: &[String]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::RetryKeyState;
+    use super::*;
 
     #[test]
     fn no_flap_when_history_stable() {

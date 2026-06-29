@@ -901,8 +901,7 @@ mod tests {
         allowed_emits: [build.start, build.done, LOOP_COMPLETE]
         terminal_when: all_done
 "#;
-        let flow = FlowDeclaration::from_yaml(yaml)
-            .expect("diagnostic-flow YAML must parse");
+        let flow = FlowDeclaration::from_yaml(yaml).expect("diagnostic-flow YAML must parse");
         // Sanity: the helper declares the topics the callers emit. If a
         // future test adds a new topic, this assertion fails loudly
         // instead of silently producing a `flow_unknown_emit` reject.
@@ -924,6 +923,7 @@ mod tests {
             on_partial: step.on_partial.clone(),
             total_units: None,
         };
-        event_loop.stage_pipeline = crate::event_loop::stage_pipeline::StagePipeline::with_default_stages(flow);
+        event_loop.stage_pipeline =
+            crate::event_loop::stage_pipeline::StagePipeline::with_default_stages(flow);
     }
 }

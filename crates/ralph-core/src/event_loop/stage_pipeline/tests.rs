@@ -3,8 +3,8 @@ use crate::event_loop::stage_pipeline::{
     EmitStage, FlowStep, RepairStateMachine, StageContext, StagePipeline, StageReject,
 };
 use ralph_proto::Event;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Counter stage that accepts every event and increments a counter.
 struct AcceptCounter {
@@ -95,7 +95,9 @@ fn stage_pipeline_skeleton_reject_short_circuits() {
     ]);
 
     let event = dummy_event();
-    let err = pipeline.run(&mut dummy_ctx(&mut repair), &event).unwrap_err();
+    let err = pipeline
+        .run(&mut dummy_ctx(&mut repair), &event)
+        .unwrap_err();
 
     assert_eq!(err.stage_name, "Beta");
     assert_eq!(err.reason_code, "always_reject");
@@ -168,9 +170,14 @@ fn stage_pipeline_skeleton_locked_order_matches() {
         // includes `StepCloseObligation`
         // between `FlowStepScope` and
         // `VerdictGate`.
-        Box::new(crate::event_loop::stages::step_close_obligation_stage::StepCloseObligationStage::new(
-            FlowDeclaration::from_yaml("mechanism:\n  flow:\n    type: declared\n    version: 1\n    steps: []\n").unwrap(),
-        )),
+        Box::new(
+            crate::event_loop::stages::step_close_obligation_stage::StepCloseObligationStage::new(
+                FlowDeclaration::from_yaml(
+                    "mechanism:\n  flow:\n    type: declared\n    version: 1\n    steps: []\n",
+                )
+                .unwrap(),
+            ),
+        ),
         Box::new(VerdictGateStage),
     ]);
 
@@ -181,14 +188,25 @@ fn stage_pipeline_skeleton_locked_order_matches() {
     // `ArchiveVersion` stage is a loop-start hook,
     // not an emit stage, so it does not appear in
     // the runtime pipeline.
-    crate::assert_stage_order!(pipeline, [ArchiveVersion, RepairDispatch, EmitSchemaGate, FlowStepScope, StepCloseObligation, VerdictGate]);
+    crate::assert_stage_order!(
+        pipeline,
+        [
+            ArchiveVersion,
+            RepairDispatch,
+            EmitSchemaGate,
+            FlowStepScope,
+            StepCloseObligation,
+            VerdictGate
+        ]
+    );
 }
 
 #[test]
 fn stage_pipeline_order_default_matches_locked_emit_order() {
     use crate::event_loop::flow_declaration::FlowDeclaration;
 
-    let flow = FlowDeclaration::from_yaml(r#"
+    let flow = FlowDeclaration::from_yaml(
+        r#"
 mechanism:
   flow:
     type: declared
@@ -197,7 +215,9 @@ mechanism:
     steps:
       - id: unit_loop
         allowed_emits: [work.ready]
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     let pipeline = StagePipeline::with_default_stages(flow);
     assert_eq!(
         pipeline.names(),
@@ -205,7 +225,13 @@ mechanism:
         // `StepCloseObligation` is now part of
         // the locked emit order (between
         // `FlowStepScope` and `VerdictGate`).
-        vec!["RepairDispatch", "EmitSchemaGate", "FlowStepScope", "StepCloseObligation", "VerdictGate"]
+        vec![
+            "RepairDispatch",
+            "EmitSchemaGate",
+            "FlowStepScope",
+            "StepCloseObligation",
+            "VerdictGate"
+        ]
     );
 }
 
@@ -218,5 +244,8 @@ fn stage_pipeline_skeleton_wrong_order_fails_at_runtime() {
 
     let actual = pipeline.names();
     let expected: &[&str] = &["ArchiveVersion", "RepairDispatch"];
-    assert_ne!(actual, expected, "deliberately wrong order to test assertion utility");
+    assert_ne!(
+        actual, expected,
+        "deliberately wrong order to test assertion utility"
+    );
 }

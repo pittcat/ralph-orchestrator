@@ -80,11 +80,9 @@ pub(crate) fn project_ensure_task(
     // schema-level guidance (Fix-2 in `loop_runner/runner.rs`).
     if let Some(provided_id) = json_pointer(payload, "task_id") {
         if provided_id.is_empty() {
-            return Err(
-                "empty_task_id_in_work_ready: coordinator must embed the \
+            return Err("empty_task_id_in_work_ready: coordinator must embed the \
                  projector-derived id (see preset ce-executor-serial line 1179)"
-                    .to_string(),
-            );
+                .to_string());
         }
         task.id = provided_id.to_string();
     }
@@ -246,11 +244,7 @@ mod tests {
     fn project_task_with_no_loop_id_anywhere_stays_none() {
         let dir = tempdir().unwrap();
         // No loop marker in ctx, no loop_id in payload.
-        let mut ctx = ProjectionContext::new(
-            dir.path(),
-            StateProjectionConfig::default(),
-            false,
-        );
+        let mut ctx = ProjectionContext::new(dir.path(), StateProjectionConfig::default(), false);
         let payload = payload_with_task_id("task-1", "k-1");
         project_ensure_task(&mut ctx, &payload, "task_key", None).unwrap();
         let tasks = ctx.task_snapshot().0;

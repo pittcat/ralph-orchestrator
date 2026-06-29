@@ -18,6 +18,7 @@ use ralph_core::{
     },
 };
 use ralph_proto::{Hat, HatId, Topic};
+use serde_json::Value;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -874,6 +875,16 @@ fn emit_command_with_root_and_hats(
     } else {
         serde_json::Value::String(payload)
     };
+
+    // Generic guard: reject an empty task_id in any emitted event payload.
+    // An empty task_id is never valid (Ralph task ids are always non-empty
+    // strings like `task-{timestamp}-{hex}`), and letting it through would
+    // break the step-handoff / state-projection chain.
+    if let Some(Value::String(task_id)) = payload_value.get("task_id") {
+        if task_id.trim().is_empty() {
+            anyhow::bail!("task_id cannot be empty in event payload for topic '{topic}'");
+        }
+    }
 
     let mut record = serde_json::json!({
         "topic": args.topic,
@@ -2898,6 +2909,73 @@ event_loop:
             message.contains("reason_codes="),
             "expected unified reason_codes in bail, got: {message}"
         );
+    }
+
+    #[test]
+    fn test_emit_rejects_empty_task_id_in_payload() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+
+        let err = emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: Some("work.ready".to_string()),
+                payload: r#"{"task_id":"","step":"step-01"}"#.to_string(),
+                json: true,
+                file: PathBuf::from(".ralph/events.jsonl"),
+                policy_check: false,
+                no_policy_check: false,
+                hat: None,
+                triggered: None,
+                source: None,
+                schema: None,
+            },
+            Some(&workspace),
+        )
+        .expect_err("empty task_id must be rejected");
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("task_id cannot be empty"),
+            "expected empty task_id error, got: {message}"
+        );
+
+        // No event should have been written.
+        let events_path = workspace.join(".ralph/events.jsonl");
+        assert!(
+            !events_path.exists(),
+            "rejected emit must not write events file"
+        );
+    }
+
+    #[test]
+    fn test_emit_allows_non_empty_task_id_in_payload() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+
+        emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: Some("work.ready".to_string()),
+                payload: r#"{"task_id":"task-123-abc","step":"step-01"}"#.to_string(),
+                json: true,
+                file: PathBuf::from(".ralph/events.jsonl"),
+                policy_check: false,
+                no_policy_check: false,
+                hat: None,
+                triggered: None,
+                source: None,
+                schema: None,
+            },
+            Some(&workspace),
+        )
+        .expect("non-empty task_id should be accepted");
+
+        let events =
+            std::fs::read_to_string(workspace.join(".ralph/events.jsonl")).expect("read events");
+        assert!(events.contains("\"task_id\":\"task-123-abc\""));
     }
 }
 

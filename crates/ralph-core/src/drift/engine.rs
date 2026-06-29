@@ -336,10 +336,7 @@ impl DriftEngine {
                             Err(_) => serde_json::Value::Null,
                         };
                         event_loop.diagnostics().log_recovery_via_idempotent(
-                            &mut log,
-                            &key,
-                            payload,
-                            /* is_final = */ true,
+                            &mut log, &key, payload, /* is_final = */ true,
                         );
                     }
                 }
@@ -446,8 +443,7 @@ impl DriftEngine {
                 // `pending_recovery_hat` mechanism used by the
                 // hard-gate / wave-recovery paths
                 // (`event_loop/mod.rs:2464`).
-                event_loop.state_mut().pending_recovery_hat =
-                    Some(HatId::from("shipper"));
+                event_loop.state_mut().pending_recovery_hat = Some(HatId::from("shipper"));
                 // Phase 1: defer termination so shipper can
                 // process `plan.blocked` on the next iteration.
                 return None;
@@ -630,7 +626,8 @@ fn publish_hard_recovery_event(
         None,
         &allowed_topics,
     );
-    let event = Event::new("task.resume", structured_payload).with_target(action.target_hat.clone());
+    let event =
+        Event::new("task.resume", structured_payload).with_target(action.target_hat.clone());
     // Publish through the existing route so all observers
     // (including the drift observer) see the recovery event.
     event_loop.bus().publish(event);
@@ -1187,12 +1184,17 @@ mod tests {
         );
         let _ = event_loop.recovery_responder_mut().record_finding(&env, 1);
         let term = engine.check_termination_hint(&mut event_loop);
-        assert!(term.is_none(), "Soft hint must not terminate, got: {term:?}");
+        assert!(
+            term.is_none(),
+            "Soft hint must not terminate, got: {term:?}"
+        );
 
         use ralph_proto::HatId;
         let coordinator_events = event_loop.bus().take_pending(&HatId::from("coordinator"));
         assert!(
-            !coordinator_events.iter().any(|e| e.topic.as_str() == "plan.blocked"),
+            !coordinator_events
+                .iter()
+                .any(|e| e.topic.as_str() == "plan.blocked"),
             "P0-3: plan.blocked must NOT be emitted for non-Final hint"
         );
     }

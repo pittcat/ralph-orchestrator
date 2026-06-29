@@ -132,9 +132,7 @@ pub struct DiagnosisSummary {
 }
 
 impl DiagnosisSummary {
-    pub fn from_final_records(
-        records: &[IdempotentRecord],
-    ) -> Self {
+    pub fn from_final_records(records: &[IdempotentRecord]) -> Self {
         let mut summary = Self::default();
         for r in records {
             if !r._final {

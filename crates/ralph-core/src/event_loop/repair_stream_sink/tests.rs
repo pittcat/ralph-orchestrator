@@ -13,7 +13,7 @@
 //!    `repair_dispatch` string so `ralph diagnose` can
 //!    attribute the record.
 
-use super::{record_repair_event, RepairStreamSink, REPAIR_SINK_REASON_CODE};
+use super::{REPAIR_SINK_REASON_CODE, RepairStreamSink, record_repair_event};
 use ralph_proto::Event;
 
 fn ev(topic: &str, payload: &str) -> Event {
@@ -51,8 +51,11 @@ fn u6_sink_appends_two_lines_for_two_events() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();
 
-    record_repair_event(&ev("task.relocate_legacy", r#"{"task_key":"a"}"#), workspace)
-        .expect("first write");
+    record_repair_event(
+        &ev("task.relocate_legacy", r#"{"task_key":"a"}"#),
+        workspace,
+    )
+    .expect("first write");
     record_repair_event(&ev("repair.close", r#"{"task_key":"a"}"#), workspace)
         .expect("second write");
 

@@ -82,8 +82,11 @@ pub fn relocate_legacy_tasks(
             continue;
         }
 
-        let mut value: Value = serde_json::from_str(line)
-            .map_err(|e| RelocateError::MalformedJson { line: idx + 1, source: e })?;
+        let mut value: Value =
+            serde_json::from_str(line).map_err(|e| RelocateError::MalformedJson {
+                line: idx + 1,
+                source: e,
+            })?;
 
         let needs_fill = match value.get("loop_id") {
             None => true,

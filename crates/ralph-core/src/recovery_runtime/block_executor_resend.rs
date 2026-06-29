@@ -32,14 +32,10 @@ pub fn block_executor_resend_storm(ctx: &RuntimeContext) -> Vec<RecoveryAction> 
         return Vec::new();
     }
 
-    let recent_events: Vec<&EventSnapshot> = ctx
-        .events
-        .iter()
-        .rev()
-        .take(RESEND_WINDOW)
-        .collect();
+    let recent_events: Vec<&EventSnapshot> = ctx.events.iter().rev().take(RESEND_WINDOW).collect();
 
-    let mut work_done_by_task: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
+    let mut work_done_by_task: std::collections::HashMap<String, Vec<u32>> =
+        std::collections::HashMap::new();
     for event in recent_events.iter().rev() {
         if event.topic != "work.done" {
             continue;
@@ -166,7 +162,9 @@ mod tests {
         };
         let actions = block_executor_resend_storm(&ctx);
         assert_eq!(actions.len(), 1);
-        assert!(matches!(&actions[0], RecoveryAction::InjectDirective { text } if text == "ralph stop"));
+        assert!(
+            matches!(&actions[0], RecoveryAction::InjectDirective { text } if text == "ralph stop")
+        );
     }
 
     #[test]

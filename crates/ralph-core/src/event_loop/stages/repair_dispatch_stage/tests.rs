@@ -1,7 +1,5 @@
 use super::*;
-use crate::event_loop::stage_pipeline::{
-    EmitStage, FlowStep, StageContext,
-};
+use crate::event_loop::stage_pipeline::{EmitStage, FlowStep, StageContext};
 
 /// Build a fresh `(ctx, machine)` pair. The
 /// `&'static mut RepairStateMachine` lives in
@@ -38,15 +36,24 @@ fn repair_dispatch_does_not_recognise_normal_topics() {
 #[test]
 fn repair_dispatch_stage_accepts_repair_events_without_error() {
     let stage = RepairDispatchStage;
-    let e = ev("task.relocate_legacy", r#"{"task_key":"abc","target_loop_id":"loop-x","reason":"legacy"}"#);
-    assert!(stage.check(&mut fresh_ctx(), &e).is_ok(), "repair events must not be rejected by the stage");
+    let e = ev(
+        "task.relocate_legacy",
+        r#"{"task_key":"abc","target_loop_id":"loop-x","reason":"legacy"}"#,
+    );
+    assert!(
+        stage.check(&mut fresh_ctx(), &e).is_ok(),
+        "repair events must not be rejected by the stage"
+    );
 }
 
 #[test]
 fn repair_dispatch_stage_accepts_non_repair_events() {
     let stage = RepairDispatchStage;
     let e = ev("work.ready", "{}");
-    assert!(stage.check(&mut fresh_ctx(), &e).is_ok(), "non-repair events must pass through");
+    assert!(
+        stage.check(&mut fresh_ctx(), &e).is_ok(),
+        "non-repair events must pass through"
+    );
 }
 
 #[test]
@@ -129,7 +136,9 @@ fn task_resume_consumes_repair_budget_then_rejects() {
     let result = stage.check(&mut ctx!(), &ev("task.resume", payload));
     let reject = result.expect_err("fifth task.resume must be rejected");
     assert!(
-        reject.reason_code.starts_with("repair_unrecoverable_after_"),
+        reject
+            .reason_code
+            .starts_with("repair_unrecoverable_after_"),
         "P1-4: reject reason_code must be the P1-1 escalation marker, got: {}",
         reject.reason_code
     );

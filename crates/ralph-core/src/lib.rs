@@ -19,7 +19,6 @@ pub mod config;
 /// in-prompt `## ORCHESTRATOR CORRECTION` blocks.
 pub mod correction;
 pub mod diagnosis;
-pub mod recovery_runtime;
 pub mod diagnostics;
 pub mod drift;
 pub mod emit_schema_hint;
@@ -40,6 +39,7 @@ pub mod hat_lifecycle;
 mod hat_registry;
 mod hatless_ralph;
 pub mod hooks;
+pub mod recovery_runtime;
 pub use emit_schema_hint::{
     build_publish_emit_section, fix_hint_for_hat_topic, format_emit_json_example,
 };

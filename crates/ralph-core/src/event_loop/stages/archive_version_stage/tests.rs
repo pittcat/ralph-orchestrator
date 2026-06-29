@@ -132,10 +132,8 @@ fn u4_repeat_first_loop_id_does_not_rewrite_version() {
     // is a no-op when the persisted loop_id matches.
     let dir = TempDir::new().unwrap();
     let _ = archive_state_for_loop(dir.path(), "loop-stable").unwrap();
-    let first_content =
-        fs::read_to_string(dir.path().join("loop-version.json")).unwrap();
+    let first_content = fs::read_to_string(dir.path().join("loop-version.json")).unwrap();
     let _ = archive_state_for_loop(dir.path(), "loop-stable").unwrap();
-    let second_content =
-        fs::read_to_string(dir.path().join("loop-version.json")).unwrap();
+    let second_content = fs::read_to_string(dir.path().join("loop-version.json")).unwrap();
     assert_eq!(first_content, second_content);
 }

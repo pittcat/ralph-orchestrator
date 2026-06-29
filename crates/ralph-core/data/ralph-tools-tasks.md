@@ -56,6 +56,7 @@ ralph tools task show <task-id> [--format table|json|quiet]
 - ONLY close tasks after verification (tests pass, build succeeds)
 - Use `task reopen` when more work remains after a failed review/finalization pass
 - Use `task fail` when the task is blocked and cannot be completed in the current iteration
+- **NEVER pass an empty `task_id`**: `ralph tools task start/close/fail/reopen/show` and any `ralph emit` payload containing `task_id` must use a real, non-empty id like `task-{timestamp}-{hex}`. Empty `task_id` is rejected by the CLI and will break step handoff.
 
 ### Cross-Loop and Cross-Hat Authorization
 
@@ -137,6 +138,7 @@ ralph tools task ready  # Only shows unblocked tasks
 
 - **收到 `task.resume(kind=recovery_exhausted)` 后**：**禁止**再重试；立即 emit `plan.blocked(reason="recovery_exhausted:<retry_key>")` 并把阻塞原因写入当前 task note。
 - **收到 `task.resume(kind=execution_contract:TaskWrongLoop)` 后**：重新 emit 前**必须**确认 `task_id` 属于当前 loop；跨 loop task 只能读、不能改。
+- **任何 emit 的 `task_id` 必须真实且非空**：在 emit 任何带 `task_id` 字段的事件前，必须先从 `.ralph/agent/tasks.jsonl`（`ralph tools task list` / `ralph tools task show`）取得当前 loop 的真实 id 填入 payload。`task_id=""`、`null` 或 `from_key:...` 形态都会被拒绝，并破坏 step handoff / state projection。
 - **task 反复失败时**：不要无限 reopen 同一 task；评估是否需要拆分为更小任务或提升到 `plan.blocked`。
 - 更多细节见自动注入的 `## RECOVERY DIRECTIVES` 块（ID：`RD-PLAN-BLOCKED-ON-RECOVERY-EXHAUSTED`、`RD-TASK-ID-MUST-BE-LOOP-SCOPED`）。
 

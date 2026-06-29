@@ -83,8 +83,8 @@ fn extract_target_hat(payload: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event_loop::stage_pipeline::{FlowStep, StageContext};
     use crate::event_loop::repair_flow::RepairStateMachine;
+    use crate::event_loop::stage_pipeline::{FlowStep, StageContext};
 
     fn ctx<'a>(repair: &'a mut RepairStateMachine) -> StageContext<'a> {
         StageContext::for_test_machine(FlowStep::new("unit_loop"), "loop-1", 1, repair)
@@ -116,7 +116,11 @@ mod tests {
         let stage = TargetHatGuardStage::new();
         let mut repair = RepairStateMachine::default();
         let mut ctx = ctx(&mut repair);
-        let e = event_with("task.resume", Some("progress-steward"), Some("progress-steward"));
+        let e = event_with(
+            "task.resume",
+            Some("progress-steward"),
+            Some("progress-steward"),
+        );
         let err = stage.check(&mut ctx, &e).unwrap_err();
         assert_eq!(err.reason_code, "target_self_loop");
     }
@@ -126,7 +130,11 @@ mod tests {
         let stage = TargetHatGuardStage::new();
         let mut repair = RepairStateMachine::default();
         let mut ctx = ctx(&mut repair);
-        let e = event_with("task.resume", Some("coordinator"), Some("review-synthesizer"));
+        let e = event_with(
+            "task.resume",
+            Some("coordinator"),
+            Some("review-synthesizer"),
+        );
         assert!(stage.check(&mut ctx, &e).is_ok());
     }
 

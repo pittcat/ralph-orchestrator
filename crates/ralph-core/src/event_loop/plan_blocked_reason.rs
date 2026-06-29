@@ -68,7 +68,9 @@ impl PlanBlockedReason {
             "flow_state_closed" => Some(Self::FlowStateClosed),
             "upstream_review_incomplete" => Some(Self::UpstreamReviewIncomplete),
             "loop_stalled_max_iterations" => Some(Self::LoopStalledMaxIterations),
-            "dimension_reviewers_failed_to_converge" => Some(Self::DimensionReviewersFailedToConverge),
+            "dimension_reviewers_failed_to_converge" => {
+                Some(Self::DimensionReviewersFailedToConverge)
+            }
             _ => None,
         }
     }
@@ -104,10 +106,12 @@ mod tests {
         // built by splicing `original_trigger_payload`
         // strings. This is the exact value that triggered
         // the U5b redesign.
-        assert!(PlanBlockedReason::parse(
-            "review_never_completed_scope_violation_blocked_review_coordinator"
-        )
-        .is_none());
+        assert!(
+            PlanBlockedReason::parse(
+                "review_never_completed_scope_violation_blocked_review_coordinator"
+            )
+            .is_none()
+        );
         assert!(PlanBlockedReason::parse("").is_none());
         assert!(PlanBlockedReason::parse("random").is_none());
     }

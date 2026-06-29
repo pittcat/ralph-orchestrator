@@ -56,10 +56,8 @@ fn idempotent_log_append_writes_final_record_to_disk() {
     )
     .unwrap();
 
-    let on_disk = std::fs::read_to_string(
-        dir.path().join("recovery:abc:loop:loop-1.jsonl"),
-    )
-    .unwrap();
+    let on_disk =
+        std::fs::read_to_string(dir.path().join("recovery:abc:loop:loop-1.jsonl")).unwrap();
     assert!(on_disk.contains("\"_idempotency_key\":\"recovery:abc:loop:loop-1\""));
     assert!(on_disk.contains("\"_final\":true"));
     assert!(on_disk.contains("\"retry_key\":\"abc\""));
@@ -96,8 +94,7 @@ fn idempotent_log_append_records_intermediate_transitions() {
     let content = std::fs::read_to_string(dir.path().join(format!("{key}.jsonl"))).unwrap();
     assert_eq!(content.lines().count(), 1);
 
-    let parsed: IdempotentRecord =
-        serde_json::from_str(content.lines().next().unwrap()).unwrap();
+    let parsed: IdempotentRecord = serde_json::from_str(content.lines().next().unwrap()).unwrap();
     assert_eq!(parsed._transitions.len(), 3);
     assert!(parsed._final);
     assert_eq!(log.final_count(), 1);
@@ -109,7 +106,8 @@ fn idempotent_log_append_rejects_writing_after_final() {
     let mut log = fresh_log(dir.path(), "loop-1");
     let key = "recovery:abc:loop:loop-1";
 
-    log.append(IdempotentRecord::new(key).with_final(true)).unwrap();
+    log.append(IdempotentRecord::new(key).with_final(true))
+        .unwrap();
     let err = log.append(IdempotentRecord::new(key)).unwrap_err();
     assert!(matches!(err, IdempotentError::FinalAlreadySet(ref k) if k == key));
 }
@@ -129,9 +127,12 @@ fn idempotent_log_different_keys_coexist() {
     let dir = TempDir::new().unwrap();
     let mut log = fresh_log(dir.path(), "loop-1");
 
-    log.append(IdempotentRecord::new("task:a:loop:loop-1").with_final(true)).unwrap();
-    log.append(IdempotentRecord::new("task:b:loop:loop-1").with_final(true)).unwrap();
-    log.append(IdempotentRecord::new("task:c:loop:loop-1").with_final(true)).unwrap();
+    log.append(IdempotentRecord::new("task:a:loop:loop-1").with_final(true))
+        .unwrap();
+    log.append(IdempotentRecord::new("task:b:loop:loop-1").with_final(true))
+        .unwrap();
+    log.append(IdempotentRecord::new("task:c:loop:loop-1").with_final(true))
+        .unwrap();
 
     assert_eq!(log.final_count(), 3);
 }
@@ -151,7 +152,9 @@ fn idempotent_log_concurrent_append_only_one_final_succeeds() {
 
     let dir = TempDir::new().unwrap();
     let workspace: PathBuf = dir.path().to_path_buf();
-    let log = Arc::new(Mutex::new(IdempotentLog::open(&workspace, "loop-race").unwrap()));
+    let log = Arc::new(Mutex::new(
+        IdempotentLog::open(&workspace, "loop-race").unwrap(),
+    ));
     let n = 50;
     let barrier = Arc::new(Barrier::new(n));
 
@@ -178,13 +181,15 @@ fn idempotent_log_concurrent_append_only_one_final_succeeds() {
     }
 
     assert_eq!(ok, 1, "exactly one writer must succeed");
-    assert_eq!(rejected, n - 1, "all other writers must see FinalAlreadySet");
+    assert_eq!(
+        rejected,
+        n - 1,
+        "all other writers must see FinalAlreadySet"
+    );
 
     // The on-disk file must contain exactly one line.
-    let content = std::fs::read_to_string(
-        workspace.join("recovery:race:loop:loop-race.jsonl"),
-    )
-    .unwrap();
+    let content =
+        std::fs::read_to_string(workspace.join("recovery:race:loop:loop-race.jsonl")).unwrap();
     assert_eq!(content.lines().count(), 1);
 }
 
@@ -198,7 +203,11 @@ fn idempotent_log_concurrent_process_test_uses_subcommand_for_stress() {
 
     let exe = std::env::current_exe().unwrap();
     let output = Command::new(exe)
-        .args(["--ignored", "--nocapture", "idempotent_log_concurrent_final_process_child"])
+        .args([
+            "--ignored",
+            "--nocapture",
+            "idempotent_log_concurrent_final_process_child",
+        ])
         .output();
     // The test binary path will not have this marker test by
     // default; we accept either a successful exit (test was
@@ -228,7 +237,9 @@ fn idempotent_log_concurrent_final_process_child() {
             thread::spawn(move || {
                 bar.wait();
                 let mut guard = log.lock().unwrap();
-                guard.append(IdempotentRecord::new("recovery:child:loop:loop-child-race").with_final(true))
+                guard.append(
+                    IdempotentRecord::new("recovery:child:loop:loop-child-race").with_final(true),
+                )
             })
         })
         .collect();
@@ -245,10 +256,9 @@ fn idempotent_log_concurrent_final_process_child() {
     assert_eq!(ok, 1);
     assert_eq!(rejected, n - 1);
 
-    let content = std::fs::read_to_string(
-        workspace.join("recovery:child:loop:loop-child-race.jsonl"),
-    )
-    .unwrap();
+    let content =
+        std::fs::read_to_string(workspace.join("recovery:child:loop:loop-child-race.jsonl"))
+            .unwrap();
     assert_eq!(content.lines().count(), 1);
 }
 
@@ -257,9 +267,12 @@ fn idempotent_log_replay_rebuilds_in_memory_index_from_disk() {
     let dir = TempDir::new().unwrap();
     {
         let mut log = fresh_log(dir.path(), "loop-1");
-        log.append(IdempotentRecord::new("a:loop:loop-1").with_final(true)).unwrap();
-        log.append(IdempotentRecord::new("b:loop:loop-1").with_final(true)).unwrap();
-        log.append(IdempotentRecord::new("c:loop:loop-1").with_final(false)).unwrap();
+        log.append(IdempotentRecord::new("a:loop:loop-1").with_final(true))
+            .unwrap();
+        log.append(IdempotentRecord::new("b:loop:loop-1").with_final(true))
+            .unwrap();
+        log.append(IdempotentRecord::new("c:loop:loop-1").with_final(false))
+            .unwrap();
     }
 
     // New process / fresh IdempotentLog instance — must replay

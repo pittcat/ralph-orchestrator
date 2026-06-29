@@ -491,9 +491,9 @@ hats:
         "kind": "missing_event_gate",
         "recovery_directives": ["RD-EXECUTOR-RESEND-LIMIT"],
     });
-    event_loop
-        .bus
-        .publish(Event::new("task.resume", payload.to_string()).with_target(HatId::new("executor")));
+    event_loop.bus.publish(
+        Event::new("task.resume", payload.to_string()).with_target(HatId::new("executor")),
+    );
 
     // In coordinator mode the ralph hat consumes pending events and
     // builds the coordinator prompt; recovery directives must be

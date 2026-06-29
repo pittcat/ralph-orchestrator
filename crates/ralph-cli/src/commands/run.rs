@@ -778,7 +778,10 @@ fn resolve_plan_arg(plan: &Path, workspace_root: &Path) -> PathBuf {
 
     // 3. Try `docs/plans/<basename>.md` for bare plan names.
     if let Some(name) = plan.file_name() {
-        let docs_plans = Path::new("docs").join("plans").join(name).with_extension("md");
+        let docs_plans = Path::new("docs")
+            .join("plans")
+            .join(name)
+            .with_extension("md");
         let candidate_docs_plans = workspace_root.join(&docs_plans);
         if candidate_docs_plans.is_file() {
             return docs_plans;

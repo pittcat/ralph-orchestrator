@@ -78,17 +78,19 @@ pub fn archive_state_for_loop(
             "loop_id": current_loop_id,
             "version": 1,
         });
-        fs::write(&version_path, serde_json::to_string_pretty(&initial).map_err(|e| {
-            ArchiveError::Io(io::Error::other(format!(
-                "failed to serialise initial loop-version.json: {e}"
-            )))
-        })?)?;
+        fs::write(
+            &version_path,
+            serde_json::to_string_pretty(&initial).map_err(|e| {
+                ArchiveError::Io(io::Error::other(format!(
+                    "failed to serialise initial loop-version.json: {e}"
+                )))
+            })?,
+        )?;
         return Ok(None);
     }
 
-    let persisted: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&version_path)?)
-            .map_err(|e| ArchiveError::Io(io::Error::other(format!("bad loop-version.json: {e}"))))?;
+    let persisted: serde_json::Value = serde_json::from_str(&fs::read_to_string(&version_path)?)
+        .map_err(|e| ArchiveError::Io(io::Error::other(format!("bad loop-version.json: {e}"))))?;
     let old_loop_id = persisted
         .get("loop_id")
         .and_then(|v| v.as_str())
@@ -99,10 +101,7 @@ pub fn archive_state_for_loop(
         return Ok(None);
     }
 
-    let timestamp = chrono::Utc::now().to_rfc3339_opts(
-        chrono::SecondsFormat::Micros,
-        true,
-    );
+    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
     let archive_name = format!("{}.{}", old_loop_id, timestamp);
     let archive_dir = workspace.join(ARCHIVE_DIR).join(&archive_name);
     fs::create_dir_all(&archive_dir)?;

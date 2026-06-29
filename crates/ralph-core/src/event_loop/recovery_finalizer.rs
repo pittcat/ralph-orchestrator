@@ -123,11 +123,7 @@ impl RecoveryFinalizer {
     /// for diagnostics. The caller decides what counts as
     /// a "new" reminder (per-(topic, field), per-retry_key,
     /// etc.).
-    pub fn record(
-        &mut self,
-        mechanism: RecoveryMechanism,
-        _key: &str,
-    ) -> Option<TerminalEvent> {
+    pub fn record(&mut self, mechanism: RecoveryMechanism, _key: &str) -> Option<TerminalEvent> {
         let cfg = self.configs.get(&mechanism)?;
         let state = self.states.get_mut(&mechanism)?;
         state.count = state.count.saturating_add(1);
@@ -161,9 +157,7 @@ impl RecoveryFinalizer {
     /// diagnostics).
     #[must_use]
     pub fn count(&self, mechanism: RecoveryMechanism) -> u32 {
-        self.states
-            .get(&mechanism)
-            .map_or(0, |s| s.count)
+        self.states.get(&mechanism).map_or(0, |s| s.count)
     }
 
     /// True when `mechanism` has already fired its terminal
@@ -180,7 +174,13 @@ impl RecoveryFinalizer {
 /// final reason string is a stable snake_case identifier.
 fn sanitize_reason(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -190,10 +190,7 @@ mod tests {
 
     fn finalizer_with(max: u32) -> RecoveryFinalizer {
         let mut configs = HashMap::new();
-        configs.insert(
-            RecoveryMechanism::Drift,
-            MechanismConfig::new(max, "drift"),
-        );
+        configs.insert(RecoveryMechanism::Drift, MechanismConfig::new(max, "drift"));
         configs.insert(
             RecoveryMechanism::RepairStream,
             MechanismConfig::new(max, "repair"),

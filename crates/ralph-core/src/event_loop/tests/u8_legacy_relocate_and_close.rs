@@ -40,8 +40,7 @@ fn u8_relocate_legacy_tasks_backfills_two_records() {
             r#"{"task_key":"task-with-id","loop_id":"existing","status":"open"}"#,
         ],
     );
-    let backfilled =
-        relocate_legacy_tasks(&tasks_path, "loop-u8-1").expect("relocate succeeds");
+    let backfilled = relocate_legacy_tasks(&tasks_path, "loop-u8-1").expect("relocate succeeds");
     assert_eq!(backfilled, 2, "two legacy records must be backfilled");
 }
 

@@ -122,10 +122,13 @@ mod tests {
         let ctx = RuntimeContext {
             current_iteration: 10,
             current_hat: Some("executor".to_string()),
-            current_retry_key: Some("stall_recovery:executor:work_done:handoff_dispatch_timeout:*".to_string()),
+            current_retry_key: Some(
+                "stall_recovery:executor:work_done:handoff_dispatch_timeout:*".to_string(),
+            ),
             recovery_envelopes: vec![
                 EnvelopeSnapshot {
-                    retry_key: "stall_recovery:executor:work_done:handoff_dispatch_timeout:*".to_string(),
+                    retry_key: "stall_recovery:executor:work_done:handoff_dispatch_timeout:*"
+                        .to_string(),
                     source: "StallRecovery".to_string(),
                     outcome: "Pending".to_string(),
                     iteration: 10,
@@ -143,7 +146,9 @@ mod tests {
         };
         let actions = dispatch(&ctx);
         assert!(
-            actions.iter().any(|a| matches!(a, RecoveryAction::DedupeEnvelope { .. })),
+            actions
+                .iter()
+                .any(|a| matches!(a, RecoveryAction::DedupeEnvelope { .. })),
             "dedupe action should be present"
         );
     }

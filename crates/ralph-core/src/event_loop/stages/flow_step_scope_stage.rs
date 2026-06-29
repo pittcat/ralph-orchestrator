@@ -14,7 +14,7 @@
 //! `FlowDeclaration` is loaded once at preset-load time and
 //! shared (immutably) across all `check` calls.
 
-use crate::event_loop::flow_declaration::{is_partial_state, FlowDeclaration, FlowStepDecl};
+use crate::event_loop::flow_declaration::{FlowDeclaration, FlowStepDecl, is_partial_state};
 use crate::event_loop::stage_pipeline::{EmitStage, StageContext, StageReject};
 use ralph_proto::Event;
 
@@ -151,17 +151,11 @@ impl EmitStage for FlowStepScopeStage {
             // fixtures. The reason code is
             // `flow_step_undeclared` so the BDD
             // scenario can assert it verbatim.
-            return Err(StageReject::new(
-                self.name(),
-                "flow_step_undeclared",
-            ));
+            return Err(StageReject::new(self.name(), "flow_step_undeclared"));
         };
 
         if !allows_topic(step, event.topic.as_str()) {
-            return Err(StageReject::new(
-                self.name(),
-                "flow_unknown_emit",
-            ));
+            return Err(StageReject::new(self.name(), "flow_unknown_emit"));
         }
 
         // Partial-state reason pattern check.
@@ -192,10 +186,7 @@ impl EmitStage for FlowStepScopeStage {
         }
 
         if !reason_matches_partial_pattern(terminal_when, &reason) {
-            return Err(StageReject::new(
-                self.name(),
-                "reason_pattern_mismatch",
-            ));
+            return Err(StageReject::new(self.name(), "reason_pattern_mismatch"));
         }
 
         Ok(())

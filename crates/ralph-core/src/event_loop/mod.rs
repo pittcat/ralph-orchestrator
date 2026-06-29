@@ -451,7 +451,11 @@ fn build_stage_pipeline_from_config(
             // use the top-level `mechanism:`
             // key (mirroring the
             // `presets/schemas/<name>.yml` SSOT).
-            config.event_loop.mechanism.as_ref().and_then(|m| m.flow.as_ref())
+            config
+                .event_loop
+                .mechanism
+                .as_ref()
+                .and_then(|m| m.flow.as_ref())
         })
         .and_then(|flow_cfg| {
             // Wrap the typed flow in the `mechanism:` block
@@ -459,9 +463,9 @@ fn build_stage_pipeline_from_config(
             // the typed config produces the inner map;
             // we wrap it into the `mechanism.flow` key
             // pair the parser looks up.
-            serde_yaml::to_string(flow_cfg).ok().map(|flow| {
-                format!("mechanism:\n  flow:\n{flow}")
-            })
+            serde_yaml::to_string(flow_cfg)
+                .ok()
+                .map(|flow| format!("mechanism:\n  flow:\n{flow}"))
         })
         .and_then(|yaml| FlowDeclaration::from_yaml(&yaml).ok())
         .unwrap_or_else(|| {
@@ -478,7 +482,8 @@ fn build_stage_pipeline_from_config(
         .iter()
         .filter_map(|s| s.total_units.map(|n| (s.id.clone(), n)))
         .collect();
-    let pipeline = StagePipeline::with_default_stages_for_loop_config(flow_yaml, Some(&config.event_loop));
+    let pipeline =
+        StagePipeline::with_default_stages_for_loop_config(flow_yaml, Some(&config.event_loop));
     (pipeline, step_totals)
 }
 
@@ -595,10 +600,7 @@ impl EventLoop {
         if let Some(loop_id) = context.loop_id() {
             use crate::event_loop::stages::archive_version_stage::archive_state_for_loop;
             match archive_state_for_loop(&context.ralph_dir(), loop_id) {
-                Ok(Some(dir)) => info!(
-                    "U13: archived previous-loop state to {}",
-                    dir.display()
-                ),
+                Ok(Some(dir)) => info!("U13: archived previous-loop state to {}", dir.display()),
                 Ok(None) => debug!("U13: no previous loop state to archive"),
                 Err(e) => {
                     // U13 fail-closed: surface the error
@@ -611,9 +613,7 @@ impl EventLoop {
                     // root cause of SC-6 violations.
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
-                        format!(
-                            "U13: archive_state_for_loop failed for loop_id={loop_id}: {e}"
-                        ),
+                        format!("U13: archive_state_for_loop failed for loop_id={loop_id}: {e}"),
                     ));
                 }
             }
@@ -632,16 +632,10 @@ impl EventLoop {
                 let tasks_path = context.tasks_path();
                 match TaskStore::load(&tasks_path) {
                     Ok(mut store) => {
-                        match IdempotentLog::open(
-                            &context.workspace().join(".ralph"),
-                            loop_id,
-                        ) {
+                        match IdempotentLog::open(&context.workspace().join(".ralph"), loop_id) {
                             Ok(log) => {
-                                let arc =
-                                    std::sync::Arc::new(std::sync::Mutex::new(log));
-                                if let Err(e) =
-                                    store.save_with_shared_log(arc, loop_id)
-                                {
+                                let arc = std::sync::Arc::new(std::sync::Mutex::new(log));
+                                if let Err(e) = store.save_with_shared_log(arc, loop_id) {
                                     warn!(
                                         loop_id = %loop_id,
                                         tasks_path = %tasks_path.display(),
@@ -683,9 +677,7 @@ impl EventLoop {
                     tasks_path.display()
                 ),
                 Ok(_) => debug!("U8: no legacy task records to backfill"),
-                Err(e) => warn!(
-                    "U8: relocate_legacy_tasks failed (continuing): {e}"
-                ),
+                Err(e) => warn!("U8: relocate_legacy_tasks failed (continuing): {e}"),
             }
         }
 
@@ -859,7 +851,9 @@ impl EventLoop {
                             "IdempotentLog::open failed for non-required preset; \
                              falling back to disabled log."
                         );
-                        std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled())
+                        std::sync::Mutex::new(
+                            crate::state::idempotent_log::IdempotentLog::disabled(),
+                        )
                     }
                 }
             }
@@ -1099,7 +1093,9 @@ impl EventLoop {
             )),
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
             ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
-            idempotent_log: std::sync::Mutex::new(crate::state::idempotent_log::IdempotentLog::disabled()),
+            idempotent_log: std::sync::Mutex::new(
+                crate::state::idempotent_log::IdempotentLog::disabled(),
+            ),
             stage_pipeline,
             flow_step_totals,
             // P1-5 (2026-06-27 adversarial review):
@@ -2879,11 +2875,7 @@ impl EventLoop {
     ///
     /// The machine is keyed by `task_key` (= `stall_key` from
     /// the caller); different keys have independent budgets.
-    fn drive_repair_state_machine(
-        &mut self,
-        task_key: &str,
-        stall_count: u32,
-    ) -> bool {
+    fn drive_repair_state_machine(&mut self, task_key: &str, stall_count: u32) -> bool {
         use crate::event_loop::repair_flow::{
             RepairAction, RepairBudget, RepairStateMachine, RepairTransitionResult,
         };
@@ -2915,13 +2907,9 @@ impl EventLoop {
             RepairTransitionResult::BudgetExhausted(exhausted) => {
                 let payload = format!(
                     r#"{{"reason":"{}","task_key":"{}","retries_consumed":{},"budget":{}}}"#,
-                    exhausted.reason_code,
-                    task_key,
-                    exhausted.retries_consumed,
-                    exhausted.max,
+                    exhausted.reason_code, task_key, exhausted.retries_consumed, exhausted.max,
                 );
-                let blocked =
-                    Event::new("plan.blocked", payload).with_target(HatId::new("ralph"));
+                let blocked = Event::new("plan.blocked", payload).with_target(HatId::new("ralph"));
                 self.record_repair_event(&blocked);
                 // 2026-06-29 code-review fix: set the
                 // `terminal_event_emitted` flag so U8's
@@ -2986,8 +2974,7 @@ impl EventLoop {
                     r#"{{"reason":"stall_recovery_exhausted","task_key":"{}","stall_count":{}}}"#,
                     stall_key, stall_count_value,
                 );
-                let blocked =
-                    Event::new("plan.blocked", payload).with_target(HatId::new("ralph"));
+                let blocked = Event::new("plan.blocked", payload).with_target(HatId::new("ralph"));
                 self.record_repair_event(&blocked);
                 self.terminal_event_emitted = true;
             }
@@ -3009,10 +2996,7 @@ impl EventLoop {
         // emit a `plan.blocked` envelope and short-circuit so
         // no `task.resume` is published — the loop's self-stop
         // path takes over.
-        let budget_exhausted = self.drive_repair_state_machine(
-            &stall_key,
-            stall_count_value,
-        );
+        let budget_exhausted = self.drive_repair_state_machine(&stall_key, stall_count_value);
         if budget_exhausted {
             debug!(
                 stall_count = stall_count_value,
@@ -4778,8 +4762,8 @@ impl EventLoop {
         &self,
         extra_jsonl_events: &[crate::event_reader::Event],
     ) -> crate::recovery_runtime::RuntimeContext {
-        use crate::recovery_runtime::{EnvelopeSnapshot, EventSnapshot, RetryKeyState};
         use crate::diagnosis::DiagnosisSource;
+        use crate::recovery_runtime::{EnvelopeSnapshot, EventSnapshot, RetryKeyState};
 
         let mut ctx = crate::recovery_runtime::RuntimeContext {
             current_iteration: self.state.iteration,
@@ -4879,7 +4863,9 @@ impl EventLoop {
             match action {
                 RecoveryAction::PublishEvent { topic, payload } => {
                     debug!(topic = %topic, "runtime-recovery: publishing corrective event");
-                    self.bus.publish(Event::new(topic.as_str(), payload).with_source(HatId::from("ralph")));
+                    self.bus.publish(
+                        Event::new(topic.as_str(), payload).with_source(HatId::from("ralph")),
+                    );
                 }
                 RecoveryAction::ForcePlanBlocked { reason, retry_key } => {
                     warn!(%reason, %retry_key, "runtime-recovery: forcing plan.blocked");
@@ -5092,7 +5078,10 @@ impl EventLoop {
             let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload) else {
                 continue;
             };
-            let Some(array) = payload.get("recovery_directives").and_then(|v| v.as_array()) else {
+            let Some(array) = payload
+                .get("recovery_directives")
+                .and_then(|v| v.as_array())
+            else {
                 continue;
             };
             for item in array {
@@ -5152,11 +5141,7 @@ impl EventLoop {
     }
 
     /// Prepend recovery directives (if any) to the prompt.
-    fn prepend_recovery_directives(
-        &mut self,
-        prompt: String,
-        events: &[Event],
-    ) -> String {
+    fn prepend_recovery_directives(&mut self, prompt: String, events: &[Event]) -> String {
         let ids = Self::recovery_directive_ids_from_events(events);
         let mut section = self.build_recovery_directives_section(&ids);
         // 2026-06-28-003: also prepend directives produced by in-flight
@@ -6453,13 +6438,22 @@ impl EventLoop {
                     serde_json::Value::String("handoff_dispatch_timeout".into()),
                 );
                 map.insert("topic".into(), serde_json::Value::String(esc.topic.clone()));
-                map.insert("consumer".into(), serde_json::Value::String(esc.consumer.clone()));
-                map.insert("event_id".into(), serde_json::Value::String(esc.event_id.clone()));
+                map.insert(
+                    "consumer".into(),
+                    serde_json::Value::String(esc.consumer.clone()),
+                );
+                map.insert(
+                    "event_id".into(),
+                    serde_json::Value::String(esc.event_id.clone()),
+                );
                 map.insert(
                     "safe_target".into(),
                     serde_json::Value::String(esc.safe_target.clone()),
                 );
-                map.insert("details".into(), serde_json::Value::String(esc.reason.clone()));
+                map.insert(
+                    "details".into(),
+                    serde_json::Value::String(esc.reason.clone()),
+                );
             }
             let resume_event = Event::new("task.resume", payload.to_string())
                 .with_source(HatId::from("ralph"))
@@ -8714,8 +8708,7 @@ impl EventLoop {
             // the `&self` borrow ends before the loop
             // body needs `&mut self` for
             // `apply_emit_gate`.
-            let workspace_root_owned =
-                std::path::PathBuf::from(&self.config.core.workspace_root);
+            let workspace_root_owned = std::path::PathBuf::from(&self.config.core.workspace_root);
             let tasks_path_owned = self.tasks_path();
             let workspace_root = workspace_root_owned.as_path();
             let tasks_path = tasks_path_owned.as_path();
@@ -8983,9 +8976,7 @@ impl EventLoop {
         // mutate) before the gate loop runs so the
         // `&mut self` borrow on `apply_emit_gate` is
         // unblocked.
-        let policy_enabled_for_gate = policy_config_ref
-            .map(|c| c.enabled)
-            .unwrap_or(false);
+        let policy_enabled_for_gate = policy_config_ref.map(|c| c.enabled).unwrap_or(false);
         let completion_after_terminal_for_gate = policy_config_ref
             .map(|c| c.completion_after_terminal.write_diagnostic_event)
             .unwrap_or(false);
@@ -9849,11 +9840,7 @@ impl EventLoop {
         if done < total_units {
             return;
         }
-        if let Err(e) = self
-            .state
-            .flow_lifecycle
-            .advance_to("review_walk")
-        {
+        if let Err(e) = self.state.flow_lifecycle.advance_to("review_walk") {
             tracing::warn!(
                 error = %e,
                 "flow_lifecycle.advance_to(review_walk) failed; staying on unit_loop"
@@ -9908,11 +9895,7 @@ impl EventLoop {
                     .unwrap_or(false)
             })
             .count() as u32;
-        if count == 0 {
-            None
-        } else {
-            Some(count)
-        }
+        if count == 0 { None } else { Some(count) }
     }
 
     /// 2026-06-26 plan U4: discharge hat obligations for any accepted
@@ -10348,9 +10331,7 @@ impl EventLoop {
         // The facade owns the routing decision; we only
         // need to mirror the three outcomes into the
         // appropriate sink.
-        let outcome = crate::event_loop::emit_gate::evaluate_emit_gate(
-            &mut stage_ctx, &event,
-        );
+        let outcome = crate::event_loop::emit_gate::evaluate_emit_gate(&mut stage_ctx, &event);
         match outcome {
             crate::event_loop::emit_gate::EmitGateOutcome::AcceptMainBus => {
                 // 2026-06-28 plan U4: a successful accept may
@@ -10358,11 +10339,9 @@ impl EventLoop {
                 // We advance AFTER publish so the stage_ctx
                 // that just succeeded does not see its own
                 // topic through the new step's scope.
-                if let Some(next) = advance_plan_step(
-                    &self.config,
-                    &self.current_plan_step,
-                    event.topic.as_str(),
-                ) {
+                if let Some(next) =
+                    advance_plan_step(&self.config, &self.current_plan_step, event.topic.as_str())
+                {
                     self.current_plan_step = next;
                 }
                 // U10 (2026-06-27-002 plan completion): if
@@ -10640,11 +10619,7 @@ impl EventLoop {
     ) {
         use crate::diagnosis::{DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef};
         const PAYLOAD_PREVIEW_CHARS: usize = 200;
-        let payload_preview: String = event
-            .payload
-            .chars()
-            .take(PAYLOAD_PREVIEW_CHARS)
-            .collect();
+        let payload_preview: String = event.payload.chars().take(PAYLOAD_PREVIEW_CHARS).collect();
         let mut builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
             .source(DiagnosisSource::CliEmit)
             .severity(DiagnosisSeverity::Warning)
@@ -10680,15 +10655,20 @@ impl EventLoop {
         // emitters (waves, step-handoff, stall
         // detector) so it lands on the main bus without
         // re-entering the stage pipeline.
-        if reject.reason_code.starts_with("repair_unrecoverable_after_") {
+        if reject
+            .reason_code
+            .starts_with("repair_unrecoverable_after_")
+        {
             let blocked_payload = serde_json::json!({
                 "reason": reject.reason_code,
                 "topic": event.topic.as_str(),
                 "stage": reject.stage_name,
                 "loop_id": self.loop_id_label(),
             });
-            self.bus
-                .publish(ralph_proto::Event::new("plan.blocked", blocked_payload.to_string()));
+            self.bus.publish(ralph_proto::Event::new(
+                "plan.blocked",
+                blocked_payload.to_string(),
+            ));
             debug!(
                 topic = %event.topic,
                 reason = %reject.reason_code,

@@ -81,12 +81,7 @@ pub fn enforce_preset_lint_gate(
     source_is_builtin_embedded: bool,
 ) -> Result<(), PresetLintGateError> {
     let lint_strictness = LintStrictness::Strict;
-    let findings = run_preset_lint(
-        config,
-        lint_strictness,
-        source_is_builtin_embedded,
-        None,
-    );
+    let findings = run_preset_lint(config, lint_strictness, source_is_builtin_embedded, None);
 
     let error_count = findings
         .iter()

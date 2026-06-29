@@ -742,9 +742,7 @@ fn run_scenario_with_snapshots(
     // already cover that) and the `recovery_contains`
     // list is a regression guard for the wire-level path.
     if !yaml.expected.recovery_contains.is_empty() {
-        let session_dir = event_loop
-            .diagnostics()
-            .session_dir();
+        let session_dir = event_loop.diagnostics().session_dir();
         if let Some(session_dir) = session_dir {
             let recovery_path = session_dir.join("recovery.jsonl");
             let body = std::fs::read_to_string(&recovery_path).unwrap_or_else(|_| {
@@ -2677,9 +2675,8 @@ fn evaluate_prompt_injects(
 
 #[test]
 fn test_mechanism_plan_blocked_reason_required() {
-    let yaml = load_scenario(
-        "tests/scenarios/mechanism/foundation/plan_blocked_reason_required.yml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/mechanism/foundation/plan_blocked_reason_required.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -2701,17 +2698,14 @@ fn test_mechanism_diagnosis_count_matches_final_state() {
 
 #[test]
 fn test_mechanism_flow_unknown_emit_rejected() {
-    let yaml = load_scenario(
-        "tests/scenarios/mechanism/foundation/flow_unknown_emit_rejected.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/mechanism/foundation/flow_unknown_emit_rejected.yml");
     run_workflow_guard_scenario(yaml);
 }
 
 #[test]
 fn test_mechanism_verdict_gate_terminal_alignment() {
-    let yaml = load_scenario(
-        "tests/scenarios/mechanism/foundation/verdict_gate_terminal_alignment.yml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/mechanism/foundation/verdict_gate_terminal_alignment.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -2890,8 +2884,6 @@ fn test_u1a_current_step_field() {
 /// U7/U15 repair stream).
 #[test]
 fn test_mechanism_scenario_replay_2026_06_26() {
-    let yaml = load_scenario(
-        "tests/scenarios/mechanism/foundation/scenario_replay_2026_06_26.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/mechanism/foundation/scenario_replay_2026_06_26.yml");
     run_workflow_guard_scenario(yaml);
 }

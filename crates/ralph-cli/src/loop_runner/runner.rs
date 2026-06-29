@@ -146,8 +146,7 @@ pub(crate) fn build_termination_diagnostics(
     // because `ralph diagnose` and operator greps read those
     // files; the COUNT field is now sourced from the
     // authoritative IdempotentLog.
-    let (recovery_count, drift_finding_count, _task_count) =
-        collect_idempotent_counts(event_loop);
+    let (recovery_count, drift_finding_count, _task_count) = collect_idempotent_counts(event_loop);
 
     let mut notes = Vec::new();
     notes.push(format!(

@@ -126,10 +126,7 @@ fn legacy_task_relocate_errors_on_malformed_json() {
     let dir = TempDir::new().unwrap();
     let path = write_lines(
         &dir,
-        &[
-            r#"{"task_id":"a","loop_id":null}"#,
-            r#"not-valid-json"#,
-        ],
+        &[r#"{"task_id":"a","loop_id":null}"#, r#"not-valid-json"#],
     );
 
     let result = relocate_legacy_tasks(&path, "loop-current");

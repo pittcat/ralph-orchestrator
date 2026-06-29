@@ -18,7 +18,10 @@ fn u12_required_emit_returns_none_when_zero_progress() {
     // No progress yet — no obligation.
     let progress = StepProgress { done: 0, total: 8 };
     let mut on_partial = std::collections::BTreeMap::new();
-    on_partial.insert("partial_units_done".to_string(), "plan.blocked(reason=\"4_of_8_partial\")".to_string());
+    on_partial.insert(
+        "partial_units_done".to_string(),
+        "plan.blocked(reason=\"4_of_8_partial\")".to_string(),
+    );
     let obligation = required_emit(progress, &on_partial);
     assert_eq!(obligation, Obligation::None);
 }
@@ -27,10 +30,7 @@ fn u12_required_emit_returns_none_when_zero_progress() {
 fn u12_required_emit_returns_pending_when_partial() {
     let progress = StepProgress { done: 4, total: 8 };
     let mut on_partial = std::collections::BTreeMap::new();
-    on_partial.insert(
-        "all_done".to_string(),
-        "plan.complete".to_string(),
-    );
+    on_partial.insert("all_done".to_string(), "plan.complete".to_string());
     on_partial.insert(
         "any_failed".to_string(),
         "plan.blocked(reason=\"unit_failed\")".to_string(),
@@ -103,11 +103,7 @@ fn u12_emit_violates_partial_obligation_when_skipping_review() {
 fn u12_emit_satisfies_no_obligation_returns_true() {
     // An empty obligation accepts any emit.
     let obligation = Obligation::None;
-    assert!(emit_satisfies_obligation(
-        &obligation,
-        "anything",
-        "{}",
-    ));
+    assert!(emit_satisfies_obligation(&obligation, "anything", "{}",));
 }
 
 #[test]

@@ -19,8 +19,8 @@
 //! `tracker.complete()` will hit the `None` branch and only warn, leaving
 //! the activation leaked.
 
-use super::*;
 use super::common::*;
+use super::*;
 use ralph_proto::HatId;
 
 /// Minimal event-loop config used by every test in this file.

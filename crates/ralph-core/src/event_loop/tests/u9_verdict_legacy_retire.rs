@@ -20,8 +20,7 @@ fn load_ce_executor_serial_schema() -> std::path::PathBuf {
     // The schema lives under `presets/schemas/` in the
     // workspace root. We use `CARGO_MANIFEST_DIR` to
     // find it from `ralph-core`'s tests.
-    let crate_dir =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     crate_dir
         .join("../../presets/schemas/ce-executor-serial.yml")
         .canonicalize()
@@ -99,13 +98,18 @@ hats:
     // schema / runtime contract) — the runtime path
     // is verified end-to-end by the BDD scenario
     // `verdict_gate_terminal_alignment` (U17).
-    assert!(config.event_loop.verdict_gate.as_ref().unwrap().additional_topics.is_empty());
+    assert!(
+        config
+            .event_loop
+            .verdict_gate
+            .as_ref()
+            .unwrap()
+            .additional_topics
+            .is_empty()
+    );
     let _ = EventLoop::with_diagnostics(
         config,
-        crate::diagnostics::DiagnosticsCollector::with_enabled(
-            std::path::Path::new("/tmp"),
-            false,
-        )
-        .unwrap(),
+        crate::diagnostics::DiagnosticsCollector::with_enabled(std::path::Path::new("/tmp"), false)
+            .unwrap(),
     );
 }

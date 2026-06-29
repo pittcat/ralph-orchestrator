@@ -181,7 +181,8 @@ event_loop:
 //     `synth_terminal="review.complete"` + `synth_pass=true`。
 // ─────────────────────────────────────────────────────────────────
 
-fn fix_unit_tracker_with_two_fix_steps() -> crate::event_loop::review_step_state::ReviewStepTracker {
+fn fix_unit_tracker_with_two_fix_steps() -> crate::event_loop::review_step_state::ReviewStepTracker
+{
     use crate::event_loop::review_step_state::ReviewStepTracker;
     use crate::event_reader::Event as JsonlEvent;
 
@@ -294,7 +295,9 @@ fn u1_review_complete_with_fix_plan_file_prefills_fix_steps() {
     // 这里再次走"已经预填"的等价路径：fix-01 的 plan.complete 必须放行。
     // 该测试也隐含约束：未声明 fix_plan_file 的 review.complete 不应预填。
     assert!(
-        tracker.check_semantic_gates(&plan_complete_fix_01).is_none(),
+        tracker
+            .check_semantic_gates(&plan_complete_fix_01)
+            .is_none(),
         "after review.complete(fix_plan_file=...) tracker must accept plan.complete for fix-01"
     );
 }

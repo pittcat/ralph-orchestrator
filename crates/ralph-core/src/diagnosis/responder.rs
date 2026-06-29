@@ -1587,7 +1587,10 @@ mod tests {
         let (prefix, suffix) = r
             .sibling_lookup("stall_recovery:executor:work.done:handoff_dispatch_timeout:*")
             .expect("stall_recovery must have a sibling key shape");
-        assert_eq!(prefix, "missing_event_gate:executor:work.done:missing_event:");
+        assert_eq!(
+            prefix,
+            "missing_event_gate:executor:work.done:missing_event:"
+        );
         assert_eq!(suffix, "*");
     }
 
@@ -1597,7 +1600,10 @@ mod tests {
         let (prefix, suffix) = r
             .sibling_lookup("missing_event_gate:executor:work.done:missing_event:*")
             .expect("missing_event_gate must have a sibling key shape");
-        assert_eq!(prefix, "stall_recovery:executor:work.done:handoff_dispatch_timeout:");
+        assert_eq!(
+            prefix,
+            "stall_recovery:executor:work.done:handoff_dispatch_timeout:"
+        );
         assert_eq!(suffix, "*");
     }
 
@@ -1605,7 +1611,10 @@ mod tests {
     fn p0_1_sibling_lookup_returns_none_for_unrelated_keys() {
         let r = RecoveryResponder::new(cfg_with(3, 5, true));
         // A non-stall/non-missing key must not be folded.
-        assert!(r.sibling_lookup("execution_contract:executor:r:*").is_none());
+        assert!(
+            r.sibling_lookup("execution_contract:executor:r:*")
+                .is_none()
+        );
         assert!(r.sibling_lookup("drift_monitor:ralph:r:*").is_none());
     }
 
@@ -1709,8 +1718,8 @@ mod tests {
         // Now ask the responder directly: from the
         // missing_event_gate side, what is the merged attempt
         // count? Must be 2 (the stall sibling).
-        let merged = r
-            .merge_sibling_attempts("missing_event_gate:executor:work.done:missing_event:*");
+        let merged =
+            r.merge_sibling_attempts("missing_event_gate:executor:work.done:missing_event:*");
         assert_eq!(
             merged, 2,
             "P0-1: merge_sibling_attempts must return the stall_recovery attempt_count of 2"
@@ -1756,7 +1765,10 @@ mod tests {
             );
             let _ = r2.record_finding(&env, i);
         }
-        assert_eq!(r2.outcome_history_snapshot("k:builder:work_done:r:*").len(), 4);
+        assert_eq!(
+            r2.outcome_history_snapshot("k:builder:work_done:r:*").len(),
+            4
+        );
         // 6 iterations later (window=5) the entry must reset.
         r2.begin_iteration();
         let env = envelope(
@@ -1823,7 +1835,11 @@ mod tests {
             ..Default::default()
         };
         let actions = crate::recovery_runtime::dispatch(&ctx);
-        assert_eq!(actions.len(), 1, "flapping detector must fire on real history");
+        assert_eq!(
+            actions.len(),
+            1,
+            "flapping detector must fire on real history"
+        );
         assert!(
             matches!(&actions[0], crate::recovery_runtime::RecoveryAction::ForcePlanBlocked { reason, .. } if reason.contains("outcome_flapping")),
             "action must be ForcePlanBlocked with outcome_flapping reason, got: {:?}",

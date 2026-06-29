@@ -1,8 +1,6 @@
 use super::*;
 use crate::event_loop::flow_declaration::FlowDeclaration;
-use crate::event_loop::stage_pipeline::{
-    EmitStage, FlowStep, RepairStateMachine, StageContext,
-};
+use crate::event_loop::stage_pipeline::{EmitStage, FlowStep, RepairStateMachine, StageContext};
 use ralph_proto::Event;
 
 const FLOW_YAML: &str = r#"
@@ -195,11 +193,7 @@ fn u3_bypass_accepts_coordinator_plan_complete() {
 #[test]
 fn u3_bypass_accepts_review_coordinator_dimensions_complete() {
     let stage = FlowStepScopeStage::new(flow());
-    let e = ev_with_source(
-        "review.dimensions.complete",
-        "{}",
-        "review-coordinator",
-    );
+    let e = ev_with_source("review.dimensions.complete", "{}", "review-coordinator");
     assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
 }
 

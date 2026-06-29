@@ -1,4 +1,4 @@
-use super::{check, EmitDecision};
+use super::{EmitDecision, check};
 use serde_json::json;
 
 fn req(names: &[&str]) -> Vec<String> {

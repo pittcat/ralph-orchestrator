@@ -12,7 +12,7 @@
 //! no threading. The same event + the same `required_fields`
 //! always produces the same decision.
 
-use crate::event_loop::emit_schema_gate::{check as check_payload, EmitDecision};
+use crate::event_loop::emit_schema_gate::{EmitDecision, check as check_payload};
 use crate::event_loop::stage_pipeline::{EmitStage, StageContext, StageReject};
 use ralph_proto::Event;
 use serde_json::Value;
@@ -73,10 +73,7 @@ pub(crate) fn required_fields_from_loop_config(
         if fields.is_empty() {
             continue;
         }
-        map.insert(
-            topic.clone(),
-            fields.iter().cloned().collect(),
-        );
+        map.insert(topic.clone(), fields.iter().cloned().collect());
     }
     map
 }

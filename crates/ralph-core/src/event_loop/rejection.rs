@@ -695,14 +695,7 @@ pub fn enrich_task_resume_payload_with_stage(
     stage: Option<RejectionStage>,
     kind: Option<RejectionKind>,
 ) -> String {
-    enrich_task_resume_payload_full(
-        free_form_message,
-        reason_hint,
-        target_hat,
-        stage,
-        kind,
-        &[],
-    )
+    enrich_task_resume_payload_full(free_form_message, reason_hint, target_hat, stage, kind, &[])
 }
 
 /// 2026-06-28-002 U3: full-control variant of

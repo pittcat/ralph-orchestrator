@@ -1067,12 +1067,8 @@ impl RuntimeContractAggregator {
         let skip_flow_lint = config.hats.is_empty();
         if !skip_flow_lint {
             let builtin_source = source_label_is_builtin_embedded(&report.source_label);
-            for finding in run_preset_lint(
-                config,
-                LintStrictness::Strict,
-                builtin_source,
-                raw_yaml,
-            ) {
+            for finding in run_preset_lint(config, LintStrictness::Strict, builtin_source, raw_yaml)
+            {
                 report.add_finding(finding);
             }
         }

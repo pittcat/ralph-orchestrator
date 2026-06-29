@@ -40,20 +40,19 @@ pub mod workflow_activation;
 mod tests;
 
 pub use coordinator::check_coordinator_rules;
-pub use flow_declaration::check_flow_declaration;
 pub use finding_id::{
     FINDING_ACTIVATION_EGRESS_MISSING, FINDING_COORDINATOR_MISSING,
     FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH, FINDING_FLOW_DECLARATION_MISSING,
     FINDING_FLOW_PARTIAL_BRANCH_EMPTY, FINDING_FLOW_PARTIAL_STATE_UNDECLARED,
     FINDING_FLOW_TERMINAL_EMIT_MISSING, FINDING_FLOW_UNKNOWN_EMIT_REJECTED,
-    FINDING_HANDOFF_PAIRING_BROKEN,
-    FINDING_HANDOFF_SEED_DERIVED_CONFLICT, FINDING_INVALID_TOPIC_FORMAT,
-    FINDING_MISSING_TOPIC_OWNER, FINDING_MULTI_HAT_REQUIRES_ISOLATED, FINDING_OWNER_NOT_PUBLISHER,
-    FINDING_OWNER_UNKNOWN_HAT, FINDING_RE_EMIT_TRAP, FINDING_TASK_PUBLISHER_NOT_COORDINATED,
-    FINDING_TERMINAL_DUAL_SUBSCRIBE, FINDING_TERMINAL_PUBLISHER_INCOMPLETE,
-    FINDING_TRIGGER_PUBLISH_ASYMMETRY, FINDING_WHITELIST_EXEMPT_TOPIC,
-    FINDING_WORK_DONE_ACTION_CHAIN_ORDER,
+    FINDING_HANDOFF_PAIRING_BROKEN, FINDING_HANDOFF_SEED_DERIVED_CONFLICT,
+    FINDING_INVALID_TOPIC_FORMAT, FINDING_MISSING_TOPIC_OWNER, FINDING_MULTI_HAT_REQUIRES_ISOLATED,
+    FINDING_OWNER_NOT_PUBLISHER, FINDING_OWNER_UNKNOWN_HAT, FINDING_RE_EMIT_TRAP,
+    FINDING_TASK_PUBLISHER_NOT_COORDINATED, FINDING_TERMINAL_DUAL_SUBSCRIBE,
+    FINDING_TERMINAL_PUBLISHER_INCOMPLETE, FINDING_TRIGGER_PUBLISH_ASYMMETRY,
+    FINDING_WHITELIST_EXEMPT_TOPIC, FINDING_WORK_DONE_ACTION_CHAIN_ORDER,
 };
+pub use flow_declaration::check_flow_declaration;
 
 // Re-export the WAC top-level entry point so callers (and the
 // WAC-U8 BDD scenarios) can invoke the rule family without
@@ -65,6 +64,9 @@ pub use finding_id::{
 // `2026-06-12-003-feat-wac-rollout-completion-plan.md` (WRC-U1) and
 // `2026-06-12-002-feat-workflow-activation-contract-plan.md`
 // (KTD-2: WAC always-on, severity by strictness).
+pub use dimension_reviewer_write_paths::{
+    FINDING_DIMENSION_REVIEWER_WRITE_PLAN, check_dimension_reviewer_write_paths,
+};
 pub use hat_scope_invariant::check_hat_scope_invariant;
 pub use metadata_runtime_drift::check_metadata_runtime_drift;
 pub use multi_hat::check_multi_hat_isolation;
@@ -73,9 +75,6 @@ pub use state_projection::check_work_done_action_chain_order;
 pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,
     validate_all_topics, validate_topic_format,
-};
-pub use dimension_reviewer_write_paths::{
-    check_dimension_reviewer_write_paths, FINDING_DIMENSION_REVIEWER_WRITE_PLAN,
 };
 pub use workflow_activation::{HandoffGraph, run_workflow_activation_contract};
 
@@ -472,7 +471,10 @@ pub fn run_preset_lint(
         None => {
             let config_yaml = serde_yaml::to_string(config).unwrap_or_default();
             let config_yaml = if let Some(mechanism) = config.mechanism.as_ref() {
-                if config_yaml.lines().any(|line| line.trim_start().starts_with("mechanism:")) {
+                if config_yaml
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("mechanism:"))
+                {
                     // The typed-config dump already
                     // carries the `mechanism:` key;
                     // do not double-append.
@@ -506,7 +508,9 @@ pub fn run_preset_lint(
         .any(|line| line.trim_start().starts_with("mechanism:"));
     if source_is_builtin_embedded || has_mechanism_block {
         match flow_declaration::check_flow_declaration(&raw_yaml_owned) {
-            Ok(flow_findings) => findings.extend(lint_findings_to_contract_findings(&flow_findings)),
+            Ok(flow_findings) => {
+                findings.extend(lint_findings_to_contract_findings(&flow_findings))
+            }
             Err(e) => {
                 // Parse-level error from `mechanism.flow` is surfaced as a
                 // single lint finding so the operator can see why the

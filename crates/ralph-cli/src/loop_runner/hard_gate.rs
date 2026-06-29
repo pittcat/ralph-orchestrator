@@ -1,4 +1,5 @@
 use super::*;
+use ralph_core::state_projector::Rejection as StateProjectorRejection;
 use ralph_core::{
     NonRetryableReason, PolicyRejection, Rejection, RejectionKind, RejectionStage,
     TerminationReason, U2_REJECTION_RETRY_LIMIT, ViolationType,
@@ -9,7 +10,6 @@ use ralph_core::{
     },
     event_loop::rejection::enrich_task_resume_payload_with_stage,
 };
-use ralph_core::state_projector::Rejection as StateProjectorRejection;
 
 pub fn should_hard_gate(hat_id: &HatId, event_loop: &EventLoop) -> bool {
     let Some(config) = event_loop.registry().get_config(hat_id) else {
@@ -1241,8 +1241,7 @@ pub fn inject_state_projection_rejection_guidance(
     // Deduplicate findings by `(topic, reason)` so a batch that
     // fails on the same reason once surfaces one bullet instead
     // of N copies. BTreeSet gives deterministic ordering.
-    let mut seen: std::collections::BTreeSet<(String, String)> =
-        std::collections::BTreeSet::new();
+    let mut seen: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
     let mut unique: Vec<&StateProjectorRejection> = Vec::new();
     for r in rejections {
         let key = (r.topic.clone(), r.reason.clone());
@@ -1422,12 +1421,12 @@ mod p0_1_dedup_tests {
     // "happy path / edge path / error path" coverage on the
     // actual guard function.
 
+    use ralph_core::RalphConfig;
     use ralph_core::diagnosis::{
         DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope,
         RecoveryDiagnosisEnvelopeBuilder,
     };
     use ralph_core::event_loop::EventLoop;
-    use ralph_core::RalphConfig;
 
     fn build_event_loop(workspace: &std::path::Path) -> EventLoop {
         let yaml = r#"
@@ -1444,8 +1443,9 @@ hats:
 "#;
         let mut config: RalphConfig = serde_yaml::from_str(yaml).expect("parse test yaml");
         config.core.workspace_root = workspace.to_path_buf();
-        let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(workspace, true)
-            .expect("create diagnostics collector");
+        let diagnostics =
+            ralph_core::diagnostics::DiagnosticsCollector::with_enabled(workspace, true)
+                .expect("create diagnostics collector");
         let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
         event_loop.initialize("p0_1_end_to_end");
         event_loop
@@ -1456,9 +1456,7 @@ hats:
         // `normalize_part` (`.` -> `_`); mirror that here so
         // the assertion checks the actual key on the responder.
         let normalized_topic = topic.replace('.', "_");
-        let key = format!(
-            "stall_recovery:{hat}:{normalized_topic}:handoff_dispatch_timeout:*"
-        );
+        let key = format!("stall_recovery:{hat}:{normalized_topic}:handoff_dispatch_timeout:*");
         let envelope = RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
             DiagnosisSource::StallRecovery,
             Some(hat),

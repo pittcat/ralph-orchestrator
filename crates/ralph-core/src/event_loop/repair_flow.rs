@@ -120,7 +120,10 @@ pub enum RepairTransitionResult {
     /// Transition rejected because the action is not legal from
     /// the current state. This is a programming error — repair
     /// topics are emitted by a finite, vetted set of hats.
-    IllegalTransition { from: RepairState, action: RepairAction },
+    IllegalTransition {
+        from: RepairState,
+        action: RepairAction,
+    },
     /// Transition rejected because the retry budget is exhausted.
     BudgetExhausted(BudgetExhausted),
 }
@@ -174,10 +177,7 @@ impl RepairStateMachine {
     /// further action returns `IllegalTransition`. The internal
     /// `retries` counter is reset on a successful `Close` so the
     /// next repair cycle on the same task starts fresh.
-    pub fn try_transition(
-        &mut self,
-        action: RepairAction,
-    ) -> RepairTransitionResult {
+    pub fn try_transition(&mut self, action: RepairAction) -> RepairTransitionResult {
         if self.closed {
             return RepairTransitionResult::IllegalTransition {
                 from: self.state,
@@ -195,9 +195,10 @@ impl RepairStateMachine {
                 RepairAction::Retry,
             ) => {
                 if self.retries >= self.budget.max {
-                    return RepairTransitionResult::BudgetExhausted(
-                        BudgetExhausted::new(self.retries, self.budget.max),
-                    );
+                    return RepairTransitionResult::BudgetExhausted(BudgetExhausted::new(
+                        self.retries,
+                        self.budget.max,
+                    ));
                 }
                 self.retries += 1;
                 RepairState::Diagnosing
@@ -209,10 +210,7 @@ impl RepairStateMachine {
                 return RepairTransitionResult::Accepted;
             }
             _ => {
-                return RepairTransitionResult::IllegalTransition {
-                    from,
-                    action,
-                };
+                return RepairTransitionResult::IllegalTransition { from, action };
             }
         };
 

@@ -89,8 +89,8 @@ impl EmitStage for TerminalStateGuardStage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event_loop::stage_pipeline::{FlowStep, StageContext};
     use crate::event_loop::repair_flow::RepairStateMachine;
+    use crate::event_loop::stage_pipeline::{FlowStep, StageContext};
 
     fn ctx_with_phase<'a>(
         repair: &'a mut RepairStateMachine,
@@ -131,7 +131,9 @@ mod tests {
         let stage = TerminalStateGuardStage::new();
         let mut repair = RepairStateMachine::default();
         let mut c = ctx_with_phase(&mut repair, Some("Failed"));
-        let err = stage.check(&mut c, &event("review.dimension.ready")).unwrap_err();
+        let err = stage
+            .check(&mut c, &event("review.dimension.ready"))
+            .unwrap_err();
         assert_eq!(err.reason_code, "flow_state_closed");
     }
 

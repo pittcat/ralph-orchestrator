@@ -29,14 +29,14 @@ hats:
     let diagnostics =
         crate::diagnostics::DiagnosticsCollector::with_enabled(&diagnostics_root, true)
             .expect("create diagnostics");
-    let context =
-        LoopContext::worktree("loop-u13-1", diagnostics_root.clone(), diagnostics_root.clone());
+    let context = LoopContext::worktree(
+        "loop-u13-1",
+        diagnostics_root.clone(),
+        diagnostics_root.clone(),
+    );
 
     let result = EventLoop::with_context_and_diagnostics(config, context, diagnostics);
-    assert!(
-        result.is_ok(),
-        "expected loop start to succeed"
-    );
+    assert!(result.is_ok(), "expected loop start to succeed");
 }
 
 /// Pin the U13 contract: an `archive_state_for_loop`
@@ -82,11 +82,7 @@ hats:
     let diagnostics =
         crate::diagnostics::DiagnosticsCollector::with_enabled(&bogus_workspace, false)
             .expect("create diagnostics");
-    let context = LoopContext::worktree(
-        "loop-u13-2",
-        bogus_workspace.clone(),
-        bogus_workspace,
-    );
+    let context = LoopContext::worktree("loop-u13-2", bogus_workspace.clone(), bogus_workspace);
     let result = EventLoop::with_context_and_diagnostics(config, context, diagnostics);
     assert!(
         result.is_err(),

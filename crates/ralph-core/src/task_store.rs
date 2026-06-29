@@ -165,11 +165,9 @@ impl TaskStore {
                                 continue;
                             }
                         };
-                        if let Err(err) =
-                            crate::event_loop::idempotent_wiring::write_task(
-                                &mut log, &task.id, loop_id, payload, is_final,
-                            )
-                        {
+                        if let Err(err) = crate::event_loop::idempotent_wiring::write_task(
+                            &mut log, &task.id, loop_id, payload, is_final,
+                        ) {
                             tracing::warn!(
                                 target: "ralph_core::task_store",
                                 task_id = %task.id,
@@ -262,9 +260,9 @@ impl TaskStore {
                     continue;
                 }
             };
-            if let Err(err) =
-                crate::event_loop::idempotent_wiring::write_task(log, &task.id, loop_id, payload, is_final)
-            {
+            if let Err(err) = crate::event_loop::idempotent_wiring::write_task(
+                log, &task.id, loop_id, payload, is_final,
+            ) {
                 tracing::warn!(
                     target: "ralph_core::task_store",
                     task_id = %task.id,

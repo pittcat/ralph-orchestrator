@@ -1,6 +1,4 @@
-use super::{
-    RepairAction, RepairBudget, RepairState, RepairStateMachine, RepairTransitionResult,
-};
+use super::{RepairAction, RepairBudget, RepairState, RepairStateMachine, RepairTransitionResult};
 
 #[test]
 fn repair_flow_happy_path_full_progression() {
@@ -94,10 +92,7 @@ fn repair_flow_budget_exhausted_then_repeated_calls_still_reject() {
     // returning BudgetExhausted (no panic).
     for _ in 0..3 {
         let result = sm.try_transition(RepairAction::Retry);
-        assert!(matches!(
-            result,
-            RepairTransitionResult::BudgetExhausted(_)
-        ));
+        assert!(matches!(result, RepairTransitionResult::BudgetExhausted(_)));
     }
 }
 

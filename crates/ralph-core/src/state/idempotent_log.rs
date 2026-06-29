@@ -65,11 +65,9 @@ use thiserror::Error;
 use tracing::debug;
 
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use nix::fcntl::{Flock, FlockArg, OFlag};
 #[cfg(unix)]
-use {
-    nix::fcntl::{Flock, FlockArg, OFlag},
-};
+use std::os::unix::fs::OpenOptionsExt;
 
 /// One transition entry inside `IdempotentRecord._transitions`.
 ///
@@ -150,7 +148,9 @@ pub enum IdempotentError {
     FinalAlreadySet(String),
     #[error("serde error: {0}")]
     Serde(#[from] serde_json::Error),
-    #[error("OS file lock unavailable on this platform (Windows needs caller-side inter-process mutex)")]
+    #[error(
+        "OS file lock unavailable on this platform (Windows needs caller-side inter-process mutex)"
+    )]
     NoOsLock,
 }
 
@@ -336,7 +336,9 @@ impl IdempotentLog {
             record._created_at = now_iso8601();
         }
 
-        let key_path = self.workspace.join(format!("{}.jsonl", record._idempotency_key));
+        let key_path = self
+            .workspace
+            .join(format!("{}.jsonl", record._idempotency_key));
 
         // 1. Acquire OS lock.
         let _guard = acquire_exclusive_lock(&key_path)?;
@@ -466,11 +468,7 @@ impl IdempotentLog {
         if self.disabled {
             return Vec::new();
         }
-        self.index
-            .values()
-            .filter(|r| r._final)
-            .cloned()
-            .collect()
+        self.index.values().filter(|r| r._final).cloned().collect()
     }
 }
 
@@ -508,10 +506,7 @@ fn read_last_record(path: &Path) -> Result<Option<IdempotentRecord>, IdempotentE
     // Each per-key file holds exactly one record (merged on
     // every append). Reading the last non-empty line is the
     // authoritative shape.
-    let last_non_empty = content
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty());
+    let last_non_empty = content.lines().rev().find(|l| !l.trim().is_empty());
     match last_non_empty {
         None => Ok(None),
         Some(line) => Ok(Some(serde_json::from_str(line)?)),

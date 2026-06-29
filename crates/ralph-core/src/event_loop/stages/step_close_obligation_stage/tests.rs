@@ -190,11 +190,7 @@ fn u6_fix_step_falls_back_to_tasks_jsonl_count() {
                     .unwrap_or(false)
             })
             .count() as u32;
-        if count == 0 {
-            None
-        } else {
-            Some(count)
-        }
+        if count == 0 { None } else { Some(count) }
     }
 
     let tmp = tempfile::TempDir::new().unwrap();

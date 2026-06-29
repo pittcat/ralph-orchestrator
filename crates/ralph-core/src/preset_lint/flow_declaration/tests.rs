@@ -35,7 +35,10 @@ fn flow_declaration_lint_passes_on_legal_yaml() {
     assert!(
         findings.is_empty(),
         "expected no findings, got {:?}",
-        findings.iter().map(|f| (f.id, &f.message)).collect::<Vec<_>>()
+        findings
+            .iter()
+            .map(|f| (f.id, &f.message))
+            .collect::<Vec<_>>()
     );
 }
 

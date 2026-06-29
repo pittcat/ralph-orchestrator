@@ -25,13 +25,13 @@
 //!   topic the runtime doesn't know how to validate against.
 
 use crate::config::RalphConfig;
-use crate::event_loop::flow_declaration::{is_partial_state, FlowDeclaration, FlowParseError};
+use crate::event_loop::flow_declaration::{FlowDeclaration, FlowParseError, is_partial_state};
+use crate::preset_lint::LintFinding;
 use crate::preset_lint::finding_id::{
     FINDING_FLOW_DECLARATION_MISSING, FINDING_FLOW_PARTIAL_BRANCH_EMPTY,
     FINDING_FLOW_PARTIAL_STATE_UNDECLARED, FINDING_FLOW_TERMINAL_EMIT_MISSING,
     FINDING_FLOW_UNKNOWN_EMIT_REJECTED,
 };
-use crate::preset_lint::LintFinding;
 use serde_yaml::Value;
 
 /// Run every flow declaration rule and return the findings.
@@ -108,11 +108,7 @@ pub fn check_flow_declaration(raw_yaml: &str) -> Result<Vec<LintFinding>, FlowPa
         .and_then(|el| el.get("completion_promise"))
         .and_then(|v| v.as_str())
         .unwrap_or("LOOP_COMPLETE");
-    if !decl
-        .terminal_emits
-        .iter()
-        .any(|t| t == completion_promise)
-    {
+    if !decl.terminal_emits.iter().any(|t| t == completion_promise) {
         let mut f = LintFinding::new(
             FINDING_FLOW_TERMINAL_EMIT_MISSING,
             format!(
@@ -193,11 +189,7 @@ fn collect_known_topics(raw_yaml: &str) -> std::collections::HashSet<String> {
 
     // Whitelist of well-known control topics that the
     // topic_format rule already exempts from format checks.
-    for topic in [
-        "LOOP_COMPLETE",
-        "REPORT_DONE",
-        "REVIEW_COMPLETE",
-    ] {
+    for topic in ["LOOP_COMPLETE", "REPORT_DONE", "REVIEW_COMPLETE"] {
         set.insert(topic.to_string());
     }
 
