@@ -3,6 +3,7 @@
 //! The event loop coordinates the execution of hats via pub/sub messaging.
 
 pub mod loop_state;
+pub mod plan_blocked_reason;
 pub mod rejection;
 pub mod review_step_state;
 // 2026-06-27 mechanism foundation U1: hard required-fields check at

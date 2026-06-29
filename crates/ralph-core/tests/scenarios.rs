@@ -2715,6 +2715,18 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-29-007 plan U5b: smoke test for the
+/// `PlanBlockedReason` typed enum. The closed-set
+/// enforcement is unit-tested in
+/// `plan_blocked_reason::tests`. This scenario verifies
+/// the typed enum does not break the existing happy
+/// path emit pattern.
+#[test]
+fn test_u5b_coordinator_reason() {
+    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u5b-coordinator-reason.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U5a: smoke test for the
 /// `dimension_reviewer_write_paths` lint. The core
 /// "reject docs/plans/ write access for
