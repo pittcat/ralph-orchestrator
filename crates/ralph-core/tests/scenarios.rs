@@ -2715,7 +2715,21 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
-/// U19 (2026-06-27-002 plan completion): replay the
+/// 2026-06-29-007 plan U1a: smoke test for the new
+/// `flow_lifecycle.current_step` dedicated field. The
+/// scenario itself is a 2-step happy path (no `mechanism.flow`
+/// declared, so it stays on the `unit_loop` step the entire
+/// run). The point is to confirm that the field-based
+/// `current_step_id()` lookup does not regress any existing
+/// path: a 2-step plan completes cleanly with no spurious
+/// `flow_unknown_emit` rejections.
+#[test]
+fn test_u1a_current_step_field() {
+    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u1a-current-step-field.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-06-29-007 plan U19: replay the
 /// 2026-06-26 diagnostic scenario. The loop must NOT
 /// silently burn the budget on a 4/8 partial + silence
 /// emit chain (U12 obligation + U5 budget gate +

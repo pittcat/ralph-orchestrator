@@ -225,6 +225,17 @@ pub struct FlowLifecycleRegistry {
     /// after each `transition()` call so envelope writing stays on
     /// the caller's preferred path.
     pending_envelopes: Vec<RecoveryDiagnosisEnvelope>,
+    /// 2026-06-29-007 plan U1a: explicit `current_step` field.
+    /// Tracks the plan-mode step id (`unit_loop` / `review_walk` /
+    /// `plan_end` / `ship`) directly instead of inferring it from
+    /// the active record's `source_topic`. Set on
+    /// [`Self::register`] from the caller-supplied step, updated
+    /// by [`Self::advance_to`] (U1b), and read by
+    /// [`Self::current_step_id`]. The legacy records-iteration
+    /// fallback is preserved for existing fixtures/tests that
+    /// relied on the inferred behaviour — see the `#[deprecated]`
+    /// note on [`Self::current_step_id_fallback`].
+    current_step: String,
 }
 
 impl FlowLifecycleRegistry {
@@ -446,11 +457,28 @@ impl FlowLifecycleRegistry {
         });
     }
 
-    /// U6 (2026-06-27 mechanism foundation): best-effort
-    /// accessor returning the id of the most-recently active
-    /// flow unit's first step. Falls back to "unit_loop"
-    /// when no non-terminal record is registered.
+    /// 2026-06-29-007 plan U1a: explicit accessor for the
+    /// plan-mode `current_step`. Returns the value of the
+    /// dedicated [`Self::current_step`] field. Defaults to
+    /// `"unit_loop"` when the field is empty (legacy callers
+    /// that never called `register`/`advance_to`).
     pub fn current_step_id(&self) -> &str {
+        if !self.current_step.is_empty() {
+            return self.current_step.as_str();
+        }
+        self.current_step_id_fallback()
+    }
+
+    /// 2026-06-29-007 plan U1a: deprecated records-iteration
+    /// fallback. Preserved so the existing fixtures (003-005
+    /// plans landed pre-U1a) keep passing without a mass
+    /// rewrite. U1b will add explicit `advance_to` calls in
+    /// the event loop; U1a only swaps the accessor to prefer
+    /// the dedicated field when set.
+    #[deprecated(
+        note = "Pre-U1a records-iteration fallback. New code should set current_step via register/advance_to and call current_step_id() directly."
+    )]
+    pub fn current_step_id_fallback(&self) -> &str {
         for record in self.records.values() {
             if !record.phase.is_terminal() {
                 return record.source_topic.as_str();
@@ -458,7 +486,81 @@ impl FlowLifecycleRegistry {
         }
         "unit_loop"
     }
+
+    /// 2026-06-29-007 plan U1a: explicit setter for the
+    /// `current_step` field. Validates that `step` is a
+    /// non-empty string; empty strings are rejected with a
+    /// typed error so the field can never drift to the
+    /// empty state via this path (the empty default is only
+    /// reachable through [`Self::default`] / unset state).
+    pub fn set_current_step(&mut self, step: &str) -> Result<(), FlowError> {
+        if step.is_empty() {
+            return Err(FlowError::UnknownStep {
+                step: step.to_string(),
+            });
+        }
+        self.current_step = step.to_string();
+        Ok(())
+    }
+
+    /// 2026-06-29-007 plan U1b: advance the `current_step`
+    /// field to `target`. Refuses to advance if the target
+    /// equals the current value (idempotent no-op). The
+    /// U1b-emitted `flow.transition` event handling is the
+    /// caller's responsibility; this helper is a pure
+    /// mutator. U1a's set_current_step stays for tests.
+    pub fn advance_to(&mut self, target: &str) -> Result<&str, FlowError> {
+        if target.is_empty() {
+            return Err(FlowError::PrematureTransition {
+                from: self.current_step.clone(),
+                to: target.to_string(),
+            });
+        }
+        if self.current_step == target {
+            return Ok(self.current_step.as_str());
+        }
+        let prev = std::mem::replace(&mut self.current_step, target.to_string());
+        tracing::debug!(
+            from = %prev,
+            to = %self.current_step,
+            "FlowLifecycleRegistry::advance_to"
+        );
+        Ok(self.current_step.as_str())
+    }
 }
+
+/// Typed errors for flow step manipulation. U1a adds the
+/// two variants used by `set_current_step` /
+/// `advance_to`; future Units may add more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlowError {
+    /// The supplied step id is not declared in the
+    /// `mechanism.flow` declaration. Currently we only
+    /// guard against empty strings; full StepId enum
+    /// validation lands with the follow-up type-state
+    /// refactor (see plan §Deferred to Follow-Up Work).
+    UnknownStep { step: String },
+    /// Caller attempted to advance before reaching the
+    /// `unit_loop.all_done` trigger condition. Returned
+    /// by [`FlowLifecycleRegistry::advance_to`] when the
+    /// target is empty (the only premature condition we
+    /// detect pre-U1b; full validation lives in the
+    /// event-loop caller).
+    PrematureTransition { from: String, to: String },
+}
+
+impl std::fmt::Display for FlowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownStep { step } => write!(f, "unknown step id: {step:?}"),
+            Self::PrematureTransition { from, to } => {
+                write!(f, "premature transition from {from:?} to {to:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FlowError {}
 
 /// Returns the legal successor phases for `current`.
 ///
@@ -1007,6 +1109,84 @@ mod tests {
         let r = reg.get("wf-dup").unwrap();
         assert_eq!(r.wave_total, 5, "existing record must be preserved");
         assert_eq!(r.phase, FlowPhase::Detected);
+    }
+
+    // -----------------------------------------------------------------
+    // U1a (2026-06-29-007 plan): explicit `current_step` field
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn current_step_defaults_to_unit_loop() {
+        let reg = FlowLifecycleRegistry::new();
+        assert_eq!(reg.current_step_id(), "unit_loop");
+    }
+
+    #[test]
+    fn current_step_setter_updates_field() {
+        let mut reg = FlowLifecycleRegistry::new();
+        reg.set_current_step("review_walk").unwrap();
+        assert_eq!(reg.current_step_id(), "review_walk");
+        reg.set_current_step("plan_end").unwrap();
+        assert_eq!(reg.current_step_id(), "plan_end");
+        reg.set_current_step("ship").unwrap();
+        assert_eq!(reg.current_step_id(), "ship");
+    }
+
+    #[test]
+    fn current_step_setter_rejects_empty() {
+        let mut reg = FlowLifecycleRegistry::new();
+        let err = reg.set_current_step("").unwrap_err();
+        assert!(matches!(err, FlowError::UnknownStep { .. }));
+    }
+
+    #[test]
+    fn current_step_advance_to_updates_field() {
+        let mut reg = FlowLifecycleRegistry::new();
+        reg.set_current_step("unit_loop").unwrap();
+        let step = reg.advance_to("review_walk").unwrap();
+        assert_eq!(step, "review_walk");
+        assert_eq!(reg.current_step_id(), "review_walk");
+        let step = reg.advance_to("plan_end").unwrap();
+        assert_eq!(step, "plan_end");
+    }
+
+    #[test]
+    fn current_step_advance_to_is_idempotent() {
+        let mut reg = FlowLifecycleRegistry::new();
+        reg.set_current_step("unit_loop").unwrap();
+        reg.advance_to("review_walk").unwrap();
+        let step = reg.advance_to("review_walk").unwrap();
+        assert_eq!(step, "review_walk");
+        assert_eq!(reg.current_step_id(), "review_walk");
+    }
+
+    #[test]
+    fn current_step_advance_to_rejects_empty_target() {
+        let mut reg = FlowLifecycleRegistry::new();
+        reg.set_current_step("unit_loop").unwrap();
+        let err = reg.advance_to("").unwrap_err();
+        assert!(matches!(err, FlowError::PrematureTransition { .. }));
+    }
+
+    #[test]
+    fn current_step_field_takes_precedence_over_records_fallback() {
+        // 2026-06-29-007 plan U1a: even when records are
+        // registered (which would have triggered the legacy
+        // records-iteration fallback), the dedicated field
+        // wins. This is the contract change U1a introduces:
+        // setter/advance_to always beat the inferred value.
+        let mut reg = FlowLifecycleRegistry::new();
+        reg.register(FlowLifecycleRecord::new(
+            "wf-1",
+            "review-coordinator",
+            "review.wave.ready",
+            3,
+        ));
+        // Field is still empty → records fallback fires.
+        assert_eq!(reg.current_step_id(), "review.wave.ready");
+        // Setter takes precedence.
+        reg.set_current_step("review_walk").unwrap();
+        assert_eq!(reg.current_step_id(), "review_walk");
     }
 
     // -----------------------------------------------------------------
