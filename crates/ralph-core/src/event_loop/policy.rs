@@ -107,16 +107,22 @@ pub fn publish_correction_via_context(
     }
 
     // R11 (3-strike escalation): if the correction block already
-    // crossed the escalation threshold, publish a `human.guidance`
-    // event so the operator sees the hook fire — the legacy
-    // `task.resume` event is not published alongside (the `return`
-    // in the caller short-circuits the legacy path).
+    // crossed the escalation threshold, publish a `plan.blocked`
+    // event so the shipper / reporter chain runs the preset's
+    // failure path. The legacy `task.resume` event is not
+    // published alongside (the `return` in the caller short-
+    // circuits the legacy path).
+    //
+    // Pre-2026-06-28-005 this published `human.guidance` for
+    // an operator. The operator channel was removed by that
+    // plan; the escalation now terminates the loop via
+    // `plan.blocked(reason=correction_3_strike_exhausted)`.
     if ctx.needs_escalation {
-        let guidance = crate::correction::maybe_escalate_to_human_guidance(bus, &ctx);
-        if guidance {
+        let escalated = crate::correction::escalate_to_plan_blocked(bus, &ctx);
+        if escalated {
             tracing::warn!(
                 retry_key = %ctx.retry_key,
-                "A3: human.guidance escalation fired (3-strike threshold reached)"
+                "A3: plan.blocked escalation fired (3-strike threshold reached)"
             );
         }
     }
