@@ -22,4 +22,5 @@ pub mod flow_step_scope_stage;
 pub mod repair_dispatch_stage;
 pub mod step_close_obligation_stage;
 pub mod target_hat_guard_stage;
+pub mod terminal_state_guard_stage;
 pub mod verdict_gate_stage;

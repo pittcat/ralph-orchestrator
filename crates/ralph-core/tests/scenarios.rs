@@ -2715,6 +2715,18 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-29-007 plan U7: smoke test for the
+/// `TerminalStateGuardStage`. The phase-based reject is
+/// unit-tested in
+/// `terminal_state_guard_stage::tests`. This scenario
+/// verifies the new stage does not break the existing
+/// happy path.
+#[test]
+fn test_u7_terminal_state_guard() {
+    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u7-terminal-state.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U10: smoke test for the
 /// PHASE 2 branch gate. The classify / rewrite logic is
 /// unit-tested in

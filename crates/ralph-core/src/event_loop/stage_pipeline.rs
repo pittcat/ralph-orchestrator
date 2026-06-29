@@ -139,6 +139,12 @@ pub struct StageContext<'a> {
     /// caller (`publish_event` / `process_parse_result`)
     /// does not need to thread the pipeline separately.
     pub pipeline: Option<&'a StagePipeline>,
+    /// 2026-06-29-007 plan U7: optional
+    /// `flow_lifecycle.phase` label. `None` means the
+    /// registry is still active; `Some("Closed")` /
+    /// `Some("Failed")` puts the
+    /// `TerminalStateGuardStage` into reject mode.
+    pub flow_phase: Option<String>,
 }
 
 impl<'a> StageContext<'a> {
@@ -155,6 +161,7 @@ impl<'a> StageContext<'a> {
             expected_version,
             repair_states,
             pipeline: None,
+            flow_phase: None,
         }
     }
 
@@ -174,6 +181,7 @@ impl<'a> StageContext<'a> {
             expected_version,
             repair_states,
             pipeline: Some(pipeline),
+            flow_phase: None,
         }
     }
 
