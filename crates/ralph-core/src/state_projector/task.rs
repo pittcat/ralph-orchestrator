@@ -142,7 +142,29 @@ pub(crate) fn project_close_task(
         .to_string();
 
     let mut store = TaskStore::load(&ctx.tasks_path).map_err(|e| format!("tasks_load: {e}"))?;
-    let closed = store.close(&task_id);
+    // 2026-06-30 P0-2 (primary-153653): when multiple tasks share
+    // the same task_id (coordinator emits the same id for fix-01
+    // and fix-02 because the agent's prompt template reuses it),
+    // `store.close(&task_id)` only closes the **first** row with
+    // that id (`TaskStore::get_mut` returns the first match) —
+    // later fix-unit rows stay `open` forever, producing the
+    // P0-3 tasks.jsonl ↔ progress.md drift. When the payload also
+    // carries a `task_key` (always present in ce-executor-serial
+    // payloads), look up by key first; the key is unique per
+    // step including fix-NN, so the close targets the right row.
+    // Fall back to id lookup when no key is available so legacy
+    // payloads keep working.
+    let closed = if let Some(task_key) = json_pointer(payload, "task_key") {
+        if store.get_by_key_mut(task_key).is_some() {
+            store.close_by_key(task_key)
+        } else {
+            // Key mismatch — fall back to id lookup so we don't
+            // silently no-op on malformed payloads.
+            store.close(&task_id)
+        }
+    } else {
+        store.close(&task_id)
+    };
     if closed.is_none() {
         // Fail-closed: a `work.done` referencing a task_id that
         // is not in the ledger is a contract violation. The
@@ -284,6 +306,66 @@ mod tests {
         assert!(
             tasks.is_empty(),
             "Fix-1: rejected event must not write to ledger (was: wrote synthetic from_key: task)"
+        );
+    }
+
+    // 2026-06-30 P0-2 (primary-153653): fix-01 and fix-02
+    // shared the same task_id in the JSONL because the
+    // coordinator's fix-unit prompt template copied it. Closing
+    // by id alone only closed the first row, leaving the rest
+    // `open` forever and producing the P0-3 tasks.jsonl ↔
+    // progress.md drift. The projector now prefers `task_key`
+    // when present, then falls back to id. Regression test:
+    // ensure two fix-units with the same task_id but different
+    // task_keys, close each via work.done carrying the right
+    // task_key, and verify both rows end up closed.
+    #[test]
+    fn p0_2_fix_units_share_task_id_close_by_key_independently() {
+        use crate::state_projector::ProjectionContext;
+        use crate::state_projector::StateProjectionConfig;
+
+        let dir = tempdir().unwrap();
+        let mut ctx = ProjectionContext::new(dir.path(), StateProjectionConfig::default(), false)
+            .with_current_loop_id("loop-A");
+        // Two fix-units, same task_id (the bug condition), different
+        // task_keys (the discriminator the fix relies on).
+        let fix01_ensure = serde_json::json!({
+            "task_id": "task-shared",
+            "task_key": "ce-executor:p:fix-01:u1",
+            "plan_name": "p",
+        });
+        let fix02_ensure = serde_json::json!({
+            "task_id": "task-shared",
+            "task_key": "ce-executor:p:fix-02:u2",
+            "plan_name": "p",
+        });
+        project_ensure_task(&mut ctx, &fix01_ensure, "task_key", None).unwrap();
+        project_ensure_task(&mut ctx, &fix02_ensure, "task_key", None).unwrap();
+
+        let fix01_close = serde_json::json!({
+            "task_id": "task-shared",
+            "task_key": "ce-executor:p:fix-01:u1",
+            "step": "fix-01",
+        });
+        let fix02_close = serde_json::json!({
+            "task_id": "task-shared",
+            "task_key": "ce-executor:p:fix-02:u2",
+            "step": "fix-02",
+        });
+        project_close_task(&mut ctx, &fix01_close, "task_id", Some("step")).unwrap();
+        project_close_task(&mut ctx, &fix02_close, "task_id", Some("step")).unwrap();
+
+        let tasks = ctx.task_snapshot().0;
+        assert_eq!(tasks.len(), 2, "two fix-units must both be persisted");
+        let closed_keys: Vec<&str> = tasks
+            .iter()
+            .filter(|t| t.status == crate::task::TaskStatus::Closed)
+            .filter_map(|t| t.key.as_deref())
+            .collect();
+        assert_eq!(
+            closed_keys.len(),
+            2,
+            "P0-2: both fix-units must close when task_key differs (was: only first closes)"
         );
     }
 }

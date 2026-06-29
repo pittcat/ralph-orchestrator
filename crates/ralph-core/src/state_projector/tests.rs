@@ -357,21 +357,22 @@ fn p0_retain_drops_only_matching_payload_in_batch() {
         .expect("ensure produced a task");
 
     // Build a batch with three work.done events:
-    //   - index 0: closes task-A (will succeed once we fix the
-    //     payload to use the real id; here it uses the wrong id
-    //     and fails with task_not_found).
-    //   - index 1: missing task_id pointer (fails payload_parse
-    //     is not right; fails because of missing pointer).
+    //   - index 0: closes task-A with a wrong id AND wrong key
+    //     (fails task_not_found; the P0-2 fallback path looks up
+    //     by `task_key` first when present, so the wrong-id path
+    //     only fails when neither id nor key match).
+    //   - index 1: missing task_id pointer (fails because of
+    //     missing pointer).
     //   - index 2: closes task-A with the right id (would
     //     succeed on its own).
     //
-    // We craft index 0 to fail (wrong id), index 1 to fail
-    // (missing field), and index 2 to succeed. After apply, the
-    // rejection set must identify (0, payload0) and (1, payload1)
-    // as the dropped ones, leaving index 2 intact in the loop's
-    // event batch.
+    // We craft index 0 to fail (wrong id + wrong key), index 1
+    // to fail (missing field), and index 2 to succeed. After
+    // apply, the rejection set must identify (0, payload0) and
+    // (1, payload1) as the dropped ones, leaving index 2 intact
+    // in the loop's event batch.
     let bad_id_payload =
-        json!({"task_id": "wrong-id", "task_key": "ce-executor:p:step-01:u1-impl", "step": "step-01"})
+        json!({"task_id": "wrong-id", "task_key": "wrong-key", "step": "step-01"})
             .to_string();
     let missing_field_payload = json!({}).to_string(); // no task_id
     let good_payload = json!({

@@ -265,6 +265,39 @@ fn u1_plan_complete_for_non_fix_step_still_requires_terminal() {
 }
 
 #[test]
+fn p0_1_plan_complete_with_object_step_id_fix_skips_gate() {
+    // 2026-06-30 P0-1 (primary-153653):
+    // `CoordinatorDecisionGateStage::rewrite_work_ready_topic` 把
+    // `work.ready` 的 topic 改为 `plan.complete` 但不改 payload。
+    // payload 中的 `step` 此时是嵌套对象
+    // `{"id":"fix-02","last_in_phase":true}`，原实现 `as_str()`
+    // 取不到 → fix-* 豁免不触发 → plan_gate 误拒。
+    // 修复后必须同时支持 string 与 object.id 两种形态。
+    use crate::event_loop::review_step_state::ReviewStepTracker;
+    use crate::event_reader::Event as JsonlEvent;
+
+    let tracker = ReviewStepTracker::default();
+    let plan_complete = JsonlEvent {
+        topic: "plan.complete".to_string(),
+        payload: Some(
+            r#"{"plan_name":"p","completed_steps":1,"task_id":"t1","task_key":"k1","step":{"id":"fix-02","last_in_phase":true},"verdict":"pass"}"#.to_string(),
+        ),
+        ts: String::new(),
+        hat: Some("plan-gate".to_string()),
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+    assert!(
+        tracker.check_semantic_gates(&plan_complete).is_none(),
+        "plan.complete with step={{id:\"fix-*\",...}} must skip plan_gate (P0-1)"
+    );
+}
+
+#[test]
 fn u1_review_complete_with_fix_plan_file_prefills_fix_steps() {
     use crate::event_loop::review_step_state::ReviewStepTracker;
     use crate::event_reader::Event as JsonlEvent;

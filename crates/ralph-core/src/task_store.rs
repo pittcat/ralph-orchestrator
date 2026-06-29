@@ -420,6 +420,22 @@ impl TaskStore {
         None
     }
 
+    /// Closes a task by stable key and returns a reference to it.
+    ///
+    /// 2026-06-30 P0-2 (primary-153653): when multiple tasks share
+    /// the same id (fix-unit coordinator emits), close-by-id targets
+    /// only the first match; close-by-key targets the exact row.
+    /// The key is unique per step (including fix-NN) because the
+    /// `task_key` payload field encodes the step id.
+    pub fn close_by_key(&mut self, key: &str) -> Option<&Task> {
+        if let Some(task) = self.get_by_key_mut(key) {
+            task.status = TaskStatus::Closed;
+            task.closed = Some(chrono::Utc::now().to_rfc3339());
+            return self.get_by_key(key);
+        }
+        None
+    }
+
     /// Starts a task by ID and returns a reference to it.
     pub fn start(&mut self, id: &str) -> Option<&Task> {
         if let Some(task) = self.get_mut(id) {

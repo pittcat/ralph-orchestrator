@@ -311,9 +311,22 @@ impl ReviewStepTracker {
             // 而不是 review.passed/review.complete 的逐 step terminal。
             // coordinator 在 `plan.complete` 时携带 `step="fix-{NN}"`，
             // 我们直接放行，避免 plan_gate 死锁。
-            if let Some(step) = obj.get("step").and_then(|v| v.as_str())
-                && step.starts_with("fix-")
-            {
+            //
+            // 2026-06-30 P0-1 (primary-153653): `step` 也可能为对象
+            // 形态 `{"id":"fix-02","last_in_phase":true}`
+            // (CoordinatorDecisionGateStage::rewrite_work_ready_topic
+            // 在改 topic 时不重写 payload，参见
+            // `event_loop::stages::coordinator_decision_gate_stage`)。
+            // 这里同时支持 string 与 object.id 两种形态。
+            let step_str = obj
+                .get("step")
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s.as_str()),
+                    Value::Object(o) => o.get("id").and_then(|i| i.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            if step_str.starts_with("fix-") {
                 return None;
             }
             let matching: Vec<_> = self
