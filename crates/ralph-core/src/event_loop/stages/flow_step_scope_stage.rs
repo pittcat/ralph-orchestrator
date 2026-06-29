@@ -23,6 +23,23 @@ use ralph_proto::Event;
 /// its terminal-alignment check.
 const VERDICT_GATE_TOPICS: &[&str] = &["LOOP_COMPLETE"];
 
+/// 2026-06-29 plan 2026-06-29-007 U2: transition topics.
+///
+/// These topics are emitted by the review chain while the
+/// `current_step` state machine may still be pinned to
+/// `unit_loop` (the transition to `review_walk` happens
+/// lazily). Without this list, a missing or mismatched
+/// `source_hat` would cause the `DEFENSIVE_BYPASS` to miss
+/// and the event would be rejected as `flow_unknown_emit`.
+///
+/// The list is intentionally narrow: only aggregate/transition
+/// events that close a phase are allowed. Individual review
+/// events (`review.dimension.done`, etc.) still require the
+/// hat-specific `DEFENSIVE_BYPASS`.
+const TRANSITION_TOPICS: &[(&str, &[&str])] = &[
+    ("review.dimensions.complete", &["unit_loop", "review_walk"]),
+];
+
 /// 2026-06-28 plan U3: defensive bypass list.
 ///
 /// Until U4 (plan-mode `current_step` state machine) lands, the
@@ -132,6 +149,24 @@ impl EmitStage for FlowStepScopeStage {
             }
         }
 
+        // 2026-06-29-007 plan U2: transition-topic bypass.
+        // Review-chain aggregate events may be emitted before
+        // `current_step` has advanced to `review_walk`. When the
+        // `source_hat` is missing or empty (legacy / synthetic events,
+        // or a hat-channel merge that produced an empty string) we
+        // accept a narrow set of transition topics so the review
+        // handoff does not stall. Hats with a real source still
+        // go through the hat-specific `DEFENSIVE_BYPASS` above,
+        // preserving the "executor cannot emit review.*" guard.
+        if source_is_missing_or_empty(event) {
+            let current_step_id = ctx.current_step.id.as_str();
+            if TRANSITION_TOPICS.iter().any(|(topic, steps)| {
+                *topic == event.topic.as_str() && steps.contains(&current_step_id)
+            }) {
+                return Ok(());
+            }
+        }
+
         let step = self.flow.step(&ctx.current_step.id);
         let Some(step) = step else {
             // P1-6 (2026-06-27 adversarial review):
@@ -223,6 +258,19 @@ fn reason_matches_partial_pattern(terminal_when: &str, reason: &str) -> bool {
         _ => return true,
     };
     required.iter().any(|needle| reason_lower.contains(needle))
+}
+
+/// True when an event carries no source hat or an empty one.
+/// Empty strings can appear when a JSONL record is malformed or
+/// a hat-channel merge stamps an empty value; treating them as
+/// missing lets the transition-topic bypass fire instead of
+/// falling through to `flow_unknown_emit`.
+fn source_is_missing_or_empty(event: &Event) -> bool {
+    event
+        .source
+        .as_ref()
+        .map(|s| s.as_str().trim().is_empty())
+        .unwrap_or(true)
 }
 
 #[cfg(test)]

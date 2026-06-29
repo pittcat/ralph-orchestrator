@@ -239,6 +239,39 @@ fn u3_bypass_accepts_coordinator_loop_complete() {
     assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
 }
 
+// ── 2026-06-29-007 plan U2: transition-topic bypass for review-chain
+// aggregate events when source_hat is missing or the step has not
+// advanced yet.
+
+#[test]
+fn transition_topic_accepts_dimensions_complete_without_source_at_unit_loop() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev("review.dimensions.complete", "{}");
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn transition_topic_accepts_dimensions_complete_with_empty_source_at_unit_loop() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = Event::new("review.dimensions.complete", "{}").with_source("");
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
+fn transition_topic_accepts_dimensions_complete_without_source_at_review_walk() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev("review.dimensions.complete", "{}");
+    assert!(stage.check(&mut ctx_for("review_walk"), &e).is_ok());
+}
+
+#[test]
+fn transition_topic_rejects_dimensions_complete_at_unrelated_step() {
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev("review.dimensions.complete", "{}");
+    let err = stage.check(&mut ctx_for("plan_end"), &e).unwrap_err();
+    assert_eq!(err.reason_code, "flow_unknown_emit");
+}
+
 #[test]
 fn u3_bypass_rejects_unrelated_hat() {
     // executor emitting review.* — bypass list does NOT include
@@ -263,12 +296,15 @@ fn u3_bypass_rejects_wrong_topic_for_bypassed_hat() {
 }
 
 #[test]
-fn u3_bypass_requires_source_hat() {
-    // No source hat — the bypass cannot match, and `unit_loop`
-    // does not allow `review.dimensions.complete`, so the
-    // legacy reject path fires.
+fn u3_bypass_requires_source_hat_for_non_transition_topics() {
+    // No source hat — the bypass cannot match, and this topic is
+    // NOT in the transition-topic allowlist, so the legacy reject
+    // path fires. `review.dimensions.complete` without source is
+    // now handled by the U2 transition-topic bypass (see tests
+    // above); this test pins the stricter behaviour for other
+    // review-chain topics.
     let stage = FlowStepScopeStage::new(flow());
-    let e = ev("review.dimensions.complete", "{}");
+    let e = ev("review.dimension.done", "{}");
     let err = stage.check(&mut ctx_for("unit_loop"), &e).unwrap_err();
     assert_eq!(err.reason_code, "flow_unknown_emit");
 }

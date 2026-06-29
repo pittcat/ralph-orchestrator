@@ -29,8 +29,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::config::RalphConfig;
 use crate::preset_lint::finding_id::{
-    FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK, FINDING_HAT_SCOPE_EVENT_FILTER_DISABLED,
-    FINDING_HAT_SCOPE_TOPIC_DENY_INCOMPLETE, FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN,
+    FINDING_HAT_SCOPE_COORDINATOR_FORBIDDEN_PUBLISH, FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK,
+    FINDING_HAT_SCOPE_EVENT_FILTER_DISABLED, FINDING_HAT_SCOPE_TOPIC_DENY_INCOMPLETE,
+    FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN,
 };
 use crate::runtime_contract::{
     FindingSeverity, FindingSource, FindingStage, RuntimeContractFinding,
@@ -67,6 +68,25 @@ const COORDINATOR_FORBIDDEN_TOPICS: &[&str] = &[
     "review.dimensions.failed",
     "review.failed",
 ];
+
+/// Topics that a coordinator hat must NEVER publish.
+///
+/// - `human.guidance` has been removed from the protocol (see
+///   2026-06-18-004 plan U2 / R2-KTD2); the active hat prompt never
+///   receives it and any emit is rejected by the runtime scope gate.
+/// - `loop.stalled` is owned by loop-level fallback hats (e.g.
+///   `progress-steward`); the coordinator publishing it causes the
+///   `semantic_gate_violation` stalls seen in the
+///   `primary-20260629-120038` run.
+const COORDINATOR_FORBIDDEN_PUBLISHES: &[&str] = &["loop.stalled"];
+
+/// Topics that **no** hat may publish.
+///
+/// - `human.guidance` has been removed from the agent protocol
+///   (2026-06-18-004 plan U2 / R2-KTD2). It is reserved for human
+///   operators and orchestrator injection; any hat declaring it in
+///   `publishes` is a latent `semantic_gate_violation`.
+const GLOBALLY_FORBIDDEN_PUBLISHES: &[&str] = &["human.guidance"];
 
 /// Run the hat scope invariant checks against a `RalphConfig`.
 ///
@@ -188,6 +208,39 @@ pub fn check_hat_scope_invariant(config: &RalphConfig) -> Vec<RuntimeContractFin
                 }
             }
         }
+
+        // Rule 3.5 (2026-06-29-007 U2): no hat may publish topics
+        // that have been removed from the agent protocol. These emits
+        // are rejected at runtime by the semantic gate; the lint fails
+        // the preset at authoring time so the mistake never reaches a
+        // live loop.
+        for topic in &hat_cfg.publishes {
+            if GLOBALLY_FORBIDDEN_PUBLISHES.contains(&topic.as_str()) {
+                findings.push(globally_forbidden_publish_finding(hat_id, topic));
+            }
+        }
+        if let Some(default) = hat_cfg.default_publishes.as_deref() {
+            if GLOBALLY_FORBIDDEN_PUBLISHES.contains(&default) {
+                findings.push(globally_forbidden_publish_finding(hat_id, default));
+            }
+        }
+
+        // Rule 4 (2026-06-29-007 U2): coordinator must not publish
+        // out-of-scope topics. These emits are rejected at runtime by
+        // the semantic gate; the lint fails the preset at authoring
+        // time so the mistake never reaches a live loop.
+        if is_coordinator {
+            for topic in &hat_cfg.publishes {
+                if COORDINATOR_FORBIDDEN_PUBLISHES.contains(&topic.as_str()) {
+                    findings.push(coordinator_forbidden_publish_finding(hat_id, topic));
+                }
+            }
+            if let Some(default) = hat_cfg.default_publishes.as_deref() {
+                if COORDINATOR_FORBIDDEN_PUBLISHES.contains(&default) {
+                    findings.push(coordinator_forbidden_publish_finding(hat_id, default));
+                }
+            }
+        }
     }
 
     findings
@@ -286,6 +339,53 @@ fn coordinator_review_leak_finding(hat_id: &str, topic: &str) -> RuntimeContract
     .with_action_hint(format!(
         "Remove `{topic}` from `hats.{hat_id}.event_filter.events`; the \
          coordinator dispatches the workflow, it does not react to verdicts"
+    ))
+}
+
+fn coordinator_forbidden_publish_finding(hat_id: &str, topic: &str) -> RuntimeContractFinding {
+    let id = format!("lint.{}", FINDING_HAT_SCOPE_COORDINATOR_FORBIDDEN_PUBLISH);
+    RuntimeContractFinding::try_new_core(
+        id,
+        FindingSource::Lint,
+        FindingSeverity::Error,
+        FindingStage::Authoring,
+        format!(
+            "coordinator hat `{hat_id}` declares `{topic}` in its publish \
+             scope. `{topic}` is owned by loop-level fallback hats (e.g. \
+             `progress-steward`); the coordinator publishing it causes \
+             `semantic_gate_violation` stalls."
+        ),
+    )
+    .expect("Lint source is not the reserved Preflight source")
+    .with_detail("hat", hat_id.to_string())
+    .with_detail("topic", topic.to_string())
+    .with_action_hint(format!(
+        "Remove `{topic}` from `hats.{hat_id}.publishes` (and \
+         `default_publishes` if set); only the loop-level fallback hat \
+         should publish this topic"
+    ))
+}
+
+fn globally_forbidden_publish_finding(hat_id: &str, topic: &str) -> RuntimeContractFinding {
+    let id = format!("lint.{}", FINDING_HAT_SCOPE_COORDINATOR_FORBIDDEN_PUBLISH);
+    RuntimeContractFinding::try_new_core(
+        id,
+        FindingSource::Lint,
+        FindingSeverity::Error,
+        FindingStage::Authoring,
+        format!(
+            "hat `{hat_id}` declares `{topic}` in its publish scope. \
+             `{topic}` has been removed from the agent protocol and is \
+             reserved for human operators / orchestrator injection; any \
+             hat emit is rejected by the runtime scope gate."
+        ),
+    )
+    .expect("Lint source is not the reserved Preflight source")
+    .with_detail("hat", hat_id.to_string())
+    .with_detail("topic", topic.to_string())
+    .with_action_hint(format!(
+        "Remove `{topic}` from `hats.{hat_id}.publishes` (and \
+         `default_publishes` if set)"
     ))
 }
 
@@ -531,6 +631,108 @@ hats:
             !ids.iter()
                 .any(|id| *id == *format!("lint.{}", FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK)),
             "non-coordinator must not trigger rule 3: {ids:#?}"
+        );
+    }
+
+    #[test]
+    fn rule4_fires_when_coordinator_publishes_human_guidance() {
+        let cfg = isolated_with_hats(
+            r#"
+hats:
+  coordinator:
+    name: Coordinator
+    triggers: ["work.start"]
+    publishes: ["work.ready", "human.guidance"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+tasks:
+  enabled: true
+  coordinator_hats: ["coordinator"]
+"#,
+        );
+        let findings = check_hat_scope_invariant(&cfg);
+        assert!(
+            findings.iter().any(|f| {
+                f.id == *format!("lint.{}", FINDING_HAT_SCOPE_COORDINATOR_FORBIDDEN_PUBLISH)
+            }),
+            "expected coordinator_forbidden_publish finding, got: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn rule4_fires_when_coordinator_default_publishes_loop_stalled() {
+        let cfg = isolated_with_hats(
+            r#"
+hats:
+  coordinator:
+    name: Coordinator
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+    default_publishes: "loop.stalled"
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+tasks:
+  enabled: true
+  coordinator_hats: ["coordinator"]
+"#,
+        );
+        let findings = check_hat_scope_invariant(&cfg);
+        assert!(
+            findings.iter().any(|f| {
+                f.id == *format!("lint.{}", FINDING_HAT_SCOPE_COORDINATOR_FORBIDDEN_PUBLISH)
+            }),
+            "expected coordinator_forbidden_publish finding for default_publishes, got: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn rule4_does_not_fire_for_progress_steward_publishing_loop_stalled() {
+        let cfg = isolated_with_hats(
+            r#"
+hats:
+  progress-steward:
+    name: Progress Steward
+    triggers: ["loop.stalled"]
+    publishes: ["task.resume", "loop.stalled"]
+    event_filter:
+      enabled: true
+      events: ["loop.stalled"]
+tasks:
+  enabled: true
+  coordinator_hats: ["coordinator"]
+"#,
+        );
+        let findings = check_hat_scope_invariant(&cfg);
+        let ids: Vec<_> = findings.iter().map(|f| f.id.clone()).collect();
+        assert!(
+            !ids.iter()
+                .any(|id| *id == *format!("lint.{}", FINDING_HAT_SCOPE_COORDINATOR_FORBIDDEN_PUBLISH)),
+            "non-coordinator must not trigger rule 4: {ids:#?}"
+        );
+    }
+
+    #[test]
+    fn rule3_5_fires_when_non_coordinator_publishes_human_guidance() {
+        let cfg = isolated_with_hats(
+            r#"
+hats:
+  worker:
+    name: Worker
+    triggers: ["work.start"]
+    publishes: ["work.done", "human.guidance"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+"#,
+        );
+        let findings = check_hat_scope_invariant(&cfg);
+        assert!(
+            findings.iter().any(|f| {
+                f.id == *format!("lint.{}", FINDING_HAT_SCOPE_COORDINATOR_FORBIDDEN_PUBLISH)
+            }),
+            "expected globally_forbidden_publish finding for human.guidance, got: {findings:#?}"
         );
     }
 

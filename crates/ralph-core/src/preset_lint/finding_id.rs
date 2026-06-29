@@ -227,6 +227,17 @@ pub const FINDING_HAT_SCOPE_TOPIC_DENY_INCOMPLETE: &str = "preset.hat_scope_topi
 pub const FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK: &str =
     "preset.hat_scope_coordinator_review_leak";
 
+/// 2026-06-29 plan 2026-06-29-007 U2: a coordinator hat declares
+/// `human.guidance` or `loop.stalled` in its `publishes` /
+/// `default_publishes`. `human.guidance` has been removed from the
+/// protocol; `loop.stalled` is owned by loop-level fallback hats
+/// such as `progress-steward`. The coordinator must NOT publish
+/// either topic.
+///
+/// Always `Error` severity.
+pub const FINDING_HAT_SCOPE_COORDINATOR_FORBIDDEN_PUBLISH: &str =
+    "preset.hat_scope_coordinator_forbidden_publish";
+
 /// 2026-06-26 Root-Cause Review P1 #2: warn the operator when
 /// `verdict_gate.verdict_field` is set to a name that is not
 /// the well-known `verdict` / `pass_or_fail` alias. The gate
