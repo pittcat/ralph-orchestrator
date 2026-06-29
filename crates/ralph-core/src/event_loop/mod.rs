@@ -5,6 +5,7 @@
 pub mod loop_state;
 pub mod plan_blocked_reason;
 pub mod rejection;
+pub mod rejection_kind;
 pub mod review_step_state;
 // 2026-06-27 mechanism foundation U1: hard required-fields check at
 // emit time. Pure-logic core; `EmitSchemaGateStage` (U6) wraps it.

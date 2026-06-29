@@ -2715,6 +2715,17 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-29-007 plan U8: smoke test for the
+/// `RejectionKind` typed enum. The retry-key computation
+/// and outcome migration are unit-tested in
+/// `rejection_kind::tests`. This scenario verifies the
+/// typed enum does not break the existing happy path.
+#[test]
+fn test_u8_typed_retry_key() {
+    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u8-typed-retry-key.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U7: smoke test for the
 /// `TerminalStateGuardStage`. The phase-based reject is
 /// unit-tested in
