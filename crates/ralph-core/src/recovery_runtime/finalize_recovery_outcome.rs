@@ -53,6 +53,7 @@ fn count_flips(history: &[String]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::RetryKeyState;
 
     #[test]
     fn no_flap_when_history_stable() {

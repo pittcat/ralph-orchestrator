@@ -72,6 +72,7 @@ fn same_hat_topic(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::EnvelopeSnapshot;
 
     #[test]
     fn empty_context_yields_no_action() {

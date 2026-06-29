@@ -548,6 +548,7 @@ mod tests {
             flow_lifecycle: crate::flow_lifecycle::FlowLifecycleRegistry::new(),
             stall_recovery_counts: std::collections::HashMap::new(),
             pending_recovery_hat: None,
+            pending_recovery_directives: Vec::new(),
             pending_synthesizer_timeout: None,
             last_ephemeral_relocations: Vec::new(),
             // P0-3 (plan 2026-06-29-006 U7) two-phase
