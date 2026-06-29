@@ -3,7 +3,7 @@
 //!
 //! See plan 2026-06-28-003 §Defense 2, function 2.
 
-use super::{RecoveryAction, RetryKeyState, RuntimeContext};
+use super::{RecoveryAction, RuntimeContext};
 
 /// Thresholds: if a retry key's outcome flips among Pending/Recovered/Repeated
 /// at least this many times within the recent history, force a terminal

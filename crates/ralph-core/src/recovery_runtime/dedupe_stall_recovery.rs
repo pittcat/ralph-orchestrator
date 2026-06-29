@@ -5,7 +5,7 @@
 //!
 //! See plan 2026-06-28-003 §Defense 2, function 1.
 
-use super::{EnvelopeSnapshot, RecoveryAction, RuntimeContext};
+use super::{RecoveryAction, RuntimeContext};
 
 /// If the current iteration already has a `stall_recovery` envelope for the
 /// same hat/topic, drop the secondary `missing_event_gate` envelope.
