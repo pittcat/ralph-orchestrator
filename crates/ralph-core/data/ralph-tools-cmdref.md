@@ -143,7 +143,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `ralph completions` | 生成 shell 补全脚本 |
 | `ralph inspect` | 只读诊断命名空间（含 `inspect profiles`，用于预览 profile overlay 解析） |
 
-> U8 (2026-06-25): `ralph bot` 已随 `ralph-telegram` crate 一起删除;运行时不再提供人工通道。`human.guidance` / `task.resume` 恢复通道保留(由 runtime diagnosis engine 产出)。
+> U8 (2026-06-25): `ralph bot` 已随 `ralph-telegram` crate 一起删除;运行时不再提供人工通道。`human.guidance` 已废弃(plan 2026-06-28-005);`task.resume` 恢复通道保留(由 runtime diagnosis engine 产出)。
 
 > 低频命令的独有参数可通过 `ralph <cmd> --help` 查看。全量参考见 `docs/guide/`。
 
