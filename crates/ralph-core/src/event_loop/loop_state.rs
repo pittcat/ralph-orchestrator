@@ -200,6 +200,14 @@ pub struct LoopState {
     pub consecutive_malformed_events: u32,
     /// Consecutive hard-gate triggers when agent claims emit but writes no event.
     pub consecutive_hard_gates: u32,
+    /// Fix-2 (2026-06-29 primary-072512 P0): the projector
+    /// rejections from the most recent `apply` call. Cleared and
+    /// rewritten on every iteration so the runner can decide
+    /// between hard-gate (no emit) and schema-guidance (emit
+    /// happened but projector rejected) without changing the
+    /// event_loop's existing consume-the-rejections flow. See
+    /// `loop_runner::runner` step-close partition.
+    pub last_projection_rejections: Vec<crate::state_projector::Rejection>,
     /// Whether a completion event has been observed in JSONL.
     pub completion_requested: bool,
     /// Whether the completion event has already been honored (prevents duplicate side effects).
@@ -698,6 +706,7 @@ impl Default for LoopState {
             abandoned_task_redispatches: 0,
             consecutive_malformed_events: 0,
             consecutive_hard_gates: 0,
+            last_projection_rejections: Vec::new(),
             completion_requested: false,
             completion_honored: false,
             isolated_turn_business_event_accepted: false,

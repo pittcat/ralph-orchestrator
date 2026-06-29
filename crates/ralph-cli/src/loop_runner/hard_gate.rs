@@ -9,6 +9,7 @@ use ralph_core::{
     },
     event_loop::rejection::enrich_task_resume_payload_with_stage,
 };
+use ralph_core::state_projector::Rejection as StateProjectorRejection;
 
 pub fn should_hard_gate(hat_id: &HatId, event_loop: &EventLoop) -> bool {
     let Some(config) = event_loop.registry().get_config(hat_id) else {
@@ -1211,6 +1212,107 @@ pub fn inject_wave_policy_rejection_guidance(
             unique_findings.len()
         )];
         event_loop.record_recovery_envelope(&envelope, notes);
+    }
+}
+
+// Fix-2 (2026-06-29 primary-072512 P0): mirror of
+// `inject_wave_policy_rejection_guidance` but for state-projection
+// rejections (events the projector rejected at the ledger write).
+//
+// The agent DID emit (so the regular hard-gate branch would be
+// wrong), but the projector refused to apply the event because of
+// a payload-level contract violation (e.g. empty `task_id`,
+// enforced by Fix-1 in `state_projector/task.rs`). The runner
+// must surface a `human.guidance` event so the agent retries
+// with a corrected payload, AND must NOT increment the hard-gate
+// counter — projection rejection is a schema problem, not a
+// "did not emit" problem.
+pub fn inject_state_projection_rejection_guidance(
+    ctx: &LoopContext,
+    _event_loop: Option<&mut EventLoop>,
+    hat_id: &HatId,
+    rejections: &[StateProjectorRejection],
+    expected_topics: &[String],
+) {
+    if rejections.is_empty() {
+        return;
+    }
+
+    // Deduplicate findings by `(topic, reason)` so a batch that
+    // fails on the same reason once surfaces one bullet instead
+    // of N copies. BTreeSet gives deterministic ordering.
+    let mut seen: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
+    let mut unique: Vec<&StateProjectorRejection> = Vec::new();
+    for r in rejections {
+        let key = (r.topic.clone(), r.reason.clone());
+        if seen.insert(key) {
+            unique.push(r);
+        }
+    }
+
+    let topics_str = if expected_topics.is_empty() {
+        "(check hat configuration)".to_string()
+    } else {
+        expected_topics.join("`, `")
+    };
+
+    let findings_block = unique
+        .iter()
+        .map(|r| format!("  - `{}`: {}", r.topic, r.reason))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let payload = format!(
+        "⚠️ STATE PROJECTION REJECTED: Previous iteration by hat `{hat}` emitted event(s) \
+         for topic(s) `{topics}`, but the state projector REJECTED every event because \
+         of payload-level contract violations. The events were dropped from the bus \
+         before they reached the ledgers.\n\n\
+         Schema findings (unique):\n{findings}\n\n\
+         You MUST fix the payload before re-emitting. Common fixes:\n  \
+         - `empty_task_id_in_work_ready`: read the canonical task_id from \
+         `.ralph/agent/tasks.jsonl` via `ralph tools task show <task_key>` and embed \
+         it in the `task_id` field. NEVER emit `task_id=\"\"` or `from_key:*` synthetic ids.\n  \
+         - other payload contract errors: see preset schema at \
+         `presets/schemas/ce-executor-serial.yml` for the required fields of the \
+         offending topic.\n\n\
+         Allowed topics for this hat: `{topics}`",
+        hat = hat_id.as_str(),
+        topics = topics_str,
+        findings = findings_block,
+    );
+
+    let events_path = resolve_current_events_path(ctx);
+
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let event = serde_json::json!({
+        "topic": "human.guidance",
+        "payload": payload,
+        "ts": timestamp,
+    });
+
+    match serde_json::to_string(&event) {
+        Ok(line) => {
+            use std::io::Write;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&events_path);
+            match file {
+                Ok(f) => {
+                    let mut writer = std::io::BufWriter::new(f);
+                    if writeln!(writer, "{}", line).is_err() {
+                        warn!(path = ?events_path, "Failed writing state-projection-rejection guidance event");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, path = ?events_path, "Failed opening events file for state-projection-rejection guidance");
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed serializing state-projection-rejection guidance event");
+        }
     }
 }
 

@@ -8072,6 +8072,17 @@ impl EventLoop {
                 p
             });
             let report = projector.apply(&events);
+            // Fix-2 (2026-06-29 primary-072512 P0): snapshot the
+            // rejections into LoopState so the runner's step-close
+            // partition can choose between hard-gate (no emit) and
+            // schema-guidance (emit happened but projector rejected).
+            // Without this, the runner cannot distinguish "agent did
+            // not emit" from "agent emitted but the event was
+            // dropped at projection", and the latter triggered
+            // hard-gate exhaustion on step-04 (events:14 in
+            // `docs/report/2026-06-29-ce-executor-serial-primary-
+            // 20260629-072512-diagnosis.md`).
+            self.state.last_projection_rejections = report.rejections.clone();
             if !report.rejections.is_empty() {
                 for rej in &report.rejections {
                     let payload = serde_json::json!({

@@ -4245,6 +4245,36 @@ async fn run_loop_impl_inner(
                 raw_count = wave_raw_count,
                 "Wave batch was policy-rejected; injected schema-level guidance instead of missing-event gate"
             );
+        } else if !event_loop.state().last_projection_rejections.is_empty()
+            && wave_events.is_empty()
+            && !hard_gate_triggered_this_iteration
+            && late_termination_reason.is_none()
+        {
+            // Fix-2 (2026-06-29 primary-072512 P0): the agent DID
+            // emit, but the state projector rejected the event
+            // (e.g. `work.done` with empty `task_id` after Fix-1
+            // fails the projector closed at task.rs). Inject a
+            // schema-level guidance message instead of incrementing
+            // the hard-gate counter — the agent can retry with a
+            // corrected `task_id`, but the loop must not die just
+            // because a single emit was malformed.
+            let publishes = event_loop.get_hat_publishes(&display_hat);
+            let rejections = event_loop.state().last_projection_rejections.clone();
+            inject_state_projection_rejection_guidance(
+                &ctx,
+                Some(&mut event_loop),
+                &display_hat,
+                &rejections,
+                &publishes,
+            );
+            // Clear the snapshot so the next iteration starts
+            // clean and the gate does not re-fire on stale data.
+            event_loop.state_mut().last_projection_rejections.clear();
+            info!(
+                hat = %display_hat.as_str(),
+                rejection_count = rejections.len(),
+                "State projection rejected events; injected schema-level guidance instead of missing-event gate"
+            );
         } else if !agent_wrote_any_valid_or_rejected
             && wave_events.is_empty()
             && !hard_gate_triggered_this_iteration

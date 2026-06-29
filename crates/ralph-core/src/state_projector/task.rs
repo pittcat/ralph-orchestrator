@@ -66,19 +66,27 @@ pub(crate) fn project_ensure_task(
     // (ce-executor presets always do). Without this the loop
     // would round-trip through a generated id that the agent
     // can never reproduce, breaking the subsequent `work.done`.
-    // 2026-06-28 plan U5 (R8): when the payload's `task_id`
-    // field is present but empty, fall back to a derived id
-    // from the task_key. This stops the agent's
-    // `task_id=""` mistake from generating a new orphan task
-    // on every retry — the loop will instead close the
-    // existing record that was opened under the same
-    // `task_key`. A non-empty payload `task_id` always wins.
+    //
+    // Fix-1 (2026-06-29 primary-072512 P0): the prior 2026-06-28
+    // plan U5 fallback that synthesized `from_key:{key}` when
+    // the payload's `task_id` was empty was the root cause of the
+    // 4th recurrence of the same pattern group. The synthetic id
+    // (a) silently swallowed a contract violation, (b) could not
+    // be matched by the subsequent `work.done`, (c) triggered
+    // hard-gate exhaustion, and (d) blocked the review/ship/
+    // report chain. The preset line 1179 forbids empty
+    // `task_id`; we now fail-closed instead of papering over the
+    // mistake. The recovery path is the runner injecting
+    // schema-level guidance (Fix-2 in `loop_runner/runner.rs`).
     if let Some(provided_id) = json_pointer(payload, "task_id") {
-        if !provided_id.is_empty() {
-            task.id = provided_id.to_string();
-        } else if let Some(key) = &task.key {
-            task.id = format!("from_key:{key}");
+        if provided_id.is_empty() {
+            return Err(
+                "empty_task_id_in_work_ready: coordinator must embed the \
+                 projector-derived id (see preset ce-executor-serial line 1179)"
+                    .to_string(),
+            );
         }
+        task.id = provided_id.to_string();
     }
     if let Some(plan_name) = json_pointer(payload, "plan_name") {
         task = task.with_description(Some(format!("plan: {plan_name}")));
@@ -250,5 +258,38 @@ mod tests {
         // Loop_id is None — preserve pre-fix behaviour for
         // non-loop-scoped presets that don't set a marker.
         assert_eq!(tasks[0].loop_id, None);
+    }
+
+    // Fix-1 (2026-06-29 primary-072512 P0): empty task_id must
+    // be rejected by the projector instead of silently falling
+    // back to `from_key:{key}`. The 4th recurrence of the same
+    // pattern group caused the hard gate to exhaust on step-04
+    // because `work.ready(task_id="")` produced a synthetic
+    // task that the subsequent `work.done` could not match.
+    #[test]
+    fn project_task_rejects_empty_task_id() {
+        let dir = tempdir().unwrap();
+        let mut ctx = ctx_with_loop_marker(dir.path(), "loop-A");
+        let payload = serde_json::json!({
+            "task_id": "",
+            "task_key": "ce-executor:test:step-01:u0-impl",
+            "plan_name": "test-plan",
+        });
+        let result = project_ensure_task(&mut ctx, &payload, "task_key", None);
+        assert!(
+            result.is_err(),
+            "Fix-1: empty task_id must fail-closed (was: silently fell back to from_key:)"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("empty_task_id"),
+            "error must name the root cause: got {err}"
+        );
+        // No task should have been written to the ledger.
+        let tasks = ctx.task_snapshot().0;
+        assert!(
+            tasks.is_empty(),
+            "Fix-1: rejected event must not write to ledger (was: wrote synthetic from_key: task)"
+        );
     }
 }

@@ -497,6 +497,7 @@ mod tests {
             abandoned_task_redispatches: 0,
             consecutive_malformed_events: 0,
             consecutive_hard_gates: 0,
+            last_projection_rejections: Vec::new(),
             completion_requested: false,
             completion_honored: false,
             isolated_turn_business_event_accepted: false,

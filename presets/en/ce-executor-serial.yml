@@ -734,6 +734,26 @@ hats:
       - Each task description includes: Goal, Files, Approach, Execution note, Verification
       - **Current U Principle (HARD RULE)**: emit `work.ready` ONLY for the *current* U. Do NOT pre-create tasks for U2, U3, etc. — the projector will only create a task for the unit currently routed by the loop, and pre-emitting sibling `work.ready` events leaves orphans. When U1 closes, the validator's `test.passed` triggers another coordinator activation, which emits `work.ready` for U2.
       - **R4 carve-out — sub-units**: when a plan explicitly splits a U into sub-units (`U1a / U1b / U1c`), use keys `...:u1a-impl`, `...:u1b-impl`, `...:u1c-impl`. The runtime collapses these to the same base unit so they coexist alongside the parent `U1` task when needed.
+      - **MANDATORY task_id derivation (HARD RULE — Fix-3, 2026-06-29 primary-072512)**:
+        The `task_id` field in every `work.ready` / `work.done` payload
+        MUST be a non-empty string. Empty `task_id` is now fail-closed
+        in the projector (`state_projector/task.rs` Fix-1) and the
+        runner will surface a `human.guidance` rejection
+        (`loop_runner/runner.rs` Fix-2) instead of incrementing the
+        hard-gate counter — but emitting a valid `task_id` from the
+        start is still strictly cheaper than retrying.
+        - Recommended workflow:
+          1. Emit `work.ready` with only `task_key` set.
+          2. Wait for the next activation's `## ORCHESTRATOR CONTEXT` block,
+             which carries the projector-derived `task_id`.
+          3. Embed that `task_id` in all subsequent `work.done` payloads.
+        - DO NOT emit `task_id=""` — projector rejects the event.
+        - DO NOT emit `from_key:*` synthetic IDs — preset line 1179
+          (below) forbids these and the runner will reject them too.
+        - If `.ralph/agent/tasks.jsonl` is empty for your U-ID, call
+          `ralph tools task create` first to seed the ledger, then
+          read back the canonical `task_id` before publishing
+          `work.ready`.
       - **Trivial mode**: create one summary task, key `ce-executor:{plan_name}:trivial`
 
       ### Task Split Heuristics
