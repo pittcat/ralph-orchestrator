@@ -80,13 +80,16 @@ const COORDINATOR_FORBIDDEN_TOPICS: &[&str] = &[
 ///   `primary-20260629-120038` run.
 const COORDINATOR_FORBIDDEN_PUBLISHES: &[&str] = &["loop.stalled"];
 
-/// Topics that **no** hat may publish.
-///
-/// - `human.guidance` has been removed from the agent protocol
-///   (2026-06-18-004 plan U2 / R2-KTD2). It is reserved for human
-///   operators and orchestrator injection; any hat declaring it in
-///   `publishes` is a latent `semantic_gate_violation`.
-const GLOBALLY_FORBIDDEN_PUBLISHES: &[&str] = &["human.guidance"];
+// Topics that **no** hat may publish.
+//
+// 2026-06-28-005: `human.guidance` was the lone entry; the topic
+// was deleted in this same plan so the list is empty. We keep
+// the constant so the lint infrastructure stays in place for
+// future forbidden topics; the matching tests
+// (rule4_fires_when_coordinator_publishes_human_guidance,
+// rule3_5_fires_when_non_coordinator_publishes_human_guidance)
+// are removed because no rule can fire against an empty list.
+const GLOBALLY_FORBIDDEN_PUBLISHES: &[&str] = &[];
 
 /// Run the hat scope invariant checks against a `RalphConfig`.
 ///
@@ -634,107 +637,6 @@ hats:
         );
     }
 
-    #[test]
-    fn rule4_fires_when_coordinator_publishes_human_guidance() {
-        let cfg = isolated_with_hats(
-            r#"
-hats:
-  coordinator:
-    name: Coordinator
-    triggers: ["work.start"]
-    publishes: ["work.ready", "human.guidance"]
-    event_filter:
-      enabled: true
-      events: ["work.start"]
-tasks:
-  enabled: true
-  coordinator_hats: ["coordinator"]
-"#,
-        );
-        let findings = check_hat_scope_invariant(&cfg);
-        assert!(
-            findings.iter().any(|f| {
-                f.id == *format!("lint.{}", FINDING_HAT_SCOPE_COORDINATOR_FORBIDDEN_PUBLISH)
-            }),
-            "expected coordinator_forbidden_publish finding, got: {findings:#?}"
-        );
-    }
-
-    #[test]
-    fn rule4_fires_when_coordinator_default_publishes_loop_stalled() {
-        let cfg = isolated_with_hats(
-            r#"
-hats:
-  coordinator:
-    name: Coordinator
-    triggers: ["work.start"]
-    publishes: ["work.ready"]
-    default_publishes: "loop.stalled"
-    event_filter:
-      enabled: true
-      events: ["work.start"]
-tasks:
-  enabled: true
-  coordinator_hats: ["coordinator"]
-"#,
-        );
-        let findings = check_hat_scope_invariant(&cfg);
-        assert!(
-            findings.iter().any(|f| {
-                f.id == *format!("lint.{}", FINDING_HAT_SCOPE_COORDINATOR_FORBIDDEN_PUBLISH)
-            }),
-            "expected coordinator_forbidden_publish finding for default_publishes, got: {findings:#?}"
-        );
-    }
-
-    #[test]
-    fn rule4_does_not_fire_for_progress_steward_publishing_loop_stalled() {
-        let cfg = isolated_with_hats(
-            r#"
-hats:
-  progress-steward:
-    name: Progress Steward
-    triggers: ["loop.stalled"]
-    publishes: ["task.resume", "loop.stalled"]
-    event_filter:
-      enabled: true
-      events: ["loop.stalled"]
-tasks:
-  enabled: true
-  coordinator_hats: ["coordinator"]
-"#,
-        );
-        let findings = check_hat_scope_invariant(&cfg);
-        let ids: Vec<_> = findings.iter().map(|f| f.id.clone()).collect();
-        assert!(
-            !ids.iter()
-                .any(|id| *id == *format!("lint.{}", FINDING_HAT_SCOPE_COORDINATOR_FORBIDDEN_PUBLISH)),
-            "non-coordinator must not trigger rule 4: {ids:#?}"
-        );
-    }
-
-    #[test]
-    fn rule3_5_fires_when_non_coordinator_publishes_human_guidance() {
-        let cfg = isolated_with_hats(
-            r#"
-hats:
-  worker:
-    name: Worker
-    triggers: ["work.start"]
-    publishes: ["work.done", "human.guidance"]
-    event_filter:
-      enabled: true
-      events: ["work.start"]
-"#,
-        );
-        let findings = check_hat_scope_invariant(&cfg);
-        assert!(
-            findings.iter().any(|f| {
-                f.id == *format!("lint.{}", FINDING_HAT_SCOPE_COORDINATOR_FORBIDDEN_PUBLISH)
-            }),
-            "expected globally_forbidden_publish finding for human.guidance, got: {findings:#?}"
-        );
-    }
 
     #[test]
     fn rule_skipped_in_coordinator_mode() {

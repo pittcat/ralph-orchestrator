@@ -580,7 +580,7 @@ pub fn check_trigger_publish_asymmetry(
     // publisher" archetype for the same reason as
     // cancellation_promise: the runner injects the publish. The
     // `progress-steward` hat is the canonical consumer.
-    const RUNNER_INJECTED_TRIGGERS: &[&str] = &["loop.stalled", "human.guidance", "task.resume"];
+    const RUNNER_INJECTED_TRIGGERS: &[&str] = &["loop.stalled", "task.resume"];
 
     // R5 is per-trigger and depends only on graph topology (no
     // bounded BFS over terminals), so the terminal set is unused.
@@ -604,9 +604,10 @@ pub fn check_trigger_publish_asymmetry(
                 continue;
             }
             // 2026-06-16-001 U5: runner-injected topics
-            // (`loop.stalled`, `human.guidance`, `task.resume`) are
-            // exempt for the same reason — the loop runner is
-            // the publisher, not a hat.
+            // (`loop.stalled`, `task.resume`) are exempt for the
+            // same reason — the loop runner is the publisher,
+            // not a hat. (2026-06-28-005: `human.guidance` was
+            // removed from this list together with the topic.)
             if RUNNER_INJECTED_TRIGGERS.contains(&trigger.as_str()) {
                 continue;
             }
