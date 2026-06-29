@@ -2715,6 +2715,18 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-29-007 plan U6b: smoke test for the
+/// `CoordinatorDecisionGateStage`. The
+/// `upstream_review_incomplete` reject logic is
+/// unit-tested in `coordinator_decision_gate_stage::tests`.
+/// This scenario verifies the new stage does not break
+/// the existing happy path.
+#[test]
+fn test_u6b_coordinator_step_guard() {
+    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u6b-coordinator-step-guard.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U6a: smoke test for the
 /// coordinator trigger update. The preset yml change is
 /// verified by the ce-executor-serial SSOT byte-equality

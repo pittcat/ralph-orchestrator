@@ -16,6 +16,7 @@
 //! §"Stage pipeline 锁定".
 
 pub mod archive_version_stage;
+pub mod coordinator_decision_gate_stage;
 pub mod emit_schema_gate_stage;
 pub mod flow_step_scope_stage;
 pub mod repair_dispatch_stage;
