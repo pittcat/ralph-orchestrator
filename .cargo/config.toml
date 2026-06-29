@@ -11,7 +11,7 @@
 # Background: `reqwest::Client::new()` reads the `HTTP_PROXY` / `HTTPS_PROXY`
 # env vars and routes 127.0.0.1 traffic through them when no `NO_PROXY`
 # exclusion exists. In environments with a corporate proxy (e.g.
-# `HTTP_PROXY=http://192.168.3.231:808`), the proxy cannot reach a local
+# `HTTP_PROXY=http://192.168.3.231:909`), the proxy cannot reach a local
 # `TcpListener::bind("127.0.0.1:0")` and closes the connection before the
 # HTTP response is delivered, producing
 # `error sending request ... connection closed before message completed`
