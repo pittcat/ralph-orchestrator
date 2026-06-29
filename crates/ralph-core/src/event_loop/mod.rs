@@ -305,22 +305,27 @@ pub(crate) fn append_runtime_config_block(base_prompt: String, max_residuals: u3
     )
 }
 
-fn filter_human_guidance_blocks(content: &str) -> String {
+
+/// Strip the `### HUMAN GUIDANCE` block from a historical
+/// scratchpad. Kept as a private file-level helper because
+/// `filter_human_guidance_blocks` (which used to handle every
+/// `### HUMAN GUIDANCE` block plus its inline variants) was
+/// removed in plan 2026-06-28-005 together with the
+/// `human.guidance` topic. We still need to drop the block
+/// from scratchpads that pre-date 2026-06-28 so the bootstrap
+/// path does not surface stale guidance text to a fresh
+/// agent. New scratchpads will not contain the block (the
+/// emit path is gone), so this helper only fires on history.
+fn strip_human_guidance_block(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     let mut in_guidance = false;
     for line in content.lines() {
         if line.starts_with("### HUMAN GUIDANCE") {
-            // Drop the entire guidance block (header + body).
-            // Replace with a single blank line so subsequent
-            // sections keep their line numbering stable.
             in_guidance = true;
             out.push('\n');
             continue;
         }
         if in_guidance && (line.starts_with("### ") || line.starts_with("## ")) {
-            // New section starts after a guidance block — exit
-            // the guidance state and emit the new section header
-            // normally.
             in_guidance = false;
         }
         if !in_guidance {
@@ -5230,8 +5235,26 @@ impl EventLoop {
             .map(|hat| self.coordinator_bootstrap_gate_closed(hat))
             .unwrap_or(false);
         let suppress_active = self.human_guidance_suppressed();
-        let content = if gate_closed || suppress_active {
-            filter_human_guidance_blocks(&content)
+        // 2026-06-28-005: filter_human_guidance_blocks was
+        // deleted together with the `human.guidance` topic.
+        // The bootstrap gate (`gate_closed`) is the only
+        // remaining reason to filter the scratchpad today.
+        let content = if gate_closed {
+            // Drop the `### HUMAN GUIDANCE` block from any
+            // historical scratchpad that pre-dates the topic
+            // removal. This is purely defensive: a scratchpad
+            // from before 2026-06-28 might still contain the
+            // block; the regex-free inline filter below
+            // strips it line by line. We keep the filter
+            // here as a small private helper rather than
+            // pulling back the public filter function.
+            strip_human_guidance_block(&content)
+        } else if suppress_active {
+            // Suppress is now a no-op (the topic it gated is
+            // gone). Kept for backwards-compatible YAML
+            // loading — the field still deserializes (see
+            // Phase 3b U7) and we simply do not act on it.
+            content
         } else {
             content
         };
