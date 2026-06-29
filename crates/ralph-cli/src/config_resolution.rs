@@ -64,7 +64,6 @@ pub(crate) fn default_core_value() -> Result<Value> {
         // when declared; only the default placeholder is stripped.
         const PRESET_OPT_IN_KEYS: &[&str] = &[
             "state_projection",
-            "suppress_human_guidance",
             "workflow_contract",
             "ephemeral_isolation",
             "enforce_current_unit",
@@ -284,7 +283,6 @@ event_loop:
 
         for key in [
             "state_projection",
-            "suppress_human_guidance",
             "workflow_contract",
             "ephemeral_isolation",
             "enforce_current_unit",

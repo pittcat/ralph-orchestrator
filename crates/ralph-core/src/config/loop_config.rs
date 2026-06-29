@@ -316,28 +316,6 @@ pub struct EventLoopConfig {
     #[serde(default)]
     pub state_projection: StateProjectionConfig,
 
-    /// U2 (2026-06-18-004 plan, R2, KTD2): suppress `human.guidance`
-    /// injection for the active hat. When `true`, the event loop
-    /// MUST skip:
-    ///   - `update_robot_guidance` (no `human.guidance` cache)
-    ///   - `apply_robot_guidance` (no `ralph.robot_guidance` push)
-    ///   - `collect_robot_guidance` (no `## ROBOT GUIDANCE` block)
-    ///   - scratchpad `### HUMAN GUIDANCE` block inclusion
-    ///     (handled in `prepend_scratchpad` via
-    ///     `filter_human_guidance_blocks`)
-    ///
-    /// `human.guidance` events are STILL accepted into the events
-    /// JSONL and the scratchpad for audit purposes — this only
-    /// stops the guidance from reaching the prompt of the active
-    /// hat. Used by `ce-executor-serial` to prevent the perky-maple
-    /// P1-2 probe storm where the executor went into a 6-round
-    /// emit-probing spiral after `human.guidance` injection. TUI
-    /// guidance injection is unchanged.
-    ///
-    /// Default: `false`. Opt-in per preset.
-    #[serde(default)]
-    pub suppress_human_guidance: bool,
-
     /// 2026-06-24 plan U2: residual-finding threshold for verdict
     /// promotion. When the shipper hat translates
     /// `plan.complete.verdict == "pass_with_residuals"` to
@@ -374,19 +352,6 @@ pub struct ProgressStewardConfig {
     /// terminates cleanly through shipper → reporter.
     #[serde(default = "default_progress_steward_max_iterations")]
     pub max_steward_iterations: u32,
-
-    /// 2026-06-18-001 plan U7: 即使 `event_loop.suppress_human_guidance`
-    /// 为 true,progress-steward 是否仍能收到 `human.guidance` 内容。
-    ///
-    /// 默认 `true`(backward-compatible):旧 preset 缺失该字段时
-    /// steward 仍被豁免,不被 suppress 误伤。需要切回严格 suppress
-    /// 行为时显式设为 `false`。
-    #[serde(default = "default_progress_steward_exempt_suppress")]
-    pub exempt_from_suppress_human_guidance: bool,
-}
-
-fn default_progress_steward_exempt_suppress() -> bool {
-    true
 }
 
 fn default_progress_steward_enabled() -> bool {
@@ -407,8 +372,6 @@ impl Default for ProgressStewardConfig {
             enabled: default_progress_steward_enabled(),
             steward_hat_id: default_progress_steward_hat_id(),
             max_steward_iterations: default_progress_steward_max_iterations(),
-            // 2026-06-18-001 plan U7: 默认豁免
-            exempt_from_suppress_human_guidance: default_progress_steward_exempt_suppress(),
         }
     }
 }
@@ -455,11 +418,6 @@ impl Default for EventLoopConfig {
             // 2026-06-17-003 U1: state projection opt-in. Disabled
             // by default; presets opt in via YAML.
             state_projection: StateProjectionConfig::default(),
-            // 2026-06-18-004 plan U2 (R2, KTD2): suppress
-            // human guidance injection by default is OFF so
-            // existing presets are unaffected. ce-executor-serial
-            // opts in via YAML.
-            suppress_human_guidance: false,
             // 2026-06-24 plan U2: max_residuals default 8.
             // Presets (e.g. ce-executor-serial → 8) and operators
             // may override via YAML.
@@ -607,43 +565,15 @@ impl Default for WarmupConfig {
 mod tests {
     use super::*;
 
-    /// 2026-06-18-001 plan U7: 默认豁免 suppress(backward-compatible)。
-    #[test]
-    fn u7_progress_steward_exempt_from_suppress_default_true() {
-        let cfg = ProgressStewardConfig::default();
-        assert!(
-            cfg.exempt_from_suppress_human_guidance,
-            "默认豁免(backward-compatible):旧 preset 缺失该字段时 steward 仍可见 guidance"
-        );
-        assert_eq!(cfg.steward_hat_id, "progress-steward");
-    }
-
     #[test]
     fn u7_progress_steward_config_serializes_with_exempt_field() {
         let yaml = r#"
 enabled: true
 steward_hat_id: "progress-steward"
 max_steward_iterations: 3
-exempt_from_suppress_human_guidance: false
 "#;
         let cfg: ProgressStewardConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(!cfg.exempt_from_suppress_human_guidance);
         assert_eq!(cfg.max_steward_iterations, 3);
-    }
-
-    /// 缺字段时 serde default 兜底为 true
-    #[test]
-    fn u7_progress_steward_config_missing_field_uses_default_true() {
-        let yaml = r#"
-enabled: true
-steward_hat_id: "progress-steward"
-max_steward_iterations: 3
-"#;
-        let cfg: ProgressStewardConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(
-            cfg.exempt_from_suppress_human_guidance,
-            "缺字段时 default = true"
-        );
     }
 
     // 2026-06-23: T1 — `max_fix_rounds` field removed in 2026-06-24

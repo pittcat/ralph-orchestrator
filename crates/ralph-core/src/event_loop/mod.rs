@@ -1253,18 +1253,16 @@ impl EventLoop {
         !self.state.bootstrap_complete && !self.state.bootstrap_failed
     }
 
-    /// U2 (2026-06-18-004 plan, R2, KTD2): returns `true` when
-    /// `human.guidance` injection MUST be suppressed for the
-    /// current loop. Driven by the `event_loop.suppress_human_guidance`
-    /// config flag — used by `ce-executor-serial` to prevent the
-    /// perky-maple P1-2 probe storm. Mirrors the
-    /// `coordinator_bootstrap_gate_closed` access pattern so the
-    /// four guidance injection sites
-    /// (`update_robot_guidance` / `apply_robot_guidance` /
-    /// `collect_robot_guidance` / `prepend_scratchpad`) can each
-    /// short-circuit through a single helper.
+    /// 2026-06-28-005: stub kept so the three call sites
+    /// inside `update_robot_guidance` / `apply_robot_guidance` /
+    /// `prepend_scratchpad` still compile while those
+    /// robot-guidance helpers are scheduled for deletion in a
+    /// follow-up phase. The `suppress_human_guidance` config
+    /// field was removed in this same phase (it gates nothing
+    /// now that the `human.guidance` topic is gone), so this
+    /// helper always returns `false`.
     pub fn human_guidance_suppressed(&self) -> bool {
-        self.config.event_loop.suppress_human_guidance
+        false
     }
 
     /// Unit 3 (2026-06-16-002 plan): `true` when `hat_id ==
@@ -4260,11 +4258,11 @@ impl EventLoop {
             .progress_steward
             .steward_hat_id
             .clone();
-        let exempt_enabled = self
-            .config
-            .event_loop
-            .progress_steward
-            .exempt_from_suppress_human_guidance;
+        // 2026-06-28-005: progress_steward.exempt_from_suppress_human_guidance
+        // was deleted together with the suppress_human_guidance field.
+        // Hard-coded to false here; this branch becomes dead once
+        // update_robot_guidance itself is removed in a follow-up phase.
+        let exempt_enabled = false;
 
         // Persist new guidance to scratchpad before caching
         self.persist_guidance_to_scratchpad(&guidance_events);
@@ -4499,29 +4497,22 @@ impl EventLoop {
         // 清空 `self.ralph.robot_guidance`——让 steward 在 suppress
         // 下能持续看到跨 turn 累积的 guidance。
         if self.human_guidance_suppressed() {
-            let steward_hat_id = self
+            // 2026-06-28-005: progress_steward.exempt_from_suppress_human_guidance
+            // config field was deleted together with suppress_human_guidance.
+            // The exempt branch is therefore unreachable: human_guidance_suppressed()
+            // is a stub that always returns false, so the body below
+            // becomes dead. Kept temporarily while update_robot_guidance
+            // is scheduled for deletion in a follow-up phase.
+            let _steward_hat_id = self
                 .config
                 .event_loop
                 .progress_steward
                 .steward_hat_id
                 .as_str();
-            let exempt = self
-                .config
-                .event_loop
-                .progress_steward
-                .exempt_from_suppress_human_guidance
-                && hat_id.as_str() == steward_hat_id;
-            if exempt {
-                tracing::debug!(
-                    target: "ralph::human_guidance",
-                    hat_id = %hat_id.as_str(),
-                    "U7: progress-steward exempt from suppress — pushing guidance to ralph"
-                );
-                self.ralph.set_robot_guidance(self.robot_guidance.clone());
-                // 与非 suppress 路径一致:推入后清空本层 cache
-                self.robot_guidance.clear();
-                return;
-            }
+            // The exempt check used to read the now-deleted
+            // exempt_from_suppress_human_guidance field; the helper
+            // returns false unconditionally, so we fall through to
+            // the suppress path uniformly.
             self.robot_guidance.clear();
             self.ralph.clear_robot_guidance();
             return;

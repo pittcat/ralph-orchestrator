@@ -203,16 +203,12 @@ event_loop:
   # Same single-U contract as ce-executor-serial. Coordinator must
   # only create the current U's task.
   enforce_current_unit: true
-  # 2026-06-18-004 plan U2 (R2, KTD2): suppress human guidance
-  # injection for all hats in this preset. Free-text guidance
-  # caused the perky-maple P1-2 probe storm where the executor
-  # went into a 6-round emit-probing spiral after `human.guidance`
-  # injection. We persist guidance to the scratchpad and the
-  # events JSONL for audit, but the active hat's prompt NEVER
-  # contains the text. Operator-side manual emit still works
-  # (TUI, CLI, or external tooling). Set `false` to restore
-  # guidance injection.
-  suppress_human_guidance: true
+  # 2026-06-28-005: suppress_human_guidance config field was
+  # removed in plan 2026-06-28-005 (the human.guidance topic
+  # itself no longer exists). The perky-maple probe storm is
+  # no longer possible because no guidance event reaches any
+  # hat. Operator-side manual emit still works (TUI, CLI, or
+  # external tooling).
   # Plan 2026-06-20-001 F-PS-005: state_projection moved to
   # `presets/schemas/ce-executor-serial.yml` SSOT (uses the
   # `actions_chain` form with `mark_step_completed`). The inline
