@@ -11,7 +11,24 @@ const RESEND_WINDOW: usize = 8;
 const RESEND_THRESHOLD: usize = 3;
 
 pub fn block_executor_resend_storm(ctx: &RuntimeContext) -> Vec<RecoveryAction> {
-    if ctx.current_hat.as_deref() != Some("executor") {
+    // Resend-storm detection requires the runtime to identify the
+    // currently active executor-class hat structurally (by which hat
+    // publishes `work.done`) rather than by a fragile string
+    // comparison against the literal name "executor". When
+    // `executor_hat_ids` is empty (e.g. unit tests construct a bare
+    // context) fall back to the legacy "executor" string so existing
+    // tests keep passing.
+    let current_hat_is_executor = match ctx.current_hat.as_deref() {
+        Some(hat) => {
+            if ctx.executor_hat_ids.iter().any(|id| id == hat) {
+                true
+            } else {
+                ctx.executor_hat_ids.is_empty() && hat == "executor"
+            }
+        }
+        None => false,
+    };
+    if !current_hat_is_executor {
         return Vec::new();
     }
 
@@ -120,6 +137,52 @@ mod tests {
                 .map(|i| EventSnapshot {
                     topic: "work.done".to_string(),
                     payload: format!(r#"{{"task_id":"t1","commit_count":{}}}"#, i + 1),
+                    iteration: 5 + i as u32,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        assert!(block_executor_resend_storm(&ctx).is_empty());
+    }
+
+    #[test]
+    fn triggers_for_executor_class_hat_by_registry_list() {
+        // P1 fix: the detector must recognise any hat whose config
+        // publishes `work.done`, not just the literal "executor"
+        // name. The live registry populates `executor_hat_ids` from
+        // `HatConfig.publishes`, so a renamed executor hat (e.g.
+        // `executor-fix-unit`) still triggers the block.
+        let ctx = RuntimeContext {
+            current_hat: Some("executor-fix-unit".to_string()),
+            executor_hat_ids: vec!["executor-fix-unit".to_string()],
+            events: (0..3)
+                .map(|i| EventSnapshot {
+                    topic: "work.done".to_string(),
+                    payload: r#"{"task_id":"t1","commit_count":2}"#.to_string(),
+                    iteration: 5 + i as u32,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let actions = block_executor_resend_storm(&ctx);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(&actions[0], RecoveryAction::InjectDirective { text } if text == "ralph stop"));
+    }
+
+    #[test]
+    fn ignores_non_executor_hat_even_with_empty_registry_list() {
+        // Empty registry list = the live registry has not yet been
+        // populated. The detector must NOT silently accept any hat
+        // when the structural list is empty: it must fall back to
+        // the legacy "executor" string match so a renamed hat does
+        // not accidentally fire (e.g. `planner` hat misconfigured).
+        let ctx = RuntimeContext {
+            current_hat: Some("planner".to_string()),
+            executor_hat_ids: vec![],
+            events: (0..3)
+                .map(|i| EventSnapshot {
+                    topic: "work.done".to_string(),
+                    payload: r#"{"task_id":"t1","commit_count":1}"#.to_string(),
                     iteration: 5 + i as u32,
                 })
                 .collect(),

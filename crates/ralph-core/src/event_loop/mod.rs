@@ -4614,6 +4614,26 @@ impl EventLoop {
         envelope: &RecoveryDiagnosisEnvelope,
         notes: Vec<String>,
     ) -> crate::diagnosis::EscalationDecision {
+        // 2026-06-28-003 P1: consult the runtime-recovery dispatcher
+        // before persisting. If a DedupeEnvelope action matches this
+        // envelope's retry_key, the dispatcher's view of the runtime
+        // state already considers this envelope redundant (e.g. a
+        // stall_recovery envelope on the same hat/topic was tracked
+        // earlier in the iteration), so skip writing the duplicate to
+        // recovery.jsonl and skip the orchestration audit event.
+        if self.should_dedupe_envelope(envelope) {
+            debug!(
+                retry_key = %envelope.retry_key,
+                "P1 dedupe: runtime-recovery dispatcher requested drop"
+            );
+            return crate::diagnosis::EscalationDecision {
+                level: crate::diagnosis::EscalationLevel::Soft,
+                retry_key: envelope.retry_key.clone(),
+                attempt: 0,
+                target_hat: None,
+                reason: None,
+            };
+        }
         let hat = envelope
             .source_hat
             .as_deref()
@@ -4631,6 +4651,22 @@ impl EventLoop {
             .unwrap_or(0);
         self.recovery_responder
             .record_finding(envelope, current_iteration)
+    }
+
+    /// Returns true when the runtime-recovery dispatcher's
+    /// `DedupeEnvelope` action matches `envelope.retry_key`.
+    ///
+    /// The dispatcher compares the candidate envelope against the
+    /// currently tracked retry keys (plus pending findings from the
+    /// same iteration) so a `missing_event_gate` envelope that
+    /// duplicates an already-tracked `stall_recovery` on the same
+    /// `(hat, topic)` is dropped before it pollutes recovery.jsonl.
+    fn should_dedupe_envelope(&self, envelope: &RecoveryDiagnosisEnvelope) -> bool {
+        use crate::recovery_runtime::RecoveryAction;
+        let ctx = self.runtime_recovery_context(&[]);
+        crate::recovery_runtime::dispatch(&ctx)
+            .iter()
+            .any(|action| matches!(action, RecoveryAction::DedupeEnvelope { drop_retry_key } if drop_retry_key == &envelope.retry_key))
     }
 
     /// U11-T2 step-handoff side effects: when the unified pipeline
@@ -4749,6 +4785,20 @@ impl EventLoop {
             ..Default::default()
         };
 
+        // Snapshot the executor-class hat set from the live registry
+        // so `block_executor_resend_storm` matches structurally on
+        // `publishes contains work.done` rather than a hard-coded
+        // "executor" string. Empty registry (test scaffolding) leaves
+        // the list empty and the detector falls back to the legacy
+        // string match for backwards compatibility.
+        for id in self.registry.ids() {
+            if let Some(cfg) = self.registry.get_config(id) {
+                if cfg.publishes.iter().any(|t| t == "work.done") {
+                    ctx.executor_hat_ids.push(id.as_str().to_string());
+                }
+            }
+        }
+
         // Snapshot tracked retry keys.
         for key in self.recovery_responder.tracked_retry_keys_list() {
             let outcome = self
@@ -4757,10 +4807,16 @@ impl EventLoop {
                 .map(|o| format!("{o:?}"))
                 .unwrap_or_else(|| "Pending".to_string());
             let attempt = self.recovery_responder.attempt_count(&key);
+            let history: Vec<String> = self
+                .recovery_responder
+                .outcome_history_snapshot(&key)
+                .into_iter()
+                .map(|o| format!("{o:?}"))
+                .collect();
             ctx.retry_key_states.push(RetryKeyState {
                 retry_key: key.clone(),
                 last_outcome: outcome.clone(),
-                outcome_history: vec![outcome],
+                outcome_history: history,
                 attempt_count: attempt,
             });
         }

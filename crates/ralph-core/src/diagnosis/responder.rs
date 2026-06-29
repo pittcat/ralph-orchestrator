@@ -101,6 +101,23 @@ pub const RUNTIME_DIAGNOSIS_ALERT_HEADER: &str = "## Runtime Diagnosis Alert";
 /// user-facing knob).
 const HARD_MAX_FINDINGS: usize = 32;
 
+/// Capacity of the per-retry-key outcome history ring. The runtime-
+/// recovery detector's flapping rule (plan 2026-06-28-003 §Defense 2 /
+/// function 2) reads the last `FLAP_WINDOW=8` entries, so we keep
+/// exactly that many to bound memory while making the snapshot
+/// available without copying.
+pub(super) const OUTCOME_HISTORY_CAP: usize = 8;
+
+/// Push an outcome onto a bounded ring buffer, evicting the oldest
+/// entry when at capacity. Centralised here so `observe()` does not
+/// repeat the bounded-push logic.
+fn push_outcome_history(buffer: &mut Vec<DiagnosisOutcome>, outcome: DiagnosisOutcome) {
+    if buffer.len() >= OUTCOME_HISTORY_CAP {
+        buffer.remove(0);
+    }
+    buffer.push(outcome);
+}
+
 /// What level of escalation a single finding triggered this iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -228,6 +245,14 @@ struct RetryState {
     last_severity: DiagnosisSeverity,
     /// Most recent outcome recorded.
     last_outcome: DiagnosisOutcome,
+    /// Bounded ring of recent outcomes for flapping detection. Capped
+    /// at [`OUTCOME_HISTORY_CAP`] entries so memory stays bounded in
+    /// long loops; the runtime-recovery detector (plan 2026-06-28-003
+    /// §Defense 2 / function 2) reads this snapshot to force a
+    /// `plan.blocked` when a retry key flips among
+    /// `Pending ↔ Recovered ↔ Repeated` too many times within the
+    /// recent window.
+    outcome_history: Vec<DiagnosisOutcome>,
     /// Optional target hat from the envelope, used for Hard
     /// escalation routing.
     target_hat: Option<String>,
@@ -321,6 +346,7 @@ impl RetryState {
             last_iteration: envelope.iteration,
             last_severity: envelope.severity,
             last_outcome: envelope.outcome,
+            outcome_history: vec![envelope.outcome],
             target_hat: envelope.target_hat.clone(),
             topic: envelope.topic.clone(),
             source: envelope.source,
@@ -464,6 +490,20 @@ impl RecoveryResponder {
     #[must_use]
     pub fn outcome_for(&self, retry_key: &str) -> Option<DiagnosisOutcome> {
         self.state.get(retry_key).map(|s| s.last_outcome)
+    }
+
+    /// Snapshot the recent outcome history (newest last) for the
+    /// runtime-recovery flapping detector. Returns an empty `Vec`
+    /// when the retry key is not tracked.
+    ///
+    /// The buffer is capped at [`OUTCOME_HISTORY_CAP`] entries; the
+    /// returned slice never exceeds that cap.
+    #[must_use]
+    pub fn outcome_history_snapshot(&self, retry_key: &str) -> Vec<DiagnosisOutcome> {
+        self.state
+            .get(retry_key)
+            .map(|s| s.outcome_history.clone())
+            .unwrap_or_default()
     }
 
     /// Most recent severity the responder recorded for
@@ -845,6 +885,7 @@ impl RecoveryResponder {
                 state.first_iteration = envelope.iteration;
                 state.last_iteration = Some(current_iteration);
                 state.attempt_count = 1;
+                state.outcome_history = vec![envelope.outcome];
                 self.state.insert(retry_key.clone(), state);
                 1
             }
@@ -860,6 +901,7 @@ impl RecoveryResponder {
                 {
                     entry.attempt_count = 1;
                     entry.first_iteration = envelope.iteration;
+                    entry.outcome_history.clear();
                 } else {
                     entry.attempt_count = entry.attempt_count.saturating_add(1);
                 }
@@ -877,6 +919,8 @@ impl RecoveryResponder {
                 entry.required_field = incoming.required_field;
                 entry.from_topic = incoming.from_topic;
                 entry.to_topic = incoming.to_topic;
+                entry.last_outcome = envelope.outcome;
+                push_outcome_history(&mut entry.outcome_history, envelope.outcome);
                 entry.attempt_count
             }
         };
@@ -1670,6 +1714,120 @@ mod tests {
         assert_eq!(
             merged, 2,
             "P0-1: merge_sibling_attempts must return the stall_recovery attempt_count of 2"
+        );
+    }
+
+    #[test]
+    fn outcome_history_caps_at_window_and_clears_on_reset() {
+        // Drive observe() past OUTCOME_HISTORY_CAP and assert the
+        // oldest entries drop off — the runtime-recovery flapping
+        // detector relies on this bound to stay memory-safe in
+        // long loops.
+        let mut r = RecoveryResponder::new(cfg_with(20, 50, false));
+        // 9 observations within the retry window: history should hold
+        // exactly the last 8.
+        for i in 1..=9_u32 {
+            r.begin_iteration();
+            let env = envelope(
+                "k:builder:work_done:r:*",
+                i,
+                DiagnosisSeverity::Warning,
+                true,
+                Some("builder"),
+                DiagnosisSource::MissingEventGate,
+            );
+            let _ = r.record_finding(&env, i);
+        }
+        let snap = r.outcome_history_snapshot("k:builder:work_done:r:*");
+        assert_eq!(snap.len(), OUTCOME_HISTORY_CAP);
+        // Stale-window reset: when the gap between first observation
+        // and current exceeds the configured window, the next
+        // observation must clear the history.
+        let mut r2 = RecoveryResponder::new(cfg_with(20, 5, false));
+        for i in 1..=4_u32 {
+            r2.begin_iteration();
+            let env = envelope(
+                "k:builder:work_done:r:*",
+                i,
+                DiagnosisSeverity::Warning,
+                true,
+                Some("builder"),
+                DiagnosisSource::MissingEventGate,
+            );
+            let _ = r2.record_finding(&env, i);
+        }
+        assert_eq!(r2.outcome_history_snapshot("k:builder:work_done:r:*").len(), 4);
+        // 6 iterations later (window=5) the entry must reset.
+        r2.begin_iteration();
+        let env = envelope(
+            "k:builder:work_done:r:*",
+            10,
+            DiagnosisSeverity::Warning,
+            true,
+            Some("builder"),
+            DiagnosisSource::MissingEventGate,
+        );
+        let _ = r2.record_finding(&env, 10);
+        let snap2 = r2.outcome_history_snapshot("k:builder:work_done:r:*");
+        assert_eq!(
+            snap2.len(),
+            1,
+            "stale-window reset must clear the history before pushing the new outcome"
+        );
+    }
+
+    #[test]
+    fn outcome_history_drives_runtime_recovery_flapping_detector() {
+        // End-to-end: drive the responder through a flip-flapping
+        // pattern (Pending → Recovered → Repeated → Recovered →
+        // Pending) and assert that the runtime-recovery detector
+        // returns ForcePlanBlocked. This is the regression test for
+        // the primary-172725 cascade — without outcome_history,
+        // finalize_recovery_outcome_on_flapping never fires.
+        let mut r = RecoveryResponder::new(cfg_with(20, 50, false));
+        let outcomes = [
+            DiagnosisOutcome::Pending,
+            DiagnosisOutcome::Recovered,
+            DiagnosisOutcome::Repeated,
+            DiagnosisOutcome::Recovered,
+            DiagnosisOutcome::Pending,
+        ];
+        for (i, outcome) in outcomes.iter().enumerate() {
+            r.begin_iteration();
+            let mut env = envelope(
+                "k:executor:work_done:missing_event:*",
+                i as u32 + 1,
+                DiagnosisSeverity::Warning,
+                true,
+                Some("executor"),
+                DiagnosisSource::MissingEventGate,
+            );
+            env.outcome = *outcome;
+            let _ = r.record_finding(&env, i as u32 + 1);
+        }
+        // Build the RuntimeContext the way runtime_recovery_context
+        // does — using the snapshot, not a single element.
+        let history_strings: Vec<String> = r
+            .outcome_history_snapshot("k:executor:work_done:missing_event:*")
+            .into_iter()
+            .map(|o| format!("{o:?}"))
+            .collect();
+        let ctx = crate::recovery_runtime::RuntimeContext {
+            current_iteration: 5,
+            retry_key_states: vec![crate::recovery_runtime::RetryKeyState {
+                retry_key: "k:executor:work_done:missing_event:*".to_string(),
+                last_outcome: history_strings.last().cloned().unwrap_or_default(),
+                outcome_history: history_strings,
+                attempt_count: 5,
+            }],
+            ..Default::default()
+        };
+        let actions = crate::recovery_runtime::dispatch(&ctx);
+        assert_eq!(actions.len(), 1, "flapping detector must fire on real history");
+        assert!(
+            matches!(&actions[0], crate::recovery_runtime::RecoveryAction::ForcePlanBlocked { reason, .. } if reason.contains("outcome_flapping")),
+            "action must be ForcePlanBlocked with outcome_flapping reason, got: {:?}",
+            actions[0]
         );
     }
 }

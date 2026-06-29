@@ -54,6 +54,13 @@ pub struct RuntimeContext {
     pub retry_key_states: Vec<RetryKeyState>,
     pub current_retry_key: Option<String>,
     pub current_hat: Option<String>,
+    /// Hat IDs considered "executor-class" for the resend-storm
+    /// detector: any hat whose `publishes` list contains `work.done`.
+    /// Populated by [`crate::event_loop::EventLoop::runtime_recovery_context`]
+    /// from the live [`crate::hat_registry::HatRegistry`] so a preset
+    /// that renames the executor hat (e.g. `executor-fix`,
+    /// `executor-integration`) still triggers the detector.
+    pub executor_hat_ids: Vec<String>,
 }
 
 /// Corrective action produced by a detector. Callers apply actions in the
