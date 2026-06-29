@@ -2715,6 +2715,19 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-29-007 plan U10: smoke test for the
+/// PHASE 2 branch gate. The classify / rewrite logic is
+/// unit-tested in
+/// `coordinator_decision_gate_stage::tests`. This scenario
+/// verifies the rewrite does not break the existing
+/// happy path (a single-step plan that emits work.ready
+/// without `last_in_phase=true`).
+#[test]
+fn test_u10_phase2_branch() {
+    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u10-phase2-branch.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U6b: smoke test for the
 /// `CoordinatorDecisionGateStage`. The
 /// `upstream_review_incomplete` reject logic is

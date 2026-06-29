@@ -1,0 +1,48 @@
+# 2026-06-29-007 U10: PHASE 2 branch gate (fix-NN → plan.complete)
+#
+# BDD 覆盖:CoordinatorDecisionGate 把 last fix-unit 的 work.ready
+# 重写成 plan.complete(避免触发新一轮 review.start,2026-06-24
+# regression 路径)。单测在 coordinator_decision_gate_stage::tests
+# 已覆盖核心 classify/topic_for_phase/rewrite 逻辑;此 scenario
+# 是 integration 冒烟,验证 happy path 不被破坏。
+#
+# 期望:happy path 完整跑通,无 plan.blocked 出现。
+
+name: u10_phase2_branch
+description: U10 - PHASE 2 branch gate 在 happy path 不破坏既有流
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - plan.complete
+      default_publishes: plan.complete
+
+mock_responses:
+  - |
+    <event topic="work.done">
+    plan_name: "u10-demo"
+    step: "step-01"
+    task_id: "u10-task"
+    </event>
+  - |
+    <event topic="plan.complete">
+    plan_name: "u10-demo"
+    verdict: pass
+    </event>
+  - |
+    waiting.
+    </event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: work.done
+    - topic: plan.complete
+  absent_events:
+    - topic: plan.blocked
+  completion: false
