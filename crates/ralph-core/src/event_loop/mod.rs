@@ -6054,6 +6054,19 @@ impl EventLoop {
     /// events, not hat routing signals.
     fn is_system_event(topic: &str) -> bool {
         topic.starts_with("event.")
+            // 2026-06-28-005: `plan.blocked` is the terminal
+            // orchestrator topic (replaced `human.guidance` as
+            // the contract-reject guidance target). Treat it
+            // like `event.*` for active-hat selection: a hat
+            // subscribing to `plan.*` or `*` (the Ralph
+            // fallback) must not be activated by the contract
+            // path's guidance publish. Without this guard,
+            // changing the default guidance_topic from
+            // `human.guidance` (which was partitioned to a
+            // separate `human_pending` queue and therefore
+            // skipped this loop) to `plan.blocked` would
+            // shadow the targeted retry to the source hat.
+            || topic == "plan.blocked"
     }
 
     fn is_entrypoint_topic(&self, topic: &str) -> bool {
@@ -8909,7 +8922,13 @@ impl EventLoop {
                             );
                             self.bus.publish(diagnostic_event);
 
-                            // Publish human-readable guidance
+                            // Publish the human-readable guidance. The default target
+                            // is `plan.blocked` (plan 2026-06-28-005
+                            // changed it from the now-deleted
+                            // `human.guidance`). The payload is
+                            // kept as a free-form string so existing
+                            // consumer tooling that parses text still
+                            // works.
                             let guidance_payload = format!(
                                 "Execution contract rejection for '{}': {}\n\n\
                                  To proceed, either:\n\

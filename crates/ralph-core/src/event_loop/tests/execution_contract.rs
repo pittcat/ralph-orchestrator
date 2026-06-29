@@ -255,8 +255,8 @@ fn test_contract_rejection_does_not_publish_original_event() {
         observed_topics
     );
     assert!(
-        observed_topics.iter().any(|t| t == "human.guidance"),
-        "Guidance event should be published. observed: {:?}",
+        observed_topics.iter().any(|t| t == "plan.blocked"),
+        "Guidance event should be published (default topic is plan.blocked per plan 2026-06-28-005). observed: {:?}",
         observed_topics
     );
     // The original work.done event was NOT published to the bus.
@@ -398,7 +398,7 @@ fn test_contract_rejection_publishes_targeted_retry_to_source_hat() {
         .cloned()
         .unwrap_or_default();
     let targeted_retry = pending.iter().find(|e| {
-        e.topic.as_str() != "human.guidance"
+        e.topic.as_str() != "plan.blocked"
             && e.target.as_ref().map(|t| t.as_str()) == Some("executor")
     });
     assert!(
@@ -418,10 +418,11 @@ fn test_contract_rejection_publishes_targeted_retry_to_source_hat() {
         "Recovery event payload must mention the rejected topic 'work.done'. payload={}",
         payload
     );
-    // human.guidance is still persisted for operator visibility.
+    // plan.blocked is published for operator visibility (default
+    // guidance topic per plan 2026-06-28-005).
     assert!(
-        observed_topics.iter().any(|t| t == "human.guidance"),
-        "human.guidance must still be published for operator visibility. observed: {:?}",
+        observed_topics.iter().any(|t| t == "plan.blocked"),
+        "plan.blocked must still be published for operator visibility. observed: {:?}",
         observed_topics
     );
     // The structured diagnostic event is also published.
@@ -438,8 +439,9 @@ fn test_contract_rejection_publishes_targeted_retry_to_source_hat() {
 fn test_contract_rejection_activates_source_hat_for_next_prompt() {
     // After a rejected `work.done`, the next active hat must be executor
     // (via targeted retry), not the Ralph fallback. Today this assertion
-    // fails because only `human.guidance` is published and it is partitioned
-    // away from active hat selection.
+    // fails because only `plan.blocked` is published (the contract
+    // reject guidance topic, default per plan 2026-06-28-005) and
+    // it is partitioned away from active hat selection.
     let config = contract_enabled_config();
     let mut event_loop = EventLoop::new(config);
 
