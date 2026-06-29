@@ -25,7 +25,12 @@
 #
 # Event Flow:
 #   coordinator → executor (unit-01, TDD) → validator
-#     ├─ test.passed(step-01) [PHASE 1] → coordinator → executor (unit-02) → ... → unit-N all done
+#     ├─ test.passed(step-01) [PHASE 1] → coordinator (Branch B pre-decision gate:
+#     │                                    confirm current step == N_total from
+#     │                                    plan.md + progress.md before emitting
+#     │                                    review.start; otherwise emit work.ready
+#     │                                    for the next unit)
+#     │                              → executor (unit-02) → ... → unit-N all done
 #     │                                    ↓
 #     │                                  coordinator → review.start
 #     │                                  review-coordinator → dimension-reviewer(goal-alignment)
@@ -826,13 +831,74 @@ hats:
              end-of-plan signal, NOT a request for another review round.
 
       #### Branch B — `step` does NOT start with `fix-` (plan unit / trivial completion):
-         - If there is a next plan unit:
+
+         **Pre-decision gate (HARD RULE — read FIRST, decide SECOND):**
+         Before picking the "next unit" vs "last unit → review.start" branch,
+         you MUST verify the unit-count against the plan's source-of-truth files.
+         Guessing from the `step` payload alone is the root cause of the
+         "premature `review.start` after unit-01 of a multi-unit plan"
+         regression — Branch B below MUST NOT publish `review.start`
+         until the pre-decision gate confirms the current step is the
+         last plan unit. The guard is mandatory:
+
+         1. Open `.agents/scratchpad/ce-executor/{plan_name}/plan.md`
+            (the derived mirror written by this preset's coordinator on
+            `work.start`). Find the `## Implementation Units` section.
+            Count every `### U{N}.` heading — that is `N_total`.
+            (If you instead need the source-of-truth plan file at
+            `plan_path`, parse the same `## Implementation Units`
+            section there — both mirrors MUST agree; on conflict use
+            the scratchpad `plan.md` because it is what this loop
+            created and other hats read from.)
+         2. Open `.agents/scratchpad/ce-executor/{plan_name}/progress.md`
+            (also `.ralph/agent/progress.md` if present — they are
+            updated together) and read the `Completed Steps` list
+            (plus any `## Completed Steps` head subsection).
+            Count the entries — that is `N_closed`.
+         3. Parse `current_step_index` from the incoming `test.passed`
+            payload's `step` field: `step-01` → 1, `step-02` → 2,
+            etc.; `trivial` → 1 (a trivial mode IS the only unit).
+         4. Decision rule (apply in this exact order):
+            - **Cannot read plan.md or progress.md** (file missing,
+              unreadable, no `## Implementation Units` heading, or
+              `step` not in `step-NN` / `trivial` form): default to
+              the **next-unit** branch. The pre-decision gate's
+              answer when data is missing is "more units remain";
+              do NOT publish `review.start`. This is the
+              fail-safe — the worst case is one extra
+              `work.ready` cycle, not a premature review.
+            - **Can read both files**: `current_step_index ==
+              N_total` AND `N_closed + 1 == N_total` (this
+              `test.passed` is the closure of the last remaining
+              unit). Only then take the "last plan unit" branch.
+              Anything else (off-by-one, completed-count mismatch,
+              step index missing from `1..=N_total`) → take the
+              **next-unit** branch.
+         5. The intent: Branch B is a state machine, not a guess.
+            `test.passed` arrives once per unit; review runs ONCE,
+            after the very last one. Reading two files and
+            comparing integers is cheap. Skipping the check is
+            how multi-unit plans regress into a per-step review
+            loop.
+
+         With the gate satisfied, follow the matching branch below.
+
+         - If there is a next plan unit (gate chose next-unit OR
+           gate could not confirm last-unit):
            - Create the runtime task for the next unit (if not already created)
            - Publish `work.ready` with payload containing the next unit's `task_id`,
              `task_key`, `step`, `plan_path`, `plan_name`, `complexity`
            - Stop — do NOT proceed to any other work
-         - If the current unit is the last plan unit (all plan units complete):
-           - Publish `review.start` with payload: `plan_name`, `task_id`, `task_key`
+         - If the current unit is the last plan unit (gate confirmed
+           `current_step_index == N_total` AND `N_closed + 1 == N_total`):
+           - Publish `review.start` with payload: `plan_name`, `task_id`, `task_key`,
+             `unit_index: <current_step_index>`, `total_units: <N_total>` — these two
+             extra fields ship the gate's verdict so downstream review-coordinator
+             and the diagnostic surfaces (`ralph diagnose --from-ledger`,
+             `ralph doctor plan-sync`) can independently confirm the trigger
+             was the last plan unit, not a misfire. Downstream hats treat them
+             as advisory (do not fail the emit if the runtime is on an older
+             schema that drops unknown fields).
            - Stop — the review flow is taken over by review-coordinator
 
       ### Fix Plan Handling (review.complete trigger)
