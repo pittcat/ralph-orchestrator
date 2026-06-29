@@ -1,0 +1,52 @@
+# 2026-06-29-007 U4: task.resume target_hat self-loop 防御
+#
+# BDD 覆盖:TargetHatGuardStage 拒绝 task.resume 自指(target ==
+# source)。单测在 target_hat_guard_stage::tests 已覆盖核心逻辑;
+# 此 scenario 是 integration 冒烟,验证 recovery_runtime 没有
+# 注入 task.resume 自指事件。
+#
+# 期望:
+# - 走 happy path,无 target_self_loop 记录
+# - plan.complete 终止 loop
+
+name: u4_target_hat_self_loop
+description: U4 - task.resume 自指不会在 happy path 出现,guard 不破坏既有流
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - plan.complete
+      default_publishes: plan.complete
+
+mock_responses:
+  - |
+    <event topic="work.done">
+    plan_name: "u4-demo"
+    step: "step-01"
+    task_id: "u4-task"
+    </event>
+  - |
+    <event topic="plan.complete">
+    plan_name: "u4-demo"
+    verdict: pass
+    </event>
+  - |
+    waiting.
+    </event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: work.done
+    - topic: plan.complete
+  absent_events:
+    - topic: plan.blocked
+    - topic: task.resume
+  recovery_absent:
+    - "target_self_loop"
+  completion: false

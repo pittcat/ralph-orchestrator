@@ -2715,6 +2715,18 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-29-007 plan U4: smoke test for the
+/// `TargetHatGuardStage`. The scenario exercises the
+/// happy path so we can be sure the new guard stage does
+/// not break any existing emit. The
+/// `target_self_loop` reject is unit-tested in
+/// `target_hat_guard_stage::tests`.
+#[test]
+fn test_u4_target_hat_self_loop() {
+    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u4-target-hat-self-loop.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U3: smoke test for the
 /// `recovery_runtime::retry_cap` detector. The scenario
 /// exercises the same review-chain happy path as U2
