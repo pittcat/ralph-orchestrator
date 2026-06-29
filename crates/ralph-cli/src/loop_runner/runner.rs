@@ -2189,23 +2189,14 @@ async fn run_loop_impl_inner(
         // `check_termination` did not already produce a stronger
         // reason (PayloadContractViolation, LoopStale, etc.).
         //
-        // R8 contract: a `Warning` Final hint does NOT promote
-        // to a termination reason — instead the engine publishes
-        // a `human.guidance` event (see
-        // `check_final_human_guidance`). The loop continues under
-        // operator supervision. We do that check inline here so
-        // the operator gets a chance to intervene before the
-        // next hat dispatch.
+        // R8 contract: a `Warning` Final hint does NOT promote to a
+        // termination reason. 2026-06-28-002 U2 promoted all
+        // Final-level hints (any severity) to
+        // `RecoveryExhausted` — including Warning. The earlier
+        // "publish human.guidance and let the loop continue"
+        // path was removed by plan 2026-06-28-005; the soft
+        // guidance emit is gone, the trip itself is in place.
         //
-        // Unit 3 (2026-06-16-002 plan): pass the loop's
-        // `bootstrap_complete` flag.  While the loop is still
-        // in the bootstrap window (work.start → first legal
-        // coordinator work.ready) the engine MUST NOT publish
-        // a `human.guidance` — the coordinator's first prompt
-        // must not be derailed by recovery noise.  The Error /
-        // Critical branch (`check_termination_hint`) is
-        // intentionally NOT gated so a misbehaving coordinator
-        // can still be caught early.
         // Unit 3 (2026-06-16-002 plan) bootstrap gate: the
         // engine reads `bootstrap_complete` from `event_loop`
         // internally so the caller no longer needs to pass it
@@ -2214,13 +2205,6 @@ async fn run_loop_impl_inner(
         // `check_termination_hint` Error/Critical branch is
         // intentionally NOT gated so a misbehaving coordinator
         // can still be caught early.
-        let guidance_published = drift_engine.check_final_human_guidance(&mut event_loop);
-        if guidance_published {
-            tracing::info!(
-                iteration = event_loop.state().iteration,
-                "drift engine published human.guidance for Final Warning hint"
-            );
-        }
         let hint_reason = drift_engine.check_termination_hint(&mut event_loop);
         if let Some(reason) = event_loop.check_termination().or(hint_reason) {
             let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
