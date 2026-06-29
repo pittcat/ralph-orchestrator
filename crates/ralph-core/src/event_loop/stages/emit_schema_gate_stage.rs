@@ -26,19 +26,24 @@ use std::collections::HashMap;
 /// IMPORTANT: this table is the **generic baseline** gate —
 /// it covers only topics whose payload contract is fixed
 /// across ALL presets (e.g. `work.*`, `test.*`, `fix.*`,
-/// `plan.blocked`, `task.resume`, `human.guidance`,
-/// `review.start`). Preset-specific contracts like
-/// `review.complete` (which requires `fix_plan_file`,
-/// `verdict`, `findings_count`, … in `ce-executor-serial`
-/// but is a free-form topic in the harness FR-1 integration
-/// tests) MUST be injected via
+/// `plan.blocked`, `task.resume`, `review.start`).
+/// Preset-specific contracts like `review.complete` (which
+/// requires `fix_plan_file`, `verdict`, `findings_count`, …
+/// in `ce-executor-serial` but is a free-form topic in the
+/// harness FR-1 integration tests) MUST be injected via
 /// `EmitSchemaGateStage::new(preset_required_fields)` so the
 /// baseline stays permissive for legacy / harness fixtures.
+///
+/// Note (2026-06-28-005): `human.guidance` was removed from
+/// this baseline because the topic itself was deleted
+/// (no external operator channel). The corresponding
+/// `field_completeness` R13 bypass in
+/// `drift::detector::check_field_completeness` is now
+/// safe to drop as well (see plan 2026-06-28-005 U1).
 pub fn default_required_fields() -> HashMap<&'static str, Vec<&'static str>> {
     let mut map: HashMap<&'static str, Vec<&'static str>> = HashMap::new();
     map.insert("plan.blocked", vec!["reason"]);
     map.insert("task.resume", vec!["reason", "target_hat", "kind"]);
-    map.insert("human.guidance", vec!["message"]);
     map.insert("work.done", vec!["task_id"]);
     map.insert("work.failed", vec!["task_id", "reason"]);
     map.insert("test.passed", vec!["task_id"]);
