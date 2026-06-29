@@ -84,7 +84,7 @@ hats:
     publishes: ["work.ready", "work.done"]
   progress-steward:
     name: "🛟 Progress Steward"
-    triggers: ["loop.stalled", "human.guidance"]
+    triggers: ["loop.stalled", "task.resume"]
     publishes: ["work.ready", "queue.advance", "review.wave.ready", "task.resume", "plan.blocked"]
     terminal_events: ["plan.blocked"]
 "#;

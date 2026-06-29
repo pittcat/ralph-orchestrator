@@ -25,7 +25,6 @@ mod ephemeral_isolation_integration;
 mod event_filter;
 mod event_policy;
 mod execution_contract;
-mod guidance_dedup;
 mod handoff_dispatch;
 mod hat_backend;
 mod hat_exhaustion;

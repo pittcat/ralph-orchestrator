@@ -76,19 +76,18 @@ fn test_verify_scratchpad_complete_variants() {
 
 #[test]
 fn test_has_pending_human_events_detects_guidance() {
-    let mut event_loop = EventLoop::new(RalphConfig::default());
-    event_loop
-        .bus
-        .publish(Event::new("human.guidance", "Please focus on tests"));
-
-    assert!(event_loop.has_pending_human_events());
+    // 2026-06-28-005: human.guidance topic was deleted; the
+    // has_pending_human_events stub always returns false now
+    // (the dedicated human_pending queue was removed together
+    // with the topic). Pin that here so the stub contract is
+    // visible from tests.
+    let event_loop = EventLoop::new(RalphConfig::default());
+    assert!(!event_loop.has_pending_human_events());
 }
 
 #[test]
 fn test_has_pending_human_events_ignores_non_human() {
-    let mut event_loop = EventLoop::new(RalphConfig::default());
-    event_loop.bus.publish(Event::new("task.start", "Do work"));
-
+    let event_loop = EventLoop::new(RalphConfig::default());
     assert!(!event_loop.has_pending_human_events());
 }
 

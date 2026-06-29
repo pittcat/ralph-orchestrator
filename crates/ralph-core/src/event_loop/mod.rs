@@ -2487,10 +2487,11 @@ impl EventLoop {
             HatExecutionMode::Isolated => {
                 // Isolated mode: use round-robin to select the next hat.
                 // This advances the cursor on the bus for fair scheduling.
-                if self.bus.has_human_pending() && !self.bus.has_pending_non_human() {
-                    // Only human events pending — route to ralph.
-                    return self.bus.hat_ids().find(|id| id.as_str() == "ralph");
-                }
+                //
+                // 2026-06-28-005: the `has_human_pending` guard that
+                // routed to ralph when only human events were pending
+                // is gone — the `human_pending` queue was removed
+                // together with the `human.guidance` topic.
                 // WAC-U5 (2026-06-12-002): handoff priority pre-emption.
                 // If the HandoffIndex has at least one priority-eligible
                 // entry (unique consumer) and that hat currently has a
@@ -2526,10 +2527,10 @@ impl EventLoop {
                 // Coordinator mode: peek for pending, then return ralph if any.
                 let has_pending = self.bus.peek_next_hat_with_pending().is_some();
 
-                // If no pending hat events but human interactions are pending, route to Ralph.
-                if !has_pending && self.bus.has_human_pending() {
-                    return self.bus.hat_ids().find(|id| id.as_str() == "ralph");
-                }
+                // 2026-06-28-005: the `has_human_pending` fallback
+                // path that routed to ralph when only human events
+                // were pending is gone — the `human_pending` queue
+                // was removed together with the topic.
 
                 if !has_pending {
                     return None;
@@ -2609,30 +2610,13 @@ impl EventLoop {
 
     /// Checks if any pending events are human guidance events.
     ///
-    /// Used to skip cooldown delays when a human guidance event is next, since
-    /// we don't want to artificially delay the response to a human interaction.
+    /// 2026-06-28-005: stub kept so callers that previously
+    /// consulted `bus.has_human_pending()` still compile while the
+    /// `human.guidance` topic and its dedicated `human_pending`
+    /// queue are removed together. Always returns `false` now —
+    /// the queue is gone, so the question is no longer meaningful.
     pub fn has_pending_human_events(&self) -> bool {
-        self.bus.has_human_pending()
-    }
-
-    /// Injects `human.guidance` events directly into the in-memory bus.
-    ///
-    /// This is used for local TUI/RPC guidance so the next prompt boundary
-    /// sees the message immediately without waiting for a JSONL reread.
-    pub fn inject_human_guidance<I, S>(&mut self, messages: I)
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let verdict_topics = self.verdict_gate_topics();
-        let verdict_topics_slice = verdict_topics.as_deref();
-        for message in messages {
-            let event = Event::new("human.guidance", message.into());
-            self.state.record_event(&event);
-            self.state
-                .record_verdict_if_match(&event, verdict_topics_slice);
-            self.bus.publish(event);
-        }
+        false
     }
 
     /// Returns whether unread JSONL events include any semantic `plan.*` topics.
@@ -8958,7 +8942,18 @@ impl EventLoop {
                                 event.topic.as_str(),
                             );
                             let guidance_event =
-                                Event::new(guidance_topic_owned.as_str(), guidance_payload);
+                                Event::new(guidance_topic_owned.as_str(), guidance_payload)
+                                // 2026-06-28-005: pin the guidance
+                                // publish to the same target as the
+                                // retry event so the ralph fallback
+                                // (subscribed to *) does not shadow
+                                // it. retry_target is None for the
+                                // no-safe-target case; in that case
+                                // the event fans out to the
+                                // fallback (which is the documented
+                                // behaviour — see no_retry_reason
+                                // branch above).
+                                .with_target(retry_target.clone().unwrap_or_else(|| HatId::new("ralph")));
                             self.bus.publish(guidance_event);
 
                             contract_rejections.extend(findings.iter().cloned());
