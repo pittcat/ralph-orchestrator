@@ -2715,6 +2715,22 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-29-007 plan U2: regression for the
+/// `FlowStepScopeStage` DEFENSIVE_BYPASS placement
+/// contract. While `current_step == "unit_loop"`, review
+/// chain emits (review.dimensions.complete /
+/// review.dimension.done / review.complete /
+/// REVIEW_COMPLETE / LOOP_COMPLETE) must pass without
+/// consulting `unit_loop.allowed_emits` — the bypass
+/// runs BEFORE the step lookup so the review chain can
+/// drive itself to completion during the unit_loop
+/// phase.
+#[test]
+fn test_u2_flow_step_scope_bypass() {
+    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u2-flow-step-scope-bypass.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U1a: smoke test for the new
 /// `flow_lifecycle.current_step` dedicated field. The
 /// scenario itself is a 2-step happy path (no `mechanism.flow`

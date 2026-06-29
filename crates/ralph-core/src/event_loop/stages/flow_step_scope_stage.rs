@@ -106,10 +106,22 @@ impl EmitStage for FlowStepScopeStage {
             return Ok(());
         }
 
-        // 2026-06-28 plan U3: defensive bypass — see DEFENSIVE_BYPASS.
-        // The match is on `(source_hat, topic)`. A missing
-        // `source_hat` (legacy / synthetic events) cannot match
-        // because every bypass entry requires a real hat id.
+        // 2026-06-28 plan U3 + 2026-06-29-007 plan U2:
+        // defensive bypass — see DEFENSIVE_BYPASS. The match
+        // is on `(source_hat, topic)`. A missing `source_hat`
+        // (legacy / synthetic events) cannot match because
+        // every bypass entry requires a real hat id.
+        //
+        // U2 contract: this bypass MUST run BEFORE
+        // `let step = self.flow.step(&ctx.current_step.id)`
+        // so a `(review-coordinator, review.dimensions.complete)`
+        // emit at `unit_loop` step is accepted without
+        // consulting `unit_loop.allowed_emits`. Once U1b
+        // advances `current_step` to `review_walk`, the
+        // bypass is no longer needed for review events
+        // (they will be in `review_walk.allowed_emits`) but
+        // the bypass list is retained as a defensive
+        // safety net for the transition window.
         if let Some(source) = event.source.as_ref() {
             let source_str = source.as_str();
             if DEFENSIVE_BYPASS
