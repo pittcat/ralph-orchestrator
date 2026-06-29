@@ -174,7 +174,7 @@ hook 失败时由 `on_error` 决定 Ralph 怎么处理：
 | 长任务成功后生成总结 | `post.loop.complete` + `on_error: warn` |
 | 长任务失败后保留现场 | `post.loop.error` + `on_error: warn` |
 | 捕获计划文档 | `post.plan.created` |
-| 审计人机交互 | （human-in-the-loop 已退役；改用 `pre.loop.error` + `post.loop.error` 配合 `human.guidance` 事件做事后审计） |
+| 审计人机交互 | （human-in-the-loop 已退役；改用 `pre.loop.error` + `post.loop.error` 做事后审计 — plan 2026-06-28-005） |
 
 不建议把重型逻辑放进 `pre.iteration.start` 或 `post.iteration.start`。这两个 hook 每轮都会跑，适合轻量监控，不适合长时间检索、生成文档或网络重任务。
 
@@ -512,8 +512,10 @@ tasks:
 
 For recovery-time guidance when an iteration crosses a drift / correction threshold
 (3-strike escalation, completion-correction injection, etc.), the runtime diagnosis
-engine still publishes `human.guidance` to the bus, and `task.resume` is injected into
-PENDING EVENTS whenever policy / origin / contract rejects a payload. See
+engine now publishes `plan.blocked(reason=...)` (the previous
+`human.guidance` topic was removed by plan 2026-06-28-005), and
+`task.resume` is injected into PENDING EVENTS whenever policy / origin /
+contract rejects a payload. See
 `docs/solutions/integration-issues/ce-executor-serial-precheck-recovery-alignment-2026-06-17.md`
 for the surviving recovery flow.
 

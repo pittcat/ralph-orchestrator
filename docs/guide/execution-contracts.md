@@ -85,7 +85,7 @@ event_loop:
 
 1. 原始事件**不会**发布到总线
 2. 诊断事件发布到 `event.execution_contract.rejected`
-3. 指导发布到 `human.guidance`
+3. 指导发布到 `plan.blocked`（2026-06-28-005 之前是 `human.guidance`，已废弃）
 4. 下游 hat **不会**收到该事件
 
 ## ce-executor 示例
@@ -122,8 +122,8 @@ event_loop:
 
 1. **控制台警告**：以 `warn!` 级别记录，包含 topic、hat 和违反原因
 2. **结构化诊断事件**：当 `RALPH_DIAGNOSTICS=1` 时，通过 `DiagnosticsCollector::log_execution_contract_rejections` 写入 `.ralph/diagnostics/<session>/orchestration.jsonl`（事件类型为 `ExecutionContractRejected`）
-3. **TUI / RPC 可见性**：TUI 通过 EventBus observer 消费上述 `event.execution_contract.rejected` 和 `human.guidance` 事件
-4. **人工指导**：发布到 `human.guidance` 供下一次迭代参考
+3. **TUI / RPC 可见性**:TUI 通过 EventBus observer 消费上述 `event.execution_contract.rejected` 事件(`human.guidance` 已废弃 — plan 2026-06-28-005)
+4. **人工指导**:发布到 `plan.blocked` 供下一次迭代参考(`human.guidance` 已废弃)
 
 ## 测试
 
