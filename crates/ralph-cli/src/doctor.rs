@@ -1075,6 +1075,10 @@ mod tests {
             // 2026-06-26 plan U2: doctor test fixture does not
             // exercise the exempt list; default empty.
             exempt_topics: vec![],
+            // 2026-06-29-007 plan U5a: doctor test fixture
+            // does not exercise write paths; default `None`
+            // mirrors production default.
+            allowed_write_paths: None,
             phase_triggers: None,
             obligations: vec![],
             trigger_multi_consumer_topics: HashSet::new(),

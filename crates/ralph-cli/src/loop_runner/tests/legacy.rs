@@ -3892,6 +3892,10 @@ fn make_wave_with_count(
             // 2026-06-26 plan U2: test fixture does not exercise
             // the exempt list; default empty.
             exempt_topics: vec![],
+            // 2026-06-29-007 plan U5a: test fixture does not
+            // exercise write paths; default `None` mirrors
+            // production default.
+            allowed_write_paths: None,
             phase_triggers: None,
             ignore_payload_fields: vec![],
             obligations: vec![],

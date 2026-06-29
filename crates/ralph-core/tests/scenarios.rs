@@ -2715,6 +2715,20 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-29-007 plan U11: end-to-end BDD scenario for
+/// the post-fix happy path. Exercises the full chain
+/// (coordinator → executor → validator → review chain →
+/// shipper → LOOP_COMPLETE) and asserts no recovery
+/// envelope carries any of the four reject codes that
+/// the P0 fixes introduced (`flow_unknown_emit`,
+/// `target_self_loop`, `flow_state_closed`,
+/// `upstream_review_incomplete`).
+#[test]
+fn test_u11_full_e2e_after_fix() {
+    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u11-full-e2e.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U8: smoke test for the
 /// `RejectionKind` typed enum. The retry-key computation
 /// and outcome migration are unit-tested in
