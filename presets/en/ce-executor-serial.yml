@@ -572,14 +572,13 @@ event_loop:
     # U4: enable plan_name equality validation — work.done plan_name
     # must match the current_plan_name from work.ready.
     plan_name_equality_required: true
-    # U1 (2026-06-11-002): trivial_step semantic gate. Mirrors the wave
-    # gate's `changed_lines_min: 50`. A `review.passed` event with
-    # `skip_reason=trivial_step` is rejected by the event policy when
-    # the payload shows `findings_count > 0` OR
-    # `changed_lines >= trivial_step_max_changed_lines`. Set to 0 to
-    # disable the gate (NOT recommended). The 50-line threshold
-    # matches the wave gate so the two presets stay synchronized.
-    trivial_step_max_changed_lines: 50
+    # NOTE: The previous U1 (2026-06-11-002) trivial_step semantic gate
+    # (`trivial_step_max_changed_lines: 50`) was removed on 2026-06-29
+    # in plan 008 — the gate only ran against `review.passed(skip_reason=trivial_step)`,
+    # but the ce-executor-serial architecture runs review exactly once after all
+    # plan units complete, and the `skip_reason=trivial_step` path is no longer
+    # reachable in practice. The `changed_lines` field is still required in
+    # work.done payloads (observability), but no threshold gates it.
     # NOTE: schemas are merged from
     # `presets/schemas/ce-executor-serial.yml` by `build.rs` at compile
     # time. That file is the authoring single source of truth. The
@@ -1536,13 +1535,11 @@ hats:
 
       Emit `review.dimension.ready` for the first pending dimension when ANY of these is true:
       - `commit_count >= 1` (any commit on top of base)
-      - `changed_lines >= 50` (per `git diff --shortstat` sum, including untracked)
       - `git ls-files --others --exclude-standard` is non-empty (untracked files present)
       - `git diff <base>..HEAD` (or `git diff <base>` fallback) is non-empty
 
       Emit `review.dimensions.complete` (empty-diff fast path) ONLY when ALL of these are true:
       - `commit_count == 0`
-      - `changed_lines == 0`
       - `git ls-files --others --exclude-standard` is empty
       - `git diff <base>..HEAD` (or `git diff <base>` fallback) is empty
       - the sequence is empty (no `pending` dimensions remain) — this is the normal post-synthesis case where the synthesizer already closed the previous sequence
@@ -1581,7 +1578,7 @@ hats:
            and either aggregates findings or escalates failures.
          - For the empty-diff fast path (sequence was empty / never
            had pending dimensions, AND `commit_count == 0` AND
-           `changed_lines == 0` AND untracked is empty AND
+           untracked is empty AND
            `git diff <base>..HEAD` is empty): emit the array with
            every row `status: "done"` and `findings_file: null`. The
            synthesizer reads the payload, sees no findings, and
@@ -1705,7 +1702,7 @@ hats:
       ### Constraints
       - MUST NOT review code directly
       - MUST NOT start fixing issues
-      - MUST decide walk vs pass per the HARD RULE above (commit_count / changed_lines / untracked / diff state), NOT based on intent or trust in the executor
+      - MUST decide walk vs pass per the HARD RULE above (commit_count / untracked / diff state), NOT based on intent or trust in the executor
       - MUST NOT emit `review.complete` from this hat — `review.complete` is owned exclusively by `review-synthesizer`. The empty-diff fast path is now `review.dimensions.complete` (with all rows `status: done`, `findings_file: null`); the synthesizer then emits `review.complete` with `fix_plan_file: "null"` and `verdict: "pass"`. Any attempt to call `ralph emit review.complete --hat review-coordinator` is rejected by the CLI precheck (`isolated_scope_violation`) and the topic-deny rule.
       - MUST NOT emit `review.dimension.ready` for more than one dimension per turn (single-event boundary)
       - MUST walk the sequence in the fixed order (goal-alignment → correctness → testing → maintainability → project-standards → adversarial)
@@ -2453,11 +2450,9 @@ hats:
 
       ### Simplify Check (plan.complete ONLY)
       - **Only execute on `plan.complete`.** On `plan.blocked`, skip entirely.
-      - If `changed_lines >= 30` and not purely mechanical changes:
-        - **Only on Claude Code** — review recent files for simplification
-        - On other backends, skip simplify
-        - Re-run final validation after simplify
-      - If < 30 lines or mechanical, skip
+      - Review recent files for simplification on Claude Code backend;
+        on other backends, skip simplify.
+      - Re-run final validation after simplify
 
       ### Update Plan Status (plan.complete ONLY)
       - On `plan.complete`: if plan has YAML frontmatter with `status: active` → change to `status: completed`

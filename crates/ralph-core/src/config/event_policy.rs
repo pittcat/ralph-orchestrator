@@ -7,11 +7,6 @@ use serde::{Deserialize, Serialize};
 use super::default_true;
 use super::loop_config::EventSchema;
 
-/// Threshold above which a `review.passed(skip_reason=trivial_step)` event
-/// is considered an attempt to bypass the wave review. Default 50, matching
-/// the preset's `changed_lines_min: 50` wave gate.
-pub const DEFAULT_TRIVIAL_STEP_CHANGED_LINES: u64 = 50;
-
 /// A rule that denies a specific hat from publishing a specific topic.
 ///
 /// Matching semantics: exact `hat_id` + exact `topic` (no glob).  When the
@@ -64,19 +59,6 @@ pub struct EventPolicyConfig {
     /// recent `work.ready` event.  Default false (backward compatible).
     #[serde(default)]
     pub plan_name_equality_required: bool,
-    /// U1 (2026-06-11-002): semantic gate for `review.passed`. When the
-    /// `skip_reason` is `trivial_step` AND the payload shows either
-    /// `findings_count > 0` OR `changed_lines >= trivial_step_max_changed_lines`,
-    /// the event is rejected with reason `invalid_trivial_step_bypass` and
-    /// the source hat receives a `task.resume` pointing it at the
-    /// synthesizer/Fixer or the proper terminal topic. Defaults to the
-    /// preset's wave threshold (50); setting this to `0` disables the gate.
-    #[serde(default = "default_trivial_step_max_changed_lines")]
-    pub trivial_step_max_changed_lines: u64,
-}
-
-fn default_trivial_step_max_changed_lines() -> u64 {
-    DEFAULT_TRIVIAL_STEP_CHANGED_LINES
 }
 
 impl Default for EventPolicyConfig {
@@ -95,7 +77,6 @@ impl Default for EventPolicyConfig {
             completion_after_terminal: CompletionAfterTerminalConfig::default(),
             topic_deny_rules: Vec::new(),
             plan_name_equality_required: false,
-            trivial_step_max_changed_lines: DEFAULT_TRIVIAL_STEP_CHANGED_LINES,
         }
     }
 }
