@@ -151,6 +151,16 @@ pub struct ProjectionContext {
     /// Plan ref: R1 in
     /// `docs/plans/2026-06-17-005-fix-state-projection-phase1-review-findings-plan.md`.
     pub enforce_current_unit: bool,
+    /// P0-2 (plan 2026-06-29-006): current loop id marker used as
+    /// a fallback for the task `loop_id` field when the event
+    /// payload does not carry one. The runtime reads the canonical
+    /// `current_loop_id` from `EventLoop::current_loop_id_for_contract`
+    /// and threads it through every projector call so tasks
+    /// projected from a loop-scoped event always get a `loop_id`
+    /// — even when the agent's payload is `from_key:...` legacy
+    /// or `""` (which otherwise would trigger `TaskWrongLoop`
+    /// in `validate_task`).
+    pub current_loop_id: Option<String>,
     /// In-memory cache of the tasks ledger. Populated by
     /// [`StateProjector::bootstrap_from_disk`] on loop resume; kept
     /// in sync by [`task::project`] on every apply.
@@ -222,10 +232,24 @@ impl ProjectionContext {
             progress_path: progress_path(workspace_root),
             config,
             enforce_current_unit,
+            // P0-2 (plan 2026-06-29-006): default `None` preserves
+            // pre-fix behaviour (no fallback injection). Loop
+            // callers should use `with_current_loop_id` to wire
+            // the marker.
+            current_loop_id: None,
             tasks_cache: Vec::new(),
             progress_cache: ProgressSnapshot::default(),
             ledger_snapshot: None,
         }
+    }
+
+    /// P0-2 (plan 2026-06-29-006): thread the loop's canonical
+    /// `current_loop_id` into the context so the projector can
+    /// fall back to it when an event payload omits `loop_id`.
+    /// Mirrors `EventLoop::current_loop_id_for_contract`.
+    pub fn with_current_loop_id(mut self, loop_id: impl Into<String>) -> Self {
+        self.current_loop_id = Some(loop_id.into());
+        self
     }
 
     /// Backward-compatible constructor with `enforce_current_unit=false`.

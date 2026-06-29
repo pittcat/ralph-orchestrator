@@ -885,15 +885,30 @@ impl RecoveryResponder {
     ) -> EscalationLevel {
         let max_repeats = self.config.max_repeated_recoveries.max(1) as u32;
         let window = self.config.retry_window_iterations.max(1) as u32;
+        // P0-1 (plan 2026-06-29-006): when classifying
+        // `missing_event_gate:*` or `stall_recovery:*` retry
+        // keys, also fold in the attempt_count of the *sibling*
+        // key on the same (hat, topic) — the two paths diagnose
+        // the same root cause in the handoff path and the
+        // P1-1 dedup guard (`hard_gate.rs`) catches the in-flight
+        // case, but if a duplicate envelope slips through (e.g.
+        // across iterations) the two attempt counters must not
+        // accumulate independently. See
+        // 2026-06-29-ce-executor-serial-primary-172725 §F1/F2.
+        let merged_attempts = self.merge_sibling_attempts(retry_key);
+        let merged_first_iteration = self.merge_sibling_first_iteration(retry_key);
         let (attempts, escalated) = self
             .state
             .get(retry_key)
             .map_or((0_u32, false), |s| (s.attempt_count, s.escalated));
+        let attempts = attempts.max(merged_attempts);
         let over_threshold = attempts >= max_repeats;
         let over_window = current_iteration.saturating_sub(
             self.state
                 .get(retry_key)
-                .map_or(current_iteration, |s| s.first_iteration.unwrap_or(0)),
+                .map_or(merged_first_iteration, |s| {
+                    s.first_iteration.unwrap_or(merged_first_iteration)
+                }),
         ) >= window;
         if !over_threshold {
             return EscalationLevel::Soft;
@@ -916,6 +931,73 @@ impl RecoveryResponder {
         }
         self.mark_escalated(retry_key);
         EscalationLevel::Hard
+    }
+
+    /// P0-1 (plan 2026-06-29-006): for `stall_recovery` and
+    /// `missing_event_gate` retry keys, look up the sibling key
+    /// on the same (hat, topic) and return the larger
+    /// `attempt_count`. Returns 0 when no sibling exists.
+    fn merge_sibling_attempts(&self, retry_key: &str) -> u32 {
+        let Some((sibling_prefix, suffix)) = self.sibling_lookup(retry_key) else {
+            return 0;
+        };
+        self.state
+            .keys()
+            .filter(|k| k.starts_with(&sibling_prefix) && k.ends_with(&suffix))
+            .filter_map(|k| self.state.get(k).map(|s| s.attempt_count))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Same idea as [`Self::merge_sibling_attempts`] but for
+    /// `first_iteration`: return the earliest first_iteration
+    /// across the key and its sibling. The window check uses
+    /// the earliest observation so the merged retry class
+    /// cannot outlive either side's window.
+    fn merge_sibling_first_iteration(&self, retry_key: &str) -> u32 {
+        let Some((sibling_prefix, suffix)) = self.sibling_lookup(retry_key) else {
+            return 0;
+        };
+        self.state
+            .keys()
+            .filter(|k| k.starts_with(&sibling_prefix) && k.ends_with(&suffix))
+            .filter_map(|k| self.state.get(k).and_then(|s| s.first_iteration))
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// Map a `stall_recovery` retry key to its
+    /// `missing_event_gate` sibling (and vice versa). Both keys
+    /// have the form
+    /// `<source>:<hat>:<topic>:<reason>:<field>` — the
+    /// `reason` segment is the differentiator. Returns
+    /// `(sibling_prefix, field_suffix)`:
+    /// - `sibling_prefix` matches the keys' shared leading
+    ///   three segments + the alternative source + the
+    ///   alternative reason;
+    /// - `field_suffix` is the trailing `<field>` so we only
+    ///   match keys with the same `field` slot (`*` for both
+    ///   call sites in this fix).
+    fn sibling_lookup(&self, retry_key: &str) -> Option<(String, String)> {
+        // The retry_key format is
+        // `<source>:<hat>:<topic>:<reason>:<field>` with five
+        // colon-separated parts. We split on `:` to inspect
+        // the source and reason.
+        let parts: Vec<&str> = retry_key.split(':').collect();
+        if parts.len() != 5 {
+            return None;
+        }
+        let (source, hat, topic, reason, field) =
+            (parts[0], parts[1], parts[2], parts[3], parts[4]);
+        let (sibling_source, sibling_reason) = match (source, reason) {
+            ("stall_recovery", _) => ("missing_event_gate", "missing_event"),
+            ("missing_event_gate", _) => ("stall_recovery", "handoff_dispatch_timeout"),
+            _ => return None,
+        };
+        Some((
+            format!("{sibling_source}:{hat}:{topic}:{sibling_reason}:"),
+            field.to_string(),
+        ))
     }
 }
 
@@ -1434,5 +1516,152 @@ mod tests {
         );
         let _ = r.record_finding(&env, 1);
         assert!(r.target_hat_for_retry("k:ralph:*:r:*").is_none());
+    }
+
+    // === P0-1 (plan 2026-06-29-006) attempt-count merging ===
+    //
+    // `stall_recovery` and `missing_event_gate` on the same
+    // (hat, topic) diagnose the same root cause (consumer
+    // did not emit within window). Before U6, the two retry
+    // keys had independent attempt counters — each could
+    // cross the threshold alone, prematurely triggering
+    // `EscalationLevel::Final`. The P0-1 fix folds the
+    // sibling attempt_count into `classify` so the two paths
+    // cannot blow past the threshold independently.
+
+    #[test]
+    fn p0_1_sibling_lookup_maps_stall_to_missing_event() {
+        let r = RecoveryResponder::new(cfg_with(3, 5, true));
+        let (prefix, suffix) = r
+            .sibling_lookup("stall_recovery:executor:work.done:handoff_dispatch_timeout:*")
+            .expect("stall_recovery must have a sibling key shape");
+        assert_eq!(prefix, "missing_event_gate:executor:work.done:missing_event:");
+        assert_eq!(suffix, "*");
+    }
+
+    #[test]
+    fn p0_1_sibling_lookup_maps_missing_event_to_stall() {
+        let r = RecoveryResponder::new(cfg_with(3, 5, true));
+        let (prefix, suffix) = r
+            .sibling_lookup("missing_event_gate:executor:work.done:missing_event:*")
+            .expect("missing_event_gate must have a sibling key shape");
+        assert_eq!(prefix, "stall_recovery:executor:work.done:handoff_dispatch_timeout:");
+        assert_eq!(suffix, "*");
+    }
+
+    #[test]
+    fn p0_1_sibling_lookup_returns_none_for_unrelated_keys() {
+        let r = RecoveryResponder::new(cfg_with(3, 5, true));
+        // A non-stall/non-missing key must not be folded.
+        assert!(r.sibling_lookup("execution_contract:executor:r:*").is_none());
+        assert!(r.sibling_lookup("drift_monitor:ralph:r:*").is_none());
+    }
+
+    #[test]
+    fn p0_1_classify_takes_max_of_self_and_sibling_attempts() {
+        // Setup: 2 attempts on `stall_recovery` and 1 on
+        // `missing_event_gate`; threshold = 2; window = 5.
+        // Without P0-1 the `missing_event_gate` classify would
+        // see attempts=1 (under threshold → Soft). With P0-1
+        // the sibling stall_recovery attempts=2 are folded in,
+        // so `missing_event_gate` classify now also sees
+        // attempts=2 and crosses the threshold.
+        let mut r = RecoveryResponder::new(cfg_with(2, 5, true));
+        r.begin_iteration();
+        let stall = envelope(
+            "stall_recovery:executor:work.done:handoff_dispatch_timeout:*",
+            1,
+            DiagnosisSeverity::Warning,
+            true,
+            Some("executor"),
+            DiagnosisSource::StallRecovery,
+        );
+        // The first record_finding runs classify on the stall
+        // key with attempts=1 (under threshold → Soft) — no
+        // state mutation that would affect the miss key.
+        let _ = r.record_finding(&stall, 1);
+        r.begin_iteration();
+        // Second record on stall: attempts=2, threshold=2,
+        // classify returns Hard and marks the stall key
+        // escalated. The miss key has not been touched yet.
+        let _ = r.record_finding(&stall, 2);
+
+        // Now drive a missing_event_gate envelope on a fresh
+        // iteration so the internal classify gets called on
+        // the miss key.
+        r.begin_iteration();
+        let miss = envelope(
+            "missing_event_gate:executor:work.done:missing_event:*",
+            4,
+            DiagnosisSeverity::Warning,
+            true,
+            Some("executor"),
+            DiagnosisSource::MissingEventGate,
+        );
+        // `record_finding` invokes classify internally — the
+        // P0-1 sibling fold must make it return Hard (the miss
+        // key itself has attempts=1, but the stall sibling has
+        // attempts=2, merged=2 ≥ threshold=2).
+        let decision = r.record_finding(&miss, 4);
+        assert_eq!(
+            decision.level,
+            EscalationLevel::Hard,
+            "P0-1: missing_event_gate must inherit stall_recovery attempts and escalate"
+        );
+    }
+
+    #[test]
+    fn p0_1_classify_does_not_inherit_when_sibling_absent() {
+        // Without any stall_recovery entry, the missing_event_gate
+        // attempt counter is independent — verifies the merge is
+        // a true sibling fold (not a global multiplier).
+        let mut r = RecoveryResponder::new(cfg_with(2, 5, true));
+        r.begin_iteration();
+        let miss = envelope(
+            "missing_event_gate:executor:work.done:missing_event:*",
+            1,
+            DiagnosisSeverity::Warning,
+            true,
+            Some("executor"),
+            DiagnosisSource::MissingEventGate,
+        );
+        let decision = r.record_finding(&miss, 1);
+        // Only 1 attempt on the key itself, threshold = 2, so
+        // classify must return Soft regardless of the merge.
+        assert_eq!(
+            decision.level,
+            EscalationLevel::Soft,
+            "P0-1: without a sibling, attempts must not be over-merged"
+        );
+    }
+
+    #[test]
+    fn p0_1_merge_sibling_attempts_returns_max() {
+        // Pinned contract: `merge_sibling_attempts` must return
+        // the maximum attempt_count across the key and its
+        // sibling. This is the underlying primitive the
+        // `classify` change relies on.
+        let mut r = RecoveryResponder::new(cfg_with(2, 5, true));
+        r.begin_iteration();
+        let stall = envelope(
+            "stall_recovery:executor:work.done:handoff_dispatch_timeout:*",
+            1,
+            DiagnosisSeverity::Warning,
+            true,
+            Some("executor"),
+            DiagnosisSource::StallRecovery,
+        );
+        let _ = r.record_finding(&stall, 1);
+        r.begin_iteration();
+        let _ = r.record_finding(&stall, 2);
+        // Now ask the responder directly: from the
+        // missing_event_gate side, what is the merged attempt
+        // count? Must be 2 (the stall sibling).
+        let merged = r
+            .merge_sibling_attempts("missing_event_gate:executor:work.done:missing_event:*");
+        assert_eq!(
+            merged, 2,
+            "P0-1: merge_sibling_attempts must return the stall_recovery attempt_count of 2"
+        );
     }
 }

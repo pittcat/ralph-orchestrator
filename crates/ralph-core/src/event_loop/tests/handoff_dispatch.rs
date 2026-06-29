@@ -91,7 +91,9 @@ fn policy_rejection_leaves_tracker_empty() {
 /// uses to synthesize the `task.resume` event.
 #[test]
 fn escalation_payload_shape() {
-    let mut tracker = HandoffTracker::new().with_fallback_safe_target("plan-gate");
+    let mut tracker = HandoffTracker::new()
+        .with_default_timeout(Duration::from_secs(30))
+        .with_fallback_safe_target("plan-gate");
     tracker.on_handoff_accepted("work.ready", "executor", "evt-1", Instant::now());
     let escalations: Vec<HandoffEscalation> =
         tracker.expired(Instant::now() + Duration::from_secs(60));

@@ -389,16 +389,66 @@ impl DriftEngine {
     /// [`Self::check_final_human_guidance`] so the Warning path is
     /// not silently dropped.
     #[must_use]
-    pub fn check_termination_hint(&self, event_loop: &EventLoop) -> Option<TerminationReason> {
+    pub fn check_termination_hint(&self, event_loop: &mut EventLoop) -> Option<TerminationReason> {
         if !self.config.enabled {
             return None;
         }
-        let hint: &TerminationHint = event_loop.recovery_responder().peek_termination_hint()?;
+        // Clone out the hint's payload first so we can drop
+        // the immutable borrow on the responder before
+        // publishing the plan.blocked event (which needs a
+        // mutable borrow on the bus).
+        let hint: TerminationHint = event_loop
+            .recovery_responder()
+            .peek_termination_hint()
+            .cloned()?;
         // 2026-06-28-002 U2: any Final-escalation hint terminates
         // the loop regardless of severity. A Warning-severity Final
         // hint means "retry window exhausted, no safe target" —
         // continuing the loop would only burn iterations.
         if hint.level == EscalationLevel::Final {
+            // P0-3 (plan 2026-06-29-006): when the responder
+            // promotes to Final, the loop must still surface
+            // the preset's failure path before terminating.
+            //
+            // Two-phase termination:
+            //
+            // Phase 1 (first call): emit `plan.blocked` to the
+            // shipper's pending queue and set
+            // `pending_plan_blocked_for_failure` so the next
+            // iteration's hat selection picks `shipper` to
+            // consume it. Return `None` so the loop continues
+            // for one more iteration instead of hard-exiting.
+            //
+            // Phase 2 (next call): the engine sees the flag is
+            // still set (or that it is the *second* call after
+            // the emit) and returns the actual
+            // `RecoveryExhausted` so the runner can clean up.
+            //
+            // The flag is consumed on the second call so a
+            // future Final hint from a different retry_key
+            // still gets a fresh Phase 1. We also bound the
+            // wait at one iteration so a preset without a
+            // shipper does not hang the loop indefinitely.
+            if !event_loop.state().pending_plan_blocked_for_failure {
+                Self::emit_plan_blocked_for_recovery_exhaustion(event_loop, &hint);
+                event_loop.state_mut().pending_plan_blocked_for_failure = true;
+                // P0-3 (2026-06-29-006): pin the next hat
+                // activation to `shipper` so the just-published
+                // `plan.blocked` is consumed immediately on the
+                // next iteration, instead of waiting for
+                // round-robin to pick shipper. Mirrors the
+                // `pending_recovery_hat` mechanism used by the
+                // hard-gate / wave-recovery paths
+                // (`event_loop/mod.rs:2464`).
+                event_loop.state_mut().pending_recovery_hat =
+                    Some(HatId::from("shipper"));
+                // Phase 1: defer termination so shipper can
+                // process `plan.blocked` on the next iteration.
+                return None;
+            }
+            // Phase 2: clear the flag and return
+            // `RecoveryExhausted`.
+            event_loop.state_mut().pending_plan_blocked_for_failure = false;
             return Some(TerminationReason::RecoveryExhausted {
                 retry_key: hint.retry_key.clone().unwrap_or_default(),
                 reason: hint.reason.clone(),
@@ -419,6 +469,51 @@ impl DriftEngine {
             // branch.
             DiagnosisSeverity::Warning | DiagnosisSeverity::Info => None,
         }
+    }
+
+    /// P0-3 (plan 2026-06-29-006): synthesise and publish a
+    /// `plan.blocked` business event with the recovery
+    /// exhaustion context so the coordinator / shipper /
+    /// reporter chain can run the preset's failure path before
+    /// the loop actually terminates. Routed to the bus
+    /// `ralph` source so the EventOriginGuard accepts the
+    /// publish. The event is best-effort: a publish failure is
+    /// logged but does not block the return of
+    /// `RecoveryExhausted` (the loop must still terminate to
+    /// avoid burning more iterations on a known-bad run).
+    ///
+    /// 2026-06-29 code-review fix: the target is now `shipper`
+    /// (not `coordinator`). The `ce-executor-serial` preset's
+    /// `shipper` hat subscribes to `plan.blocked` directly
+    /// (see `presets/en/ce-executor-serial.yml` shipper
+    /// `triggers`); `coordinator` does not. Routing to
+    /// `coordinator` left the event in the bus with no
+    /// subscriber, so the failure path never ran.
+    fn emit_plan_blocked_for_recovery_exhaustion(
+        event_loop: &mut EventLoop,
+        hint: &TerminationHint,
+    ) {
+        use ralph_proto::{Event, HatId, Topic};
+        let reason = format!(
+            "recovery_exhausted:{}",
+            hint.retry_key.as_deref().unwrap_or("unknown")
+        );
+        let payload = serde_json::json!({
+            "reason": reason,
+            "retry_key": hint.retry_key,
+            "severity": hint.severity.as_str(),
+        });
+        let event = Event::new("plan.blocked", payload.to_string())
+            .with_source(HatId::from("ralph"))
+            .with_target(HatId::from("shipper"));
+        // The bus may not have a shipper subscriber in
+        // some presets; the bus itself will still record the
+        // event in the events file so downstream tooling can
+        // observe it.
+        let _ = event_loop.bus().publish(event);
+        // Touch Topic so the import isn't flagged unused on
+        // platforms that drop the alias.
+        let _ = Topic::from("plan.blocked");
     }
 
     /// Inspect the responder's most recent `TerminationHint` and,
@@ -847,7 +942,7 @@ mod tests {
         let published = engine.check_final_human_guidance(&mut event_loop);
         assert!(!published, "Soft must not publish human.guidance");
         // No termination reason promoted.
-        let term = engine.check_termination_hint(&event_loop);
+        let term = engine.check_termination_hint(&mut event_loop);
         assert!(term.is_none(), "Soft must not terminate the loop");
     }
 
@@ -900,7 +995,7 @@ mod tests {
         let published = engine.drain_hard_escalations(&mut event_loop);
         assert_eq!(published, 1, "engine must publish the task.resume");
         // Engine does NOT terminate on Hard.
-        let term = engine.check_termination_hint(&event_loop);
+        let term = engine.check_termination_hint(&mut event_loop);
         assert!(term.is_none(), "Hard must not terminate the loop");
     }
 
@@ -934,21 +1029,166 @@ mod tests {
             DiagnosisSource::StallRecovery,
         );
         let _ = event_loop.recovery_responder_mut().record_finding(&env, 1);
-        // The engine must promote the Error hint to a
-        // termination reason.
-        let term = engine.check_termination_hint(&event_loop);
+        // P0-3 (plan 2026-06-29-006 U7): Phase 1 defers
+        // termination and emits `plan.blocked`. Phase 2
+        // returns `RecoveryExhausted`.
+        let term_phase1 = engine.check_termination_hint(&mut event_loop);
+        assert!(
+            term_phase1.is_none(),
+            "Error Final hint must defer termination on Phase 1, got: {term_phase1:?}"
+        );
+        let term = engine.check_termination_hint(&mut event_loop);
         assert!(
             matches!(
                 term,
                 Some(crate::event_loop::TerminationReason::RecoveryExhausted { .. })
             ),
-            "Error Final hint must become RecoveryExhausted, got: {term:?}"
+            "Error Final hint must become RecoveryExhausted on Phase 2, got: {term:?}"
         );
         // And it must NOT publish a human.guidance (the
         // guidance is the Warning branch, not the Error
         // branch).
         let published = engine.check_final_human_guidance(&mut event_loop);
         assert!(!published, "Error must not produce human.guidance");
+    }
+
+    /// P0-3 (plan 2026-06-29-006): when the responder promotes
+    /// to `Final`, the engine must publish a `plan.blocked`
+    /// business event *before* returning
+    /// `RecoveryExhausted`, so the coordinator / shipper /
+    /// reporter chain can run the preset's failure path. The
+    /// 2026-06-28-172725 run missed this and terminated
+    /// without emitting any terminal events; the fix pins the
+    /// "publish then terminate" ordering.
+    #[test]
+    fn p0_3_final_emits_plan_blocked_before_terminating() {
+        let diag = diagnosis_config(true, 1, 1);
+        let config = make_config_with_diagnosis(Arc::clone(&diag));
+        let mut event_loop = crate::event_loop::EventLoop::new(config);
+        event_loop.initialize("p0_3_final_emits_plan_blocked");
+        let mut engine = DriftEngine::enabled(
+            Arc::clone(&diag),
+            RequiredFields::new(),
+            DeclaredEdges::new(),
+        );
+        engine.begin_iteration(&mut event_loop, 1);
+        event_loop.set_iteration_for_test(1);
+
+        // Register a coordinator hat (kept for legacy
+        // compatibility) AND the shipper hat that the
+        // 2026-06-29-006 code-review fix routes to.
+        use ralph_proto::Hat;
+        let coordinator = Hat {
+            id: HatId::from("coordinator"),
+            name: "Coordinator".to_string(),
+            description: "P0-3 test stub".to_string(),
+            subscriptions: Vec::new(),
+            publishes: vec![ralph_proto::Topic::from("plan.blocked")],
+            instructions: String::new(),
+        };
+        event_loop.bus().register(coordinator);
+        let shipper = Hat {
+            id: HatId::from("shipper"),
+            name: "Shipper".to_string(),
+            description: "P0-3 test stub".to_string(),
+            subscriptions: vec![ralph_proto::Topic::from("plan.blocked")],
+            publishes: Vec::new(),
+            instructions: String::new(),
+        };
+        event_loop.bus().register(shipper);
+
+        // Trigger Final via a single Error observation.
+        let env = envelope_for(
+            "k:ralph:*:stall:*",
+            1,
+            DiagnosisSeverity::Error,
+            false,
+            None,
+            DiagnosisSource::StallRecovery,
+        );
+        let _ = event_loop.recovery_responder_mut().record_finding(&env, 1);
+
+        // Phase 1: the engine emits `plan.blocked` to the
+        // shipper's queue and returns `None` so the loop
+        // continues for one more iteration.
+        let term_phase1 = engine.check_termination_hint(&mut event_loop);
+        assert!(
+            term_phase1.is_none(),
+            "P0-3: first call (Phase 1) must defer termination, got: {term_phase1:?}"
+        );
+        assert!(
+            event_loop.state().pending_plan_blocked_for_failure,
+            "P0-3: Phase 1 must set the pending_plan_blocked_for_failure flag"
+        );
+        let shipper_events = event_loop.bus().take_pending(&HatId::from("shipper"));
+        let plan_blocked = shipper_events
+            .iter()
+            .find(|e| e.topic.as_str() == "plan.blocked")
+            .expect("P0-3: plan.blocked must be queued for shipper on Phase 1");
+        let payload: serde_json::Value = serde_json::from_str(&plan_blocked.payload)
+            .expect("P0-3: plan.blocked payload must be valid JSON");
+        let reason = payload
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .expect("P0-3: plan.blocked reason must be a string");
+        assert!(
+            reason.starts_with("recovery_exhausted:"),
+            "P0-3: plan.blocked reason must start with `recovery_exhausted:`, got: {reason}"
+        );
+
+        // Phase 2: the engine now returns
+        // `RecoveryExhausted` so the runner can clean up.
+        let term_phase2 = engine.check_termination_hint(&mut event_loop);
+        assert!(
+            matches!(
+                term_phase2,
+                Some(crate::event_loop::TerminationReason::RecoveryExhausted { .. })
+            ),
+            "P0-3: second call (Phase 2) must return RecoveryExhausted, got: {term_phase2:?}"
+        );
+        assert!(
+            !event_loop.state().pending_plan_blocked_for_failure,
+            "P0-3: Phase 2 must clear the pending_plan_blocked_for_failure flag"
+        );
+    }
+
+    /// P0-3 (plan 2026-06-29-006): the engine must NOT emit
+    /// `plan.blocked` for non-Final hints (Soft / Hard) —
+    /// those continue under operator supervision.
+    #[test]
+    fn p0_3_non_final_does_not_emit_plan_blocked() {
+        let diag = diagnosis_config(true, 1, 1);
+        let config = make_config_with_diagnosis(Arc::clone(&diag));
+        let mut event_loop = crate::event_loop::EventLoop::new(config);
+        event_loop.initialize("p0_3_non_final_no_plan_blocked");
+        let mut engine = DriftEngine::enabled(
+            Arc::clone(&diag),
+            RequiredFields::new(),
+            DeclaredEdges::new(),
+        );
+        engine.begin_iteration(&mut event_loop, 1);
+        event_loop.set_iteration_for_test(1);
+
+        // One Warning observation → classify → Soft, no
+        // Final hint, no plan.blocked.
+        let env = envelope_for(
+            "k:ralph:*:r:*",
+            1,
+            DiagnosisSeverity::Warning,
+            true,
+            Some("coordinator"),
+            DiagnosisSource::StallRecovery,
+        );
+        let _ = event_loop.recovery_responder_mut().record_finding(&env, 1);
+        let term = engine.check_termination_hint(&mut event_loop);
+        assert!(term.is_none(), "Soft hint must not terminate, got: {term:?}");
+
+        use ralph_proto::HatId;
+        let coordinator_events = event_loop.bus().take_pending(&HatId::from("coordinator"));
+        assert!(
+            !coordinator_events.iter().any(|e| e.topic.as_str() == "plan.blocked"),
+            "P0-3: plan.blocked must NOT be emitted for non-Final hint"
+        );
     }
 
     /// Lifecycle 3b: FINAL Warning produces `human.guidance`,
@@ -987,7 +1227,10 @@ mod tests {
         // human.guidance side-effect so the operator sees the
         // reason before the loop exits, but the loop is no longer
         // allowed to drift forever on Warning hints.
-        let term = engine.check_termination_hint(&event_loop);
+        // P0-3 (2026-06-29-006 U7): Phase 1 defers; Phase 2
+        // returns `RecoveryExhausted`.
+        let _ = engine.check_termination_hint(&mut event_loop);
+        let term = engine.check_termination_hint(&mut event_loop);
         assert!(
             matches!(
                 term,
@@ -1040,7 +1283,10 @@ mod tests {
         // observation so the level must be Final.
         assert_eq!(decision.level, EscalationLevel::Final);
         // Termination MUST fire even with Warning severity.
-        let term = engine.check_termination_hint(&event_loop);
+        // P0-3 (2026-06-29-006 U7): Phase 1 defers; Phase 2
+        // returns `RecoveryExhausted`.
+        let _ = engine.check_termination_hint(&mut event_loop);
+        let term = engine.check_termination_hint(&mut event_loop);
         assert!(
             matches!(
                 term,
@@ -1081,7 +1327,10 @@ mod tests {
         );
         let decision = event_loop.recovery_responder_mut().record_finding(&env, 1);
         assert_eq!(decision.level, EscalationLevel::Final);
-        let term = engine.check_termination_hint(&event_loop);
+        // P0-3 (plan 2026-06-29-006 U7): Phase 1 defers;
+        // Phase 2 returns `RecoveryExhausted`.
+        let _ = engine.check_termination_hint(&mut event_loop);
+        let term = engine.check_termination_hint(&mut event_loop);
         assert!(
             matches!(
                 term,

@@ -280,7 +280,10 @@ hats:
     // Pre-load a handoff that is already past its deadline.
     // The tracker's `expired()` will return it on the next
     // `process_output` call.
-    let t0 = std::time::Instant::now() - std::time::Duration::from_secs(120);
+    // P0-4 of 2026-06-29-006: default timeout is 600s, so we
+    // need a t0 at least 600s in the past for the entry to be
+    // considered expired.
+    let t0 = std::time::Instant::now() - std::time::Duration::from_secs(700);
     event_loop.state.handoff_tracker.on_handoff_accepted(
         "work.ready",
         "executor",
@@ -290,7 +293,7 @@ hats:
     // Force the deadline into the past with the smallest
     // possible configuration: a 1-second default timeout
     // that we already exceeded by 120 seconds.
-    // (Default is 30s; t0 is 120s ago → expired.)
+    // (Default is 600s post-2026-06-29-006 P0-4; t0 is 700s ago → expired.)
 
     // Act: call process_output. The handoff loop iterates
     // `expired()` and writes a recovery envelope for each
@@ -339,6 +342,120 @@ hats:
         Some("executor"),
         "U7 handoff: target_hat (safe_target) is the consumer unless the consumer is plan-gate itself; got {:?}",
         handoff_env.target_hat
+    );
+}
+
+/// P1-2 (plan 2026-06-29-006): the handoff escalation path
+/// must publish a `task.resume` event whose JSON payload
+/// carries the `kind` field. Previously the path built an
+/// inline JSON blob without `kind`, which the drift detector
+/// counted as 0/N (e.g. `task.resume.kind 1/5` in
+/// `primary-20260628-172725`). Now that we route through
+/// `enrich_task_resume_payload_full`, every emitted payload
+/// must be schema-compliant.
+#[test]
+fn test_p1_2_handoff_escalation_publishes_task_resume_with_kind() {
+    use std::time::{Duration, Instant};
+
+    let temp = tempfile::tempdir().unwrap();
+    let events_path = temp.path().join("events.jsonl");
+    let diagnostics_root = temp.path().to_path_buf();
+
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  planner:
+    name: "Planner"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = diagnostics_root.clone();
+    let diagnostics =
+        crate::diagnostics::DiagnosticsCollector::with_enabled(&diagnostics_root, true)
+            .expect("create diagnostics collector");
+    let session_dir = diagnostics.session_dir().unwrap().to_path_buf();
+    let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
+    event_loop.initialize("P1-2 handoff escalation kind");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Pre-load a handoff that is already past its deadline.
+    let t0 = Instant::now() - Duration::from_secs(700);
+    event_loop.state.handoff_tracker.on_handoff_accepted(
+        "work.ready",
+        "executor",
+        "evt-p1-2-1",
+        t0,
+    );
+
+    // Drive the handoff escalation loop.
+    let _ = event_loop.process_output(&HatId::new("planner"), "", true);
+
+    // The orchestrator's `task.resume` is targeted at the
+    // safe_target hat (here: executor). Pull executor's
+    // pending events and inspect the `kind` field. The
+    // `EventBus` is a writer-side structure that does not
+    // expose a public subscribe API; routed events land in
+    // each hat's pending queue.
+    let executor_events = event_loop
+        .bus
+        .take_pending(&HatId::new("executor"));
+    let task_resume = executor_events
+        .iter()
+        .find(|e| e.topic.as_str() == "task.resume")
+        .expect("P1-2: handoff escalation must publish task.resume routed to the safe_target");
+    let payload: serde_json::Value = serde_json::from_str(&task_resume.payload)
+        .expect("P1-2: task.resume payload must be valid JSON");
+    assert_eq!(
+        payload.get("kind").and_then(|v| v.as_str()),
+        Some("handoff_dispatch_timeout"),
+        "P1-2: `kind` field must be populated by enrich_task_resume_payload_full"
+    );
+    // `reason` is the violation_class fallback from
+    // `extract_reason_code`; for an unknown violation string
+    // it is the literal "other" (see
+    // `event_loop::rejection::violation_class`). The literal
+    // reason string is preserved in the `message` field.
+    assert!(
+        payload.get("reason").and_then(|v| v.as_str()).is_some(),
+        "P1-2: `reason` field must be present and non-empty"
+    );
+    assert!(
+        payload
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(|s| s.contains("did not activate within timeout"))
+            .unwrap_or(false),
+        "P1-2: `message` field must describe the handoff stall"
+    );
+    // Legacy fields preserved for downstream correlation.
+    assert_eq!(
+        payload.get("topic").and_then(|v| v.as_str()),
+        Some("work.ready")
+    );
+    assert_eq!(
+        payload.get("consumer").and_then(|v| v.as_str()),
+        Some("executor")
+    );
+    assert_eq!(
+        payload.get("event_id").and_then(|v| v.as_str()),
+        Some("evt-p1-2-1")
+    );
+    assert_eq!(
+        payload.get("safe_target").and_then(|v| v.as_str()),
+        Some("executor")
+    );
+    assert!(
+        payload.get("details").and_then(|v| v.as_str()).is_some(),
+        "P1-2: `details` field must be preserved"
     );
 }
 

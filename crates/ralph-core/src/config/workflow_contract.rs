@@ -36,18 +36,20 @@ pub struct StepHandoffConfig {
 
 /// Maximum allowed `handoff_dispatch_timeout_seconds`.
 ///
-/// The 30s default + 120s ceiling is a deliberate usability
-/// choice: a longer timeout turns a benign dispatch stall into
-/// a multi-minute loop freeze. Operators who genuinely need
-/// longer windows should redesign the workflow (split the
-/// handoff into multiple stages with intermediate observable
-/// state) rather than raise this knob.
-pub const HANDOFF_DISPATCH_TIMEOUT_MAX_SECONDS: u64 = 120;
+/// P0-4 of `2026-06-29-006` plan: raised from 120s to 1800s to
+/// match the observed validator dispatch latency envelope
+/// (54s-540s in `primary-20260628-172725` plus a 1260s buffer
+/// for future validator latencies). Operators who genuinely
+/// need longer windows should redesign the workflow rather
+/// than raise this knob.
+pub const HANDOFF_DISPATCH_TIMEOUT_MAX_SECONDS: u64 = 1800;
 
-/// Default handoff dispatch timeout in seconds. KTD-11: 30s
-/// is the operator-friendly default that surfaces dispatch
-/// stalls within one operator attention cycle.
-pub const HANDOFF_DISPATCH_TIMEOUT_DEFAULT_SECONDS: u64 = 30;
+/// Default handoff dispatch timeout in seconds. P0-4 of
+/// `2026-06-29-006` plan: raised from 30s to 600s (the observed
+/// 540s validator latency ceiling plus a 60s buffer) so the
+/// runtime dispatcher no longer mis-classifies slow-but-real
+/// validator activations as `stall_recovery`.
+pub const HANDOFF_DISPATCH_TIMEOUT_DEFAULT_SECONDS: u64 = 600;
 
 /// R7 seed handoff topics that the runtime dispatcher monitors
 /// even when the static graph does not surface them as unique
@@ -175,9 +177,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_timeout_is_30s() {
+    fn default_timeout_is_600s() {
         let cfg = WorkflowContractConfig::default();
-        assert_eq!(cfg.handoff_dispatch_timeout_seconds, 30);
+        assert_eq!(
+            cfg.handoff_dispatch_timeout_seconds, 600,
+            "P0-4 of 2026-06-29-006: default must cover observed validator latency (54s-540s) plus buffer"
+        );
     }
 
     #[test]
@@ -195,7 +200,7 @@ mod tests {
     #[test]
     fn timeout_above_ceiling_is_clamped() {
         let cfg = WorkflowContractConfig {
-            handoff_dispatch_timeout_seconds: 600,
+            handoff_dispatch_timeout_seconds: HANDOFF_DISPATCH_TIMEOUT_MAX_SECONDS + 1,
             handoff_topic_seeds: vec![],
             incomplete_wave_gate: Default::default(),
             step_handoff: StepHandoffConfig::default(),
@@ -204,6 +209,20 @@ mod tests {
             cfg.effective_timeout_seconds(),
             HANDOFF_DISPATCH_TIMEOUT_MAX_SECONDS
         );
+    }
+
+    #[test]
+    fn configured_value_under_max_is_preserved() {
+        // P0-4 of 2026-06-29-006: a 600s value must be preserved
+        // (covers the observed 540s validator latency plus buffer)
+        // and not be clamped to the legacy 120s ceiling.
+        let cfg = WorkflowContractConfig {
+            handoff_dispatch_timeout_seconds: 600,
+            handoff_topic_seeds: vec![],
+            incomplete_wave_gate: Default::default(),
+            step_handoff: StepHandoffConfig::default(),
+        };
+        assert_eq!(cfg.effective_timeout_seconds(), 600);
     }
 
     #[test]

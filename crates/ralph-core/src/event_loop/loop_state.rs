@@ -449,6 +449,22 @@ pub struct LoopState {
     /// (consume-on-read).
     pub last_ephemeral_relocations: Vec<crate::ephemeral_isolation::RelocationRecord>,
 
+    /// P0-3 fix (plan 2026-06-29-006 U7): when the drift engine
+    /// promotes a `Final` hint to `RecoveryExhausted`, it must
+    /// first publish a `plan.blocked` business event so the
+    /// `shipper` / `reporter` chain can run the preset's
+    /// failure path. The flag records "we already emitted
+    /// `plan.blocked` and are waiting for shipper to process
+    /// it" so the engine can defer the actual
+    /// `RecoveryExhausted` return for one iteration.
+    ///
+    /// Lifetime: set by `DriftEngine::check_termination_hint`
+    /// when the responder escalates to `Final`; consumed (and
+    /// cleared) by the same function on the next iteration
+    /// after the emit. Capped at 1 iteration to avoid hanging
+    /// the loop when no shipper is registered.
+    pub pending_plan_blocked_for_failure: bool,
+
     /// Unit 3 (2026-06-16-002 plan): `true` once the coordinator has
     /// emitted its first legal bootstrap `work.ready` event
     /// (no `reviewed_task_id` correlation).  While `false`, the
@@ -728,6 +744,7 @@ impl Default for LoopState {
             pending_recovery_hat: None,
             pending_synthesizer_timeout: None,
             last_ephemeral_relocations: Vec::new(),
+            pending_plan_blocked_for_failure: false,
             bootstrap_complete: false,
             bootstrap_failed: false,
             recoverable_exhaustion_buffer: Vec::new(),

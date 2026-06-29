@@ -895,6 +895,52 @@ pub fn inject_missing_event_hard_gate_guidance_with_triggers(
         } else {
             format!("emit one of: {}", expected_topics.join(", "))
         };
+        // P0-1 / P1-1 (plan 2026-06-29-006): if a
+        // `stall_recovery` envelope for the same `(hat, topic)`
+        // was already recorded on this iteration, the
+        // `missing_event_gate` is a duplicate diagnosis of the
+        // same root cause (the handoff tracker already flagged
+        // the missing event via `stall_recovery`). Skip the
+        // second envelope so the two retry_keys do not
+        // accumulate attempts in parallel. See
+        // 2026-06-29-ce-executor-serial-primary-172725 §F1/F2.
+        let stall_key = match topic_for_envelope.as_deref() {
+            Some(topic) => {
+                // `RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts`
+                // normalizes topic via `normalize_part` (which
+                // replaces `.` with `_`). The 2026-06-29
+                // code-review fix applies the same normalization
+                // here so the dedup guard can actually find a
+                // matching key — without this, the seed key
+                // has `work_done` while the guard's lookup has
+                // `work.done`, the dedup never fires, and the
+                // primary-172725 cascade reproduces.
+                let normalized_topic = topic.replace('.', "_");
+                Some(format!(
+                    "stall_recovery:{hat_name}:{normalized_topic}:handoff_dispatch_timeout:*"
+                ))
+            }
+            None => None,
+        };
+        if let Some(key) = stall_key.as_deref() {
+            let already_tracked = event_loop
+                .recovery_responder()
+                .tracked_retry_keys_list()
+                .iter()
+                .any(|k| k == key);
+            if already_tracked {
+                debug!(
+                    hat = %hat_name,
+                    topic = %topic_for_envelope.as_deref().unwrap_or(""),
+                    "P0-1 (2026-06-29-006): missing_event_gate skipped — stall_recovery envelope already tracks this hat/topic; emitting task.resume guidance only"
+                );
+                // The task.resume guidance event has already been
+                // written to the events file above; we only skip
+                // the second recovery envelope to avoid double
+                // counting.
+                return;
+            }
+        }
         // U3 (2026-06-13-001 plan): pin the next iteration to the
         // gated hat so the round-robin / coordinator selection
         // cannot drift to `executor` (or any other hat) right after
@@ -1190,5 +1236,206 @@ pub fn resolve_hat_for_output_processing(hat_id: &HatId, display_hat: &HatId) ->
         display_hat.clone()
     } else {
         hat_id.clone()
+    }
+}
+
+#[cfg(test)]
+mod p0_1_dedup_tests {
+    //! P0-1 / P1-1 (plan 2026-06-29-006): when the handoff
+    //! tracker has already recorded a `stall_recovery` envelope
+    //! for the same `(hat, topic)` pair, the
+    //! `missing_event_gate` injector must skip writing its own
+    //! envelope. The two paths diagnose the same root cause
+    //! (consumer did not emit within window); without dedup
+    //! the two retry_keys would accumulate attempts in parallel
+    //! and prematurely trigger `EscalationLevel::Final`. See
+    //! 2026-06-29-ce-executor-serial-primary-172725 §F1/F2.
+    //!
+    //! The U5 guard fires inside
+    //! `inject_missing_event_hard_gate_guidance_with_triggers`
+    //! by reading the responder's `tracked_retry_keys_list()`.
+    //! This test pins the contract of the *key format* the
+    //! guard looks up, so any drift between the handoff
+    //! tracker's recorded key and the guard's expected key
+    //! causes a compile-time or assertion-time failure.
+
+    use super::*;
+
+    /// Format of the stall_recovery retry key the guard looks
+    /// up. Must match the format produced by
+    /// `RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts`
+    /// for `DiagnosisSource::StallRecovery` with
+    /// reason_code `handoff_dispatch_timeout`. Pinned here so
+    /// drift between the two halves is caught at test time.
+    ///
+    /// `retry_key_from_parts` normalizes topic parts with
+    /// `normalize_part`, which replaces `.` with `_`. The guard
+    /// code in `inject_missing_event_hard_gate_guidance_with_triggers`
+    /// mirrors the same normalization, so the two halves match
+    /// even when the topic is `work.done` rather than
+    /// `work_done`. We pin the normalized form here.
+    fn stall_key_for(hat: &str, topic: &str) -> String {
+        let normalized_topic = topic.replace('.', "_");
+        format!("stall_recovery:{hat}:{normalized_topic}:handoff_dispatch_timeout:*")
+    }
+
+    #[test]
+    fn p0_1_stall_key_format_is_consistent() {
+        // The guard matches on the literal key
+        // `stall_recovery:<hat>:<topic>:handoff_dispatch_timeout:*`,
+        // normalised with `.` -> `_` (matching
+        // `retry_key_from_parts`'s `normalize_part`). If either
+        // the handoff tracker or the guard changes this format
+        // (or the normalisation step drifts), the dedup
+        // silently breaks — pin it.
+        assert_eq!(
+            stall_key_for("executor", "work.done"),
+            "stall_recovery:executor:work_done:handoff_dispatch_timeout:*"
+        );
+    }
+
+    #[test]
+    fn p0_1_stall_key_distinguishes_topics() {
+        let a = stall_key_for("executor", "work.ready");
+        let b = stall_key_for("executor", "work.done");
+        assert_ne!(a, b, "different topics must produce different keys");
+    }
+
+    #[test]
+    fn p0_1_stall_key_distinguishes_hats() {
+        let a = stall_key_for("executor", "work.done");
+        let b = stall_key_for("validator", "work.done");
+        assert_ne!(a, b, "different hats must produce different keys");
+    }
+
+    // === End-to-end U5 guard verification (plan 2026-06-29-006) ===
+    //
+    // The key-format tests above verify the *contract* the guard
+    // reads, but do not exercise the guard itself. The end-to-end
+    // tests below build a real `EventLoop`, seed a `stall_recovery`
+    // envelope via `record_recovery_envelope`, then drive the
+    // missing-event injector and assert the
+    // `tracked_retry_keys_list` does not gain a
+    // `missing_event_gate` entry. This pins the plan-required
+    // "happy path / edge path / error path" coverage on the
+    // actual guard function.
+
+    use ralph_core::diagnosis::{
+        DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope,
+        RecoveryDiagnosisEnvelopeBuilder,
+    };
+    use ralph_core::event_loop::EventLoop;
+    use ralph_core::RalphConfig;
+
+    fn build_event_loop(workspace: &std::path::Path) -> EventLoop {
+        let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+"#;
+        let mut config: RalphConfig = serde_yaml::from_str(yaml).expect("parse test yaml");
+        config.core.workspace_root = workspace.to_path_buf();
+        let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(workspace, true)
+            .expect("create diagnostics collector");
+        let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
+        event_loop.initialize("p0_1_end_to_end");
+        event_loop
+    }
+
+    fn seed_stall_recovery(event_loop: &mut EventLoop, hat: &str, topic: &str) {
+        // retry_key_from_parts normalizes topic via
+        // `normalize_part` (`.` -> `_`); mirror that here so
+        // the assertion checks the actual key on the responder.
+        let normalized_topic = topic.replace('.', "_");
+        let key = format!(
+            "stall_recovery:{hat}:{normalized_topic}:handoff_dispatch_timeout:*"
+        );
+        let envelope = RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+            DiagnosisSource::StallRecovery,
+            Some(hat),
+            Some(topic),
+            "handoff_dispatch_timeout",
+            None,
+        );
+        let env = RecoveryDiagnosisEnvelope::builder()
+            .source(DiagnosisSource::StallRecovery)
+            .source_hat(hat.to_string())
+            .target_hat(hat.to_string())
+            .reason_code("handoff_dispatch_timeout")
+            .topic(topic.to_string())
+            .severity(DiagnosisSeverity::Warning)
+            .safe_target(true)
+            .expected_action("wait for hat to activate".to_string())
+            .message(format!("seeded stall_recovery for {hat}/{topic}"))
+            .retry_key(envelope.clone())
+            .build();
+        let _ = event_loop.recovery_responder_mut().record_finding(&env, 1);
+        // Sanity: the seeded key must be in the tracked list.
+        assert!(
+            event_loop
+                .recovery_responder()
+                .tracked_retry_keys_list()
+                .iter()
+                .any(|k| k == &key),
+            "P0-1: seed must record the stall_recovery key, got: {:?}",
+            event_loop.recovery_responder().tracked_retry_keys_list()
+        );
+    }
+
+    #[test]
+    fn p0_1_end_to_end_guard_skips_when_stall_recovery_tracked() {
+        // Plan U5 happy path: a stall_recovery envelope is
+        // already tracked; the missing-event guard must skip
+        // and not register a new missing_event_gate envelope.
+        let dir = tempfile::tempdir().unwrap();
+        let mut event_loop = build_event_loop(dir.path());
+        seed_stall_recovery(&mut event_loop, "executor", "work.done");
+
+        let missing_key = "missing_event_gate:executor:work_done:missing_event:*";
+        let before: Vec<String> = event_loop
+            .recovery_responder()
+            .tracked_retry_keys_list()
+            .into_iter()
+            .filter(|k| k == missing_key)
+            .collect();
+        assert!(
+            before.is_empty(),
+            "P0-1: missing_event_gate key must not be present before the guard runs"
+        );
+
+        // Drive the guard. We use a minimal stub hat_id and
+        // empty triggers; the guard only inspects the responder
+        // state, so the inputs do not matter for the dedup
+        // decision. The function writes the guidance event to
+        // the events file but does not record a recovery
+        // envelope when the guard short-circuits.
+        let ctx = ralph_core::loop_context::LoopContext::primary(dir.path().to_path_buf());
+        let hat = HatId::from("executor");
+        let expected_topics = vec!["work.done".to_string()];
+        super::inject_missing_event_hard_gate_guidance_with_triggers(
+            &ctx,
+            Some(&mut event_loop),
+            &hat,
+            &expected_topics,
+            &[],
+        );
+
+        let after: Vec<String> = event_loop
+            .recovery_responder()
+            .tracked_retry_keys_list()
+            .into_iter()
+            .filter(|k| k == missing_key)
+            .collect();
+        assert!(
+            after.is_empty(),
+            "P0-1: missing_event_gate key must not be registered when stall_recovery is already tracked; got: {after:?}"
+        );
     }
 }

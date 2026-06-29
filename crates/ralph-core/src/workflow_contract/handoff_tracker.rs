@@ -107,6 +107,13 @@ pub struct HandoffTracker {
     fallback_safe_target: String,
     /// Per-loop default timeout (set from `WorkflowContractConfig`).
     default_timeout: Duration,
+    /// P2-1 (plan 2026-06-29-006): cumulative stall count per
+    /// `consumer` hat, used to drive the `loop.stalled` business
+    /// event when a hat stalls repeatedly without ever
+    /// activating. Reset by [`Self::reset_consumer_stall_counts`]
+    /// (the loop runner calls this on the iteration tick so
+    /// a successful activation clears the prior signal).
+    consumer_stall_counts: HashMap<String, u32>,
 }
 
 impl HandoffTracker {
@@ -119,6 +126,7 @@ impl HandoffTracker {
             default_timeout: Duration::from_secs(
                 crate::config::HANDOFF_DISPATCH_TIMEOUT_DEFAULT_SECONDS,
             ),
+            consumer_stall_counts: HashMap::new(),
         }
     }
 
@@ -135,6 +143,38 @@ impl HandoffTracker {
     pub fn with_fallback_safe_target(mut self, target: impl Into<String>) -> Self {
         self.fallback_safe_target = target.into();
         self
+    }
+
+    /// P2-1 (plan 2026-06-29-006): bump the cumulative stall
+    /// count for `consumer` and return the new value. The
+    /// caller should publish a `loop.stalled` business event
+    /// when the returned value is `>= 2` (i.e. the second
+    /// consecutive stall).
+    pub fn bump_consumer_stall_count(&mut self, consumer: &str) -> u32 {
+        let entry = self
+            .consumer_stall_counts
+            .entry(consumer.to_string())
+            .or_insert(0);
+        *entry += 1;
+        *entry
+    }
+
+    /// P2-1 (plan 2026-06-29-006): clear the cumulative stall
+    /// count for `consumer`. Call this on a successful hat
+    /// activation so a brief stall does not pollute the
+    /// `loop.stalled` signal for the rest of the session.
+    pub fn reset_consumer_stall_count(&mut self, consumer: &str) {
+        self.consumer_stall_counts.remove(consumer);
+    }
+
+    /// P2-1 (plan 2026-06-29-006): read-only view of the
+    /// consumer's cumulative stall count. Used by tests and
+    /// diagnostics surfaces.
+    pub fn consumer_stall_count(&self, consumer: &str) -> u32 {
+        self.consumer_stall_counts
+            .get(consumer)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Record a newly accepted handoff. Returns the entry's
@@ -180,6 +220,11 @@ impl HandoffTracker {
     pub fn on_hat_activated(&mut self, consumer: &str) -> usize {
         let before = self.pending.len();
         self.pending.retain(|_, p| p.consumer != consumer);
+        // P2-1 (plan 2026-06-29-006): a successful activation
+        // clears the consumer's stall history. Without this, a
+        // single past stall would poison the `loop.stalled`
+        // signal for the rest of the session.
+        self.consumer_stall_counts.remove(consumer);
         before - self.pending.len()
     }
 
@@ -283,12 +328,13 @@ mod tests {
     #[test]
     fn expired_returns_escalations_and_clears_them() {
         let mut tracker = HandoffTracker::new();
-        // t(0) is "now"; default timeout is 30s, so deadlines
-        // land at t(30) and t(35).
+        // t(0) is "now"; default timeout is 600s (P0-4 of
+        // 2026-06-29-006), so deadlines land at t(600) and
+        // t(605).
         tracker.on_handoff_accepted("work.ready", "executor", "evt-1", t(0));
         tracker.on_handoff_accepted("work.failed", "fixer", "evt-2", t(5));
-        // At t(40) both entries are past their deadlines.
-        let escalations = tracker.expired(t(40));
+        // At t(610) both entries are past their deadlines.
+        let escalations = tracker.expired(t(610));
         assert_eq!(escalations.len(), 2);
         // Each escalation names the original consumer as the
         // safe_target (executor / fixer are not the fallback).
@@ -304,7 +350,7 @@ mod tests {
     fn expired_does_not_touch_unexpired_entries() {
         let mut tracker = HandoffTracker::new();
         tracker.on_handoff_accepted("work.ready", "executor", "evt-1", t(0));
-        // At t=5 the entry is not yet expired (deadline = t(30)).
+        // At t(5) the entry is not yet expired (deadline = t(600)).
         let escalations = tracker.expired(t(5));
         assert!(escalations.is_empty());
         assert_eq!(tracker.pending_count(), 1);
@@ -314,7 +360,8 @@ mod tests {
     fn fallback_safe_target_used_when_consumer_matches() {
         let mut tracker = HandoffTracker::new();
         tracker.on_handoff_accepted("work.ready", "plan-gate", "evt-1", t(0));
-        let escalations = tracker.expired(t(100));
+        // P0-4 of 2026-06-29-006: default timeout is now 600s.
+        let escalations = tracker.expired(t(601));
         assert_eq!(escalations.len(), 1);
         // Plan-gate is the bottleneck → fall back to
         // review-coordinator.
@@ -338,7 +385,8 @@ mod tests {
         tracker.on_handoff_accepted("zeta", "a", "evt-2", t(0));
         tracker.on_handoff_accepted("alpha", "b", "evt-1", t(0));
         tracker.on_handoff_accepted("alpha", "c", "evt-3", t(0));
-        let escalations = tracker.expired(t(100));
+        // P0-4 of 2026-06-29-006: default timeout is now 600s.
+        let escalations = tracker.expired(t(601));
         assert_eq!(
             escalations
                 .iter()
@@ -372,8 +420,68 @@ mod tests {
         assert_eq!(tracker.pending_count(), 1);
         assert!(!tracker.cancel_pending("evt-1"));
         // evt-2 仍然在,直到 expired() 或 on_hat_activated。
-        let escalations = tracker.expired(t(100));
+        // P0-4 of 2026-06-29-006: 600s is the new default timeout
+        // so we advance past that to trigger expiry.
+        let escalations = tracker.expired(t(601));
         assert_eq!(escalations.len(), 1);
         assert_eq!(escalations[0].event_id, "evt-2");
+    }
+
+    // === P2-1 (plan 2026-06-29-006) consumer stall counts ===
+    //
+    // The tracker now keeps a per-consumer cumulative stall
+    // count. The event_loop reads it after each escalation to
+    // decide whether to publish a `loop.stalled` business event
+    // (threshold = 2 consecutive stalls) for the
+    // `progress-steward` hat to pick up.
+
+    #[test]
+    fn p2_1_consumer_stall_count_starts_at_zero() {
+        let tracker = HandoffTracker::new();
+        assert_eq!(tracker.consumer_stall_count("executor"), 0);
+    }
+
+    #[test]
+    fn p2_1_bump_consumer_stall_count_increments_and_returns() {
+        let mut tracker = HandoffTracker::new();
+        assert_eq!(tracker.bump_consumer_stall_count("executor"), 1);
+        assert_eq!(tracker.bump_consumer_stall_count("executor"), 2);
+        assert_eq!(tracker.bump_consumer_stall_count("executor"), 3);
+        assert_eq!(tracker.consumer_stall_count("executor"), 3);
+    }
+
+    #[test]
+    fn p2_1_consumer_stall_counts_are_per_consumer() {
+        let mut tracker = HandoffTracker::new();
+        tracker.bump_consumer_stall_count("executor");
+        tracker.bump_consumer_stall_count("executor");
+        tracker.bump_consumer_stall_count("validator");
+        assert_eq!(tracker.consumer_stall_count("executor"), 2);
+        assert_eq!(tracker.consumer_stall_count("validator"), 1);
+        assert_eq!(tracker.consumer_stall_count("ralph"), 0);
+    }
+
+    #[test]
+    fn p2_1_on_hat_activated_clears_stall_count() {
+        let mut tracker = HandoffTracker::new();
+        tracker.bump_consumer_stall_count("executor");
+        tracker.bump_consumer_stall_count("executor");
+        assert_eq!(tracker.consumer_stall_count("executor"), 2);
+        tracker.on_hat_activated("executor");
+        assert_eq!(
+            tracker.consumer_stall_count("executor"),
+            0,
+            "P2-1: a successful activation must clear the stall history"
+        );
+    }
+
+    #[test]
+    fn p2_1_reset_clears_a_single_consumer() {
+        let mut tracker = HandoffTracker::new();
+        tracker.bump_consumer_stall_count("executor");
+        tracker.bump_consumer_stall_count("validator");
+        tracker.reset_consumer_stall_count("executor");
+        assert_eq!(tracker.consumer_stall_count("executor"), 0);
+        assert_eq!(tracker.consumer_stall_count("validator"), 1);
     }
 }

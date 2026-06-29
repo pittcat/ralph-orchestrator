@@ -2222,7 +2222,7 @@ async fn run_loop_impl_inner(
                 "drift engine published human.guidance for Final Warning hint"
             );
         }
-        let hint_reason = drift_engine.check_termination_hint(&event_loop);
+        let hint_reason = drift_engine.check_termination_hint(&mut event_loop);
         if let Some(reason) = event_loop.check_termination().or(hint_reason) {
             let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                 &event_loop,

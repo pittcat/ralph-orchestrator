@@ -586,20 +586,56 @@ fn validate_task(
                 });
             }
         } else {
-            // Legacy task without loop_id - reject if loop_scoped is required
-            return Some(ExecutionContractFinding {
-                kind: ExecutionContractViolationKind::TaskWrongLoop {
-                    task_id: task_id.clone(),
-                    expected_loop: current_loop_id.to_string(),
-                    actual_loop: None,
-                },
-                message: format!(
-                    "Task '{}' has no loop_id (legacy), but contract requires loop '{}'",
-                    task_id, current_loop_id
-                ),
-                topic: event.topic.to_string(),
-                ..Default::default()
-            });
+            // P1-3 (plan 2026-06-29-006): defensive allow path —
+            // if the task's `key` already encodes the current
+            // `loop_id`, treat it as the same-loop task even
+            // though `loop_id` was not projected. The U2 fix
+            // (`state_projector::task::project_ensure_task`) is
+            // the primary path; this is the belt-and-suspenders
+            // fallback for tasks that were projected before the
+            // loop marker was threaded through. See
+            // 2026-06-29-ce-executor-serial-primary-172725 §F3
+            // for the cascade root cause.
+            if let Some(task_key) = &task.key {
+                if task_key.contains(current_loop_id) {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        task_key = %task_key,
+                        current_loop_id = %current_loop_id,
+                        "P1-3 (2026-06-29-006): accepting task with no `loop_id` field because its key contains the current loop marker; ensure U2 fix is also wired so this defensive allow is rarely needed"
+                    );
+                    // Defensive accept — fall through to the
+                    // terminal-status check below.
+                } else {
+                    return Some(ExecutionContractFinding {
+                        kind: ExecutionContractViolationKind::TaskWrongLoop {
+                            task_id: task_id.clone(),
+                            expected_loop: current_loop_id.to_string(),
+                            actual_loop: None,
+                        },
+                        message: format!(
+                            "Task '{}' has no loop_id (legacy), but contract requires loop '{}'",
+                            task_id, current_loop_id
+                        ),
+                        topic: event.topic.to_string(),
+                        ..Default::default()
+                    });
+                }
+            } else {
+                return Some(ExecutionContractFinding {
+                    kind: ExecutionContractViolationKind::TaskWrongLoop {
+                        task_id: task_id.clone(),
+                        expected_loop: current_loop_id.to_string(),
+                        actual_loop: None,
+                    },
+                    message: format!(
+                        "Task '{}' has no loop_id (legacy), but contract requires loop '{}'",
+                        task_id, current_loop_id
+                    ),
+                    topic: event.topic.to_string(),
+                    ..Default::default()
+                });
+            }
         }
     }
 
@@ -1431,6 +1467,166 @@ mod tests {
             }
             ExecutionContractDecision::Accept => {
                 panic!("Task with wrong loop_id must be rejected")
+            }
+        }
+    }
+
+    // === P1-3 (plan 2026-06-29-006) defensive-allow tests ===
+    //
+    // The P1-3 path accepts legacy tasks whose `key` already
+    // encodes the current loop marker even though `loop_id` was
+    // never projected. Primary path is U2 (projector fallback);
+    // these tests pin the defensive-allow contract that backs
+    // it up.
+
+    fn write_task_with_key_no_loop(tasks_path: &std::path::Path, task_id: &str, key: &str) {
+        let mut store = TaskStore::load(tasks_path).unwrap();
+        let mut task = Task::new(format!("task {task_id}"), 1).with_key(Some(key.to_string()));
+        task.id = task_id.to_string();
+        task.status = TaskStatus::Closed;
+        store.add(task);
+        store.save().unwrap();
+    }
+
+    #[test]
+    fn p1_3_accepts_legacy_task_when_key_contains_current_loop_id() {
+        let temp = TempDir::new().unwrap();
+        let ralph_dir = temp.path().join(".ralph");
+        std::fs::create_dir_all(ralph_dir.join("agent")).unwrap();
+        std::fs::write(
+            ralph_dir.join("current-loop-id"),
+            "primary-20260628-172725\n",
+        )
+        .unwrap();
+        let tasks_path = ralph_dir.join("agent/tasks.jsonl");
+        write_task_with_key_no_loop(
+            &tasks_path,
+            "task-1",
+            "from_key:ce-executor:primary-20260628-172725:step-01:u0",
+        );
+
+        let rule = make_work_done_rule();
+        let event = Event::new(
+            "work.done",
+            r#"{"plan_name":"p","plan_path":"/p","task_id":"task-1","task_key":"from_key:ce-executor:primary-20260628-172725:step-01:u0","step":"s"}"#,
+        );
+        let current_loop_id = read_marker(&temp);
+
+        let decision = validate_execution_contract(
+            &event,
+            &rule,
+            temp.path(),
+            &current_loop_id,
+            &tasks_path,
+            None,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+
+        assert!(
+            !matches!(decision, ExecutionContractDecision::Reject(_)),
+            "P1-3: legacy task whose key contains the current loop marker must be accepted"
+        );
+    }
+
+    #[test]
+    fn p1_3_rejects_legacy_task_when_key_lacks_current_loop_id() {
+        let temp = TempDir::new().unwrap();
+        let ralph_dir = temp.path().join(".ralph");
+        std::fs::create_dir_all(ralph_dir.join("agent")).unwrap();
+        std::fs::write(
+            ralph_dir.join("current-loop-id"),
+            "primary-20260628-172725\n",
+        )
+        .unwrap();
+        let tasks_path = ralph_dir.join("agent/tasks.jsonl");
+        write_task_with_key_no_loop(&tasks_path, "task-1", "from_key:ce-executor:step-99:u0");
+
+        let rule = make_work_done_rule();
+        let event = Event::new(
+            "work.done",
+            r#"{"plan_name":"p","plan_path":"/p","task_id":"task-1","task_key":"from_key:ce-executor:step-99:u0","step":"s"}"#,
+        );
+        let current_loop_id = read_marker(&temp);
+
+        let decision = validate_execution_contract(
+            &event,
+            &rule,
+            temp.path(),
+            &current_loop_id,
+            &tasks_path,
+            None,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+
+        match decision {
+            ExecutionContractDecision::Reject(findings) => {
+                let wrong_loop = findings.iter().find_map(|f| match &f.kind {
+                    ExecutionContractViolationKind::TaskWrongLoop {
+                        expected_loop,
+                        actual_loop,
+                        ..
+                    } => Some((expected_loop.clone(), actual_loop.clone())),
+                    _ => None,
+                });
+                let (expected, actual) = wrong_loop.expect("expected TaskWrongLoop finding");
+                assert_eq!(expected, "primary-20260628-172725");
+                assert_eq!(actual, None);
+            }
+            ExecutionContractDecision::Accept => {
+                panic!("P1-3: task whose key lacks the marker must be hard-rejected")
+            }
+        }
+    }
+
+    #[test]
+    fn p1_3_rejects_when_task_loop_id_does_not_match_current_loop() {
+        let temp = TempDir::new().unwrap();
+        let ralph_dir = temp.path().join(".ralph");
+        std::fs::create_dir_all(ralph_dir.join("agent")).unwrap();
+        std::fs::write(
+            ralph_dir.join("current-loop-id"),
+            "primary-20260628-172725\n",
+        )
+        .unwrap();
+        let tasks_path = ralph_dir.join("agent/tasks.jsonl");
+        write_task_with_loop_id(&tasks_path, "task-1", Some("primary-OTHER"));
+
+        let rule = make_work_done_rule();
+        let event = Event::new(
+            "work.done",
+            r#"{"plan_name":"p","plan_path":"/p","task_id":"task-1","task_key":"k","step":"s"}"#,
+        );
+        let current_loop_id = read_marker(&temp);
+
+        let decision = validate_execution_contract(
+            &event,
+            &rule,
+            temp.path(),
+            &current_loop_id,
+            &tasks_path,
+            None,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+
+        match decision {
+            ExecutionContractDecision::Reject(findings) => {
+                let wrong_loop = findings.iter().find_map(|f| match &f.kind {
+                    ExecutionContractViolationKind::TaskWrongLoop {
+                        expected_loop,
+                        actual_loop,
+                        ..
+                    } => Some((expected_loop.clone(), actual_loop.clone())),
+                    _ => None,
+                });
+                let (expected, actual) = wrong_loop.expect("expected TaskWrongLoop finding");
+                assert_eq!(expected, "primary-20260628-172725");
+                assert_eq!(actual.as_deref(), Some("primary-OTHER"));
+            }
+            ExecutionContractDecision::Accept => {
+                panic!("P1-3: mismatched loop_id must be hard-rejected")
             }
         }
     }

@@ -1100,6 +1100,13 @@ hats:
       - Check current branch: `git branch --show-current`
       - Record branch name in `context.md` (read-only — do NOT modify it)
 
+      ### Re-emission Protocol (HARD RULE, plan 2026-06-29-006 U9)
+      When you receive a `task.resume` that asks you to re-emit `work.done`:
+      1. **Read task_store first**: run `rg '"task_key": "<your_task_key>"' .ralph/agent/tasks.jsonl | tail -1` to find the canonical `task_id` for the current U-ID. Use THAT `task_id` in the payload — never the empty string `""` and never the synthetic `from_key:<key>` form.
+      2. **One re-emission, then converge**: emit `work.done` at most once per `task.resume` for the same U-ID. If the runtime rejects it again, do NOT re-emit `work.done` a third time — instead publish `work.failed(reason="re-emit_exhausted")` so the coordinator can route the failure through the proper `plan.blocked → REVIEW_COMPLETE(fail)` chain. The 2026-06-28-172725 run hit `recovery_exhausted` directly because of seven-step `work.done` storm re-emissions; this rule is the fix.
+      3. **If `task_store` is empty for your U-ID** (e.g. your prior `work.done` was never projected): check `.ralph/current-loop-id` for the loop marker, then build a `task_id` of the form `task-<unix_timestamp>-<4-char-random>` and proceed. Do not invent a `from_key:` form.
+      4. **Hard cap on re-emissions per U-ID**: at most 2 re-emissions of `work.done` per U-ID within a 5-minute window. After 2 failures, the third event MUST be `work.failed` (never a third `work.done`).
+
       ### Branch / Worktree Policy (HARD RULE)
       - **MUST NOT create, switch, or rename any branch.** All commits go to the current working branch.
       - The loop runs in the current working branch by default. A new worktree + branch is created **only** when the user passes `--worktree` to `ralph run`; that is handled by the orchestrator before you ever activate, not by you.

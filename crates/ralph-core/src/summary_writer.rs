@@ -550,6 +550,11 @@ mod tests {
             pending_recovery_hat: None,
             pending_synthesizer_timeout: None,
             last_ephemeral_relocations: Vec::new(),
+            // P0-3 (plan 2026-06-29-006 U7) two-phase
+            // termination: empty by default; the drift engine
+            // sets this when it emits `plan.blocked` and waits
+            // for the shipper to process it.
+            pending_plan_blocked_for_failure: false,
             // Unit 3 (2026-06-16-002 plan) bootstrap gate flags.
             bootstrap_complete: false,
             bootstrap_failed: false,

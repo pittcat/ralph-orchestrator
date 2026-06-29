@@ -6101,19 +6101,108 @@ impl EventLoop {
             // U2 (2026-06-17-003 plan): the JSON payload already
             // includes `reason`; add `target_hat` so the drift
             // detector counts it as schema-compliant.
-            let payload = serde_json::json!({
-                "reason": "handoff_dispatch_timeout",
-                "target_hat": esc.safe_target,
-                "topic": esc.topic,
-                "consumer": esc.consumer,
-                "event_id": esc.event_id,
-                "safe_target": esc.safe_target,
-                "details": esc.reason,
-            });
+            // P1-2 (plan 2026-06-29-006): route the synthesis
+            // through `enrich_task_resume_payload_full` so the
+            // `kind` field is populated explicitly. Previously this
+            // path built an inline JSON payload that missed the
+            // `kind` field, which the drift detector saw as 0/N
+            // (`task.resume.kind` 1/5 in primary-172725).
+            let message = format!(
+                "handoff deadline exceeded: consumer '{}' did not activate within timeout",
+                esc.consumer
+            );
+            let payload_str = crate::event_loop::rejection::enrich_task_resume_payload_full(
+                &message,
+                "handoff_dispatch_timeout",
+                Some(esc.safe_target.as_str()),
+                // `MissingEvent` is the closest existing
+                // RejectionStage variant for a "consumer did not
+                // emit within window" handoff stall; the drift
+                // detector already special-cases it (see
+                // `rejection::RejectionStage::MissingEvent`).
+                Some(crate::event_loop::rejection::RejectionStage::MissingEvent),
+                // Pass `None` so `enrich_task_resume_payload_full`
+                // falls back to `reason_hint` ("handoff_dispatch_timeout")
+                // for the `kind` field. The typed
+                // `RejectionKind::StallNoEvents` would also work
+                // but it would force drift to bucket these
+                // escalations as `stall_no_events`, which is a
+                // different (loop-wide) class. Keeping the kind
+                // = reason preserves the original drift semantics
+                // for the handoff path while still satisfying
+                // the `kind` field presence requirement.
+                None,
+                // `allowed_topics` is reserved for the rejection
+                // pipeline that knows the target hat's published
+                // topic set; the handoff escalation path doesn't
+                // carry that context, so we leave the list empty
+                // (the enrich helper skips the field entirely in
+                // that case).
+                &[],
+            );
+            // The legacy inline JSON also carried
+            // `topic` / `consumer` / `event_id` / `safe_target` /
+            // `details` so downstream hats can correlate the
+            // envelope. The enrich helper only knows the common
+            // schema, so we re-parse and merge those fields back in
+            // before publishing.
+            let mut payload: serde_json::Value = serde_json::from_str(&payload_str)
+                .unwrap_or_else(|e| panic!("enrich payload must be valid JSON: {e}"));
+            if let serde_json::Value::Object(ref mut map) = payload {
+                // Override `kind` with the literal `reason_hint`.
+                // `enrich_task_resume_payload_full` falls back to
+                // the violation_class of `reason_hint`, which is
+                // "other" for `handoff_dispatch_timeout`. The
+                // drift detector's `task.resume.kind` field
+                // presence check only requires the field to be
+                // non-empty; using the literal reason here
+                // matches the value the downstream hat / drift
+                // detector will see in the `reason` field.
+                map.insert(
+                    "kind".into(),
+                    serde_json::Value::String("handoff_dispatch_timeout".into()),
+                );
+                map.insert("topic".into(), serde_json::Value::String(esc.topic.clone()));
+                map.insert("consumer".into(), serde_json::Value::String(esc.consumer.clone()));
+                map.insert("event_id".into(), serde_json::Value::String(esc.event_id.clone()));
+                map.insert(
+                    "safe_target".into(),
+                    serde_json::Value::String(esc.safe_target.clone()),
+                );
+                map.insert("details".into(), serde_json::Value::String(esc.reason.clone()));
+            }
             let resume_event = Event::new("task.resume", payload.to_string())
                 .with_source(HatId::from("ralph"))
                 .with_target(HatId::from(esc.safe_target.as_str()));
             self.bus.publish(resume_event);
+            // P2-1 (plan 2026-06-29-006): bump the
+            // consumer's cumulative stall count. When the
+            // post-bump value reaches 2, publish a
+            // `loop.stalled` business event so the
+            // `progress-steward` hat (which subscribes to
+            // `loop.stalled` in the ce-executor-serial preset)
+            // can step in and rescue the loop. Without this
+            // signal, the loop just keeps routing `task.resume`
+            // to the stalled hat indefinitely.
+            let stall_count = self
+                .state
+                .handoff_tracker
+                .bump_consumer_stall_count(&esc.consumer);
+            if stall_count >= 2 {
+                let stalled_payload = serde_json::json!({
+                    "reason": "consumer_stall_repeat",
+                    "consumer": esc.consumer,
+                    "topic": esc.topic,
+                    "stall_count": stall_count,
+                    "retry_key": format!(
+                        "stall_recovery:{}:{}:handoff_dispatch_timeout:*",
+                        esc.consumer, esc.topic
+                    ),
+                });
+                let stalled_event = Event::new("loop.stalled", stalled_payload.to_string())
+                    .with_source(HatId::from("ralph"));
+                self.bus.publish(stalled_event);
+            }
             // 2026-06-13-004 U7 (P2-4): write a recovery envelope
             // for the handoff escalation so the responder can
             // surface this stall in the next prompt. The bus

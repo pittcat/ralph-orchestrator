@@ -83,8 +83,18 @@ pub(crate) fn project_ensure_task(
     if let Some(plan_name) = json_pointer(payload, "plan_name") {
         task = task.with_description(Some(format!("plan: {plan_name}")));
     }
+    // P0-2 (plan 2026-06-29-006): prefer the payload's `loop_id`
+    // when present, otherwise fall back to the loop marker
+    // threaded in via `ProjectionContext::current_loop_id`. Without
+    // this fallback, executor re-emissions that ship
+    // `task_id="from_key:..."` or `task_id=""` produce a task
+    // whose `loop_id` is `None`, which is then hard-rejected by
+    // `validate_task` as `TaskWrongLoop { actual_loop: None }`
+    // (see 2026-06-29-ce-executor-serial-primary-172725 §F3).
     if let Some(loop_id) = ctx_loop_id(payload) {
         task = task.with_loop_id(Some(loop_id.to_string()));
+    } else if let Some(loop_id) = ctx.current_loop_id.as_ref() {
+        task = task.with_loop_id(Some(loop_id.clone()));
     }
     // R1 (2026-06-17-005 fix plan): when the loop enables R4, the
     // projector must surface single-U collisions as `Err` so the
@@ -162,4 +172,83 @@ fn persist(_path: &Path, store: &TaskStore, cache: &mut Vec<Task>) -> Result<(),
 
 fn ctx_loop_id(payload: &Value) -> Option<&str> {
     json_pointer(payload, "loop_id")
+}
+
+#[cfg(test)]
+mod tests {
+    //! P0-2 (plan 2026-06-29-006): the projector must fall back
+    //! to `ProjectionContext::current_loop_id` when an event
+    //! payload omits the `loop_id` field. Without the fallback,
+    //! tasks projected from `task_id="from_key:..."` legacy
+    //! emissions stay `loop_id=None` and trigger
+    //! `TaskWrongLoop { actual_loop: None }` in `validate_task`.
+
+    use super::*;
+    use crate::state_projector::StateProjectionConfig;
+    use tempfile::tempdir;
+
+    fn ctx_with_loop_marker(workspace: &Path, loop_id: &str) -> ProjectionContext {
+        ProjectionContext::new(workspace, StateProjectionConfig::default(), false)
+            .with_current_loop_id(loop_id)
+    }
+
+    fn payload_with_task_id(task_id: &str, task_key: &str) -> Value {
+        serde_json::json!({
+            "task_id": task_id,
+            "task_key": task_key,
+            "plan_name": "test-plan",
+        })
+    }
+
+    #[test]
+    fn project_task_with_payload_loop_id_uses_payload() {
+        let dir = tempdir().unwrap();
+        let mut ctx = ctx_with_loop_marker(dir.path(), "loop-A");
+        let payload = payload_with_task_id("task-1", "k-1");
+        let payload_with_loop = serde_json::json!({
+            "task_id": "task-1",
+            "task_key": "k-1",
+            "plan_name": "test-plan",
+            "loop_id": "loop-B",
+        });
+        project_ensure_task(&mut ctx, &payload_with_loop, "task_key", None).unwrap();
+        let tasks = ctx.task_snapshot().0;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].loop_id.as_deref(), Some("loop-B"));
+        // Reference unused variables to silence lints.
+        let _ = payload;
+    }
+
+    #[test]
+    fn project_task_falls_back_to_ctx_loop_id_when_payload_missing() {
+        let dir = tempdir().unwrap();
+        let mut ctx = ctx_with_loop_marker(dir.path(), "loop-A");
+        let payload = payload_with_task_id("task-1", "k-1");
+        project_ensure_task(&mut ctx, &payload, "task_key", None).unwrap();
+        let tasks = ctx.task_snapshot().0;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].loop_id.as_deref(),
+            Some("loop-A"),
+            "P0-2: when payload has no `loop_id`, projector must use the loop marker"
+        );
+    }
+
+    #[test]
+    fn project_task_with_no_loop_id_anywhere_stays_none() {
+        let dir = tempdir().unwrap();
+        // No loop marker in ctx, no loop_id in payload.
+        let mut ctx = ProjectionContext::new(
+            dir.path(),
+            StateProjectionConfig::default(),
+            false,
+        );
+        let payload = payload_with_task_id("task-1", "k-1");
+        project_ensure_task(&mut ctx, &payload, "task_key", None).unwrap();
+        let tasks = ctx.task_snapshot().0;
+        assert_eq!(tasks.len(), 1);
+        // Loop_id is None — preserve pre-fix behaviour for
+        // non-loop-scoped presets that don't set a marker.
+        assert_eq!(tasks[0].loop_id, None);
+    }
 }

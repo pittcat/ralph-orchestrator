@@ -370,7 +370,7 @@ event_loop:
   completion_promise: "LOOP_COMPLETE"
   execution_mode: isolated
   workflow_contract:
-    handoff_dispatch_timeout_seconds: 150
+    handoff_dispatch_timeout_seconds: 2000
     handoff_topic_seeds: []
 hats:
   a:
