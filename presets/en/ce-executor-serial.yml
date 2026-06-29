@@ -635,7 +635,13 @@ hats:
     #
     # PHASE 3 — TERMINAL (handled by shipper, do not touch):
     #   plan.complete / plan.blocked → shipper takes over
-    triggers: ["work.start", "task.resume", "test.passed", "review.complete", "work.failed"]
+    # 2026-06-29-007 plan U6a: add `review.dimensions.complete`
+    # so the coordinator hat is woken when the review chain
+    # is fully collected (review-coordinator → all dimension
+    # done → review-synthesizer → review.complete). This
+    # lets the coordinator prepare the fix-unit chain or
+    # plan.complete decision without polling.
+    triggers: ["work.start", "task.resume", "test.passed", "review.complete", "work.failed", "review.dimensions.complete"]
     # 2026-06-28 plan U10 (R10): coordinator may emit
     # `LOOP_COMPLETE(success=false)` to self-stop the loop
     # when the automated recovery machinery is exhausted

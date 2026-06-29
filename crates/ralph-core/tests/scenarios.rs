@@ -2715,6 +2715,19 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-29-007 plan U6a: smoke test for the
+/// coordinator trigger update. The preset yml change is
+/// verified by the ce-executor-serial SSOT byte-equality
+/// test (`test_ce_executor_root_preset_matches_embedded`)
+/// in the ralph-cli integration suite. This scenario
+/// exercises the hat-state-machine path so a regression
+/// in the hat trigger matcher is caught.
+#[test]
+fn test_u6a_coordinator_triggers() {
+    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u6a-coordinator-triggers.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U5b: smoke test for the
 /// `PlanBlockedReason` typed enum. The closed-set
 /// enforcement is unit-tested in
