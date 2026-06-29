@@ -1381,6 +1381,33 @@ hats:
       - If `plan_name` is not in payload, scan `.agents/scratchpad/ce-executor/*/context.md` files to find the one matching current branch
       - Read `context.md` for plan context, R-IDs, and scope boundaries
 
+      ### Plan Identity Verification (HARD RULE — anti plan-name drift)
+      Before initializing the sequence, verify the plan_name in the
+      payload matches the loop-anchor plan. Drift between the
+      payload's plan_name and the live loop's plan causes
+      goal-alignment (and the other 5 dimensions) to silently
+      review the wrong target. This section is the review-phase
+      half of the drift defense; the loop-anchor SSOT itself is
+      set by the orchestrator at loop start.
+
+      1. Read the current loop id: `current_loop=$(cat .ralph/current-loop-id 2>/dev/null)`. If empty or missing, STOP and publish `work.failed(reason="current_loop_id_unavailable_during_review")`.
+      2. Read `.ralph/loops.json` (the loop registry; written by the orchestrator at loop start) and find the entry where `loop_id == $current_loop`. Extract that entry's `plan_path` and `plan_name` — these are the loop-anchor SSOT. If no entry matches, STOP with `work.failed(reason="loop_anchor_not_found: $current_loop")`.
+      3. Compare the loop-anchor `plan_name` against the trigger payload's `plan_name`:
+         - Match: proceed.
+         - Mismatch: STOP. Do NOT emit `review.dimension.ready` or `review.dimensions.complete`. Publish `work.failed` with `reason: "plan_name_drift: payload=<X> loop_anchor=<Y> loop_id=<Z>"`. Reviewing plan X's diff against plan Y's R-IDs is worse than not reviewing at all.
+      4. Verify the original plan file still exists and is readable at the loop-anchor `plan_path`. Use `test -r <plan_path>`. If the file is missing or unreadable: STOP with `work.failed(reason="plan_file_missing_during_review: <plan_path>")`. A review that cannot cross-check against the original plan cannot answer goal-alignment truthfully.
+      5. Record the verified identity in `.agents/scratchpad/ce-executor/{plan_name}/review-trace.json` (atomic write, temp + rename like review-sequence.json):
+         ```json
+         {
+           "loop_id": "<$current_loop>",
+           "plan_path": "<loop-anchor plan_path>",
+           "plan_name": "<loop-anchor plan_name>",
+           "verified_at": "<ISO-8601 UTC, e.g. date -u +%FT%TZ>",
+           "review_coordinator_invocation": <n — increment per activation of this hat, 1-based; read existing file first to continue numbering>
+         }
+         ```
+         The trace file is the single source of truth that the dimension-reviewer and review-synthesizer cross-check against.
+
       ### Scope Detection
       - Identify your trigger:
         - `review.start` — coordinator triggered the overall review → initialize sequence and start
@@ -1734,6 +1761,26 @@ hats:
       - Read `findings.md` (existing, if any) for pre-existing issues
       - Read `plan.md` and `context.md` for plan context
 
+      ### Plan Identity Cross-Check (HARD RULE)
+      The `plan_name` in the `review.dimension.ready` payload must
+      match the loop-anchor plan. goal-alignment in particular
+      fails silently if you review plan X's diff against plan Y's
+      R-IDs — and since you only emit findings (no review
+      decisions), a wrong-plan review produces a wrong-plan
+      fix-plan.
+
+      1. Re-derive the current loop id: `current_loop=$(cat .ralph/current-loop-id 2>/dev/null)`. If empty or missing, emit `review.dimension.failed` immediately with `reason: "current_loop_id_unavailable"`. Do not produce findings for a plan you cannot anchor.
+      2. Read `.ralph/loops.json`, find `loop_id == $current_loop`, extract `plan_path` and `plan_name`. If not found, emit `review.dimension.failed(reason="loop_anchor_not_found: $current_loop")`.
+      3. Compare the loop-anchor `plan_name` against the payload's `plan_name`:
+         - Match: proceed.
+         - Mismatch: emit `review.dimension.failed` with `reason: "plan_name_drift: payload=<X> loop_anchor=<Y> loop_id=<Z> dimension=<this dimension>"`. Do not produce findings for the wrong plan.
+      4. Read `.agents/scratchpad/ce-executor/{plan_name}/review-trace.json` (the trace written by review-coordinator). If its `loop_id` does not equal `$current_loop`, the sequence was started by a different loop — emit `review.dimension.failed(reason="review_sequence_loop_mismatch: trace_loop=<X> current_loop=<Y>")`.
+      5. After all of the above pass, append your dimension to `review-trace.json` (atomic write — read, modify in memory, write to temp, rename):
+         ```json
+         {"dimension": "<this dimension>", "verified_at": "<ISO-8601 UTC>", "findings_count": <count of findings you are about to write, 0 if none>}
+         ```
+         This gives the review-synthesizer an audit trail of which loop's plan each dimension actually reviewed against. If the append fails (file became unreadable mid-review, etc.), emit `review.dimension.failed(reason="review_trace_append_failed")` rather than silently producing unanchored findings.
+
       ### Findings Schema (every finding MUST have these fields)
       - `title`: string (short, ≤10 words)
       - `severity`: "P0" | "P1" | "P2" | "P3"
@@ -1909,6 +1956,12 @@ hats:
 
       ### Read Inputs
       - `review.dimensions.complete` payload: `plan_name`, `task_id`, `task_key`, `step`, `dimensions`
+      - **Plan identity cross-check (HARD RULE)** — read `.ralph/loops.json` and `.ralph/current-loop-id`, extract the current loop's `plan_name` and `plan_path`. Verify ALL of:
+        1. Loop-anchor `plan_name` matches the payload's `plan_name`. Mismatch → emit `review.complete` with `verdict: "blocked"`, `findings_count: 0`, `fix_plan_file: "null"`, plus payload `reason: "plan_name_drift: payload=<X> loop_anchor=<Y>"`. Do NOT synthesize a fix-plan over a mismatched identity.
+        2. The original plan file at the loop-anchor `plan_path` exists and is readable. Missing → same `verdict: "blocked"`, `reason: "plan_file_missing_during_synthesis: <plan_path>"`.
+        3. `.agents/scratchpad/ce-executor/{plan_name}/review-trace.json` exists. Read it and assert `trace.loop_id` matches the current loop id. Mismatch → `verdict: "blocked"`, `reason: "review_trace_loop_mismatch: trace_loop=<X> current_loop=<Y>"`.
+        4. The `dimensions` array has at most 6 entries (one per reviewer). If more, treat the extra entries as malformed and log in Coverage.
+        Any of the above failures short-circuits the entire synthesis. Do not merge findings, do not write a fix-plan, do not run calibration.
       - For every entry with `status: "done"`, read the per-dimension
         findings file at `dimensions[i].findings_file`.
       - For every entry with `status: "failed"`, treat the entry as
