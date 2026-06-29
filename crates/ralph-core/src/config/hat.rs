@@ -534,6 +534,16 @@ pub struct HatConfig {
     #[serde(default)]
     pub exempt_topics: Vec<String>,
 
+    /// 2026-06-29-007 plan U5a: paths this hat is allowed to
+    /// write. The dimension-reviewer lint
+    /// (`dimension_reviewer_write_paths`) rejects any preset
+    /// that grants `dimension-reviewer` access to `docs/plans/`
+    /// (the reviewer is a code-only reviewer; letting it
+    /// rewrite the plan mid-loop is the 2026-06-28
+    /// scope_violation 早班 pattern).
+    #[serde(default)]
+    pub allowed_write_paths: Option<Vec<String>>,
+
     /// Phase-aware triggers: map from phase name to list of trigger topics.
     ///
     /// When present, the hat subscribes to the triggers of the current phase
@@ -636,6 +646,8 @@ impl Default for HatConfig {
             event_filter: None,
             // 2026-06-26 plan U2: default no exempt list.
             exempt_topics: Vec::new(),
+            // 2026-06-29-007 plan U5a: default no write paths.
+            allowed_write_paths: None,
             phase_triggers: None,
             ignore_payload_fields: Vec::new(),
             obligations: Vec::new(),
@@ -864,6 +876,10 @@ mod tests {
             // the exempt list; default empty mirrors the
             // production default.
             exempt_topics: Vec::new(),
+            // 2026-06-29-007 plan U5a: test helper does not
+            // exercise write paths; default `None` mirrors
+            // the production default.
+            allowed_write_paths: None,
             phase_triggers: None,
             ignore_payload_fields: Vec::new(),
             obligations,

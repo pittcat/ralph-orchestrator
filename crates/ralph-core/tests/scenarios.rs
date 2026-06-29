@@ -2715,6 +2715,19 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-29-007 plan U5a: smoke test for the
+/// `dimension_reviewer_write_paths` lint. The core
+/// "reject docs/plans/ write access for
+/// dimension-reviewer" behaviour is unit-tested in
+/// `dimension_reviewer_write_paths::tests`. This scenario
+/// verifies the lint is wired into the run_preset_lint
+/// path without breaking the existing happy path.
+#[test]
+fn test_u5a_dimension_reviewer_scope() {
+    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u5a-dimension-reviewer-scope.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U4: smoke test for the
 /// `TargetHatGuardStage`. The scenario exercises the
 /// happy path so we can be sure the new guard stage does

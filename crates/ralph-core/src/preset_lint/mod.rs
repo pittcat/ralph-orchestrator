@@ -24,6 +24,7 @@ use crate::runtime_contract::{
 };
 
 pub mod coordinator;
+pub mod dimension_reviewer_write_paths;
 pub mod finding_id;
 pub mod flow_declaration;
 pub mod hat_scope_invariant;
@@ -72,6 +73,9 @@ pub use state_projection::check_work_done_action_chain_order;
 pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,
     validate_all_topics, validate_topic_format,
+};
+pub use dimension_reviewer_write_paths::{
+    check_dimension_reviewer_write_paths, FINDING_DIMENSION_REVIEWER_WRITE_PLAN,
 };
 pub use workflow_activation::{HandoffGraph, run_workflow_activation_contract};
 
@@ -422,6 +426,15 @@ pub fn run_preset_lint(
     // `check_publishes_have_schema` for runtime surfacing.
     let schema_parity_findings = schema_parity::check_publishes_have_schema(config, strictness);
     findings.extend(lint_findings_to_contract_findings(&schema_parity_findings));
+
+    // 2026-06-29-007 plan U5a: dimension-reviewer write-path lint.
+    // dimension-reviewer is a code-only reviewer; granting it
+    // write access to docs/plans/ lets a bad review rewrite
+    // the runbook mid-loop. The lint fires `Error` so the
+    // preset-load hard gate rejects the offending preset.
+    findings.extend(lint_findings_to_contract_findings(
+        &check_dimension_reviewer_write_paths(config, strictness),
+    ));
 
     // 2026-06-27 mechanism foundation U5: flow declaration lint.
     // Builtin presets are required to carry a `mechanism.flow` block
