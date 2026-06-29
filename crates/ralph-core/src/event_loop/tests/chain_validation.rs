@@ -162,6 +162,65 @@ fn test_chain_validation_injects_correction_on_rejection() {
 }
 
 #[test]
+fn test_rejected_loop_complete_does_not_poison_terminal_state() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r#"
+event_loop:
+  required_events:
+    - "report.done"
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    terminal_topics:
+      - "LOOP_COMPLETE"
+    business_topics:
+      - "report.done"
+      - "plan.blocked"
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    install_admitting_flow(&mut event_loop, &["report.done", "plan.blocked"]);
+
+    // Emit LOOP_COMPLETE without the required report.done.
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "Done");
+    let _ = event_loop.process_events_from_jsonl();
+    let reason = event_loop.check_completion_event();
+    assert_eq!(reason, None, "LOOP_COMPLETE should be rejected");
+
+    // The rejected LOOP_COMPLETE must not set terminal_observed; otherwise
+    // recovery events like plan.blocked would hit terminal_monotonicity_violation.
+    let policy_state = event_loop
+        .state()
+        .policy_runtime_state
+        .as_ref()
+        .expect("policy runtime state should exist");
+    assert!(
+        !policy_state.terminal_observed,
+        "rejected LOOP_COMPLETE must not poison terminal_observed"
+    );
+
+    // Recovery path: plan.blocked should be accepted, not rejected as a
+    // business event after a (phantom) terminal event.
+    write_event_to_jsonl(&events_path, "plan.blocked", r#"{"reason": "review_failed"}"#);
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    assert!(
+        !result.had_rejected_events,
+        "plan.blocked recovery event must not be rejected after a rejected LOOP_COMPLETE"
+    );
+    assert!(
+        result.accepted_events.iter().any(|e| e.topic == "plan.blocked".into()),
+        "plan.blocked should be accepted"
+    );
+}
+
+#[test]
 fn test_loop_cancel_terminates_without_chain_validation() {
     use tempfile::TempDir;
 

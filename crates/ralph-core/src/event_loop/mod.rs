@@ -2071,6 +2071,10 @@ impl EventLoop {
         {
             if let Some(ref mut policy_state) = self.state.policy_runtime_state {
                 policy_state.completion_honored = true;
+                // 2026-06-29-007 P0 fix: terminal_observed is set only when the
+                // completion promise is actually honored, not when it is merely
+                // seen and later rejected by required_events / verdict gate.
+                policy_state.terminal_observed = true;
                 policy_state.completion_topic =
                     Some(self.config.event_loop.completion_promise.clone());
                 policy_state.completion_iteration = Some(self.state.iteration);
@@ -8669,8 +8673,16 @@ impl EventLoop {
                 .state
                 .policy_runtime_state
                 .get_or_insert_with(PolicyRuntimeState::default);
+            let completion_promise = self.config.event_loop.completion_promise.as_str();
             for event in &events {
-                if policy_config.terminal_topics.contains(&event.topic) {
+                // 2026-06-29-007 P0 fix: do not mark the completion promise
+                // (e.g. LOOP_COMPLETE) as terminal until check_completion_event
+                // has actually validated required_events / verdict gate. A
+                // rejected LOOP_COMPLETE must not poison terminal state and
+                // block recovery events like plan.blocked / task.resume.
+                if policy_config.terminal_topics.contains(&event.topic)
+                    && event.topic != completion_promise
+                {
                     policy_state.terminal_observed = true;
                 }
             }
