@@ -336,3 +336,117 @@ fn isolated_build_prompt_includes_git_baselines() {
         "prompt must include loop_start_sha; got:\n{prompt}"
     );
 }
+
+// =====================================================================
+// P0-2 fix regression guard (plan 2026-06-29-006 follow-up):
+//
+// The projector fallback in `state_projector::task::project_ensure_task`
+// (lines 100-104) tries `payload.loop_id` first, then falls back to
+// `ProjectionContext::current_loop_id`. The latter must be wired up by
+// the loop entry point — `event_loop/mod.rs:8056` creates the
+// `ProjectionContext` but historically did NOT call
+// `.with_current_loop_id(...)`, so the fallback was a dead branch in
+// production. Effect: coordinator `work.ready` events (whose payload
+// does not carry `loop_id`) produced tasks with `loop_id == None` on
+// disk, which the CLI `authorize_lifecycle` then hard-rejected with
+// "legacy task has no loop_id; not mutable from agent context".
+//
+// This test pins the wiring contract: with a `.ralph/current-loop-id`
+// marker in place, a work.ready event whose payload omits `loop_id`
+// must produce a task with `loop_id` set to the marker value.
+// =====================================================================
+#[test]
+fn work_ready_without_payload_loop_id_inherits_marker_via_projector_fallback() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+
+    // Write the loop marker that `EventLoop::current_loop_id()` reads.
+    let ralph_dir = dir.path().join(".ralph");
+    fs::create_dir_all(&ralph_dir).unwrap();
+    let marker_value = "primary-test-20260629-130000";
+    fs::write(ralph_dir.join("current-loop-id"), marker_value).unwrap();
+
+    // Write a single work.ready event whose payload has NO `loop_id`
+    // (matches the real ce-executor coordinator emission shape).
+    let events_path = ralph_dir.join("events.jsonl");
+    let ts = chrono::Utc::now().to_rfc3339();
+    let payload = json!({
+        "task_id": "task-test-001",
+        "task_key": "ce-executor:test:step-01:u1-skeleton",
+        "step": "step-01",
+        "plan_name": "test-plan",
+    });
+    let event_line = json!({
+        "topic": "work.ready",
+        "payload": payload.to_string(),
+        "ts": ts,
+    });
+    fs::write(&events_path, format!("{event_line}\n")).unwrap();
+
+    // Build an event loop whose projector is enabled for work.ready
+    // (ensure_task action with task_key pointer).
+    let yaml = r#"
+mode: "multi"
+event_loop:
+  state_projection:
+    enabled: true
+    actions:
+      work.ready:
+        kind: "ensure_task"
+        key: "task_key"
+        title: "step"
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.task"]
+    instructions: "Do work."
+"#;
+    let mut config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = dir.path().to_path_buf();
+    // Production `ralph run` builds the EventLoop via
+    // `EventLoop::with_context` (loop_runner/runner.rs:852); using
+    // `EventLoop::new` here would leave `loop_context = None` and
+    // `current_loop_id()` would silently return `None`, masking
+    // the regression. Mirror the production wiring exactly.
+    let mut event_loop = EventLoop::with_context(
+        config,
+        crate::loop_context::LoopContext::primary(dir.path().to_path_buf()),
+    );
+    event_loop.initialize("P0-2 projector fallback regression test");
+    event_loop.event_reader =
+        crate::event_reader::EventReader::new(&events_path);
+
+    // Drive the JSONL ingest path that lazy-initialises the
+    // projector at event_loop/mod.rs:8056 — this is the wiring
+    // site the regression guards.
+    let _ = event_loop.process_events_from_jsonl();
+
+    // Read the on-disk task ledger and assert the projected task
+    // carries the marker-sourced loop_id.
+    let tasks_path = ralph_dir.join("agent/tasks.jsonl");
+    let contents = fs::read_to_string(&tasks_path)
+        .unwrap_or_else(|e| panic!("tasks.jsonl must exist after work.ready ingest: {e}"));
+    assert!(
+        !contents.trim().is_empty(),
+        "tasks.jsonl must contain the projected task; got empty body"
+    );
+
+    let task: serde_json::Value = contents
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("task line must parse"))
+        .expect("at least one task line");
+
+    assert_eq!(
+        task.get("loop_id").and_then(|v| v.as_str()),
+        Some(marker_value),
+        "projected task must inherit loop_id from the marker via the \
+         projector fallback (event_loop/mod.rs:8056 must wire \
+         ProjectionContext::current_loop_id); got task: {task}"
+    );
+    assert_eq!(
+        task.get("id").and_then(|v| v.as_str()),
+        Some("task-test-001"),
+        "projected task must honour payload.task_id; got task: {task}"
+    );
+}

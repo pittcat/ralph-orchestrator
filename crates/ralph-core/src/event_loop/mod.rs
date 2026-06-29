@@ -8052,6 +8052,12 @@ impl EventLoop {
         // affected events are dropped from the bus with an
         // `event.state_projection.rejected` diagnostic.
         if self.config.event_loop.state_projection.enabled {
+            // P0-2 follow-up (plan 2026-06-29-006 §F3): hoist the
+            // loop id out of `self` BEFORE the closure below so the
+            // borrow checker doesn't conflict with the
+            // `self.state.state_projection` immutable borrow on
+            // 8055.
+            let projector_loop_id = self.current_loop_id_for_contract();
             let projector = self.state.state_projection.get_or_insert_with(|| {
                 let ctx = crate::state_projector::ProjectionContext::new(
                     self.config.core.workspace_root.as_path(),
@@ -8061,7 +8067,18 @@ impl EventLoop {
                     // silently disabling it. R1 in
                     // 2026-06-17-005 fix plan.
                     self.config.event_loop.enforce_current_unit,
-                );
+                )
+                // P0-2 follow-up: thread the loop's
+                // `current-loop-id` marker into the projector
+                // context so `project_ensure_task`'s fallback
+                // (when `payload.loop_id` is absent) hits a real
+                // value. Without this wiring the fallback is a
+                // dead branch in production and coordinator
+                // `work.ready` events produced tasks whose
+                // `loop_id` was `None` on disk — the CLI then
+                // hard-rejected those records with "legacy task
+                // has no loop_id; not mutable from agent context".
+                .with_current_loop_id(projector_loop_id);
                 let mut p = crate::state_projector::StateProjector::new(ctx);
                 // Best-effort bootstrap; failure is non-fatal
                 // because the projector falls back to live
