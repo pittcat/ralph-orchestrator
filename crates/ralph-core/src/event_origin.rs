@@ -77,9 +77,14 @@ pub(crate) fn is_jsonl_control_topic(topic: &str, cancellation_topic: &str) -> b
 pub fn is_orchestrator_control_topic(topic: &str, cancellation_topic: &str) -> bool {
     let topic_lc = topic.to_ascii_lowercase();
     let cancellation_lc = cancellation_topic.to_ascii_lowercase();
+    // 2026-06-28-005: human.guidance was removed from this list
+    // together with the topic. loop.resume (U7b deterministic
+    // resume boot topic) is now recognised here too so callers
+    // that pass loop.resume as their `cancellation_topic`-style
+    // boot signal get the same allowlist behaviour.
     matches!(
         topic_lc.as_str(),
-        "task.resume" | "build.task.abandoned"
+        "task.resume" | "loop.resume" | "build.task.abandoned"
     ) || (!cancellation_lc.is_empty() && topic_lc == cancellation_lc)
 }
 
@@ -1043,7 +1048,7 @@ hats:
 
         // Uppercase — same control topics, different case.
         assert!(is_orchestrator_control_topic(
-            "Human.Guidance",
+            "Loop.Resume",
             "loop.cancel"
         ));
         assert!(is_orchestrator_control_topic("TASK.RESUME", "loop.cancel"));

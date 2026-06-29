@@ -1413,35 +1413,6 @@ event_loop:
     }
 
     #[test]
-    fn test_emit_ralph_hat_allows_control_topic_human_guidance() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let workspace = temp_dir.path().to_path_buf();
-        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
-        let events_file = workspace.join(".ralph/events.jsonl");
-
-        emit_command_with_root(
-            ColorMode::Never,
-            EmitArgs {
-                topic: Some("human.guidance".to_string()),
-                payload: r#"{"messages":["continue"]}"#.to_string(),
-                json: true,
-                file: events_file.clone(),
-                policy_check: false,
-                no_policy_check: false,
-                hat: Some("ralph".to_string()),
-                triggered: None,
-                source: None,
-                schema: None,
-            },
-            Some(&workspace),
-        )
-        .expect("ralph hat must be allowed to emit human.guidance (control topic)");
-
-        let events = std::fs::read_to_string(&events_file).expect("read events");
-        assert!(events.contains("human.guidance"));
-    }
-
-    #[test]
     fn test_emit_ralph_hat_allows_task_resume() {
         let temp_dir = TempDir::new().expect("temp dir");
         let workspace = temp_dir.path().to_path_buf();

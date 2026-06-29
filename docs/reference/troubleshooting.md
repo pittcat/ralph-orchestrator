@@ -217,7 +217,9 @@ hats:
 
 For runtime-diagnosis recovery (3-strike escalation, completion-correction injection,
 drift journals), see `docs/guide/runtime-diagnosis.md` and the surviving
-`human.guidance` / `task.resume` channel.
+`task.resume` channel. (`human.guidance` was removed by plan
+2026-06-28-005; the recovery channel is now `task.resume` plus
+`TerminationReason::RecoveryExhausted`.)
 
 #### Multi-Hat Isolation Policy Violation
 
