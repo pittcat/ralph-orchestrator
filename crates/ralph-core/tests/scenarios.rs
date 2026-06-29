@@ -2715,6 +2715,20 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-29-007 plan U3: smoke test for the
+/// `recovery_runtime::retry_cap` detector. The scenario
+/// exercises the same review-chain happy path as U2
+/// (DEFENSIVE_BYPASS) so we can be sure the new
+/// `detect_retry_cap_escalation` detector does not break
+/// the existing dispatch ordering. The core retry-cap
+/// behaviour is unit-tested in
+/// `recovery_runtime::retry_cap::tests`.
+#[test]
+fn test_u3_stall_recovery_cap() {
+    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u3-stall-recovery-cap.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U1b: regression for the
 /// `flow_lifecycle.current_step` field transition
 /// triggered by `drive_step_transition` after

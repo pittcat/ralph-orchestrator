@@ -11,11 +11,13 @@ use block_executor_resend::block_executor_resend_storm;
 use dedupe_stall_recovery::dedupe_stall_recovery_with_missing_event_gate;
 use finalize_recovery_outcome::finalize_recovery_outcome_on_flapping;
 use publish_loop_stalled::publish_loop_stalled_business_event;
+use retry_cap::{detect_retry_cap_escalation, get_retry_attempt};
 
 pub mod block_executor_resend;
 pub mod dedupe_stall_recovery;
 pub mod finalize_recovery_outcome;
 pub mod publish_loop_stalled;
+pub mod retry_cap;
 
 /// Lightweight snapshot of a recovery envelope relevant to the detectors.
 #[derive(Debug, Clone, Default)]
@@ -86,7 +88,23 @@ pub fn dispatch(ctx: &RuntimeContext) -> Vec<RecoveryAction> {
     actions.extend(finalize_recovery_outcome_on_flapping(ctx));
     actions.extend(publish_loop_stalled_business_event(ctx));
     actions.extend(block_executor_resend_storm(ctx));
+    // 2026-06-29-007 plan U3: review-chain retry cap runs
+    // LAST so its `ForcePlanBlocked` action wins over any
+    // earlier escalation. This is the path that breaks
+    // the "loop 停不下来" recursion: after `RETRY_CAP`
+    // task.resume injections on a review-chain retry_key,
+    // the loop is forced to plan.blocked.
+    actions.extend(detect_retry_cap_escalation(ctx));
     actions
+}
+
+/// 2026-06-29-007 plan U3 + U8 (KTD-6): convenience accessor
+/// for the BDD scenario runner. Delegates to
+/// [`retry_cap::get_retry_attempt`] so scenario assertions
+/// can read the current attempt count without poking into
+/// internal state directly.
+pub fn get_retry_attempt_for(retry_key: &str, ctx: &RuntimeContext) -> u32 {
+    get_retry_attempt(ctx, retry_key)
 }
 
 #[cfg(test)]
