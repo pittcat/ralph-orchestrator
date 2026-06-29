@@ -4004,50 +4004,15 @@ async fn run_loop_impl_inner(
                     if should_hard_gate(&display_hat, &event_loop) {
                         hard_gate_triggered_this_iteration = true;
                         event_loop.increment_hard_gate_count();
-                        // Capture the expected_topics before taking a
-                        // mutable borrow on `event_loop` (passed to
-                        // `inject_hard_gate_guidance` for the
-                        // `pending_recovery_hat` pin) so the
-                        // immutable borrow on `get_hat_publishes`
-                        // does not overlap with the mut borrow.
-                        let expected_topics = event_loop.get_hat_publishes(&display_hat);
-                        // 2026-06-17-004 U4 (R1): snapshot the
-                        // obligation triggers (the events that woke
-                        // the gated hat) so the gate can embed
-                        // their topic + payload into the
-                        // `task.resume` JSON AND replay them into
-                        // `last_activation_events` for the next
-                        // activation.  For hats without explicit
-                        // obligations we use the same
-                        // `last_activation_events` (the legacy
-                        // blanket rule path doesn't care about
-                        // triggers, but the replay is still useful
-                        // for the U1 field-completeness metric and
-                        // the U2 recovery envelope shape).
-                        let triggers_for_gate = event_loop.state().last_activation_events.clone();
-                        inject_hard_gate_guidance_with_triggers(
-                            &ctx,
-                            Some(&mut event_loop),
-                            &display_hat,
-                            &expected_topics,
-                            &triggers_for_gate,
-                        );
-                        // 2026-06-17-004 U4 (R1): after the gate
-                        // pins `pending_recovery_hat`, drain the
-                        // snapshot into `last_activation_events`
-                        // so the next activation (the one woken by
-                        // the recovery `task.resume`) sees the
-                        // original trigger context.  Without this
-                        // replay the next iteration's
-                        // `last_activation_events` would be empty
-                        // (only the resume itself is in flight), and
-                        // the obligation check in
-                        // `should_gate_missing_events` would have
-                        // no trigger to evaluate against — a
-                        // `dimension-reviewer` that was originally
-                        // woken by `review.dimension.ready(dimension=testing)`
-                        // would then have no idea which dimension
-                        // to review on the retry turn.
+                        // 2026-06-28-005: the inject_hard_gate_guidance
+                        // helper that used to publish a `human.guidance`
+                        // event into events.jsonl was deleted together
+                        // with the rest of the inject_*_guidance helpers
+                        // in hard_gate.rs (the topic no longer exists).
+                        // The replay_obligation_triggers_to_activation_state
+                        // call below is still required because obligation
+                        // bookkeeping feeds into should_gate_missing_events
+                        // on the next iteration.
                         event_loop
                             .state_mut()
                             .replay_obligation_triggers_to_activation_state();
@@ -4205,58 +4170,44 @@ async fn run_loop_impl_inner(
         // the plan) and the default_publishes fallback (we have
         // evidence the agent tried to emit a wave, so synthesizing a
         // default would be misleading).
+        // 2026-06-28-005: the four inject_*_guidance helpers in
+        // hard_gate.rs (inject_hard_gate_guidance,
+        // inject_hard_gate_guidance_with_triggers,
+        // inject_missing_event_hard_gate_guidance,
+        // inject_missing_event_hard_gate_guidance_with_triggers,
+        // inject_wave_policy_rejection_guidance,
+        // inject_state_projection_rejection_guidance) were all
+        // deleted because their only purpose was to publish a
+        // `human.guidance` event into events.jsonl. That topic no
+        // longer exists (plan 2026-06-28-005). The gate
+        // bookkeeping below — hard_gate_count, replay_obligation
+        // _triggers, last_projection_rejections clearing —
+        // remains intact because those drive obligation checks
+        // and the recovery responder on the next iteration;
+        // the only thing that disappeared is the in-band
+        // guidance publish.
         if wave_had_policy_rejections
             && wave_events.is_empty()
             && !hard_gate_triggered_this_iteration
             && late_termination_reason.is_none()
         {
-            // Resolve the publish list before the mutable borrow so
-            // the helper can take `&mut event_loop` (U6 recovery
-            // responder bookkeeping lives on the event loop).
-            let publishes = event_loop.get_hat_publishes(&display_hat);
-            inject_wave_policy_rejection_guidance(
-                &ctx,
-                Some(&mut event_loop),
-                &display_hat,
-                &wave_policy_rejections,
-                wave_raw_count,
-                &publishes,
-            );
             info!(
                 hat = %display_hat.as_str(),
                 rejection_count = wave_policy_rejections.len(),
                 raw_count = wave_raw_count,
-                "Wave batch was policy-rejected; injected schema-level guidance instead of missing-event gate"
+                "Wave batch was policy-rejected; no guidance injected (plan 2026-06-28-005 removed the topic)"
             );
         } else if !event_loop.state().last_projection_rejections.is_empty()
             && wave_events.is_empty()
             && !hard_gate_triggered_this_iteration
             && late_termination_reason.is_none()
         {
-            // Fix-2 (2026-06-29 primary-072512 P0): the agent DID
-            // emit, but the state projector rejected the event
-            // (e.g. `work.done` with empty `task_id` after Fix-1
-            // fails the projector closed at task.rs). Inject a
-            // schema-level guidance message instead of incrementing
-            // the hard-gate counter — the agent can retry with a
-            // corrected `task_id`, but the loop must not die just
-            // because a single emit was malformed.
-            let publishes = event_loop.get_hat_publishes(&display_hat);
-            let rejections = event_loop.state().last_projection_rejections.clone();
-            inject_state_projection_rejection_guidance(
-                &ctx,
-                Some(&mut event_loop),
-                &display_hat,
-                &rejections,
-                &publishes,
-            );
             // Clear the snapshot so the next iteration starts
             // clean and the gate does not re-fire on stale data.
             event_loop.state_mut().last_projection_rejections.clear();
             info!(
                 hat = %display_hat.as_str(),
-                rejection_count = rejections.len(),
-                "State projection rejected events; injected schema-level guidance instead of missing-event gate"
+                "State projection rejected events; no guidance injected (plan 2026-06-28-005 removed the topic)"
             );
         } else if !agent_wrote_any_valid_or_rejected
             && wave_events.is_empty()
@@ -4265,37 +4216,12 @@ async fn run_loop_impl_inner(
             && should_gate_missing_events(&display_hat, &event_loop, &candidate_topics)
         {
             event_loop.increment_hard_gate_count();
-            // Resolve the publish list before the mutable borrow so
-            // the helper can take `&mut event_loop` (U6 recovery
-            // responder bookkeeping lives on the event loop).
-            let publishes = event_loop.get_hat_publishes(&display_hat);
-            // 2026-06-17-004 U3 (R4+R5): snapshot the obligation
-            // triggers (the events that woke the gated hat) so
-            // the gate can embed their topic + payload into the
-            // `task.resume` JSON AND replay them into
-            // `last_activation_events` for the next activation.
-            // For hats without explicit obligations we use the
-            // same `last_activation_events` (the legacy blanket
-            // rule path doesn't care about triggers, but the
-            // replay is still useful for the U1 field-completeness
-            // metric and the U2 recovery envelope shape).
-            let triggers_for_gate = event_loop.state().last_activation_events.clone();
-            inject_missing_event_hard_gate_guidance_with_triggers(
-                &ctx,
-                Some(&mut event_loop),
-                &display_hat,
-                &publishes,
-                &triggers_for_gate,
-            );
-            // 2026-06-17-004 U3 (R4+R5): after the gate pins
-            // `pending_recovery_hat`, drain the snapshot into
-            // `last_activation_events` so the next activation
-            // (the one woken by the recovery `task.resume`) sees
-            // the original trigger context.  Without this replay
-            // the next iteration's `last_activation_events` would
-            // be empty (only the resume itself is in flight), and
-            // the obligation check in `should_gate_missing_events`
-            // would have no trigger to evaluate against.
+            // 2026-06-17-004 U3 (R4+R5): the obligation trigger
+            // replay below still matters because obligation
+            // bookkeeping feeds into should_gate_missing_events
+            // on the next iteration. The guidance emit itself
+            // was removed together with the inject_*_guidance
+            // helpers in hard_gate.rs.
             event_loop
                 .state_mut()
                 .replay_obligation_triggers_to_activation_state();
