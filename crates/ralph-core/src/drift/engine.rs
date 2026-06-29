@@ -393,6 +393,12 @@ impl DriftEngine {
         if !self.config.enabled {
             return None;
         }
+        // 2026-06-28-003: run runtime-recovery detectors before the
+        // normal termination logic so flapping retry keys can be
+        // forced to plan.blocked without waiting for the responder's
+        // own escalation ladder.
+        let ctx = event_loop.runtime_recovery_context(&[]);
+        event_loop.apply_runtime_recovery_actions(&ctx);
         // Clone out the hint's payload first so we can drop
         // the immutable borrow on the responder before
         // publishing the plan.blocked event (which needs a

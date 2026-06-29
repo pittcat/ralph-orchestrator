@@ -185,3 +185,15 @@ ralph tools memory add -t fix "cargo test hangs: kill orphan postgres from previ
 # Context: project-specific knowledge
 ralph tools memory add -t context "The /legacy folder is deprecated, use /v2 endpoints"
 ```
+
+---
+
+## 运行时行为规范
+
+以下规范在 loop 遇到 `task.resume` 时由 runner 自动注入（对应 `ralph-tools-recovery-directives` skill）。memory/task 操作**必须**遵守：
+
+- **收到 `task.resume(kind=execution_contract:TaskWrongLoop)` 后**：重新 emit `work.done` 前**必须**先读 `.ralph/agent/tasks.jsonl`，使用**当前 loop** 的 task id；**禁止**使用 `""`、`null` 或 `from_key:...` 形态的 `task_id`。
+- **task/memory 写入失败时**：如果是跨 loop / 跨 hat 权限问题，不要反复重试同一命令；先 `ralph tools task list` 或 `ralph tools memory list` 确认状态，再决定 reopen / fail / 开新 task。
+- **禁止**用 echo/cat 直写 `.ralph/agent/tasks.jsonl` 或 `.agent/memories.md`；所有变更必须通过 CLI 工具完成。
+- 更多细节见自动注入的 `## RECOVERY DIRECTIVES` 块（ID：`RD-TASK-ID-MUST-BE-LOOP-SCOPED`）。
+

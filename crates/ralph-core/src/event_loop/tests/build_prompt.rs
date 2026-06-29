@@ -468,3 +468,75 @@ tasks:
         "ralph-tools must be injected when tasks.enabled = true (even with memories off)"
     );
 }
+
+#[test]
+fn test_build_prompt_injects_recovery_directives_from_task_resume() {
+    // 2026-06-28-003: a pending `task.resume` event with
+    // `recovery_directives` must cause the runner to prepend a
+    // `## RECOVERY DIRECTIVES` block to the prompt.
+    let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready", "task.resume"]
+    publishes: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Recovery directives injection test");
+
+    let payload = serde_json::json!({
+        "reason": "missing_event_gate",
+        "target_hat": "executor",
+        "kind": "missing_event_gate",
+        "recovery_directives": ["RD-EXECUTOR-RESEND-LIMIT"],
+    });
+    event_loop
+        .bus
+        .publish(Event::new("task.resume", payload.to_string()).with_target(HatId::new("executor")));
+
+    // In coordinator mode the ralph hat consumes pending events and
+    // builds the coordinator prompt; recovery directives must be
+    // prepended there.
+    let prompt = event_loop
+        .build_prompt(&HatId::new("ralph"))
+        .expect("prompt should build");
+    assert!(
+        prompt.contains("## RECOVERY DIRECTIVES"),
+        "prompt must contain RECOVERY DIRECTIVES section; got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("RD-EXECUTOR-RESEND-LIMIT"),
+        "prompt must contain the directive section body"
+    );
+    assert!(
+        prompt.contains("at most 2 times"),
+        "directive content must be injected"
+    );
+}
+
+#[test]
+fn test_build_prompt_skips_recovery_directives_when_empty() {
+    let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready", "task.resume"]
+    publishes: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("No recovery directives test");
+
+    event_loop
+        .bus
+        .publish(Event::new("work.ready", "{}").with_target(HatId::new("executor")));
+
+    let prompt = event_loop
+        .build_prompt(&HatId::new("executor"))
+        .expect("prompt should build");
+    assert!(
+        !prompt.contains("## RECOVERY DIRECTIVES"),
+        "RECOVERY DIRECTIVES must not appear when no task.resume carries directives"
+    );
+}

@@ -427,6 +427,12 @@ pub struct LoopState {
     ///     wave recovery)
     pub pending_recovery_hat: Option<HatId>,
 
+    /// 2026-06-28-003: runtime-recovery directives produced by
+    /// in-flight detectors (e.g. `block_executor_resend_storm`).
+    /// Consumed by `build_prompt` and cleared on read so the directive
+    /// is injected exactly once.
+    pub pending_recovery_directives: Vec<String>,
+
     /// R1 (2026-06-14-003 plan): when `review-synthesizer` is woken up
     /// by an aggregate timeout (`inject_review_aggregate_timeouts`),
     /// the loop pins the wave_id here so the next `build_prompt` can
@@ -742,6 +748,7 @@ impl Default for LoopState {
             flow_lifecycle: FlowLifecycleRegistry::new(),
             stall_recovery_counts: HashMap::new(),
             pending_recovery_hat: None,
+            pending_recovery_directives: Vec::new(),
             pending_synthesizer_timeout: None,
             last_ephemeral_relocations: Vec::new(),
             pending_plan_blocked_for_failure: false,

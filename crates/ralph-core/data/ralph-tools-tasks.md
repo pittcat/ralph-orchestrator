@@ -128,3 +128,15 @@ ralph tools task ensure --key auth:setup "Setup auth" -p 1
 ralph tools task ensure --key auth:routes "Add user routes" --blocked-by task-1737372000-a1b2
 ralph tools task ready  # Only shows unblocked tasks
 ```
+
+---
+
+## 运行时行为规范
+
+以下规范在 loop 遇到 `task.resume` 时由 runner 自动注入（对应 `ralph-tools-recovery-directives` skill）。task 管理**必须**遵守：
+
+- **收到 `task.resume(kind=recovery_exhausted)` 后**：**禁止**再重试；立即 emit `plan.blocked(reason="recovery_exhausted:<retry_key>")` 并把阻塞原因写入当前 task note。
+- **收到 `task.resume(kind=execution_contract:TaskWrongLoop)` 后**：重新 emit 前**必须**确认 `task_id` 属于当前 loop；跨 loop task 只能读、不能改。
+- **task 反复失败时**：不要无限 reopen 同一 task；评估是否需要拆分为更小任务或提升到 `plan.blocked`。
+- 更多细节见自动注入的 `## RECOVERY DIRECTIVES` 块（ID：`RD-PLAN-BLOCKED-ON-RECOVERY-EXHAUSTED`、`RD-TASK-ID-MUST-BE-LOOP-SCOPED`）。
+

@@ -23,3 +23,14 @@ if [ "$ACTUAL" -gt "$MAX_LINES" ]; then
   exit 1
 fi
 echo "OK: ralph-tools.md is $ACTUAL lines (max $MAX_LINES)"
+
+# 2026-06-28-003: also guard the new recovery directives skill.
+RECOVERY_DIRECTIVES_FILE="$REPO_ROOT/crates/ralph-core/data/ralph-tools-recovery-directives.md"
+if [ -f "$RECOVERY_DIRECTIVES_FILE" ]; then
+  RECOVERY_ACTUAL=$(wc -l < "$RECOVERY_DIRECTIVES_FILE")
+  if [ "$RECOVERY_ACTUAL" -gt "$MAX_LINES" ]; then
+    echo "FAIL: ralph-tools-recovery-directives.md is $RECOVERY_ACTUAL lines (max $MAX_LINES)."
+    exit 1
+  fi
+  echo "OK: ralph-tools-recovery-directives.md is $RECOVERY_ACTUAL lines (max $MAX_LINES)"
+fi

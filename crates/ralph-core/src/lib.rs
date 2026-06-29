@@ -19,6 +19,7 @@ pub mod config;
 /// in-prompt `## ORCHESTRATOR CORRECTION` blocks.
 pub mod correction;
 pub mod diagnosis;
+pub mod recovery_runtime;
 pub mod diagnostics;
 pub mod drift;
 pub mod emit_schema_hint;

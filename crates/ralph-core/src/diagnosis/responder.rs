@@ -412,6 +412,14 @@ impl RecoveryResponder {
         self.pending_findings.len()
     }
 
+    /// Read-only access to the pending findings collected this
+    /// iteration. Used by the runtime-recovery engine to inspect
+    /// envelopes without re-parsing recovery.jsonl.
+    #[must_use]
+    pub fn pending_findings(&self) -> &[RecoveryDiagnosisEnvelope] {
+        &self.pending_findings
+    }
+
     /// Take the most recent hard-escalation actions. The runner
     /// publishes them as `task.resume` events and calls this again at
     /// the end of the iteration to clear the queue.

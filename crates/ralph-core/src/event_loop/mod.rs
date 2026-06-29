@@ -3606,6 +3606,10 @@ impl EventLoop {
                 // U6 plan so the skills index is never broken by the
                 // alert text.
                 let base_prompt = self.apply_runtime_diagnosis_prompt(base_prompt, hat_id);
+                // 2026-06-28-003: prepend recovery directives derived
+                // from pending `task.resume` events so the agent sees
+                // behaviour guidance before the skill index.
+                let base_prompt = self.prepend_recovery_directives(base_prompt, &regular_events);
                 let with_skills = self.prepend_auto_inject_skills(base_prompt);
                 let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
                 let with_state_files = self.prepend_state_files(with_scratchpad);
@@ -3893,6 +3897,9 @@ impl EventLoop {
                 // helper sees the full set of findings — the
                 // coordinator sees every hat's alerts.
                 let base_prompt = self.apply_runtime_diagnosis_prompt(base_prompt, hat_id);
+                // 2026-06-28-003: prepend recovery directives derived
+                // from pending `task.resume` events.
+                let base_prompt = self.prepend_recovery_directives(base_prompt, &regular_events);
                 let with_skills = self.prepend_auto_inject_skills(base_prompt);
                 let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
                 let with_state_files = self.prepend_state_files(with_scratchpad);
@@ -4075,6 +4082,9 @@ impl EventLoop {
             // rejection path; when the feature flag is off, the
             // queue stays empty and this prepend is a no-op).
             let base_prompt = self.prepend_correction_and_resume(base_prompt);
+            // 2026-06-28-003: prepend recovery directives derived
+            // from pending `task.resume` events.
+            let base_prompt = self.prepend_recovery_directives(base_prompt, &regular_events);
             let with_skills = self.prepend_auto_inject_skills(base_prompt);
             let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
             let with_state_files = self.prepend_state_files(with_scratchpad);
@@ -4720,6 +4730,126 @@ impl EventLoop {
         &mut self.recovery_responder
     }
 
+    /// 2026-06-28-003: build a runtime-recovery context from the
+    /// current loop state. Used by hot-path detectors.
+    ///
+    /// `extra_jsonl_events` are appended to the pending regular events so
+    /// detectors can see just-accepted JSONL events that have not yet
+    /// been published to the bus.
+    pub(crate) fn runtime_recovery_context(
+        &self,
+        extra_jsonl_events: &[crate::event_reader::Event],
+    ) -> crate::recovery_runtime::RuntimeContext {
+        use crate::recovery_runtime::{EnvelopeSnapshot, EventSnapshot, RetryKeyState};
+        use crate::diagnosis::DiagnosisSource;
+
+        let mut ctx = crate::recovery_runtime::RuntimeContext {
+            current_iteration: self.state.iteration,
+            current_hat: self.state.last_hat.as_ref().map(|h| h.as_str().to_string()),
+            ..Default::default()
+        };
+
+        // Snapshot tracked retry keys.
+        for key in self.recovery_responder.tracked_retry_keys_list() {
+            let outcome = self
+                .recovery_responder
+                .outcome_for(&key)
+                .map(|o| format!("{o:?}"))
+                .unwrap_or_else(|| "Pending".to_string());
+            let attempt = self.recovery_responder.attempt_count(&key);
+            ctx.retry_key_states.push(RetryKeyState {
+                retry_key: key.clone(),
+                last_outcome: outcome.clone(),
+                outcome_history: vec![outcome],
+                attempt_count: attempt,
+            });
+        }
+
+        // Snapshot recent pending regular events plus any extra JSONL
+        // events supplied by the caller (e.g. a freshly accepted work.done).
+        for event in self.peek_pending_regular_events() {
+            ctx.events.push(EventSnapshot {
+                topic: event.topic.to_string(),
+                payload: event.payload.clone(),
+                iteration: self.state.iteration,
+            });
+        }
+        for event in extra_jsonl_events {
+            ctx.events.push(EventSnapshot {
+                topic: event.topic.to_string(),
+                payload: event.payload.clone().unwrap_or_default(),
+                iteration: self.state.iteration,
+            });
+        }
+
+        // Snapshot pending findings as recovery envelopes.
+        for finding in self.recovery_responder.pending_findings() {
+            ctx.recovery_envelopes.push(EnvelopeSnapshot {
+                retry_key: finding.retry_key.clone(),
+                source: match finding.source {
+                    DiagnosisSource::StallRecovery => "StallRecovery".to_string(),
+                    DiagnosisSource::MissingEventGate => "MissingEventGate".to_string(),
+                    DiagnosisSource::DriftMonitor => "DriftMonitor".to_string(),
+                    DiagnosisSource::WorkflowGuard => "WorkflowGuard".to_string(),
+                    DiagnosisSource::ExecutionContract => "ExecutionContract".to_string(),
+                    DiagnosisSource::PayloadContract => "PayloadContract".to_string(),
+                    DiagnosisSource::HookRetry => "HookRetry".to_string(),
+                    DiagnosisSource::LoopStale => "LoopStale".to_string(),
+                    DiagnosisSource::TopicFormat => "TopicFormat".to_string(),
+                    _ => "Other".to_string(),
+                },
+                outcome: format!("{:?}", finding.outcome),
+                iteration: finding.iteration.unwrap_or(self.state.iteration),
+                attempt: finding.retry_attempt,
+            });
+        }
+
+        ctx
+    }
+
+    /// 2026-06-28-003: run runtime-recovery detectors against the
+    /// supplied context and apply the returned actions to the loop.
+    /// Detectors are best-effort: a missing signal causes silent skip.
+    pub fn apply_runtime_recovery_actions(
+        &mut self,
+        ctx: &crate::recovery_runtime::RuntimeContext,
+    ) {
+        use crate::recovery_runtime::RecoveryAction;
+        use ralph_proto::{Event, HatId};
+
+        for action in crate::recovery_runtime::dispatch(ctx) {
+            match action {
+                RecoveryAction::PublishEvent { topic, payload } => {
+                    debug!(topic = %topic, "runtime-recovery: publishing corrective event");
+                    self.bus.publish(Event::new(topic.as_str(), payload).with_source(HatId::from("ralph")));
+                }
+                RecoveryAction::ForcePlanBlocked { reason, retry_key } => {
+                    warn!(%reason, %retry_key, "runtime-recovery: forcing plan.blocked");
+                    let payload = serde_json::json!({
+                        "reason": format!("recovery_exhausted:{retry_key}"),
+                        "runtime_recovery_reason": reason,
+                    });
+                    self.bus.publish(
+                        Event::new("plan.blocked", payload.to_string())
+                            .with_source(HatId::from("ralph"))
+                            .with_target(HatId::from("shipper")),
+                    );
+                }
+                RecoveryAction::InjectDirective { text } => {
+                    warn!(%text, "runtime-recovery: directive injection requested");
+                    // Store for the next prompt build. build_prompt drains
+                    // the buffer so the directive is delivered exactly once.
+                    self.state.pending_recovery_directives.push(text);
+                }
+                RecoveryAction::DedupeEnvelope { drop_retry_key } => {
+                    debug!(%drop_retry_key, "runtime-recovery: envelope dedupe requested");
+                    // Callers that record envelopes should check this action
+                    // and skip writing the duplicate.
+                }
+            }
+        }
+    }
+
     /// This generalizes the former `prepend_memories()` into a skill auto-injection
     /// pipeline that handles memories, tools, and any other auto-inject skills.
     ///
@@ -4886,6 +5016,108 @@ impl EventLoop {
             ));
             debug!("Injected auto-inject skill: {}", skill.name);
         }
+    }
+
+    /// Extract recovery directive IDs from a batch of pending events.
+    ///
+    /// Only `task.resume` events are inspected. The `recovery_directives`
+    /// array is read from each payload, flattened, deduplicated while
+    /// preserving first-seen order. Unknown IDs are kept (the lookup
+    /// step skips them).
+    fn recovery_directive_ids_from_events(events: &[Event]) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut ordered = Vec::new();
+        for event in events {
+            if event.topic.as_str() != "task.resume" {
+                continue;
+            }
+            let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload) else {
+                continue;
+            };
+            let Some(array) = payload.get("recovery_directives").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for item in array {
+                let Some(id) = item.as_str() else {
+                    continue;
+                };
+                if seen.insert(id.to_string()) {
+                    ordered.push(id.to_string());
+                }
+            }
+        }
+        ordered
+    }
+
+    /// Build the `## RECOVERY DIRECTIVES` prompt section from the
+    /// registered `ralph-tools-recovery-directives` skill.
+    ///
+    /// For each directive ID, the matching `## <ID>` section is extracted
+    /// from the skill markdown. IDs without a matching section are
+    /// silently skipped. Returns an empty string when there are no IDs
+    /// or the skill is not registered.
+    fn build_recovery_directives_section(&self, directive_ids: &[String]) -> String {
+        if directive_ids.is_empty() {
+            return String::new();
+        }
+        let Some(skill) = self.skill_registry.get("ralph-tools-recovery-directives") else {
+            return String::new();
+        };
+        let content = skill.content.trim();
+        let mut sections: Vec<String> = Vec::new();
+        for id in directive_ids {
+            let marker = format!("## {id}");
+            let Some(start) = content.find(&marker) else {
+                continue;
+            };
+            let rest = &content[start + marker.len()..];
+            let end = rest.find("\n## ").unwrap_or(rest.len());
+            let section = &content[start..start + marker.len() + end];
+            sections.push(section.trim().to_string());
+        }
+        if sections.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("## RECOVERY DIRECTIVES\n\n");
+        out.push_str(
+            "The following runtime directives apply to pending `task.resume` events. \
+             Treat them as system operating procedure.\n\n",
+        );
+        for (i, section) in sections.iter().enumerate() {
+            if i > 0 {
+                out.push_str("\n\n");
+            }
+            out.push_str(section);
+        }
+        out.push('\n');
+        out
+    }
+
+    /// Prepend recovery directives (if any) to the prompt.
+    fn prepend_recovery_directives(
+        &mut self,
+        prompt: String,
+        events: &[Event],
+    ) -> String {
+        let ids = Self::recovery_directive_ids_from_events(events);
+        let mut section = self.build_recovery_directives_section(&ids);
+        // 2026-06-28-003: also prepend directives produced by in-flight
+        // runtime-recovery detectors (e.g. resend-storm block).
+        let runtime_directives = std::mem::take(&mut self.state.pending_recovery_directives);
+        if !runtime_directives.is_empty() {
+            if section.is_empty() {
+                section = String::from("## RECOVERY DIRECTIVES\n\n");
+            }
+            for directive in runtime_directives {
+                section.push_str("\n- ");
+                section.push_str(&directive);
+            }
+            section.push('\n');
+        }
+        if section.is_empty() {
+            return prompt;
+        }
+        format!("{section}\n{prompt}")
     }
 
     /// Prepends scratchpad content to the prompt if the file exists and is non-empty.
@@ -6312,6 +6544,13 @@ impl EventLoop {
                 )],
             );
         }
+
+        // 2026-06-28-003: run runtime-recovery detectors after recording
+        // any StallRecovery envelopes. This publishes loop.stalled when
+        // the stall path forgot to do so and forces flapping keys to
+        // plan.blocked.
+        let ctx = self.runtime_recovery_context(&[]);
+        self.apply_runtime_recovery_actions(&ctx);
 
         // U2 (2026-06-17-003 plan): per-iteration incomplete-wave scan.
         // Run after handoff escalations and before processing new JSONL events
@@ -8223,6 +8462,12 @@ impl EventLoop {
                                 let key = LoopState::work_done_dedup_key(pn, st, ti);
                                 self.state.work_done_seen_tasks.insert(key);
                             }
+                            // 2026-06-28-003: run the resend-storm detector on
+                            // every accepted work.done. If the executor keeps
+                            // emitting the same commit_count, the next prompt
+                            // gets a hard stop directive.
+                            let ctx = self.runtime_recovery_context(std::slice::from_ref(accepted));
+                            self.apply_runtime_recovery_actions(&ctx);
                         }
                         "fix.applied" => {
                             if let Some(p) = accepted.payload.as_deref()

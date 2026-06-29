@@ -351,6 +351,26 @@ pub fn extract_reason_code(violation: &str) -> &'static str {
     violation_class(violation)
 }
 
+/// Return the recovery directive IDs that should be injected into the
+/// agent prompt when a `task.resume` event with this `kind` is
+/// dispatched.  The directive list is intentionally small and stable;
+/// unknown kinds map to an empty list.  The `target_hat` is accepted for
+/// forward compatibility but is intentionally not used as a gate — these
+/// directives apply to whichever hat is being resumed.
+///
+/// See plan 2026-06-28-003 (ralph-runtime-recovery) for the mapping.
+pub fn recovery_directives_for_kind(kind: &str, _target_hat: &str) -> Vec<String> {
+    match kind {
+        "missing_event_gate" => vec!["RD-EXECUTOR-RESEND-LIMIT".to_string()],
+        "stall_no_events" | "stall_recovery" => vec!["RD-STALL-DETECT-AND-YIELD".to_string()],
+        "execution_contract:TaskWrongLoop" | "task_wrong_loop" => {
+            vec!["RD-TASK-ID-MUST-BE-LOOP-SCOPED".to_string()]
+        }
+        "recovery_exhausted" => vec!["RD-PLAN-BLOCKED-ON-RECOVERY-EXHAUSTED".to_string()],
+        _ => Vec::new(),
+    }
+}
+
 /// Convert an [`OriginCheck::Rejected`] to a [`Rejection`].  Helper
 /// for callers that already have the origin guard's verdict.
 pub fn rejection_from_origin(check: &OriginCheck, source_hat: Option<String>) -> Option<Rejection> {
@@ -500,25 +520,41 @@ pub fn build_task_resume_payload(
     // `reason` string (which mirrors `violation` substring). This
     // mirrors `gate::reject_to_task_resume` behaviour so all
     // `task.resume` payloads in the system carry the typed kind.
+    let kind_value = rejection
+        .kind
+        .map(|k| k.reason_code().to_string())
+        .unwrap_or_else(|| extract_reason_code(&rejection.violation).to_string());
+    payload.insert("kind".into(), serde_json::Value::String(kind_value.clone()));
+    // 2026-06-28-003: surface recovery directives so the runner can
+    // inject targeted behaviour guidance into the prompt on the next
+    // iteration. Empty list is the default and is skipped by the
+    // injector.
+    let resolved_target_hat = rejection
+        .target_hat
+        .as_deref()
+        .or(rejection.source_hat.as_deref())
+        .or(rejection.business_hat.as_deref())
+        .unwrap_or("ralph");
     payload.insert(
-        "kind".into(),
-        serde_json::Value::String(
-            rejection
-                .kind
-                .map(|k| k.reason_code().to_string())
-                .unwrap_or_else(|| extract_reason_code(&rejection.violation).to_string()),
+        "recovery_directives".into(),
+        serde_json::Value::Array(
+            recovery_directives_for_kind(&kind_value, resolved_target_hat)
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
         ),
     );
     // `target_hat` resolution: explicit `target_hat` first, then
     // `source_hat` (which is what `resolve_target_hat` falls back
     // to), then `business_hat`.  Mirrors the existing helper
     // `resolve_target_hat` so the values are consistent.
-    let resolved_target_hat = rejection
+    // (resolved_target_hat already computed above for recovery directives.)
+    if let Some(hat) = rejection
         .target_hat
         .as_deref()
         .or(rejection.source_hat.as_deref())
-        .or(rejection.business_hat.as_deref());
-    if let Some(hat) = resolved_target_hat {
+        .or(rejection.business_hat.as_deref())
+    {
         payload.insert(
             "target_hat".into(),
             serde_json::Value::String(hat.to_string()),
@@ -704,11 +740,27 @@ pub fn enrich_task_resume_payload_full(
         }
     }
     // 2026-06-23-005 U1 (R1+R2): typed kind SSOT.
+    let kind_value_string = kind
+        .map(|k| k.reason_code().to_string())
+        .unwrap_or_else(|| reason_code.to_string());
     if let serde_json::Value::Object(ref mut map) = obj {
-        let kind_value = kind
-            .map(|k| serde_json::Value::String(k.reason_code().to_string()))
-            .unwrap_or_else(|| serde_json::Value::String(reason_code.to_string()));
-        map.insert("kind".into(), kind_value);
+        map.insert(
+            "kind".into(),
+            serde_json::Value::String(kind_value_string.clone()),
+        );
+    }
+    // 2026-06-28-003: inject recovery directive IDs when the kind and
+    // target_hat match a known runtime-recovery pattern.
+    if let serde_json::Value::Object(ref mut map) = obj {
+        map.insert(
+            "recovery_directives".into(),
+            serde_json::Value::Array(
+                recovery_directives_for_kind(&kind_value_string, &target_hat_value)
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
     }
     // 2026-06-28-002 U3: surface the target hat's allowed
     // publish topics. The legacy path leaves this empty so the
@@ -1390,6 +1442,81 @@ mod tests {
         let v4: serde_json::Value = serde_json::from_str(&payload4).unwrap();
         assert_eq!(v4["reason"], "type_mismatch");
         assert_eq!(v4["kind"], "type_mismatch");
+    }
+
+    /// 2026-06-28-003: recovery directives are surfaced on task.resume
+    /// payloads when the kind/target_hat pair matches a known pattern.
+    #[test]
+    fn recovery_directives_are_injected_for_known_patterns() {
+        // missing_event_gate + executor → RD-EXECUTOR-RESEND-LIMIT
+        let payload = enrich_task_resume_payload(
+            "missing event",
+            "hard_gate_missing_event",
+            Some("executor"),
+            Some(RejectionKind::MissingEventGate),
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let directives: Vec<String> = v["recovery_directives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect();
+        assert_eq!(directives, vec!["RD-EXECUTOR-RESEND-LIMIT"]);
+
+        // stall_no_events + executor → RD-STALL-DETECT-AND-YIELD
+        let payload2 = enrich_task_resume_payload(
+            "stall",
+            "stall_no_events",
+            Some("executor"),
+            Some(RejectionKind::StallNoEvents),
+        );
+        let v2: serde_json::Value = serde_json::from_str(&payload2).unwrap();
+        let directives2: Vec<String> = v2["recovery_directives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect();
+        assert_eq!(directives2, vec!["RD-STALL-DETECT-AND-YIELD"]);
+
+        // Non-executor target still gets directives (directives apply to
+        // whichever hat is being resumed).
+        let payload3 = enrich_task_resume_payload(
+            "missing event",
+            "hard_gate_missing_event",
+            Some("reviewer"),
+            Some(RejectionKind::MissingEventGate),
+        );
+        let v3: serde_json::Value = serde_json::from_str(&payload3).unwrap();
+        let directives3: Vec<String> = v3["recovery_directives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect();
+        assert_eq!(directives3, vec!["RD-EXECUTOR-RESEND-LIMIT"]);
+
+        // Unknown kind → empty list
+        let payload4 = enrich_task_resume_payload("x", "out-of-scope", Some("executor"), None);
+        let v4: serde_json::Value = serde_json::from_str(&payload4).unwrap();
+        assert!(v4["recovery_directives"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recovery_directives_helper_handles_custom_kind_strings() {
+        assert_eq!(
+            recovery_directives_for_kind("execution_contract:TaskWrongLoop", "executor"),
+            vec!["RD-TASK-ID-MUST-BE-LOOP-SCOPED".to_string()]
+        );
+        assert_eq!(
+            recovery_directives_for_kind("recovery_exhausted", "executor"),
+            vec!["RD-PLAN-BLOCKED-ON-RECOVERY-EXHAUSTED".to_string()]
+        );
+        assert_eq!(
+            recovery_directives_for_kind("missing_event_gate", "reviewer"),
+            vec!["RD-EXECUTOR-RESEND-LIMIT".to_string()]
+        );
     }
 
     #[test]

@@ -323,4 +323,25 @@ if [ $ERRORS -gt 0 ]; then
   exit 1
 fi
 
+# 2026-06-28-003: runtime-recovery module coverage. The four detectors are
+# the executable contract of the plan; if any are renamed or removed the
+# script must fail so the docs/CI do not drift from the implementation.
+RECOVERY_RUNTIME_FUNCTIONS=(
+  "dedupe_stall_recovery_with_missing_event_gate"
+  "finalize_recovery_outcome_on_flapping"
+  "publish_loop_stalled_business_event"
+  "block_executor_resend_storm"
+)
+RECOVERY_MISSING=0
+for fn in "${RECOVERY_RUNTIME_FUNCTIONS[@]}"; do
+  if ! grep -Rq "pub fn ${fn}" "$REPO_ROOT/crates/ralph-core/src/recovery_runtime/"; then
+    echo "ERROR: recovery_runtime function '${fn}' not found in source" >&2
+    RECOVERY_MISSING=$((RECOVERY_MISSING + 1))
+  fi
+done
+if [ $RECOVERY_MISSING -gt 0 ]; then
+  echo "runtime-recovery module drift: $RECOVERY_MISSING function(s) missing" >&2
+  exit 1
+fi
+
 echo "CLI doc drift check passed"

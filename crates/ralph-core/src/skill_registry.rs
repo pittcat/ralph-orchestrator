@@ -36,6 +36,12 @@ const RALPH_TOOLS_WAVE_SKILL_RAW: &str = include_str!("../data/ralph-tools-wave.
 /// see plan 2026-06-25-001.
 const RALPH_TOOLS_CMDREF_SKILL_RAW: &str = include_str!("../data/ralph-tools-cmdref.md");
 
+/// Built-in ralph-tools-recovery-directives skill content (runtime recovery
+/// directives auto-injected on `task.resume`). See plan
+/// 2026-06-28-003-feat-ralph-tools-pitfalls-and-injection-hardening-plan.md.
+const RALPH_TOOLS_RECOVERY_DIRECTIVES_SKILL_RAW: &str =
+    include_str!("../data/ralph-tools-recovery-directives.md");
+
 /// Registry of all available skills for the current loop.
 pub struct SkillRegistry {
     /// All skills indexed by name.
@@ -93,6 +99,12 @@ impl SkillRegistry {
         self.register_builtin("ralph-tools-emit", RALPH_TOOLS_EMIT_SKILL_RAW)?;
         self.register_builtin("ralph-tools-wave", RALPH_TOOLS_WAVE_SKILL_RAW)?;
         self.register_builtin("ralph-tools-cmdref", RALPH_TOOLS_CMDREF_SKILL_RAW)?;
+        // Auto-injected on task.resume events that carry recovery_directives.
+        // See plan 2026-06-28-003.
+        self.register_builtin(
+            "ralph-tools-recovery-directives",
+            RALPH_TOOLS_RECOVERY_DIRECTIVES_SKILL_RAW,
+        )?;
         Ok(())
     }
 
@@ -385,6 +397,7 @@ mod tests {
         assert!(registry.get("ralph-tools-emit").is_some());
         assert!(registry.get("ralph-tools-wave").is_some());
         assert!(registry.get("ralph-tools-cmdref").is_some());
+        assert!(registry.get("ralph-tools-recovery-directives").is_some());
     }
 
     #[test]
