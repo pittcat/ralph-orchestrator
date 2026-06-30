@@ -761,4 +761,73 @@ mod tests {
                 .unwrap_or_else(|e| panic!("legacy task id '{}' should not be rejected: {e}", loose_id));
         }
     }
+
+    // 2026-06-30 P0-3 (primary-140433 diagnosis):
+    //
+    // The fixture for this run records `task_id="task-1782830434-abcd"`
+    // emitted by the coordinator fix-02 path. That id matches the
+    // schema shape (`task-{ts}-{4hex}`), so the projection boundary
+    // accepts it even though the agent hand-wrote the unix_ts plus
+    // a hex suffix (`1782830434` + `abcd`) instead of using the
+    // canonical `Task::fix_unit_task_id` helper (see
+    // `crates/ralph-core/src/task.rs::fix_unit_task_id`).
+    //
+    // The runtime cannot differentiate the hand-written shape-1 id
+    // from one derived through the helper today — both match the
+    // lenient validator. This test pins two invariants:
+    //  1. The hand-written fixture id is observed by the lenient
+    //     validator (shape-1 acceptance is real, not theoretical),
+    //     so any future runtime tightening that rejects it must be
+    //     explicit, not implicit.
+    //  2. The helper output is always accepted across unicode plan
+    //     names and arbitrary ts / no-ts inputs.
+    //
+    // If the runtime is later tightened so that fix-unit `task_id`
+    // must be derived through `Task::fix_unit_task_id` (a future
+    // P0-3 follow-up), this test should be updated to assert the
+    // rejection for the hand-written id while keeping the helper
+    // acceptance assertion.
+    #[test]
+    fn p0_3_fix_unit_pinned_to_fix_unit_task_id_helper() {
+        // 1. The hand-written id from the fixture passes through
+        //    the lenient schema validator today. The runtime cannot
+        //    differentiate shape-1 from helper-derived ids.
+        let hand_written = "task-1782830434-abcd";
+        assert!(
+            is_valid_task_id_format(hand_written),
+            "shape-1 ids pass the lenient validator today; runtime \
+             cannot differentiate hand-written from helper-derived. \
+             Any future tightening must explicitly reject this id.",
+        );
+
+        // 2. The helper output is always accepted, including for
+        //    unicode plan names and arbitrary ts / no-ts.
+        for (plan, fr, ui, ts) in [
+            ("ce-executor:2026-06-20-001-feat-python-sort", 0, 1, Some(0x1782_8312_3456u64)),
+            ("simple-plan", 0, 1, None),
+            ("中文方案", 2, 3, Some(0xdead_beef)),
+        ] {
+            let id = Task::fix_unit_task_id(plan, fr, ui, ts);
+            assert!(
+                is_valid_task_id_format(&id),
+                "Task::fix_unit_task_id output must always pass \
+                 the lenient validator: {id} (plan={plan})",
+            );
+        }
+
+        // 3. The fix-unit key embeds `fix-{NN}`, so the fix-unit
+        //    path of `project_ensure_task` is exercised by any
+        //    payload whose `task_key` matches that shape.
+        let fix_unit_key = "ce-executor:p:fix-02:u2";
+        assert!(
+            is_fix_unit_key(fix_unit_key),
+            "the fixture-style fix-unit key must register as fix-unit",
+        );
+
+        // 4. A helper-derived id and the hand-written id differ in
+        //    structure — the prompt should route the coordinator
+        //    through the helper instead of copy-pasting a unix_ts.
+        let good_id = Task::fix_unit_task_id("p", 0, 2, Some(0x1782_8304_34u64));
+        assert_ne!(good_id, hand_written);
+    }
 }
