@@ -1557,7 +1557,65 @@ hats:
 
       **Empty-diff ownership (HARD RULE — 2026-06-17-004 plan U1, R3)**: the empty-diff path closes the sequence with `review.dimensions.complete`. `review.complete` is owned exclusively by `review-synthesizer`; the synthesizer will read the `dimensions` array you emit (every row `status: done` and `findings_file: null`), see no findings, and emit `review.complete` with `fix_plan_file: "null"` and `verdict: "pass"`. The topic-deny rules + `publishes` scope both reject `review-coordinator → review.complete` at the CLI precheck. When in doubt, choose walk.
 
-      Write shared diff to `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch` (filename retained from the wave preset for compat with downstream tooling).
+      Write shared review diff to `.agents/scratchpad/ce-executor/{plan_name}/review-diff.patch` (file renamed from `wave-diff.patch`; the old wave-preset name no longer matches this preset's review phase). Write the file **only on the initial `review.start` trigger**, NOT on each `review.dimension.done`/`failed` walk continuation. Sidecar metadata (diff_base, diff_base_fallback, generated_at) goes to `.agents/scratchpad/ce-executor/{plan_name}/review-diff.patch.meta` — keep the patch file body clean so `git apply --check` succeeds.
+
+      Data sources (use the same sources Scope Detection uses, do NOT re-derive from `## ORCHESTRATOR CONTEXT` block — that block is rendered by state projector from these same sources):
+      - `TRIGGER` — read the most recent event's `.topic` from the events file: `jq -r '.topic' "$(ls -t .ralph/events-*.jsonl | grep -v history | head -1 | xargs tail -1)"`. The first `review.start` walk; `review.dimension.done` and `review.dimension.failed` are continuations.
+      - `DIFF_BASE` — read from the persisted baseline file: `cat .ralph/agent/plan-baseline-prompt-*.sha`. This is the same value the `## ORCHESTRATOR CONTEXT` block's `plan_baseline_sha` field renders from; reading the file directly avoids the prompt-text grep. If the file is missing/empty, fall back to `loop_start_sha` from `.ralph/loops.json` → `git log -1 --format=%H .ralph` (or `git rev-parse HEAD~1` if no .ralph commits), then `origin/main` → `origin/master` → `main` → `master` → `HEAD~1` (last-resort chain).
+      - `DIFF_BASE_FALLBACK` — empty string when `DIFF_BASE` came from `plan-baseline-prompt-*.sha`; set to `"no_plan_baseline_sha"` if it came from `loop_start_sha`; set to `"no_loop_start_sha"` if it came from the base detection chain. (Mirror Scope Detection's `diff_base_fallback` tag exactly.)
+      - `PLAN_NAME` — read from `.ralph/loops.json` (no `plan_name` field there; derive by matching the loop's prompt text to a plan file basename) OR scan `.agents/scratchpad/ce-executor/*/context.md` for one whose `start_sha` matches `DIFF_BASE`. The latter is more reliable.
+
+      Steps (run as one shell block on `review.start` only — skip entirely on walk continuations):
+
+      ```bash
+      # 1. Trigger guard — skip on walk continuations
+      if [ "$TRIGGER" != "review.start" ]; then
+        : # walk continuation: review-diff.patch already exists from review.start
+      else
+        # 2. Sanity: DIFF_BASE must resolve to a real commit
+        if ! git cat-file -t "$DIFF_BASE" >/dev/null 2>&1; then
+          echo "FATAL: DIFF_BASE=$DIFF_BASE is not a valid git commit; aborting" >&2
+          exit 1
+        fi
+
+        # 3. Write patch body (clean — no header comments, must be git-apply-parseable)
+        REVIEW_DIFF_PATH=".agents/scratchpad/ce-executor/${PLAN_NAME}/review-diff.patch"
+        REVIEW_META_PATH="${REVIEW_DIFF_PATH}.meta"
+        mkdir -p "$(dirname "$REVIEW_DIFF_PATH")"
+        TMP_DIFF="${REVIEW_DIFF_PATH}.tmp.$$"
+
+        # 3a. Tracked diff (with rename detection)
+        git diff -U10 --find-renames=50% --find-copies-harder "${DIFF_BASE}"..HEAD > "$TMP_DIFF" 2>/dev/null || true
+
+        # 3b. Untracked files (NUL-delimited to handle spaces in filenames)
+        while IFS= read -r -d '' f; do
+          git diff --no-index --no-color -- /dev/null "$f" 2>/dev/null >> "$TMP_DIFF" || true
+        done < <(git ls-files --others --exclude-standard -z)
+
+        # 3c. Atomic rename
+        mv "$TMP_DIFF" "$REVIEW_DIFF_PATH"
+
+        # 4. Write sidecar metadata (kept out of the patch so git apply --check stays clean)
+        {
+          echo "diff_base: ${DIFF_BASE}"
+          echo "diff_base_fallback: ${DIFF_BASE_FALLBACK:-}"
+          echo "generated_at: $(date -u +%FT%TZ)"
+          echo "generator: review-coordinator (ce-executor-serial preset)"
+        } > "$REVIEW_META_PATH"
+
+        # 5. Sanity: file must exist and be non-empty when there are changes
+        if [ ! -s "$REVIEW_DIFF_PATH" ] && [ -z "$(git ls-files --others --exclude-standard)" ] && [ "$(git rev-list --count "${DIFF_BASE}"..HEAD 2>/dev/null)" = "0" ]; then
+          : # empty-diff fast path: this file will be ignored by dimension-reviewer
+        fi
+      fi
+      ```
+
+      Sanity check before emitting the first `review.dimension.ready`:
+      - `test -s "$REVIEW_DIFF_PATH" || test -s "$REVIEW_META_PATH"` — at least one of them must exist (or you're on the empty-diff fast path)
+      - `git apply --check "$REVIEW_DIFF_PATH"` should exit 0 (only on non-empty diffs)
+      - The `DIFF_BASE` used above MUST equal the `diff_base` field in the `review.dimension.ready` payload you are about to emit (since both come from the same disk file, this holds by construction)
+
+      The downstream `dimension-reviewer` reads `review-diff.patch` as a fallback; the primary diff source is the `changed_files` / `diff_base` / `intent_summary` fields in the per-dimension payload. The `.meta` sidecar lets readers recover scope even when they only have the directory listing, not the payload.
 
       ### Intent Discovery
       - From branch name, commit messages (`git log --oneline ${BASE}..HEAD`), plan.md
@@ -1859,7 +1917,7 @@ hats:
       ### Read Shared Context
       - From event payload: `dimension`, `focus`, `depth`, `diff_base`, `intent_summary`, `changed_files`, `plan_name`, `task_id`, `task_key`, `step`
       - Use `plan_name` from payload to resolve path `{plan_name}` below
-      - Read shared diff: `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch`
+      - Read shared diff: `.agents/scratchpad/ce-executor/{plan_name}/review-diff.patch` (and sidecar `.meta` for scope info)
       - Read `findings.md` (existing, if any) for pre-existing issues
       - Read `plan.md` and `context.md` for plan context
 
