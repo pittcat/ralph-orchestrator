@@ -1477,7 +1477,6 @@ impl LoopState {
                 | "event.completion.ignored"
                 | "event.isolation.boundary_violation"
                 | "event.step_handoff.gate_rejected"
-                | "human.guidance"
                 | "loop.cancel"
                 | "build.task.abandoned"
         ) || topic.ends_with(".exhausted")

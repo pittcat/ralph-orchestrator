@@ -11,7 +11,9 @@ Ralph's security-related utilities are distributed across crates. Common safegua
 > **Note:** Earlier versions of this page documented secret-masking and HTML-escape
 > helpers that were tied to the human-in-the-loop channel. That channel is retired;
 > the recovery story now lives in `docs/guide/runtime-diagnosis.md` and the
-> `human.guidance` / `task.resume` event topics.
+> `task.resume` event topic. (`human.guidance` was removed by plan
+> 2026-06-28-005; the recovery story is now `task.resume` plus
+> `TerminationReason::RecoveryExhausted`.)
 
 ## Safe CLI Execution
 

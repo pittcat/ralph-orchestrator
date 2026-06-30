@@ -95,11 +95,6 @@ pub struct DriftEngine {
     config: Arc<RuntimeDiagnosisConfig>,
     /// Iteration stamped onto snapshots by the EventBus observer.
     iteration: Arc<AtomicU32>,
-    /// Last iteration a `human.guidance` event was published
-    /// for a `Warning`-level Final hint. The engine only re-fires
-    /// when the iteration advances, so the same hint does not
-    /// spam the bus. `u32::MAX` means "never published".
-    last_guidance_iteration: u32,
 }
 
 impl DriftEngine {
@@ -116,7 +111,6 @@ impl DriftEngine {
             detector,
             config,
             iteration: Arc::new(AtomicU32::new(0)),
-            last_guidance_iteration: u32::MAX,
         }
     }
 
@@ -137,7 +131,6 @@ impl DriftEngine {
             detector,
             config,
             iteration: Arc::new(AtomicU32::new(0)),
-            last_guidance_iteration: u32::MAX,
         }
     }
 
@@ -379,12 +372,8 @@ impl DriftEngine {
     /// |---|---|---|
     /// | `Final` | any | Promote to `TerminationReason::RecoveryExhausted` — the loop terminates (2026-06-28-002 U2) |
     /// | non-Final | `Critical` / `Error` | Promote to `TerminationReason::RecoveryExhausted` — the loop terminates |
-    /// | non-Final | `Warning` | Emit a `human.guidance` event so the operator can intervene — the loop continues |
+    /// | non-Final | `Warning` | Soft alert only — the loop continues (no `human.guidance` emit; the topic was removed by plan 2026-06-28-005) |
     /// | non-Final | `Info` | No active action — the soft alert is enough |
-    ///
-    /// Callers should always pair this with
-    /// [`Self::check_final_human_guidance`] so the Warning path is
-    /// not silently dropped.
     #[must_use]
     pub fn check_termination_hint(&self, event_loop: &mut EventLoop) -> Option<TerminationReason> {
         if !self.config.enabled {
@@ -464,11 +453,10 @@ impl DriftEngine {
                 })
             }
             // Warning is intentionally NOT promoted here — the
-            // engine publishes a `human.guidance` event instead
-            // and lets the loop continue under operator
-            // supervision. The runner checks
-            // `check_final_human_guidance` for the Warning
-            // branch.
+            // engine silently records the soft alert and lets the
+            // loop continue. `human.guidance` no longer exists
+            // (plan 2026-06-28-005), so the Warning non-Final
+            // branch is a no-op.
             DiagnosisSeverity::Warning | DiagnosisSeverity::Info => None,
         }
     }
@@ -516,65 +504,6 @@ impl DriftEngine {
         // Touch Topic so the import isn't flagged unused on
         // platforms that drop the alias.
         let _ = Topic::from("plan.blocked");
-    }
-
-    /// Inspect the responder's most recent `TerminationHint` and,
-    /// when the severity is `Warning` AND the engine has not
-    /// already published a `human.guidance` for this hint, publish
-    /// one on the bus. The hint is intentionally NOT consumed: the
-    /// loop must keep running under supervision and the next
-    /// iteration's `finalize_recovery_diagnosis` will still see
-    /// it.
-    ///
-    /// Returns `true` when a `human.guidance` event was published
-    /// this call. The runner should call this once per iteration
-    /// after [`Self::check_termination_hint`]. The engine keeps an
-    /// internal monotonic counter (matched to the iteration
-    /// number) so it does not re-fire the same guidance every
-    /// iteration once the hint is stable.
-    pub fn check_final_human_guidance(&mut self, event_loop: &mut EventLoop) -> bool {
-        if !self.config.enabled {
-            return false;
-        }
-        // Unit 3 (2026-06-16-002 plan): during the coordinator
-        // bootstrap window we must NOT publish any
-        // `human.guidance` event.  The build_prompt guard already
-        // drops the events on the consumer side, but emitting
-        // them at all would inflate the bus for downstream
-        // readers.  Skip the call entirely while
-        // `in_bootstrap_phase()` is true; the Warning hint stays
-        // in the responder and will fire naturally once
-        // `bootstrap_complete` flips.
-        if event_loop.in_bootstrap_phase() {
-            return false;
-        }
-        let Some(hint) = event_loop.recovery_responder().peek_termination_hint() else {
-            return false;
-        };
-        // Only Warning triggers a guidance event; Error/Critical
-        // terminate the loop via `check_termination_hint`, and
-        // Info is silent. The boundary matches the table in
-        // `check_termination_hint`'s doc.
-        if !matches!(hint.severity, DiagnosisSeverity::Warning) {
-            return false;
-        }
-        let current_iteration = event_loop.state().iteration;
-        if self.last_guidance_iteration == current_iteration {
-            return false;
-        }
-        let retry_key = hint.retry_key.clone().unwrap_or_default();
-        let reason = hint.reason.clone();
-        let payload = format!(
-            "RECOVERY-FINAL-WARNING\nretry_key={retry_key}\nreason={reason}\niteration={current_iteration}\n"
-        );
-        // `human.guidance` is the in-band recovery topic. The
-        // bus accepts it without targeting a specific hat; the
-        // orchestrator's recovery responder routes it to the
-        // targeted hat.
-        let event = Event::new("human.guidance", payload);
-        event_loop.bus().publish(event);
-        self.last_guidance_iteration = current_iteration;
-        true
     }
 
     /// Configuration handle. Useful for tests and for the runner
@@ -941,10 +870,9 @@ mod tests {
         // No termination hint surfaced.
         let hint = event_loop.recovery_responder().peek_termination_hint();
         assert!(hint.is_none(), "Soft must not produce a hint");
-        // No human guidance published for Soft.
-        let published = engine.check_final_human_guidance(&mut event_loop);
-        assert!(!published, "Soft must not publish human.guidance");
-        // No termination reason promoted.
+        // No human guidance published for Soft (plan
+        // 2026-06-28-005 removed the soft guidance path; assert
+        // no soft action is emitted).
         let term = engine.check_termination_hint(&mut event_loop);
         assert!(term.is_none(), "Soft must not terminate the loop");
     }
@@ -1048,11 +976,11 @@ mod tests {
             ),
             "Error Final hint must become RecoveryExhausted on Phase 2, got: {term:?}"
         );
-        // And it must NOT publish a human.guidance (the
-        // guidance is the Warning branch, not the Error
-        // branch).
-        let published = engine.check_final_human_guidance(&mut event_loop);
-        assert!(!published, "Error must not produce human.guidance");
+        // Error does not produce a `human.guidance` soft reminder
+        // (plan 2026-06-28-005 removed that path); the warning
+        // branch was the only caller.
+        let published = engine.check_termination_hint(&mut event_loop);
+        assert!(published.is_none(), "Error must not produce soft alerts");
     }
 
     /// P0-3 (plan 2026-06-29-006): when the responder promotes
@@ -1199,11 +1127,16 @@ mod tests {
         );
     }
 
-    /// Lifecycle 3b: FINAL Warning produces `human.guidance`,
-    /// not termination. The loop continues under operator
-    /// supervision.
-    #[test]
-    fn lifecycle_final_warning_publishes_human_guidance() {
+    /// Lifecycle 3b: FINAL Warning terminates the loop directly.
+///
+/// Pre-2026-06-28-002 the Warning branch published a
+/// `human.guidance` soft reminder and let the loop continue.
+/// That path was removed by plan 2026-06-28-005; the Warning
+/// Final hint now terminates the loop via
+/// `TerminationReason::RecoveryExhausted`, with no `human.guidance`
+/// emit (the topic no longer exists).
+#[test]
+fn lifecycle_final_warning_terminates_loop() {
         let diag = diagnosis_config(true, 1, 1);
         let config = make_config_with_diagnosis(Arc::clone(&diag));
         let mut event_loop = crate::event_loop::EventLoop::new(config);
@@ -1215,10 +1148,10 @@ mod tests {
         );
         engine.begin_iteration(&mut event_loop, 1);
         event_loop.set_iteration_for_test(1);
-        // Unit 3 (2026-06-16-002 plan): `check_final_human_guidance`
-        // short-circuits while `in_bootstrap_phase()` is true so the
-        // bootstrap window is human-guidance free.  Flip the gate
-        // here so the test exercises the post-bootstrap path.
+        // The bootstrap gate previously short-circuited the
+        // soft guidance path; that gate is moot now that the
+        // path itself is gone. Flip the flag so the responder
+        // is allowed to fire.
         event_loop.state_mut().bootstrap_complete = true;
 
         let env = envelope_for(
@@ -1230,12 +1163,9 @@ mod tests {
             DiagnosisSource::StallRecovery,
         );
         let _ = event_loop.recovery_responder_mut().record_finding(&env, 1);
-        // 2026-06-28-002 U2: Final level now terminates the loop
-        // regardless of severity. The Warning branch keeps its
-        // human.guidance side-effect so the operator sees the
-        // reason before the loop exits, but the loop is no longer
-        // allowed to drift forever on Warning hints.
-        // P0-3 (2026-06-29-006 U7): Phase 1 defers; Phase 2
+        // 2026-06-28-002 U2: Final level terminates the loop
+        // regardless of severity. P0-3 (2026-06-29-006 U7):
+        // Phase 1 defers and emits `plan.blocked`; Phase 2
         // returns `RecoveryExhausted`.
         let _ = engine.check_termination_hint(&mut event_loop);
         let term = engine.check_termination_hint(&mut event_loop);
@@ -1246,14 +1176,16 @@ mod tests {
             ),
             "U2: Warning Final hint must promote to RecoveryExhausted, got: {term:?}"
         );
-        // It ALSO publishes human.guidance so the operator can
-        // see the reason in the bus before the loop terminates.
-        let published = engine.check_final_human_guidance(&mut event_loop);
-        assert!(published, "Warning Final must publish human.guidance");
-        // A second call in the same iteration is a no-op so
-        // the bus is not spammed.
-        let published2 = engine.check_final_human_guidance(&mut event_loop);
-        assert!(!published2, "same iteration must not re-publish");
+        // No `human.guidance` event on the bus: the topic was
+        // deleted in plan 2026-06-28-005.
+        use ralph_proto::HatId;
+        let bus_events = event_loop.bus().take_pending(&HatId::from("ralph"));
+        assert!(
+            !bus_events
+                .iter()
+                .any(|e| e.topic.as_str() == "human.guidance"),
+            "human.guidance topic must not appear in the bus after removal"
+        );
     }
 
     /// 2026-06-28-002 U2: a Warning-severity Final hint MUST
@@ -1310,6 +1242,11 @@ mod tests {
     /// takes (Critical → fast trip, Warning → guidance + trip,
     /// Info → log + trip). All three severities share the same
     /// Final-level termination semantics.
+    ///
+    /// Note (2026-06-28-005): the "guidance + trip" branch
+    /// referenced above no longer emits `human.guidance` (the
+    /// topic was removed). The trip itself is still in place;
+    /// the guidance emit was the only thing that disappeared.
     #[test]
     fn u2_final_info_hint_terminates_loop() {
         let diag = diagnosis_config(true, 1, 1);
@@ -1348,53 +1285,7 @@ mod tests {
         );
     }
 
-    /// Unit 3 (2026-06-16-002 plan) companion test:
-    /// `check_final_human_guidance` MUST return `false` while
-    /// the loop is still in the bootstrap window.  The Warning
-    /// hint stays in the responder (and the operator will see
-    /// it once `bootstrap_complete` flips on the next iteration),
-    /// but we MUST NOT publish a `human.guidance` event into
-    /// the bus during the bootstrap window — the coordinator's
-    /// first prompt is supposed to be guidance-free so the
-    /// first legal handoff wins over stale human input.
-    #[test]
-    fn lifecycle_final_warning_suppressed_during_bootstrap() {
-        let diag = diagnosis_config(true, 1, 1);
-        let config = make_config_with_diagnosis(Arc::clone(&diag));
-        let mut event_loop = crate::event_loop::EventLoop::new(config);
-        event_loop.initialize("lifecycle_final_warning_bootstrap");
-        // Sanity: we ARE in the bootstrap window — no need to
-        // flip any flag here.
-        assert!(event_loop.in_bootstrap_phase());
-        let mut engine = DriftEngine::enabled(
-            Arc::clone(&diag),
-            RequiredFields::new(),
-            DeclaredEdges::new(),
-        );
-        engine.begin_iteration(&mut event_loop, 1);
-        event_loop.set_iteration_for_test(1);
-
-        let env = envelope_for(
-            "k:ralph:*:stall:*",
-            1,
-            DiagnosisSeverity::Warning,
-            false,
-            None,
-            DiagnosisSource::StallRecovery,
-        );
-        let _ = event_loop.recovery_responder_mut().record_finding(&env, 1);
-        // The bootstrap gate MUST suppress the warning
-        // publication.  The Warning hint stays in the
-        // responder; we only check that nothing has been
-        // published to the bus.
-        let published = engine.check_final_human_guidance(&mut event_loop);
-        assert!(
-            !published,
-            "bootstrap window MUST suppress drift Warning -> human.guidance; got published={published}"
-        );
-    }
-
-    /// Lifecycle 4: RECOVERED.
+    // Lifecycle 4: RECOVERED.
     ///
     /// A finding on iteration N is NOT marked Recovered on the
     /// same iteration (grace period). On iteration N+1, when

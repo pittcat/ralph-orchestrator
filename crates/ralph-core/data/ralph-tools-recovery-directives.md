@@ -37,7 +37,7 @@ metadata:
 
 **行为规范：**
 - If no expected event (`test.passed`, `review.*.done`, etc.) arrives within approximately 30 seconds, yield instead of repeating the same emit.
-- Emit `human.guidance` or `loop.stalled` with a concise reason and the last attempted action.
+- Emit `loop.stalled` with a concise reason and the last attempted action. `human.guidance` is no longer a valid emit target (plan 2026-06-28-005).
 - Then wait for the orchestrator or operator to route the next step.
 
 **禁止：** 在 stall 状态下无限循环重发同一事件。

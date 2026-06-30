@@ -33,7 +33,6 @@ pub const RALPH_CONTROL_TOPICS: &[&str] = &[
     "LOOP_COMPLETE",
     "loop.cancel",
     "loop.start",
-    "human.guidance",
     // U1: keep parity with `is_jsonl_control_topic` so the ralph-pseudo-hat
     // guard (origin guard and CLI emit guard) agrees on what `ralph` is
     // allowed to publish. `task.resume` is the recovery signal the loop
@@ -78,9 +77,14 @@ pub(crate) fn is_jsonl_control_topic(topic: &str, cancellation_topic: &str) -> b
 pub fn is_orchestrator_control_topic(topic: &str, cancellation_topic: &str) -> bool {
     let topic_lc = topic.to_ascii_lowercase();
     let cancellation_lc = cancellation_topic.to_ascii_lowercase();
+    // 2026-06-28-005: human.guidance was removed from this list
+    // together with the topic. loop.resume (U7b deterministic
+    // resume boot topic) is now recognised here too so callers
+    // that pass loop.resume as their `cancellation_topic`-style
+    // boot signal get the same allowlist behaviour.
     matches!(
         topic_lc.as_str(),
-        "human.guidance" | "task.resume" | "build.task.abandoned"
+        "task.resume" | "loop.resume" | "build.task.abandoned"
     ) || (!cancellation_lc.is_empty() && topic_lc == cancellation_lc)
 }
 
@@ -617,7 +621,11 @@ hats:
     publishes: ["work.done"]
 "#,
         );
-        let event = make_event("human.guidance", None);
+        // 2026-06-28-005: human.guidance was a control topic
+        // whose ralph-pseudo-hat allowlist this assertion
+        // exercised. The topic is gone; the equivalent positive
+        // case now is task.resume (still a control topic).
+        let event = make_event("task.resume", None);
         assert_eq!(
             validate_event_origin(&event, &registry, "", ""),
             OriginCheck::Accepted
@@ -1029,7 +1037,7 @@ hats:
     fn test_p1_2_control_topic_case_insensitive_match() {
         // Lowercase baseline (no change in behavior).
         assert!(is_orchestrator_control_topic(
-            "human.guidance",
+            "loop.resume",
             "loop.cancel"
         ));
         assert!(is_orchestrator_control_topic("task.resume", "loop.cancel"));
@@ -1040,7 +1048,7 @@ hats:
 
         // Uppercase — same control topics, different case.
         assert!(is_orchestrator_control_topic(
-            "Human.Guidance",
+            "Loop.Resume",
             "loop.cancel"
         ));
         assert!(is_orchestrator_control_topic("TASK.RESUME", "loop.cancel"));
@@ -1198,7 +1206,7 @@ hats:
     #[test]
     fn u5_control_topic_passes_without_provenance() {
         let registry = two_hat_registry();
-        let event = make_event("human.guidance", None);
+        let event = make_event("loop.resume", None);
         assert!(!is_anonymous_business_topic(
             &event,
             &registry,

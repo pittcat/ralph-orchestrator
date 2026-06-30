@@ -36,10 +36,6 @@ pub const LOOP_COMPLETE: &str = "loop.complete";
 /// Orchestrator control topic used to cancel the loop.
 pub const LOOP_CANCEL: &str = "loop.cancel";
 
-/// Orchestrator control topic used to inject a human-facing
-/// guidance message.
-pub const HUMAN_GUIDANCE: &str = "human.guidance";
-
 /// Orchestrator diagnostic topic published whenever a boundary
 /// (origin / scope / pseudo-hat) gate fires.
 pub const EVENT_ISOLATION_BOUNDARY_VIOLATION: &str = "event.isolation.boundary_violation";
@@ -49,11 +45,15 @@ pub const EVENT_ISOLATION_BOUNDARY_VIOLATION: &str = "event.isolation.boundary_v
 /// in `is_orchestrator_control_topic` so callers that don't
 /// have access to the orchestrator config can still test the
 /// topic name cheaply.
+///
+/// 2026-06-28-005: the `HUMAN_GUIDANCE` constant was removed
+/// together with the topic itself. The match arm for it is
+/// gone; `human.guidance` strings that pre-date the removal
+/// still return `false` from this function (no longer
+/// recognised as a control topic, which is correct — the
+/// topic does not exist).
 pub fn is_orchestrator_control(topic: &str) -> bool {
-    matches!(
-        topic,
-        LOOP_RESUME | TASK_RESUME | LOOP_COMPLETE | LOOP_CANCEL | HUMAN_GUIDANCE
-    )
+    matches!(topic, LOOP_RESUME | TASK_RESUME | LOOP_COMPLETE | LOOP_CANCEL)
 }
 
 #[cfg(test)]
@@ -76,7 +76,10 @@ mod tests {
         assert!(is_orchestrator_control(TASK_RESUME));
         assert!(is_orchestrator_control(LOOP_COMPLETE));
         assert!(is_orchestrator_control(LOOP_CANCEL));
-        assert!(is_orchestrator_control(HUMAN_GUIDANCE));
+        // 2026-06-28-005: human.guidance is no longer a control
+        // topic; assert the negative case so the constant does
+        // not silently come back.
+        assert!(!is_orchestrator_control("human.guidance"));
         assert!(!is_orchestrator_control("work.done"));
         assert!(!is_orchestrator_control("loop.suspend"));
     }

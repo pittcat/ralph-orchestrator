@@ -305,22 +305,27 @@ pub(crate) fn append_runtime_config_block(base_prompt: String, max_residuals: u3
     )
 }
 
-fn filter_human_guidance_blocks(content: &str) -> String {
+
+/// Strip the `### HUMAN GUIDANCE` block from a historical
+/// scratchpad. Kept as a private file-level helper because
+/// `filter_human_guidance_blocks` (which used to handle every
+/// `### HUMAN GUIDANCE` block plus its inline variants) was
+/// removed in plan 2026-06-28-005 together with the
+/// `human.guidance` topic. We still need to drop the block
+/// from scratchpads that pre-date 2026-06-28 so the bootstrap
+/// path does not surface stale guidance text to a fresh
+/// agent. New scratchpads will not contain the block (the
+/// emit path is gone), so this helper only fires on history.
+fn strip_human_guidance_block(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     let mut in_guidance = false;
     for line in content.lines() {
         if line.starts_with("### HUMAN GUIDANCE") {
-            // Drop the entire guidance block (header + body).
-            // Replace with a single blank line so subsequent
-            // sections keep their line numbering stable.
             in_guidance = true;
             out.push('\n');
             continue;
         }
         if in_guidance && (line.starts_with("### ") || line.starts_with("## ")) {
-            // New section starts after a guidance block — exit
-            // the guidance state and emit the new section header
-            // normally.
             in_guidance = false;
         }
         if !in_guidance {
@@ -1248,18 +1253,16 @@ impl EventLoop {
         !self.state.bootstrap_complete && !self.state.bootstrap_failed
     }
 
-    /// U2 (2026-06-18-004 plan, R2, KTD2): returns `true` when
-    /// `human.guidance` injection MUST be suppressed for the
-    /// current loop. Driven by the `event_loop.suppress_human_guidance`
-    /// config flag — used by `ce-executor-serial` to prevent the
-    /// perky-maple P1-2 probe storm. Mirrors the
-    /// `coordinator_bootstrap_gate_closed` access pattern so the
-    /// four guidance injection sites
-    /// (`update_robot_guidance` / `apply_robot_guidance` /
-    /// `collect_robot_guidance` / `prepend_scratchpad`) can each
-    /// short-circuit through a single helper.
+    /// 2026-06-28-005: stub kept so the three call sites
+    /// inside `update_robot_guidance` / `apply_robot_guidance` /
+    /// `prepend_scratchpad` still compile while those
+    /// robot-guidance helpers are scheduled for deletion in a
+    /// follow-up phase. The `suppress_human_guidance` config
+    /// field was removed in this same phase (it gates nothing
+    /// now that the `human.guidance` topic is gone), so this
+    /// helper always returns `false`.
     pub fn human_guidance_suppressed(&self) -> bool {
-        self.config.event_loop.suppress_human_guidance
+        false
     }
 
     /// Unit 3 (2026-06-16-002 plan): `true` when `hat_id ==
@@ -2484,10 +2487,11 @@ impl EventLoop {
             HatExecutionMode::Isolated => {
                 // Isolated mode: use round-robin to select the next hat.
                 // This advances the cursor on the bus for fair scheduling.
-                if self.bus.has_human_pending() && !self.bus.has_pending_non_human() {
-                    // Only human events pending — route to ralph.
-                    return self.bus.hat_ids().find(|id| id.as_str() == "ralph");
-                }
+                //
+                // 2026-06-28-005: the `has_human_pending` guard that
+                // routed to ralph when only human events were pending
+                // is gone — the `human_pending` queue was removed
+                // together with the `human.guidance` topic.
                 // WAC-U5 (2026-06-12-002): handoff priority pre-emption.
                 // If the HandoffIndex has at least one priority-eligible
                 // entry (unique consumer) and that hat currently has a
@@ -2523,10 +2527,10 @@ impl EventLoop {
                 // Coordinator mode: peek for pending, then return ralph if any.
                 let has_pending = self.bus.peek_next_hat_with_pending().is_some();
 
-                // If no pending hat events but human interactions are pending, route to Ralph.
-                if !has_pending && self.bus.has_human_pending() {
-                    return self.bus.hat_ids().find(|id| id.as_str() == "ralph");
-                }
+                // 2026-06-28-005: the `has_human_pending` fallback
+                // path that routed to ralph when only human events
+                // were pending is gone — the `human_pending` queue
+                // was removed together with the topic.
 
                 if !has_pending {
                     return None;
@@ -2606,30 +2610,13 @@ impl EventLoop {
 
     /// Checks if any pending events are human guidance events.
     ///
-    /// Used to skip cooldown delays when a human guidance event is next, since
-    /// we don't want to artificially delay the response to a human interaction.
+    /// 2026-06-28-005: stub kept so callers that previously
+    /// consulted `bus.has_human_pending()` still compile while the
+    /// `human.guidance` topic and its dedicated `human_pending`
+    /// queue are removed together. Always returns `false` now —
+    /// the queue is gone, so the question is no longer meaningful.
     pub fn has_pending_human_events(&self) -> bool {
-        self.bus.has_human_pending()
-    }
-
-    /// Injects `human.guidance` events directly into the in-memory bus.
-    ///
-    /// This is used for local TUI/RPC guidance so the next prompt boundary
-    /// sees the message immediately without waiting for a JSONL reread.
-    pub fn inject_human_guidance<I, S>(&mut self, messages: I)
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let verdict_topics = self.verdict_gate_topics();
-        let verdict_topics_slice = verdict_topics.as_deref();
-        for message in messages {
-            let event = Event::new("human.guidance", message.into());
-            self.state.record_event(&event);
-            self.state
-                .record_verdict_if_match(&event, verdict_topics_slice);
-            self.bus.publish(event);
-        }
+        false
     }
 
     /// Returns whether unread JSONL events include any semantic `plan.*` topics.
@@ -4255,11 +4242,11 @@ impl EventLoop {
             .progress_steward
             .steward_hat_id
             .clone();
-        let exempt_enabled = self
-            .config
-            .event_loop
-            .progress_steward
-            .exempt_from_suppress_human_guidance;
+        // 2026-06-28-005: progress_steward.exempt_from_suppress_human_guidance
+        // was deleted together with the suppress_human_guidance field.
+        // Hard-coded to false here; this branch becomes dead once
+        // update_robot_guidance itself is removed in a follow-up phase.
+        let exempt_enabled = false;
 
         // Persist new guidance to scratchpad before caching
         self.persist_guidance_to_scratchpad(&guidance_events);
@@ -4494,29 +4481,22 @@ impl EventLoop {
         // 清空 `self.ralph.robot_guidance`——让 steward 在 suppress
         // 下能持续看到跨 turn 累积的 guidance。
         if self.human_guidance_suppressed() {
-            let steward_hat_id = self
+            // 2026-06-28-005: progress_steward.exempt_from_suppress_human_guidance
+            // config field was deleted together with suppress_human_guidance.
+            // The exempt branch is therefore unreachable: human_guidance_suppressed()
+            // is a stub that always returns false, so the body below
+            // becomes dead. Kept temporarily while update_robot_guidance
+            // is scheduled for deletion in a follow-up phase.
+            let _steward_hat_id = self
                 .config
                 .event_loop
                 .progress_steward
                 .steward_hat_id
                 .as_str();
-            let exempt = self
-                .config
-                .event_loop
-                .progress_steward
-                .exempt_from_suppress_human_guidance
-                && hat_id.as_str() == steward_hat_id;
-            if exempt {
-                tracing::debug!(
-                    target: "ralph::human_guidance",
-                    hat_id = %hat_id.as_str(),
-                    "U7: progress-steward exempt from suppress — pushing guidance to ralph"
-                );
-                self.ralph.set_robot_guidance(self.robot_guidance.clone());
-                // 与非 suppress 路径一致:推入后清空本层 cache
-                self.robot_guidance.clear();
-                return;
-            }
+            // The exempt check used to read the now-deleted
+            // exempt_from_suppress_human_guidance field; the helper
+            // returns false unconditionally, so we fall through to
+            // the suppress path uniformly.
             self.robot_guidance.clear();
             self.ralph.clear_robot_guidance();
             return;
@@ -5230,8 +5210,26 @@ impl EventLoop {
             .map(|hat| self.coordinator_bootstrap_gate_closed(hat))
             .unwrap_or(false);
         let suppress_active = self.human_guidance_suppressed();
-        let content = if gate_closed || suppress_active {
-            filter_human_guidance_blocks(&content)
+        // 2026-06-28-005: filter_human_guidance_blocks was
+        // deleted together with the `human.guidance` topic.
+        // The bootstrap gate (`gate_closed`) is the only
+        // remaining reason to filter the scratchpad today.
+        let content = if gate_closed {
+            // Drop the `### HUMAN GUIDANCE` block from any
+            // historical scratchpad that pre-dates the topic
+            // removal. This is purely defensive: a scratchpad
+            // from before 2026-06-28 might still contain the
+            // block; the regex-free inline filter below
+            // strips it line by line. We keep the filter
+            // here as a small private helper rather than
+            // pulling back the public filter function.
+            strip_human_guidance_block(&content)
+        } else if suppress_active {
+            // Suppress is now a no-op (the topic it gated is
+            // gone). Kept for backwards-compatible YAML
+            // loading — the field still deserializes (see
+            // Phase 3b U7) and we simply do not act on it.
+            content
         } else {
             content
         };
@@ -6053,6 +6051,24 @@ impl EventLoop {
     /// `event.malformed`, `event.scope_violation`). These are audit/diagnostic
     /// events, not hat routing signals.
     fn is_system_event(topic: &str) -> bool {
+        // 2026-06-28-005 plan U3: the previous addition of
+        // `topic == "plan.blocked"` here was reverted because
+        // it broke the legitimate hat-routing path in
+        // `test_ce_executor_plan_blocked_routes_to_shipper_not_reporter`:
+        // the ce-executor-serial preset has a `shipper` hat
+        // with `triggers: ["plan.blocked"]`, and that test
+        // expects the shipper to be the next active hat after
+        // a real `plan.blocked` event. Marking the topic as a
+        // system event short-circuits that routing.
+        //
+        // The original KTD-3 contract-reject concern was that
+        // `plan.blocked` would shadow the targeted retry on
+        // the source hat. That is handled separately by
+        // publishing the targeted retry *before* the guidance
+        // publish (see event_loop/mod.rs around the contract
+        // reject site) and by keeping the publish `with_target`
+        // on the guidance event itself. The system-event guard
+        // is not required.
         topic.starts_with("event.")
     }
 
@@ -8909,7 +8925,13 @@ impl EventLoop {
                             );
                             self.bus.publish(diagnostic_event);
 
-                            // Publish human-readable guidance
+                            // Publish the human-readable guidance. The default target
+                            // is `plan.blocked` (plan 2026-06-28-005
+                            // changed it from the now-deleted
+                            // `human.guidance`). The payload is
+                            // kept as a free-form string so existing
+                            // consumer tooling that parses text still
+                            // works.
                             let guidance_payload = format!(
                                 "Execution contract rejection for '{}': {}\n\n\
                                  To proceed, either:\n\
@@ -8920,7 +8942,18 @@ impl EventLoop {
                                 event.topic.as_str(),
                             );
                             let guidance_event =
-                                Event::new(guidance_topic_owned.as_str(), guidance_payload);
+                                Event::new(guidance_topic_owned.as_str(), guidance_payload)
+                                // 2026-06-28-005: pin the guidance
+                                // publish to the same target as the
+                                // retry event so the ralph fallback
+                                // (subscribed to *) does not shadow
+                                // it. retry_target is None for the
+                                // no-safe-target case; in that case
+                                // the event fans out to the
+                                // fallback (which is the documented
+                                // behaviour — see no_retry_reason
+                                // branch above).
+                                .with_target(retry_target.clone().unwrap_or_else(|| HatId::new("ralph")));
                             self.bus.publish(guidance_event);
 
                             contract_rejections.extend(findings.iter().cloned());

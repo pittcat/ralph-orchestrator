@@ -31,8 +31,8 @@ pub use json_rpc::{
 };
 pub use topic::Topic;
 pub use topics::{
-    EVENT_ISOLATION_BOUNDARY_VIOLATION, HUMAN_GUIDANCE, LOOP_CANCEL, LOOP_COMPLETE, LOOP_RESUME,
-    TASK_RESUME, is_orchestrator_control,
+    EVENT_ISOLATION_BOUNDARY_VIOLATION, LOOP_CANCEL, LOOP_COMPLETE, LOOP_RESUME, TASK_RESUME,
+    is_orchestrator_control,
 };
 pub use ux_event::{
     FrameCapture, TerminalColorMode, TerminalResize, TerminalWrite, TuiFrame, UxEvent,

@@ -227,7 +227,14 @@ fn test_stale_breaker_system_event_does_not_reset() {
     let _ = event_loop.check_completion_event();
     assert_eq!(event_loop.state.consecutive_completion_rejections, 1);
 
-    // Add only system topics (should NOT count as progress)
+    // Add only system topics (should NOT count as progress).
+    // Use the structured `event.*` diagnostic topics here; the
+    // test's pre-2026-06-28 mix included `human.guidance` as a
+    // human-only diagnostic, but the topic was removed in
+    // plan 2026-06-28-005. `plan.blocked` is NOT a system
+    // event — it's the structured terminal orchestrator
+    // topic with hat subscriptions — so it does not appear
+    // here either.
     event_loop
         .state
         .seen_topics
@@ -235,7 +242,7 @@ fn test_stale_breaker_system_event_does_not_reset() {
     event_loop
         .state
         .seen_topics
-        .insert("human.guidance".to_string());
+        .insert("event.execution_contract.rejected".to_string());
     event_loop
         .state
         .seen_topics

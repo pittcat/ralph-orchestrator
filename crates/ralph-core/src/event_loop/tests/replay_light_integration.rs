@@ -405,7 +405,7 @@ fn test_rejection_publishes_diagnostic_and_guidance_to_bus() {
         observed_topics
     );
     assert!(
-        observed_topics.iter().any(|t| t == "human.guidance"),
+        observed_topics.iter().any(|t| t == "plan.blocked"),
         "Guidance event should be published, observed: {:?}",
         observed_topics
     );
@@ -546,7 +546,7 @@ fn test_rejected_open_task_routes_retry_to_executor_not_reviewer() {
         .cloned()
         .unwrap_or_default();
     let targeted_retry = executor_pending.iter().find(|e| {
-        e.topic.as_str() != "human.guidance"
+        e.topic.as_str() != "plan.blocked"
             && e.target.as_ref().map(|t| t.as_str()) == Some("executor")
     });
     assert!(
@@ -631,7 +631,7 @@ fn test_rejected_missing_plan_path_names_finding_and_routes_retry() {
         .unwrap_or_default();
     let targeted_retry = executor_pending.iter().find(|e| {
         e.target.as_ref().map(|t| t.as_str()) == Some("executor")
-            && e.topic.as_str() != "human.guidance"
+            && e.topic.as_str() != "plan.blocked"
     });
     assert!(
         targeted_retry.is_some(),
@@ -676,8 +676,13 @@ fn test_rejected_work_done_retry_payload_reaches_executor_prompt() {
         "Missing plan_path should reject"
     );
 
+    // 2026-06-28-005: the retry now lands on the executor's
+    // pending queue directly via a targeted `task.resume` (and
+    // a `plan.blocked` with target=executor for the structured
+    // retry context). The executor hat's build_prompt is the
+    // path that sees the retry payload, not ralph's.
     let prompt = event_loop
-        .build_prompt(&ralph_proto::HatId::new("ralph"))
+        .build_prompt(&ralph_proto::HatId::new("executor"))
         .expect("contract rejection retry should build a prompt");
 
     assert_eq!(
@@ -830,7 +835,7 @@ fn test_forged_ralph_work_done_does_not_create_retry_to_ralph() {
         .cloned()
         .unwrap_or_default();
     let targeted_to_ralph = ralph_pending.iter().find(|e| {
-        e.topic.as_str() != "human.guidance"
+        e.topic.as_str() != "plan.blocked"
             && e.target.as_ref().map(|t| t.as_str()) == Some("ralph")
     });
     assert!(
@@ -851,7 +856,7 @@ fn test_forged_ralph_work_done_does_not_create_retry_to_ralph() {
         .cloned()
         .unwrap_or_default();
     let targeted_to_executor = executor_pending.iter().find(|e| {
-        e.topic.as_str() != "human.guidance"
+        e.topic.as_str() != "plan.blocked"
             && e.target.as_ref().map(|t| t.as_str()) == Some("executor")
     });
     assert!(

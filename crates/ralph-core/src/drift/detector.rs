@@ -399,16 +399,13 @@ impl DriftDetector {
     // ── field_completeness ────────────────────────────────────────
 
     fn check_field_completeness(&mut self, topic: &str, out: &mut Vec<DriftFinding>) {
-        // 2026-06-28 plan U13 (R13): `human.guidance` is
-        // suppressed in the ce-executor-serial preset (and any
-        // other no-human preset that opts in). Skipping the
-        // topic here keeps `field_completeness` from raising a
-        // Critical finding every time a hat forgets to emit
-        // `human.guidance` (which is by design — there is no
-        // human to receive it).
-        if topic == "human.guidance" {
-            return;
-        }
+        // 2026-06-28-005: the R13 bypass that 2026-06-28-002 U13
+        // added for `human.guidance` was removed when the topic
+        // itself was deleted — the baseline `default_required_fields`
+        // no longer contains a key for `human.guidance`, so the
+        // guard below (`required.is_empty()`) already short-
+        // circuits any `human.guidance` string that happens to
+        // leak through. This commit reverses the 002 U13 bypass.
         let required = self.required_fields.for_topic(topic);
         if required.is_empty() {
             return;

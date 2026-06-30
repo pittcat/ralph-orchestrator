@@ -741,8 +741,6 @@ const ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS: &[&str] = &[
 /// (Differs from [`ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS`], where preset wins.)
 const PRESET_OPT_IN_WHEN_OPERATOR_OMITS: &[&str] = &[
     "state_projection",
-    // 2026-06-18-004 U2: ce-executor-serial suppresses guidance-in-prompt.
-    "suppress_human_guidance",
     // 2026-06-17-002: step_handoff progress ↔ task gate.
     "workflow_contract",
     // ce-executor-* hat safety properties (defaults are off).
@@ -1532,7 +1530,6 @@ event_loop:
         let hats: Value = serde_yaml::from_str(
             r"
 event_loop:
-  suppress_human_guidance: true
   ephemeral_isolation: true
   enforce_current_unit: true
   workflow_contract:
@@ -1548,10 +1545,6 @@ hats:
         let merged = merge_hats_overlay(core, hats).unwrap();
         let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
 
-        assert!(
-            config.event_loop.suppress_human_guidance,
-            "preset suppress_human_guidance must apply when operator omits it"
-        );
         assert!(
             config.event_loop.ephemeral_isolation,
             "preset ephemeral_isolation must apply when operator omits it"

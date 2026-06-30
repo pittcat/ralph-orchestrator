@@ -703,36 +703,44 @@ static TEST_CORRECTION_ENABLED: std::sync::OnceLock<std::sync::atomic::AtomicBoo
 
 /// R11 (plan 2026-06-21-002): when the same `retry_key` has
 /// been rejected 3 or more times in a short window, escalate
-/// to the operator.  Emits a `human.guidance` event whose
-/// payload names the offending hat / topic / reason_code so
-/// the operator (or a downstream hat) can decide whether to
-/// continue or terminate.
+/// the loop's failure path. Emits a `plan.blocked` event whose
+/// payload names the offending hat / topic / reason_code so the
+/// shipper / reporter chain can run the preset's failure path.
 ///
 /// Returns `true` when escalation fired (the caller should
 /// skip the correction block — the agent has already been
-/// asked for human help).
+/// told the loop is going down).
 ///
 /// This is a thin helper over `CorrectionContext::needs_escalation`
 /// so the same retry-count threshold drives both the prompt
 /// block (`## ESCALATION` annotation) and the runtime
 /// escalation.  The helper takes the `EventBus` rather than
 /// the loop state to keep the dependency surface small.
-pub fn maybe_escalate_to_human_guidance(
+///
+/// History: this used to publish `human.guidance` (the previous
+/// "ask the operator" path).  Plan 2026-06-28-005 removed that
+/// topic because there is no operator channel in this build of
+/// ralph-orchestrator.  The escalation now terminates the loop
+/// via `plan.blocked(reason=correction_3_strike_exhausted)` —
+/// see KTD-1 in the plan for why `plan.blocked` over
+/// `LOOP_COMPLETE(success=false)` is the right terminal shape.
+pub fn escalate_to_plan_blocked(
     bus: &mut ralph_proto::EventBus,
     correction: &CorrectionContext,
 ) -> bool {
     if !correction.needs_escalation {
         return false;
     }
-    let message = format!(
-        "rejection budget exhausted: hat={} topic={} reason={} (retry_count={})",
-        correction.source_hat.as_deref().unwrap_or("unknown"),
-        correction.topic,
-        correction.reason_code,
-        correction.retry_count,
-    );
-    let event =
-        ralph_proto::Event::new(ralph_proto::HUMAN_GUIDANCE, message).with_system_injected();
+    let payload = serde_json::json!({
+        "reason": "correction_3_strike_exhausted",
+        "retry_key": correction.retry_key,
+        "source_hat": correction.source_hat,
+        "topic": correction.topic,
+        "reason_code": correction.reason_code,
+        "retry_count": correction.retry_count,
+    });
+    let event = ralph_proto::Event::new("plan.blocked", serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()))
+        .with_system_injected();
     bus.publish(event);
     true
 }
@@ -1151,26 +1159,35 @@ mod tests {
     }
 
     #[test]
-    fn escalation_helper_publishes_human_guidance_at_threshold() {
+    fn escalation_helper_publishes_plan_blocked_at_threshold() {
         let mut bus = ralph_proto::EventBus::new();
+        // Register shipper so the published plan.blocked event
+        // has somewhere to land — EventBus silently drops events
+        // when no hat is registered (see event_bus::publish).
+        let shipper = ralph_proto::Hat::new(
+            ralph_proto::HatId::from("shipper"),
+            "shipper",
+        )
+        .subscribe(ralph_proto::Topic::new("*"));
+        bus.register(shipper);
         let r = sample_rejection();
         let ctx = CorrectionContext::from_rejection(&r, 3);
-        let fired = maybe_escalate_to_human_guidance(&mut bus, &ctx);
+        let fired = escalate_to_plan_blocked(&mut bus, &ctx);
         assert!(fired);
-        // Drain pending human events to confirm publish.
-        let human_events = bus.take_human_pending();
-        let guidance: Vec<_> = human_events
+        // The escalation now publishes a structured plan.blocked
+        // event; drain by topic name.
+        let pending = bus.take_pending(&ralph_proto::HatId::from("shipper"));
+        let plan_blocked: Vec<_> = pending
             .iter()
-            .filter(|e| e.topic.as_str() == ralph_proto::HUMAN_GUIDANCE)
+            .filter(|e| e.topic.as_str() == "plan.blocked")
             .collect();
-        assert_eq!(guidance.len(), 1, "exactly one human.guidance event");
-        let payload = guidance[0].payload.clone();
+        assert_eq!(plan_blocked.len(), 1, "exactly one plan.blocked event");
+        let payload = &plan_blocked[0].payload;
         assert!(
-            payload.contains("rejection budget exhausted"),
-            "payload = {:?}",
-            payload
+            payload.contains("correction_3_strike_exhausted"),
+            "payload = {payload:?}"
         );
-        assert!(payload.contains("topic=work.done"));
+        assert!(payload.contains("work.done"), "payload = {payload:?}");
     }
 
     #[test]
@@ -1178,10 +1195,15 @@ mod tests {
         let mut bus = ralph_proto::EventBus::new();
         let r = sample_rejection();
         let ctx = CorrectionContext::from_rejection(&r, 2);
-        let fired = maybe_escalate_to_human_guidance(&mut bus, &ctx);
+        let fired = escalate_to_plan_blocked(&mut bus, &ctx);
         assert!(!fired);
-        let human_events = bus.take_human_pending();
-        assert!(human_events.is_empty());
+        // Nothing should be pending on the bus. We do not register
+        // any hats so the bus cannot route to anyone; checking
+        // has_pending is the cheapest way to confirm.
+        assert!(
+            !bus.has_pending_non_human(),
+            "no events should be published below threshold"
+        );
     }
 
     #[test]

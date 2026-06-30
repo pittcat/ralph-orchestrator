@@ -155,42 +155,11 @@ fn test_u4_rejection_stage_emit_claimed_but_not_written_as_str() {
     assert_eq!(back, RejectionStage::EmitClaimedButNotWritten);
 }
 
-#[test]
-fn test_u3_t3_6b_r5_hard_gate_routing_regression() {
-    // T3.6: R5 routing regression — the JSONL line written by the
-    // missing-event gate helper must carry top-level `target` =
-    // hat name (matches the `Event::with_target` shape that R5
-    // uses for policy / workflow rejections).  The R5 test
-    // (`r5_hard_gate_routing.rs`) covers the policy-rejection
-    // path; this test pins the parallel contract for the
-    // missing-event gate.
-    use std::io::Read;
-    let tmp = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir_all(tmp.path().join(".ralph")).expect("create .ralph");
-    let events_path = tmp.path().join(".ralph/events.jsonl");
-    std::fs::write(&events_path, "").expect("seed events file");
-    let ctx = ralph_core::loop_context::LoopContext::primary(tmp.path().to_path_buf());
-    std::fs::write(
-        ctx.current_events_marker(),
-        events_path.to_string_lossy().to_string(),
-    )
-    .expect("write current-events marker");
+// 2026-06-17-001 Unit 6: GateWaveMutex. The wave registry lives
+// in `LoopState::flow_lifecycle`; the hard gate must NOT fire
+// while a wave obligation is pending, and must still fire when
+// no wave was emitted (the "completely forgot to emit" case).
 
-    let hat = HatId::new("review-coordinator");
-    let expected_topics = vec!["review.passed".to_string()];
-
-    inject_missing_event_hard_gate_guidance(&ctx, None, &hat, &expected_topics);
-
-    let mut buf = String::new();
-    std::fs::File::open(&events_path)
-        .expect("open events file")
-        .read_to_string(&mut buf)
-        .expect("read events file");
-    let line = buf.lines().last().expect("at least one line written");
-    let value: serde_json::Value = serde_json::from_str(line).expect("valid JSONL");
-    assert_eq!(value["target"], "review-coordinator");
-    assert_eq!(value["hat"], "review-coordinator");
-}
 
 // 2026-06-17-001 Unit 6: GateWaveMutex. The wave registry lives
 // in `LoopState::flow_lifecycle`; the hard gate must NOT fire
@@ -726,44 +695,6 @@ hats:
     (temp, root)
 }
 
-#[test]
-fn test_u3_pending_recovery_hat_is_set_by_missing_event_guidance() {
-    // 2026-06-13 plan U3 — happy path: hard gate for
-    // `review-coordinator` sets `pending_recovery_hat` so the
-    // next iteration activates `review-coordinator`, not
-    // whatever round-robin would pick (executor in this preset).
-    let (_temp, workspace) = u3_workspace_with_isolated_hats();
-    let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
-        .expect("create diagnostics collector");
-    let config = ralph_core::RalphConfig::default();
-    let mut event_loop = ralph_core::EventLoop::with_diagnostics(config, diagnostics);
-    event_loop.set_iteration_for_test(3);
-
-    let ctx = LoopContext::primary(workspace.clone());
-    let expected_topics = vec!["review.wave.ready".to_string(), "review.passed".to_string()];
-    let hat_id = ralph_proto::HatId::new("review-coordinator");
-
-    // Sanity: the field starts as None on a fresh event loop.
-    assert!(
-        event_loop.state().pending_recovery_hat.is_none(),
-        "pending_recovery_hat must start as None on a fresh loop"
-    );
-
-    inject_missing_event_hard_gate_guidance(&ctx, Some(&mut event_loop), &hat_id, &expected_topics);
-
-    // U3: the field is now pinned to review-coordinator so the
-    // next iteration's `next_hat` call will return it.
-    let pinned = event_loop
-        .state()
-        .pending_recovery_hat
-        .as_ref()
-        .map(|h| h.as_str().to_string());
-    assert_eq!(
-        pinned.as_deref(),
-        Some("review-coordinator"),
-        "hard gate must pin pending_recovery_hat to the gated hat"
-    );
-}
 
 #[test]
 fn test_u3_next_hat_consumes_pending_recovery_hat_and_clears() {
@@ -851,60 +782,6 @@ hats:
     assert!(
         event_loop.state().pending_recovery_hat.is_none(),
         "U3: stale pin must be cleared even when the hat is unregistered"
-    );
-}
-
-#[test]
-fn test_u3_wave_policy_rejection_guidance_pins_recovery_hat() {
-    // 2026-06-13 plan U3 — happy path: wave schema rejection on
-    // `review-coordinator` pins the next iteration to
-    // `review-coordinator`, not the round-robin default.
-    let (_temp, workspace) = u3_workspace_with_isolated_hats();
-    let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
-        .expect("create diagnostics collector");
-    let config = ralph_core::RalphConfig::default();
-    let mut event_loop = ralph_core::EventLoop::with_diagnostics(config, diagnostics);
-    event_loop.set_iteration_for_test(5);
-
-    let ctx = LoopContext::primary(workspace.clone());
-    let hat_id = ralph_proto::HatId::new("review-coordinator");
-    let expected_topics = vec!["review.wave.ready".to_string()];
-
-    // Build a single-element rejection set (the helper requires
-    // at least one entry; 7 is more realistic but 1 is enough to
-    // exercise the pin side effect).
-    let rejection = ralph_core::PolicyRejection {
-        topic: "review.wave.ready".to_string(),
-        source_hat: Some("review-coordinator".to_string()),
-        finding: ralph_core::PolicyFinding {
-            topic: "review.wave.ready".to_string(),
-            violation_type: ralph_core::ViolationType::MissingRequiredField {
-                field: "depth".to_string(),
-            },
-            message: "Missing required field: depth".to_string(),
-        },
-        reason_class: None,
-    };
-    let rejections = vec![rejection];
-
-    inject_wave_policy_rejection_guidance(
-        &ctx,
-        Some(&mut event_loop),
-        &hat_id,
-        &rejections,
-        1,
-        &expected_topics,
-    );
-
-    let pinned = event_loop
-        .state()
-        .pending_recovery_hat
-        .as_ref()
-        .map(|h| h.as_str().to_string());
-    assert_eq!(
-        pinned.as_deref(),
-        Some("review-coordinator"),
-        "U3: wave policy rejection must pin pending_recovery_hat to the gated hat"
     );
 }
 

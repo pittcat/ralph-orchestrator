@@ -2109,7 +2109,11 @@ hats:
         // ralph + LOOP_COMPLETE → Ok (control topic whitelist).
         assert!(check_isolated_scope(Some("ralph"), "LOOP_COMPLETE", &cfg).is_ok());
         assert!(check_isolated_scope(Some("ralph"), "task.resume", &cfg).is_ok());
-        assert!(check_isolated_scope(Some("ralph"), "human.guidance", &cfg).is_ok());
+        // 2026-06-28-005: human.guidance is no longer a control topic.
+        // Use plan.blocked instead — it is the structured terminal
+        // orchestrator topic and ships with the same allowlist
+        // semantics.
+        assert!(check_isolated_scope(Some("ralph"), "plan.blocked", &cfg).is_ok());
     }
 
     #[test]
@@ -2218,11 +2222,15 @@ hats:
     fn u1_check_emit_provenance_control_topics_allowed_without_hat() {
         let cfg = isolated_config_minimal();
         // Control topics are produced by the loop / runtime pseudo-hat.
+        // 2026-06-28-005: human.guidance was removed from this
+        // list; plan.blocked is the new structured terminal
+        // orchestrator topic and ships with the same allowlist
+        // semantics.
         for topic in [
             "LOOP_COMPLETE",
             "loop.cancel",
             "task.resume",
-            "human.guidance",
+            "plan.blocked",
         ] {
             assert!(
                 check_emit_provenance(None, topic, &cfg).is_ok(),

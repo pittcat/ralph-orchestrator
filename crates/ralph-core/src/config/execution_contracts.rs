@@ -176,6 +176,15 @@ pub struct ContractRejectConfig {
     pub diagnostic_topic: String,
 
     /// Topic for the human-readable guidance event.
+    ///
+    /// Plan 2026-06-28-005 changed the default from `human.guidance`
+    /// (the deleted operator channel) to `plan.blocked`, which is
+    /// the existing structured terminal-orchestrator topic. Operators
+    /// can still override this field, but the value MUST be a
+    /// terminal orchestrator topic (`plan.blocked`, `loop.cancel`,
+    /// `LOOP_COMPLETE`); setting it to a non-terminal topic such as
+    /// `task.resume` or the removed `human.guidance` will cause the
+    /// engine to ignore the override and emit a warning at runtime.
     #[serde(default = "default_reject_guidance_topic")]
     pub guidance_topic: String,
 }
@@ -194,5 +203,5 @@ fn default_reject_diagnostic_topic() -> String {
 }
 
 fn default_reject_guidance_topic() -> String {
-    "human.guidance".to_string()
+    "plan.blocked".to_string()
 }

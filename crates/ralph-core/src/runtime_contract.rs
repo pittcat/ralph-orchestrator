@@ -363,7 +363,9 @@ pub const LOOP_RUNNER_INTERNAL_TOPICS: &[&str] = &[
     // runtime diagnosis engine as a recovery channel, not by any
     // hat. The `progress-steward` hat subscribes so an operator's
     // proactive guidance can wake the fallback path.
-    "human.guidance",
+    //
+    // 2026-06-28-005: the topic itself was deleted; the runner-
+    // injected topics list now omits `human.guidance`.
     // 2026-06-16-001 U5: `task.resume` is produced by the loop
     // runner as a recovery signal (U3 freshness filter, U5
     // steward). The runner is the publisher, not a hat. Listed

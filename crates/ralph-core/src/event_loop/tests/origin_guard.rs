@@ -691,11 +691,11 @@ hats:
     event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
     let captured = capture_bus_events(&mut event_loop);
 
-    // Mix: task.resume, human.guidance, loop.cancel — all no-hat
+    // Mix: task.resume, plan.blocked, loop.cancel — all no-hat
     // orchestrator-internal signals. None of them should produce
     // a scope_violation diagnostic. All should reach the bus.
     write_event_to_jsonl(&events_path, "task.resume", "{\"target\":\"executor\"}");
-    write_event_to_jsonl(&events_path, "human.guidance", "All good");
+    write_event_to_jsonl(&events_path, "plan.blocked", "All good");
     write_event_to_jsonl(&events_path, "loop.cancel", "stop");
 
     let result = event_loop.process_events_from_jsonl().unwrap();

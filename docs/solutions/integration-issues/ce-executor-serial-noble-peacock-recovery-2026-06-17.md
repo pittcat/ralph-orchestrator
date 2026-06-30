@@ -1,3 +1,21 @@
+> ⚠️ **SUPERSEDED 2026-06-28 by plan `docs/plans/2026-06-28-005-refactor-remove-human-guidance-topic-plan.md`**:
+> The `human.guidance` topic was physically deleted from the runtime
+> (no external operator channel exists in this build of
+> ralph-orchestrator). The recovery patterns described in this
+> document — injecting a `human.guidance` event so the operator
+> can intervene between iterations, and tracking the operator's
+> response on the loop's pending queue — are no longer applicable.
+>
+> Plan 2026-06-28-005 redirects the 3-strike escalation output to
+> `plan.blocked(reason=correction_3_strike_exhausted)` so the
+> shipper / reporter chain runs the preset's failure path; the
+> drift Warning + Final hint is routed to
+> `TerminationReason::RecoveryExhausted` directly without an
+> intermediate guidance publish. Historical diagnoses
+> (`merry-lotus`, `noble-peacock`, etc.) are preserved below for
+> context, but the recovery mechanisms they describe have been
+> replaced.
+
 ---
 title: "ce-executor-serial noble-peacock review chain deadlock: three-mechanism gap, fail-closed provenance, and HatActivationClock"
 date: 2026-06-17

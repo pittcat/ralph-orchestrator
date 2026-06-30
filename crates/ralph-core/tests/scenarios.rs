@@ -1361,13 +1361,6 @@ fn test_serial_lint_2_rejection_digest() {
 }
 
 #[test]
-fn test_serial_lint_3_steward_guidance_exempt() {
-    let yaml =
-        load_scenario("tests/scenarios/serial_lint/serial_lint_3_steward_guidance_exempt.yaml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
 fn test_serial_lint_4_resume_hint_consumed() {
     let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_4_resume_hint_consumed.yaml");
     run_workflow_guard_scenario(yaml);
