@@ -1705,6 +1705,14 @@ hats:
            atomically. Do NOT mark it as in-progress — the runtime
            state machine tracks the in-progress hat activation.
          - Stop — do not emit anything else this turn.
+         - **HARD RULE (ce-executor-serial 2026-06-30):** at most ONE
+           `ralph emit` business event per activation. The cost of
+           violating this is silent: isolated-mode drops the surplus
+           and the runner only logs WARN, so YOU as the hat will not
+           see the rejection. Persist your emission choice to
+           `.agents/scratchpad/ce-executor/{plan_name}/review-sequence.json`
+           atomically before you emit; the next activation reads the
+           persisted state, not your chat history.
       5. If a pending dimension exists and the diff is empty: this
          is the rare in-flight empty state. Per the HARD RULE above,
          choose `walk` — emit `review.dimension.ready` against the
