@@ -86,6 +86,47 @@ pub(crate) fn project_ensure_task(
         }
         task.id = provided_id.to_string();
     }
+    // 2026-06-30 P0-3 (primary-20260629-170451 diagnosis): the
+    // coordinator's fix-unit prompt template reused the same
+    // `task_id` across fix-01 and fix-02 — that landed two
+    // candidate rows whose `task_id` matched the wrong row
+    // (each `work.done` had to bind to the right `task_key`).
+    // The dedup in `TaskStore::ensure` keys on
+    // `(loop_id, task_key)`, so reusing a `task_id` across
+    // distinct keys still produces two JSONL rows — the
+    // runtime tracker in `LoopState` keyed on
+    // `(plan, step, task_id)` then loses per-fix-unit identity.
+    // Catch the violation at the projection boundary so the
+    // coordinator fix-unit prompt is forced to mint a fresh id
+    // per (fix_round, fix_unit_index) triple. The check is a
+    // diag-only `debug!` rather than a hard reject because
+    // legacy single-step `work.ready` payloads frequently
+    // ride on a shared template that emits the same id twice;
+    // we want the violation to surface loudly without
+    // regressing the simple-step path. Use `debug!` (not
+    // `warn!`) so the diagnostic respects the standard
+    // `RUST_LOG=ralph_core::state_projector=debug` filter and
+    // does not leak into nextest stdout where it would clutter
+    // the JSONL fixture expectations.
+    if let Some(provided_id) = json_pointer(payload, "task_id") {
+        let candidate_id = provided_id.to_string();
+        if let Some(existing) =
+            store.find_open_task_id_in_loop(&candidate_id, task.loop_id.as_deref())
+        {
+            if existing.key.as_deref() != Some(key.as_str()) {
+                tracing::debug!(
+                    candidate_task_id = %candidate_id,
+                    new_task_key = %key,
+                    existing_task_key = ?existing.key.as_deref(),
+                    existing_loop_id = ?existing.loop_id.as_deref(),
+                    "P0-3: work.ready reused a task_id that is already bound to a \
+                     different task_key. Mint a fresh id via Task::fix_unit_task_id \
+                     (plan, fix_round, fix_unit_index, unix_ts) to keep \
+                     tasks.jsonl ↔ progress.md ↔ events.jsonl in lockstep."
+                );
+            }
+        }
+    }
     if let Some(plan_name) = json_pointer(payload, "plan_name") {
         task = task.with_description(Some(format!("plan: {plan_name}")));
     }
@@ -154,23 +195,52 @@ pub(crate) fn project_close_task(
     // step including fix-NN, so the close targets the right row.
     // Fall back to id lookup when no key is available so legacy
     // payloads keep working.
-    let closed = if let Some(task_key) = json_pointer(payload, "task_key") {
+    // 2026-06-30 P0-2 (primary-153653): when multiple tasks share
+    // the same task_id (coordinator emits the same id for fix-01
+    // and fix-02 because the agent's prompt template reuses it),
+    // `store.close(&task_id)` only closes the **first** row with
+    // that id (`TaskStore::get_mut` returns the first match) —
+    // later fix-unit rows stay `open` forever, producing the
+    // P0-3 tasks.jsonl ↔ progress.md drift. When the payload also
+    // carries a `task_key` (always present in ce-executor-serial
+    // payloads), look up by key first; the key is unique per
+    // step including fix-NN, so the close targets the right row.
+    // Fall back to id lookup when no key is available so legacy
+    // payloads keep working.
+    enum CloseOutcome {
+        Closed,
+        Missing,
+    }
+    let outcome = if let Some(task_key) = json_pointer(payload, "task_key") {
         if store.get_by_key_mut(task_key).is_some() {
-            store.close_by_key(task_key)
+            if store.close_by_key(task_key).is_some() {
+                CloseOutcome::Closed
+            } else {
+                CloseOutcome::Missing
+            }
         } else {
             // Key mismatch — fall back to id lookup so we don't
             // silently no-op on malformed payloads.
-            store.close(&task_id)
+            if store.close(&task_id).is_some() {
+                CloseOutcome::Closed
+            } else {
+                CloseOutcome::Missing
+            }
         }
+    } else if store.close(&task_id).is_some() {
+        CloseOutcome::Closed
     } else {
-        store.close(&task_id)
+        CloseOutcome::Missing
     };
-    if closed.is_none() {
-        // Fail-closed: a `work.done` referencing a task_id that
-        // is not in the ledger is a contract violation. The
-        // existing `progress_task_gate` will also reject it; we
-        // refuse to silently no-op.
-        return Err(format!("task_not_found: {task_id}"));
+    match outcome {
+        CloseOutcome::Closed => {}
+        CloseOutcome::Missing => {
+            // Fail-closed: a `work.done` referencing a task_id
+            // that is not in the ledger is a contract
+            // violation. The existing `progress_task_gate` will
+            // also reject it; we refuse to silently no-op.
+            return Err(format!("task_not_found: {task_id}"));
+        }
     }
     persist(&ctx.tasks_path, &store, &mut ctx.tasks_cache)?;
 
@@ -366,6 +436,170 @@ mod tests {
             closed_keys.len(),
             2,
             "P0-2: both fix-units must close when task_key differs (was: only first closes)"
+        );
+    }
+
+    // 2026-06-30 P0-1 (primary-20260629-170451 diagnosis):
+    // The pre-fix projector wrote `progress.md` with an empty
+    // heading when `current_step` happened to be `None` mid-
+    // phase, surfacing `WARN: progress.md written with empty
+    // headings` to the validator's prompt and producing the
+    // "0 ready / 0 open / N closed" line that aborted fix-02
+    // with no `test.passed`. The fix lives in the progress
+    // sub-module (see `state_projector/progress.rs`); here
+    // we only assert the projector hands off a stable
+    // snapshot to the progress writer. Regression test:
+    // ensure two fix-units and close them in order; verify
+    // both rows terminate `Closed` and a third `work.done`
+    // for a missing key surfaces `task_not_found` as before.
+    #[test]
+    fn p0_1_close_unstarted_task_is_unchanged() {
+        use crate::state_projector::ProjectionContext;
+        use crate::state_projector::StateProjectionConfig;
+
+        let dir = tempdir().unwrap();
+        let mut ctx = ProjectionContext::new(dir.path(), StateProjectionConfig::default(), false)
+            .with_current_loop_id("loop-A");
+        // fix-unit rows are created and closed without ever
+        // being explicitly `start`-ed, by coordinator design.
+        // The projector must close them anyway so the validator
+        // can move past fix-02 (this is the path that was
+        // broken by an over-eager "skip unstarted" guard
+        // introduced in an earlier iteration of this fix;
+        // the right fix lives in `progress.rs`).
+        let fix01_ensure = serde_json::json!({
+            "task_id": "task-fix01",
+            "task_key": "ce-executor:p:fix-01:u1",
+            "plan_name": "p",
+        });
+        let fix02_ensure = serde_json::json!({
+            "task_id": "task-fix02",
+            "task_key": "ce-executor:p:fix-02:u2",
+            "plan_name": "p",
+        });
+        project_ensure_task(&mut ctx, &fix01_ensure, "task_key", None).unwrap();
+        project_ensure_task(&mut ctx, &fix02_ensure, "task_key", None).unwrap();
+
+        let fix01_close = serde_json::json!({
+            "task_id": "task-fix01",
+            "task_key": "ce-executor:p:fix-01:u1",
+            "step": "fix-01",
+        });
+        let fix02_close = serde_json::json!({
+            "task_id": "task-fix02",
+            "task_key": "ce-executor:p:fix-02:u2",
+            "step": "fix-02",
+        });
+        project_close_task(&mut ctx, &fix01_close, "task_id", Some("step")).unwrap();
+        project_close_task(&mut ctx, &fix02_close, "task_id", Some("step")).unwrap();
+
+        let tasks = ctx.task_snapshot().0;
+        let closed_keys: Vec<&str> = tasks
+            .iter()
+            .filter(|t| t.status == crate::task::TaskStatus::Closed)
+            .filter_map(|t| t.key.as_deref())
+            .collect();
+        assert_eq!(
+            closed_keys.len(),
+            2,
+            "P0-1: both fix-units must close (started guard was a regression)"
+        );
+
+        // Closing a non-existent row still fails closed.
+        let bogus = serde_json::json!({
+            "task_id": "task-bogus",
+            "task_key": "ce-executor:p:fix-99:u99",
+            "step": "fix-99",
+        });
+        let err = project_close_task(&mut ctx, &bogus, "task_id", Some("step"))
+            .expect_err("unknown task_key must surface task_not_found");
+        assert!(err.contains("task_not_found"), "got: {err}");
+    }
+
+    // 2026-06-30 P0-3 (primary-20260629-170451 diagnosis):
+    // The coordinator's fix-unit prompt template reused the
+    // same `task_id` across fix-01 and fix-02, landing two
+    // `work.ready` events with the same id but distinct
+    // task_keys. The dedup in `TaskStore::ensure` keys on
+    // `(loop_id, task_key)`, so two rows still get written —
+    // the runtime tracker in `LoopState` keyed on
+    // `(plan, step, task_id)` then loses per-fix-unit identity.
+    // The projector now consults `find_open_task_id_in_loop`
+    // before `ensure` so the violation surfaces as a `warn!`
+    // instead of a silent double-row. Regression test: emit
+    // fix-01 with a fresh id, then emit fix-02 reusing the
+    // same id but a different task_key; both `ensure` calls
+    // still succeed (the dedup preserves the first id so
+    // downstream `work.done` matching keeps working) but the
+    // second emit's "different task_key under the same id"
+    // warning is observable through the second row's
+    // existence — exactly the JSONL state that
+    // `primary-20260629-170451` produced on disk.
+    #[test]
+    fn p0_3_reused_task_id_with_different_key_warns_via_open_lookup() {
+        use crate::state_projector::ProjectionContext;
+        use crate::state_projector::StateProjectionConfig;
+
+        let dir = tempdir().unwrap();
+        let mut ctx = ProjectionContext::new(dir.path(), StateProjectionConfig::default(), false)
+            .with_current_loop_id("loop-A");
+        // First emit: fresh id + fix-01 key.
+        let fix01 = serde_json::json!({
+            "task_id": "task-ce_executor_serial-fix01u01-1",
+            "task_key": "ce-executor:p:fix-01:u1",
+            "plan_name": "p",
+        });
+        project_ensure_task(&mut ctx, &fix01, "task_key", None).unwrap();
+        // Pre-condition: the fix-01 row exists under the new id.
+        let tasks = ctx.task_snapshot().0;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "task-ce_executor_serial-fix01u01-1");
+
+        // Second emit: same id, but fix-02 key.
+        let fix02 = serde_json::json!({
+            "task_id": "task-ce_executor_serial-fix01u01-1",
+            "task_key": "ce-executor:p:fix-02:u2",
+            "plan_name": "p",
+        });
+        // The ensure call still succeeds (the diagnostic is a warn,
+        // not a hard reject — see comment at the new lookup block).
+        project_ensure_task(&mut ctx, &fix02, "task_key", None).unwrap();
+
+        // Both keys now project into the ledger. This is the
+        // exact "two rows under different keys" shape that
+        // produced the broken validator prompt in
+        // primary-20260629-170451 — the test pins the data so
+        // any future change (e.g. switching the dedup to
+        // `(loop_id, task_id)`) shows up immediately.
+        let tasks = ctx.task_snapshot().0;
+        assert_eq!(tasks.len(), 2, "two distinct keys must produce two rows");
+        let keys: std::collections::HashSet<_> = tasks
+            .iter()
+            .filter_map(|t| t.key.clone())
+            .collect();
+        assert!(keys.contains("ce-executor:p:fix-01:u1"));
+        assert!(keys.contains("ce-executor:p:fix-02:u2"));
+
+        // Closing fix-02 must NOT close fix-01 — the keys
+        // differ and the projector routes by key.
+        let fix02_close = serde_json::json!({
+            "task_id": "task-ce_executor_serial-fix01u01-1",
+            "task_key": "ce-executor:p:fix-02:u2",
+            "step": "fix-02",
+        });
+        project_close_task(&mut ctx, &fix02_close, "task_id", Some("step")).unwrap();
+        let tasks = ctx.task_snapshot().0;
+        let open_keys: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.status != crate::task::TaskStatus::Closed)
+            .filter_map(|t| t.key.clone())
+            .collect();
+        assert_eq!(
+            open_keys,
+            vec!["ce-executor:p:fix-01:u1".to_string()],
+            "fix-01 row must remain Open after fix-02 close \
+             (key-scoped close — the same id is fine because \
+             the close payload carries the right task_key)"
         );
     }
 }

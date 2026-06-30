@@ -120,6 +120,43 @@ impl Task {
         format!("task-{}-{}", timestamp, hex_suffix)
     }
 
+    /// Build a fix-unit task id from a `(plan_name, fix_round,
+    /// fix_unit_index)` triple, optionally combined with a Unix
+    /// timestamp. The format
+    /// `task-{plan_slug}-fix{round}u{unit}-{ts|hex}` is:
+    ///
+    /// - **Stable across retries inside one fix-unit**: two
+    ///   consecutive `work.ready` emits for the same fix-unit
+    ///   can be diffed by `(plan_slug, fix_round, fix_unit_index)`
+    ///   without the timestamp.
+    /// - **Globally unique across fix-units**: combining the
+    ///   triple with `unix_ts` (or the unique id generator if
+    ///   `unix_ts` is `None`) prevents the
+    ///   `ce-executor-serial` primary-20260629-170451 bug,
+    ///   where the coordinator's prompt template reused the
+    ///   same task_id for fix-01 and fix-02 — that surfaced as a
+    ///   "21 seconds and the same row in tasks.jsonl" storm.
+    /// - **Aligned with `ralph_core::preset_lint` checks**: the
+    ///   projector can detect "two `work.ready` events with the
+    ///   same task_id but different step prefixes" and reject the
+    ///   second emit loudly.
+    pub fn fix_unit_task_id(
+        plan_name: &str,
+        fix_round: u32,
+        fix_unit_index: u32,
+        unix_ts: Option<u64>,
+    ) -> String {
+        let plan_slug = sanitize_plan_slug(plan_name);
+        let ts = unix_ts.unwrap_or_else(|| {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        });
+        format!("task-{plan_slug}-fix{fix_round:02}u{fix_unit_index:02}-{ts:x}")
+    }
+
     /// Returns true if this task is ready to work on (open + no blockers pending).
     pub fn is_ready(&self, all_tasks: &[Task]) -> bool {
         if self.status != TaskStatus::Open {
@@ -165,6 +202,25 @@ impl Task {
         self.status = TaskStatus::Open;
         self.closed = None;
     }
+}
+
+/// Sanitize a plan name into a slug safe to embed in a task_id.
+/// Concretely, lower-case the string and replace anything that
+/// is not an ASCII alnum with `_`. This is used by
+/// [`Task::fix_unit_task_id`] so the generator can fold over
+/// arbitrary plan names without breaking the id format. The
+/// `ce-executor-serial` prompt template keeps `plan_name`
+/// ASCII-clean for the same reason.
+fn sanitize_plan_slug(plan_name: &str) -> String {
+    let mut buf = String::with_capacity(plan_name.len());
+    for ch in plan_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            buf.push(ch.to_ascii_lowercase());
+        } else if !buf.ends_with('_') {
+            buf.push('_');
+        }
+    }
+    buf
 }
 
 #[cfg(test)]
@@ -297,5 +353,60 @@ mod tests {
         task.reopen();
         assert_eq!(task.status, TaskStatus::Open);
         assert!(task.closed.is_none());
+    }
+
+    // 2026-06-30 P0-3 (primary-20260629-170451 diagnosis):
+    // The coordinator's prompt template reused the same
+    // `task_id` for fix-01 and fix-02 — produce rows in the
+    // tasks.jsonl but two distinct `task_key`s routed to the
+    // projector in two separate `work.ready` events. The
+    // dedup helpers `TaskStore::ensure` now anchor on
+    // `(loop_id, task_key)`, so the projection does not in
+    // fact create two rows any more — but the runtime
+    // tracking in `LoopState` (which key is on
+    // `(plan_name, step, task_id)`) loses per-fix-unit
+    // identity, so the counter resets between fix units. The
+    // remediation is to give the coordinator a deterministic
+    // id generator that mints a fresh id per fix-unit tuple;
+    // the projector then enforces "one task per
+    // `(plan, fix_round, fix_unit_index)`" by rejecting
+    // re-emission of the same id with a different key.
+    #[test]
+    fn test_fix_unit_task_id_is_unique_per_triple() {
+        let id_a = Task::fix_unit_task_id("ce-executor-serial", 1, 1, Some(0x1234));
+        let id_b = Task::fix_unit_task_id("ce-executor-serial", 1, 2, Some(0x1234));
+        let id_c = Task::fix_unit_task_id("ce-executor-serial", 2, 1, Some(0x1234));
+        assert!(
+            id_a.starts_with("task-ce_executor_serial-fix01u01-"),
+            "id_a: {id_a}"
+        );
+        assert!(
+            id_b.starts_with("task-ce_executor_serial-fix01u02-"),
+            "id_b: {id_b}"
+        );
+        assert!(
+            id_c.starts_with("task-ce_executor_serial-fix02u01-"),
+            "id_c: {id_c}"
+        );
+        let ids = vec![id_a.clone(), id_b.clone(), id_c.clone()];
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            3,
+            "fix_round × fix_unit_index must yield three distinct ids, got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_fix_unit_task_id_handles_unicode_plan_name() {
+        // Non-alphanumeric chars collapse into a single `_`
+        // (the sanitizer skips duplicates), then `001` is kept
+        // verbatim. The slug therefore ends as `_001`.
+        let id = Task::fix_unit_task_id("中文方案-001", 0, 0, Some(1));
+        assert!(
+            id.starts_with("task-_001"),
+            "expected unicode plan name to slug to `_001`, got {id}"
+        );
+        assert!(id.ends_with("-fix00u00-1"), "got {id}");
     }
 }

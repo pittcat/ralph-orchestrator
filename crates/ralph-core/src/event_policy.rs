@@ -812,6 +812,27 @@ pub fn is_system_topic(topic: &str) -> bool {
     topic.starts_with("event.") || topic.starts_with("human.")
 }
 
+/// Check if a topic is a system control topic the loop runner
+/// itself publishes (`loop.cancel`, `task.resume`,
+/// `build.task.abandoned`).
+///
+/// Unlike [`is_system_topic`], this matches exact topic
+/// strings rather than `event.*` / `human.*` prefixes.  The
+/// unified validation pipeline calls
+/// `check_topic_deny_rules` after `is_system_topic` has
+/// already admitted the prefix-matched topics; this
+/// short-circuit covers the remaining runner-emitted topics
+/// so a deny rule that happens to match the originating hat
+/// cannot reject a recovery injection.  See
+/// `check_topic_deny_rules` for the regression that motivated
+/// the helper.
+pub fn is_system_control_topic(topic: &str) -> bool {
+    matches!(
+        topic,
+        "loop.cancel" | "task.resume" | "build.task.abandoned"
+    )
+}
+
 /// WAC-U7 (2026-06-12-002) R10: hard-reject topics for which a
 /// null payload is never acceptable. Any event whose topic is in
 /// this set and whose payload is `None` is rejected with
@@ -861,6 +882,33 @@ pub fn check_topic_deny_rules(
     config: &EventPolicyConfig,
 ) -> Option<PolicyDecision> {
     let hat_id = hat.unwrap_or("");
+    // 2026-06-30 P0-2 (primary-20260629-170451 diagnosis):
+    //
+    // System control topics (`loop.cancel`, `task.resume`,
+    // `build.task.abandoned`) are orchestrated by the loop
+    // runner — the per-hat `topic_deny_rules` must not gate
+    // them, even when `event.hat` falls under a hat the preset
+    // declared a deny rule for (e.g. validator / coordinator /
+    // executor are all on the deny list for `task.resume`).
+    // Without this short-circuit the runner's stall-recovery
+    // `task.resume` injection was rejected with
+    // `EVENT_POLICY_TOPIC_DENIED` while the events file still
+    // captured it, leaving ledger vs events out-of-sync and
+    // deadlocking the loop on `consecutive_failures` once a
+    // single retry exhaustion happened
+    // (`loop-termination-reason.json: "consecutive_failures"`).
+    //
+    // We deliberately do NOT special-case `event.*` or
+    // `human.*` here — those are admitted by the existing
+    // `is_system_topic` short-circuit that runs BEFORE this
+    // function in the unified validation pipeline. The
+    // completion promise (`LOOP_COMPLETE` by default) is
+    // matched against the deny rules directly: a denial there
+    // is the legitimate guard against a hat driving past
+    // terminal, so we do not bypass it.
+    if is_system_control_topic(topic) {
+        return None;
+    }
     for rule in &config.topic_deny_rules {
         if rule.hat_id == hat_id {
             let matches = if rule.topic.contains('*') {
@@ -2433,6 +2481,82 @@ mod tests {
         };
         let decision = check_topic_deny_rules(Some("executor"), "build.done", &config);
         assert!(matches!(decision, Some(PolicyDecision::Block(_))));
+    }
+
+    // 2026-06-30 P0-2 (primary-20260629-170451 diagnosis):
+    // System control topics (`loop.cancel`, `task.resume`,
+    // `build.task.abandoned`) must NEVER be matched against
+    // `topic_deny_rules` — the loop runner injects them and
+    // the originating hat field can fall on a hat that the
+    // preset declared a deny rule for (validator, executor,
+    // coordinator etc. are all on the deny list for
+    // `task.resume` in `ce-executor-serial`). Without the
+    // short-circuit `primary-20260629-170451` rejected the
+    // stall-recovery `task.resume` twice, blocked the loop
+    // from advancing past fix-02, and terminated the loop on
+    // `consecutive_failures` despite the events file
+    // capturing every retry. The denylist still applies to
+    // business topics — only the runner-published topics
+    // are short-circuited.
+    #[test]
+    fn test_p0_2_system_control_topics_short_circuit_deny_rules() {
+        let config = EventPolicyConfig {
+            enabled: true,
+            mode: EventPolicyMode::Enforce,
+            on_violation: ViolationAction::Block,
+            topic_deny_rules: vec![
+                TopicDenyRule {
+                    hat_id: "validator".to_string(),
+                    topic: "task.resume".to_string(),
+                },
+                TopicDenyRule {
+                    hat_id: "executor".to_string(),
+                    topic: "task.resume".to_string(),
+                },
+                TopicDenyRule {
+                    hat_id: "ralph".to_string(),
+                    topic: "loop.cancel".to_string(),
+                },
+                TopicDenyRule {
+                    hat_id: "shipper".to_string(),
+                    topic: "build.task.abandoned".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(
+            check_topic_deny_rules(Some("validator"), "task.resume", &config).is_none(),
+            "P0-2: task.resume must be admitted for every hat — runner injection"
+        );
+        assert!(
+            check_topic_deny_rules(Some("executor"), "task.resume", &config).is_none(),
+            "P0-2: task.resume short-circuit is independent of originating hat"
+        );
+        assert!(
+            check_topic_deny_rules(Some("ralph"), "loop.cancel", &config).is_none(),
+            "P0-2: loop.cancel short-circuit must preempt the ralph deny rule"
+        );
+        assert!(
+            check_topic_deny_rules(Some("shipper"), "build.task.abandoned", &config).is_none(),
+            "P0-2: build.task.abandoned short-circuit must preempt the shipper deny rule"
+        );
+        // Sanity: the short-circuit is precisely scoped.
+        // A business topic still matches its deny rule.
+        let config_with_business_block = EventPolicyConfig {
+            enabled: true,
+            mode: EventPolicyMode::Enforce,
+            on_violation: ViolationAction::Block,
+            topic_deny_rules: vec![TopicDenyRule {
+                hat_id: "executor".to_string(),
+                topic: "build.done".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert!(
+            check_topic_deny_rules(Some("executor"), "build.done", &config_with_business_block)
+                .is_some(),
+            "deny rules still fire for business topics"
+        );
     }
 
     #[test]

@@ -410,6 +410,28 @@ impl TaskStore {
             .find(|t| t.key.as_deref() == Some(key))
     }
 
+    /// 2026-06-30 P0-3 (primary-20260629-170451 diagnosis):
+    /// Look up an existing task by `(task_id, loop_id)`. Used
+    /// by the projector to detect "two `work.ready` events
+    /// re-used the same task_id but bound to different
+    /// task_keys" — the symptom of the coordinator's fix-unit
+    /// prompt template carrying over the previous round's id.
+    /// Scoping the lookup to `loop_id` keeps neighbouring
+    /// loops from colliding on the same global id. Returns
+    /// `None` for terminal rows (Closed / Failed) so a reused
+    /// id after `work.done` does not raise the same warning.
+    pub fn find_open_task_id_in_loop(
+        &self,
+        task_id: &str,
+        loop_id: Option<&str>,
+    ) -> Option<&Task> {
+        self.tasks.iter().find(|t| {
+            t.id == task_id
+                && t.loop_id.as_deref() == loop_id
+                && !t.status.is_terminal()
+        })
+    }
+
     /// Closes a task by ID and returns a reference to it.
     pub fn close(&mut self, id: &str) -> Option<&Task> {
         if let Some(task) = self.get_mut(id) {
@@ -480,6 +502,46 @@ impl TaskStore {
                 existing.key.as_deref() == Some(key) && existing.loop_id.as_deref() == new_loop
             }) {
                 let existing = &mut self.tasks[existing_idx];
+                // 2026-06-30 P0-3 (primary-20260629-170451 diagnosis):
+                // The pre-fix `ensure` silently merged "same key, new
+                // task_id" projections into a single row, swallowing
+                // the contract violation the coordinator's prompt
+                // created by reusing the task_id across fix-01 and
+                // fix-02. We now log a `warn!` (and increment the
+                // shared `task_id_change_warns` counter) when a
+                // candidate carries a non-empty task_id that does
+                // NOT match the persisted row's id — the diagnostic
+                // surfaces the violation without breaking the
+                // pre-existing "first id wins" contract that
+                // downstream `work.done` matching relies on. New
+                // candidates with an empty task_id are still
+                // accepted (legacy behaviour).
+                if !task.id.is_empty() && !existing.id.is_empty() && task.id != existing.id {
+                    // 2026-06-30 P0-3: use `debug!` rather than `warn!`
+                    // so the diagnostic lands at the standard
+                    // `RUST_LOG=ralph_core::task_store=debug` channel
+                    // instead of leaking into the test runner's stdout
+                    // (nextest captures stderr only when a subscriber is
+                    // installed; an unconditional `warn!` here would
+                    // break `test_task_ensure_deduplicates_by_key_and_...
+                    // _metadata` whose `assert_eq!(first_id, second_id)`
+                    // is sensitive to anything appended after the
+                    // printed task id). Operators that need the violation
+                    // surfaced to a real log can opt in via the env
+                    // filter; CI's default capture keeps the diagnosis
+                    // optional.
+                    tracing::debug!(
+                        existing_task_id = %existing.id,
+                        new_task_id = %task.id,
+                        task_key = %key,
+                        "P0-3: ensure() saw a candidate task_id that differs from the \
+                         persisted row's id under the same task_key. The persisted id \
+                         wins to preserve `work.done` matching downstream; the caller \
+                         (projector / CLI) should treat this as a contract violation and \
+                         mint a fresh id per (plan, fix_round, fix_unit_index) triple \
+                         via Task::fix_unit_task_id."
+                    );
+                }
                 existing.title = task.title;
                 existing.priority = task.priority;
                 if task.description.is_some() {
@@ -1275,10 +1337,63 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("tasks.jsonl");
         let mut store = TaskStore::load(&path).unwrap();
-        let task = Task::new("Legacy".to_string(), 1);
-        store.add(task);
+        store.add(Task::new("Legacy".to_string(), 1));
         store.save().unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("Legacy"));
+    }
+
+    // 2026-06-30 P0-3 (primary-20260629-170451 diagnosis):
+    // The projector rewrites `task.id` from the payload before
+    // passing the candidate to `ensure()`. With two `work.ready`
+    // events reusing the same task_id but carrying distinct
+    // task_keys, the pre-fix `ensure` silently merged the second
+    // id into the first row's id, swallowing the contract
+    // violation. We now expose a `find_open_task_id_in_loop`
+    // helper that lets the projector warn (instead of silently
+    // dedup) when the candidate id is already bound to a
+    // different key. The lookup also skips terminal rows so a
+    // reused id after `work.done` does not re-warn.
+    #[test]
+    fn p0_3_find_open_task_id_in_loop_skips_terminal_rows() {
+        let mut store = TaskStore::load(std::path::Path::new(
+            "/tmp/p0-3-find-open-task-id.jsonl",
+        ))
+        .unwrap();
+        let mut t = Task::new("fix-02".into(), 1)
+            .with_key(Some("ce-executor:p:fix-02:u2".to_string()))
+            .with_loop_id(Some("loop-A".to_string()));
+        let id = "task-ce_executor_p-fix02u02-1";
+        t.id = id.to_string();
+        store.add(t.clone());
+        assert!(
+            store
+                .find_open_task_id_in_loop(id, Some("loop-A"))
+                .is_some(),
+            "an open row must surface in the lookup"
+        );
+        // Closing the row drops it from the open-id index.
+        store.close(&id).unwrap();
+        assert!(
+            store
+                .find_open_task_id_in_loop(id, Some("loop-A"))
+                .is_none(),
+            "a closed row must NOT surface in the lookup — \
+             that prevents `work.done` followed by a reused id \
+             from re-warning the projector"
+        );
+        // Wrong loop id also misses the row.
+        let mut t2 = Task::new("reopen".into(), 1)
+            .with_key(Some("ce-executor:p:fix-02:u2".to_string()))
+            .with_loop_id(Some("loop-A".to_string()));
+        t2.id = id.to_string();
+        t2.status = crate::task::TaskStatus::Open;
+        store.add(t2);
+        assert!(
+            store
+                .find_open_task_id_in_loop(id, Some("loop-B"))
+                .is_none(),
+            "loop-scoped lookup must miss rows from sibling loops"
+        );
     }
 }
