@@ -203,12 +203,11 @@ event_loop:
   # Same single-U contract as ce-executor-serial. Coordinator must
   # only create the current U's task.
   enforce_current_unit: true
-  # 2026-06-28-005: suppress_human_guidance config field was
-  # removed in plan 2026-06-28-005 (the human.guidance topic
-  # itself no longer exists). The perky-maple probe storm is
-  # no longer possible because no guidance event reaches any
-  # hat. Operator-side manual emit still works (TUI, CLI, or
-  # external tooling).
+  # 2026-06-28-005: the human.guidance topic and the
+  # suppress_human_guidance config field were removed in plan
+  # 2026-06-28-005. Automated recovery flows through `task.resume`;
+  # the perky-maple probe storm is no longer possible because no
+  # guidance event reaches any hat.
   # Plan 2026-06-20-001 F-PS-005: state_projection moved to
   # `presets/schemas/ce-executor-serial.yml` SSOT (uses the
   # `actions_chain` form with `mark_step_completed`). The inline
@@ -730,13 +729,11 @@ hats:
       - **Current U Principle (HARD RULE)**: emit `work.ready` ONLY for the *current* U. Do NOT pre-create tasks for U2, U3, etc. — the projector will only create a task for the unit currently routed by the loop, and pre-emitting sibling `work.ready` events leaves orphans. When U1 closes, the validator's `test.passed` triggers another coordinator activation, which emits `work.ready` for U2.
       - **R4 carve-out — sub-units**: when a plan explicitly splits a U into sub-units (`U1a / U1b / U1c`), use keys `...:u1a-impl`, `...:u1b-impl`, `...:u1c-impl`. The runtime collapses these to the same base unit so they coexist alongside the parent `U1` task when needed.
       - **MANDATORY task_id derivation (HARD RULE — Fix-3, 2026-06-29 primary-072512)**:
-        The `task_id` field in every `work.ready` / `work.done` payload
         MUST be a non-empty string. Empty `task_id` is now fail-closed
         in the projector (`state_projector/task.rs` Fix-1) and the
-        runner will surface a `human.guidance` rejection
-        (`loop_runner/runner.rs` Fix-2) instead of incrementing the
-        hard-gate counter — but emitting a valid `task_id` from the
-        start is still strictly cheaper than retrying.
+        runner will surface a rejection event (`loop_runner/runner.rs` Fix-2)
+        instead of incrementing the hard-gate counter — but emitting a valid
+        `task_id` from the start is still strictly cheaper than retrying.
         - Recommended workflow:
           1. Emit `work.ready` with only `task_key` set.
           2. Wait for the next activation's `## ORCHESTRATOR CONTEXT` block,
@@ -845,28 +842,48 @@ hats:
       After the phase gate, follow the matching branch below.
 
       #### Branch A — `step` starts with `fix-` (fix-unit completion):
-         - Read `fix_plan_file` from the most recent `review.complete` payload (cached in
-           `context.md` when the fix-unit was dispatched) to know the fix-plan path.
-         - Parse the `## Implementation Units` section of the fix-plan file. Count the
-           `### U{N}.` headings — that is the total fix-unit count.
-         - Derive the current fix-unit index from `step` (`fix-01` → 1, `fix-02` → 2, ...).
-         - **If there are more fix-units after the current one:**
-           - Publish `work.ready` for the next fix-unit with payload: `plan_path` (the
-             fix-plan file), `plan_name`, `complexity: "small"`, the next step's
-             `task_id`/`task_key` (e.g. `fix-02`), and carry forward `fix_plan_file`.
-           - Stop — do NOT proceed to any other work, do NOT emit `review.start`.
-         - **If this was the last fix-unit (no more `### U{N}.` headings after the current index):**
-           - Publish `plan.complete` with payload: `plan_name`, `completed_steps`,
-             `task_id`, `task_key`, `verdict: "pass_with_residuals"` (or `"pass"` if
-             the most recent `review.complete` had `residual_findings_count == 0`),
-             `final_findings_count: <int>` (carry forward from the most recent `review.complete` payload's
-             `findings_count` field), `fix_round: <int>` (carry forward from the most recent `review.complete`
-             payload's `fix_round` field; 0 if not present).
-             The shipper reads `plan.complete.{verdict,final_findings_count,fix_round}` (see shipper
-             instructions, line 2062) — omitting these two fields causes the verdict-promotion gate at
-             line 2121 to evaluate against undefined values.
-           - Stop — do NOT emit `review.start`. A fix-unit's `test.passed` is the
-             end-of-plan signal, NOT a request for another review round.
+
+         **PRE-DECISION GATE (HARD RULE — count first, emit second):**
+         Before emitting anything after a `test.passed(fix-NN)`, you MUST:
+
+         1. Read `fix_plan_file` from the most recent `review.complete` payload
+            (cached in `context.md` when the fix-unit was dispatched).
+         2. Parse the `## Implementation Units` section of the fix-plan file.
+            Count every `### U{N}.` heading — that is `total_fix_units`.
+         3. Derive the current fix-unit index from `step` (`fix-01` → 1, `fix-02` → 2, ...).
+         4. **If `current_index < total_fix_units`:**
+            - Publish `work.ready` for the NEXT fix-unit (`fix-{current+1:02}`).
+            - **FAIL-SAFE (bounded):** if you cannot read / parse the fix-plan file,
+              assume there is at least one more fix-unit and emit the next
+              `work.ready`. You may apply this fail-safe **at most once per fix-unit
+              chain**; if the file remains unreadable on the next activation, emit
+              `plan.blocked(reason="fix_plan_unreadable")` instead of continuing to
+              emit endless fix-units.
+            - **NEVER emit `plan.complete` or `review.start` in this branch.**
+            - Stop.
+         5. **If `current_index == total_fix_units`:**
+            - Publish `plan.complete`.
+            - When emitting `plan.complete`, set `step` to the current
+              `fix-NN` value. Without `step`, `plan_gate` cannot apply the fix-*
+              exemption and will reject the event.
+            - Stop.
+
+         This gate is the primary defence against the 2026-06-30 P0-C regression,
+         where the coordinator skipped fix-02 / fix-03 and emitted `plan.complete`
+         after only fix-01 had closed.
+
+         When emitting `work.ready` for the next fix-unit, the payload fields MUST
+         be internally consistent:
+         - `step` and the `fix-{NN}` segment in `task_key` MUST use the same number.
+           Example of a violation: `step=fix-02` but `task_key=...:fix-01:u2`.
+         - `task_id` MUST be freshly minted per fix-unit; do NOT reuse the previous
+           fix-unit's `task_id`. Prefer `Task::fix_unit_task_id(plan_name, fix_round,
+           fix_unit_index, unix_ts)`. The id MUST match either
+           `task-{ts}-{4hex}` or `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}`.
+         - `completed_steps` (used later in `plan.complete`) MUST include every
+           fix-unit that has actually closed, in order.
+
+         **After the phase gate, follow the matching branch below.**
 
       #### Branch B — `step` does NOT start with `fix-` (plan unit / trivial completion):
 
@@ -946,7 +963,7 @@ hats:
          double-quote, n, u, l, l, double-quote) when there are no P0/P1 findings.
          A JSON `null` literal is NOT acceptable — the runtime will reject the event.
       2. If `fix_plan_file` is the literal string `"null"` or the file does not exist (no issues to fix):
-         - Publish `plan.complete` with payload: `plan_name`, `completed_steps`, `task_id`, `task_key`, `verdict: "pass"`, `final_findings_count: <int>` (carry forward from the most recent `review.complete` payload's `findings_count` field; should be 0 here but the field is REQUIRED for shipper's verdict-promotion gate), `fix_round: <int>` (carry forward; 0 if not present)
+         - Publish `plan.complete` with payload: `plan_name`, `completed_steps`, `task_id`, `task_key`, **`step`** (set to the current step, e.g. `"step-01"` — required by schema for `plan.complete` since 2026-06-30 P0-A), `verdict: "pass"`, `final_findings_count: <int>` (carry forward from the most recent `review.complete` payload's `findings_count` field; should be 0 here but the field is REQUIRED for shipper's verdict-promotion gate), `fix_round: <int>` (carry forward; 0 if not present)
          - Stop
       3. If `fix_plan_file` is a real path (issues to fix):
          - Read the fix-plan file
@@ -955,9 +972,18 @@ hats:
          - Publish `work.ready` for the FIRST fix-unit (U1) with payload:
            - `plan_path` (set to the fix-plan file path)
            - `plan_name`
-           - `task_id`
-           - `task_key`
-           - `step: "fix-01"` — MUST follow the `fix-{NN}` format (zero-padded 2 digits).
+           - `task_id`: MUST be freshly minted for this fix-unit. Do NOT reuse an
+             existing task id from a prior step or fix-unit. Use the canonical
+             `task-{unix_ts}-{4hex}` shape, or call `Task::fix_unit_task_id(plan_name,
+             fix_round, fix_unit_index, unix_ts)` if available in your tool chain.
+             Hand-written suffixes such as `u2` or `f002` are invalid and will be
+             rejected by the state projector.
+           - `task_key`: `ce-executor:{plan_name}:fix-{NN}:{slug}` where `{NN}` is
+             exactly the same number used in `step`. `step` and `task_key` MUST NOT
+             disagree — a payload with `step=fix-02` but `task_key=...:fix-01:u2`
+             will break the runtime tracker and is the root cause of the
+             2026-06-30 P0-E regression.
+           - `step`: "fix-01" — MUST follow the `fix-{NN}` format (zero-padded 2 digits).
              This is the **phase signal** coordinator branches on in the
              test.passed handler: `step-NN` / `trivial` = plan unit,
              `fix-NN` = fix unit. NEVER mix the two — coordinator must
@@ -980,7 +1006,9 @@ hats:
         - `plan_path`, `plan_name`, `complexity`
         - `task_id`: the first uncompleted runtime task ID (from Pre-Publish Validation)
         - `task_key`: the corresponding task key
-        - `step`: step identifier (e.g., "step-01" or "trivial")
+        - `step`: step identifier (e.g., "step-01" or "trivial"). If the payload also
+          contains a `task_key`, the step segment inside `task_key` MUST match `step`
+          exactly. Do not emit a payload where these two fields disagree.
         - `preflight_checks`: list of hard prerequisites the executor must verify before implementation
       - Stop — do not continue to other work
       - **Stop immediately after publishing work.ready** — do NOT continue any other work, including simulating other hats' behavior or emitting other events
@@ -2770,9 +2798,8 @@ hats:
   # `consecutive_no_progress_turns >= progress_steward.max_steward_iterations`.
   # The serial preset narrows the steward's auto-wake path to
   # `loop.stalled` only — the serial preset does not consume
-  # `human.guidance`. The `human.guidance` topic schema is retained
-  # so an operator can still emit it manually; the steward simply
-  # does not subscribe to it. Automated recovery flows through
+  # `human.guidance`. The `human.guidance` topic schema was removed
+  # in plan 2026-06-28-005; automated recovery flows through
   # `task.resume` (see U2/U3 in 2026-06-17-003 plan). The 2026-06-25
   # refactor retired the Telegram-driven RObot producer; the
   # recovery channel itself is preserved.

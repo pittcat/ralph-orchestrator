@@ -266,11 +266,15 @@ schemas:
     # for verdict promotion (pass_with_residuals → pass when
     # final_findings_count <= max_residuals). `fix_round` is the
     # dedup SSOT carried from the last review.complete.
+    # 2026-06-30 P0-A: `step` is required so plan_gate can recognise
+    # fix-* exemption path; without it plan.complete from the fix-unit
+    # chain is rejected as `plan_gate_review_not_terminal`.
     required_fields:
       - plan_name
       - completed_steps
       - task_id
       - task_key
+      - step
       - verdict
       - final_findings_count
       - fix_round
@@ -385,20 +389,6 @@ schemas:
   loop.stalled:
     required_fields:
       - reason
-    payload: json_object
-
-  # 2026-06-16-001 U5: `human.guidance` runtime diagnosis engine topic.
-  #
-  # The `human.guidance` schema is retained so an operator can still
-  # emit it manually (TUI, CLI, or external tooling). The serial
-  # preset's `progress-steward` does NOT subscribe to this topic —
-  # it is auto-woken on `loop.stalled` only. The 2026-06-17-003 plan
-  # (merry-lotus follow-up) records the product decision: automated
-  # recovery flows through `task.resume` (structured), not
-  # `human.guidance` (free-form, reserved for humans).
-  human.guidance:
-    required_fields:
-      - message
     payload: json_object
 
 # =============================================================================

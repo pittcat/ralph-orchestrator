@@ -75,6 +75,21 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 - 🔴 `ralph emit` **没有** `format` 选项。
 - 🔴 试图通过 `RALPH_EVENTS_FILE` 或 `--file` 写入其他 worktree 的 events 文件会被 `ralph emit` 拒绝；错误信息会列出当前 allowlist。
 
+**Payload 字段自洽检查**
+
+emit 任何 step handoff 事件前，确认 payload 内部一致：
+
+- 如果 preset 同时定义了 `step` 字段和 `task_key` 字段，两者描述的 step 必须一致。
+  反例：`step=fix-02` 但 `task_key=...:fix-01:u2` ❌
+- `task_id` 必须来自当前 loop 的真实任务列表（`ralph tools task list`），不要手写、不要复用已闭合 task 的 id。
+- 聚合字段（如 `completed_steps`）必须与已落盘的事件流一致；不要在 `plan.complete` 中宣称某个 step 已完成而事件流里缺少它。
+
+**isolated mode 重发规则**
+
+- isolated mode 下，同一 turn 内重复 emit 同一 business topic 会被静默丢弃。
+- 如果事件发出去后没有产生预期推进，先检查 schema 和字段自洽，不要立即重发同一 topic。
+- 重发前必须收到新的 `task.resume` 或进入新的 turn。
+
 **NULL payload 拒收白名单**（`crates/ralph-core/src/event_policy.rs:829-839` `NULL_PAYLOAD_REJECT_TOPICS`）：以下 9 个 topic 不接受空 payload（`[PAYLOAD]` 省略 + 无 `-j`）— 必须传 JSON object：
 
 | Topic | 出现位置 |

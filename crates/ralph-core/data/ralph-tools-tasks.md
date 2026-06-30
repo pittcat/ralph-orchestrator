@@ -57,6 +57,10 @@ ralph tools task show <task-id> [--format table|json|quiet]
 - Use `task reopen` when more work remains after a failed review/finalization pass
 - Use `task fail` when the task is blocked and cannot be completed in the current iteration
 - **NEVER pass an empty `task_id`**: `ralph tools task start/close/fail/reopen/show` and any `ralph emit` payload containing `task_id` must use a real, non-empty id like `task-{timestamp}-{hex}`. Empty `task_id` is rejected by the CLI and will break step handoff.
+- **`task_id` / `task_key` / `step` 必须同源**: 在 `ralph emit` payload 中，如果同时出现 `task_id`、`task_key` 和 `step`：
+  - `task_id` 必须真实存在于 `.ralph/agent/tasks.jsonl` 且属于当前 loop，不要复用已 closed 的 id。
+  - `task_key` 中的 step 段（例如 `:fix-02:`）必须与 `step` 字段完全一致。
+  - 不要手写 `task_id`；优先用 `ralph tools task add/ensure` 生成，或按当前 preset 的规范构造。
 
 ### Cross-Loop and Cross-Hat Authorization
 

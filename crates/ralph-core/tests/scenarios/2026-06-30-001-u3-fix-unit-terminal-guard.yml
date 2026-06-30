@@ -66,6 +66,7 @@ mock_responses:
   - |
     <event topic="plan.complete">
     plan_name: "u3-guard-demo"
+    step: "fix-02"
     verdict: pass
     </event>
   - |
