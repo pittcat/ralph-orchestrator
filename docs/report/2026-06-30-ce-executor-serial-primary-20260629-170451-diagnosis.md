@@ -24,22 +24,79 @@
 
 **v2 修正后,本次诊断的真实 P0 三条为**:P0-1 fix-02 闭链断链 / P0-2 `task.resume` topic_denied 二次过滤 / P0-3 coordinator fix-unit 21 秒重发 + projector dedup 缺失。
 
+**v3 新增**:基于用户提供的完整代码级根因链,新增 §1「完整根因链」,明确 P0-1 的真因是 **projector 在 fix-02 阶段把任务错误关闭**,导致 validator 收不到 fix-02 任务上下文,而不是单纯的「validator 缺席无兜底」。
+
 ---
 
-## 1. 结论摘要
+## 1. 完整根因链(新增)
+
+### 1.1 时间线
+
+| 时间 | 事件 | 说明 |
+|---|---|---|
+| 17:43:01 | executor  emit `work.done(step=fix-02, commit_count=1)` | fix-02 代码(`c787086`)已 commit ✅ |
+| 17:43:06 | Ralph 收到 `work.done`,调度下一个 hat | spawn `child_pid=76133`(validator hat 跑测试) |
+| 17:43:06 | prompt 显示 **「0 ready / 0 open / 6 closed」** | ⚠️ validator 收不到 fix-02 的具体任务描述 |
+| 17:46:27 | validator hat 被超时(210s ≈ 3.5 分钟无 emit) | hard gate trigger:`validator did not emit any event` |
+| 17:46:27 | 自动 inject `task.resume` 让 validator 重做 | spawn `child_pid=90494` |
+| 17:46:27 | 重做 prompt 仍是 **「0 ready / 0 open / 6 closed」** | validator 再次没 emit event |
+| 17:49:30 | progress-steward 的 `task.resume` 被 `event_policy` 拒收 | ledger seq=27 记录 `topic_denied` |
+| 17:52:39 | stall_recovery 自动 inject `task.resume(target=ralph)` | 仍无进展 |
+| 17:55:38 | progress-steward 也不 emit event | hard gate 第二次触发 `consecutive=2` |
+| 17:58:41 | `consecutive_failures ≥ 5` | loop 终止 |
+
+**🎯 真正根因:任务在 projector 阶段被错误关闭,validator 看不到 fix-02 的任务上下文。**
+
+### 1.2 fix-01 vs fix-02 关键差异
+
+| 阶段 | fix-01 | fix-02 |
+|---|---|---|
+| `work.done` 后 "Injecting ready tasks" | 0 ready / 0 open / **4 closed** | 0 ready / 0 open / **6 closed** |
+| fix-unit task 双条记录 | `task-1782754445-f12e` "fix-01: Document..." + "fix-01" | `task-1782754894-f0d0` "U2: Add recursion depth..." + "fix-02" |
+| 第二条 task `created → closed` 间隔 | 17:34:48 → 17:36:03 = 75秒 | 17:42:01 → 17:43:06 = 65秒 |
+| 第二条 task 的状态 | 跳过 `started` 直接 `closed` | 跳过 `started` 直接 `closed` |
+| validator hat 行为 | 跑测试 + emit `test.passed` ✅ | 没 emit 任何 event ❌ |
+
+### 1.3 关键洞察
+
+1. **fix-01 和 fix-02 都有「双条 task 投影」问题**(P0-3 / P1-2 已记录),而且 fix-02 的双条 task 从 `created` 直接到 `closed`,跳过了 `started`。
+2. **fix-01 的 validator 之所以成功**,是因为:
+   - 4.7 分钟的间隔(比 fix-02 的 3.3 分钟长 40%);
+   - Claude agent 自己会读 `.ralph/agent/` 下的 scratchpad 和 `context.md`(preset 里 validator 的 instructions 要求"Read fields from the triggering event payload" + "Read context.md and plan.md");
+   - fix-01 任务虽然 closed 了,但 git working tree 还在 + `context.md` 描述清晰,Claude 知道要测什么。
+3. **fix-02 的 validator 失败**,更可能是因为:
+   - 任务上下文中 **0 ready tasks** — validator 看不到自己的 fix-02 任务;
+   - 加上 **6 个 closed task** 全塞进上下文(fix-01 和 fix-02 的双条记录让上下文混乱);
+   - 加上 `progress.md` 在 17:43:06.757 出现 `WARN: progress.md written with empty headings` —— projector 写出空 progress,validator 看不到当前状态;
+   - fix-02 时没有 fix-01 那样能让 Claude 推断工作的 fallback —— 递归深度保护这个改动虽然 commit 了,但 validator 可能因为上下文污染 / 自身复杂度,没能识别出该跑测试。
+
+### 1.4 这是机制 bug 还是编排 bug?
+
+**机制 bug 为主**,具体 4 条:
+
+1. **`TaskStore::ensure_task` 没有去重(P0-3)** —— 导致 fix-01 / fix-02 都出现 task 双条投影,污染上下文。
+2. **`progress.md` projector 在 fix-02 后写出 empty headings** —— 状态投影丢失,validator 没有当前状态可读。
+3. **`TaskStore::close_by_key` 误关闭** —— 第二条 task `started: null`,`closed: 17:43:06`,根本没运行就关闭。
+4. **`task.resume` 被 `event_policy` 拒收(P0-2)** —— 兜底失效。
+
+---
+
+## 2. 结论摘要
 
 **本次 run 健康度:中度异常** — 代码产物 100% 提交(`6ee20e9` docstrings + `c787086` recursion depth guard + 23/23 测试通过),TDD step-01/02 闭环、6 维 review 全程正确、fix-01/fix-02 修复 commit 已落。但 **PHASE 2 末端断链**:fix-02 `work.done` 之后无 `test.passed`,progress-steward 兜底发 `task.resume` 又被 `event_policy:topic_denied` 拒收,ledger 末条 `loop.batch_sync.no_progress`,最终 `consecutive_failures` ≥ 5 终止,**全链缺失** `plan.complete` / `REVIEW_COMPLETE` / `report.done` / `LOOP_COMPLETE`。
 
 **一句话**:`ce-executor-serial` 在 2-UNIT Python 排序算法 plan 上**代码层全绿 + 运行层末段断链**,consecutive_failures 终止,未走 shipper → reporter → LOOP_COMPLETE clean exit。
 
+**v3 补充根因**:fix-02 断链不是单纯的「validator 缺席无兜底」,而是 projector 把 fix-02 任务错误关闭 + progress.md 写空 + task 双条投影共同导致 validator 看不到任务上下文,进而无法 emit。`consecutive_failures` 只是这一连串机制 bug 的最终表现。
+
 - **关键异常**:P0 = 3 条 / P1 = 3 条 / P2 = 5 条(共 11 条归因)
 - **涉及历史重复问题**:5 条 / 11 条(其中 🔴 极高关联 2 条、🔴 高关联 2 条、高关联 1 条)
-- **归因比例**:编排 1(P0-3) + 基座 2(P0-1/P0-2 含源) + 叠加 0(全部 P0 含源混合)— **基座机制责任占主流**
+- **归因比例**:编排 1(P0-3) + 基座 3(P0-1/P0-2/P0-3 含源) + 叠加 0(全部 P0 含源混合)— **基座机制责任占绝对主流**
 - **代码产物状态**:`6ee20e9 docs(sorts): document O(n²) worst-case` + `c787086 feat(sorts): add recursion depth guard with heap sort fallback`,全部进入 git 主分支
 
 ---
 
-## 2. 执行链路对比图
+## 3. 执行链路对比图
 
 > 数据源对比:preset 预期 vs `/tmp/run-events.jsonl` 30 行实际
 
@@ -96,7 +153,7 @@ graph TD
 
 ---
 
-## 3. 历史问题上下文(Agent B 整理)
+## 4. 历史问题上下文(Agent B 整理)
 
 | 历史编号 | 最早出现 | 本次复跑现象 | 关联度 | 历史判定 |
 |---|---|---|---|---|
@@ -123,7 +180,7 @@ graph TD
 
 ---
 
-## 4. 证据清单(Agent C 偏离证据要点)
+## 5. 证据清单(Agent C 偏离证据要点)
 
 > 完整 15 张证据卡见本次诊断 Agent C 输出(对话内)。本节列出本次诊断的**关键证据**(精确到文件:行号 / 事件 ID / 时间戳)。
 
@@ -146,17 +203,17 @@ graph TD
 
 ---
 
-## 5. 问题归因表(P0 / P1 / P2)
+## 6. 问题归因表(P0 / P1 / P2)
 
 > **归类原则**:`(a)` preset 设计 / `(b)` Ralph loop 基座 / `(c)` agent 产物 / `(d)` 多因素叠加
 
 | 优先级 | 问题描述 | 根因分类 | 证据 | 历史关联 |
 |---|---|---|---|---|
-| **P0-1** | **fix-02 `work.done` 之后无 `test.passed`**,progress-steward 兜底发 task.resume 又被 `topic_denied` 拒收,反复 no_progress,最终 `consecutive_failures` ≥ 5 终止;**全链缺失 plan.complete / REVIEW_COMPLETE / report.done / LOOP_COMPLETE** | **(d) 编排 + 机制** — 编排:coordinator 在 validator 缺席时无降级路径(没有「work.done 后 N 秒无 test.passed 自动切 shipper 兜底」)<br/>基座:`TaskStore::close_by_key` 没在 PHASE 2 末端检查「validator 实际是否 emit」,`consecutive_failures` 把 no_progress 误计为 fail severity | events.jsonl:28-30 / ledger:27-29 / `loop_state.rs:665` | **🔴 极高**(H_CF + P0-B 叠加);本次**新增断链类型**,153653 报告未覆盖 |
+| **P0-1** | **fix-02 `work.done` 之后无 `test.passed`**,progress-steward 兜底发 task.resume 又被 `topic_denied` 拒收,反复 no_progress,最终 `consecutive_failures` ≥ 5 终止;**全链缺失 plan.complete / REVIEW_COMPLETE / report.done / LOOP_COMPLETE**。v3 真因:**projector 把 fix-02 任务错误关闭 + `progress.md` 写空 + task 双条投影**,validator prompt 显示 "0 ready / 0 open / 6 closed",根本看不到 fix-02 任务上下文,所以无法 emit。 | **(b) 基座机制** 为主 — `TaskStore::close_by_key` 在 PHASE 2 末端误关任务;`state_projector/progress.rs` 写空 headings;`TaskStore::ensure_task` 未去重导致上下文污染。<br/>编排为辅:coordinator 在 validator 缺席时无降级路径。 | events.jsonl:28-30 / ledger:27-29 / `loop_state.rs:665` / `progress.md` WARN empty headings / tasks.jsonl:5-6 双条 | **🔴 极高**(H_CF + P0-B 叠加);本次**新增断链类型**,153653 报告未覆盖 |
 | **P0-2** | **`task.resume` 被 `topic_denied` 拒收**,ledger seq 27/28 字面 `event_policy:event_policy:topic_denied`,但 `event_policy.rs:794` 显式 `allowed.insert("task.resume")` | **(b) 基座机制** — event_policy `allowed` 白名单与 `check_topic_deny_rules` 二次过滤**未对齐**:allowed 仅放行「系统 topic」,deny_rules 仍按 hat_id 拦截;ledger 误记 `rejection_recorded`,实际 events 流成功写入 L29/L30 — **ledger 与 events 口径不一致** | ledger.jsonl:27-28 / `event_policy.rs:794, 2301` / `event_loop/rejection.rs:521-525 build_task_resume_payload` | **🔴 极高**(noble-peacock + 150653 P1-1);23dcfdaf 没修 |
-| **P0-3** | **fix-01 `work.ready` 21 秒内被 coordinator 重发 2 次**(同 task_id,同 task_key,同 step),后续触发 tasks.jsonl fix-01 双条记录 | **(d) 编排 + 机制** — 编排:coordinator fix-unit 推进策略无视「上一次同 task_key 已 dispatch」<br/>基座:`TaskStore::ensure_task` 路径**没做 dedup**,23dcfdaf 加 `close_by_key`(关任务路径)但**没加 `dedupe_by_key`** | events.jsonl:23-24 / recovery.jsonl:1-2 / tasks.jsonl:3-4 | **🔴 高**(H6 同源;153653 误判「未触发」本次反向打脸) |
+| **P0-3** | **fix-01 `work.ready` 21 秒内被 coordinator 重发 2 次**(同 task_id,同 task_key,同 step),后续触发 tasks.jsonl fix-01 双条记录;fix-02 同样双条投影 | **(d) 编排 + 机制** — 编排:coordinator fix-unit 推进策略无视「上一次同 task_key 已 dispatch」<br/>基座:`TaskStore::ensure_task` 路径**没做 dedup**,23dcfdaf 加 `close_by_key`(关任务路径)但**没加 `dedupe_by_key`** | events.jsonl:23-24 / recovery.jsonl:1-2 / tasks.jsonl:3-6 | **🔴 高**(H6 同源;153653 误判「未触发」本次反向打脸) |
 | P1-1 | **`summary.md` "Tasks: _No scratchpad found._"** 但 scratchpad 实际在 `.agents/scratchpad/.../` | **(c) agent 产物** — `summary_writer.rs:296-303` 查 `.ralph/agent/scratchpad.md`,但 preset `presets/en/ce-executor-serial.yml:596` 写到 `.agents/scratchpad/{preset}/{plan_name}/`;**两套路径不通** | summary.md:9 / `presets/en/ce-executor-serial.yml:596` vs `summary_writer.rs:296-303` | **🔴 高**(120038 row 43 + 150653 P2-1 已识别) |
-| P1-2 | **`tasks.jsonl` fix-01/fix-02 task 双条记录**(一条带 owner,一条无 owner/key),且 `description` 与 fix-plan.md U1/U2 一致(本条**无错位**)| **(b) 基座机制** — projector `ensure_task` 未去重;23dcfdaf 仅覆盖 `close_by_key` | tasks.jsonl:3-4 / `state_projector/task.rs:100-104` | **🔴 高**(153653 P0-2 已部分修;未覆盖 dedup) |
+| P1-2 | **`tasks.jsonl` fix-01/fix-02 task 双条记录**(一条带 owner,一条无 owner/key),且 `description` 与 fix-plan.md U1/U2 一致(本条**无错位**)| **(b) 基座机制** — projector `ensure_task` 未去重;23dcfdaf 仅覆盖 `close_by_key` | tasks.jsonl:3-6 / `state_projector/task.rs:100-104` | **🔴 高**(153653 P0-2 已部分修;未覆盖 dedup) |
 | P1-3 | **`work.ready` 的 `preflight_checks` 字段不一致**(step-01 有,step-02/fix-01/fix-02 全无);preset 写成 optional,coordinator 在 step-01 后放弃 | **(c) agent 产物** — schema 允许,executor 按 `contains` 语义忽略 | events.jsonl:2/5/23/24/27 / `presets/schemas/ce-executor-serial.yml:60-68` | **极低** |
 | P2-1 | **ledger `loop.batch_sync.no_progress` 不递增 iter 但 summary 显示 31 次 iter**(ledger 差 3 条);`no_progress` 不直接加 `consecutive_failures`,但 `stall_recovery` 间接触发 task.resume 拒收形成循环 | **(b) 基座机制** — `consecutive_no_progress_turns` 与 `consecutive_failures` 两条独立计数器(`loop_state.rs:334` vs `:698`)| ledger.jsonl:29 / `loop_state.rs:334, 698` / `audit.rs:58-77` | **高**(H_CF 同型,触发链不同) |
 | P2-2 | **`test.passed` payload 缺 `commit_count`/`changed_lines`**,对比 `work.done` 有,可观测性弱化 | **(a) preset 设计** — schema 未声明必需字段;可选但应填 | events.jsonl:3-4, 6-7 / `presets/schemas/ce-executor-serial.yml:97-105` | 低 |
@@ -165,23 +222,23 @@ graph TD
 | P2-5 | **preflight 启动 3 条 WARN**(`debug-resolver` / `plan-gate` hat overlay 被忽略 + ralph.yml 包含 hats/events 但被 preset 覆盖)— 上游 workspace 残留配置 | **(c) 产物(配置)** | `ralph-e2e/.ralph/diagnostics/2026-06-30T01-04-51/trace.jsonl` | 低 |
 
 ### 编排 vs 机制的责任分布
-- **P0 分布**:编排 1(P0-3 coordinator 重发)+ 基座 2(P0-2 task.resume 拒收、P0-3 间接含 projector)+ 叠加 1(P0-1 双源)— **基座责任占主流**
-- **总分布**:P0 基座 + 叠加 3 条;P1 基座 + 产物 3 条;P2 基座 + 编排 + 产物混合
+- **P0 分布**:编排 1(P0-3 coordinator 重发)+ 基座 3(P0-1 projector 误关/空 progress、P0-2 task.resume 拒收、P0-3 dedup)+ 叠加 0 — **基座责任占绝对主流**
+- **总分布**:P0 基座 + 叠加 4 条;P1 基座 + 产物 3 条;P2 基座 + 编排 + 产物混合
 - **结论**:**修基座优先**(P0-1 主要落点基座,P0-2 纯基座,P0-3 半基座);编排可作配合改动
 
 ---
 
-## 6. 修复建议(按优先级)
+## 7. 修复建议(按优先级)
 
-### P0-1 — fix-02 闭链断链:加 `work.done` 后 N 秒无 `test.passed` 自动降级路径
+### P0-1 — fix-02 闭链断链:先修 projector,再加 validator 缺席兜底
 
 | 项 | 内容 |
 |---|---|
-| 目标文件 | `crates/ralph-core/src/event_loop/mod.rs` `project_state` 入口(约 `loop_state.rs:665` 阈值上游);`crates/ralph-core/src/coordinator.rs`(`emit_plan_complete`);`crates/ralph-core/src/event_loop/repair_dispatch_stage.rs` |
-| 具体修改 | 1) `loop_runner` 在 `work.done` 后启动 `test_passed_deadline` 计时器(默认 300s,可配)<br/>2) 到期仍未 `test.passed` → 自动 inject `task.resume(target=validator, reason=missing_test_passed)`,而不是 stall_recovery 兜底<br/>3) `TaskStore::close_by_key` 在 validator 二次重试仍缺席时触发 `finalize_fix_unit` 自动 emit `plan.complete(step=fix-NN)` → 进 shipper 流程 |
-| 预期效果 | fix-NN 后 PHASE 2 末端不再断链;`consecutive_failures` 不再因 validator 缺席累加 |
-| fixtures/tests | `fixtures/validator_absent_deadline.json` + 单测 `crates/ralph-core/src/event_loop/tests/test_work_done_no_test_passed_deadline.rs`;**BDD 场景** `crates/ralph-core/tests/scenarios/test-passed-deadline-auto-fallback.yml`(必须用 `run_workflow_guard_scenario`,2026-06-24 P0-2/P0-3 根因教训)|
-| docs plans | 新增 `docs/plans/2026-06-30-002-fix-work-done-no-test-passed-deadline-plan.md` |
+| 目标文件 | `crates/ralph-core/src/state_projector/task.rs`(`apply_work_done`/`close_by_key`);`crates/ralph-core/src/state_projector/progress.rs`;`crates/ralph-core/src/task_store.rs`;`crates/ralph-core/src/event_loop/mod.rs` |
+| 具体修改 | 1) `TaskStore::close_by_key` **禁止关闭 `started: null` 的任务**:只有 task 真正被启动过(存在 `started` 时间戳)才允许进入 closed;否则保持 open 或标记为 `projected`<br/>2) `state_projector/progress.rs` 在 headings 为空时**不写空文件**,而是写 "No active tasks" 占位或保留上一个非空状态,避免 validator 看到空 progress<br/>3) `TaskStore::ensure_task` 加 `(task_key)` 唯一索引(见 P0-3),消除双条投影导致的 "6 closed" 上下文污染<br/>4) **兜底**:loop_runner 在 `work.done` 后启动 `test_passed_deadline` 计时器(默认 300s,可配),到期仍未 `test.passed` → 自动 inject `task.resume(target=validator, reason=missing_test_passed)` |
+| 预期效果 | fix-NN 后 PHASE 2 末端不再断链;validator prompt 始终能看到自己的 fix 任务;`consecutive_failures` 不再因 validator 缺席累加 |
+| fixtures/tests | `fixtures/progress_empty_headings_preserve_last.json` + `fixtures/validator_absent_deadline.json` + 单测 `crates/ralph-core/src/event_loop/tests/test_work_done_no_test_passed_deadline.rs`;**BDD 场景** `crates/ralph-core/tests/scenarios/test-passed-deadline-auto-fallback.yml` + `progress-not-empty.yml`(必须用 `run_workflow_guard_scenario`,2026-06-24 P0-2/P0-3 根因教训)|
+| docs plans | 新增 `docs/plans/2026-06-30-002-fix-work-done-no-test-passed-deadline-plan.md`(合并 projector 修复) |
 | 同步 | `crates/ralph-cli/src/ralph-tools.md`(CLI 文档,如新增 retry_policy) + `presets/manifest.yml`(scenarios 新增索引) |
 
 ### P0-2 — `task.resume` topic_denied 二次过滤未对齐:让 allowed 起决定作用
@@ -224,7 +281,7 @@ graph TD
 
 ---
 
-## 7. 本次 run 实际成效(相对完整链路)
+## 8. 本次 run 实际成效(相对完整链路)
 
 **好消息**:
 - TDD step-01 / step-02 闭环,30 tests 全过 → 可交付
@@ -234,18 +291,19 @@ graph TD
 
 **坏消息**:
 - **PHASE 2 末端断链**:fix-02 `work.done` 后无 `test.passed`,progress-steward 兜底发 `task.resume` × 2 全被拒,consecutive_failures ≥ 5 终止
+- **v3 真因**:projector 把 fix-02 任务错误关闭 + `progress.md` 空 headings + task 双条投影,validator 根本看不到 fix-02 上下文
 - **`plan.complete` / `REVIEW_COMPLETE` / `report.done` / `LOOP_COMPLETE` 全 0 次**,shipper / reporter 链路未启动
 - **编排出错**:fix-01 阶段 `work.ready` 21 秒内重发 2 次(tasks.jsonl 双条投影)
-- **基座机制有多处未修**(P0-2 task.resume 拒收、P0-3 dedup 缺),修了 23dcfdaf 后仍未根除
+- **基座机制有多处未修**(P0-1 projector 误关、P0-2 task.resume 拒收、P0-3 dedup 缺),修了 23dcfdaf 后仍未根除
 - **summary "No scratchpad"** 与现实互斥,诊断面口径不对
 
-**结论**:这是**真实运行链路故障**(非测试层 flake),机制问题占主流 — 编排不算离谱,主要卡在运行时对「`work.done` 后 validator 缺席」和「`task.resume` 二次过滤」两个机制都没保护。本次 run 17:04:51 启动 vs commit `23dcfdaf` 17:05:xx 完成 → **本质是修完即复跑的对照基线**,**本次现象 = 修复前快照**,其价值在于**暴露了 commit `23dcfdaf` 未覆盖的 P0-B/P1-A/P1-B 三处机制缺口**。
+**结论**:这是**真实运行链路故障**(非测试层 flake),**机制问题占绝对主流** — 编排不算离谱,主要卡在 projector 错误关闭任务、`progress.md` 写空、`task.resume` 二次过滤三个机制都没保护。本次 run 17:04:51 启动 vs commit `23dcfdaf` 17:05:xx 完成 → **本质是修完即复跑的对照基线**,**本次现象 = 修复前快照**,其价值在于**暴露了 commit `23dcfdaf` 未覆盖的 P0-1/P0-B/P1-A/P1-B 四处机制缺口**。
 
 ---
 
-## 8. 推荐的下一步
+## 9. 推荐的下一步
 
-1. **修复 #1(P0-1)** — 改 `loop_runner` 加 `test_passed_deadline` 兜底,让 fix-NN 后 validator 缺席能自动降级;新增 BDD `test-passed-deadline-auto-fallback.yml`(`run_workflow_guard_scenario`)。预计 fix-02 走断链的时间从「3m26s 等不到」收敛到「300s deadline 后自动 fallback」
+1. **修复 #1(P0-1)** — 先修 `TaskStore::close_by_key`(禁止关闭未 started 的任务)和 `progress.md` projector(禁止写空 headings),再加 `test_passed_deadline` 兜底;新增 BDD `test-passed-deadline-auto-fallback.yml` + `progress-not-empty.yml`(`run_workflow_guard_scenario`)。预计 fix-02 走断链的时间从「3m26s 等不到」收敛到「300s deadline 后自动 fallback」
 2. **修复 #2(P0-2)** — `check_topic_deny_rules` 加 `is_system_topic` 短路,让 `task.resume` 真正起 re-prompt 作用;预计 ledger 末段 2 条 `topic_denied` 消失
 3. **修复 #3(P0-3)** — `TaskStore::ensure_task` 加 `(task_key)` 唯一索引,修 23dcfdaf 未覆盖的 dedup;预计 tasks.jsonl 不再双条
 
@@ -253,7 +311,7 @@ graph TD
 
 ---
 
-## 9. 验证清单(下次跑前必跑)
+## 10. 验证清单(下次跑前必跑)
 
 ```bash
 cd /Users/pittcat/Dev/Rust/ralph-orchestrator
@@ -266,6 +324,7 @@ cargo nextest run -p ralph-cli --bin ralph -- test_ce_executor_root_preset_match
 # 2. BDD scenarios(关键!真 EventLoop runner 断言 events)
 cargo nextest run -p ralph-core --test scenarios -- \
   test-passed-deadline-auto-fallback \
+  progress-not-empty \
   task-resume-system-topic-bypass \
   fix-unit-task-id-dedup
 
@@ -293,9 +352,10 @@ RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh
   - `crates/ralph-core/src/coordinator.rs`(`generate_fix_task_id`, `emit_plan_complete`, `finalize_fix_plan`)
   - `crates/ralph-core/src/task_store.rs`(`open_fix_unit`, `close_by_key`)
   - `crates/ralph-core/src/state_projector/task.rs:100-104`
+  - `crates/ralph-core/src/state_projector/progress.rs`(progress.md 投影)
   - `crates/ralph-core/src/summary_writer.rs:296-303`(scratchpad 路径)
 - 关键 commit:
-  - `23dcfdaf fix(ralph-core): 修复 ce-executor-serial primary-20260629-153653 链路诊断 P0/P1`(2026-06-30 17:05)— 修了 plan.complete step 字段、close_by_key、project_close_task 优先 task_key;**未覆盖**:task.resume 二次过滤、coordinator 重发去重、summary 双路径
+  - `23dcfdaf fix(ralph-core): 修复 ce-executor-serial primary-20260629-153653 链路诊断 P0/P1`(2026-06-30 17:05)— 修了 plan.complete step 字段、close_by_key、project_close_task 优先 task_key;**未覆盖**:task.resume 二次过滤、coordinator 重发去重、projector 误关/空 progress、summary 双路径
   - `2ac23dea fix(state_projector): wiring working tree to fix P0-2`(2026-06-29 21:01)
   - `c327d295`(LOOP_COMPLETE 不污染 terminal)
   - `76123d49`(task_id 空串 fail-closed)
@@ -325,5 +385,5 @@ RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh
 
 ---
 
-**报告版本**:v2(2026-06-30)
-**与 v1 差异**:Agent D v2 报告 2 处致命错误纠正(见 §0);P0 三条真因重写为 PHASE 2 末 validator 缺席,而非 plan_gate / human.guidance。
+**报告版本**:v3(2026-06-30)
+**与 v2 差异**:新增 §1「完整根因链」,明确 P0-1 真因是 projector 把 fix-02 任务错误关闭 + progress.md 写空 + task 双条投影,导致 validator 看不到任务上下文;修复建议相应从「纯兜底」升级为「先修 projector,再加兜底」。
