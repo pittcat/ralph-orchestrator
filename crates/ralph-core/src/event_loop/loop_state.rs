@@ -1475,6 +1475,7 @@ impl LoopState {
                 | "event.policy_warning"
                 | "event.completion.blocked"
                 | "event.completion.ignored"
+                | "event.execution_contract.rejected"
                 | "event.isolation.boundary_violation"
                 | "event.step_handoff.gate_rejected"
                 | "loop.cancel"

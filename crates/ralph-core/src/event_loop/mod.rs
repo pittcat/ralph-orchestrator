@@ -4091,6 +4091,14 @@ impl EventLoop {
 
         let hat = self.registry.get(hat_id)?;
 
+        // Set active hat for downstream logic (default_publishes, enforce_hat_scope).
+        // Mirror the isolated-mode assignment at L4079 so observers reading
+        // `last_active_hat_ids` after `build_prompt` see the same value in both
+        // execution modes. Without this, backward-compat (Coordinator default)
+        // callers would observe a stale Vec while isolated callers see the
+        // just-built hat — see test_rejected_work_done_retry_payload_reaches_executor_prompt.
+        self.state.last_active_hat_ids = vec![hat_id.clone()];
+
         // Debug logging to trace hat routing
         debug!(
             "build_prompt: hat_id='{}', instructions.is_empty()={}",
