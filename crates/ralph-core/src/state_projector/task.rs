@@ -29,7 +29,7 @@ use serde_json::Value;
 use crate::state_projector::ProjectionContext;
 use crate::state_projector::json_pointer;
 use crate::task::Task;
-use crate::task_store::TaskStore;
+use crate::task_store::{is_fix_unit_id, is_fix_unit_key, TaskStore};
 
 /// Project a `work.ready` event into the task ledger.
 ///
@@ -211,27 +211,55 @@ pub(crate) fn project_close_task(
         Closed,
         Missing,
     }
-    let outcome = if let Some(task_key) = json_pointer(payload, "task_key") {
-        if store.get_by_key_mut(task_key).is_some() {
+    // 2026-06-30-001 P0-4: the `work.done` projector path
+    // is the only legitimate way a task gets closed without
+    // an explicit `TaskStore::start` call (executor picks
+    // the task up between `work.ready` and `work.done`,
+    // and never calls start). Mark the row as started here
+    // so the new `TaskStore::close_by_key` /
+    // `TaskStore::close` `started.is_none()` guard (added
+    // in P0-4 to prevent orphan closed tasks for
+    // placeholder rows) accepts the close. Fix-unit tasks
+    // (matched by `is_fix_unit_key`) skip this branch —
+    // they are exempt from the guard by design (see
+    // `TaskStore::close_by_key`).
+    //
+    // Pre-fix behaviour: the projector just called
+    // `close_by_key`. Post-fix: the close still happens,
+    // but the row is first marked started so the
+    // never-started placeholder rows that the diagnose
+    // report P0-4 is targeting remain rejected (they
+    // never go through `work.done`).
+    let mut outcome = CloseOutcome::Missing;
+    if let Some(task_key) = json_pointer(payload, "task_key") {
+        if let Some(row) = store.get_by_key_mut(task_key) {
+            if row.started.is_none() && !is_fix_unit_key(task_key) {
+                row.start();
+            }
             if store.close_by_key(task_key).is_some() {
-                CloseOutcome::Closed
-            } else {
-                CloseOutcome::Missing
+                outcome = CloseOutcome::Closed;
             }
         } else {
             // Key mismatch — fall back to id lookup so we don't
             // silently no-op on malformed payloads.
+            if let Some(row) = store.get_mut(&task_id)
+                && row.started.is_none()
+                && !is_fix_unit_id(&task_id)
+            {
+                row.start();
+            }
             if store.close(&task_id).is_some() {
-                CloseOutcome::Closed
-            } else {
-                CloseOutcome::Missing
+                outcome = CloseOutcome::Closed;
             }
         }
-    } else if store.close(&task_id).is_some() {
-        CloseOutcome::Closed
-    } else {
-        CloseOutcome::Missing
-    };
+    } else if let Some(row) = store.get_mut(&task_id) {
+        if row.started.is_none() && !is_fix_unit_id(&task_id) {
+            row.start();
+        }
+        if store.close(&task_id).is_some() {
+            outcome = CloseOutcome::Closed;
+        }
+    }
     match outcome {
         CloseOutcome::Closed => {}
         CloseOutcome::Missing => {

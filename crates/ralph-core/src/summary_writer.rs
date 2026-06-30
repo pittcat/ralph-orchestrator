@@ -500,6 +500,23 @@ mod tests {
             last_projection_rejections: Vec::new(),
             completion_requested: false,
             completion_honored: false,
+            // 2026-06-30-001 P0-5: report_done_seen starts
+            // `false`; the first accepted `report.done` event
+            // flips it. Test fixture mirrors the production
+            // default.
+            report_done_seen: false,
+            // 2026-06-30-001 P0-3: dedup hash starts
+            // `None`; the first accepted `REVIEW_COMPLETE`
+            // event populates it.
+            terminal_adjacent_seen_payload_hash: None,
+            // 2026-06-30-001 P0-3: starts `false`; the U3
+            // runtime guard flips it when the fix-unit
+            // chain is exhausted.
+            fix_unit_chain_exhausted: false,
+            // 2026-06-30-001 P0-3: in-memory counter for
+            // fix-unit `work.done` admissions; test
+            // fixture mirrors the production default.
+            seen_fix_unit_completions: 0,
             isolated_turn_business_event_accepted: false,
             hat_activation_counts: std::collections::HashMap::new(),
             exhausted_hats: std::collections::HashSet::new(),

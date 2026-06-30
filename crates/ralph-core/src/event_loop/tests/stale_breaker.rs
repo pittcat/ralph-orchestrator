@@ -195,7 +195,10 @@ fn test_stale_breaker_task_state_change_resets_counter() {
     let tasks_path = temp_dir.path().join(".ralph/agent/tasks.jsonl");
     let mut store = TaskStore::load(&tasks_path).unwrap();
     let task_id = store.open().first().map(|t| t.id.clone());
-    if let Some(id) = task_id {
+    if let Some(id) = task_id.clone() {
+        // 2026-06-30-001 P0-4: start the task first; the
+        // close guard refuses never-started rows.
+        store.start(&id).unwrap();
         store.close(&id);
     }
     store.save().unwrap();
@@ -309,11 +312,19 @@ fn test_report_done_satisfies_ce_executor_completion_gate() {
     event_loop.initialize("Test");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
-    // Simulate report.done being seen (this is the required event)
-    event_loop
-        .state
-        .seen_topics
-        .insert("report.done".to_string());
+    // 2026-06-30-001 P0-5: route report.done through the JSONL
+    // pipeline so the runtime's admit loop flips
+    // `report_done_seen` via `record_event` (or the
+    // per-event admit-loop assignment in
+    // `process_parse_result`). Direct `seen_topics.insert`
+    // bypasses the guard because it does not exercise the
+    // accept path.
+    write_event_to_jsonl(
+        &events_path,
+        "report.done",
+        r#"{"verdict":"pass","summary":"done"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
 
     // Write LOOP_COMPLETE to JSONL
     write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "done");
@@ -340,10 +351,12 @@ fn test_post_completion_business_events_do_not_reset_stale_breaker() {
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Completion with report.done satisfied
-    event_loop
-        .state
-        .seen_topics
-        .insert("report.done".to_string());
+    write_event_to_jsonl(
+        &events_path,
+        "report.done",
+        r#"{"verdict":"pass","summary":"done"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
     write_event_to_jsonl(&events_path, "LOOP_COMPLETE", "done");
     let _ = event_loop.process_events_from_jsonl();
     let reason = event_loop.check_completion_event();

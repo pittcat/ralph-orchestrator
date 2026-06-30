@@ -1011,10 +1011,25 @@ fn close_task_with_context(
     authorize_lifecycle(&snapshot, ctx, coordinator_hats, "close")?;
 
     let title = store
-        .close(task_id)
-        .context(format!("Task {} not found", task_id))?
-        .title
-        .clone();
+        .get_mut(task_id)
+        .map(|t| {
+            // 2026-06-30-001 P0-4: the `ralph task close`
+            // CLI path is the only legitimate way a task
+            // gets closed without an explicit
+            // `TaskStore::start` call (operator explicitly
+            // retires a row that never picked up). Mark
+            // the row started here, mirroring the
+            // `project_close_task` event path. The new
+            // `TaskStore::close` / `close_by_key`
+            // `started.is_none()` guard (added in P0-4
+            // to prevent orphan closed tasks for
+            // placeholder rows) accepts the close.
+            t.start();
+            t.status = TaskStatus::Closed;
+            t.closed = Some(chrono::Utc::now().to_rfc3339());
+            t.title.clone()
+        })
+        .context(format!("Task {} not found", task_id))?;
 
     store.save().context("Failed to save tasks")?;
 

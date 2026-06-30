@@ -413,6 +413,21 @@ impl LedgerSnapshot {
             CommitDelta::StallRecoveryCounted { key, new_count } => {
                 self.stall_recovery_counts.insert(key.clone(), *new_count);
             }
+            // 2026-06-30-001 P1-4: the no-progress marker is
+            // a record-only delta — it does not mutate any
+            // snapshot field, but it persists into the
+            // ledger so operators can distinguish no-progress
+            // turns from business-progress turns even
+            // though both use the same `loop.batch_sync`
+            // source string.
+            CommitDelta::NoProgressTurnObserved { iteration: _ } => {
+                // No-op on the snapshot; the on-disk line is
+                // the source of truth for the no-progress
+                // signal. We accept the delta and let
+                // `replay_from_disk` rebuild the iteration
+                // counter from the per-turn CounterChanged
+                // entries that follow.
+            }
             CommitDelta::TaskBlockCounted { task_id, new_count } => {
                 self.task_block_counts.insert(task_id.clone(), *new_count);
             }

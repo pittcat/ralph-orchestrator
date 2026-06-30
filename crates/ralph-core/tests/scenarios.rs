@@ -2752,6 +2752,59 @@ fn test_u10_phase2_branch() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-06-30-001 P0-1 BDD coverage for U3 (fix-unit terminal
+/// guard). The runtime MUST reject `review.start` after every
+/// fix-NN is closed in `tasks.jsonl`; the smoke test below
+/// confirms the runtime loop keeps `plan.complete →
+/// REVIEW_COMPLETE → report.done → LOOP_COMPLETE` intact when
+/// the pre-fix failure pattern (extra `review.start`) is fed
+/// in. Single-step plan-level coverage lives in
+/// `test_review_start_rejected_after_fix_unit_chain_exhausted`.
+#[test]
+fn test_u3_fix_unit_terminal_guard() {
+    let yaml = load_scenario(
+        "tests/scenarios/2026-06-30-001-u3-fix-unit-terminal-guard.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-06-30-001 P0-1 BDD coverage for U4 (shipper reason
+/// strict-match whitelist). When `plan.blocked` carries a
+/// recovery-bucket reason that is NOT in the strict whitelist
+/// (`loop_stalled_max_iterations`, `steward_escalation`,
+/// `review_terminal_drift`), the shipper MUST hard-fail —
+/// not promote to pass via substring match. The smoke
+/// scenario below verifies the hard-fail path emits
+/// `REVIEW_COMPLETE(pass_or_fail=fail, verdict=fail)` and
+/// never emits `LOOP_COMPLETE`/`plan.complete`. Lint coverage
+/// is in `strict_reason_routing::tests`.
+#[test]
+fn test_u4_shipper_reason_whitelist() {
+    let yaml = load_scenario(
+        "tests/scenarios/2026-06-30-001-u4-shipper-reason-whitelist.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-06-30-001 P0-1 BDD coverage for U5 (REVIEW_COMPLETE
+/// byte-level dedup). The runtime MUST drop a second
+/// byte-identical `REVIEW_COMPLETE` payload so the
+/// `events.jsonl` file does not accumulate the 29-second
+/// pattern observed in primary-20260630-032648. The smoke
+/// scenario below emits two byte-identical `REVIEW_COMPLETE`
+/// events in the same mock batch and asserts only one
+/// surfaces in the events stream. Single-step unit coverage
+/// is in `test_review_complete_payload_dedup` /
+/// `test_report_done_payload_dedup` /
+/// `test_loop_complete_payload_dedup`.
+#[test]
+fn test_u5_review_complete_dedup() {
+    let yaml = load_scenario(
+        "tests/scenarios/2026-06-30-001-u5-review-complete-dedup.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U6b: smoke test for the
 /// `CoordinatorDecisionGateStage`. The
 /// `upstream_review_incomplete` reject logic is

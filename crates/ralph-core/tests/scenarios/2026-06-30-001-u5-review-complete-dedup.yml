@@ -1,0 +1,66 @@
+# 2026-06-30-001 U5 BDD scenario: REVIEW_COMPLETE 字节级去重
+#
+# BDD 覆盖:P0-3 (primary-20260630-032648 diagnosis) 修复。
+# reviewer 在同 batch 内 emit 两次字节级相同的 REVIEW_COMPLETE
+# payload。Runtime U5 dedup guard 必须 dedup 第二次,不让
+# events.jsonl 累积两条 byte-identical 行。
+#
+# 单测在 `test_review_complete_payload_dedup` 已覆盖
+# LoopState.is_review_complete_duplicate;此 scenario 验证
+# 整条事件流闭环:reporter 收到第一次 REVIEW_COMPLETE,
+# emit report.done,正常 terminate。
+# 第二次 REVIEW_COMPLETE 在同一批被 dedup,不影响事件流。
+#
+# 期望:events 序列中 REVIEW_COMPLETE 出现 1 次(去重后);
+# report.done 出现 1 次;无 plan.blocked。
+
+name: u5_review_complete_dedup
+description: U5 - 字节级重复 REVIEW_COMPLETE 被 dedup,events 流只保留 1 次
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  hats:
+    reviewer:
+      subscribes_to:
+        - work.done
+      publishes:
+        - REVIEW_COMPLETE
+    reporter:
+      subscribes_to:
+        - REVIEW_COMPLETE
+      publishes:
+        - report.done
+
+mock_responses:
+  # 第一次 REVIEW_COMPLETE
+  - |
+    <event topic="REVIEW_COMPLETE">
+    verdict: pass
+    pass_or_fail: pass
+    final_findings_count: 0
+    </event>
+  # 字节级相同的第二次 REVIEW_COMPLETE
+  # (在同 batch 内被 dedup,不应在 events 流中出现)
+  - |
+    <event topic="REVIEW_COMPLETE">
+    verdict: pass
+    pass_or_fail: pass
+    final_findings_count: 0
+    </event>
+  - |
+    <event topic="report.done">
+    verdict: pass
+    summary: u5-dedup-demo done
+    </event>
+  - |
+    waiting.
+
+expected:
+  iterations: 4
+  events:
+    - topic: REVIEW_COMPLETE
+    - topic: report.done
+  absent_events:
+    - topic: plan.blocked
+  completion: false

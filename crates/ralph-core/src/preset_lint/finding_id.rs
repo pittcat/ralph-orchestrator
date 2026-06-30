@@ -296,3 +296,20 @@ pub const FINDING_FLOW_UNKNOWN_EMIT_REJECTED: &str = "preset.flow_unknown_emit_r
 /// half of this contract a hard panic, U12 makes the
 /// preset-half a hard lint.
 pub const FINDING_METADATA_RUNTIME_DRIFT: &str = "preset.metadata_runtime_drift";
+
+// ──────────────────────────────────────────────────────────────────────────
+// 2026-06-30-001 P0-2 (primary-20260630-032648 diagnosis):
+// shipper's `plan.blocked` reason routing must use a STRICT
+// exact-match whitelist. The pre-fix prompt wording ("with
+// recoverable reason X") let the agent promote recovery-bucket
+// reasons (e.g. `stall_no_events`) to pass by substring
+// matching. The lint scans the shipper prompt and warns when
+// the marker phrases ("STRICT-MATCH" or "STRICT EXACT MATCH")
+// are missing — drift-guard against future prompt refactors
+// that re-loosen the routing.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Shipper `plan.blocked` reason routing is missing the
+/// STRICT-MATCH marker. The lint is structural (Error) so the
+/// preset fails to load when the marker is removed.
+pub const FINDING_STRICT_REASON_ROUTING_MISSING: &str = "preset.strict_reason_routing_missing";

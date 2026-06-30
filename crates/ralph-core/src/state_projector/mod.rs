@@ -526,8 +526,43 @@ impl StateProjector {
                 materialize_snapshot_tasks(&mut store, snapshot.tasks());
                 let inserted = store.all().len() - pre_count;
                 let changed = match transition {
-                    TaskTransition::Closed => store.close(task_id).is_some(),
-                    TaskTransition::Failed => store.fail(task_id).is_some(),
+                    TaskTransition::Closed => {
+                        // 2026-06-30-001 P0-4: the new
+                        // `TaskStore::close` / `close_by_key`
+                        // guard refuses to close never-started
+                        // rows. The projector was the only
+                        // legitimate path that closes a task
+                        // without an explicit `start` call
+                        // (executor picks the task up between
+                        // `work.ready` and `work.done`), so we
+                        // mark the row started here, mirroring
+                        // the `project_close_task` event
+                        // path. Fix-unit rows are exempt by
+                        // design (see `is_fix_unit_id` /
+                        // `is_fix_unit_key`).
+                        if let Some(row) = store.get_mut(task_id)
+                            && row.started.is_none()
+                            && !crate::task_store::is_fix_unit_id(task_id)
+                        {
+                            row.start();
+                        }
+                        store.close(task_id).is_some()
+                    }
+                    TaskTransition::Failed => {
+                        // Same as `Closed`: the new guard
+                        // requires `started.is_some()` for
+                        // non-fix-unit rows. We mark started
+                        // here so a task that never had an
+                        // explicit start but hit `work.failed`
+                        // can still be marked Failed.
+                        if let Some(row) = store.get_mut(task_id)
+                            && row.started.is_none()
+                            && !crate::task_store::is_fix_unit_id(task_id)
+                        {
+                            row.start();
+                        }
+                        store.fail(task_id).is_some()
+                    }
                     TaskTransition::Started | TaskTransition::Reopened | TaskTransition::Opened => {
                         // Opened/Started/Reopened on an existing
                         // task are pass-throughs; the projector
@@ -612,6 +647,7 @@ impl StateProjector {
             | CommitDelta::HatExhausted { .. }
             | CommitDelta::RejectionLastIteration { .. }
             | CommitDelta::StallRecoveryCounted { .. }
+            | CommitDelta::NoProgressTurnObserved { .. }
             | CommitDelta::TaskBlockCounted { .. }
             | CommitDelta::TaskAbandoned { .. }
             | CommitDelta::ReviewStepUpdated { .. }

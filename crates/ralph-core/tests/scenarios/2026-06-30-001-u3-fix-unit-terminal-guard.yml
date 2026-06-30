@@ -1,0 +1,86 @@
+# 2026-06-30-001 U3 BDD scenario: fix-unit chain exhausts → review.start rejected
+#
+# BDD 覆盖:P0-3 (primary-20260630-032648 diagnosis) 修复。
+# 验证两条事件流契约:
+#   1. 修复后的 runtime 在 fix-unit chain exhausted 后
+#      reject `review.start` (事件不会进入 seen_topics,
+#      不会进入 accepted_log_events)。
+#   2. happy path `plan.complete` 仍能正常 emit。
+#
+# 单测在 `test_review_start_rejected_after_fix_unit_chain_exhausted`
+# 覆盖 LoopState 字段;此 scenario 是 integration smoke
+# 验证。
+
+name: u3_fix_unit_terminal_guard
+description: U3 - fix-unit chain exhausted 后 review.start 被 runtime guard reject
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - plan.complete
+        - review.start
+    fix-executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+
+mock_responses:
+  # 1) step-01 work.done (not fix-unit)
+  - |
+    <event topic="work.done">
+    plan_name: "u3-guard-demo"
+    step: "step-01"
+    task_id: "u3-task-01"
+    task_key: "ce-executor:p:step-01:u1-impl"
+    </event>
+  # 2) fix-01 work.done (fix-unit, but chain not exhausted yet)
+  - |
+    <event topic="work.done">
+    plan_name: "u3-guard-demo"
+    step: "fix-01"
+    task_id: "u3-fix-01"
+    task_key: "ce-executor:p:fix-01:u1"
+    </event>
+  # 3) fix-02 work.done (last fix-unit — chain now exhausted)
+  - |
+    <event topic="work.done">
+    plan_name: "u3-guard-demo"
+    step: "fix-02"
+    task_id: "u3-fix-02"
+    task_key: "ce-executor:p:fix-02:u2"
+    </event>
+  # 4) coordinator 错发 review.start — runtime U3 guard
+  # reject,因为 fix-unit chain 已经 exhausted。
+  - |
+    <event topic="review.start">
+    plan_name: "u3-guard-demo"
+    step: "step-01"
+    </event>
+  # 5) coordinator 正常发 plan.complete — runtime accept
+  - |
+    <event topic="plan.complete">
+    plan_name: "u3-guard-demo"
+    verdict: pass
+    </event>
+  - |
+    waiting.
+  - |
+    waiting.
+  - |
+    waiting.
+
+expected:
+  iterations: 8
+  events:
+    - topic: work.done
+    - topic: plan.complete
+  absent_events:
+    - topic: review.start
+    - topic: plan.blocked
+  completion: false

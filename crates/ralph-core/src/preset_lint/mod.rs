@@ -33,6 +33,7 @@ pub mod multi_hat;
 pub mod ownership;
 pub mod schema_parity;
 pub mod state_projection;
+pub mod strict_reason_routing;
 pub mod topic_format;
 pub mod workflow_activation;
 
@@ -72,6 +73,7 @@ pub use metadata_runtime_drift::check_metadata_runtime_drift;
 pub use multi_hat::check_multi_hat_isolation;
 pub use ownership::{check_owner_references, check_ownership_rules};
 pub use state_projection::check_work_done_action_chain_order;
+pub use strict_reason_routing::check_strict_reason_routing;
 pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,
     validate_all_topics, validate_topic_format,
@@ -433,6 +435,27 @@ pub fn run_preset_lint(
     // preset-load hard gate rejects the offending preset.
     findings.extend(lint_findings_to_contract_findings(
         &check_dimension_reviewer_write_paths(config, strictness),
+    ));
+
+    // 2026-06-30-001 P0-2 (primary-20260630-032648 diagnosis):
+    // shipper's `plan.blocked` reason routing must use a
+    // STRICT EXACT MATCH on the canonical whitelist. The lint
+    // scans the shipper prompt body and fires `Error` when the
+    // marker is missing, so a casual prompt refactor that
+    // re-loosens the routing is caught at preset-load time
+    // rather than mid-run.
+    //
+    // P1-2: prefer the raw_yaml the caller supplied (when
+    // available) so the lint can scan the shipper prompt
+    // body in its YAML-original form. The `RalphConfig`
+    // round-trip drops fields the typed config does not
+    // model (e.g. `system_prompt_template`, anchor-based
+    // fragments injected at render time). Falling back to
+    // `instructions + extra_instructions` keeps the lint
+    // useful for synthesised configs (unit tests, debug
+    // harnesses).
+    findings.extend(lint_findings_to_contract_findings(
+        &check_strict_reason_routing(config, strictness, raw_yaml),
     ));
 
     // 2026-06-27 mechanism foundation U5: flow declaration lint.

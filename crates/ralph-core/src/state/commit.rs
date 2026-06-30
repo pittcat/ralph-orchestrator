@@ -183,6 +183,22 @@ pub enum CommitDelta {
     /// Increment a per-stall recovery counter.
     StallRecoveryCounted { key: String, new_count: u32 },
 
+    /// 2026-06-30-001 P1-4 (primary-20260630-032648 diagnosis):
+    /// the loop's per-turn stall-detector noticed that no
+    /// business event was admitted (a "no-progress" turn).
+    /// Recorded as a separate ledger entry so operators can
+    /// keep the `loop.batch_sync` source string monotonic
+    /// (single source) **and** distinguish no-progress
+    /// turns from business-progress turns via the
+    /// `delta.kind == "NoProgressTurnObserved"` filter,
+    /// without losing the no-progress dimension that the
+    /// pre-fix `loop.batch_sync.no_progress` source
+    /// string used to expose. The on-disk shape stays
+    /// `{"kind": "no_progress_turn_observed", ...}` so
+    /// downstream tooling can grep by either source
+    /// string or kind.
+    NoProgressTurnObserved { iteration: u32 },
+
     /// Increment a per-task thrash counter.
     TaskBlockCounted { task_id: String, new_count: u32 },
 

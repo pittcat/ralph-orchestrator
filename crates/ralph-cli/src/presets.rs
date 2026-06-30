@@ -1323,10 +1323,15 @@ mod tests {
         let preset =
             get_preset("ce-executor-serial").expect("ce-executor-serial preset must be embedded");
         let content: &str = preset.content.as_ref();
-        // Shipper instructions must contain the reason-based routing block.
+        // 2026-06-30-001 P0-2: shipper instructions must use
+        // the STRICT-MATCH marker on the recoverable-reasons
+        // paragraph; the pre-fix wording ("reason-based
+        // routing") is too loose and was being interpreted
+        // as a substring match by the agent.
         assert!(
-            content.contains("reason-based routing"),
-            "shipper instructions must mention reason-based routing for plan.blocked"
+            content.contains("STRICT-MATCH")
+                || content.contains("STRICT EXACT MATCH"),
+            "P0-2: shipper instructions must use STRICT-MATCH on plan.blocked reason routing"
         );
         // Recoverable reasons must be listed.
         assert!(

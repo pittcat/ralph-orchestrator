@@ -110,18 +110,38 @@ pub(crate) fn project_plan_complete(
         push_completed(&mut ctx.progress_cache, step);
         ctx.progress_cache.current_step = Some(step.to_string());
     }
-    // Close every still-open task so the ledger matches the
-    // plan-complete state. We do NOT re-open tasks that were
-    // already closed/failed — `is_terminal` is the source of
-    // truth. The single `save` makes the close atomic on disk.
+    // Close every still-open AND started task so the ledger
+    // matches the plan-complete state. We do NOT re-open tasks
+    // that were already closed/failed — `is_terminal` is the
+    // source of truth. The single `save` makes the close atomic
+    // on disk.
+    //
+    // 2026-06-30-001 P0-4 (primary-20260630-032648 diagnosis):
+    // skipping never-started rows (started.is_none()) prevents
+    // `tasks.jsonl` from accumulating orphan closed tasks with
+    // `key=null, started_at=null, closed=<now>` rows that the
+    // validator's `open_tasks` view treats as "executor did
+    // work". TaskStore::close / close_by_key also gate the
+    // same condition as a defence-in-depth; the projector
+    // additionally filters here so the diagnostic
+    // `closed_count` reflects only legitimate closes.
     let mut store = crate::task_store::TaskStore::load(&ctx.tasks_path)
         .map_err(|e| format!("tasks_load: {e}"))?;
     let mut closed = 0usize;
     for task in store.all().to_vec() {
-        if !task.status.is_terminal() {
-            store.close(&task.id);
-            closed += 1;
+        if task.status.is_terminal() {
+            continue;
         }
+        if task.started.is_none() {
+            debug!(
+                task_id = %task.id,
+                task_key = ?task.key,
+                "state projection: plan.complete skipped never-started task"
+            );
+            continue;
+        }
+        store.close(&task.id);
+        closed += 1;
     }
     if closed > 0 {
         store.save().map_err(|e| format!("tasks_save: {e}"))?;

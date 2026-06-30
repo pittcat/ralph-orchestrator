@@ -1111,6 +1111,123 @@ fn p1_2_terminal_completion_requested_survives_process_restart() {
     );
 }
 
+// 2026-06-30-001 P0-6 (primary-20260630-032648 diagnosis):
+// the `loop.batch_sync.no_progress` source is no longer used —
+// both happy-path and no-progress turns commit under the
+// single `loop.batch_sync` topic so the ledger iter sequence
+// is monotonic and matches `summary.md`. The test pins the
+// single-topic contract.
+#[test]
+fn p0_6_batch_sync_source_string_is_unified() {
+    let dir = workspace();
+    let workspace = dir.path();
+    let mut ledger = StateLedger::new(workspace, true);
+
+    // Commit 5 turns; both happy and no-progress must use
+    // `loop.batch_sync`. Pre-fix code would have produced
+    // two distinct source strings and a stalled iter
+    // sequence.
+    for i in 1..=5i64 {
+        ledger
+            .commit(
+                CommitDelta::CounterChanged {
+                    counter: CounterKind::Iteration,
+                    new_value: i,
+                },
+                Some("loop.batch_sync".to_string()),
+            )
+            .unwrap();
+    }
+    drop(ledger);
+
+    // Replay the ledger and assert the source strings are
+    // monotonically `loop.batch_sync` with iter=1..=5.
+    let snap = StateLedger::replay_from_disk(workspace).expect("replay");
+    assert_eq!(
+        snap.iteration, 5,
+        "P0-6: replayed iter must equal the last commit (5)"
+    );
+    let raw = std::fs::read_to_string(workspace.join(LEDGER_RELATIVE_PATH)).unwrap();
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 5, "ledger must have 5 entries, got: {lines:?}");
+    for (i, line) in lines.iter().enumerate() {
+        assert!(
+            line.contains("\"event_topic\":\"loop.batch_sync\""),
+            "P0-6: every ledger line must use 'loop.batch_sync', got line {i}: {line}"
+        );
+        assert!(
+            !line.contains("loop.batch_sync.no_progress"),
+            "P0-6: no-progress source string must NOT appear, got line {i}: {line}"
+        );
+    }
+}
+
+// 2026-06-30-001 P1-4 (primary-20260630-032648 diagnosis):
+// the no-progress dimension is preserved as a separate
+// `NoProgressTurnObserved` ledger delta with the same
+// `loop.batch_sync` source string. Operators can query
+// "no-progress turns" via the `kind` field even though
+// the source string is unified.
+#[test]
+fn p1_4_no_progress_turn_observed_preserves_dimension() {
+    let dir = workspace();
+    let workspace = dir.path();
+    let mut ledger = StateLedger::new(workspace, true);
+
+    // 3 turns, all no-progress (no `had_events` /
+    // accepted_log_events).
+    for i in 1..=3u32 {
+        ledger
+            .commit(
+                CommitDelta::CounterChanged {
+                    counter: CounterKind::Iteration,
+                    new_value: i as i64,
+                },
+                Some("loop.batch_sync".to_string()),
+            )
+            .unwrap();
+        ledger
+            .commit(
+                CommitDelta::NoProgressTurnObserved { iteration: i },
+                Some("loop.batch_sync".to_string()),
+            )
+            .unwrap();
+    }
+    drop(ledger);
+
+    // 6 lines total: 3 CounterChanged + 3 NoProgressTurnObserved.
+    let raw = std::fs::read_to_string(workspace.join(LEDGER_RELATIVE_PATH)).unwrap();
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 6, "ledger must have 6 entries, got: {lines:?}");
+    // Source string unified.
+    for (i, line) in lines.iter().enumerate() {
+        assert!(
+            line.contains("\"event_topic\":\"loop.batch_sync\""),
+            "P1-4: every line uses loop.batch_sync, got line {i}: {line}"
+        );
+    }
+    // No-progress dimension preserved as 3 separate
+    // `no_progress_turn_observed` entries.
+    let no_progress_lines: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| l.contains("\"kind\":\"no_progress_turn_observed\""))
+        .collect();
+    assert_eq!(
+        no_progress_lines.len(),
+        3,
+        "P1-4: 3 NoProgressTurnObserved entries, got: {no_progress_lines:?}"
+    );
+    // The iter counter still monotonically advances to 3
+    // (CounterChanged entries take precedence on
+    // `replay_from_disk`).
+    let snap = StateLedger::replay_from_disk(workspace).expect("replay");
+    assert_eq!(
+        snap.iteration, 3,
+        "P1-4: replayed iter must equal the last CounterChanged value (3)"
+    );
+}
+
 #[test]
 fn p1_2_terminal_cancellation_requested_survives_process_restart() {
     let dir = workspace();

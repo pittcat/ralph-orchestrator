@@ -393,6 +393,9 @@ mod tests {
         let task1 = Task::new("Completed task".to_string(), 1);
         let id1 = task1.id.clone();
         store.add(task1);
+        // 2026-06-30-001 P0-4: start the task first; the
+        // close guard refuses never-started rows.
+        store.start(&id1).unwrap();
         store.close(&id1);
 
         let task2 = Task::new("Open task".to_string(), 2);

@@ -213,6 +213,87 @@ pub struct LoopState {
     /// Whether the completion event has already been honored (prevents duplicate side effects).
     pub completion_honored: bool,
 
+    /// 2026-06-30-001 P0-5 (primary-20260630-032648 diagnosis):
+    /// sticky flag set to `true` the first time a `report.done`
+    /// event (or any of the verdict-mirror topics that includes
+    /// `report.done`) is admitted into the loop. Gates
+    /// `completion_requested`: ralph runner / agent must NOT
+    /// transition to terminal until the workflow has produced
+    /// its final report, even when the agent / text fallback
+    /// already wrote `LOOP_COMPLETE` to the events stream. The
+    /// pre-fix runner could set `completion_requested = true`
+    /// mid-review-chain (events L37 of the 032648 run), causing
+    /// `LOOP_COMPLETE` to be honored before `report.done` ever
+    /// landed and silently dropping the final report payload
+    /// from the loop summary. Default `false`; flipped to
+    /// `true` by `record_verdict_if_match` (which is the single
+    /// per-event observation point for verdict-mirror topics)
+    /// when the event topic equals `report.done`.
+    pub report_done_seen: bool,
+
+    /// 2026-06-30-001 P0-3 (primary-20260630-032648 diagnosis):
+    /// hash of the most recently admitted
+    /// "terminal-adjacent" event payload (REVIEW_COMPLETE,
+    /// report.done, LOOP_COMPLETE, or any other verdict
+    /// gate topic + the configured completion promise), if
+    /// any. Set the first time the runtime admits one of
+    /// these events; on the next admit, a byte-identical
+    /// payload short-circuits to "duplicate" and the runtime
+    /// drops the event from the accepted stream (it is NOT
+    /// added to `accepted_log_events` so the events.jsonl
+    /// file does not accumulate a second byte-identical
+    /// row). A non-identical payload replaces the hash so
+    /// legitimate verdict changes (e.g. pass → fail) are
+    /// still observed. `None` until the first such event
+    /// lands.
+    ///
+    /// P1-3 (after code-review): the original P0-3 scope
+    /// only covered `REVIEW_COMPLETE`; ralph-032648 also
+    /// showed that LOOP_COMPLETE and report.done can be
+    /// re-emitted byte-identically (events L29/L31 pattern).
+    /// We now dedup **any** "terminal-adjacent" topic so
+    /// these surfaces stay clean too. The constant set is
+    /// centralised in `terminal_adjacent_topics()` so the
+    /// set stays in lockstep with `record_terminal_adjacent`.
+    pub terminal_adjacent_seen_payload_hash: Option<u64>,
+
+    /// 2026-06-30-001 P0-3 (primary-20260630-032648 diagnosis):
+    /// sticky flag set to `true` when the runtime admits a
+    /// `work.done` whose `task_key` is a fix-unit shape and
+    /// the on-disk task store confirms every fix-NN task in
+    /// the current plan is `Closed` (or `Failed`). Used by
+    /// the U3 runtime guard to detect "every fix-unit in
+    /// the current plan is closed" and reject any
+    /// subsequent `review.start` emit (the
+    /// `primary-20260630-032648` failure mode:
+    /// coordinator emitted `review.start` while the
+    /// fix-unit chain was already exhausted).
+    ///
+    /// **BDD / unit-test note**: the on-disk check
+    /// (`is_fix_unit_chain_exhausted` on `EventLoop`) only
+    /// sees the tasks that the projector has actually
+    /// persisted. In a `run_scenario` / BDD harness that
+    /// does not exercise the projector, the task store
+    /// stays empty and the structural check would
+    /// silently fall through. The simpler in-memory
+    /// `seen_fix_unit_completions` counter below is the
+    /// back-up signal: once the runtime has admitted at
+    /// least one fix-unit `work.done` AND has not seen a
+    /// `plan.complete` yet, the chain is considered
+    /// exhausted. This is the only signal BDD scenarios
+    /// can reliably observe; the production runtime
+    /// additionally crosses it with the on-disk check.
+    pub fix_unit_chain_exhausted: bool,
+
+    /// 2026-06-30-001 P0-3: count of `work.done` events
+    /// with a fix-unit-shaped `task_key` admitted by the
+    /// runtime. Sticky counter; never reset during a loop
+    /// lifetime. Used by the U3 guard when the on-disk
+    /// task store is unavailable (e.g. BDD harness
+    /// without projector wiring) to infer "fix-unit
+    /// chain is exhausted".
+    pub seen_fix_unit_completions: u32,
+
     /// U3 P0 fix (post-review): sticky flag tracking whether a business
     /// event has been accepted in the current isolated-mode turn.
     /// Reset at the start of each new turn (in `process_output`).
@@ -709,6 +790,25 @@ impl Default for LoopState {
             last_projection_rejections: Vec::new(),
             completion_requested: false,
             completion_honored: false,
+            // 2026-06-30-001 P0-5: starts `false`; the first
+            // accepted `report.done` event flips it to `true`.
+            report_done_seen: false,
+            // 2026-06-30-001 P0-3: starts `None`; the first
+            // accepted `REVIEW_COMPLETE` event records the
+            // payload hash; subsequent byte-identical events
+            // are deduped.
+            terminal_adjacent_seen_payload_hash: None,
+            // 2026-06-30-001 P0-3: starts `false`;
+            // flipped to `true` by the U3 runtime guard
+            // when every fix-NN step in the current plan
+            // is closed in `tasks.jsonl`.
+            fix_unit_chain_exhausted: false,
+            // 2026-06-30-001 P0-3: in-memory counter for
+            // fix-unit `work.done` admissions. BDD
+            // scenarios without projector wiring rely on
+            // this; production runtime additionally
+            // crosses it with the on-disk check.
+            seen_fix_unit_completions: 0,
             isolated_turn_business_event_accepted: false,
             hat_activation_counts: HashMap::new(),
             exhausted_hats: HashSet::new(),
@@ -1360,6 +1460,19 @@ impl LoopState {
     pub fn record_event(&mut self, event: &Event) {
         self.seen_topics.insert(event.topic.to_string());
 
+        // 2026-06-30-001 P0-5: keep `report_done_seen` in
+        // sync with the unified event-recording path. The
+        // admit-loop assignment in `process_parse_result`
+        // covers the runtime flow; this assignment keeps
+        // the flag correct for unit tests and any
+        // back-door recorder that bypasses that loop
+        // (e.g. replay / cold-start replay which
+        // re-injects the original event into the
+        // event-recording pipeline).
+        if event.topic.as_str() == "report.done" {
+            self.report_done_seen = true;
+        }
+
         if !Self::event_counts_toward_stale_loop(event) {
             self.consecutive_same_signature = 0;
             self.last_emitted_signature = Some(EventSignature::from_event(event));
@@ -1403,6 +1516,34 @@ impl LoopState {
             return;
         }
         if topics.iter().any(|t| t == event.topic.as_str()) {
+            // 2026-06-30-001 P0-3 (primary-20260630-032648
+            // diagnosis): byte-identical `REVIEW_COMPLETE`
+            // payloads must NOT be re-recorded as new
+            // terminal events. The pre-fix runtime
+            // double-recorded the same payload in events
+            // L29 and L31 (29-second gap), producing a
+            // duplicate `REVIEW_COMPLETE` row in
+            // events.jsonl. The dedup hashes the payload and
+            // records the hash; a subsequent identical
+            // payload still updates `last_verdict_payload`
+            // (so the runtime can read the latest verdict)
+            // but the event is otherwise short-circuited by
+            // callers via `is_review_complete_duplicate`.
+            if self.is_review_complete_duplicate(event) {
+                tracing::debug!(
+                    topic = %event.topic,
+                    "P0-3: duplicate REVIEW_COMPLETE payload observed; \
+                     caller must drop the event from the accepted stream"
+                );
+                // Update the verdict payload to the latest
+                // copy (in case the agent emitted a fresh
+                // timestamp / sequence on the duplicate);
+                // the hash stays the same because the
+                // payload bytes are identical.
+                self.last_verdict_payload = Some(event.payload.clone());
+                return;
+            }
+
             // 2026-06-10 P0-C fix: track the topic alongside the payload
             // so the fail-path auto-termination check can detect when
             // the verdict has propagated to the LAST configured mirror
@@ -1418,7 +1559,143 @@ impl LoopState {
             {
                 self.last_upstream_verdict_payload = Some(event.payload.clone());
             }
+
+            // 2026-06-30-001 P0-5: report.done is the
+            // canonical "workflow has produced its final
+            // report" signal. Mark it as observed the first
+            // time the runtime admits a `report.done` topic
+            // (or any other configured mirror that we have
+            // explicitly listed as the post-report guard
+            // trigger). The flag is sticky and idempotent so
+            // a re-emitted mirror in a later batch does not
+            // bounce the runtime.
+            if event.topic.as_str() == "report.done" {
+                self.report_done_seen = true;
+            }
         }
+    }
+
+    /// 2026-06-30-001 P0-5 (primary-20260630-032648 diagnosis):
+    /// try to set `completion_requested = true`. Returns
+    /// `Err(reason)` when `report.done` is listed in
+    /// `required_events` but the runtime has not yet observed
+    /// a `report.done` event. The caller is expected to log the
+    /// rejection and skip the terminal transition. The
+    /// `report.done` event is the canonical "workflow has
+    /// produced its final report" signal defined in
+    /// `ce-executor-serial` `required_events`; honouring
+    /// `LOOP_COMPLETE` before that signal arrives silently
+    /// drops the final report from the loop summary.
+    ///
+    /// **P1-1 re-evaluation**: the code-review claim that R5
+    /// requires a *universal* gate (regardless of
+    /// `required_events`) is over-broad. R5 was written
+    /// against the `ce-executor-serial` failure mode where
+    /// `report.done` IS in `required_events`; simple presets
+    /// (`solo_mode`, `default_publishes`, etc.) that do not
+    /// declare `report.done` would otherwise be broken by
+    /// a `LOOP_COMPLETE` they emit legitimately. The
+    /// pre-existing escape hatch is `completion_promise: ""`
+    /// (no terminal signal) — we honour that here so
+    /// operators who want the universal gate can set it
+    /// explicitly. The default behaviour keeps the
+    /// `required_events`-driven gate that protects
+    /// plan-driven presets.
+    pub fn mark_completion_requested(
+        &mut self,
+        required_events: &[String],
+        completion_promise: &str,
+    ) -> Result<(), String> {
+        // Empty `completion_promise` means the preset
+        // disabled the terminal signal entirely. The legacy
+        // unconditional `completion_requested = true` path
+        // applies (this matches the pre-P0-5 behaviour for
+        // non-terminal presets).
+        if completion_promise.is_empty() {
+            if self.completion_honored {
+                return Ok(());
+            }
+            self.completion_requested = true;
+            return Ok(());
+        }
+        // `report.done` is only enforced when the preset
+        // declares it as a required event. This keeps
+        // simple presets (no `report.done` requirement)
+        // working unchanged, and matches R5: the gate is
+        // triggered for `ce-executor-serial` and other
+        // plan-driven presets that opt into `report.done`.
+        let report_done_required = required_events.iter().any(|t| t == "report.done");
+        if report_done_required && !self.report_done_seen {
+            return Err(
+                "P0-5: completion_requested rejected — report.done is required but has not been observed yet"
+                    .to_string(),
+            );
+        }
+        if self.completion_honored {
+            // Idempotent: a second mark after honour is a
+            // no-op success, matching the legacy
+            // `if self.state.completion_honored { debug; }` path.
+            return Ok(());
+        }
+        self.completion_requested = true;
+        Ok(())
+    }
+
+    /// 2026-06-30-001 P0-3 (primary-20260630-032648 diagnosis):
+    /// returns `true` when the event is a "terminal-adjacent"
+    /// topic (REVIEW_COMPLETE, report.done, LOOP_COMPLETE, or
+    /// any other verdict-mirror topic) whose payload bytes
+    /// are byte-identical to a previously admitted payload of
+    /// the same kind. The caller is expected to drop the
+    /// duplicate from the accepted stream so the
+    /// `events.jsonl` file does not accumulate a second
+    /// row. Side effect: the dedup hash is updated to the
+    /// event's hash so the *next* identical payload also
+    /// dedups. A non-identical payload is a legitimate
+    /// change and must NOT be deduped (returns `false` and
+    /// the caller proceeds to update the verdict / completion
+    /// state in `record_terminal_adjacent`).
+    ///
+    /// P1-3: extended to `report.done` + `LOOP_COMPLETE` so
+    /// the 29-second gap pattern observed in events L29/L31
+    /// of primary-20260630-032648 (byte-identical duplicate
+    /// emit of `REVIEW_COMPLETE` and similar surfaces) is
+    /// caught across all "terminal-adjacent" topics. The
+    /// hash uses Rust's default `Hasher` (siphash) — good
+    /// enough for a payload-fingerprint guard, no
+    /// cryptographic strength needed.
+    pub fn is_review_complete_duplicate(&mut self, event: &Event) -> bool {
+        if !Self::is_terminal_adjacent_topic(event.topic.as_str()) {
+            return false;
+        }
+        // Hash the payload; empty payloads are a degenerate
+        // case (legacy emit) and we do not dedup them so a
+        // missing-payload pattern cannot mask repeated
+        // empty emits.
+        if event.payload.is_empty() {
+            return false;
+        }
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        event.payload.hash(&mut hasher);
+        let h = hasher.finish();
+        if Some(h) == self.terminal_adjacent_seen_payload_hash {
+            return true;
+        }
+        // Record the new hash; legitimate payload changes
+        // are NOT deduped.
+        self.terminal_adjacent_seen_payload_hash = Some(h);
+        false
+    }
+
+    /// 2026-06-30-001 P1-3: the constant set of "terminal-adjacent"
+    /// topics that participate in payload dedup. Keeping
+    /// this in one place lets the dedup helper and any
+    /// future lint agree on which topics to gate, and
+    /// makes drift easy to spot.
+    pub fn is_terminal_adjacent_topic(topic: &str) -> bool {
+        matches!(topic, "REVIEW_COMPLETE" | "report.done" | "LOOP_COMPLETE")
     }
 
     /// Computes a composite progress fingerprint capturing all meaningful progress signals.

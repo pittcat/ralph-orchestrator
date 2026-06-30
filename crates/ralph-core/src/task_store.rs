@@ -433,7 +433,39 @@ impl TaskStore {
     }
 
     /// Closes a task by ID and returns a reference to it.
+    ///
+    /// 2026-06-30-001 P0-4 (primary-20260630-032648 diagnosis):
+    /// closing a task that was never started (`started.is_none()`)
+    /// would produce an orphan row in `tasks.jsonl` with
+    /// `key=null, started_at=null, closed=<now>`, polluting the
+    /// validator's `open_tasks` view. Such tasks must be
+    /// skipped — they are either placeholder rows or plan units
+    /// the executor never actually picked up. Logged at `warn!`
+    /// so the diagnostic surfaces a "task closed without start"
+    /// record the runtime can correlate with the offending
+    /// caller.
+    ///
+    /// **Exception — fix-unit tasks**: fix-unit ids match
+    /// `Task::fix_unit_task_id` (e.g.
+    /// `task-<plan>-fix{NN}u{NN}-<ts_hex>`). ce-executor-serial
+    /// coordinator creates fix-units via `work.ready` and
+    /// closes via `work.done` **without** an intervening
+    /// `start` call, by preset design. The diagnose report
+    /// P0-4 fix targets the placeholder rows
+    /// (`key=null, owner_hat_id=coordinator`), NOT the
+    /// legitimate fix-unit lifecycle. We therefore exempt
+    /// fix-unit ids from the `started.is_none()` guard so
+    /// `project_close_task` continues to close fix-01 / fix-02
+    /// rows normally.
     pub fn close(&mut self, id: &str) -> Option<&Task> {
+        let started_is_none = self.get(id).map(|t| t.started.is_none()).unwrap_or(false);
+        if started_is_none && !is_fix_unit_id(id) {
+            tracing::warn!(
+                task_id = %id,
+                "TaskStore::close skipped: task was never started (started.is_none)"
+            );
+            return None;
+        }
         if let Some(task) = self.get_mut(id) {
             task.status = TaskStatus::Closed;
             task.closed = Some(chrono::Utc::now().to_rfc3339());
@@ -444,12 +476,32 @@ impl TaskStore {
 
     /// Closes a task by stable key and returns a reference to it.
     ///
+    /// 2026-06-30-001 P0-4: same `started.is_none()` guard as
+    /// `close` — the diagnose report P0-4 fix is structural:
+    /// the guard lives on the lowest layer (TaskStore) so any
+    /// caller — projector / loop_runner / recovery / future
+    /// emitters — cannot bypass it by going around
+    /// `project_plan_complete`.
+    ///
+    /// Fix-unit keys (`<plan>:step:fix-NN:u{N}`) are exempt for
+    /// the same reason as `close`: ce-executor-serial
+    /// coordinator creates fix-units without an explicit
+    /// `start` and closes them with `work.done`.
+    ///
     /// 2026-06-30 P0-2 (primary-153653): when multiple tasks share
     /// the same id (fix-unit coordinator emits), close-by-id targets
     /// only the first match; close-by-key targets the exact row.
     /// The key is unique per step (including fix-NN) because the
     /// `task_key` payload field encodes the step id.
     pub fn close_by_key(&mut self, key: &str) -> Option<&Task> {
+        let started_is_none = self.get_by_key(key).map(|t| t.started.is_none()).unwrap_or(false);
+        if started_is_none && !is_fix_unit_key(key) {
+            tracing::warn!(
+                task_key = %key,
+                "TaskStore::close_by_key skipped: task was never started (started.is_none)"
+            );
+            return None;
+        }
         if let Some(task) = self.get_by_key_mut(key) {
             task.status = TaskStatus::Closed;
             task.closed = Some(chrono::Utc::now().to_rfc3339());
@@ -634,6 +686,51 @@ impl TaskStore {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// 2026-06-30-001 P0-4 helpers
+// ──────────────────────────────────────────────────────────────────────────
+
+/// 2026-06-30-001 P0-4 (primary-20260630-032648 diagnosis):
+/// returns true when the task identifier matches a fix-unit
+/// shape. We exempt fix-units from the `started.is_none()`
+/// close guard because ce-executor-serial coordinator
+/// creates a fix-unit task via `work.ready` and closes it
+/// via `work.done` **without** an intervening `start` call
+/// (by preset design).
+///
+/// Recognised shapes:
+///   - id: `task-<plan>-fix{NN}u{NN}-<ts_hex>` (`Task::fix_unit_task_id`)
+///   - id: legacy `task-...fix{NN}...` (older emit patterns)
+pub fn is_fix_unit_id(id: &str) -> bool {
+    // Cheap regex-free substring probe — the format is
+    // well-known and a false positive only loosens the guard,
+    // which is the conservative direction. The `digit_after_fix`
+    // check prevents matching the literal word "fix" in any
+    // task title.
+    if let Some(idx) = id.find("fix") {
+        let after = &id[idx + 3..];
+        // The character right after "fix" must be a digit
+        // (fix01, fix02) or '-' (fix-01, fix-02). The
+        // generated id format is `fix{NN}u{NN}-{ts}` so the
+        // first byte after the "fix" prefix is always a digit.
+        after.chars().next().is_some_and(|c| c.is_ascii_digit())
+    } else {
+        false
+    }
+}
+
+/// 2026-06-30-001 P0-4: returns true when the stable key
+/// encodes a fix-unit step. Keys look like
+/// `<plan>:step:fix-NN:uN`; we look for the `fix-NN` step
+/// marker between colons.
+pub fn is_fix_unit_key(key: &str) -> bool {
+    key.split(':').any(|seg| {
+        seg.starts_with("fix-")
+            && seg.len() > 4
+            && seg.as_bytes()[4..].iter().all(|b| b.is_ascii_digit())
+    })
+}
+
 /// R4 (2026-06-14-003 plan): extract the unit identifier from a task
 /// key's final slug.  Returns `None` when the slug does not match the
 /// `uN-` shape so the contract silently falls through for legacy /
@@ -805,6 +902,12 @@ mod tests {
         let task = Task::new("Test".to_string(), 1);
         let id = task.id.clone();
         store.add(task);
+        // 2026-06-30-001 P0-4: `close` refuses to close a
+        // never-started row (the structural guard against
+        // orphan `started=null, closed=…` rows in
+        // `tasks.jsonl`). Start the task first so the guard
+        // accepts the close.
+        store.start(&id).unwrap();
 
         let closed = store.close(&id).unwrap();
         assert_eq!(closed.status, TaskStatus::Closed);
@@ -1036,6 +1139,9 @@ mod tests {
 
         // Close the task - should have no pending
         let id = store.all()[0].id.clone();
+        // 2026-06-30-001 P0-4: start the task first; the
+        // close guard refuses never-started rows.
+        store.start(&id).unwrap();
         store.close(&id);
         assert!(!store.has_pending_tasks());
     }

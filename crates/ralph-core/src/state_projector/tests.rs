@@ -439,12 +439,20 @@ fn p0_retain_drops_only_matching_payload_in_batch() {
 // progress.md. Without this, the next `queue.advance` would
 // fail the U4 `progress_task_gate` because tasks.jsonl still
 // carried stale open rows.
+//
+// 2026-06-30-001 P0-4 (primary-20260630-032648 diagnosis):
+// `project_plan_complete` MUST skip never-started rows
+// (started.is_none()) to prevent orphan closed tasks in
+// tasks.jsonl. Started tasks still close normally.
 #[test]
 fn p1_plan_complete_closes_open_tasks() {
     let tmp = workspace();
     let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     // Create two open tasks via the projector so the ledger is
-    // // populated the same way the loop would do it.
+    // populated the same way the loop would do it. task-A is
+    // marked started (simulating a real work.start); task-B
+    // is left unstarted (simulating a placeholder row that
+    // the runtime must skip on plan.complete per P0-4).
     let ready1 = make_event(
         "work.ready",
         json!({
@@ -474,15 +482,31 @@ fn p1_plan_complete_closes_open_tasks() {
             .all(|t| !t.status.is_terminal())
     );
 
-    // Fire plan.complete. After this, every task must be terminal.
+    // Persist task-A as started so project_plan_complete
+    // sees started.is_some() and closes it.
+    use crate::task_store::TaskStore;
+    let store_path = tmp.path().join(".ralph").join("agent").join("tasks.jsonl");
+    let mut store = TaskStore::load(&store_path).unwrap();
+    let id_a = store
+        .all()
+        .iter()
+        .find(|t| t.key.as_deref() == Some("ce-executor:p:step-01:u1-impl"))
+        .map(|t| t.id.clone())
+        .expect("task-A should be in store");
+    if let Some(row) = store.get_mut(&id_a) {
+        row.started = Some("2026-06-30T06:00:00Z".to_string());
+    }
+    store.save().unwrap();
+
+    // Fire plan.complete. Started task-A must close;
+    // unstarted task-B must remain open (P0-4).
     let plan_complete = make_event("plan.complete", json!({"step": "step-final"}).to_string());
     let report = proj.apply(&[plan_complete]);
     assert_eq!(report.applied, 1, "plan.complete should apply");
-    let tasks_path = tmp.path().join(".ralph").join("agent").join("tasks.jsonl");
-    let content = std::fs::read_to_string(&tasks_path).unwrap();
+    let content = std::fs::read_to_string(&store_path).unwrap();
     assert!(
         content.contains("\"closed\""),
-        "every task must end up closed after plan.complete; ledger: {content}"
+        "started task must end up closed after plan.complete; ledger: {content}"
     );
     let reopened: Vec<_> = proj
         .context()
@@ -490,9 +514,14 @@ fn p1_plan_complete_closes_open_tasks() {
         .iter()
         .filter(|t| !t.status.is_terminal())
         .collect();
+    assert_eq!(
+        reopened.len(),
+        1,
+        "P0-4: only the never-started task should remain open; ledger: {reopened:?}"
+    );
     assert!(
-        reopened.is_empty(),
-        "no task may remain open after plan.complete: {reopened:?}"
+        reopened[0].id == "task-B",
+        "P0-4: task-B must remain open (started.is_none())"
     );
 }
 

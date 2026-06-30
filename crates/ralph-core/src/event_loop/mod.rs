@@ -1166,6 +1166,86 @@ impl EventLoop {
         &mut self.state
     }
 
+    /// 2026-06-30-001 P0-3 (U3 runtime guard): returns
+    /// `true` when the event payload is a `work.done`
+    /// whose `task_key` is a fix-unit shape
+    /// (`<plan>:step:fix-NN:u{N}`). The check tolerates
+    /// the legacy "YAML-style" payload format used by
+    /// BDD harness mocks (e.g.
+    /// `task_key: "ce-executor:p:fix-01:u1"`) by
+    /// looking for the marker in both structured JSON
+    /// and the raw text. Production payloads are
+    /// structured JSON; BDD mocks and ad-hoc emit
+    /// patterns are loose text.
+    fn is_fix_unit_completion_event(&self, event: &Event) -> bool {
+        if event.topic.as_str() != "work.done" {
+            return false;
+        }
+        if event.payload.is_empty() {
+            return false;
+        }
+        // Try structured JSON first (production path).
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.payload) {
+            if let Some(key) = value.get("task_key").and_then(|v| v.as_str()) {
+                if crate::task_store::is_fix_unit_key(key) {
+                    return true;
+                }
+            }
+        }
+        // Fallback: scan the raw text for the fix-unit
+        // marker. The marker is `task_key:` followed
+        // by a quoted string containing `fix-` and
+        // digits — distinctive enough that a substring
+        // match is safe.
+        let lower = event.payload.to_ascii_lowercase();
+        lower.contains("task_key:") && lower.contains("fix-")
+    }
+
+    /// 2026-06-30-001 P0-3 (U3 runtime guard): returns
+    /// `true` when every fix-unit task in the current
+    /// plan's `tasks.jsonl` is `Closed` (or `Failed`).
+    /// This is the structural signal that the fix-unit
+    /// ladder is exhausted and the next event from
+    /// coordinator must be `plan.complete`, NOT
+    /// `review.start`.
+    fn is_fix_unit_chain_exhausted(&self) -> bool {
+        use crate::task_store::TaskStore;
+        // Resolve the tasks path through the loop
+        // context (the only place the workspace
+        // configuration is held on `EventLoop`).
+        let Some(loop_ctx) = self.loop_context.as_ref() else {
+            return false;
+        };
+        let tasks_path = loop_ctx.tasks_path();
+        let Ok(store) = TaskStore::load(&tasks_path) else {
+            return false;
+        };
+        let mut has_any_fix_unit = false;
+        for task in store.all() {
+            // The store's stable key encodes the
+            // step prefix; only fix-unit tasks
+            // participate in the chain-exhausted check.
+            let Some(key) = task.key.as_deref() else {
+                continue;
+            };
+            if !crate::task_store::is_fix_unit_key(key) {
+                continue;
+            }
+            has_any_fix_unit = true;
+            if !task.status.is_terminal() {
+                return false;
+            }
+        }
+        // No fix-unit tasks at all → chain is trivially
+        // exhausted (the loop has no fix-units, so
+        // "review.start after every fix-NN is closed"
+        // is vacuously true). The runtime guard is
+        // still safe: it only rejects `review.start`
+        // that arrives AFTER a fix-unit chain was
+        // expected to be done.
+        has_any_fix_unit
+    }
+
     /// Test-only: set the current iteration directly. Production code
     /// should never call this; the iteration is normally advanced by
     /// the main loop. Exposed at the `pub` level so external
@@ -1726,22 +1806,38 @@ impl EventLoop {
     /// using `ralph emit`), this sets `completion_requested = true` so that
     /// `check_completion_event()` can apply all safety checks (persistent mode,
     /// required events, runtime tasks) before terminating.
+    ///
+    /// 2026-06-30-001 P0-5: gated by `report_done_seen`. A
+    /// text-fallback completion promise that arrives before
+    /// `report.done` is logged at `warn!` and rejected; the loop
+    /// continues to wait for the workflow's final report before
+    /// transitioning to terminal.
     pub fn request_completion_from_text_fallback(&mut self) {
         if self.state.completion_honored {
             debug!("Completion already handled, ignoring text fallback request");
+            return;
+        }
+        // P0-5 (2026-06-30-001): report_done_seen gate.
+        if let Err(reason) = self
+            .state
+            .mark_completion_requested(&self.config.event_loop.required_events, &self.config.event_loop.completion_promise)
+        {
+            tracing::warn!(
+                reason = %reason,
+                iteration = self.state.iteration,
+                "P0-5: text-fallback completion rejected; \
+                 report.done not yet observed; loop continues"
+            );
             return;
         }
         // P1-2: per-event commit so a mid-flight crash preserves
         // the completion signal for replay. The A1 end-of-batch
         // hook used to commit this; moving to the decision point
         // shrinks the window where a crash loses the signal.
-        if !self.state.completion_requested {
-            Self::commit_terminal_delta(
-                &mut self.state.state_ledger,
-                crate::state::CommitDelta::CompletionRequested,
-            );
-        }
-        self.state.completion_requested = true;
+        Self::commit_terminal_delta(
+            &mut self.state.state_ledger,
+            crate::state::CommitDelta::CompletionRequested,
+        );
         info!("Completion requested via text fallback (output contained completion promise)");
     }
 
@@ -6317,14 +6413,35 @@ impl EventLoop {
                 topic = %default_topic_str,
                 "default_publishes matches completion_promise — requesting termination"
             );
-            // P1-2: per-event commit (see `commit_terminal_delta`).
-            if !self.state.completion_requested {
+            // 2026-06-30-001 P0-5: gate default_publishes'
+            // terminal signal on `report_done_seen`. A
+            // hat-default completion topic that fires before
+            // `report.done` is logged and the default emit
+            // path continues without flipping
+            // `completion_requested`.
+            if let Err(reason) = self
+                .state
+                .mark_completion_requested(&self.config.event_loop.required_events, &self.config.event_loop.completion_promise)
+            {
+                tracing::warn!(
+                    reason = %reason,
+                    hat = %hat_id.as_str(),
+                    topic = %default_topic_str,
+                    iteration = self.state.iteration,
+                    "P0-5: default_publishes completion rejected; \
+                     report.done not yet observed; \
+                     hat's default emit will not transition loop to terminal"
+                );
+                // Fall through: still publish the default
+                // event so the agent can continue running;
+                // the terminal transition just does not fire.
+            } else {
+                // P1-2: per-event commit (see `commit_terminal_delta`).
                 Self::commit_terminal_delta(
                     &mut self.state.state_ledger,
                     crate::state::CommitDelta::CompletionRequested,
                 );
             }
-            self.state.completion_requested = true;
         }
 
         self.bus.publish(default_event);
@@ -9130,16 +9247,42 @@ impl EventLoop {
                     debug!("Completion event already handled, ignoring duplicate");
                     continue;
                 }
+                // 2026-06-30-001 P0-5: report_done_seen guard.
+                // Refuse to honour `LOOP_COMPLETE` if the
+                // workflow has not yet produced its final
+                // `report.done`. This stops the runner / agent
+                // from racing the reviewer chain to the
+                // terminal — events L37 of the 032648 run
+                // showed ralph emitting `LOOP_COMPLETE` while
+                // 6/7 review dimensions were still in flight.
+                if let Err(reason) = self
+                    .state
+                    .mark_completion_requested(&self.config.event_loop.required_events, &self.config.event_loop.completion_promise)
+                {
+                    tracing::warn!(
+                        reason = %reason,
+                        iteration = self.state.iteration,
+                        topic = %event.topic,
+                        index = index,
+                        "P0-5: completion event rejected; \
+                         report.done not yet observed; \
+                         event will not transition loop to terminal"
+                    );
+                    // Drop the event from this batch's
+                    // accepted stream; the runtime continues
+                    // to wait for `report.done`. The event is
+                    // NOT added to `accepted_log_events` so
+                    // the events.jsonl file does not carry a
+                    // false-positive terminal event.
+                    continue;
+                }
                 // Completion event is accepted regardless of position in batch.
                 // Events AFTER it in the same batch are protected by the completion guard.
                 // P1-2: per-event commit (see `commit_terminal_delta`).
-                if !self.state.completion_requested {
-                    Self::commit_terminal_delta(
-                        &mut self.state.state_ledger,
-                        crate::state::CommitDelta::CompletionRequested,
-                    );
-                }
-                self.state.completion_requested = true;
+                Self::commit_terminal_delta(
+                    &mut self.state.state_ledger,
+                    crate::state::CommitDelta::CompletionRequested,
+                );
                 completion_seen_in_batch = true;
                 accepted_log_events.push(Event::new(event.topic.as_str(), &payload));
                 self.diagnostics.log_orchestration(
@@ -9568,9 +9711,74 @@ impl EventLoop {
         // Record and diagnose validated events (before consuming them).
         let verdict_topics = self.verdict_gate_topics();
         let verdict_topics_slice = verdict_topics.as_deref();
-        for event in &validated_events {
+        for event in validated_events.iter() {
+            // 2026-06-30-001 P0-3 (primary-20260630-032648
+            // diagnosis): the runtime rejects
+            // `review.start` emits that arrive after the
+            // fix-unit chain is exhausted. The pre-fix
+            // behaviour let coordinator emit
+            // `review.start` a second time after the
+            // `fix-NN` chain was complete, triggering an
+            // unwanted second review walk that confused
+            // the progress-steward state machine and
+            // pushed the loop off the normal
+            // `plan.complete → shipper → reporter →
+            // LOOP_COMPLETE` ladder. The fix is
+            // structural: the runtime enforces "no
+            // `review.start` after every fix-NN is
+            // closed", regardless of what the agent's
+            // prompt says. The pre-fix prompt comment is
+            // still kept (defence in depth), but it is
+            // no longer the sole guard.
+            //
+            // Detection: when the admitted event is a
+            // `work.done` whose `task_key` is a fix-unit
+            // shape, we re-check the task store. If every
+            // fix-NN step in the current plan is now
+            // closed, flip `fix_unit_chain_exhausted` to
+            // `true`. The next admit loop iteration that
+            // sees a `review.start` while the flag is
+            // `true` rejects it before it lands in
+            // `accepted_log_events`.
+            if event.topic.as_str() == "work.done"
+                && self.is_fix_unit_completion_event(event)
+            {
+                self.state.seen_fix_unit_completions =
+                    self.state.seen_fix_unit_completions.saturating_add(1);
+                if self.is_fix_unit_chain_exhausted() {
+                    self.state.fix_unit_chain_exhausted = true;
+                }
+            }
+            if event.topic.as_str() == "review.start"
+                && (self.state.fix_unit_chain_exhausted
+                    || self.state.seen_fix_unit_completions >= 2)
+            {
+                tracing::warn!(
+                    iteration = self.state.iteration,
+                    "P0-3: rejected review.start after fix-unit chain exhausted; \
+                     coordinator must emit plan.complete, NOT a second review walk"
+                );
+                // Drop the event from the accepted stream;
+                // the runtime continues to wait for
+                // `plan.complete`.
+                continue;
+            }
+
             // Record topic for event chain validation
             self.state.record_event(event);
+            // 2026-06-30-001 P0-5: `report.done` is the canonical
+            // "workflow has produced its final report" signal.
+            // Set the sticky flag here, in the validated-event
+            // admit loop, so the gate works whether or not the
+            // preset configures a `verdict_gate` (the
+            // `record_verdict_if_match` call below only fires
+            // when verdict_gate is present; this assignment
+            // covers the case where the preset opts in via
+            // `required_events: ["report.done"]` without a
+            // verdict_gate).
+            if event.topic.as_str() == "report.done" {
+                self.state.report_done_seen = true;
+            }
             self.state
                 .record_verdict_if_match(event, verdict_topics_slice);
 
@@ -9803,15 +10011,55 @@ impl EventLoop {
             // happy path from the no-progress path so operators
             // inspecting `ledger.jsonl` can see when the loop
             // chose not to advance.
-            let batch_sync_source = if had_events || !accepted_log_events.is_empty() {
-                "loop.batch_sync"
-            } else {
-                "loop.batch_sync.no_progress"
-            };
+            //
+            // 2026-06-30-001 P0-6 (primary-20260630-032648
+            // diagnosis): the pre-fix code emitted
+            // `loop.batch_sync.no_progress` for no-progress
+            // turns, which produced two diverging iter
+            // sequences in the ledger — `loop.batch_sync`
+            // and `loop.batch_sync.no_progress` were
+            // committed with independent `seq` numbers, and
+            // `summary.md` ended up showing 41 iter while
+            // the no-progress sub-stream was at 28. We now
+            // commit a single `loop.batch_sync` entry per
+            // turn and carry the no-progress signal in the
+            // `delta.kind` (via `kind: "no_progress"`),
+            // keeping the iter sequence monotonic.
+            let batch_sync_source = "loop.batch_sync";
             let iter_counter = CommitDelta::CounterChanged {
                 counter: CounterKind::Iteration,
                 new_value: self.state.iteration as i64,
             };
+            // 2026-06-30-001 P1-4: when the turn is a
+            // no-progress turn, ALSO commit a
+            // `NoProgressTurnObserved` delta so the
+            // no-progress dimension is preserved on disk
+            // even though we now use a single
+            // `loop.batch_sync` source string. Operators
+            // can still query "no-progress turns" via
+            // `grep kind no_progress_turn_observed
+            // .ralph/ledger.jsonl`. The source string on
+            // this companion entry is the same
+            // `loop.batch_sync` so any source-string
+            // filter keeps working unchanged.
+            let is_no_progress_turn =
+                !had_events && accepted_log_events.is_empty();
+            if is_no_progress_turn {
+                let no_progress = CommitDelta::NoProgressTurnObserved {
+                    iteration: self.state.iteration,
+                };
+                if let Err(e) = ledger.commit(
+                    no_progress,
+                    Some(batch_sync_source.to_string()),
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        iteration = self.state.iteration,
+                        source = %batch_sync_source,
+                        "P1-4: no-progress companion commit failed; loop continues"
+                    );
+                }
+            }
             if let Err(e) = ledger.commit(iter_counter, Some(batch_sync_source.to_string())) {
                 tracing::warn!(
                     error = %e,
