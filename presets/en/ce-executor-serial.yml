@@ -1557,7 +1557,68 @@ hats:
 
       **Empty-diff ownership (HARD RULE — 2026-06-17-004 plan U1, R3)**: the empty-diff path closes the sequence with `review.dimensions.complete`. `review.complete` is owned exclusively by `review-synthesizer`; the synthesizer will read the `dimensions` array you emit (every row `status: done` and `findings_file: null`), see no findings, and emit `review.complete` with `fix_plan_file: "null"` and `verdict: "pass"`. The topic-deny rules + `publishes` scope both reject `review-coordinator → review.complete` at the CLI precheck. When in doubt, choose walk.
 
-      Write shared diff to `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch` (filename retained from the wave preset for compat with downstream tooling).
+      ### Write shared review diff (review.start only — code-level enforced)
+      **MUST run only on the initial `review.start` trigger.** Walk continuations (`review.dimension.done` / `review.dimension.failed`) MUST skip this entire block — the file was already written on `review.start` and the contents do not change between walks. The check is at the **code** level (an `if` guard), not just in this comment, so a hat that re-reads the instructions still skips on walk triggers.
+
+      **`DIFF_BASE` is inherited, not re-derived.** The Scope Detection block above already resolved `DIFF_BASE` through the 3-level priority chain (`plan_baseline_sha` → `loop_start_sha` → base detection chain) and set `diff_base` in the per-dimension payload. The script below **reuses that same `DIFF_BASE` value directly** — do NOT re-resolve it from `## ORCHESTRATOR CONTEXT` or grep the block again. The two paths (file scope vs payload scope) MUST stay in lockstep; the only way to guarantee that is to read it once and pass it forward.
+
+      The fallback tag (`diff_base_fallback: "no_plan_baseline_sha"` / `"no_loop_start_sha"` / unset) is also inherited from Scope Detection and written into the file header as a `# diff_base_fallback: ...` comment, so downstream readers (dimension-reviewer, review-synthesizer) can tell whether the diff is the authoritative plan-baseline view or a downgrade.
+
+      ```bash
+      # 1. Trigger guard — skip on walk continuations. Set $TRIGGER from the
+      #    inbound event topic BEFORE this block runs:
+      #      TRIGGER=review.start          → run
+      #      TRIGGER=review.dimension.done → skip (file already exists from review.start)
+      #      TRIGGER=review.dimension.failed → skip
+      if [ "$TRIGGER" != "review.start" ]; then
+        : # no-op on walk continuations
+      else
+        # 2. $DIFF_BASE and $DIFF_BASE_FALLBACK are inherited from Scope Detection.
+        #    Both MUST already be set by the time we reach this block. If either is
+        #    empty here, that means Scope Detection was skipped or failed — stop and
+        #    emit work.failed rather than silently rewriting scope.
+        if [ -z "$DIFF_BASE" ]; then
+          echo "FATAL: DIFF_BASE not set by Scope Detection; cannot write review-diff.patch" >&2
+          exit 1
+        fi
+
+        # 3. Compute and write to temp file (atomic via temp + rename)
+        REVIEW_DIFF_PATH=".agents/scratchpad/ce-executor/${PLAN_NAME}/review-diff.patch"
+        mkdir -p "$(dirname "$REVIEW_DIFF_PATH")"
+        TMP_DIFF="${REVIEW_DIFF_PATH}.tmp.$$"
+
+        # 4. Write the header (metadata) first so downstream readers can recover
+        #    scope info even if the diff body is empty (empty-diff fast path).
+        {
+          echo "# diff_base: ${DIFF_BASE}"
+          if [ -n "$DIFF_BASE_FALLBACK" ]; then
+            echo "# diff_base_fallback: ${DIFF_BASE_FALLBACK}"
+          fi
+          echo "# generated_at: $(date -u +%FT%TZ)"
+          echo "# generator: review-coordinator (ce-executor-serial preset)"
+        } > "$TMP_DIFF"
+
+        # 5. Main diff (tracked files), with rename/copy detection so renames
+        #    within the diff are detected as such, not as delete+add.
+        git diff -U10 --find-renames=50% --find-copies-harder "${DIFF_BASE}"..HEAD >> "$TMP_DIFF" 2>/dev/null || true
+
+        # 6. Append untracked-file diffs (so review-diff.patch is the COMPLETE
+        #    picture, not just tracked-file diffs; dimension-reviewer needs both)
+        for f in $(git ls-files --others --exclude-standard); do
+          # Treat each untracked file as a /dev/null → new file diff
+          git diff --no-index --no-color -- /dev/null "$f" 2>/dev/null >> "$TMP_DIFF" || true
+        done
+
+        # 7. Atomic rename into place
+        mv "$TMP_DIFF" "$REVIEW_DIFF_PATH"
+      fi
+      ```
+
+      Sanity check before emitting the first `review.dimension.ready`:
+      - `wc -l "$REVIEW_DIFF_PATH"` should be > the header line count when `commit_count >= 1` or untracked files exist; equal to header line count on the empty-diff fast path
+      - The `DIFF_BASE` you used above MUST equal the `diff_base` field in the `review.dimension.ready` payload you are about to emit. Since both come from the same `$DIFF_BASE` variable, drift is impossible by construction — but if Scope Detection ran in a different shell invocation than this block, re-export it from a shared state file before this check.
+
+      The downstream `dimension-reviewer` reads this same path (see line ~1899 below) as a fallback; the primary diff source is the `changed_files` / `diff_base` / `intent_summary` fields in the per-dimension payload. The file header (`# diff_base:` / `# diff_base_fallback:`) lets readers recover scope even when they only have the file, not the payload.
 
       ### Intent Discovery
       - From branch name, commit messages (`git log --oneline ${BASE}..HEAD`), plan.md
@@ -1859,7 +1920,7 @@ hats:
       ### Read Shared Context
       - From event payload: `dimension`, `focus`, `depth`, `diff_base`, `intent_summary`, `changed_files`, `plan_name`, `task_id`, `task_key`, `step`
       - Use `plan_name` from payload to resolve path `{plan_name}` below
-      - Read shared diff: `.agents/scratchpad/ce-executor/{plan_name}/wave-diff.patch`
+      - Read shared diff: `.agents/scratchpad/ce-executor/{plan_name}/review-diff.patch`
       - Read `findings.md` (existing, if any) for pre-existing issues
       - Read `plan.md` and `context.md` for plan context
 
