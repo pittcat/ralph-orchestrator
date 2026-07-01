@@ -99,7 +99,7 @@ emit 任何 step handoff 事件前，确认 payload 内部一致：
 - **一个 turn 只发射一个业务事件**是默认纪律；去重层再强也只是兜底，不要在同一回合内通过“多发一次”来尝试修复。
 - 如果某条事件被去重层拒绝并收到 `task.resume`，下一回合只发一次修正后的事件，不要在同一回合继续补发。
 
-**NULL payload 拒收白名单**（`crates/ralph-core/src/event_policy.rs:829-839` `NULL_PAYLOAD_REJECT_TOPICS`）：以下 9 个 topic 不接受空 payload（`[PAYLOAD]` 省略 + 无 `-j`）— 必须传 JSON object：
+**NULL payload 拒收白名单**（`crates/ralph-core/src/event_policy.rs:907-917` `NULL_PAYLOAD_REJECT_TOPICS`）：以下 9 个 topic 不接受空 payload（`[PAYLOAD]` 省略 + 无 `-j`）— 必须传 JSON object：
 
 | Topic | 出现位置 |
 |-------|---------|

@@ -59,23 +59,20 @@ rg "enrich_task_resume_payload_with_stage\(" crates/ --type rust
 # 加上 tests/ 内联 case 4 个,合计 6 个 grep 命中。
 
 rg "enrich_task_resume_payload\(" crates/ --type rust
-# 预期 caller 数 = 6(全部 mod.rs 内部,实施 U1 + F2 后):
-# 这些 caller 不带 stage,只在 reason 字段有 reason_hint。
-# 6 个 caller 全部传 Some(typed RejectionKind),不留 None 兜底(R2 SSOT):
-#   - crates/ralph-core/src/event_loop/mod.rs:1760 → PersistentLoopActive(persistent 模式兜底)
-#   - crates/ralph-core/src/event_loop/mod.rs:1807 → OpenTasksBlocking(open tasks 拒绝完成信号)
-#   - crates/ralph-core/src/event_loop/mod.rs:2545 → ContractViolation(aggregate_timeout 恢复路径)
-#   - crates/ralph-core/src/event_loop/mod.rs:2697 → StallNoEvents(stall_recovery 路径)
-#   - crates/ralph-core/src/event_loop/mod.rs:2748 → StallNoEvents(stall_recovery fallback → last_hat)
-#   - crates/ralph-core/src/event_loop/mod.rs:2778 → StallNoEvents(stall_recovery fallback → ralph)
-# 加上 tests/ 内联 case 4 个,合计 10 个 grep 命中(6 生产 + 4 测试)。
+# 生产 mod.rs caller = 4(2026-07-01 复核,base `enrich_task_resume_payload(`):
+#   - crates/ralph-core/src/event_loop/mod.rs:2202 → PersistentLoopActive(persistent 模式兜底)
+#   - crates/ralph-core/src/event_loop/mod.rs:2249 → OpenTasksBlocking(open tasks 拒绝完成信号)
+#   - crates/ralph-core/src/event_loop/mod.rs:3036 → aggregate_timeout(review-synthesizer 恢复,3-arg,不带 typed kind)
+#   - crates/ralph-core/src/event_loop/mod.rs:8227 → isolated_extra_business_event_dropped(isolated 单业务事件超发)
+# 注:原 stall_recovery 三处 StallNoEvents 已迁移到新变体 `enrich_task_resume_payload_full(`
+#     (带 hat publishes 参数),现位于 mod.rs:3308 / 3365 / 3401;grep base 变体时不再命中。
+# 其余命中为 tests(event_loop/tests/enrich_kind_wiring.rs、rejection.rs 内联)。
 
 rg "build_task_resume_payload\(" crates/ --type rust
-# 预期 caller 数 = 4(全部 tests/集成,无生产 caller):
-# - crates/ralph-core/src/event_loop/mod.rs:7070          (tests 内联)
-# - crates/ralph-core/src/event_loop/mod.rs:7683          (tests 内联)
-# - crates/ralph-cli/tests/ce_executor_recovery.rs:393    (e2e 集成)
-# - crates/ralph-core/src/event_loop/rejection.rs:1102+  (内联 tests 多个)
+# 2026-07-01 复核:已新增 1 个生产 caller(R5 wave context 恢复路径),不再是"无生产 caller":
+# - crates/ralph-core/src/event_loop/mod.rs:7977         (生产:isolated stale-rejection 恢复)
+# - crates/ralph-cli/tests/ce_executor_recovery.rs:393   (e2e 集成)
+# - crates/ralph-core/src/event_loop/rejection.rs:1164+  (内联 tests 多个)
 ```
 
 **实施步骤**(U1):
@@ -152,9 +149,10 @@ impl CoordinatorDispatcher {
 
 **对偶路径**(散落匹配):
 ```rust
-crates/ralph-core/src/event_loop/mod.rs:1760 / 1807 / 2545 / 2697 / 2748 / 2778
-// 6 处 enrich_task_resume_payload 调用,各自独立 reason_hint 字符串,
-// 在 F2 修复后全部传 Some(typed RejectionKind),不再留 None 兜底
+crates/ralph-core/src/event_loop/mod.rs:2202 / 2249 / 3036 / 8227   (base enrich_task_resume_payload)
+crates/ralph-core/src/event_loop/mod.rs:3308 / 3365 / 3401          (StallNoEvents,已迁移到 enrich_task_resume_payload_full)
+// 2026-07-01 复核:base 变体现有 4 处生产调用(见对 1);原 3 处 StallNoEvents
+// 已迁移到带 publishes 参数的 _full 变体,各自独立 reason_hint 字符串。
 ```
 
 **对齐状态**: **已修**(本 plan U2 + F2)
@@ -186,7 +184,7 @@ rg "RejectionKind::" crates/ --type rust
 
 **主路径**:
 ```rust
-crates/ralph-core/src/event_loop/mod.rs:5934
+crates/ralph-core/src/event_loop/mod.rs:6961
 fn audit_file_modifications(&mut self, hat_id: &HatId)
 ```
 **功能**: 检测 scope_violation(hat 改了不该改的文件),目前只 emit `{hat}.scope_violation` 诊断事件 + WARN 日志,**不计入 consecutive_failures**。
@@ -201,7 +199,7 @@ fn audit_file_modifications(&mut self, hat_id: &HatId)
 ```bash
 rg "fn audit_" crates/ralph-core/src/event_loop/mod.rs
 # 预期命中:
-# - audit_file_modifications (mod.rs:5934)
+# - audit_file_modifications (mod.rs:6961)
 # 实施 U4 前 grep 全 codebase 确认无遗漏 audit 函数
 
 rg "scope_violation_circuit_breaker_tripped" crates/ralph-core/src --type rust
@@ -232,10 +230,10 @@ pub enum TerminationTrigger {
 
 **对偶路径**(现状态):
 ```rust
-crates/ralph-core/src/event_loop/mod.rs:5658
+crates/ralph-core/src/event_loop/mod.rs:6606
 pub fn process_output(
     &mut self,
-    output_hat_id: &HatId,
+    hat_id: &HatId,
     output: &str,
     success: bool,
 ) -> Option<TerminationReason>
