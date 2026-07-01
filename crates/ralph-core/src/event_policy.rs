@@ -1168,6 +1168,71 @@ pub fn validate_event_with_hat(
         }
     }
 
+    // 2026-07-02 P1-A: `review.dimension.failed` schema gate.
+    // The dedup / stage gate only checks `(hat, topic)`, not the
+    // payload, so a `dimension-reviewer` emit with
+    // `dimension=unknown` (or missing the field entirely) would
+    // slip through and leave review-coordinator with an unknown
+    // dimension to retry. The 6-dimension whitelist mirrors
+    // `ce-executor-serial.yml` line 1505-1528
+    // (goal-alignment → correctness → testing →
+    // maintainability → project-standards → adversarial) so
+    // a wrong / missing dimension is rejected as
+    // `InvalidFieldValue` instead of surfacing as
+    // `flow_unknown_emit` downstream. The check sits in the
+    // policy layer (not the flow-scope stage) so the same gate
+    // fires for both the in-loop emit path and the
+    // CLI precheck emit path; the reason code is
+    // `invalid_field_value` so the existing
+    // `InvalidFieldValue` recovery hint is reused.
+    if topic == "review.dimension.failed"
+        && let Some(p) = payload
+        && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+    {
+        const DIMENSION_WHITELIST: &[&str] = &[
+            "goal-alignment",
+            "correctness",
+            "testing",
+            "maintainability",
+            "project-standards",
+            "adversarial",
+        ];
+        match obj.get("dimension") {
+            None => {
+                let finding = PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::MissingRequiredField {
+                        field: "dimension".to_string(),
+                    },
+                    message: format!(
+                        "review.dimension.failed payload is missing required 'dimension' field \
+                         (allowed: {})",
+                        DIMENSION_WHITELIST.join(", ")
+                    ),
+                };
+                return PolicyDecision::RejectWithResume(finding);
+            }
+            Some(Value::String(dim))
+                if !DIMENSION_WHITELIST.contains(&dim.as_str()) =>
+            {
+                let finding = PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::InvalidFieldValue {
+                        field: "dimension".to_string(),
+                        value: Value::String(dim.clone()),
+                    },
+                    message: format!(
+                        "review.dimension.failed payload has unknown 'dimension' value \
+                         '{dim}'; allowed: {}",
+                        DIMENSION_WHITELIST.join(", ")
+                    ),
+                };
+                return PolicyDecision::RejectWithResume(finding);
+            }
+            _ => {} // allowed dimension, fall through.
+        }
+    }
+
     // U5 (2026-06-18-004 plan, R4, KTD3) + U6 (2026-06-18-006
     // plan, R6, KTD4): duplicate `review.dimensions.complete`
     // detection. The dedup key is
@@ -3520,6 +3585,123 @@ mod tests {
                 f.violation_type
             );
         }
+    }
+
+    // 2026-07-02 P1-A: review.dimension.failed schema gate.
+    // The whitelist mirrors ce-executor-serial.yml
+    // 6-dimension sequence. See event_policy.rs:1170 above.
+    fn review_dimension_failed_payload(dim: Option<&str>) -> String {
+        match dim {
+            Some(d) => format!(r#"{{"dimension":"{d}","plan_name":"p1","step":"step-01","task_id":"t1"}}"#),
+            None => r#"{"plan_name":"p1","step":"step-01","task_id":"t1"}"#.to_string(),
+        }
+    }
+
+    #[test]
+    fn review_dimension_failed_unknown_dimension_rejected() {
+        // The 2026-07-01 ralph-e2e run emitted
+        // `review.dimension.failed(dimension=unknown)` from a
+        // dimension-reviewer payload that lost its
+        // `original_dimension` field. The P1-A gate must
+        // reject the unknown value with InvalidFieldValue
+        // BEFORE the flow-scope stage can surface it as
+        // `flow_unknown_emit`.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = review_dimension_failed_payload(Some("unknown"));
+        let decision = validate_event(
+            "review.dimension.failed",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert!(
+            matches!(
+                decision,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    violation_type: ViolationType::InvalidFieldValue { ref field, .. },
+                    ..
+                }) if field == "dimension"
+            ),
+            "unknown dimension must be rejected with InvalidFieldValue, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn review_dimension_failed_missing_dimension_rejected() {
+        // The P1-A gate must also catch payloads that omit
+        // the `dimension` field entirely. This is the
+        // `MissingRequiredField` arm (not InvalidFieldValue).
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = review_dimension_failed_payload(None);
+        let decision = validate_event(
+            "review.dimension.failed",
+            Some(&payload),
+            &config,
+            &mut state,
+        );
+        assert!(
+            matches!(
+                decision,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    violation_type: ViolationType::MissingRequiredField { ref field },
+                    ..
+                }) if field == "dimension"
+            ),
+            "missing dimension must be rejected with MissingRequiredField, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn review_dimension_failed_whitelisted_dimension_accepted() {
+        // Happy path: any of the 6 known dimensions is
+        // accepted by the P1-A gate.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        for dim in &[
+            "goal-alignment",
+            "correctness",
+            "testing",
+            "maintainability",
+            "project-standards",
+            "adversarial",
+        ] {
+            let payload = review_dimension_failed_payload(Some(dim));
+            let decision = validate_event(
+                "review.dimension.failed",
+                Some(&payload),
+                &config,
+                &mut state,
+            );
+            assert_eq!(
+                decision,
+                PolicyDecision::Accept,
+                "whitelisted dimension {dim} must be accepted, got {:?}",
+                decision
+            );
+        }
+    }
+
+    #[test]
+    fn review_dimension_failed_missing_payload_falls_through() {
+        // If the event has no payload (legacy / synthetic),
+        // the P1-A gate cannot decode the dimension. The
+        // check must fall through (no rejection from this
+        // layer) so downstream schema/terminal layers can
+        // surface their own precise error.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let decision =
+            validate_event("review.dimension.failed", None, &config, &mut state);
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "missing-payload event must fall through, got {:?}",
+            decision
+        );
     }
 
     #[test]

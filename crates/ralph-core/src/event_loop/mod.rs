@@ -11257,6 +11257,49 @@ impl EventLoop {
             }
         }
 
+        // 2026-07-02 P0: `review.dimension.ready` idempotency
+        // dedup must run BEFORE the emit-gate facade so a
+        // resume-replayed duplicate (e.g. review-coordinator
+        // re-sending `adversarial` after a stall_recovery
+        // `task.resume` — observed in the 2026-07-01
+        // ralph-e2e run, recovery.jsonl iter 24) is rejected
+        // as `DuplicateWorkDone` and the original retry_key
+        // path is preserved. The dedup lives in
+        // `event_policy::validate_event_with_hat`
+        // (event_policy.rs:1115-1169) but the policy module
+        // is only invoked from unit tests today — hat-channel
+        // output bypasses it. This call wires the dedup into
+        // the production emit path with no schema-side
+        // change; on RejectWithResume the event is routed to
+        // the repair stream (the same sink the stage pipeline
+        // uses for `AcceptRepairStream`) and never reaches
+        // the bus, so a `task.resume` retry does not
+        // re-introduce a duplicate.
+        if event.topic.as_str() == "review.dimension.ready"
+            && let Some(ref mut policy_state) = self.state.policy_runtime_state
+            && let Some(ref policy_config) = self.config.event_loop.event_policy
+            && policy_config.enabled
+        {
+            use crate::event_policy::{validate_event_with_hat, PolicyDecision};
+            let payload_str = event.payload.as_str();
+            let decision = validate_event_with_hat(
+                event.topic.as_str(),
+                Some(payload_str),
+                policy_config,
+                policy_state,
+                event.source.as_ref().map(|h| h.as_str()),
+            );
+            if let PolicyDecision::RejectWithResume(_) | PolicyDecision::Hold(_) = decision {
+                tracing::info!(
+                    topic = %event.topic,
+                    plan = %event.source.as_ref().map(|s| s.as_str()).unwrap_or(""),
+                    "P0: review.dimension.ready rejected by idempotency dedup; routing to repair stream"
+                );
+                self.record_repair_event(&event);
+                return;
+            }
+        }
+
         // U6 (2026-06-27 mechanism foundation): every event
         // that survives the ralph-boundary check must also
         // pass through the emit-gate facade (U1/U2). The

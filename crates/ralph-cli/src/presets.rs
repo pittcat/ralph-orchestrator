@@ -1339,6 +1339,28 @@ mod tests {
                 && content.contains("steward_escalation"),
             "shipper must list recoverable reasons for plan.blocked"
         );
+        // 2026-07-02 P1-B: the v1 extension adds the
+        // `stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*`
+        // and
+        // `stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:*`
+        // retry_key shapes that the diagnosis responder
+        // synthesises on handoff_dispatch_timeout. The 4
+        // shipper fails in the 2026-07-01 ralph-e2e run
+        // (events-20260701-220911.jsonl iter 22/24/26/34)
+        // all hit this gap; without these entries the
+        // shipper still routes them to hard-fail.
+        assert!(
+            content.contains(
+                "stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*"
+            ),
+            "shipper must list stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:* as recoverable (P1-B)"
+        );
+        assert!(
+            content.contains(
+                "stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:*"
+            ),
+            "shipper must list stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:* as recoverable (P1-B)"
+        );
         // Hard-fail reasons must be listed.
         assert!(
             content.contains("executor failed")

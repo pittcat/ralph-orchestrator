@@ -172,6 +172,23 @@ schemas:
       - task_id
       - task_key
       - step
+    # 2026-07-02 P1-A: dimension must be in the 6-dimension
+    # whitelist so a payload with `dimension=unknown` (the bug
+    # surfaced in the 2026-07-01 ralph-e2e run, iter 12
+    # `flow_unknown_emit`) is caught at the schema gate
+    # instead of stalling the review chain. The list mirrors
+    # the 6-dimension review walk in
+    # `crates/ralph-core/src/event_policy.rs`
+    # `DIMENSION_WHITELIST` and `ce-executor-serial.yml` line
+    # 1505-1528 (review-coordinator walk).
+    allowed_values:
+      dimension:
+        - goal-alignment
+        - correctness
+        - testing
+        - maintainability
+        - project-standards
+        - adversarial
     payload: json_object
 
   # Aggregate event over the entire review sequence. Triggers

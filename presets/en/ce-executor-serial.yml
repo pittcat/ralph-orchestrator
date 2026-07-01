@@ -2699,6 +2699,21 @@ hats:
           - `loop_stalled_max_iterations`
           - `steward_escalation`
           - `review_terminal_drift` (legacy; kept for forward-compat with older recovery journals)
+          # 2026-07-02 P1-B: stall_recovery retry_key family. v0 baseline above
+          # covers the 3 string literals the recovery_runtime emits
+          # directly; the v1 extension below covers the structured
+          # retry_key shape that the diagnosis responder synthesises
+          # when a handoff_dispatch_timeout triggers task.resume. The
+          # comparison is still STRICT-MATCH: the agent must check
+          # `reason == "stall_recovery:<hat>:<topic>:handoff_dispatch_timeout:*"`
+          # (i.e. literal `:*` suffix, not arbitrary payload text). The
+          # 4 shipper fails in the 2026-07-01 ralph-e2e run
+          # (events-20260701-220911.jsonl iter 22/24/26/34) all hit
+          # this gap and were promoted to `pass` after checks 1-2;
+          # adding these two entries prevents the same run from
+          # logging 4 misleading `REVIEW_COMPLETE(fail)` reports.
+          - `stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*`
+          - `stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:*`
           For recoverable reasons (after trim+lowercase == whitelist entry): run checks 1-2 (test suite + build/lint/typecheck). If BOTH pass, publish `REVIEW_COMPLETE` with `pass_or_fail: "pass"`, `verdict: "pass_with_residuals"`, and `residual_findings_summary: "plan.blocked with recoverable reason '<reason>'; verification passed"`. If either check fails, fall through to the hard-fail path.
         - **Hard-fail reasons** (the unit, review, or fix pipeline itself broke; verification cannot rescue it):
           - `executor failed: <detail>` (coordinator emitted on `work.failed`)
