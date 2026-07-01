@@ -2711,6 +2711,57 @@ impl EventLoop {
             );
         }
 
+        // 2026-07-02-001 review P0 fix (code-review #1): when a hat
+        // has a **targeted** event in its pending queue (i.e. an
+        // event with `event.target == Some(hat_id)`), the next
+        // activation MUST be that hat. The pre-existing
+        // `event_bus::publish` direct-target contract already routes
+        // targeted events to the named hat's queue; the dispatcher's
+        // only remaining job is to ensure the dispatcher picks that
+        // hat up next. Without this fast path, a targeted
+        // `task.resume` from the 62a40b41
+        // `isolated_extra_business_event_dropped` backpressure (or
+        // any other targeted recovery signal) could be deferred by
+        // the round-robin scan, leaving the over-emitting hat dormant
+        // for a full cycle. The hat is selected deterministically
+        // (BTreeMap dict order) when multiple hats have targeted
+        // events, mirroring the round-robin cursor's tie-breaking.
+        //
+        // This is a **targeted-event fast path**, separate from the
+        // handoff priority pre-emption below. Targeted events are
+        // unambiguous by construction (the publisher named a specific
+        // hat), so they don't need a "topic-eligibility" filter; the
+        // handoff priority path's strict topic-exact predicate is
+        // preserved for the broad (untargeted) handoff case.
+        let targeted_hat: Option<HatId> = {
+            let mut found: Option<HatId> = None;
+            for id in self.bus.hat_ids() {
+                let has_targeted = self
+                    .bus
+                    .peek_pending(id)
+                    .map(|q| q.iter().any(|event| event.target.as_ref() == Some(id)))
+                    .unwrap_or(false);
+                if has_targeted {
+                    // BTreeMap order → first targeted wins.
+                    found = Some(id.clone());
+                    break;
+                }
+            }
+            found
+        };
+        if let Some(ref id) = targeted_hat {
+            tracing::debug!(
+                target = "ralph_core::event_loop",
+                hat = %id,
+                "next_hat: targeted event in consumer queue — fast-pathing to that hat"
+            );
+            // Advance the round-robin cursor to mirror a normal
+            // selection (so the next non-targeted selection resumes
+            // fairly from the registered successor).
+            self.bus.select_next_hat_with_pending(Some(id))?;
+            return self.bus.hat_ids().find(|hat_id| hat_id == &id).clone();
+        }
+
         match self.config.event_loop.execution_mode {
             HatExecutionMode::Isolated => {
                 // Isolated mode: use round-robin to select the next hat.
@@ -2734,11 +2785,19 @@ impl EventLoop {
                 // consumer queue. The pre-fix predicate (consumer queue
                 // non-empty → eligible for priority) was susceptible to
                 // misleading routing whenever a hat's queue held an event
-                // whose topic was *not* the handoff entry's topic (e.g. a
-                // targeted `task.resume` left behind by the 62a40b41
-                // per-turn budget exhaustion). Such residue would short-
-                // circuit the round-robin scan and pre-empt a different
-                // hat's legitimate handoff dispatch.
+                // whose topic was *not* the handoff entry's topic (e.g. an
+                // untargeted `task.resume` left behind by an earlier round).
+                // Such residue would short-circuit the round-robin scan and
+                // pre-empt a different hat's legitimate handoff dispatch.
+                //
+                // "Topic-exact" means `event.topic.as_str() == entry.topic`
+                // — string equality on the topic name. Topic *pattern*
+                // matching (e.g. `work.*`) is the `EventBus::publish`
+                // concern; the dispatcher's priority pre-empt requires the
+                // consumer to have a pending event whose topic is the
+                // handoff entry's topic verbatim, not a pattern. This is
+                // the same contract the HandoffIndex uses for `consumer_of`
+                // (see `workflow_contract/handoff_index.rs:228`).
                 //
                 // The post-fix predicate walks the priority-dispatchable
                 // entries in BTreeMap (alphabetical topic) order, and for
@@ -2748,10 +2807,33 @@ impl EventLoop {
                 // If no entry yields a topic-exact pending, `priority_hat`
                 // stays `None` and the dispatcher falls through to the
                 // normal round-robin scan.
+                //
+                // 2026-07-02-001 review P0 fix (code-review #1): the
+                // targeted-event fast path above (`targeted_hat`) handles
+                // the 62a40b41 `isolated_extra_business_event_dropped`
+                // targeted-`task.resume` reactivation. The
+                // priority-predicate additionally filters out topics
+                // classified as **orchestrator control / system
+                // backpressure** by `ralph_proto::is_orchestrator_control`
+                // (`task.resume`, `loop.resume`, `LOOP_COMPLETE`,
+                // `LOOP_CANCEL`). These topics *do* appear in
+                // `HandoffIndex::entries` when a hat subscribes to them
+                // (e.g. `executor` subscribes to `task.resume`), and the
+                // strict topic-exact predicate alone is not enough to
+                // reject the priority pre-empt — an untargeted
+                // `task.resume` residue in such a consumer's queue would
+                // still win the priority pre-empt. Filtering them here
+                // restores the 62a40b41 contract: system backpressure
+                // events never pre-empt a handoff dispatch, and the
+                // targeted-event fast path above is the only place such
+                // events can re-activate a hat.
                 let priority_hat: Option<HatId> =
                     self.handoff_index.entries.iter().find_map(|(topic, entry)| {
                         let consumer = entry.consumer.as_deref()?;
                         let hat_id = HatId::from(consumer);
+                        if ralph_proto::topics::is_orchestrator_control(topic.as_str()) {
+                            return None;
+                        }
                         let topic_matches = self
                             .bus
                             .peek_pending(&hat_id)

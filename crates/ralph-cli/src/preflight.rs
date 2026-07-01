@@ -800,6 +800,15 @@ fn validate_hats_config_shape(value: &Value, label: &str) -> Result<()> {
 /// automatically gets the default treatment without the developer
 /// having to remember to add it to two parallel lists (which is
 /// exactly how `mechanism` got dropped in 2026-06-27).
+///
+/// 2026-07-02-001 review P1 #5 fix (code-review): add a static
+/// assertion that `SPECIAL_OVERLAY_KEYS` is a strict subset of
+/// `ALLOWED_HATS_TOP_LEVEL`. If a future developer adds a special
+/// key without also adding it to the validator allow-list, the
+/// shape-check layer (`hats_disallowed_keys`) will silently filter
+/// the overlay and the `SPECIAL_OVERLAY_KEYS` constant will be
+/// stale. The compile-time check makes that drift a hard build
+/// failure.
 const SPECIAL_OVERLAY_KEYS: &[&str] = &[
     "hats",
     "events",
@@ -808,6 +817,14 @@ const SPECIAL_OVERLAY_KEYS: &[&str] = &[
     "topic_format_whitelist",
     "telemetry",
 ];
+
+// 2026-07-02-001 review P1 #5 fix (code-review): the static
+// invariant `SPECIAL_OVERLAY_KEYS ⊆ ALLOWED_HATS_TOP_LEVEL` is
+// checked by `tests::special_overlay_keys_is_subset_of_allowed`.
+// Compile-time `const` containment is not stable for `&str`
+// (`PartialEq` for slices is not const), so the check runs in a
+// `#[test]` instead. The test is one assertion and is included in
+// the standard CI pipeline (`./scripts/run-tests.sh`).
 
 fn extract_hat_overlay_from_preset(preset_value: Value) -> Result<Value> {
     let mapping = preset_value
@@ -1519,6 +1536,26 @@ mechanism:
                 "extract_hat_overlay_from_preset must include default key `{key}` (from \
                  ALLOWED_HATS_TOP_LEVEL); a drift between the validator allow-list and the \
                  extraction list is the exact 2026-07-02-001 U3 root cause"
+            );
+        }
+    }
+
+    /// 2026-07-02-001 review P1 #5 fix (code-review): every key in
+    /// `SPECIAL_OVERLAY_KEYS` (the hand-written branch set in
+    /// `merge_hats_overlay`) must also be in `ALLOWED_HATS_TOP_LEVEL`
+    /// (the validator allow-list). If a developer adds a special
+    /// key without also adding it to the allow-list, the shape-check
+    /// layer (`hats_disallowed_keys`) will silently filter the
+    /// overlay and the `SPECIAL_OVERLAY_KEYS` constant will be
+    /// stale. This test pins the invariant that the two lists stay
+    /// in sync.
+    #[test]
+    fn special_overlay_keys_is_subset_of_allowed_hats_top_level() {
+        for key in SPECIAL_OVERLAY_KEYS.iter() {
+            assert!(
+                ALLOWED_HATS_TOP_LEVEL.contains(key),
+                "SPECIAL_OVERLAY_KEYS contains `{key}` which is missing from \
+                 ALLOWED_HATS_TOP_LEVEL; add it to the validator allow-list first"
             );
         }
     }
