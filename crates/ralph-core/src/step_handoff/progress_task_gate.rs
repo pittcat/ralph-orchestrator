@@ -325,15 +325,31 @@ pub fn check_alignment_with_snapshot(
     if let Some(step_value) = step {
         match progress.current_step.as_deref() {
             None => {
-                return GateDecision::Mismatch(ProgressTaskMismatch {
-                    reason: "progress_missing_current_step".to_string(),
-                    detail: format!(
-                        "event step='{}' but progress.md has no Current Step heading",
-                        step_value
-                    ),
-                    step: Some(step_value.to_string()),
-                    task_id: task_id.map(|t| t.to_string()),
-                });
+                // Fallback (2026-07-01 fix for primary-20260701-140149):
+                // when progress.md has no Current Step heading but the
+                // target step is already listed under Completed Steps,
+                // the agent has finished this step without updating the
+                // "current" pointer. This is legitimate on the
+                // `fix_plan_file="null"` happy path (all units closed, no
+                // fix-unit expected, shipper emits plan.complete directly).
+                // Treat as aligned rather than failing closed.
+                //
+                // Conservative: only relax the `None` branch when the step
+                // name matches something the agent already finished in the
+                // same progress.md. All other fail-closed paths
+                // (empty_headings, missing file, cold-start) are preserved
+                // unchanged above.
+                if !progress.is_step_completed(step_value) {
+                    return GateDecision::Mismatch(ProgressTaskMismatch {
+                        reason: "progress_missing_current_step".to_string(),
+                        detail: format!(
+                            "event step='{}' but progress.md has no Current Step heading",
+                            step_value
+                        ),
+                        step: Some(step_value.to_string()),
+                        task_id: task_id.map(|t| t.to_string()),
+                    });
+                }
             }
             Some(current) if current.trim() != step_value.trim() => {
                 if !progress.is_step_completed(step_value) {
@@ -504,15 +520,26 @@ pub fn check_progress_task_alignment(
     if let Some(step) = step {
         match progress.current_step.as_deref() {
             None => {
-                return GateDecision::Mismatch(ProgressTaskMismatch {
-                    reason: "progress_missing_current_step".to_string(),
-                    detail: format!(
-                        "event step='{}' but progress.md has no Current Step heading",
-                        step
-                    ),
-                    step: Some(step.to_string()),
-                    task_id: task_id.map(|t| t.to_string()),
-                });
+                // Fallback (2026-07-01 fix for primary-20260701-140149):
+                // mirror of the snapshot variant above. When
+                // `progress.md` has no Current Step heading but the
+                // target step is already listed under Completed Steps,
+                // treat as aligned (this is the `fix_plan_file="null"`
+                // happy path: all units closed, no fix-unit expected,
+                // shipper takes over directly). Conservative — only
+                // relaxes the `None` branch when the step name matches
+                // an already-completed entry in the same progress.md.
+                if !progress.is_step_completed(step) {
+                    return GateDecision::Mismatch(ProgressTaskMismatch {
+                        reason: "progress_missing_current_step".to_string(),
+                        detail: format!(
+                            "event step='{}' but progress.md has no Current Step heading",
+                            step
+                        ),
+                        step: Some(step.to_string()),
+                        task_id: task_id.map(|t| t.to_string()),
+                    });
+                }
             }
             Some(current) if current.trim() != step.trim() => {
                 // Allow step == current. If the event advances past
