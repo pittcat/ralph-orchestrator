@@ -613,7 +613,19 @@ pub struct MechanismConfig {
 /// in the `mechanism:` key the parser expects.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FlowDeclarationConfig {
-    #[serde(default = "default_flow_type")]
+    // 2026-07-02-001 plan U4 (Fix D): the `type` rename mirrors
+    // `event_loop::flow_declaration::FlowDeclaration::flow_type` so a
+    // non-default value declared in a preset's `mechanism.flow` block
+    // (e.g. `type: declared` written by `ce-executor-serial.yml`)
+    // is no longer silently dropped to the framework default at the
+    // config-typed view. Pre-fix: `flow_type` carried no rename, so
+    // serde_yaml saw the YAML key `type` and fell through to
+    // `default_flow_type()`. The runtime's downstream
+    // `FlowDeclaration::from_yaml` reads the same `type` key correctly
+    // (it has its own `#[serde(rename = "type")]`), so the discrepancy
+    // was invisible until a future guard started inspecting
+    // `config.mechanism.flow.flow_type` directly.
+    #[serde(rename = "type", default = "default_flow_type")]
     pub flow_type: String,
     #[serde(default = "default_flow_version")]
     pub version: u32,
@@ -663,4 +675,59 @@ fn default_enforce_schema() -> String {
 
 fn default_state_idempotency() -> String {
     "required".to_string()
+}
+
+#[cfg(test)]
+mod flow_declaration_config_tests {
+    //! 2026-07-02-001 plan U4 (Fix D) round-trip pins: the
+    //! `type` rename on `FlowDeclarationConfig::flow_type` must
+    //! behave like its sibling
+    //! `event_loop::flow_declaration::FlowDeclaration::flow_type`
+    //! (which already had `#[serde(rename = "type")]` since the
+    //! 2026-06-27 mechanism foundation). The pre-fix
+    //! `FlowDeclarationConfig::flow_type` had no rename, so any
+    //! preset declaring `type: <non-default>` in its
+    //! `mechanism.flow` block would silently fall back to
+    //! `default_flow_type() == "declared"` at this layer.
+    //!
+    //! See `docs/plans/2026-07-02-001-fix-hat-routing-next-hop-plan.md` U4 / R5.
+    use super::*;
+
+    /// U4 happy path: `type: <non-default-sentinel>` survives
+    /// the rename. Pre-fix: this assertion would have observed
+    /// the framework default `"declared"`, hiding the bug.
+    #[test]
+    fn flow_type_renames_from_yaml_type_key() {
+        let yaml = r#"
+type: "u4-sentinel"
+version: 2
+steps:
+  - id: "step-01"
+"#;
+        let cfg: FlowDeclarationConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.flow_type, "u4-sentinel",
+            "`type:` in YAML must land on `flow_type` via the `rename` attribute; \
+             pre-fix the rename was missing and this would silently be the framework default"
+        );
+        assert_eq!(cfg.version, 2);
+    }
+
+    /// U4 default path: omitting `type:` must still produce the
+    /// framework default `"declared"` so backward compatibility is
+    /// preserved for presets that don't declare a flow type.
+    #[test]
+    fn flow_type_defaults_when_omitted() {
+        let yaml = r#"
+version: 1
+steps:
+  - id: "step-01"
+"#;
+        let cfg: FlowDeclarationConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.flow_type, "declared",
+            "missing `type:` must fall back to default_flow_type() to preserve \
+             presets that omit the field"
+        );
+    }
 }

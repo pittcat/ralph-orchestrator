@@ -786,35 +786,75 @@ fn validate_hats_config_shape(value: &Value, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Keys that have **special merge semantics** in
+/// [`merge_hats_overlay`] and are handled by dedicated branches.
+///
+/// 2026-07-02-001 plan U3 (Fix C): the special-set is the single
+/// source of truth for which keys get hand-written branches; the
+/// remaining keys in [`ALLOWED_HATS_TOP_LEVEL`] (i.e.
+/// `ALLOWED_HATS_TOP_LEVEL − SPECIAL_OVERLAY_KEYS`) are merged by
+/// the generic "default" branch which inserts the value wholesale
+/// into the core mapping. This eliminates the previous fork
+/// between the `extract_hat_overlay_from_preset` key list and
+/// `ALLOWED_HATS_TOP_LEVEL`: any new top-level hat-declarable key
+/// automatically gets the default treatment without the developer
+/// having to remember to add it to two parallel lists (which is
+/// exactly how `mechanism` got dropped in 2026-06-27).
+const SPECIAL_OVERLAY_KEYS: &[&str] = &[
+    "hats",
+    "events",
+    "tasks",
+    "event_loop",
+    "topic_format_whitelist",
+    "telemetry",
+];
+
 fn extract_hat_overlay_from_preset(preset_value: Value) -> Result<Value> {
     let mapping = preset_value
         .as_mapping()
         .ok_or_else(|| anyhow::anyhow!("Builtin hat collection must be a YAML mapping"))?;
 
+    // 2026-07-02-001 plan U3 (Fix C): the extraction key set is
+    // derived from `ALLOWED_HATS_TOP_LEVEL` (the validator-side
+    // allow-list) minus `SPECIAL_OVERLAY_KEYS` (which have dedicated
+    // merge branches in `merge_hats_overlay`). Previously this list
+    // was hand-maintained in a separate literal below, and the
+    // `mechanism` key shipped in `ALLOWED_HATS_TOP_LEVEL` but was
+    // missing from the extraction list — the exact root cause of the
+    // `mechanism.flow` block being dropped from builtin presets
+    // since 2026-06-27. Deriving from a single source of truth
+    // means a new top-level hat-declarable field only needs to be
+    // added to `ALLOWED_HATS_TOP_LEVEL` to flow through; the
+    // integrity test in `tests::overlay_round_trip_preserves_all_allowed_keys`
+    // will fail loudly if a new key is added to
+    // `ALLOWED_HATS_TOP_LEVEL` without a corresponding merge
+    // branch in `merge_hats_overlay` (the test goes through the
+    // full overlay path and deserialises into `RalphConfig`,
+    // asserting `config.mechanism` is `Some(_)` for the
+    // `ce-executor-serial` fixture).
+    let default_keys: Vec<&str> = ALLOWED_HATS_TOP_LEVEL
+        .iter()
+        .copied()
+        .filter(|k| !SPECIAL_OVERLAY_KEYS.contains(k))
+        .collect();
+
     let mut overlay = Mapping::new();
-    // U5 (2026-06-09) follow-up (2026-06-11): include
-    // `topic_format_whitelist` so preset-declared protocol tokens
-    // (e.g. LOOP_COMPLETE / REVIEW_COMPLETE) survive into
-    // `merge_hats_overlay` and the lint treats them as exempt. Without
-    // this, the U5 commit f876241 that added the whitelist to all 9
-    // builtin presets was a no-op in real runs.
-    for key in [
-        "name",
-        "description",
-        "event_loop",
-        "events",
-        "hats",
-        "tasks",
-        "topic_format_whitelist",
-        // 2026-06-24 KTD-Drift: pass-through `telemetry.*` so the
-        // `coord_join_mode` opt-in from `ce-executor-serial` survives
-        // the `merge_hats_overlay` step (per the
-        // `merge_hats_overlay_preserves_coord_join_mode_via_default_core_value`
-        // e2e guard). The security boundary is enforced by the
-        // operator's `ralph.yml` overriding preset values per-key in
-        // the deep-merge step in `merge_hats_overlay`.
-        "telemetry",
-    ] {
+    // First: special keys that have dedicated merge semantics
+    // (e.g. `event_loop` deep-merges, `telemetry` deep-merges,
+    // `topic_format_whitelist` unions). The merge step is
+    // responsible for these; the extraction step must hand them
+    // over verbatim.
+    for key in SPECIAL_OVERLAY_KEYS {
+        if let Some(value) = mapping_get(mapping, key) {
+            mapping_insert(&mut overlay, key, value.clone());
+        }
+    }
+    // Then: the default "wholesale insert" keys (currently
+    // `name` / `description` / `mechanism`). New entries in
+    // `ALLOWED_HATS_TOP_LEVEL` automatically join this loop — the
+    // static `SPECIAL_OVERLAY_KEYS` and dynamic default loop share
+    // the same source of truth.
+    for key in &default_keys {
         if let Some(value) = mapping_get(mapping, key) {
             mapping_insert(&mut overlay, key, value.clone());
         }
@@ -1076,6 +1116,50 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
         mapping_insert(core_mapping, "telemetry", merged_telemetry);
     }
 
+    // 2026-07-02-001 plan U3 (Fix C): the "default merge" branch.
+    //
+    // Every key that is in [`ALLOWED_HATS_TOP_LEVEL`] (i.e. hat-
+    // declarable at the preset top level) but NOT in
+    // [`SPECIAL_OVERLAY_KEYS`] (which have hand-written deep-merge /
+    // union semantics above) is merged by this branch using a simple
+    // "operator wins" rule:
+    //
+    //   - If the operator's ralph.yml already declares the key,
+    //     keep the operator's value (do not touch).
+    //   - Otherwise, insert the preset's value wholesale.
+    //
+    // Currently this picks up `mechanism` (the 2026-06-27 U10
+    // mechanism block), `name`, and `description`. Future
+    // additions to `ALLOWED_HATS_TOP_LEVEL` automatically join this
+    // loop — no second list to keep in sync. The integrity test
+    // `tests::overlay_round_trip_preserves_all_allowed_keys` pins
+    // that any `ALLOWED_HATS_TOP_LEVEL` entry with a preset-side
+    // value round-trips into the deserialised `RalphConfig`.
+    for (key, value) in hats_mapping.iter() {
+        let Some(key_str) = key.as_str() else {
+            continue;
+        };
+        if SPECIAL_OVERLAY_KEYS.contains(&key_str) {
+            // Already handled by a dedicated branch above.
+            continue;
+        }
+        if !ALLOWED_HATS_TOP_LEVEL.contains(&key_str) {
+            // Not in the hat-collection allow-list; the validator
+            // will reject the overlay at the shape-check layer
+            // (see `validate_hats_config_shape`), so skip silently
+            // here to avoid double-warning.
+            continue;
+        }
+        if core_mapping.contains_key(key) {
+            // Operator wins on a per-key basis (mirrors the
+            // `event_loop` PRESET_OPT_IN_WHEN_OPERATOR_OMITS contract
+            // for default-branch keys: the operator's value is
+            // authoritative; the preset only fills in absent keys).
+            continue;
+        }
+        core_mapping.insert(key.clone(), value.clone());
+    }
+
     Ok(core)
 }
 
@@ -1253,6 +1337,190 @@ hats:
         assert_eq!(config.event_loop.completion_promise, "REVIEW_COMPLETE");
         assert!(config.hats.contains_key("reviewer"));
         assert!(!config.hats.contains_key("builder"));
+    }
+
+    // 2026-07-02-001 plan U3 (Fix C): round-trip integrity for the
+    // preset → overlay → RalphConfig path. The pre-fix
+    // `extract_hat_overlay_from_preset` maintained a hand-written
+    // key list that drifted from `ALLOWED_HATS_TOP_LEVEL`, which
+    // dropped the `mechanism` block from builtin presets since
+    // 2026-06-27. This test pins the contract that every key in
+    // `ALLOWED_HATS_TOP_LEVEL` declared by a preset survives the
+    // full overlay + deserialise path.
+    //
+    // Specifically: `mechanism.flow` is the 2026-06-27 U10 stage
+    // pipeline opt-in; the runtime's `FlowStepScopeStage` and the
+    // `mechanism.flow` warning gate depend on this value being
+    // `Some(_)`. If a future change re-introduces a fork between
+    // the validator allow-list and the extraction list, this test
+    // will fail with `config.mechanism` being `None` and the flow
+    // count being `0`.
+    #[test]
+    fn overlay_round_trip_preserves_mechanism_block_from_preset() {
+        // Mimic the structure of `presets/en/ce-executor-serial.yml`
+        // — operator's ralph.yml is empty, preset supplies everything.
+        let core: Value = serde_yaml::from_str(
+            r"
+cli:
+  backend: claude
+event_loop:
+  completion_promise: LOOP_COMPLETE
+hats: {}
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r#"
+hats:
+  executor:
+    name: Executor
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    steps:
+      - id: "step-01"
+        allowed_emits: ["work.ready"]
+  repair_budget: 1
+  enforce_schema: "hard"
+  state_idempotency: "required"
+"#,
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert!(
+            config.mechanism.is_some(),
+            "operator-empty preset must round-trip `mechanism` into RalphConfig"
+        );
+        let mechanism = config.mechanism.as_ref().unwrap();
+        assert!(
+            mechanism.flow.is_some(),
+            "operator-empty preset must round-trip `mechanism.flow` into RalphConfig"
+        );
+        let flow = mechanism.flow.as_ref().unwrap();
+        assert_eq!(
+            flow.steps.len(),
+            1,
+            "the one declared step must survive the round-trip"
+        );
+        assert_eq!(flow.steps[0].id, "step-01");
+    }
+
+    /// U3 (Fix C): operator-supplied `mechanism` must win over the
+    /// preset's value (per-key operator-wins contract on the
+    /// default branch).
+    #[test]
+    fn overlay_round_trip_operator_mechanism_wins_over_preset() {
+        let core: Value = serde_yaml::from_str(
+            r#"
+cli:
+  backend: claude
+event_loop:
+  completion_promise: LOOP_COMPLETE
+hats: {}
+mechanism:
+  flow:
+    type: declared
+    steps:
+      - id: "operator-step"
+"#,
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r#"
+hats:
+  executor:
+    name: Executor
+mechanism:
+  flow:
+    type: declared
+    steps:
+      - id: "preset-step"
+"#,
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        let mechanism = config.mechanism.as_ref().unwrap();
+        let flow = mechanism.flow.as_ref().unwrap();
+        assert_eq!(
+            flow.steps.len(),
+            1,
+            "operator's mechanism.flow must replace the preset's wholesale (one step total, not two)"
+        );
+        assert_eq!(
+            flow.steps[0].id, "operator-step",
+            "operator-wins: the surviving step must be the operator's"
+        );
+    }
+
+    /// U3 (Fix C): removing the default branch from
+    /// `merge_hats_overlay` (or re-adding a hand-written key list
+    /// to `extract_hat_overlay_from_preset` that omits `mechanism`)
+    /// would make this test go red. The two-pronged pin (this test
+    /// + `overlay_round_trip_preserves_mechanism_block_from_preset`)
+    /// catches both the "extraction list lost a key" failure mode
+    /// and the "merge dropped the default branch" failure mode.
+    #[test]
+    fn extract_hat_overlay_includes_all_allowed_keys_with_values() {
+        let preset: Value = serde_yaml::from_str(
+            r#"
+name: "TestPreset"
+description: "U3 fixture"
+hats:
+  executor:
+    name: Executor
+event_loop:
+  execution_mode: isolated
+events:
+  - topic: "work.ready"
+tasks: {}
+topic_format_whitelist: ["LOOP_COMPLETE"]
+telemetry:
+  runtime_diagnosis:
+    drift:
+      coord_join_mode: serial
+mechanism:
+  flow:
+    - step: "s1"
+"#,
+        )
+        .unwrap();
+
+        let overlay = extract_hat_overlay_from_preset(preset).unwrap();
+        let mapping = overlay.as_mapping().expect("overlay is a mapping");
+
+        // The 6 special keys must all be present.
+        for key in SPECIAL_OVERLAY_KEYS {
+            assert!(
+                mapping_get(mapping, key).is_some(),
+                "extract_hat_overlay_from_preset must include special key `{key}`; \
+                 check SPECIAL_OVERLAY_KEYS and the extraction loop in `extract_hat_overlay_from_preset`"
+            );
+        }
+        // The default keys (e.g. `mechanism`, `name`, `description`)
+        // must all be present.
+        for key in ALLOWED_HATS_TOP_LEVEL.iter() {
+            if SPECIAL_OVERLAY_KEYS.contains(key) {
+                continue; // already checked above
+            }
+            assert!(
+                mapping_get(mapping, key).is_some(),
+                "extract_hat_overlay_from_preset must include default key `{key}` (from \
+                 ALLOWED_HATS_TOP_LEVEL); a drift between the validator allow-list and the \
+                 extraction list is the exact 2026-07-02-001 U3 root cause"
+            );
+        }
     }
 
     #[test]
