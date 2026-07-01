@@ -3,12 +3,6 @@
 //! The event loop coordinates the execution of hats via pub/sub messaging.
 
 pub mod loop_state;
-// 2026-07-01-001 plan U6: engine-computed `expected_event` +
-// plan/fix topology cache. The single SSOT for "what should
-// the coordinator emit next" lives here; both the prompt
-// injection (`## ORCHESTRATOR STATE`) and the diagnostic
-// ledger share the same struct.
-pub mod orchestrator_state;
 pub mod plan_blocked_reason;
 pub mod rejection;
 pub mod rejection_kind;
@@ -4168,15 +4162,6 @@ impl EventLoop {
             //   hat instructions
             let base_prompt = self.prepend_orchestrator_context(base_prompt, hat_id);
 
-            // 2026-07-01-001 plan U6: prepend the
-            // `## ORCHESTRATOR STATE` block for the
-            // coordinator. The block is computed by the
-            // engine (plan/fix topology, last test.passed,
-            // review-walk / completion status) and tells the
-            // coordinator what to emit next. Other hats skip
-            // the block.
-            let base_prompt = self.prepend_orchestrator_state(base_prompt, hat_id);
-
             // R1: `## WAVE CONTEXT` block lives near the top for
             // `review-synthesizer`; it is a no-op for any other hat.
             let base_prompt = self.prepend_wave_context(base_prompt, hat_id);
@@ -5709,135 +5694,6 @@ impl EventLoop {
         snap.loop_start_sha = self.state.loop_start_sha.clone();
         snap.plan_baseline_sha = self.state.plan_baseline_sha.clone();
         format!("{}{prompt}", snap.to_prompt_block())
-    }
-
-    /// 2026-07-01-001 plan U6: prepend the
-    /// `## ORCHESTRATOR STATE` block to the coordinator's
-    /// prompt. The block is computed from the engine-side
-    /// state (last `test.passed`, plan/fix topology, review
-    /// walk status, completion honored flag) so the
-    /// coordinator no longer has to count `### U{N}.`
-    /// headings in `plan.md` itself.
-    ///
-    /// Scope: only the `coordinator` hat receives the block —
-    /// other hats do not need the directive and including it
-    /// would just add noise. If the engine has no directive
-    /// (e.g. no test.passed observed yet, or plan topology
-    /// failed to parse), the block is omitted.
-    fn prepend_orchestrator_state(&self, prompt: String, hat_id: &HatId) -> String {
-        if hat_id.as_str() != "coordinator" {
-            return prompt;
-        }
-        use crate::event_loop::orchestrator_state::{
-            compute_expected_event, render_orchestrator_state_block, ComputeInput,
-        };
-        // The runtime tracks `fix_unit_chain_exhausted` as the
-        // post-review-walk signal; the synthesiser's
-        // `review.complete` (pass verdict) flips it via the U3
-        // guard. Until then `expected_event` after the last
-        // plan unit is `review.start`.
-        let review_walk_closed = self.state.fix_unit_chain_exhausted
-            || self.state.report_done_seen;
-        let input = ComputeInput {
-            last_test_passed_step: self.state.last_test_passed_step.as_deref(),
-            last_was_fix_unit: self.state.last_test_passed_was_fix_unit,
-            review_walk_closed,
-            completion_honored: self.state.completion_honored,
-        };
-        let state = compute_expected_event(&self.state.plan_topology, &input);
-        if state.expected_event.is_none() {
-            // No directive — keep the prompt quiet; U1/U2
-            // still back-stop the emit, and the existing
-            // top-down review prompts remain the source of
-            // truth for cold-start activations.
-            return prompt;
-        }
-        let block = render_orchestrator_state_block(&state);
-        if block.is_empty() {
-            prompt
-        } else {
-            format!("{block}{prompt}")
-        }
-    }
-
-    /// 2026-07-01-001 plan U6 wiring (review P1-2): install the
-    /// plan topology from a `plan_path` string. Best-effort —
-    /// failures emit a diagnostic via the ledger and log but
-    /// never abort the loop. Idempotent: a second call with
-    /// the same path re-scans but does not duplicate the
-    /// diagnostic emission (only an empty topology publishes
-    /// the rejection, which only fires on the first install
-    /// because subsequent installs that succeed skip it).
-    fn try_install_plan_topology(&mut self, plan_path: &str) {
-        let path = std::path::Path::new(plan_path);
-        if !path.exists() {
-            tracing::debug!(
-                plan_path = %plan_path,
-                "U6: plan_path does not exist on disk; \
-                 skipping topology install (orchestrator-state cache stays empty)"
-            );
-            return;
-        }
-        if let Some(ledger) = self.state.state_ledger.as_mut() {
-            if let Err(e) = self
-                .state
-                .plan_topology
-                .install_plan_topology(ledger, path)
-            {
-                tracing::warn!(
-                    error = %e,
-                    "U6: plan topology install failed; \
-                     compute_expected_event will fall back to plan_topology_unparseable"
-                );
-            }
-        } else {
-            // Without the unified ledger the diagnostic channel
-            // is unavailable, but the cache itself still
-            // populates so the next coordinator prompt can
-            // read the topology.
-            let ids = crate::event_loop::orchestrator_state::PlanTopologyCache::scan(path);
-            if !ids.is_empty() {
-                self.state.plan_topology.plan_path = Some(plan_path.to_string());
-                self.state.plan_topology.plan_unit_ids = ids;
-            }
-        }
-    }
-
-    /// 2026-07-01-001 plan U6 wiring (review P1-2): install the
-    /// fix topology from a `fix_plan_file` string (typically
-    /// carried in the `review.complete` payload). Symmetric to
-    /// [`Self::try_install_plan_topology`] but emits the fix
-    /// diagnostic on empty scans.
-    fn try_install_fix_topology(&mut self, fix_plan_path: &str) {
-        let path = std::path::Path::new(fix_plan_path);
-        if !path.exists() {
-            tracing::debug!(
-                fix_plan_path = %fix_plan_path,
-                "U6: fix_plan_file does not exist on disk; \
-                 skipping fix topology install"
-            );
-            return;
-        }
-        if let Some(ledger) = self.state.state_ledger.as_mut() {
-            if let Err(e) = self
-                .state
-                .plan_topology
-                .install_fix_topology(ledger, path)
-            {
-                tracing::warn!(
-                    error = %e,
-                    "U6: fix topology install failed; \
-                     compute_expected_event will fall back to fix_topology_unparseable"
-                );
-            }
-        } else {
-            let ids =
-                crate::event_loop::orchestrator_state::PlanTopologyCache::scan_fix_plan(path);
-            if !ids.is_empty() {
-                self.state.plan_topology.fix_plan_path = Some(fix_plan_path.to_string());
-                self.state.plan_topology.fix_unit_ids = ids;
-            }
-        }
     }
 
     /// R3 (2026-06-14-003 plan): invoke the ephemeral isolation engine
@@ -10443,25 +10299,11 @@ impl EventLoop {
             }
         }
 
-        // 2026-07-01-001 plan U6 wiring (review P1-2):
-        // populate the orchestrator-state topology caches
-        // when the runtime first sees the relevant file
-        // payload. `work.ready` is the canonical carrier of
-        // `plan_path`; `review.complete` carries
-        // `fix_plan_file`. Both installs are idempotent —
-        // re-scanning the same path replaces the cached ids
-        // but does not double-emit diagnostics.
-        for event in &accepted_log_events {
-            if event.topic.as_str() == "work.ready" {
-                if let Some(plan_path) = extract_plan_path(&event.payload) {
-                    self.try_install_plan_topology(&plan_path);
-                }
-            } else if event.topic.as_str() == "review.complete" {
-                if let Some(fix_plan) = extract_fix_plan_file(&event.payload) {
-                    self.try_install_fix_topology(&fix_plan);
-                }
-            }
-        }
+        // 2026-07-01-001 plan U6 wiring was removed: plan
+        // topology scanning is no longer a base concern. The
+        // coordinator hat now derives plan structure from the
+        // plan file via prompt context instead of engine-side
+        // regex parsing.
 
         // A1 (002-adversarial-review / 003-adversarial-review
         // P0-1): when the unified ledger is wired in, mirror
@@ -11815,25 +11657,6 @@ fn extract_step_id(payload: &str) -> Option<String> {
 /// the caller treats that as "skip this turn's install
 /// attempt" (the topology cache stays empty, which is the
 /// pre-existing fail-closed state).
-fn extract_plan_path(payload: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
-    value
-        .get("plan_path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
-/// 2026-07-01-001 plan U6 wiring (review P1-2): extract the
-/// fix-plan path from a `review.complete` payload. Same
-/// fail-closed contract as [`extract_plan_path`].
-fn extract_fix_plan_file(payload: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
-    value
-        .get("fix_plan_file")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
 fn initial_current_plan_step(config: &RalphConfig) -> String {
     config
         .event_loop

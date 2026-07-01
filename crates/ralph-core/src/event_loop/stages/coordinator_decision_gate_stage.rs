@@ -149,6 +149,11 @@ pub fn classify_work_ready(payload: &str) -> PhaseClass {
     }
 }
 
+// Test-only convenience wrapper over `classify_plain_step_with_last`;
+// production callers pass `last_in_phase` explicitly. `#[cfg(test)]`
+// keeps the lib build free of a dead-code warning without dropping
+// the helper the unit tests rely on.
+#[cfg(test)]
 fn classify_plain_step(step: &str) -> PhaseClass {
     classify_plain_step_with_last(step, false)
 }

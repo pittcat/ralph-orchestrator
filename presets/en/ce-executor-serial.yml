@@ -884,18 +884,6 @@ hats:
             - When emitting `plan.complete`, set `step` to the current
               `fix-NN` value. Without `step`, `plan_gate` cannot apply the fix-*
               exemption and will reject the event.
-            - **READ `## ORCHESTRATOR STATE` FIRST (HARD RULE — 2026-07-01-001 U6):**
-              Every coordinator prompt now carries an
-              `## ORCHESTRATOR STATE` block with `expected_event`,
-              `last_in_phase`, and the plan/fix topology totals
-              computed by the engine. Use the engine's directive —
-              **do NOT count `### U{N}.` headings in `plan.md` /
-              `fix-plan.md` yourself**; the engine has already
-              scanned the plan at loop start and the fix-plan
-              when `review.complete` landed. The engine's
-              directive and the manual count must agree; if they
-              don't, trust the engine and surface the divergence
-              in your reasoning.
             - Stop.
 
          This gate is the primary defence against the 2026-06-30 P0-C regression,

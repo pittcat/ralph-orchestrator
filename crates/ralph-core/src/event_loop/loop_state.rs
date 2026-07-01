@@ -727,18 +727,10 @@ pub struct LoopState {
     /// `None` until the loop constructor wires it in.
     pub state_ledger: Option<crate::state::StateLedger>,
 
-    /// 2026-07-01-001 plan U6: engine-computed plan/fix
-    /// topology cache. Filled in by the runner on loop start
-    /// (plan) and on `review.complete` with `fix_plan_file`
-    /// (fix). The cache is the SSOT for `compute_expected_event`
-    /// — the coordinator prompt reads from this, never from
-    /// the plan file directly.
-    pub plan_topology: crate::event_loop::orchestrator_state::PlanTopologyCache,
-
     /// 2026-07-01-001 plan U6: most recently admitted
     /// `test.passed` step id (e.g. `step-03` or `fix-02`).
-    /// Used to feed `compute_expected_event` so the next
-    /// coordinator prompt can render a directive.
+    /// Kept for prompt diagnostics; the agent decides the next
+    /// emit by reading the plan file directly.
     pub last_test_passed_step: Option<String>,
 
     /// 2026-07-01-001 plan U6: mirror of `last_test_passed_step`
@@ -925,10 +917,6 @@ impl Default for LoopState {
             // U1 (plan 2026-06-21-002): unified state ledger.
             // `None` until the loop constructor wires it in.
             state_ledger: None,
-            // 2026-07-01-001 plan U6: empty topology on
-            // construction; the runner installs the plan
-            // topology on loop start.
-            plan_topology: crate::event_loop::orchestrator_state::PlanTopologyCache::default(),
             // 2026-07-01-001 plan U6: no test.passed observed yet.
             last_test_passed_step: None,
             last_test_passed_was_fix_unit: false,

@@ -4,59 +4,7 @@ use crate::event_policy::{PolicyFinding, ViolationType};
 use crate::event_reader::Event as JsonlEvent;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::time::{Duration, Instant};
-
-/// 2026-07-01-001 plan U6: shared plan/fix-plan heading scanner.
-///
-/// Reads a markdown file and returns the ordered list of step
-/// ids derived from headings that match the `### U{N}.` (or
-/// `### U{N}`) convention. The scanner emits `fix-{NN}` for
-/// fix-plan files (the pre-U6 use case for
-/// [`ReviewStepTracker::prefill_fix_steps_from_plan`]); callers
-/// needing `step-NN` should rebrand via [`scan_unit_headings_as_steps`].
-///
-/// The function is shared between
-/// [`ReviewStepTracker::prefill_fix_steps_from_plan`] (legacy
-/// use) and [`crate::event_loop::orchestrator_state::PlanTopologyCache::scan`]
-/// (U6 use). Returns an empty Vec on any IO / parse failure —
-/// callers must decide whether to fail-closed or fall back.
-pub fn scan_unit_headings(path: &Path) -> Vec<String> {
-    scan_unit_headings_with_prefix(path, "fix")
-}
-
-/// 2026-07-01-001 plan U6: variant that emits `step-NN` for
-/// the plan-unit path. Kept separate from `scan_unit_headings`
-/// so the legacy fix-plan callers keep their historical
-/// `fix-NN` shape without rebinding every callsite.
-pub fn scan_unit_headings_as_steps(path: &Path) -> Vec<String> {
-    scan_unit_headings_with_prefix(path, "step")
-}
-
-fn scan_unit_headings_with_prefix(path: &Path, prefix: &str) -> Vec<String> {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let mut found = Vec::new();
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("### U") {
-            continue;
-        }
-        // 期望形式:`### U{N}. <title>` 或 `### U{N} <title>`
-        let after_marker = trimmed.trim_start_matches("### U");
-        let digits: String = after_marker
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if let Ok(n) = digits.parse::<u32>()
-            && n > 0
-        {
-            found.push(format!("{prefix}-{n:02}"));
-        }
-    }
-    found
-}
 
 /// Emitted when a review wave exceeds the synthesizer aggregate window (U4).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,11 +168,31 @@ impl ReviewStepTracker {
     /// tracker 提供更早的"已填好"状态，便于下游做诊断与后续
     /// `is_wave_closed` 查询。
     ///
-    /// 2026-07-01-001 U6: scan logic now lives in
-    /// [`scan_unit_headings`] so the orchestrator-state cache
-    /// and the tracker share a single parser.
+    /// 注：解析器为自包含内联实现，不依赖 2026-07-01-001 U6 已回滚的
+    /// 共享 `scan_unit_headings` helper。此函数与其调用点属于
+    /// 2026-06-28-002 U1，不在 U6 回滚范围内。
     fn prefill_fix_steps_from_plan(&mut self, plan_path: &str) {
-        let found = scan_unit_headings(std::path::Path::new(plan_path));
+        let Ok(content) = std::fs::read_to_string(plan_path) else {
+            return;
+        };
+        let mut found = Vec::new();
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("### U") {
+                continue;
+            }
+            // 期望形式：`### U{N}. <title>` 或 `### U{N} <title>`
+            let after_marker = trimmed.trim_start_matches("### U");
+            let digits: String = after_marker
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(n) = digits.parse::<u32>()
+                && n > 0
+            {
+                found.push(format!("fix-{n:02}"));
+            }
+        }
         if found.is_empty() {
             return;
         }
@@ -248,6 +216,7 @@ impl ReviewStepTracker {
             }
         }
     }
+
     /// Semantic gates that run after schema validation (U1/U3).
     pub fn check_semantic_gates(&self, event: &JsonlEvent) -> Option<PolicyFinding> {
         let hat = event.hat.as_deref().unwrap_or("");
@@ -1419,43 +1388,61 @@ mod tests {
         );
     }
 
-    // 2026-07-01-001 plan U6: verify the shared scanner's
-    // plan vs fix-plan prefix split. `scan_unit_headings`
-    // keeps the legacy `fix-NN` shape for the fix-plan
-    // caller; `scan_unit_headings_as_steps` emits `step-NN`
-    // for the plan-unit path so `PlanTopologyCache` matches
-    // the rest of the runtime's `step-NN` vocabulary.
+    /// 2026-06-28-002 U1 回归守卫（2026-07-01 补）：`review.complete`
+    /// 携带非空 `fix_plan_file` 时，必须按 fix-plan 里的 `### U{N}.`
+    /// 标题为每个 `fix-{NN}` step 预填 review 终态（synth_terminal /
+    /// synth_pass / open_wave_id=None），使下游 `is_wave_closed` 对
+    /// 未直接出现在事件里的 fix 单元也返回 closed。此前该路径无
+    /// 测试，导致 U6 回滚误删 `prefill_fix_steps_from_plan` 时无人
+    /// 察觉；本测试把行为钉死。
     #[test]
-    fn u6_scan_unit_headings_fix_prefix_preserved() {
+    fn prefill_fix_steps_from_plan_seeds_all_fix_units_on_review_complete() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("fix-plan.md");
-        std::fs::write(
-            &path,
-            "### U1. one\n### U2. two\n### U3. three\n",
-        )
-        .unwrap();
-        let ids = scan_unit_headings(&path);
-        assert_eq!(
-            ids,
-            vec!["fix-01".to_string(), "fix-02".to_string(), "fix-03".to_string()],
-            "legacy fix-plan scanner must keep emitting `fix-NN`"
-        );
-    }
+        let fix_plan = dir.path().join("fix-plan.md");
+        std::fs::write(&fix_plan, "### U1. first\n### U2. second\n### U3. third\n").unwrap();
+        let fix_plan_str = fix_plan.to_str().unwrap();
 
-    #[test]
-    fn u6_scan_unit_headings_as_steps_emits_step_prefix() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("plan.md");
-        std::fs::write(
-            &path,
-            "### U1. one\n### U2. two\n### U3. three\n",
-        )
-        .unwrap();
-        let ids = scan_unit_headings_as_steps(&path);
-        assert_eq!(
-            ids,
-            vec!["step-01".to_string(), "step-02".to_string(), "step-03".to_string()],
-            "plan-unit scanner must emit `step-NN` so PlanTopologyCache matches runtime vocabulary"
+        let mut tracker = ReviewStepTracker::default();
+        // 一条覆盖整份 fix-plan 的 review.complete，只显式携带 fix-02。
+        let payload = format!(
+            r#"{{"plan_name":"p","task_id":"t1","task_key":"k1","step":"fix-02","verdict":"pass","fix_plan_file":"{fix_plan_str}"}}"#
+        );
+        let complete = jsonl("review.complete", "review-synthesizer", &payload);
+        tracker.observe_accepted(&complete);
+
+        // fix-01 / fix-03 从未在事件里直接出现，但 prefill 必须给
+        // 它们建条目并置为已 review、wave 已闭合。
+        for fix in ["fix-01", "fix-02", "fix-03"] {
+            let key = StepKey {
+                plan_name: "p".to_string(),
+                task_id: "t1".to_string(),
+                step: fix.to_string(),
+            };
+            let state = tracker
+                .steps
+                .get(&key)
+                .unwrap_or_else(|| panic!("{fix} must be prefilled from fix-plan"));
+            assert_eq!(
+                state.synth_terminal.as_deref(),
+                Some("review.complete"),
+                "{fix}: synth_terminal must be prefilled from fix-plan"
+            );
+            assert!(state.synth_pass, "{fix}: synth_pass must be true");
+            assert!(
+                tracker.is_wave_closed("p", "t1", fix),
+                "{fix}: wave must be closed after prefill"
+            );
+        }
+
+        // 负控制：fix-plan 里没有的 fix-04 不得被凭空创建。
+        let absent = StepKey {
+            plan_name: "p".to_string(),
+            task_id: "t1".to_string(),
+            step: "fix-04".to_string(),
+        };
+        assert!(
+            tracker.steps.get(&absent).is_none(),
+            "fix-04 not present in fix-plan must not be prefilled"
         );
     }
 }
