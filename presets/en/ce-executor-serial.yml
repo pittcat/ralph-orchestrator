@@ -999,6 +999,28 @@ hats:
              schema that drops unknown fields).
            - Stop — the review flow is taken over by review-coordinator
 
+      ### Single-emit guard for `review.start` (HARD RULE)
+      Before publishing `review.start`, you MUST verify that the current
+      loop has not already started a review sequence for the same
+      `(plan_name, task_id)`:
+      1. Inspect the live events file:
+         ```bash
+         events_file="$(cat .ralph/current-events 2>/dev/null || echo .ralph/events.jsonl)"
+         grep '"topic":"review.start"' "$events_file" | grep "\"plan_name\":\"$PLAN_NAME\"" | grep "\"task_id\":\"$TASK_ID\"" | tail -1
+         ```
+      2. If a matching `review.start` already exists, **DO NOT emit another
+         one**. The review-coordinator is already walking the 6-dimension
+         sequence. Instead, wait for the next `review.dimension.done`,
+         `review.dimension.failed`, or `review.dimensions.complete` event.
+      3. This guard prevents the common failure mode where a coordinator
+         re-activates after a `task.resume` and emits a second
+         `review.start`, which the runtime will now reject as a duplicate
+         and which wastes the single business-event slot in isolated mode.
+      4. `review.start` MUST be the **only** business event you emit in the
+         activation that publishes it. Do not precede it with `work.ready`
+         or any other emit — isolated mode keeps only the FIRST business
+         event per turn and silently drops the rest.
+
       ### Fix Plan Handling (review.complete trigger)
       When `review.complete` arrives, review-synthesizer has finished the overall review:
       1. Read the `fix_plan_file` field from the `review.complete` payload (repo-relative path to a fix-plan markdown file, or the literal string `"null"`).
@@ -1777,6 +1799,34 @@ hats:
            write atomically.
          - Then fall through to step 2 (find the next pending
            dimension) and continue the walk.
+
+      ### Single-emit guard for `review.dimension.ready` (HARD RULE)
+      Before publishing `review.dimension.ready` for a dimension, you MUST
+      verify that the current loop has not already emitted
+      `review.dimension.ready` for the same
+      `(plan_name, task_id, step, dimension)`:
+      1. Inspect the live events file:
+         ```bash
+         events_file="$(cat .ralph/current-events 2>/dev/null || echo .ralph/events.jsonl)"
+         grep '"topic":"review.dimension.ready"' "$events_file" \
+           | grep "\"plan_name\":\"$PLAN_NAME\"" \
+           | grep "\"task_id\":\"$TASK_ID\"" \
+           | grep "\"dimension\":\"$DIMENSION\"" \
+           | tail -1
+         ```
+      2. If a matching `review.dimension.ready` already exists, **DO NOT
+         emit another one**. The dimension-reviewer has already been
+         triggered for that dimension. Wait for `review.dimension.done`
+         or `review.dimension.failed` before advancing to the next
+         dimension.
+      3. This guard prevents the common failure mode where a
+         review-coordinator re-activates after a `task.resume` and
+         re-issues the first dimension's `review.dimension.ready`,
+         which the runtime will now reject as a duplicate and which
+         wastes the single business-event slot in isolated mode.
+      4. `review.dimension.ready` (or `review.dimensions.complete`) MUST
+         be the **only** business event you emit in the activation that
+         publishes it. Do not precede it with any other emit.
 
       ### Per-dimension focus strings (copy-pasteable)
       - `goal-alignment`    → `"Goal-to-plan-to-code alignment: core objective traceability, logical gaps, missing or divergent implementation steps"`

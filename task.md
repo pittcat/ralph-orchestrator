@@ -1,5 +1,5 @@
 中间产物目录:
-/Users/pittcat/Dev/Rust/ralph-e2e/.ralph
+/home/chaowen/Dev/agent_tools/ralph-e2e
 preset文件:
 presets/en/ce-executor-serial.yml
 

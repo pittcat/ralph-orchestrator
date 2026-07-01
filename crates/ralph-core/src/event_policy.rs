@@ -324,6 +324,27 @@ pub struct PolicyRuntimeState {
     /// format mirrors `test_passed_seen_keys`. Same fall-through
     /// rule for missing/non-numeric `fix_round`.
     pub test_failed_seen_keys: HashSet<String>,
+    /// 2026-07-01-001 U1: dedup set for `review.start` events.
+    /// Key format: `{plan_name}::{task_id}` when `step` is absent,
+    /// `{plan_name}::{task_id}::{step}` when present. A 2nd emit
+    /// with the same key is rejected as `DuplicateWorkDone` so the
+    /// runtime stops a coordinator from starting multiple review
+    /// sequences for the same plan/task. Pruned on `fix.applied`
+    /// so a legitimate re-review after a fix round is allowed.
+    pub review_start_seen_keys: HashSet<String>,
+}
+
+/// Build the dedup key for `review.start`.
+///
+/// `step` is optional because the schema does not require it, but
+/// when it is present it is included so two different plan units
+/// that happen to share a `task_id` do not collide.
+fn review_start_dedup_key(plan_name: &str, step: Option<&str>, task_id: &str) -> String {
+    if let Some(st) = step {
+        format!("{plan_name}::{task_id}::{st}")
+    } else {
+        format!("{plan_name}::{task_id}")
+    }
 }
 
 impl PolicyRuntimeState {
@@ -421,6 +442,22 @@ impl PolicyRuntimeState {
             .retain(|key| !key.starts_with(&prefix));
     }
 
+    /// 2026-07-01-001 U1: prune every `review_start_seen_keys`
+    /// entry that belongs to a given `(plan_name, task_id)` bucket,
+    /// including keys that carry an optional `step` suffix. Called
+    /// when `fix.applied` is policy-accepted so that a coordinator
+    /// can legally start a fresh review round after fixes land.
+    pub fn prune_review_start_bucket(
+        &mut self,
+        plan_name: &str,
+        task_id: &str,
+    ) {
+        let base = format!("{plan_name}::{task_id}");
+        self.review_start_seen_keys.retain(|key| {
+            !(key == &base || key.starts_with(&format!("{base}::")))
+        });
+    }
+
     /// Replays events from a JSONL file to build up the policy runtime state.
     ///
     /// Reads all events from the file, tracking which terminal topics have been
@@ -474,6 +511,22 @@ impl PolicyRuntimeState {
                     state
                         .review_dimension_ready_seen_keys
                         .insert(format!("{pn}::{st}::{ti}::{dim}"));
+                }
+            }
+            // 2026-07-01-001 U1: replay prior `review.start` events
+            // so a loop restart or new `process_output` batch does
+            // not accept a duplicate review kick-off for the same
+            // `(plan_name, task_id)`.
+            if event.topic == "review.start"
+                && let Some(obj) = Self::payload_object(event.payload.as_deref())
+            {
+                let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+                let step = obj.get("step").and_then(|v| v.as_str());
+                let task_id = obj.get("task_id").and_then(|v| v.as_str());
+                if let (Some(pn), Some(ti)) = (plan_name, task_id) {
+                    state
+                        .review_start_seen_keys
+                        .insert(review_start_dedup_key(pn, step, ti));
                 }
             }
             // U1 (2026-06-18-004 plan, KTD1): replay prior
@@ -531,6 +584,10 @@ impl PolicyRuntimeState {
                     // with the prior round's entries.
                     state.prune_work_ready_bucket(pn, st);
                     state.prune_test_result_buckets(pn, st, ti);
+                    // 2026-07-01-001 U1: prune `review.start`
+                    // so a coordinator can start a fresh review
+                    // sequence after fixes land.
+                    state.prune_review_start_bucket(pn, ti);
                 }
             }
             // U5 (2026-06-18-004 plan, R4): replay prior
@@ -974,6 +1031,40 @@ pub fn validate_event_with_hat(
     state.observed_topics.insert(topic.to_string());
 
     let mut findings = Vec::new();
+
+    // 2026-07-01-001 U1: duplicate `review.start` detection.
+    // The dedup key is `(plan_name, task_id)` with optional `step`.
+    // A 2nd `review.start` with the same key is rejected as
+    // `DuplicateWorkDone` so the runtime stops a coordinator from
+    // starting multiple review sequences for the same plan/task.
+    // The check is applied before schema/terminal layers so a
+    // duplicate is a duplicate regardless of state.
+    if topic == "review.start"
+        && let Some(p) = payload
+        && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+    {
+        let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
+        let step = obj.get("step").and_then(|v| v.as_str());
+        let task_id = obj.get("task_id").and_then(|v| v.as_str());
+        if let (Some(pn), Some(ti)) = (plan_name, task_id) {
+            let dedup_key = review_start_dedup_key(pn, step, ti);
+            if state.review_start_seen_keys.contains(&dedup_key) {
+                let finding = PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::DuplicateWorkDone {
+                        key: dedup_key.clone(),
+                        hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                    },
+                    message: format!(
+                        "duplicate_review_start: review.start for key '{dedup_key}' was already accepted. \
+                         Wait for the review sequence to complete before re-sending review.start."
+                    ),
+                };
+                return PolicyDecision::RejectWithResume(finding);
+            }
+            state.review_start_seen_keys.insert(dedup_key);
+        }
+    }
 
     // U4 (2026-06-17-003 plan): duplicate `work.done` detection.
     // The dedup key is `(plan_name, step, task_id)`. A 2nd
@@ -3230,6 +3321,18 @@ mod tests {
         )
     }
 
+    fn review_start_payload(plan: &str, step: Option<&str>, task: &str) -> String {
+        if let Some(st) = step {
+            format!(
+                r#"{{"plan_name":"{plan}","step":"{st}","task_id":"{task}","task_key":"k-{task}"}}"#
+            )
+        } else {
+            format!(
+                r#"{{"plan_name":"{plan}","task_id":"{task}","task_key":"k-{task}"}}"#
+            )
+        }
+    }
+
     #[test]
     fn review_dimension_ready_dedup_first_accepted() {
         // Happy path: first `review.dimension.ready` for a
@@ -3442,6 +3545,141 @@ mod tests {
             "from_events must populate dedup set from prior review.dimension.ready, got {:?}",
             state.review_dimension_ready_seen_keys
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // 2026-07-01-001 U1: `review.start` dedup and replay tests.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn review_start_dedup_first_accepted() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = review_start_payload("p1", Some("step-01"), "t1");
+        let decision = validate_event("review.start", Some(&payload), &config, &mut state);
+        assert_eq!(decision, PolicyDecision::Accept);
+        assert!(state.review_start_seen_keys.contains("p1::t1::step-01"));
+    }
+
+    #[test]
+    fn review_start_dedup_duplicate_rejected() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = review_start_payload("p1", Some("step-01"), "t1");
+        assert_eq!(validate_event("review.start", Some(&payload), &config, &mut state), PolicyDecision::Accept);
+        let second = validate_event("review.start", Some(&payload), &config, &mut state);
+        assert!(
+            matches!(second, PolicyDecision::RejectWithResume(_)),
+            "duplicate review.start must be rejected, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn review_start_dedup_different_task_accepted() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let p1 = review_start_payload("p1", Some("step-01"), "t1");
+        let p2 = review_start_payload("p1", Some("step-01"), "t2");
+        assert_eq!(validate_event("review.start", Some(&p1), &config, &mut state), PolicyDecision::Accept);
+        assert_eq!(validate_event("review.start", Some(&p2), &config, &mut state), PolicyDecision::Accept);
+    }
+
+    #[test]
+    fn review_start_dedup_missing_task_id_skips_dedup() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"plan_name":"p1","step":"step-01"}"#; // missing task_id
+        let decision = validate_event("review.start", Some(payload), &config, &mut state);
+        if let PolicyDecision::RejectWithResume(f) = &decision {
+            assert!(
+                !matches!(f.violation_type, ViolationType::DuplicateWorkDone { .. }),
+                "missing task_id must not trigger DuplicateWorkDone, got {:?}",
+                f.violation_type
+            );
+        }
+    }
+
+    #[test]
+    fn review_start_dedup_step_in_key() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let without_step = review_start_payload("p1", None, "t1");
+        let with_step = review_start_payload("p1", Some("step-01"), "t1");
+        assert_eq!(validate_event("review.start", Some(&without_step), &config, &mut state), PolicyDecision::Accept);
+        // Same plan/task but now with a step is a different key, so accepted.
+        assert_eq!(validate_event("review.start", Some(&with_step), &config, &mut state), PolicyDecision::Accept);
+        // Re-emitting the no-step payload should still be rejected.
+        assert!(
+            matches!(
+                validate_event("review.start", Some(&without_step), &config, &mut state),
+                PolicyDecision::RejectWithResume(_)
+            ),
+            "re-emitting no-step review.start must be rejected"
+        );
+    }
+
+    #[test]
+    fn review_start_replay_from_events_populates_seen_keys() {
+        use std::io::Write;
+        let jsonl = r#"{"topic":"review.start","hat":"coordinator","payload":"{\"plan_name\":\"p1\",\"task_id\":\"t1\",\"task_key\":\"k1\"}"}"#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(jsonl.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let state = PolicyRuntimeState::from_events(tmp.path(), &test_config()).unwrap();
+        assert!(
+            state.review_start_seen_keys.contains("p1::t1"),
+            "from_events must populate review.start dedup set, got {:?}",
+            state.review_start_seen_keys
+        );
+    }
+
+    #[test]
+    fn review_start_replay_from_events_with_step_populates_seen_keys() {
+        use std::io::Write;
+        let jsonl = r#"{"topic":"review.start","hat":"coordinator","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"task_key\":\"k1\"}"}"#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(jsonl.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let state = PolicyRuntimeState::from_events(tmp.path(), &test_config()).unwrap();
+        assert!(
+            state.review_start_seen_keys.contains("p1::t1::step-01"),
+            "from_events must include step in review.start key, got {:?}",
+            state.review_start_seen_keys
+        );
+    }
+
+    #[test]
+    fn review_start_prune_on_fix_applied_from_events() {
+        use std::io::Write;
+        let jsonl = r#"{"topic":"review.start","hat":"coordinator","payload":"{\"plan_name\":\"p1\",\"task_id\":\"t1\",\"task_key\":\"k1\"}"}
+{"topic":"fix.applied","hat":"fixer","payload":"{\"plan_name\":\"p1\",\"step\":\"step-01\",\"task_id\":\"t1\",\"task_key\":\"k1\"}"}"#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(jsonl.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let state = PolicyRuntimeState::from_events(tmp.path(), &test_config()).unwrap();
+        assert!(
+            !state.review_start_seen_keys.contains("p1::t1"),
+            "fix.applied replay must prune review.start dedup set, got {:?}",
+            state.review_start_seen_keys
+        );
+    }
+
+    #[test]
+    fn review_start_prune_bucket_manual() {
+        let mut state = PolicyRuntimeState::default();
+        state.review_start_seen_keys.insert("p1::t1".into());
+        state.review_start_seen_keys.insert("p1::t1::step-01".into());
+        state.review_start_seen_keys.insert("p2::t1".into());
+
+        state.prune_review_start_bucket("p1", "t1");
+
+        assert!(!state.review_start_seen_keys.contains("p1::t1"));
+        assert!(!state.review_start_seen_keys.contains("p1::t1::step-01"));
+        assert!(state.review_start_seen_keys.contains("p2::t1"));
     }
 
     // -------------------------------------------------------------------------

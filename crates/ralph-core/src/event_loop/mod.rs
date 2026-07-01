@@ -879,7 +879,31 @@ impl EventLoop {
             .unwrap_or_else(|_| context.events_path());
         let event_reader = EventReader::new(&events_path);
 
+        // 2026-07-01-001 U1: seed policy runtime state from the existing events
+        // file so per-loop dedup sets (`review.start`, `review.dimension.ready`,
+        // `work.done`, etc.) survive process restarts. Without this, a loop
+        // restart or a new `ralph` invocation sees an empty dedup set and
+        // accepts duplicate handoff events that the previous process already
+        // handled.
         let mut state = LoopState::new();
+        if let Some(policy_config) = config.event_loop.event_policy.as_ref().filter(|p| p.enabled) {
+            match crate::event_policy::PolicyRuntimeState::from_events(
+                &events_path,
+                policy_config,
+            ) {
+                Ok(policy_state) => {
+                    state.policy_runtime_state = Some(policy_state);
+                }
+                Err(e) => {
+                    warn!(
+                        events_path = %events_path.display(),
+                        error = %e,
+                        "Failed to seed policy runtime state from events; starting with empty state"
+                    );
+                }
+            }
+        }
+
         let handoff_timeout = config
             .event_loop
             .workflow_contract
@@ -9044,6 +9068,11 @@ impl EventLoop {
                                             // entries.
                                             policy_state.prune_work_ready_bucket(pn, st);
                                             policy_state.prune_test_result_buckets(pn, st, ti);
+                                            // 2026-07-01-001 U1: prune
+                                            // `review.start` so a coordinator
+                                            // can start a fresh review round
+                                            // after fixes land.
+                                            policy_state.prune_review_start_bucket(pn, ti);
                                         }
                                     }
                                 }
