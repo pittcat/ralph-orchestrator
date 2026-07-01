@@ -18,7 +18,7 @@ origin: docs/report/2026-07-01-ce-executor-serial-primary-20260630-175407-diagno
 2. **P0-2** isolated 模式“每轮一个业务事件”的预算会把 `plan.complete` 这类终态事件静默丢弃——当同轮先出现一个 stray `work.ready` 时，`plan.complete` 就会因为预算耗尽而被丢。
 3. **P0-3** fix-unit 的 `task_id` shape-1 校验只检查格式，不检查时间戳，导致手写的 2025 年时间戳通过校验。
 
-修复以机制侧为主：加固 isolated 预算的终态事件优先级、让 `completion_honored` 守卫跨 activation 持久化、让 `CoordinatorDecisionGateStage` 强制最后一个 fix-unit 走 `plan.complete` 终态、并对 fix-unit `task_id` 增加时间戳窗口校验。preset 编排与 `plan.blocked.reason` schema 作为第二道防线同步收紧。
+修复以机制侧为主：加固 isolated 预算的终态事件优先级、让 `completion_honored` 守卫跨 activation 持久化、让 `CoordinatorDecisionGateStage` 强制最后一个 fix-unit 走 `plan.complete` 终态、并对 fix-unit `task_id` 增加时间戳窗口校验。**抑制 coordinator 乱发事件**：在唤醒 coordinator 之前由引擎（Rust）根据账本 + 缓存的 plan 拓扑算出 `expected_event` 并注入 `orchestrator_state`（U6），不再依赖 agent 阅读 plan 散文或数 `### U{N}.` 标题。preset 编排与 `plan.blocked.reason` schema 作为第二道防线同步收紧。
 
 ---
 
@@ -44,13 +44,14 @@ origin: docs/report/2026-07-01-ce-executor-serial-primary-20260630-175407-diagno
 - **R3** 最后一个 fix-unit 的 `test.passed` 落地后，必须且只能发出并接纳一个 `plan.complete`；同一 fix-unit 的 `work.ready` 重发不得占用每轮业务事件预算。
 - **R4** fix-unit 的 `task_id` 当嵌入时间戳超出当前 loop 时间窗口时必须被拒绝。
 - **R5** preset 指令必须明确指引 coordinator 在最后一个 fix-unit 后只 emit `plan.complete`，并禁止手写 `task_id` 时间戳。
-- **R6** 注入给 coordinator 的上下文（`task.resume` / context payload）必须显式携带当前所处阶段与应该发射的事件类型，让 agent 不再依赖自然语言判断。
+- **R6** 唤醒 coordinator 之前，引擎必须用**确定性代码**算出 `expected_event` 并注入 `orchestrator_state`（写入每次 activation 的 prompt / context，不仅限于 rejection 后的 `task.resume`）；agent 按字段 emit，不得自行推断阶段。
+- **R7** `expected_event` 的计算必须以 **events 账本 + tasks.jsonl + flow_lifecycle** 为权威输入；`plan.md` / `fix-plan.md` 仅在 loop 启动或 fix-plan 落盘时按固定标题约定扫描一次并缓存，**禁止**每次 `test.passed` 让 LLM 重读 plan 全文或数标题。
 
 ---
 
 ## 范围边界
 
-- **在范围内**：isolated 模式预算、完成守卫持久化、`CoordinatorDecisionGateStage` 终态改写、fix-unit task-id 校验、`ce-executor-serial` preset 指令与 schema。
+- **在范围内**：isolated 模式预算、完成守卫持久化、`CoordinatorDecisionGateStage` 终态改写、fix-unit task-id 校验、`compute_expected_event` + plan 拓扑缓存（U6）、`ce-executor-serial` preset 指令与 schema。
 - **不在范围内**：更广泛的 dedup 时序问题（P1-1 prompt 文本反馈）、per-hat 事件切片 writer（P2-2 诊断面缺失）、dimension-reviewer 越权写文件的 escalation（§G）、其他 preset（如 `ce-executor-lite`）。
 - **推迟到后续工作**：isolated 预算丢弃后的 typed `task.resume` 反馈；`plan.blocked.reason` 的 `recoverable` 结构化字段。
 
@@ -82,7 +83,31 @@ origin: docs/report/2026-07-01-ce-executor-serial-primary-20260630-175407-diagno
 - **语义层强制单终态发射（U3）**：`CoordinatorDecisionGateStage` 负责识别最后一个 fix-unit 并将 `work.ready` 改写为 `plan.complete`，同时保证改写后的 payload 字段完整。U3 是**语义正确性保证**，它把“应该发什么事件”从 agent 推断转移到运行时强制改写；U1 则是**预算层保护**，确保即使 agent 多发了非终态事件，终态事件仍有槽位。U3 不重复 U1 的预算职责，只负责改写和单终态语义。
 - **持久化的 completion-honored 守卫（U2）**：把 `completion_honored` 从每 activation 的 `PolicyRuntimeState` 移动到持久 loop state（或在 `LOOP_COMPLETE` 被接纳时持久化快照），使 `check_completion_honored` 能拒绝后续 batch 中的终态后业务事件。
 - **fix-unit task id 时间戳窗口 fail-closed（U4）**：shape-1 fix-unit id 的时间戳必须落在 `[loop_start - 60s, now]` 窗口内，过期或未来时间戳在投影边界被拒绝。
-- **coordinator payload 阶段标记（U6）**：在 runner 注入给 coordinator 的 `task.resume` / context payload 中增加机器可读的 `expected_event`、`phase`、`last_in_phase`、`completed_steps` 字段，直接告诉 agent 本轮应该 emit 什么事件。
+- **coordinator 指令卡（U6）**：唤醒 coordinator **之前**，由 `compute_expected_event()`（纯 Rust）根据账本与缓存拓扑算出 `expected_event`，写入 `orchestrator_state` 并注入 prompt。U6 降低乱发概率；U1/U3 在乱发时兜底。详见下文「expected_event 计算 SSOT」。
+- **plan 拓扑缓存（U6 子项）**：loop 启动时对 `plan.md` 扫描 `### U{N}.` → `step-{NN}` 列表并写入 `LoopState`；`review.complete` 后/fix-plan 落盘时对 fix-plan 复用 `review_step_state::prefill_fix_steps_from_plan` 同款扫描 → `fix-{NN}` 列表。扫描失败或标题数为 0 → fail-closed 诊断，不 silent 猜 `N_total`。
+
+### expected_event 计算 SSOT（2026-07-01 设计对齐）
+
+**原则**：状态来自机器账本，不是 agent 读 plan 散文。
+
+| 优先级 | 输入 | 用途 |
+|--------|------|------|
+| 1 | 刚落地的 `test.passed` payload 中的 `step` | 触发信号（如 `fix-02`） |
+| 2 | `flow_lifecycle`（`unit_loop` / `review_walk` / …） | 宏观阶段（review 是否已走完） |
+| 3 | `tasks.jsonl`（fix/plan unit task 数量与 terminal 状态） | fix 链是否 exhausted、`is_fix_unit_chain_exhausted` |
+| 4 | 账本中的 `review.start.total_units` 或启动时缓存的 plan unit 总数 | 判断 `step-NN` 是否为最后一个 plan unit |
+| 5 | fix-plan 扫描缓存或 fix task 计数 | 判断 `fix-NN` 是否为最后一个 fix unit |
+| 6 | `progress.md` 窄字段（`ProgressSnapshot`） | 辅助对账，**不作为** `expected_event` 唯一依据 |
+
+**查表规则**（与 `coordinator_decision_gate_stage::topic_for_phase` 对齐）：
+
+- `test.passed(step-NN)` 且 NN < 缓存的 plan unit 总数 → `work.ready(step-{NN+1})`
+- `test.passed(step-NN)` 且 NN == 缓存的 plan unit 总数 → `review.start`
+- `test.passed(fix-NN)` 且 NN < 缓存的 fix unit 总数 → `work.ready(fix-{NN+1})`
+- `test.passed(fix-NN)` 且 NN == 缓存的 fix unit 总数 → `plan.complete`
+- `LOOP_COMPLETE` 已 honor → coordinator/reporter/shipper 的 `expected_event` 为空或 `terminal`（U2 拒绝任何业务 emit）
+
+**三层抑制乱发**：U6 唤醒前注入指令卡 → U3 emit 时改写 → U1/U2 预算与完成守卫拒绝。
 
 ---
 
@@ -100,7 +125,15 @@ origin: docs/report/2026-07-01-ce-executor-serial-primary-20260630-175407-diagno
 
 - isolated 预算中“终态事件”的具体列表（实现时应从 `EventPolicyConfig.terminal_topics` 与 completion promise 派生）。
 - `report.done` 是只由持久守卫处理，还是同时加入 preset 的 `business_after_completion` reject 列表。
-- coordinator payload 阶段标记的最佳注入位置：是统一写入 `task.resume` payload，还是写入 `context.md` 的 JSON 块？实现阶段根据现有 `enrich_task_resume_payload` 与 `context.md` 生成路径决定。若实现时发现同时注入两者更简单，允许双写，但须保证字段语义一致。
+- coordinator `orchestrator_state` 的最佳注入位置：是统一写入 `task.resume` payload，还是写入 `context.md` 的 JSON 块？实现阶段根据现有 `enrich_task_resume_payload` 与 `context.md` 生成路径决定。若实现时发现同时注入两者更简单，允许双写，但须保证字段语义一致。
+
+### 规划中已解决（2026-07-01 补充）
+
+- **Q**: `plan.md` 是文本文件，引擎能可靠算出 `expected_event` 吗？  
+  **A**: 不能每次解析 plan 散文。plan/fix-plan 仅在启动或 fix-plan 出现时按 `### U{N}.` 固定约定扫描一次并缓存；运行时以 events + tasks + flow_lifecycle 为准。格式不符则 fail-closed，不交给 LLM 猜。
+
+- **Q**: 需要单独写一份「抑制乱发」计划吗？  
+  **A**: 否。并入本计划 U6（计算 + 注入）与 U5（preset 删除「请 agent 数标题」类指令），与 U1–U3 机制兜底同一交付。
 
 ---
 
@@ -252,7 +285,7 @@ origin: docs/report/2026-07-01-ce-executor-serial-primary-20260630-175407-diagno
 
 **需求**：R3、R5、R6
 
-**依赖**：U3、U4（U6 为辅助增强，不阻塞 U5 的主体 schema/指令收紧）
+**依赖**：U3、U4、U6（U6 提供 `orchestrator_state` 后，U5 再删除 preset 中的 LLM 数标题步骤）
 
 **文件**：
 - 修改：`presets/en/ce-executor-serial.yml`
@@ -262,7 +295,7 @@ origin: docs/report/2026-07-01-ce-executor-serial-primary-20260630-175407-diagno
 **做法**：
 - 在 `presets/en/ce-executor-serial.yml` 最后一个 fix-unit 的指令中，强化“本轮只能 emit 一个事件”的说明，并明确指出 `CoordinatorDecisionGateStage` 会把最后一个 `work.ready` 改写为 `plan.complete`。
 - 在 fix-unit `task_id` 指令中强制要求调用 `Task::fix_unit_task_id`，禁止手写时间戳。
-- 在 coordinator 指令中明确要求读取 `task.resume` / context payload 中的 `expected_event` 与 `phase` 字段，按字段要求发射事件，不再依赖自然语言推断。
+- 在 coordinator 指令中明确要求读取 prompt 中 `## ORCHESTRATOR STATE`（或 `orchestrator_state` JSON）的 `expected_event` 与 `phase`，按字段发射；**删除**「Count every `### U{N}.` heading — that is `N_total` / `total_fix_units`」等由 agent 解析 plan 的步骤（改由 U6 引擎缓存拓扑）。
 - 在 `presets/schemas/ce-executor-serial.yml` 中为 `plan.blocked.reason` 增加 `allowed_values` 或 regex 约束，使 `progress_md_validation_stale` 这类 narrative 不再被接受；将 `progress_md_validation_stale` 从允许的 reason 列表中移除。
 - 按 AGENTS.md builtin preset 改动的 4/5 处同步规则，更新 `presets/manifest.yml`、`crates/ralph-cli/src/presets.rs`、`presets/index.json`、`scripts/ralph-zsh-plugin.zsh`、`AGENTS.md`/`CLAUDE.md`。
 
@@ -283,46 +316,75 @@ origin: docs/report/2026-07-01-ce-executor-serial-primary-20260630-175407-diagno
 
 ---
 
-- [ ] U6. **在 coordinator 上下文 payload 中注入阶段与预期事件标记**
+- [ ] U6. **引擎计算 `expected_event` 并在唤醒 coordinator 前注入 `orchestrator_state`**
 
-**目标**：让 coordinator 每次被激活时都能从 payload 中直接读到当前阶段和应该发射的事件，不再靠自然语言或启发式推断。**U6 是辅助增强单元**，不是 P0 修复的必经之路；它通过降低 agent 误判概率来减少未来 regression 风险。
+**目标**：用 Rust 在**每次 coordinator activation 之前**算出本轮唯一合法的 `expected_event`，写入 prompt，替代 agent 阅读 plan 散文或数 `### U{N}.` 标题。U6 与 U3/U1 组成「指令卡 → 改写 → 拒绝」三层防线；单独 U6 不足以关闭 P0，但直接针对 175407 中 coordinator 猜错阶段的触发链。
 
-**需求**：R6
+**需求**：R6、R7
 
-**依赖**：无（可独立实现；U3 的 stage 改写是最终兜底）
+**依赖**：无（可与 U3 并行；U5 删除 preset 中与 U6 重复的 LLM 计数指令）
 
 **文件**：
-- 修改：`crates/ralph-core/src/event_loop/mod.rs`（task.resume / context 注入点）
-- 修改：`crates/ralph-core/src/event_loop/context_builder.rs` 或等价的上下文生成模块（如存在）
-- 测试：`crates/ralph-core/src/event_loop/mod.rs` 现有测试、新增 BDD 场景
+- 新增：`crates/ralph-core/src/event_loop/orchestrator_state.rs`（或等价模块：`compute_expected_event`、`PlanTopologyCache`）
+- 修改：`crates/ralph-core/src/event_loop/mod.rs`（coordinator 唤醒 / `build_prompt` / `prepend_correction_and_resume` 注入点）
+- 修改：`crates/ralph-core/src/event_loop/loop_state.rs`（缓存 `plan_unit_ids`、`fix_unit_ids`、`plan_unit_total`）
+- 复用：`crates/ralph-core/src/event_loop/review_step_state.rs` 中 `### U{N}.` 扫描逻辑（提取为共享 `scan_unit_headings(path) -> Vec<String>`）
+- 复用：`crates/ralph-core/src/event_loop/stages/coordinator_decision_gate_stage.rs` 中 `PhaseClass` / `topic_for_phase` 语义
+- 测试：新增单元测试 + BDD 场景
 
 **做法**：
-- 在 progress-steward 或 event-loop 注入 `task.resume` / context 给 coordinator 时，附带结构化 JSON 字段：
-  - `phase`: `"plan_unit" | "fix_unit" | "review_walk" | "ship" | "terminal"`
-  - `expected_event`: `"work.ready" | "review.start" | "plan.complete" | "plan.blocked" | "LOOP_COMPLETE"`
-  - `last_in_phase`: bool
-  - `completed_steps`: 已关闭 step 列表
-  - `total_fix_units`: fix-unit 总数
-  - `current_fix_unit_index`: 当前 fix-unit 序号
-  - `next_step`: 下一步 step id（当 `expected_event=work.ready` 时）
-  - `reason`: 人类可读说明
-- 这些字段应写入 `task.resume` payload 的 `orchestrator_state` 对象，或写入 `context.md` 的独立 JSON 块，确保 coordinator prompt 能引用。
-- 更新 `presets/en/ce-executor-serial.yml` 中 coordinator 的 prompt 模板，要求 agent 优先按 payload 中的 `expected_event` 发射，而不是自己判断阶段。
+
+1. **Plan 拓扑缓存（loop 启动一次）**
+   - 在 loop 初始化或首次 `work.start` 后，对 `plan_path` 扫描 `### U{N}.` → `["step-01", "step-02", …]`，写入 `LoopState.plan_topology`。
+   - 扫描结果为空 → 发布诊断 `plan_topology_unparseable`，`expected_event` 计算 fail-closed（不猜 `N_total`）。
+   - fix 列表初始为空；`review.complete` 携带 `fix_plan_file` 落盘后，对 fix-plan 扫描 → `["fix-01", …]` 并缓存（复用 `prefill_fix_steps_from_plan` 同款规则）。
+
+2. **`compute_expected_event(trigger, loop_state) -> OrchestratorState`**
+   - 触发源：以 `test.passed` 订阅唤醒 coordinator 为主路径；实现时 hook 在 hat 调度 / `build_prompt` 前，入参为「上一笔接纳的业务事件」+ 当前 `flow_lifecycle` + `tasks.jsonl` 快照。
+   - plan unit 总数：优先 `LoopState.plan_topology.len()`；若账本已有 `review.start` 且 payload 含 `total_units`，可与缓存交叉校验，不一致时诊断但不 silent 覆盖缓存。
+   - fix unit 总数：优先缓存的 `fix_topology.len()`；回退 `tasks.jsonl` 中 `is_fix_unit_key` 计数；再回退 `is_fix_unit_chain_exhausted()`。
+   - 输出 `OrchestratorState` 字段：
+     - `phase`: `"plan_unit" | "fix_unit" | "review_walk" | "ship" | "terminal"`
+     - `expected_event`: `"work.ready" | "review.start" | "plan.complete" | …`
+     - `last_in_phase`: bool
+     - `completed_step`: 刚通过的 step id
+     - `next_step`: 当 `expected_event=work.ready` 时
+     - `plan_unit_total` / `fix_unit_total`: 来自缓存
+     - `reason`: 人类可读说明（含查表依据，便于诊断）
+
+3. **注入点（每次 coordinator activation，不仅 rejection 后）**
+   - 在 `build_prompt` / `prepend_correction_and_resume` 路径为 `hat_id=coordinator`  prepend `## ORCHESTRATOR STATE` JSON 块（只读）；或在 `context.md` 生成时写入固定段落。
+   - rejection 路径的 `task.resume` 可附带相同 `orchestrator_state` 子对象，与 `enrich_task_resume_payload_full` merge。
+   - U5 同步删除 coordinator prompt 中「Count every `### U{N}.` heading」类 LLM 计数步骤，改为「读取 `orchestrator_state.expected_event`」。
 
 **遵循模式**：
-- 现有 `enrich_task_resume_payload` 函数。
-- 现有 `context.md` 生成逻辑。
+- `coordinator_decision_gate_stage::classify_work_ready` / `topic_for_phase`（查表规则 SSOT）
+- `review_step_state::prefill_fix_steps_from_plan`（fix-plan 标题扫描）
+- `prepend_correction_and_resume`（prompt 注入）
+- `is_fix_unit_chain_exhausted`（fix 链终态）
 
 **测试场景**：
-- 正常路径：最后一个 fix-unit 完成后，注入的 `task.resume` payload 中 `expected_event=plan.complete`，coordinator 按此 emit。
-- 正常路径：中间 plan unit 完成后，`expected_event=work.ready`，`next_step=step-02`。
-- 错误路径：coordinator 忽略 `expected_event` 而 emit 其他事件时，被 isolated 预算或 stage gate 拒绝。
-- 集成：BDD 场景回放 `primary-20260630-175407` 中 fix-02 完成后阶段，断言 `task.resume` payload 包含 `expected_event=plan.complete`。
+- 单元：`compute_expected_event(test.passed(step-01), topology=[step-01,step-02])` → `work.ready(step-02)`。
+- 单元：`compute_expected_event(test.passed(step-02), topology 共 2)` → `review.start`。
+- 单元：`compute_expected_event(test.passed(fix-02), fix_topology 共 2, review_walk 已关闭)` → `plan.complete`。
+- 单元：plan 无 `### U{N}.` → `plan_topology_unparseable`，不产出 guess。
+- 集成：BDD 回放 `primary-20260630-175407` fix-02 完成后，coordinator prompt 含 `expected_event=plan.complete`。
+- 错误路径：coordinator 忽略 `expected_event` 乱发时，U3 改写 + U1 预算仍兜底。
 
 **验收标准**：
-- `cargo nextest run -p ralph-core -- test` 通过。
-- 新增 BDD 场景通过。
-- 现有 coordinator 相关测试保持通过。
+- `compute_expected_event` 单元测试覆盖 plan/fix 各分支。
+- 新增 BDD 场景在 `cargo nextest run -p ralph-core --test scenarios` 下通过。
+- coordinator prompt 不再依赖 agent 数 plan 标题（U5 preset 同步后 `preset_lint` 通过）。
+
+---
+
+## 推荐实施顺序
+
+1. **U6 + U3 + U1**（P0-2）：引擎算 `expected_event` 并注入 → emit 改写 → 预算终态优先
+2. **U2**（P0-1）：跨 batch `completion_honored`
+3. **U4**（P0-3）：task_id 时间戳 fail-closed
+4. **U5**：preset/schema 收紧，删除 agent 数 plan 标题
+5. P1/P2（本计划范围外项）按需跟进
 
 ---
 
@@ -331,7 +393,7 @@ origin: docs/report/2026-07-01-ce-executor-serial-primary-20260630-175407-diagno
 - **交互图**：isolated 预算改动影响所有 isolated 模式 preset，不只是 `ce-executor-serial`；完成守卫改动影响所有配置了 `completion_after_terminal` 的 preset。
 - **错误传播**：被拒绝的终态后事件会产生 `event.completion.blocked` 诊断事件；配置为 `reject` 时也会静默拦截。
 - **状态生命周期风险**：持久化的 `completion_honored` 必须在 loop 重启/重新水合时清零，避免新 loop 继承旧终态标志。
-- **API 表面对齐**：无 CLI/API 变更。coordinator payload 新增 `orchestrator_state` 字段，`task.resume` 的 schema 不因此收紧（向后兼容，缺失该字段时 coordinator 仍按现有 prompt 规则推断）。
+- **API 表面对齐**：无 CLI/API 变更。coordinator prompt 新增只读 `orchestrator_state` 块；`task.resume` schema 不因此收紧。`ce-executor-serial` 下缺失 `orchestrator_state` 视为实现缺陷（诊断），不再鼓励 agent 自行推断。
 - **集成覆盖**：BDD 场景必须走真实 `EventLoop` runner，禁止使用仅断言 iteration 数的 `run_scenario` stub。U2 验收标准中增加对 `plan.blocked` 在 `LOOP_COMPLETE` 后被直接拒绝的覆盖。
 
 ---
@@ -344,7 +406,9 @@ origin: docs/report/2026-07-01-ce-executor-serial-primary-20260630-175407-diagno
 | 持久化完成标志在重新水合时未清零 | 在 loop 构造/回放路径中显式重置（已写入 U2 做法） |
 | `CoordinatorDecisionGateStage` 丢弃事件可能误伤合法 `work.ready` | U3 不再负责丢弃，只负责改写；竞争事件由 U1 的预算优先级处理 |
 | 时间戳窗口误拒 resumed loop 的合法 id | 使用 `loop_start_ts` 而非进程启动时间；60s 容差覆盖正常情况 |
-| coordinator payload 字段缺失导致旧行为被依赖 | 字段设计为可选；prompt 同时保留 fallback 规则，逐步迁移 |
+| coordinator `orchestrator_state` 缺失导致旧行为被依赖 | ce-executor-serial 启动后应始终注入；其他 preset 可选；缺失时打诊断，不 silent 回退 LLM 数标题 |
+| plan.md 不符合 `### U{N}.` 约定导致拓扑缓存失败 | fail-closed + `plan_topology_unparseable` 诊断；plan precheck/lint 文档化必填格式 |
+| 账本 `total_units` 与缓存拓扑不一致 | 交叉校验发诊断；`expected_event` 以缓存 + 当前 `test.passed.step` 为准 |
 | `plan.blocked` 的“陈旧”误判根因未直接修复 | U2 的持久完成守卫 + U5 的 reason 白名单从机制上让该路径无法生效；验收中增加对该序列的断言 |
 
 ---
@@ -361,7 +425,7 @@ origin: docs/report/2026-07-01-ce-executor-serial-primary-20260630-175407-diagno
 
 - **来源文档：** `docs/report/2026-07-01-ce-executor-serial-primary-20260630-175407-diagnosis.md`
 - 相关计划：`docs/plans/2026-06-30-001-fix-ce-executor-serial-fix-unit-terminal-p0-plan.md`
-- 机制代码：`crates/ralph-core/src/event_loop/mod.rs`、`crates/ralph-core/src/event_policy.rs`
+- 机制代码：`crates/ralph-core/src/event_loop/mod.rs`、`crates/ralph-core/src/event_policy.rs`、（U6 新增）`crates/ralph-core/src/event_loop/orchestrator_state.rs`
 - Stage 代码：`crates/ralph-core/src/event_loop/stages/coordinator_decision_gate_stage.rs`、`crates/ralph-core/src/event_loop/stages/terminal_state_guard_stage.rs`
 - 投影代码：`crates/ralph-core/src/state_projector/task.rs`
 - Preset/Schema：`presets/en/ce-executor-serial.yml`、`presets/schemas/ce-executor-serial.yml`
