@@ -103,40 +103,6 @@ emit 任何 step handoff 事件前，确认 payload 内部一致：
 
 JSON 写法：`ralph emit work.done --policy-check -j '{"plan_path": "...", "task_id": "..."}'`（事件文件已存在 + allowlist 命中）。
 
-**`## ORCHESTRATOR STATE` 指令卡（coordinator only, 2026-07-01-001 plan U6）**
-
-当 `hat_id == "coordinator"` 时，coordinator prompt 头部会被引擎注入一段 `## ORCHESTRATOR STATE` JSON 块。引擎用确定性代码算出 `expected_event`、`last_in_phase`、`completed_step`、`next_step` 等字段，你只需按字段 emit，**不要**自己数 plan.md / fix-plan.md 的 `### U{N}.` 标题。
-
-块示例（coordinator 收到 `test.passed(step-02)` 后）：
-
-```json
-{
-  "phase": "plan_unit",
-  "expected_event": "review.start",
-  "last_in_phase": true,
-  "completed_step": "step-02",
-  "next_step": null,
-  "plan_unit_total": 2,
-  "fix_unit_total": 0,
-  "reason": "plan_unit_last: 'step-02' is the 2/2 plan unit; next is 'review.start'"
-}
-```
-
-字段含义：
-
-- `phase`：`plan_unit` / `fix_unit` / `review_walk` / `ship` / `terminal`
-- `expected_event`：本 turn 应发的事件 topic。若为 `None`（`reason` 含 `*_topology_unparseable` 或 `no_test_passed_trigger`），表示引擎没有指令，回到 prompt 顶部你自己的 coordinator 指令
-- `last_in_phase`：true 表示该 step 是当前 phase 的最后一个；引擎会协同 `CoordinatorDecisionGateStage`（U3）把 `work.ready` 改写为 `plan.complete`
-- `completed_step`：刚刚通过 `test.passed` 的 step id
-- `next_step`：当 `expected_event=work.ready` 时填下一个 step id
-- `reason`：人类可读解释（含查表依据）
-
-**不要做**：
-
-- ❌ 看到 prompt 里既有 `## ORCHESTRATOR STATE` 又有老的手册式 coordinator 指令时，自行选择"按手册走"——以 `expected_event` 为准
-- ❌ 在没有 `## ORCHESTRATOR STATE` 时按 `expected_event` 字段 emit（该字段不存在）
-- ❌ 在 `last_in_phase=true` 时坚持发 `work.ready` 而非 `plan.complete`——U3 gate 会改写，但仍占预算名额
-
 **`--policy-check` 边界**：CLI `--policy-check` 与 `ralph run` 循环内统一校验管线 `validation::rules_event_policy::EventPolicyRule` 行为**同源**（都走 `event_policy.schemas.<topic>.required_fields`），但**不覆盖** step handoff 的 `progress_task_gate`（`progress.md` ↔ `tasks.jsonl` 一致性）。完整预检（含 `progress_task_gate` 在 CLI 入口预检）见计划 `docs/plans/2026-06-17-005-fix-agent-recovery-mechanism-gaps-plan.md`。
 
 **校验：**

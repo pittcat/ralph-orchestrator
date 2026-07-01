@@ -120,13 +120,6 @@ User YAML → RalphConfig → EventLoopConfig → HatConfig overrides → effect
 
 完整 Isolated 终态 Authority(U3)/ Fair Scheduling(U4)/ Agent Output Governance(R1-R6)/ preset SSoT 多点同步规则 → `.cursor/rules/multi-hat-isolation.mdc`。
 
-### Coordinator `## ORCHESTRATOR STATE` 块（2026-07-01-001 plan U6）
-
-- 当 `hat_id == "coordinator"` 时,prompt 头部会被引擎注入 `## ORCHESTRATOR STATE` JSON 块。字段:`phase` / `expected_event` / `last_in_phase` / `completed_step` / `next_step` / `reason`。
-- 引擎在 loop 启动时扫描 `plan.md` 一次,`review.complete` 携带 `fix_plan_file` 时扫描 fix-plan,缓存为 `LoopState.plan_topology`(`compute_expected_event` 是 SSOT)。
-- agent 必须按 `expected_event` 字段 emit,**不要**自己数 `### U{N}.` 标题。
-- 完整字段表 + 不要做清单 → `crates/ralph-core/data/ralph-tools-emit.md`「`## ORCHESTRATOR STATE` 指令卡」段。
-
 ### Presets & Hats System
 
 Presets define collections of hats. Located in `presets/` directory and `crates/ralph-cli/src/presets.rs` (~1100 lines):
