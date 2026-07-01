@@ -1042,3 +1042,114 @@ hats:
         "ralph control topic must be published directly"
     );
 }
+
+// 2026-07-01-001 plan U2 (review P1-3): cross-batch
+// persistent completion_honored guard. Two separate
+// `process_events_from_jsonl` invocations simulate the
+// scenario the plan §"新增测试场景" requires:
+//   1. batch 1: emit `LOOP_COMPLETE`, the runtime
+//      honours it and `state.completion_honored = true`.
+//   2. batch 2: emit `plan.blocked`, the cross-batch
+//      guard must reject the event with
+//      `event.completion.blocked` and refuse to admit it
+//      into `accepted_log_events`.
+//
+// We deliberately use a minimal preset WITHOUT
+// `event_policy` enabled so the P1-1 fallback hard
+// intercept path is exercised (the pre-fix code only
+// rejected post-completion events when an event_policy
+// was configured).
+#[test]
+fn u2_cross_batch_persistent_completion_guard() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    // Note: NO `event_policy` block — exercises the R1
+    // fallback intercept path.
+    let yaml = r#"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["experiment.ready", "LOOP_COMPLETE", "plan.blocked"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    let captured = capture_bus_events(&mut event_loop);
+
+    // ── Batch 1: emit LOOP_COMPLETE ──────────────────────
+    write_event_with_hat_to_jsonl(&events_path, "LOOP_COMPLETE", "Done", "executor");
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+    // Note: the runtime's main event loop sets
+    // `completion_requested = true` for the LOOP_COMPLETE
+    // topic but does NOT call `check_completion_event()`
+    // itself — that's the loop runner's responsibility.
+    // For the unit test we manually drive
+    // `check_completion_event` so `completion_honored`
+    // flips true and we can exercise the cross-batch
+    // guard on the next batch.
+    let completion_reason = event_loop.check_completion_event();
+    assert!(
+        completion_reason.is_some(),
+        "U2: check_completion_event must return Some(_) after LOOP_COMPLETE was admitted; \
+         got None (the required-events gate may have rejected)"
+    );
+    assert!(
+        event_loop.state.completion_honored,
+        "U2: completion_honored must be true after batch 1 honoured LOOP_COMPLETE"
+    );
+
+    // ── Batch 2: emit plan.blocked post-completion ──────
+    // Re-open the events file with a fresh EventReader
+    // so the byte-offset from batch 1 doesn't confuse the
+    // reader (truncate + new EventReader is the cleanest
+    // way to simulate a second `process_events_from_jsonl`
+    // pass with no leftover state from batch 1).
+    let _ = std::fs::remove_file(&events_path);
+    write_event_with_hat_to_jsonl(
+        &events_path,
+        "plan.blocked",
+        "stale attempt after completion",
+        "executor",
+    );
+    event_loop.event_reader =
+        crate::event_reader::EventReader::new(&events_path);
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+
+    // The post-completion guard must refuse plan.blocked.
+    let topics: Vec<String> = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| e.topic.to_string())
+        .collect();
+    assert!(
+        topics
+            .iter()
+            .any(|t| t == "event.completion.blocked"),
+        "U2 cross-batch: expected event.completion.blocked diagnostic; got topics: {topics:?}"
+    );
+
+    // plan.blocked must NOT have landed in seen_topics
+    // (the guard rejected it before admission).
+    assert!(
+        !event_loop.state.seen_topics.contains("plan.blocked"),
+        "U2 cross-batch: plan.blocked must not be admitted post-completion; \
+         seen_topics: {:?}",
+        event_loop.state.seen_topics
+    );
+
+    // completion_honored must still be true (the guard
+    // must not flip it off when rejecting a stray event).
+    assert!(
+        event_loop.state.completion_honored,
+        "U2 cross-batch: completion_honored must remain true after guard rejects post-completion event"
+    );
+}

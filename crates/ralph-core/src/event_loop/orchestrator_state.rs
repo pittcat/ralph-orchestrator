@@ -651,4 +651,106 @@ mod tests {
         assert!(block.contains("\"expected_event\""));
         assert!(block.contains("work.ready"));
     }
+
+    // 2026-07-01-001 review P1-2: install path wiring tests.
+    // The install helpers are the production SSOT for
+    // populating `plan_unit_ids` / `fix_unit_ids`; without
+    // them `compute_expected_event` falls back to
+    // `*_topology_unparseable` and the coordinator never
+    // sees the directive block.
+
+    #[test]
+    fn p1_2_install_plan_topology_populates_plan_unit_ids() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(
+            &plan_path,
+            "### U1. intro\n### U2. body\n### U3. outro\n",
+        )
+        .unwrap();
+        let mut cache = PlanTopologyCache::default();
+        // The runtime always passes a `&mut StateLedger`.
+        // For the unit test we use a fresh ledger with the
+        // on-disk file disabled — install_plan_topology emits
+        // the diagnostic through that channel but the cache
+        // population is what we care about.
+        let mut ledger = crate::state::StateLedger::new(dir.path(), false);
+        cache
+            .install_plan_topology(&mut ledger, &plan_path)
+            .unwrap();
+        assert_eq!(
+            cache.plan_unit_ids,
+            vec!["step-01".to_string(), "step-02".to_string(), "step-03".to_string()],
+            "install_plan_topology must populate plan_unit_ids with step-NN"
+        );
+        assert_eq!(cache.plan_unit_total(), Some(3));
+        assert_eq!(cache.plan_position("step-02"), Some(2));
+    }
+
+    #[test]
+    fn p1_2_install_fix_topology_populates_fix_unit_ids() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let fix_plan = dir.path().join("fix-plan.md");
+        std::fs::write(
+            &fix_plan,
+            "### U1. fix A\n### U2. fix B\n",
+        )
+        .unwrap();
+        let mut cache = PlanTopologyCache::default();
+        let mut ledger = crate::state::StateLedger::new(dir.path(), false);
+        cache
+            .install_fix_topology(&mut ledger, &fix_plan)
+            .unwrap();
+        assert_eq!(
+            cache.fix_unit_ids,
+            vec!["fix-01".to_string(), "fix-02".to_string()],
+            "install_fix_topology must populate fix_unit_ids with fix-NN"
+        );
+        assert_eq!(cache.fix_unit_total(), Some(2));
+        assert_eq!(cache.fix_position("fix-01"), Some(1));
+    }
+
+    #[test]
+    fn p1_2_install_plan_topology_empty_returns_err() {
+        // A plan that does not match the `### U{N}.` convention
+        // must fail-closed: empty `plan_unit_ids` and an Err
+        // that callers can route into the diagnostic ledger.
+        let dir = tempfile::TempDir::new().unwrap();
+        let bogus = dir.path().join("bogus.md");
+        std::fs::write(&bogus, "no headings here\n").unwrap();
+        let mut cache = PlanTopologyCache::default();
+        let mut ledger = crate::state::StateLedger::new(dir.path(), false);
+        let result = cache.install_plan_topology(&mut ledger, &bogus);
+        assert!(result.is_err());
+        assert!(cache.plan_unit_ids.is_empty());
+        assert_eq!(cache.plan_unit_total(), None);
+    }
+
+    #[test]
+    fn p1_2_compute_expected_event_after_install_emits_directive() {
+        // After install_plan_topology, the runtime is no
+        // longer in the fail-closed state: compute_expected_event
+        // produces a real `expected_event` instead of `None`.
+        let dir = tempfile::TempDir::new().unwrap();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(
+            &plan_path,
+            "### U1. one\n### U2. two\n",
+        )
+        .unwrap();
+        let mut cache = PlanTopologyCache::default();
+        let mut ledger = crate::state::StateLedger::new(dir.path(), false);
+        cache
+            .install_plan_topology(&mut ledger, &plan_path)
+            .unwrap();
+        let input = ComputeInput {
+            last_test_passed_step: Some("step-01"),
+            last_was_fix_unit: false,
+            review_walk_closed: false,
+            completion_honored: false,
+        };
+        let out = compute_expected_event(&cache, &input);
+        assert_eq!(out.expected_event.as_deref(), Some("work.ready"));
+        assert_eq!(out.next_step.as_deref(), Some("step-02"));
+    }
 }

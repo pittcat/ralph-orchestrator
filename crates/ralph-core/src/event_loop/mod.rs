@@ -5760,6 +5760,86 @@ impl EventLoop {
         }
     }
 
+    /// 2026-07-01-001 plan U6 wiring (review P1-2): install the
+    /// plan topology from a `plan_path` string. Best-effort —
+    /// failures emit a diagnostic via the ledger and log but
+    /// never abort the loop. Idempotent: a second call with
+    /// the same path re-scans but does not duplicate the
+    /// diagnostic emission (only an empty topology publishes
+    /// the rejection, which only fires on the first install
+    /// because subsequent installs that succeed skip it).
+    fn try_install_plan_topology(&mut self, plan_path: &str) {
+        let path = std::path::Path::new(plan_path);
+        if !path.exists() {
+            tracing::debug!(
+                plan_path = %plan_path,
+                "U6: plan_path does not exist on disk; \
+                 skipping topology install (orchestrator-state cache stays empty)"
+            );
+            return;
+        }
+        if let Some(ledger) = self.state.state_ledger.as_mut() {
+            if let Err(e) = self
+                .state
+                .plan_topology
+                .install_plan_topology(ledger, path)
+            {
+                tracing::warn!(
+                    error = %e,
+                    "U6: plan topology install failed; \
+                     compute_expected_event will fall back to plan_topology_unparseable"
+                );
+            }
+        } else {
+            // Without the unified ledger the diagnostic channel
+            // is unavailable, but the cache itself still
+            // populates so the next coordinator prompt can
+            // read the topology.
+            let ids = crate::event_loop::orchestrator_state::PlanTopologyCache::scan(path);
+            if !ids.is_empty() {
+                self.state.plan_topology.plan_path = Some(plan_path.to_string());
+                self.state.plan_topology.plan_unit_ids = ids;
+            }
+        }
+    }
+
+    /// 2026-07-01-001 plan U6 wiring (review P1-2): install the
+    /// fix topology from a `fix_plan_file` string (typically
+    /// carried in the `review.complete` payload). Symmetric to
+    /// [`Self::try_install_plan_topology`] but emits the fix
+    /// diagnostic on empty scans.
+    fn try_install_fix_topology(&mut self, fix_plan_path: &str) {
+        let path = std::path::Path::new(fix_plan_path);
+        if !path.exists() {
+            tracing::debug!(
+                fix_plan_path = %fix_plan_path,
+                "U6: fix_plan_file does not exist on disk; \
+                 skipping fix topology install"
+            );
+            return;
+        }
+        if let Some(ledger) = self.state.state_ledger.as_mut() {
+            if let Err(e) = self
+                .state
+                .plan_topology
+                .install_fix_topology(ledger, path)
+            {
+                tracing::warn!(
+                    error = %e,
+                    "U6: fix topology install failed; \
+                     compute_expected_event will fall back to fix_topology_unparseable"
+                );
+            }
+        } else {
+            let ids =
+                crate::event_loop::orchestrator_state::PlanTopologyCache::scan_fix_plan(path);
+            if !ids.is_empty() {
+                self.state.plan_topology.fix_plan_path = Some(fix_plan_path.to_string());
+                self.state.plan_topology.fix_unit_ids = ids;
+            }
+        }
+    }
+
     /// R3 (2026-06-14-003 plan): invoke the ephemeral isolation engine
     /// when the preset opts in.  The records are stored on
     /// `LoopState.last_ephemeral_relocations` and consumed by the
@@ -9580,55 +9660,85 @@ impl EventLoop {
             // be rejected even if the *current* batch has not
             // seen a completion topic yet. The same-batch
             // guard below stays as a fast path for diagnostics.
+            //
+            // 2026-07-01-001 review P1-1: when `event_policy`
+            // is disabled or absent, the policy-config branch
+            // is skipped — but R1's "no further business event
+            // may enter the bus" is an absolute invariant, so
+            // we fall back to a hard intercept that always
+            // `continue`s. This keeps simple presets (no
+            // event_policy) on the same R1 contract as
+            // ce-executor-serial.
             if self.state.completion_honored
                 && event.topic != self.config.event_loop.completion_promise.as_str()
                 && event.topic != self.config.event_loop.cancellation_promise.as_str()
             {
+                let policy_enabled = policy_config_ref.is_some_and(|c| c.enabled);
+                if !policy_enabled {
+                    // Hard fallback (2026-07-01-001 review P1-1):
+                    // refuse every business event
+                    // post-completion when no policy is
+                    // configured. We ALWAYS emit the
+                    // diagnostic here (no `write_diagnostic`
+                    // gate) because there is no
+                    // `completion_after_terminal` config to
+                    // consult — the R1 absolute invariant
+                    // holds regardless of policy settings,
+                    // and `ralph diagnose` needs the event
+                    // for parity with the policy-configured
+                    // path.
+                    self.bus.publish(Event::new(
+                        "event.completion.blocked",
+                        format!(
+                            "Persistent completion guard hard-blocked '{}': \
+                             no event_policy configured; R1 fallback intercept",
+                            event.topic
+                        ),
+                    ));
+                    continue;
+                }
                 if let Some(ref policy_config) = policy_config_ref
-                    && policy_config.enabled
-                {
-                    if let Some(decision) =
+                    && let Some(decision) =
                         check_completion_guard(&event.topic, policy_config, true)
-                    {
-                        match &decision {
-                            PolicyDecision::Block(finding) => {
-                                if write_diagnostic {
-                                    self.bus.publish(Event::new(
-                                        "event.completion.blocked",
-                                        format!(
-                                            "Persistent completion guard blocked '{}': {}",
-                                            event.topic, finding.message
-                                        ),
-                                    ));
-                                }
+                {
+                    match &decision {
+                        PolicyDecision::Block(finding) => {
+                            if write_diagnostic {
+                                self.bus.publish(Event::new(
+                                    "event.completion.blocked",
+                                    format!(
+                                        "Persistent completion guard blocked '{}': {}",
+                                        event.topic, finding.message
+                                    ),
+                                ));
                             }
-                            PolicyDecision::Ignore(finding) => {
-                                if write_diagnostic {
-                                    self.bus.publish(Event::new(
-                                        "event.completion.ignored",
-                                        format!(
-                                            "Persistent completion guard ignored '{}': {}",
-                                            event.topic, finding.message
-                                        ),
-                                    ));
-                                }
-                            }
-                            PolicyDecision::Warn(findings) => {
-                                for finding in findings {
-                                    self.bus.publish(Event::new(
-                                        "event.policy_warning",
-                                        format!(
-                                            "Persistent completion guard warning for '{}': {}",
-                                            event.topic, finding.message
-                                        ),
-                                    ));
-                                }
-                                accept_event!(Event::new(event.topic.as_str(), &payload));
-                            }
-                            _ => {}
                         }
-                        continue;
+                        PolicyDecision::Ignore(finding) => {
+                            if write_diagnostic {
+                                self.bus.publish(Event::new(
+                                    "event.completion.ignored",
+                                    format!(
+                                        "Persistent completion guard ignored '{}': {}",
+                                        event.topic, finding.message
+                                    ),
+                                ));
+                            }
+                        }
+                        PolicyDecision::Warn(findings) => {
+                            for finding in findings {
+                                self.bus.publish(Event::new(
+                                    "event.policy_warning",
+                                    format!(
+                                        "Persistent completion guard warning for '{}': {}",
+                                        event.topic, finding.message
+                                    ),
+                                ));
+                            }
+                            accept_event!(Event::new(event.topic.as_str(), &payload));
+                        }
+                        _ => {}
                     }
+                    continue;
                 }
             }
 
@@ -10329,6 +10439,26 @@ impl EventLoop {
                 if let Some(step) = extract_step_id(&event.payload) {
                     let was_fix = step.starts_with("fix-");
                     self.state.record_test_passed(step, was_fix);
+                }
+            }
+        }
+
+        // 2026-07-01-001 plan U6 wiring (review P1-2):
+        // populate the orchestrator-state topology caches
+        // when the runtime first sees the relevant file
+        // payload. `work.ready` is the canonical carrier of
+        // `plan_path`; `review.complete` carries
+        // `fix_plan_file`. Both installs are idempotent —
+        // re-scanning the same path replaces the cached ids
+        // but does not double-emit diagnostics.
+        for event in &accepted_log_events {
+            if event.topic.as_str() == "work.ready" {
+                if let Some(plan_path) = extract_plan_path(&event.payload) {
+                    self.try_install_plan_topology(&plan_path);
+                }
+            } else if event.topic.as_str() == "review.complete" {
+                if let Some(fix_plan) = extract_fix_plan_file(&event.payload) {
+                    self.try_install_fix_topology(&fix_plan);
                 }
             }
         }
@@ -11676,6 +11806,32 @@ fn extract_step_id(payload: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 2026-07-01-001 plan U6 wiring (review P1-2): extract the
+/// plan path from a `work.ready` payload so the runtime can
+/// install the plan topology on first sight. Returns `None`
+/// when the payload is malformed or the field is absent —
+/// the caller treats that as "skip this turn's install
+/// attempt" (the topology cache stays empty, which is the
+/// pre-existing fail-closed state).
+fn extract_plan_path(payload: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    value
+        .get("plan_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// 2026-07-01-001 plan U6 wiring (review P1-2): extract the
+/// fix-plan path from a `review.complete` payload. Same
+/// fail-closed contract as [`extract_plan_path`].
+fn extract_fix_plan_file(payload: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    value
+        .get("fix_plan_file")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 fn initial_current_plan_step(config: &RalphConfig) -> String {

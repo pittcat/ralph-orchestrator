@@ -748,11 +748,10 @@ hats:
           `work.ready`.
       - **2026-07-01-001 plan U4 — fix-unit `task_id` MUST be helper-derived**:
         Hand-written `task-{unix_ts}-{4hex}` ids with stale (e.g. 2025)
-        timestamps are now rejected at the projection boundary by
-        `is_valid_task_id_format` (the validator window-checks the
-        embedded unix_ts against the current loop time). Always
-        call `ralph tools task create` (or the underlying
-        `Task::fix_unit_task_id` helper) to mint the `task_id` —
+        timestamps are now rejected at the projection boundary
+        (the runtime validator window-checks the embedded unix_ts
+        against the current loop time). Always call
+        `ralph tools task create` to mint the `task_id` —
         never hand-compose the suffix.
       - **Trivial mode**: create one summary task, key `ce-executor:{plan_name}:trivial`
 
@@ -908,9 +907,9 @@ hats:
          - `step` and the `fix-{NN}` segment in `task_key` MUST use the same number.
            Example of a violation: `step=fix-02` but `task_key=...:fix-01:u2`.
          - `task_id` MUST be freshly minted per fix-unit; do NOT reuse the previous
-           fix-unit's `task_id`. Prefer `Task::fix_unit_task_id(plan_name, fix_round,
-           fix_unit_index, unix_ts)`. The id MUST match either
-           `task-{ts}-{4hex}` or `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}`.
+           fix-unit's `task_id`. Use `ralph tools task create` — the CLI emits the
+           canonical id in the canonical `task-{ts}-{4hex}` /
+           `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}` shape.
          - `completed_steps` (used later in `plan.complete`) MUST include every
            fix-unit that has actually closed, in order.
 
@@ -1004,10 +1003,11 @@ hats:
            - `plan_path` (set to the fix-plan file path)
            - `plan_name`
            - `task_id`: MUST be freshly minted for this fix-unit. Do NOT reuse an
-             existing task id from a prior step or fix-unit. Use the canonical
-             `task-{unix_ts}-{4hex}` shape, or call `Task::fix_unit_task_id(plan_name,
-             fix_round, fix_unit_index, unix_ts)` if available in your tool chain.
-             Hand-written suffixes such as `u2` or `f002` are invalid and will be
+             existing task id from a prior step or fix-unit. Call
+             `ralph tools task create` to mint it — the CLI emits the
+             canonical `task-{unix_ts}-{4hex}` /
+             `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}` shape. Hand-written
+             suffixes such as `u2` or `f002` are invalid and will be
              rejected by the state projector.
            - `task_key`: `ce-executor:{plan_name}:fix-{NN}:{slug}` where `{NN}` is
              exactly the same number used in `step`. `step` and `task_key` MUST NOT
