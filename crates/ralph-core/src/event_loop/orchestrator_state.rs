@@ -36,7 +36,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::event_loop::review_step_state::scan_unit_headings;
+use crate::event_loop::review_step_state::{
+    scan_unit_headings, scan_unit_headings_as_steps,
+};
 use crate::state::CommitDelta;
 use crate::state::StateLedger;
 
@@ -140,10 +142,17 @@ impl PlanTopologyCache {
             .map(|p| p as u32 + 1)
     }
 
-    /// Scan `path` (a plan or fix-plan markdown file) and
-    /// return the ordered step ids. Returns an empty Vec on
-    /// any failure — callers should publish a diagnostic.
+    /// Scan `path` (a plan markdown file) and return the
+    /// ordered step ids as `step-NN`. Returns an empty Vec
+    /// on any failure — callers should publish a diagnostic.
     pub fn scan(path: &Path) -> Vec<String> {
+        scan_unit_headings_as_steps(path)
+    }
+
+    /// Scan `path` (a fix-plan markdown file) and return the
+    /// ordered step ids as `fix-NN`. Returns an empty Vec on
+    /// any failure.
+    pub fn scan_fix_plan(path: &Path) -> Vec<String> {
         scan_unit_headings(path)
     }
 
@@ -189,7 +198,7 @@ impl PlanTopologyCache {
         ledger: &mut StateLedger,
         path: &Path,
     ) -> Result<(), String> {
-        let ids = Self::scan(path);
+        let ids = Self::scan_fix_plan(path);
         if ids.is_empty() {
             let _ = ledger.commit(
                 CommitDelta::RejectionRecorded {

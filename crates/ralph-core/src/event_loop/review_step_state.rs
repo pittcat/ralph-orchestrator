@@ -11,14 +11,29 @@ use std::time::{Duration, Instant};
 ///
 /// Reads a markdown file and returns the ordered list of step
 /// ids derived from headings that match the `### U{N}.` (or
-/// `### U{N}`) convention. For plan files the scanner returns
-/// `["step-01", "step-02", ...]`; for fix-plan files it
-/// returns `["fix-01", ...]`. The function is shared between
+/// `### U{N}`) convention. The scanner emits `fix-{NN}` for
+/// fix-plan files (the pre-U6 use case for
+/// [`ReviewStepTracker::prefill_fix_steps_from_plan`]); callers
+/// needing `step-NN` should rebrand via [`scan_unit_headings_as_steps`].
+///
+/// The function is shared between
 /// [`ReviewStepTracker::prefill_fix_steps_from_plan`] (legacy
 /// use) and [`crate::event_loop::orchestrator_state::PlanTopologyCache::scan`]
 /// (U6 use). Returns an empty Vec on any IO / parse failure —
 /// callers must decide whether to fail-closed or fall back.
 pub fn scan_unit_headings(path: &Path) -> Vec<String> {
+    scan_unit_headings_with_prefix(path, "fix")
+}
+
+/// 2026-07-01-001 plan U6: variant that emits `step-NN` for
+/// the plan-unit path. Kept separate from `scan_unit_headings`
+/// so the legacy fix-plan callers keep their historical
+/// `fix-NN` shape without rebinding every callsite.
+pub fn scan_unit_headings_as_steps(path: &Path) -> Vec<String> {
+    scan_unit_headings_with_prefix(path, "step")
+}
+
+fn scan_unit_headings_with_prefix(path: &Path, prefix: &str) -> Vec<String> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -37,7 +52,7 @@ pub fn scan_unit_headings(path: &Path) -> Vec<String> {
         if let Ok(n) = digits.parse::<u32>()
             && n > 0
         {
-            found.push(format!("fix-{n:02}"));
+            found.push(format!("{prefix}-{n:02}"));
         }
     }
     found
@@ -1401,6 +1416,46 @@ mod tests {
         assert!(
             tracker.is_wave_closed("p", "t1", "2"),
             "R-F5: step 2 has no wave, SHA write is safe (different step)"
+        );
+    }
+
+    // 2026-07-01-001 plan U6: verify the shared scanner's
+    // plan vs fix-plan prefix split. `scan_unit_headings`
+    // keeps the legacy `fix-NN` shape for the fix-plan
+    // caller; `scan_unit_headings_as_steps` emits `step-NN`
+    // for the plan-unit path so `PlanTopologyCache` matches
+    // the rest of the runtime's `step-NN` vocabulary.
+    #[test]
+    fn u6_scan_unit_headings_fix_prefix_preserved() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("fix-plan.md");
+        std::fs::write(
+            &path,
+            "### U1. one\n### U2. two\n### U3. three\n",
+        )
+        .unwrap();
+        let ids = scan_unit_headings(&path);
+        assert_eq!(
+            ids,
+            vec!["fix-01".to_string(), "fix-02".to_string(), "fix-03".to_string()],
+            "legacy fix-plan scanner must keep emitting `fix-NN`"
+        );
+    }
+
+    #[test]
+    fn u6_scan_unit_headings_as_steps_emits_step_prefix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("plan.md");
+        std::fs::write(
+            &path,
+            "### U1. one\n### U2. two\n### U3. three\n",
+        )
+        .unwrap();
+        let ids = scan_unit_headings_as_steps(&path);
+        assert_eq!(
+            ids,
+            vec!["step-01".to_string(), "step-02".to_string(), "step-03".to_string()],
+            "plan-unit scanner must emit `step-NN` so PlanTopologyCache matches runtime vocabulary"
         );
     }
 }
