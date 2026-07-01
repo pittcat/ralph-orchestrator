@@ -2968,3 +2968,23 @@ fn test_mechanism_scenario_replay_2026_06_26() {
     let yaml = load_scenario("tests/scenarios/mechanism/foundation/scenario_replay_2026_06_26.yml");
     run_workflow_guard_scenario(yaml);
 }
+
+/// 2026-07-02-001 plan U2 (Fix B): end-to-end regression for the
+/// hat-routing next-hop bug. The scenario reproduces the production
+/// incident chain (duplicate `work.done` → residual targeted
+/// `task.resume` in executor's queue → `test.passed` next hop must
+/// route to `coordinator`, not the mis-led `executor`) and asserts
+/// on the event sequence at the workflow-guard layer. Pre-U1, the
+/// preemption predicate (`consumer queue non-empty` instead of
+/// `consumer queue contains the handoff topic`) caused `next_hat`
+/// to pre-empt `coordinator`'s legitimate handoff dispatch, so
+/// `executor` would run step-02 without re-coordination. Post-U1
+/// the route goes through `coordinator` and a fresh `work.ready`
+/// is emitted before `work.done(step-02)`.
+///
+/// See `docs/plans/2026-07-02-001-fix-hat-routing-next-hop-plan.md` U2 / R2.
+#[test]
+fn test_hat_routing_next_hop_regression() {
+    let yaml = load_scenario("tests/scenarios/2026-07-02-hat-routing-next-hop.yml");
+    run_workflow_guard_scenario(yaml);
+}

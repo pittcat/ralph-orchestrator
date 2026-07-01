@@ -248,6 +248,19 @@ impl EventBus {
     /// a **unique** consumer of the corresponding handoff
     /// topic. Multi-consumer or wildcard topics must not use
     /// the priority path.
+    ///
+    /// **Caller contract (2026-07-02-001 plan U1)**: the `priority_hat`
+    /// passed in must be **topic-eligible**, not just queue-non-empty.
+    /// "Topic-eligible" means the hat is the unique consumer of some
+    /// handoff topic T **and** the hat's pending queue contains at
+    /// least one event whose `topic == T`. This function trusts the
+    /// caller to enforce that contract; the only check it performs
+    /// is "is the hat's queue non-empty?". A queue that holds only
+    /// non-handoff residue (e.g. a targeted `task.resume`) is **not**
+    /// sufficient justification for priority pre-emption. Callers
+    /// (currently `EventLoop::next_hat`) must filter the candidate
+    /// set to topic-exact matches before invoking this method with
+    /// `priority_hat = Some(...)`.
     pub fn select_next_hat_with_pending(&mut self, priority_hat: Option<&HatId>) -> Option<HatId> {
         // WAC-U5 priority pre-emption: if the priority hat has
         // pending events, dispatch it now and advance the
@@ -1158,6 +1171,72 @@ mod tests {
         assert!(
             bus.peek_human_pending().is_empty(),
             "unregistered target must NOT silently fall back to human_pending"
+        );
+    }
+
+    // ── 2026-07-02-001 plan U1: caller contract for priority_hat ──
+    //
+    // `select_next_hat_with_pending` is a strategy-agnostic primitive:
+    // it trusts the caller to pass a `priority_hat` that is **truly
+    // eligible**. "Eligible" means: the hat is the unique consumer of
+    // some handoff topic T AND the hat's pending queue contains at
+    // least one event with `topic == T`. The function itself only
+    // checks "queue non-empty?". These tests pin down that contract
+    // by exercising the boundary cases: a non-empty queue with
+    // residue (not the handoff topic) is **not** a priority signal at
+    // this layer; the caller is responsible for filtering. We don't
+    // re-derive the priority check in the primitive (that would leak
+    // strategy into the primitive); we only document and pin the
+    // boundary so future refactors don't widen the eligibility
+    // surface.
+    //
+    // See `docs/plans/2026-07-02-001-fix-hat-routing-next-hop-plan.md`
+    // U1 / R1 for the rationale.
+
+    /// Contract: priority_hat with **only** non-handoff residue in its
+    /// queue is accepted by the primitive (the primitive is policy-
+    /// agnostic), but a topic-aware caller is responsible for not
+    /// passing such a hat. This test pins the primitive's behavior so
+    /// future refactors of `next_hat` don't accidentally introduce a
+    /// leak of topic-awareness into `event_bus`.
+    #[test]
+    fn priority_hat_with_only_non_handoff_residue_still_accepted_by_primitive() {
+        let mut bus = EventBus::new();
+        for id in ["alpha", "beta"] {
+            bus.register(Hat::new(id, id).subscribe("work.*"));
+        }
+        // Beta has residue (not a handoff topic) — primitive accepts it
+        // because primitive only checks queue non-empty.
+        bus.publish(Event::new("task.resume", "resume").with_target("beta"));
+        // Alpha has no pending at all.
+        let sel = bus
+            .select_next_hat_with_pending(Some(&HatId::from("beta")))
+            .unwrap();
+        assert_eq!(
+            sel.as_str(),
+            "beta",
+            "primitive accepts any non-empty queue; topic-eligibility is the caller's job"
+        );
+    }
+
+    /// Contract: priority_hat with an empty queue falls through to
+    /// round-robin, regardless of topic semantics. This is the
+    /// documented "priority hat drained between rounds" behavior.
+    #[test]
+    fn priority_hat_with_empty_queue_falls_through_to_round_robin() {
+        let mut bus = EventBus::new();
+        for id in ["alpha", "beta", "gamma"] {
+            bus.register(Hat::new(id, id).subscribe("work.*"));
+        }
+        bus.publish(Event::new("work.a", "a").with_target("alpha"));
+        // priority_hat is "beta" with empty queue; alpha is non-empty.
+        let sel = bus
+            .select_next_hat_with_pending(Some(&HatId::from("beta")))
+            .unwrap();
+        assert_eq!(
+            sel.as_str(),
+            "alpha",
+            "empty priority_hat queue falls through to round-robin"
         );
     }
 }

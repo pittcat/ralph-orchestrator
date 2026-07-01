@@ -2729,16 +2729,44 @@ impl EventLoop {
                 // order for determinism. If no priority hat has pending
                 // events, we fall through to the normal round-robin
                 // pass.
+                // 2026-07-02-001 plan U1 (Fix A): handoff priority pre-emption
+                // must require **topic-exact pending**, not just a non-empty
+                // consumer queue. The pre-fix predicate (consumer queue
+                // non-empty → eligible for priority) was susceptible to
+                // misleading routing whenever a hat's queue held an event
+                // whose topic was *not* the handoff entry's topic (e.g. a
+                // targeted `task.resume` left behind by the 62a40b41
+                // per-turn budget exhaustion). Such residue would short-
+                // circuit the round-robin scan and pre-empt a different
+                // hat's legitimate handoff dispatch.
+                //
+                // The post-fix predicate walks the priority-dispatchable
+                // entries in BTreeMap (alphabetical topic) order, and for
+                // each `(topic T, consumer C)` checks whether C's pending
+                // queue contains an event with `event.topic == T`. Only
+                // that case is treated as eligible for priority pre-emption.
+                // If no entry yields a topic-exact pending, `priority_hat`
+                // stays `None` and the dispatcher falls through to the
+                // normal round-robin scan.
                 let priority_hat: Option<HatId> =
-                    self.handoff_index.entries.values().find_map(|entry| {
+                    self.handoff_index.entries.iter().find_map(|(topic, entry)| {
                         let consumer = entry.consumer.as_deref()?;
-                        let has_pending = self
+                        let hat_id = HatId::from(consumer);
+                        let topic_matches = self
                             .bus
-                            .peek_pending(&HatId::from(consumer))
-                            .map(|q| !q.is_empty())
+                            .peek_pending(&hat_id)
+                            .map(|q| q.iter().any(|event| event.topic.as_str() == topic.as_str()))
                             .unwrap_or(false);
-                        if has_pending {
-                            Some(HatId::from(consumer))
+                        if topic_matches {
+                            // KTD-9 / R1: pre-emption hits are observable
+                            // so future drift has a forensic trail.
+                            tracing::debug!(
+                                target = "ralph_core::event_loop",
+                                topic = %topic,
+                                consumer = %hat_id,
+                                "priority pre-empt: topic-exact pending in consumer queue"
+                            );
+                            Some(hat_id)
                         } else {
                             None
                         }

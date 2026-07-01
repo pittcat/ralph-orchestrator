@@ -35,6 +35,7 @@ mod initialization;
 mod isolated_complex_regression;
 mod isolated_wave_budget;
 mod loop_context;
+mod next_hat_topic_preemption;
 mod objective;
 mod origin_guard;
 mod payload_types;

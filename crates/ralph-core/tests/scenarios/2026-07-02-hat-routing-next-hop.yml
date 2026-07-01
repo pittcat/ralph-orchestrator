@@ -1,0 +1,110 @@
+# 2026-07-02-001 plan U2 (Fix B): 端到端回归 — 钉死原生产事故链
+#
+# 事故链:
+#   iter1: coordinator 解析 work.start → 发 work.ready(step-01)
+#   iter2: executor 接收 work.ready → 发 work.done(step-01)
+#          + 多发一条 work.done(step-01)(重复事件)→ 触发 isolated 单事件预算,
+#            多余事件被丢弃,runtime 注入一条 targeted task.resume
+#            到 executor 队列(executor 队列残留 task.resume)。
+#   iter3: validator 接收 work.done → 发 test.passed(step-01)
+#   iter4: *** 修复后必须由 coordinator 上场 ***,发 work.ready(step-02)
+#          (修复前:executor 队列里的残留 task.resume 让 next_hat 误把
+#           executor 当 priority hat,挤掉 coordinator 合法 test.passed
+#           handoff,executor 抢先跑 step-02 → 破坏串行编排)
+#   iter5: executor 接收 work.ready(step-02) → 发 work.done(step-02)
+#
+# 断言:
+#   1. 必出现 work.ready(step-01) 与 work.ready(step-02)(coordinator 派活)
+#   2. work.done(step-01) 至少出现一次(第二条被 budget 丢弃,见
+#      absent_events:work.done[step-01] 重复不通过)
+#   3. work.done(step-02) 必出现,顺序在 work.ready(step-02) 之后
+#   4. test.passed(step-01) 必出现
+#   5. 不得出现 plan.blocked / LOOP_COMPLETE(本场景只钉死事故链,不收尾)
+#
+# 该 scenario 在 U1 修复前失败(U1 把"consumer 队列非空"误判为 priority),
+# 在 U1 修复后通过。
+
+name: hat_routing_next_hop_regression
+description: 'isolated 模式下 duplicate work.done → 残留 task.resume → test.passed 后下一跳必须是 coordinator'
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+        - test.passed
+      publishes:
+        - work.ready
+    executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+    validator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - test.passed
+  event_loop:
+    execution_mode: isolated
+    starting_event: "work.start"
+
+# Turn 1: coordinator 解析 work.start 并发出 work.ready(step-01)
+# Turn 2: executor 接收 work.ready(step-01),连续发两条 work.done(step-01)
+#         (第二条被 isolated 单事件预算丢弃,runtime 注入 targeted
+#         task.resume 到 executor 队列 → 模拟 62a40b41 行为)
+# Turn 3: validator 接收 work.done(step-01),发 test.passed(step-01)
+# Turn 4: *** 关键 *** 修复后 coordinator 必须接管并发 work.ready(step-02)
+#         (修复前 executor 会被残留 task.resume 误导抢跑 step-02)
+# Turn 5: executor 接收 work.ready(step-02) 并发 work.done(step-02)
+mock_responses:
+  - hat: coordinator
+    text: |
+      <event topic="work.start">
+      {"task_id":"t1","step":"step-01"}
+      </event>
+  - hat: coordinator
+    text: |
+      <event topic="work.ready">
+      {"task_id":"t1","step":"step-01"}
+      </event>
+  - hat: executor
+    text: |
+      <event topic="work.done">
+      {"task_id":"t1","step":"step-01","ok":true}
+      </event>
+      <event topic="work.done">
+      {"task_id":"t1","step":"step-01","ok":true,"dup":true}
+      </event>
+  - hat: validator
+    text: |
+      <event topic="test.passed">
+      {"task_id":"t1","step":"step-01","tests_run":1,"tests_passed":1}
+      </event>
+  - hat: coordinator
+    text: |
+      <event topic="work.ready">
+      {"task_id":"t1","step":"step-02"}
+      </event>
+  - hat: executor
+    text: |
+      <event topic="work.done">
+      {"task_id":"t1","step":"step-02","ok":true}
+      </event>
+
+expected:
+  iterations: 6
+  events:
+    - topic: work.ready
+    - topic: work.done
+    - topic: test.passed
+    - topic: work.ready
+    - topic: work.done
+  # 关键反向断言:reporter/shipper/looper 等下下游不在本场景内,不应被触发
+  absent_events:
+    - topic: plan.blocked
+    - topic: LOOP_COMPLETE
+    - topic: review.start
+  completion: false
