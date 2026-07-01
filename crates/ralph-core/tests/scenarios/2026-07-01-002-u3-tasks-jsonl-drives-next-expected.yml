@@ -1,0 +1,69 @@
+# 2026-07-01-002 U3/U4 BDD scenario: tasks.jsonl drives fix-unit next_expected
+#
+# 验证:coordinator 的 `## ORCHESTRATOR CONTEXT` 注入的
+# `fix_unit_state` 字段(tasks.jsonl 驱动)与 orchestrator 的
+# topology 投影一致;当 `next_expected = plan.complete` 时,
+# coordinator 直发 `plan.complete` 而不再数 plan 标题。
+#
+# Plan ref: 2026-07-01-002-fix-ce-executor-serial-fix-unit-terminal-guidance-plan.md U3/U4
+
+name: u3_tasks_jsonl_drives_next_expected
+description: U3 - tasks.jsonl 驱动 fix_unit_state.next_expected,coordinator 命中 plan.complete
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  event_loop:
+    execution_mode: isolated
+    ephemeral_isolation: false
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - plan.complete
+    fix-executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+
+mock_responses:
+  # 1) fix-01 完成 — 仍有后续 fix-unit
+  - |
+    <event topic="work.done">
+    plan_name: "u3-state-demo"
+    step: "fix-01"
+    task_id: "u3-fix-01"
+    task_key: "ce-executor:u3-state-demo:step:fix-01:u1"
+    </event>
+  # 2) fix-02 完成 — 这是最后一个 fix-unit;coordinator 必须直接发 plan.complete
+  - |
+    <event topic="work.done">
+    plan_name: "u3-state-demo"
+    step: "fix-02"
+    task_id: "u3-fix-02"
+    task_key: "ce-executor:u3-state-demo:step:fix-02:u2"
+    </event>
+  # 3) coordinator 看到 next_expected=plan.complete 之后,发射 plan.complete
+  - |
+    <event topic="plan.complete">
+    plan_name: "u3-state-demo"
+    step: "fix-02"
+    verdict: pass
+    </event>
+  - |
+    waiting.
+  - |
+    waiting.
+
+expected:
+  iterations: 5
+  events:
+    - topic: work.done
+    - topic: plan.complete
+  absent_events:
+    - topic: plan.blocked
+    - topic: review.start
+    - topic: work.ready
+  completion: false

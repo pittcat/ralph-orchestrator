@@ -2768,6 +2768,41 @@ fn test_u3_fix_unit_terminal_guard() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-01-002 U3/U4: tasks.jsonl 驱动 fix_unit_state 的
+/// next_expected;coordinator 拿到 `plan.complete` 提示后直接
+/// 发射 plan.complete,不再数 plan 标题。
+#[test]
+fn test_u3_tasks_jsonl_drives_next_expected() {
+    let yaml = load_scenario(
+        "tests/scenarios/2026-07-01-002-u3-tasks-jsonl-drives-next-expected.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-01-002 U1+U3: 同 activation 内的 stray
+/// `work.ready(last_in_phase=true)` 由 CoordinatorDecisionGateStage
+/// 改写为 `plan.complete`,U1 的终态预算保证 ledger 里只看到
+/// plan.complete。
+#[test]
+fn test_u1u3_stray_work_ready_rewritten_to_plan_complete() {
+    let yaml = load_scenario(
+        "tests/scenarios/2026-07-01-002-u1u3-stray-work-ready-rewritten.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-01-002 P1-1: range guard rejects a `work.ready(fix-03)`
+/// when `tasks.jsonl` only contains `fix-01`/`fix-02`, and surfaces
+/// a `task.resume` carrying `reason_code=contract:invalid_step_target`.
+/// Covers AE5 in the brainstorm document.
+#[test]
+fn test_u1_invalid_step_target_issued_for_unknown_fix_unit() {
+    let yaml = load_scenario(
+        "tests/scenarios/2026-07-01-002-u1-invalid-step-target-redirect.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-30-001 P0-1 BDD coverage for U4 (shipper reason
 /// strict-match whitelist). When `plan.blocked` carries a
 /// recovery-bucket reason that is NOT in the strict whitelist

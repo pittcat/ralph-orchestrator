@@ -1,0 +1,83 @@
+# 2026-07-01-002 P1-1 BDD scenario: stray work.ready(fix-XX) outside
+# the projector-known chain is rejected with task.resume carrying
+# reason_code=contract:invalid_step_target.
+#
+# Validates brainstorms R5 + AE5: when the coordinator emits a
+# `work.ready(fix-03)` but the projector knows only `fix-01`/`fix-02`,
+# the runtime must reject the emit and surface a `task.resume` so the
+# coordinator knows to re-pick (or finish via plan.complete).
+#
+# Plan ref: 2026-07-01-002-fix-ce-executor-serial-fix-unit-terminal-guidance-plan.md
+
+name: u1_unknown_fix_step_rejected_with_task_resume
+description: P1-1 - work.ready(fix-03) for an unknown fix-unit is rejected with task.resume carrying invalid_step_target
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  event_loop:
+    execution_mode: isolated
+    ephemeral_isolation: false
+    state_projection:
+      enabled: true
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - work.ready
+        - plan.complete
+    fix-executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+
+# Pre-seed tasks.jsonl so the projector knows `fix-01` and `fix-02`
+# only — the rejected emit targets `fix-03` which is outside the
+# known chain.
+fixture_files:
+  - path: .ralph/agent/tasks.jsonl
+    content: |
+      {"id":"task-fix01","title":"fix-01","key":"ce-executor:ae5:step:fix-01:u1","status":"open","priority":1,"blocked_by":[],"loop_id":null,"owner_hat_id":null,"created":"2026-07-01T00:00:00Z"}
+      {"id":"task-fix02","title":"fix-02","key":"ce-executor:ae5:step:fix-02:u2","status":"open","priority":1,"blocked_by":[],"loop_id":null,"owner_hat_id":null,"created":"2026-07-01T00:00:00Z"}
+
+mock_responses:
+  # Coordinator emits a `work.ready` whose step target is *not* in
+  # the projector-known chain. The range guard must reject with
+  # `task.resume(invalid_step_target)` and surface the known chain.
+  - |
+    <event topic="work.ready">
+    plan_name: "ae5"
+    step: "fix-03"
+    task_id: "out-of-range"
+    task_key: "ce-executor:ae5:step:fix-03:u3"
+    </event>
+  - |
+    waiting.
+  - |
+    waiting.
+  - |
+    waiting.
+  - |
+    waiting.
+
+expected:
+  iterations: 5
+  events:
+    # The rejected `work.ready(fix-03)` is still surfaced through
+    # the bus so the projector records it as a seen topic — but no
+    # downstream hat reacts to it.
+    - topic: work.ready
+  absent_events:
+    - topic: plan.blocked
+    - topic: plan.complete
+    - topic: review.start
+  completion: false
+  # Pin the rejection envelope: the contract:invalid_step_target
+  # reason_code is the contract for AE5.
+  recovery_contains:
+    - "contract:invalid_step_target"
+    - "fix-03"
+    - "fix-01"
+    - "fix-02"

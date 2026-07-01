@@ -208,6 +208,11 @@ impl ReasonCode {
     pub const CONTRACT_NO_GIT_EVIDENCE: &'static str = "contract:no_git_evidence";
     /// Execution contract: no test evidence.
     pub const CONTRACT_NO_TEST_EVIDENCE: &'static str = "contract:no_test_evidence";
+    /// P1-1 (2026-07-01-002 audit): `work.ready(fix-XX)` targeting
+    /// an id outside the projector-known fix-unit chain.  The
+    /// synthesis rejection publishes a `task.resume` carrying this
+    /// reason so the agent knows to re-pick or finish the chain.
+    pub const CONTRACT_INVALID_STEP_TARGET: &'static str = "contract:invalid_step_target";
 
     /// Step handoff: progress ↔ tasks mismatch. The detailed reason
     /// is appended after the prefix.

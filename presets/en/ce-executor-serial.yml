@@ -850,25 +850,34 @@ hats:
 
       #### Branch A — `step` starts with `fix-` (fix-unit completion):
 
-         **PRE-DECISION GATE (HARD RULE — count first, emit second):**
+         **PRE-DECISION GATE (HARD RULE — read structured state, not plan markdown):**
          Before emitting anything after a `test.passed(fix-NN)`, you MUST:
 
-         1. Read `fix_plan_file` from the most recent `review.complete` payload
-            (cached in `context.md` when the fix-unit was dispatched).
-         2. Parse the `## Implementation Units` section of the fix-plan file.
-            Count every `### U{N}.` heading — that is `total_fix_units`.
-         3. Derive the current fix-unit index from `step` (`fix-01` → 1, `fix-02` → 2, ...).
-         4. **If `current_index < total_fix_units`:**
-            - Publish `work.ready` for the NEXT fix-unit (`fix-{current+1:02}`).
-            - **FAIL-SAFE (bounded):** if you cannot read / parse the fix-plan file,
-              assume there is at least one more fix-unit and emit the next
-              `work.ready`. You may apply this fail-safe **at most once per fix-unit
-              chain**; if the file remains unreadable on the next activation, emit
-              `plan.blocked(reason="fix_plan_unreadable")` instead of continuing to
-              emit endless fix-units.
-            - **NEVER emit `plan.complete` or `review.start` in this branch.**
-            - Stop.
-         5. **If `current_index == total_fix_units`:**
+         1. Read `tasks.jsonl` (canonical ledger; the orchestrator owns it)
+            and pull the `fix_unit_state` block from the `## ORCHESTRATOR
+            CONTEXT` injection.  The block is authoritative; it is
+            computed from `tasks.jsonl` and never from the
+            `### U{N}.` headings of `fix-plan.md` or `plan.md`.  Do
+            NOT count headings — the runtime no longer parses those
+            documents for topology (2026-07-01-002 plan U1/U3).
+         2. Use the four `fix_unit_state` fields directly:
+            * `total` — how many fix-units this round contains.
+            * `completed` — `fix-NN` ids already closed/failed.
+            * `current` — the `fix-NN` the loop should be working on
+              now (lowest non-terminal id).
+            * `next_expected` — the preset's pre-computed hint;
+              either `plan.complete` or `work.ready(fix-NN)` with
+              the exact id.
+         3. **Cross-check against the most recent commit** when git is
+            available: the agent should have left a
+            `[fix-unit: <step>]` footer in the commit that closed
+            the current unit.  If `commit footer != step`, surface
+            the discrepancy in your reasoning but always trust
+            `fix_unit_state` (tasks.jsonl) for the count — the
+            footer is a courtesy diagnostic, not the source of
+            truth.
+         4. **If `next_expected == "plan.complete"` (or
+            `current` is the highest id in `total`):**
             - Publish `plan.complete`.
             - **EMIT EXACTLY ONE EVENT THIS TURN (HARD RULE — 2026-07-01-001 U1+U3):** `plan.complete` must be the
               ONLY business event you emit this activation. Do NOT precede it with
@@ -884,6 +893,22 @@ hats:
             - When emitting `plan.complete`, set `step` to the current
               `fix-NN` value. Without `step`, `plan_gate` cannot apply the fix-*
               exemption and will reject the event.
+            - Stop.
+         5. **If `next_expected == "work.ready(fix-NN)":**
+            - Publish `work.ready` with that exact `fix-NN` id (do
+              not invent one — copy the id from
+              `fix_unit_state.next_expected`).
+            - **FAIL-SAFE (bounded):** if `fix_unit_state` is
+              absent or `current` is `None` but the event clearly
+              carries a `step` ending this fix-unit, emit one more
+              `work.ready` for `fix-{NN+1:02}` parsed from `step`
+              (e.g. `step=fix-02` → `work.ready(fix-03)`). You may
+              apply this fail-safe **at most once per fix-unit
+              chain**; if the next activation still lacks a
+              `fix_unit_state`, emit
+              `plan.blocked(reason="fix_plan_unreadable")` instead
+              of continuing to emit endless fix-units.
+            - **NEVER emit `plan.complete` or `review.start` in this branch.**
             - Stop.
 
          This gate is the primary defence against the 2026-06-30 P0-C regression,

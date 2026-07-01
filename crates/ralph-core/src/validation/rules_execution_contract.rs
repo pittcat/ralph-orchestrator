@@ -188,5 +188,24 @@ fn map_finding(kind: ExecutionContractViolationKind) -> (String, String) {
                 actual_loop.as_deref().unwrap_or("none"),
             ),
         ),
+        // Soft-check variant.  `map_finding` is only called for
+        // hard rejections; FixUnitTagMissing is surfaced via
+        // `run_execution_contract_soft_checks` and never reaches
+        // here.  Keep the arm so the match is exhaustive.
+        ExecutionContractViolationKind::FixUnitTagMissing { step, expected_tag } => (
+            ReasonCode::CONTRACT_NO_GIT_EVIDENCE.to_string(),
+            format!(
+                "fix-unit step `{step}` is missing commit footer `{expected_tag}` (soft check)"
+            ),
+        ),
+        // P1-1 (2026-07-01-002 audit): invalid_step_target is a
+        // wired finding raised inline by the fix-unit range guard,
+        // not the contract pipeline.  We keep this arm so the
+        // match is exhaustive and the rejection path emits the
+        // expected reason code string.
+        ExecutionContractViolationKind::InvalidStepTarget { step, .. } => (
+            ReasonCode::CONTRACT_INVALID_STEP_TARGET.to_string(),
+            format!("fix-unit step `{step}` is outside the known chain"),
+        ),
     }
 }

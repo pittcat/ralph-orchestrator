@@ -62,6 +62,20 @@ pub trait GitEvidenceProvider: Send + Sync {
     fn has_uncommitted_changes(&self, workspace: &Path) -> bool;
     /// Returns true if there are commits since the given baseline SHA.
     fn has_new_commits_since(&self, workspace: &Path, start_sha: Option<&str>) -> bool;
+
+    /// Returns the most recent commit messages reachable from HEAD, in
+    /// reverse-chronological order (newest first).  When `since_sha` is
+    /// `Some(start)`, only commits in the `start..HEAD` range are returned.
+    /// When `None`, the latest `max_count` commits are returned.  Returns
+    /// an empty `Vec` when the command fails or no commits exist; this
+    /// method must never panic so execution-contract soft checks can
+    /// safely call it on broken workspaces.
+    fn recent_commit_messages(
+        &self,
+        workspace: &Path,
+        since_sha: Option<&str>,
+        max_count: usize,
+    ) -> Vec<String>;
 }
 
 /// Production git evidence provider using git CLI.
@@ -115,14 +129,77 @@ impl GitEvidenceProvider for DefaultGitEvidenceProvider {
             None => false,
         }
     }
+
+    fn recent_commit_messages(
+        &self,
+        workspace: &Path,
+        since_sha: Option<&str>,
+        max_count: usize,
+    ) -> Vec<String> {
+        if max_count == 0 {
+            return Vec::new();
+        }
+        // Use `--format=%H%n%B%n--END--` so each commit is delimited
+        // and the body (%B) can contain arbitrary newlines without
+        // splitting a single commit into multiple entries.
+        // We split off the SHA later (only messages are returned to
+        // keep the contract narrow).  Reflog commits are excluded
+        // (`--no-walk` is not appropriate here because we want
+        // ranges; `--not --reflog` would be, but adds noise).  We
+        // pick `%H%n%B%n--END--` so multiple subject+body chunks
+        // are stable to split.
+        let range = match since_sha {
+            Some(start) => format!("{}..HEAD", start),
+            None => format!("HEAD"),
+        };
+        let n = max_count.to_string();
+        let output = Command::new("git")
+            .args([
+                "log",
+                "--format=%H%n%B%n--END--",
+                &format!("-{}", n),
+                &range,
+            ])
+            .current_dir(workspace)
+            .output();
+        let Ok(out) = output else {
+            return Vec::new();
+        };
+        if !out.status.success() {
+            return Vec::new();
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut messages = Vec::new();
+        for raw in stdout.split("--END--\n") {
+            let entry = raw.trim_end_matches('\n');
+            if entry.is_empty() {
+                continue;
+            }
+            // First line is the SHA (%H).  Drop it; we only want
+            // the human-authored message body which is everything
+            // after the first newline.
+            match entry.find('\n') {
+                Some(idx) => {
+                    let body = entry[idx + 1..].trim().to_string();
+                    if !body.is_empty() {
+                        messages.push(body);
+                    }
+                }
+                None => {
+                    // Only SHA, no body — skip.
+                }
+            }
+        }
+        messages
+    }
 }
 
 /// Outcome of an execution contract validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionContractDecision {
-    /// The event satisfies all contract requirements.
+    /// The event satisfies all hard contract requirements.
     Accept,
-    /// The event violates one or more contract requirements.
+    /// The event violates one or more hard contract requirements.
     Reject(Vec<ExecutionContractFinding>),
 }
 
@@ -193,6 +270,21 @@ pub enum ExecutionContractViolationKind {
     NoGitEvidence { step: Option<String> },
     /// Test evidence check failed (required field missing or falsy).
     NoTestEvidence { field: String },
+    /// Soft-check finding: a fix-unit work event (e.g. `work.done`
+    /// with `step="fix-NN"`) was emitted but the most recent commit
+    /// in `since_sha..HEAD` does not carry the matching
+    /// `[fix-unit: fix-NN]` footer.  Never used to reject the event;
+    /// surfaced via the soft-check diagnostic channel so the agent
+    /// can correct its commit-message convention next iteration.
+    FixUnitTagMissing { step: String, expected_tag: String },
+    /// P1-1 (2026-07-01-002 audit): a `work.ready(fix-XX)` event
+    /// was emitted with an `fix-XX` id that is **not** in the
+    /// projector-known fix-unit chain.  The agent is asked to
+    /// re-pick via the synthesized `task.resume` payload.
+    InvalidStepTarget {
+        step: String,
+        known_fix_units: Vec<String>,
+    },
 }
 
 impl Default for ExecutionContractViolationKind {
@@ -205,6 +297,139 @@ impl Default for ExecutionContractViolationKind {
         // visible in code review.
         ExecutionContractViolationKind::InvalidPayload
     }
+}
+
+/// Maximum number of commit messages scanned for the fix-unit footer
+/// soft check.  Keeps the loop bounded even on large monorepos.
+pub const FIX_UNIT_FOOTER_SCAN_LIMIT: usize = 10;
+
+/// Regex used to match the `[fix-unit: <id>]` footer inside commit
+/// messages.  Captures the `<id>` (e.g. `fix-02`) so the soft check
+/// can compare it against the event's `step`.
+///
+/// Public so test code in other modules can use the same pattern
+/// without re-declaring it.
+pub static FIX_UNIT_FOOTER_REGEX: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| {
+        // Compiled once.  Wrapping in a `LazyLock` keeps panics
+        // confined to first use, and the regex is small (~120 bytes
+        // compiled) so the cold-start cost is trivial.
+        regex::Regex::new(r"\[fix-unit:\s*(fix-\d{1,3})\]")
+            .expect("FIX_UNIT_FOOTER_REGEX must compile")
+    });
+
+/// Run the **soft** checks on an event after the hard execution
+/// contract has accepted it.  Currently only the fix-unit commit
+/// footer is enforced; the function is structured so future soft
+/// checks (e.g. expected duration, conventional-commit suffixes) can
+/// be added without re-touching `validate_execution_contract`.
+///
+/// Soft checks **never** cause rejection.  Each soft finding is
+/// returned separately so the caller can log it under
+/// `diagnostics_topic` and surface it to the user/agent without
+/// blocking the event flow.
+///
+/// Returns an empty `Vec` for events whose payload has no
+/// fix-unit-looking `step`, for non-fix-unit events, or when the
+/// commit-history scan fails.
+pub fn run_execution_contract_soft_checks(
+    event: &Event,
+    workspace_root: &Path,
+    git_provider: &dyn GitEvidenceProvider,
+    loop_start_sha: Option<&str>,
+) -> Vec<ExecutionContractFinding> {
+    let mut findings = Vec::new();
+    check_fix_unit_commit_footer(
+        event,
+        workspace_root,
+        git_provider,
+        loop_start_sha,
+        &mut findings,
+    );
+    findings
+}
+
+/// Soft check: when `event.payload.step` starts with `fix-`, look for
+/// a matching `[fix-unit: <step>]` footer in the most recent
+/// commits.  Missing footer produces a `FixUnitTagMissing` finding;
+/// non-fix steps produce no finding.
+fn check_fix_unit_commit_footer(
+    event: &Event,
+    workspace_root: &Path,
+    git_provider: &dyn GitEvidenceProvider,
+    loop_start_sha: Option<&str>,
+    findings: &mut Vec<ExecutionContractFinding>,
+) {
+    let payload_str: &str = event.payload.as_str();
+    let step = match serde_json::from_str::<Value>(payload_str)
+        .ok()
+        .and_then(|v| match v.get("step") {
+            Some(step_value) => match step_value {
+                Value::String(s) => Some(s.clone()),
+                // Object form: `{"id":"fix-02","last_in_phase":true}`.
+                // R6 says step can be either shape; the soft check only
+                // cares about the id, so we collapse to `id`.  When the
+                // object carries no `id` we fall back to skipping the
+                // check entirely.
+                Value::Object(map) => map
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                _ => None,
+            },
+            None => None,
+        }) {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Only fix-unit steps trigger this check.  Other step names
+    // (`step-01`, `trivial`, …) are deliberately excluded: the
+    // footer convention is fix-unit-specific.
+    if !step.starts_with("fix-") {
+        return;
+    }
+
+    let expected_tag = format!("[fix-unit: {}]", step);
+    let messages = git_provider.recent_commit_messages(
+        workspace_root,
+        loop_start_sha,
+        FIX_UNIT_FOOTER_SCAN_LIMIT,
+    );
+
+    let matched = messages
+        .iter()
+        .any(|m| FIX_UNIT_FOOTER_REGEX.is_match(m) && m.contains(&expected_tag));
+    if matched {
+        return;
+    }
+
+    let recent_in_range = messages
+        .iter()
+        .take(3)
+        .map(|m| m.lines().next().unwrap_or("").to_string())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let detail = if recent_in_range.is_empty() {
+        "no commits found in range".to_string()
+    } else {
+        format!("recent: {recent_in_range}")
+    };
+    findings.push(ExecutionContractFinding {
+        kind: ExecutionContractViolationKind::FixUnitTagMissing {
+            step: step.clone(),
+            expected_tag: expected_tag.clone(),
+        },
+        message: format!(
+            "{} payload step='{}' but no commit footer '{}' found since loop start. \
+             Add the footer (e.g. `git commit --amend --no-edit` after appending the line, \
+             or include it in the next commit) so coordinator can rely on tasks.jsonl + \
+             commit footer instead of plan heading parses. ({})",
+            event.topic, step, expected_tag, detail
+        ),
+        topic: event.topic.to_string(),
+        source_hat: None,
+    });
 }
 
 /// Validate an event against an execution contract rule.
@@ -1772,5 +1997,565 @@ mod u5_placeholder_tests {
                 "real task_id must not hit the InvalidPayload placeholder path: {f:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod recent_commit_messages_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    /// Mock provider used when we want to drive `recent_commit_messages`
+    /// (and only that method) without touching the real git CLI.
+    struct StubGitProvider {
+        messages: Vec<String>,
+    }
+    impl GitEvidenceProvider for StubGitProvider {
+        fn is_git_repo(&self, _workspace: &Path) -> bool {
+            true
+        }
+        fn has_uncommitted_changes(&self, _workspace: &Path) -> bool {
+            false
+        }
+        fn has_new_commits_since(&self, _workspace: &Path, _start_sha: Option<&str>) -> bool {
+            !self.messages.is_empty()
+        }
+        fn recent_commit_messages(
+            &self,
+            _workspace: &Path,
+            _since_sha: Option<&str>,
+            _max_count: usize,
+        ) -> Vec<String> {
+            self.messages.clone()
+        }
+    }
+
+    fn run_git(args: &[&str], dir: &PathBuf) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git command available in test env");
+        assert!(status.success(), "git {:?} failed", args);
+    }
+
+    #[test]
+    fn stub_provider_returns_configured_messages() {
+        let stub = StubGitProvider {
+            messages: vec!["[fix-unit: fix-02] hello".to_string()],
+        };
+        let msgs = stub.recent_commit_messages(Path::new("/tmp"), None, 10);
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].contains("[fix-unit: fix-02]"));
+    }
+
+    #[test]
+    fn recent_commit_messages_returns_empty_for_max_count_zero() {
+        // The `max_count` short-circuit must not call git.
+        let dir = std::env::temp_dir().join(format!(
+            "ralph-u1-zero-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Even though dir is not a repo, this must not panic.
+        let msgs =
+            DefaultGitEvidenceProvider.recent_commit_messages(&dir, None, 0);
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn recent_commit_messages_returns_empty_for_non_repo_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "ralph-u1-norepo-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // No `git init` here — git log will fail with status != 0,
+        // we must return an empty Vec instead of panicking.
+        let msgs =
+            DefaultGitEvidenceProvider.recent_commit_messages(&dir, None, 10);
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn recent_commit_messages_handles_multiline_body() {
+        // A commit body with blank lines between paragraphs must be
+        // returned as one logical message, not split into three.
+        let dir = std::env::temp_dir().join(format!(
+            "ralph-u1-multiline-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git(&["init", "-q"], &dir);
+        run_git(
+            &["config", "user.email", "test@example.com"],
+            &dir,
+        );
+        run_git(&["config", "user.name", "test"], &dir);
+        run_git(
+            &[
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "fix(core): subject line\n\nbody paragraph 1\n\nbody paragraph 2\n\n[fix-unit: fix-01]",
+            ],
+            &dir,
+        );
+
+        let msgs =
+            DefaultGitEvidenceProvider.recent_commit_messages(&dir, None, 10);
+        assert_eq!(msgs.len(), 1, "want one message, got {:?}", msgs);
+        assert!(msgs[0].contains("subject line"));
+        assert!(msgs[0].contains("body paragraph 1"));
+        assert!(msgs[0].contains("body paragraph 2"));
+        assert!(msgs[0].contains("[fix-unit: fix-01]"));
+    }
+
+    #[test]
+    fn recent_commit_messages_respects_max_count() {
+        let dir = std::env::temp_dir().join(format!(
+            "ralph-u1-cap-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git(&["init", "-q"], &dir);
+        run_git(
+            &["config", "user.email", "test@example.com"],
+            &dir,
+        );
+        run_git(&["config", "user.name", "test"], &dir);
+        for i in 0..5 {
+            run_git(
+                &["commit", "--allow-empty", "-q", "-m", &format!("c{i}")],
+                &dir,
+            );
+        }
+
+        let msgs =
+            DefaultGitEvidenceProvider.recent_commit_messages(&dir, None, 3);
+        assert_eq!(msgs.len(), 3);
+        // Newest first — commit 4 is the most recent.
+        assert!(msgs[0].contains("c4"));
+        assert!(msgs[1].contains("c3"));
+        assert!(msgs[2].contains("c2"));
+    }
+
+    #[test]
+    fn recent_commit_messages_respects_since_sha_range() {
+        let dir = std::env::temp_dir().join(format!(
+            "ralph-u1-range-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git(&["init", "-q"], &dir);
+        run_git(
+            &["config", "user.email", "test@example.com"],
+            &dir,
+        );
+        run_git(&["config", "user.name", "test"], &dir);
+        run_git(
+            &["commit", "--allow-empty", "-q", "-m", "baseline"],
+            &dir,
+        );
+        let baseline = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let baseline = String::from_utf8(baseline.stdout).unwrap();
+        let baseline = baseline.trim();
+
+        run_git(
+            &["commit", "--allow-empty", "-q", "-m", "post-1"],
+            &dir,
+        );
+        run_git(
+            &["commit", "--allow-empty", "-q", "-m", "post-2"],
+            &dir,
+        );
+
+        let msgs = DefaultGitEvidenceProvider.recent_commit_messages(
+            &dir,
+            Some(baseline),
+            10,
+        );
+        // Should contain post-1 and post-2 only.
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("baseline") && !m.contains("post"))
+                == false,
+            "baseline should be excluded: {msgs:?}"
+        );
+        assert!(msgs.iter().any(|m| m.contains("post-1")));
+        assert!(msgs.iter().any(|m| m.contains("post-2")));
+    }
+}
+
+#[cfg(test)]
+mod fix_unit_footer_soft_check_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::Mutex;
+
+    /// Provider whose recent-commit history is configurable per test.
+    struct ConfigurableCommitProvider {
+        recent: Mutex<Vec<String>>,
+    }
+    impl ConfigurableCommitProvider {
+        fn new(messages: Vec<String>) -> Self {
+            Self {
+                recent: Mutex::new(messages),
+            }
+        }
+    }
+    impl GitEvidenceProvider for ConfigurableCommitProvider {
+        fn is_git_repo(&self, _workspace: &Path) -> bool {
+            true
+        }
+        fn has_uncommitted_changes(&self, _workspace: &Path) -> bool {
+            false
+        }
+        fn has_new_commits_since(
+            &self,
+            _workspace: &Path,
+            _start_sha: Option<&str>,
+        ) -> bool {
+            !self.recent.lock().unwrap().is_empty()
+        }
+        fn recent_commit_messages(
+            &self,
+            _workspace: &Path,
+            _since_sha: Option<&str>,
+            _max_count: usize,
+        ) -> Vec<String> {
+            self.recent.lock().unwrap().clone()
+        }
+    }
+
+    fn make_event(step: &str) -> Event {
+        Event::new(
+            "work.done",
+            format!(r#"{{"task_id":"t","task_key":"k","step":"{step}"}}"#),
+        )
+    }
+
+    #[test]
+    fn happy_path_no_finding_when_footer_matches() {
+        let provider = ConfigurableCommitProvider::new(vec![
+            "fix(core): something\n\n[fix-unit: fix-02]".to_string(),
+        ]);
+        let event = make_event("fix-02");
+        let diagnostics = run_execution_contract_soft_checks(
+            &event,
+            Path::new("/tmp"),
+            &provider,
+            None,
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn missing_footer_produces_finding() {
+        let provider = ConfigurableCommitProvider::new(vec![
+            "fix(core): something\n\nno footer here".to_string(),
+        ]);
+        let event = make_event("fix-02");
+        let diagnostics = run_execution_contract_soft_checks(
+            &event,
+            Path::new("/tmp"),
+            &provider,
+            None,
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(matches!(
+            diagnostics[0].kind,
+            ExecutionContractViolationKind::FixUnitTagMissing { .. }
+        ));
+        // Importantly, soft findings never reject.
+        let decision = ExecutionContractDecision::Accept;
+        match decision {
+            ExecutionContractDecision::Accept => {}
+            ExecutionContractDecision::Reject(_) => {
+                panic!("soft check must not flip Accept into Reject")
+            }
+        }
+    }
+
+    #[test]
+    fn step_mismatch_produces_finding() {
+        // Footer says fix-01 but event step is fix-02.
+        let provider = ConfigurableCommitProvider::new(vec![
+            "fix(core): something\n\n[fix-unit: fix-01]".to_string(),
+        ]);
+        let event = make_event("fix-02");
+        let diagnostics = run_execution_contract_soft_checks(
+            &event,
+            Path::new("/tmp"),
+            &provider,
+            None,
+        );
+        assert_eq!(diagnostics.len(), 1);
+        match &diagnostics[0].kind {
+            ExecutionContractViolationKind::FixUnitTagMissing { step, expected_tag } => {
+                assert_eq!(step, "fix-02");
+                assert_eq!(expected_tag, "[fix-unit: fix-02]");
+            }
+            _ => panic!("wrong kind"),
+        }
+    }
+
+    #[test]
+    fn one_of_many_commits_with_footer_satisfies_check() {
+        // Multiple commits, one of which has the matching footer.
+        let provider = ConfigurableCommitProvider::new(vec![
+            "no footer here".to_string(),
+            "fix: blah\n\n[fix-unit: fix-02]".to_string(),
+            "yet another".to_string(),
+        ]);
+        let event = make_event("fix-02");
+        let diagnostics = run_execution_contract_soft_checks(
+            &event,
+            Path::new("/tmp"),
+            &provider,
+            None,
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn non_fix_step_is_skipped() {
+        // The footer convention is fix-unit-specific; step="step-01"
+        // must not trigger the check even with no commits in range.
+        let provider =
+            ConfigurableCommitProvider::new(vec!["some commit".to_string()]);
+        let event = make_event("step-01");
+        let diagnostics = run_execution_contract_soft_checks(
+            &event,
+            Path::new("/tmp"),
+            &provider,
+            None,
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn empty_commit_history_records_finding() {
+        // No commits at all in the range — must record a finding so
+        // the coordinator is aware the agent never committed.
+        let provider = ConfigurableCommitProvider::new(vec![]);
+        let event = make_event("fix-02");
+        let diagnostics = run_execution_contract_soft_checks(
+            &event,
+            Path::new("/tmp"),
+            &provider,
+            None,
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(matches!(
+            diagnostics[0].kind,
+            ExecutionContractViolationKind::FixUnitTagMissing { .. }
+        ));
+    }
+
+    #[test]
+    fn event_without_step_field_is_skipped() {
+        // events whose payload has no `step` field must not throw.
+        let provider =
+            ConfigurableCommitProvider::new(vec!["some commit".to_string()]);
+        let event = Event::new("work.done", r#"{"task_id":"t","task_key":"k"}"#);
+        let diagnostics = run_execution_contract_soft_checks(
+            &event,
+            Path::new("/tmp"),
+            &provider,
+            None,
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn event_with_invalid_json_payload_is_skipped() {
+        // Defensive: if the payload cannot be parsed, treat the
+        // check as skipped rather than recording a misleading
+        // finding.
+        let provider =
+            ConfigurableCommitProvider::new(vec!["some commit".to_string()]);
+        let event = Event::new("work.done", "not json at all");
+        let diagnostics = run_execution_contract_soft_checks(
+            &event,
+            Path::new("/tmp"),
+            &provider,
+            None,
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn object_form_step_collapses_to_id() {
+        // R6 canonical emit uses
+        // `step={"id":"fix-02","last_in_phase":true}`.  The soft
+        // check still recognises the step id and compares against
+        // commit footers; if the agent only emitted object-form
+        // steps without a footer, the diagnostic still fires.
+        let provider = ConfigurableCommitProvider::new(vec![
+            "fix(core): no footer here".to_string(),
+        ]);
+        let event = Event::new(
+            "work.done",
+            r#"{"task_id":"t","task_key":"k","step":{"id":"fix-02","last_in_phase":true}}"#,
+        );
+        let diagnostics = run_execution_contract_soft_checks(
+            &event,
+            Path::new("/tmp"),
+            &provider,
+            None,
+        );
+        assert_eq!(diagnostics.len(), 1);
+        match &diagnostics[0].kind {
+            ExecutionContractViolationKind::FixUnitTagMissing { step, .. } => {
+                assert_eq!(step, "fix-02");
+            }
+            _ => panic!("wrong kind"),
+        }
+    }
+
+    #[test]
+    fn object_form_step_with_matching_footer_passes() {
+        let provider = ConfigurableCommitProvider::new(vec![
+            "fix(core): with footer\n\n[fix-unit: fix-02]".to_string(),
+        ]);
+        let event = Event::new(
+            "work.done",
+            r#"{"task_id":"t","task_key":"k","step":{"id":"fix-02","last_in_phase":true}}"#,
+        );
+        let diagnostics = run_execution_contract_soft_checks(
+            &event,
+            Path::new("/tmp"),
+            &provider,
+            None,
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn regex_compiles_and_matches_correctly() {
+        // Sanity check the regex against the documented pattern so
+        // somebody tweaking it later gets an immediate red light.
+        let m = FIX_UNIT_FOOTER_REGEX.captures("anything [fix-unit: fix-99] end");
+        assert!(m.is_some(), "regex should match");
+        assert_eq!(m.unwrap().get(1).unwrap().as_str(), "fix-99");
+        // The regex is intentionally permissive about whitespace
+        // between `:` and the id (`\s*`), so both forms match.
+        assert!(FIX_UNIT_FOOTER_REGEX.is_match("[fix-unit:fix-99]"));
+        assert!(FIX_UNIT_FOOTER_REGEX.is_match("[fix-unit:    fix-99]"));
+        // Non-fix-unit tags must NOT match.
+        assert!(!FIX_UNIT_FOOTER_REGEX.is_match("[step: fix-99]"));
+        assert!(!FIX_UNIT_FOOTER_REGEX.is_match("[fix-unit: step-99]"));
+    }
+
+    #[test]
+    fn integration_with_real_git_repo_and_matching_footer() {
+        // End-to-end: real git history with matching footer must
+        // produce zero findings.
+        let dir = std::env::temp_dir().join(format!(
+            "ralph-u2-real-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git_init(&dir);
+        run_git(
+            &dir,
+            &[
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "fix(core): first\n\n[fix-unit: fix-02]",
+            ],
+        );
+
+        let event = make_event("fix-02");
+        let diagnostics = run_execution_contract_soft_checks(
+            &event,
+            &dir,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn integration_with_real_git_repo_missing_footer() {
+        let dir = std::env::temp_dir().join(format!(
+            "ralph-u2-missing-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git_init(&dir);
+        run_git(
+            &dir,
+            &[
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "fix(core): forgot the footer",
+            ],
+        );
+
+        let event = make_event("fix-02");
+        let diagnostics = run_execution_contract_soft_checks(
+            &event,
+            &dir,
+            &DefaultGitEvidenceProvider,
+            None,
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(matches!(
+            diagnostics[0].kind,
+            ExecutionContractViolationKind::FixUnitTagMissing { .. }
+        ));
+        assert!(diagnostics[0].message.contains("fix-02"));
+    }
+
+    fn run_git_init(dir: &PathBuf) {
+        run_git(dir, &["init", "-q"]);
+        run_git(
+            dir,
+            &["config", "user.email", "test@example.com"],
+        );
+        run_git(dir, &["config", "user.name", "test"]);
+    }
+
+    fn run_git(dir: &PathBuf, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git available in test env");
+        assert!(status.success(), "git {:?} failed in {:?}", args, dir);
     }
 }

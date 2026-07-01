@@ -21,7 +21,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::state_projector::StateProjector;
-use crate::task::Task;
+use crate::task::{Task, TaskStatus};
+use crate::task_store::is_fix_unit_key;
 
 /// Heading the loop prepends. Logged in the prompt verbatim so
 /// agents and grep-based scrapers can match a single literal.
@@ -52,6 +53,41 @@ pub struct RuntimeStateSnapshot {
     /// True when state projection is disabled for this run; the
     /// agent is told so it does not invent its own ledger.
     pub projection_disabled: bool,
+    /// U3 (2026-07-01-002 plan): structured snapshot of the
+    /// `fix-NN` task progress as derived from
+    /// `.ralph/agent/tasks.jsonl`.  Drives the coordinator's
+    /// `next_expected` decision instead of letting it count
+    /// `### U{N}.` headings in `fix-plan.md`.
+    #[serde(default)]
+    pub fix_unit_state: Option<FixUnitState>,
+}
+
+/// Per-fix-round view derived from `tasks.jsonl`.  All fields are
+/// computed, never hand-written, so the schema is stable for
+/// downstream agents (and BDD scenarios) to parse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FixUnitState {
+    /// Number of fix-NN tasks currently visible in tasks.jsonl.
+    /// Equals `1` only when one fix-unit is open, `2+` for multi-unit
+    /// plans, `0` for plans that never reached fix-phase.
+    pub total: u32,
+    /// Identifiers (`fix-01`, `fix-02`, …) of the fix-units already
+    /// in a terminal state (`Closed` or `Failed`), sorted ascending.
+    pub completed: Vec<String>,
+    /// Identifier of the fix-unit the coordinator should be working
+    /// on right now.  `None` when the loop has moved past fix-phase
+    /// (e.g. all `Closed`) or never entered it.  This mirrors
+    /// `progress.current_step` but is computed from `tasks.jsonl`
+    /// only — the canonical ledger for fix-units.
+    pub current: Option<String>,
+    /// Coordinator hint derived from `current` vs `total`.
+    ///
+    /// * `Some("plan.complete")` when `current` is the last open
+    ///   fix-unit, signalling `next_expected = plan.complete`.
+    /// * `Some("work.ready(fix-NN+1)")` while another fix-unit is
+    ///   pending.
+    /// * `None` when the loop is not in fix-phase.
+    pub next_expected: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +129,7 @@ impl RuntimeStateSnapshot {
         } else {
             (tasks_ref.to_vec(), progress_ref.clone())
         };
+        let progress_done = progress.completed_steps.clone();
         Self {
             plan_name: derive_plan_name(&tasks),
             current_step: progress.current_step,
@@ -107,6 +144,7 @@ impl RuntimeStateSnapshot {
             loop_start_sha: None,
             plan_baseline_sha: None,
             projection_disabled: !ctx.config.enabled,
+            fix_unit_state: derive_fix_unit_state(&tasks, &progress_done),
         }
     }
 
@@ -125,6 +163,7 @@ impl RuntimeStateSnapshot {
             loop_start_sha: None,
             plan_baseline_sha: None,
             projection_disabled: true,
+            fix_unit_state: None,
         }
     }
 
@@ -195,6 +234,37 @@ impl RuntimeStateSnapshot {
                 wave.wave_id, wave.received, wave.total
             );
         }
+        match &self.fix_unit_state {
+            Some(state) => {
+                let _ = writeln!(buf, "- fix_unit_state:");
+                let _ = writeln!(buf, "    total: {}", state.total);
+                let _ = writeln!(
+                    buf,
+                    "    completed: {}",
+                    if state.completed.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        state.completed.join(", ")
+                    }
+                );
+                let _ = writeln!(
+                    buf,
+                    "    current: {}",
+                    state.current.as_deref().unwrap_or("(none)")
+                );
+                let _ = writeln!(
+                    buf,
+                    "    next_expected: {}",
+                    state
+                        .next_expected
+                        .as_deref()
+                        .unwrap_or("(none — not in fix-phase)")
+                );
+            }
+            None => {
+                let _ = writeln!(buf, "- fix_unit_state: (none — no fix-unit tasks seen)");
+            }
+        }
         let _ = writeln!(buf);
         buf
     }
@@ -254,6 +324,7 @@ fn open_task_summaries(tasks: &[Task]) -> Vec<OpenTaskSummary> {
 /// disk when no projector is wired up (U4 test path, cold paths).
 pub fn snapshot_from_disk(workspace: &Path) -> RuntimeStateSnapshot {
     let (tasks, progress) = crate::state_projector::read_state_from_disk(workspace);
+    let progress_done = progress.completed_steps.clone();
     RuntimeStateSnapshot {
         plan_name: derive_plan_name(&tasks),
         current_step: progress.current_step,
@@ -263,7 +334,185 @@ pub fn snapshot_from_disk(workspace: &Path) -> RuntimeStateSnapshot {
         loop_start_sha: None,
         plan_baseline_sha: None,
         projection_disabled: true,
+        fix_unit_state: derive_fix_unit_state(&tasks, &progress_done),
     }
+}
+
+/// U3 (2026-07-01-002 plan): compute the fix-unit state view from the
+/// tasks ledger.  Mirrors what
+/// `review_step_state::prefill_fix_steps_from_plan` used to drive at
+/// the tracker level, but here it stays in the snapshot layer so the
+/// coordinator prompt can render it without the runtime needing to
+/// re-parse `fix-plan.md` markdown.
+///
+/// **双源对账 (P1-2 fix):** `progress_completed_steps` must be the
+/// authoritative "done" signal.  Tasks.jsonl `status` is updated by
+/// projector after `task close`, which may race with the coordinator
+/// activation following a `test.passed(fix-NN)`.  When the two
+/// sources disagree (e.g. progress lists `fix-02` as completed but
+/// tasks.jsonl still shows it `Open`), we trust progress — otherwise
+/// the coordinator would emit a stray `work.ready(fix-03)` during the
+/// brief window before task-close lands.  This is the exact regression
+/// the original plan set out to prevent.
+///
+/// Behaviour:
+/// * If no fix-unit keys exist, returns `None` (the loop is not in
+///   fix-phase, nothing to advertise).
+/// * Otherwise groups fix-NN tasks by step id, sorts by numeric id,
+///   and emits:
+///   - `total` — number of distinct fix-unit ids observed,
+///   - `completed` — union of (terminal task status) ∪ (fix-NN ids
+///     appearing in `progress_completed_steps`), sorted ascending,
+///   - `current` — id of the lowest non-terminal fix-unit **not** in
+///     `progress_completed_steps`, `None` when every fix-unit is
+///     either terminal or otherwise marked done,
+///   - `next_expected` — `Some("plan.complete")` when `current` is
+///     the highest id, otherwise
+///     `Some("work.ready(fix-{NN+1})")` with the next id.  Uses the
+///     id found in `current`, not a derived counter, so hand-edited
+///     or out-of-order keys still surface the right hint.
+fn derive_fix_unit_state(
+    tasks: &[Task],
+    progress_completed_steps: &[String],
+) -> Option<FixUnitState> {
+    use std::collections::BTreeSet;
+    // Pre-compute the set of `fix-NN` ids appearing in progress.md's
+    // `Completed Steps` — the high-water mark for "executor declared
+    // this unit done".  We treat any such id as terminal even if
+    // tasks.jsonl still reports Open, because progress.md is written
+    // synchronously by the projector right after `test.passed` lands.
+    let progress_done: BTreeSet<String> = progress_completed_steps
+        .iter()
+        .filter_map(|s| fix_id_from_string(s))
+        .collect();
+    let mut all: BTreeSet<String> = BTreeSet::new();
+    let mut completed: BTreeSet<String> = BTreeSet::new();
+    let mut first_open: Option<String> = None;
+    for t in tasks {
+        let key = match t.key.as_deref() {
+            Some(k) if is_fix_unit_key(k) => k,
+            _ => continue,
+        };
+        let Some(id) = fix_id_from_key(key) else {
+            continue;
+        };
+        all.insert(id.clone());
+        if t.status.is_terminal() || progress_done.contains(&id) {
+            completed.insert(id.clone());
+        } else if first_open.is_none() {
+            first_open = Some(id.clone());
+        }
+    }
+    if all.is_empty() {
+        return None;
+    }
+    let total = all.len() as u32;
+    let completed: Vec<String> = completed.into_iter().collect();
+    let current = first_open;
+    let last_id = all.iter().last().cloned();
+    let next_expected = match (current.as_ref(), last_id) {
+        (Some(curr), Some(last)) => {
+            if curr == &last {
+                Some("plan.complete".to_string())
+            } else {
+                // Find the next id strictly greater than `curr`.
+                let next_in_seq = all
+                    .iter()
+                    .find(|id| is_strictly_greater(id, curr))
+                    .cloned();
+                next_in_seq.map(|n| format!("work.ready({n})"))
+            }
+        }
+        (None, _) => Some("plan.complete".to_string()),
+        (Some(_), None) => None,
+    };
+    Some(FixUnitState {
+        total,
+        completed,
+        current,
+        next_expected,
+    })
+}
+
+/// Extract the `fix-NN` id from a free-form string (e.g. a value
+/// pulled verbatim from `progress.md`'s `## Completed Steps` list).
+/// Returns `None` for anything that does not match the canonical
+/// `fix-<digits>` shape; never panics on oddly-shaped legacy entries.
+fn fix_id_from_string(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with("fix-") || trimmed.len() <= 4 {
+        return None;
+    }
+    if !trimmed.as_bytes()[4..].iter().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Public entry point for the event loop: collect the set of
+/// `fix-NN` ids currently observed in `tasks.jsonl`.  Used by
+/// the fix-unit emit-gate (P1-1, 2026-07-01-002 audit) to reject
+/// `work.ready(fix-XX)` events whose id is **not** in this set —
+/// e.g. a stale coordinator emitting `work.ready(fix-03)` after
+/// the chain only ever had `fix-01`/`fix-02`.  When the
+/// projector cache is empty we fall back to a single disk read,
+/// which is bounded (`tasks.jsonl` is small).
+pub fn fix_unit_known_ids(projector: &crate::state_projector::StateProjector) -> std::collections::BTreeSet<String> {
+    let ctx = projector.context();
+    let (tasks_ref, _from_ledger) = ctx.task_snapshot();
+    let tasks = if tasks_ref.is_empty() {
+        let (disk_tasks, _prog) =
+            crate::state_projector::read_state_from_disk(&ctx.workspace_root);
+        disk_tasks
+    } else {
+        tasks_ref.to_vec()
+    };
+    let mut ids = std::collections::BTreeSet::new();
+    for t in &tasks {
+        let Some(k) = t.key.as_deref() else { continue };
+        if is_fix_unit_key(k) {
+            if let Some(id) = fix_id_from_key(k) {
+                ids.insert(id);
+            }
+        }
+    }
+    ids
+}
+
+/// Extract the `fix-NN` id segment from a key shaped like
+/// `<plan>:step:fix-NN:uNN…`.  Returns `None` for keys that don't
+/// match the canonical shape.
+fn fix_id_from_key(key: &str) -> Option<String> {
+    key.split(':').find_map(|seg| {
+        if seg.starts_with("fix-")
+            && seg.len() > 4
+            && seg.as_bytes()[4..].iter().all(|b| b.is_ascii_digit())
+        {
+            Some(seg.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Compare two fix-unit ids by their trailing numeric suffix.
+/// `fix-01` < `fix-02`, `fix-09` < `fix-10`, etc.  Lexical sort is
+/// wrong when ids reach double digits, hence the parse.
+fn is_strictly_greater(candidate: &str, baseline: &str) -> bool {
+    let cand_n = trailing_digits(candidate);
+    let base_n = trailing_digits(baseline);
+    match (cand_n, base_n) {
+        (Some(c), Some(b)) => c > b,
+        // If either side cannot be parsed, fall back to lexical so
+        // the snapshot still surfaces a hint instead of failing
+        // silently.
+        _ => candidate > baseline,
+    }
+}
+
+fn trailing_digits(s: &str) -> Option<u32> {
+    let idx = s.find('-')?;
+    s[idx + 1..].parse::<u32>().ok()
 }
 
 #[cfg(test)]
@@ -330,6 +579,7 @@ mod tests {
             loop_start_sha: None,
             plan_baseline_sha: None,
             projection_disabled: false,
+            fix_unit_state: None,
         };
         let block = snap.to_prompt_block();
         assert!(block.starts_with(ORCHESTRATOR_CONTEXT_HEADING));
@@ -372,6 +622,22 @@ mod tests {
         let mut t = Task::new("step-01".to_string(), 1);
         t.key = key.map(|s| s.to_string());
         t.description = description.map(|s| s.to_string());
+        t
+    }
+
+    fn fix_unit_task_with(
+        step_id: &str,
+        status: TaskStatus,
+    ) -> Task {
+        // Mirrors the projector-generated key shape
+        // `<plan>:step:<step_id>:<unit>-impl`.  We pick a stable
+        // plan name so the tests can group multiple fix-units under
+        // the same plan.
+        let mut t = Task::new(format!("fix-unit {step_id}"), 1);
+        t.key = Some(format!(
+            "ce-executor:test-plan:step:{step_id}:u1-impl"
+        ));
+        t.status = status;
         t
     }
 
@@ -419,5 +685,193 @@ mod tests {
             ..RuntimeStateSnapshot::default()
         };
         assert_eq!(snap.plan_name.as_deref(), Some("trusted-plan"));
+    }
+
+    // U3 (2026-07-01-002 plan) tests: fix_unit_state derivation and
+    // prompt-block rendering.
+
+    #[test]
+    fn fix_unit_state_returns_none_when_no_fix_tasks() {
+        // A plan with only non-fix tasks must not advertise a
+        // fix-phase.  Coordinator sees `(none)` and keeps its old
+        // logic.
+        let tasks = vec![
+            task_with(Some("ce-executor:test-plan:step-01:u1-impl"), None),
+        ];
+        assert!(derive_fix_unit_state(&tasks, &[]).is_none());
+    }
+
+    #[test]
+    fn fix_unit_state_marks_last_unit_with_plan_complete() {
+        let tasks = vec![
+            fix_unit_task_with("fix-01", TaskStatus::Closed),
+            fix_unit_task_with("fix-02", TaskStatus::Open),
+        ];
+        let state = derive_fix_unit_state(&tasks, &[]).expect("fix-unit state");
+        assert_eq!(state.total, 2);
+        assert_eq!(state.completed, vec!["fix-01".to_string()]);
+        assert_eq!(state.current.as_deref(), Some("fix-02"));
+        assert_eq!(state.next_expected.as_deref(), Some("plan.complete"));
+    }
+
+    #[test]
+    fn fix_unit_state_next_expected_is_work_ready_for_middle() {
+        let tasks = vec![
+            fix_unit_task_with("fix-01", TaskStatus::Closed),
+            fix_unit_task_with("fix-02", TaskStatus::Open),
+            fix_unit_task_with("fix-03", TaskStatus::Open),
+        ];
+        let state = derive_fix_unit_state(&tasks, &[]).expect("fix-unit state");
+        assert_eq!(state.total, 3);
+        assert_eq!(state.current.as_deref(), Some("fix-02"));
+        assert_eq!(
+            state.next_expected.as_deref(),
+            Some("work.ready(fix-03)")
+        );
+    }
+
+    #[test]
+    fn fix_unit_state_handles_double_digit_sorting() {
+        // Lexical sort would mis-rank `fix-10` below `fix-02`, so
+        // we must use numeric ordering.
+        let tasks = vec![
+            fix_unit_task_with("fix-02", TaskStatus::Open),
+            fix_unit_task_with("fix-10", TaskStatus::Open),
+            fix_unit_task_with("fix-01", TaskStatus::Closed),
+        ];
+        let state = derive_fix_unit_state(&tasks, &[]).expect("fix-unit state");
+        assert_eq!(state.total, 3);
+        assert_eq!(state.completed, vec!["fix-01".to_string()]);
+        assert_eq!(state.current.as_deref(), Some("fix-02"));
+        // After fix-02 we expect work.ready(fix-10), skipping the
+        // notional fix-03..fix-09 ids (the snapshot is descriptive,
+        // not prescriptive — the coordinator decides whether to
+        // spawn a fix-03).
+        assert_eq!(
+            state.next_expected.as_deref(),
+            Some("work.ready(fix-10)")
+        );
+    }
+
+    #[test]
+    fn fix_unit_state_handles_no_first_open_when_all_terminal() {
+        // Two terminal fix-units and nothing more → next_expected
+        // defaults to plan.complete (the loop is past fix-phase).
+        let tasks = vec![
+            fix_unit_task_with("fix-01", TaskStatus::Closed),
+            fix_unit_task_with("fix-02", TaskStatus::Failed),
+        ];
+        let state = derive_fix_unit_state(&tasks, &[]).expect("fix-unit state");
+        assert_eq!(state.completed, vec!["fix-01", "fix-02"]);
+        assert_eq!(state.current, None);
+        assert_eq!(state.next_expected.as_deref(), Some("plan.complete"));
+    }
+
+    #[test]
+    fn fix_unit_state_prompt_block_contains_all_fields() {
+        let snap = RuntimeStateSnapshot {
+            fix_unit_state: Some(FixUnitState {
+                total: 2,
+                completed: vec!["fix-01".to_string()],
+                current: Some("fix-02".to_string()),
+                next_expected: Some("plan.complete".to_string()),
+            }),
+            ..RuntimeStateSnapshot::default()
+        };
+        let block = snap.to_prompt_block();
+        assert!(block.contains("fix_unit_state:"), "block: {block}");
+        assert!(block.contains("total: 2"));
+        assert!(block.contains("completed: fix-01"));
+        assert!(block.contains("current: fix-02"));
+        assert!(block.contains("next_expected: plan.complete"));
+    }
+
+    #[test]
+    fn fix_unit_state_prompt_block_handles_no_fix_state() {
+        let snap = RuntimeStateSnapshot::default();
+        let block = snap.to_prompt_block();
+        assert!(block.contains("fix_unit_state: (none"));
+    }
+
+    #[test]
+    fn is_strictly_greater_handles_double_digits() {
+        assert!(is_strictly_greater("fix-10", "fix-02"));
+        assert!(!is_strictly_greater("fix-02", "fix-02"));
+        assert!(!is_strictly_greater("fix-01", "fix-10"));
+    }
+
+    #[test]
+    fn fix_id_from_key_extracts_canonical_fix_segment() {
+        assert_eq!(
+            fix_id_from_key("ce-executor:test-plan:step:fix-07:u1-impl"),
+            Some("fix-07".to_string())
+        );
+        // Legacy / odd shapes must not panic.
+        assert_eq!(fix_id_from_key("nonsense"), None);
+        assert_eq!(fix_id_from_key("ce-executor:plan:step:step-99:u1"), None);
+    }
+
+    #[test]
+    fn progress_completed_steps_takes_precedence_over_task_status() {
+        // P1-2 (2026-07-01-002 audit): when progress.md lists fix-02
+        // as completed but tasks.jsonl still has it Open, we must
+        // trust progress.  Otherwise the coordinator would emit a
+        // stray work.ready(fix-03) during the brief window between
+        // test.passed landing and the projector closing the task.
+        let tasks = vec![
+            fix_unit_task_with("fix-01", TaskStatus::Closed),
+            // status Open: simulates the race window.
+            fix_unit_task_with("fix-02", TaskStatus::Open),
+        ];
+        let progress_done = vec!["fix-02".to_string()];
+        let state =
+            derive_fix_unit_state(&tasks, &progress_done).expect("fix-unit state");
+        assert_eq!(state.completed, vec!["fix-01", "fix-02"]);
+        assert_eq!(state.current, None);
+        assert_eq!(state.next_expected.as_deref(), Some("plan.complete"));
+    }
+
+    #[test]
+    fn progress_completed_steps_partial_progress_is_mirrored() {
+        // Only fix-01 is in progress; fix-02 stays current even
+        // though task status is also Open for both.  The two Open
+        // entries must NOT both be promoted to completed — only
+        // the one progress.md acknowledges.  With total=2 and
+        // current=last_id, `next_expected` is `plan.complete`.
+        let tasks = vec![
+            fix_unit_task_with("fix-01", TaskStatus::Open),
+            fix_unit_task_with("fix-02", TaskStatus::Open),
+        ];
+        let progress_done = vec!["fix-01".to_string()];
+        let state =
+            derive_fix_unit_state(&tasks, &progress_done).expect("fix-unit state");
+        assert_eq!(state.completed, vec!["fix-01"]);
+        assert_eq!(state.current.as_deref(), Some("fix-02"));
+        // total=2, current=last → must emit plan.complete.
+        assert_eq!(state.next_expected.as_deref(), Some("plan.complete"));
+    }
+
+    #[test]
+    fn progress_completed_steps_ignores_non_fix_entries() {
+        // Non-fix-unit entries in progress.md (e.g. step-01) must
+        // not pollute the fix-unit completed list.
+        let tasks = vec![fix_unit_task_with("fix-01", TaskStatus::Open)];
+        let progress_done = vec![
+            "step-01".to_string(),
+            "fix-01".to_string(),
+            "trivial".to_string(),
+        ];
+        let state =
+            derive_fix_unit_state(&tasks, &progress_done).expect("fix-unit state");
+        assert_eq!(state.completed, vec!["fix-01"]);
+    }
+
+    #[test]
+    fn fix_id_from_string_accepts_bare_fix_nn() {
+        assert_eq!(fix_id_from_string("fix-02"), Some("fix-02".to_string()));
+        assert_eq!(fix_id_from_string(" fix-02 "), Some("fix-02".to_string()));
+        assert_eq!(fix_id_from_string("step-02"), None);
+        assert_eq!(fix_id_from_string("fix-ab"), None);
+        assert_eq!(fix_id_from_string(""), None);
     }
 }

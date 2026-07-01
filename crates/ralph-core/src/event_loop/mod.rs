@@ -134,7 +134,7 @@ use crate::event_policy::{PolicyDecision, PolicyRuntimeState, check_completion_g
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::execution_contract::{
     DefaultGitEvidenceProvider, ExecutionContractDecision, ExecutionContractFinding,
-    validate_execution_contract,
+    run_execution_contract_soft_checks, validate_execution_contract,
 };
 use crate::hat_lifecycle::{ActivationKey, ActivationLifecycleTracker, SystemTimeClock};
 use crate::hat_registry::HatRegistry;
@@ -501,6 +501,80 @@ fn build_stage_pipeline_from_config(
 /// removed in U11-T4 (post-commit wiring); the recovery-envelope writer
 /// `Self::log_workflow_guard_rejection` survives because it is
 /// implementation-agnostic and is reused by the unified handler.
+
+/// P1-1 (2026-07-01-002 audit): parse the `step` field out of a
+/// `work.ready` payload and return it when (a) it claims to be a
+/// `fix-NN` step and (b) the id is **not** present in
+/// `fix_unit_known`.  Returns `None` for non-fix-unit steps,
+/// malformed payloads, or already-known ids — those are not in
+/// scope for the fix-unit range guard.
+fn unknown_fix_step(payload: Option<&str>, fix_unit_known: &std::collections::BTreeSet<String>) -> Option<String> {
+    let payload = payload?;
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let step_id = match value.get("step")? {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(map) => map.get("id")?.as_str()?.to_string(),
+        _ => return None,
+    };
+    if !step_id.starts_with("fix-") {
+        return None;
+    }
+    if fix_unit_known.contains(&step_id) {
+        return None;
+    }
+    Some(step_id)
+}
+
+/// P1-1 (2026-07-01-002 audit): shape the `task.resume` payload
+/// for JSONL events read from `apply_emit_gate`.  The JSONL
+/// `Event` only carries `topic` / `hat` / `payload` — there is
+/// no `source` field, so `target` is sourced from `hat`.
+fn build_invalid_step_target_resume_payload_for_jsonl(
+    finding: &crate::execution_contract::ExecutionContractFinding,
+    original_event: &crate::event_reader::Event,
+    known_fix_units: &[String],
+) -> String {
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "stage".into(),
+        serde_json::Value::String("FixUnitRangeGuard".into()),
+    );
+    payload.insert(
+        "original_topic".into(),
+        serde_json::Value::String(original_event.topic.clone()),
+    );
+    payload.insert(
+        "violation".into(),
+        serde_json::Value::String("invalid_step_target".into()),
+    );
+    payload.insert(
+        "reason_code".into(),
+        serde_json::Value::String(
+            crate::validation::ReasonCode::CONTRACT_INVALID_STEP_TARGET.to_string(),
+        ),
+    );
+    if let Some(hat) = original_event.hat.as_ref() {
+        payload.insert(
+            "target".into(),
+            serde_json::Value::String(hat.clone()),
+        );
+    }
+    payload.insert(
+        "known_fix_units".into(),
+        serde_json::Value::Array(
+            known_fix_units
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
+        ),
+    );
+    payload.insert(
+        "guidance".into(),
+        serde_json::Value::String(finding.message.clone()),
+    );
+    serde_json::to_string(&serde_json::Value::Object(payload))
+        .unwrap_or_else(|_| "{}".to_string())
+}
 
 impl EventLoop {
     /// 2026-07-01-001 plan U1: collect the set of topics the
@@ -9092,7 +9166,75 @@ impl EventLoop {
             let tasks_path = tasks_path_owned.as_path();
 
             let mut accepted: Vec<JsonlEvent> = Vec::with_capacity(events.len());
+            // P1-1 (2026-07-01-002 audit): collect the set of
+            // `fix-NN` ids already known to the projector so that a
+            // stale coordinator emitting `work.ready(fix-XX)` for an
+            // id outside the chain is rejected before the contract
+            // check produces a misleading finding.  When the
+            // projector is disabled the gate is a no-op — the
+            // contract pipeline still applies, but the range
+            // guard's `fix-unit` set is empty so unknown-fix emits
+            // pass through.  This preserves the historical
+            // behaviour for presets that opt out of state
+            // projection.
+            let fix_unit_known: std::collections::BTreeSet<String> =
+                match self.state.state_projection.as_ref() {
+                    Some(projector) => crate::runtime_state::fix_unit_known_ids(projector),
+                    None => std::collections::BTreeSet::new(),
+                };
+            // Re-usable insertion point for the fix-unit range
+            // finding.  Constructed fresh per iteration so the
+            // closure captures the right `&event`.
             for event in events {
+                // Range guard BEFORE the contract check: when the
+                // payload targets a `fix-NN` step that the
+                // projector has never seen, drop the event as
+                // `invalid_step_target`.  We skip the check for any
+                // other topic (e.g. `fix.applied`, `work.done`,
+                // `plan.complete`) and for fix-unit events whose
+                // step is already known.
+                if event.topic.as_str() == "work.ready" {
+                    // The range guard only fires when the
+                    // projector is active (it has populated
+                    // `tasks.jsonl`).  When the chain is genuinely
+                    // empty — e.g. before the first fix-unit is
+                    // dispatched — we let the event through so the
+                    // contract pipeline can decide.  This
+                    // preserves the historical behaviour when
+                    // state projection is disabled (empty chain
+                    // means "no information, accept everything").
+                    let guard_active = self
+                        .state
+                        .state_projection
+                        .as_ref()
+                        .is_some();
+                    if guard_active {
+                        if let Some(rejected_step) =
+                            unknown_fix_step(event.payload.as_deref(), &fix_unit_known)
+                        {
+                            warn!(
+                                topic = %event.topic,
+                                step = %rejected_step,
+                                "fix-unit step outside known chain — rejecting work.ready and surfacing task.resume"
+                            );
+                            // Synthesize an ExecutionContractFinding so
+                            // the downstream rejection machinery (which
+                            // already knows how to publish a `task.resume`
+                            // with the right provenance) treats this
+                            // exactly like any other contract violation.
+                            self.push_fix_unit_range_finding(
+                                &event,
+                                &rejected_step,
+                                &fix_unit_known,
+                            );
+                            // Skip the rest of the contract pipeline
+                            // for the rejected event; the rejection
+                            // machinery above has already published the
+                            // diagnostic + `task.resume`.
+                            continue;
+                        }
+                    }
+                }
                 // Check if this topic has a contract rule
                 if let Some(rule) = contracts.rules.get(event.topic.as_str()) {
                     let proto_event =
@@ -9127,6 +9269,25 @@ impl EventLoop {
                     let diagnostic_topic_owned = rule.reject.diagnostic_topic.clone();
                     match decision {
                         ExecutionContractDecision::Accept => {
+                            // U2 (2026-07-01-002 plan): run soft checks
+                            // (e.g. fix-unit commit footer) on accepted
+                            // events.  These never flip an Accept into a
+                            // Reject; instead they surface diagnostics so
+                            // the agent can self-correct next iteration
+                            // (see `check_fix_unit_commit_footer`).
+                            let soft_diagnostics = run_execution_contract_soft_checks(
+                                &proto_event,
+                                workspace_root,
+                                &DefaultGitEvidenceProvider,
+                                self.state.loop_start_sha.as_deref(),
+                            );
+                            for diag in &soft_diagnostics {
+                                warn!(
+                                    topic = %event.topic,
+                                    step = ?diag.kind,
+                                    "Execution contract soft-check diagnostic"
+                                );
+                            }
                             accepted.push(event);
                         }
                         ExecutionContractDecision::Reject(findings) => {
@@ -11081,6 +11242,65 @@ impl EventLoop {
     /// running the pipeline twice. The first-pass
     /// outcome is stashed in `validated_gate_outcomes`
     /// (keyed by the JSONL event's index — see
+    /// P1-1 (2026-07-01-002 audit): when the coordinator emits a
+    /// `work.ready(fix-XX)` whose `fix-XX` is **not** in the
+    /// projector-known chain, reject it with a synthetic
+    /// `ExecutionContractFinding` so the downstream rejection
+    /// machinery publishes a `task.resume` with the right
+    /// provenance (the source hat) and appends a recovery
+    /// envelope to the ledger.
+    ///
+    /// This is intentionally **not** a stage — the check runs
+    /// before the contract pipeline and only matches a single
+    /// topic (`work.ready`).  Adding a stage for one topic would
+    /// push an unrelated layer into every other emit path.
+    ///
+    /// `fix_unit_known` carries the closure's projection so it
+    /// doesn't need `&self`.  Free function rather than method to
+    /// avoid the borrow conflict with the surrounding `for event
+    /// in events` loop.
+    fn push_fix_unit_range_finding(
+        &mut self,
+        event: &crate::event_reader::Event,
+        rejected_step: &str,
+        fix_unit_known: &std::collections::BTreeSet<String>,
+    ) {
+        use crate::execution_contract::{ExecutionContractFinding, ExecutionContractViolationKind};
+        let known_list: Vec<String> = fix_unit_known.iter().cloned().collect();
+        let source_hat: Option<String> = event.hat.clone();
+        let finding = ExecutionContractFinding {
+            kind: ExecutionContractViolationKind::InvalidStepTarget {
+                step: rejected_step.to_string(),
+                known_fix_units: known_list.clone(),
+            },
+            message: format!(
+                "work.ready requested fix-unit `{}` which is not in the known fix-unit chain ({}). \
+                 The chain has already exhausted or the id is from a stale plan; re-emit with an id from `{}` or finish with `plan.complete`.",
+                rejected_step,
+                if known_list.is_empty() { "(none yet)".to_string() } else { known_list.join(", ") },
+                if known_list.is_empty() { "<none>".to_string() } else { format!("{{{}}}", known_list.join(", ")) },
+            ),
+            topic: event.topic.clone(),
+            source_hat: source_hat.clone(),
+        };
+        tracing::warn!(
+            finding = ?finding.kind,
+            step = %rejected_step,
+            "fix-unit range reject"
+        );
+        let payload_json = build_invalid_step_target_resume_payload_for_jsonl(
+            &finding,
+            event,
+            &known_list,
+        );
+        self.bus.publish(ralph_proto::Event::new("task.resume", payload_json));
+        self.diagnostics.log_execution_contract_rejections(
+            0,
+            source_hat.as_deref().unwrap_or("ralph"),
+            std::slice::from_ref(&finding),
+        );
+    }
+
     /// `apply_emit_gate`).
     fn apply_emit_gate_on_validated(
         &mut self,
