@@ -84,11 +84,13 @@ emit 任何 step handoff 事件前，确认 payload 内部一致：
 - `task_id` 必须来自当前 loop 的真实任务列表（`ralph tools task list`），不要手写、不要复用已闭合 task 的 id。
 - 聚合字段（如 `completed_steps`）必须与已落盘的事件流一致；不要在 `plan.complete` 中宣称某个 step 已完成而事件流里缺少它。
 
-**isolated mode 重发规则**
+**isolated mode 单业务事件 / 重发规则**
 
-- isolated mode 下，同一 turn 内重复 emit 同一 business topic 会被静默丢弃。
-- 如果事件发出去后没有产生预期推进，先检查 schema 和字段自洽，不要立即重发同一 topic。
-- 重发前必须收到新的 `task.resume` 或进入新的 turn。
+- isolated mode 下，一个 hat 每个 activation（turn）只接受 **1 个业务事件**：运行时只保留你这一回合**最先发出**的那个业务事件，**其后发出的全部静默丢弃**——**无论 topic 是否相同**。
+- 因此**绝不要在你真正要发的事件之前先发别的事件**。例如要发 `plan.complete` 收尾，就不要先发一个 `work.ready`——那个 `work.ready` 会占掉唯一名额，你的 `plan.complete` 会被丢掉，loop 收不到收尾信号。
+- 正确做法：**一个 activation 只发一个业务事件，发完立即停止**，不要在同一回合补发、重发或追加任何其它业务事件。
+- 事件被丢弃时运行时会向你注入一条 `task.resume`（reason=`isolated_extra_business_event_dropped`）提示重发；收到后，下一个 turn **只发一个**你真正想发的事件即可。
+- 如果事件发出后没有产生预期推进，先检查 schema 与字段自洽，**不要立即重发**；等收到新的 `task.resume` 或进入新的 turn 再发。
 
 **NULL payload 拒收白名单**（`crates/ralph-core/src/event_policy.rs:829-839` `NULL_PAYLOAD_REJECT_TOPICS`）：以下 9 个 topic 不接受空 payload（`[PAYLOAD]` 省略 + 无 `-j`）— 必须传 JSON object：
 

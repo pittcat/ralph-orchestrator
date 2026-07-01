@@ -863,6 +863,12 @@ hats:
             - Stop.
          5. **If `current_index == total_fix_units`:**
             - Publish `plan.complete`.
+            - **EMIT EXACTLY ONE EVENT THIS TURN:** `plan.complete` must be the
+              ONLY business event you emit this activation. Do NOT precede it with
+              `work.ready` or any other emit — isolated mode keeps only the FIRST
+              business event per turn and silently drops the rest, so a stray
+              earlier emit causes your `plan.complete` to be discarded and the
+              loop to stall.
             - When emitting `plan.complete`, set `step` to the current
               `fix-NN` value. Without `step`, `plan_gate` cannot apply the fix-*
               exemption and will reject the event.

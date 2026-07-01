@@ -4,15 +4,22 @@
 # U3 update: in isolated mode, the completion promise and other agent terminal
 # topics (review verdicts, report completion) are no longer treated as
 # orchestrator control topics. They go through the normal `can_publish` +
-# single-event budget path, so:
-#   - an isolated hat that has not declared the completion promise in its
-#     `publishes` list cannot terminate the loop (it would be rejected as
-#     scope_violation).
-#   - the second business event in a single turn is dropped, even when
-#     it is the completion promise.
+# single-event budget path, so the second business event in a single turn is
+# dropped, even when it is the completion promise.
+#
+# 2026-06-30 backpressure update: when the single-business-event budget drops
+# an extra in-scope event, the runtime now injects ONE hat-targeted
+# `task.resume` (reason=`isolated_extra_business_event_dropped`) back to the
+# source hat. That recovery re-activates the over-emitting hat on the NEXT
+# turn so it can re-emit EXACTLY ONE event — without it the loop silently
+# stalled (the real incident dropped 30 `plan.complete` behind a stray
+# `work.ready` and hung ~15 minutes). This scenario now proves the recovery
+# round-trip: strategist over-emits in turn 1, is re-activated by the recovery
+# resume in turn 2 (its prompt carries the "EXACTLY ONE business event"
+# instruction), and then completes correctly.
 
 name: isolated_boundary_violation
-description: Isolated mode drops extra business events beyond the first (U3 boundary)
+description: Isolated mode drops extra business events beyond the first, then re-activates the hat via a targeted recovery resume
 
 config:
   prompt_file: PROMPT.md
@@ -24,13 +31,18 @@ config:
       publishes:
         - experiment.planned
         - experiment.ready
+        - LOOP_COMPLETE
   event_loop:
     execution_mode: isolated
     completion_promise: LOOP_COMPLETE
 
-# Run 1: strategist writes experiment.planned (accepted) and
-# experiment.ready in the same turn. experiment.ready is dropped.
-# Strategist does NOT publish LOOP_COMPLETE.
+# Turn 1: strategist writes experiment.planned (accepted, first business event)
+# and experiment.ready in the same turn. experiment.ready is dropped by the
+# single-business-event budget; the runtime injects a recovery `task.resume`
+# targeted at strategist.
+# Turn 2: strategist is re-activated by that recovery resume (NOT ralph) and
+# emits a single LOOP_COMPLETE, which it is now authorized to publish, closing
+# the loop.
 mock_responses:
   - |
     <event topic="experiment.planned">
@@ -48,4 +60,15 @@ expected:
   iterations: 2
   events:
     - topic: experiment.planned
+  # The dropped second business event must never be accepted.
+  absent_events:
+    - topic: experiment.ready
+  # Fix guard: the recovery resume must reach strategist's turn-2 prompt. If
+  # the backpressure injection were removed, ralph (not strategist) would run
+  # turn 2 and strategist's last prompt would be turn 1 (no recovery text),
+  # failing this assertion.
+  prompt_contains:
+    - hat: strategist
+      substrings:
+        - "EXACTLY ONE business event"
   completion: true

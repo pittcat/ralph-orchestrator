@@ -7381,6 +7381,13 @@ impl EventLoop {
             //   2026-06-15-003 U1) — the second event in the pair
             //   does not consume a fresh slot.
             let mut non_wave_business_event_accepted = false;
+            // 2026-06-30 per-turn-budget backpressure: emit at most ONE
+            // hat-targeted `task.resume` per turn when extra business
+            // events are dropped by the single-business-event budget.
+            // The real incident dropped 30 `plan.complete` events behind
+            // a stray `work.ready`; without this guard each drop would
+            // inject a duplicate resume (event storm).
+            let mut per_turn_budget_feedback_injected = false;
             let mut accepted_wave_id: Option<String> = None;
             // 2026-06-13-004 P0 #4 review fix (U7 envelope disk
             // storm): per-turn dedup set for scope_drop retry_keys.
@@ -7950,6 +7957,96 @@ impl EventLoop {
                         ),
                     );
                     self.bus.publish(diagnostic);
+
+                    // 2026-06-30 backpressure fix: a silently-dropped
+                    // extra business event previously left the agent
+                    // with zero actionable feedback. In a real run the
+                    // coordinator emitted a stray `work.ready` first plus
+                    // 30 correct `plan.complete` — the stray event
+                    // consumed the only slot, all 30 `plan.complete` were
+                    // silently dropped, and the loop stalled ~15 minutes
+                    // with no completion signal. Mirror the out-of-scope
+                    // drop path: inject ONE hat-targeted `task.resume`
+                    // this turn so the agent learns to re-emit EXACTLY
+                    // one business event, and push a synthetic
+                    // `task.resume` into `accepted` so the turn is not
+                    // reported as empty (which would itself trip the
+                    // stall detector). This is feedback-only — no
+                    // business event reaches the bus that wouldn't today;
+                    // the dropped event stays dropped.
+                    if !per_turn_budget_feedback_injected {
+                        // Reuse the U2 circuit breaker so a hat that keeps
+                        // over-emitting eventually stops getting resumes
+                        // instead of looping forever. Record BEFORE the
+                        // exhaustion check so the count includes this
+                        // attempt (matches the out-of-scope path).
+                        //
+                        // The key MUST keep the hat in segment 1
+                        // (`prefix:{hat}:suffix`) using the SAME
+                        // `normalize_part` form that
+                        // `clear_rejection_keys_for_hat` matches on (it
+                        // is invoked when a hat publishes a legal event —
+                        // see the process_output handoff-clear site). A
+                        // key with the hat in segment 0 is never cleared,
+                        // so the counter would accumulate monotonically
+                        // across the whole loop and trip a PERMANENT fuse
+                        // after `U2_REJECTION_RETRY_LIMIT` cumulative
+                        // over-emits, silently disabling the recovery
+                        // resume and re-introducing the very stall this
+                        // fix removes. Clearing on success keeps the fuse
+                        // scoped to *consecutive* over-emit turns.
+                        let key = format!(
+                            "isolated_budget:{}:per_turn",
+                            crate::diagnosis::normalize_part(isolated_hat.as_str())
+                        );
+                        let count = self.state.record_rejection_key(&key);
+                        if self.state.rejection_key_is_exhausted(&key) {
+                            // Breaker tripped: fall back to diagnostic-only.
+                            warn!(
+                                key = %key,
+                                hat = %isolated_hat.as_str(),
+                                topic = %event.topic,
+                                count = count,
+                                "Isolated per-turn budget circuit breaker: no more task.resume injections for key '{}'",
+                                key
+                            );
+                        } else {
+                            let free_form = format!(
+                                "Isolated mode dropped an extra business event ('{}') this turn — only the FIRST business event per activation is kept; everything emitted after it is discarded regardless of topic. Re-emit EXACTLY ONE business event (the one you actually intend, e.g. plan.complete) and nothing else.",
+                                event.topic
+                            );
+                            let payload = enrich_task_resume_payload(
+                                &free_form,
+                                "isolated_extra_business_event_dropped",
+                                Some(isolated_hat.as_str()),
+                                Some(RejectionKind::ContractViolation),
+                            );
+                            self.bus.publish(
+                                Event::new("task.resume", payload.clone())
+                                    .with_target(isolated_hat.clone()),
+                            );
+                            // Push a synthetic `task.resume`
+                            // (`event_reader::Event`) into `accepted` so
+                            // the JSONL-derived `accepted_events` (and thus
+                            // `had_events`) sees the recovery and the turn
+                            // is not treated as empty. Same struct shape as
+                            // the out-of-scope path above.
+                            let resume_jsonl = crate::event_reader::Event {
+                                topic: "task.resume".to_string(),
+                                payload: Some(payload),
+                                ts: chrono::Utc::now().to_rfc3339(),
+                                hat: None,
+                                triggered: Some(isolated_hat.as_str().to_string()),
+                                source: None,
+                                wave_id: None,
+                                wave_index: None,
+                                wave_total: None,
+                                system_injected: None,
+                            };
+                            accepted.push(resume_jsonl);
+                            per_turn_budget_feedback_injected = true;
+                        }
+                    }
                 } else {
                     accepted.push(event);
                     match event_wave_id.as_deref() {
