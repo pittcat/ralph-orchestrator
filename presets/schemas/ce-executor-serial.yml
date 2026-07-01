@@ -293,9 +293,39 @@ schemas:
     #   - fix budget exhausted / fix_exhausted (fixer hard cap)
     #   - dimension_failed / all_dimensions_failed (review dimension)
     #   - any other reason not listed as recoverable
+    #
+    # 2026-07-01-001 plan U5: lock the recoverable reasons
+    # with `allowed_values` so narrative prefix matching
+    # (`progress_md_validation_stale`, `stall_no_events
+    # recovery: ...`) can no longer leak through. The
+    # `progress_md_validation_stale` value used by the
+    # 175407 run is intentionally absent — it was never in
+    # the recoverable whitelist and the schema now refuses
+    # to accept it. Anything outside this list routes to
+    # hard-fail per the comment above; shipper's strict
+    # exact-match gate (see preset_lint/strict_reason_routing)
+    # already enforces that comparison.
     required_fields:
       - reason
     payload: json_object
+    allowed_values:
+      reason:
+        - loop_stalled_max_iterations
+        - steward_escalation
+        - review_terminal_drift
+        - unit_failed
+        - partial_units_done
+        - review_failed
+        - work_failed
+        - fix_exhausted
+        - fix_budget_exhausted
+        - dimension_failed
+        - all_dimensions_failed
+        - plan_file_not_found
+        - plan_file_unreadable
+        - plan_missing_implementation_units
+        - plan_content_empty_or_placeholder
+        - progress_md_invalid
 
   loop.cancel:
     required_fields:

@@ -746,6 +746,14 @@ hats:
           `ralph tools task create` first to seed the ledger, then
           read back the canonical `task_id` before publishing
           `work.ready`.
+      - **2026-07-01-001 plan U4 — fix-unit `task_id` MUST be helper-derived**:
+        Hand-written `task-{unix_ts}-{4hex}` ids with stale (e.g. 2025)
+        timestamps are now rejected at the projection boundary by
+        `is_valid_task_id_format` (the validator window-checks the
+        embedded unix_ts against the current loop time). Always
+        call `ralph tools task create` (or the underlying
+        `Task::fix_unit_task_id` helper) to mint the `task_id` —
+        never hand-compose the suffix.
       - **Trivial mode**: create one summary task, key `ce-executor:{plan_name}:trivial`
 
       ### Task Split Heuristics
@@ -863,15 +871,32 @@ hats:
             - Stop.
          5. **If `current_index == total_fix_units`:**
             - Publish `plan.complete`.
-            - **EMIT EXACTLY ONE EVENT THIS TURN:** `plan.complete` must be the
+            - **EMIT EXACTLY ONE EVENT THIS TURN (HARD RULE — 2026-07-01-001 U1+U3):** `plan.complete` must be the
               ONLY business event you emit this activation. Do NOT precede it with
               `work.ready` or any other emit — isolated mode keeps only the FIRST
               business event per turn and silently drops the rest, so a stray
               earlier emit causes your `plan.complete` to be discarded and the
-              loop to stall.
+              loop to stall. The runtime's
+              `CoordinatorDecisionGateStage` will rewrite any
+              stray `work.ready` carrying `step.fix-NN.last_in_phase=true`
+              into `plan.complete` and the U1 budget now treats
+              terminal topics as first-class so the rewritten event
+              wins the per-turn slot.
             - When emitting `plan.complete`, set `step` to the current
               `fix-NN` value. Without `step`, `plan_gate` cannot apply the fix-*
               exemption and will reject the event.
+            - **READ `## ORCHESTRATOR STATE` FIRST (HARD RULE — 2026-07-01-001 U6):**
+              Every coordinator prompt now carries an
+              `## ORCHESTRATOR STATE` block with `expected_event`,
+              `last_in_phase`, and the plan/fix topology totals
+              computed by the engine. Use the engine's directive —
+              **do NOT count `### U{N}.` headings in `plan.md` /
+              `fix-plan.md` yourself**; the engine has already
+              scanned the plan at loop start and the fix-plan
+              when `review.complete` landed. The engine's
+              directive and the manual count must agree; if they
+              don't, trust the engine and surface the divergence
+              in your reasoning.
             - Stop.
 
          This gate is the primary defence against the 2026-06-30 P0-C regression,

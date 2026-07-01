@@ -550,10 +550,18 @@ hats:
 }
 
 /// U3 boundary: an isolated hat that publishes a legal business event
-/// first, then a declared completion promise in the same turn —
-/// the completion is the second business event and must be
-/// rejected with a boundary_violation diagnostic. The first
-/// event is accepted, completion is NOT honored.
+/// first, then a declared completion promise in the same turn.
+///
+/// 2026-07-01-001 plan U1: the runtime's terminal-priority
+/// budget policy makes the completion promise displace the
+/// earlier non-terminal business event — the completion
+/// is admitted, the earlier event is dropped, and the
+/// completion is honored. This is the inverse of the
+/// pre-U1 behaviour where the second event was rejected
+/// with `event.isolation.boundary_violation`. The change
+/// is intentional: it stops the per-turn stray event from
+/// eating the slot a terminal event needs (the exact
+/// primary-20260630-175407 P0-2 failure mode).
 #[test]
 fn test_u3_isolated_hat_business_then_completion_boundary_violation() {
     use tempfile::TempDir;
@@ -584,13 +592,16 @@ hats:
     write_event_with_hat_to_jsonl(&events_path, "LOOP_COMPLETE", "Done", "executor");
 
     let result = event_loop.process_events_from_jsonl().unwrap();
+    // The completion event is a terminal admission and
+    // honours through `accepted_log_events`, not
+    // `validated_events` (the latter tracks pre-completion
+    // acceptances only). Pre-U1 the second event was
+    // rejected with `boundary_violation`; post-U1 the
+    // completion is honored and `completion_requested`
+    // flips true.
     assert!(
-        result.had_events,
-        "U3 boundary: first business event must be accepted"
-    );
-    assert!(
-        !event_loop.state.completion_requested,
-        "U3 boundary: second event (completion) must be rejected — completion must NOT be honored"
+        event_loop.state.completion_requested,
+        "U3 boundary (post-U1): the completion must be honored — terminal topics have priority over non-terminal business events in the per-turn budget"
     );
     let topics: Vec<String> = captured
         .lock()
@@ -601,8 +612,8 @@ hats:
     assert!(
         topics
             .iter()
-            .any(|t| t == "event.isolation.boundary_violation"),
-        "U3 boundary: expected event.isolation.boundary_violation diagnostic; got topics: {topics:?}"
+            .any(|t| t == "event.isolation.terminal_priority"),
+        "U3 boundary (post-U1): expected event.isolation.terminal_priority diagnostic; got topics: {topics:?}"
     );
 }
 

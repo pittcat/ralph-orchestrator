@@ -192,12 +192,100 @@ impl CoordinatorDecisionGateStage {
     /// emit. The rewrite happens in-place on the event so
     /// the rest of the pipeline sees the new topic.
     /// Returns `true` when a rewrite happened.
+    ///
+    /// 2026-07-01-001 plan U3: when the rewrite targets
+    /// `plan.complete`, the helper now also **fills in the
+    /// payload fields** the runtime's `plan.complete`
+    /// schema expects. Without this, the prior behaviour
+    /// left the event with a `step` blob but no
+    /// `plan_name` / `task_id` / `completed_steps`, which
+    /// downstream stages (terminal ledger commit, report
+    /// builder) silently dropped. The fill uses values
+    /// already present in the payload; missing keys are
+    /// left absent so the schema can still reject a
+    /// genuinely malformed rewrite.
     pub fn rewrite_work_ready_topic(event: &mut Event) -> bool {
         if event.topic.as_str() != "work.ready" {
             return false;
         }
         let class = classify_work_ready(&event.payload);
         if let Some(new_topic) = topic_for_phase(class) {
+            if new_topic == "plan.complete" {
+                // U3: enrich the payload so the terminal
+                // stage accepts the rewritten event. We
+                // borrow the existing payload, augment the
+                // JSON object, and write the new value back.
+                if let Ok(mut value) =
+                    serde_json::from_str::<serde_json::Value>(&event.payload)
+                {
+                    if let Some(obj) = value.as_object_mut() {
+                        // `plan_name` is already in the payload
+                        // for `work.ready(fix-NN, last_in_phase)`;
+                        // surface it under the canonical key
+                        // expected by the terminal stage.
+                        if !obj.contains_key("plan_name") {
+                            if let Some(pn) = obj
+                                .get("plan")
+                                .and_then(|v| v.as_str())
+                                .or_else(|| {
+                                    obj.get("planName").and_then(|v| v.as_str())
+                                })
+                            {
+                                obj.insert(
+                                    "plan_name".to_string(),
+                                    serde_json::Value::String(pn.to_string()),
+                                );
+                            }
+                        }
+                        // `task_id` flows through unchanged when
+                        // present (the projector expects the
+                        // same id on `plan.complete`).
+                        if !obj.contains_key("task_id") {
+                            if let Some(tid) =
+                                obj.get("taskId").and_then(|v| v.as_str())
+                            {
+                                obj.insert(
+                                    "task_id".to_string(),
+                                    serde_json::Value::String(tid.to_string()),
+                                );
+                            }
+                        }
+                        // `completed_steps` defaults to the
+                        // rewritten step id so the report
+                        // builder can mark the chain
+                        // finished.
+                        if !obj.contains_key("completed_steps") {
+                            if let Some(step_str) =
+                                obj.get("step").and_then(|v| v.as_str())
+                            {
+                                obj.insert(
+                                    "completed_steps".to_string(),
+                                    serde_json::Value::Array(vec![
+                                        serde_json::Value::String(step_str.to_string()),
+                                    ]),
+                                );
+                            } else if let Some(step_obj) =
+                                obj.get("step").and_then(|v| v.as_object())
+                            {
+                                if let Some(id) = step_obj
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    obj.insert(
+                                        "completed_steps".to_string(),
+                                        serde_json::Value::Array(vec![
+                                            serde_json::Value::String(id.to_string()),
+                                        ]),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if let Ok(serialized) = serde_json::to_string(&value) {
+                        event.payload = serialized;
+                    }
+                }
+            }
             event.topic = ralph_proto::Topic::new(new_topic);
             return true;
         }
@@ -339,5 +427,63 @@ mod tests {
             classify_work_ready(r#"{"step":{"id":"fix-02","last_in_phase":true}}"#),
             PhaseClass::FixUnitLast
         );
+    }
+
+    // 2026-07-01-001 plan U3: when the rewrite targets
+    // `plan.complete`, the helper must enrich the payload
+    // so the terminal stage accepts the event. The tests
+    // below cover three scenarios:
+    //   1. payload already has all keys -> no change
+    //   2. payload has alias keys -> helper normalises them
+    //   3. payload is missing keys -> helper fills in
+    //      `completed_steps` from the `step.id`
+
+    #[test]
+    fn u3_rewrite_preserves_already_complete_plan_payload() {
+        let mut e = event("work.ready");
+        e.payload = r#"{"step":{"id":"fix-02","last_in_phase":true},"plan_name":"p","task_id":"t-1","completed_steps":["fix-01"]}"#.to_string();
+        let _ = CoordinatorDecisionGateStage::rewrite_work_ready_topic(&mut e);
+        assert_eq!(e.topic.as_str(), "plan.complete");
+        // Existing `completed_steps` is preserved (the
+        // chain ran fix-01 then fix-02, so the report
+        // builder wants both).
+        assert!(e.payload.contains("\"fix-01\""));
+        assert!(e.payload.contains("\"plan_name\":\"p\""));
+    }
+
+    #[test]
+    fn u3_rewrite_fills_completed_steps_from_step_id() {
+        let mut e = event("work.ready");
+        e.payload = r#"{"step":{"id":"fix-02","last_in_phase":true},"task_id":"t-1"}"#.to_string();
+        let _ = CoordinatorDecisionGateStage::rewrite_work_ready_topic(&mut e);
+        assert_eq!(e.topic.as_str(), "plan.complete");
+        let v: serde_json::Value = serde_json::from_str(&e.payload).unwrap();
+        assert_eq!(
+            v.get("completed_steps").and_then(|c| c.as_array()),
+            Some(&vec![serde_json::Value::String("fix-02".to_string())])
+        );
+        assert_eq!(v.get("task_id").and_then(|t| t.as_str()), Some("t-1"));
+    }
+
+    #[test]
+    fn u3_rewrite_normalises_alias_keys() {
+        let mut e = event("work.ready");
+        e.payload = r#"{"step":{"id":"fix-02","last_in_phase":true},"plan":"p","taskId":"t-1"}"#.to_string();
+        let _ = CoordinatorDecisionGateStage::rewrite_work_ready_topic(&mut e);
+        let v: serde_json::Value = serde_json::from_str(&e.payload).unwrap();
+        assert_eq!(v.get("plan_name").and_then(|p| p.as_str()), Some("p"));
+        assert_eq!(v.get("task_id").and_then(|t| t.as_str()), Some("t-1"));
+    }
+
+    #[test]
+    fn u3_rewrite_keeps_work_ready_for_mid_step() {
+        let mut e = event("work.ready");
+        e.payload = r#"{"step":{"id":"fix-01","last_in_phase":false}}"#.to_string();
+        let original = e.payload.clone();
+        assert!(!CoordinatorDecisionGateStage::rewrite_work_ready_topic(
+            &mut e
+        ));
+        assert_eq!(e.topic.as_str(), "work.ready");
+        assert_eq!(e.payload, original);
     }
 }

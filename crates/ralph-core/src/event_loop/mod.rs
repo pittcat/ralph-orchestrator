@@ -3,6 +3,12 @@
 //! The event loop coordinates the execution of hats via pub/sub messaging.
 
 pub mod loop_state;
+// 2026-07-01-001 plan U6: engine-computed `expected_event` +
+// plan/fix topology cache. The single SSOT for "what should
+// the coordinator emit next" lives here; both the prompt
+// injection (`## ORCHESTRATOR STATE`) and the diagnostic
+// ledger share the same struct.
+pub mod orchestrator_state;
 pub mod plan_blocked_reason;
 pub mod rejection;
 pub mod rejection_kind;
@@ -503,6 +509,40 @@ fn build_stage_pipeline_from_config(
 /// implementation-agnostic and is reused by the unified handler.
 
 impl EventLoop {
+    /// 2026-07-01-001 plan U1: collect the set of topics the
+    /// runtime considers "terminal" for the current loop.
+    /// Derived from `EventPolicyConfig.terminal_topics` (when
+    /// the policy is enabled) plus the configured completion
+    /// promise and cancellation promise — that way the
+    /// terminal set stays in lockstep with whatever the
+    /// preset author wired in `event_policy`, instead of
+    /// hard-coding a topic list that drifts when the
+    /// ce-executor-serial preset changes its `terminal_topics`.
+    pub(crate) fn collect_terminal_topic_set(&self) -> std::collections::HashSet<&str> {
+        use std::collections::HashSet;
+        let mut out: HashSet<&str> = HashSet::new();
+        if let Some(policy) = self.config.event_loop.event_policy.as_ref() {
+            if policy.enabled {
+                for topic in &policy.terminal_topics {
+                    out.insert(topic.as_str());
+                }
+            }
+        }
+        // Always treat the configured completion promise
+        // and cancellation promise as terminal — the rest of
+        // the loop (U2) is anchored on these and skipping
+        // them would let a post-completion event through.
+        let completion = self.config.event_loop.completion_promise.as_str();
+        if !completion.is_empty() {
+            out.insert(completion);
+        }
+        let cancellation = self.config.event_loop.cancellation_promise.as_str();
+        if !cancellation.is_empty() {
+            out.insert(cancellation);
+        }
+        out
+    }
+
     /// 2026-06-09: returns the union of `verdict_gate.topic` and
     /// its `additional_topics`, or `None` when no gate is
     /// configured.  Used at every record-verdict call site so the
@@ -4128,6 +4168,15 @@ impl EventLoop {
             //   hat instructions
             let base_prompt = self.prepend_orchestrator_context(base_prompt, hat_id);
 
+            // 2026-07-01-001 plan U6: prepend the
+            // `## ORCHESTRATOR STATE` block for the
+            // coordinator. The block is computed by the
+            // engine (plan/fix topology, last test.passed,
+            // review-walk / completion status) and tells the
+            // coordinator what to emit next. Other hats skip
+            // the block.
+            let base_prompt = self.prepend_orchestrator_state(base_prompt, hat_id);
+
             // R1: `## WAVE CONTEXT` block lives near the top for
             // `review-synthesizer`; it is a no-op for any other hat.
             let base_prompt = self.prepend_wave_context(base_prompt, hat_id);
@@ -5660,6 +5709,55 @@ impl EventLoop {
         snap.loop_start_sha = self.state.loop_start_sha.clone();
         snap.plan_baseline_sha = self.state.plan_baseline_sha.clone();
         format!("{}{prompt}", snap.to_prompt_block())
+    }
+
+    /// 2026-07-01-001 plan U6: prepend the
+    /// `## ORCHESTRATOR STATE` block to the coordinator's
+    /// prompt. The block is computed from the engine-side
+    /// state (last `test.passed`, plan/fix topology, review
+    /// walk status, completion honored flag) so the
+    /// coordinator no longer has to count `### U{N}.`
+    /// headings in `plan.md` itself.
+    ///
+    /// Scope: only the `coordinator` hat receives the block —
+    /// other hats do not need the directive and including it
+    /// would just add noise. If the engine has no directive
+    /// (e.g. no test.passed observed yet, or plan topology
+    /// failed to parse), the block is omitted.
+    fn prepend_orchestrator_state(&self, prompt: String, hat_id: &HatId) -> String {
+        if hat_id.as_str() != "coordinator" {
+            return prompt;
+        }
+        use crate::event_loop::orchestrator_state::{
+            compute_expected_event, render_orchestrator_state_block, ComputeInput,
+        };
+        // The runtime tracks `fix_unit_chain_exhausted` as the
+        // post-review-walk signal; the synthesiser's
+        // `review.complete` (pass verdict) flips it via the U3
+        // guard. Until then `expected_event` after the last
+        // plan unit is `review.start`.
+        let review_walk_closed = self.state.fix_unit_chain_exhausted
+            || self.state.report_done_seen;
+        let input = ComputeInput {
+            last_test_passed_step: self.state.last_test_passed_step.as_deref(),
+            last_was_fix_unit: self.state.last_test_passed_was_fix_unit,
+            review_walk_closed,
+            completion_honored: self.state.completion_honored,
+        };
+        let state = compute_expected_event(&self.state.plan_topology, &input);
+        if state.expected_event.is_none() {
+            // No directive — keep the prompt quiet; U1/U2
+            // still back-stop the emit, and the existing
+            // top-down review prompts remain the source of
+            // truth for cold-start activations.
+            return prompt;
+        }
+        let block = render_orchestrator_state_block(&state);
+        if block.is_empty() {
+            prompt
+        } else {
+            format!("{block}{prompt}")
+        }
     }
 
     /// R3 (2026-06-14-003 plan): invoke the ephemeral isolation engine
@@ -7934,15 +8032,92 @@ impl EventLoop {
                             && prev.hat.as_ref() == event.hat.as_ref()
                     });
 
+                // 2026-07-01-001 plan U1: terminal-priority
+                // budget. When the non-wave slot has already
+                // been consumed by a non-terminal event (e.g.
+                // a stray `work.ready` that the agent emitted
+                // before the terminal), the runtime must NOT
+                // drop a terminal event (LOOP_COMPLETE /
+                // plan.complete / plan.blocked / report.done /
+                // REVIEW_COMPLETE). The terminal topic list is
+                // derived from `EventPolicyConfig.terminal_topics`
+                // + the configured completion / cancellation
+                // promises, so non-ce-executor presets stay
+                // untouched.
+                //
+                // Mechanics: when the current event is a
+                // terminal topic and the slot is already
+                // taken, we publish a `event.isolation.terminal_priority`
+                // diagnostic, evict the non-terminal
+                // business event from `accepted`, and admit
+                // the terminal event instead. The eviction
+                // is safe because the agent already had a
+                // chance to act on the non-terminal event in
+                // earlier turns; dropping it here is the
+                // lesser evil vs. stalling the loop.
+                let terminal_topics = self.collect_terminal_topic_set();
+                let event_is_terminal = terminal_topics.contains(event.topic.as_str());
+                let mut evicted_non_terminal: Option<usize> = None;
+                if event_is_terminal && non_wave_business_event_accepted {
+                    for (idx, prev) in accepted.iter().enumerate().rev() {
+                        let prev_topic = prev.topic.as_str();
+                        if prev_topic == "task.resume" {
+                            // Don't touch recovery envelopes.
+                            continue;
+                        }
+                        if terminal_topics.contains(prev_topic) {
+                            // Already admitted a terminal event
+                            // — keep the new one out so the
+                            // budget stays sane.
+                            break;
+                        }
+                        if !prev.wave_id.is_some() {
+                            evicted_non_terminal = Some(idx);
+                            break;
+                        }
+                    }
+                }
+
                 let should_admit = if admitted_under_wave {
                     true
                 } else if wave_collision {
                     false
                 } else if !non_wave_business_event_accepted {
                     true
+                } else if event_is_terminal && evicted_non_terminal.is_some() {
+                    // U1: terminal-priority override — the
+                    // terminal event displaces the earlier
+                    // non-terminal business event.
+                    true
                 } else {
                     is_dual_publish_step_handoff
                 };
+
+                if should_admit && evicted_non_terminal.is_some() {
+                    let idx = evicted_non_terminal.unwrap();
+                    let evicted = accepted.remove(idx);
+                    warn!(
+                        evicted_topic = %evicted.topic,
+                        admitted_topic = %event.topic,
+                        hat = %isolated_hat.as_str(),
+                        "U1 terminal-priority: displaced earlier non-terminal business event to admit terminal event"
+                    );
+                    let diagnostic = Event::new(
+                        "event.isolation.terminal_priority",
+                        format!(
+                            "{{\"hat\":\"{}\",\"evicted_topic\":\"{}\",\"admitted_topic\":\"{}\",\"reason\":\"isolated mode: terminal topics have priority over non-terminal business events in the per-turn budget\"}}",
+                            isolated_hat.as_str(),
+                            evicted.topic,
+                            event.topic
+                        ),
+                    );
+                    self.bus.publish(diagnostic);
+                    // The eviction freed the non-wave slot;
+                    // the per-turn sticky flag must be reset
+                    // so subsequent admits (this turn) see
+                    // the slot as open.
+                    non_wave_business_event_accepted = false;
+                }
 
                 if !should_admit {
                     warn!(
@@ -9398,6 +9573,65 @@ impl EventLoop {
                 continue;
             }
 
+            // 2026-07-01-001 plan U2: persistent
+            // `completion_honored` guard. Once a previous batch
+            // (or this loop's prior run via ledger replay) set
+            // the flag, every subsequent business event must
+            // be rejected even if the *current* batch has not
+            // seen a completion topic yet. The same-batch
+            // guard below stays as a fast path for diagnostics.
+            if self.state.completion_honored
+                && event.topic != self.config.event_loop.completion_promise.as_str()
+                && event.topic != self.config.event_loop.cancellation_promise.as_str()
+            {
+                if let Some(ref policy_config) = policy_config_ref
+                    && policy_config.enabled
+                {
+                    if let Some(decision) =
+                        check_completion_guard(&event.topic, policy_config, true)
+                    {
+                        match &decision {
+                            PolicyDecision::Block(finding) => {
+                                if write_diagnostic {
+                                    self.bus.publish(Event::new(
+                                        "event.completion.blocked",
+                                        format!(
+                                            "Persistent completion guard blocked '{}': {}",
+                                            event.topic, finding.message
+                                        ),
+                                    ));
+                                }
+                            }
+                            PolicyDecision::Ignore(finding) => {
+                                if write_diagnostic {
+                                    self.bus.publish(Event::new(
+                                        "event.completion.ignored",
+                                        format!(
+                                            "Persistent completion guard ignored '{}': {}",
+                                            event.topic, finding.message
+                                        ),
+                                    ));
+                                }
+                            }
+                            PolicyDecision::Warn(findings) => {
+                                for finding in findings {
+                                    self.bus.publish(Event::new(
+                                        "event.policy_warning",
+                                        format!(
+                                            "Persistent completion guard warning for '{}': {}",
+                                            event.topic, finding.message
+                                        ),
+                                    ));
+                                }
+                                accept_event!(Event::new(event.topic.as_str(), &payload));
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                }
+            }
+
             // Same-batch completion guard: events after a completion topic in the
             // same batch are subject to completion_after_terminal filtering.
             if completion_seen_in_batch {
@@ -10082,6 +10316,22 @@ impl EventLoop {
             &mut self.bus,
         );
         // --- End U5 stall detection ---
+
+        // 2026-07-01-001 plan U6: capture the most recent
+        // `test.passed` step into the orchestrator-state cache
+        // so the next coordinator prompt can render a
+        // directive. We scan `accepted_log_events` (the
+        // post-validation stream) so a rejected test.passed
+        // is intentionally ignored — the engine only feeds
+        // the directive for admitted passes.
+        for event in &accepted_log_events {
+            if event.topic.as_str() == "test.passed" {
+                if let Some(step) = extract_step_id(&event.payload) {
+                    let was_fix = step.starts_with("fix-");
+                    self.state.record_test_passed(step, was_fix);
+                }
+            }
+        }
 
         // A1 (002-adversarial-review / 003-adversarial-review
         // P0-1): when the unified ledger is wired in, mirror
@@ -11408,6 +11658,24 @@ fn self_is_state_idempotency_required(config: &RalphConfig) -> bool {
         .and_then(|m| m.flow.as_ref())
         .map(|f| f.state_idempotency == "required")
         .unwrap_or(false)
+}
+
+/// 2026-07-01-001 plan U6: extract the canonical step id
+/// from a `test.passed` payload. Returns `None` for
+/// malformed payloads — the orchestrator-state cache then
+/// keeps its previous value (so a transient malformed
+/// event does not wipe the directive).
+fn extract_step_id(payload: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    if let Some(s) = value.get("step").and_then(|v| v.as_str()) {
+        return Some(s.to_string());
+    }
+    if let Some(obj) = value.get("step").and_then(|v| v.as_object()) {
+        if let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
+            return Some(id.to_string());
+        }
+    }
+    None
 }
 
 fn initial_current_plan_step(config: &RalphConfig) -> String {

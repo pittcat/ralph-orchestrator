@@ -620,6 +620,15 @@ mod tests {
             // stays empty in the test fixture (infrastructure-only;
             // `process_output` does not consume it).
             termination_triggers: std::collections::VecDeque::new(),
+            // 2026-07-01-001 plan U6: empty topology on
+            // construction; the runner installs the plan
+            // topology on loop start. Mirrors the production
+            // default in LoopState::default().
+            plan_topology:
+                crate::event_loop::orchestrator_state::PlanTopologyCache::default(),
+            // 2026-07-01-001 plan U6: no test.passed observed yet.
+            last_test_passed_step: None,
+            last_test_passed_was_fix_unit: false,
         }
     }
 

@@ -4,7 +4,44 @@ use crate::event_policy::{PolicyFinding, ViolationType};
 use crate::event_reader::Event as JsonlEvent;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::time::{Duration, Instant};
+
+/// 2026-07-01-001 plan U6: shared plan/fix-plan heading scanner.
+///
+/// Reads a markdown file and returns the ordered list of step
+/// ids derived from headings that match the `### U{N}.` (or
+/// `### U{N}`) convention. For plan files the scanner returns
+/// `["step-01", "step-02", ...]`; for fix-plan files it
+/// returns `["fix-01", ...]`. The function is shared between
+/// [`ReviewStepTracker::prefill_fix_steps_from_plan`] (legacy
+/// use) and [`crate::event_loop::orchestrator_state::PlanTopologyCache::scan`]
+/// (U6 use). Returns an empty Vec on any IO / parse failure —
+/// callers must decide whether to fail-closed or fall back.
+pub fn scan_unit_headings(path: &Path) -> Vec<String> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("### U") {
+            continue;
+        }
+        // 期望形式:`### U{N}. <title>` 或 `### U{N} <title>`
+        let after_marker = trimmed.trim_start_matches("### U");
+        let digits: String = after_marker
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(n) = digits.parse::<u32>()
+            && n > 0
+        {
+            found.push(format!("fix-{n:02}"));
+        }
+    }
+    found
+}
 
 /// Emitted when a review wave exceeds the synthesizer aggregate window (U4).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,28 +204,12 @@ impl ReviewStepTracker {
     /// 已经在 `plan.complete` step=`fix-*` 分支生效，这里只是给
     /// tracker 提供更早的"已填好"状态，便于下游做诊断与后续
     /// `is_wave_closed` 查询。
+    ///
+    /// 2026-07-01-001 U6: scan logic now lives in
+    /// [`scan_unit_headings`] so the orchestrator-state cache
+    /// and the tracker share a single parser.
     fn prefill_fix_steps_from_plan(&mut self, plan_path: &str) {
-        let Ok(content) = std::fs::read_to_string(plan_path) else {
-            return;
-        };
-        let mut found = Vec::new();
-        for line in content.lines() {
-            let trimmed = line.trim_start();
-            if !trimmed.starts_with("### U") {
-                continue;
-            }
-            // 期望形式：`### U{N}. <title>` 或 `### U{N} <title>`
-            let after_marker = trimmed.trim_start_matches("### U");
-            let digits: String = after_marker
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            if let Ok(n) = digits.parse::<u32>()
-                && n > 0
-            {
-                found.push(format!("fix-{n:02}"));
-            }
-        }
+        let found = scan_unit_headings(std::path::Path::new(plan_path));
         if found.is_empty() {
             return;
         }

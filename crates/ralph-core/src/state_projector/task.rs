@@ -62,11 +62,91 @@ fn is_valid_task_id_format(task_id: &str) -> bool {
             && parts[1].len() == 4
             && parts[1].chars().all(|c| c.is_ascii_hexdigit())
         {
-            return true;
+            // 2026-07-01-001 plan U4 (primary-20260630-175407
+            // P0-3): shape-1 ids embed a unix timestamp in
+            // `parts[0]`. The legacy validator accepted any
+            // digit string — the fixture in
+            // `primary-20260630-175407` shows the coordinator
+            // hand-wrote `task-1751414400-a1b2` (2025-07-01)
+            // for `fix-02`, which the format check passed.
+            // Reject timestamps outside the loop window so
+            // stale hand-written ids can no longer poison the
+            // task ledger. The window is
+            // `[now - 6 months, now + 60s]`; 6 months is wide
+            // enough to accept any current-loop fixtures and
+            // snapshots while still rejecting the year-old
+            // `1751414400` (2025-07-01) timestamp in the
+            // 175407 fixture. The forward 60s tolerance covers
+            // normal clock skew.
+            return is_valid_task_id_timestamp(parts[0]);
         }
     }
     // Shape 2: fix-unit id.
-    fix_re.is_match(task_id)
+    if fix_re.is_match(task_id) {
+        // 2026-07-01-001 plan U4: shape-2 ids embed a hex
+        // timestamp as the trailing segment. Apply the same
+        // window check (the helper computes the seconds and
+        // falls back to accept-on-parse-failure so we do not
+        // break ids from older runs whose hex segment is not a
+        // valid unix_ts).
+        let ts_hex = task_id.rsplit('-').next().unwrap_or("");
+        return is_valid_task_id_hex_timestamp(ts_hex);
+    }
+    false
+}
+
+/// 2026-07-01-001 plan U4: window-check the unix timestamp
+/// embedded in a shape-1 `task-{ts}-{4hex}` id. The window is
+/// `[now - 6 months, now + 60s]`. Returns `true` when
+/// `now_unix_ts` is `None` so legacy callers without a clock
+/// continue to accept shape-1 ids (the format check itself
+/// already ran).
+fn is_valid_task_id_timestamp(ts_str: &str) -> bool {
+    let Ok(ts) = ts_str.parse::<i64>() else {
+        return false;
+    };
+    let Some(now) = current_unix_ts() else {
+        return true;
+    };
+    let six_months = SIXTY_SECONDS * 60 * 24 * 365 / 2;
+    let lower = now.saturating_sub(six_months);
+    let upper = now.saturating_add(SIXTY_SECONDS);
+    ts >= lower && ts <= upper
+}
+
+/// 2026-07-01-001 plan U4: window-check the hex timestamp
+/// embedded in a shape-2 `task-...-fix{NN}u{NN}-{ts_hex}` id.
+/// The helper is permissive on parse failure — old fixtures
+/// may carry non-time hex values that we still want to accept
+/// so existing snapshots do not regress.
+fn is_valid_task_id_hex_timestamp(ts_hex: &str) -> bool {
+    let Ok(ts) = u64::from_str_radix(ts_hex, 16) else {
+        return true;
+    };
+    let Some(now) = current_unix_ts() else {
+        return true;
+    };
+    let now_u64 = now.max(0) as u64;
+    let six_months = SIXTY_SECONDS_U64 * 60 * 24 * 365 / 2;
+    let lower = now_u64.saturating_sub(six_months);
+    let upper = now_u64.saturating_add(SIXTY_SECONDS_U64);
+    ts >= lower && ts <= upper
+}
+
+const SIXTY_SECONDS: i64 = 60;
+const SIXTY_SECONDS_U64: u64 = 60;
+
+/// 2026-07-01-001 plan U4: best-effort wall clock for the
+/// timestamp-window check. Returns `None` when the platform
+/// clock is unavailable so the validator falls back to the
+/// pre-U4 behaviour. We deliberately do not propagate errors
+/// — the projector must keep accepting ids when the clock is
+/// missing.
+fn current_unix_ts() -> Option<i64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs() as i64)
 }
 
 /// Returns true when `task_key` encodes a ce-executor fix-unit.
@@ -551,13 +631,18 @@ mod tests {
         // broken by an over-eager "skip unstarted" guard
         // introduced in an earlier iteration of this fix;
         // the right fix lives in `progress.rs`).
+        // 2026-07-01-001 plan U4: helper-derive these ids so the
+        // validator's 6-month back-window accepts them. The
+        // historical hand-written `task-p-fix01u01-a1b2` /
+        // `b2c3` ids used 1970-era hex that now falls outside
+        // the window.
         let fix01_ensure = serde_json::json!({
-            "task_id": "task-p-fix01u01-a1b2",
+            "task_id": Task::fix_unit_task_id("p", 1, 1, None),
             "task_key": "ce-executor:p:fix-01:u1",
             "plan_name": "p",
         });
         let fix02_ensure = serde_json::json!({
-            "task_id": "task-p-fix01u02-b2c3",
+            "task_id": Task::fix_unit_task_id("p", 1, 2, None),
             "task_key": "ce-executor:p:fix-02:u2",
             "plan_name": "p",
         });
@@ -565,12 +650,12 @@ mod tests {
         project_ensure_task(&mut ctx, &fix02_ensure, "task_key", None).unwrap();
 
         let fix01_close = serde_json::json!({
-            "task_id": "task-p-fix01u01-a1b2",
+            "task_id": Task::fix_unit_task_id("p", 1, 1, None),
             "task_key": "ce-executor:p:fix-01:u1",
             "step": "fix-01",
         });
         let fix02_close = serde_json::json!({
-            "task_id": "task-p-fix01u02-b2c3",
+            "task_id": Task::fix_unit_task_id("p", 1, 2, None),
             "task_key": "ce-executor:p:fix-02:u2",
             "step": "fix-02",
         });
@@ -609,19 +694,26 @@ mod tests {
         let mut ctx = ProjectionContext::new(dir.path(), StateProjectionConfig::default(), false)
             .with_current_loop_id("loop-A");
         // First emit: fresh id + fix-01 key.
+        // 2026-07-01-001 plan U4: helper-derive the id so the
+        // validator's 6-month back-window accepts it. The
+        // historical `task-ce_executor_serial-fix01u01-1` had
+        // a 1970-era hex suffix and now falls outside.
         let fix01 = serde_json::json!({
-            "task_id": "task-ce_executor_serial-fix01u01-1",
+            "task_id": Task::fix_unit_task_id("ce-executor-serial", 1, 1, None),
             "task_key": "ce-executor:p:fix-01:u1",
             "plan_name": "p",
         });
         project_ensure_task(&mut ctx, &fix01, "task_key", None).unwrap();
         let tasks = ctx.task_snapshot().0;
         assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].id, "task-ce_executor_serial-fix01u01-1");
+        assert_eq!(
+            tasks[0].id,
+            Task::fix_unit_task_id("ce-executor-serial", 1, 1, None)
+        );
 
         // Second emit: same id, but fix-02 key — must fail-closed.
         let fix02 = serde_json::json!({
-            "task_id": "task-ce_executor_serial-fix01u01-1",
+            "task_id": Task::fix_unit_task_id("ce-executor-serial", 1, 1, None),
             "task_key": "ce-executor:p:fix-02:u2",
             "plan_name": "p",
         });
@@ -727,7 +819,16 @@ mod tests {
 
         // Chinese plan names are sanitized to a valid slug by
         // Task::fix_unit_task_id; the projector must accept them.
-        let chinese_id = Task::fix_unit_task_id("中文方案-001", 0, 0, Some(1));
+        // 2026-07-01-001 plan U4: pass a current-loop unix_ts
+        // so the helper output falls inside the validator's
+        // 18-month back-window (the historical `Some(1)` value
+        // corresponds to 1970-01-01 and now fails the
+        // timestamp-window check).
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let chinese_id = Task::fix_unit_task_id("中文方案-001", 0, 0, Some(now_ts));
         assert!(
             is_valid_task_id_format(&chinese_id),
             "fix_unit_task_id output for chinese plan must be accepted: {chinese_id}"
@@ -802,10 +903,19 @@ mod tests {
 
         // 2. The helper output is always accepted, including for
         //    unicode plan names and arbitrary ts / no-ts.
+        //    2026-07-01-001 plan U4: pass current-loop unix_ts
+        //    values so the helper output stays inside the
+        //    validator's 6-month back-window. The historical
+        //    `Some(0x1782_8312_3456u64)` value decoded to
+        //    >5000 years in the future and now falls outside.
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         for (plan, fr, ui, ts) in [
-            ("ce-executor:2026-06-20-001-feat-python-sort", 0, 1, Some(0x1782_8312_3456u64)),
+            ("ce-executor:2026-06-20-001-feat-python-sort", 0, 1, Some(now_ts)),
             ("simple-plan", 0, 1, None),
-            ("中文方案", 2, 3, Some(0xdead_beef)),
+            ("中文方案", 2, 3, Some(now_ts)),
         ] {
             let id = Task::fix_unit_task_id(plan, fr, ui, ts);
             assert!(
@@ -827,7 +937,82 @@ mod tests {
         // 4. A helper-derived id and the hand-written id differ in
         //    structure — the prompt should route the coordinator
         //    through the helper instead of copy-pasting a unix_ts.
-        let good_id = Task::fix_unit_task_id("p", 0, 2, Some(0x1782_8304_34u64));
+        //    2026-07-01-001 plan U4: use a current-loop unix_ts
+        //    so the helper output passes the validator's 18-month
+        //    back-window (the legacy `0x1782_8304_34` value
+        //    corresponds to 2021 and now falls outside).
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let good_id = Task::fix_unit_task_id("p", 0, 2, Some(now_ts));
         assert_ne!(good_id, hand_written);
+    }
+
+    // 2026-07-01-001 plan U4 (primary-20260630-175407 P0-3):
+    // hand-written `task-1751414400-a1b2` carried a 2025-07-01
+    // timestamp that the lenient shape-1 validator silently
+    // accepted. Window-check the unix_ts segment of shape-1 ids
+    // and the hex segment of shape-2 ids so the legacy leniency
+    // can no longer poison the task ledger. The validator runs
+    // against `is_valid_task_id_format` directly so we do not
+    // need to spin up a ProjectionContext for this unit-level
+    // invariant.
+    #[test]
+    fn u4_stale_shape1_timestamp_is_rejected() {
+        // 2025-07-01 timestamp — the exact fixture id from
+        // `primary-20260630-175407`. Was accepted pre-U4; must
+        // be rejected now that the validator window-checks the
+        // unix_ts segment.
+        assert!(!is_valid_task_id_format("task-1751414400-a1b2"));
+    }
+
+    #[test]
+    fn u4_current_loop_timestamp_is_accepted() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let id = format!("task-{now}-abcd");
+        assert!(is_valid_task_id_format(&id));
+    }
+
+    #[test]
+    fn u4_future_timestamp_is_rejected() {
+        let far_future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600; // 1 hour into the future
+        let id = format!("task-{far_future}-abcd");
+        assert!(!is_valid_task_id_format(&id));
+    }
+
+    #[test]
+    fn u4_helper_derived_id_is_accepted() {
+        // The helper mints shape-2 ids. Use a current-loop
+        // unix_ts so the validator's 18-month back-window
+        // accepts the helper output (the historical
+        // `0x1782_8304_34` value decodes to 2021 and now
+        // falls outside the window).
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let id = Task::fix_unit_task_id("p", 0, 2, Some(now_ts));
+        assert!(is_valid_task_id_format(&id));
+    }
+
+    #[test]
+    fn u4_stale_shape2_hex_timestamp_is_rejected() {
+        // Hand-written hex timestamp equivalent to 2025-07-01
+        // (~1.75e9). The validator must window-check it.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let old = now.saturating_sub(2 * 365 * 24 * 3600); // 2 years ago
+        let id = format!("task-ce_executor_serial-fix02u02-{old:x}");
+        assert!(!is_valid_task_id_format(&id));
     }
 }
