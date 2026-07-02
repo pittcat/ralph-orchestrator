@@ -560,4 +560,3 @@ pub fn resolve_hat_for_output_processing(hat_id: &HatId, display_hat: &HatId) ->
         hat_id.clone()
     }
 }
-

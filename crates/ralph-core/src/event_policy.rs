@@ -447,15 +447,10 @@ impl PolicyRuntimeState {
     /// including keys that carry an optional `step` suffix. Called
     /// when `fix.applied` is policy-accepted so that a coordinator
     /// can legally start a fresh review round after fixes land.
-    pub fn prune_review_start_bucket(
-        &mut self,
-        plan_name: &str,
-        task_id: &str,
-    ) {
+    pub fn prune_review_start_bucket(&mut self, plan_name: &str, task_id: &str) {
         let base = format!("{plan_name}::{task_id}");
-        self.review_start_seen_keys.retain(|key| {
-            !(key == &base || key.starts_with(&format!("{base}::")))
-        });
+        self.review_start_seen_keys
+            .retain(|key| !(key == &base || key.starts_with(&format!("{base}::"))));
     }
 
     /// Replays events from a JSONL file to build up the policy runtime state.
@@ -1212,9 +1207,7 @@ pub fn validate_event_with_hat(
                 };
                 return PolicyDecision::RejectWithResume(finding);
             }
-            Some(Value::String(dim))
-                if !DIMENSION_WHITELIST.contains(&dim.as_str()) =>
-            {
+            Some(Value::String(dim)) if !DIMENSION_WHITELIST.contains(&dim.as_str()) => {
                 let finding = PolicyFinding {
                     topic: topic.to_string(),
                     violation_type: ViolationType::InvalidFieldValue {
@@ -3392,9 +3385,7 @@ mod tests {
                 r#"{{"plan_name":"{plan}","step":"{st}","task_id":"{task}","task_key":"k-{task}"}}"#
             )
         } else {
-            format!(
-                r#"{{"plan_name":"{plan}","task_id":"{task}","task_key":"k-{task}"}}"#
-            )
+            format!(r#"{{"plan_name":"{plan}","task_id":"{task}","task_key":"k-{task}"}}"#)
         }
     }
 
@@ -3592,7 +3583,9 @@ mod tests {
     // 6-dimension sequence. See event_policy.rs:1170 above.
     fn review_dimension_failed_payload(dim: Option<&str>) -> String {
         match dim {
-            Some(d) => format!(r#"{{"dimension":"{d}","plan_name":"p1","step":"step-01","task_id":"t1"}}"#),
+            Some(d) => {
+                format!(r#"{{"dimension":"{d}","plan_name":"p1","step":"step-01","task_id":"t1"}}"#)
+            }
             None => r#"{"plan_name":"p1","step":"step-01","task_id":"t1"}"#.to_string(),
         }
     }
@@ -3694,8 +3687,7 @@ mod tests {
         // surface their own precise error.
         let config = test_config();
         let mut state = PolicyRuntimeState::default();
-        let decision =
-            validate_event("review.dimension.failed", None, &config, &mut state);
+        let decision = validate_event("review.dimension.failed", None, &config, &mut state);
         assert_eq!(
             decision,
             PolicyDecision::Accept,
@@ -3748,7 +3740,10 @@ mod tests {
         let config = test_config();
         let mut state = PolicyRuntimeState::default();
         let payload = review_start_payload("p1", Some("step-01"), "t1");
-        assert_eq!(validate_event("review.start", Some(&payload), &config, &mut state), PolicyDecision::Accept);
+        assert_eq!(
+            validate_event("review.start", Some(&payload), &config, &mut state),
+            PolicyDecision::Accept
+        );
         let second = validate_event("review.start", Some(&payload), &config, &mut state);
         assert!(
             matches!(second, PolicyDecision::RejectWithResume(_)),
@@ -3763,8 +3758,14 @@ mod tests {
         let mut state = PolicyRuntimeState::default();
         let p1 = review_start_payload("p1", Some("step-01"), "t1");
         let p2 = review_start_payload("p1", Some("step-01"), "t2");
-        assert_eq!(validate_event("review.start", Some(&p1), &config, &mut state), PolicyDecision::Accept);
-        assert_eq!(validate_event("review.start", Some(&p2), &config, &mut state), PolicyDecision::Accept);
+        assert_eq!(
+            validate_event("review.start", Some(&p1), &config, &mut state),
+            PolicyDecision::Accept
+        );
+        assert_eq!(
+            validate_event("review.start", Some(&p2), &config, &mut state),
+            PolicyDecision::Accept
+        );
     }
 
     #[test]
@@ -3788,9 +3789,15 @@ mod tests {
         let mut state = PolicyRuntimeState::default();
         let without_step = review_start_payload("p1", None, "t1");
         let with_step = review_start_payload("p1", Some("step-01"), "t1");
-        assert_eq!(validate_event("review.start", Some(&without_step), &config, &mut state), PolicyDecision::Accept);
+        assert_eq!(
+            validate_event("review.start", Some(&without_step), &config, &mut state),
+            PolicyDecision::Accept
+        );
         // Same plan/task but now with a step is a different key, so accepted.
-        assert_eq!(validate_event("review.start", Some(&with_step), &config, &mut state), PolicyDecision::Accept);
+        assert_eq!(
+            validate_event("review.start", Some(&with_step), &config, &mut state),
+            PolicyDecision::Accept
+        );
         // Re-emitting the no-step payload should still be rejected.
         assert!(
             matches!(
@@ -3854,7 +3861,9 @@ mod tests {
     fn review_start_prune_bucket_manual() {
         let mut state = PolicyRuntimeState::default();
         state.review_start_seen_keys.insert("p1::t1".into());
-        state.review_start_seen_keys.insert("p1::t1::step-01".into());
+        state
+            .review_start_seen_keys
+            .insert("p1::t1::step-01".into());
         state.review_start_seen_keys.insert("p2::t1".into());
 
         state.prune_review_start_bucket("p1", "t1");
@@ -4608,8 +4617,6 @@ mod tests {
             state.review_dimensions_complete_seen_keys
         );
     }
-
-
 
     // ── WAC-U7 (2026-06-12-002): payload hard gate ──
 

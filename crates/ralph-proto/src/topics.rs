@@ -53,7 +53,10 @@ pub const EVENT_ISOLATION_BOUNDARY_VIOLATION: &str = "event.isolation.boundary_v
 /// recognised as a control topic, which is correct — the
 /// topic does not exist).
 pub fn is_orchestrator_control(topic: &str) -> bool {
-    matches!(topic, LOOP_RESUME | TASK_RESUME | LOOP_COMPLETE | LOOP_CANCEL)
+    matches!(
+        topic,
+        LOOP_RESUME | TASK_RESUME | LOOP_COMPLETE | LOOP_CANCEL
+    )
 }
 
 #[cfg(test)]

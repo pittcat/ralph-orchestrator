@@ -29,7 +29,7 @@ use serde_json::Value;
 use crate::state_projector::ProjectionContext;
 use crate::state_projector::json_pointer;
 use crate::task::Task;
-use crate::task_store::{is_fix_unit_id, is_fix_unit_key, TaskStore};
+use crate::task_store::{TaskStore, is_fix_unit_id, is_fix_unit_key};
 
 /// Validate that a user-supplied `task_id` follows one of the
 /// canonical formats. We accept two shapes:
@@ -51,8 +51,9 @@ fn is_valid_task_id_format(task_id: &str) -> bool {
         return false;
     }
     static FIX_UNIT_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let fix_re = FIX_UNIT_RE
-        .get_or_init(|| regex::Regex::new(r"^task-[a-z0-9_]*-fix\d{2}u\d{2}-[0-9a-fA-F]+$").unwrap());
+    let fix_re = FIX_UNIT_RE.get_or_init(|| {
+        regex::Regex::new(r"^task-[a-z0-9_]*-fix\d{2}u\d{2}-[0-9a-fA-F]+$").unwrap()
+    });
     // Shape 1: ordinary runtime id.
     if let Some(rest) = task_id.strip_prefix("task-") {
         let parts: Vec<&str> = rest.splitn(2, '-').collect();
@@ -804,10 +805,7 @@ mod tests {
         }
 
         // Valid canonical ids are still accepted.
-        for good_id in [
-            "task-1782811846-3de0",
-            "task-ce_executor_serial-fix01u01-1",
-        ] {
+        for good_id in ["task-1782811846-3de0", "task-ce_executor_serial-fix01u01-1"] {
             let payload = serde_json::json!({
                 "task_id": good_id,
                 "task_key": format!("ce-executor:p:fix-good:{}", good_id),
@@ -847,19 +845,15 @@ mod tests {
         // Non-fix-unit payloads must not be rejected for non-canonical
         // task ids — this preserves compatibility with legacy presets,
         // human CLI, and tests.
-        for loose_id in [
-            "task-1",
-            "task-fix01",
-            "task-1782813211-u2",
-            "task-abc-def",
-        ] {
+        for loose_id in ["task-1", "task-fix01", "task-1782813211-u2", "task-abc-def"] {
             let payload = serde_json::json!({
                 "task_id": loose_id,
                 "task_key": format!("legacy:step:{}", loose_id),
                 "plan_name": "p",
             });
-            project_ensure_task(&mut ctx, &payload, "task_key", None)
-                .unwrap_or_else(|e| panic!("legacy task id '{}' should not be rejected: {e}", loose_id));
+            project_ensure_task(&mut ctx, &payload, "task_key", None).unwrap_or_else(|e| {
+                panic!("legacy task id '{}' should not be rejected: {e}", loose_id)
+            });
         }
     }
 
@@ -913,7 +907,12 @@ mod tests {
             .unwrap()
             .as_secs();
         for (plan, fr, ui, ts) in [
-            ("ce-executor:2026-06-20-001-feat-python-sort", 0, 1, Some(now_ts)),
+            (
+                "ce-executor:2026-06-20-001-feat-python-sort",
+                0,
+                1,
+                Some(now_ts),
+            ),
             ("simple-plan", 0, 1, None),
             ("中文方案", 2, 3, Some(now_ts)),
         ] {

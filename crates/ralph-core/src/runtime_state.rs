@@ -416,10 +416,7 @@ fn derive_fix_unit_state(
                 Some("plan.complete".to_string())
             } else {
                 // Find the next id strictly greater than `curr`.
-                let next_in_seq = all
-                    .iter()
-                    .find(|id| is_strictly_greater(id, curr))
-                    .cloned();
+                let next_in_seq = all.iter().find(|id| is_strictly_greater(id, curr)).cloned();
                 next_in_seq.map(|n| format!("work.ready({n})"))
             }
         }
@@ -457,12 +454,13 @@ fn fix_id_from_string(raw: &str) -> Option<String> {
 /// the chain only ever had `fix-01`/`fix-02`.  When the
 /// projector cache is empty we fall back to a single disk read,
 /// which is bounded (`tasks.jsonl` is small).
-pub fn fix_unit_known_ids(projector: &crate::state_projector::StateProjector) -> std::collections::BTreeSet<String> {
+pub fn fix_unit_known_ids(
+    projector: &crate::state_projector::StateProjector,
+) -> std::collections::BTreeSet<String> {
     let ctx = projector.context();
     let (tasks_ref, _from_ledger) = ctx.task_snapshot();
     let tasks = if tasks_ref.is_empty() {
-        let (disk_tasks, _prog) =
-            crate::state_projector::read_state_from_disk(&ctx.workspace_root);
+        let (disk_tasks, _prog) = crate::state_projector::read_state_from_disk(&ctx.workspace_root);
         disk_tasks
     } else {
         tasks_ref.to_vec()
@@ -625,18 +623,13 @@ mod tests {
         t
     }
 
-    fn fix_unit_task_with(
-        step_id: &str,
-        status: TaskStatus,
-    ) -> Task {
+    fn fix_unit_task_with(step_id: &str, status: TaskStatus) -> Task {
         // Mirrors the projector-generated key shape
         // `<plan>:step:<step_id>:<unit>-impl`.  We pick a stable
         // plan name so the tests can group multiple fix-units under
         // the same plan.
         let mut t = Task::new(format!("fix-unit {step_id}"), 1);
-        t.key = Some(format!(
-            "ce-executor:test-plan:step:{step_id}:u1-impl"
-        ));
+        t.key = Some(format!("ce-executor:test-plan:step:{step_id}:u1-impl"));
         t.status = status;
         t
     }
@@ -695,9 +688,10 @@ mod tests {
         // A plan with only non-fix tasks must not advertise a
         // fix-phase.  Coordinator sees `(none)` and keeps its old
         // logic.
-        let tasks = vec![
-            task_with(Some("ce-executor:test-plan:step-01:u1-impl"), None),
-        ];
+        let tasks = vec![task_with(
+            Some("ce-executor:test-plan:step-01:u1-impl"),
+            None,
+        )];
         assert!(derive_fix_unit_state(&tasks, &[]).is_none());
     }
 
@@ -724,10 +718,7 @@ mod tests {
         let state = derive_fix_unit_state(&tasks, &[]).expect("fix-unit state");
         assert_eq!(state.total, 3);
         assert_eq!(state.current.as_deref(), Some("fix-02"));
-        assert_eq!(
-            state.next_expected.as_deref(),
-            Some("work.ready(fix-03)")
-        );
+        assert_eq!(state.next_expected.as_deref(), Some("work.ready(fix-03)"));
     }
 
     #[test]
@@ -747,10 +738,7 @@ mod tests {
         // notional fix-03..fix-09 ids (the snapshot is descriptive,
         // not prescriptive — the coordinator decides whether to
         // spawn a fix-03).
-        assert_eq!(
-            state.next_expected.as_deref(),
-            Some("work.ready(fix-10)")
-        );
+        assert_eq!(state.next_expected.as_deref(), Some("work.ready(fix-10)"));
     }
 
     #[test]
@@ -824,8 +812,7 @@ mod tests {
             fix_unit_task_with("fix-02", TaskStatus::Open),
         ];
         let progress_done = vec!["fix-02".to_string()];
-        let state =
-            derive_fix_unit_state(&tasks, &progress_done).expect("fix-unit state");
+        let state = derive_fix_unit_state(&tasks, &progress_done).expect("fix-unit state");
         assert_eq!(state.completed, vec!["fix-01", "fix-02"]);
         assert_eq!(state.current, None);
         assert_eq!(state.next_expected.as_deref(), Some("plan.complete"));
@@ -843,8 +830,7 @@ mod tests {
             fix_unit_task_with("fix-02", TaskStatus::Open),
         ];
         let progress_done = vec!["fix-01".to_string()];
-        let state =
-            derive_fix_unit_state(&tasks, &progress_done).expect("fix-unit state");
+        let state = derive_fix_unit_state(&tasks, &progress_done).expect("fix-unit state");
         assert_eq!(state.completed, vec!["fix-01"]);
         assert_eq!(state.current.as_deref(), Some("fix-02"));
         // total=2, current=last → must emit plan.complete.
@@ -861,8 +847,7 @@ mod tests {
             "fix-01".to_string(),
             "trivial".to_string(),
         ];
-        let state =
-            derive_fix_unit_state(&tasks, &progress_done).expect("fix-unit state");
+        let state = derive_fix_unit_state(&tasks, &progress_done).expect("fix-unit state");
         assert_eq!(state.completed, vec!["fix-01"]);
     }
 

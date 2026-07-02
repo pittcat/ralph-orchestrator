@@ -2797,9 +2797,7 @@ fn test_u10_phase2_branch() {
 /// `test_review_start_rejected_after_fix_unit_chain_exhausted`.
 #[test]
 fn test_u3_fix_unit_terminal_guard() {
-    let yaml = load_scenario(
-        "tests/scenarios/2026-06-30-001-u3-fix-unit-terminal-guard.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/2026-06-30-001-u3-fix-unit-terminal-guard.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -2808,9 +2806,8 @@ fn test_u3_fix_unit_terminal_guard() {
 /// 发射 plan.complete,不再数 plan 标题。
 #[test]
 fn test_u3_tasks_jsonl_drives_next_expected() {
-    let yaml = load_scenario(
-        "tests/scenarios/2026-07-01-002-u3-tasks-jsonl-drives-next-expected.yml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/2026-07-01-002-u3-tasks-jsonl-drives-next-expected.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -2820,9 +2817,7 @@ fn test_u3_tasks_jsonl_drives_next_expected() {
 /// plan.complete。
 #[test]
 fn test_u1u3_stray_work_ready_rewritten_to_plan_complete() {
-    let yaml = load_scenario(
-        "tests/scenarios/2026-07-01-002-u1u3-stray-work-ready-rewritten.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/2026-07-01-002-u1u3-stray-work-ready-rewritten.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -2832,9 +2827,7 @@ fn test_u1u3_stray_work_ready_rewritten_to_plan_complete() {
 /// Covers AE5 in the brainstorm document.
 #[test]
 fn test_u1_invalid_step_target_issued_for_unknown_fix_unit() {
-    let yaml = load_scenario(
-        "tests/scenarios/2026-07-01-002-u1-invalid-step-target-redirect.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/2026-07-01-002-u1-invalid-step-target-redirect.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -2850,9 +2843,7 @@ fn test_u1_invalid_step_target_issued_for_unknown_fix_unit() {
 /// is in `strict_reason_routing::tests`.
 #[test]
 fn test_u4_shipper_reason_whitelist() {
-    let yaml = load_scenario(
-        "tests/scenarios/2026-06-30-001-u4-shipper-reason-whitelist.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/2026-06-30-001-u4-shipper-reason-whitelist.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -2869,9 +2860,7 @@ fn test_u4_shipper_reason_whitelist() {
 /// `test_loop_complete_payload_dedup`.
 #[test]
 fn test_u5_review_complete_dedup() {
-    let yaml = load_scenario(
-        "tests/scenarios/2026-06-30-001-u5-review-complete-dedup.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/2026-06-30-001-u5-review-complete-dedup.yml");
     run_workflow_guard_scenario(yaml);
 }
 

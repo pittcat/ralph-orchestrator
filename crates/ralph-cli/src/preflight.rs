@@ -1456,11 +1456,9 @@ event_loop:
         )
         .unwrap();
 
-        let preset_value = config_resolution::parse_yaml_value(
-            preset.content,
-            "builtin:ce-executor-pipeline",
-        )
-        .unwrap();
+        let preset_value =
+            config_resolution::parse_yaml_value(preset.content, "builtin:ce-executor-pipeline")
+                .unwrap();
         let hats = extract_hat_overlay_from_preset(preset_value).unwrap();
         let merged = merge_hats_overlay(core, hats).unwrap();
         let config: RalphConfig = serde_yaml::from_value(merged).unwrap();

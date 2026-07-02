@@ -2070,7 +2070,6 @@ fn u4_orchestration_has_recovery_diagnosed(workspace_root: &Path, diagnosis_id: 
         .any(|line| line.contains("\"type\":\"recovery_diagnosed\"") && line.contains(diagnosis_id))
 }
 
-
 #[test]
 fn u4_handle_execution_contract_rejections_writes_envelope_for_safe_target() {
     // U4: a rejected contract event with a safe retry target writes

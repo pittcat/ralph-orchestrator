@@ -909,7 +909,12 @@ fn isolated_extra_business_event_drop_injects_targeted_recovery_resume() {
     // (NOT a scope violation — the topic is declared).
     event_loop.state.current_isolated_hat = Some(HatId::new("reporter"));
     append_event(&events_path, "report.done", Some("reporter"), "first");
-    append_event(&events_path, "report.done", Some("reporter"), "second-extra");
+    append_event(
+        &events_path,
+        "report.done",
+        Some("reporter"),
+        "second-extra",
+    );
     let result = event_loop
         .process_events_from_jsonl()
         .expect("process_events_from_jsonl must succeed");
@@ -995,8 +1000,18 @@ fn isolated_extra_business_event_breaker_resets_on_successful_publish() {
         event_loop.state.current_isolated_hat = Some(reporter_id.clone());
         // Unique payloads per turn so cross-turn idempotency dedup does
         // not collapse identical events and mask the budget drop.
-        append_event(&events_path, "report.done", Some("reporter"), &format!("first-{i}"));
-        append_event(&events_path, "report.done", Some("reporter"), &format!("extra-{i}"));
+        append_event(
+            &events_path,
+            "report.done",
+            Some("reporter"),
+            &format!("first-{i}"),
+        );
+        append_event(
+            &events_path,
+            "report.done",
+            Some("reporter"),
+            &format!("extra-{i}"),
+        );
         event_loop
             .process_events_from_jsonl()
             .expect("process_events_from_jsonl must succeed");
@@ -1004,7 +1019,11 @@ fn isolated_extra_business_event_breaker_resets_on_successful_publish() {
         let resumes = event_loop
             .bus
             .peek_pending(&reporter_id)
-            .map(|q| q.iter().filter(|e| e.topic.as_str() == "task.resume").count())
+            .map(|q| {
+                q.iter()
+                    .filter(|e| e.topic.as_str() == "task.resume")
+                    .count()
+            })
             .unwrap_or(0);
         assert_eq!(
             resumes,

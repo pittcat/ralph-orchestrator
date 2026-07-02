@@ -637,7 +637,6 @@ hats:
         );
     }
 
-
     #[test]
     fn rule_skipped_in_coordinator_mode() {
         // Coordinator mode keeps the soft-hint semantics; the

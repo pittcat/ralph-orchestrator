@@ -1036,10 +1036,7 @@ hats:
     #[test]
     fn test_p1_2_control_topic_case_insensitive_match() {
         // Lowercase baseline (no change in behavior).
-        assert!(is_orchestrator_control_topic(
-            "loop.resume",
-            "loop.cancel"
-        ));
+        assert!(is_orchestrator_control_topic("loop.resume", "loop.cancel"));
         assert!(is_orchestrator_control_topic("task.resume", "loop.cancel"));
         assert!(is_orchestrator_control_topic(
             "build.task.abandoned",
@@ -1047,10 +1044,7 @@ hats:
         ));
 
         // Uppercase — same control topics, different case.
-        assert!(is_orchestrator_control_topic(
-            "Loop.Resume",
-            "loop.cancel"
-        ));
+        assert!(is_orchestrator_control_topic("Loop.Resume", "loop.cancel"));
         assert!(is_orchestrator_control_topic("TASK.RESUME", "loop.cancel"));
         assert!(is_orchestrator_control_topic(
             "BUILD.TASK.ABANDONED",

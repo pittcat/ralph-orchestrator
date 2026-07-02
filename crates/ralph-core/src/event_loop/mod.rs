@@ -305,7 +305,6 @@ pub(crate) fn append_runtime_config_block(base_prompt: String, max_residuals: u3
     )
 }
 
-
 /// Strip the `### HUMAN GUIDANCE` block from a historical
 /// scratchpad. Kept as a private file-level helper because
 /// `filter_human_guidance_blocks` (which used to handle every
@@ -465,8 +464,7 @@ fn build_stage_pipeline_from_config(
             .iter()
             .filter_map(|s| s.total_units.map(|n| (s.id.clone(), n)))
             .collect();
-        let pipeline =
-            StagePipeline::with_default_stages_for_loop_config(flow_yaml, loop_cfg);
+        let pipeline = StagePipeline::with_default_stages_for_loop_config(flow_yaml, loop_cfg);
         (pipeline, step_totals)
     } else {
         let pipeline = StagePipeline::with_hat_only_stages_for_loop_config(loop_cfg);
@@ -490,7 +488,10 @@ fn build_stage_pipeline_from_config(
 /// `fix_unit_known`.  Returns `None` for non-fix-unit steps,
 /// malformed payloads, or already-known ids — those are not in
 /// scope for the fix-unit range guard.
-fn unknown_fix_step(payload: Option<&str>, fix_unit_known: &std::collections::BTreeSet<String>) -> Option<String> {
+fn unknown_fix_step(
+    payload: Option<&str>,
+    fix_unit_known: &std::collections::BTreeSet<String>,
+) -> Option<String> {
     let payload = payload?;
     let value: serde_json::Value = serde_json::from_str(payload).ok()?;
     let step_id = match value.get("step")? {
@@ -536,10 +537,7 @@ fn build_invalid_step_target_resume_payload_for_jsonl(
         ),
     );
     if let Some(hat) = original_event.hat.as_ref() {
-        payload.insert(
-            "target".into(),
-            serde_json::Value::String(hat.clone()),
-        );
+        payload.insert("target".into(), serde_json::Value::String(hat.clone()));
     }
     payload.insert(
         "known_fix_units".into(),
@@ -554,8 +552,7 @@ fn build_invalid_step_target_resume_payload_for_jsonl(
         "guidance".into(),
         serde_json::Value::String(finding.message.clone()),
     );
-    serde_json::to_string(&serde_json::Value::Object(payload))
-        .unwrap_or_else(|_| "{}".to_string())
+    serde_json::to_string(&serde_json::Value::Object(payload)).unwrap_or_else(|_| "{}".to_string())
 }
 
 impl EventLoop {
@@ -591,6 +588,62 @@ impl EventLoop {
             out.insert(cancellation);
         }
         out
+    }
+
+    /// Topics listed in `event_loop.required_events` for the current loop.
+    pub(crate) fn required_event_topic_set(&self) -> std::collections::HashSet<&str> {
+        self.config
+            .event_loop
+            .required_events
+            .iter()
+            .map(|topic| topic.as_str())
+            .collect()
+    }
+
+    /// Isolated-mode per-turn budget carve-out for ordered dual publishes
+    /// from the same hat: `queue.advance` → `work.ready`, and any
+    /// `required_events` topic → `completion_promise`.
+    pub(crate) fn isolated_dual_publish_handoff(
+        &self,
+        incoming_topic: &str,
+        incoming_hat: &str,
+        isolated_hat: &str,
+        accepted: &[crate::event_reader::Event],
+    ) -> bool {
+        let Some(last) = accepted.last() else {
+            return false;
+        };
+        // Mirror isolated scope attribution: events without provenance
+        // inherit the active isolated hat (same as the caller's
+        // `incoming_hat` fallback). Using `""` for the previous event
+        // broke the legacy `(queue.advance, work.ready)` pair when
+        // neither JSONL line carried a `hat` field — the old inline
+        // check compared `Option` equality (`None == None`).
+        let last_hat = last
+            .hat
+            .as_deref()
+            .or(last.source.as_deref())
+            .unwrap_or(isolated_hat);
+        if last_hat != incoming_hat {
+            return false;
+        }
+        let last_topic = last.topic.as_str();
+        if incoming_topic == "work.ready" && last_topic == "queue.advance" {
+            return true;
+        }
+        let completion = self.config.event_loop.completion_promise.as_str();
+        if incoming_topic == completion
+            && !completion.is_empty()
+            && self.required_event_topic_set().contains(last_topic)
+        {
+            return true;
+        }
+        false
+    }
+
+    fn mark_required_event_seen(&mut self, topic: &str) {
+        let required = self.config.event_loop.required_events.clone();
+        self.state.mark_required_event_topic_seen(topic, &required);
     }
 
     /// 2026-06-09: returns the union of `verdict_gate.topic` and
@@ -868,11 +921,14 @@ impl EventLoop {
         // accepts duplicate handoff events that the previous process already
         // handled.
         let mut state = LoopState::new();
-        if let Some(policy_config) = config.event_loop.event_policy.as_ref().filter(|p| p.enabled) {
-            match crate::event_policy::PolicyRuntimeState::from_events(
-                &events_path,
-                policy_config,
-            ) {
+        if let Some(policy_config) = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .filter(|p| p.enabled)
+        {
+            match crate::event_policy::PolicyRuntimeState::from_events(&events_path, policy_config)
+            {
                 Ok(policy_state) => {
                     state.policy_runtime_state = Some(policy_state);
                 }
@@ -1931,17 +1987,18 @@ impl EventLoop {
             debug!("Completion already handled, ignoring text fallback request");
             return;
         }
-        // P0-5 (2026-06-30-001): report_done_seen gate.
-        if let Err(reason) = self
-            .state
-            .mark_completion_requested(&self.config.event_loop.required_events, &self.config.event_loop.completion_promise)
-        {
+        // P0-5: required_events gate.
+        if let Err(reason) = self.state.mark_completion_requested(
+            &self.config.event_loop.required_events,
+            &self.config.event_loop.completion_promise,
+        ) {
             tracing::warn!(
                 reason = %reason,
                 iteration = self.state.iteration,
                 "P0-5: text-fallback completion rejected; \
-                 report.done not yet observed; loop continues"
+                 required events not yet observed; loop continues"
             );
+            self.state.completion_requested = true;
             return;
         }
         // P1-2: per-event commit so a mid-flight crash preserves
@@ -2810,31 +2867,36 @@ impl EventLoop {
                 // targeted-event fast path above is the only place such
                 // events can re-activate a hat.
                 let priority_hat: Option<HatId> =
-                    self.handoff_index.entries.iter().find_map(|(topic, entry)| {
-                        let consumer = entry.consumer.as_deref()?;
-                        let hat_id = HatId::from(consumer);
-                        if ralph_proto::topics::is_orchestrator_control(topic.as_str()) {
-                            return None;
-                        }
-                        let topic_matches = self
-                            .bus
-                            .peek_pending(&hat_id)
-                            .map(|q| q.iter().any(|event| event.topic.as_str() == topic.as_str()))
-                            .unwrap_or(false);
-                        if topic_matches {
-                            // KTD-9 / R1: pre-emption hits are observable
-                            // so future drift has a forensic trail.
-                            tracing::debug!(
-                                target = "ralph_core::event_loop",
-                                topic = %topic,
-                                consumer = %hat_id,
-                                "priority pre-empt: topic-exact pending in consumer queue"
-                            );
-                            Some(hat_id)
-                        } else {
-                            None
-                        }
-                    });
+                    self.handoff_index
+                        .entries
+                        .iter()
+                        .find_map(|(topic, entry)| {
+                            let consumer = entry.consumer.as_deref()?;
+                            let hat_id = HatId::from(consumer);
+                            if ralph_proto::topics::is_orchestrator_control(topic.as_str()) {
+                                return None;
+                            }
+                            let topic_matches = self
+                                .bus
+                                .peek_pending(&hat_id)
+                                .map(|q| {
+                                    q.iter().any(|event| event.topic.as_str() == topic.as_str())
+                                })
+                                .unwrap_or(false);
+                            if topic_matches {
+                                // KTD-9 / R1: pre-emption hits are observable
+                                // so future drift has a forensic trail.
+                                tracing::debug!(
+                                    target = "ralph_core::event_loop",
+                                    topic = %topic,
+                                    consumer = %hat_id,
+                                    "priority pre-empt: topic-exact pending in consumer queue"
+                                );
+                                Some(hat_id)
+                            } else {
+                                None
+                            }
+                        });
                 // Select via round-robin. This updates last_selected.
                 // We need to return a borrowed HatId, so we select and then look it up.
                 let selected = self
@@ -3248,6 +3310,14 @@ impl EventLoop {
     pub fn inject_fallback_event(&mut self) -> bool {
         if self.inject_review_aggregate_timeouts() {
             return true;
+        }
+
+        // Do not stall-recover after the loop has already reached terminal.
+        if self.state.completion_honored {
+            return false;
+        }
+        if self.state.completion_requested && self.check_completion_event().is_some() {
+            return false;
         }
 
         const STALL_HARD_THRESHOLD: u32 = 3;
@@ -6637,23 +6707,19 @@ impl EventLoop {
                 topic = %default_topic_str,
                 "default_publishes matches completion_promise — requesting termination"
             );
-            // 2026-06-30-001 P0-5: gate default_publishes'
-            // terminal signal on `report_done_seen`. A
-            // hat-default completion topic that fires before
-            // `report.done` is logged and the default emit
-            // path continues without flipping
-            // `completion_requested`.
-            if let Err(reason) = self
-                .state
-                .mark_completion_requested(&self.config.event_loop.required_events, &self.config.event_loop.completion_promise)
-            {
+            // P0-5: gate default_publishes' terminal signal on
+            // `required_events`.
+            if let Err(reason) = self.state.mark_completion_requested(
+                &self.config.event_loop.required_events,
+                &self.config.event_loop.completion_promise,
+            ) {
                 tracing::warn!(
                     reason = %reason,
                     hat = %hat_id.as_str(),
                     topic = %default_topic_str,
                     iteration = self.state.iteration,
                     "P0-5: default_publishes completion rejected; \
-                     report.done not yet observed; \
+                     required events not yet observed; \
                      hat's default emit will not transition loop to terminal"
                 );
                 // Fall through: still publish the default
@@ -8152,11 +8218,18 @@ impl EventLoop {
                     None => false,
                 };
 
-                let is_dual_publish_step_handoff = event.topic.as_str() == "work.ready"
-                    && accepted.last().is_some_and(|prev| {
-                        prev.topic.as_str() == "queue.advance"
-                            && prev.hat.as_ref() == event.hat.as_ref()
-                    });
+                let incoming_hat = event
+                    .hat
+                    .as_deref()
+                    .or(event.source.as_deref())
+                    .unwrap_or(isolated_hat.as_str());
+                let is_dual_publish_step_handoff = self.isolated_dual_publish_handoff(
+                    event.topic.as_str(),
+                    incoming_hat,
+                    isolated_hat.as_str(),
+                    &accepted,
+                );
+                let required_event_topics = self.required_event_topic_set();
 
                 // 2026-07-01-001 plan U1: terminal-priority
                 // budget. When the non-wave slot has already
@@ -8190,6 +8263,11 @@ impl EventLoop {
                         if prev_topic == "task.resume" {
                             // Don't touch recovery envelopes.
                             continue;
+                        }
+                        if required_event_topics.contains(prev_topic) {
+                            // P0-5: required pre-completion events must
+                            // never be displaced by U1 terminal-priority.
+                            break;
                         }
                         if terminal_topics.contains(prev_topic) {
                             // Already admitted a terminal event
@@ -8349,6 +8427,7 @@ impl EventLoop {
                         }
                     }
                 } else {
+                    self.mark_required_event_seen(event.topic.as_str());
                     accepted.push(event);
                     match event_wave_id.as_deref() {
                         Some(wid) => {
@@ -9324,11 +9403,7 @@ impl EventLoop {
                     // preserves the historical behaviour when
                     // state projection is disabled (empty chain
                     // means "no information, accept everything").
-                    let guard_active = self
-                        .state
-                        .state_projection
-                        .as_ref()
-                        .is_some();
+                    let guard_active = self.state.state_projection.as_ref().is_some();
                     if guard_active {
                         if let Some(rejected_step) =
                             unknown_fix_step(event.payload.as_deref(), &fix_unit_known)
@@ -9558,17 +9633,19 @@ impl EventLoop {
                             );
                             let guidance_event =
                                 Event::new(guidance_topic_owned.as_str(), guidance_payload)
-                                // 2026-06-28-005: pin the guidance
-                                // publish to the same target as the
-                                // retry event so the ralph fallback
-                                // (subscribed to *) does not shadow
-                                // it. retry_target is None for the
-                                // no-safe-target case; in that case
-                                // the event fans out to the
-                                // fallback (which is the documented
-                                // behaviour — see no_retry_reason
-                                // branch above).
-                                .with_target(retry_target.clone().unwrap_or_else(|| HatId::new("ralph")));
+                                    // 2026-06-28-005: pin the guidance
+                                    // publish to the same target as the
+                                    // retry event so the ralph fallback
+                                    // (subscribed to *) does not shadow
+                                    // it. retry_target is None for the
+                                    // no-safe-target case; in that case
+                                    // the event fans out to the
+                                    // fallback (which is the documented
+                                    // behaviour — see no_retry_reason
+                                    // branch above).
+                                    .with_target(
+                                        retry_target.clone().unwrap_or_else(|| HatId::new("ralph")),
+                                    );
                             self.bus.publish(guidance_event);
 
                             contract_rejections.extend(findings.iter().cloned());
@@ -9745,24 +9822,42 @@ impl EventLoop {
                 // terminal — events L37 of the 032648 run
                 // showed ralph emitting `LOOP_COMPLETE` while
                 // 6/7 review dimensions were still in flight.
-                if let Err(reason) = self
-                    .state
-                    .mark_completion_requested(&self.config.event_loop.required_events, &self.config.event_loop.completion_promise)
-                {
+                if let Err(reason) = self.state.mark_completion_requested(
+                    &self.config.event_loop.required_events,
+                    &self.config.event_loop.completion_promise,
+                ) {
+                    let missing = self
+                        .state
+                        .missing_required_events(&self.config.event_loop.required_events);
+                    let free_form = format!(
+                        "LOOP_COMPLETE rejected: missing required events: {missing:?}. \
+                         The agent must complete all workflow phases before emitting LOOP_COMPLETE. \
+                         Use loop.cancel to abort the workflow instead."
+                    );
                     tracing::warn!(
                         reason = %reason,
+                        missing = ?missing,
                         iteration = self.state.iteration,
                         topic = %event.topic,
                         index = index,
                         "P0-5: completion event rejected; \
-                         report.done not yet observed; \
+                         required events not yet observed; \
                          event will not transition loop to terminal"
                     );
+                    let _ = Self::inject_completion_correction(
+                        &mut self.state,
+                        "missing_required_events",
+                        &free_form,
+                    );
+                    // Keep `completion_requested` set so
+                    // `check_completion_event()` can run the stale-breaker
+                    // and correction path (same as a post-admit rejection).
+                    self.state.completion_requested = true;
                     // Drop the event from this batch's
                     // accepted stream; the runtime continues
-                    // to wait for `report.done`. The event is
-                    // NOT added to `accepted_log_events` so
-                    // the events.jsonl file does not carry a
+                    // to wait for required workflow events. The
+                    // event is NOT added to `accepted_log_events`
+                    // so the events.jsonl file does not carry a
                     // false-positive terminal event.
                     continue;
                 }
@@ -10319,9 +10414,7 @@ impl EventLoop {
             // sees a `review.start` while the flag is
             // `true` rejects it before it lands in
             // `accepted_log_events`.
-            if event.topic.as_str() == "work.done"
-                && self.is_fix_unit_completion_event(event)
-            {
+            if event.topic.as_str() == "work.done" && self.is_fix_unit_completion_event(event) {
                 self.state.seen_fix_unit_completions =
                     self.state.seen_fix_unit_completions.saturating_add(1);
                 if self.is_fix_unit_chain_exhausted() {
@@ -10345,19 +10438,7 @@ impl EventLoop {
 
             // Record topic for event chain validation
             self.state.record_event(event);
-            // 2026-06-30-001 P0-5: `report.done` is the canonical
-            // "workflow has produced its final report" signal.
-            // Set the sticky flag here, in the validated-event
-            // admit loop, so the gate works whether or not the
-            // preset configures a `verdict_gate` (the
-            // `record_verdict_if_match` call below only fires
-            // when verdict_gate is present; this assignment
-            // covers the case where the preset opts in via
-            // `required_events: ["report.done"]` without a
-            // verdict_gate).
-            if event.topic.as_str() == "report.done" {
-                self.state.report_done_seen = true;
-            }
+            self.mark_required_event_seen(event.topic.as_str());
             self.state
                 .record_verdict_if_match(event, verdict_topics_slice);
 
@@ -10643,16 +10724,12 @@ impl EventLoop {
             // this companion entry is the same
             // `loop.batch_sync` so any source-string
             // filter keeps working unchanged.
-            let is_no_progress_turn =
-                !had_events && accepted_log_events.is_empty();
+            let is_no_progress_turn = !had_events && accepted_log_events.is_empty();
             if is_no_progress_turn {
                 let no_progress = CommitDelta::NoProgressTurnObserved {
                     iteration: self.state.iteration,
                 };
-                if let Err(e) = ledger.commit(
-                    no_progress,
-                    Some(batch_sync_source.to_string()),
-                ) {
+                if let Err(e) = ledger.commit(no_progress, Some(batch_sync_source.to_string())) {
                     tracing::warn!(
                         error = %e,
                         iteration = self.state.iteration,
@@ -11262,7 +11339,7 @@ impl EventLoop {
             && let Some(ref policy_config) = self.config.event_loop.event_policy
             && policy_config.enabled
         {
-            use crate::event_policy::{validate_event_with_hat, PolicyDecision};
+            use crate::event_policy::{PolicyDecision, validate_event_with_hat};
             let payload_str = event.payload.as_str();
             let decision = validate_event_with_hat(
                 event.topic.as_str(),
@@ -11441,8 +11518,16 @@ impl EventLoop {
                 "work.ready requested fix-unit `{}` which is not in the known fix-unit chain ({}). \
                  The chain has already exhausted or the id is from a stale plan; re-emit with an id from `{}` or finish with `plan.complete`.",
                 rejected_step,
-                if known_list.is_empty() { "(none yet)".to_string() } else { known_list.join(", ") },
-                if known_list.is_empty() { "<none>".to_string() } else { format!("{{{}}}", known_list.join(", ")) },
+                if known_list.is_empty() {
+                    "(none yet)".to_string()
+                } else {
+                    known_list.join(", ")
+                },
+                if known_list.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    format!("{{{}}}", known_list.join(", "))
+                },
             ),
             topic: event.topic.clone(),
             source_hat: source_hat.clone(),
@@ -11452,12 +11537,10 @@ impl EventLoop {
             step = %rejected_step,
             "fix-unit range reject"
         );
-        let payload_json = build_invalid_step_target_resume_payload_for_jsonl(
-            &finding,
-            event,
-            &known_list,
-        );
-        self.bus.publish(ralph_proto::Event::new("task.resume", payload_json));
+        let payload_json =
+            build_invalid_step_target_resume_payload_for_jsonl(&finding, event, &known_list);
+        self.bus
+            .publish(ralph_proto::Event::new("task.resume", payload_json));
         self.diagnostics.log_execution_contract_rejections(
             0,
             source_hat.as_deref().unwrap_or("ralph"),

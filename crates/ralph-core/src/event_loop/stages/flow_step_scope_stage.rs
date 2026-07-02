@@ -36,9 +36,8 @@ const VERDICT_GATE_TOPICS: &[&str] = &["LOOP_COMPLETE"];
 /// events that close a phase are allowed. Individual review
 /// events (`review.dimension.done`, etc.) still require the
 /// hat-specific `DEFENSIVE_BYPASS`.
-const TRANSITION_TOPICS: &[(&str, &[&str])] = &[
-    ("review.dimensions.complete", &["unit_loop", "review_walk"]),
-];
+const TRANSITION_TOPICS: &[(&str, &[&str])] =
+    &[("review.dimensions.complete", &["unit_loop", "review_walk"])];
 
 /// 2026-06-28 plan U3: defensive bypass list.
 ///

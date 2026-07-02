@@ -303,7 +303,7 @@ hats:
       On plan.blocked: for recoverable reasons, run checks.
 "#;
         let cfg = cfg_with_shipper_prompt(
-            Some("STRICT-MATCH on whitelist"),  // typed config has marker
+            Some("STRICT-MATCH on whitelist"), // typed config has marker
             vec![],
         );
         let findings = check_strict_reason_routing(&cfg, LintStrictness::Default, Some(yaml));

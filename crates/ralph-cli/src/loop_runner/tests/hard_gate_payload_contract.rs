@@ -160,7 +160,6 @@ fn test_u4_rejection_stage_emit_claimed_but_not_written_as_str() {
 // while a wave obligation is pending, and must still fire when
 // no wave was emitted (the "completely forgot to emit" case).
 
-
 // 2026-06-17-001 Unit 6: GateWaveMutex. The wave registry lives
 // in `LoopState::flow_lifecycle`; the hard gate must NOT fire
 // while a wave obligation is pending, and must still fire when
@@ -694,7 +693,6 @@ hats:
     let _ = event_loop;
     (temp, root)
 }
-
 
 #[test]
 fn test_u3_next_hat_consumes_pending_recovery_hat_and_clears() {

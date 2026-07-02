@@ -220,9 +220,7 @@ impl CoordinatorDecisionGateStage {
                 // stage accepts the rewritten event. We
                 // borrow the existing payload, augment the
                 // JSON object, and write the new value back.
-                if let Ok(mut value) =
-                    serde_json::from_str::<serde_json::Value>(&event.payload)
-                {
+                if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&event.payload) {
                     if let Some(obj) = value.as_object_mut() {
                         // `plan_name` is already in the payload
                         // for `work.ready(fix-NN, last_in_phase)`;
@@ -232,9 +230,7 @@ impl CoordinatorDecisionGateStage {
                             if let Some(pn) = obj
                                 .get("plan")
                                 .and_then(|v| v.as_str())
-                                .or_else(|| {
-                                    obj.get("planName").and_then(|v| v.as_str())
-                                })
+                                .or_else(|| obj.get("planName").and_then(|v| v.as_str()))
                             {
                                 obj.insert(
                                     "plan_name".to_string(),
@@ -246,9 +242,7 @@ impl CoordinatorDecisionGateStage {
                         // present (the projector expects the
                         // same id on `plan.complete`).
                         if !obj.contains_key("task_id") {
-                            if let Some(tid) =
-                                obj.get("taskId").and_then(|v| v.as_str())
-                            {
+                            if let Some(tid) = obj.get("taskId").and_then(|v| v.as_str()) {
                                 obj.insert(
                                     "task_id".to_string(),
                                     serde_json::Value::String(tid.to_string()),
@@ -260,27 +254,22 @@ impl CoordinatorDecisionGateStage {
                         // builder can mark the chain
                         // finished.
                         if !obj.contains_key("completed_steps") {
-                            if let Some(step_str) =
-                                obj.get("step").and_then(|v| v.as_str())
-                            {
+                            if let Some(step_str) = obj.get("step").and_then(|v| v.as_str()) {
                                 obj.insert(
                                     "completed_steps".to_string(),
-                                    serde_json::Value::Array(vec![
-                                        serde_json::Value::String(step_str.to_string()),
-                                    ]),
+                                    serde_json::Value::Array(vec![serde_json::Value::String(
+                                        step_str.to_string(),
+                                    )]),
                                 );
                             } else if let Some(step_obj) =
                                 obj.get("step").and_then(|v| v.as_object())
                             {
-                                if let Some(id) = step_obj
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                {
+                                if let Some(id) = step_obj.get("id").and_then(|v| v.as_str()) {
                                     obj.insert(
                                         "completed_steps".to_string(),
-                                        serde_json::Value::Array(vec![
-                                            serde_json::Value::String(id.to_string()),
-                                        ]),
+                                        serde_json::Value::Array(vec![serde_json::Value::String(
+                                            id.to_string(),
+                                        )]),
                                     );
                                 }
                             }
@@ -473,7 +462,8 @@ mod tests {
     #[test]
     fn u3_rewrite_normalises_alias_keys() {
         let mut e = event("work.ready");
-        e.payload = r#"{"step":{"id":"fix-02","last_in_phase":true},"plan":"p","taskId":"t-1"}"#.to_string();
+        e.payload = r#"{"step":{"id":"fix-02","last_in_phase":true},"plan":"p","taskId":"t-1"}"#
+            .to_string();
         let _ = CoordinatorDecisionGateStage::rewrite_work_ready_topic(&mut e);
         let v: serde_json::Value = serde_json::from_str(&e.payload).unwrap();
         assert_eq!(v.get("plan_name").and_then(|p| p.as_str()), Some("p"));

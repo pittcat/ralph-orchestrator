@@ -466,6 +466,205 @@ hats:
 }
 
 #[test]
+fn test_isolated_dual_publish_handoff_required_event_to_completion() {
+    let yaml = r#"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+  required_events: ["report.done", "align.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let event_loop = EventLoop::new(config);
+
+    let mk = |topic: &str, hat: &str| crate::event_reader::Event {
+        topic: topic.to_string(),
+        payload: None,
+        ts: "t".to_string(),
+        hat: Some(hat.to_string()),
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+
+    let report_pair = vec![mk("report.done", "reporter")];
+    assert!(
+        event_loop.isolated_dual_publish_handoff(
+            "LOOP_COMPLETE",
+            "reporter",
+            "reporter",
+            &report_pair
+        ),
+        "report.done → LOOP_COMPLETE handoff must be allowed"
+    );
+
+    let align_pair = vec![mk("align.done", "alignment")];
+    assert!(
+        event_loop.isolated_dual_publish_handoff(
+            "LOOP_COMPLETE",
+            "alignment",
+            "alignment",
+            &align_pair
+        ),
+        "align.done → LOOP_COMPLETE handoff must be allowed"
+    );
+
+    let wrong_hat = vec![mk("report.done", "reporter")];
+    assert!(
+        !event_loop.isolated_dual_publish_handoff(
+            "LOOP_COMPLETE",
+            "ralph",
+            "reporter",
+            &wrong_hat
+        ),
+        "cross-hat handoff must be rejected"
+    );
+
+    // BDD scenarios often omit `hat` on JSONL lines; both sides inherit
+    // `isolated_hat` and the queue.advance → work.ready pair must still work.
+    let no_hat_pair = vec![crate::event_reader::Event {
+        topic: "queue.advance".to_string(),
+        payload: None,
+        ts: "t".to_string(),
+        hat: None,
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    }];
+    assert!(
+        event_loop.isolated_dual_publish_handoff(
+            "work.ready",
+            "plan-gate",
+            "plan-gate",
+            &no_hat_pair
+        ),
+        "queue.advance → work.ready handoff must work without hat provenance"
+    );
+}
+
+#[test]
+fn test_isolated_required_event_then_completion_same_turn_report_done() {
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+  required_events: ["report.done"]
+hats:
+  reporter:
+    name: "Reporter"
+    description: "Final report"
+    triggers: ["align.done"]
+    publishes: ["report.done", "LOOP_COMPLETE"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.process_output(&HatId::new("reporter"), "output", true);
+    event_loop.state.current_isolated_hat = Some(HatId::new("reporter"));
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    write_event_with_hat_to_jsonl(
+        &events_path,
+        "report.done",
+        r#"{"verdict":"pass"}"#,
+        "reporter",
+    );
+    write_event_with_hat_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"reason":"done"}"#,
+        "reporter",
+    );
+
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    let accepted_topics: Vec<_> = result
+        .accepted_events
+        .iter()
+        .map(|e| e.topic.as_str())
+        .collect();
+
+    assert!(
+        event_loop.state().seen_topics.contains("report.done"),
+        "report.done must survive isolated per-turn budgeting"
+    );
+    assert!(
+        accepted_topics.contains(&"LOOP_COMPLETE"),
+        "LOOP_COMPLETE must be admitted as required-event handoff; got {accepted_topics:?}"
+    );
+    assert!(
+        event_loop.state.completion_requested,
+        "same-turn required event + completion must set completion_requested"
+    );
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "completion must be honored once required event was observed"
+    );
+}
+
+#[test]
+fn test_isolated_required_event_then_completion_same_turn_generic_topic() {
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+  required_events: ["align.done"]
+hats:
+  alignment:
+    name: "Alignment"
+    description: "Align residuals"
+    triggers: ["fix.done"]
+    publishes: ["align.done", "LOOP_COMPLETE"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.process_output(&HatId::new("alignment"), "output", true);
+    event_loop.state.current_isolated_hat = Some(HatId::new("alignment"));
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    write_event_with_hat_to_jsonl(
+        &events_path,
+        "align.done",
+        r#"{"residuals_count":0}"#,
+        "alignment",
+    );
+    write_event_with_hat_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"reason":"done"}"#,
+        "alignment",
+    );
+
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    let accepted_topics: Vec<_> = result
+        .accepted_events
+        .iter()
+        .map(|e| e.topic.as_str())
+        .collect();
+
+    assert!(event_loop.state().seen_topics.contains("align.done"));
+    assert!(
+        accepted_topics.contains(&"LOOP_COMPLETE"),
+        "LOOP_COMPLETE handoff must succeed for generic required topic; got {accepted_topics:?}"
+    );
+    assert!(event_loop.state.completion_requested);
+    assert_eq!(
+        event_loop.check_completion_event(),
+        Some(TerminationReason::CompletionPromise)
+    );
+}
+
+#[test]
 fn test_string_payload_events_pass_through_normally() {
     let config = RalphConfig::default();
     let mut event_loop = EventLoop::new(config);

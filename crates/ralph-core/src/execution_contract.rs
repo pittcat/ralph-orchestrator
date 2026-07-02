@@ -2062,8 +2062,7 @@ mod recent_commit_messages_tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         // Even though dir is not a repo, this must not panic.
-        let msgs =
-            DefaultGitEvidenceProvider.recent_commit_messages(&dir, None, 0);
+        let msgs = DefaultGitEvidenceProvider.recent_commit_messages(&dir, None, 0);
         assert!(msgs.is_empty());
     }
 
@@ -2079,8 +2078,7 @@ mod recent_commit_messages_tests {
         std::fs::create_dir_all(&dir).unwrap();
         // No `git init` here — git log will fail with status != 0,
         // we must return an empty Vec instead of panicking.
-        let msgs =
-            DefaultGitEvidenceProvider.recent_commit_messages(&dir, None, 10);
+        let msgs = DefaultGitEvidenceProvider.recent_commit_messages(&dir, None, 10);
         assert!(msgs.is_empty());
     }
 
@@ -2097,10 +2095,7 @@ mod recent_commit_messages_tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         run_git(&["init", "-q"], &dir);
-        run_git(
-            &["config", "user.email", "test@example.com"],
-            &dir,
-        );
+        run_git(&["config", "user.email", "test@example.com"], &dir);
         run_git(&["config", "user.name", "test"], &dir);
         run_git(
             &[
@@ -2113,8 +2108,7 @@ mod recent_commit_messages_tests {
             &dir,
         );
 
-        let msgs =
-            DefaultGitEvidenceProvider.recent_commit_messages(&dir, None, 10);
+        let msgs = DefaultGitEvidenceProvider.recent_commit_messages(&dir, None, 10);
         assert_eq!(msgs.len(), 1, "want one message, got {:?}", msgs);
         assert!(msgs[0].contains("subject line"));
         assert!(msgs[0].contains("body paragraph 1"));
@@ -2133,10 +2127,7 @@ mod recent_commit_messages_tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         run_git(&["init", "-q"], &dir);
-        run_git(
-            &["config", "user.email", "test@example.com"],
-            &dir,
-        );
+        run_git(&["config", "user.email", "test@example.com"], &dir);
         run_git(&["config", "user.name", "test"], &dir);
         for i in 0..5 {
             run_git(
@@ -2145,8 +2136,7 @@ mod recent_commit_messages_tests {
             );
         }
 
-        let msgs =
-            DefaultGitEvidenceProvider.recent_commit_messages(&dir, None, 3);
+        let msgs = DefaultGitEvidenceProvider.recent_commit_messages(&dir, None, 3);
         assert_eq!(msgs.len(), 3);
         // Newest first — commit 4 is the most recent.
         assert!(msgs[0].contains("c4"));
@@ -2165,15 +2155,9 @@ mod recent_commit_messages_tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         run_git(&["init", "-q"], &dir);
-        run_git(
-            &["config", "user.email", "test@example.com"],
-            &dir,
-        );
+        run_git(&["config", "user.email", "test@example.com"], &dir);
         run_git(&["config", "user.name", "test"], &dir);
-        run_git(
-            &["commit", "--allow-empty", "-q", "-m", "baseline"],
-            &dir,
-        );
+        run_git(&["commit", "--allow-empty", "-q", "-m", "baseline"], &dir);
         let baseline = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&dir)
@@ -2182,20 +2166,10 @@ mod recent_commit_messages_tests {
         let baseline = String::from_utf8(baseline.stdout).unwrap();
         let baseline = baseline.trim();
 
-        run_git(
-            &["commit", "--allow-empty", "-q", "-m", "post-1"],
-            &dir,
-        );
-        run_git(
-            &["commit", "--allow-empty", "-q", "-m", "post-2"],
-            &dir,
-        );
+        run_git(&["commit", "--allow-empty", "-q", "-m", "post-1"], &dir);
+        run_git(&["commit", "--allow-empty", "-q", "-m", "post-2"], &dir);
 
-        let msgs = DefaultGitEvidenceProvider.recent_commit_messages(
-            &dir,
-            Some(baseline),
-            10,
-        );
+        let msgs = DefaultGitEvidenceProvider.recent_commit_messages(&dir, Some(baseline), 10);
         // Should contain post-1 and post-2 only.
         assert!(
             msgs.iter()
@@ -2233,11 +2207,7 @@ mod fix_unit_footer_soft_check_tests {
         fn has_uncommitted_changes(&self, _workspace: &Path) -> bool {
             false
         }
-        fn has_new_commits_since(
-            &self,
-            _workspace: &Path,
-            _start_sha: Option<&str>,
-        ) -> bool {
+        fn has_new_commits_since(&self, _workspace: &Path, _start_sha: Option<&str>) -> bool {
             !self.recent.lock().unwrap().is_empty()
         }
         fn recent_commit_messages(
@@ -2263,12 +2233,8 @@ mod fix_unit_footer_soft_check_tests {
             "fix(core): something\n\n[fix-unit: fix-02]".to_string(),
         ]);
         let event = make_event("fix-02");
-        let diagnostics = run_execution_contract_soft_checks(
-            &event,
-            Path::new("/tmp"),
-            &provider,
-            None,
-        );
+        let diagnostics =
+            run_execution_contract_soft_checks(&event, Path::new("/tmp"), &provider, None);
         assert!(diagnostics.is_empty());
     }
 
@@ -2278,12 +2244,8 @@ mod fix_unit_footer_soft_check_tests {
             "fix(core): something\n\nno footer here".to_string(),
         ]);
         let event = make_event("fix-02");
-        let diagnostics = run_execution_contract_soft_checks(
-            &event,
-            Path::new("/tmp"),
-            &provider,
-            None,
-        );
+        let diagnostics =
+            run_execution_contract_soft_checks(&event, Path::new("/tmp"), &provider, None);
         assert_eq!(diagnostics.len(), 1);
         assert!(matches!(
             diagnostics[0].kind,
@@ -2306,12 +2268,8 @@ mod fix_unit_footer_soft_check_tests {
             "fix(core): something\n\n[fix-unit: fix-01]".to_string(),
         ]);
         let event = make_event("fix-02");
-        let diagnostics = run_execution_contract_soft_checks(
-            &event,
-            Path::new("/tmp"),
-            &provider,
-            None,
-        );
+        let diagnostics =
+            run_execution_contract_soft_checks(&event, Path::new("/tmp"), &provider, None);
         assert_eq!(diagnostics.len(), 1);
         match &diagnostics[0].kind {
             ExecutionContractViolationKind::FixUnitTagMissing { step, expected_tag } => {
@@ -2331,12 +2289,8 @@ mod fix_unit_footer_soft_check_tests {
             "yet another".to_string(),
         ]);
         let event = make_event("fix-02");
-        let diagnostics = run_execution_contract_soft_checks(
-            &event,
-            Path::new("/tmp"),
-            &provider,
-            None,
-        );
+        let diagnostics =
+            run_execution_contract_soft_checks(&event, Path::new("/tmp"), &provider, None);
         assert!(diagnostics.is_empty());
     }
 
@@ -2344,15 +2298,10 @@ mod fix_unit_footer_soft_check_tests {
     fn non_fix_step_is_skipped() {
         // The footer convention is fix-unit-specific; step="step-01"
         // must not trigger the check even with no commits in range.
-        let provider =
-            ConfigurableCommitProvider::new(vec!["some commit".to_string()]);
+        let provider = ConfigurableCommitProvider::new(vec!["some commit".to_string()]);
         let event = make_event("step-01");
-        let diagnostics = run_execution_contract_soft_checks(
-            &event,
-            Path::new("/tmp"),
-            &provider,
-            None,
-        );
+        let diagnostics =
+            run_execution_contract_soft_checks(&event, Path::new("/tmp"), &provider, None);
         assert!(diagnostics.is_empty());
     }
 
@@ -2362,12 +2311,8 @@ mod fix_unit_footer_soft_check_tests {
         // the coordinator is aware the agent never committed.
         let provider = ConfigurableCommitProvider::new(vec![]);
         let event = make_event("fix-02");
-        let diagnostics = run_execution_contract_soft_checks(
-            &event,
-            Path::new("/tmp"),
-            &provider,
-            None,
-        );
+        let diagnostics =
+            run_execution_contract_soft_checks(&event, Path::new("/tmp"), &provider, None);
         assert_eq!(diagnostics.len(), 1);
         assert!(matches!(
             diagnostics[0].kind,
@@ -2378,15 +2323,10 @@ mod fix_unit_footer_soft_check_tests {
     #[test]
     fn event_without_step_field_is_skipped() {
         // events whose payload has no `step` field must not throw.
-        let provider =
-            ConfigurableCommitProvider::new(vec!["some commit".to_string()]);
+        let provider = ConfigurableCommitProvider::new(vec!["some commit".to_string()]);
         let event = Event::new("work.done", r#"{"task_id":"t","task_key":"k"}"#);
-        let diagnostics = run_execution_contract_soft_checks(
-            &event,
-            Path::new("/tmp"),
-            &provider,
-            None,
-        );
+        let diagnostics =
+            run_execution_contract_soft_checks(&event, Path::new("/tmp"), &provider, None);
         assert!(diagnostics.is_empty());
     }
 
@@ -2395,15 +2335,10 @@ mod fix_unit_footer_soft_check_tests {
         // Defensive: if the payload cannot be parsed, treat the
         // check as skipped rather than recording a misleading
         // finding.
-        let provider =
-            ConfigurableCommitProvider::new(vec!["some commit".to_string()]);
+        let provider = ConfigurableCommitProvider::new(vec!["some commit".to_string()]);
         let event = Event::new("work.done", "not json at all");
-        let diagnostics = run_execution_contract_soft_checks(
-            &event,
-            Path::new("/tmp"),
-            &provider,
-            None,
-        );
+        let diagnostics =
+            run_execution_contract_soft_checks(&event, Path::new("/tmp"), &provider, None);
         assert!(diagnostics.is_empty());
     }
 
@@ -2414,19 +2349,14 @@ mod fix_unit_footer_soft_check_tests {
         // check still recognises the step id and compares against
         // commit footers; if the agent only emitted object-form
         // steps without a footer, the diagnostic still fires.
-        let provider = ConfigurableCommitProvider::new(vec![
-            "fix(core): no footer here".to_string(),
-        ]);
+        let provider =
+            ConfigurableCommitProvider::new(vec!["fix(core): no footer here".to_string()]);
         let event = Event::new(
             "work.done",
             r#"{"task_id":"t","task_key":"k","step":{"id":"fix-02","last_in_phase":true}}"#,
         );
-        let diagnostics = run_execution_contract_soft_checks(
-            &event,
-            Path::new("/tmp"),
-            &provider,
-            None,
-        );
+        let diagnostics =
+            run_execution_contract_soft_checks(&event, Path::new("/tmp"), &provider, None);
         assert_eq!(diagnostics.len(), 1);
         match &diagnostics[0].kind {
             ExecutionContractViolationKind::FixUnitTagMissing { step, .. } => {
@@ -2445,12 +2375,8 @@ mod fix_unit_footer_soft_check_tests {
             "work.done",
             r#"{"task_id":"t","task_key":"k","step":{"id":"fix-02","last_in_phase":true}}"#,
         );
-        let diagnostics = run_execution_contract_soft_checks(
-            &event,
-            Path::new("/tmp"),
-            &provider,
-            None,
-        );
+        let diagnostics =
+            run_execution_contract_soft_checks(&event, Path::new("/tmp"), &provider, None);
         assert!(diagnostics.is_empty());
     }
 
@@ -2495,12 +2421,8 @@ mod fix_unit_footer_soft_check_tests {
         );
 
         let event = make_event("fix-02");
-        let diagnostics = run_execution_contract_soft_checks(
-            &event,
-            &dir,
-            &DefaultGitEvidenceProvider,
-            None,
-        );
+        let diagnostics =
+            run_execution_contract_soft_checks(&event, &dir, &DefaultGitEvidenceProvider, None);
         assert!(diagnostics.is_empty());
     }
 
@@ -2527,12 +2449,8 @@ mod fix_unit_footer_soft_check_tests {
         );
 
         let event = make_event("fix-02");
-        let diagnostics = run_execution_contract_soft_checks(
-            &event,
-            &dir,
-            &DefaultGitEvidenceProvider,
-            None,
-        );
+        let diagnostics =
+            run_execution_contract_soft_checks(&event, &dir, &DefaultGitEvidenceProvider, None);
         assert_eq!(diagnostics.len(), 1);
         assert!(matches!(
             diagnostics[0].kind,
@@ -2543,10 +2461,7 @@ mod fix_unit_footer_soft_check_tests {
 
     fn run_git_init(dir: &PathBuf) {
         run_git(dir, &["init", "-q"]);
-        run_git(
-            dir,
-            &["config", "user.email", "test@example.com"],
-        );
+        run_git(dir, &["config", "user.email", "test@example.com"]);
         run_git(dir, &["config", "user.name", "test"]);
     }
 

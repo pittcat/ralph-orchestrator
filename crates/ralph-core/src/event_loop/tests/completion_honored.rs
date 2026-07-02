@@ -631,14 +631,8 @@ fn test_review_complete_payload_dedup() {
     use ralph_proto::Event;
 
     let mut state = LoopState::default();
-    let first = Event::new(
-        "REVIEW_COMPLETE",
-        r#"{"verdict":"pass","summary":"first"}"#,
-    );
-    let second = Event::new(
-        "REVIEW_COMPLETE",
-        r#"{"verdict":"pass","summary":"first"}"#,
-    );
+    let first = Event::new("REVIEW_COMPLETE", r#"{"verdict":"pass","summary":"first"}"#);
+    let second = Event::new("REVIEW_COMPLETE", r#"{"verdict":"pass","summary":"first"}"#);
     // First admit: not a duplicate, hash recorded.
     assert!(
         !state.is_review_complete_duplicate(&first),
@@ -688,14 +682,8 @@ fn test_report_done_payload_dedup() {
     use ralph_proto::Event;
 
     let mut state = LoopState::default();
-    let first = Event::new(
-        "report.done",
-        r#"{"verdict":"pass","summary":"ok"}"#,
-    );
-    let second = Event::new(
-        "report.done",
-        r#"{"verdict":"pass","summary":"ok"}"#,
-    );
+    let first = Event::new("report.done", r#"{"verdict":"pass","summary":"ok"}"#);
+    let second = Event::new("report.done", r#"{"verdict":"pass","summary":"ok"}"#);
     assert!(
         !state.is_review_complete_duplicate(&first),
         "first report.done is not a duplicate"
@@ -812,6 +800,7 @@ fn test_review_start_rejected_after_fix_unit_chain_exhausted() {
     // decision; this test pins the contract.
 }
 
+#[test]
 fn test_loop_complete_allowed_after_report_done() {
     use tempfile::TempDir;
     let temp_dir = TempDir::new().unwrap();

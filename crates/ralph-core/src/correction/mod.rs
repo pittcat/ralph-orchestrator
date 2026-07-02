@@ -739,8 +739,11 @@ pub fn escalate_to_plan_blocked(
         "reason_code": correction.reason_code,
         "retry_count": correction.retry_count,
     });
-    let event = ralph_proto::Event::new("plan.blocked", serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()))
-        .with_system_injected();
+    let event = ralph_proto::Event::new(
+        "plan.blocked",
+        serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .with_system_injected();
     bus.publish(event);
     true
 }
@@ -1164,11 +1167,8 @@ mod tests {
         // Register shipper so the published plan.blocked event
         // has somewhere to land — EventBus silently drops events
         // when no hat is registered (see event_bus::publish).
-        let shipper = ralph_proto::Hat::new(
-            ralph_proto::HatId::from("shipper"),
-            "shipper",
-        )
-        .subscribe(ralph_proto::Topic::new("*"));
+        let shipper = ralph_proto::Hat::new(ralph_proto::HatId::from("shipper"), "shipper")
+            .subscribe(ralph_proto::Topic::new("*"));
         bus.register(shipper);
         let r = sample_rejection();
         let ctx = CorrectionContext::from_rejection(&r, 3);

@@ -372,8 +372,7 @@ fn p0_retain_drops_only_matching_payload_in_batch() {
     // (1, payload1) as the dropped ones, leaving index 2 intact
     // in the loop's event batch.
     let bad_id_payload =
-        json!({"task_id": "wrong-id", "task_key": "wrong-key", "step": "step-01"})
-            .to_string();
+        json!({"task_id": "wrong-id", "task_key": "wrong-key", "step": "step-01"}).to_string();
     let missing_field_payload = json!({}).to_string(); // no task_id
     let good_payload = json!({
         "task_id": id_a,

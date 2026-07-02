@@ -3095,4 +3095,3 @@ fn compute_agent_wrote_any_valid_or_rejected(
 ) -> bool {
     runner::agent_wrote_any_valid_or_rejected(processed.as_ref(), wave_policy_rejections)
 }
-

@@ -1128,15 +1128,15 @@ mod tests {
     }
 
     /// Lifecycle 3b: FINAL Warning terminates the loop directly.
-///
-/// Pre-2026-06-28-002 the Warning branch published a
-/// `human.guidance` soft reminder and let the loop continue.
-/// That path was removed by plan 2026-06-28-005; the Warning
-/// Final hint now terminates the loop via
-/// `TerminationReason::RecoveryExhausted`, with no `human.guidance`
-/// emit (the topic no longer exists).
-#[test]
-fn lifecycle_final_warning_terminates_loop() {
+    ///
+    /// Pre-2026-06-28-002 the Warning branch published a
+    /// `human.guidance` soft reminder and let the loop continue.
+    /// That path was removed by plan 2026-06-28-005; the Warning
+    /// Final hint now terminates the loop via
+    /// `TerminationReason::RecoveryExhausted`, with no `human.guidance`
+    /// emit (the topic no longer exists).
+    #[test]
+    fn lifecycle_final_warning_terminates_loop() {
         let diag = diagnosis_config(true, 1, 1);
         let config = make_config_with_diagnosis(Arc::clone(&diag));
         let mut event_loop = crate::event_loop::EventLoop::new(config);

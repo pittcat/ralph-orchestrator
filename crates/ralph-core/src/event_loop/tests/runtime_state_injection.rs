@@ -413,8 +413,7 @@ hats:
         crate::loop_context::LoopContext::primary(dir.path().to_path_buf()),
     );
     event_loop.initialize("P0-2 projector fallback regression test");
-    event_loop.event_reader =
-        crate::event_reader::EventReader::new(&events_path);
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Drive the JSONL ingest path that lazy-initialises the
     // projector at event_loop/mod.rs:8056 — this is the wiring

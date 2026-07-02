@@ -32,7 +32,10 @@ const PRESETS: &[EmbeddedPreset] = &[
     EmbeddedPreset {
         name: "ce-executor-pipeline",
         description: "Isolated-mode linear one-shot plan execution: review plan → execute whole plan with TDD + full suite green → 6 serial dimension reviewers → synthesize fix plan → fix → align → report → complete",
-        content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-pipeline.yml")),
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/presets/ce-executor-pipeline.yml"
+        )),
         public: true,
     },
     EmbeddedPreset {
@@ -1336,8 +1339,7 @@ mod tests {
         // routing") is too loose and was being interpreted
         // as a substring match by the agent.
         assert!(
-            content.contains("STRICT-MATCH")
-                || content.contains("STRICT EXACT MATCH"),
+            content.contains("STRICT-MATCH") || content.contains("STRICT EXACT MATCH"),
             "P0-2: shipper instructions must use STRICT-MATCH on plan.blocked reason routing"
         );
         // Recoverable reasons must be listed.
@@ -1357,9 +1359,7 @@ mod tests {
         // all hit this gap; without these entries the
         // shipper still routes them to hard-fail.
         assert!(
-            content.contains(
-                "stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*"
-            ),
+            content.contains("stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*"),
             "shipper must list stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:* as recoverable (P1-B)"
         );
         assert!(
@@ -2124,9 +2124,9 @@ mod tests {
             let all_id_exempt = !errors.is_empty()
                 && errors.iter().all(|f| {
                     matches!(f.source, ralph_core::runtime_contract::FindingSource::Lint)
-                        && AUTHORING_EXEMPT_FINDINGS.iter().any(|(name, id)| {
-                            *name == preset.name && *id == f.id.as_str()
-                        })
+                        && AUTHORING_EXEMPT_FINDINGS
+                            .iter()
+                            .any(|(name, id)| *name == preset.name && *id == f.id.as_str())
                 });
 
             if topology_exempt.contains(&preset.name) && (all_topology || all_id_exempt) {

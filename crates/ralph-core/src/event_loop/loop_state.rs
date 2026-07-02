@@ -1526,6 +1526,19 @@ impl LoopState {
             .collect()
     }
 
+    /// Mark a required-event topic as observed before the full admit loop runs.
+    /// Used in isolated per-turn budgeting so a same-turn `completion_promise`
+    /// handoff can pass the P0-5 gate after the required topic was admitted.
+    pub fn mark_required_event_topic_seen(&mut self, topic: &str, required_events: &[String]) {
+        if !required_events.iter().any(|required| required == topic) {
+            return;
+        }
+        self.seen_topics.insert(topic.to_string());
+        if topic == "report.done" {
+            self.report_done_seen = true;
+        }
+    }
+
     /// Records the payload of an event if its topic matches the configured verdict gate.
     ///
     /// Called alongside `record_event` at every site. The most recent matching
@@ -1607,15 +1620,11 @@ impl LoopState {
 
     /// 2026-06-30-001 P0-5 (primary-20260630-032648 diagnosis):
     /// try to set `completion_requested = true`. Returns
-    /// `Err(reason)` when `report.done` is listed in
-    /// `required_events` but the runtime has not yet observed
-    /// a `report.done` event. The caller is expected to log the
-    /// rejection and skip the terminal transition. The
-    /// `report.done` event is the canonical "workflow has
-    /// produced its final report" signal defined in
-    /// `ce-executor-serial` `required_events`; honouring
-    /// `LOOP_COMPLETE` before that signal arrives silently
-    /// drops the final report from the loop summary.
+    /// `Err(reason)` when any topic listed in `required_events`
+    /// has not yet been observed. The caller is expected to log
+    /// the rejection and skip the terminal transition. Honouring
+    /// `LOOP_COMPLETE` before required workflow signals arrive
+    /// silently drops final handoff payloads from the loop summary.
     ///
     /// **P1-1 re-evaluation**: the code-review claim that R5
     /// requires a *universal* gate (regardless of
@@ -1648,18 +1657,11 @@ impl LoopState {
             self.completion_requested = true;
             return Ok(());
         }
-        // `report.done` is only enforced when the preset
-        // declares it as a required event. This keeps
-        // simple presets (no `report.done` requirement)
-        // working unchanged, and matches R5: the gate is
-        // triggered for `ce-executor-serial` and other
-        // plan-driven presets that opt into `report.done`.
-        let report_done_required = required_events.iter().any(|t| t == "report.done");
-        if report_done_required && !self.report_done_seen {
-            return Err(
-                "P0-5: completion_requested rejected — report.done is required but has not been observed yet"
-                    .to_string(),
-            );
+        let missing = self.missing_required_events(required_events);
+        if !missing.is_empty() {
+            return Err(format!(
+                "P0-5: completion_requested rejected — required events not yet observed: {missing:?}"
+            ));
         }
         if self.completion_honored {
             // Idempotent: a second mark after honour is a
@@ -1982,6 +1984,29 @@ mod detect_rejection_stall_kind_tests {
 mod tests {
     use super::{LoopState, U2_REJECTION_RETRY_LIMIT, WorkflowProgress};
     use ralph_proto::Event;
+
+    #[test]
+    fn mark_completion_requested_waits_for_all_required_events() {
+        let mut state = LoopState::new();
+        let required = vec!["align.done".to_string(), "report.done".to_string()];
+        assert!(
+            state
+                .mark_completion_requested(&required, "LOOP_COMPLETE")
+                .is_err()
+        );
+        state.mark_required_event_topic_seen("align.done", &required);
+        assert!(
+            state
+                .mark_completion_requested(&required, "LOOP_COMPLETE")
+                .is_err()
+        );
+        state.mark_required_event_topic_seen("report.done", &required);
+        assert!(
+            state
+                .mark_completion_requested(&required, "LOOP_COMPLETE")
+                .is_ok()
+        );
+    }
 
     #[test]
     fn repeated_task_complete_does_not_accumulate_stale_loop_count() {

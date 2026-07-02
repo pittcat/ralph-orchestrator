@@ -835,8 +835,7 @@ fn test_forged_ralph_work_done_does_not_create_retry_to_ralph() {
         .cloned()
         .unwrap_or_default();
     let targeted_to_ralph = ralph_pending.iter().find(|e| {
-        e.topic.as_str() != "plan.blocked"
-            && e.target.as_ref().map(|t| t.as_str()) == Some("ralph")
+        e.topic.as_str() != "plan.blocked" && e.target.as_ref().map(|t| t.as_str()) == Some("ralph")
     });
     assert!(
         targeted_to_ralph.is_none(),

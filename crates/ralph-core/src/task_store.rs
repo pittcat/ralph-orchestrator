@@ -420,16 +420,10 @@ impl TaskStore {
     /// loops from colliding on the same global id. Returns
     /// `None` for terminal rows (Closed / Failed) so a reused
     /// id after `work.done` does not raise the same warning.
-    pub fn find_open_task_id_in_loop(
-        &self,
-        task_id: &str,
-        loop_id: Option<&str>,
-    ) -> Option<&Task> {
-        self.tasks.iter().find(|t| {
-            t.id == task_id
-                && t.loop_id.as_deref() == loop_id
-                && !t.status.is_terminal()
-        })
+    pub fn find_open_task_id_in_loop(&self, task_id: &str, loop_id: Option<&str>) -> Option<&Task> {
+        self.tasks
+            .iter()
+            .find(|t| t.id == task_id && t.loop_id.as_deref() == loop_id && !t.status.is_terminal())
     }
 
     /// Closes a task by ID and returns a reference to it.
@@ -494,7 +488,10 @@ impl TaskStore {
     /// The key is unique per step (including fix-NN) because the
     /// `task_key` payload field encodes the step id.
     pub fn close_by_key(&mut self, key: &str) -> Option<&Task> {
-        let started_is_none = self.get_by_key(key).map(|t| t.started.is_none()).unwrap_or(false);
+        let started_is_none = self
+            .get_by_key(key)
+            .map(|t| t.started.is_none())
+            .unwrap_or(false);
         if started_is_none && !is_fix_unit_key(key) {
             tracing::warn!(
                 task_key = %key,
@@ -1462,10 +1459,8 @@ mod tests {
     // reused id after `work.done` does not re-warn.
     #[test]
     fn p0_3_find_open_task_id_in_loop_skips_terminal_rows() {
-        let mut store = TaskStore::load(std::path::Path::new(
-            "/tmp/p0-3-find-open-task-id.jsonl",
-        ))
-        .unwrap();
+        let mut store =
+            TaskStore::load(std::path::Path::new("/tmp/p0-3-find-open-task-id.jsonl")).unwrap();
         let mut t = Task::new("fix-02".into(), 1)
             .with_key(Some("ce-executor:p:fix-02:u2".to_string()))
             .with_loop_id(Some("loop-A".to_string()));

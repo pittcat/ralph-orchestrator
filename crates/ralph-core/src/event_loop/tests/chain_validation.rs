@@ -208,14 +208,21 @@ event_loop:
 
     // Recovery path: plan.blocked should be accepted, not rejected as a
     // business event after a (phantom) terminal event.
-    write_event_to_jsonl(&events_path, "plan.blocked", r#"{"reason": "review_failed"}"#);
+    write_event_to_jsonl(
+        &events_path,
+        "plan.blocked",
+        r#"{"reason": "review_failed"}"#,
+    );
     let result = event_loop.process_events_from_jsonl().unwrap();
     assert!(
         !result.had_rejected_events,
         "plan.blocked recovery event must not be rejected after a rejected LOOP_COMPLETE"
     );
     assert!(
-        result.accepted_events.iter().any(|e| e.topic == "plan.blocked".into()),
+        result
+            .accepted_events
+            .iter()
+            .any(|e| e.topic == "plan.blocked".into()),
         "plan.blocked should be accepted"
     );
 }

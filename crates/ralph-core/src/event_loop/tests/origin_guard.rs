@@ -1119,8 +1119,7 @@ hats:
         "stale attempt after completion",
         "executor",
     );
-    event_loop.event_reader =
-        crate::event_reader::EventReader::new(&events_path);
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
     let _ = event_loop.process_events_from_jsonl().unwrap();
 
     // The post-completion guard must refuse plan.blocked.
@@ -1131,9 +1130,7 @@ hats:
         .map(|e| e.topic.to_string())
         .collect();
     assert!(
-        topics
-            .iter()
-            .any(|t| t == "event.completion.blocked"),
+        topics.iter().any(|t| t == "event.completion.blocked"),
         "U2 cross-batch: expected event.completion.blocked diagnostic; got topics: {topics:?}"
     );
 

@@ -38,10 +38,7 @@ pub fn finalize_recovery_outcome_on_flapping(ctx: &RuntimeContext) -> Vec<Recove
 
         if handoff_timeout_pending(ctx, state) {
             actions.push(RecoveryAction::ForcePlanBlocked {
-                reason: format!(
-                    "handoff_timeout_recovery_finalized:{}",
-                    state.retry_key
-                ),
+                reason: format!("handoff_timeout_recovery_finalized:{}", state.retry_key),
                 retry_key: state.retry_key.clone(),
             });
             continue;
@@ -189,15 +186,17 @@ mod tests {
         use super::super::EnvelopeSnapshot;
         let ctx = RuntimeContext {
             retry_key_states: vec![RetryKeyState {
-                retry_key: "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:*"
-                    .to_string(),
+                retry_key:
+                    "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:*"
+                        .to_string(),
                 last_outcome: "Pending".to_string(),
                 outcome_history: vec!["Pending".to_string(); 3],
                 attempt_count: 3,
             }],
             recovery_envelopes: vec![EnvelopeSnapshot {
-                retry_key: "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:r1"
-                    .to_string(),
+                retry_key:
+                    "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:r1"
+                        .to_string(),
                 source: "StallRecovery".to_string(),
                 outcome: "Pending".to_string(),
                 iteration: 10,
@@ -217,15 +216,17 @@ mod tests {
         use super::super::EnvelopeSnapshot;
         let ctx = RuntimeContext {
             retry_key_states: vec![RetryKeyState {
-                retry_key: "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:*"
-                    .to_string(),
+                retry_key:
+                    "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:*"
+                        .to_string(),
                 last_outcome: "Failed".to_string(),
                 outcome_history: vec!["Failed".to_string()],
                 attempt_count: 1,
             }],
             recovery_envelopes: vec![EnvelopeSnapshot {
-                retry_key: "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:r1"
-                    .to_string(),
+                retry_key:
+                    "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:r1"
+                        .to_string(),
                 source: "StallRecovery".to_string(),
                 outcome: "Failed".to_string(),
                 iteration: 10,
@@ -244,10 +245,17 @@ mod tests {
             retry_key_states: vec![RetryKeyState {
                 retry_key: "k".to_string(),
                 last_outcome: "Recovered".to_string(),
-                outcome_history: vec!["Pending", "Pending", "Pending", "Recovered", "Recovered", "Recovered"]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
+                outcome_history: vec![
+                    "Pending",
+                    "Pending",
+                    "Pending",
+                    "Recovered",
+                    "Recovered",
+                    "Recovered",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
                 attempt_count: 6,
             }],
             ..Default::default()

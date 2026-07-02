@@ -159,9 +159,7 @@ hats:
     event_loop.initialize("Test");
 
     // handoff 主题路由到 executor;test.passed 路由到 coordinator
-    event_loop
-        .bus
-        .publish(Event::new("work.ready", "ready"));
+    event_loop.bus.publish(Event::new("work.ready", "ready"));
     event_loop
         .bus
         .publish(Event::new("test.passed", "review done"));
@@ -284,25 +282,19 @@ hats:
     let mut selections: Vec<String> = Vec::new();
 
     // iter 1: coordinator (from work.start handoff)
-    event_loop
-        .bus
-        .publish(Event::new("work.start", "start"));
+    event_loop.bus.publish(Event::new("work.start", "start"));
     let s1 = event_loop.next_hat().unwrap().clone();
     selections.push(s1.as_str().to_string());
     // coordinator consumes its queue, emits work.ready(step-01)
     event_loop.bus.take_pending(&s1);
-    event_loop
-        .bus
-        .publish(Event::new("work.ready", "ready-1"));
+    event_loop.bus.publish(Event::new("work.ready", "ready-1"));
 
     // iter 2: executor (from work.ready handoff, consumer=executor)
     let s2 = event_loop.next_hat().unwrap().clone();
     selections.push(s2.as_str().to_string());
     event_loop.bus.take_pending(&s2);
     // executor emits work.done(step-01)
-    event_loop
-        .bus
-        .publish(Event::new("work.done", "done-1"));
+    event_loop.bus.publish(Event::new("work.done", "done-1"));
 
     // Inject the residual: an UNTARGETED `task.resume` event. Per
     // the `event_bus::publish` contract (lines 138-146), an event
@@ -352,9 +344,7 @@ hats:
     let s4 = event_loop.next_hat().unwrap().clone();
     selections.push(s4.as_str().to_string());
     event_loop.bus.take_pending(&s4);
-    event_loop
-        .bus
-        .publish(Event::new("work.ready", "ready-2"));
+    event_loop.bus.publish(Event::new("work.ready", "ready-2"));
 
     // iter 5: executor 接收 work.ready(step-02)
     let s5 = event_loop.next_hat().unwrap().clone();
