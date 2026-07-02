@@ -99,7 +99,7 @@ emit 任何 step handoff 事件前，确认 payload 内部一致：
 - **一个 turn 只发射一个业务事件**是默认纪律；去重层再强也只是兜底，不要在同一回合内通过“多发一次”来尝试修复。
 - 如果某条事件被去重层拒绝并收到 `task.resume`，下一回合只发一次修正后的事件，不要在同一回合继续补发。
 
-**NULL payload 拒收白名单**（`crates/ralph-core/src/event_policy.rs:907-917` `NULL_PAYLOAD_REJECT_TOPICS`）：以下 9 个 topic 不接受空 payload（`[PAYLOAD]` 省略 + 无 `-j`）— 必须传 JSON object：
+**NULL payload 拒收白名单**（`crates/ralph-core/src/event_policy.rs:938-948` `NULL_PAYLOAD_REJECT_TOPICS`）：以下 9 个 topic 不接受空 payload（`[PAYLOAD]` 省略 + 无 `-j`）— 必须传 JSON object：
 
 | Topic | 出现位置 |
 |-------|---------|
@@ -108,9 +108,9 @@ emit 任何 step handoff 事件前，确认 payload 内部一致：
 | `review.wave.ready` | wave 入口 |
 | `work.ready` / `plan.complete` / `plan.blocked` | step handoff 关键事件 |
 
-JSON 写法：`ralph emit work.done --policy-check -j '{"plan_path": "...", "task_id": "..."}'`（事件文件已存在 + allowlist 命中）。
+JSON 写法：`ralph emit work.done --policy-check -j '{"plan_path": "...", "task_id": "..."}'`（dry-run 预检，不写盘；通过后去掉 `--policy-check` 再正式 emit）。
 
-**`--policy-check` 边界**：显式 `--policy-check` 是 **dry-run 预检**——校验通过与 loop gate 同源，但**不会**把事件写入 `events.jsonl`；通过后再跑一次不带 `--policy-check` 的正式 `ralph emit` 才会落盘。配置强制 `require_policy_check_for_cli_emit: true` 时，校验通过后仍会写盘（Enforce 模式，不是 dry-run）。CLI `--policy-check` 与 `ralph run` 循环内统一校验管线 `validation::rules_event_policy::EventPolicyRule` 行为**同源**（都走 `event_policy.schemas.<topic>.required_fields`），但**不覆盖** step handoff 的 `progress_task_gate`（`progress.md` ↔ `tasks.jsonl` 一致性）。完整预检（含 `progress_task_gate` 在 CLI 入口预检）见计划 `docs/plans/2026-06-17-005-fix-agent-recovery-mechanism-gaps-plan.md`。
+**`--policy-check` 边界**：显式 `--policy-check` 是 **dry-run 预检**——校验通过与 loop gate 同源，但**不会**把事件写入 `events.jsonl`；通过后再跑一次不带 `--policy-check` 的正式 `ralph emit` 才会落盘。配置强制 `require_policy_check_for_cli_emit: true` 时，校验通过后仍会写盘（Enforce 模式，不是 dry-run）。CLI 校验覆盖：unified validation pipeline（`event_policy.schemas.<topic>.required_fields`）、isolated hat 作用域、以及 `progress_task_gate`（`plan.complete` / `queue.advance` 的 `progress.md` ↔ `tasks.jsonl` 一致性，`emit.rs` step handoff gate）。
 
 **校验：**
 ```bash

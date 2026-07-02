@@ -9,7 +9,7 @@ metadata:
 
 > **这不是 CLI 命令。** 没有 `ralph precheck`。本机制由 preset 里的 `event_loop.precheck` 配置驱动，在 `RalphConfig::normalize()` 时脱糖，runtime 合成 `precheck-<X>` gate hat。
 >
-> **与 `ralph emit --policy-check` 无关** — 后者是 CLI 写盘前的确定性 schema/ownership 校验；本特性是 loop 里多一轮 LLM-as-judge hat。
+> **与 `ralph emit --policy-check` 无关** — 后者是 CLI dry-run 确定性 schema/ownership 预检（**不写盘**）；本特性是 loop 里多一轮 LLM-as-judge hat。
 >
 > **opt-in**：未声明 `event_loop.precheck` 时一切行为与未启用时等价；出厂 builtin preset 默认不带 precheck。
 >
@@ -84,7 +84,7 @@ RALPH_PRECHECK_MODE=off ralph run ...
 - ❌ 下游 hat 订阅 `<X>.proposed` 或 `<X>.rejected` — 拓扑错误；consumer 只订 `<X>`
 - ❌ 把 git diff / test pass / task 关闭等塞进 `precheck.rules.<X>.prompt` — 用 execution_contracts / event_policy
 - ❌ 看到 `<X>.rejected` 后自己再 emit bare `<X>` — 等 `task.resume` 打回 producer 重做
-- ❌ 与 `ralph emit --policy-check` 混淆 — policy 失败在写盘前；precheck 失败在 gate hat 轮次
+- ❌ 与 `ralph emit --policy-check` 混淆 — policy 失败在正式 emit 前（`--policy-check` 本身不写盘）；precheck 失败在 gate hat 轮次
 
 ---
 

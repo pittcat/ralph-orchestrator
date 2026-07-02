@@ -7,7 +7,7 @@ metadata:
 
 # Ralph CLI 核心参考
 
-> **前提**：本 skill 仅在 `memories.enabled` 或 `tasks.enabled` 至少一个启用时被注入（`crates/ralph-core/src/event_loop/mod.rs:5152-5257` `inject_memories_and_tools_skill`，门控条件在 `5217`）。速查表中的"已注入"列均受此条件约束。
+> **前提**：本 skill 仅在 `memories.enabled` 或 `tasks.enabled` 至少一个启用时被注入（`crates/ralph-core/src/event_loop/mod.rs:5334-5436` `inject_memories_and_tools_skill`，门控条件在 `5399`）。速查表中的"已注入"列均受此条件约束。
 
 > **遇到不确定的命令语法时，先 `ralph <cmd> --help` 再执行。**
 

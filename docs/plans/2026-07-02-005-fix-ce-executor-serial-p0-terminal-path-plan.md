@@ -4,6 +4,8 @@ type: fix
 status: active
 date: 2026-07-02
 revised: 2026-07-02
+progress:
+  u11: done  # 5a58b8ac — explicit --policy-check dry-run
 origin:
   - docs/report/2026-07-01-ce-executor-serial-primary-20260701-140149-diagnosis.md
   - docs/report/2026-07-01-ce-executor-serial-primary-20260630-175407-diagnosis.md
@@ -27,6 +29,8 @@ v2 相对初稿的变更（对抗性审查收口）：
 5. **成功标准升级为 LOOP 级**，不单测 gate 放行。
 
 仍采用 **U1→U12 严格串行 + 单元内原子 TDD**；BDD 放在 Final Verification。
+
+**进度（2026-07-02）：** U11（BP1-3 / R10）已通过 P0-2 提前闭合（`5a58b8ac`，显式 `--policy-check` dry-run）；U1–U10、U12 与 Final Verification 仍待实施。
 
 ---
 
@@ -60,7 +64,7 @@ v2 相对初稿的变更（对抗性审查收口）：
 |----|------|
 | **BP1-1** | shipper 三次 `REVIEW_COMPLETE(fail)`（`recovery_exhausted` / `review_failed` 白名单外） |
 | **BP1-2** | 错位第二次 `review.start`（非字节重复） |
-| **BP1-3** | `ralph emit` 探测写盘污染事件流 |
+| **BP1-3** | `ralph emit` 探测写盘污染事件流 | **已闭合**（U11，`5a58b8ac`：`--policy-check` dry-run 不写盘） |
 
 **非目标**：全开 LLM precheck；重写 EventBus；executor task_key 双发治理（140149 P1-1，另开编排强化）。
 
@@ -79,7 +83,7 @@ v2 相对初稿的变更（对抗性审查收口）：
 | R7 | shipper strict-match 白名单扩展：`recovery_exhausted`、`review_failed`（及 schema `plan.blocked.reason` 同步）。 |
 | R8 | 同 plan 同 review round 内第二次 `review.start` 被拒（语义键，非仅字节相等）。 |
 | R9 | `hat=ralph` 不得发 `work.ready`。 |
-| R10 | `ralph emit --dry-run` 校验通过不写盘。 |
+| R10 | 显式 `ralph emit --policy-check`（dry-run 预检）校验通过不写盘；正式 `ralph emit`（含 Enforce 模式）校验通过后写盘。 |
 | R11 | `LOOP_COMPLETE` honored 后，同 run 不再入账第二次 `LOOP_COMPLETE` / 业务 `report.done`。 |
 | R12 | 每个 Unit 遵守 **Execution Protocol**；**模块完成 ≠ 目标完成**，仅 Final Verification 通过算闭环。 |
 
@@ -112,7 +116,7 @@ flowchart LR
   U7 --> U8[U8 review.start semantic dedup]
   U8 --> U9[U9 dimension.ready dedup]
   U9 --> U10[U10 event_origin]
-  U10 --> U11[U11 emit dry-run]
+  U10 --> U11[U11 emit policy-check dry-run ✅]
   U11 --> U12[U12 completion guard]
   U12 --> FV[Final Verification BDD]
 ```
@@ -393,19 +397,27 @@ sequenceDiagram
 
 ---
 
-### U11. CLI：`ralph emit --dry-run`（NEW）
+### U11. CLI：显式 `--policy-check` dry-run（**DONE** — `5a58b8ac`）
 
-**Goal:** 同 v1 U8。
+**Kind:** DONE（初稿称 `--dry-run`；落地为既有 `--policy-check` 显式模式，语义等价）
 
-**Requirements:** R10, R12
+**Goal:** 显式 `--policy-check` 仅做 schema/策略/step-handoff 预检，**校验通过不写盘**；agent 去掉该 flag 再正式 emit 才落盘。配置 `require_policy_check_for_cli_emit: true` 的 **Enforce** 路径不变（校验通过后仍写盘）。
 
-**Dependencies:** U10
+**Requirements:** R10, R12, BP1-3
+
+**Dependencies:** 无（相对 U1–U10 串行顺序**提前落地**，P0-2 热修；不阻塞 U12）
+
+**Delivered in:** `5a58b8ac` + skill 文档同步（`ralph-tools-emit.md` / `ralph-tools.md` / `ralph-tools-precheck.md`）
 
 **Files:**
-- `crates/ralph-cli/src/commands/emit.rs`
+- `crates/ralph-cli/src/commands/emit.rs`（`PolicyCheckMode::ExplicitCheck` 校验后 `return`，不写 JSONL）
 - `crates/ralph-core/data/ralph-tools-emit.md`
+- `crates/ralph-core/data/ralph-tools.md`
+- `crates/ralph-core/data/ralph-tools-precheck.md`
 
-**Verification:** `cargo nextest run -p ralph-cli --bin ralph -- emit` 子集绿。
+**Not delivered:** 独立 `--dry-run` flag（与 `--policy-check` 重复；未新增别名）
+
+**Verification:** ✅ `cargo nextest run -p ralph-cli --bin ralph -- test_emit_policy_check`；`./scripts/check-cli-doc-drift.sh`
 
 ---
 
@@ -437,8 +449,8 @@ sequenceDiagram
 
 | 项 | 内容 |
 |----|------|
-| BDD-1 | `crates/ralph-core/tests/scenarios/ce_executor_serial_pass_with_residuals_terminal.yml`：2 unit + `review.complete(pass_with_residuals, fix_plan_file=null)` → `plan.complete` → `REVIEW_COMPLETE` → `LOOP_COMPLETE` **×1** |
-| BDD-2 | `crates/ralph-core/tests/scenarios/ce_executor_serial_fix_unit_terminal.yml`（可扩展现有）：fix-02 `test.passed` 后 `plan.complete`（非 `work.ready`）入账 |
+| BDD-1 | **新建** `crates/ralph-core/tests/scenarios/ce_executor_serial_pass_with_residuals_terminal.yml`：2 unit + `review.complete(pass_with_residuals, fix_plan_file=null)` → `plan.complete` → `REVIEW_COMPLETE` → `LOOP_COMPLETE` **×1** |
+| BDD-2 | **新建/扩展** `crates/ralph-core/tests/scenarios/ce_executor_serial_fix_unit_terminal.yml`：fix-02 `test.passed` 后 `plan.complete`（非 `work.ready`）入账 |
 | 回归 | `review_step_gate`、`progress_task_gate`、`event_policy`、`completion_honored`、`scenarios` |
 | 基线 | `./scripts/run-tests.sh` |
 
@@ -446,7 +458,7 @@ sequenceDiagram
 
 - AE1–AE2：`plan.complete` 双卡消失。
 - AE3：`LOOP_COMPLETE` 恰好 1 次；`REVIEW_COMPLETE` fail 风暴 ≤ 诊断阈值。
-- AE4：`ralph emit --dry-run` 不写盘。
+- AE4：显式 `ralph emit --policy-check` 不写盘（**已验**，U11）。
 - AE5：同 plan 第二次 `review.start` 被拒或 drop。
 
 ---
@@ -469,7 +481,7 @@ sequenceDiagram
 | AE1 | 140149 形：2 unit 完成 + `pass_with_residuals` | `plan.complete` 入账 |
 | AE2 | `plan.complete` 的 task_id ≠ `review.complete` 的 task_id | 仍入账（plan terminal） |
 | AE3 | 正常收口 | `LOOP_COMPLETE` ×1 |
-| AE4 | `ralph emit ... --dry-run` | events 行数不变 |
+| AE4 | `ralph emit <topic> --policy-check ...`（显式 dry-run） | events 行数不变；正式 emit 才追加 |
 | AE5 | 同 plan 第二次 `review.start`（triggered 不同） | policy deny/duplicate |
 
 ---
@@ -490,3 +502,5 @@ sequenceDiagram
 |------|------|
 | 2026-07-02 v1 | 初稿 U1–U8 + 可选 FV 接线 |
 | 2026-07-02 v2 | 对抗性审查收口：U5/U6 强制接线、U2 plan 级终端、U7 shipper、U6 stale、U8 语义 dedup、U12 completion guard、LOOP 级成功标准 |
+| 2026-07-02 v2.1 | Plan Reviewer 就地修补：Final Verification BDD-1/BDD-2 路径标注 "新建/扩展"（磁盘校验时两文件尚不存在,避免执行方误读为已落地）；其他 17 处引用文件均存在 |
+| 2026-07-02 v2.2 | **U11 标 DONE**：P0-2 已用显式 `--policy-check`（非独立 `--dry-run` flag）实现 dry-run 不写盘（`5a58b8ac`）；R10/AE4/BP1-3 措辞与实现对齐；注明 U11 相对 U1–U10 提前落地、不阻塞 U12 |
