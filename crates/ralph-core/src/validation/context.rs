@@ -52,6 +52,13 @@ pub struct ValidationContext<'a> {
     /// Optional target-hat attribution per topic, used when building
     /// a structured `PayloadContractViolation`.
     target_hats_by_topic: Option<&'a BTreeMap<String, Vec<String>>>,
+    /// U5 of plan 2026-07-02-005: optional path to the on-disk
+    /// `tasks.jsonl`. The `StepHandoffRule` consults this path when
+    /// its in-memory `LedgerSnapshot.tasks` is missing a task — the
+    /// 140149 / 175407 failure mode is precisely the gate hitting
+    /// a stale in-memory view while disk has the row. `None`
+    /// preserves the legacy behaviour (no disk fallback).
+    tasks_path: Option<std::path::PathBuf>,
 }
 
 impl<'a> ValidationContext<'a> {
@@ -67,7 +74,22 @@ impl<'a> ValidationContext<'a> {
             workflow_guard_details: None,
             source_hats_by_topic: None,
             target_hats_by_topic: None,
+            tasks_path: None,
         }
+    }
+
+    /// U5 of plan 2026-07-02-005: hand the `StepHandoffRule` a
+    /// disk path so it can best-effort reload a missing task.
+    pub fn with_tasks_path(mut self, path: std::path::PathBuf) -> Self {
+        self.tasks_path = Some(path);
+        self
+    }
+
+    /// U5 of plan 2026-07-02-005: access the on-disk tasks path,
+    /// if any. Returns `None` when the context was built without
+    /// `with_tasks_path` (legacy / non-runtime callers).
+    pub fn tasks_path(&self) -> Option<&std::path::Path> {
+        self.tasks_path.as_deref()
     }
 
     /// Use a caller-supplied `PolicyRuntimeState` instead of the

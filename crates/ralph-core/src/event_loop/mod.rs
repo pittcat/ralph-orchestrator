@@ -9033,7 +9033,15 @@ impl EventLoop {
                     .with_payload_contract_violation(&mut event_policy_violation)
                     .with_policy_rejections(&mut policy_rejections)
                     .with_source_hats_by_topic(&source_hats_by_topic)
-                    .with_target_hats_by_topic(&target_hats_by_topic);
+                    .with_target_hats_by_topic(&target_hats_by_topic)
+                    // U5 of plan 2026-07-02-005: wire the on-disk
+                    // tasks.jsonl path so the StepHandoffRule can
+                    // best-effort reload on a stale in-memory view
+                    // (140149 / 175407 root cause).
+                    .with_tasks_path(self.config.core.workspace_root
+                        .join(".ralph")
+                        .join("agent")
+                        .join("tasks.jsonl"));
                 let results = pipeline.validate_pre_commit_with_view(&view, &mut ctx, evt);
                 let mut event_accepted = true;
                 let mut event_warnings: Vec<String> = Vec::new();

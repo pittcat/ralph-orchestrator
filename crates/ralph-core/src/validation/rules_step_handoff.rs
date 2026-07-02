@@ -15,6 +15,8 @@ use crate::preset::engine::protocol::ProtocolView;
 use crate::step_handoff::progress_task_gate::{
     GATED_TOPICS, TaskProgressDecision, check_alignment_with_snapshot,
 };
+use crate::task::Task;
+use crate::task_store::resolve_task_for_gate;
 use ralph_proto::HatId;
 
 use super::context::ValidationContext;
@@ -55,6 +57,33 @@ impl ValidationRule for StepHandoffRule {
         // `completed_steps` array so the gate can use it for
         // `plan.complete` under `Current Step=None` branches.
         let payload_completed_steps = extract_completed_steps_array(event);
+
+        // U5 of plan 2026-07-02-005: when the gate needs to
+        // check a specific `task_id` AND the in-memory snapshot
+        // is missing it, fall back to a best-effort disk reload
+        // via `resolve_task_for_gate`. This eliminates the
+        // 140149 / 175407 false-positive `task_not_found`
+        // rejection when the runtime in-memory view is stale.
+        // The fallback only runs when:
+        //   1. The event carries a `task_id` field.
+        //   2. The snapshot.tasks slice lacks that id.
+        //   3. The caller wired a `tasks_path` via
+        //      `ValidationContext::with_tasks_path`.
+        // If any of those are missing, the legacy path (in-memory
+        // only) runs unchanged.
+        let resolved_task: Option<Task> = match (
+            task_id.as_deref(),
+            ctx.tasks_path(),
+        ) {
+            (Some(tid), Some(path)) => match resolve_task_for_gate(&snapshot.tasks, path, tid) {
+                Ok(t) => t,
+                Err(_) => None, // Treat reload failure as a clean miss;
+                                // gate's downstream check still emits
+                                // the right `task_not_found` finding.
+            },
+            _ => None,
+        };
+
         let decision = check_alignment_with_snapshot(
             &snapshot.progress,
             &snapshot.tasks,
@@ -63,6 +92,35 @@ impl ValidationRule for StepHandoffRule {
             task_id.as_deref(),
             payload_completed_steps.as_deref(),
         );
+
+        // U5: if the in-memory view missed the task but the disk
+        // reload found it, we have a single fresh row but the
+        // gate's signature takes `&[Task]`. Build a one-row
+        // shadow slice **only** when the gate rejected on
+        // `task_not_found` (the case U5 was designed for). This
+        // keeps the change surgical: the legacy accept path is
+        // untouched.
+        let decision = if let TaskProgressDecision::Mismatch(m) = &decision
+            && m.reason == "task_not_found"
+            && let Some(ref found) = resolved_task
+        {
+            // Re-run with the disk-reloaded row appended.
+            let mut extended: Vec<Task> = snapshot.tasks.to_vec();
+            if !extended.iter().any(|t| t.id == found.id) {
+                extended.push(found.clone());
+            }
+            check_alignment_with_snapshot(
+                &snapshot.progress,
+                &extended,
+                event.topic.as_str(),
+                step.as_deref(),
+                task_id.as_deref(),
+                payload_completed_steps.as_deref(),
+            )
+        } else {
+            decision
+        };
+
         match decision {
             TaskProgressDecision::Inert | TaskProgressDecision::Aligned => {
                 ValidationResult::accept_with(ValidationStage::StepHandoff)

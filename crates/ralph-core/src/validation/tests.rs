@@ -550,3 +550,136 @@ fn validate_with_preview_rejects_missing_required_field() {
             .contains("required_field")
     );
 }
+
+// ============================================================
+// U5 of plan 2026-07-02-005: StepHandoffRule disk fallback
+// ============================================================
+
+#[test]
+fn u5_step_handoff_rule_disk_reload_accepts_when_in_memory_empty() {
+    // 140149 / 175407 root cause: the runtime's in-memory
+    // LedgerSnapshot.tasks is stale (the new task landed on disk
+    // after the snapshot was taken). The gate, when wired with a
+    // tasks_path, must fall back to a disk reload via
+    // `resolve_task_for_gate` and accept the event.
+    use crate::step_handoff::ProgressSnapshot;
+    use crate::task::{Task, TaskStatus};
+    use crate::validation::rules_step_handoff::StepHandoffRule;
+    let view = ProtocolView::from_event_loop(&minimal_config());
+    let mut snap = minimal_snapshot();
+    // Progress: current step = step-02, step-01 completed. The
+    // closed task's title is `step-01`, so the task alignment
+    // branch (3) requires the closed task's title to be in
+    // progress.
+    let mut progress = ProgressSnapshot::default();
+    progress.current_step = Some("step-02".to_string());
+    progress.completed_steps = vec!["step-01".to_string()];
+    snap.progress = progress;
+    // In-memory is EMPTY (the stale-view scenario).
+    snap.tasks = Vec::new();
+
+    // Build a real tasks.jsonl on disk with the missing row.
+    let dir = tempfile::tempdir().unwrap();
+    let tasks_path = dir.path().join("tasks.jsonl");
+    let mut disk_task = Task::new("step-01".to_string(), 1);
+    disk_task.id = "task-1".to_string();
+    disk_task.status = TaskStatus::Closed;
+    std::fs::write(
+        &tasks_path,
+        format!("{}\n", serde_json::to_string(&disk_task).unwrap()),
+    )
+    .unwrap();
+
+    // Wire the context with the disk path.
+    let mut ctx = ValidationContext::new(&mut snap).with_tasks_path(tasks_path.clone());
+
+    let event = make_event(
+        "queue.advance",
+        r#"{"step":"step-02","task_id":"task-1"}"#,
+        None,
+    );
+    let result = StepHandoffRule.validate(&view, &mut ctx, &event);
+    assert!(
+        result.accepted,
+        "U5: disk reload must rescue the event when in-memory is empty; \
+         got: {result:?}"
+    );
+}
+
+#[test]
+fn u5_step_handoff_rule_without_tasks_path_keeps_legacy_reject() {
+    // Same setup, but `ValidationContext` is built WITHOUT
+    // `with_tasks_path`. Legacy behaviour: in-memory miss → reject.
+    use crate::step_handoff::ProgressSnapshot;
+    use crate::validation::rules_step_handoff::StepHandoffRule;
+    let view = ProtocolView::from_event_loop(&minimal_config());
+    let mut snap = minimal_snapshot();
+    let mut progress = ProgressSnapshot::default();
+    progress.current_step = Some("step-02".to_string());
+    progress.completed_steps = vec!["step-01".to_string()];
+    snap.progress = progress;
+    snap.tasks = Vec::new();
+
+    let mut ctx = ValidationContext::new(&mut snap);
+    // No with_tasks_path call.
+
+    let event = make_event(
+        "queue.advance",
+        r#"{"step":"step-02","task_id":"task-1"}"#,
+        None,
+    );
+    let result = StepHandoffRule.validate(&view, &mut ctx, &event);
+    assert!(
+        !result.accepted,
+        "U5: without tasks_path, the gate must keep the legacy in-memory reject path"
+    );
+    assert!(
+        result
+            .reason_code
+            .as_deref()
+            .unwrap_or("")
+            .contains("task_not_found"),
+        "expected task_not_found reason, got: {:?}",
+        result.reason_code
+    );
+}
+
+#[test]
+fn u5_step_handoff_rule_disk_reload_accepts_plan_complete_terminal() {
+    // P0-2: plan.complete on a closed task whose in-memory row
+    // is missing must still pass through the disk fallback.
+    use crate::step_handoff::ProgressSnapshot;
+    use crate::task::{Task, TaskStatus};
+    use crate::validation::rules_step_handoff::StepHandoffRule;
+    let view = ProtocolView::from_event_loop(&minimal_config());
+    let mut snap = minimal_snapshot();
+    let mut progress = ProgressSnapshot::default();
+    progress.current_step = Some("step-02".to_string());
+    progress.completed_steps = vec!["step-01".to_string()];
+    snap.progress = progress;
+    snap.tasks = Vec::new();
+
+    let dir = tempfile::tempdir().unwrap();
+    let tasks_path = dir.path().join("tasks.jsonl");
+    let mut disk_task = Task::new("step-01".to_string(), 1);
+    disk_task.id = "task-1".to_string();
+    disk_task.status = TaskStatus::Closed;
+    std::fs::write(
+        &tasks_path,
+        format!("{}\n", serde_json::to_string(&disk_task).unwrap()),
+    )
+    .unwrap();
+
+    let mut ctx = ValidationContext::new(&mut snap).with_tasks_path(tasks_path);
+
+    let event = make_event(
+        "plan.complete",
+        r#"{"plan_name":"p","completed_steps":2,"task_id":"task-1","task_key":"k1","step":"step-02","verdict":"pass"}"#,
+        None,
+    );
+    let result = StepHandoffRule.validate(&view, &mut ctx, &event);
+    assert!(
+        result.accepted,
+        "U5: plan.complete with closed task on disk must accept; got: {result:?}"
+    );
+}
