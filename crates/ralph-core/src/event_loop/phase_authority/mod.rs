@@ -21,6 +21,8 @@ pub mod primitives;
 pub mod evaluator;
 // U16: plan_gate skip helper.
 pub mod plan_gate_helper;
+// U17: progress_gate skip helper.
+pub mod progress_gate_helper;
 
 pub use declaration::PhaseAuthorityDeclaration;
 pub use evaluator::{EventFixture, TransitionEvaluator};
