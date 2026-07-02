@@ -46,6 +46,11 @@ mod rules_workflow_guard;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+// 2026-07-02-006 plan U18: ValidationContext::workflow_phase
+// getter tests. Sibling to `tests` so the new accessor is
+// visible to readers scanning the module's test layout.
+mod workflow_phase_getter_tests;
 
 pub use context::ValidationContext;
 pub use pipeline::{RulePhase, ValidationPipeline, ValidationReport, ValidationRule};

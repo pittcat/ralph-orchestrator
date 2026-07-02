@@ -241,4 +241,18 @@ impl<'a> ValidationContext<'a> {
             .and_then(|m| m.get(topic).cloned())
             .unwrap_or_default()
     }
+
+    /// 2026-07-02-006 plan U18: read-only accessor for the
+    /// `WorkflowPhaseAuthority` snapshot projected onto the
+    /// ledger. Returns `None` when the engine is disabled
+    /// (R1) — the snapshot's `workflow_phase` field is
+    /// `Option<PhaseSnapshot>` for exactly this case.
+    ///
+    /// Validation rules consult this to decide whether to
+    /// short-circuit (U16 / U17 helpers).
+    pub fn workflow_phase(
+        &self,
+    ) -> Option<&crate::event_loop::phase_authority::snapshot::PhaseSnapshot> {
+        self.snapshot.workflow_phase.as_ref()
+    }
 }
