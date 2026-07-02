@@ -158,6 +158,7 @@ mod tests {
                 enforce_schema: enforce_schema.to_string(),
                 state_idempotency: state_idempotency.to_string(),
             }),
+            phase_authority: None,
         });
         cfg
     }

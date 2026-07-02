@@ -617,6 +617,21 @@ pub struct MechanismConfig {
     /// minimal flow declaration so legacy presets
     /// continue to function without changes.
     pub flow: Option<FlowDeclarationConfig>,
+
+    /// 2026-07-02-006 plan (U1): opt-in
+    /// `WorkflowPhaseAuthority` engine config. Mirrors
+    /// `mechanism.phase_authority` in
+    /// `presets/en/<name>.yml`. When `None` or
+    /// `enabled == false`, the runtime's phase
+    /// authority is a no-op and behaviour matches the
+    /// pre-006 baseline (serial runs through the
+    /// existing `FlowStepScopeStage` flow guard). The
+    /// typed view lives in
+    /// `event_loop::phase_authority::config::PhaseAuthorityConfig`
+    /// and is re-exported from there.
+    #[serde(default)]
+    pub phase_authority:
+        Option<crate::event_loop::phase_authority::config::PhaseAuthorityConfig>,
 }
 
 /// P0-3: typed view of a `mechanism.flow`

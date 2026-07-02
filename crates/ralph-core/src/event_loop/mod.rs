@@ -20,6 +20,11 @@ pub mod emit_gate;
 // The lint in `preset_lint::flow_declaration` and the
 // `FlowStepScopeStage` (U9) both consume the same type.
 pub mod flow_declaration;
+// 2026-07-02-006 plan U1: opt-in `WorkflowPhaseAuthority`
+// engine entry point. The pure-data `PhaseAuthorityConfig` lives
+// in `phase_authority::config`; U2 onward extends the module with
+// declaration / evaluator / stage wiring.
+pub mod phase_authority;
 // 2026-06-27 mechanism foundation U8: thin wiring layer from
 // the existing task_store / diagnosis / drift consumers to the
 // U4 `IdempotentLog`. The runtime opts in by setting
@@ -12582,6 +12587,7 @@ mod u4_current_plan_step_tests {
                     steps: step_configs,
                     ..FlowDeclarationConfig::default()
                 }),
+                phase_authority: None,
             }),
             ..EventLoopConfig::default()
         };
