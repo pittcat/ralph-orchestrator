@@ -142,6 +142,76 @@ mechanism:
   repair_budget: 3
   enforce_schema: hard
   state_idempotency: required
+  # 2026-07-02-006 plan U24: opt-in phase authority.
+  # Disabled by default so the preset's existing flow-based
+  # runtime path is unchanged. Set `enabled: true` to switch
+  # the runtime onto the phase engine; the transition table
+  # below mirrors the KTD4 + on_test_passed_step matrix
+  # documented in the plan's "Phase 状态机（serial 实例）" section.
+  phase_authority:
+    enabled: false
+    initial_phase: unit_loop
+    phases:
+      - id: unit_loop
+        allowed_emits:
+          coordinator: [work.ready, queue.advance]
+          executor: [work.done, work.failed]
+          validator: [test.passed, test.failed]
+      - id: review
+        allowed_emits:
+          coordinator: [review.start]
+          review-coordinator: [review.dimension.ready, review.dimensions.complete]
+          "*": [review.complete]
+      - id: fix_units
+        allowed_emits:
+          coordinator: [work.ready]
+          executor: [work.done, work.failed]
+          validator: [test.passed, test.failed]
+      - id: plan_end
+        allowed_emits:
+          coordinator: [plan.complete, plan.blocked]
+      - id: ship
+        allowed_emits:
+          shipper: [REVIEW_COMPLETE]
+          reporter: [report.done, LOOP_COMPLETE]
+      - id: terminal
+        allowed_emits: {}
+    transitions:
+      - on: { event: work.start }
+        from: "*"
+        to: unit_loop
+      - on:
+          primitive: on_test_passed_step
+          step_kind: plan_unit
+          when: last
+        from: unit_loop
+        to: review
+      - on:
+          primitive: on_review_complete_verdict
+          matrix: serial_default
+        from: review
+        to: plan_end
+      - on:
+          primitive: on_review_complete_verdict
+          matrix: serial_default
+        from: review
+        to: fix_units
+      - on:
+          primitive: on_test_passed_step
+          step_kind: fix_unit
+          when: last
+        from: fix_units
+        to: plan_end
+      - on: { event: plan.complete }
+        from: plan_end
+        to: ship
+      - on:
+          primitive: on_loop_complete_honored
+        from: ship
+        to: terminal
+    violation_policy:
+      max_resume_per_hat: 3
+      on_exhausted: plan_blocked
 
 topic_format_whitelist:
   - LOOP_COMPLETE
