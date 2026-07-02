@@ -25,6 +25,8 @@ pub mod plan_gate_helper;
 pub mod progress_gate_helper;
 // U19: progress.md projection on phase enter.
 pub mod progress_projection;
+// U20: shipper routing helper.
+pub mod shipper_helper;
 
 pub use declaration::PhaseAuthorityDeclaration;
 pub use evaluator::{EventFixture, TransitionEvaluator};
