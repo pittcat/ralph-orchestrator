@@ -57,6 +57,39 @@ struct StepReviewState {
 #[derive(Debug, Default, Clone)]
 pub struct ReviewStepTracker {
     steps: HashMap<StepKey, StepReviewState>,
+    /// U2 of plan 2026-07-02-005: plan-level review terminal state.
+    ///
+    /// 140149 root cause: `review.complete` is a **plan-level** event
+    /// (one review synthesizes findings across every unit of the
+    /// plan), but the existing per-step gate requires `task_id` to
+    /// match the per-step entry exactly. When the terminal review
+    /// emits `plan.complete` with a different `task_id` (e.g.
+    /// `finalize` task that aggregates everything), per-step
+    /// matching fails and `plan_gate_review_not_terminal` rejects.
+    ///
+    /// When `observe_accepted` sees `review.complete` /
+    /// `review.passed` with a pass-class verdict AND a null/empty
+    /// `fix_plan_file`, we record `plan_review_terminal[plan_name] =
+    /// pass`. The `plan.complete` gate consults this map FIRST and
+    /// accepts non-`fix-*` `plan.complete` as long as the plan has
+    /// hit a terminal pass.
+    plan_review_terminal: HashMap<String, PlanReviewTerminal>,
+}
+
+/// U2 of plan 2026-07-02-005: plan-level terminal projection. One
+/// entry per plan that has reached `review.complete` /
+/// `review.passed` with a pass-class verdict AND no pending fix
+/// plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanReviewTerminal {
+    /// Verdict string from the original `review.complete` /
+    /// `review.passed` payload (e.g. `pass`,
+    /// `pass_with_residuals`).
+    pub verdict: String,
+    /// Last observed `fix_plan_file` value. When non-null /
+    /// non-empty, the terminal is **not** considered plan-level
+    /// pass — fix-unit chain is still pending.
+    pub fix_plan_file_seen: Option<String>,
 }
 
 /// U2 (2026-06-17-003 plan): describe an open wave that the
@@ -158,6 +191,14 @@ fn plan_gate_finding(topic: &str, reason: &str) -> PolicyFinding {
              (review.passed or review.complete with pass verdict) for this step"
         ),
     }
+}
+
+/// U2 of plan 2026-07-02-005: helper that decides whether a
+/// `verdict` payload field counts as a pass-class verdict for the
+/// purposes of `plan_review_terminal`. Mirrors the per-step
+/// `synth_pass` rule (`verdict != "fail"`).
+fn is_pass_class_verdict(verdict: &str) -> bool {
+    !verdict.eq_ignore_ascii_case("fail")
 }
 
 impl ReviewStepTracker {
@@ -334,6 +375,33 @@ impl ReviewStepTracker {
             if step_str.starts_with("fix-") {
                 return None;
             }
+
+            // U2 of plan 2026-07-02-005: 优先看 plan 级 terminal。
+            // 140149 路径：`review.complete(pass_with_residuals,
+            // fix_plan_file=null)` 已经把 plan 整体标为 pass，
+            // 但 `plan.complete` 的 `task_id` 可能与任何单个 step
+            // 的 `task_id` 都不匹配 — 这种情况下 per-step 匹配必然
+            // 返回空集。`plan_review_terminal` 是 plan 级终态的
+            // 单一事实源；存在即放行（fail verdict 永远不会被
+            // `observe_accepted` 记录到这里，见实现）。
+            //
+            // 但是：`review.failed` 已标记 `failed_pending_fix`
+            // 的 per-step 状态仍然高于 plan-level terminal。如果
+            // 任意 per-step 在 fail 队列，agent 必须先走 fix 单元
+            // 才能 `plan.complete`。这是 `failed_then_passed_blocks_
+            // plan_complete` 的核心意图。
+            if let Some(terminal) = self.plan_review_terminal.get(plan_name)
+                && is_pass_class_verdict(&terminal.verdict)
+            {
+                let any_failed_pending = self
+                    .steps
+                    .values()
+                    .any(|s| s.failed_pending_fix);
+                if !any_failed_pending {
+                    return None;
+                }
+            }
+
             let matching: Vec<_> = self
                 .steps
                 .iter()
@@ -424,6 +492,41 @@ impl ReviewStepTracker {
                 state.synth_terminal = Some(topic.to_string());
                 state.synth_pass = pass;
                 state.open_wave_id = None;
+
+                // U2 of plan 2026-07-02-005: record plan-level
+                // terminal. We only mark the plan as terminal when
+                // (a) the verdict is pass-class AND (b) `fix_plan_file`
+                // is null/missing/empty. Otherwise the fix-unit
+                // chain is still pending and the per-step matching
+                // remains authoritative (existing `prefill_fix_steps_from_plan`
+                // handles that branch).
+                if let Some(p) = event.payload.as_deref()
+                    && let Ok(Value::Object(obj)) = serde_json::from_str(p)
+                    && let Some(plan_name) =
+                        obj.get("plan_name").and_then(|v| v.as_str())
+                    && pass
+                {
+                    let fix_plan_file = obj
+                        .get("fix_plan_file")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty() && s != "null");
+                    if fix_plan_file.is_none() {
+                        let verdict = obj
+                            .get("verdict")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("pass")
+                            .to_string();
+                        self.plan_review_terminal.insert(
+                            plan_name.to_string(),
+                            PlanReviewTerminal {
+                                verdict,
+                                fix_plan_file_seen: None,
+                            },
+                        );
+                    }
+                }
+
                 // 2026-06-28-002 U1: `review.complete` 携带非空
                 // `fix_plan_file` 时，按 fix-plan 中的 `### U{N}.`
                 // 数量预填每个 fix-{NN} step 的 synth_terminal。
@@ -1386,6 +1489,126 @@ mod tests {
             tracker.is_wave_closed("p", "t1", "2"),
             "R-F5: step 2 has no wave, SHA write is safe (different step)"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-07-02-005 U2: plan-level review terminal
+    //
+    // Background: `review.complete(pass_with_residuals,
+    // fix_plan_file=null)` is a PLAN-level terminal. The per-step
+    // matching gate cannot see it because the `task_id` of the
+    // terminalizing review is `finalize` (or similar), not the
+    // task_id of any single unit step. The plan-level terminal map
+    // is the authoritative source for `plan.complete` gate when no
+    // per-step entry matches.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn u2_plan_complete_after_review_complete_pass_with_residuals_accepted_even_with_different_task_id() {
+        // 140149-shape: review.complete carries verdict=pass_with_residuals
+        // and an EMPTY fix_plan_file. The plan should be marked
+        // terminal at the plan level.
+        let mut tracker = ReviewStepTracker::default();
+        let review = jsonl(
+            "review.complete",
+            "review-synthesizer",
+            r#"{"plan_name":"p","task_id":"finalize","task_key":"kF","step":"finalize","verdict":"pass_with_residuals","final_findings_count":3,"fix_plan_file":""}"#,
+        );
+        tracker.observe_accepted(&review);
+
+        // plan.complete carries a DIFFERENT task_id (no matching
+        // per-step entry). With the plan-level terminal, the gate
+        // must accept.
+        let plan_complete = jsonl(
+            "plan.complete",
+            "plan-gate",
+            r#"{"plan_name":"p","completed_steps":1,"task_id":"t1","task_key":"k1","step":"step-02","verdict":"pass"}"#,
+        );
+        assert!(
+            tracker.check_semantic_gates(&plan_complete).is_none(),
+            "plan-level terminal must let plan.complete pass even when per-step entry is missing"
+        );
+    }
+
+    #[test]
+    fn u2_plan_complete_verdict_fail_does_not_set_plan_terminal() {
+        let mut tracker = ReviewStepTracker::default();
+        let review = jsonl(
+            "review.complete",
+            "review-synthesizer",
+            r#"{"plan_name":"p","task_id":"t1","task_key":"k1","step":"step-01","verdict":"fail"}"#,
+        );
+        tracker.observe_accepted(&review);
+
+        let plan_complete = jsonl(
+            "plan.complete",
+            "plan-gate",
+            r#"{"plan_name":"p","completed_steps":1,"task_id":"t1","task_key":"k1","step":"step-01","verdict":"pass"}"#,
+        );
+        let finding = tracker
+            .check_semantic_gates(&plan_complete)
+            .expect("verdict=fail must NOT set plan-level terminal");
+        assert!(
+            finding.message.contains("plan_gate_review_not_terminal"),
+            "expected plan_gate_review_not_terminal, got: {}",
+            finding.message
+        );
+    }
+
+    #[test]
+    fn u2_plan_complete_without_any_review_observation_still_rejected() {
+        let tracker = ReviewStepTracker::default();
+        let plan_complete = jsonl(
+            "plan.complete",
+            "plan-gate",
+            r#"{"plan_name":"p","completed_steps":1,"task_id":"t1","task_key":"k1","step":"step-01","verdict":"pass"}"#,
+        );
+        let finding = tracker
+            .check_semantic_gates(&plan_complete)
+            .expect("plan.complete without any review observation must be rejected");
+        assert!(finding.message.contains("plan_gate_review_not_terminal"));
+    }
+
+    #[test]
+    fn u2_plan_complete_fix_unit_routes_through_fix_branch_not_plan_terminal() {
+        // fix-NN plan.complete goes through the dedicated
+        // `step.starts_with("fix-")` exemption, NOT the
+        // plan-level terminal. Plan-level terminal is irrelevant
+        // here. Verify the fix branch produces a clean accept.
+        let tracker = ReviewStepTracker::default();
+        let plan_complete = jsonl(
+            "plan.complete",
+            "plan-gate",
+            r#"{"plan_name":"p","completed_steps":1,"task_id":"t1","task_key":"k1","step":"fix-02","verdict":"pass"}"#,
+        );
+        assert!(tracker.check_semantic_gates(&plan_complete).is_none());
+    }
+
+    #[test]
+    fn u2_plan_complete_review_complete_with_fix_plan_file_does_not_set_plan_terminal() {
+        // review.complete with NON-empty fix_plan_file → fix-unit
+        // chain pending. Plan-level terminal MUST NOT be set;
+        // otherwise fix-02 plan.complete would skip review gate.
+        let mut tracker = ReviewStepTracker::default();
+        let review = jsonl(
+            "review.complete",
+            "review-synthesizer",
+            r#"{"plan_name":"p","task_id":"t1","task_key":"k1","step":"step-01","verdict":"pass_with_residuals","fix_plan_file":"docs/plans/fix.md"}"#,
+        );
+        tracker.observe_accepted(&review);
+
+        // A subsequent plan.complete with a DIFFERENT task_id (not
+        // matching step-01's task_id) and no plan-level terminal
+        // should be rejected (no per-step entry matches).
+        let plan_complete = jsonl(
+            "plan.complete",
+            "plan-gate",
+            r#"{"plan_name":"p","completed_steps":1,"task_id":"finalize","task_key":"kF","step":"step-99","verdict":"pass"}"#,
+        );
+        let finding = tracker
+            .check_semantic_gates(&plan_complete)
+            .expect("fix_plan_file non-empty must NOT set plan terminal");
+        assert!(finding.message.contains("plan_gate_review_not_terminal"));
     }
 
     /// 2026-06-28-002 U1 回归守卫（2026-07-01 补）：`review.complete`
