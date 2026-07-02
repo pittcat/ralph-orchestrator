@@ -39,54 +39,11 @@
 # deterministically via `report.done` (required_events) and
 # `LOOP_COMPLETE` (completion_promise). topology_exempt documents this;
 # do NOT merge hats to appease lint.
-
-# 2026-06-27 mechanism foundation U10: declarative flow metadata.
-mechanism:
-  flow:
-    type: declared
-    version: 1
-    terminal_emits: [LOOP_COMPLETE]
-    steps:
-      - id: pipeline
-        kind: sequence
-        # Every hat-emitted business / terminal topic belongs here.
-        # `work.start` is operator-injected at loop start and is
-        # intentionally NOT in allowed_emits (the runtime starts the
-        # loop without a hat emit for the startup event).
-        allowed_emits:
-          - plan.ready
-          - plan.blocked
-          - work.done
-          - work.failed
-          - review.goalalign.done
-          - review.correctness.done
-          - review.testing.done
-          - review.maintainability.done
-          - review.standards.done
-          - review.adversarial.done
-          - review.complete
-          - fix.done
-          - align.done
-          - report.done
-          - LOOP_COMPLETE
-        body:
-          - plan.ready
-          - work.done
-          - review.goalalign.done
-          - review.correctness.done
-          - review.testing.done
-          - review.maintainability.done
-          - review.standards.done
-          - review.adversarial.done
-          - review.complete
-          - fix.done
-          - align.done
-          - report.done
-          - LOOP_COMPLETE
-        emit_when: linear
-  repair_budget: 3
-  enforce_schema: hard
-  state_idempotency: required
+#
+# No `mechanism.flow` block: this preset is a flat hat-only linear chain.
+# Routing + scope enforcement come from hat triggers/publishes, isolated mode,
+# and `event_policy` (topic_deny_rules + inline schemas). FlowStepScope is
+# skipped at runtime when a preset does not opt into `mechanism.flow`.
 
 topic_format_whitelist:
   - LOOP_COMPLETE

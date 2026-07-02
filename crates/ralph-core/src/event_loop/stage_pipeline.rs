@@ -278,6 +278,28 @@ impl StagePipeline {
         ])
     }
 
+    /// Hat-only emit pipeline for presets that did **not** opt into
+    /// `mechanism.flow` (e.g. `ce-executor-pipeline`: flat linear chain
+    /// where hat triggers/publishes + `event_policy` are the SSOT).
+    ///
+    /// Skips `FlowStepScopeStage` and `StepCloseObligationStage` so
+    /// business emits are not rejected by step-scope gating. Keeps
+    /// `RepairDispatch`, schema validation, and terminal alignment.
+    pub fn with_hat_only_stages_for_loop_config(loop_config: Option<&EventLoopConfig>) -> Self {
+        let schema_gate = match loop_config {
+            Some(cfg) => EmitSchemaGateStage::new(required_fields_from_loop_config(cfg)),
+            None => EmitSchemaGateStage::with_defaults(),
+        };
+        let verdict_flow = hat_only_verdict_flow_declaration();
+        Self::new(vec![
+            Box::new(crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage::default()),
+            Box::new(schema_gate),
+            Box::new(crate::event_loop::stages::verdict_gate_stage::VerdictGateStage::new(
+                verdict_flow,
+            )),
+        ])
+    }
+
     /// Run the event through every stage in order.  The first
     /// rejection short-circuits and is returned.
     pub fn run(&self, ctx: &mut StageContext, event: &Event) -> Result<(), StageReject> {
@@ -349,6 +371,21 @@ impl StagePipeline {
             }
         }
     }
+}
+
+/// Minimal flow used only by [`StagePipeline::with_hat_only_stages_for_loop_config`].
+/// Empty `steps` — no FlowStepScope — with `LOOP_COMPLETE` terminal alignment.
+fn hat_only_verdict_flow_declaration() -> FlowDeclaration {
+    FlowDeclaration::from_yaml(
+        r#"mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps: []
+"#,
+    )
+    .expect("hat-only verdict flow YAML must parse")
 }
 
 /// Assert at compile time that the pipeline's stage names match the

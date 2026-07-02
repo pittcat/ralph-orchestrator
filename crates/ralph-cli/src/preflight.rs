@@ -1430,6 +1430,51 @@ mechanism:
         assert_eq!(flow.steps[0].id, "step-01");
     }
 
+    /// `ce-executor-pipeline` is hat-only: no `mechanism.flow` block in YAML.
+    #[test]
+    fn ce_executor_pipeline_overlay_has_no_mechanism_flow() {
+        use crate::presets;
+
+        let preset = presets::get_preset("ce-executor-pipeline").expect("embedded preset");
+        assert!(
+            !preset
+                .content
+                .lines()
+                .any(|line| line.trim_start().starts_with("mechanism:")),
+            "ce-executor-pipeline must not declare mechanism.flow"
+        );
+
+        let core: Value = serde_yaml::from_str(
+            r"
+cli:
+  backend: claude
+event_loop:
+  max_iterations: 500
+  completion_promise: LOOP_COMPLETE
+  prompt_file: PROMPT.md
+",
+        )
+        .unwrap();
+
+        let preset_value = config_resolution::parse_yaml_value(
+            preset.content,
+            "builtin:ce-executor-pipeline",
+        )
+        .unwrap();
+        let hats = extract_hat_overlay_from_preset(preset_value).unwrap();
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert!(
+            config.mechanism.is_none(),
+            "merged config must not carry mechanism for hat-only preset"
+        );
+        assert!(
+            config.event_loop.mechanism.is_none(),
+            "legacy event_loop.mechanism must also be absent"
+        );
+    }
+
     /// U3 (Fix C): operator-supplied `mechanism` must win over the
     /// preset's value (per-key operator-wins contract on the
     /// default branch).

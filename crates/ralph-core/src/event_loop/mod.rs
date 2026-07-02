@@ -336,8 +336,10 @@ fn strip_human_guidance_block(content: &str) -> String {
     out
 }
 
-/// Minimal FlowDeclaration YAML used as the fallback when
-/// the preset has no mechanism: block.
+/// Minimal FlowDeclaration YAML retained for documentation and legacy
+/// test fixtures. Hat-only presets no longer fall back to this at
+/// runtime — see [`StagePipeline::with_hat_only_stages_for_loop_config`].
+#[allow(dead_code)]
 fn minimal_flow_declaration_yaml() -> &'static str {
     // U11 (2026-06-27-002 plan completion) requires
     // `FlowStepScopeStage` to be fail-closed when the
@@ -416,46 +418,25 @@ fn minimal_flow_declaration_yaml() -> &'static str {
 "#
 }
 
-/// U6: build the default emit-time stage pipeline from the
-/// loaded RalphConfig. Falls back to a minimal declared flow
-/// when the preset has no mechanism: block.
+/// U6: build the default emit-time stage pipeline from the loaded
+/// `RalphConfig`.
 ///
-/// P0-3 (2026-06-27 adversarial review): the
-/// previous implementation round-tripped the entire
-/// `RalphConfig` through `serde_yaml::to_string` and
-/// fed it to `FlowDeclaration::from_yaml`, but
-/// `RalphConfig` had no `mechanism:` field — the
-/// parser therefore always saw a missing
-/// `mechanism:` block and silently fell back to the
-/// minimal flow declaration (empty `steps`),
-/// rendering `FlowStepScopeStage` no-op for
-/// operator-declared flows. We now read the typed
-/// `config.event_loop.mechanism.flow` field
-/// (added in P0-3) and serialise ONLY the
-/// `mechanism:` subtree the parser expects. The
-/// fallback to the minimal flow declaration
-/// remains for presets that have not opted in.
-fn build_stage_pipeline_from_config(
+/// Presets that **opt in** to `mechanism.flow` (top-level or legacy
+/// `event_loop.mechanism`) get the full stage pipeline including
+/// `FlowStepScopeStage` and `StepCloseObligationStage`.
+///
+/// Presets without `mechanism.flow` (hat-only linear chains such as
+/// `ce-executor-pipeline`) skip flow-step gating; routing is driven by
+/// hat triggers/publishes plus `event_policy`.
+fn load_opt_in_flow_declaration(
     config: &crate::config::RalphConfig,
-) -> (
-    crate::event_loop::stage_pipeline::StagePipeline,
-    std::collections::HashMap<String, u32>,
-) {
+) -> Option<crate::event_loop::flow_declaration::FlowDeclaration> {
     use crate::event_loop::flow_declaration::FlowDeclaration;
-    use crate::event_loop::stage_pipeline::StagePipeline;
-    let flow_yaml = config
+    config
         .mechanism
         .as_ref()
         .and_then(|m| m.flow.as_ref())
         .or_else(|| {
-            // Legacy `event_loop.mechanism` (P0-3
-            // v1 placement) — accepted as a
-            // backward-compat shim for presets
-            // that nested the block under
-            // `event_loop:`. New presets should
-            // use the top-level `mechanism:`
-            // key (mirroring the
-            // `presets/schemas/<name>.yml` SSOT).
             config
                 .event_loop
                 .mechanism
@@ -463,33 +444,34 @@ fn build_stage_pipeline_from_config(
                 .and_then(|m| m.flow.as_ref())
         })
         .and_then(|flow_cfg| {
-            // Wrap the typed flow in the `mechanism:` block
-            // the parser expects. `serde_yaml::to_string` on
-            // the typed config produces the inner map;
-            // we wrap it into the `mechanism.flow` key
-            // pair the parser looks up.
             serde_yaml::to_string(flow_cfg)
                 .ok()
                 .map(|flow| format!("mechanism:\n  flow:\n{flow}"))
         })
         .and_then(|yaml| FlowDeclaration::from_yaml(&yaml).ok())
-        .unwrap_or_else(|| {
-            FlowDeclaration::from_yaml(minimal_flow_declaration_yaml())
-                .expect("minimal flow declaration YAML is always valid")
-        });
-    // U12 wiring (P0-1, 2026-06-27 review): mirror
-    // `total_units` per step so `drive_step_close_progress`
-    // can resolve the total without walking the
-    // trait-object pipeline. Steps without `total_units`
-    // are absent from the map → stage stays fail-open.
-    let step_totals: std::collections::HashMap<String, u32> = flow_yaml
-        .steps
-        .iter()
-        .filter_map(|s| s.total_units.map(|n| (s.id.clone(), n)))
-        .collect();
-    let pipeline =
-        StagePipeline::with_default_stages_for_loop_config(flow_yaml, Some(&config.event_loop));
-    (pipeline, step_totals)
+}
+
+fn build_stage_pipeline_from_config(
+    config: &crate::config::RalphConfig,
+) -> (
+    crate::event_loop::stage_pipeline::StagePipeline,
+    std::collections::HashMap<String, u32>,
+) {
+    use crate::event_loop::stage_pipeline::StagePipeline;
+    let loop_cfg = Some(&config.event_loop);
+    if let Some(flow_yaml) = load_opt_in_flow_declaration(config) {
+        let step_totals: std::collections::HashMap<String, u32> = flow_yaml
+            .steps
+            .iter()
+            .filter_map(|s| s.total_units.map(|n| (s.id.clone(), n)))
+            .collect();
+        let pipeline =
+            StagePipeline::with_default_stages_for_loop_config(flow_yaml, loop_cfg);
+        (pipeline, step_totals)
+    } else {
+        let pipeline = StagePipeline::with_hat_only_stages_for_loop_config(loop_cfg);
+        (pipeline, std::collections::HashMap::new())
+    }
 }
 
 /// Validates events against configured workflow guards is implemented by
@@ -12220,5 +12202,22 @@ mod u4_current_plan_step_tests {
         let cfg = RalphConfig::default();
         let next = advance_plan_step(&cfg, "unit_loop", "review.start");
         assert_eq!(next, None);
+    }
+}
+
+#[cfg(test)]
+mod hat_only_pipeline_tests {
+    use super::*;
+    use crate::config::RalphConfig;
+
+    #[test]
+    fn config_without_mechanism_uses_hat_only_emit_pipeline() {
+        let config = RalphConfig::default();
+        let (pipeline, step_totals) = build_stage_pipeline_from_config(&config);
+        assert!(step_totals.is_empty());
+        assert_eq!(
+            pipeline.names(),
+            vec!["RepairDispatch", "EmitSchemaGate", "VerdictGate"]
+        );
     }
 }

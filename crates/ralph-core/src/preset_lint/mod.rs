@@ -459,10 +459,9 @@ pub fn run_preset_lint(
     ));
 
     // 2026-06-27 mechanism foundation U5: flow declaration lint.
-    // Builtin presets are required to carry a `mechanism.flow` block
-    // (2026-06-27 plan U10). Custom presets are checked when they
-    // already have a `mechanism:` key but missing declarations are not
-    // retroactively enforced so existing operator presets keep working.
+    // Only presets that declare a `mechanism:` block are checked.
+    // Hat-only linear presets (e.g. `ce-executor-pipeline`) intentionally
+    // omit `mechanism.flow` and rely on hat triggers + event_policy.
     //
     // 2026-06-27 wiring follow-up: prefer the raw_yaml the caller
     // supplied (when running strict_lint against embedded presets
@@ -529,7 +528,7 @@ pub fn run_preset_lint(
     let has_mechanism_block = raw_yaml_owned
         .lines()
         .any(|line| line.trim_start().starts_with("mechanism:"));
-    if source_is_builtin_embedded || has_mechanism_block {
+    if has_mechanism_block {
         match flow_declaration::check_flow_declaration(&raw_yaml_owned) {
             Ok(flow_findings) => {
                 findings.extend(lint_findings_to_contract_findings(&flow_findings))

@@ -236,6 +236,38 @@ mechanism:
 }
 
 #[test]
+fn hat_only_pipeline_omits_flow_step_scope_and_accepts_plan_ready() {
+    use crate::event_loop::emit_gate::{EmitGateOutcome, evaluate_emit_gate};
+    use crate::event_loop::repair_flow::RepairStateMachine;
+    use ralph_proto::Event;
+
+    let mut pipeline = StagePipeline::with_hat_only_stages_for_loop_config(None);
+    assert_eq!(
+        pipeline.names(),
+        vec!["RepairDispatch", "EmitSchemaGate", "VerdictGate"]
+    );
+
+    let mut sm: std::collections::HashMap<String, RepairStateMachine> =
+        std::collections::HashMap::new();
+    let mut ctx = StageContext::with_pipeline(
+        FlowStep::new("unit_loop"),
+        "loop-1",
+        1,
+        &mut sm,
+        &pipeline,
+    );
+    let event = Event::new(
+        "plan.ready",
+        r#"{"plan_name":"p","plan_path":"docs/plans/p.md","plan_revised":false,"review_summary":"ok"}"#,
+    );
+    let outcome = evaluate_emit_gate(&mut ctx, &event);
+    assert!(
+        matches!(outcome, EmitGateOutcome::AcceptMainBus),
+        "hat-only pipeline must not reject plan.ready via FlowStepScope: {outcome:?}"
+    );
+}
+
+#[test]
 fn stage_pipeline_skeleton_wrong_order_fails_at_runtime() {
     let pipeline = StagePipeline::new(vec![
         Box::new(RepairDispatchStage),
