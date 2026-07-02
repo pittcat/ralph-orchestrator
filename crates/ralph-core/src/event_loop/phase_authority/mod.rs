@@ -27,6 +27,8 @@ pub mod progress_gate_helper;
 pub mod progress_projection;
 // U20: shipper routing helper.
 pub mod shipper_helper;
+// U21: test.passed step parser.
+pub mod step_parse;
 
 pub use declaration::PhaseAuthorityDeclaration;
 pub use evaluator::{EventFixture, TransitionEvaluator};
