@@ -29,6 +29,8 @@ pub mod progress_projection;
 pub mod shipper_helper;
 // U21: test.passed step parser.
 pub mod step_parse;
+// U22: phase-violation resume budget.
+pub mod resume_budget;
 
 pub use declaration::PhaseAuthorityDeclaration;
 pub use evaluator::{EventFixture, TransitionEvaluator};
