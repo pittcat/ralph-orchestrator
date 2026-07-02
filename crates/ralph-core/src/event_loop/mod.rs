@@ -64,6 +64,11 @@ pub mod termination;
 pub mod audit;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+// 2026-07-02-006 plan U15: build_stage_pipeline_from_config
+// branch tests. Sibling to `tests` so the wiring change is
+// visible without scanning the entire mod.rs.
+mod build_stage_pipeline_phase_branch_tests;
 
 // 2026-06-10-003 U1 scaffold: 10 target submodules (filled in U3-U6).
 // Each placeholder is intentionally empty; `pub use xxx::*` re-exports
@@ -470,8 +475,53 @@ fn build_stage_pipeline_from_config(
     crate::event_loop::stage_pipeline::StagePipeline,
     std::collections::HashMap<String, u32>,
 ) {
+    use crate::event_loop::flow_declaration::FlowDeclaration;
     use crate::event_loop::stage_pipeline::StagePipeline;
     let loop_cfg = Some(&config.event_loop);
+    let phase_authority_enabled = config
+        .event_loop
+        .mechanism
+        .as_ref()
+        .and_then(|m| m.phase_authority.as_ref())
+        .map(|pa| pa.enabled)
+        .unwrap_or(false);
+
+    if phase_authority_enabled {
+        // 2026-07-02-006 plan U15: phase-authority wiring.
+        // Build the engine from the typed config; on parse
+        // failure the lint should have already rejected the
+        // preset, but we fall back to the disabled engine so
+        // the runtime stays alive.
+        let phase_decl = config
+            .event_loop
+            .mechanism
+            .as_ref()
+            .and_then(|m| m.phase_authority.as_ref())
+            .map(|cfg| {
+                use crate::event_loop::phase_authority::WorkflowPhaseAuthority;
+                WorkflowPhaseAuthority::from_config(cfg)
+            });
+        let authority = match phase_decl {
+            Some(Ok(fac)) => std::sync::Arc::new(fac),
+            _ => std::sync::Arc::new(
+                crate::event_loop::phase_authority::WorkflowPhaseAuthority::disabled(),
+            ),
+        };
+        let flow_yaml = load_opt_in_flow_declaration(config)
+            .unwrap_or_else(|| FlowDeclaration::from_yaml(minimal_flow_declaration_yaml()).unwrap());
+        let step_totals: std::collections::HashMap<String, u32> = flow_yaml
+            .steps
+            .iter()
+            .filter_map(|s| s.total_units.map(|n| (s.id.clone(), n)))
+            .collect();
+        let pipeline = StagePipeline::with_phase_authority_stages_for_loop_config(
+            flow_yaml,
+            loop_cfg,
+            authority,
+        );
+        return (pipeline, step_totals);
+    }
+
     if let Some(flow_yaml) = load_opt_in_flow_declaration(config) {
         let step_totals: std::collections::HashMap<String, u32> = flow_yaml
             .steps
