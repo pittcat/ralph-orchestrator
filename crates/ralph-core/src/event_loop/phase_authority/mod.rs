@@ -37,6 +37,8 @@ pub mod on_accepted;
 pub mod second_preset_fixture;
 // U26: dual-check diagnosis helper (R14).
 pub mod diagnosis;
+// U27: advance_step_on_test_passed pure fn.
+pub mod step_transition;
 
 pub use on_accepted::{
     AcceptedEvent, PhaseSideEffects, handle_phase_on_event_accepted,
