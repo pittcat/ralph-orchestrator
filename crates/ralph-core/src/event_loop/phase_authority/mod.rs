@@ -11,6 +11,8 @@
 
 pub mod config;
 pub mod declaration;
+// U4: per-phase per-hat topic whitelist (pure decision fn).
+pub mod whitelist;
 
 #[cfg(test)]
 mod declaration_tests;
