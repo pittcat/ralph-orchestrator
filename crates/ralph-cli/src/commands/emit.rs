@@ -929,6 +929,23 @@ fn emit_command_with_root_and_hats(
         record["wave_index"] = serde_json::Value::Number(wave_index.into());
     }
 
+    // P0-2 (2026-07-02-005 BP1-3): explicit `--policy-check` is a dry-run
+    // probe — validation already ran above; do not append to JSONL.
+    // Enforce mode (config-mandated check before write) still writes.
+    if check_mode == PolicyCheckMode::ExplicitCheck {
+        if use_colors {
+            println!(
+                "{}✓{} Policy check passed: {} (not written to disk)",
+                colors::GREEN,
+                colors::RESET,
+                topic
+            );
+        } else {
+            println!("Policy check passed: {} (not written to disk)", topic);
+        }
+        return Ok(());
+    }
+
     // Resolve events file via the P6 allowlist guard. The guard verifies
     // the candidate path is either the active `current-candidate-events`
     // target, the `current-events` target, or the default `events.jsonl`
@@ -1168,8 +1185,11 @@ event_loop:
         )
         .expect("should accept business event when no terminal exists");
 
-        let events = std::fs::read_to_string(&events_file).expect("read events");
-        assert!(events.contains("experiment.planned"));
+        let events = std::fs::read_to_string(&events_file).unwrap_or_default();
+        assert!(
+            events.trim().is_empty(),
+            "explicit --policy-check must not write to events file; got: {events}"
+        );
     }
 
     #[test]
@@ -2844,8 +2864,11 @@ event_loop:
         )
         .expect("policy check must accept a valid payload");
 
-        let events = std::fs::read_to_string(&events_file).expect("events file should exist");
-        assert!(events.contains("\"task_key\":\"k1\""));
+        let events = std::fs::read_to_string(&events_file).unwrap_or_default();
+        assert!(
+            events.trim().is_empty(),
+            "explicit --policy-check must not write to events file; got: {events}"
+        );
     }
 
     /// Policy-check rejection surfaces the unified structured envelope

@@ -32,7 +32,7 @@ ralph emit [OPTIONS] <TOPIC> [PAYLOAD]
 | `[PAYLOAD]` | string/json | 否 | `""` | 事件负载；配合 `-j` 可解析为 JSON 对象 |
 | `-j, --json` | flag | 否 | — | 将 payload 按 JSON 对象解析而非普通字符串 |
 | `--file <FILE>` | path | 否 | `.ralph/events.jsonl` | 目标事件文件路径 |
-| `--policy-check` | flag | 否 | — | 发射前按当前事件策略校验 |
+| `--policy-check` | flag | 否 | — | 发射前按当前事件策略校验；**校验通过不写盘**（dry-run 探测，与正式 `ralph emit` 区分） |
 | `--unsafe-no-policy-check` | flag | 否 | — | 跳过强制策略检查（仅当配置允许时） |
 | `--hat <HAT>` | string | 否 | `$RALPH_CURRENT_HAT` | 发布此事件的 hat |
 | `--triggered <TRIGGERED>` | string | 否 | `$RALPH_TRIGGERED_HAT` | 被此事件触发的目标 hat |
@@ -110,7 +110,7 @@ emit 任何 step handoff 事件前，确认 payload 内部一致：
 
 JSON 写法：`ralph emit work.done --policy-check -j '{"plan_path": "...", "task_id": "..."}'`（事件文件已存在 + allowlist 命中）。
 
-**`--policy-check` 边界**：CLI `--policy-check` 与 `ralph run` 循环内统一校验管线 `validation::rules_event_policy::EventPolicyRule` 行为**同源**（都走 `event_policy.schemas.<topic>.required_fields`），但**不覆盖** step handoff 的 `progress_task_gate`（`progress.md` ↔ `tasks.jsonl` 一致性）。完整预检（含 `progress_task_gate` 在 CLI 入口预检）见计划 `docs/plans/2026-06-17-005-fix-agent-recovery-mechanism-gaps-plan.md`。
+**`--policy-check` 边界**：显式 `--policy-check` 是 **dry-run 预检**——校验通过与 loop gate 同源，但**不会**把事件写入 `events.jsonl`；通过后再跑一次不带 `--policy-check` 的正式 `ralph emit` 才会落盘。配置强制 `require_policy_check_for_cli_emit: true` 时，校验通过后仍会写盘（Enforce 模式，不是 dry-run）。CLI `--policy-check` 与 `ralph run` 循环内统一校验管线 `validation::rules_event_policy::EventPolicyRule` 行为**同源**（都走 `event_policy.schemas.<topic>.required_fields`），但**不覆盖** step handoff 的 `progress_task_gate`（`progress.md` ↔ `tasks.jsonl` 一致性）。完整预检（含 `progress_task_gate` 在 CLI 入口预检）见计划 `docs/plans/2026-06-17-005-fix-agent-recovery-mechanism-gaps-plan.md`。
 
 **校验：**
 ```bash

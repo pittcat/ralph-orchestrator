@@ -6690,7 +6690,19 @@ impl EventLoop {
             return;
         }
 
-        let default_event = Event::new(default_topic_str, "").with_source(hat_id.clone());
+        let payload = serde_json::json!({
+            "reason": "default_publishes",
+            "message": format!(
+                "Hat '{}' emitted no events; orchestrator injected default topic '{}'",
+                hat_id.as_str(),
+                default_topic_str
+            ),
+            "hat": hat_id.as_str(),
+            "topic": default_topic_str,
+        });
+        let default_event = Event::new(default_topic_str, payload.to_string())
+            .with_source(hat_id.clone())
+            .with_system_injected();
         let verdict_topics = self.verdict_gate_topics();
         let verdict_topics_slice = verdict_topics.as_deref();
         self.state
@@ -6754,7 +6766,116 @@ impl EventLoop {
             }
         }
 
+        self.persist_system_injected_jsonl_event(hat_id, default_topic_str, &payload);
+
+        let reason_code = "default_publishes_injected";
+        let hat_str = hat_id.as_str();
+        let mut env_builder = crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+            .source(crate::diagnosis::DiagnosisSource::MissingEventGate)
+            .severity(crate::diagnosis::DiagnosisSeverity::Warning)
+            .iteration(self.state.iteration)
+            .topic(default_topic_str)
+            .source_hat(hat_str)
+            .reason_code(reason_code)
+            .message(format!(
+                "Hat '{hat_str}' emitted no events; orchestrator injected default_publishes topic '{default_topic_str}'"
+            ))
+            .expected_action(format!(
+                "Hat '{hat_str}' should emit '{default_topic_str}' before the turn ends; this injection is a synthetic fallback"
+            ))
+            .outcome(crate::diagnosis::DiagnosisOutcome::Pending)
+            .retry_key(
+                crate::diagnosis::RecoveryDiagnosisEnvelopeBuilder::retry_key_from_parts(
+                    crate::diagnosis::DiagnosisSource::MissingEventGate,
+                    Some(hat_str),
+                    Some(default_topic_str),
+                    reason_code,
+                    None,
+                ),
+            );
+        if let Some(session_id) = self.diagnostics.session_id() {
+            env_builder = env_builder.session_id(session_id);
+        }
+        let envelope = env_builder.build();
+        self.record_recovery_envelope(
+            &envelope,
+            vec![format!("default_publishes:{default_topic_str}")],
+        );
+
         self.bus.publish(default_event);
+    }
+
+    /// P0-3 (2026-07-02-005): persist orchestrator-injected
+    /// `default_publishes` events to the trusted events JSONL so
+    /// operators can audit why a downstream hat was activated.
+    ///
+    /// The event is also published on the bus for immediate routing.
+    /// The JSONL copy is marked `system_injected: true` and the reader
+    /// position is advanced past it so the next
+    /// `process_events_from_jsonl` pass does not double-publish.
+    fn persist_system_injected_jsonl_event(
+        &mut self,
+        hat_id: &HatId,
+        topic: &str,
+        payload: &serde_json::Value,
+    ) {
+        let events_path = self.event_reader.path().to_path_buf();
+        if let Some(parent) = events_path.parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                path = %events_path.display(),
+                error = %err,
+                "P0-3: failed to create events directory for default_publishes audit write"
+            );
+            return;
+        }
+
+        let ts = chrono::Utc::now().to_rfc3339();
+        let record = serde_json::json!({
+            "topic": topic,
+            "payload": payload,
+            "ts": ts,
+            "hat": hat_id.as_str(),
+            "source": hat_id.as_str(),
+            "system_injected": true,
+        });
+
+        let append_result = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&events_path)?;
+            let line = serde_json::to_string(&record)?;
+            writeln!(file, "{line}")?;
+            file.flush()?;
+            Ok(())
+        })();
+
+        match append_result {
+            Ok(()) => {
+                if let Ok(metadata) = std::fs::metadata(&events_path) {
+                    self.event_reader.set_position(metadata.len());
+                }
+                debug!(
+                    hat = %hat_id.as_str(),
+                    topic = %topic,
+                    path = %events_path.display(),
+                    "P0-3: persisted default_publishes event to JSONL for audit"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    hat = %hat_id.as_str(),
+                    topic = %topic,
+                    path = %events_path.display(),
+                    error = %err,
+                    "P0-3: failed to persist default_publishes event to JSONL; continuing with bus publish only"
+                );
+            }
+        }
     }
 
     /// Returns a mutable reference to the event bus for direct event publishing.

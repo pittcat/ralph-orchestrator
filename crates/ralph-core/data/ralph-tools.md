@@ -58,7 +58,7 @@ metadata:
    - `allowed_topics`：当前 hat 可发布的所有 topic（**只在这列里挑**）
    - `reason` / `kind`：结构化 reason code（U2）
    - `target_hat`：应当修复并重发的目标 hat
-2. **对照 `required_fields` 补齐 payload**；用 `ralph emit <topic> --policy-check -j '...'` 在写盘前预检（与 loop gate 同源 schema）。
+2. **对照 `required_fields` 补齐 payload**；用 `ralph emit <topic> --policy-check -j '...'` 预检（与 loop gate 同源 schema，**不写盘**）；通过后再正式 `ralph emit` 落盘。
 3. **确认 hat 作用域**：isolated 模式下未在 `allowed_topics`（与 hat `publishes` 交集）的 topic 越权 — 改用 hat 实际可发的 topic，不要靠 `--unsafe-no-policy-check` 绕过。
 4. **不要**用 `--unsafe-no-policy-check` 绕 policy；`ce-executor-serial` preset 默认 `allow_unsafe_cli_emit: false`，该参数直接被拒。**不要**直写 `events.jsonl` — 写完仍会被 `payload_contract` 拒。
 5. **复杂 violation**：按需加载对应 skill 查 deep-dive；当前 `ralph tools skill` 列表见命令速查表。

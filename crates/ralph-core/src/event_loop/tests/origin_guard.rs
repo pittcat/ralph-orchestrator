@@ -968,6 +968,90 @@ hats:
     );
 }
 
+/// P0-3 (2026-07-02-005): default_publishes injections must land in
+/// events JSONL (audit) and recovery.jsonl (diagnose), not bus-only.
+#[test]
+fn test_p0_default_publishes_persisted_to_jsonl_and_recovery() {
+    use crate::diagnosis::DiagnosisSource;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let workspace = temp_dir.path().to_path_buf();
+    let events_path = workspace.join(".ralph/events.jsonl");
+    std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
+
+    let yaml = r#"
+event_loop:
+  execution_mode: coordinator
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done", "work.failed"]
+    default_publishes: work.failed
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = workspace.clone();
+    let diagnostics =
+        crate::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
+            .expect("create diagnostics collector");
+    let session_dir = diagnostics.session_dir().unwrap().to_path_buf();
+    let context = crate::loop_context::LoopContext::primary(workspace);
+    let mut event_loop =
+        EventLoop::with_context_and_diagnostics(config, context, diagnostics).unwrap();
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    event_loop.check_default_publishes(&HatId::new("executor"));
+
+    let events_content = std::fs::read_to_string(&events_path)
+        .unwrap_or_else(|e| panic!("read events.jsonl: {e}: {}", events_path.display()));
+    assert!(
+        events_content.contains("\"topic\":\"work.failed\""),
+        "P0-3: default_publishes must be written to events JSONL; got: {events_content}"
+    );
+    assert!(
+        events_content.contains("\"system_injected\":true"),
+        "P0-3: injected event must be marked system_injected; got: {events_content}"
+    );
+    assert!(
+        events_content.contains("\"reason\":\"default_publishes\""),
+        "P0-3: injected payload must explain default_publishes; got: {events_content}"
+    );
+
+    let recovery_path = session_dir.join("recovery.jsonl");
+    let recovery_content = std::fs::read_to_string(&recovery_path)
+        .unwrap_or_else(|e| panic!("read recovery.jsonl: {e}: {}", recovery_path.display()));
+    assert!(
+        recovery_content.contains("default_publishes_injected"),
+        "P0-3: recovery envelope must record default_publishes_injected; got: {recovery_content}"
+    );
+    let entries: Vec<crate::diagnosis::RecoveryJournalEntry> = recovery_content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let env = entries
+        .iter()
+        .find(|e| e.envelope.reason_code == "default_publishes_injected")
+        .map(|e| &e.envelope)
+        .unwrap_or_else(|| {
+            panic!(
+                "P0-3: default_publishes recovery envelope not found; got: {:?}",
+                entries
+                    .iter()
+                    .map(|e| (
+                        e.envelope.source,
+                        e.envelope.reason_code.clone(),
+                        e.envelope.topic.clone()
+                    ))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(env.source, DiagnosisSource::MissingEventGate);
+    assert_eq!(env.topic.as_deref(), Some("work.failed"));
+}
+
 /// R6/U2: publish_event guards ralph pseudo-hat business topics.
 #[test]
 fn test_publish_event_rejects_ralph_business_topic() {
