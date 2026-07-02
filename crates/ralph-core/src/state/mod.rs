@@ -44,6 +44,13 @@ mod ledger;
 pub mod recovery_log;
 mod snapshot;
 
+#[cfg(test)]
+// 2026-07-02-006 plan U12: pin the new `workflow_phase`
+// field. Lives next to `state::snapshot` so the field's
+// ownership stays obvious to anyone reading the field
+// declaration.
+mod snapshot_workflow_phase_tests;
+
 pub use commit::{Commit, CommitDelta, CounterKind, TaskTransition};
 pub use ledger::{LEDGER_RELATIVE_PATH, LedgerError, StateLedger, read_commit_log, truncate_after};
 pub use recovery_log::{

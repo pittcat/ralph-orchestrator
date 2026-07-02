@@ -259,6 +259,16 @@ pub struct LedgerSnapshot {
     /// start can reconstruct the sequence of phase transitions
     /// even when the live registry is gone.
     pub flow_lifecycle_log: Vec<FlowLifecycleUpdateRecord>,
+
+    // ---- workflow phase authority (2026-07-02-006 U12) ------
+    /// 2026-07-02-006 plan U12: `WorkflowPhaseAuthority`
+    /// snapshot, projected into the ledger so downstream
+    /// consumers (`plan_gate`, `progress_gate`,
+    /// `ValidationContext`, `ralph diagnose`) can read it
+    /// without rebuilding the engine. The field is `None`
+    /// when the engine is disabled (R1 / KTD1) — gate
+    /// behaviour is unchanged from the pre-006 baseline.
+    pub workflow_phase: Option<crate::event_loop::phase_authority::snapshot::PhaseSnapshot>,
 }
 
 /// One `FlowLifecycleUpdated` delta, captured in
