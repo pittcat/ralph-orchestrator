@@ -13,6 +13,8 @@ pub mod config;
 pub mod declaration;
 // U4: per-phase per-hat topic whitelist (pure decision fn).
 pub mod whitelist;
+// U5: PhaseSnapshot value type (no I/O).
+pub mod snapshot;
 
 #[cfg(test)]
 mod declaration_tests;
