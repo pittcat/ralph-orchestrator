@@ -8,3 +8,6 @@
 pub mod on_event;
 // U7: on_test_passed_step — handles `test.passed` topic.
 pub mod on_test_passed_step;
+// U8: on_review_complete_verdict — KTD4 matrix (parameterised
+// by MatrixId, never by preset name).
+pub mod on_review_complete_verdict;
