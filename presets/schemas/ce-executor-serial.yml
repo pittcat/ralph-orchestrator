@@ -343,6 +343,13 @@ schemas:
         - plan_missing_implementation_units
         - plan_content_empty_or_placeholder
         - progress_md_invalid
+        # 2026-07-02-005 plan U7: drift engine emits
+        # `plan.blocked(reason=recovery_exhausted)` when the
+        # responder promotes a Final hint to RecoveryExhausted.
+        # Without this entry, the schema's strict
+        # `allowed_values` check rejects the event before
+        # shipper can route it.
+        - recovery_exhausted
         # 2026-07-02-004 plan U6: precheck gate hat retry-budget
         # exhaustion escalates to `plan.blocked(reason=
         # precheck_failed)`. Adding it here keeps the

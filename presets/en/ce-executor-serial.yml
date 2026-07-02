@@ -2699,6 +2699,17 @@ hats:
           - `loop_stalled_max_iterations`
           - `steward_escalation`
           - `review_terminal_drift` (legacy; kept for forward-compat with older recovery journals)
+          # 2026-07-02 plan 005 U7: prior runs (140149 / 175407) emit
+          # `recovery_exhausted` (drift engine promoting Final hint) and
+          # `review_failed` (review pipeline gave up); these reasons
+          # used to route to hard-fail even when the underlying work
+          # was sound and verification 1-2 succeeded. Adding them
+          # here (STRICT-MATCH exact, per the rule above) gives the
+          # shipper a recovery path. Whitelist width is the
+          # minimum set the two diagnoses identified; further
+          # widening requires an explicit P0/P1 fix-plan entry.
+          - `recovery_exhausted`
+          - `review_failed`
           # 2026-07-02 P1-B: stall_recovery retry_key family. v0 baseline above
           # covers the 3 string literals the recovery_runtime emits
           # directly; the v1 extension below covers the structured
