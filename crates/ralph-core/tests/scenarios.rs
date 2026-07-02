@@ -3029,3 +3029,25 @@ fn test_precheck_gate_exhaust() {
     let yaml = load_scenario("tests/scenarios/2026-07-02-precheck-gate-exhaust.yml");
     run_workflow_guard_scenario(yaml);
 }
+
+// ============================================================
+// plan 2026-07-02-005 Final Verification: pass_with_residuals
+// terminal path (140149 root cause). LOOP_COMPLETE × 1, post-
+// completion business events rejected.
+// ============================================================
+
+#[test]
+fn test_ce_executor_serial_pass_with_residuals_terminal() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_serial_pass_with_residuals_terminal.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_ce_executor_serial_fix_unit_terminal() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_serial_fix_unit_terminal.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
