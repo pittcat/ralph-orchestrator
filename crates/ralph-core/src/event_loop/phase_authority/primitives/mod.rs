@@ -11,3 +11,5 @@ pub mod on_test_passed_step;
 // U8: on_review_complete_verdict — KTD4 matrix (parameterised
 // by MatrixId, never by preset name).
 pub mod on_review_complete_verdict;
+// U9: on_loop_complete_honored — honored LOOP_COMPLETE → terminal.
+pub mod on_loop_complete_honored;
