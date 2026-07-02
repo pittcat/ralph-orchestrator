@@ -1,0 +1,82 @@
+# 2026-07-02-004 plan U5: precheck gate pass path (BDD)
+#
+# Flow after normalize():
+#   executor publishes work.done.proposed → precheck-work.done gate
+#   → gate emits work.done → finisher emits LOOP_COMPLETE
+
+name: precheck_gate_pass
+description: precheck gate passes proposed work.done and downstream receives the real event
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+        - task.resume
+      publishes:
+        - work.done
+    finisher:
+      name: "Finisher"
+      subscribes_to:
+        - work.done
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    precheck:
+      enabled: true
+      rules:
+        work.done:
+          prompt:
+            - "work is substantively complete"
+          on_fail:
+            target: executor
+            retry_budget: 3
+            on_exhausted: "plan.blocked(reason=precheck_failed)"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - step
+        task.start:
+          payload: json_object
+
+mock_responses:
+  - hat: executor
+    text: |
+      <event topic="work.done.proposed">
+      {"step":"s1"}
+      </event>
+  - hat: precheck-work.done
+    text: |
+      <event topic="work.done">
+      {"step":"s1"}
+      </event>
+  - hat: finisher
+    text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"done"}
+      </event>
+  - hat: finisher
+    text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"done"}
+      </event>
+
+expected:
+  iterations: 4
+  events:
+    - topic: work.done.proposed
+    - topic: work.done
+  absent_events:
+    - topic: work.done.rejected
+    - topic: plan.blocked
+  completion: true

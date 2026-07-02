@@ -1,0 +1,514 @@
+//! 2026-07-02-004 plan milestone B (U6): failure-closure
+//! runner for synthesized `precheck-<X>` gate hats.
+//!
+//! Contract (locked by U6):
+//! 1. When a gate hat emits `<X>.rejected`, the runtime
+//!    increments a per-`(loop_id, topic)` counter.
+//! 2. While `count <= retry_budget`, the runner synthesizes a
+//!    `task.resume` targeting the gate's `on_fail.target` hat.
+//!    The resume payload carries the gate's
+//!    `failed_checks` / `reason` so the target hat sees the
+//!    reason in its next prompt.
+//! 3. When the budget is exhausted, the runner emits the
+//!    configured `on_exhausted` topic (default:
+//!    `plan.blocked(reason=precheck_failed)`).
+//! 4. When the gate emits `<X>` (pass), the counter resets to
+//!    zero and no resume is injected.
+//! 5. The counter is in-memory per loop (`HashMap<String,
+//!    u32>` keyed by `"{loop_id}|{topic}"`) — the runtime
+//!    rebuilds it on each process restart and a rejection in
+//!    one loop never bleeds into another. This mirrors the
+//!    StallRecovery / repair_budget pattern.
+//!
+//! Architectural note: this module is pure CPU only. The wiring
+//! into the event loop lives in `event_loop::mod`.
+
+use std::collections::HashMap;
+
+/// Outcome of dispatching a gate rejection.  The event loop
+/// reads this to decide whether to inject a resume, escalate to
+/// `plan.blocked`, or no-op (LLM-emitted pass).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchOutcome {
+    /// Gate emitted `<X>` (pass).  No further action; counter
+    /// resets to zero on the next `record_pass`.
+    Pass,
+    /// Gate emitted `<X>.rejected` and the retry budget has
+    /// not been exhausted.  The event loop should inject a
+    /// `task.resume` targeting `target_hat` with the supplied
+    /// payload so the next activation re-enters the upstream
+    /// hat.
+    Resume {
+        target_hat: String,
+        payload_json: String,
+        new_count: u32,
+    },
+    /// Gate emitted `<X>.rejected` and the budget is exhausted.
+    /// The event loop should emit `on_exhausted` (default:
+    /// `plan.blocked(reason=precheck_failed)`).
+    Exhausted { topic: String, reason: String },
+}
+
+/// Retry-counter registry.  Keyed by `"{loop_id}|{topic}"` so
+/// the same gate in different loops is tracked independently
+/// (the orchestrator can run several loops against the same
+/// preset, e.g. the ce-executor-serial multi-loop pattern).
+#[derive(Debug, Default, Clone)]
+pub struct PrecheckRetryRegistry {
+    /// `"{loop_id}|{topic}"` → consecutive-rejection count.
+    counters: HashMap<String, u32>,
+}
+
+impl PrecheckRetryRegistry {
+    /// Construct an empty registry.  The orchestrator builds one
+    /// per `EventLoop` and threads it through gate-hat
+    /// dispatches.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Compute the storage key for a (loop, topic) pair.
+    pub fn key(loop_id: &str, topic: &str) -> String {
+        format!("{loop_id}|{topic}")
+    }
+
+    /// Reset the counter for `key` to zero.  Called on every
+    /// successful `<X>` pass so a long-running loop does not
+    /// slowly accumulate stale counts.
+    pub fn reset(&mut self, key: &str) {
+        self.counters.insert(key.to_string(), 0);
+    }
+
+    /// Read the current count without mutating.  Test-only
+    /// accessor; runtime paths should prefer
+    /// [`Self::record_pass`] / [`Self::record_rejection`].
+    #[cfg(test)]
+    pub fn peek(&self, key: &str) -> u32 {
+        self.counters.get(key).copied().unwrap_or(0)
+    }
+
+    /// Record a pass (gate emitted `<X>`).  Resets the counter
+    /// to zero.
+    pub fn record_pass(&mut self, loop_id: &str, topic: &str) {
+        let key = Self::key(loop_id, topic);
+        self.counters.insert(key, 0);
+    }
+
+    /// Record a rejection and return the new count.  The
+    /// dispatch helper uses the returned value to decide
+    /// between resume and exhaustion.
+    pub fn record_rejection(&mut self, loop_id: &str, topic: &str) -> u32 {
+        let key = Self::key(loop_id, topic);
+        let entry = self.counters.entry(key).or_insert(0);
+        *entry = entry.saturating_add(1);
+        *entry
+    }
+}
+
+/// Parameters that drive the dispatch decision.  Bundled so
+/// call sites don't accidentally swap argument order.
+#[derive(Debug, Clone)]
+pub struct DispatchParams<'a> {
+    /// Orchestrator loop id (so multiple loops against the
+    /// same preset get isolated counters).
+    pub loop_id: &'a str,
+    /// Guarded topic `X` (e.g. `"review.complete"`).
+    pub topic: &'a str,
+    /// `target_hat` from `PrecheckOnFail`.
+    pub target_hat: &'a str,
+    /// `retry_budget` from `PrecheckOnFail`.
+    pub retry_budget: u32,
+    /// `on_exhausted` from `PrecheckOnFail` (e.g.
+    /// `"plan.blocked(reason=precheck_failed)"`).
+    pub on_exhausted: &'a str,
+    /// Already-incremented rejection count.
+    pub rejection_count: u32,
+    /// Pre-rendered `<X>.rejected` payload (LLM or synthetic).
+    pub rejected_payload_json: &'a str,
+}
+
+/// Decide the dispatch outcome after a rejection.  Pure
+/// function: given the new count and the rule, returns the
+/// `DispatchOutcome` for the event loop to act on.
+///
+/// `retry_budget == 0` is treated as "no retries allowed" so a
+/// first rejection immediately exhausts — useful for presets
+/// that want a single hard gate with no back-and-forth.
+pub fn dispatch_rejection(params: &DispatchParams<'_>) -> DispatchOutcome {
+    let exhausted = if params.retry_budget == 0 {
+        params.rejection_count >= 1
+    } else {
+        params.rejection_count >= params.retry_budget
+    };
+    if exhausted {
+        // Exhausted: emit `on_exhausted`.  We split on `(reason=`
+        // for the default `plan.blocked(reason=...)` form so the
+        // event loop can render a `plan.blocked` payload with the
+        // reason field set explicitly (R8).
+        let (topic, reason) = split_on_exhausted(params.on_exhausted);
+        return DispatchOutcome::Exhausted {
+            topic,
+            reason,
+        };
+    }
+
+    // Within budget: build a `task.resume` payload that
+    // preserves the rejection reason so the target hat sees
+    // the failure on its next prompt (R5).  Mirrors the shape
+    // of `event_loop::rejection::build_task_resume_payload` so
+    // the prompt injector reads the fields uniformly.
+    let payload = build_resume_payload(
+        params.topic,
+        params.target_hat,
+        params.rejection_count,
+        params.retry_budget,
+        params.rejected_payload_json,
+    );
+    DispatchOutcome::Resume {
+        target_hat: params.target_hat.to_string(),
+        payload_json: payload,
+        new_count: params.rejection_count,
+    }
+}
+
+/// Parse an `on_exhausted` string of the form
+/// `topic(reason="...")` (the grammar produced by the
+/// default `plan.blocked(reason=precheck_failed)` value).
+/// Falls back to `(topic, default_reason)` when the grammar
+/// doesn't match — e.g. a bare `plan.blocked`.
+fn split_on_exhausted(on_exhausted: &str) -> (String, String) {
+    if let Some(start) = on_exhausted.find("(reason=") {
+        let topic = on_exhausted[..start].trim().to_string();
+        let rest = &on_exhausted[start + "(reason=".len()..];
+        // Strip a leading quote if present, then trim trailing
+        // `)` and any trailing quote.
+        let rest = rest.trim_start_matches('"');
+        let reason = rest.trim_end_matches(')').trim_end_matches('"').to_string();
+        return (topic, reason);
+    }
+    (on_exhausted.trim().to_string(), "precheck_failed".to_string())
+}
+
+/// Human-readable failure text for prompt injection (R5 / AE3).
+pub fn format_precheck_failure_message(
+    guarded_topic: &str,
+    rejected_payload_json: &str,
+) -> String {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(rejected_payload_json) {
+        let reason = parsed
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("precheck_rejected");
+        let checks = parsed
+            .get("failed_checks")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "[]".to_string());
+        return format!(
+            "PRECHECK GATE rejected `{guarded_topic}`: reason={reason}; failed_checks={checks}"
+        );
+    }
+    format!("PRECHECK GATE rejected `{guarded_topic}` (malformed rejection payload)")
+}
+
+/// Build a `task.resume` payload that carries the rejection
+/// context to the target hat.  Mirrors the wire shape of
+/// `event_loop::rejection::build_task_resume_payload` (which
+/// the runner already injects for other rejection kinds) so
+/// downstream consumers can parse both uniformly.
+fn build_resume_payload(
+    topic: &str,
+    target_hat: &str,
+    rejection_count: u32,
+    retry_budget: u32,
+    rejected_payload_json: &str,
+) -> String {
+    // Try to extract `failed_checks` / `reason` from the
+    // rejected payload so they surface in the prompt without
+    // a second round-trip.  Fall back to empty arrays when the
+    // payload isn't a JSON object (defensive — LLM emits are
+    // not always valid JSON).
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "stage".into(),
+        serde_json::Value::String("precheck".into()),
+    );
+    obj.insert(
+        "topic".into(),
+        serde_json::Value::String(topic.to_string()),
+    );
+    obj.insert(
+        "violation".into(),
+        serde_json::Value::String("precheck_rejected".into()),
+    );
+    obj.insert(
+        "reason".into(),
+        serde_json::Value::String("precheck_rejected".into()),
+    );
+    obj.insert(
+        "kind".into(),
+        serde_json::Value::String("precheck_rejected".into()),
+    );
+    obj.insert(
+        "target_hat".into(),
+        serde_json::Value::String(target_hat.to_string()),
+    );
+    obj.insert(
+        "precheck_count".into(),
+        serde_json::Value::Number(rejection_count.into()),
+    );
+    obj.insert(
+        "precheck_budget".into(),
+        serde_json::Value::Number(retry_budget.into()),
+    );
+    // Embed the original rejected payload's structured fields
+    // so the prompt injector can render them verbatim.
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(rejected_payload_json) {
+        if let Some(arr) = parsed.get("failed_checks").cloned() {
+            obj.insert("failed_checks".into(), arr);
+        }
+        if let Some(reason) = parsed.get("reason").and_then(|v| v.as_str()) {
+            obj.insert(
+                "precheck_reason".into(),
+                serde_json::Value::String(reason.to_string()),
+            );
+        }
+    }
+    serde_json::Value::Object(obj).to_string()
+}
+
+/// Build the payload for an `on_exhausted` topic.  Splits the
+/// directive on `(` so the common `plan.blocked(reason=X)` form
+/// produces a payload with `reason` set explicitly.
+pub fn build_exhausted_payload(topic: &str, reason: &str) -> String {
+    serde_json::json!({
+        "topic": topic,
+        "reason": reason,
+        "kind": "precheck_exhausted",
+    })
+    .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_params<'a>(
+        loop_id: &'a str,
+        topic: &'a str,
+        target_hat: &'a str,
+        retry_budget: u32,
+        on_exhausted: &'a str,
+        rejection_count: u32,
+        rejected_payload_json: &'a str,
+    ) -> DispatchParams<'a> {
+        DispatchParams {
+            loop_id,
+            topic,
+            target_hat,
+            retry_budget,
+            on_exhausted,
+            rejection_count,
+            rejected_payload_json,
+        }
+    }
+
+    #[test]
+    fn record_pass_resets_counter() {
+        let mut reg = PrecheckRetryRegistry::new();
+        let key = PrecheckRetryRegistry::key("loop1", "review.complete");
+        reg.counters.insert(key.clone(), 2);
+        reg.record_pass("loop1", "review.complete");
+        assert_eq!(reg.peek(&key), 0);
+    }
+
+    #[test]
+    fn record_rejection_increments() {
+        let mut reg = PrecheckRetryRegistry::new();
+        let n1 = reg.record_rejection("loop1", "review.complete");
+        let n2 = reg.record_rejection("loop1", "review.complete");
+        let n3 = reg.record_rejection("loop1", "review.complete");
+        assert_eq!(n1, 1);
+        assert_eq!(n2, 2);
+        assert_eq!(n3, 3);
+    }
+
+    #[test]
+    fn counters_isolated_per_loop_and_topic() {
+        let mut reg = PrecheckRetryRegistry::new();
+        reg.record_rejection("loop1", "review.complete");
+        reg.record_rejection("loop1", "review.complete");
+        reg.record_rejection("loop2", "review.complete");
+        reg.record_rejection("loop1", "build.done");
+        assert_eq!(
+            reg.peek(&PrecheckRetryRegistry::key("loop1", "review.complete")),
+            2
+        );
+        assert_eq!(
+            reg.peek(&PrecheckRetryRegistry::key("loop2", "review.complete")),
+            1
+        );
+        assert_eq!(
+            reg.peek(&PrecheckRetryRegistry::key("loop1", "build.done")),
+            1
+        );
+    }
+
+    #[test]
+    fn dispatch_within_budget_emits_resume() {
+        let rejected = r#"{"failed_checks":[1],"reason":"missing","synthetic":false}"#;
+        let outcome = dispatch_rejection(&default_params(
+            "loop1",
+            "review.complete",
+            "reviewer",
+            3,
+            "plan.blocked(reason=precheck_failed)",
+            1,
+            rejected,
+        ));
+        match outcome {
+            DispatchOutcome::Resume {
+                target_hat,
+                payload_json,
+                new_count,
+            } => {
+                assert_eq!(target_hat, "reviewer");
+                assert_eq!(new_count, 1);
+                let parsed: serde_json::Value = serde_json::from_str(&payload_json).unwrap();
+                assert_eq!(parsed["target_hat"], "reviewer");
+                assert_eq!(parsed["topic"], "review.complete");
+                assert_eq!(parsed["precheck_count"], 1);
+                assert_eq!(parsed["precheck_budget"], 3);
+                assert_eq!(parsed["failed_checks"], serde_json::json!([1]));
+                assert_eq!(parsed["precheck_reason"], "missing");
+            }
+            other => panic!("expected Resume, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_at_budget_emits_exhausted() {
+        // count == budget → AE2: third rejection exhausts when budget is 3.
+        let outcome = dispatch_rejection(&default_params(
+            "loop1",
+            "x",
+            "target",
+            3,
+            "plan.blocked(reason=precheck_failed)",
+            3,
+            "{}",
+        ));
+        assert!(matches!(outcome, DispatchOutcome::Exhausted { .. }));
+    }
+
+    #[test]
+    fn dispatch_within_budget_before_exhaustion() {
+        let outcome = dispatch_rejection(&default_params(
+            "loop1",
+            "x",
+            "target",
+            3,
+            "plan.blocked(reason=precheck_failed)",
+            2,
+            "{}",
+        ));
+        assert!(matches!(outcome, DispatchOutcome::Resume { .. }));
+    }
+
+    #[test]
+    fn dispatch_exhausted_emits_default_topic() {
+        let outcome = dispatch_rejection(&default_params(
+            "loop1",
+            "x",
+            "target",
+            3,
+            "plan.blocked(reason=precheck_failed)",
+            4,
+            "{}",
+        ));
+        match outcome {
+            DispatchOutcome::Exhausted { topic, reason } => {
+                assert_eq!(topic, "plan.blocked");
+                assert_eq!(reason, "precheck_failed");
+            }
+            other => panic!("expected Exhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_zero_budget_exhausts_on_first_rejection() {
+        let outcome = dispatch_rejection(&default_params(
+            "loop1",
+            "x",
+            "target",
+            0,
+            "plan.blocked(reason=precheck_failed)",
+            1,
+            "{}",
+        ));
+        assert!(matches!(outcome, DispatchOutcome::Exhausted { .. }));
+    }
+
+    #[test]
+    fn dispatch_custom_on_exhausted_is_parsed() {
+        let outcome = dispatch_rejection(&default_params(
+            "loop1",
+            "x",
+            "target",
+            0,
+            "custom.terminal(reason=\"custom_value\")",
+            1,
+            "{}",
+        ));
+        match outcome {
+            DispatchOutcome::Exhausted { topic, reason } => {
+                assert_eq!(topic, "custom.terminal");
+                assert_eq!(reason, "custom_value");
+            }
+            other => panic!("expected Exhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_on_exhausted_handles_bare_topic() {
+        let (topic, reason) = split_on_exhausted("plan.blocked");
+        assert_eq!(topic, "plan.blocked");
+        assert_eq!(reason, "precheck_failed");
+    }
+
+    #[test]
+    fn build_exhausted_payload_carries_topic_and_reason() {
+        let payload = build_exhausted_payload("plan.blocked", "precheck_failed");
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["topic"], "plan.blocked");
+        assert_eq!(parsed["reason"], "precheck_failed");
+        assert_eq!(parsed["kind"], "precheck_exhausted");
+    }
+
+    #[test]
+    fn resume_payload_survives_malformed_rejected_json() {
+        // The LLM sometimes emits invalid JSON; the resume
+        // payload must still serialize cleanly so the prompt
+        // injector can read its top-level fields.
+        let outcome = dispatch_rejection(&default_params(
+            "loop1",
+            "x",
+            "target",
+            3,
+            "plan.blocked(reason=precheck_failed)",
+            1,
+            "this is not json",
+        ));
+        match outcome {
+            DispatchOutcome::Resume { payload_json, .. } => {
+                let parsed: serde_json::Value = serde_json::from_str(&payload_json).unwrap();
+                assert_eq!(parsed["target_hat"], "target");
+                assert_eq!(parsed["topic"], "x");
+                // failed_checks / precheck_reason absent when
+                // input was malformed.
+                assert!(parsed.get("failed_checks").is_none());
+                assert!(parsed.get("precheck_reason").is_none());
+            }
+            other => panic!("expected Resume, got {other:?}"),
+        }
+    }
+}

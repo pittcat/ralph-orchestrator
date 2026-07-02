@@ -31,6 +31,20 @@ use crate::runtime_contract::{
 /// is `config.event_loop.execution_mode` (default is
 /// [`HatExecutionMode::Coordinator`]).
 ///
+/// 2026-07-02-004 plan U8: this rule MUST be evaluated against the
+/// **desugared** config.  The precheck pipeline
+/// (`RalphConfig::apply_precheck_desugar`) inserts one synthesized
+/// `precheck-<X>` gate hat per guarded topic, so a 3-hand-written-hat
+/// preset that opts into precheck becomes a 4-hat preset.  The
+/// default lint entrypoint (`run_preset_lint`) operates on the
+/// already-desugared config — callers must `normalize()` before
+/// passing it in.  When a preset trips the cap with a synthesized
+/// gate hat, the operator-facing message remains the standard
+/// "set `event_loop.execution_mode: isolated`" hint; the gate hat
+/// itself is the deciding factor.  See
+/// `synthesized_precheck_gate_hat_is_counted_by_multi_hat_lint`
+/// for the regression test that pins this contract.
+///
 /// The finding is `Error` severity. Caller-supplied
 /// `LintStrictness` does not affect the result: the rule is never
 /// downgraded.
@@ -318,5 +332,123 @@ hats:
         let config = make_config_default_mode(1);
         let findings = check_multi_hat_isolation(&config);
         assert!(findings.is_empty());
+    }
+
+    // ── 2026-07-02-004 plan U8: synthesized `precheck-<X>` gate
+    //    hats are added by `RalphConfig::apply_precheck_desugar`
+    //    and MUST be counted by the multi-hat isolation policy
+    //    (R2 / plan §"isolation 上限").  Otherwise a preset with
+    //    3 hand-written hats plus 1+ precheck gates would silently
+    //    exceed the coordinator limit.  This test wires 3 regular
+    //    hats + 1 synthesized gate hat into the desugar path and
+    //    asserts the lint fires the same Error finding it would
+    //    for any other 4-hat preset.
+
+    #[test]
+    fn synthesized_precheck_gate_hat_is_counted_by_multi_hat_lint() {
+        // 3 hand-written hats + precheck enabled on a guarded
+        // topic that one of them produces → desugar adds a 4th
+        // hat (`precheck-review.complete`).  Default
+        // (Coordinator) mode must surface an over-limit finding.
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  precheck:
+    enabled: true
+    rules:
+      review.complete:
+        prompt: ["check findings are concrete"]
+        on_fail:
+          target: coordinator
+          retry_budget: 3
+          on_exhausted: "plan.blocked(reason=precheck_failed)"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["review.complete"]
+  reviewer:
+    name: "Reviewer"
+    triggers: ["review.complete"]
+    publishes: ["work.done"]
+"#;
+        let mut config: RalphConfig = serde_yaml::from_str(yaml).expect("parse test config");
+        // Simulate the desugar path: rewrite the producer to
+        // emit `review.complete.proposed` and synthesize the
+        // gate hat.  This mirrors
+        // `RalphConfig::apply_precheck_desugar` but is inlined
+        // so the lint test stays self-contained.
+        use crate::event_loop::precheck_gate_enforcement as gate;
+        config
+            .hats
+            .get_mut("executor")
+            .expect("executor hat")
+            .publishes
+            .retain(|p| p != "review.complete");
+        config
+            .hats
+            .get_mut("executor")
+            .unwrap()
+            .publishes
+            .push("review.complete.proposed".to_string());
+        config.hats.insert(
+            "precheck-review.complete".to_string(),
+            crate::config::HatConfig {
+                name: "Precheck Gate: review.complete".to_string(),
+                triggers: vec!["review.complete.proposed".to_string()],
+                publishes: vec![
+                    "review.complete".to_string(),
+                    "review.complete.rejected".to_string(),
+                ],
+                ..Default::default()
+            },
+        );
+
+        // Sanity: the synthesized gate hat is in the desugared
+        // config, prefixed `precheck-`, exactly as the
+        // enforcement module expects.
+        assert!(
+            config
+                .hats
+                .keys()
+                .any(|k| gate::is_gate_hat(k) && gate::gate_topic(k) == Some("review.complete")),
+            "desugared config must contain a precheck-review.complete gate hat, got {:?}",
+            config.hats.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(config.hats.len(), 4);
+
+        // Default (Coordinator) at 4 hats → must fail with the
+        // standard multi-hat finding, including the synthesized
+        // gate in the count.
+        let findings = check_multi_hat_isolation(&config);
+        assert_eq!(
+            findings.len(),
+            1,
+            "3 hand-written + 1 precheck gate hat must trip multi-hat lint, got: {findings:?}"
+        );
+        assert_eq!(
+            findings[0].details.get("actual").map(String::as_str),
+            Some("4"),
+            "actual must count the synthesized gate hat as a real hat"
+        );
+        assert_eq!(
+            findings[0].details.get("required_mode").map(String::as_str),
+            Some("isolated")
+        );
+
+        // Switching to isolated clears the finding.
+        config.event_loop.execution_mode = HatExecutionMode::Isolated;
+        let isolated_findings = check_multi_hat_isolation(&config);
+        assert!(
+            isolated_findings.is_empty(),
+            "isolated mode must accept the 4-hat preset (incl. gate hat), got: {isolated_findings:?}"
+        );
     }
 }

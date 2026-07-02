@@ -40,6 +40,15 @@ pub enum PlanBlockedReason {
     /// below the staleness threshold without `dimension.done`
     /// ever arriving.
     DimensionReviewersFailedToConverge,
+    /// 2026-07-02-004 plan U6: synthesized `precheck-<X>`
+    /// gate hat exhausted its retry budget; the runner
+    /// emitted `plan.blocked(reason=precheck_failed)` via
+    /// `precheck_gate_runner::build_exhausted_payload`.
+    /// Keeping this as a typed variant ensures the
+    /// `reason_invalid` rejector sees `precheck_failed` as a
+    /// legitimate, fully-spelled reason (rather than
+    /// rejecting it as a typo of an existing variant).
+    PrecheckFailed,
 }
 
 impl PlanBlockedReason {
@@ -54,6 +63,7 @@ impl PlanBlockedReason {
             Self::UpstreamReviewIncomplete => "upstream_review_incomplete",
             Self::LoopStalledMaxIterations => "loop_stalled_max_iterations",
             Self::DimensionReviewersFailedToConverge => "dimension_reviewers_failed_to_converge",
+            Self::PrecheckFailed => "precheck_failed",
         }
     }
 
@@ -71,6 +81,7 @@ impl PlanBlockedReason {
             "dimension_reviewers_failed_to_converge" => {
                 Some(Self::DimensionReviewersFailedToConverge)
             }
+            "precheck_failed" => Some(Self::PrecheckFailed),
             _ => None,
         }
     }
@@ -94,6 +105,7 @@ mod tests {
             PlanBlockedReason::UpstreamReviewIncomplete,
             PlanBlockedReason::LoopStalledMaxIterations,
             PlanBlockedReason::DimensionReviewersFailedToConverge,
+            PlanBlockedReason::PrecheckFailed,
         ];
         for r in all {
             assert_eq!(PlanBlockedReason::parse(r.as_str()), Some(r));

@@ -1,0 +1,81 @@
+# 2026-07-02-004 plan U6 / AE2: precheck retry budget exhaustion (BDD)
+#
+# retry_budget=3 → two rejections resume, third rejection emits
+# plan.blocked(reason=precheck_failed).
+
+name: precheck_gate_exhaust
+description: precheck gate exhausts retry budget and escalates to plan.blocked
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+        - task.resume
+      publishes:
+        - work.done
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    precheck:
+      enabled: true
+      rules:
+        work.done:
+          prompt:
+            - "work is substantively complete"
+          on_fail:
+            target: executor
+            retry_budget: 3
+            on_exhausted: "plan.blocked(reason=precheck_failed)"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.done:
+          required_fields:
+            - step
+
+mock_responses:
+  - hat: executor
+    text: |
+      <event topic="work.done.proposed">
+      {"step":"s1"}
+      </event>
+  - hat: precheck-work.done
+    text: |
+      <event topic="work.done.rejected">
+      {"failed_checks":[1],"reason":"not ready","synthetic":false}
+      </event>
+  - hat: executor
+    text: |
+      <event topic="work.done.proposed">
+      {"step":"s1"}
+      </event>
+  - hat: precheck-work.done
+    text: |
+      <event topic="work.done.rejected">
+      {"failed_checks":[1],"reason":"still not ready","synthetic":false}
+      </event>
+  - hat: executor
+    text: |
+      <event topic="work.done.proposed">
+      {"step":"s1"}
+      </event>
+  - hat: precheck-work.done
+    text: |
+      <event topic="work.done.rejected">
+      {"failed_checks":[1],"reason":"give up","synthetic":false}
+      </event>
+
+expected:
+  iterations: 6
+  events:
+    - topic: plan.blocked
+  absent_events:
+    - topic: work.done
+  completion: false

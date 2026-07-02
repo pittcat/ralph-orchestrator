@@ -358,6 +358,7 @@ fn merge_preset_with_schema(
         ("verdict_gate", &["event_loop", "verdict_gate"]),
         ("workflow_contract", &["event_loop", "workflow_contract"]),
         ("state_projection", &["event_loop", "state_projection"]),
+        ("precheck", &["event_loop", "precheck"]),
     ];
     for (ssot_key, target_path) in section_targets {
         let ssot_value = match ssot.get(*ssot_key) {

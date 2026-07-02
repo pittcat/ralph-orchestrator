@@ -16,6 +16,7 @@ pub mod hat;
 mod hooks;
 mod loop_config;
 mod memories;
+mod precheck;
 mod preflight_ext;
 mod ralph_config;
 mod skills;
@@ -64,6 +65,7 @@ pub use memories::{InjectMode, MemoriesConfig, MemoriesFilter};
 pub use multi_hat_policy::{
     MULTI_HAT_ISOLATION_LIMIT, MultiHatPolicyViolation, evaluate_multi_hat_isolation,
 };
+pub use precheck::{PrecheckConfig, PrecheckOnFail, PrecheckRule, precheck_runtime_enabled};
 pub use preflight_ext::{HookStage, PreflightExtensionsConfig, PreflightHook};
 pub use profiles::{ProfileScope, ProfileSpec, ProfilesConfig};
 pub use skills::{SkillOverride, SkillsConfig};

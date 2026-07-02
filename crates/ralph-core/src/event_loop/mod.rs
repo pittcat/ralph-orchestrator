@@ -37,6 +37,15 @@ pub mod repair_flow;
 pub mod repair_stream_sink;
 pub mod stage_pipeline;
 pub mod step_close_obligation;
+// 2026-07-02-004 plan milestone B (U5): synthesized precheck
+// gate hat hard-gate enforcement. Pure-logic core that the
+// event loop invokes from the step-close obligation path.
+pub mod precheck_gate_enforcement;
+// 2026-07-02-004 plan milestone B (U6): failure-closure
+// runner for `<X>.rejected` events. Owns the per-(loop,
+// topic) retry counter and the dispatch decision
+// (resume vs escalate to `plan.blocked`).
+pub mod precheck_gate_runner;
 // 2026-06-27 mechanism foundation U6+ wiring stages. Each
 // U-* wiring unit lives in `event_loop::stages` as its own
 // submodule. Order matches the locked pipeline order; do
@@ -1089,6 +1098,12 @@ impl EventLoop {
             // defensive bypass.
             current_plan_step: initial_current_plan_step(&config),
             terminal_event_emitted: false,
+            // 2026-07-02-004 plan U6: per-loop
+            // precheck gate retry registry. In-memory
+            // only; rebuilt on process restart (same
+            // cold-start semantics as
+            // stall_recovery_counts).
+            precheck_retries: crate::event_loop::precheck_gate_runner::PrecheckRetryRegistry::new(),
         })
     }
 
@@ -1244,6 +1259,11 @@ impl EventLoop {
             repair_stream_pending: 0,
             current_plan_step: initial_current_plan_step(&config),
             terminal_event_emitted: false,
+            // 2026-07-02-004 plan U6: per-loop
+            // precheck gate retry registry (see
+            // matching initialiser in the first
+            // `with_context_and_diagnostics` body).
+            precheck_retries: crate::event_loop::precheck_gate_runner::PrecheckRetryRegistry::new(),
         }
     }
 
@@ -10704,6 +10724,13 @@ impl EventLoop {
         // counter is up to date.
         self.drive_step_transition();
 
+        // 2026-07-02-004 plan U5/U6 wiring: enforce the
+        // synthesized precheck gate hat hard-gate and
+        // dispatch rejections (resume vs. exhaustion).
+        // Runs after `drive_step_transition` so the
+        // step-close stage fires first when both apply.
+        self.drive_precheck_gate_obligation(&accepted_log_events);
+
         Ok(ProcessedEvents {
             had_events,
             had_raw_events,
@@ -10782,6 +10809,213 @@ impl EventLoop {
                 error = %e,
                 "flow_lifecycle.advance_to(review_walk) failed; staying on unit_loop"
             );
+        }
+    }
+
+    /// 2026-07-02-004 plan milestone B (U5/U6): enforce precheck
+    /// gate hard-gate semantics and dispatch rejections (resume vs.
+    /// exhaustion).  U5 synthesizes `<X>.rejected` when the gate
+    /// hat is silent or ambiguous; U6 routes failures through the
+    /// correction + `task.resume` pipeline (R5 / AE3).
+    fn drive_precheck_gate_obligation(&mut self, accepted: &[ralph_proto::Event]) {
+        use crate::event_loop::precheck_gate_enforcement as gate;
+        use ralph_proto::HatId;
+        use std::collections::HashSet;
+
+        let precheck_cfg = match self.config.event_loop.precheck.as_ref() {
+            Some(p) if p.enabled && !p.rules.is_empty() => p.clone(),
+            _ => return,
+        };
+        if !crate::config::precheck_runtime_enabled() {
+            return;
+        }
+
+        let loop_id = self
+            .loop_context
+            .as_ref()
+            .and_then(|c| c.loop_id())
+            .unwrap_or("default")
+            .to_string();
+
+        // U5: silent / ambiguous gate → synthetic `<X>.rejected`.
+        let synthetics = gate::collect_synthetic_precheck_rejections(
+            &self.state.hat_obligations,
+            accepted,
+            |topic| precheck_cfg.rules.get(topic).map(|r| r.prompt.len()),
+        );
+        let mut synthesized_gates: HashSet<String> = HashSet::new();
+        for synthetic in synthetics {
+            synthesized_gates.insert(synthetic.gate_hat_id.clone());
+            let gate_hat = HatId::new(&synthetic.gate_hat_id);
+            self.state
+                .discharge_hat_obligation(&gate_hat, &synthetic.rejected_topic);
+            self.dispatch_precheck_rejection(
+                &loop_id,
+                &precheck_cfg,
+                &synthetic.gate_hat_id,
+                &synthetic.guarded_topic,
+                &synthetic.payload_json,
+            );
+        }
+
+        for event in accepted {
+            let source_hat = match gate::resolve_gate_hat_for_emit(event, &precheck_cfg.rules) {
+                Some(id) => HatId::new(id),
+                None => continue,
+            };
+            if !gate::is_gate_hat(source_hat.as_str()) {
+                continue;
+            }
+            if synthesized_gates.contains(source_hat.as_str()) {
+                continue;
+            }
+            let topic_str = event.topic.as_str();
+
+            if let Some(guarded) = gate::gate_topic(source_hat.as_str()) {
+                if topic_str == guarded {
+                    self.precheck_retries.record_pass(&loop_id, guarded);
+                    self.state
+                        .discharge_hat_obligation(&source_hat, topic_str);
+                    continue;
+                }
+            }
+
+            let guarded = match topic_str.strip_suffix(".rejected") {
+                Some(s) => s,
+                None => continue,
+            };
+            let hat_guarded = match gate::gate_topic(source_hat.as_str()) {
+                Some(g) => g,
+                None => continue,
+            };
+            if hat_guarded != guarded {
+                continue;
+            }
+
+            let Some(_rule) = precheck_cfg.rules.get(guarded) else {
+                continue;
+            };
+
+            self.state
+                .discharge_hat_obligation(&source_hat, topic_str);
+            self.dispatch_precheck_rejection(
+                &loop_id,
+                &precheck_cfg,
+                source_hat.as_str(),
+                guarded,
+                event.payload.as_str(),
+            );
+        }
+    }
+
+    /// U6 closure for one `<X>.rejected` (LLM or synthetic).
+    fn dispatch_precheck_rejection(
+        &mut self,
+        loop_id: &str,
+        precheck_cfg: &crate::config::PrecheckConfig,
+        gate_hat_id: &str,
+        guarded: &str,
+        rejected_payload_json: &str,
+    ) {
+        use crate::event_loop::precheck_gate_runner as runner;
+        use crate::event_loop::rejection::enrich_task_resume_payload_full;
+        use crate::preset::engine::gates::RejectionKind;
+        use ralph_proto::HatId;
+
+        let rule = match precheck_cfg.rules.get(guarded) {
+            Some(r) => r,
+            None => return,
+        };
+        let rejection_count = self
+            .precheck_retries
+            .record_rejection(loop_id, guarded);
+
+        let params = runner::DispatchParams {
+            loop_id,
+            topic: guarded,
+            target_hat: rule.on_fail.target.as_str(),
+            retry_budget: rule.on_fail.retry_budget,
+            on_exhausted: rule.on_fail.on_exhausted.as_str(),
+            rejection_count,
+            rejected_payload_json,
+        };
+        let outcome = runner::dispatch_rejection(&params);
+        match outcome {
+            runner::DispatchOutcome::Resume {
+                target_hat,
+                new_count,
+                ..
+            } => {
+                let message =
+                    runner::format_precheck_failure_message(guarded, rejected_payload_json);
+                let mut rejection = Rejection {
+                    stage: RejectionStage::Policy,
+                    source_hat: Some(gate_hat_id.to_string()),
+                    business_hat: None,
+                    topic: guarded.to_string(),
+                    violation: message.clone(),
+                    retry_key: String::new(),
+                    retry_eligible: true,
+                    non_retryable_reason: None,
+                    target_hat: Some(target_hat.clone()),
+                    original_event_id: None,
+                    original_ts: None,
+                    kind: Some(RejectionKind::ContractViolation),
+                };
+                rejection.retry_key = rejection.compute_retry_key();
+                let _ctx = crate::correction::emit_correction_context(
+                    self.state.state_ledger.as_mut(),
+                    &rejection,
+                    new_count,
+                    Some(self.config.core.workspace_root.as_path()),
+                    &mut self.state.prompt_context,
+                );
+
+                let allowed_topics = self
+                    .registry
+                    .get_config(&HatId::new(&target_hat))
+                    .map(|cfg| cfg.publishes.clone())
+                    .unwrap_or_default();
+                let resume_payload = enrich_task_resume_payload_full(
+                    &message,
+                    "precheck_rejected",
+                    Some(&target_hat),
+                    Some(RejectionStage::Policy),
+                    Some(RejectionKind::ContractViolation),
+                    &allowed_topics,
+                );
+                tracing::info!(
+                    loop_id = %loop_id,
+                    gate = %gate_hat_id,
+                    topic = %guarded,
+                    target_hat = %target_hat,
+                    count = new_count,
+                    "U6: precheck rejection within budget; injecting correction + task.resume"
+                );
+                self.bus.publish(
+                    ralph_proto::Event::new("task.resume", resume_payload)
+                        .with_target(HatId::new(target_hat.clone())),
+                );
+                self.state
+                    .redispatch_hat_obligation(&HatId::new(target_hat));
+            }
+            runner::DispatchOutcome::Exhausted { topic, reason } => {
+                tracing::warn!(
+                    loop_id = %loop_id,
+                    gate = %gate_hat_id,
+                    topic = %guarded,
+                    on_exhausted = %topic,
+                    reason = %reason,
+                    "U6: precheck retry budget exhausted; escalating to on_exhausted"
+                );
+                let payload = runner::build_exhausted_payload(&topic, &reason);
+                let blocked =
+                    ralph_proto::Event::new(topic.clone(), payload).with_source(HatId::new(gate_hat_id));
+                self.state.record_event(&blocked);
+                self.bus.publish(blocked);
+                self.terminal_event_emitted = true;
+            }
+            runner::DispatchOutcome::Pass => {}
         }
     }
 

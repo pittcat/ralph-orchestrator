@@ -180,3 +180,116 @@ pub fn check_ownership_rules(config: &RalphConfig, strictness: LintStrictness) -
 
     findings
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RalphConfig;
+    use std::collections::HashMap;
+
+    /// Build a minimal config with the synthesized
+    /// `precheck-<X>` gate hat and a single non-gate consumer
+    /// so we can assert that:
+    /// - the gate hat is recognized as the owner of `<X>` and
+    ///   `<X>.rejected`,
+    /// - publishing `<X>` from a non-owner is flagged (proves
+    ///   the gate hat actually owns the topic in the lint's
+    ///   eyes),
+    /// - publishing `<X>` from the gate hat itself is
+    ///   accepted (no spurious R3 finding).
+    fn desugared_precheck_config() -> RalphConfig {
+        let mut hats = HashMap::new();
+        hats.insert(
+            "executor".to_string(),
+            crate::config::HatConfig {
+                name: "Executor".to_string(),
+                triggers: vec!["work.start".to_string()],
+                publishes: vec!["review.complete.proposed".to_string()],
+                ..Default::default()
+            },
+        );
+        hats.insert(
+            "precheck-review.complete".to_string(),
+            crate::config::HatConfig {
+                name: "Precheck Gate: review.complete".to_string(),
+                triggers: vec!["review.complete.proposed".to_string()],
+                publishes: vec![
+                    "review.complete".to_string(),
+                    "review.complete.rejected".to_string(),
+                ],
+                ..Default::default()
+            },
+        );
+        hats.insert(
+            "reviewer".to_string(),
+            crate::config::HatConfig {
+                name: "Reviewer".to_string(),
+                triggers: vec!["review.complete".to_string()],
+                publishes: vec!["work.done".to_string()],
+                ..Default::default()
+            },
+        );
+        let mut topic_owners = HashMap::new();
+        topic_owners.insert(
+            "review.complete".to_string(),
+            vec!["precheck-review.complete".to_string()],
+        );
+        topic_owners.insert(
+            "review.complete.rejected".to_string(),
+            vec!["precheck-review.complete".to_string()],
+        );
+        RalphConfig {
+            hats,
+            topic_owners,
+            ..Default::default()
+        }
+    }
+
+    /// 2026-07-02-004 plan U8: ownership lint recognizes the
+    /// synthesized gate hat as the sole owner of both `<X>`
+    /// and `<X>.rejected`.  No R3 finding should fire — the
+    /// gate is the owner and is allowed to publish.
+    #[test]
+    fn synthesized_gate_hat_is_recognized_as_owner_of_guarded_topic() {
+        let config = desugared_precheck_config();
+        let findings = check_ownership_rules(&config, LintStrictness::Default);
+        assert!(
+            findings.is_empty(),
+            "gate hat must own review.complete / .rejected; got: {findings:?}"
+        );
+        // And strict mode should not regress.
+        let strict_findings = check_ownership_rules(&config, LintStrictness::Strict);
+        assert!(
+            strict_findings.is_empty(),
+            "strict mode must also accept the synthesized owner, got: {strict_findings:?}"
+        );
+    }
+
+    /// Counter-test: if the operator hand-writes a producer
+    /// of `<X>` that is NOT the gate hat (so the gate hat is
+    /// no longer the sole owner of `<X>`), the ownership lint
+    /// MUST flag the cross-hat publish.  This proves the
+    /// previous test is actually exercising the owner check
+    /// rather than no-oping.
+    #[test]
+    fn non_owner_publishing_guarded_topic_is_flagged() {
+        let mut config = desugared_precheck_config();
+        // Add a stray hat that publishes the guarded topic.
+        config.hats.insert(
+            "intruder".to_string(),
+            crate::config::HatConfig {
+                name: "Intruder".to_string(),
+                triggers: vec!["work.start".to_string()],
+                publishes: vec!["review.complete".to_string()],
+                ..Default::default()
+            },
+        );
+        let findings = check_ownership_rules(&config, LintStrictness::Default);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH),
+            "intruder publishing owned topic must be flagged, got: {findings:?}"
+        );
+    }
+}

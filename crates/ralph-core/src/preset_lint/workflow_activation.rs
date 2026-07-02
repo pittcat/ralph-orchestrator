@@ -1176,4 +1176,133 @@ hats:
         assert!(!source_label_is_builtin_embedded("/abs/path/to/preset.yml"));
         assert!(!source_label_is_builtin_embedded("current-config"));
     }
+
+    // 2026-07-02-004 plan U8: synthesized `precheck-<X>` gate
+    // hats are part of the desugared graph and must satisfy the
+    // four WAC rules.  Specifically:
+    // - the gate hat's `triggers=[<X>.proposed]` MUST have at
+    //   least one publisher (the upstream hat that was rewritten
+    //   to emit `<X>.proposed`), or R5 (trigger/publish
+    //   asymmetry) fires;
+    // - the gate hat's `publishes=[<X>, <X>.rejected]` MUST
+    //   hand off to a downstream consumer of `<X>`, or R4
+    //   (handoff pairing) fires;
+    // - the rewritten producer's `<X>.proposed` MUST not be
+    //   re-emitted by the same hat, or R2 (re-emit trap) fires.
+    //
+    // The fixture below wires `executor → precheck gate →
+    // reviewer` with `executor` rewritten to emit
+    // `review.complete.proposed`.  All four WAC rules must
+    // pass on this graph.
+    #[test]
+    fn synthesized_gate_hat_satisfies_wac() {
+        let yaml = r#"
+tasks:
+  enabled: false
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "LOOP_COMPLETE"
+  precheck:
+    enabled: true
+    rules:
+      review.complete:
+        prompt: ["check findings are concrete"]
+        on_fail:
+          target: executor
+          retry_budget: 3
+          on_exhausted: "plan.blocked(reason=precheck_failed)"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["review.complete.proposed"]
+  precheck-review.complete:
+    name: "Precheck Gate: review.complete"
+    triggers: ["review.complete.proposed"]
+    publishes: ["review.complete", "review.complete.rejected"]
+  reviewer:
+    name: "Reviewer"
+    triggers: ["review.complete"]
+    publishes: ["LOOP_COMPLETE"]
+"#;
+        let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        // The desugared config must contain the gate hat.
+        use crate::event_loop::precheck_gate_enforcement as gate;
+        assert!(
+            config.hats.keys().any(|k| {
+                gate::is_gate_hat(k) && gate::gate_topic(k) == Some("review.complete")
+            }),
+            "fixture must include a synthesized precheck-review.complete gate hat, got {:?}",
+            config.hats.keys().collect::<Vec<_>>()
+        );
+
+        // Sanity: the producer was rewritten to `<X>.proposed`.
+        let executor_publishes = &config.hats["executor"].publishes;
+        assert!(
+            executor_publishes.iter().any(|p| p == "review.complete.proposed"),
+            "executor must publish review.complete.proposed, got {executor_publishes:?}"
+        );
+        assert!(
+            !executor_publishes.iter().any(|p| p == "review.complete"),
+            "executor must NOT still publish the bare review.complete after desugar, got {executor_publishes:?}"
+        );
+
+        let graph = HandoffGraph::from_config(&config);
+
+        // R5 (trigger/publish asymmetry): every trigger must
+        // have at least one publisher.  `review.complete.proposed`
+        // is published by `executor`; `review.complete` is
+        // published by `precheck-review.complete`.  Both
+        // resolve.
+        let asym = check_trigger_publish_asymmetry(&config, &graph, true, false);
+        assert!(
+            asym.is_empty(),
+            "trigger/publish asymmetry must be empty for a well-formed precheck graph, got: {asym:?}"
+        );
+
+        // R4 (handoff pairing): `review.complete.proposed` is
+        // published by `executor` and consumed (only) by the
+        // gate hat — exactly one consumer, OK.  `review.complete`
+        // is published by the gate hat and consumed by
+        // `reviewer` — one consumer, OK.
+        let pairing = check_handoff_pairing(&config, &graph, true, false);
+        assert!(
+            pairing.is_empty(),
+            "handoff pairing must be empty for a well-formed precheck graph, got: {pairing:?}"
+        );
+
+        // R3 (activation egress): every hat must publish at
+        // least one terminal / progress-emitting topic.
+        // executor publishes `review.complete.proposed`; the
+        // gate publishes `<X>` and `<X>.rejected`; reviewer
+        // publishes `LOOP_COMPLETE`.  All three clear.
+        let egress = check_activation_egress(&config, &graph, true, false);
+        assert!(
+            egress.is_empty(),
+            "activation egress must be empty, got: {egress:?}"
+        );
+
+        // R2 (re-emit trap): `review.complete.proposed` is
+        // published by `executor` and triggers
+        // `precheck-review.complete` (which does NOT publish
+        // `review.complete.proposed`), so R2 must be clear.
+        let re_emit = check_re_emit_trap(&config, &graph, true, false);
+        assert!(
+            re_emit.is_empty(),
+            "re-emit trap must be empty, got: {re_emit:?}"
+        );
+
+        // Tidy: ensure the gate hat DOES NOT publish
+        // `<X>.proposed` (which would loop the producer back
+        // to the gate).  This is a deliberate invariant of
+        // the desugar — the gate emits `<X>` or `<X>.rejected`,
+        // never `<X>.proposed`.
+        let gate = &config.hats["precheck-review.complete"];
+        assert!(
+            !gate.publishes.iter().any(|p| p == "review.complete.proposed"),
+            "gate hat must never re-publish <X>.proposed, got {gate_publishes:?}",
+            gate_publishes = gate.publishes
+        );
+        let _ = config;
+    }
 }

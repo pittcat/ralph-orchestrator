@@ -343,6 +343,13 @@ schemas:
         - plan_missing_implementation_units
         - plan_content_empty_or_placeholder
         - progress_md_invalid
+        # 2026-07-02-004 plan U6: precheck gate hat retry-budget
+        # exhaustion escalates to `plan.blocked(reason=
+        # precheck_failed)`. Adding it here keeps the
+        # recoverable whitelist honest — U6's
+        # `build_exhausted_payload` already stamps the reason,
+        # so the runtime does not need a schema exception.
+        - precheck_failed
 
   loop.cancel:
     required_fields:
@@ -457,6 +464,12 @@ schemas:
 # `require_payload_fields`; engine derives required fields from
 # `event_policy.schemas[topic].required_fields ∪
 #  execution_contracts.rules[topic].extra_required_fields` at runtime.
+#
+# 2026-07-02-004 plan milestone A (U1) placeholder:
+#   precheck:                → event_loop.precheck
+# Not activated on this preset (zero-regression contract, U4).
+# Add `precheck: { enabled: true, rules: { ... } }` here to opt
+# in; `build.rs` will deep-merge it into `event_loop.precheck`.
 # =============================================================================
 
 # R2 / R7-5: Execution contract rules per topic. SSOT for

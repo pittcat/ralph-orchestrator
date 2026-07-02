@@ -4,6 +4,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::debug;
 
+// 2026-07-02-004 plan milestone A: explicit import for
+// `build_gate_instructions` even though `use super::*`
+// already brings it in. Keeps the dependency visible
+// for code review.
+use super::precheck::PrecheckRule;
+
 impl RalphConfig {
     /// Loads configuration from a YAML file.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
@@ -116,11 +122,96 @@ impl RalphConfig {
             }
         }
 
+        // 2026-07-02-004 plan milestone A (U2): precheck desugar.
+        // Rewrites producers of each guarded topic to emit
+        // `<topic>.proposed` and synthesizes a gate hat. Strict
+        // no-op when `precheck.enabled` is false, when
+        // `rules` is empty, or when `RALPH_PRECHECK_MODE=off`.
+        self.apply_precheck_desugar();
+
         if normalized_count > 0 {
             debug!(
                 fields_normalized = normalized_count,
                 "V1 to V2 config normalization complete"
             );
+        }
+    }
+
+    /// 2026-07-02-004 plan milestone A (U2/U3): precheck desugar.
+    /// For each `event_loop.precheck.rules.<X>`:
+    /// 1. Rewrite every hat whose `publishes` or
+    ///    `terminal_events` contains `X` so those entries become
+    ///    `X.proposed`. Consumer hats (which only reference `X` in
+    ///    their `triggers`) are NOT touched.
+    /// 2. Synthesize a new hat `precheck-<X>` that:
+    ///    - triggers on `X.proposed`,
+    ///    - publishes `X` and `X.rejected`,
+    ///    - has `terminal_events = [X, X.rejected]`,
+    ///    - carries the rendered checklist in its `instructions`,
+    ///    - has a `max_activations` cap of `retry_budget + 1`
+    ///      (one initial + allowed retries).
+    ///
+    /// Strict no-op when:
+    /// - `precheck` is `None` or `enabled = false`,
+    /// - `rules` is empty,
+    /// - `RALPH_PRECHECK_MODE=off` is set in the environment.
+    fn apply_precheck_desugar(&mut self) {
+        let precheck = match self.event_loop.precheck.as_ref() {
+            Some(p) if p.enabled && !p.rules.is_empty() => p.clone(),
+            _ => return,
+        };
+        if !super::precheck::precheck_runtime_enabled() {
+            return;
+        }
+
+        for (topic, rule) in &precheck.rules {
+            let proposed = format!("{topic}.proposed");
+            let rejected = format!("{topic}.rejected");
+
+            for (hat_id, hat) in &mut self.hats {
+                let publishes_topic = hat.publishes.iter().any(|p| p == topic);
+                let terminal_topic =
+                    hat.terminal_events.iter().any(|t| t == topic);
+
+                if !publishes_topic && !terminal_topic {
+                    continue;
+                }
+
+                if publishes_topic {
+                    hat.publishes.retain(|p| p != topic);
+                    hat.publishes.push(proposed.clone());
+                    hat.publishes.sort();
+                    hat.publishes.dedup();
+                }
+                if terminal_topic {
+                    hat.terminal_events.retain(|t| t != topic);
+                    hat.terminal_events.push(proposed.clone());
+                    hat.terminal_events.sort();
+                    hat.terminal_events.dedup();
+                }
+                debug!(hat = %hat_id, topic = %topic, "Rewrote producer to emit proposed variant");
+            }
+
+            let instructions = build_gate_instructions(topic, rule);
+
+            let gate_id = format!("precheck-{topic}");
+            let max_activations = rule.on_fail.retry_budget.saturating_add(1);
+            let gate = HatConfig {
+                name: format!("Precheck Gate: {topic}"),
+                description: Some(format!(
+                    "LLM-as-judge gate for `{topic}`. Renders the declared checklist and \
+                     passes or rejects the proposed event before it reaches downstream hats."
+                )),
+                triggers: vec![proposed.clone()],
+                publishes: vec![topic.clone(), rejected.clone()],
+                terminal_events: vec![topic.clone(), rejected.clone()],
+                instructions,
+                max_activations: Some(max_activations),
+                ..Default::default()
+            };
+            self.hats.insert(gate_id.clone(), gate);
+            super::precheck::inject_precheck_event_schemas(self, topic);
+            debug!(gate = %gate_id, topic = %topic, "Synthesized precheck gate hat");
         }
     }
 
@@ -796,6 +887,38 @@ impl RalphConfig {
 ///         command: ["./scripts/hooks/env-guard.sh"]
 ///         on_error: block
 /// ```
+/// 2026-07-02-004 plan milestone A (U3): render the
+/// declared checklist + hard-constraint instructions for a
+/// synthesized precheck gate hat.
+fn build_gate_instructions(topic: &str, rule: &PrecheckRule) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("## PRECHECK GATE: {topic}\n\n"));
+    out.push_str(
+        "You are an LLM-as-judge gate. A upstream hat just published `",
+    );
+    out.push_str(&format!("{topic}.proposed"));
+    out.push_str("`. You must decide whether the proposed event is acceptable.\n\n");
+    out.push_str("### Checklist\n\n");
+    for (i, item) in rule.prompt.iter().enumerate() {
+        out.push_str(&format!("{}. {}\n", i + 1, item));
+    }
+    out.push_str("\n### Decision (hard constraint)\n\n");
+    out.push_str(&format!(
+        "You MUST emit exactly one of `{topic}` (pass) or `{topic}.rejected` (fail).\n"
+    ));
+    out.push_str(&format!(
+        "If you reject, fill the `failed_checks` array (the 1-based checklist numbers that failed) \
+         and the `reason` string in the `{topic}.rejected` payload.\n"
+    ));
+    out.push_str("\n### Scope boundary\n\n");
+    out.push_str(
+        "This gate is for subjective judgement only. Deterministic checks (schema, payload \
+         fields, required events, git evidence, etc.) are handled by other gates. Do not try \
+         to enforce those — just answer the checklist above.\n",
+    );
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4077,6 +4200,386 @@ profiles:
         assert!(
             result.is_err(),
             "spec 'repo:' with empty name must be rejected"
+        );
+    }
+
+    // =====================================================================
+    // 2026-07-02-004 plan milestone A regression tests (U1-U4).
+    // =====================================================================
+
+    fn minimal_yaml() -> &'static str {
+        r#"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+hats:
+  planner:
+    name: "Planner"
+    description: "Plans tasks"
+    triggers: ["task.start"]
+    publishes: ["build.task"]
+  builder:
+    name: "Builder"
+    description: "Builds things"
+    triggers: ["build.task"]
+    publishes: ["build.done"]
+"#
+    }
+
+    /// U1 happy path: a minimal `precheck` block with one rule
+    /// parses cleanly and round-trips through serde.
+    #[test]
+    fn precheck_config_round_trip() {
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      review.complete:
+        prompt:
+          - "Findings are concrete and actionable"
+          - "Each finding cites a file path"
+        on_fail:
+          target: "reviewer"
+          retry_budget: 2
+          on_exhausted: "plan.blocked(reason=precheck_failed)"
+          reason: "review findings inadequate"
+"#;
+        let cfg: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+        let precheck = cfg.event_loop.precheck.as_ref().expect("precheck set");
+        assert!(precheck.enabled);
+        assert_eq!(precheck.rules.len(), 1);
+        let rule = precheck.rules.get("review.complete").expect("rule");
+        assert_eq!(rule.prompt.len(), 2);
+        assert_eq!(rule.on_fail.target, "reviewer");
+        assert_eq!(rule.on_fail.retry_budget, 2);
+        assert_eq!(
+            rule.on_fail.on_exhausted,
+            "plan.blocked(reason=precheck_failed)"
+        );
+        assert_eq!(rule.on_fail.reason, "review findings inadequate");
+
+        // Round-trip via serialize
+        let serialized = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: RalphConfig = serde_yaml::from_str(&serialized).expect("re-parse");
+        assert_eq!(
+            cfg.event_loop.precheck.as_ref().unwrap().rules,
+            reparsed.event_loop.precheck.as_ref().unwrap().rules
+        );
+    }
+
+    /// U1 disabled-by-default: omitting `precheck` yields `None`.
+    #[test]
+    fn precheck_disabled_is_noop() {
+        let cfg = RalphConfig::parse_yaml(minimal_yaml()).expect("parse");
+        assert!(cfg.event_loop.precheck.is_none());
+    }
+
+    /// U2 desugar: when `precheck.enabled = true` and a rule
+    /// guards `build.done`, a `precheck-build.done` hat appears,
+    /// and the builder's `publishes` is rewritten to
+    /// `build.done.proposed`.
+    #[test]
+    fn precheck_desugar_synthesizes_gate_hat() {
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      build.done:
+        prompt:
+          - "Tests were run"
+        on_fail:
+          target: "builder"
+hats:
+  builder:
+    name: "Builder"
+    description: "build"
+    triggers: ["task.start"]
+    publishes: ["build.done"]
+"#;
+        let mut cfg = RalphConfig::parse_yaml(yaml).expect("parse");
+        cfg.normalize();
+
+        let gate_id = "precheck-build.done";
+        let gate = cfg.hats.get(gate_id).expect("gate hat present");
+        assert_eq!(gate.triggers, vec!["build.done.proposed".to_string()]);
+        assert_eq!(
+            gate.publishes,
+            vec!["build.done".to_string(), "build.done.rejected".to_string()]
+        );
+        assert_eq!(
+            gate.terminal_events,
+            vec!["build.done".to_string(), "build.done.rejected".to_string()]
+        );
+        assert!(gate.description.is_some(), "gate must have a description");
+        assert_eq!(gate.max_activations, Some(4), "retry_budget=3 default + 1");
+
+        // Producer rewrite
+        let builder = cfg.hats.get("builder").expect("builder hat");
+        assert!(
+            builder
+                .publishes
+                .contains(&"build.done.proposed".to_string()),
+            "builder must publish proposed variant; got {:?}",
+            builder.publishes
+        );
+        assert!(
+            !builder.publishes.contains(&"build.done".to_string()),
+            "builder must no longer publish raw topic; got {:?}",
+            builder.publishes
+        );
+    }
+
+    /// U3 instructions: the gate hat's `instructions` field must
+    /// include every checklist point, the hard-constraint
+    /// directive, and the scope boundary.
+    #[test]
+    fn precheck_gate_instructions_contain_checklist() {
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      review.complete:
+        prompt:
+          - "All findings are concrete"
+          - "Each finding has a file path"
+        on_fail:
+          target: "reviewer"
+"#;
+        let mut cfg = RalphConfig::parse_yaml(yaml).expect("parse");
+        cfg.normalize();
+
+        let gate = cfg
+            .hats
+            .get("precheck-review.complete")
+            .expect("gate");
+        let instructions = &gate.instructions;
+        assert!(
+            instructions.contains("All findings are concrete"),
+            "checklist item 1 missing"
+        );
+        assert!(
+            instructions.contains("Each finding has a file path"),
+            "checklist item 2 missing"
+        );
+        assert!(
+            instructions.contains("`review.complete`"),
+            "must reference target topic in hard constraint"
+        );
+        assert!(
+            instructions.contains("`review.complete.rejected`"),
+            "must reference rejected variant"
+        );
+        assert!(
+            instructions.contains("subjective judgement only"),
+            "must include scope boundary"
+        );
+    }
+
+    /// U4 zero-regression: a config without `precheck` must
+    /// parse and normalize without producing any precheck-derived
+    /// hats or rewriting any existing topic.
+    #[test]
+    fn precheck_absent_is_strict_noop() {
+        let mut cfg = RalphConfig::parse_yaml(minimal_yaml()).expect("parse");
+        let hats_before: Vec<String> = {
+            let mut keys: Vec<String> = cfg.hats.keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        let builder_publishes_before = cfg.hats.get("builder").unwrap().publishes.clone();
+
+        cfg.normalize();
+
+        let hats_after: Vec<String> = {
+            let mut keys: Vec<String> = cfg.hats.keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(
+            hats_before, hats_after,
+            "no hats should be added when precheck is absent"
+        );
+        assert!(
+            !hats_after.iter().any(|k| k.starts_with("precheck-")),
+            "no precheck-* hats should exist; got {:?}",
+            hats_after
+        );
+        assert_eq!(
+            cfg.hats.get("builder").unwrap().publishes,
+            builder_publishes_before,
+            "builder.publishes must be unchanged"
+        );
+    }
+
+    /// U4 zero-regression: `precheck.enabled = false` is a no-op
+    /// even when rules are declared.
+    #[test]
+    fn precheck_disabled_block_is_noop() {
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: false
+    rules:
+      build.done:
+        prompt: ["check something"]
+        on_fail:
+          target: "builder"
+hats:
+  builder:
+    name: "Builder"
+    description: "build"
+    triggers: ["task.start"]
+    publishes: ["build.done"]
+"#;
+        let mut cfg = RalphConfig::parse_yaml(yaml).expect("parse");
+        let builder_publishes_before = cfg.hats.get("builder").unwrap().publishes.clone();
+
+        cfg.normalize();
+
+        assert!(
+            !cfg.hats.keys().any(|k| k.starts_with("precheck-")),
+            "no gate hats when enabled=false"
+        );
+        assert_eq!(
+            cfg.hats.get("builder").unwrap().publishes,
+            builder_publishes_before,
+            "builder.publishes must be unchanged when enabled=false"
+        );
+    }
+
+    /// U4 kill switch: test override skips desugar when enabled.
+    #[test]
+    fn precheck_kill_switch_skips_desugar() {
+        use super::precheck::{
+            reset_precheck_kill_switch_for_test, set_precheck_kill_switch_for_test,
+        };
+        set_precheck_kill_switch_for_test(true);
+
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      build.done:
+        prompt: ["ok"]
+        on_fail:
+          target: builder
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["task.start"]
+    publishes: ["build.done"]
+"#;
+        let mut cfg = RalphConfig::parse_yaml(yaml).expect("parse");
+        let before = cfg.hats.get("builder").unwrap().publishes.clone();
+        cfg.normalize();
+        assert!(
+            !cfg.hats.keys().any(|k| k.starts_with("precheck-")),
+            "kill switch must skip desugar"
+        );
+        assert_eq!(cfg.hats.get("builder").unwrap().publishes, before);
+
+        reset_precheck_kill_switch_for_test();
+    }
+
+    /// U2 multi-producer: when multiple hats publish the
+    /// guarded topic, all of them are rewritten to `.proposed`.
+    #[test]
+    fn precheck_desugar_handles_multiple_producers() {
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      ship.done:
+        prompt: ["safe to ship"]
+        on_fail:
+          target: "executor"
+hats:
+  shipper:
+    name: "Shipper"
+    description: "ship stuff"
+    triggers: ["plan.complete"]
+    publishes: ["ship.done"]
+  alt_shipper:
+    name: "Alt Shipper"
+    description: "alt ship"
+    triggers: ["plan.complete"]
+    publishes: ["ship.done", "log.done"]
+"#;
+        let mut cfg = RalphConfig::parse_yaml(yaml).expect("parse");
+        cfg.normalize();
+
+        for hat_id in &["shipper", "alt_shipper"] {
+            let hat = cfg.hats.get(*hat_id).expect(hat_id);
+            assert!(
+                hat.publishes.contains(&"ship.done.proposed".to_string()),
+                "{} must publish proposed variant; got {:?}",
+                hat_id,
+                hat.publishes
+            );
+            assert!(
+                !hat.publishes.contains(&"ship.done".to_string()),
+                "{} must not publish raw ship.done; got {:?}",
+                hat_id,
+                hat.publishes
+            );
+        }
+
+        // alt_shipper's other topic (log.done) must be untouched.
+        let alt = cfg.hats.get("alt_shipper").unwrap();
+        assert!(
+            alt.publishes.contains(&"log.done".to_string()),
+            "log.done must be untouched; got {:?}",
+            alt.publishes
+        );
+
+        // Gate hat exists
+        let gate = cfg.hats.get("precheck-ship.done").expect("gate");
+        assert_eq!(gate.triggers, vec!["ship.done.proposed".to_string()]);
+    }
+
+    /// U2 consumer isolation: hats that only subscribe to the
+    /// guarded topic via `triggers` must NOT be touched.
+    #[test]
+    fn precheck_desugar_preserves_consumers() {
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      build.done:
+        prompt: ["ok"]
+        on_fail:
+          target: "builder"
+hats:
+  builder:
+    name: "Builder"
+    description: "build"
+    triggers: ["task.start"]
+    publishes: ["build.done"]
+  downstream:
+    name: "Downstream"
+    description: "consume build.done"
+    triggers: ["build.done"]
+    publishes: ["next.event"]
+"#;
+        let mut cfg = RalphConfig::parse_yaml(yaml).expect("parse");
+        cfg.normalize();
+
+        let downstream = cfg.hats.get("downstream").expect("downstream");
+        assert_eq!(
+            downstream.triggers,
+            vec!["build.done".to_string()],
+            "consumer's trigger on raw topic must be untouched; got {:?}",
+            downstream.triggers
+        );
+        assert_eq!(
+            downstream.publishes,
+            vec!["next.event".to_string()],
+            "consumer's publishes must be untouched"
         );
     }
 }
