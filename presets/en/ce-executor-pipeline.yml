@@ -1,4 +1,4 @@
-# ce-executor-pipeline: 线性一条龙 Plan-Driven Execution Preset
+# ce-executor-pipeline: linear plan-driven execution preset
 #
 # Pattern: Plan → Review Plan → Execute (TDD + full suite green) → 6-Dimension
 # Serial Review → Synthesize Fix Plan → Fix → Align → Report → Complete
@@ -419,7 +419,7 @@ hats:
       - Validate the file exists and is readable.
       - Derive `plan_name` from the plan file path (filename without extension).
       - Derive `plan_path` as the **repo-relative** path to the plan file
-        (e.g. `docs/plans/my-plan.md`). Use paths relative to the workspace
+        (e.g. `path/to/plan.md`). Use paths relative to the workspace
         root, NOT absolute filesystem paths.
 
       ### Step 2 — Plan File Error Paths (HARD RULE — must use `plan.blocked`)
@@ -444,7 +444,7 @@ hats:
       1. **Implementation Units / Work Breakdown present and actionable.** Each U has a Goal, Files, Approach, Verification, and is at the right granularity (one U per independent, testable deliverable).
       2. **Scope Boundaries explicit.** Non-goals are listed; ambiguity is resolved.
       3. **Requirements Trace present.** R-IDs are listed and mapped to U-IDs.
-      4. **Verification per unit.** Each U has a concrete `cargo nextest` (or equivalent) command and expected pass count. The full-suite green gate must be achievable.
+      4. **Verification per unit.** Each U names a concrete, project-specific test command (from repo docs — not hardcoded to `cargo`) and expected pass criteria. The full-suite green gate must be achievable.
       5. **Patterns to follow cited.** Reference files / docs are concrete (paths, not "see codebase").
       6. **Risks / Mitigations / Open Questions resolved.** Any `### Deferred to Implementation` items that block execution are resolved (either by your edit or by flagging them).
       7. **TDD intent.** Each U's `Execution note` says test-first or characterization-first.
@@ -573,16 +573,16 @@ hats:
       ### Full-Suite Green Gate (HARD DoD)
 
       After ALL U-IDs are implemented, run the **full** test suite:
-      - Rust: `cargo nextest run --workspace --exclude ralph-e2e`
-        (per `CLAUDE.md` HARD RULE 1: `cargo nextest` is the required
-        test entry; never `cargo test` for the `ralph-cli` package).
-      - Cross-language: discover the project's test runner from the
-        plan's `Patterns to follow` section or from
-        `AGENTS.md` / `CLAUDE.md`. Common alternatives:
-        Python `pytest`, TS `npm test`, Go `go test ./...`,
-        etc. Run the project's authoritative command.
+      - Discover the authoritative command from the plan's per-U
+        **Verification** / **Patterns to follow**, or from repo
+        `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md`. Common shapes:
+        Python `pytest`, TS `npm test`, Go `go test ./...`, Rust
+        `cargo nextest run ...` **only when those docs say so** —
+        this preset is cross-language; do not assume Ralph's Rust
+        defaults on a foreign repo.
       - Include any lint / typecheck gates the project requires
-        (`cargo clippy`, `cargo fmt --check`, `tsc --noEmit`, etc.).
+        (`tsc --noEmit`, `ruff check`, `cargo clippy`, etc. — per
+        project docs).
 
       All gates must pass. **NO `work.done` until full green.**
 
@@ -665,7 +665,7 @@ hats:
 
       Copy-pasteable example (replace placeholders):
       ```bash
-      ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"docs/plans/my-plan.md","executor_head_sha":"abc123...","tests_run":12,"tests_passed":12,"changed_lines":85,"commit_count":3}'
+      ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"path/to/plan.md","executor_head_sha":"abc123...","tests_run":12,"tests_passed":12,"changed_lines":85,"commit_count":3}'
       ```
 
       MUST NOT append to `.ralph/events.jsonl` directly; use `ralph emit`.
@@ -1298,21 +1298,254 @@ hats:
       - Has P0 → `verdict: "blocked"`
 
       ### Step 7 — Write fix-plan file
-      Write to `.ralph/review/{plan_name}/fix-plan.md` (under
-      `ephemeral_isolation`; gitignored).
 
-      If `verdict == "blocked"` OR there are P0/P1 findings: write
-      a real fix plan with one Implementation Unit per P0 and one
-      per P1 (P2/P3 may be bundled into a single U-`residuals` U if
-      present). Each U has Goal / Files / Approach / Execution
-      note (TDD) / Test scenarios / Verification.
+      **Path:** `.ralph/review/{plan_name}/fix-plan.md` (under
+      `ephemeral_isolation`; gitignored). `{plan_name}` = basename of
+      `plan_path` without `.md`.
 
-      If `verdict == "pass"` (no findings OR only P3 nits):
-      write a placeholder file:
-      ```
+      #### 7a — When to write which shape
+
+      | Condition | File shape |
+      |-----------|------------|
+      | `p0_count > 0` OR `p1_count > 0` | **Full fix-plan** (template §7c) |
+      | `verdict == "pass"` (no P0/P1) | **Placeholder** (template §7b) |
+
+      Mapping findings → Units (after Step 2 dedup):
+      - **One P0 finding → one `### U<N>.`** (do not merge unrelated P0s).
+      - **One P1 finding → one `### U<N>.`** (same rule).
+      - **P2/P3 only (bundled):** optional single
+        `### U<N>. Residuals (deferred)` with
+        `**Kind:** DOC` and `**Verification:** none — documentation-only`;
+        fixer does **not** implement code for this Unit (see fixer Step 1).
+      - Order Units **U1 → U2 → …** by severity (all P0 first, then P1,
+        then residuals). **Never** renumber after assign; gaps OK.
+      - Heading token is always uppercase `U` + integer (`U1`, `U2`, …) —
+        same token in git commit subjects for alignment matching.
+
+      Each Unit MUST cite source finding IDs in **Requirements** (e.g.
+      `F-IDs: correctness:C3, testing:T1`).
+
+      **Verdict → file shape → frontmatter `verdict` (full fix-plan only):**
+
+      | Step 6 `verdict` | File | Frontmatter `verdict` |
+      |------------------|------|------------------------|
+      | `pass` (no P0/P1) | §7b placeholder | (no frontmatter) |
+      | `pass_with_residuals` (`p1_count > 0`, `p0_count == 0`) | §7c full | `pass_with_residuals` |
+      | `blocked` (`p0_count > 0`) | §7c full | `blocked` |
+
+      Do NOT set frontmatter `verdict: blocked` when only P1 findings exist.
+
+      #### 7b — Placeholder template (`verdict == "pass"`)
+
+      Write exactly this shape (no frontmatter, no Implementation Units):
+
+      ```markdown
       # fix-plan: no fixes required
-      All 6 dimensions reviewed with no P0/P1 findings. No fix
-      plan required.
+
+      All 6 dimensions reviewed with no P0/P1 findings. No fix plan
+      required.
+
+      - findings_count: <N>
+      - p0_count: 0
+      - p1_count: 0
+      - verdict: pass
+      ```
+
+      #### 7c — Full fix-plan template (canonical layout)
+
+      Use the **Fix-Plan Canonical Layout** below. This is the fix-plan
+      SSOT shape — **do not** copy section titles from the operator's
+      original plan verbatim (original plans may include extra narrative
+      sections). Fixer executes **only** `## Implementation Units`;
+      frontmatter and narrative sections are context for humans and
+      alignment.
+
+      **Mandatory sections (in order):**
+
+      1. YAML frontmatter (between `---` lines)
+      2. `# <title>` (H1, matches frontmatter `title`)
+      3. `## Summary` (1 short paragraph)
+      4. `## Problem Frame` (table: finding id, severity, symptom, evidence)
+      5. `## Requirements` (table: R1…Rn mapped to finding IDs)
+      6. `## Scope Boundaries` (`### In scope` / `### Deferred` / `### Outside`)
+      7. `## Patterns to follow` (optional — cite project docs / reference
+         files needed to discover test commands; omit if redundant)
+      8. `## Execution Protocol` (copy §7d verbatim — fixer MUST obey)
+      9. `## Implementation Units` — headings `### U1. <Name>` … `### UN.`
+         Each actionable Unit uses the **per-unit field block** in §7e.
+      10. `## Final Verification` (**mandatory** — sole location for the
+          full-suite command; see §7d rule 6)
+
+      **Frontmatter keys (all required on full fix-plan):**
+
+      ```yaml
+      ---
+      title: fix: <kebab-short-title>
+      type: fix
+      status: active
+      date: YYYY-MM-DD
+      origin_plan: <plan_path from review.complete trigger>
+      executor_head_sha: <sha from trigger>
+      findings_source: .ralph/review/<plan_name>/
+      p0_count: <int>
+      p1_count: <int>
+      verdict: <pass_with_residuals|blocked>
+      ---
+      ```
+
+      `verdict` MUST match the table in §7a (P1-only → `pass_with_residuals`;
+      any P0 → `blocked`).
+
+      #### 7d — Execution Protocol (embed verbatim in every full fix-plan)
+
+      ```markdown
+      ## Execution Protocol
+
+      Fixer runs in **isolated mode** — no memory of executor. This
+      document is the sole execution SSOT.
+
+      1. **Strictly sequential:** Execute U1 → U2 → … → UN in order.
+         Unit N+1 starts only after Unit N code and unit-scoped tests
+         are green.
+      2. **Absolute isolation:** Touch only paths listed under that
+         Unit's **Files** field. Do not edit files owned by another
+         Unit.
+      3. **Zero forward dependency:** Unit N must not import or call
+         symbols introduced in Unit N+1. No tests that wait for a
+         later Unit to land.
+      4. **Atomic TDD:** Per Unit — failing test (this Unit's I/O only)
+         → implement → refactor. No cross-Unit integration tests inside
+         a single Unit.
+      5. **Test placement:** Match the target project's conventions
+         (inline tests, `tests/` tree, framework test files, etc.) and
+         list paths in **Files**.
+      6. **Full-suite last:** Run the project full-suite only after all
+         Units are green. Put the command **only** in `## Final Verification`
+         — never in per-Unit **Verification** or **Test scenarios**.
+      ```
+
+      `## Final Verification` is mandatory on every full fix-plan (§7c).
+
+      #### 7e — Per-unit field block (required under each actionable `### U<N>.`)
+
+      Use level-3 headings (not bullet checklists). **Heading format:**
+      `### U<N>. <Short imperative name>` where `<N>` is an integer
+      without zero-padding (`U1`, `U2`, …). This token MUST match fixer
+      commit subjects (`fix(U1): …`) and alignment grep.
+
+      Each actionable Unit includes the plan-reviewer core fields (Goal,
+      Files, Approach, Verification) plus fix-plan trace fields:
+
+      ```markdown
+      ### U1. <Short imperative name>
+
+      **Kind:** FIX | EXTEND | NEW | DOC (use DOC only for Residuals unit)
+
+      **Goal:** <one sentence — what this unit alone delivers>
+
+      **Requirements:** R1 (F-IDs: <dimension>:<id>, …)
+
+      **Dependencies:** none | U<k> only (exactly one prior unit, or none for U1)
+
+      **Files:**
+      - <project-relative paths to create/modify/test for THIS unit only>
+
+      **Approach:** <minimal; no code blocks; one unit = one concern>
+
+      **Execution note:** TDD — write failing test for this unit's public
+      behavior first (RED → GREEN → REFACTOR).
+
+      **Test scenarios:**
+      - Happy path: <input> → <expected output>
+      - Edge: <boundary> → <expected>
+      - (No scenarios that require another Unit's code to exist)
+
+      **Verification:** <unit-scoped only — named test target or narrow
+      command that proves THIS unit; MUST NOT be the full-suite command>
+      ```
+
+      Optional `---` horizontal rule between Units is allowed; do not
+      change the `### U<N>.` heading format.
+
+      **Anti-patterns (reject your own draft if present):**
+      - Units that mix unrelated concerns (split them).
+      - One Unit that changes both production/runtime code **and**
+        orchestration config (preset YAML, workflow schema) — split into
+        separate Units (runtime vs config).
+      - Unit N's test imports helpers introduced only in Unit N+1.
+      - Vague Verification ("run tests") without command or test name.
+      - Full-suite command in per-Unit **Verification** (belongs only in
+        `## Final Verification`).
+      - Toolchain-specific commands unless project docs require them.
+
+      #### 7f — Minimal worked example (structure only)
+
+      ```markdown
+      ---
+      title: fix: validate user id before persist
+      type: fix
+      status: active
+      date: 2026-07-02
+      origin_plan: <plan_path from trigger>
+      executor_head_sha: abc1234
+      findings_source: .ralph/review/<plan_name>/
+      p0_count: 1
+      p1_count: 1
+      verdict: blocked
+      ---
+
+      # fix: validate user id before persist
+
+      ## Summary
+      Close one P0 input-validation gap and one P1 missing test from review.
+
+      ## Problem Frame
+      | ID | Sev | Symptom | Evidence |
+      |----|-----|---------|----------|
+      | correctness:C1 | P0 | empty id persists | <path from finding> |
+      | testing:T2 | P1 | no test for empty id | <path from finding> |
+
+      ## Requirements
+      | ID | Text |
+      |----|------|
+      | R1 | Reject empty user id before write (C1) |
+      | R2 | Add unit test for empty id (T2) |
+
+      ## Scope Boundaries
+      ### In scope
+      - U1–U2 only.
+      ### Deferred
+      - P3 comment nits.
+      ### Outside
+      - Schema migration.
+
+      ## Execution Protocol
+      (§7d block pasted here)
+
+      ## Implementation Units
+
+      ### U1. Reject empty user id in store layer
+      **Kind:** FIX
+      **Goal:** …
+      **Requirements:** R1 (F-IDs: correctness:C1)
+      **Dependencies:** none
+      **Files:** …
+      **Approach:** …
+      **Execution note:** TDD — …
+      **Test scenarios:** …
+      **Verification:** …
+
+      ### U2. Add regression test for empty id
+      **Kind:** FIX
+      **Goal:** …
+      **Requirements:** R2 (F-IDs: testing:T2)
+      **Dependencies:** U1
+      …
+
+      ## Final Verification
+      Run the project's full-suite command (discovered from `## Patterns
+      to follow`, project contributor docs, or `## Final Verification` in
+      the original plan at `plan_path`) after all actionable Units are green.
       ```
 
       ### Step 8 — Emit event (one terminal per activation)
@@ -1351,7 +1584,7 @@ hats:
 
       ### HARD RULES
       - Emit EXACTLY ONE `fix.done` per activation.
-      - **Source of truth = `fix_plan_file` only.** Never implement U-IDs
+      - **Source of truth = `fix_plan_file` only.** Never implement Units
         from the original plan file at `plan_path`.
       - Do NOT emit `work.done` / `work.failed` /
         `plan.*` / `review.*` / `align.done` / `report.done` /
@@ -1359,9 +1592,12 @@ hats:
       - Do NOT route back to review; alignment handles residuals.
       - Do NOT create / switch / rename branches / worktrees.
       - **Full-suite green gate (HARD DoD)**: before `fix.done`, run the
-        same authoritative test command the executor used (e.g.
-        `cargo nextest run --workspace --exclude ralph-e2e`). All gates
-        must pass — fixes must not regress the green suite.
+        project's **authoritative full-suite command** (discovery order:
+        fix-plan `## Final Verification` → original plan `## Final
+        Verification` at `plan_path` → `AGENTS.md` / `CLAUDE.md` /
+        `CONTRIBUTING.md`). **Isolated mode does not pass executor's
+        command on events** — do not guess from toolchain defaults. All
+        gates must pass.
 
       ### Step 1 — Read context
       - From `review.complete` payload: `plan_name`, `plan_path`
@@ -1370,39 +1606,57 @@ hats:
         `findings_summary`, `verdict` (emit as `review_verdict` on
         `fix.done`).
       - Read **only** the fix-plan file at `fix_plan_file`.
-      - If the file starts with `# fix-plan: no fixes required`, or
-        contains no P0/P1 Implementation Units, jump to Step 4.
+      - **Fast path** (jump to Step 4 — no per-Unit code):
+        - File starts with `# fix-plan: no fixes required` (§7b), OR
+        - No actionable `### U<N>.` headings remain after excluding
+          `Residuals (deferred)` / `**Kind:** DOC` units (P2/P3-only
+          documentation Units are never implemented).
 
-      ### Step 2 — Per-U TDD fix application (fix-plan U-IDs ONLY)
-      For each Implementation Unit (U-ID) listed in **fix-plan.md** (not
-      the original plan):
+      ### Step 2 — Per-Unit TDD (`### U<N>.` headings in fix-plan ONLY)
+
+      Read `## Execution Protocol` in fix-plan.md **first** — it is
+      binding. Execute actionable Units in numeric order (U1 → U2 → …);
+      finish each Unit's RED/GREEN/REFACTOR + unit-scoped **Verification**
+      before touching the next. Do not run full-suite until all actionable
+      Units are green — use `## Final Verification` only (never per-Unit
+      Verification for full-suite).
+
+      For each actionable `### U<N>.` heading in **fix-plan.md** (skip
+      `Residuals (deferred)` / `Kind: DOC` units; never read Units from
+      the original plan at `plan_path`):
       1. **RED**: write or update the test for this fix finding.
       2. **GREEN**: minimal code change to make the test pass.
       3. **REFACTOR**: clean up while keeping tests green.
-      4. **Per-U commit** (after executor phase — commits land on top of
+      4. **Per-Unit commit** (after executor phase — commits land on top of
          `executor_head_sha`):
          ```bash
-         git add <relevant files> && git commit -m "fix(<u-id>): <one-liner from fix U Goal>"
+         git add <relevant files> && git commit -m "fix(U<N>): <one-liner from Unit Goal>"
          ```
-         Do NOT batch multiple fix U-IDs into one commit.
+         Use the exact heading token (`U1`, `U2`, …). Do NOT batch multiple
+         Units into one commit.
 
-      Track `fixes_applied` (fix-plan U-IDs committed) and `fixes_skipped`
-      (fix-plan U-IDs not addressed).
+      Track `fixes_applied` (actionable Units committed) and `fixes_skipped`
+      (actionable Units not addressed). DOC / residuals Units do not count
+      toward either counter.
 
       ### Step 3 — Partial application
-      If you cannot complete a fix-plan U (blocked infrastructure, wrong
-      diagnosis):
+      If you cannot complete an actionable Unit (blocked infrastructure,
+      wrong diagnosis):
       - DO NOT silently skip.
       - Increment `fixes_skipped` and document in `.ralph/agent/decisions.md`.
-      - Continue with remaining fix-plan U-IDs.
+      - Continue with remaining actionable Units.
 
       ### Step 4 — Full-suite verification (HARD DoD)
-      After all fix-plan U-IDs (or on empty-plan fast path), run the
-      **full** project test suite + required lint/typecheck gates.
-      NO `fix.done` until all green (same bar as executor).
+      After all actionable Units (or on Step 1 fast path), discover and
+      run the **full** project test suite + lint/typecheck gates from
+      fix-plan `## Final Verification` → original plan at `plan_path` →
+      repo docs (see HARD RULE above). NO `fix.done` until all green —
+      same **bar** as executor, not a shared memory of which shell command
+      executor ran.
 
       ### Step 5 — Empty-plan fast path
-      When fix-plan says "no fixes required" (or only P2/P3 deferred):
+      When Step 1 fast path applies (§7b placeholder, or only P2/P3 DOC
+      residuals Units):
       - `fixes_applied: 0`, `fixes_skipped: 0`
       - No commits.
       - Still run full-suite verification to confirm no regression.
@@ -1416,9 +1670,9 @@ hats:
       Then stop. Alignment will be triggered next.
 
       ### Failure Handling
-      - If a fix-plan U cannot be completed: add to `fixes_skipped`, continue.
+      - If an actionable Unit cannot be completed: add to `fixes_skipped`, continue.
       - If full suite cannot reach green after honest attempts: still emit
-        `fix.done` with `fixes_skipped` reflecting unapplied U-IDs — alignment
+        `fix.done` with `fixes_skipped` reflecting unapplied Units — alignment
         and reporter record the regression; do NOT emit `work.failed`.
 
   alignment:
@@ -1441,7 +1695,8 @@ hats:
       You audit **two separate plans** against git evidence:
       1. **Original plan** (`plan_path`) — executor-phase U-IDs, commits in
          `<DIFF_BASE>..<executor_head_sha>`.
-      2. **Fix plan** (`fix_plan_file`) — synthesizer fix U-IDs only, commits
+      2. **Fix plan** (`fix_plan_file`) — synthesizer actionable Units only
+         (`### U<N>.` with P0/P1 findings; excludes DOC residuals), commits
          in `<executor_head_sha>..HEAD` (fixer phase; NOT the original plan).
 
       Record residuals; do NOT loop back, retry, or block.
@@ -1471,23 +1726,25 @@ hats:
          `false` and include missing U-IDs in residuals.
 
       ### Step 3 — Cross-check fix plan (fixer phase ONLY)
-      1. If fix-plan starts with `# fix-plan: no fixes required` (or has no
-         P0/P1 U-IDs): set `fix_plan_executed: true` (nothing to apply).
-      2. Else list every U-ID in **fix-plan.md** (ignore U-IDs from the
-         original plan file).
-      3. For each fix-plan U-ID, search
-         `git log --oneline <executor_head_sha>..HEAD` for a matching commit
-         (e.g. `fix(<u-id>):` or subject contains the U-ID).
-      4. Collect `missing_fix_uids` = fix-plan U-IDs with no commit.
+      1. If fix-plan matches Step 1 fast path (§7b placeholder, or only DOC
+         residuals Units): set `fix_plan_executed: true` (nothing to apply).
+      2. Else list every **actionable** `### U<N>.` heading in
+         **fix-plan.md** — exclude `Residuals (deferred)` / `Kind: DOC`
+         units; ignore Units from the original plan at `plan_path`.
+      3. For each actionable Unit token (`U1`, `U2`, …), search
+         `git log --oneline <executor_head_sha>..HEAD` for a commit whose
+         subject contains that token (preferred: `fix(U1):` / `fix(U2):`).
+      4. Collect `missing_fix_uids` = actionable Unit tokens with no commit.
       5. Add any `fixes_skipped` from `fix.done` to residuals.
       6. `fix_plan_executed: true` iff `missing_fix_uids` is empty AND
          `fixes_skipped == 0`; else `false`.
 
       ### Step 4 — Build residuals list
-      Merge `missing_plan_uids`, `missing_fix_uids`, and skipped fix U-IDs
-      into `{u_id, kind: "plan" | "fix", reason: "<short reason>"}` entries.
+      Merge `missing_plan_uids`, `missing_fix_uids`, and skipped actionable
+      Units into `{u_id, kind: "plan" | "fix", reason: "<short reason>"}`
+      entries. Use the Unit token as `u_id` (`U1`, `U2`, …).
       Set `residuals_count` to the list length.
-      Format `residuals_summary` as comma-separated `U-ID:reason` or `none`.
+      Format `residuals_summary` as comma-separated `U<N>:reason` or `none`.
 
       ### Step 5 — Emit event
       Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`,
