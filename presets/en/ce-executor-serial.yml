@@ -51,19 +51,13 @@
 #                        │   └─ test.failed → fixer (continue)
 #                        └─ fix.exhausted → executor (rewrite chance, max 10) → validator → ...
 #
-# PHASE GATE (CRITICAL): `test.passed` arrives in BOTH phases but with
-# opposite semantics. PHASE 1 (step-NN) advances the plan-unit flow;
-# PHASE 2 (fix-NN) advances the fix-unit flow. Branching on `step`
-# prefix in coordinator's Unit / Fix-Unit Advancement handler is
-# mandatory — see line ~775 for the gate table. Mixing the two
-# branches is the root cause of the 2026-06-24 regression where every
-# fix-unit completion incorrectly triggered a new review.start round.
-#
 # Why this architecture:
 #   - No multi-consumer topics: every event has exactly one subscriber
 #   - No plan-gate: coordinator directly advances units on test.passed
 #   - No debug-resolver: fixer merges diagnosis + fix capability
 #   - No per-step review: review runs once after all units complete
+#   - Phase authority engine (U24) handles the unit_loop → review →
+#     fix_units → plan_end routing per KTD1
 
 # 2026-06-27 mechanism foundation U10: declarative flow metadata.
 # The runtime reads `mechanism.flow` at preset-load time and
@@ -368,10 +362,9 @@ event_loop:
           # git-evidence half.
           mode: "commit_only"
           allow_empty_for_steps: ["trivial"]
-  # U5 (2026-06-17-001): progress_steward defaults to disabled; enable
-  # it here. The runtime wakes progress-steward when no business event
-  # has advanced for max_steward_iterations consecutive turns; the hat
-  # then emits a recovery event.
+  # U5 (2026-06-17-001): progress_steward fallback wakes the
+  # loop-level `progress-steward` hat after
+  # max_steward_iterations consecutive no-progress turns.
   progress_steward:
     enabled: true
     steward_hat_id: "progress-steward"
@@ -920,35 +913,13 @@ hats:
 
       ### Unit / Fix-Unit Advancement (test.passed trigger)
 
-      **PHASE GATE (HARD RULE — read FIRST, execute SECOND):**
-
-      `test.passed` arrives in TWO phases with opposite semantics.
-      Branch on `step` prefix BEFORE reading progress.md or plan.md:
-
-      | `step` prefix   | Phase     | What you emit                                                              |
-      |-----------------|-----------|----------------------------------------------------------------------------|
-      | `step-NN`       | PLAN UNIT | next plan unit's `work.ready`, OR `review.start` if last plan unit         |
-      | `trivial`       | PLAN UNIT | plan.complete (no further units)                                           |
-      | `fix-NN`        | FIX UNIT  | next fix-unit's `work.ready`, OR `plan.complete` if last fix-unit          |
-
-      **DO NOT** emit `review.start` when `step` starts with `fix-` — that
-      triggers an unwanted second review round. (Historical note: 2026-06-24
-      regression had this exact failure mode; guard against it.)
-
-      **2026-06-30-001 P0-1 (primary-20260630-032648 diagnosis):**
-      After the LAST fix-unit's `test.passed(fix-NN)` lands, you MUST
-      emit `plan.complete` — NOT `review.start`, NOT a second review
-      walk, NOT `work.ready` for any further step. The fix-unit chain
-      is the workflow's terminal ladder: the moment `fix_plan_file` is
-      exhausted, the next event is `plan.complete` regardless of which
-      dimensions have been published on the upstream review chain. If
-      you find yourself about to emit `review.start` while
-      `completed_steps` already contains every `fix-NN` unit from the
-      current fix-plan, stop and emit `plan.complete` instead. The
-      `progress-steward` will inject
-      `task.resume(reason=fix_unit_complete_plan_complete_pending)` if
-      you slip, and that re-entry MUST result in `plan.complete` —
-      never `review.start`.
+      The phase engine (KTD1) drives the unit_loop → review →
+      fix_units → plan_end transitions; the engine handles the
+      unit-vs-fix discrimination via the KTD4 matrix and the
+      `step_kind` argument of `on_test_passed_step`. The
+      coordinator follows the matching branch below only after
+      the engine's snapshot says we are still in `unit_loop` (or
+      `fix_units` for Branch A).
 
       After the phase gate, follow the matching branch below.
 
