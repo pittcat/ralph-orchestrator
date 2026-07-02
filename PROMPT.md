@@ -1,5 +1,6 @@
 
-Implement dev plan:@docs/plans/2026-07-01-001-refactor-event-loop-mod-split-plan.md
+Implement dev plan:@docs/plans/2026-07-02-006-feat-ce-executor-serial-runtime-phase-authority-plan.md
+
 ### Note
 
 注意每个角色要各司其职,不能越权
