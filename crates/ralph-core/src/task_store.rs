@@ -838,6 +838,38 @@ impl TaskStore {
     }
 }
 
+/// U4 of plan 2026-07-02-005: disk-aware task lookup used by the
+/// `step_handoff` gate. Looks up `task_id` in the in-memory
+/// `tasks` slice first; on miss, reloads the on-disk JSONL from
+/// `path` (best-effort) and re-checks. This protects against the
+/// 140149 / 175407 failure mode where the runtime's in-memory
+/// view of `tasks.jsonl` is stale and the gate would reject a
+/// perfectly valid event.
+///
+/// Returns:
+/// - `Ok(Some(task))` if the task was found in either view.
+/// - `Ok(None)` if it was not found in either view (legitimate
+///   "task not present" case; the gate emits a `task_not_found`
+///   finding using its own message).
+/// - `Err(_)` only when disk reload itself fails AND there was
+///   no in-memory answer (the gate cannot decide; the caller
+///   surfaces a `tasks_unreadable` finding).
+pub fn resolve_task_for_gate(
+    tasks: &[Task],
+    path: &Path,
+    task_id: &str,
+) -> Result<Option<Task>, std::io::Error> {
+    if let Some(t) = tasks.iter().find(|t| t.id == task_id) {
+        return Ok(Some(t.clone()));
+    }
+    // Miss in memory; try a best-effort disk reload.
+    match TaskStore::load(path) {
+        Ok(store) => Ok(store.tasks.iter().find(|t| t.id == task_id).cloned()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1495,6 +1527,93 @@ mod tests {
                 .find_open_task_id_in_loop(id, Some("loop-B"))
                 .is_none(),
             "loop-scoped lookup must miss rows from sibling loops"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // U4 of plan 2026-07-02-005: `resolve_task_for_gate` —
+    // disk-aware task lookup that protects against stale in-memory
+    // views (140149 / 175407 root cause). Pure function: takes a
+    // snapshot, returns a fresh task (cloned). Does not start the
+    // EventLoop.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn write_task_jsonl(dir: &TempDir, rows: &[(&str, &str, TaskStatus)]) -> std::path::PathBuf {
+        let path = dir.path().join(".ralph/agent/tasks.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let body: String = rows
+            .iter()
+            .map(|(id, title, status)| {
+                let mut t = Task::new((*title).to_string(), 1);
+                t.id = (*id).to_string();
+                t.status = status.clone();
+                serde_json::to_string(&t).unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn u4_resolve_task_for_gate_hits_in_memory() {
+        let dir = TempDir::new().unwrap();
+        let path = write_task_jsonl(&dir, &[("t1", "step-01", TaskStatus::Closed)]);
+        let mut t = Task::new("step-01".to_string(), 1);
+        t.id = "t1".to_string();
+        t.status = TaskStatus::Closed;
+        let found = resolve_task_for_gate(&[t], &path, "t1").unwrap();
+        assert!(found.is_some(), "in-memory hit must return Some");
+        assert_eq!(found.unwrap().id, "t1");
+    }
+
+    #[test]
+    fn u4_resolve_task_for_gate_disk_reload_on_miss() {
+        let dir = TempDir::new().unwrap();
+        let path = write_task_jsonl(&dir, &[("t-disk", "step-02", TaskStatus::Closed)]);
+        // In-memory is empty; disk has the row.
+        let found = resolve_task_for_gate(&[], &path, "t-disk").unwrap();
+        assert!(
+            found.is_some(),
+            "disk reload on miss must return the row, got None"
+        );
+        assert_eq!(found.unwrap().id, "t-disk");
+    }
+
+    #[test]
+    fn u4_resolve_task_for_gate_missing_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let path = write_task_jsonl(&dir, &[("t1", "step-01", TaskStatus::Closed)]);
+        let found = resolve_task_for_gate(&[], &path, "absent").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn u4_resolve_task_for_gate_missing_file_returns_none() {
+        // Path does not exist on disk; in-memory is empty too.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("no-such.jsonl");
+        let found = resolve_task_for_gate(&[], &path, "absent").unwrap();
+        assert!(found.is_none(), "missing file is treated as a clean miss");
+    }
+
+    #[test]
+    fn u4_resolve_task_for_gate_corrupt_jsonl_returns_none_not_err() {
+        // The task_store loader is intentionally lenient: a
+        // malformed JSONL line is logged + skipped, not
+        // propagated. After skipping the row, there is simply no
+        // `task_id` to find → `Ok(None)`. The gate can then emit
+        // `task_not_found`. This is the documented behaviour
+        // (see `parse_task_line` warning + filter_map) — we pin
+        // it here so a future "fail-closed" change is intentional.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tasks.jsonl");
+        std::fs::write(&path, "this is not valid json\n").unwrap();
+        let found = resolve_task_for_gate(&[], &path, "any").unwrap();
+        assert!(
+            found.is_none(),
+            "corrupt JSONL is silently skipped; resolve returns Ok(None) \
+             so the gate can emit task_not_found (got Some)",
         );
     }
 }
