@@ -35,6 +35,8 @@ pub mod resume_budget;
 pub mod on_accepted;
 // U25: minimal second-preset fixture.
 pub mod second_preset_fixture;
+// U26: dual-check diagnosis helper (R14).
+pub mod diagnosis;
 
 pub use on_accepted::{
     AcceptedEvent, PhaseSideEffects, handle_phase_on_event_accepted,
