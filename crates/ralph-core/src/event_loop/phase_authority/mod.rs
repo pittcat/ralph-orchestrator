@@ -10,6 +10,9 @@
 //! here.
 
 pub mod config;
+pub mod declaration;
 
+#[cfg(test)]
+mod declaration_tests;
 #[cfg(test)]
 mod tests;
