@@ -28,14 +28,14 @@ use super::snapshot::PhaseSnapshot;
 /// caller passes the actual topic so `on_event::evaluate`
 /// can match.
 #[derive(Debug, Clone)]
-pub enum EventFixture {
-    Bare(&'static str),
+pub enum EventFixture<'a> {
+    Bare(&'a str),
     TestPassed(StepProgressFixture),
     ReviewComplete(on_review_complete_verdict::ReviewCompleteFixture),
     LoopComplete { honored: bool },
 }
 
-impl EventFixture {
+impl<'a> EventFixture<'a> {
     pub fn topic(&self) -> &str {
         match self {
             EventFixture::Bare(t) => t,
@@ -75,7 +75,7 @@ impl TransitionEvaluator {
     /// Returns the (possibly mutated) snapshot. The input
     /// snapshot is **not** mutated — callers may keep the
     /// previous snapshot for diagnostics.
-    pub fn apply(&self, snapshot: PhaseSnapshot, fixture: &EventFixture) -> PhaseSnapshot {
+    pub fn apply(&self, snapshot: PhaseSnapshot, fixture: &EventFixture<'_>) -> PhaseSnapshot {
         // Walk the transition table in declaration order; the
         // first match wins (U10 contract).
         for tr in &self.decl.transitions {
@@ -91,7 +91,7 @@ impl TransitionEvaluator {
     }
 }
 
-fn evaluate_transition(on: &serde_yaml::Value, fixture: &EventFixture) -> Option<String> {
+fn evaluate_transition(on: &serde_yaml::Value, fixture: &EventFixture<'_>) -> Option<String> {
     match fixture {
         EventFixture::Bare(_) => on_event::evaluate(on, fixture.topic()),
         EventFixture::TestPassed(fx) => {

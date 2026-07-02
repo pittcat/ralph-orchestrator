@@ -31,6 +31,12 @@ pub mod shipper_helper;
 pub mod step_parse;
 // U22: phase-violation resume budget.
 pub mod resume_budget;
+// U23: handle_phase_on_event_accepted free function.
+pub mod on_accepted;
+
+pub use on_accepted::{
+    AcceptedEvent, PhaseSideEffects, handle_phase_on_event_accepted,
+};
 
 pub use declaration::PhaseAuthorityDeclaration;
 pub use evaluator::{EventFixture, TransitionEvaluator};
