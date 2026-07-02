@@ -51,12 +51,17 @@ impl ValidationRule for StepHandoffRule {
         // is happy because `extract_step_task` consumes only
         // `&Event` (no overlap with the snapshot accessors).
         let snapshot = ctx.snapshot();
+        // U1 of plan 2026-07-02-005: extract the payload
+        // `completed_steps` array so the gate can use it for
+        // `plan.complete` under `Current Step=None` branches.
+        let payload_completed_steps = extract_completed_steps_array(event);
         let decision = check_alignment_with_snapshot(
             &snapshot.progress,
             &snapshot.tasks,
             event.topic.as_str(),
             step.as_deref(),
             task_id.as_deref(),
+            payload_completed_steps.as_deref(),
         );
         match decision {
             TaskProgressDecision::Inert | TaskProgressDecision::Aligned => {
@@ -90,6 +95,26 @@ fn extract_step_task(event: &Event) -> (Option<String>, Option<String>) {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     (step, task_id)
+}
+
+/// U1 of plan 2026-07-02-005: extract `completed_steps` array from
+/// the event payload. Returns `Some(vec)` when the payload has a
+/// `completed_steps` JSON array, `None` otherwise (incl. non-array
+/// shapes). Step may be either a string or an object with `id`
+/// (coordinator rewrites `step` but not `completed_steps`), so the
+/// array shape is left as-is.
+fn extract_completed_steps_array(event: &Event) -> Option<Vec<String>> {
+    let payload = event.payload.as_deref()?;
+    let parsed: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let arr = parsed.get("completed_steps")?.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        // Accept only string entries; mixed-shape arrays are ignored.
+        if let Some(s) = v.as_str() {
+            out.push(s.to_string());
+        }
+    }
+    Some(out)
 }
 
 // Keep the unused HatId import out of warnings.

@@ -295,8 +295,14 @@ pub use TaskProgressDecision as GateDecision;
 /// `std::fs::*` from inside the validation hot path.
 ///
 /// `progress` is the parsed markdown snapshot, `tasks` is the
-/// in-memory task ledger (lifted from `LedgerSnapshot`). All
-/// other behaviour mirrors [`check_progress_task_alignment`]
+/// U1 of plan 2026-07-02-005: `payload_completed_steps` carries
+/// the `completed_steps` array from the inbound event payload
+/// (only meaningful for `plan.complete`). When non-empty, the
+/// gate uses array-vs-snapshot set inclusion as the primary
+/// acceptance criterion under the `Current Step=None` branch,
+/// instead of falling back to the single-step heuristic above.
+///
+/// All other behaviour mirrors [`check_progress_task_alignment`]
 /// including the cold-start exemption and fail-closed defaults.
 pub fn check_alignment_with_snapshot(
     progress: &ProgressSnapshot,
@@ -304,6 +310,7 @@ pub fn check_alignment_with_snapshot(
     topic: &str,
     step: Option<&str>,
     task_id: Option<&str>,
+    payload_completed_steps: Option<&[String]>,
 ) -> GateDecision {
     if !is_gated_topic(topic) {
         return GateDecision::Inert;
@@ -321,7 +328,15 @@ pub fn check_alignment_with_snapshot(
         });
     }
 
-    // 2. Step alignment.
+    // 2. Step alignment. U1 of plan 2026-07-02-005: when
+    //    `progress.current_step` is `None` and `topic == "plan.complete"`,
+    //    accept if the event's `completed_steps` array (from payload)
+    //    is entirely a subset of `snapshot.completed_steps` (the
+    //    single-step fallback also remains: `step ∈ completed`). This
+    //    covers the `pass_with_residuals` terminal path where the agent
+    //    ships `plan.complete` with a `completed_steps` payload listing
+    //    every step but does not maintain a `Current Step` pointer
+    //    (the agent has already advanced past every step).
     if let Some(step_value) = step {
         match progress.current_step.as_deref() {
             None => {
@@ -366,6 +381,43 @@ pub fn check_alignment_with_snapshot(
             }
             Some(_) => {}
         }
+    }
+
+    // U1 of plan 2026-07-02-005 (EXTEND): pay-load-driven
+    // `completed_steps` array check. When the topic is `plan.complete`
+    // and `progress.current_step` is `None`, the agent may ship the
+    // terminal event with a `completed_steps: string[]` payload whose
+    // every element is already listed under Completed Steps in
+    // `progress.md`. This is the `pass_with_residuals` / 140149-shaped
+    // path. Require every entry to be present; even one missing entry
+    // is a `progress_missing_current_step` mismatch. A non-empty
+    // `payload_completed_steps` is the authoritative signal — when it
+    // is `None` or empty, the legacy single-step fallback above stays
+    // the only path.
+    if topic == "plan.complete"
+        && progress.current_step.is_none()
+        && let Some(payload_steps) = payload_completed_steps
+        && !payload_steps.is_empty()
+    {
+        let missing: Vec<&str> = payload_steps
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|s| !progress.is_step_completed(s))
+            .collect();
+        if !missing.is_empty() {
+            return GateDecision::Mismatch(ProgressTaskMismatch {
+                reason: "progress_missing_current_step".to_string(),
+                detail: format!(
+                    "plan.complete completed_steps={:?} but progress.md Completed Steps is missing entries: {}",
+                    payload_steps,
+                    missing.join(", ")
+                ),
+                step: step.map(|s| s.to_string()),
+                task_id: task_id.map(|t| t.to_string()),
+            });
+        }
+        // Accepted: every payload completed step is in snapshot.
+        return GateDecision::Aligned;
     }
 
     // 3. Task alignment (closed-but-not-marked).
@@ -921,5 +973,171 @@ mod tests {
             tmp.path(),
         );
         assert_eq!(decision, GateDecision::Aligned);
+    }
+
+    // U1 of plan 2026-07-02-005 — payload `completed_steps`
+    // array drives the gate under `Current Step=None`. The shape
+    // mirrors the 140149 fix-unit terminal: progress.md is left
+    // without a `## Current Step` heading (every step is done)
+    // while the agent emits `plan.complete` with a
+    // `completed_steps: [..]` payload listing each completed
+    // step.
+
+    fn snapshot_with_completed(steps: &[&str]) -> ProgressSnapshot {
+        ProgressSnapshot {
+            current_step: None,
+            completed_steps: steps.iter().map(|s| s.to_string()).collect(),
+            empty_headings: false,
+        }
+    }
+
+    #[test]
+    fn u1_plan_complete_completed_steps_subset_is_aligned() {
+        let snap = snapshot_with_completed(&["step-01", "step-02"]);
+        let payload = vec!["step-01".to_string(), "step-02".to_string()];
+        let decision = check_alignment_with_snapshot(
+            &snap,
+            &[],
+            "plan.complete",
+            Some("step-02"),
+            Some("task-1"),
+            Some(&payload),
+        );
+        assert_eq!(decision, GateDecision::Aligned);
+    }
+
+    #[test]
+    fn u1_plan_complete_completed_steps_last_step_event_step_aligned() {
+        let snap = snapshot_with_completed(&["step-01", "step-02"]);
+        let payload = vec![
+            "step-01".to_string(),
+            "step-02".to_string(),
+        ];
+        let decision = check_alignment_with_snapshot(
+            &snap,
+            &[],
+            "plan.complete",
+            Some("step-02"),
+            Some("task-1"),
+            Some(&payload),
+        );
+        assert_eq!(
+            decision,
+            GateDecision::Aligned,
+            "event's `step` is the terminal step AND `completed_steps` array intersects snapshot"
+        );
+    }
+
+    #[test]
+    fn u1_plan_complete_completed_steps_missing_entry_is_mismatch() {
+        let snap = snapshot_with_completed(&["step-01", "step-02"]);
+        let payload = vec![
+            "step-01".to_string(),
+            // step-02 缺失
+            "step-03".to_string(),
+        ];
+        let decision = check_alignment_with_snapshot(
+            &snap,
+            &[],
+            "plan.complete",
+            Some("step-02"),
+            Some("task-1"),
+            Some(&payload),
+        );
+        match decision {
+            GateDecision::Mismatch(m) => {
+                assert_eq!(
+                    m.reason, "progress_missing_current_step",
+                    "missing `completed_steps` entry must surface as progress_missing_current_step"
+                );
+            }
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn u1_plan_complete_completed_steps_none_falls_back_to_single_step() {
+        // No `completed_steps` in payload → falls back to the
+        // pre-existing single-step branch: `step` in
+        // snapshot.completed → Aligned.
+        let snap = snapshot_with_completed(&["step-02"]);
+        let decision = check_alignment_with_snapshot(
+            &snap,
+            &[],
+            "plan.complete",
+            Some("step-02"),
+            None,
+            None,
+        );
+        assert_eq!(decision, GateDecision::Aligned);
+    }
+
+    #[test]
+    fn u1_plan_complete_completed_steps_empty_falls_back_to_single_step() {
+        // Empty `completed_steps` → same fall-through as `None`.
+        let snap = snapshot_with_completed(&["step-02"]);
+        let decision = check_alignment_with_snapshot(
+            &snap,
+            &[],
+            "plan.complete",
+            Some("step-02"),
+            None,
+            Some(&[]),
+        );
+        assert_eq!(decision, GateDecision::Aligned);
+    }
+
+    #[test]
+    fn u1_queue_advance_completed_steps_payload_ignored() {
+        // payload_completed_steps is only meaningful for
+        // `plan.complete`; queue.advance still uses the single-
+        // step alignment path.
+        let snap = snapshot_with_completed(&["step-02"]);
+        let payload = vec!["step-01".to_string()]; // bogus non-subset
+        let decision = check_alignment_with_snapshot(
+            &snap,
+            &[],
+            "queue.advance",
+            Some("step-02"),
+            None,
+            Some(&payload),
+        );
+        assert_eq!(decision, GateDecision::Aligned);
+    }
+
+    /// U1 of plan 2026-07-02-005: when `progress.md` has only
+    /// `Completed Steps` (no `Current Step`) and `payload.
+    /// completed_steps` covers every step in snapshot, the
+    /// `task_closed_but_progress_missing` rule still fires for
+    /// any closed task whose `title` is NOT covered. This pins
+    /// the rule ordering: completed_steps accept runs first,
+    /// then task alignment runs as a separate guard. We
+    /// exercise the latter by omitting the array (forcing
+    /// fall-through to task alignment) and a closed task that
+    /// lacks progress.
+    #[test]
+    fn u1_plan_complete_closed_task_still_routes_to_task_alignment_branch() {
+        let snap = snapshot_with_completed(&["step-01", "step-02"]);
+        let mut task = Task::new("other-step".to_string(), 1);
+        task.id = "task-1".to_string();
+        task.status = TaskStatus::Closed;
+        // No payload `completed_steps` → falls through to the
+        // legacy single-step + task alignment path.
+        let decision = check_alignment_with_snapshot(
+            &snap,
+            std::slice::from_ref(&task),
+            "plan.complete",
+            Some("step-02"),
+            Some("task-1"),
+            None,
+        );
+        match decision {
+            GateDecision::Mismatch(m) => {
+                assert_eq!(m.reason, "task_closed_but_progress_missing");
+            }
+            other => panic!(
+                "expected task_closed_but_progress_missing Mismatch, got {other:?}"
+            ),
+        }
     }
 }
