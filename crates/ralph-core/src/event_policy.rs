@@ -347,14 +347,35 @@ pub fn precheck_proposed_dedup_key(guarded_topic: &str, payload: &str) -> String
 
 /// Build the dedup key for `review.start`.
 ///
-/// `step` is optional because the schema does not require it, but
-/// when it is present it is included so two different plan units
-/// that happen to share a `task_id` do not collide.
-fn review_start_dedup_key(plan_name: &str, step: Option<&str>, task_id: &str) -> String {
-    if let Some(st) = step {
-        format!("{plan_name}::{task_id}::{st}")
-    } else {
-        format!("{plan_name}::{task_id}")
+/// U8 of plan 2026-07-02-005: prefer the semantic key
+/// `(plan_name, fix_round, total_units)` when the payload
+/// carries both. This is the 175407 root-cause fix: the
+/// 2nd `review.start` had identical `plan_name + task_id + step`
+/// but a different `triggered` value (e.g. `ralph` vs
+/// `review-coordinator`); byte equality rejected the 1st
+/// emit but the semantic-identity 2nd slipped through. The
+/// semantic key is `triggered`-agnostic by construction.
+///
+/// When `fix_round` / `total_units` are absent from the
+/// payload (legacy / pre-fix emits), fall back to the
+/// pre-U8 `(plan_name, task_id [, step])` key to preserve
+/// backward compatibility.
+fn review_start_dedup_key(
+    plan_name: &str,
+    step: Option<&str>,
+    task_id: &str,
+    fix_round: Option<u32>,
+    total_units: Option<u32>,
+) -> String {
+    match (fix_round, total_units) {
+        (Some(fr), Some(tu)) => format!("{plan_name}::fr={fr}::tu={tu}"),
+        _ => {
+            if let Some(st) = step {
+                format!("{plan_name}::{task_id}::{st}")
+            } else {
+                format!("{plan_name}::{task_id}")
+            }
+        }
     }
 }
 
@@ -538,10 +559,16 @@ impl PolicyRuntimeState {
                 let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
                 let step = obj.get("step").and_then(|v| v.as_str());
                 let task_id = obj.get("task_id").and_then(|v| v.as_str());
+                let fix_round = obj.get("fix_round").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let total_units = obj.get("total_units").and_then(|v| v.as_u64()).map(|n| n as u32);
                 if let (Some(pn), Some(ti)) = (plan_name, task_id) {
-                    state
-                        .review_start_seen_keys
-                        .insert(review_start_dedup_key(pn, step, ti));
+                    state.review_start_seen_keys.insert(review_start_dedup_key(
+                        pn,
+                        step,
+                        ti,
+                        fix_round,
+                        total_units,
+                    ));
                 }
             }
             // U1 (2026-06-18-004 plan, KTD1): replay prior
@@ -1099,12 +1126,12 @@ pub fn validate_event_with_hat(
     }
 
     // 2026-07-01-001 U1: duplicate `review.start` detection.
-    // The dedup key is `(plan_name, task_id)` with optional `step`.
-    // A 2nd `review.start` with the same key is rejected as
-    // `DuplicateWorkDone` so the runtime stops a coordinator from
-    // starting multiple review sequences for the same plan/task.
-    // The check is applied before schema/terminal layers so a
-    // duplicate is a duplicate regardless of state.
+    // U8 of plan 2026-07-02-005: prefer the semantic key
+    // `(plan_name, fix_round, total_units)` so a 2nd emit with
+    // only `triggered` differing (175407 root cause) is still
+    // recognised as a duplicate. Falls back to the legacy
+    // `(plan_name, task_id [, step])` key when fix_round /
+    // total_units are absent.
     if topic == "review.start"
         && let Some(p) = payload
         && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
@@ -1112,8 +1139,10 @@ pub fn validate_event_with_hat(
         let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
         let step = obj.get("step").and_then(|v| v.as_str());
         let task_id = obj.get("task_id").and_then(|v| v.as_str());
+        let fix_round = obj.get("fix_round").and_then(|v| v.as_u64()).map(|n| n as u32);
+        let total_units = obj.get("total_units").and_then(|v| v.as_u64()).map(|n| n as u32);
         if let (Some(pn), Some(ti)) = (plan_name, task_id) {
-            let dedup_key = review_start_dedup_key(pn, step, ti);
+            let dedup_key = review_start_dedup_key(pn, step, ti, fix_round, total_units);
             if state.review_start_seen_keys.contains(&dedup_key) {
                 let finding = PolicyFinding {
                     topic: topic.to_string(),
@@ -3876,6 +3905,84 @@ mod tests {
                 PolicyDecision::RejectWithResume(_)
             ),
             "re-emitting no-step review.start must be rejected"
+        );
+    }
+
+    // U8 of plan 2026-07-02-005: semantic-key dedup. The 175407
+    // failure: 2nd `review.start` had identical `plan_name +
+    // task_id + step` but a different `triggered` value (e.g.
+    // `ralph` vs `review-coordinator`); byte equality rejected
+    // the 1st emit but the semantic-identity 2nd slipped
+    // through. The fix: when the payload carries
+    // `fix_round` AND `total_units`, the dedup key is built
+    // from those two fields only — `triggered` is intentionally
+    // ignored, regardless of which hat produced the event.
+
+    #[test]
+    fn u8_review_start_semantic_dedup_ignores_triggered_field() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        // 1st emit: triggered=ralph, fix_round=0, total_units=11.
+        let first = r#"{"plan_name":"p1","task_id":"t1","task_key":"k1","fix_round":0,"total_units":11,"triggered":"ralph"}"#;
+        assert_eq!(
+            validate_event("review.start", Some(first), &config, &mut state),
+            PolicyDecision::Accept
+        );
+        // 2nd emit: triggered=review-coordinator, identical
+        // (plan_name, task_id, fix_round, total_units). 175407
+        // root cause: this slipped through before U8. After U8,
+        // the dedup key is `p1::fr=0::tu=11` and matches.
+        let second = r#"{"plan_name":"p1","task_id":"t1","task_key":"k1","fix_round":0,"total_units":11,"triggered":"review-coordinator"}"#;
+        assert!(
+            matches!(
+                validate_event("review.start", Some(second), &config, &mut state),
+                PolicyDecision::RejectWithResume(_)
+            ),
+            "U8: 2nd review.start with identical fix_round+total_units must be rejected \
+             regardless of `triggered`"
+        );
+    }
+
+    #[test]
+    fn u8_review_start_different_total_units_allowed() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let first = r#"{"plan_name":"p1","task_id":"t1","task_key":"k1","fix_round":0,"total_units":11,"triggered":"ralph"}"#;
+        let second = r#"{"plan_name":"p1","task_id":"t1","task_key":"k1","fix_round":0,"total_units":7,"triggered":"ralph"}"#;
+        assert_eq!(
+            validate_event("review.start", Some(first), &config, &mut state),
+            PolicyDecision::Accept
+        );
+        // Different total_units is a different semantic key, so
+        // accepted (e.g. plan was re-planned mid-review).
+        assert_eq!(
+            validate_event("review.start", Some(second), &config, &mut state),
+            PolicyDecision::Accept
+        );
+    }
+
+    #[test]
+    fn u8_review_start_legacy_fallback_when_fix_round_missing() {
+        // Pre-U8 emits that don't carry `fix_round` /
+        // `total_units` must still use the legacy
+        // `(plan_name, task_id [, step])` key — backward
+        // compatibility for older recovery journals.
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let first = r#"{"plan_name":"p1","task_id":"t1","task_key":"k1"}"#;
+        let second = r#"{"plan_name":"p1","task_id":"t1","task_key":"k1","triggered":"review-coordinator"}"#;
+        assert_eq!(
+            validate_event("review.start", Some(first), &config, &mut state),
+            PolicyDecision::Accept
+        );
+        // Without `fix_round` / `total_units`, the legacy key
+        // `p1::t1` matches.
+        assert!(
+            matches!(
+                validate_event("review.start", Some(second), &config, &mut state),
+                PolicyDecision::RejectWithResume(_)
+            ),
+            "U8: legacy fallback (no fix_round / total_units) must still dedup"
         );
     }
 
