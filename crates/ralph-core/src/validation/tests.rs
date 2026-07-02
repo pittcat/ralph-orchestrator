@@ -683,3 +683,70 @@ fn u5_step_handoff_rule_disk_reload_accepts_plan_complete_terminal() {
         "U5: plan.complete with closed task on disk must accept; got: {result:?}"
     );
 }
+
+// ============================================================
+// U6 of plan 2026-07-02-005: progress stale refresh
+// ============================================================
+
+#[test]
+fn u6_step_handoff_rule_refreshes_stale_progress_from_disk() {
+    // 175407 root cause: in-memory `LedgerSnapshot.progress` is
+    // stale (the projector wrote a fresh `progress.md` but the
+    // snapshot mirror kept the pre-flush view). The gate would
+    // emit `progress_missing_current_step` on a perfectly valid
+    // event. The rule must reconcile the in-memory view from
+    // disk BEFORE running the gate check.
+    use crate::step_handoff::ProgressSnapshot;
+    use crate::validation::rules_step_handoff::StepHandoffRule;
+    let view = ProtocolView::from_event_loop(&minimal_config());
+    let mut snap = minimal_snapshot();
+    // Stale in-memory: empty completed list, current step is
+    // step-05 (does not match event step).
+    let mut progress = ProgressSnapshot::default();
+    progress.current_step = Some("step-05".to_string());
+    progress.completed_steps = Vec::new();
+    snap.progress = progress;
+
+    // Disk has the real state: step-01 done, current step = step-02.
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("progress.md"),
+        "## Current Step\nstep-02\n\n## Completed Steps\n- step-01\n",
+    )
+    .unwrap();
+    let tasks_path = agent_dir.join("tasks.jsonl");
+    std::fs::write(&tasks_path, "").unwrap();
+
+    let mut ctx = ValidationContext::new(&mut snap).with_tasks_path(tasks_path);
+
+    let event = make_event("queue.advance", r#"{"step":"step-02"}"#, None);
+    let result = StepHandoffRule.validate(&view, &mut ctx, &event);
+    assert!(
+        result.accepted,
+        "U6: stale in-memory progress must be reconciled from disk; got: {result:?}"
+    );
+}
+
+#[test]
+fn u6_step_handoff_rule_no_refresh_without_tasks_path() {
+    // No tasks_path wired → no progress reconciliation → the
+    // gate keeps using the in-memory view (legacy behaviour).
+    use crate::step_handoff::ProgressSnapshot;
+    use crate::validation::rules_step_handoff::StepHandoffRule;
+    let view = ProtocolView::from_event_loop(&minimal_config());
+    let mut snap = minimal_snapshot();
+    let mut progress = ProgressSnapshot::default();
+    progress.current_step = Some("step-05".to_string());
+    progress.completed_steps = Vec::new();
+    snap.progress = progress;
+    // No with_tasks_path call.
+    let mut ctx = ValidationContext::new(&mut snap);
+    let event = make_event("queue.advance", r#"{"step":"step-02"}"#, None);
+    let result = StepHandoffRule.validate(&view, &mut ctx, &event);
+    assert!(
+        !result.accepted,
+        "U6: without tasks_path, the gate must keep using the in-memory view"
+    );
+}

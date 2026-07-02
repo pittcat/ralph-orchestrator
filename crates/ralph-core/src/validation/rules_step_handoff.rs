@@ -14,6 +14,7 @@ use crate::event_reader::Event;
 use crate::preset::engine::protocol::ProtocolView;
 use crate::step_handoff::progress_task_gate::{
     GATED_TOPICS, TaskProgressDecision, check_alignment_with_snapshot,
+    refresh_progress_snapshot_if_stale,
 };
 use crate::task::Task;
 use crate::task_store::resolve_task_for_gate;
@@ -45,6 +46,11 @@ impl ValidationRule for StepHandoffRule {
             return ValidationResult::accept_with(ValidationStage::StepHandoff);
         }
         let (step, task_id) = extract_step_task(event);
+        // U1 of plan 2026-07-02-005: extract the payload
+        // `completed_steps` array so the gate can use it for
+        // `plan.complete` under `Current Step=None` branches.
+        let payload_completed_steps = extract_completed_steps_array(event);
+
         // P1-#9 (002-adversarial-review): borrow progress +
         // tasks from the snapshot instead of cloning them on
         // every validation. `check_alignment_with_snapshot`
@@ -53,10 +59,46 @@ impl ValidationRule for StepHandoffRule {
         // is happy because `extract_step_task` consumes only
         // `&Event` (no overlap with the snapshot accessors).
         let snapshot = ctx.snapshot();
-        // U1 of plan 2026-07-02-005: extract the payload
-        // `completed_steps` array so the gate can use it for
-        // `plan.complete` under `Current Step=None` branches.
-        let payload_completed_steps = extract_completed_steps_array(event);
+
+        // U6 of plan 2026-07-02-005: best-effort reconciliation
+        // of the in-memory `LedgerSnapshot.progress` mirror with
+        // the on-disk `progress.md` (175407 root cause). When
+        // the runtime's mirror is stale (e.g. projector flushed
+        // to disk but the snapshot kept the pre-flush view), the
+        // gate would otherwise emit a `progress_missing_current_step`
+        // mismatch on a perfectly valid event. We reconcile the
+        // mirror in-place via `refresh_progress_snapshot_if_stale`
+        // BEFORE running the gate check.
+        //
+        // The refresh needs the progress.md path. Use the
+        // workspace_root-derived path: the runtime always places
+        // the ledger at `<workspace>/.ralph/agent/progress.md`.
+        // We re-derive it from the task path's parent (parent's
+        // parent) so we don't need a separate `progress_path` knob
+        // on the context — the path layout is a hard invariant.
+        //
+        // We use a local `progress` variable rather than mutating
+        // the snapshot mirror in-place: the snapshot accessor
+        // returns `&LedgerSnapshot`, and mutating it from the
+        // rule would require a deeper API change. The next
+        // projector flush will reconcile the mirror naturally.
+        let progress = match ctx.tasks_path() {
+            Some(tasks_path) => {
+                let progress_path = tasks_path
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.join("agent").join("progress.md"));
+                match progress_path {
+                    Some(p) => {
+                        let mut local = snapshot.progress.clone();
+                        refresh_progress_snapshot_if_stale(&p, &mut local);
+                        local
+                    }
+                    None => snapshot.progress.clone(),
+                }
+            }
+            None => snapshot.progress.clone(),
+        };
 
         // U5 of plan 2026-07-02-005: when the gate needs to
         // check a specific `task_id` AND the in-memory snapshot
@@ -85,7 +127,7 @@ impl ValidationRule for StepHandoffRule {
         };
 
         let decision = check_alignment_with_snapshot(
-            &snapshot.progress,
+            &progress,
             &snapshot.tasks,
             event.topic.as_str(),
             step.as_deref(),
@@ -110,7 +152,7 @@ impl ValidationRule for StepHandoffRule {
                 extended.push(found.clone());
             }
             check_alignment_with_snapshot(
-                &snapshot.progress,
+                &progress,
                 &extended,
                 event.topic.as_str(),
                 step.as_deref(),

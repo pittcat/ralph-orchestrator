@@ -678,6 +678,101 @@ fn read_progress(path: &Path) -> Result<ProgressSnapshot, &'static str> {
     }
 }
 
+/// U6 of plan 2026-07-02-005: PreCommit-time progress snapshot
+/// reconciliation. The runtime's in-memory `LedgerSnapshot.progress`
+/// is sometimes stale (175407: the projector flushed `progress.md`
+/// to disk but the snapshot mirror kept the pre-flush view). The
+/// gate then sees a `progress_missing_current_step` mismatch that
+/// is in fact a stale-mirror false positive.
+///
+/// This function is the cheap reconciliation layer: it reads
+/// `progress.md` from disk and, **only if** the parsed
+/// fingerprint differs from the in-memory snapshot's
+/// fingerprint, overwrites the snapshot with the on-disk view.
+///
+/// Staleness fingerprint = `(current_step, completed_steps.join(",")).
+/// Return value: `true` if the snapshot was refreshed, `false`
+/// otherwise (including all read errors — the caller falls back
+/// to the in-memory view on a read error so the gate stays
+/// fail-closed on real I/O issues).
+pub fn refresh_progress_snapshot_if_stale(
+    progress_path: &Path,
+    snapshot: &mut ProgressSnapshot,
+) -> bool {
+    let disk = match read_progress(progress_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let disk_fp = progress_fingerprint(&disk);
+    let mem_fp = progress_fingerprint(snapshot);
+    if disk_fp == mem_fp {
+        return false;
+    }
+    *snapshot = disk;
+    true
+}
+
+fn progress_fingerprint(snap: &ProgressSnapshot) -> (Option<String>, String) {
+    (
+        snap.current_step.clone(),
+        snap.completed_steps.join(","),
+    )
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_progress(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn refresh_progress_snapshot_if_stale_returns_false_on_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.md");
+        write_progress(&path, "## Current Step\nstep-02\n\n## Completed Steps\n- step-01\n");
+        let mut snap = ProgressSnapshot::parse(&std::fs::read_to_string(&path).unwrap());
+        let refreshed = refresh_progress_snapshot_if_stale(&path, &mut snap);
+        assert!(!refreshed, "matching fingerprint must NOT report refresh");
+    }
+
+    #[test]
+    fn refresh_progress_snapshot_if_stale_overwrites_on_mismatch() {
+        // 175407 root cause scenario: in-memory progress is stale
+        // (empty / pre-flush), but disk has the real completed
+        // list. The reconciler must overwrite.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.md");
+        write_progress(
+            &path,
+            "## Completed Steps\n- step-01\n- step-02\n",
+        );
+        let mut snap = ProgressSnapshot::default(); // stale, empty
+        let refreshed = refresh_progress_snapshot_if_stale(&path, &mut snap);
+        assert!(refreshed, "stale mirror must be reported as refreshed");
+        assert_eq!(snap.completed_steps, vec!["step-01", "step-02"]);
+        assert_eq!(
+            snap.current_step, None,
+            "no ## Current Step heading → current_step is None"
+        );
+    }
+
+    #[test]
+    fn refresh_progress_snapshot_if_stale_returns_false_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no-such.md");
+        let mut snap = ProgressSnapshot::default();
+        let refreshed = refresh_progress_snapshot_if_stale(&path, &mut snap);
+        assert!(!refreshed, "missing file must NOT report refresh");
+        // The snapshot is untouched.
+        assert!(snap.completed_steps.is_empty());
+    }
+}
+
 /// Review fix #5 (code-review-2026-06-17-002): helper for the
 /// cold-start exemption. Returns true when the inbound step looks
 /// like the very first step of a fresh plan (digit-1 prefix, no
