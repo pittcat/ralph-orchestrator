@@ -1300,4 +1300,55 @@ hats:
             );
         }
     }
+
+    // 2026-07-02-004 U7: origin guard must accept desugared precheck topics.
+    #[test]
+    fn u7_precheck_desugar_origin_allows_producer_proposed_and_gate_terminal() {
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      work.done:
+        prompt: ["ok"]
+        on_fail:
+          target: executor
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.start"]
+    publishes: ["work.done"]
+"#;
+        let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        config.normalize();
+        let registry = HatRegistry::from_config(&config);
+
+        assert!(
+            registry.can_publish(&HatId::new("executor"), "work.done.proposed"),
+            "producer must publish work.done.proposed after desugar"
+        );
+        assert!(
+            !registry.can_publish(&HatId::new("executor"), "work.done"),
+            "producer must not publish bare work.done after desugar"
+        );
+        assert!(
+            registry.can_publish(&HatId::new("precheck-work.done"), "work.done"),
+            "gate hat must publish work.done on pass"
+        );
+        assert!(
+            registry.can_publish(&HatId::new("precheck-work.done"), "work.done.rejected"),
+            "gate hat must publish work.done.rejected on fail"
+        );
+
+        let proposed = make_event("work.done.proposed", Some("executor"));
+        assert_eq!(
+            validate_event_origin(&proposed, &registry, "", ""),
+            OriginCheck::Accepted
+        );
+        let rejected = make_event("work.done.rejected", Some("precheck-work.done"));
+        assert_eq!(
+            validate_event_origin(&rejected, &registry, "", ""),
+            OriginCheck::Accepted
+        );
+    }
 }

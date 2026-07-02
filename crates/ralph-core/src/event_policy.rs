@@ -332,6 +332,17 @@ pub struct PolicyRuntimeState {
     /// sequences for the same plan/task. Pruned on `fix.applied`
     /// so a legitimate re-review after a fix round is allowed.
     pub review_start_seen_keys: HashSet<String>,
+    /// 2026-07-02-004 U7 (R6): pending precheck candidate keys.
+    /// Format: `{guarded_topic}::{payload}`. Populated when
+    /// `<X>.proposed` is accepted; pruned when the gate emits
+    /// `<X>` (pass) or `<X>.rejected` (fail) so a retry after
+    /// rejection can re-emit the same payload.
+    pub precheck_proposed_pending_keys: HashSet<String>,
+}
+
+/// Dedup key for a precheck `<X>.proposed` candidate (U7 / R6).
+pub fn precheck_proposed_dedup_key(guarded_topic: &str, payload: &str) -> String {
+    format!("{guarded_topic}::{}", payload.trim())
 }
 
 /// Build the dedup key for `review.start`.
@@ -442,6 +453,15 @@ impl PolicyRuntimeState {
             .retain(|key| !key.starts_with(&prefix));
     }
 
+    /// 2026-07-02-004 U7: drop pending precheck candidates for
+    /// guarded topic `X` after the gate emits `<X>` or
+    /// `<X>.rejected`.
+    pub fn prune_precheck_proposed_bucket(&mut self, guarded_topic: &str) {
+        let prefix = format!("{guarded_topic}::");
+        self.precheck_proposed_pending_keys
+            .retain(|key| !key.starts_with(&prefix));
+    }
+
     /// 2026-07-01-001 U1: prune every `review_start_seen_keys`
     /// entry that belongs to a given `(plan_name, task_id)` bucket,
     /// including keys that carry an optional `step` suffix. Called
@@ -548,6 +568,22 @@ impl PolicyRuntimeState {
                         .work_done_seen_keys
                         .insert(format!("{pn}::{st}::{ti}"));
                 }
+            }
+            // 2026-07-02-004 U7: replay precheck gate lifecycle.
+            if let Some(guarded) = event.topic.strip_suffix(".rejected") {
+                state.prune_precheck_proposed_bucket(guarded);
+            } else if event.topic.ends_with(".proposed")
+                && let Some(p) = event.payload.as_deref()
+            {
+                let guarded = event
+                    .topic
+                    .strip_suffix(".proposed")
+                    .unwrap_or(event.topic.as_str());
+                state.precheck_proposed_pending_keys.insert(
+                    precheck_proposed_dedup_key(guarded, p),
+                );
+            } else if !event.topic.ends_with(".proposed") {
+                state.prune_precheck_proposed_bucket(&event.topic);
             }
             // U1 (2026-06-18-004 plan, KTD1, symmetry fix):
             // when a `fix.applied` is replayed, also prune the
@@ -1031,6 +1067,41 @@ pub fn validate_event_with_hat(
     state.observed_topics.insert(topic.to_string());
 
     let mut findings = Vec::new();
+
+    // 2026-07-02-004 U7 (R6): close or advance the precheck gate
+    // obligation — prune pending `<X>.proposed` keys when the
+    // gate emits `<X>.rejected` (fail) or bare `<X>` (pass).
+    if let Some(guarded) = topic.strip_suffix(".rejected") {
+        state.prune_precheck_proposed_bucket(guarded);
+    } else if !topic.ends_with(".proposed") {
+        state.prune_precheck_proposed_bucket(topic);
+    }
+
+    // 2026-07-02-004 U7 (R6): duplicate `<X>.proposed` detection.
+    // A 2nd emit with the same `(guarded, payload)` while the
+    // gate obligation is still open is rejected so the runtime
+    // does not schedule two gate activations for one candidate.
+    if let Some(guarded) = topic.strip_suffix(".proposed")
+        && let Some(p) = payload
+    {
+        let key = precheck_proposed_dedup_key(guarded, p);
+        if state.precheck_proposed_pending_keys.contains(&key) {
+            let finding = PolicyFinding {
+                topic: topic.to_string(),
+                violation_type: ViolationType::DuplicateWorkDone {
+                    key: key.clone(),
+                    hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                },
+                message: format!(
+                    "duplicate_precheck_proposed: {topic} for key '{key}' was already accepted. \
+                     Wait for the precheck gate to emit {guarded} or {guarded}.rejected before \
+                     re-emitting the same candidate."
+                ),
+            };
+            return PolicyDecision::RejectWithResume(finding);
+        }
+        state.precheck_proposed_pending_keys.insert(key);
+    }
 
     // 2026-07-01-001 U1: duplicate `review.start` detection.
     // The dedup key is `(plan_name, task_id)` with optional `step`.
@@ -5191,5 +5262,85 @@ mod tests {
         assert!(!state.work_ready_seen_keys.contains("p1::step-01::t2"));
         // Different step preserved
         assert!(state.work_ready_seen_keys.contains("p1::step-02::t1"));
+    }
+
+    // 2026-07-02-004 U7: precheck `<X>.proposed` dedup (R6).
+    #[test]
+    fn u7_precheck_proposed_dedup_rejects_duplicate_candidate() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"step":"s1"}"#;
+
+        let first = validate_event("work.done.proposed", Some(payload), &config, &mut state);
+        assert_eq!(first, PolicyDecision::Accept);
+
+        let second = validate_event("work.done.proposed", Some(payload), &config, &mut state);
+        assert!(
+            matches!(
+                second,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
+                    ..
+                }) if key == "work.done::{\"step\":\"s1\"}"
+            ),
+            "duplicate work.done.proposed must be rejected, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn u7_precheck_proposed_cleared_on_rejected_allows_retry() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"step":"s1"}"#;
+
+        assert_eq!(
+            validate_event("work.done.proposed", Some(payload), &config, &mut state),
+            PolicyDecision::Accept
+        );
+        assert_eq!(
+            validate_event(
+                "work.done.rejected",
+                Some(r#"{"failed_checks":[1],"reason":"no","synthetic":false}"#),
+                &config,
+                &mut state
+            ),
+            PolicyDecision::Accept
+        );
+        assert_eq!(
+            validate_event("work.done.proposed", Some(payload), &config, &mut state),
+            PolicyDecision::Accept,
+            "after gate rejection the same candidate may be re-proposed"
+        );
+    }
+
+    #[test]
+    fn u7_build_allowed_topics_includes_precheck_derived_topics() {
+        use crate::config::RalphConfig;
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      work.done:
+        prompt: ["ok"]
+        on_fail:
+          target: executor
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.start"]
+    publishes: ["work.done"]
+"#;
+        let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        config.normalize();
+        let allowed = build_allowed_topics(
+            &config.hats,
+            "LOOP_COMPLETE",
+            config.event_loop.event_policy.as_ref(),
+        );
+        assert!(allowed.contains("work.done.proposed"));
+        assert!(allowed.contains("work.done.rejected"));
+        assert!(allowed.contains("work.done"));
     }
 }

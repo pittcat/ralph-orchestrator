@@ -1215,18 +1215,14 @@ hats:
   executor:
     name: "Executor"
     triggers: ["work.start"]
-    publishes: ["review.complete.proposed"]
-  precheck-review.complete:
-    name: "Precheck Gate: review.complete"
-    triggers: ["review.complete.proposed"]
-    publishes: ["review.complete", "review.complete.rejected"]
+    publishes: ["review.complete"]
   reviewer:
     name: "Reviewer"
     triggers: ["review.complete"]
     publishes: ["LOOP_COMPLETE"]
 "#;
         let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        // The desugared config must contain the gate hat.
+        config.normalize();
         use crate::event_loop::precheck_gate_enforcement as gate;
         assert!(
             config.hats.keys().any(|k| {

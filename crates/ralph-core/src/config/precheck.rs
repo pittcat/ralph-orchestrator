@@ -142,4 +142,15 @@ pub fn inject_precheck_event_schemas(
             allowed_values: HashMap::new(),
             hat_allowed_values: HashMap::new(),
         });
+
+    // Gate hat publishes bare `<X>` on pass; ensure a schema exists
+    // (idempotent — presets that already declare `<X>` are untouched).
+    schemas
+        .entry(topic.to_string())
+        .or_insert_with(|| EventSchema {
+            payload: Some(PayloadType::JsonObject),
+            required_fields: Vec::new(),
+            allowed_values: HashMap::new(),
+            hat_allowed_values: HashMap::new(),
+        });
 }
