@@ -853,6 +853,20 @@ hats:
             "hat=ralph with business topic should be rejected (ralph_control_only)"
         );
 
+        // U10 of plan 2026-07-02-005: regression lock for
+        // 083222-shaped incident — `hat=ralph` MUST NOT emit
+        // `work.ready` (business topic). R9 enforcement.
+        let event = make_event("work.ready", Some("ralph"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, "loop.cancel", ""),
+            OriginCheck::Rejected {
+                topic: "work.ready".to_string(),
+                hat: Some("ralph".to_string()),
+                reason: "ralph_control_only"
+            },
+            "U10: hat=ralph with work.ready must be rejected (ralph_control_only)"
+        );
+
         // hat=ralph topic=LOOP_COMPLETE: completion promise is a control topic
         let event = make_event("LOOP_COMPLETE", Some("ralph"));
         assert_eq!(
