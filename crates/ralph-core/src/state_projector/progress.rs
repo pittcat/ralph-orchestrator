@@ -77,6 +77,13 @@ pub(crate) fn project_close_step(ctx: &mut ProjectionContext, step: &str) -> Res
 ///
 /// Plan ref: U3a of
 /// `docs/plans/2026-06-20-001-feat-serial-preset-precheck-as-linter-plan.md`.
+/// U3 of plan 2026-07-02-005: maintain `current_step` pointer
+/// after marking. The agent has finished this step; the
+/// `current_step` heading should NOT keep pointing at the
+/// just-closed step (that produced a "shadow" duplicate). Set
+/// it to `None` so the writer falls back to the `(none)`
+/// placeholder; the next `queue.advance` will repopulate with
+/// the next step.
 pub(crate) fn project_mark_step_completed(
     ctx: &mut ProjectionContext,
     payload: &serde_json::Value,
@@ -87,6 +94,9 @@ pub(crate) fn project_mark_step_completed(
         .ok_or_else(|| format!("mark_step_completed: missing pointer '{pointer}'"))?
         .to_string();
     push_completed(&mut ctx.progress_cache, &step);
+    // U3: clear current_step so it doesn't point at the just-closed
+    // step. Agent's next queue.advance will set it again.
+    ctx.progress_cache.current_step = None;
     write_progress(&ctx.progress_path, &ctx.progress_cache)
 }
 
@@ -288,5 +298,81 @@ mod tests {
             body.contains("(none)"),
             "empty snapshot must still produce a placeholder body, got:\n{body}"
         );
+    }
+
+    // U3 of plan 2026-07-02-005: `project_mark_step_completed`
+    // must clear `current_step` after pushing the closed step,
+    // so the markdown `## Current Step` heading does not point
+    // at the just-closed step. The agent's next queue.advance
+    // will repopulate the pointer.
+
+    fn build_ctx_for_test(dir: &std::path::Path) -> crate::state_projector::ProjectionContext {
+        use crate::state_projector::ProjectionContext;
+        let progress_path = dir.join("progress.md");
+        let tasks_path = dir.join("tasks.jsonl");
+        std::fs::write(&progress_path, "# Progress\n\n## Current Step\nstep-01\n").unwrap();
+        let mut ctx = ProjectionContext::new(
+            dir,
+            crate::config::StateProjectionConfig::default(),
+            false,
+        );
+        ctx.progress_cache =
+            ProgressSnapshot::parse(&std::fs::read_to_string(&progress_path).unwrap());
+        ctx
+    }
+
+    #[test]
+    fn u3_mark_step_completed_clears_current_step_pointer() {
+        use crate::state_projector::progress::project_mark_step_completed;
+        let dir = tempdir().unwrap();
+        let mut ctx = build_ctx_for_test(dir.path());
+        // Pre-condition: context picked up `step-01` from disk.
+        assert_eq!(ctx.progress_cache.current_step.as_deref(), Some("step-01"));
+
+        let payload = serde_json::json!({"step": "step-01"});
+        project_mark_step_completed(&mut ctx, &payload, None).unwrap();
+
+        assert_eq!(
+            ctx.progress_cache.current_step, None,
+            "U3: current_step must be cleared after marking so the \
+             writer does not keep the just-closed step as the heading"
+        );
+        assert!(
+            ctx.progress_cache.is_step_completed("step-01"),
+            "step-01 must be listed under Completed Steps"
+        );
+        let body = std::fs::read_to_string(&ctx.progress_path).unwrap();
+        assert!(
+            body.contains("## Current Step\n(none)\n"),
+            "rendered progress.md must show `(none)` placeholder, got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn u3_mark_step_completed_missing_step_pointer_returns_err() {
+        use crate::state_projector::progress::project_mark_step_completed;
+        let dir = tempdir().unwrap();
+        let mut ctx = build_ctx_for_test(dir.path());
+        // Empty payload → no `step` field → error.
+        let payload = serde_json::json!({});
+        let err = project_mark_step_completed(&mut ctx, &payload, None).unwrap_err();
+        assert!(
+            err.contains("missing pointer 'step'"),
+            "error must mention missing pointer, got: {err}"
+        );
+    }
+
+    #[test]
+    fn u3_mark_step_completed_consecutive_marks_idempotent_on_completed() {
+        use crate::state_projector::progress::project_mark_step_completed;
+        let dir = tempdir().unwrap();
+        let mut ctx = build_ctx_for_test(dir.path());
+        // First mark.
+        project_mark_step_completed(&mut ctx, &serde_json::json!({"step": "step-01"}), None).unwrap();
+        // Second mark of a DIFFERENT step — current_step stays None.
+        project_mark_step_completed(&mut ctx, &serde_json::json!({"step": "step-02"}), None).unwrap();
+        assert!(ctx.progress_cache.is_step_completed("step-01"));
+        assert!(ctx.progress_cache.is_step_completed("step-02"));
+        assert_eq!(ctx.progress_cache.current_step, None);
     }
 }
