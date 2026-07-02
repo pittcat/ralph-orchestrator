@@ -1,4 +1,4 @@
-# refactor: 拆分 event_loop/mod.rs (12071 行) 为按职责切分的子模块
+# refactor: 拆分 event_loop/mod.rs (12306 行) 为按职责切分的子模块
 
 > **目标**: 将 `crates/ralph-core/src/event_loop/mod.rs` 拆分为按职责切分的子模块,确保 **0 行为回归**,严格按 **串行 / 隔离 / TDD 闭环** 三约束推进。
 >
@@ -11,7 +11,7 @@
 
 ## Problem Frame
 
-`crates/ralph-core/src/event_loop/mod.rs` 已达 **12071 行**(`rtk fd -e rs -x wc -l` 实测),是项目里最大的单体文件:
+`crates/ralph-core/src/event_loop/mod.rs` 已达 **12306 行**(`wc -l` 实测,commit `5b55a283` 基线),是项目里最大的单体文件:
 - 内含 `impl EventLoop` 80+ 个方法、2 个 `Default`/`TerminationReason` impl、若干 free function
 - 已有 13 个空壳占位文件(`prompt.rs`、`dispatch.rs`、`wave.rs` 等只有 2-3 行 `pub mod xxx;`)等待填充
 - 已有部分拆出的子模块(`loop_state.rs` 2825 行、`rejection.rs` 1716 行、`review_step_state.rs` 1448 行)但 mod.rs 主体未动
@@ -37,7 +37,7 @@
 - 不拆 `loop_state.rs`/`rejection.rs`/`review_step_state.rs` 这些已存在的子模块(它们有各自的演进计划)
 - 不改 stage 顺序、不改 stage pipeline wiring、不动 emit gate 机制
 - 不改公开 API 路径
-- 不动 `event_loop/tests/*`(54 个 test 文件保持不动,它们用 `use super::*` 拉 mod.rs 命名空间)
+- 不动 `event_loop/tests/*`(68 个 test 文件保持不动,它们用 `use super::*` 拉 mod.rs 命名空间)
 - 不动 `crates/ralph-cli/src/*` 对 event_loop 的引用(`policy_check.rs`、`loop_runner/{runner,hard_gate}.rs`、`tests/{hard_gate,hard_gate_payload_contract,legacy}.rs`)
 - 不引入新依赖
 
@@ -127,8 +127,8 @@ event_loop/
 ├── wave.rs         ── [U5 填充] wave context 构造 + isolated scope (5663-5946 行)
 ├── workflow_guard.rs ── [U6 填充] workflow_guard_completion (7244-7320 行)
 │
-└── tests/          ── 不动 (54 个测试文件)
-    └── ... (54 files)
+└── tests/          ── 不动 (68 个测试文件)
+    └── ... (68 files)
 ```
 
 ### 拆分单元 (Implementation Units)
@@ -340,7 +340,7 @@ event_loop/
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| 拆分中误改方法签名导致回归 | Medium | High | KTD-5: mirror-then-delete,签名冻结;每个 Unit 都跑 `event_loop::tests::*` 全集(54 个测试文件) |
+| 拆分中误改方法签名导致回归 | Medium | High | KTD-5: mirror-then-delete,签名冻结;每个 Unit 都跑 `event_loop::tests::*` 全集(68 个测试文件) |
 | `impl EventLoop` 块分散导致 Borrow Checker 报错 | High | Medium | KTD-3: impl 块全部保留在 mod.rs,只迁出 free function,thin wrapper 转发 |
 | 公开 API 路径意外变更 | Low | High | KTD-2: 严格冻结 `pub use` 列表;不改 `lib.rs:141-148` 导出 |
 | 单元间代码意外重叠 | Low | Medium | 串行执行 + 每 Unit 仅迁移指定行号范围;`git diff` 仅显示新子模块文件 + mod.rs 删除段 |
@@ -355,7 +355,7 @@ event_loop/
 - **`crates/ralph-cli/src/loop_runner/*`**: 引用 `event_loop::*` 公开 API,本 plan 不修改
 - **`crates/ralph-cli/src/policy_check.rs`**: 同上
 - **`crates/ralph-cli/src/loop_runner/tests/*`**: 同上
-- **`crates/ralph-core/src/event_loop/tests/*`**(54 个 test 文件): 全部 `use super::*` 拉 mod.rs 命名空间,本 plan 不修改
+- **`crates/ralph-core/src/event_loop/tests/*`**(68 个 test 文件): 全部 `use super::*` 拉 mod.rs 命名空间,本 plan 不修改
 - **CI 影响**: 无 — `cargo nextest run` 入口不变,只是 mod.rs 文件缩小
 - **下游 preset/event_topology**: 无 — impl 块保留在 mod.rs,运行时行为不变
 
@@ -369,30 +369,29 @@ event_loop/
 
 ## Source & Research
 
-- **既有 modules 列表**(2026-07-01 实测):
+- **既有 modules 列表**(2026-07-02 实测,基于 commit `5b55a283`):
   ```
-  12071 crates/ralph-core/src/event_loop/mod.rs
-  2825 crates/ralph-core/src/event_loop/loop_state.rs
-  1716 crates/ralph-core/src/event_loop/rejection.rs
-  1448 crates/ralph-core/src/event_loop/review_step_state.rs
+  12306 crates/ralph-core/src/event_loop/mod.rs
+   2850 crates/ralph-core/src/event_loop/loop_state.rs
+   1716 crates/ralph-core/src/event_loop/rejection.rs
+   1448 crates/ralph-core/src/event_loop/review_step_state.rs
   ```
-- **占位文件列表**(2-3 行):
+- **空壳占位文件列表**(3 行 `pub mod xxx;`,需 U1/U2/U4/U5/U6 填充):
   ```
-  226 event_loop/diagnostics.rs
-  3 event_loop/dispatch.rs
-  152 event_loop/lifecycle.rs
-  152 event_loop/loop_state_active.rs
-  152 event_loop/loop_state_history.rs
-  152 event_loop/rejection_envelope.rs
-  152 event_loop/rejection_payload.rs
-  152 event_loop/review_step_gate.rs
-  3 event_loop/process.rs
-  3 event_loop/prompt.rs
-  152 event_loop/flow_lifecycle.rs
-  3 event_loop/wave.rs
-  3 event_loop/workflow_guard.rs
+    3 event_loop/diagnostics.rs
+    3 event_loop/dispatch.rs
+    3 event_loop/process.rs
+    3 event_loop/prompt.rs
+    3 event_loop/wave.rs
+    3 event_loop/workflow_guard.rs
   ```
-- **既有子模块**:`policy.rs`(129 行 free function 容器)、`types.rs`(18532 行)、`stage_pipeline.rs`(372 行)、`flow_declaration.rs`(219 行)
+- **既有 / 已完成的子模块**(本 plan 不动):`policy.rs`(129 行 free function 容器)、`types.rs`(~18K 行)、`stage_pipeline.rs`(411 行)、`flow_declaration.rs`(219 行)、`emit_gate.rs`(131 行)、`emit_schema_gate.rs`(73 行)、`audit.rs`(188 行)、`recovery_finalizer.rs`(264 行)、`repair_flow.rs`(223 行)、`rejection_kind.rs`(197 行)、`step_close_obligation.rs`(191 行)、`idempotent_wiring.rs`(154 行)、`legacy_task_relocate.rs`(140 行)、`plan_blocked_reason.rs`(118 行)、`repair_stream_sink.rs`(118 行)、`termination_impl.rs`(73 行)、`lifecycle.rs`(19 行,公开 API 入口)、`verdict.rs`、`termination.rs`、`stages`
+- **私有未启用占位文件**(mod.rs 未声明,2 行,本 plan 严格不启用,保持原状):`flow_lifecycle.rs` / `loop_state_active.rs` / `loop_state_history.rs` / `rejection_envelope.rs` / `rejection_payload.rs` / `review_step_gate.rs`
+- **测试目录实测文件数**:`crates/ralph-core/src/event_loop/tests/` 下 **68 个文件**(包含子目录 `common/`、`active_hat.rs` 等);所有 test 文件 `use super::*` 拉 mod.rs 命名空间,本 plan 不修改
+- **mod.rs 公开 API 路径现状**(2026-07-02 实测,本 plan 冻结不变):
+  - `pub use lifecycle::build_state_ledger_from_env;`(mod.rs:62)
+  - `pub use termination_impl::{format_duration, termination_status_text};`(mod.rs:69)
+  - `lib.rs:141-148` 重新导出 `event_loop::{EventLoop, LoopState, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason, U2_REJECTION_RETRY_LIMIT, UserPrompt, rejection::*}`(冻结)
 - **CLAUDE.md 引用**:
   - HARD RULE 1 (测试入口必须 nextest)
   - HARD RULE 2 (默认并发)
@@ -404,7 +403,7 @@ event_loop/
 ## Plan Handoff
 
 执行流程:
-1. 创建 worktree:`ralph run --worktree --reuse-worktree --plan docs/plans/2026-07-01-001-refactor-event-loop-mod-split-plan.md`
+1. 创建 worktree:`ralph run --worktree --reuse-worktree --plan docs/plans/2026-07-01-001-refactor-event-loop-mod-split-plan.md`(遵循 CLAUDE.md HARD RULE 3,显式传 `--plan`,复用键 = plan basename `2026-07-01-001-refactor-event-loop-mod-split-plan`)
 2. 严格按 U1 → U2 → U3 → U4 → U5 → U6 → U7 → U8 串行执行,每 Unit 通过 `cargo nextest run -p ralph-core -- event_loop::<submodule>` 验证
 3. 所有 Unit 完成后跑 `./scripts/run-tests.sh`(全 workspace 基线,符合 CLAUDE.md HARD RULE)
 4. 单个 PR 提交(全 8 Unit 一并提交,因代码块互相隔离无 cross-unit conflict;若 PR review 要求拆细可拆为 8 个 commit,每个 Unit 一个 commit)

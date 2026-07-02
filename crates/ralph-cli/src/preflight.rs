@@ -962,21 +962,34 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
         let overlay_mapping = tasks_overlay
             .as_mapping()
             .ok_or_else(|| anyhow::anyhow!("hats.tasks must be a mapping when provided"))?;
+        let tasks_value = mapping_get(core_mapping, "tasks")
+            .cloned()
+            .unwrap_or_else(|| Value::Mapping(Mapping::new()));
+        let mut tasks_mapping = tasks_value
+            .as_mapping()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("core.tasks must be a mapping when provided"))?;
+
+        // `tasks.enabled` is preset opt-in: hat-only presets (e.g.
+        // ce-executor-pipeline) declare `enabled: false` without
+        // `coordinator_hats`. The operator's explicit declaration wins;
+        // when omitted (including after `default_core_value()` strips
+        // the framework placeholder), the preset value applies.
+        if let Some(enabled) = mapping_get(overlay_mapping, "enabled")
+            && mapping_get(&tasks_mapping, "enabled").is_none()
+        {
+            mapping_insert(&mut tasks_mapping, "enabled", enabled.clone());
+        }
+
         if let Some(coordinator_hats) = mapping_get(overlay_mapping, "coordinator_hats") {
-            let tasks_value = mapping_get(core_mapping, "tasks")
-                .cloned()
-                .unwrap_or_else(|| Value::Mapping(Mapping::new()));
-            let mut tasks_mapping = tasks_value
-                .as_mapping()
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("core.tasks must be a mapping when provided"))?;
             mapping_insert(
                 &mut tasks_mapping,
                 "coordinator_hats",
                 coordinator_hats.clone(),
             );
-            mapping_insert(core_mapping, "tasks", Value::Mapping(tasks_mapping));
         }
+
+        mapping_insert(core_mapping, "tasks", Value::Mapping(tasks_mapping));
     }
 
     if let Some(event_loop_overlay) = mapping_get(hats_mapping, "event_loop") {
@@ -1471,6 +1484,10 @@ event_loop:
             config.event_loop.mechanism.is_none(),
             "legacy event_loop.mechanism must also be absent"
         );
+        assert!(
+            !config.tasks.enabled,
+            "ce-executor-pipeline declares tasks.enabled: false; merge must not leave framework default true"
+        );
     }
 
     /// U3 (Fix C): operator-supplied `mechanism` must win over the
@@ -1726,6 +1743,64 @@ hats:
             )
             .iter()
             .all(|finding| finding.id != "lint.preset.multi_hat_requires_isolated")
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_preserves_preset_tasks_enabled_when_operator_omits_it() {
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+tasks:
+  enabled: false
+hats:
+  reporter:
+    name: Reporter
+    publishes:
+      - report.done
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert!(
+            !config.tasks.enabled,
+            "hat-only preset `tasks.enabled: false` must survive merge when operator omits tasks"
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_preserves_preset_tasks_enabled_via_default_core_value() {
+        let core = crate::config_resolution::default_core_value()
+            .expect("default_core_value must succeed");
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+tasks:
+  enabled: false
+hats:
+  reporter:
+    name: Reporter
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert!(
+            !config.tasks.enabled,
+            "production-path merge (default_core_value -> merge_hats_overlay) must inherit \
+             preset `tasks.enabled: false`"
         );
     }
 

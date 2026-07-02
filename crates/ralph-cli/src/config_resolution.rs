@@ -93,6 +93,17 @@ pub(crate) fn default_core_value() -> Result<Value> {
         // opt-in. KTD-Drift e2e guard
         // `merge_hats_overlay_preserves_coord_join_mode_via_default_core_value`
         // pins this contract.
+        // 2026-07-02: strip `tasks.enabled` so hat-only presets can opt
+        // out of the runtime task system via `tasks.enabled: false`
+        // without tripping `lint.preset.coordinator_missing` when the
+        // operator ralph.yml omits the `tasks` subtree.
+        if let Some(tasks) = mapping
+            .get_mut(&Value::String("tasks".to_string()))
+            .and_then(|v| v.as_mapping_mut())
+        {
+            tasks.remove(&Value::String("enabled".to_string()));
+        }
+
         if let Some(telemetry) = mapping
             .get_mut(&Value::String("telemetry".to_string()))
             .and_then(|v| v.as_mapping_mut())
@@ -314,6 +325,17 @@ event_loop:
              block preset opt-in via `contains_key` guard in \
              `merge_hats_overlay`); got {:?}",
             coord_join_mode
+        );
+
+        let tasks_enabled = default_value
+            .get("tasks")
+            .and_then(|v| v.get("enabled"));
+        assert!(
+            tasks_enabled.is_none(),
+            "default core value must NOT contain tasks.enabled \
+             (framework default `true` would block preset opt-in via \
+             `contains_key` guard in `merge_hats_overlay`); got {:?}",
+            tasks_enabled
         );
     }
 }
