@@ -49,8 +49,17 @@ impl EventFixture {
 /// Combined evaluator. The runtime constructs one of these per
 /// loop, passes the declaration by `Arc` so the evaluator is
 /// `Send + Sync`, and calls `apply` on every accepted event.
+#[derive(Clone)]
 pub struct TransitionEvaluator {
     decl: Arc<PhaseAuthorityDeclaration>,
+}
+
+impl std::fmt::Debug for TransitionEvaluator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransitionEvaluator")
+            .field("decl", &self.decl)
+            .finish()
+    }
 }
 
 impl TransitionEvaluator {
