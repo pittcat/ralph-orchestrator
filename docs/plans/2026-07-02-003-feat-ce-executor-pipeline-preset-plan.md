@@ -78,7 +78,7 @@ origin: docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md
 - `logic-errors/base-runtime-must-not-parse-business-markdown.md` — **Rust 不解析计划 markdown**；LLM 理解计划/步骤，Rust 只校验事件 schema + 驱动状态机。本 preset 天然满足（`tasks.enabled:false`）。
 - `integration-issues/ce-executor-isolated-preset-dispatch-gap-*.md` — **(1) dead-end trigger**：每个被 `triggers` 的 topic 必须有上游 hat `publishes`，否则卡死→`loop.cancel`；6 维链每个 done 事件都要有唯一上游+下游。**(2) isolated 每轮只留第一个业务事件**：每 hat 每轮**只 emit 一个**，终态前不得有其他 emit。
 - `integration-issues/ce-executor-serial-mechanism-close-loop-*.md` — 终态/verdict：pass/fail 放**唯一**字段，`pass_with_residuals ≡ pass`；别让下游同时订阅一对姊妹终态。
-- `developer-experience/wac-rollout-tiered-gates-*.md` — **WAC egress 闭包 BFS `EGRESS_MAX_HOPS=4`**；本 preset 是 ~12 跳扁平长链，**几乎必然触发 `activation_egress_missing`**。ce-executor-serial 靠 coordinator 枢纽压短跳数才过；扁平直链没有枢纽 → 处置见 Risks（大概率 `topology_exempt` 白名单）。
+- `developer-experience/wac-rollout-tiered-gates-*.md` + 已核实源码 `crates/ralph-core/src/preset_lint/workflow_activation.rs` — **WAC egress 闭包 BFS `EGRESS_MAX_HOPS=8`**（2026-06-24 从 4 提到 8 以容纳 ce-executor-serial 评审链；终态集 = `completion_promise` + `required_events`，本 preset 即 `LOOP_COMPLETE` + `report.done`）。egress **逐 hat** 判：该 hat emit 的某个事件能否在 8 跳内到达终态。实测本链：`plan-reviewer`/`executor` 因兼发失败事件（`plan.blocked`/`work.failed`）直达 reporter→`report.done` 而快速闭合；6 维 hat 中 `correctness` 恰好 8 跳（过）、`testing` 及之后更近（过），**只有链首 `goal-alignment` 距 `report.done` 9 跳、超 1 跳 → 只它一个 hat 触发 `activation_egress_missing`**（连带同根因的 R2 re-emit-trap / R4 handoff-pairing）。处置见 Risks。
 - `developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md` — 测试只用 nextest；`ralph-cli` 走 cli-serial。
 - `2026-06-16-isolated-wave-stability-and-progress-steward.md` — `loop.stalled`→steward：emit 恰好一个恢复事件后退出、自我防重入、N 次后升级 `plan.blocked(reason=loop_stalled_max_iterations)`；`loop.stalled`/`task.resume` 是 runner 注入 system-control topic，需进内部 topic 白名单避免 lint 报无发布者。`human.guidance` 已删除，**不得**接入。
 
@@ -97,6 +97,7 @@ origin: docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md
 - **无 `fix_round`/re-review 循环**：对齐只记残留不回环。
 - **单一完成路径**：所有终止经 reporter → `report.done`(`required_events`) → `LOOP_COMPLETE`(`completion_promise`)。
 - **每维 hat 只读**（`disallowed_tools:["Edit"]`，仿 ce-executor-serial dimension-reviewer）：评审阶段不改代码，改代码留给 fixer。
+- **链长不是约束，不为迎合 lint 缩短拓扑**（用户 2026-07-02 明确）：单链路只要能终止（经 reporter → `report.done`/`LOOP_COMPLETE`）就是合法拓扑，无论 hat 数多少。WAC `activation_egress_missing`（8 跳上限）对链首维度是**已知误报**，用 `topology_exempt` 豁免，**不**为此合并 hat 或砍维度。
 
 ---
 
@@ -112,7 +113,7 @@ origin: docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md
 
 ### Deferred to Implementation
 
-- **WAC egress 闭包对 ~12 跳长链的实际判定与处置**（`topology_exempt` 白名单 vs 缩链 vs BFS 实际计跳）→ U1 骨架跑 lint 时定；预判需 `topology_exempt`。
+- **WAC egress 处置**（`EGRESS_MAX_HOPS=8`，已核实；实测仅链首 `goal-alignment` 距 `report.done` 9 跳、超 1 跳失败）→ U1 骨架跑 lint 坐实 finding 集合，首选把 preset 加进 `topology_exempt` 白名单。
 - 6 维 done 事件的确切 topic 名与 topic-format 合规（是否需 `topic_format_whitelist`）；维度产物文件落盘路径（遵守 `ephemeral_isolation`）→ U1/U5。
 - `workflow_contract.handoff_topic_seeds` 是否必填/是否需为编译期 const 超集 → U1 lint 暴露后定。
 - executor 跨语言测试入口发现（本仓库固定 `cargo nextest`）→ U4。
@@ -273,7 +274,7 @@ event_loop:
 
 **Approach:**
 - 结构照 `presets/en/merge-loop.yml`；6 维 hat 单链路接线（`work.done`→goal-alignment→…→adversarial→synthesizer）。
-- **WAC egress 是本单元核心风险**：~12 跳 > `EGRESS_MAX_HOPS=4`，预判 `activation_egress_missing`。先核实 BFS 实际计跳；若确认失败，加 `topology_exempt`（Rust `presets.rs` + `scripts/validate-builtin-presets.sh` 两处镜像）并写清「本 preset 是有意的扁平长链、确定能终止于 LOOP_COMPLETE」理由。
+- **WAC egress 是本单元要坐实的点**（`EGRESS_MAX_HOPS=8`，已核实源码）：实测只有链首维度 `goal-alignment` 距终态 `report.done` 9 跳、超 1 跳，仅它触发 `activation_egress_missing`（+ 同根因 R2/R4）；其余 hat 均在 8 跳内闭合。**这是 lint 跳数上限的误报，不是拓扑缺陷**——单链路只要能终止就是合法拓扑，与 hat 数无关，**不因此缩短链**。处置：把 preset 加进 `topology_exempt`（Rust `presets.rs` + `scripts/validate-builtin-presets.sh` 两处镜像 + 理由注释：有意的扁平单链路、确定终止于 `report.done`/`LOOP_COMPLETE`，egress finding 为已知误报）。
 - 需 `cargo build` 先跑（`build.rs` 生成 `$OUT_DIR/presets/*.yml`）再 `include_str!` 生效。
 
 **Patterns to follow:** `presets/en/merge-loop.yml`（骨架）、`presets/en/ce-executor-serial.yml`（hat 字段）。
@@ -536,7 +537,7 @@ event_loop:
 
 | Risk | Mitigation |
 |---|---|
-| **WAC egress 闭包（`EGRESS_MAX_HOPS=4`）对 ~12 跳扁平长链报 `activation_egress_missing`（本 preset 最大风险）** | U1 骨架先跑 lint 早暴露；核实 BFS 计跳后大概率加 `topology_exempt`（`presets.rs` + `validate-builtin-presets.sh` 两处镜像 + 理由注释：有意的扁平长链、确定终止于 LOOP_COMPLETE）。若不可豁免，退路是引入一个 review 枢纽 hat 压短跳数（偏离「扁平直链」，需回问用户） |
+| WAC egress（`EGRESS_MAX_HOPS=8`，已核实）：链首维度 `goal-alignment` 距终态 9 跳、超 1 跳，触发 `activation_egress_missing`（仅此一 hat，非全链） | **lint 跳数上限的误报，非拓扑缺陷**——单链路能终止即合法拓扑，与 hat 数无关。处置=把 preset 加进 `topology_exempt`（`presets.rs` + `validate-builtin-presets.sh` 两处镜像 + 理由注释）；U1 坐实 finding 集合。**不缩短链**（用户明确：拓扑长度不是问题） |
 | isolated 每轮只留第一个业务事件，某维/synthesizer/reporter 误 emit 多个致链断/终态丢失 | 各 hat instructions 明确「一轮一 emit」；U2 guard 断言 13 事件计数与顺序 |
 | 6 维 done 事件 topic-format 不合规（大小写/下划线） | U1 用纯 lowercase dotted 单 token 命名；必要时进 `topic_format_whitelist` |
 | hat 数多（13）致 preset 体积/维护成本上升 | 6 维 hat 共享 instructions 模板（U5），仅焦点段不同；synthesizer 汇总，避免每维重复合成逻辑 |
@@ -549,7 +550,7 @@ event_loop:
 ## Alternative Approaches Considered
 
 - **reviewer 单 hat + 并行 subagent（先前方案）**：hat 少、并行快，但依赖 Claude 后端 Task 原语、隐藏 subagent 行为、且 isolated 单 emit 与 subagent 协作需小心。**放弃**：用户改选串行维度 hat 链（事件更清晰、无后端依赖）。
-- **coordinator↔dimension 循环（ce-executor-serial 原样）**：跳数短（利于 WAC egress）、但引入 coordinator 状态机循环，偏离「单链路一环扣一环」。**放弃**：用户要扁平直链；WAC egress 用 `topology_exempt` 处置。
+- **coordinator↔dimension 循环（ce-executor-serial 原样）**：跳数短，但引入 coordinator 状态机循环，偏离「单链路一环扣一环」。**放弃**：用户要扁平直链；链长不是约束，WAC egress 用 `topology_exempt` 豁免（不改结构）。
 - **split-schema SSOT 文件**：authoring 分离清晰，但多同步点 + byte-equality 测试。**放弃**：inline schemas 更简（merge-loop 范式）。
 - **`tasks.enabled:true` + per-unit ledger**：有任务台账，但引入 unit/fix-unit 二阶段 + state_projection 复杂度。**放弃**：整份执行符合用户意图。
 

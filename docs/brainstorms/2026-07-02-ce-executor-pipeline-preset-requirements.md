@@ -122,7 +122,7 @@ topic: ce-executor-pipeline-preset
 
 - 依赖既有 preset 结构范式：`presets/en/merge-loop.yml`（isolated + `tasks.enabled:false` + 单 sequence flow 的最小骨架）与 `presets/en/ce-executor-serial.yml`（hat 字段形态、6 维度评审的 dimension-reviewer/synthesizer 模板）。
 - **实现 carrying cost（提醒）**：新增一个 builtin preset 需同步下游清单——`presets/en/<name>.yml`、`presets/manifest.yml`、`presets/index.json`、`crates/ralph-cli/src/presets.rs` 的 `PRESETS` 数组 + 计数/镜像测试、`scripts/ralph-zsh-plugin.zsh`、`AGENTS.md`/`CLAUDE.md`、`.cursor/rules/multi-hat-isolation.mdc`，最后跑全量 `./scripts/run-tests.sh`。
-- **WAC egress 风险**：egress 闭包 BFS `EGRESS_MAX_HOPS=4`，而本 preset 是 ~12 跳的扁平长链，极可能触发 `activation_egress_missing`；处置见开发计划（大概率需 `topology_exempt` 白名单放行，链确实能终止，属合法豁免）。
+- **WAC egress 风险（已核实源码、范围小）**：egress 闭包 BFS `EGRESS_MAX_HOPS=8`（不是 4），**逐 hat** 判「能否在 8 跳内到终态」。实测本链只有链首维度 `goal-alignment`（距 `report.done` 9 跳）超 1 跳失败，其余 hat 均闭合（`plan-reviewer`/`executor` 靠兼发失败事件直达 reporter）。处置见开发计划（首选把 preset 加进 `topology_exempt` 白名单，链确实终止，属合法豁免）。
 - **质量风险（已缓解）**：executor 的「全量测试全绿」是硬门槛（R7），坏代码在执行阶段就被拦；6 维度评审 + testing/correctness 维度实际跑测试是第二道。
 - 评审不再依赖 hat 内 spawn subagent（已放弃该方案），故不再有 subagent 后端可行性假设。
 
@@ -132,7 +132,7 @@ topic: ce-executor-pipeline-preset
 
 ### 留到计划阶段（Deferred to Planning）
 - [影响 R2/R8][技术] 6 个维度 hat 之间的具体事件名与 topic-format 合规（是否需进 `topic_format_whitelist`）、以及维度产物文件的落盘路径（遵守 `ephemeral_isolation`）。
-- [影响 R2][需研究] WAC egress 闭包对 ~12 跳长链的实际判定与处置（`topology_exempt` 白名单 vs 其它）。
+- [影响 R2] WAC egress 对链首 `goal-alignment`（距终态 9 跳 > `EGRESS_MAX_HOPS=8`）是 lint 跳数上限的**误报**（单链路拓扑合法、能终止），用 `topology_exempt` 白名单豁免，**不缩短链**（用户明确：拓扑长度不是问题）。
 - [影响 R6/R7][技术] executor 如何自动发现测试入口并断言全绿（对齐项目 `cargo nextest` 硬规则；跨语言泛化）。
 - [影响 R1/R3][技术] `tasks` 机制关闭（`tasks.enabled:false`）后 `state_projection`/`execution_contracts` 的最小配置。
 - [影响 R13][技术] 报告文件与各维度产物文件的落盘位置与格式。
