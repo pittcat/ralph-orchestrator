@@ -23,6 +23,8 @@ pub mod evaluator;
 pub mod plan_gate_helper;
 // U17: progress_gate skip helper.
 pub mod progress_gate_helper;
+// U19: progress.md projection on phase enter.
+pub mod progress_projection;
 
 pub use declaration::PhaseAuthorityDeclaration;
 pub use evaluator::{EventFixture, TransitionEvaluator};
