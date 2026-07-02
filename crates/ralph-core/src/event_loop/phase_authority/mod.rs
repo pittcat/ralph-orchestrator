@@ -33,6 +33,8 @@ pub mod step_parse;
 pub mod resume_budget;
 // U23: handle_phase_on_event_accepted free function.
 pub mod on_accepted;
+// U25: minimal second-preset fixture.
+pub mod second_preset_fixture;
 
 pub use on_accepted::{
     AcceptedEvent, PhaseSideEffects, handle_phase_on_event_accepted,
