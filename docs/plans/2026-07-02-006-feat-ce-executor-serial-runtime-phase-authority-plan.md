@@ -830,7 +830,7 @@ U1 config → U2 decl → U3 lint → U4 whitelist → U5 snapshot
 | 共享路径误伤 pipeline | U15 专测 names；FV pipeline 场景 |
 | 005 plan 冲突 | 本 plan 优先 |
 
-**金丝雀 plan:** `docs/plans/2026-06-20-001-feat-python-sort-algorithms-plan.md`
+**金丝雀 plan:** 由 operator 在 U28 完成后自选;本 plan 不锁死具体金丝雀路径(以往常用 `docs/plans/2026-06-20-001-feat-python-sort-algorithms-plan.md` 之类的隔离小 plan,但该具体文件不在当前仓库,需 operator 当场指定)。
 
 ---
 
