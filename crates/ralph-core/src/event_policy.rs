@@ -338,6 +338,9 @@ pub struct PolicyRuntimeState {
     /// `<X>` (pass) or `<X>.rejected` (fail) so a retry after
     /// rejection can re-emit the same payload.
     pub precheck_proposed_pending_keys: HashSet<String>,
+    /// U7 of plan 2026-07-02-005: last accepted `plan.blocked.reason`
+    /// for shipper strict-match runtime routing on `REVIEW_COMPLETE`.
+    pub last_plan_blocked_reason: Option<String>,
 }
 
 /// Dedup key for a precheck `<X>.proposed` candidate (U7 / R6).
@@ -606,6 +609,12 @@ impl PolicyRuntimeState {
                 );
             } else if !event.topic.ends_with(".proposed") {
                 state.prune_precheck_proposed_bucket(&event.topic);
+            }
+            if event.topic == "plan.blocked" {
+                state.last_plan_blocked_reason =
+                    crate::shipper_reason::extract_plan_blocked_reason(event.payload.as_deref());
+            } else if event.topic == "plan.complete" {
+                state.last_plan_blocked_reason = None;
             }
             // U1 (2026-06-18-004 plan, KTD1, symmetry fix):
             // when a `fix.applied` is replayed, also prune the
@@ -1840,7 +1849,23 @@ pub fn validate_event_with_hat(
         }
     }
 
+    // U7 of plan 2026-07-02-005: runtime shipper strict-match backstop.
+    if topic == "REVIEW_COMPLETE"
+        && let Some(finding) = crate::shipper_reason::check_review_complete_shipper_routing(
+            payload,
+            state.last_plan_blocked_reason.as_deref(),
+        )
+    {
+        findings.push(finding);
+    }
+
     if findings.is_empty() {
+        if topic == "plan.blocked" {
+            state.last_plan_blocked_reason =
+                crate::shipper_reason::extract_plan_blocked_reason(payload);
+        } else if topic == "plan.complete" {
+            state.last_plan_blocked_reason = None;
+        }
         return PolicyDecision::Accept;
     }
 

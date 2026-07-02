@@ -40,6 +40,7 @@ mod hat_registry;
 mod hatless_ralph;
 pub mod hooks;
 pub mod recovery_runtime;
+pub mod shipper_reason;
 pub use emit_schema_hint::{
     build_publish_emit_section, fix_hint_for_hat_topic, format_emit_json_example,
 };

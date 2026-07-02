@@ -1,0 +1,79 @@
+# 2026-07-02-005 BP0-3: progress.md stale mirror → U6 disk refresh
+#
+# Disk progress.md already lists completed steps; in-memory snapshot
+# starts cold/empty. StepHandoff must reconcile from disk before
+# rejecting plan.complete (175407 shape).
+
+name: ce_executor_serial_progress_stale_terminal
+description: U6 stale progress refresh — plan.complete accepted when disk progress is ahead of snapshot
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  event_loop:
+    execution_mode: isolated
+    state_projection:
+      enabled: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        review.complete:
+          payload: json_object
+          required_fields:
+            - plan_name
+            - task_id
+            - task_key
+            - step
+            - verdict
+            - fix_plan_file
+        plan.complete:
+          payload: json_object
+          required_fields:
+            - plan_name
+            - completed_steps
+            - task_id
+            - task_key
+            - step
+            - verdict
+  hats:
+    review-synthesizer:
+      subscribes_to: [work.done]
+      publishes: [review.complete]
+    coordinator:
+      subscribes_to: [review.complete]
+      publishes: [plan.complete]
+
+fixture_files:
+  - path: .ralph/agent/progress.md
+    content: |
+      ## Completed Steps
+      - step-01
+      - step-02
+  - path: .ralph/agent/tasks.jsonl
+    content: |
+      {"id":"stale-task-02","title":"step-02","key":"ce-executor:stale-demo:step-02:u2","status":"closed","priority":1,"blocked_by":[],"loop_id":null,"owner_hat_id":null,"created":"2024-01-01T00:00:00Z"}
+
+mock_responses:
+  - |
+    <event topic="review.complete">
+    {"plan_name":"stale-demo","task_id":"stale-finalize","task_key":"ce-executor:stale-demo:finalize","step":"finalize","verdict":"pass_with_residuals","fix_plan_file":""}
+    </event>
+  - |
+    <event topic="plan.complete">
+    {"plan_name":"stale-demo","completed_steps":["step-01","step-02"],"task_id":"stale-task-02","task_key":"ce-executor:stale-demo:step-02:u2","step":"step-02","verdict":"pass_with_residuals","final_findings_count":0,"fix_round":0}
+    </event>
+  - |
+    waiting.
+  - |
+    waiting.
+
+expected:
+  iterations: 4
+  events:
+    - topic: review.complete
+    - topic: plan.complete
+  absent_events:
+    - topic: plan.blocked
+  completion: false

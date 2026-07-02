@@ -1,0 +1,54 @@
+# 2026-07-02-005 U7 runtime: non-recoverable plan.blocked blocks pass promotion
+
+name: ce_executor_serial_shipper_hard_fail_promotion
+description: U7 shipper runtime — non-whitelist reason cannot promote to REVIEW_COMPLETE pass
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  event_loop:
+    execution_mode: isolated
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        plan.blocked:
+          payload: json_object
+          required_fields: [reason]
+        REVIEW_COMPLETE:
+          payload: json_object
+          required_fields: [pass_or_fail, verdict]
+  hats:
+    coordinator:
+      subscribes_to: [work.done]
+      publishes: [plan.blocked]
+    shipper:
+      subscribes_to: [plan.blocked]
+      publishes: [REVIEW_COMPLETE]
+
+mock_responses:
+  - |
+    <event topic="plan.blocked">
+    {"plan_name":"hf-demo","reason":"stall_no_events recovery: progress-steward did not advance","task_id":"t1","task_key":"k1"}
+    </event>
+  - |
+    <event topic="REVIEW_COMPLETE">
+    {"plan_name":"hf-demo","verdict":"pass_with_residuals","pass_or_fail":"pass","residual_findings_summary":"incorrect pass promotion"}
+    </event>
+  - |
+    <event topic="REVIEW_COMPLETE">
+    {"plan_name":"hf-demo","verdict":"fail","pass_or_fail":"fail","residual_findings_summary":"plan.blocked with hard-fail reason"}
+    </event>
+  - |
+    waiting.
+
+expected:
+  iterations: 4
+  events:
+    - topic: plan.blocked
+    - topic: REVIEW_COMPLETE
+  event_topic_counts:
+    - topic: REVIEW_COMPLETE
+      count: 1
+  completion: false

@@ -1,177 +1,185 @@
-# 2026-07-02-005 BDD-1: pass_with_residuals terminal path
+# 2026-07-02-005 BDD-1: pass_with_residuals terminal path (gate-enabled)
 #
-# Plan 2026-07-02-005 Final Verification BDD-1: 覆盖
-# `ce-executor-serial` 终态收口的 pass_with_residuals 路径
-# (140149 root cause):
-#
-#   work.start → plan.ready (step-01)
-#     → work.done (step-01) → queue.advance (step-01 → step-02)
-#     → work.done (step-02) → plan.complete (verdict=pass_with_residuals,
-#       completed_steps=[step-01, step-02])
-#     → REVIEW_COMPLETE (pass)
-#     → report.done
-#     → LOOP_COMPLETE
-#
-# BP0-1 修复:plan.complete(payload.completed_steps) 经 U1
-# progress gate (Current Step=None + completed_steps 全部在
-# snapshot) 放行;U2 plan-level terminal 已置位;U5/U6
-# 接线无 false reject;最终 LOOP_COMPLETE 仅一次 (U12 拒绝
-# 重复 emit)。
+# Exercises production gate stack: state_projection + event_policy +
+# U1/U2/U5/U6 wiring + U12 completion_after_terminal.
 
 name: ce_executor_serial_pass_with_residuals_terminal
-description: ce-executor-serial pass_with_residuals 路径 — plan.complete 入账 → REVIEW_COMPLETE(pass) → report.done → LOOP_COMPLETE ×1 (140149 修复)
+description: ce-executor-serial pass_with_residuals — plan.complete 入账 → LOOP_COMPLETE ×1 (140149)
 
 config:
   prompt_file: PROMPT.md
   max_iterations: 16
+  event_loop:
+    execution_mode: isolated
+    completion_promise: "LOOP_COMPLETE"
+    required_events: ["report.done"]
+    state_projection:
+      enabled: true
+      actions_chain:
+        work.done:
+          - kind: close_task
+            task_id: "task_id"
+            step: "step"
+          - kind: mark_step_completed
+            step: "step"
+        plan.complete:
+          - kind: plan_complete
+            final_step: "step"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      terminal_topics:
+        - "LOOP_COMPLETE"
+      business_topics:
+        - "plan.complete"
+        - "plan.blocked"
+        - "REVIEW_COMPLETE"
+        - "report.done"
+        - "work.done"
+        - "review.complete"
+      completion_after_terminal:
+        duplicate_terminal: reject
+        business_after_completion: reject
+        write_diagnostic_event: true
+      schemas:
+        work.done:
+          payload: json_object
+          required_fields: [plan_name, task_id, task_key, step]
+        review.complete:
+          payload: json_object
+          required_fields:
+            - plan_name
+            - task_id
+            - task_key
+            - step
+            - verdict
+            - fix_plan_file
+        plan.complete:
+          payload: json_object
+          required_fields:
+            - plan_name
+            - completed_steps
+            - task_id
+            - task_key
+            - step
+            - verdict
+        REVIEW_COMPLETE:
+          payload: json_object
+          required_fields: [pass_or_fail, verdict]
+        report.done:
+          payload: json_object
+          required_fields: [plan_name, report_path]
+        LOOP_COMPLETE:
+          payload: json_object
+          required_fields: [plan_name, reason]
   hats:
     coordinator:
-      subscribes_to:
-        - work.start
-      publishes:
-        - plan.ready
-        - plan.blocked
-        - plan.complete
+      subscribes_to: [work.start]
+      publishes: [plan.ready, plan.blocked, plan.complete, queue.advance]
     executor:
-      subscribes_to:
-        - plan.ready
-      publishes:
-        - work.done
-        - work.failed
-        - queue.advance
+      subscribes_to: [plan.ready]
+      publishes: [work.done, work.failed, queue.advance]
     review-synthesizer:
-      subscribes_to:
-        - work.done
-      publishes:
-        - review.complete
-        - review.passed
+      subscribes_to: [work.done]
+      publishes: [review.complete, review.passed]
     shipper:
-      subscribes_to:
-        - plan.complete
-        - plan.blocked
-      publishes:
-        - REVIEW_COMPLETE
+      subscribes_to: [plan.complete, plan.blocked]
+      publishes: [REVIEW_COMPLETE]
     reporter:
-      subscribes_to:
-        - REVIEW_COMPLETE
-      publishes:
-        - report.done
-        - LOOP_COMPLETE
+      subscribes_to: [REVIEW_COMPLETE]
+      publishes: [report.done, LOOP_COMPLETE]
+
+fixture_files:
+  - path: .ralph/agent/progress.md
+    content: |
+      ## Completed Steps
+  - path: .ralph/agent/tasks.jsonl
+    content: |
+      {"id":"pwr-task-01","title":"step-01","key":"ce-executor:pwr-demo:step-01:u1-impl","status":"open","priority":1,"blocked_by":[],"loop_id":null,"owner_hat_id":null,"created":"2024-01-01T00:00:00Z"}
+      {"id":"pwr-task-02","title":"step-02","key":"ce-executor:pwr-demo:step-02:u2-impl","status":"open","priority":1,"blocked_by":[],"loop_id":null,"owner_hat_id":null,"created":"2024-01-01T00:00:00Z"}
+
 mock_responses:
-  # 1) coordinator → plan.ready(step-01)
-  - |
-    <event topic="plan.ready">
-    plan_name: "pwr-demo"
-    step: "step-01"
-    task_id: "pwr-task-01"
-    task_key: "ce-executor:pwr-demo:step-01:u1-impl"
-    complexity: "small"
-    </event>
-  # 2) executor → work.done(step-01)
-  - |
-    <event topic="work.done">
-    plan_name: "pwr-demo"
-    step: "step-01"
-    task_id: "pwr-task-01"
-    task_key: "ce-executor:pwr-demo:step-01:u1-impl"
-    </event>
-  # 3) coordinator → queue.advance(step-01 → step-02)
-  - |
-    <event topic="queue.advance">
-    plan_name: "pwr-demo"
-    completed_step: "step-01"
-    next_step: "step-02"
-    reviewed_task_id: "pwr-task-01"
-    reviewed_task_key: "ce-executor:pwr-demo:step-01:u1-impl"
-    </event>
-  # 4) coordinator → plan.ready(step-02)
-  - |
-    <event topic="plan.ready">
-    plan_name: "pwr-demo"
-    step: "step-02"
-    task_id: "pwr-task-02"
-    task_key: "ce-executor:pwr-demo:step-02:u2-impl"
-    complexity: "small"
-    </event>
-  # 5) executor → work.done(step-02)
-  - |
-    <event topic="work.done">
-    plan_name: "pwr-demo"
-    step: "step-02"
-    task_id: "pwr-task-02"
-    task_key: "ce-executor:pwr-demo:step-02:u2-impl"
-    </event>
-  # 6) review-synthesizer → review.complete(plan-level pass_with_residuals)
-  # fix_plan_file=null/empty → U2 plan-level terminal recorded.
-  - |
-    <event topic="review.complete">
-    plan_name: "pwr-demo"
-    task_id: "pwr-finalize"
-    task_key: "ce-executor:pwr-demo:finalize:u-synth"
-    step: "finalize"
-    verdict: "pass_with_residuals"
-    final_findings_count: 3
-    fix_plan_file: ""
-    </event>
-  # 7) coordinator → plan.complete (BP0-1: 之前被拒 4 次;
-  # U1 payload.completed_steps + U2 plan terminal 联合放行)
-  - |
-    <event topic="plan.complete">
-    plan_name: "pwr-demo"
-    completed_steps: ["step-01", "step-02"]
-    task_id: "pwr-task-02"
-    task_key: "ce-executor:pwr-demo:step-02:u2-impl"
-    step: "step-02"
-    verdict: "pass_with_residuals"
-    </event>
-  # 8) shipper → REVIEW_COMPLETE(pass)
-  - |
-    <event topic="REVIEW_COMPLETE">
-    plan_name: "pwr-demo"
-    verdict: "pass_with_residuals"
-    pass_or_fail: "pass"
-    residual_findings_summary: "all units passed with 3 residuals"
-    </event>
-  # 9) reporter → report.done
-  - |
-    <event topic="report.done">
-    plan_name: "pwr-demo"
-    report_path: ".ralph/agent/reports/pwr-demo.md"
-    awaiting_decision: false
-    </event>
-  # 10) reporter → LOOP_COMPLETE (唯一一次,U12 honor 后拒收重复)
-  - |
-    <event topic="LOOP_COMPLETE">
-    plan_name: "pwr-demo"
-    reason: "all_units_done"
-    </event>
-  # 11) reporter → 错发 2nd LOOP_COMPLETE — U12 必须 reject
-  - |
-    <event topic="LOOP_COMPLETE">
-    plan_name: "pwr-demo"
-    reason: "all_units_done"
-    </event>
-  # 12) reporter → 错发 report.done — U12 必须 reject
-  - |
-    <event topic="report.done">
-    plan_name: "pwr-demo"
-    report_path: ".ralph/agent/reports/pwr-demo-dup.md"
-    awaiting_decision: false
-    </event>
+  - text: |
+      <event topic="plan.ready">
+      {"plan_name":"pwr-demo","step":"step-01","task_id":"pwr-task-01","task_key":"ce-executor:pwr-demo:step-01:u1-impl","complexity":"small"}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"pwr-demo","step":"step-01","task_id":"pwr-task-01","task_key":"ce-executor:pwr-demo:step-01:u1-impl"}
+      </event>
+    hat: executor
+  - text: |
+      <event topic="plan.ready">
+      {"plan_name":"pwr-demo","step":"step-02","task_id":"pwr-task-02","task_key":"ce-executor:pwr-demo:step-02:u2-impl","complexity":"small"}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"pwr-demo","step":"step-02","task_id":"pwr-task-02","task_key":"ce-executor:pwr-demo:step-02:u2-impl"}
+      </event>
+    hat: executor
+  - text: |
+      <event topic="review.complete">
+      {"plan_name":"pwr-demo","task_id":"pwr-finalize","task_key":"ce-executor:pwr-demo:finalize:u-synth","step":"finalize","verdict":"pass_with_residuals","final_findings_count":3,"fix_plan_file":""}
+      </event>
+    hat: review-synthesizer
+  - text: |
+      <event topic="plan.complete">
+      {"plan_name":"pwr-demo","completed_steps":["step-01","step-02"],"task_id":"pwr-task-02","task_key":"ce-executor:pwr-demo:step-02:u2-impl","step":"step-02","verdict":"pass_with_residuals","final_findings_count":3,"fix_round":0}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="REVIEW_COMPLETE">
+      {"plan_name":"pwr-demo","verdict":"pass_with_residuals","pass_or_fail":"pass","residual_findings_summary":"all units passed with 3 residuals"}
+      </event>
+    hat: shipper
+  - text: |
+      <event topic="report.done">
+      {"plan_name":"pwr-demo","report_path":".ralph/agent/reports/pwr-demo.md","awaiting_decision":false}
+      </event>
+    hat: reporter
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      {"plan_name":"pwr-demo","reason":"all_units_done"}
+      </event>
+    hat: reporter
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      {"plan_name":"pwr-demo","reason":"all_units_done"}
+      </event>
+    hat: reporter
+  - text: |
+      <event topic="report.done">
+      {"plan_name":"pwr-demo","report_path":".ralph/agent/reports/pwr-demo-dup.md","awaiting_decision":false}
+      </event>
+    hat: reporter
+
+checkpoints:
+  - after_response: 9
+    honor_completion: true
+  - after_response: 10
+    completion_rejected: true
+  - after_response: 11
+    completion_rejected: true
 
 expected:
-  iterations: 12
+  iterations: 11
   events:
-    - topic: plan.ready
-    - topic: work.done
-    - topic: queue.advance
     - topic: plan.ready
     - topic: work.done
     - topic: review.complete
     - topic: plan.complete
     - topic: REVIEW_COMPLETE
     - topic: report.done
+  event_topic_counts:
+    - topic: LOOP_COMPLETE
+      count: 1
+    - topic: report.done
+      count: 1
   absent_events:
     - topic: plan.blocked
     - topic: work.failed
+    - topic: queue.advance
   completion: true

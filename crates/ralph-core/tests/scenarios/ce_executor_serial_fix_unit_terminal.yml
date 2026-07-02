@@ -1,147 +1,151 @@
-# 2026-07-02-005 BDD-2: fix-unit terminal path
-#
-# Plan 2026-07-02-005 Final Verification BDD-2: 覆盖
-# `ce-executor-serial` 终态收口的 fix-unit 路径
-# (2026-06-30-001 P0 root cause):
-#
-#   work.start → plan.ready (step-01)
-#     → work.done (step-01) → review.failed (with fix_plan_file)
-#     → work.ready (fix-01) → work.done (fix-01)
-#     → plan.complete (step=fix-01, NOT work.ready)
-#     → REVIEW_COMPLETE → report.done → LOOP_COMPLETE
-#
-# 关键:fix-unit 完成后 coordinator 必须 emit `plan.complete`
-# (不是 `work.ready`);U2 fix-* step 豁免;U7 shipper 白名单
-# 让 fix_plan_file 类 reason 可入账。
+# 2026-07-02-005 BDD-2: fix-unit terminal path (gate-enabled)
 
 name: ce_executor_serial_fix_unit_terminal
-description: ce-executor-serial fix-unit 路径 — plan.complete (非 work.ready) 收口 fix 单元 → REVIEW_COMPLETE → report.done → LOOP_COMPLETE
+description: ce-executor-serial fix-unit — plan.complete(fix-*) 收口 → LOOP_COMPLETE ×1
 
 config:
   prompt_file: PROMPT.md
   max_iterations: 12
+  event_loop:
+    execution_mode: isolated
+    completion_promise: "LOOP_COMPLETE"
+    required_events: ["report.done"]
+    state_projection:
+      enabled: true
+      actions_chain:
+        work.done:
+          - kind: close_task
+            task_id: "task_id"
+            step: "step"
+          - kind: mark_step_completed
+            step: "step"
+        plan.complete:
+          - kind: plan_complete
+            final_step: "step"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      terminal_topics:
+        - "LOOP_COMPLETE"
+      business_topics:
+        - "plan.complete"
+        - "REVIEW_COMPLETE"
+        - "report.done"
+        - "work.done"
+        - "work.ready"
+        - "review.failed"
+      completion_after_terminal:
+        duplicate_terminal: reject
+        business_after_completion: reject
+        write_diagnostic_event: true
+      schemas:
+        work.done:
+          payload: json_object
+          required_fields: [plan_name, task_id, task_key, step]
+        work.ready:
+          payload: json_object
+          required_fields: [plan_name, task_id, task_key, step]
+        review.failed:
+          payload: json_object
+          required_fields:
+            - plan_name
+            - task_id
+            - task_key
+            - step
+            - fix_plan_file
+        plan.complete:
+          payload: json_object
+          required_fields:
+            - plan_name
+            - task_id
+            - task_key
+            - step
+            - verdict
+        REVIEW_COMPLETE:
+          payload: json_object
+          required_fields: [pass_or_fail, verdict]
+        report.done:
+          payload: json_object
+          required_fields: [plan_name, report_path]
+        LOOP_COMPLETE:
+          payload: json_object
+          required_fields: [plan_name, reason]
   hats:
     coordinator:
-      subscribes_to:
-        - work.start
-        - work.done
-      publishes:
-        - plan.ready
-        - plan.blocked
-        - plan.complete
-        - work.ready
+      subscribes_to: [work.start, work.done]
+      publishes: [plan.ready, plan.blocked, plan.complete, work.ready]
     executor:
-      subscribes_to:
-        - plan.ready
-        - work.ready
-      publishes:
-        - work.done
-        - work.failed
+      subscribes_to: [plan.ready, work.ready]
+      publishes: [work.done, work.failed]
     review-synthesizer:
-      subscribes_to:
-        - work.done
-      publishes:
-        - review.failed
+      subscribes_to: [work.done]
+      publishes: [review.failed]
     fixer:
-      subscribes_to:
-        - work.ready
-      publishes:
-        - work.done
+      subscribes_to: [work.ready]
+      publishes: [work.done]
     shipper:
-      subscribes_to:
-        - plan.complete
-        - plan.blocked
-      publishes:
-        - REVIEW_COMPLETE
+      subscribes_to: [plan.complete, plan.blocked]
+      publishes: [REVIEW_COMPLETE]
     reporter:
-      subscribes_to:
-        - REVIEW_COMPLETE
-      publishes:
-        - report.done
-        - LOOP_COMPLETE
+      subscribes_to: [REVIEW_COMPLETE]
+      publishes: [report.done, LOOP_COMPLETE]
+
+fixture_files:
+  - path: .ralph/agent/progress.md
+    content: |
+      ## Completed Steps
+  - path: .ralph/agent/tasks.jsonl
+    content: |
+      {"id":"fix-task-01","title":"step-01","key":"ce-executor:fix-terminal-demo:step-01:u1-impl","status":"open","priority":1,"blocked_by":[],"loop_id":null,"owner_hat_id":null,"created":"2024-01-01T00:00:00Z"}
+      {"id":"fix-task-fix01","title":"fix-01","key":"ce-executor:fix-terminal-demo:fix-01:u1","status":"open","priority":1,"blocked_by":[],"loop_id":null,"owner_hat_id":null,"created":"2024-01-01T00:00:00Z"}
 
 mock_responses:
-  # 1) coordinator → plan.ready (step-01)
-  - |
-    <event topic="plan.ready">
-    plan_name: "fix-terminal-demo"
-    step: "step-01"
-    task_id: "fix-task-01"
-    task_key: "ce-executor:fix-terminal-demo:step-01:u1-impl"
-    complexity: "small"
-    </event>
-  # 2) executor → work.done (step-01)
-  - |
-    <event topic="work.done">
-    plan_name: "fix-terminal-demo"
-    step: "step-01"
-    task_id: "fix-task-01"
-    task_key: "ce-executor:fix-terminal-demo:step-01:u1-impl"
-    </event>
-  # 3) review-synthesizer → review.failed (带 fix_plan_file)
-  # 注:本场景用 review.failed 演示 fix 链触发;
-  # plan-level review.complete 路径走 BDD-1。
-  - |
-    <event topic="review.failed">
-    plan_name: "fix-terminal-demo"
-    task_id: "fix-task-01"
-    task_key: "ce-executor:fix-terminal-demo:step-01:u1-impl"
-    step: "step-01"
-    fix_round: 1
-    safe_auto_count: 0
-    gated_manual_count: 1
-    findings_summary: "step-01 has 1 manual fix needed"
-    fix_plan_file: "docs/plans/fix-terminal-demo-fix.md"
-    </event>
-  # 4) coordinator → work.ready (fix-01)
-  - |
-    <event topic="work.ready">
-    plan_name: "fix-terminal-demo"
-    step: "fix-01"
-    task_id: "fix-task-fix01"
-    task_key: "ce-executor:fix-terminal-demo:fix-01:u1"
-    complexity: "small"
-    </event>
-  # 5) fixer → work.done (fix-01)
-  - |
-    <event topic="work.done">
-    plan_name: "fix-terminal-demo"
-    step: "fix-01"
-    task_id: "fix-task-fix01"
-    task_key: "ce-executor:fix-terminal-demo:fix-01:u1"
-    </event>
-  # 6) coordinator → plan.complete (fix-01 步骤, NOT work.ready)
-  # U2 修:fix-* step 走豁免;U7 shipper 白名单允许 plan.complete
-  - |
-    <event topic="plan.complete">
-    plan_name: "fix-terminal-demo"
-    completed_steps: 1
-    task_id: "fix-task-fix01"
-    task_key: "ce-executor:fix-terminal-demo:fix-01:u1"
-    step: "fix-01"
-    verdict: "pass"
-    </event>
-  # 7) shipper → REVIEW_COMPLETE
-  - |
-    <event topic="REVIEW_COMPLETE">
-    plan_name: "fix-terminal-demo"
-    verdict: "pass"
-    pass_or_fail: "pass"
-    residual_findings_summary: "fix-01 applied successfully"
-    </event>
-  # 8) reporter → report.done
-  - |
-    <event topic="report.done">
-    plan_name: "fix-terminal-demo"
-    report_path: ".ralph/agent/reports/fix-terminal-demo.md"
-    awaiting_decision: false
-    </event>
-  # 9) reporter → LOOP_COMPLETE
-  - |
-    <event topic="LOOP_COMPLETE">
-    plan_name: "fix-terminal-demo"
-    reason: "fix_unit_terminal_reached"
-    </event>
+  - text: |
+      <event topic="plan.ready">
+      {"plan_name":"fix-terminal-demo","step":"step-01","task_id":"fix-task-01","task_key":"ce-executor:fix-terminal-demo:step-01:u1-impl","complexity":"small"}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"fix-terminal-demo","step":"step-01","task_id":"fix-task-01","task_key":"ce-executor:fix-terminal-demo:step-01:u1-impl"}
+      </event>
+    hat: executor
+  - text: |
+      <event topic="review.failed">
+      {"plan_name":"fix-terminal-demo","task_id":"fix-task-01","task_key":"ce-executor:fix-terminal-demo:step-01:u1-impl","step":"step-01","fix_round":1,"safe_auto_count":0,"gated_manual_count":1,"findings_summary":"step-01 has 1 manual fix needed","fix_plan_file":"docs/plans/fix-terminal-demo-fix.md"}
+      </event>
+    hat: review-synthesizer
+  - text: |
+      <event topic="work.ready">
+      {"plan_name":"fix-terminal-demo","step":"fix-01","task_id":"fix-task-fix01","task_key":"ce-executor:fix-terminal-demo:fix-01:u1","complexity":"small"}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"fix-terminal-demo","step":"fix-01","task_id":"fix-task-fix01","task_key":"ce-executor:fix-terminal-demo:fix-01:u1"}
+      </event>
+    hat: fixer
+  - text: |
+      <event topic="plan.complete">
+      {"plan_name":"fix-terminal-demo","completed_steps":["fix-01"],"task_id":"fix-task-fix01","task_key":"ce-executor:fix-terminal-demo:fix-01:u1","step":"fix-01","verdict":"pass","final_findings_count":0,"fix_round":1}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="REVIEW_COMPLETE">
+      {"plan_name":"fix-terminal-demo","verdict":"pass","pass_or_fail":"pass","residual_findings_summary":"fix-01 applied successfully"}
+      </event>
+    hat: shipper
+  - text: |
+      <event topic="report.done">
+      {"plan_name":"fix-terminal-demo","report_path":".ralph/agent/reports/fix-terminal-demo.md","awaiting_decision":false}
+      </event>
+    hat: reporter
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      {"plan_name":"fix-terminal-demo","reason":"fix_unit_terminal_reached"}
+      </event>
+    hat: reporter
 
 expected:
   iterations: 9
@@ -150,10 +154,12 @@ expected:
     - topic: work.done
     - topic: review.failed
     - topic: work.ready
-    - topic: work.done
     - topic: plan.complete
     - topic: REVIEW_COMPLETE
     - topic: report.done
+  event_topic_counts:
+    - topic: LOOP_COMPLETE
+      count: 1
   absent_events:
     - topic: plan.blocked
     - topic: work.failed

@@ -160,6 +160,10 @@ struct ExpectedYaml {
     /// itself never mutates state from `assert_state`).
     #[serde(default)]
     assert_state: Vec<AssertionYaml>,
+    /// 2026-07-02-005 plan Final Verification: assert accepted
+    /// event counts per topic (from `ProcessedEvents::accepted_events`).
+    #[serde(default)]
+    event_topic_counts: Vec<EventTopicCountYaml>,
 }
 
 /// One entry in `ExpectedYaml.assert_state` (2026-06-20-002 plan U1).
@@ -418,6 +422,14 @@ struct EventYaml {
     topic: String,
 }
 
+/// Assert exact count of accepted events for a topic across the run.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct EventTopicCountYaml {
+    topic: String,
+    count: usize,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct CheckpointYaml {
     after_response: usize,
@@ -425,6 +437,10 @@ struct CheckpointYaml {
     workflow_progress: Vec<WorkflowProgressYaml>,
     #[serde(default)]
     completion_rejected: bool,
+    /// After this response, call `check_completion_event()` and assert
+    /// the loop honors `LOOP_COMPLETE` (sets `completion_honored`).
+    #[serde(default)]
+    honor_completion: bool,
     /// Sleep this many milliseconds after evaluating the checkpoint.
     /// Used by flow-reliability scenarios that need real wall-clock
     /// staleness to trigger the incomplete-wave gate.
@@ -557,6 +573,8 @@ fn run_scenario_with_snapshots(
     // sync with `last_prompts` (hat-scoped last-only map) but
     // preserves the per-iteration pairing `assert_state` needs.
     let mut last_prompt_for_iter: Option<(String, String)> = None;
+    let mut accepted_topic_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for (idx, response) in yaml.mock_responses.iter().enumerate() {
         // Simulate hat execution so isolated mode scope enforcement is active.
@@ -597,7 +615,12 @@ fn run_scenario_with_snapshots(
             }
         }
 
-        let _result = event_loop.process_events_from_jsonl();
+        let result = event_loop.process_events_from_jsonl().unwrap();
+        for e in &result.accepted_events {
+            *accepted_topic_counts
+                .entry(e.topic.to_string())
+                .or_insert(0) += 1;
+        }
 
         // Evaluate checkpoints tied to this response index (1-based in YAML)
         let mut sleep_after_response = 0u64;
@@ -622,6 +645,7 @@ fn run_scenario_with_snapshots(
                 }
 
                 if checkpoint.completion_rejected {
+                    let honored_before = event_loop.state().completion_honored;
                     let reason = event_loop.check_completion_event();
                     // 2026-06-26 plan U6: verdict_fail is a
                     // structural rejection — the loop returns
@@ -635,11 +659,29 @@ fn run_scenario_with_snapshots(
                     // and a structural `CompletionStuck` satisfy
                     // it. Recoverable rejection is still
                     // `None` (correction block queued).
-                    let completion_honoured =
-                        matches!(reason, Some(TerminationReason::CompletionPromise));
+                    //
+                    // When completion was already honored on a
+                    // prior response, `check_completion_event`
+                    // is idempotent and returns
+                    // `CompletionPromise` again — that still
+                    // satisfies "this response did not newly
+                    // honor a rejected duplicate".
+                    let newly_honoured = matches!(reason, Some(TerminationReason::CompletionPromise))
+                        && !honored_before;
                     assert!(
-                        !completion_honoured,
+                        !newly_honoured,
                         "{}: After response {}, expected LOOP_COMPLETE to be rejected, but got {:?}",
+                        yaml.name,
+                        idx + 1,
+                        reason
+                    );
+                }
+
+                if checkpoint.honor_completion {
+                    let reason = event_loop.check_completion_event();
+                    assert!(
+                        matches!(reason, Some(TerminationReason::CompletionPromise)),
+                        "{}: After response {}, expected LOOP_COMPLETE to be honored, but got {:?}",
                         yaml.name,
                         idx + 1,
                         reason
@@ -831,6 +873,15 @@ fn run_scenario_with_snapshots(
             "{}: Expected LOOP_COMPLETE to be rejected, but got {:?}",
             yaml.name,
             reason
+        );
+    }
+
+    for etc in &yaml.expected.event_topic_counts {
+        let actual = accepted_topic_counts.get(&etc.topic).copied().unwrap_or(0);
+        assert_eq!(
+            actual, etc.count,
+            "{}: Expected topic '{}' to be accepted {} time(s), got {} (all counts: {:?})",
+            yaml.name, etc.topic, etc.count, actual, accepted_topic_counts
         );
     }
 
@@ -3048,6 +3099,30 @@ fn test_ce_executor_serial_pass_with_residuals_terminal() {
 fn test_ce_executor_serial_fix_unit_terminal() {
     let yaml = load_scenario(
         "tests/scenarios/ce_executor_serial_fix_unit_terminal.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_ce_executor_serial_progress_stale_terminal() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_serial_progress_stale_terminal.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_ce_executor_serial_shipper_recoverable_reasons() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_serial_shipper_recoverable_reasons.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_ce_executor_serial_shipper_hard_fail_promotion() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_serial_shipper_hard_fail_promotion.yml",
     );
     run_workflow_guard_scenario(yaml);
 }
