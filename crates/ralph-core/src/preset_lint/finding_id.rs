@@ -313,3 +313,29 @@ pub const FINDING_METADATA_RUNTIME_DRIFT: &str = "preset.metadata_runtime_drift"
 /// STRICT-MATCH marker. The lint is structural (Error) so the
 /// preset fails to load when the marker is removed.
 pub const FINDING_STRICT_REASON_ROUTING_MISSING: &str = "preset.strict_reason_routing_missing";
+
+// ──────────────────────────────────────────────────────────────────────────
+// 2026-07-02-006 plan U3: `mechanism.phase_authority` lint finding IDs
+// ──────────────────────────────────────────────────────────────────────────
+
+/// A transition under `mechanism.phase_authority.transitions`
+/// references a primitive id that is not in the engine-known
+/// whitelist. The runtime cannot evaluate the trigger, so the
+/// preset is rejected at load time. Always `Error` severity —
+/// adding a new primitive requires both this whitelist and a
+/// corresponding handler in `event_loop::phase_authority::primitives`.
+pub const FINDING_PHASE_AUTHORITY_UNKNOWN_PRIMITIVE: &str = "preset.phase_authority_unknown_primitive";
+
+/// A hat-only pipeline preset declares
+/// `mechanism.phase_authority` (either enabled or disabled).
+/// Per KTD1 the phase engine is opt-in for multi-phase
+/// coordination; hat-only pipelines must leave the block
+/// absent or `enabled: false`. Always `Error` severity.
+pub const FINDING_PHASE_AUTHORITY_PIPELINE_NOT_ALLOWED: &str =
+    "preset.phase_authority_pipeline_not_allowed";
+
+/// `mechanism.phase_authority.enabled: true` but the block
+/// carries no `phases` or no `transitions`. The engine has no
+/// state to track, so the lint surfaces the misconfiguration
+/// rather than letting the loop run inert. Always `Error`.
+pub const FINDING_PHASE_AUTHORITY_EMPTY: &str = "preset.phase_authority_empty";

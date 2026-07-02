@@ -31,6 +31,10 @@ pub mod hat_scope_invariant;
 pub mod metadata_runtime_drift;
 pub mod multi_hat;
 pub mod ownership;
+// 2026-07-02-006 plan U3: `mechanism.phase_authority` lint
+// rule family. Pure-YAML entry point; pairs with the
+// `WorkflowPhaseAuthority` engine.
+pub mod phase_authority;
 pub mod schema_parity;
 pub mod state_projection;
 pub mod strict_reason_routing;
@@ -39,6 +43,9 @@ pub mod workflow_activation;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod phase_authority_tests;
 
 pub use coordinator::check_coordinator_rules;
 pub use finding_id::{
