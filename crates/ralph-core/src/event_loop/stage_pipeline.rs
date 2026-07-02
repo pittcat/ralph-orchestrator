@@ -28,6 +28,14 @@ use crate::event_loop::stages::emit_schema_gate_stage::{
 };
 use ralph_proto::Event;
 
+#[cfg(test)]
+#[path = "stage_pipeline_phase_authority_tests.rs"]
+// 2026-07-02-006 plan U14: phase-authority pipeline test
+// module. The tests build the pipeline with a stub
+// `WorkflowPhaseAuthority::disabled()` and assert the stage
+// list ordering per KTD9.
+mod stage_pipeline_phase_authority_tests;
+
 /// A single stage in the emit pipeline.
 ///
 /// Implementations must be `Send` so the pipeline can be stored and
@@ -299,6 +307,38 @@ impl StagePipeline {
             Box::new(
                 crate::event_loop::stages::verdict_gate_stage::VerdictGateStage::new(verdict_flow),
             ),
+        ])
+    }
+
+    /// 2026-07-02-006 plan U14: phase-authority emit pipeline
+    /// for presets that opt into `mechanism.phase_authority`.
+    ///
+    /// The stage list mirrors `with_default_stages_for_loop_config`
+    /// with `PhaseAuthority` inserted between `EmitSchemaGate` and
+    /// `FlowStepScope`. Per KTD9 the phase stage must run **before**
+    /// the flow-scope stage so out-of-phase emits are rejected with
+    /// `phase_violation` (a more specific reason code) before the
+    /// flow scope rejects them as "step mismatch".
+    ///
+    /// The runtime owns the `Arc<WorkflowPhaseAuthority>`; this
+    /// builder only accepts the engine reference so U15 can wire
+    /// the active pipeline.
+    pub fn with_phase_authority_stages_for_loop_config(
+        flow: FlowDeclaration,
+        loop_config: Option<&EventLoopConfig>,
+        authority: std::sync::Arc<crate::event_loop::phase_authority::WorkflowPhaseAuthority>,
+    ) -> Self {
+        let schema_gate = match loop_config {
+            Some(cfg) => EmitSchemaGateStage::new(required_fields_from_loop_config(cfg)),
+            None => EmitSchemaGateStage::with_defaults(),
+        };
+        Self::new(vec![
+            Box::new(crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage::default()),
+            Box::new(schema_gate),
+            Box::new(crate::event_loop::stages::phase_authority_stage::PhaseAuthorityStage::new(authority)),
+            Box::new(crate::event_loop::stages::flow_step_scope_stage::FlowStepScopeStage::new(flow.clone())),
+            Box::new(crate::event_loop::stages::step_close_obligation_stage::StepCloseObligationStage::new(flow.clone())),
+            Box::new(crate::event_loop::stages::verdict_gate_stage::VerdictGateStage::new(flow)),
         ])
     }
 
