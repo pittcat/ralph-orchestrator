@@ -376,4 +376,37 @@ mod tests {
             "inline required_fields: [] should canonicalise as absent: {findings:?}"
         );
     }
+
+    #[test]
+    fn desugared_precheck_gate_publishes_have_schemas() {
+        use crate::config::RalphConfig;
+        let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+  precheck:
+    enabled: true
+    rules:
+      work.done:
+        prompt: ["ok"]
+        on_fail:
+          target: executor
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["task.start"]
+    publishes: ["work.done"]
+"#;
+        let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        config.normalize();
+        let findings = check_publishes_have_schema(&config, LintStrictness::Strict);
+        assert!(
+            findings.is_empty(),
+            "desugared precheck topics must have schemas injected by normalize(): {findings:?}"
+        );
+        let schemas = &config.event_loop.event_policy.as_ref().unwrap().schemas;
+        assert!(schemas.contains_key("work.done.proposed"));
+        assert!(schemas.contains_key("work.done.rejected"));
+    }
 }

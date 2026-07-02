@@ -920,6 +920,9 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
         if !yaml.config.event_loop.is_null() {
             config.event_loop = serde_yaml::from_value(yaml.config.event_loop.clone()).unwrap();
         }
+        // 2026-07-02-004: preset_lint and runtime both operate on the
+        // desugared graph (synthetic gate hats + `.proposed` rewrites).
+        config.normalize();
     });
 }
 
@@ -3010,5 +3013,19 @@ fn test_mechanism_scenario_replay_2026_06_26() {
 #[test]
 fn test_hat_routing_next_hop_regression() {
     let yaml = load_scenario("tests/scenarios/2026-07-02-hat-routing-next-hop.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-02-004 plan U5: gate pass path — proposed → gate → real event.
+#[test]
+fn test_precheck_gate_pass() {
+    let yaml = load_scenario("tests/scenarios/2026-07-02-precheck-gate-pass.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-02-004 plan U6 / AE2: retry budget exhaustion → plan.blocked.
+#[test]
+fn test_precheck_gate_exhaust() {
+    let yaml = load_scenario("tests/scenarios/2026-07-02-precheck-gate-exhaust.yml");
     run_workflow_guard_scenario(yaml);
 }

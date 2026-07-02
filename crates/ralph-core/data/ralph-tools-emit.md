@@ -153,6 +153,48 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 
 ---
 
+## Precheck Gates（事件发射 LLM 关卡）
+
+> 2026-07-02-004 计划（U1–U6）。**opt-in**：未声明 `event_loop.precheck` 一切行为与今天字节等价；出厂 builtin preset 默认不带 precheck。
+
+### 启用与关停
+
+```yaml
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      <TOPIC>:                                # 被守 topic X
+        prompt:                               # 渲染进 gate hat 的 checklist
+          - "检查 1: ..."
+          - "检查 2: ..."
+        on_fail:
+          target: <hat_id>                    # 打回的目标 hat（接 task.resume）
+          retry_budget: 3                     # 默认 3，与 mechanism.repair_budget 对齐
+          on_exhausted: "plan.blocked(reason=precheck_failed)"
+          reason: "short human-readable"
+```
+
+- **环境变量 kill switch**：`RALPH_PRECHECK_MODE=off` 让整个 precheck 块**严格 no-op**（即使配置 `enabled: true` 也不脱糖）。用于紧急停用 gate 而不动 YAML。
+- **脱糖**（`RalphConfig::apply_precheck_desugar`）：每个 `rules.<X>` 把所有 `publishes/terminal_events` 含 `X` 的 producer 改写为发 `X.proposed`，并合成一个 `precheck-<X>` hat：triggers=`[X.proposed]`、publishes=`[X, X.rejected]`、terminal_events=`[X, X.rejected]`。
+- **失败闭环**（U6）：gate 发 `X.rejected` → runtime 注入 `task.resume(target=on_fail.target)`；连续 `retry_budget` 次仍未过 → 发 `on_exhausted`（默认 `plan.blocked(reason=precheck_failed)`）。`precheck_failed` 已加入 `presets/schemas/ce-executor-serial.yml` 的 `plan.blocked.allowed_values.reason` 白名单。
+
+### agent 在 loop 里会看到的新 topic
+
+| Topic | 谁发 | 何时 | agent 应该做什么 |
+|-------|------|------|------------------|
+| `<X>.proposed` | producer（脱糖后） | producer 想发 `<X>` 时 | **不要处理**——gate hat 会消费 |
+| `<X>` | `precheck-<X>` gate | gate LLM 通过 checklist | 正常处理 |
+| `<X>.rejected` | `precheck-<X>` gate | gate LLM 不通过 | **不要处理**——runtime 已自动注入 `task.resume` 打回 producer；如果看到连续 `<X>.rejected` 说明 `retry_budget` 即将耗尽，不要自己重发 `<X>` |
+
+### 反模式
+
+- ❌ 把机械检查（如 git diff、test pass、task 状态）塞进 `precheck.rules.<X>.prompt`——那是确定性门的职责（plan R11）。precheck 只做主观 checklist。
+- ❌ 多个 producer topic 同时挂同一个 `<X>.rejected` 路由——一个 rule 的 `on_fail.target` 是单数；多 producer 各自一个 rule。
+- ❌ 试图手动 emit `X.proposed`（绕过 producer 改写）——runtime 会拒收。
+
+---
+
 ## 运行时行为规范
 
 以下规范在 loop 遇到 `task.resume` 时由 runner 自动注入（对应 `ralph-tools-recovery-directives` skill）。emit 相关操作**必须**遵守：

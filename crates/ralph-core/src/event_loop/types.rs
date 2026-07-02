@@ -370,4 +370,12 @@ pub struct EventLoop {
     /// `RepairStateMachine` reports `BudgetExhausted`.
     /// Reset only by loop construction (one shot per run).
     pub(crate) terminal_event_emitted: bool,
+    /// 2026-07-02-004 plan milestone C (U6): per-loop
+    /// retry-counter registry for precheck gate hats.
+    /// Keyed by `(loop_id, topic)` so the same gate
+    /// across multiple loops gets isolated counters.
+    /// The dispatch helpers in `precheck_gate_runner`
+    /// read/write this field; the event loop only
+    /// hands `&mut self.precheck_retries` to them.
+    pub(crate) precheck_retries: crate::event_loop::precheck_gate_runner::PrecheckRetryRegistry,
 }

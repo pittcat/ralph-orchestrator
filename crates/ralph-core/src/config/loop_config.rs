@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::event_policy::EventPolicyConfig;
 use super::execution_contracts::ExecutionContractsConfig;
+use super::precheck::PrecheckConfig;
 use super::state_machine::StateMachineConfig;
 use super::state_projection::StateProjectionConfig;
 use super::workflow_contract::WorkflowContractConfig;
@@ -230,6 +231,17 @@ pub struct EventLoopConfig {
     #[serde(default)]
     pub execution_contracts: Option<ExecutionContractsConfig>,
 
+    /// 2026-07-02-004 plan milestone A (U1): opt-in precheck
+    /// gate. When `enabled: true` and at least one rule is
+    /// declared, `RalphConfig::normalize` rewrites producers of
+    /// each guarded topic to emit `<topic>.proposed` and
+    /// synthesizes a gate hat that emits either the original
+    /// topic (pass) or `<topic>.rejected` (fail). Disabled by
+    /// default; `RALPH_PRECHECK_MODE=off` forces no-op even
+    /// when enabled.
+    #[serde(default)]
+    pub precheck: Option<PrecheckConfig>,
+
     /// WAC-U3 (2026-06-12-002): Workflow Activation Contract
     /// runtime configuration. Optional; when absent the defaults
     /// (30s dispatch timeout, R7 seed handoff topics) apply.
@@ -402,6 +414,11 @@ impl Default for EventLoopConfig {
             phase_config: None,
             verdict_gate: None,
             execution_contracts: None,
+            // 2026-07-02-004 plan milestone A (U1):
+            // precheck is opt-in. None by default so
+            // existing presets keep their zero-regression
+            // contract.
+            precheck: None,
             workflow_contract: None,
             ephemeral_isolation: false,
             enforce_current_unit: false,

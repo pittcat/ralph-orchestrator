@@ -31,4 +31,7 @@ pub const SSOT_SECTION_TARGETS: &[(&str, &[&str])] = &[
     ("verdict_gate", &["event_loop", "verdict_gate"]),
     ("workflow_contract", &["event_loop", "workflow_contract"]),
     ("state_projection", &["event_loop", "state_projection"]),
+    // 2026-07-02-004 plan U1: optional SSOT defaults for
+    // `event_loop.precheck` (per-preset authoring layer).
+    ("precheck", &["event_loop", "precheck"]),
 ];
