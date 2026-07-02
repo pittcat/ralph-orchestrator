@@ -6,3 +6,5 @@
 //! `preset_lint::phase_authority::KNOWN_PRIMITIVES`.
 
 pub mod on_event;
+// U7: on_test_passed_step — handles `test.passed` topic.
+pub mod on_test_passed_step;
