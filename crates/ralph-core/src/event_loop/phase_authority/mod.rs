@@ -15,6 +15,11 @@ pub mod declaration;
 pub mod whitelist;
 // U5: PhaseSnapshot value type (no I/O).
 pub mod snapshot;
+// U6+: transition primitives. U6 lands `on_event`; U7–U9
+// follow in lockstep with the plan.
+pub mod primitives;
+// U10: TransitionEvaluator composes U6–U9.
+pub mod evaluator;
 
 #[cfg(test)]
 mod declaration_tests;
