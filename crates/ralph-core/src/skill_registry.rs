@@ -29,6 +29,10 @@ const RALPH_TOOLS_EMIT_SKILL_RAW: &str = include_str!("../data/ralph-tools-emit.
 /// Built-in ralph-tools-wave skill content (ralph wave command reference).
 const RALPH_TOOLS_WAVE_SKILL_RAW: &str = include_str!("../data/ralph-tools-wave.md");
 
+/// Built-in ralph-tools-precheck skill content (event_loop.precheck LLM gate
+/// runtime behavior for loop agents). See plan 2026-07-02-004.
+const RALPH_TOOLS_PRECHECK_SKILL_RAW: &str = include_str!("../data/ralph-tools-precheck.md");
+
 /// Built-in ralph-tools-cmdref skill content (skill/run/other-commands reference).
 ///
 /// 2026-06-25 refactor: removed the `ralph tools interact` and `ralph bot`
@@ -85,7 +89,7 @@ impl SkillRegistry {
     }
 
     /// Register built-in skills (ralph-tools, ralph-tools-tasks, ralph-tools-memories,
-    /// ralph-tools-emit, ralph-tools-wave, ralph-tools-cmdref).
+    /// ralph-tools-emit, ralph-tools-wave, ralph-tools-precheck, ralph-tools-cmdref).
     ///
     /// 2026-06-25 refactor: `robot-interaction` was removed because its
     /// only content was `human.interact` / `human.guidance` Telegram guidance
@@ -98,6 +102,7 @@ impl SkillRegistry {
         // (plan 004 U3)
         self.register_builtin("ralph-tools-emit", RALPH_TOOLS_EMIT_SKILL_RAW)?;
         self.register_builtin("ralph-tools-wave", RALPH_TOOLS_WAVE_SKILL_RAW)?;
+        self.register_builtin("ralph-tools-precheck", RALPH_TOOLS_PRECHECK_SKILL_RAW)?;
         self.register_builtin("ralph-tools-cmdref", RALPH_TOOLS_CMDREF_SKILL_RAW)?;
         // Auto-injected on task.resume events that carry recovery_directives.
         // See plan 2026-06-28-003.
@@ -396,6 +401,7 @@ mod tests {
         assert!(registry.get("robot-interaction").is_none());
         assert!(registry.get("ralph-tools-emit").is_some());
         assert!(registry.get("ralph-tools-wave").is_some());
+        assert!(registry.get("ralph-tools-precheck").is_some());
         assert!(registry.get("ralph-tools-cmdref").is_some());
         assert!(registry.get("ralph-tools-recovery-directives").is_some());
     }

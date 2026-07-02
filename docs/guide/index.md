@@ -15,6 +15,7 @@ Practical guides for using Ralph Orchestrator effectively.
 | [Harness Extensions](harness-extensions.md) | Event filter / projection / state injection / preflight hooks |
 | [Payload Contracts](payload-contracts.md) | Schema-based field enforcement between hats |
 | [Execution Contracts](execution-contracts.md) | `work.done` completion gate (task closed, git evidence, tests) |
+| [Precheck Gates](precheck-gates.md) | Opt-in LLM-as-judge gate before key topics (`event_loop.precheck`) |
 | [Runtime Diagnosis](runtime-diagnosis.md) | Recovery / drift journals, `ralph diagnose` offline report, telemetry config |
 
 ## Quick Links

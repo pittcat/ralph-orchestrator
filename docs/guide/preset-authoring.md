@@ -385,6 +385,7 @@ ralph run -c ralph.yml -H .ralph/hats/my-flow.yml --skip-preflight -p "smoke mig
 ## 相关文档
 
 - [Hat Collections](./presets.md) — builtin preset 和 hat collection 概览
+- [Precheck Gates](./precheck-gates.md) — 可选的事件发射 LLM 关卡（`event_loop.precheck`）
 - [CLI Reference](./cli-reference.md) — 完整命令行参考
 - [Runtime Contracts](./runtime-contracts.md) — preset 检查的详细行为矩阵
 - [Plan: preset-static-lint](../plans/2026-06-08-003-feat-preset-static-lint-plan.md) — R1–R12 需求与 U1–U6 实现拆分

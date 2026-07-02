@@ -17,6 +17,7 @@ metadata:
 |------|--------|------|
 | Loop 拒收事件 / 收到 `task.resume` | 读下方「收到 `task.resume` 时」段；用 `ralph emit --schema <TOPIC>` 预检字段 | 本 skill |
 | 要发射单个事件或预检 schema | `ralph emit <TOPIC> --policy-check -j '{...}'` | `ralph tools skill load ralph-tools-emit` |
+| loop 里出现 `.proposed` / `.rejected` / `precheck-*` gate | 读 topic 表，勿手 emit 衍生 topic | `ralph tools skill load ralph-tools-precheck` |
 | 要派发 review wave / 作为 wave worker 返回 | `ralph wave emit <TOPIC> --payloads-stdin` | `ralph tools skill load ralph-tools-wave` |
 | 要管理 runtime task | `ralph tools task add/ensure/start/close` | `ralph-tools-tasks`（已注入，若 tasks.enabled） |
 | 要记录/查找记忆或 decision journal | `ralph tools memory add/search/prime` | `ralph-tools-memories`（已注入，若 memories.enabled） |
@@ -81,6 +82,7 @@ metadata:
 |------|------|---------|
 | `ralph emit` | 发射事件（最常用） | `ralph tools skill load ralph-tools-emit` |
 | `ralph emit --schema <TOPIC>` | 只读查 topic 协议 + protocol_hash | 同上 |
+| Precheck gate（`event_loop.precheck`） | 非 CLI；loop 内 `.proposed`/gate 行为 | `ralph tools skill load ralph-tools-precheck` |
 | `ralph wave emit` | 并行 wave 调度 | `ralph tools skill load ralph-tools-wave` |
 | `ralph run` | 启动编排循环 | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph inspect profiles` | 预览 profile overlay 解析结果（只读，不启动 loop） | `ralph tools skill load ralph-tools-cmdref` |
