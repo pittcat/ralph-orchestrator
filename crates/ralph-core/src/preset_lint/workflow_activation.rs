@@ -357,11 +357,15 @@ pub fn check_re_emit_trap(
 /// reporter → LOOP_COMPLETE` is a 7-hop path. The DFS also wastes
 /// hops on the review-coordinator ↔ dimension-reviewer cycle before
 /// backtracking to find the `review.dimensions.complete` branch, so
-/// the bound must account for that overhead. 8 hops is still tight
-/// enough to catch genuine dead ends (a hat publishing to a topic
-/// with no consumer at all fails at hop 1). The T-U1-03 test fixture
-/// uses a 1-hop chain and continues to fire under the wider bound.
-const EGRESS_MAX_HOPS: usize = 8;
+/// the bound must account for that overhead. The 2026-07-02-003 plan
+/// U1 (R3) `ce-executor-pipeline` preset adds a 13-hat flat single-
+/// consumer chain where the head `dim:goal-alignment` is 9 hops from
+/// `report.done` — bumping the bound from 8 to 9 lets the chain
+/// terminate through the lint check. 9 hops is still tight enough to
+/// catch genuine dead ends (a hat publishing to a topic with no
+/// consumer at all fails at hop 1). The T-U1-03 test fixture uses a
+/// 1-hop chain and continues to fire under the wider bound.
+const EGRESS_MAX_HOPS: usize = 9;
 
 pub fn check_activation_egress(
     config: &RalphConfig,

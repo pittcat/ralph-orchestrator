@@ -58,6 +58,7 @@ unset _ralph_fn
 # invariant.
 _RALPH_BUILTIN_HAT_VALUES=(
   "builtin:ce-executor-serial"
+  "builtin:ce-executor-pipeline"
   # builtin:ce-executor-wave  # deleted 2026-06-23
   "builtin:debug"
   "builtin:autoresearch"
@@ -65,6 +66,7 @@ _RALPH_BUILTIN_HAT_VALUES=(
 
 _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
   "Isolated-mode plan-driven work execution with serial code review (no wave), auto-fix, shipping, and manager report"
+  "Isolated-mode linear one-shot plan execution: review plan → execute (TDD) → 6 serial dimension reviewers → fix → align → report → complete"
   # Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping  # deleted 2026-06-23
   "Bug investigation, root-cause analysis, and adversarial fix verification"
   "Autonomous experiment loop: try ideas, measure, keep what works"

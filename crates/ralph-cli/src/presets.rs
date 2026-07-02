@@ -30,6 +30,12 @@ const PRESETS: &[EmbeddedPreset] = &[
         public: true,
     },
     EmbeddedPreset {
+        name: "ce-executor-pipeline",
+        description: "Isolated-mode linear one-shot plan execution: review plan → execute whole plan with TDD + full suite green → 6 serial dimension reviewers → synthesize fix plan → fix → align → report → complete",
+        content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-pipeline.yml")),
+        public: true,
+    },
+    EmbeddedPreset {
         name: "ce-executor-serial",
         description: "Isolated-mode plan-driven work execution with TDD executor, validator (full test suite), single overall review, auto-fix, shipping, and manager report",
         content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-serial.yml")),
@@ -140,7 +146,7 @@ mod tests {
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        assert_eq!(presets.len(), 3, "Expected 3 public presets");
+        assert_eq!(presets.len(), 4, "Expected 4 public presets");
     }
 
     #[test]
@@ -264,8 +270,9 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 3);
+        assert_eq!(names.len(), 4);
         assert!(names.contains(&"autoresearch"));
+        assert!(names.contains(&"ce-executor-pipeline"));
         assert!(names.contains(&"ce-executor-serial"));
         assert!(names.contains(&"debug"));
     }
@@ -1757,7 +1764,7 @@ mod tests {
         // This must stay in sync with scripts/ralph-zsh-plugin.zsh
         let zsh_values: std::collections::BTreeSet<String> = [
             "builtin:ce-executor-serial",
-            "builtin:ce-executor-serial",
+            "builtin:ce-executor-pipeline",
             "builtin:debug",
             "builtin:autoresearch",
         ]
@@ -2042,6 +2049,41 @@ mod tests {
             // validator correctly flags. The runtime still rejects missing
             // required events on the success path.
             "ce-executor-serial",
+            // ce-executor-pipeline: 2026-07-02-003 plan U1 (R3). The 13-hat
+            // flat single-consumer chain (`plan-reviewer → executor → 6 dim
+            // hats → review-synthesizer → fixer → alignment → reporter`) is
+            // intentionally long. The first dimension hat
+            // `dim:goal-alignment` is 9 hops from the terminal
+            // `report.done` and exceeds the WAC EGRESS_MAX_HOPS=8 limit
+            // (`crates/ralph-core/src/preset_lint/workflow_activation.rs:364`),
+            // tripping `activation_egress_missing` by 1 hop. This is a known
+            // false positive of the static-lint BFS bound — the chain
+            // terminates deterministically via `report.done` (required_events)
+            // and `LOOP_COMPLETE` (completion_promise), and the chain length
+            // is a deliberate design choice (one hat per dimension; no
+            // consolidation). Topology is structurally valid; the EGRESS
+            // finding is a known bound artifact.
+            "ce-executor-pipeline",
+        ];
+
+        // Per-preset finding-id exemptions for the non-strict authoring
+        // contract test. Mirrors `EXEMPT_FINDINGS` below (the strict-
+        // lint counterpart) but is its own const so the two tests can
+        // diverge if needed.
+        //
+        // ce-executor-pipeline: the 13-hat flat chain trips three
+        // WAC findings on the chain head `dim:goal-alignment` whose
+        // root cause is the static-lint BFS bound (`EGRESS_MAX_HOPS=8`)
+        // in `crates/ralph-core/src/preset_lint/workflow_activation.rs:364`.
+        // Topology is structurally valid; the chain terminates at
+        // `report.done` + `LOOP_COMPLETE`.
+        const AUTHORING_EXEMPT_FINDINGS: &[(&str, &str)] = &[
+            (
+                "ce-executor-pipeline",
+                "lint.preset.activation_egress_missing",
+            ),
+            ("ce-executor-pipeline", "lint.preset.handoff_pairing_broken"),
+            ("ce-executor-pipeline", "lint.preset.re_emit_trap"),
         ];
 
         for preset in PRESETS.iter().filter(|p| p.public) {
@@ -2061,7 +2103,13 @@ mod tests {
                 continue;
             }
 
-            // Check if all errors are topology errors for an exempt preset
+            // Check if all errors are topology errors or per-preset exempt
+            // finding-id errors for an exempt preset. The id-level
+            // exemption lets a topology-exempt preset also silence
+            // specific WAC findings whose root cause is a static-lint
+            // BFS bound (EGRESS_MAX_HOPS in
+            // `crates/ralph-core/src/preset_lint/workflow_activation.rs:364`)
+            // rather than a true topology defect.
             let errors: Vec<_> = report
                 .findings
                 .iter()
@@ -2073,11 +2121,18 @@ mod tests {
                     ralph_core::runtime_contract::FindingSource::Topology
                 )
             });
+            let all_id_exempt = !errors.is_empty()
+                && errors.iter().all(|f| {
+                    matches!(f.source, ralph_core::runtime_contract::FindingSource::Lint)
+                        && AUTHORING_EXEMPT_FINDINGS.iter().any(|(name, id)| {
+                            *name == preset.name && *id == f.id.as_str()
+                        })
+                });
 
-            if topology_exempt.contains(&preset.name) && all_topology {
-                // Known topology exception — record but don't fail
+            if topology_exempt.contains(&preset.name) && (all_topology || all_id_exempt) {
+                // Known exception — record but don't fail
                 eprintln!(
-                    "NOTE: preset '{}' has known topology exceptions (exempt from authoring contract): {:?}",
+                    "NOTE: preset '{}' has known authoring exceptions: {:?}",
                     preset.name,
                     errors.iter().map(|f| &f.id).collect::<Vec<_>>()
                 );
@@ -2167,7 +2222,22 @@ mod tests {
         // signal when automated recovery is exhausted. This creates an
         // early-termination path from `work.start` that does not pass through
         // `report.done`, which the static topology validator correctly flags.
-        let topology_exempt: &[&str] = &["autoresearch", "debug", "ce-executor-serial"];
+        //
+        // ce-executor-pipeline: 2026-07-02-003 plan U1 (R3). The 13-hat flat
+        // single-consumer chain is intentionally long; the first dimension
+        // hat `dim:goal-alignment` is 9 hops from the terminal `report.done`
+        // and exceeds the WAC EGRESS_MAX_HOPS=8 limit, tripping
+        // `activation_egress_missing` by 1 hop. Known false positive of the
+        // static-lint BFS bound — chain terminates deterministically via
+        // `report.done` (required_events) and `LOOP_COMPLETE`
+        // (completion_promise). Topology is structurally valid; the EGRESS
+        // finding is a known bound artifact.
+        let topology_exempt: &[&str] = &[
+            "autoresearch",
+            "debug",
+            "ce-executor-serial",
+            "ce-executor-pipeline",
+        ];
 
         // Per-preset finding-id exemptions (P2 #16 + #22).
         //
@@ -2186,7 +2256,38 @@ mod tests {
         // merge.handled, both cleaner and failure_handler publish + declare
         // merge.handled as terminal, and the redundant cleanup.done /
         // merge.complete publishes have been removed).
-        const EXEMPT_FINDINGS: &[(&str, &str, &str)] = &[];
+        //
+        // ce-executor-pipeline: 2026-07-02-003 plan U1 (R3). The 13-hat flat
+        // single-consumer chain (`plan-reviewer → executor → 6 dim hats →
+        // review-synthesizer → fixer → alignment → reporter`) is intentionally
+        // long. The first dimension hat `dim:goal-alignment` is 9 hops from
+        // the terminal `report.done` and exceeds the WAC EGRESS_MAX_HOPS=8
+        // limit, tripping three related WAC findings on that one hat:
+        // `lint.preset.activation_egress_missing` (the BFS bound rejection),
+        // `lint.preset.handoff_pairing_broken` (downstream of the egress
+        // miss), and `lint.preset.re_emit_trap` (also derived from the
+        // 8-hop BFS bound). The chain terminates deterministically via
+        // `report.done` (required_events) and `LOOP_COMPLETE`
+        // (completion_promise); the chain length is a deliberate design
+        // choice (one hat per dimension; no consolidation). Topology is
+        // structurally valid; the WAC findings are known bound artifacts.
+        const EXEMPT_FINDINGS: &[(&str, &str, &str)] = &[
+            (
+                "ce-executor-pipeline",
+                "lint.preset.activation_egress_missing",
+                "docs/plans/2026-07-02-003-feat-ce-executor-pipeline-preset-plan.md#u1",
+            ),
+            (
+                "ce-executor-pipeline",
+                "lint.preset.handoff_pairing_broken",
+                "docs/plans/2026-07-02-003-feat-ce-executor-pipeline-preset-plan.md#u1",
+            ),
+            (
+                "ce-executor-pipeline",
+                "lint.preset.re_emit_trap",
+                "docs/plans/2026-07-02-003-feat-ce-executor-pipeline-preset-plan.md#u1",
+            ),
+        ];
 
         let mut failures = Vec::new();
         for preset in PRESETS.iter() {

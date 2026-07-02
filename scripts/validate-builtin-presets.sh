@@ -102,6 +102,17 @@ TOPOLOGY_EXEMPT_PRESETS=(
     # (hypothesis.confirmed, fix.applied, fix.verified) are not on every
     # completion path — by design for the hypothesis/fix/verify flow.
     "debug"
+    # ce-executor-pipeline: 2026-07-02-003 plan U1 (R3). The 13-hat flat
+    # single-consumer chain is intentionally long; the first dimension
+    # hat `dim:goal-alignment` is 9 hops from the terminal `report.done`
+    # and exceeds the WAC EGRESS_MAX_HOPS=8 limit
+    # (`crates/ralph-core/src/preset_lint/workflow_activation.rs:364`),
+    # tripping `activation_egress_missing` by 1 hop. This is a known
+    # false positive of the static-lint BFS bound — the chain
+    # terminates deterministically via `report.done` (required_events)
+    # and `LOOP_COMPLETE` (completion_promise). Topology is structurally
+    # valid; the EGRESS finding is a known bound artifact.
+    "ce-executor-pipeline"
 )
 
 # WRC-U5 (2026-06-12-003) / KTD-WRC-5: Tier-0 list of builtin

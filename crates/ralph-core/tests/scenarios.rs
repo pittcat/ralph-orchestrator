@@ -1000,6 +1000,41 @@ fn test_wave_dimension_mismatch_retry() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-02-003 plan U2: linear one-shot plan execution for the
+/// `ce-executor-pipeline` preset. The 12-hat flat single-consumer
+/// chain (plan-reviewer → executor → 6 dim hats → review-synthesizer
+/// → fixer → alignment → reporter → LOOP_COMPLETE) is exercised by
+/// feeding the events through a real EventLoop. Asserts the 12
+/// business events fire in order and the loop completes
+/// (`completion: true`). Any regression that drops a dimension
+/// hat, breaks the chain handoff, or merges two downstream hats
+/// fails the `expected.events` count or the `absent_events` list.
+#[test]
+fn test_ce_executor_pipeline() {
+    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-02-003 plan U2: failure variant. When the executor
+/// emits `work.failed` (e.g. cannot reach test green), the 6-dim
+/// review chain and downstream synthesizers/fixer/alignment MUST
+/// NOT fire — only reporter handles the failure. Asserts the
+/// absent_events list contains every dimension done, fix.done,
+/// align.done, and review.complete (none of which can be reached
+/// when work.failed short-circuits the chain).
+#[test]
+fn test_ce_executor_pipeline_blocked() {
+    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// plan.blocked short-circuits to reporter without executor or review chain.
+#[test]
+fn test_ce_executor_pipeline_plan_blocked() {
+    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_plan_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 #[test]
 fn test_plan_gate_dual_publish_handoff() {
     // 2026-06-15-003 fix U2: regression for the `(queue.advance, work.ready)`

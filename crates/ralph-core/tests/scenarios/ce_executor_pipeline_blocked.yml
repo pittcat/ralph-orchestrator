@@ -1,0 +1,166 @@
+# ce_executor_pipeline_blocked: blocked/failure variant for ce-executor-pipeline preset
+#
+# 2026-07-02-003 plan U2: failure variant where executor fails
+# (work.failed) instead of completing cleanly. The 6-dim chain and
+# downstream synthesizers/fixer/alignment must NOT fire — the only
+# terminal event is reporter → report.done → LOOP_COMPLETE with
+# verdict=blocked.
+
+name: ce_executor_pipeline_blocked
+description: Executor failure variant for ce-executor-pipeline — work.failed short-circuits to reporter (no 6-dim chain)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    plan-reviewer:
+      subscribes_to:
+        - work.start
+      publishes:
+        - plan.ready
+        - plan.blocked
+    executor:
+      subscribes_to:
+        - plan.ready
+      publishes:
+        - work.done
+        - work.failed
+    "dim:goal-alignment":
+      subscribes_to:
+        - work.done
+      publishes:
+        - review.goalalign.done
+    "dim:correctness":
+      subscribes_to:
+        - review.goalalign.done
+      publishes:
+        - review.correctness.done
+    "dim:testing":
+      subscribes_to:
+        - review.correctness.done
+      publishes:
+        - review.testing.done
+    "dim:maintainability":
+      subscribes_to:
+        - review.testing.done
+      publishes:
+        - review.maintainability.done
+    "dim:project-standards":
+      subscribes_to:
+        - review.maintainability.done
+      publishes:
+        - review.standards.done
+    "dim:adversarial":
+      subscribes_to:
+        - review.standards.done
+      publishes:
+        - review.adversarial.done
+    review-synthesizer:
+      subscribes_to:
+        - review.adversarial.done
+      publishes:
+        - review.complete
+    fixer:
+      subscribes_to:
+        - review.complete
+      publishes:
+        - fix.done
+    alignment:
+      subscribes_to:
+        - fix.done
+      publishes:
+        - align.done
+    reporter:
+      subscribes_to:
+        - align.done
+        - plan.blocked
+        - work.failed
+      publishes:
+        - report.done
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "work.start"
+    completion_promise: "LOOP_COMPLETE"
+    required_events: ["report.done"]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        plan.ready:
+          required_fields:
+            - plan_name
+            - plan_path
+            - plan_revised
+            - review_summary
+          payload: json_object
+        work.failed:
+          required_fields:
+            - plan_name
+            - reason
+          payload: json_object
+        report.done:
+          required_fields:
+            - plan_name
+            - report_path
+            - verdict
+          payload: json_object
+        LOOP_COMPLETE:
+          required_fields:
+            - reason
+          payload: json_object
+
+mock_responses:
+  # 0. plan-reviewer emits plan.ready
+  - text: |
+      <event topic="plan.ready">
+      {"plan_name":"plan-b","plan_path":"docs/plans/b.md","plan_revised":false,"review_summary":"plan ready"}
+      </event>
+    hat: plan-reviewer
+  # 1. executor fails (e.g. cannot reach test green) — emits work.failed
+  - text: |
+      <event topic="work.failed">
+      {"plan_name":"plan-b","reason":"tests_not_green: 2 of 12 tests fail after 3 attempts"}
+      </event>
+    hat: executor
+  # 2. reporter emits report.done with blocked verdict
+  - text: |
+      <event topic="report.done">
+      {"plan_name":"plan-b","report_path":".ralph/review/plan-b/report.md","verdict":"blocked"}
+      </event>
+    hat: reporter
+  # 3. reporter emits LOOP_COMPLETE
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"executor blocked: tests_not_green"}
+      </event>
+    hat: reporter
+
+expected:
+  iterations: 4
+  events:
+    - topic: plan.ready
+    - topic: work.failed
+    - topic: report.done
+  absent_events:
+    # 6-dim chain MUST NOT fire (executor failed before reaching review)
+    - topic: work.done
+    - topic: review.goalalign.done
+    - topic: review.correctness.done
+    - topic: review.testing.done
+    - topic: review.maintainability.done
+    - topic: review.standards.done
+    - topic: review.adversarial.done
+    - topic: review.complete
+    - topic: fix.done
+    - topic: align.done
+    # plan.blocked is not the failure path here (executor emits work.failed)
+    - topic: plan.blocked
+    # ce-executor-serial terminology must NOT appear
+    - topic: review.start
+    - topic: review.dimension.ready
+    - topic: test.passed
+    - topic: plan.complete
+    - topic: REVIEW_COMPLETE
+  completion: true

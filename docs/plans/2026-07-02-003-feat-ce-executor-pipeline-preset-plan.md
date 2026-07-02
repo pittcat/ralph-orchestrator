@@ -12,8 +12,8 @@ origin: docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md
 
 新增一个 builtin isolated preset `ce-executor-pipeline`：一条严格单链路、单消费者、一环扣一环的流水线，把「拿一份计划 → 自动跑完 → 出报告」做成一条龙。相比 `ce-executor-serial`（10-hat、per-unit 迭代、独立 validator、shipper、coordinator 循环式评审），本 preset **砍掉**：per-unit 任务拆分（`tasks.enabled: false`，整份执行）、独立 validator hat、shipper、coordinator 循环（改扁平直链）；**保留**：TDD 执行 + 全量测试全绿硬门槛（内建 executor）、6 维度评审 + synthesizer 汇总；**新增**：前置计划评审修复关、报告前对齐关。
 
-流水线（共 12 功能 hat + 1 fallback = 13 hats）：
-`plan-reviewer → executor → dim(goal-alignment→correctness→testing→maintainability→project-standards→adversarial) → review-synthesizer → fixer → alignment → reporter`，外加 `progress-steward` 兜底。
+流水线（12 功能 hat）：
+`plan-reviewer → executor → dim(goal-alignment→correctness→testing→maintainability→project-standards→adversarial) → review-synthesizer → fixer → alignment → reporter`。
 
 关键取舍（用户 2026-07-02 修正）：reviewer **不**用单 hat + 并行 subagent，而是**每个维度一个 hat 的串行链**——事件链清晰、纯事件驱动、绕开 subagent 后端依赖，代价是 hat 数增多（用户已接受）。
 
@@ -27,7 +27,7 @@ origin: docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md
 
 ## Requirements Trace
 
-- R1. 12 功能 hat（`plan-reviewer`/`executor`/6×`dimension-reviewer`/`review-synthesizer`/`fixer`/`alignment`/`reporter`）+ 1 fallback（`progress-steward`）。→ U1
+- R1. 12 功能 hat（`plan-reviewer`/`executor`/6×`dimension-reviewer`/`review-synthesizer`/`fixer`/`alignment`/`reporter`）。→ U1
 - R2. 事件拓扑严格单链路：每业务事件恰好一个消费者，6 维 hat 串行一环扣一环，无多消费者/分支/回环。→ U1、U2
 - R3. `execution_mode: isolated`（4+ hats 硬规则），通过 `check_multi_hat_isolation`。→ U1
 - R4. `plan-reviewer` 读 `-p` 计划文件，先评审再就地修复计划文档，产出定稿计划交 executor。→ U3
@@ -41,7 +41,7 @@ origin: docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md
 - R12. 对齐未落地项一律记残留，不回环/不重试/不阻断，继续交 reporter。→ U8
 - R13. `reporter` 汇总计划改动/执行/各维度评审/修复/对齐残留，产报告并收尾 `LOOP_COMPLETE`。→ U9
 
-**Origin actors:** A1 plan-reviewer, A2 executor, A3 dimension-reviewer(×6), A4 review-synthesizer, A5 fixer, A6 alignment, A7 reporter, A8 progress-steward（见 U1、U3-U9）。
+**Origin actors:** A1 plan-reviewer, A2 executor, A3 dimension-reviewer(×6), A4 review-synthesizer, A5 fixer, A6 alignment, A7 reporter（见 U1、U3-U8）。
 **Origin flows:** F1 线性一条龙主流程（见 High-Level Technical Design 事件拓扑）。
 
 ---
@@ -66,7 +66,7 @@ origin: docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md
 ### Relevant Code and Patterns
 
 - `presets/en/merge-loop.yml` — **骨架范式**：isolated、`tasks.enabled:false`、多 hat、单 `kind:sequence` 的 `mechanism.flow`、inline `event_policy`。本 preset 以它为结构骨架。
-- `presets/en/ce-executor-serial.yml` — **维度评审模板来源**：`dimension-reviewer`（第 ~1911 行，含 `disallowed_tools:["Edit"]` 只读、`timeout`、`missing_event_grace_secs`、`instructions_inline_append`）+ `review-synthesizer`（第 ~2221 行，读各维产物→写 fix_plan_file）；executor TDD（~1168）、reporter（~2740）、progress-steward（~2931）也是模板。**注意**：ce-executor-serial 用 coordinator↔dimension 循环；本 preset 改成扁平直链（每维直接触发下一维），不搬 coordinator。
+- `presets/en/ce-executor-serial.yml` — **维度评审模板来源**：`dimension-reviewer`（第 ~1911 行，含 `disallowed_tools:["Edit"]` 只读、`timeout`、`missing_event_grace_secs`、`instructions_inline_append`）+ `review-synthesizer`（第 ~2221 行，读各维产物→写 fix_plan_file）；executor TDD（~1168）、reporter（~2740）也是模板。**注意**：ce-executor-serial 用 coordinator↔dimension 循环；本 preset 改成扁平直链（每维直接触发下一维），不搬 coordinator。
 - hat 字段形态（map 键即 hat_id）：`name`/`description`/`triggers`(唤醒/订阅)/`publishes`(emit 白名单)/`exempt_topics`/`terminal_events`(emit 即结束轮)/`event_filter.events`(prompt 可见性)/`obligations`/`instructions`(块标量) + 可选 `disallowed_tools`/`timeout`/`missing_event_grace_secs`/`default_publishes`。
 - `crates/ralph-cli/build.rs` — 编译期拷 `presets/en/<name>.yml` 进 `$OUT_DIR`；有 `presets/schemas/<name>.yml` 才 merge。本 preset **走 inline schemas**（无 SSOT 文件，同 merge-loop）→ 少同步点、免 byte-equality 测试。
 - `crates/ralph-cli/src/presets.rs` — `PRESETS` 数组 + 计数/镜像测试（详见 U1、U10）。
@@ -93,7 +93,7 @@ origin: docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md
 - **6 维评审 = 6 个 dimension-reviewer hat 的扁平串行链 + 1 synthesizer**（用户 2026-07-02 修正）。每维 hat 触发上一维的 done 事件、审单维、写产物、emit 下一维事件；末维触发 synthesizer 汇总。**不搬** coordinator 循环、**不用** subagent。理由：单链路事件清晰、纯事件驱动、无后端依赖。
 - **以 merge-loop 为结构骨架**（isolated + `tasks.enabled:false` + 单 sequence flow），dimension/synthesizer 的 instructions 从 ce-executor-serial 改编（去掉 coordinator 循环语义）。
 - **inline schemas，不建 `presets/schemas/` SSOT 文件**：少同步点、免 byte-equality 测试（同 merge-loop）。
-- **无 verdict_gate 硬失败门**：一条龙**总是**产报告并 `LOOP_COMPLETE`；成功/受阻编码在单一 `verdict` 字段（`pass`/`pass_with_residuals`/`blocked`）。失败路径（plan 不可用 / executor 无法全绿 / steward 升级）统一路由 reporter。
+- **无 verdict_gate 硬失败门**：一条龙**总是**产报告并 `LOOP_COMPLETE`；成功/受阻编码在单一 `verdict` 字段（`pass`/`pass_with_residuals`/`blocked`）。失败路径（plan 不可用 / executor 无法全绿）统一路由 reporter。
 - **无 `fix_round`/re-review 循环**：对齐只记残留不回环。
 - **单一完成路径**：所有终止经 reporter → `report.done`(`required_events`) → `LOOP_COMPLETE`(`completion_promise`)。
 - **每维 hat 只读**（`disallowed_tools:["Edit"]`，仿 ce-executor-serial dimension-reviewer）：评审阶段不改代码，改代码留给 fixer。
@@ -124,7 +124,7 @@ origin: docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md
 ## Output Structure
 
     presets/
-      en/ce-executor-pipeline.yml          # 新增：preset 本体（inline schemas，13 hats）
+      en/ce-executor-pipeline.yml          # 新增：preset 本体（inline schemas，12 hats）
     presets/manifest.yml                   # 改：embedded: + ce-executor-pipeline
     presets/index.json                     # 改：用户可见条目
     crates/ralph-cli/src/presets.rs        # 改：PRESETS + 计数/镜像测试
@@ -163,7 +163,6 @@ work.start ─▶ plan-reviewer ─plan.ready─▶ executor ─work.done─▶ 
      └───────────────── align.done ◀── alignment ◀──────────────────────────────────────────────────────┘
 
 report.done (required_events) ─▶ LOOP_COMPLETE (completion_promise)
-loop.stalled ─▶ progress-steward ─(task.resume 兜底 / plan.blocked 升级)─▶ reporter
 ```
 
 ### 生产者 → 消费者表
@@ -172,7 +171,7 @@ loop.stalled ─▶ progress-steward ─(task.resume 兜底 / plan.blocked 升�
 |---|---|---|---|
 | `work.start` | runtime | plan-reviewer | — |
 | `plan.ready` | plan-reviewer | executor | plan_name, plan_path, plan_revised, review_summary |
-| `plan.blocked` | plan-reviewer, progress-steward | reporter | reason(enum) |
+| `plan.blocked` | plan-reviewer | reporter | reason(enum) |
 | `work.done` | executor | dim:goal-alignment | plan_name, plan_path, tests_run, tests_passed, changed_lines, commit_count |
 | `work.failed` | executor | reporter | plan_name, reason |
 | `review.goalalign.done` | dim:goal-alignment | dim:correctness | plan_name, dimension, findings_file, findings_count |
@@ -186,8 +185,6 @@ loop.stalled ─▶ progress-steward ─(task.resume 兜底 / plan.blocked 升�
 | `align.done` | alignment | reporter | plan_name, plan_executed, fix_plan_executed, residuals_count, residuals_summary |
 | `report.done` | reporter | —（required_events） | report_path, verdict |
 | `LOOP_COMPLETE` | reporter | —（completion_promise） | reason |
-| `loop.stalled` | runtime | progress-steward | reason |
-| `task.resume` | progress-steward, runtime | 目标 hat（control） | reason, target_hat, kind |
 
 > 单消费者：每业务事件只在一个 hat 的 `triggers`；`topic_deny_rules` 对非 owner 全 deny 双保险。6 个 `review.*.done` 事件名待 U1 定稿并过 topic_format lint（必要时进 `topic_format_whitelist`）。
 
@@ -249,7 +246,7 @@ event_loop:
                       review.complete, fix.done, align.done, report.done]
     topic_deny_rules: [ ...非 owner 全 deny... ]
     schemas: { ...每个业务/终态 topic 的 required_fields... }   # inline
-# hats: plan-reviewer, executor, dim×6, review-synthesizer, fixer, alignment, reporter, progress-steward
+# hats: plan-reviewer, executor, dim×6, review-synthesizer, fixer, alignment, reporter
 ```
 
 ---
@@ -448,24 +445,22 @@ event_loop:
 
 ---
 
-- [ ] U9. **reporter + progress-steward instructions**
+- [ ] U9. **reporter instructions**
 
-**Goal:** reporter 汇总产报告、emit `report.done`+`LOOP_COMPLETE`，兜底消费 `plan.blocked`/`work.failed`；steward 在 `loop.stalled` 时 emit 一个恢复事件、N 次后升级 `plan.blocked`。
+**Goal:** reporter 汇总产报告、emit `report.done`+`LOOP_COMPLETE`，兜底消费 `plan.blocked`/`work.failed`。
 
 **Requirements:** R13 **Dependencies:** U1
 
-**Files:** Modify `presets/en/ce-executor-pipeline.yml`（`reporter.instructions`、`progress-steward.instructions`）
+**Files:** Modify `presets/en/ce-executor-pipeline.yml`（`reporter.instructions`）
 
 **Approach:**
 - reporter `triggers:[align.done, work.failed, plan.blocked]`（唯一消费者）；汇总计划改动/执行/6 维评审/修复/对齐残留 → 写报告 → `report.done{report_path, verdict}` → `LOOP_COMPLETE{reason}`。verdict 单字段 `pass`/`pass_with_residuals`/`blocked`。**镜像 ce-executor-serial reporter 的 report.done(required_events)→LOOP_COMPLETE(completion_promise) 握手**，遵守 isolated 单 emit。
-- steward `triggers:[loop.stalled]`；emit 恰好一个恢复事件（`task.resume` 兜底）；自我防重入；N 次 → `plan.blocked{reason=loop_stalled_max_iterations}`。`loop.stalled`/`task.resume` 登记 runner 内部 topic 白名单。**不接** `human.guidance`。
 
-**Patterns to follow:** ce-executor-serial reporter（~2740）+ progress-steward（~2931）。
+**Patterns to follow:** ce-executor-serial reporter（~2740）。
 
 **Test scenarios:** Test expectation: 经 U2（含 blocked 变体）+ live smoke。
 - Happy: `align.done` → `report.done`+`LOOP_COMPLETE`，报告含五段摘要（含 6 维发现）。
 - Error: `work.failed`/`plan.blocked` → 受阻报告 + `LOOP_COMPLETE`(verdict=blocked)。
-- Edge: `loop.stalled` → steward 一个恢复事件；连续 N 次 → `plan.blocked`。
 
 **Verification:** U2 两场景通过；--mock 实跑走到 `LOOP_COMPLETE` 并落盘报告。
 
@@ -567,7 +562,7 @@ event_loop:
 ## Sources & References
 
 - **Origin document:** docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md
-- 骨架范式: `presets/en/merge-loop.yml`；hat/instructions 模板: `presets/en/ce-executor-serial.yml`（dimension-reviewer ~1911、review-synthesizer ~2221、executor ~1168、reporter ~2740、progress-steward ~2931、fixer ~2483）
+- 骨架范式: `presets/en/merge-loop.yml`；hat/instructions 模板: `presets/en/ce-executor-serial.yml`（dimension-reviewer ~1911、review-synthesizer ~2221、executor ~1168、reporter ~2740、fixer ~2483）
 - 注册/合并: `crates/ralph-cli/src/presets.rs`、`crates/ralph-cli/build.rs`、`presets/manifest.yml`、`presets/index.json`
 - Lint/测试: `crates/ralph-core/src/preset_lint/`、`crates/ralph-core/tests/scenarios.rs`(+`scenarios/ce_executor_serial_review.yml`)
 - 学习: `docs/solutions/logic-errors/base-runtime-must-not-parse-business-markdown.md`、`docs/solutions/integration-issues/ce-executor-isolated-preset-dispatch-gap-*.md`、`docs/solutions/developer-experience/wac-rollout-tiered-gates-*.md`、`docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`

@@ -1,0 +1,1667 @@
+# ce-executor-pipeline: 线性一条龙 Plan-Driven Execution Preset
+#
+# Pattern: Plan → Review Plan → Execute (TDD + full suite green) → 6-Dimension
+# Serial Review → Synthesize Fix Plan → Fix → Align → Report → Complete
+#
+# 12-hat topology with linear single-consumer chain:
+# - plan-reviewer: Reviews the plan file in-place; no per-unit breakdown, no
+#   code edits. Output: plan.ready (with review_summary + plan_revised flag)
+#   or plan.blocked (plan unusable).
+# - executor: Whole-plan execution with TDD. Hard DoD = full test suite green.
+#   No per-unit task breakdown (tasks.enabled: false).
+# - dim:goal-alignment / dim:correctness / dim:testing / dim:maintainability /
+#   dim:project-standards / dim:adversarial: Six read-only dimension hats in
+#   a flat serial chain — each reviews ONE dimension, writes a findings
+#   product file, emits EXACTLY ONE done event triggering the next dimension
+#   (last dimension triggers review-synthesizer).
+# - review-synthesizer: Reads all 6 dimension products, dedupes / merges /
+#   ranks P0-P3, writes fix_plan_file, emits EXACTLY ONE review.complete.
+# - fixer: Applies the **review-synthesizer fix plan only** (NOT the original
+#   plan); empty fix plan → no-op + fix.done{fixes_applied:0}.
+# - alignment: Cross-checks original plan execution vs fix-plan execution
+#   (separate git ranges). Records residuals; does NOT loop or block.
+# - reporter: Aggregates plan change / execution / 6-dim review / fixes /
+#   alignment residuals. Writes report, emits report.done + LOOP_COMPLETE.
+#   Sole consumer of plan.blocked / work.failed.
+#
+# Why this architecture:
+#   - No multi-consumer topics: every event has exactly one subscriber
+#   - No coordinator loop: the chain is flat and deterministic
+#   - No subagents: dimensions are first-class hats, not parallel calls
+#   - No re-review loop: alignment records residuals, never re-enters review
+#   - Verdict is single field (pass / pass_with_residuals / blocked) —
+#     downstream subscribes to ONE terminal pair, never two siblings.
+#
+# Topology exemption rationale (`EGRESS_MAX_HOPS=9` in
+# `crates/ralph-core/src/preset_lint/workflow_activation.rs:368`):
+# `handoff_pairing_broken` / `re_emit_trap` on the chain head are known
+# static-lint artifacts for this flat serial topology. The chain terminates
+# deterministically via `report.done` (required_events) and
+# `LOOP_COMPLETE` (completion_promise). topology_exempt documents this;
+# do NOT merge hats to appease lint.
+
+# 2026-06-27 mechanism foundation U10: declarative flow metadata.
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: pipeline
+        kind: sequence
+        # Every hat-emitted business / terminal topic belongs here.
+        # `work.start` is operator-injected at loop start and is
+        # intentionally NOT in allowed_emits (the runtime starts the
+        # loop without a hat emit for the startup event).
+        allowed_emits:
+          - plan.ready
+          - plan.blocked
+          - work.done
+          - work.failed
+          - review.goalalign.done
+          - review.correctness.done
+          - review.testing.done
+          - review.maintainability.done
+          - review.standards.done
+          - review.adversarial.done
+          - review.complete
+          - fix.done
+          - align.done
+          - report.done
+          - LOOP_COMPLETE
+        body:
+          - plan.ready
+          - work.done
+          - review.goalalign.done
+          - review.correctness.done
+          - review.testing.done
+          - review.maintainability.done
+          - review.standards.done
+          - review.adversarial.done
+          - review.complete
+          - fix.done
+          - align.done
+          - report.done
+          - LOOP_COMPLETE
+        emit_when: linear
+  repair_budget: 3
+  enforce_schema: hard
+  state_idempotency: required
+
+topic_format_whitelist:
+  - LOOP_COMPLETE
+
+tasks:
+  enabled: false
+
+event_loop:
+  execution_mode: isolated  # R3: 12 hats > 3-hat coordinator limit; per R1/R11 this preset MUST be isolated.
+  prompt_file: "PROMPT.md"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["report.done"]
+  starting_event: "work.start"
+  max_iterations: 40
+  max_runtime_seconds: 28800  # 8 hours
+  enforce_hat_scope: true
+  ephemeral_isolation: true
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    terminal_topics:
+      - "LOOP_COMPLETE"
+    business_topics:
+      - "plan.ready"
+      - "plan.blocked"
+      - "work.done"
+      - "work.failed"
+      - "review.goalalign.done"
+      - "review.correctness.done"
+      - "review.testing.done"
+      - "review.maintainability.done"
+      - "review.standards.done"
+      - "review.adversarial.done"
+      - "review.complete"
+      - "fix.done"
+      - "align.done"
+      - "report.done"
+    completion_after_terminal:
+      duplicate_terminal: reject
+      business_after_completion: reject
+      write_diagnostic_event: true
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: false
+    require_emit_provenance: true
+    plan_name_equality_required: true
+    # Topic-deny rules: every business topic has exactly one owner hat.
+    # Every other hat is denied the topic. This is the runtime's second
+    # line of defense after `publishes` declarations on each hat — if
+    # any hat tries to emit a topic it does not own, the policy rejects
+    # the emit with isolated_scope_violation.
+    topic_deny_rules:
+      # plan-reviewer owns plan.ready / plan.blocked
+      - {hat_id: executor, topic: plan.ready}
+      - {hat_id: dim:goal-alignment, topic: plan.ready}
+      - {hat_id: dim:correctness, topic: plan.ready}
+      - {hat_id: dim:testing, topic: plan.ready}
+      - {hat_id: dim:maintainability, topic: plan.ready}
+      - {hat_id: dim:project-standards, topic: plan.ready}
+      - {hat_id: dim:adversarial, topic: plan.ready}
+      - {hat_id: review-synthesizer, topic: plan.ready}
+      - {hat_id: fixer, topic: plan.ready}
+      - {hat_id: alignment, topic: plan.ready}
+      - {hat_id: reporter, topic: plan.ready}
+      - {hat_id: executor, topic: plan.blocked}
+      - {hat_id: dim:goal-alignment, topic: plan.blocked}
+      - {hat_id: dim:correctness, topic: plan.blocked}
+      - {hat_id: dim:testing, topic: plan.blocked}
+      - {hat_id: dim:maintainability, topic: plan.blocked}
+      - {hat_id: dim:project-standards, topic: plan.blocked}
+      - {hat_id: dim:adversarial, topic: plan.blocked}
+      - {hat_id: review-synthesizer, topic: plan.blocked}
+      - {hat_id: fixer, topic: plan.blocked}
+      - {hat_id: alignment, topic: plan.blocked}
+      # executor owns work.done / work.failed
+      - {hat_id: plan-reviewer, topic: work.done}
+      - {hat_id: plan-reviewer, topic: work.failed}
+      - {hat_id: dim:goal-alignment, topic: work.done}
+      - {hat_id: dim:correctness, topic: work.done}
+      - {hat_id: dim:testing, topic: work.done}
+      - {hat_id: dim:maintainability, topic: work.done}
+      - {hat_id: dim:project-standards, topic: work.done}
+      - {hat_id: dim:adversarial, topic: work.done}
+      - {hat_id: review-synthesizer, topic: work.done}
+      - {hat_id: fixer, topic: work.done}
+      - {hat_id: alignment, topic: work.done}
+      - {hat_id: reporter, topic: work.done}
+      - {hat_id: plan-reviewer, topic: work.failed}
+      - {hat_id: dim:goal-alignment, topic: work.failed}
+      - {hat_id: dim:correctness, topic: work.failed}
+      - {hat_id: dim:testing, topic: work.failed}
+      - {hat_id: dim:maintainability, topic: work.failed}
+      - {hat_id: dim:project-standards, topic: work.failed}
+      - {hat_id: dim:adversarial, topic: work.failed}
+      - {hat_id: review-synthesizer, topic: work.failed}
+      - {hat_id: fixer, topic: work.failed}
+      - {hat_id: alignment, topic: work.failed}
+      # dim:goal-alignment owns review.goalalign.done
+      - {hat_id: plan-reviewer, topic: review.goalalign.done}
+      - {hat_id: executor, topic: review.goalalign.done}
+      - {hat_id: dim:correctness, topic: review.goalalign.done}
+      - {hat_id: dim:testing, topic: review.goalalign.done}
+      - {hat_id: dim:maintainability, topic: review.goalalign.done}
+      - {hat_id: dim:project-standards, topic: review.goalalign.done}
+      - {hat_id: dim:adversarial, topic: review.goalalign.done}
+      - {hat_id: review-synthesizer, topic: review.goalalign.done}
+      - {hat_id: fixer, topic: review.goalalign.done}
+      - {hat_id: alignment, topic: review.goalalign.done}
+      - {hat_id: reporter, topic: review.goalalign.done}
+      # dim:correctness owns review.correctness.done
+      - {hat_id: plan-reviewer, topic: review.correctness.done}
+      - {hat_id: executor, topic: review.correctness.done}
+      - {hat_id: dim:goal-alignment, topic: review.correctness.done}
+      - {hat_id: dim:testing, topic: review.correctness.done}
+      - {hat_id: dim:maintainability, topic: review.correctness.done}
+      - {hat_id: dim:project-standards, topic: review.correctness.done}
+      - {hat_id: dim:adversarial, topic: review.correctness.done}
+      - {hat_id: review-synthesizer, topic: review.correctness.done}
+      - {hat_id: fixer, topic: review.correctness.done}
+      - {hat_id: alignment, topic: review.correctness.done}
+      - {hat_id: reporter, topic: review.correctness.done}
+      # dim:testing owns review.testing.done
+      - {hat_id: plan-reviewer, topic: review.testing.done}
+      - {hat_id: executor, topic: review.testing.done}
+      - {hat_id: dim:goal-alignment, topic: review.testing.done}
+      - {hat_id: dim:correctness, topic: review.testing.done}
+      - {hat_id: dim:maintainability, topic: review.testing.done}
+      - {hat_id: dim:project-standards, topic: review.testing.done}
+      - {hat_id: dim:adversarial, topic: review.testing.done}
+      - {hat_id: review-synthesizer, topic: review.testing.done}
+      - {hat_id: fixer, topic: review.testing.done}
+      - {hat_id: alignment, topic: review.testing.done}
+      - {hat_id: reporter, topic: review.testing.done}
+      # dim:maintainability owns review.maintainability.done
+      - {hat_id: plan-reviewer, topic: review.maintainability.done}
+      - {hat_id: executor, topic: review.maintainability.done}
+      - {hat_id: dim:goal-alignment, topic: review.maintainability.done}
+      - {hat_id: dim:correctness, topic: review.maintainability.done}
+      - {hat_id: dim:testing, topic: review.maintainability.done}
+      - {hat_id: dim:project-standards, topic: review.maintainability.done}
+      - {hat_id: dim:adversarial, topic: review.maintainability.done}
+      - {hat_id: review-synthesizer, topic: review.maintainability.done}
+      - {hat_id: fixer, topic: review.maintainability.done}
+      - {hat_id: alignment, topic: review.maintainability.done}
+      - {hat_id: reporter, topic: review.maintainability.done}
+      # dim:project-standards owns review.standards.done
+      - {hat_id: plan-reviewer, topic: review.standards.done}
+      - {hat_id: executor, topic: review.standards.done}
+      - {hat_id: dim:goal-alignment, topic: review.standards.done}
+      - {hat_id: dim:correctness, topic: review.standards.done}
+      - {hat_id: dim:testing, topic: review.standards.done}
+      - {hat_id: dim:maintainability, topic: review.standards.done}
+      - {hat_id: dim:adversarial, topic: review.standards.done}
+      - {hat_id: review-synthesizer, topic: review.standards.done}
+      - {hat_id: fixer, topic: review.standards.done}
+      - {hat_id: alignment, topic: review.standards.done}
+      - {hat_id: reporter, topic: review.standards.done}
+      # dim:adversarial owns review.adversarial.done
+      - {hat_id: plan-reviewer, topic: review.adversarial.done}
+      - {hat_id: executor, topic: review.adversarial.done}
+      - {hat_id: dim:goal-alignment, topic: review.adversarial.done}
+      - {hat_id: dim:correctness, topic: review.adversarial.done}
+      - {hat_id: dim:testing, topic: review.adversarial.done}
+      - {hat_id: dim:maintainability, topic: review.adversarial.done}
+      - {hat_id: dim:project-standards, topic: review.adversarial.done}
+      - {hat_id: review-synthesizer, topic: review.adversarial.done}
+      - {hat_id: fixer, topic: review.adversarial.done}
+      - {hat_id: alignment, topic: review.adversarial.done}
+      - {hat_id: reporter, topic: review.adversarial.done}
+      # review-synthesizer owns review.complete
+      - {hat_id: plan-reviewer, topic: review.complete}
+      - {hat_id: executor, topic: review.complete}
+      - {hat_id: dim:goal-alignment, topic: review.complete}
+      - {hat_id: dim:correctness, topic: review.complete}
+      - {hat_id: dim:testing, topic: review.complete}
+      - {hat_id: dim:maintainability, topic: review.complete}
+      - {hat_id: dim:project-standards, topic: review.complete}
+      - {hat_id: dim:adversarial, topic: review.complete}
+      - {hat_id: fixer, topic: review.complete}
+      - {hat_id: alignment, topic: review.complete}
+      - {hat_id: reporter, topic: review.complete}
+      # fixer owns fix.done
+      - {hat_id: plan-reviewer, topic: fix.done}
+      - {hat_id: executor, topic: fix.done}
+      - {hat_id: dim:goal-alignment, topic: fix.done}
+      - {hat_id: dim:correctness, topic: fix.done}
+      - {hat_id: dim:testing, topic: fix.done}
+      - {hat_id: dim:maintainability, topic: fix.done}
+      - {hat_id: dim:project-standards, topic: fix.done}
+      - {hat_id: dim:adversarial, topic: fix.done}
+      - {hat_id: review-synthesizer, topic: fix.done}
+      - {hat_id: reporter, topic: fix.done}
+      # alignment owns align.done
+      - {hat_id: plan-reviewer, topic: align.done}
+      - {hat_id: executor, topic: align.done}
+      - {hat_id: dim:goal-alignment, topic: align.done}
+      - {hat_id: dim:correctness, topic: align.done}
+      - {hat_id: dim:testing, topic: align.done}
+      - {hat_id: dim:maintainability, topic: align.done}
+      - {hat_id: dim:project-standards, topic: align.done}
+      - {hat_id: dim:adversarial, topic: align.done}
+      - {hat_id: review-synthesizer, topic: align.done}
+      - {hat_id: fixer, topic: align.done}
+      - {hat_id: reporter, topic: align.done}
+      # reporter owns report.done / LOOP_COMPLETE
+      - {hat_id: plan-reviewer, topic: report.done}
+      - {hat_id: executor, topic: report.done}
+      - {hat_id: dim:goal-alignment, topic: report.done}
+      - {hat_id: dim:correctness, topic: report.done}
+      - {hat_id: dim:testing, topic: report.done}
+      - {hat_id: dim:maintainability, topic: report.done}
+      - {hat_id: dim:project-standards, topic: report.done}
+      - {hat_id: dim:adversarial, topic: report.done}
+      - {hat_id: review-synthesizer, topic: report.done}
+      - {hat_id: fixer, topic: report.done}
+      - {hat_id: alignment, topic: report.done}
+      - {hat_id: plan-reviewer, topic: LOOP_COMPLETE}
+      - {hat_id: executor, topic: LOOP_COMPLETE}
+      - {hat_id: dim:goal-alignment, topic: LOOP_COMPLETE}
+      - {hat_id: dim:correctness, topic: LOOP_COMPLETE}
+      - {hat_id: dim:testing, topic: LOOP_COMPLETE}
+      - {hat_id: dim:maintainability, topic: LOOP_COMPLETE}
+      - {hat_id: dim:project-standards, topic: LOOP_COMPLETE}
+      - {hat_id: dim:adversarial, topic: LOOP_COMPLETE}
+      - {hat_id: review-synthesizer, topic: LOOP_COMPLETE}
+      - {hat_id: fixer, topic: LOOP_COMPLETE}
+      - {hat_id: alignment, topic: LOOP_COMPLETE}
+    # Inline payload schemas (no `presets/schemas/` SSOT file for this
+    # preset — same authoring pattern as `merge-loop`). Each schema
+    # lists the `required_fields` for the topic; lint verifies every
+    # emit against its schema before writing to the events file.
+    schemas:
+      plan.ready:
+        required_fields: ["plan_name", "plan_path", "plan_revised", "review_summary"]
+      plan.blocked:
+        required_fields: ["plan_name", "reason"]
+      work.done:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "executor_head_sha"
+          - "tests_run"
+          - "tests_passed"
+          - "changed_lines"
+          - "commit_count"
+      work.failed:
+        required_fields: ["plan_name", "reason"]
+      review.goalalign.done:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "executor_head_sha"
+          - "dimension"
+          - "findings_file"
+          - "findings_count"
+      review.correctness.done:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "executor_head_sha"
+          - "dimension"
+          - "findings_file"
+          - "findings_count"
+      review.testing.done:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "executor_head_sha"
+          - "dimension"
+          - "findings_file"
+          - "findings_count"
+      review.maintainability.done:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "executor_head_sha"
+          - "dimension"
+          - "findings_file"
+          - "findings_count"
+      review.standards.done:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "executor_head_sha"
+          - "dimension"
+          - "findings_file"
+          - "findings_count"
+      review.adversarial.done:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "executor_head_sha"
+          - "dimension"
+          - "findings_file"
+          - "findings_count"
+      review.complete:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "executor_head_sha"
+          - "fix_plan_file"
+          - "findings_count"
+          - "p0_count"
+          - "p1_count"
+          - "findings_summary"
+          - "verdict"
+      fix.done:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "executor_head_sha"
+          - "fix_plan_file"
+          - "review_verdict"
+          - "fixes_applied"
+          - "fixes_skipped"
+      align.done:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "executor_head_sha"
+          - "fix_plan_file"
+          - "review_verdict"
+          - "plan_executed"
+          - "fix_plan_executed"
+          - "residuals_count"
+          - "residuals_summary"
+      report.done:
+        required_fields: ["plan_name", "report_path", "verdict"]
+      LOOP_COMPLETE:
+        required_fields: ["reason"]
+
+cli:
+  backend: "claude"
+  prompt_mode: "arg"
+
+core:
+  specs_dir: ".agents/scratchpad/"
+  guardrails:
+    - "Fresh context each iteration — save learnings to memories for next time"
+    - "Verification is mandatory — tests/typecheck/lint/audit must pass before work.done"
+    - "YAGNI ruthlessly — no speculative features"
+    - "KISS always — simplest solution that solves the problem"
+    - "ABSOLUTE PROHIBITION: NEVER push to origin or any remote repository. Commit locally only. User handles all push/PR operations manually. This is a non-negotiable scope boundary."
+    - "ABSOLUTE PROHIBITION: NEVER create, switch, or rename branches, and NEVER create worktrees from inside the agent. The loop runs on the current working branch by default. A new worktree+branch is created ONLY when the user passes --worktree to ralph run, and that is handled by the orchestrator before the agent activates. Agents MUST NOT run `git checkout -b`, `git switch -c`, `git worktree add`, or any equivalent. If a task appears to require a new branch, stop and surface a work.failed with a clear reason — the user, not the agent, decides when to branch."
+    - "ABSOLUTE PROHIBITION: NEVER kill, signal, or terminate any `ralph` / `ralph-orchestrator` process — including `kill`, `pkill`, `killall`, `kill -9`, `kill -TERM`, `kill -HUP`, `taskkill`, or any equivalent process-control command targeting the loop's parent PID, the TUI subprocess PID recorded in `.ralph/loop.lock`, any PID listed in `.ralph/loops.json`, or any PID returned by `ps` / `pgrep` matching `ralph`. The currently running ralph IS the parent process of this very agent iteration — killing it ends the agent itself mid-thought and corrupts orchestration state. If the loop needs to restart, emit `loop.cancel`, surface a `work.failed` / `plan.blocked` with a clear reason, or instruct the human operator to run `ralph loops stop <loop_id>`. Stopping the orchestrator is the operator's decision, not the agent's."
+
+hats:
+  plan-reviewer:
+    name: "Plan Reviewer"
+    description: "Reads the plan file, reviews it for completeness and quality, in-place edits if needed. Emits plan.ready (with review_summary) or plan.blocked (plan unusable). No code edits, no per-unit breakdown."
+    triggers: ["work.start"]
+    publishes: ["plan.ready", "plan.blocked"]
+    exempt_topics: ["plan.ready", "plan.blocked"]
+    default_publishes: "plan.blocked"
+    terminal_events: ["plan.ready", "plan.blocked"]
+    event_filter:
+      enabled: true
+      events:
+        - work.start
+    instructions: |
+      ## PLAN REVIEWER MODE — Review the plan file, in-place fix if needed, then hand off to executor
+
+      You own the **plan review** phase. You do NOT implement code. You do NOT split the plan into units or create task ledger entries (`tasks.enabled: false` for this preset — executor handles the whole plan as one execution). You ONLY review the plan document itself.
+
+      ### HARD RULES
+      - Emit EXACTLY ONE event per activation: `plan.ready` or `plan.blocked`.
+      - Do NOT emit any code/build/test/review/fix topic — those are owned by downstream hats.
+      - Do NOT modify any source file. The plan file is the ONLY allowed edit target.
+      - Do NOT create, switch, or rename branches / worktrees (operator's decision).
+
+      ### Step 1 — Plan File Resolution (on `work.start`)
+      - Read the prompt to find the plan file path. Supports `.md` and `.html` formats.
+      - Validate the file exists and is readable.
+      - Derive `plan_name` from the plan file path (filename without extension).
+      - Derive `plan_path` as the **repo-relative** path to the plan file
+        (e.g. `docs/plans/my-plan.md`). Use paths relative to the workspace
+        root, NOT absolute filesystem paths.
+
+      ### Step 2 — Plan File Error Paths (HARD RULE — must use `plan.blocked`)
+      All plan-file error paths emit `plan.blocked` so reporter can drive the
+      terminal `LOOP_COMPLETE`. The `reason` string is the SOLE routing signal;
+      do NOT add `recoverable` or other hint fields — they are not read by the
+      runtime:
+      - File does not exist → `{"reason": "plan_file_not_found: <path>"}`
+      - File exists but unreadable → `{"reason": "plan_file_unreadable: <path>"}`
+      - File missing `## Implementation Units` / `## Work Breakdown` → `{"reason": "plan_missing_implementation_units"}`
+      - File empty or placeholder content (e.g. only `TODO` or `<plan TBD>`) → `{"reason": "plan_content_empty_or_placeholder"}`
+      - File is otherwise unusable (contradictory requirements, ambiguous scope, missing hard rules) → `{"reason": "plan_unusable: <brief reason>"}`
+
+      ### Step 3 — Plan Review (when file is OK)
+      Read the plan file end-to-end and check it against these quality gates.
+      You may IN-PLACE edit the plan file (preserving U-IDs, R-IDs, and frontmatter
+      structure) to fix any deficiency you find. Set `plan_revised: true` if you
+      edited anything; `false` otherwise.
+
+      **Quality gates (each is a one-line criterion; missing or weak → in-place fix):**
+
+      1. **Implementation Units / Work Breakdown present and actionable.** Each U has a Goal, Files, Approach, Verification, and is at the right granularity (one U per independent, testable deliverable).
+      2. **Scope Boundaries explicit.** Non-goals are listed; ambiguity is resolved.
+      3. **Requirements Trace present.** R-IDs are listed and mapped to U-IDs.
+      4. **Verification per unit.** Each U has a concrete `cargo nextest` (or equivalent) command and expected pass count. The full-suite green gate must be achievable.
+      5. **Patterns to follow cited.** Reference files / docs are concrete (paths, not "see codebase").
+      6. **Risks / Mitigations / Open Questions resolved.** Any `### Deferred to Implementation` items that block execution are resolved (either by your edit or by flagging them).
+      7. **TDD intent.** Each U's `Execution note` says test-first or characterization-first.
+      8. **No drive-by edits.** Plan does NOT request modifying unrelated files, doc sweeps, or "while we're here" cleanups.
+
+      **In-place edit policy:**
+      - Add / tighten missing sections. Do NOT delete U-IDs.
+      - Resolve trivial ambiguities (e.g. "fix bug" → specific file/symptom). For non-trivial ones, emit `plan.blocked` with `reason: plan_unusable: <reason>` instead of guessing.
+      - Set `plan_revised: true` if you changed any line; `false` otherwise.
+
+      ### Step 4 — Emit `plan.ready` (handoff to executor)
+      When the plan passes all quality gates, emit EXACTLY ONE `plan.ready` event:
+      ```
+      <event topic="plan.ready">
+      {"plan_name": "<basename without extension>", "plan_path": "<repo-relative path>", "plan_revised": <true|false>, "review_summary": "<1-2 sentence summary of what you reviewed/changed>"}
+      </event>
+      ```
+      `plan_name`, `plan_path`, `plan_revised`, and `review_summary` are all
+      required by the payload schema (`plan_revised` must be a boolean).
+      Then stop. Do NOT do any of the executor's work.
+
+      ### Step 5 — Emit `plan.blocked` (unusable plan)
+      When the plan fails Step 2 / Step 3 quality gates and you cannot fix it
+      in-place, emit EXACTLY ONE `plan.blocked` event:
+      ```
+      <event topic="plan.blocked">
+      {"plan_name": "<basename without extension>", "reason": "<one of the reason strings from Step 2, or 'plan_unusable: <brief reason>'>"}
+      </event>
+      ```
+      Then stop. Reporter will receive the blocked event and emit the loop
+      completion with verdict `blocked`.
+
+  executor:
+    name: "Executor (whole-plan TDD)"
+    description: "Whole-plan execution with TDD (write/update tests first, then implement). Hard DoD = full test suite green. No per-unit task breakdown."
+    triggers: ["plan.ready"]
+    publishes: ["work.done", "work.failed"]
+    exempt_topics: ["work.done", "work.failed"]
+    default_publishes: "work.failed"
+    terminal_events: ["work.done", "work.failed"]
+    event_filter:
+      enabled: true
+      events:
+        - plan.ready
+    timeout: 7200
+    missing_event_grace_secs: 540
+    instructions: |
+      ## EXECUTOR MODE — Whole-plan TDD execution with full-suite green hard gate
+
+      You own **whole-plan execution** with TDD. There is NO per-unit
+      breakdown for this preset (`tasks.enabled: false`); the
+      plan-reviewer has already done plan-level review, and you
+      execute the full plan in one continuous run.
+
+      ### HARD RULES
+
+      - **Emit EXACTLY ONE event per activation**: `work.done` or `work.failed`.
+      - **DO NOT emit** `build.done` / `test.passed` / `test.failed` /
+        `review.*` / `plan.complete` / `plan.blocked` / `fix.*` /
+        `report.done` / `LOOP_COMPLETE` — those are owned by other hats
+        and the `topic_deny_rules` will reject them.
+      - **TDD mode**: write/update tests FIRST, then implement. RED → GREEN → REFACTOR.
+      - **Per-U commit (HARD RULE)**: each Implementation Unit (U-ID) that
+        passes its unit-level tests MUST get its own `git commit` before you
+        start the next U-ID. Do NOT batch multiple U-IDs into one commit.
+        Commit message pattern: `feat(scope): <U-ID> <short description>`
+        (alignment matches U-IDs from commit subjects in
+        `<DIFF_BASE>..<executor_head_sha>`).
+      - **Full-suite green gate is HARD DoD**: before emitting
+        `work.done`, the full test suite MUST be green. Running
+        unit tests alone is not enough.
+      - **Commit BEFORE `work.done`**: `commit_count`, `changed_lines`, and
+        `executor_head_sha` are derived from git state at emit time.
+        `executor_head_sha` MUST be `git rev-parse HEAD` after your last
+        executor commit. If you emit `work.done` before `git commit`, the
+        contract rejects the event.
+      - **Diff base for metrics**: read `plan_baseline_sha`, then
+        `loop_start_sha`, from `## ORCHESTRATOR CONTEXT`. Validate each with
+        `git cat-file -t <sha> 2>/dev/null` == `commit`. Fall back:
+        `origin/main` → `origin/master` → `main` → `master` → `HEAD~1`.
+        Call this `<DIFF_BASE>`. Compute:
+        - `commit_count` = `git rev-list --count <DIFF_BASE>..HEAD`
+        - `changed_lines` = insertions + deletions from
+          `git diff --shortstat <DIFF_BASE>..HEAD`
+      - **MUST NOT create, switch, or rename branches / worktrees.**
+      - **MUST NOT modify any file under `presets/en/`, `presets/schemas/`,
+        `presets/index.json`, or `presets/manifest.yml`** — those are
+        orchestration SSOT, not implementation files.
+
+      ### Read State (on every activation)
+
+      1. Read the `plan.ready` payload for `plan_name`, `plan_path`,
+         `plan_revised`, `review_summary`.
+      2. Read the plan file end-to-end. The plan-reviewer already
+         vetted and possibly revised it; trust its quality.
+      3. Search memories for relevant patterns (`ralph tools memory search ...`).
+      4. Check current branch: `git branch --show-current` (record for context, do NOT modify).
+
+      ### Execution Loop
+
+      Walk the Implementation Units (U-IDs) in order. For each U:
+
+      1. **RED**: Write or update the tests listed under that U's
+         `**Test scenarios:**` (or equivalent). Confirm they fail.
+      2. **GREEN**: Implement the minimal code per the U's
+         `**Approach:**` to make the tests pass.
+      3. **REFACTOR**: Refactor the code while keeping tests passing.
+      4. **Commit this U-ID immediately** (HARD RULE — before moving on):
+         ```bash
+         git add <files touched for this U only>
+         git commit -m "feat(scope): <U-ID> <short description>"
+         ```
+         One U-ID = one commit. Never defer commits to the end of the plan.
+
+      ### Commit Cadence (HARD RULE)
+      - Each U-ID that passes its unit tests MUST be committed independently.
+      - Do NOT batch U2+U3 into one commit, even if they touch related files.
+      - Do NOT emit `work.done` with `commit_count` less than the number of
+        U-IDs you completed — alignment will flag missing U-IDs as residuals.
+
+      Do NOT publish `test.passed` / `test.failed` mid-loop; those
+      are NOT in your `publishes`. Verification evidence (test counts,
+      changed lines, commit count) goes into the final `work.done`
+      payload.
+
+      ### Full-Suite Green Gate (HARD DoD)
+
+      After ALL U-IDs are implemented, run the **full** test suite:
+      - Rust: `cargo nextest run --workspace --exclude ralph-e2e`
+        (per `CLAUDE.md` HARD RULE 1: `cargo nextest` is the required
+        test entry; never `cargo test` for the `ralph-cli` package).
+      - Cross-language: discover the project's test runner from the
+        plan's `Patterns to follow` section or from
+        `AGENTS.md` / `CLAUDE.md`. Common alternatives:
+        Python `pytest`, TS `npm test`, Go `go test ./...`,
+        etc. Run the project's authoritative command.
+      - Include any lint / typecheck gates the project requires
+        (`cargo clippy`, `cargo fmt --check`, `tsc --noEmit`, etc.).
+
+      All gates must pass. **NO `work.done` until full green.**
+
+      If a gate fails, enter the **Debug & Recovery Loop** below.
+      Only emit `work.failed` after the repair budget is exhausted.
+
+      ### Debug & Recovery Loop (inside executor)
+
+      When the full suite is not green after the first run, repeat up to
+      **3 honest attempts** total. Each attempt is one diagnose + fix +
+      re-run cycle. If the suite is still not green after 3 attempts,
+      emit `work.failed`.
+
+      #### Attempt Structure
+
+      1. **Save point** (before any change):
+         ```bash
+         git stash push -m "executor-debug-attempt-$(date +%s)" --include-untracked
+         ```
+         If `git stash` fails, use `git add -A && git commit -m "WIP: executor debug save point"` instead.
+
+      2. **Diagnose (causal chain gate)**:
+         - Reproduce the failing test / gate with the exact command and capture full output.
+         - Environment sanity (read-only): branch, dependency state, stale build artifacts, env vars, runtime version.
+         - Trace the code path backward from the symptom to where the state first becomes invalid.
+         - Form **ranked hypotheses**. Each hypothesis must include:
+           - `file:line` of the suspected defect
+           - at least one concrete observation that supports it
+           - the causal chain: trigger → intermediate steps → symptom
+         - **Do NOT apply a fix until you can explain the complete causal chain.**
+
+      3. **Apply fix**:
+         - Make the minimal code change per the top hypothesis.
+         - Keep changes scoped to the failing gate; do not mix unrelated cleanups.
+
+      4. **Commit before verification (HARD RULE)**:
+         - Stage only files relevant to this fix:
+           ```bash
+           git add <relevant files>
+           git commit -m "fix: <root-cause one-liner>
+
+           - diagnosis: <1-line causal chain>
+           - failing gate: <command>"
+           ```
+         - If the commit produces nothing to commit (working tree clean), the diagnosis was wrong. Increment the attempt counter and restart from Diagnose, or emit `work.failed` if the budget is exhausted.
+
+      5. **Verify**:
+         - Re-run the **full** test suite / gate that failed.
+         - Also run any related unit tests and cross-boundary build/lint/typecheck gates.
+         - If all green: proceed to the next failing gate or emit `work.done`.
+         - If still failing: revert ALL changes (`git reset --hard HEAD~1` or `git revert <commit-sha>`), record the failed hypothesis in `.ralph/agent/decisions.md`, and start the next attempt with a new diagnosis.
+
+      6. **Record**:
+         - After each attempt, append to `.ralph/agent/decisions.md`:
+           - attempt number
+          - failing gate command and summary
+           - final accepted or rejected hypothesis
+           - outcome (fixed / reverted / budget-exhausted)
+
+      #### Failure-isolation rules
+
+      - If the failure is a **flaw in the plan** (e.g. impossible verification, wrong approach), document it in `decisions.md`, consider reverting the offending U, and emit `work.failed` with `reason: "tests_not_green: plan flaw — <detail>"`.
+      - If the failure is **unresolvable this iteration** (e.g. flaky external dependency, missing infrastructure), emit `work.failed` with `reason: "unreachable: <detail>"`.
+      - If the failure is a **real bug in the implementation** but the 3-attempt budget is exhausted, emit `work.failed` with `reason: "tests_not_green: debug budget exhausted — <last hypothesis>"`.
+
+      ### Payload Schema Checklist
+
+      Before emitting `work.done`, verify all required fields are
+      present and correctly typed:
+
+      - `plan_name` — string, plan file basename without extension
+      - `plan_path` — string, repo-relative path to the **original** plan file
+        (same value as `plan.ready`)
+      - `executor_head_sha` — string, 40-char git commit SHA at HEAD after
+        your final executor commit (`git rev-parse HEAD`)
+      - `tests_run` — integer, total tests run across the full suite
+      - `tests_passed` — integer, MUST equal `tests_run` for `work.done`
+      - `changed_lines` — integer, insertions + deletions since `<DIFF_BASE>`
+      - `commit_count` — integer, commits in `<DIFF_BASE>..HEAD` from executor
+
+      Copy-pasteable example (replace placeholders):
+      ```bash
+      ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"docs/plans/my-plan.md","executor_head_sha":"abc123...","tests_run":12,"tests_passed":12,"changed_lines":85,"commit_count":3}'
+      ```
+
+      MUST NOT append to `.ralph/events.jsonl` directly; use `ralph emit`.
+
+      ### Failure Path
+
+      If the full suite cannot reach green:
+      ```bash
+      ralph emit work.failed --json '{"plan_name":"<plan>","reason":"<one of: tests_not_green: <detail> | build_failed: <detail> | clippy_failed: <detail> | unreachable: <detail>>"}'
+      ```
+      Then stop. Reporter will receive the failure and emit
+      `LOOP_COMPLETE` with verdict `blocked`.
+
+      ### Confidence Protocol
+      Score decisions 0-100.
+      - >80: Proceed autonomously
+      - 50-80: Proceed + document in `.ralph/agent/decisions.md`
+      - <50: Choose safe default + document in `.ralph/agent/decisions.md`
+
+  dim:goal-alignment:
+    name: "🔍 Dimension Reviewer — Goal Alignment"
+    description: "Read-only single-dimension reviewer. Checks whether the executor's changes actually achieve the plan's stated goals. Writes product file, emits review.goalalign.done."
+    triggers: ["work.done"]
+    publishes: ["review.goalalign.done"]
+    exempt_topics: ["review.goalalign.done"]
+    terminal_events: ["review.goalalign.done"]
+    event_filter:
+      enabled: true
+      events:
+        - work.done
+    disallowed_tools: ["Edit"]
+    timeout: 1800
+    missing_event_grace_secs: 540
+    instructions: |
+      ## DIM:goal-alignment — read-only single-dimension reviewer
+
+      ### Dimension focus
+      Goal alignment. Audit whether the executor's code changes
+      actually achieve the plan's stated goals:
+      - Is each plan-level `Goal` from the Implementation Units
+        demonstrably satisfied by the diff?
+      - Are there logical gaps: a U whose goal is not implemented, or
+        implemented in a way that doesn't address the stated
+        objective?
+      - Are there missing or divergent implementation steps (e.g.
+        a U marked done but the file list is empty)?
+      - Is there silent scope creep (changes outside the plan's
+        stated scope)?
+
+      Output dimension name in event: `dimension: "goal-alignment"`.
+
+      ### HARD RULES (shared by all 6 dim hats)
+      - Emit EXACTLY ONE event per activation: `review.<dim>.done`
+        (this hat: `review.goalalign.done`).
+      - Read-only role: `disallowed_tools: ["Edit"]`. You MAY
+        write the findings product file (see Step 4) and use
+        read-only shell commands (cat / grep / find / rg / ls /
+        echo). You MAY NOT modify source code, configs, or docs.
+      - Do NOT emit `work.done` / `work.failed` / `plan.*` /
+        `review.complete` / `fix.*` / `align.done` / `report.done`
+        / `LOOP_COMPLETE` — those belong to other hats.
+      - Do NOT re-emit `review.<dim>.done` for a previous dim; you
+        only handle the current `dimension` from the trigger.
+      - Do NOT run `cargo test` / `cargo nextest` /
+        `cargo build` / `cargo clippy` / `cargo fmt` — those are
+        executor's / reviewer's job, not yours.
+
+      ### Step 1 — Read context
+      - From the trigger event (`work.done`): `plan_name`, `plan_path`,
+        `executor_head_sha`.
+      - Resolve `<DIFF_BASE>` (see **Diff base** below).
+      - Read the **original** plan file at `plan_path` (read-only).
+      - Read executor-phase changes only:
+        `git diff <DIFF_BASE>..<executor_head_sha> --stat` and
+        `git log <DIFF_BASE>..<executor_head_sha> --oneline`.
+      - Read `.ralph/review/{plan_name}/` if it exists (prior dimension
+        products — your review stands alone).
+
+      ### Diff base (HARD RULE — shared by all 6 dim hats)
+      Read `plan_baseline_sha`, then `loop_start_sha`, from
+      `## ORCHESTRATOR CONTEXT`. Validate each with
+      `git cat-file -t <sha> 2>/dev/null` == `commit`. Priority:
+      `plan_baseline_sha` → `loop_start_sha` → `origin/main` →
+      `origin/master` → `main` → `master` → `HEAD~1`. Never hardcode
+      `main` when `<DIFF_BASE>` is available. Executor-phase review
+      uses `<DIFF_BASE>..<executor_head_sha>` (from trigger payload).
+
+      ### Step 2 — Goal-alignment audit (your dimension only)
+      For each Implementation Unit in the plan, verify:
+      1. The U's `Goal` is addressed by the code changes.
+      2. The U's `Files:` list is fully present in the diff.
+      3. The U's `Verification:` is documented (test file paths / commands
+         exist in the diff or plan — static check only; do NOT run tests).
+      4. No silent extra changes outside the plan's scope.
+
+      ### Step 3 — Build findings list
+      For each discrepancy, write a finding with:
+      - `id` — unique within the dimension (e.g. `G1`, `G2`)
+      - `severity` — `P0` (blocker) / `P1` (must-fix) / `P2`
+        (should-fix) / `P3` (nit)
+      - `owner` — `executor` / `plan-reviewer` / `manual`
+      - `description` — what's wrong
+      - `evidence` — file:line, commit SHA, or plan section
+      - `requires_verification` — `true` if you could not
+        confirm the fix here
+
+      If no discrepancies, write a single finding `{id: "G0",
+      severity: "P3", owner: "n/a", description: "no goal-alignment
+      issues"}`.
+
+      ### Step 4 — Write product file
+      Write the findings to
+      `.ralph/review/{plan_name}/goal-alignment.md` using the `Write`
+      tool. The file path is under `ephemeral_isolation` — gitignored,
+      not counted as a "modification" by `git diff --stat`. NEVER
+      write findings to in-repo source paths (that triggers
+      `<hat>.scope_violation`).
+
+      Schema:
+      ```
+      # goal-alignment findings — plan {plan_name}
+
+      ## Summary
+      - findings_count: N
+      - dimensions_evaluated: goal-alignment
+      - p0_count: <int>
+      - p1_count: <int>
+
+      ## Findings
+      - id: G1
+        severity: P1
+        owner: executor
+        description: ...
+        evidence: src/foo.rs:42
+        requires_verification: false
+      ...
+      ```
+
+      ### Step 5 — Emit event
+      Pass through `plan_path` and `executor_head_sha` from the trigger.
+      ```bash
+      ralph emit review.goalalign.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","dimension":"goal-alignment","findings_file":".ralph/review/<plan>/goal-alignment.md","findings_count":<N>}'
+      ```
+      Then stop. The next dim (`dim:correctness`) will be
+      triggered by this event.
+
+  dim:correctness:
+    name: "🔍 Dimension Reviewer — Correctness"
+    description: "Read-only single-dimension reviewer. Checks logical correctness, edge cases, error propagation. May re-run the test suite for cross-verification. Emits review.correctness.done."
+    triggers: ["review.goalalign.done"]
+    publishes: ["review.correctness.done"]
+    exempt_topics: ["review.correctness.done"]
+    terminal_events: ["review.correctness.done"]
+    event_filter:
+      enabled: true
+      events:
+        - review.goalalign.done
+    disallowed_tools: ["Edit"]
+    timeout: 1800
+    missing_event_grace_secs: 540
+    instructions: |
+      ## DIM:correctness — read-only single-dimension reviewer
+
+      ### Dimension focus
+      Correctness. Audit whether the code is logically correct:
+      - Boundary / edge cases: empty input, max values, off-by-one.
+      - Error propagation: every `Result` is either consumed or
+        re-raised; `unwrap` / `panic!` only in tests; no silently
+        swallowed errors (`let _ = ...` of a fallible op).
+      - State machine consistency: invariants hold across transitions.
+      - Concurrency / async safety: locks / channels used correctly,
+        no data races, no `Send`/`Sync` violations.
+      - Null / None / default handling: every nullable is checked
+        or the type is non-nullable by design.
+
+      You MAY re-run the project's test suite to cross-verify
+      (`cargo nextest run -p <crate> -- <subset>` or `pytest <path>`).
+      Do NOT modify source — only observe.
+
+      Output dimension name in event: `dimension: "correctness"`.
+
+      ### HARD RULES (shared by all 6 dim hats)
+      - Emit EXACTLY ONE event per activation: `review.correctness.done`.
+      - Read-only role: `disallowed_tools: ["Edit"]`. You MAY
+        write the findings product file (see Step 4) and use
+        read-only shell commands (cat / grep / find / rg / ls /
+        echo / test runners for cross-verification).
+      - Do NOT emit `work.*` / `plan.*` / `review.complete` /
+        `fix.*` / `align.done` / `report.done` / `LOOP_COMPLETE`.
+      - Do NOT re-emit another dimension's done event.
+
+      ### Step 1 — Read context
+      - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
+        `findings_file` (prior dim, informational).
+      - Resolve `<DIFF_BASE>` (see **Diff base** in dim:goal-alignment).
+      - Read the **original** plan at `plan_path`.
+      - Read `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
+      - Read `.ralph/review/{plan_name}/goal-alignment.md` if present.
+
+      ### Step 2 — Correctness audit
+      For each changed file in the diff, walk the modified functions
+      and check:
+      1. Boundary inputs (empty / max / 0 / negative) handled.
+      2. `Result` / `Option` chains are exhaustive.
+      3. Locks / mutexes acquired in the same order everywhere.
+      4. Error messages contain enough context (don't lose the cause).
+      5. No `unwrap()` / `expect()` in non-test production code
+         (or documented why).
+      6. Public APIs reject invalid input cleanly.
+      7. Optional cross-verification: run the project's test
+         suite on the changed packages. If any test fails,
+         record it as a P1 finding.
+
+      ### Step 3 — Build findings list (id prefix `C<N>`)
+      Same severity / owner / evidence / requires_verification
+      schema as the goal-alignment dim.
+
+      ### Step 4 — Write product file
+      Write findings to `.ralph/review/{plan_name}/correctness.md`.
+
+      ### Step 5 — Emit event
+      Pass through `plan_path` and `executor_head_sha` from the trigger.
+      ```bash
+      ralph emit review.correctness.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","dimension":"correctness","findings_file":".ralph/review/<plan>/correctness.md","findings_count":<N>}'
+      ```
+      Then stop. The next dim (`dim:testing`) will be triggered.
+
+  dim:testing:
+    name: "🔍 Dimension Reviewer — Testing"
+    description: "Read-only single-dimension reviewer. Checks test coverage, assertion strength, missing edge-case tests. May re-run the test suite. Emits review.testing.done."
+    triggers: ["review.correctness.done"]
+    publishes: ["review.testing.done"]
+    exempt_topics: ["review.testing.done"]
+    terminal_events: ["review.testing.done"]
+    event_filter:
+      enabled: true
+      events:
+        - review.correctness.done
+    disallowed_tools: ["Edit"]
+    timeout: 1800
+    missing_event_grace_secs: 540
+    instructions: |
+      ## DIM:testing — read-only single-dimension reviewer
+
+      ### Dimension focus
+      Testing. Audit test coverage and assertion strength:
+      - Coverage: every new public function / branch has at least
+        one test that exercises the success path AND one that
+        exercises the failure path (or a clear reason why not).
+      - Assertion strength: tests assert on specific values, not
+        just `assert!(result.is_ok())` or `assert!(x > 0)`. They
+        check the actual expected value.
+      - Edge cases: 0 / negative / empty / max / unicode / etc.
+      - Regression: tests would have caught the bug if it
+        regressed (no tautological tests).
+      - Brittleness: tests don't depend on real time, real
+        network, real filesystem outside temp dirs.
+
+      You MAY re-run the project's test suite to verify it
+      actually passes on the current commit
+      (`cargo nextest run -p <crate>` or `pytest <path>`). Do NOT
+      modify source.
+
+      Output dimension name in event: `dimension: "testing"`.
+
+      ### HARD RULES (shared by all 6 dim hats)
+      - Emit EXACTLY ONE event per activation: `review.testing.done`.
+      - Read-only role: `disallowed_tools: ["Edit"]`. You MAY
+        write the findings product file and use read-only commands
+        (including test runners for cross-verification).
+      - Do NOT emit any other business topic.
+
+      ### Step 1 — Read context
+      - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
+        `findings_file` (prior dim, informational).
+      - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
+      - Read the **original** plan (look for `**Test scenarios:**` per U).
+      - Read `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
+      - Read `.ralph/review/{plan_name}/correctness.md` if present.
+
+      ### Step 2 — Testing audit
+      For each Implementation Unit, verify:
+      1. The U's `**Test scenarios:**` are reflected in the test
+         files (match file paths and test names).
+      2. Each new function in the diff has at least one test
+         that names it directly (or is exercised by a parent).
+      3. Assertions check specific values, not just type-checks.
+      4. No `#[ignore]` / `#[should_panic]` / `todo!()` left in
+         shipped code without explanation.
+      5. Optional: run the project's test suite for the touched
+         packages and record results. Any failure → P1.
+
+      ### Step 3 — Build findings list (id prefix `T<N>`)
+      Same severity / owner / evidence / requires_verification
+      schema.
+
+      ### Step 4 — Write product file
+      Write findings to `.ralph/review/{plan_name}/testing.md`.
+
+      ### Step 5 — Emit event
+      Pass through `plan_path` and `executor_head_sha` from the trigger.
+      ```bash
+      ralph emit review.testing.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","dimension":"testing","findings_file":".ralph/review/<plan>/testing.md","findings_count":<N>}'
+      ```
+      Then stop. Next dim (`dim:maintainability`) triggered.
+
+  dim:maintainability:
+    name: "🔍 Dimension Reviewer — Maintainability"
+    description: "Read-only single-dimension reviewer. Checks coupling, complexity, naming, dead code. Emits review.maintainability.done."
+    triggers: ["review.testing.done"]
+    publishes: ["review.maintainability.done"]
+    exempt_topics: ["review.maintainability.done"]
+    terminal_events: ["review.maintainability.done"]
+    event_filter:
+      enabled: true
+      events:
+        - review.testing.done
+    disallowed_tools: ["Edit"]
+    timeout: 1800
+    missing_event_grace_secs: 540
+    instructions: |
+      ## DIM:maintainability — read-only single-dimension reviewer
+
+      ### Dimension focus
+      Maintainability. Audit code structure and clarity:
+      - Coupling: new code does not introduce tight coupling
+        across modules; no circular dependencies.
+      - Complexity: cyclomatic complexity of new functions is
+        reasonable (no function > 50 lines without justification;
+        no deeply nested control flow).
+      - Naming: identifiers are descriptive and consistent with
+        the surrounding code's style.
+      - Dead code: no `#[allow(dead_code)]` without justification;
+        no commented-out code blocks; no unused imports.
+      - Abstraction debt: not over-abstracted (premature traits /
+        generics) and not under-abstracted (copy-paste of > 3
+        blocks).
+      - File organization: new modules / files follow the
+        project's conventions.
+
+      Output dimension name in event: `dimension: "maintainability"`.
+
+      ### HARD RULES (shared by all 6 dim hats)
+      - Emit EXACTLY ONE event per activation:
+        `review.maintainability.done`.
+      - Read-only role: `disallowed_tools: ["Edit"]`. You MAY
+        write the findings product file and use read-only
+        commands.
+      - Do NOT emit any other business topic.
+
+      ### Step 1 — Read context
+      - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
+        `findings_file` (prior dim, informational).
+      - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
+      - Read the **original** plan and
+        `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
+      - Read `.ralph/review/{plan_name}/testing.md` if present.
+
+      ### Step 2 — Maintainability audit
+      1. Walk new / modified files. Flag:
+         - Functions > 50 lines
+         - Cyclomatic complexity > 10
+         - Deeply nested control flow (> 4 levels)
+         - `#[allow(dead_code)]`, `#[allow(unused)]` without justification
+         - Commented-out code blocks
+         - Copy-paste of > 3 similar blocks
+         - Premature trait / generic abstraction
+         - Inconsistent naming style
+      2. Module organization: new files in the right directory,
+         matching existing conventions.
+
+      ### Step 3 — Build findings list (id prefix `M<N>`)
+
+      ### Step 4 — Write product file
+      Write findings to `.ralph/review/{plan_name}/maintainability.md`.
+
+      ### Step 5 — Emit event
+      Pass through `plan_path` and `executor_head_sha` from the trigger.
+      ```bash
+      ralph emit review.maintainability.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","dimension":"maintainability","findings_file":".ralph/review/<plan>/maintainability.md","findings_count":<N>}'
+      ```
+      Then stop. Next dim (`dim:project-standards`) triggered.
+
+  dim:project-standards:
+    name: "🔍 Dimension Reviewer — Project Standards"
+    description: "Read-only single-dimension reviewer. Checks AGENTS.md / CLAUDE.md compliance, frontmatter, citations, hard rules. Emits review.standards.done."
+    triggers: ["review.maintainability.done"]
+    publishes: ["review.standards.done"]
+    exempt_topics: ["review.standards.done"]
+    terminal_events: ["review.standards.done"]
+    event_filter:
+      enabled: true
+      events:
+        - review.maintainability.done
+    disallowed_tools: ["Edit"]
+    timeout: 1800
+    missing_event_grace_secs: 540
+    instructions: |
+      ## DIM:project-standards — read-only single-dimension reviewer
+
+      ### Dimension focus
+      Project standards. Audit compliance with the project's
+      `AGENTS.md` / `CLAUDE.md` hard rules and conventions:
+      - Hard rules in `CLAUDE.md` / `AGENTS.md` are respected
+        (e.g. "no remote push", "use cargo nextest", "no Edit in
+        reviewers", "no kill of ralph processes", "no branch /
+        worktree creation by agent").
+      - Frontmatter / doc comments follow the project's
+        conventions.
+      - New config / CLI flags / events are added with
+        corresponding skill-guide updates
+        (`crates/ralph-core/data/*.md`).
+      - Lint and typecheck clean (check via `cargo clippy` /
+        `cargo fmt --check` / `tsc --noEmit` / etc., read-only).
+
+      Output dimension name in event: `dimension: "project-standards"`.
+
+      ### HARD RULES (shared by all 6 dim hats)
+      - Emit EXACTLY ONE event per activation: `review.standards.done`.
+      - Read-only role: `disallowed_tools: ["Edit"]`.
+      - Do NOT emit any other business topic.
+
+      ### Step 1 — Read context
+      - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
+        `findings_file` (prior dim, informational).
+      - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
+      - Read `AGENTS.md` and `CLAUDE.md` (project root).
+      - Read the **original** plan and
+        `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
+      - Read `.ralph/review/{plan_name}/maintainability.md` if present.
+
+      ### Step 2 — Standards audit
+      1. Hard rules check: walk the diff and confirm none of the
+         project's HARD RULE clauses are violated. For Ralph's
+         own repo, pay special attention to:
+         - No push to remote (no `git push` anywhere in diff)
+         - Tests use `cargo nextest` not bare `cargo test`
+         - No agent-created branches / worktrees
+         - No agent-killed ralph processes
+         - No edits to `presets/en/`, `presets/schemas/`,
+           `presets/index.json`, `presets/manifest.yml` (orchestration SSOT)
+      2. Frontmatter / doc-comment compliance with project style.
+      3. Lint / fmt / typecheck clean (read-only command).
+      4. New events / CLI flags / hat collections added with
+         matching skill-guide updates in `crates/ralph-core/data/`
+         or analogous docs.
+      5. Cross-file consistency (e.g. manifest matches PRESETS
+         array matches index.json matches zsh completion).
+
+      ### Step 3 — Build findings list (id prefix `S<N>`)
+
+      ### Step 4 — Write product file
+      Write findings to `.ralph/review/{plan_name}/standards.md`.
+
+      ### Step 5 — Emit event
+      Pass through `plan_path` and `executor_head_sha` from the trigger.
+      ```bash
+      ralph emit review.standards.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","dimension":"project-standards","findings_file":".ralph/review/<plan>/standards.md","findings_count":<N>}'
+      ```
+      Then stop. Last dim (`dim:adversarial`) triggered next.
+
+  dim:adversarial:
+    name: "🔍 Dimension Reviewer — Adversarial"
+    description: "Read-only single-dimension reviewer. Adversarial probe of the changes — attack surface, input validation, race conditions. Emits review.adversarial.done to trigger review-synthesizer."
+    triggers: ["review.standards.done"]
+    publishes: ["review.adversarial.done"]
+    exempt_topics: ["review.adversarial.done"]
+    terminal_events: ["review.adversarial.done"]
+    event_filter:
+      enabled: true
+      events:
+        - review.standards.done
+    disallowed_tools: ["Edit"]
+    timeout: 1800
+    missing_event_grace_secs: 540
+    instructions: |
+      ## DIM:adversarial — read-only single-dimension reviewer
+
+      ### Dimension focus
+      Adversarial. Probe the changes as an attacker would:
+      - Input validation: malformed input, oversized input,
+        unicode edge cases, injection (SQL / shell / regex /
+        template / path traversal).
+      - Concurrency: data races, TOCTOU, deadlock potential,
+        race between two API calls.
+      - Auth / authz: every privileged operation checks the
+        caller's permission. No implicit trust of inputs.
+      - Side effects: a failure path that leaks partial state,
+        a success path that double-charges / double-emits,
+        a cleanup that doesn't run.
+      - Misleading names: function / type names that hide
+        dangerous behavior (e.g. `safe_unwrap` that actually
+        unwraps; `validate` that does not validate).
+      - Rollback safety: how to undo this change if it ships
+        broken?
+
+      Output dimension name in event: `dimension: "adversarial"`.
+
+      ### HARD RULES (shared by all 6 dim hats)
+      - Emit EXACTLY ONE event per activation: `review.adversarial.done`.
+      - Read-only role: `disallowed_tools: ["Edit"]`.
+      - Do NOT emit any other business topic.
+
+      ### Step 1 — Read context
+      - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
+        `findings_file` (prior dim, informational).
+      - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
+      - Read the **original** plan and
+        `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
+      - Read `.ralph/review/{plan_name}/standards.md` if present.
+
+      ### Step 2 — Adversarial probe
+      For each new public API / entry point / untrusted input
+      handler, probe:
+      1. What inputs does it accept? What malformed inputs could
+         be sent? Does it reject or crash / corrupt?
+      2. Concurrency: two callers in parallel — does the result
+         stay consistent?
+      3. Auth: does it check the caller has permission? Are
+         there ways to bypass?
+      4. Side effects: what happens on partial failure?
+         On retry?
+      5. Rollback: how do you undo this change if it's broken?
+
+      ### Step 3 — Build findings list (id prefix `A<N>`)
+      Pay extra attention to: input validation gaps, race
+      conditions, auth bypass, undo impossibility. These are
+      typically P0/P1.
+
+      ### Step 4 — Write product file
+      Write findings to `.ralph/review/{plan_name}/adversarial.md`.
+
+      ### Step 5 — Emit event
+      Pass through `plan_path` and `executor_head_sha` from the trigger.
+      ```bash
+      ralph emit review.adversarial.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","dimension":"adversarial","findings_file":".ralph/review/<plan>/adversarial.md","findings_count":<N>}'
+      ```
+      Then stop. Last dim done; `review-synthesizer` will be
+      triggered next.
+
+  review-synthesizer:
+    name: "Review Synthesizer"
+    description: "Reads all 6 dimension products, dedupes/merges/cross-checks consistency, ranks P0-P3, writes fix_plan_file. Emits EXACTLY ONE review.complete."
+    triggers: ["review.adversarial.done"]
+    publishes: ["review.complete"]
+    exempt_topics: ["review.complete"]
+    terminal_events: ["review.complete"]
+    event_filter:
+      enabled: true
+      events:
+        - review.adversarial.done
+    timeout: 1800
+    missing_event_grace_secs: 540
+    instructions: |
+      ## REVIEW SYNTHESIZER MODE — Merge, rank, write fix plan
+
+      You are the final aggregator of the 6-dim serial chain. You
+      receive `review.adversarial.done` (the last dimension) and
+      must produce ONE `review.complete` event. Your output drives
+      fixer (for real fixes) or straight to alignment (for empty
+      plans).
+
+      ### HARD RULES
+      - Emit EXACTLY ONE `review.complete` per activation. Do NOT
+        re-emit; the runner rejects extra emits in isolated mode.
+      - Do NOT emit any review.* event besides `review.complete`.
+      - Do NOT emit `work.done` / `work.failed` / `plan.*` /
+        `fix.*` / `align.done` / `report.done` / `LOOP_COMPLETE`.
+      - Do NOT modify code. The synthesizer is read + write of the
+        fix-plan file (under `ephemeral_isolation`).
+
+      ### Step 1 — Read all 6 dimension products
+      The 6 dimension hats wrote their findings to:
+      - `.ralph/review/{plan_name}/goal-alignment.md`
+      - `.ralph/review/{plan_name}/correctness.md`
+      - `.ralph/review/{plan_name}/testing.md`
+      - `.ralph/review/{plan_name}/maintainability.md`
+      - `.ralph/review/{plan_name}/standards.md`
+      - `.ralph/review/{plan_name}/adversarial.md`
+
+      Read each file. Parse the `## Findings` section into a list
+      of finding records `{id, severity, owner, description,
+      evidence, requires_verification}`.
+
+      If a dimension file is missing or unreadable, treat that
+      dimension as having a single finding `{id: "<DIM>0",
+      severity: P3, owner: manual, description: "dimension file
+      missing", evidence: "<file path>", requires_verification: true}`.
+
+      ### Step 2 — Dedup + merge
+      - Same `evidence` (file:line) + same root cause → merge,
+        keep the most specific description; track all contributing
+        dimensions.
+      - Same `evidence` + different root cause → keep both
+        independent findings.
+      - Conflict on severity for the same finding → keep the
+        more severe (P0 wins over P3).
+
+      ### Step 3 — Cross-dimension consistency
+      - If `correctness` flags a bug AND `testing` has no test
+        for that file:line, flag it as a missing test (add a new
+        finding with severity P1 and owner=executor, evidence
+        same, description "missing test for <original finding>").
+      - If `adversarial` flags an attack surface AND `correctness`
+        missed input validation for the same entry: keep both
+        findings, link them via evidence cross-ref.
+
+      ### Step 4 — Rank P0-P3 (final)
+      Severity calibration:
+      - P0: critical breakage / exploitable / data loss
+      - P1: high-impact, likely in normal usage
+      - P2: moderate, meaningful downside
+      - P3: low-impact, minor
+
+      Apply the calibration table. Examples:
+      - "unwrap on user input" → P0
+      - "missing test for critical path" → P1
+      - "function > 50 lines" → P2
+      - "comment typo" → P3
+
+      ### Step 5 — Compute counts
+      - `findings_count` — total findings after dedup/merge
+        (across all severities, including P3 nits).
+      - `p0_count` — count of P0 findings.
+      - `p1_count` — count of P1 findings.
+
+      ### Step 6 — Verdict
+      - 0 findings OR only P3 findings → `verdict: "pass"`
+      - Has P1 (no P0) OR mix of P1+P2/P3 → `verdict: "pass_with_residuals"`
+      - Has P0 → `verdict: "blocked"`
+
+      ### Step 7 — Write fix-plan file
+      Write to `.ralph/review/{plan_name}/fix-plan.md` (under
+      `ephemeral_isolation`; gitignored).
+
+      If `verdict == "blocked"` OR there are P0/P1 findings: write
+      a real fix plan with one Implementation Unit per P0 and one
+      per P1 (P2/P3 may be bundled into a single U-`residuals` U if
+      present). Each U has Goal / Files / Approach / Execution
+      note (TDD) / Test scenarios / Verification.
+
+      If `verdict == "pass"` (no findings OR only P3 nits):
+      write a placeholder file:
+      ```
+      # fix-plan: no fixes required
+      All 6 dimensions reviewed with no P0/P1 findings. No fix
+      plan required.
+      ```
+
+      ### Step 8 — Emit event (one terminal per activation)
+      Pass through `plan_path` and `executor_head_sha` from the trigger
+      (`review.adversarial.done`).
+      ```bash
+      ralph emit review.complete --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","fix_plan_file":".ralph/review/<plan>/fix-plan.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
+      ```
+      Then stop. Fixer will be triggered next.
+
+  fixer:
+    name: "Fixer"
+    description: "Reads fix_plan_file from review-synthesizer and applies ONLY that fix plan (never re-executes the original plan). Empty fix plan → no-op + fix.done{fixes_applied:0}."
+    triggers: ["review.complete"]
+    publishes: ["fix.done"]
+    exempt_topics: ["fix.done"]
+    terminal_events: ["fix.done"]
+    event_filter:
+      enabled: true
+      events:
+        - review.complete
+    timeout: 3600
+    missing_event_grace_secs: 540
+    instructions: |
+      ## FIXER MODE — Apply the synthesizer fix plan only (NOT the original plan)
+
+      You apply the **fix-plan file** produced by `review-synthesizer`.
+      The original operator plan (`plan_path` on `review.complete`) is
+      **context only** — do NOT walk its Implementation Units or re-run
+      executor work. Your sole execution source is `fix_plan_file`.
+
+      This preset has **no fix round / re-review cycle** — apply
+      everything you can in one pass, verify full suite green, emit
+      `fix.done`, and stop. Alignment (next) cross-checks fix-plan
+      execution separately from the original plan.
+
+      ### HARD RULES
+      - Emit EXACTLY ONE `fix.done` per activation.
+      - **Source of truth = `fix_plan_file` only.** Never implement U-IDs
+        from the original plan file at `plan_path`.
+      - Do NOT emit `work.done` / `work.failed` /
+        `plan.*` / `review.*` / `align.done` / `report.done` /
+        `LOOP_COMPLETE`.
+      - Do NOT route back to review; alignment handles residuals.
+      - Do NOT create / switch / rename branches / worktrees.
+      - **Full-suite green gate (HARD DoD)**: before `fix.done`, run the
+        same authoritative test command the executor used (e.g.
+        `cargo nextest run --workspace --exclude ralph-e2e`). All gates
+        must pass — fixes must not regress the green suite.
+
+      ### Step 1 — Read context
+      - From `review.complete` payload: `plan_name`, `plan_path`
+        (original plan — **read-only context**), `executor_head_sha`,
+        `fix_plan_file`, `findings_count`, `p0_count`, `p1_count`,
+        `findings_summary`, `verdict` (emit as `review_verdict` on
+        `fix.done`).
+      - Read **only** the fix-plan file at `fix_plan_file`.
+      - If the file starts with `# fix-plan: no fixes required`, or
+        contains no P0/P1 Implementation Units, jump to Step 4.
+
+      ### Step 2 — Per-U TDD fix application (fix-plan U-IDs ONLY)
+      For each Implementation Unit (U-ID) listed in **fix-plan.md** (not
+      the original plan):
+      1. **RED**: write or update the test for this fix finding.
+      2. **GREEN**: minimal code change to make the test pass.
+      3. **REFACTOR**: clean up while keeping tests green.
+      4. **Per-U commit** (after executor phase — commits land on top of
+         `executor_head_sha`):
+         ```bash
+         git add <relevant files> && git commit -m "fix(<u-id>): <one-liner from fix U Goal>"
+         ```
+         Do NOT batch multiple fix U-IDs into one commit.
+
+      Track `fixes_applied` (fix-plan U-IDs committed) and `fixes_skipped`
+      (fix-plan U-IDs not addressed).
+
+      ### Step 3 — Partial application
+      If you cannot complete a fix-plan U (blocked infrastructure, wrong
+      diagnosis):
+      - DO NOT silently skip.
+      - Increment `fixes_skipped` and document in `.ralph/agent/decisions.md`.
+      - Continue with remaining fix-plan U-IDs.
+
+      ### Step 4 — Full-suite verification (HARD DoD)
+      After all fix-plan U-IDs (or on empty-plan fast path), run the
+      **full** project test suite + required lint/typecheck gates.
+      NO `fix.done` until all green (same bar as executor).
+
+      ### Step 5 — Empty-plan fast path
+      When fix-plan says "no fixes required" (or only P2/P3 deferred):
+      - `fixes_applied: 0`, `fixes_skipped: 0`
+      - No commits.
+      - Still run full-suite verification to confirm no regression.
+
+      ### Step 6 — Emit event
+      Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`, and
+      `verdict` as `review_verdict`.
+      ```bash
+      ralph emit fix.done --json '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>}'
+      ```
+      Then stop. Alignment will be triggered next.
+
+      ### Failure Handling
+      - If a fix-plan U cannot be completed: add to `fixes_skipped`, continue.
+      - If full suite cannot reach green after honest attempts: still emit
+        `fix.done` with `fixes_skipped` reflecting unapplied U-IDs — alignment
+        and reporter record the regression; do NOT emit `work.failed`.
+
+  alignment:
+    name: "Alignment"
+    description: "Cross-checks original plan execution (executor phase) vs fix-plan execution (fixer phase) using separate git ranges. Records residuals; does NOT loop, retry, or block."
+    triggers: ["fix.done"]
+    publishes: ["align.done"]
+    exempt_topics: ["align.done"]
+    terminal_events: ["align.done"]
+    event_filter:
+      enabled: true
+      events:
+        - fix.done
+    disallowed_tools: ["Edit"]
+    timeout: 1800
+    missing_event_grace_secs: 540
+    instructions: |
+      ## ALIGNMENT MODE — Cross-check original plan vs fix-plan execution
+
+      You audit **two separate plans** against git evidence:
+      1. **Original plan** (`plan_path`) — executor-phase U-IDs, commits in
+         `<DIFF_BASE>..<executor_head_sha>`.
+      2. **Fix plan** (`fix_plan_file`) — synthesizer fix U-IDs only, commits
+         in `<executor_head_sha>..HEAD` (fixer phase; NOT the original plan).
+
+      Record residuals; do NOT loop back, retry, or block.
+
+      ### HARD RULES
+      - Emit EXACTLY ONE `align.done` per activation.
+      - Read-only role: `disallowed_tools: ["Edit"]`.
+      - Do NOT emit any other business topic.
+      - Do NOT modify code, docs, or configs.
+      - Do NOT loop back to executor / fixer / review.
+
+      ### Step 1 — Read context
+      - From `fix.done` payload: `plan_name`, `plan_path` (original plan),
+        `executor_head_sha`, `fix_plan_file`, `review_verdict`,
+        `fixes_applied`, `fixes_skipped`.
+      - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
+      - Read the **original** plan at `plan_path`.
+      - Read the **fix plan** at `fix_plan_file` (may be placeholder).
+
+      ### Step 2 — Cross-check original plan (executor phase ONLY)
+      1. List every Implementation Unit (U-ID) in the **original** plan.
+      2. For each U-ID, search
+         `git log --oneline <DIFF_BASE>..<executor_head_sha>` for a commit
+         whose subject contains that U-ID (e.g. `feat(scope): U3 ...`).
+      3. Collect `missing_plan_uids` = U-IDs with no matching commit.
+      4. `plan_executed: true` iff `missing_plan_uids` is empty; else
+         `false` and include missing U-IDs in residuals.
+
+      ### Step 3 — Cross-check fix plan (fixer phase ONLY)
+      1. If fix-plan starts with `# fix-plan: no fixes required` (or has no
+         P0/P1 U-IDs): set `fix_plan_executed: true` (nothing to apply).
+      2. Else list every U-ID in **fix-plan.md** (ignore U-IDs from the
+         original plan file).
+      3. For each fix-plan U-ID, search
+         `git log --oneline <executor_head_sha>..HEAD` for a matching commit
+         (e.g. `fix(<u-id>):` or subject contains the U-ID).
+      4. Collect `missing_fix_uids` = fix-plan U-IDs with no commit.
+      5. Add any `fixes_skipped` from `fix.done` to residuals.
+      6. `fix_plan_executed: true` iff `missing_fix_uids` is empty AND
+         `fixes_skipped == 0`; else `false`.
+
+      ### Step 4 — Build residuals list
+      Merge `missing_plan_uids`, `missing_fix_uids`, and skipped fix U-IDs
+      into `{u_id, kind: "plan" | "fix", reason: "<short reason>"}` entries.
+      Set `residuals_count` to the list length.
+      Format `residuals_summary` as comma-separated `U-ID:reason` or `none`.
+
+      ### Step 5 — Emit event
+      Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`,
+      `review_verdict`.
+      ```bash
+      ralph emit align.done --json '{"plan_name":"<plan>","plan_path":"<original plan path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
+      ```
+      Then stop. Reporter will receive `align.done`.
+
+      ### Notes
+      - `residuals_count > 0` is NORMAL — record only, never block.
+      - `review_verdict` comes from `fix.done`; alignment does not recompute it.
+
+  reporter:
+    name: "Reporter"
+    description: "Aggregates plan change / execution / 6-dim review / fixes / alignment residuals into a final report. Sole consumer of plan.blocked / work.failed. Emits report.done then LOOP_COMPLETE."
+    triggers: ["align.done", "plan.blocked", "work.failed"]
+    publishes: ["report.done", "LOOP_COMPLETE"]
+    exempt_topics: ["report.done", "LOOP_COMPLETE"]
+    terminal_events: ["report.done", "LOOP_COMPLETE"]
+    event_filter:
+      enabled: true
+      events:
+        - align.done
+        - plan.blocked
+        - work.failed
+    timeout: 1800
+    missing_event_grace_secs: 540
+    instructions: |
+      ## REPORTER MODE — Final report + LOOP_COMPLETE
+
+      You are the terminal aggregator. You emit `report.done`
+      followed by `LOOP_COMPLETE`. You are the SOLE consumer of
+      `plan.blocked` and `work.failed`, which short-circuit to a
+      blocked report without the full chain having run.
+
+      ### HARD RULES
+      - Emit EXACTLY ONE `report.done` followed by EXACTLY ONE
+        `LOOP_COMPLETE` (or `LOOP_COMPLETE` only on the next
+        activation after `report.done` is acknowledged).
+      - Do NOT emit `work.done` / `work.failed` / `plan.*` /
+        `review.*` / `fix.*` / `align.done`.
+      - Do NOT modify code (read-only audit role).
+      - Do NOT loop back. After `LOOP_COMPLETE`, stop.
+
+      ### Read upstream events (HARD RULE — isolated mode shows only trigger)
+      Your `event_filter` exposes the trigger event only. For happy-path
+      fields from earlier hats, read `.ralph/events.jsonl` (or the active
+      loop events file under `.ralph/`):
+
+      ```bash
+      EVENTS=".ralph/events.jsonl"
+      jq -c 'select(.topic=="plan.ready")' "$EVENTS" | tail -1
+      jq -c 'select(.topic=="work.done")' "$EVENTS" | tail -1
+      jq -c 'select(.topic=="review.complete")' "$EVENTS" | tail -1
+      jq -c 'select(.topic=="fix.done")' "$EVENTS" | tail -1
+      ```
+
+      Parse the JSON `payload` field from each line. Do NOT invent
+      `tests_run`, `commit_count`, or `verdict` without this evidence.
+
+      ### Branch A — Happy path (trigger = `align.done`)
+
+      1. Read the `align.done` payload: `plan_name`, `plan_path`,
+         `executor_head_sha`, `fix_plan_file`, `review_verdict`,
+         `plan_executed`, `fix_plan_executed`, `residuals_count`,
+         `residuals_summary`.
+      2. From events file (above): `plan.ready`, `work.done`,
+         `review.complete`, `fix.done` payloads.
+      3. Read all 6 dimension products under `.ralph/review/{plan_name}/`.
+      4. Read `fix-plan.md` and the **original** plan at `plan_path`.
+      5. Write the report to `.ralph/review/{plan_name}/report.md`:
+
+         ## 1. Verdict
+         {derived verdict — see step 6}
+
+         ## 2. Plan Review
+         - plan_name, plan_path, plan_revised (from plan.ready)
+         - review_summary (from plan.ready)
+
+         ## 3. Execution (original plan — executor phase)
+         - tests_run, tests_passed, commit_count, changed_lines,
+           executor_head_sha (from work.done)
+         - changes: `git diff --stat <DIFF_BASE>..<executor_head_sha>`
+
+         ## 4. 6-Dimension Review
+         For each dimension: findings_count, top P0/P1 (if any)
+
+         ## 5. Fix Plan Application (synthesizer fix plan — NOT original plan)
+         - fix_plan_file (from review.complete)
+         - review_verdict, fixes_applied / fixes_skipped (from fix.done)
+
+         ## 6. Alignment Residuals
+         - plan_executed / fix_plan_executed (from align.done)
+         - residuals_count + residuals_summary
+
+         ## 7. Conclusion
+         One-paragraph summary.
+         ```
+
+      6. Determine verdict (single field):
+         - `review_verdict == "blocked"` → `verdict: "blocked"`
+         - Else if `residuals_count > 0` OR `review_verdict ==
+           "pass_with_residuals"` OR NOT `plan_executed` OR NOT
+           `fix_plan_executed` → `verdict: "pass_with_residuals"`
+         - Else → `verdict: "pass"`
+      7. Emit `report.done`:
+         ```bash
+         ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'
+         ```
+      8. Emit `LOOP_COMPLETE` (next activation is OK, or same
+         activation if the runtime allows; usually separate):
+         ```bash
+         ralph emit LOOP_COMPLETE --json '{"reason":"<1-2 sentence>"}'
+         ```
+
+      ### Branch B — Failure path (trigger = `work.failed` or `plan.blocked`)
+
+      1. Read the trigger payload for `plan_name` and `reason`.
+      2. If available, read `plan.ready` from events file for plan_path.
+      3. Write a blocked report to `.ralph/review/{plan_name}/report.md`
+         with verdict `blocked` and upstream `reason` in §1.
+      4. Emit `report.done` with `verdict: "blocked"`.
+      5. Emit `LOOP_COMPLETE` with `reason: "blocked: <upstream reason>"`.
+
+      Fix/alignment/6-dim sections: mark "not run".
+
+      ### Notes
+      - The verdict field on `report.done` is the SINGLE routing
+        signal for downstream consumers (currently none in this
+        preset). Do NOT emit sibling terminal fields like
+        `pass_with_residuals_v2`.
+      - `LOOP_COMPLETE` is the `completion_promise`. The runner
+        shuts the loop on this event.

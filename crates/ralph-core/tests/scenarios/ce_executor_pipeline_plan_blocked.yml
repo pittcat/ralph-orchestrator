@@ -1,0 +1,94 @@
+# ce_executor_pipeline_plan_blocked: plan-reviewer blocks unusable plan
+#
+# plan.blocked short-circuits to reporter — executor and 6-dim chain
+# must NOT fire.
+
+name: ce_executor_pipeline_plan_blocked
+description: Plan blocked variant for ce-executor-pipeline — plan.blocked short-circuits to reporter
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    plan-reviewer:
+      subscribes_to:
+        - work.start
+      publishes:
+        - plan.ready
+        - plan.blocked
+    executor:
+      subscribes_to:
+        - plan.ready
+      publishes:
+        - work.done
+        - work.failed
+    "dim:goal-alignment":
+      subscribes_to:
+        - work.done
+      publishes:
+        - review.goalalign.done
+    reporter:
+      subscribes_to:
+        - align.done
+        - plan.blocked
+        - work.failed
+      publishes:
+        - report.done
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "work.start"
+    completion_promise: "LOOP_COMPLETE"
+    required_events: ["report.done"]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        plan.blocked:
+          required_fields:
+            - plan_name
+            - reason
+          payload: json_object
+        report.done:
+          required_fields:
+            - plan_name
+            - report_path
+            - verdict
+          payload: json_object
+        LOOP_COMPLETE:
+          required_fields:
+            - reason
+          payload: json_object
+
+mock_responses:
+  - text: |
+      <event topic="plan.blocked">
+      {"plan_name":"plan-x","reason":"plan_missing_implementation_units"}
+      </event>
+    hat: plan-reviewer
+  - text: |
+      <event topic="report.done">
+      {"plan_name":"plan-x","report_path":".ralph/review/plan-x/report.md","verdict":"blocked"}
+      </event>
+    hat: reporter
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"blocked: plan_missing_implementation_units"}
+      </event>
+    hat: reporter
+
+expected:
+  iterations: 3
+  events:
+    - topic: plan.blocked
+    - topic: report.done
+  absent_events:
+    - topic: plan.ready
+    - topic: work.done
+    - topic: work.failed
+    - topic: review.goalalign.done
+    - topic: review.complete
+    - topic: fix.done
+    - topic: align.done
+  completion: true

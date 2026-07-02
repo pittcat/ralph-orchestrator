@@ -28,6 +28,7 @@
 
 embedded:
   - autoresearch
+  - ce-executor-pipeline
   - ce-executor-serial
   # - ce-executor-wave  # deleted 2026-06-23
   - debug
