@@ -19,6 +19,10 @@ pub mod archive_version_stage;
 pub mod coordinator_decision_gate_stage;
 pub mod emit_schema_gate_stage;
 pub mod flow_step_scope_stage;
+// 2026-07-02-006 plan U13: `PhaseAuthorityStage` consults the
+// `WorkflowPhaseAuthority` engine and rejects out-of-phase
+// topics with a stable `phase_violation` reason code.
+pub mod phase_authority_stage;
 pub mod repair_dispatch_stage;
 pub mod step_close_obligation_stage;
 pub mod target_hat_guard_stage;
