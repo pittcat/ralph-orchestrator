@@ -116,6 +116,8 @@ JSON 写法：`ralph emit work.done --policy-check -j '{"plan_path": "...", "tas
 
 **`--policy-check` 边界**：显式 `--policy-check` 是 **dry-run 预检**——校验通过与 loop gate 同源，但**不会**把事件写入 `events.jsonl`；通过后再跑一次不带 `--policy-check` 的正式 `ralph emit` 才会落盘。配置强制 `require_policy_check_for_cli_emit: true` 时，校验通过后仍会写盘（Enforce 模式，不是 dry-run）。CLI 校验覆盖：unified validation pipeline（`event_policy.schemas.<topic>.required_fields`）、isolated hat 作用域、以及 `progress_task_gate`（`plan.complete` / `queue.advance` 的 `progress.md` ↔ `tasks.jsonl` 一致性，`emit.rs` step handoff gate）。
 
+> **OPAC Precheck/Apply（agent context 默认 enforce）**: agent 上下文下，`ralph emit` 在无 `--policy-check` 且无 `--unsafe-no-policy-check` 写盘会被拒（U15）。`allow_unsafe_cli_emit: true` 可作为 preset opt-out（打印 deprecation warning）。详见 always-injected `ralph-tools-opac` skill Apply 段。
+
 **校验：**
 ```bash
 # 1. 确定实际写入的事件文件（与 ralph emit 源码一致）
@@ -143,6 +145,7 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 | `events file not in allowlist` | `RALPH_EVENTS_FILE` / `--file` 命中非 allowlist 路径 | 查看错误信息中列出的 allowlist 条目；优先移除显式参数让 ralph emit 走 marker 解析 |
 | `topic is required` | 缺少位置参数 | 补上 topic |
 | `policy check failed` | payload 不符合策略 | 读 stderr / 用 `--output json` 取 `validation_errors[].field` 一次拿全部缺失字段；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再发。**不要**首选 `--unsafe-no-policy-check`（`ce-executor-serial` preset 默认 `allow_unsafe_cli_emit: false` 时该参数被拒） |
+| `agent policy-check required` (U15) | agent context + 业务 topic + 无 `--policy-check` | 先 `ralph emit <TOPIC> --policy-check -j '...'` 通过，再去掉 `--policy-check` 正式 emit。preset `allow_unsafe_cli_emit: true` 可 opt-out（deprecated warning） |
 | `cannot write to events file` | 文件不存在或权限不足 | 确认 `.ralph/` 目录存在，检查权限 |
 | `Invalid JSON payload` | 用 `-j` 但 payload 不是合法 JSON | 用 `jq` 验证 payload：`echo '{"a":1}' \| jq .` |
 | `task_id cannot be empty` | payload 中 `task_id` 为空字符串 | 从 `.ralph/agent/tasks.jsonl` 取得真实 task id 后再 emit；任何带 `task_id` 的事件都适用 |

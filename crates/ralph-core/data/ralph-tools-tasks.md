@@ -93,6 +93,10 @@ tasks:
     - executor
 ```
 
+> **OPAC Precheck (zero-write)**: 任何 `task add` / `ensure` / `start` / `close` / `fail` / `reopen` 前先跑 `ralph tools task verify <verb>`（共享同一 `authorize_lifecycle` / `validate_owner_hat_id` / `HatCommandPolicy` 内核，零写盘）。三字段一致性走 `ralph tools task verify-emit-bridge --task-id ID --task-key KEY --step STEP`，详见 always-injected `ralph-tools-opac` Precheck 段。
+>
+> **OPAC Confirm (close 后)**: agent context 下 `task close` 成功后若 hat-channel 无 completion topic，CLI 会 stderr 输出 `close_without_completion_emit` warning，含 `expected_topics` + `next_step`——**忽略它等于进入 stall 30s 等待 rescue**。详见 `ralph-tools-opac` Confirm 段。
+
 ### First thing every iteration
 ```bash
 ralph tools task ready    # What's open? Pick one. Don't create duplicates.

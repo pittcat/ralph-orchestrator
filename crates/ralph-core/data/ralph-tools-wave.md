@@ -131,6 +131,7 @@ printf '%s\n' \
 | `idempotency-key conflict: ...` | 同 scope 不同 payload | 改用不同 key（`round-2` 递增或换 task） |
 | `incomplete prior wave emission: ...` | 上次 events 写了 N 行但 record 丢失，扫 events 也只找到少于 N 行 | 手工删除残留 events 行；或换新 key |
 | `policy validation failed for topic 'X'`（exit ≠ 0） | 任一 payload 违反 `event_policy.schemas.<topic>.required_fields`，整批拒绝、零写盘 | 用 `--output json` 读 stdout 的 `validation_errors[].field` 一次性拿到全部缺失字段，修正后重发。`--unsafe-no-policy-check` 仅在 config `allow_unsafe_cli_emit: true` 时生效 |
+| `agent policy-check required` (U15/U21) | agent context + wave emit 无 precheck 成功记录 | 先 `ralph wave verify --payloads-stdin` 通过，再正式 `ralph wave emit`。dispatcher hat 由 `HatCommandPolicy` 派生（`publishes` 含 `*.unit.ready`）；worker hat 调 wave 子命令会被 deny |
 | 任何命令失败 | 通用恢复 | 1. `ralph wave emit --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
 
 > **wave worker 注意事项**：

@@ -98,9 +98,14 @@ metadata:
 | `ralph emit --schema <TOPIC>` | 只读查 topic 协议 + protocol_hash | 同上 |
 | Precheck gate（`event_loop.precheck`） | 非 CLI；loop 内 `.proposed`/gate 行为 | `ralph tools skill load ralph-tools-precheck` |
 | `ralph wave emit` | 并行 wave 调度 | `ralph tools skill load ralph-tools-wave` |
+| `ralph tools task verify <verb>` | 零写盘 Precheck（含 `verify-emit-bridge` 三字段同源） | `ralph tools skill load ralph-tools-tasks` |
+| `ralph wave verify --payloads-stdin` | 零写盘 wave batch Precheck（dispatcher hat） | `ralph tools skill load ralph-tools-wave` |
+| `ralph inspect loop` | 机器可读 loop + hat 身份摘要（OPAC Observe） | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph run` | 启动编排循环 | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph inspect profiles` | 预览 profile overlay 解析结果（只读，不启动 loop） | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph hats validate [--strict]` | 拓扑/payload/orphan/lint 校验 | `crates/ralph-cli/src/hats.rs:170`（strict 时启用 lint 所有权检查） |
+
+> **OPAC 纪律（agent context）**: 所有 state-changing 操作遵循 Observe → Precheck → Apply → Confirm 四阶段；详见 always-injected `ralph-tools-opac` skill。本表所有 `ralph emit` / `ralph tools task` / `ralph wave emit` 行均按 OPAC 纪律执行——agent 上下文默认 enforce `--policy-check`（见 U15）。
 
 > **按需加载需要 hat 上下文**：`ralph tools skill load` 在 agent 上下文中要求 `RALPH_CURRENT_HAT` 已设置，否则会以非零退出。如加载失败，先检查 `echo $RALPH_CURRENT_HAT` 是否非空。
 
