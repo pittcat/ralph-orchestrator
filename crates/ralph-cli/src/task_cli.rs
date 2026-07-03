@@ -9,6 +9,14 @@
 //! - `close`: Mark a task as complete
 //! - `reopen`: Reopen a closed/failed task
 //! - `show`: Show a single task by ID
+//! - `verify`: OPAC Precheck; verifies a mutation would succeed without writing
+//! - `verify-emit-bridge`: verifies the three-field task_id/task_key/step consistency
+//!
+//! `verify` exists to satisfy the OPAC Precheck stage (R7/R16). It runs the
+//! same authorization gates as the real mutation (`HatCommandPolicy` +
+//! `authorize_lifecycle` + field validation) but never touches
+//! `tasks.jsonl`. U14 fix-units / shippers rely on `verify` to confirm an
+//! emit is correctly wired before applying.
 
 use crate::{
     display::colors, hat_command_policy::HatCommandPolicy, operation_guard::OperationContext,
@@ -16,7 +24,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use ralph_core::{Task, TaskStatus, TaskStore};
 use std::path::PathBuf;
 
@@ -68,6 +76,12 @@ pub enum TaskCommands {
 
     /// Reopen a closed or failed task
     Reopen(ReopenArgs),
+
+    /// OPAC Precheck: verify a task mutation would succeed without writing
+    Verify(VerifyArgs),
+
+    /// OPAC Precheck: verify the three-field task_id/task_key/step emit-bridge
+    VerifyEmitBridge(VerifyEmitBridgeArgs),
 
     /// Show a single task by ID
     Show(ShowArgs),
@@ -207,6 +221,185 @@ pub struct ShowArgs {
     /// Output format
     #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
     pub format: OutputFormat,
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// U4: OPAC Precheck — `task verify <verb>` and `task verify-emit-bridge`.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Outer args for `ralph tools task verify <verb>`.
+///
+/// Mirrors the `TaskArgs` shape (`Parser` + `#[command(subcommand)]` field)
+/// so `Verify(VerifyArgs)` slots into `TaskCommands` cleanly. The shared
+/// `--root` flag lets agents redirect verify to another workspace's store
+/// the same way `task add` does.
+#[derive(Parser, Debug)]
+pub struct VerifyArgs {
+    #[command(subcommand)]
+    pub command: VerifyCommands,
+
+    /// Working directory (default: current directory)
+    #[arg(long, global = true)]
+    pub root: Option<PathBuf>,
+}
+
+/// Nested subcommands for `ralph tools task verify`.
+///
+/// Each verb mirrors the argument set of the corresponding mutation so the
+/// agent can copy its real command, prepend `verify`, and see the exact
+/// authorization message it would have received (R7). None of these
+/// variants writes to `tasks.jsonl`.
+#[derive(Subcommand, Debug)]
+pub enum VerifyCommands {
+    /// Verify a `task add` would succeed (does not create the task)
+    Add(VerifyAddArgs),
+
+    /// Verify a `task ensure` would succeed (does not create the task)
+    Ensure(VerifyEnsureArgs),
+
+    /// Verify a `task start` would succeed (does not start the task)
+    Start(StartArgs),
+
+    /// Verify a `task close` would succeed (does not close the task)
+    Close(CloseArgs),
+
+    /// Verify a `task fail` would succeed (does not fail the task)
+    Fail(FailArgs),
+
+    /// Verify a `task reopen` would succeed (does not reopen the task)
+    Reopen(ReopenArgs),
+}
+
+/// Common output flag for `task verify` subcommands. Mirrors the
+/// `--format` on mutation verbs so verify and apply produce the same
+/// output shape.
+#[derive(Args, Debug)]
+pub struct VerifyFormatArgs {
+    /// Output format
+    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    pub format: OutputFormat,
+}
+
+/// Argument mirror of `AddArgs` for `task verify add`.
+#[derive(Args, Debug)]
+pub struct VerifyAddArgs {
+    /// Task title (ignored when --skip is set; required otherwise)
+    pub title: Option<String>,
+
+    /// Priority (1-5, default 3)
+    #[arg(short = 'p', long, default_value = "3")]
+    pub priority: u8,
+
+    /// Task description
+    #[arg(short = 'd', long)]
+    pub description: Option<String>,
+
+    /// Task IDs that must complete first (comma-separated)
+    #[arg(long)]
+    pub blocked_by: Option<String>,
+
+    #[command(flatten)]
+    pub format: VerifyFormatArgs,
+}
+
+/// Argument mirror of `EnsureArgs` for `task verify ensure`.
+#[derive(Args, Debug)]
+pub struct VerifyEnsureArgs {
+    /// Task title (ignored when --skip is set; required otherwise)
+    pub title: Option<String>,
+
+    /// Stable key used to deduplicate orchestrator-managed tasks.
+    /// Mutually exclusive with `--for-fix-unit`.
+    #[arg(long, required_unless_present = "for_fix_unit")]
+    pub key: Option<String>,
+
+    /// Auto-derive canonical fix-unit key `PLAN:FIX_STEP:SLUG`.
+    #[arg(long, value_name = "PLAN:FIX_STEP:SLUG", conflicts_with = "key")]
+    pub for_fix_unit: Option<String>,
+
+    /// Priority (1-5, default 3)
+    #[arg(short = 'p', long, default_value = "3")]
+    pub priority: u8,
+
+    /// Task description
+    #[arg(short = 'd', long)]
+    pub description: Option<String>,
+
+    /// Task IDs that must complete first (comma-separated)
+    #[arg(long)]
+    pub blocked_by: Option<String>,
+
+    #[command(flatten)]
+    pub format: VerifyFormatArgs,
+}
+
+/// Argument mirror of the task_id/task_key/step emit bridge.
+///
+/// `ralph tools task verify-emit-bridge` checks that three fields an
+/// agent is about to put on a `ralph emit` payload are mutually
+/// consistent AND consistent with the live task store (R16). This is
+/// the OPAC Precheck equivalent of the `ralph-tools-tasks.md` red box
+/// rule: never hand-construct a `task_id`; always read it back from
+/// the store immediately before emit.
+///
+/// All three flags are required. The check fails on:
+/// - `task_id` not present in the current loop, or status is terminal (Closed/Failed)
+/// - `task_key` mismatching the registered key on the task
+/// - `step` missing the `:step-<n>:` segment required by
+///   `ralph-tools-tasks.md` (red box) or not matching the segment in `task_key`
+#[derive(Args, Debug)]
+pub struct VerifyEmitBridgeArgs {
+    /// Live task_id currently registered with the task store (current loop).
+    /// DO NOT hand-construct; read with `ralph tools task list` first.
+    #[arg(long)]
+    pub task_id: String,
+
+    /// Stable task_key the agent intends to embed on the emit payload.
+    #[arg(long)]
+    pub task_key: String,
+
+    /// Step number/slug the agent intends to embed (must match the
+    /// `:step-<n>:` segment inside `task_key` per
+    /// `ralph-tools-tasks.md` red box).
+    #[arg(long)]
+    pub step: String,
+
+    /// Output format
+    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    pub format: OutputFormat,
+}
+
+/// Format enum shared with mutation verbs but exposed for the verify
+/// command's exit-code contract: `verify` always exits non-zero on
+/// gate failure even when `--format json` is selected so the agent's
+/// `$?` check fires deterministically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyOutcome {
+    Allow,
+    Deny { reason: String, hint: String },
+}
+
+impl VerifyOutcome {
+    /// Machine-grepable prefix agents can match on. Stable across
+    /// versions — do not change without updating `ralph-tools-tasks.md`
+    /// and any `ralph<agent>.error_msg` assertions in BDD.
+    pub const DENY_PREFIX: &'static str = "task_verify denied";
+
+    pub fn allowed_message(verb: &str) -> String {
+        format!(
+            "task_verify: {verb} would be admitted by the same authorization gates as `ralph tools task {verb}` (no write performed)"
+        )
+    }
+
+    pub fn to_human_string(&self, verb: &str) -> String {
+        match self {
+            VerifyOutcome::Allow => Self::allowed_message(verb),
+            VerifyOutcome::Deny { reason, hint } => format!(
+                "{} '{verb}': [{reason}] {hint}",
+                Self::DENY_PREFIX,
+            ),
+        }
+    }
 }
 
 /// Gets the tasks file path.
@@ -511,6 +704,10 @@ pub fn execute(args: TaskArgs, use_colors: bool) -> Result<()> {
             execute_reopen(reopen_args, root.as_ref(), &coordinator_hats, use_colors)
         }
         TaskCommands::Show(show_args) => execute_show(show_args, root.as_ref(), use_colors),
+        TaskCommands::Verify(verify_args) => execute_verify(verify_args, use_colors),
+        TaskCommands::VerifyEmitBridge(bridge_args) => {
+            execute_verify_emit_bridge(bridge_args, root.as_ref())
+        }
     }
 }
 
@@ -1311,6 +1508,455 @@ fn reopen_task_with_context(
     Ok(())
 }
 
+/// U4: route `task verify <verb>` to a verb-specific dry-run helper.
+///
+/// This is the entry point of the OPAC Precheck stage for task
+/// mutations. The function never writes to `tasks.jsonl`; it only
+/// exercises the same authorization gates as the real mutation so the
+/// agent can deterministically observe the outcome without committing.
+fn execute_verify(
+    args: VerifyArgs,
+    use_colors: bool,
+) -> Result<()> {
+    let root = args.root.clone();
+    let coordinator_hats = load_coordinator_hats(root.as_ref());
+    let config = load_config_or_default(root.as_ref());
+    let cmd = args.command;
+
+    let path = get_tasks_path(root.as_ref());
+    let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
+    let ctx = operation_context_for(root.as_ref());
+
+    let outcome = match &cmd {
+        VerifyCommands::Add(a) => verify_add(&mut store, &ctx, &coordinator_hats, &config, a)?,
+        VerifyCommands::Ensure(e) => verify_ensure(&mut store, &ctx, &coordinator_hats, &config, e)?,
+        VerifyCommands::Start(s) => {
+            verify_lifecycle(&store, &ctx, &coordinator_hats, &config, "start", &s.id)?
+        }
+        VerifyCommands::Close(c) => {
+            verify_lifecycle(&store, &ctx, &coordinator_hats, &config, "close", &c.id)?
+        }
+        VerifyCommands::Fail(f) => {
+            verify_lifecycle(&store, &ctx, &coordinator_hats, &config, "fail", &f.id)?
+        }
+        VerifyCommands::Reopen(r) => {
+            verify_lifecycle(&store, &ctx, &coordinator_hats, &config, "reopen", &r.id)?
+        }
+    };
+
+    let verb = match &cmd {
+        VerifyCommands::Add(_) => "add",
+        VerifyCommands::Ensure(_) => "ensure",
+        VerifyCommands::Start(_) => "start",
+        VerifyCommands::Close(_) => "close",
+        VerifyCommands::Fail(_) => "fail",
+        VerifyCommands::Reopen(_) => "reopen",
+    };
+    match outcome {
+        VerifyOutcome::Allow => {
+            let format = match &cmd {
+                VerifyCommands::Add(a) => a.format.format,
+                VerifyCommands::Ensure(e) => e.format.format,
+                _ => OutputFormat::Table,
+            };
+            match format {
+                OutputFormat::Json => {
+                    let json = serde_json::json!({
+                        "verified": true,
+                        "verb": verb,
+                        "would_succeed": true,
+                        "no_write": true,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&json)?);
+                }
+                OutputFormat::Quiet => println!("ok"),
+                OutputFormat::Table => {
+                    let msg = VerifyOutcome::allowed_message(verb);
+                    if use_colors {
+                        println!("{}verified (no write):{} {msg}", colors::GREEN, colors::RESET);
+                    } else {
+                        println!("verified (no write): {msg}");
+                    }
+                }
+            }
+            Ok(())
+        }
+        VerifyOutcome::Deny { reason, hint } => {
+            let payload = serde_json::json!({
+                "verified": false,
+                "verb": verb,
+                "would_succeed": false,
+                "no_write": true,
+                "reason": reason,
+                "hint": hint,
+                "stable_prefix": VerifyOutcome::DENY_PREFIX,
+            });
+            let err = anyhow::Error::msg(format!(
+                "{} '{verb}': [{reason}] {hint}",
+                VerifyOutcome::DENY_PREFIX,
+                verb = verb,
+                reason = reason,
+                hint = hint,
+            ));
+            Err(err.context(payload.to_string()))
+        }
+    }
+}
+
+/// Dry-run `task add` — exercises the same gates as `add_task_with_args`
+/// but returns `VerifyOutcome` instead of writing to `tasks.jsonl`.
+fn verify_add(
+    store: &mut TaskStore,
+    ctx: &OperationContext,
+    coordinator_hats: &[String],
+    config: &ralph_core::config::RalphConfig,
+    args: &VerifyAddArgs,
+) -> Result<VerifyOutcome> {
+    if let Err(outcome) = gate_outcome(ctx, config, "add")? {
+        return Ok(outcome);
+    }
+    let Some(title) = args.title.clone() else {
+        return Ok(VerifyOutcome::Deny {
+            reason: "missing_title".to_string(),
+            hint: "`task verify add` requires a positional TITLE argument (same as `task add`).".to_string(),
+        });
+    };
+    let task = add_common_task_fields(
+        Task::new(title, args.priority),
+        ctx,
+        args.description.clone(),
+        args.blocked_by.clone(),
+    );
+
+    if let Err(message) = validate_owner_hat_id(&task, coordinator_hats) {
+        return Ok(VerifyOutcome::Deny {
+            reason: "non_coordinator_owner".to_string(),
+            hint: format!("{message}"),
+        });
+    }
+
+    let invalid_blockers = store.invalid_blockers(&task);
+    if !invalid_blockers.is_empty() {
+        return Ok(VerifyOutcome::Deny {
+            reason: "missing_blockers".to_string(),
+            hint: format!(
+                "task blocked_by references missing or out-of-loop tasks: {}",
+                invalid_blockers.join(", ")
+            ),
+        });
+    }
+
+    Ok(VerifyOutcome::Allow)
+}
+
+/// Dry-run `task ensure` — mirrors `ensure_task_with_args` but emits
+/// `VerifyOutcome` instead of writing.
+fn verify_ensure(
+    store: &mut TaskStore,
+    ctx: &OperationContext,
+    coordinator_hats: &[String],
+    config: &ralph_core::config::RalphConfig,
+    args: &VerifyEnsureArgs,
+) -> Result<VerifyOutcome> {
+    if let Err(outcome) = gate_outcome(ctx, config, "ensure")? {
+        return Ok(outcome);
+    }
+    if args.key.is_none() && args.for_fix_unit.is_none() {
+        return Ok(VerifyOutcome::Deny {
+            reason: "missing_key".to_string(),
+            hint: "`task verify ensure` requires either --key <KEY> or --for-fix-unit <PLAN:FIX_STEP:SLUG>.".to_string(),
+        });
+    }
+    let Some(title) = args.title.clone() else {
+        return Ok(VerifyOutcome::Deny {
+            reason: "missing_title".to_string(),
+            hint: "`task verify ensure` requires a positional TITLE argument (same as `task ensure`).".to_string(),
+        });
+    };
+
+    // Mirror the derive_key logic from ensure_task_with_args.
+    let derived_key = if let Some(spec) = args.for_fix_unit.as_deref() {
+        let mut parts = spec.split(':');
+        let plan = parts.next().unwrap_or("").to_string();
+        let fix_step = parts.next().unwrap_or("").to_string();
+        let slug = parts.next().unwrap_or("").to_string();
+        if plan.is_empty() || fix_step.is_empty() || slug.is_empty() || parts.next().is_some() {
+            return Ok(VerifyOutcome::Deny {
+                reason: "malformed_for_fix_unit".to_string(),
+                hint: format!(
+                    "--for-fix-unit expects exactly 3 colon-separated segments: PLAN:FIX_STEP:SLUG, got '{spec}'"
+                ),
+            });
+        }
+        Some(format!("ce-executor:{plan}:{fix_step}:{slug}"))
+    } else {
+        None
+    };
+    let key_value = derived_key
+        .clone()
+        .unwrap_or_else(|| args.key.clone().unwrap_or_default());
+    let mut task = add_common_task_fields(
+        Task::new(title, args.priority).with_key(Some(key_value)),
+        ctx,
+        args.description.clone(),
+        args.blocked_by.clone(),
+    );
+    if args.for_fix_unit.is_some() {
+        task = task.with_owner_hat(Some("coordinator".to_string()));
+    }
+    if let Err(message) = validate_owner_hat_id(&task, coordinator_hats) {
+        return Ok(VerifyOutcome::Deny {
+            reason: "non_coordinator_owner".to_string(),
+            hint: format!("{message}"),
+        });
+    }
+
+    let invalid_blockers = store.invalid_blockers(&task);
+    if !invalid_blockers.is_empty() {
+        return Ok(VerifyOutcome::Deny {
+            reason: "missing_blockers".to_string(),
+            hint: format!(
+                "task blocked_by references missing or out-of-loop tasks: {}",
+                invalid_blockers.join(", ")
+            ),
+        });
+    }
+    Ok(VerifyOutcome::Allow)
+}
+
+/// Dry-run a lifecycle mutation (start/close/fail/reopen).
+fn verify_lifecycle(
+    store: &TaskStore,
+    ctx: &OperationContext,
+    coordinator_hats: &[String],
+    config: &ralph_core::config::RalphConfig,
+    verb: &str,
+    task_id: &str,
+) -> Result<VerifyOutcome> {
+    if let Err(outcome) = gate_outcome(ctx, config, verb)? {
+        return Ok(outcome);
+    }
+    if let Err(message) = validate_task_id(task_id) {
+        return Ok(VerifyOutcome::Deny {
+            reason: "invalid_task_id".to_string(),
+            hint: format!("{message}"),
+        });
+    }
+    let snapshot = match store.get(task_id) {
+        Some(t) => t.clone(),
+        None => {
+            return Ok(VerifyOutcome::Deny {
+                reason: "task_not_found".to_string(),
+                hint: format!("task {task_id} not found"),
+            });
+        }
+    };
+    if let Err(message) = authorize_lifecycle(&snapshot, ctx, coordinator_hats, verb) {
+        return Ok(VerifyOutcome::Deny {
+            reason: "authorize_lifecycle_failed".to_string(),
+            hint: format!("{message}"),
+        });
+    }
+    Ok(VerifyOutcome::Allow)
+}
+
+/// Convert `HatCommandPolicy::check_task` (which returns `PolicyDecision`)
+/// to the local `VerifyOutcome` so verify can keep its stable success /
+/// failure exit contract instead of bailing early.
+fn gate_outcome(
+    ctx: &OperationContext,
+    config: &ralph_core::config::RalphConfig,
+    verb: &str,
+) -> Result<std::result::Result<(), VerifyOutcome>> {
+    use crate::hat_command_policy::PolicyDecision;
+    match HatCommandPolicy::check_task(ctx, config, verb) {
+        PolicyDecision::Allow { .. } => Ok(Ok(())),
+        PolicyDecision::Deny { reason, hint } => Ok(Err(VerifyOutcome::Deny {
+            reason: reason.to_string(),
+            hint,
+        })),
+    }
+}
+
+/// Build a structured `anyhow::Error` for the three emit-bridge
+/// denial paths whose only difference is the stage label, the
+/// reason code, the hint text, and the underlying message.
+///
+/// Centralizing the JSON-shape construction keeps the three error
+/// branches identical (which matters because `ralph` test agents
+/// will grep the JSON payload for the `stages` array to drive
+/// their recovery logic).
+fn emit_bridge_deny(stage: &str, reason: &str, hint: String, message: String) -> anyhow::Error {
+    let payload = serde_json::json!({
+        "verified": false,
+        "stages": [stage],
+        "reason": reason,
+        "hint": hint,
+    });
+    anyhow::Error::msg(message).context(payload.to_string())
+}
+
+/// U4 emit-bridge: verify three-field task_id/task_key/step consistency
+/// for the upcoming `ralph emit` payload (R16). Walks the live task
+/// store to confirm:
+/// - `task_id` resolves to an open (non-terminal) task in the current loop.
+/// - `task_key` matches the registered key on that task.
+/// - `step` matches the `:step-<n>:` segment inside `task_key`
+///   (per the `ralph-tools-tasks.md` red-box convention).
+fn execute_verify_emit_bridge(
+    args: VerifyEmitBridgeArgs,
+    root: Option<&PathBuf>,
+) -> Result<()> {
+    let path = get_tasks_path(root);
+    let store = TaskStore::load(&path).context("Failed to load tasks")?;
+    let ctx = operation_context_for(root);
+
+    // 1. task_id must resolve to a live, non-terminal task.
+    let snapshot = store.get(&args.task_id).cloned();
+    let Some(task) = snapshot else {
+        return Err(emit_bridge_deny(
+            "task_id_resolution",
+            "task_not_found",
+            format!(
+                "task_id '{}' does not exist in the live task store; never hand-construct task_id — read it back via `ralph tools task list` immediately before emit.",
+                args.task_id
+            ),
+            format!(
+                "task_verify_emit_bridge: task_id '{}' not found in store (never hand-construct task_id)",
+                args.task_id
+            ),
+        ));
+    };
+
+    if task.status.is_terminal() {
+        return Err(emit_bridge_deny(
+            "task_id_resolution",
+            "task_is_terminal",
+            format!(
+                "task '{}' is in terminal state {:?}; close-then-emit is rejected. Open a fresh task or reuse an existing open one.",
+                args.task_id, task.status
+            ),
+            format!(
+                "task_verify_emit_bridge: task '{}' is in terminal state ({:?}); reuse a live task instead",
+                args.task_id, task.status
+            ),
+        ));
+    }
+
+    if ctx.is_agent_context {
+        if let (Some(current), Some(target)) =
+            (ctx.current_loop_id.as_ref(), task.loop_id.as_ref())
+        {
+            if current != target {
+                return Err(emit_bridge_deny(
+                    "loop_scope",
+                    "wrong_loop",
+                    format!(
+                        "task '{}' belongs to loop '{}' but caller is in loop '{}'; open or pick a task from the current loop",
+                        args.task_id, target, current
+                    ),
+                    format!(
+                        "task_verify_emit_bridge: task '{}' belongs to loop '{}' but current loop is '{}'",
+                        args.task_id, target, current
+                    ),
+                ));
+            }
+        }
+    }
+
+    // 2. task_key must match the registered key on the task.
+    let Some(registered_key) = task.key.clone() else {
+        return Err(emit_bridge_deny(
+            "task_key_match",
+            "task_has_no_key",
+            format!(
+                "task '{}' has no registered key; the emit-bridge requires a key — re-create via `ralph tools task ensure --for-fix-unit` or `--key`",
+                args.task_id
+            ),
+            format!(
+                "task_verify_emit_bridge: task '{}' has no registered key; the emit-bridge requires a key",
+                args.task_id
+            ),
+        ));
+    };
+
+    if registered_key != args.task_key {
+        let payload = serde_json::json!({
+            "verified": false,
+            "stages": ["task_key_match"],
+            "reason": "task_key_mismatch",
+            "expected_key": registered_key,
+            "provided_key": args.task_key,
+            "hint": "task_key on the emit payload must match the registered key returned by `ralph tools task show`",
+        });
+        let err = anyhow::Error::msg(format!(
+            "task_verify_emit_bridge: task_key mismatch — registered key is '{registered_key}' but emit payload carries '{}'",
+            args.task_key
+        ));
+        return Err(err.context(payload.to_string()));
+    }
+
+    // 3. step must match the `:step-<n>:` segment inside task_key.
+    let step_segment = registered_key
+        .split(':')
+        .find(|seg| seg.starts_with("step-"));
+    let Some(step_segment) = step_segment else {
+        return Err(emit_bridge_deny(
+            "step_match",
+            "task_key_missing_step_segment",
+            format!(
+                "registered key '{registered_key}' contains no `:step-<n>:` segment; the emit-bridge requires task_key in the canonical `<plan>:<step-N>:<slug>` form per ralph-tools-tasks.md red box"
+            ),
+            format!(
+                "task_verify_emit_bridge: registered key '{registered_key}' contains no `:step-<n>:` segment"
+            ),
+        ));
+    };
+
+    if step_segment != args.step {
+        let payload = serde_json::json!({
+            "verified": false,
+            "stages": ["step_match"],
+            "reason": "step_segment_mismatch",
+            "expected_step": step_segment,
+            "provided_step": args.step,
+            "hint": "the `step` value on the emit payload must match the `:step-<n>:` segment of task_key exactly",
+        });
+        let err = anyhow::Error::msg(format!(
+            "task_verify_emit_bridge: step mismatch — task_key contains '{step_segment}' but emit payload carries '{}'",
+            args.step
+        ));
+        return Err(err.context(payload.to_string()));
+    }
+
+    match args.format {
+        OutputFormat::Json => {
+            let payload = serde_json::json!({
+                "verified": true,
+                "task_id": args.task_id,
+                "task_key": args.task_key,
+                "step": args.step,
+                "registered_key": registered_key,
+                "task_status": task.status,
+                "loop_id": task.loop_id,
+                "hint": "safe to emit; close the emit-payload round-trip with `ralph events --events-source hat-channel`",
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        }
+        OutputFormat::Quiet => println!("ok"),
+        OutputFormat::Table => {
+            println!(
+                "verified emit-bridge (no write): task_id='{}' task_key='{}' step='{}' (loop={})",
+                args.task_id,
+                args.task_key,
+                args.step,
+                task.loop_id.as_deref().unwrap_or("<unscoped>")
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2082,5 +2728,288 @@ tasks:
         let err = close_task_with_context(&mut store, "", &ctx, &["executor".to_string()], false)
             .expect_err("empty task_id must be rejected");
         assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // U4: `task verify` — OPAC Precheck stage for task mutations.
+    //
+    // Each test confirms verify behaves like the real mutation for the
+    // success path and surfaces the same machine-readable deny prefix on
+    // the failure path. The tests intentionally avoid using `ce-executor`
+    // hat names so the surface stays general (R10).
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn verify_add_args(title: &str) -> VerifyAddArgs {
+        VerifyAddArgs {
+            title: Some(title.to_string()),
+            priority: 2,
+            description: None,
+            blocked_by: None,
+            format: VerifyFormatArgs {
+                format: OutputFormat::Quiet,
+            },
+        }
+    }
+
+    fn verify_ensure_args(title: &str, key: &str) -> VerifyEnsureArgs {
+        VerifyEnsureArgs {
+            title: Some(title.to_string()),
+            key: Some(key.to_string()),
+            for_fix_unit: None,
+            priority: 2,
+            description: None,
+            blocked_by: None,
+            format: VerifyFormatArgs {
+                format: OutputFormat::Quiet,
+            },
+        }
+    }
+
+    fn base_config_with(coordinator: &[&str]) -> ralph_core::config::RalphConfig {
+        let yaml = format!(
+            "tasks:\n  coordinator_hats: [{}]\n  enabled: true\n",
+            coordinator.join(", ")
+        );
+        serde_yaml::from_str(&yaml).expect("parse yaml")
+    }
+
+    #[test]
+    fn test_verify_add_allowed_for_coordinator_hat_does_not_write() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-x");
+        let mut store = open_store(root);
+        let ctx = ctx_for(root, Some("loop-x"), Some("coordinator"));
+        let cfg = base_config_with(&["coordinator"]);
+        let before_count = store.all().len();
+
+        let outcome =
+            verify_add(&mut store, &ctx, &["coordinator".into()], &cfg, &verify_add_args("hi"))
+                .expect("verify_add should not error");
+        assert!(matches!(outcome, VerifyOutcome::Allow));
+
+        // Confirm verify did NOT touch the store.
+        assert_eq!(store.all().len(), before_count);
+    }
+
+    #[test]
+    fn test_verify_add_denied_for_non_coordinator_agent() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-x");
+        let mut store = open_store(root);
+        let ctx = ctx_for(root, Some("loop-x"), Some("worker"));
+        let cfg = base_config_with(&["coordinator"]);
+
+        let outcome =
+            verify_add(&mut store, &ctx, &["coordinator".into()], &cfg, &verify_add_args("hi"))
+                .expect("verify_add should not error");
+        match outcome {
+            VerifyOutcome::Deny { reason, .. } => assert_eq!(reason, "non_coordinator_owner"),
+            VerifyOutcome::Allow => panic!("expected Deny for non-coordinator agent"),
+        }
+    }
+
+    #[test]
+    fn test_verify_add_denies_missing_title() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-x");
+        let mut store = open_store(root);
+        let ctx = ctx_for(root, Some("loop-x"), Some("coordinator"));
+        let cfg = base_config_with(&["coordinator"]);
+        let mut args = verify_add_args("placeholder");
+        args.title = None;
+
+        let outcome =
+            verify_add(&mut store, &ctx, &["coordinator".into()], &cfg, &args).expect("ok");
+        assert!(matches!(
+            outcome,
+            VerifyOutcome::Deny { ref reason, .. } if reason == "missing_title"
+        ));
+    }
+
+    #[test]
+    fn test_verify_ensure_rejects_missing_key_and_missing_title() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-x");
+        let mut store = open_store(root);
+        let ctx = ctx_for(root, Some("loop-x"), Some("coordinator"));
+        let cfg = base_config_with(&["coordinator"]);
+        let mut args = verify_ensure_args("placeholder", "k");
+        args.key = None;
+        args.for_fix_unit = None;
+        let outcome = verify_ensure(&mut store, &ctx, &["coordinator".into()], &cfg, &args)
+            .expect("ok");
+        assert!(matches!(
+            outcome,
+            VerifyOutcome::Deny { ref reason, .. } if reason == "missing_key"
+        ));
+
+        // And missing-title branch.
+        let mut args2 = verify_ensure_args("placeholder", "k");
+        args2.title = None;
+        let outcome = verify_ensure(&mut store, &ctx, &["coordinator".into()], &cfg, &args2)
+            .expect("ok");
+        assert!(matches!(
+            outcome,
+            VerifyOutcome::Deny { ref reason, .. } if reason == "missing_title"
+        ));
+    }
+
+    #[test]
+    fn test_verify_lifecycle_close_admits_owner_task() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-x");
+        let mut store = open_store(root);
+        let ctx = ctx_for(root, Some("loop-x"), Some("coordinator"));
+        let cfg = base_config_with(&["coordinator"]);
+
+        let mut task = Task::new("done".into(), 2).with_owner_hat(Some("coordinator".into()));
+        task.loop_id = Some("loop-x".into());
+        store.add(task.clone());
+        store.save().unwrap();
+        store = open_store(root);
+
+        let outcome = verify_lifecycle(
+            &store,
+            &ctx,
+            &["coordinator".into()],
+            &cfg,
+            "close",
+            &task.id,
+        )
+        .expect("ok");
+        assert!(matches!(outcome, VerifyOutcome::Allow));
+    }
+
+    #[test]
+    fn test_verify_lifecycle_close_denies_unknown_task_id() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-x");
+        let store = open_store(root);
+        let ctx = ctx_for(root, Some("loop-x"), Some("coordinator"));
+        let cfg = base_config_with(&["coordinator"]);
+
+        let outcome = verify_lifecycle(
+            &store,
+            &ctx,
+            &["coordinator".into()],
+            &cfg,
+            "close",
+            "task-does-not-exist",
+        )
+        .expect("ok");
+        assert!(matches!(
+            outcome,
+            VerifyOutcome::Deny { ref reason, .. } if reason == "task_not_found"
+        ));
+    }
+
+    #[test]
+    fn test_verify_emit_bridge_succeeds_with_consistent_fields() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-yo");
+        let mut store = open_store(root);
+        let mut task = Task::new("bridge-ok".into(), 2)
+            .with_owner_hat(Some("coordinator".into()))
+            .with_key(Some("myplan:step-02:patch-foo".into()));
+        task.loop_id = Some("loop-yo".into());
+        task.status = TaskStatus::InProgress;
+        let id = task.id.clone();
+        store.add(task);
+        store.save().unwrap();
+
+        let args = VerifyEmitBridgeArgs {
+            task_id: id.clone(),
+            task_key: "myplan:step-02:patch-foo".into(),
+            step: "step-02".into(),
+            format: OutputFormat::Quiet,
+        };
+        // execute_verify_emit_bridge uses operation_context_for, which only
+        // honors env-level hats. We invoke the function with --root and
+        // expect allow via the human-cli path (ctx.is_agent_context==false).
+        execute_verify_emit_bridge(args, Some(&root.to_path_buf())).expect("verify ok");
+    }
+
+    #[test]
+    fn test_verify_emit_bridge_rejects_unknown_task_id() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-yo");
+        let _store = open_store(root);
+
+        let args = VerifyEmitBridgeArgs {
+            task_id: "task-missing".into(),
+            task_key: "x:step-1:foo".into(),
+            step: "step-1".into(),
+            format: OutputFormat::Quiet,
+        };
+        let err = execute_verify_emit_bridge(args, Some(&root.to_path_buf()))
+            .expect_err("unknown task_id must be denied");
+        let text = format!("{err:#}");
+        assert!(text.contains("task_verify_emit_bridge"), "stable prefix present");
+        assert!(
+            text.contains("task_id_resolution") || text.contains("task-missing"),
+            "structured context attached"
+        );
+    }
+
+    #[test]
+    fn test_verify_emit_bridge_rejects_step_key_mismatch() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-yo");
+        let mut store = open_store(root);
+        let mut task = Task::new("bridge-mismatch".into(), 2)
+            .with_owner_hat(Some("coordinator".into()))
+            .with_key(Some("plan-x:step-09:slug".into()));
+        task.loop_id = Some("loop-yo".into());
+        task.status = TaskStatus::InProgress;
+        let id = task.id.clone();
+        store.add(task);
+        store.save().unwrap();
+
+        let args = VerifyEmitBridgeArgs {
+            task_id: id,
+            task_key: "plan-x:step-09:slug".into(),
+            step: "step-08".into(), // wrong on purpose
+            format: OutputFormat::Quiet,
+        };
+        let err = execute_verify_emit_bridge(args, Some(&root.to_path_buf()))
+            .expect_err("step mismatch must be denied");
+        let text = format!("{err:#}");
+        assert!(text.contains("step") || text.contains("step-09"));
+    }
+
+    #[test]
+    fn test_verify_emit_bridge_rejects_terminal_task() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-yo");
+        let mut store = open_store(root);
+        let mut task = Task::new("bridge-closed".into(), 2)
+            .with_owner_hat(Some("coordinator".into()))
+            .with_key(Some("plan-y:step-1:slug".into()));
+        task.loop_id = Some("loop-yo".into());
+        task.status = TaskStatus::Closed;
+        let id = task.id.clone();
+        store.add(task);
+        store.save().unwrap();
+
+        let args = VerifyEmitBridgeArgs {
+            task_id: id,
+            task_key: "plan-y:step-1:slug".into(),
+            step: "step-1".into(),
+            format: OutputFormat::Quiet,
+        };
+        let err = execute_verify_emit_bridge(args, Some(&root.to_path_buf()))
+            .expect_err("terminal task must be denied");
+        let text = format!("{err:#}");
+        assert!(text.contains("terminal") || text.contains("Closed"));
     }
 }
