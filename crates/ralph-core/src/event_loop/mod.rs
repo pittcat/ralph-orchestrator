@@ -4527,8 +4527,14 @@ impl EventLoop {
             // Phase 1 scope note on `prepend_orchestrator_context`
             // and the backward-compat custom-hat path.
             //
+            // OPAC U2: `## HAT IDENTITY` is the agent's single
+            // source of truth for its role and permissions. It
+            // lives *above* ORCHESTRATOR CONTEXT so the agent sees
+            // "who you are" before "what the loop is doing" (KTD-5).
+            let base_prompt = self.prepend_hat_identity(base_prompt, hat_id);
             // P1-7 fix: orchestrator context is placed BEFORE
             // wave context so the prompt stack order is:
+            //   ## HAT IDENTITY
             //   ## WAVE CONTEXT (synthesizer only)
             //   ## ORCHESTRATOR CONTEXT
             //   hat instructions
@@ -6048,6 +6054,35 @@ impl EventLoop {
     /// build their prompts through a different pipeline that
     /// does not own a `StateProjector`. Widening the scope to
     /// those paths is deferred to Phase 2.
+    /// OPAC U2: prepend the `## HAT IDENTITY` block to the prompt so
+    /// the agent sees its authoritative identity and permission list
+    /// (derived from the resolved `RalphConfig`) before any other
+    /// injected context. Mirrors [`HatIdentitySnapshot::to_prompt_block`].
+    ///
+    /// The block is rendered only for hats that exist in the resolved
+    /// config (so a stale `ralph run` against an outdated preset does
+    /// not crash on an unknown hat id) and is skipped for the `ralph`
+    /// orchestrator sentinel — the prompt there is framework-driven
+    /// and never needs an explicit identity header. The placement is
+    /// deliberately *above* `## ORCHESTRATOR CONTEXT` so the agent
+    /// sees "who you are" before "what the loop is doing" (KTD-5).
+    pub fn prepend_hat_identity(&self, prompt: String, hat_id: &HatId) -> String {
+        if hat_id.as_str() == "ralph" {
+            return prompt;
+        }
+        let Some(snapshot) = crate::hat_identity::HatIdentitySnapshot::from_config(
+            &self.config,
+            hat_id,
+        ) else {
+            tracing::debug!(
+                hat_id = %hat_id.as_str(),
+                "OPAC U2: skipping ## HAT IDENTITY injection for unknown hat"
+            );
+            return prompt;
+        };
+        format!("{}{prompt}", snapshot.to_prompt_block())
+    }
+
     fn prepend_orchestrator_context(&self, prompt: String, hat_id: &HatId) -> String {
         // The `ralph` / orchestrator itself and short-lived
         // control hats do not need the context; the prompt is
