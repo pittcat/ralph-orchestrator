@@ -1,0 +1,49 @@
+# 2026-07-02-006 FV1: AE2 — progress gate skip at plan_end
+
+name: serial_phase_f2_multi_fix_units
+description: plan.complete at plan_end is not blocked by progress_missing_current_step
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 2
+  event_loop:
+    execution_mode: isolated
+    state_projection:
+      enabled: true
+    mechanism:
+      phase_authority:
+        enabled: true
+        initial_phase: plan_end
+        phases:
+          - id: plan_end
+            allowed_emits:
+              coordinator: [plan.complete, plan.blocked]
+        transitions: []
+  hats:
+    coordinator:
+      subscribes_to: []
+      publishes: [plan.complete]
+      default_publishes: plan.complete
+
+fixture_files:
+  - path: .ralph/agent/progress.md
+    content: |
+      # Progress
+      ## Completed Steps
+      - step-01
+      - step-02
+
+mock_responses:
+  - text: |
+      <event topic="plan.complete">
+      {"plan_name":"phase-f2","task_id":"t1","task_key":"k1","step":"step-02","completed_steps":["step-01","step-02"],"verdict":"pass_with_residuals","final_findings_count":0,"fix_round":0}
+      </event>
+    hat: coordinator
+  - text: |
+      waiting.
+
+expected:
+  iterations: 2
+  events:
+    - topic: plan.complete
+  completion: false

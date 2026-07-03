@@ -572,3 +572,16 @@ state_projection:
     plan.complete:
       - kind: plan_complete
         final_step: "step"
+
+# -----------------------------------------------------------------------------
+# 2026-07-02-006 plan U24: `mechanism.phase_authority` authoring SSOT reference.
+# build.rs only merges the `schemas:` block above; phase authority lives in
+# `presets/en/ce-executor-serial.yml` under top-level `mechanism.phase_authority`.
+# `preset_lint::phase_authority` validates phases, transitions, and primitive
+# names at lint time. Required phase ids for serial:
+#   unit_loop, review, fix_units, plan_end, ship, terminal
+# Required primitives (engine-known):
+#   on_event, on_test_passed_step, on_review_complete_verdict,
+#   on_loop_complete_honored, on_plan_terminal_accepted
+# KTD4 matrix name: serial_default
+# -----------------------------------------------------------------------------

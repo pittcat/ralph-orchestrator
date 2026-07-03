@@ -126,6 +126,8 @@ impl ValidationRule for StepHandoffRule {
             _ => None,
         };
 
+        let phase_id = ctx.workflow_phase_id();
+
         let decision = check_alignment_with_snapshot(
             &progress,
             &snapshot.tasks,
@@ -133,6 +135,7 @@ impl ValidationRule for StepHandoffRule {
             step.as_deref(),
             task_id.as_deref(),
             payload_completed_steps.as_deref(),
+            phase_id.as_deref(),
         );
 
         // U5: if the in-memory view missed the task but the disk
@@ -158,6 +161,7 @@ impl ValidationRule for StepHandoffRule {
                 step.as_deref(),
                 task_id.as_deref(),
                 payload_completed_steps.as_deref(),
+                phase_id.as_deref(),
             )
         } else {
             decision

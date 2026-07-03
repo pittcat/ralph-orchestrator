@@ -228,7 +228,7 @@ fn u1_plan_complete_for_fix_step_skips_review_terminal_gate() {
         system_injected: None,
     };
     assert!(
-        tracker.check_semantic_gates(&plan_complete).is_none(),
+        tracker.check_semantic_gates(&plan_complete, None).is_none(),
         "plan.complete with step=fix-* must skip plan_gate_review_not_terminal"
     );
 }
@@ -255,7 +255,7 @@ fn u1_plan_complete_for_non_fix_step_still_requires_terminal() {
         system_injected: None,
     };
     let finding = tracker
-        .check_semantic_gates(&plan_complete)
+        .check_semantic_gates(&plan_complete, None)
         .expect("non-fix plan.complete must still be rejected without synth terminal");
     assert!(
         finding.message.contains("plan_gate_review_not_terminal"),
@@ -292,7 +292,7 @@ fn p0_1_plan_complete_with_object_step_id_fix_skips_gate() {
         system_injected: None,
     };
     assert!(
-        tracker.check_semantic_gates(&plan_complete).is_none(),
+        tracker.check_semantic_gates(&plan_complete, None).is_none(),
         "plan.complete with step={{id:\"fix-*\",...}} must skip plan_gate (P0-1)"
     );
 }
@@ -329,7 +329,7 @@ fn u1_review_complete_with_fix_plan_file_prefills_fix_steps() {
     // 该测试也隐含约束：未声明 fix_plan_file 的 review.complete 不应预填。
     assert!(
         tracker
-            .check_semantic_gates(&plan_complete_fix_01)
+            .check_semantic_gates(&plan_complete_fix_01, None)
             .is_none(),
         "after review.complete(fix_plan_file=...) tracker must accept plan.complete for fix-01"
     );

@@ -33,7 +33,7 @@ fn phase_authority_enabled_adds_phase_authority_stage() {
         }),
     });
 
-    let (pipeline, _totals) = build_stage_pipeline_from_config(&cfg);
+    let (pipeline, _totals, _authority) = build_stage_pipeline_from_config(&cfg);
     let names = pipeline.names();
     assert!(
         names.contains(&"PhaseAuthority"),
@@ -45,7 +45,7 @@ fn phase_authority_enabled_adds_phase_authority_stage() {
 #[test]
 fn phase_authority_disabled_omits_phase_authority_stage() {
     let cfg = base_config();
-    let (pipeline, _totals) = build_stage_pipeline_from_config(&cfg);
+    let (pipeline, _totals, _authority) = build_stage_pipeline_from_config(&cfg);
     let names = pipeline.names();
     assert!(
         !names.contains(&"PhaseAuthority"),
@@ -68,7 +68,7 @@ fn phase_authority_enabled_keeps_other_stages() {
             progress_projection: Default::default(),
         }),
     });
-    let (pipeline, _totals) = build_stage_pipeline_from_config(&cfg);
+    let (pipeline, _totals, _authority) = build_stage_pipeline_from_config(&cfg);
     let names = pipeline.names();
     for required in ["RepairDispatch", "EmitSchemaGate", "VerdictGate"] {
         assert!(

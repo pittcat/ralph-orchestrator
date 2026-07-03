@@ -115,6 +115,9 @@ struct ConfigYaml {
     topic_owners: serde_yaml::Value,
     #[serde(default)]
     topic_format_whitelist: serde_yaml::Value,
+    /// Top-level `mechanism:` block (mirrors `RalphConfig.mechanism`).
+    #[serde(default)]
+    mechanism: serde_yaml::Value,
 }
 
 #[allow(dead_code)] // Test infrastructure - fields used for YAML deserialization
@@ -968,6 +971,15 @@ fn run_scenario(yaml: ScenarioYaml) {
 fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
     run_scenario_with_snapshots(&yaml, |config, yaml| {
         apply_yaml_hats(yaml, config);
+        if !yaml.config.mechanism.is_null() {
+            config.mechanism =
+                serde_yaml::from_value(yaml.config.mechanism.clone()).unwrap_or_else(|e| {
+                    panic!(
+                        "{}: failed to parse config.mechanism: {e}",
+                        yaml.name
+                    );
+                });
+        }
         if !yaml.config.event_loop.is_null() {
             config.event_loop = serde_yaml::from_value(yaml.config.event_loop.clone()).unwrap();
         }
@@ -2271,7 +2283,7 @@ fn test_u6_zippy_sparrow_replay_fixture() {
         .find(|e| e.topic == "review.passed")
         .expect("U6-P1: fixture must contain a `review.passed` event line");
     let finding = tracker
-        .check_semantic_gates(review_passed)
+        .check_semantic_gates(review_passed, None)
         .expect("U6-P1: U1 gate must produce a finding for review.passed while wave is open");
     // `event_policy::ViolationType` is not publicly re-exported
     // from the crate root, so we assert on the `Debug` /
@@ -3116,6 +3128,30 @@ fn test_ce_executor_serial_shipper_recoverable_reasons() {
     let yaml = load_scenario(
         "tests/scenarios/ce_executor_serial_shipper_recoverable_reasons.yml",
     );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_serial_phase_violation_resume_budget() {
+    let yaml = load_scenario("tests/scenarios/serial_phase_violation_resume_budget.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_serial_phase_f3_test_passed_terminal() {
+    let yaml = load_scenario("tests/scenarios/serial_phase_f3_test_passed_terminal.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_serial_phase_f2_multi_fix_units() {
+    let yaml = load_scenario("tests/scenarios/serial_phase_f2_multi_fix_units.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_serial_phase_post_loop_steward_silent() {
+    let yaml = load_scenario("tests/scenarios/serial_phase_post_loop_steward_silent.yml");
     run_workflow_guard_scenario(yaml);
 }
 

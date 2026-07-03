@@ -109,6 +109,13 @@ fn extract_shipper_text_from_yaml(yaml: &str) -> Option<String> {
     // indentation depth under `hats:`. We track depth
     // relative to the `shipper:` line to know when the
     // block ends.
+    //
+    // P1-2b: reject false positives such as
+    // `shipper: [REVIEW_COMPLETE]` under `mechanism.flow`
+    // `allowed_emits`. A real hat definition is followed by
+    // child keys (name, triggers, publishes, instructions, ...)
+    // at greater indentation; an inline map/list value is
+    // followed by a sibling at the same indentation.
     let mut lines = yaml.lines().peekable();
     while let Some(line) = lines.next() {
         let trimmed = line.trim_start();
@@ -117,6 +124,23 @@ fn extract_shipper_text_from_yaml(yaml: &str) -> Option<String> {
         }
         // Compute the indentation of the `shipper:` line.
         let indent = line.len() - trimmed.len();
+
+        // Skip false-positive `shipper:` map values that are
+        // not hat definitions.
+        let mut is_hat_block = false;
+        while let Some(next) = lines.peek() {
+            if next.is_empty() {
+                let _ = lines.next();
+                continue;
+            }
+            let next_indent = next.len() - next.trim_start().len();
+            is_hat_block = next_indent > indent;
+            break;
+        }
+        if !is_hat_block {
+            continue;
+        }
+
         let mut body = String::new();
         // Track the most recent key we saw so multi-line
         // `instructions: |` block bodies are folded into
@@ -319,6 +343,29 @@ hats:
       Some preamble.
     extra_instructions:
       - "On plan.blocked: STRICT EXACT MATCH after trim+lowercase."
+"#;
+        let cfg = cfg_with_shipper_prompt(None, vec![]);
+        assert!(check_strict_reason_routing(&cfg, LintStrictness::Default, Some(yaml)).is_empty());
+    }
+
+    #[test]
+    fn raw_yaml_skips_inline_shipper_map_value_before_real_hat() {
+        // ce-executor-serial has `shipper: [REVIEW_COMPLETE]` under
+        // mechanism.flow.allowed_emits before the actual `shipper:` hat
+        // definition. The linter must not stop at the inline map value and
+        // must still find the marker in the real shipper instructions.
+        let yaml = r#"
+mechanism:
+  flow:
+    steps:
+      - id: ship
+        allowed_emits:
+          shipper: [REVIEW_COMPLETE]
+          reporter: [report.done, LOOP_COMPLETE]
+hats:
+  shipper:
+    instructions: |
+      On plan.blocked: use STRICT-MATCH on the canonical whitelist.
 "#;
         let cfg = cfg_with_shipper_prompt(None, vec![]);
         assert!(check_strict_reason_routing(&cfg, LintStrictness::Default, Some(yaml)).is_empty());

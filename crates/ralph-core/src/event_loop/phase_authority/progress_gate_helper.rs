@@ -4,7 +4,7 @@
 //! `Option<&str>` (workflow_phase.phase_id) → `bool`.
 //!
 //! Convention:
-//! - Disabled engine → `true` (keep pre-006 behaviour).
+//! - No phase snapshot (`None`) → `false` (run legacy gate).
 //! - `unit_loop` / `fix_units` → `true` (gate can skip; the
 //!   engine handles step progression).
 //! - `plan_end` / `ship` / `terminal` → `false` (gate must
@@ -17,7 +17,7 @@
 
 pub fn progress_gate_should_skip_missing_current_step(phase_id: Option<&str>) -> bool {
     match phase_id {
-        None => true,
+        None => false,
         Some("unit_loop") | Some("fix_units") => true,
         Some(_) => false,
     }
@@ -28,8 +28,8 @@ mod tests {
     use super::progress_gate_should_skip_missing_current_step as skip;
 
     #[test]
-    fn disabled_engine_skips() {
-        assert!(skip(None));
+    fn disabled_engine_does_not_skip() {
+        assert!(!skip(None));
     }
 
     #[test]

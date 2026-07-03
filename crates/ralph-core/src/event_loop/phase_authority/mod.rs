@@ -49,23 +49,33 @@ pub use evaluator::{EventFixture, TransitionEvaluator};
 pub use snapshot::{PhaseSnapshot, ViolationKind};
 pub use whitelist::{allows, WhitelistDecision};
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::event_loop::phase_authority::config::PhaseAuthorityConfig;
 
-/// Engine facade. Construct once per loop (U23 builds it
-/// during `EventLoop::run`); share via `Arc` so multiple
-/// components (emit gate, snapshot projector) can read it.
-#[derive(Debug, Clone)]
+/// Engine facade. Construct once per loop; share via `Arc` so
+/// emit gate and event-loop post-accept handler read/write the
+/// same canonical snapshot.
+#[derive(Clone)]
 pub struct WorkflowPhaseAuthority {
-    inner: Option<EngineState>,
+    inner: Option<Arc<Mutex<EngineState>>>,
 }
 
-#[derive(Debug, Clone)]
 struct EngineState {
     decl: Arc<PhaseAuthorityDeclaration>,
     evaluator: TransitionEvaluator,
     snapshot: PhaseSnapshot,
+    violation_policy: config::ViolationPolicyConfig,
+    progress_projection: config::ProgressProjectionConfig,
+}
+
+impl std::fmt::Debug for WorkflowPhaseAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkflowPhaseAuthority")
+            .field("enabled", &self.is_enabled())
+            .field("phase_id", &self.current_phase_id())
+            .finish()
+    }
 }
 
 impl WorkflowPhaseAuthority {
@@ -80,14 +90,28 @@ impl WorkflowPhaseAuthority {
     /// builds the declaration via `PhaseAuthorityDeclaration::try_from_config`
     /// (U2); the facade does not re-parse.
     pub fn from_declaration(decl: PhaseAuthorityDeclaration) -> Self {
+        Self::from_declaration_with_policy(
+            decl,
+            config::ViolationPolicyConfig::default(),
+            config::ProgressProjectionConfig::default(),
+        )
+    }
+
+    fn from_declaration_with_policy(
+        decl: PhaseAuthorityDeclaration,
+        violation_policy: config::ViolationPolicyConfig,
+        progress_projection: config::ProgressProjectionConfig,
+    ) -> Self {
         let initial_phase = decl.initial_phase.clone().unwrap_or_default();
         let evaluator = TransitionEvaluator::new(Arc::new(decl.clone()));
         Self {
-            inner: Some(EngineState {
+            inner: Some(Arc::new(Mutex::new(EngineState {
                 decl: Arc::new(decl),
                 evaluator,
                 snapshot: PhaseSnapshot::with_phase_id(initial_phase),
-            }),
+                violation_policy,
+                progress_projection,
+            }))),
         }
     }
 
@@ -102,7 +126,11 @@ impl WorkflowPhaseAuthority {
             return Ok(Self::disabled());
         }
         let decl = PhaseAuthorityDeclaration::try_from_config(cfg)?;
-        Ok(Self::from_declaration(decl))
+        Ok(Self::from_declaration_with_policy(
+            decl,
+            cfg.violation_policy.clone(),
+            cfg.progress_projection.clone(),
+        ))
     }
 
     /// `true` when the engine is active.
@@ -111,34 +139,37 @@ impl WorkflowPhaseAuthority {
     }
 
     /// Current phase id. `None` when disabled.
-    pub fn current_phase_id(&self) -> Option<&str> {
-        self.inner.as_ref().map(|s| s.snapshot.phase_id.as_str())
+    pub fn current_phase_id(&self) -> Option<String> {
+        self.snapshot().map(|s| s.phase_id.clone())
     }
 
     /// Snapshot accessor. `None` when disabled.
-    pub fn snapshot(&self) -> Option<&PhaseSnapshot> {
-        self.inner.as_ref().map(|s| &s.snapshot)
+    pub fn snapshot(&self) -> Option<PhaseSnapshot> {
+        let state = self.inner.as_ref()?;
+        let guard = state.lock().ok()?;
+        Some(guard.snapshot.clone())
     }
 
-    /// Run the evaluator against an accepted event. Returns
-    /// the (possibly mutated) snapshot. When disabled the
-    /// input snapshot is returned unchanged.
-    pub fn on_event_accepted(
-        &self,
-        fixture: &EventFixture,
-    ) -> PhaseSnapshot {
+    /// Run the evaluator against an accepted event. Updates the
+    /// canonical snapshot and returns the post-event value.
+    pub fn on_event_accepted(&self, fixture: &EventFixture) -> PhaseSnapshot {
         let Some(state) = self.inner.as_ref() else {
             return PhaseSnapshot::with_phase_id("disabled");
         };
-        state.evaluator.apply(state.snapshot.clone(), fixture)
+        let Ok(mut guard) = state.lock() else {
+            return PhaseSnapshot::with_phase_id("disabled");
+        };
+        let next = guard.evaluator.apply(guard.snapshot.clone(), fixture);
+        guard.snapshot = next.clone();
+        next
     }
 
-    /// Persist a new snapshot. The facade holds the canonical
-    /// snapshot for the loop; the runtime calls this after
-    /// each `on_event_accepted`.
-    pub fn update_snapshot(&mut self, snapshot: PhaseSnapshot) {
-        if let Some(state) = self.inner.as_mut() {
-            state.snapshot = snapshot;
+    /// Persist a new snapshot (e.g. violation bump from resume budget).
+    pub fn update_snapshot(&self, snapshot: PhaseSnapshot) {
+        if let Some(state) = self.inner.as_ref()
+            && let Ok(mut guard) = state.lock()
+        {
+            guard.snapshot = snapshot;
         }
     }
 
@@ -153,13 +184,53 @@ impl WorkflowPhaseAuthority {
                 allowed_topics: Vec::new(),
             };
         };
-        let phase_id = state.snapshot.phase_id.clone();
-        allows(hat_id, topic, &phase_id, &state.decl)
+        let Ok(guard) = state.lock() else {
+            return WhitelistDecision {
+                allowed: true,
+                phase_id: "disabled".to_string(),
+                allowed_topics: Vec::new(),
+            };
+        };
+        let phase_id = guard.snapshot.phase_id.clone();
+        allows(hat_id, topic, &phase_id, &guard.decl)
     }
 
     /// Accessor for tests / diagnostics. `None` when disabled.
-    pub fn declaration(&self) -> Option<&PhaseAuthorityDeclaration> {
-        self.inner.as_ref().map(|s| &*s.decl)
+    pub fn declaration(&self) -> Option<PhaseAuthorityDeclaration> {
+        self.inner.as_ref().and_then(|s| {
+            s.lock()
+                .ok()
+                .map(|g| (*g.decl).clone())
+        })
+    }
+
+    /// Violation policy when the engine is enabled.
+    pub fn violation_policy(&self) -> Option<config::ViolationPolicyConfig> {
+        self.inner.as_ref().and_then(|s| {
+            s.lock().ok().map(|g| g.violation_policy.clone())
+        })
+    }
+
+    /// Progress projection config when the engine is enabled.
+    pub fn progress_projection(&self) -> Option<config::ProgressProjectionConfig> {
+        self.inner.as_ref().and_then(|s| {
+            s.lock().ok().map(|g| g.progress_projection.clone())
+        })
+    }
+
+    /// Bump phase-violation counter for a hat after a stage reject.
+    pub fn record_phase_violation(&self, hat: &str) -> PhaseSnapshot {
+        let Some(state) = self.inner.as_ref() else {
+            return PhaseSnapshot::with_phase_id("disabled");
+        };
+        let Ok(mut guard) = state.lock() else {
+            return PhaseSnapshot::with_phase_id("disabled");
+        };
+        guard.snapshot = guard
+            .snapshot
+            .clone()
+            .bump_violation(hat, ViolationKind::PhaseViolation);
+        guard.snapshot.clone()
     }
 }
 
@@ -224,37 +295,35 @@ when: last
     fn from_declaration_carries_initial_phase() {
         let fac = WorkflowPhaseAuthority::from_declaration(enabled_declaration());
         assert!(fac.is_enabled());
-        assert_eq!(fac.current_phase_id(), Some("unit_loop"));
+        assert_eq!(fac.current_phase_id(), Some("unit_loop".to_string()));
     }
 
     #[test]
     fn work_start_to_last_test_passed_walks_phase_to_review() {
-        let mut fac = WorkflowPhaseAuthority::from_declaration(enabled_declaration());
+        let fac = WorkflowPhaseAuthority::from_declaration(enabled_declaration());
 
-        let next = fac.on_event_accepted(&EventFixture::TestPassed(
+        fac.on_event_accepted(&EventFixture::TestPassed(
             on_test_passed_step::StepProgressFixture {
                 kind: on_test_passed_step::StepKind::PlanUnit,
                 index: 8,
                 total: 8,
             },
         ));
-        fac.update_snapshot(next);
-        assert_eq!(fac.current_phase_id(), Some("review"));
+        assert_eq!(fac.current_phase_id(), Some("review".to_string()));
     }
 
     #[test]
     fn non_matching_event_does_not_change_phase() {
-        let mut fac = WorkflowPhaseAuthority::from_declaration(enabled_declaration());
+        let fac = WorkflowPhaseAuthority::from_declaration(enabled_declaration());
 
-        let next = fac.on_event_accepted(&EventFixture::TestPassed(
+        fac.on_event_accepted(&EventFixture::TestPassed(
             on_test_passed_step::StepProgressFixture {
                 kind: on_test_passed_step::StepKind::PlanUnit,
                 index: 1,
                 total: 8,
             },
         ));
-        fac.update_snapshot(next);
-        assert_eq!(fac.current_phase_id(), Some("unit_loop"));
+        assert_eq!(fac.current_phase_id(), Some("unit_loop".to_string()));
     }
 
     #[test]
@@ -297,21 +366,20 @@ matrix: serial_default
             progress_projection: ProgressProjectionConfig::default(),
         };
         let decl = PhaseAuthorityDeclaration::try_from_config(&cfg).unwrap();
-        let mut fac = WorkflowPhaseAuthority::from_declaration(decl);
+        let fac = WorkflowPhaseAuthority::from_declaration(decl);
 
-        let next = fac.on_event_accepted(&EventFixture::ReviewComplete(
+        fac.on_event_accepted(&EventFixture::ReviewComplete(
             on_review_complete_verdict::ReviewCompleteFixture {
                 verdict: on_review_complete_verdict::Verdict::Fail,
                 fix_plan_attached: true,
             },
         ));
-        fac.update_snapshot(next);
-        assert_eq!(fac.current_phase_id(), Some("fix_units"));
+        assert_eq!(fac.current_phase_id(), Some("fix_units".to_string()));
     }
 
     #[test]
     fn whitelist_lookup_in_unknown_phase_denies() {
-        let mut fac = WorkflowPhaseAuthority::from_declaration(enabled_declaration());
+        let fac = WorkflowPhaseAuthority::from_declaration(enabled_declaration());
         fac.update_snapshot(PhaseSnapshot::with_phase_id("nope"));
         let d = fac.allows("coordinator", "work.ready");
         assert!(!d.allowed);
@@ -322,7 +390,7 @@ matrix: serial_default
         let fac = WorkflowPhaseAuthority::from_declaration(enabled_declaration());
         let decl = fac.declaration().expect("decl");
         assert!(decl.phases.iter().any(|p| p.id == "unit_loop"));
-        let d = whitelist_allows("coordinator", "work.ready", "unit_loop", decl);
+        let d = whitelist_allows("coordinator", "work.ready", "unit_loop", &decl);
         assert!(d.allowed);
     }
 }

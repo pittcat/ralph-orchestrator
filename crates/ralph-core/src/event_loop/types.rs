@@ -378,4 +378,6 @@ pub struct EventLoop {
     /// read/write this field; the event loop only
     /// hands `&mut self.precheck_retries` to them.
     pub(crate) precheck_retries: crate::event_loop::precheck_gate_runner::PrecheckRetryRegistry,
+    /// 2026-07-02-006 plan: shared phase authority engine (opt-in).
+    pub(crate) phase_authority: std::sync::Arc<crate::event_loop::phase_authority::WorkflowPhaseAuthority>,
 }

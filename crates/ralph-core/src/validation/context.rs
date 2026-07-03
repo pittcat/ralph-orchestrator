@@ -255,4 +255,12 @@ impl<'a> ValidationContext<'a> {
     ) -> Option<&crate::event_loop::phase_authority::snapshot::PhaseSnapshot> {
         self.snapshot.workflow_phase.as_ref()
     }
+
+    /// Owned phase id for rules that also need `review_step_tracker`.
+    pub fn workflow_phase_id(&self) -> Option<String> {
+        self.snapshot
+            .workflow_phase
+            .as_ref()
+            .map(|p| p.phase_id.clone())
+    }
 }

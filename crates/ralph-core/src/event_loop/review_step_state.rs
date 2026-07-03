@@ -259,7 +259,11 @@ impl ReviewStepTracker {
     }
 
     /// Semantic gates that run after schema validation (U1/U3).
-    pub fn check_semantic_gates(&self, event: &JsonlEvent) -> Option<PolicyFinding> {
+    pub fn check_semantic_gates(
+        &self,
+        event: &JsonlEvent,
+        workflow_phase_id: Option<&str>,
+    ) -> Option<PolicyFinding> {
         let hat = event.hat.as_deref().unwrap_or("");
         let topic = event.topic.as_str();
 
@@ -322,6 +326,11 @@ impl ReviewStepTracker {
         }
 
         if topic == "queue.advance" {
+            if crate::event_loop::phase_authority::plan_gate_helper::plan_gate_should_skip_review_not_terminal(
+                workflow_phase_id,
+            ) {
+                return None;
+            }
             let key = step_key_from_event(topic, event.payload.as_deref())?;
             let Some(state) = self.steps.get(&key) else {
                 return Some(plan_gate_finding(topic, "plan_gate_review_not_terminal"));
@@ -341,6 +350,11 @@ impl ReviewStepTracker {
             {
                 return None;
             }
+            if crate::event_loop::phase_authority::plan_gate_helper::plan_gate_should_skip_review_not_terminal(
+                workflow_phase_id,
+            ) {
+                return None;
+            }
             let key = step_key_from_event(topic, event.payload.as_deref())?;
             let Some(state) = self.steps.get(&key) else {
                 return Some(plan_gate_finding(topic, "plan_gate_review_not_terminal"));
@@ -349,6 +363,11 @@ impl ReviewStepTracker {
         }
 
         if topic == "plan.complete" {
+            if crate::event_loop::phase_authority::plan_gate_helper::plan_gate_should_skip_review_not_terminal(
+                workflow_phase_id,
+            ) {
+                return None;
+            }
             let p = event.payload.as_deref()?;
             let obj = serde_json::from_str::<Value>(p).ok()?;
             let plan_name = obj.get("plan_name")?.as_str()?;
@@ -893,11 +912,11 @@ mod tests {
         );
 
         tracker.observe_accepted(&passed);
-        assert!(tracker.check_semantic_gates(&plan_complete).is_none());
+        assert!(tracker.check_semantic_gates(&plan_complete, None).is_none());
 
         let tracker2 = ReviewStepTracker::default();
         let finding = tracker2
-            .check_semantic_gates(&plan_complete)
+            .check_semantic_gates(&plan_complete, None)
             .expect("must reject");
         assert!(finding.message.contains("plan_gate_review_not_terminal"));
     }
@@ -941,7 +960,7 @@ mod tests {
             "review-coordinator",
             r#"{"plan_name":"p","task_id":"t1","task_key":"k1","step":"1","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"empty_diff"}"#,
         );
-        let finding = tracker.check_semantic_gates(&passed).expect("must reject");
+        let finding = tracker.check_semantic_gates(&passed, None).expect("must reject");
         assert!(finding.message.contains("review_passed_while_wave_open"));
         // U1 (2026-06-17-003 plan): the finding must be the
         // dedicated `SemanticGateViolation` variant — NOT a
@@ -1022,7 +1041,7 @@ mod tests {
         tracker.observe_accepted(&failed);
         tracker.observe_accepted(&passed);
         let finding = tracker
-            .check_semantic_gates(&plan_complete)
+            .check_semantic_gates(&plan_complete, None)
             .expect("must reject");
         assert!(
             finding
@@ -1039,7 +1058,7 @@ mod tests {
             "plan-gate",
             r#"{"plan_name":"p","completed_step":"1","next_step":"2","reviewed_task_id":"t1","reviewed_task_key":"k1"}"#,
         );
-        let finding = tracker.check_semantic_gates(&advance).expect("must reject");
+        let finding = tracker.check_semantic_gates(&advance, None).expect("must reject");
         assert!(finding.message.contains("plan_gate_review_not_terminal"));
     }
 
@@ -1052,7 +1071,7 @@ mod tests {
             r#"{"plan_name":"p","plan_path":"docs/plans/p.md","task_id":"t2","task_key":"k2","step":"2","complexity":"small","reviewed_task_id":"t1","reviewed_task_key":"k1","completed_step":"1","next_step":"2"}"#,
         );
         let finding = tracker
-            .check_semantic_gates(&ready)
+            .check_semantic_gates(&ready, None)
             .expect("must reject step-advance work.ready without synth terminal");
         assert!(finding.message.contains("plan_gate_review_not_terminal"));
     }
@@ -1079,11 +1098,11 @@ mod tests {
         );
 
         assert!(
-            tracker.check_semantic_gates(&advance).is_none(),
+            tracker.check_semantic_gates(&advance, None).is_none(),
             "queue.advance must pass after synth terminal"
         );
         assert!(
-            tracker.check_semantic_gates(&ready).is_none(),
+            tracker.check_semantic_gates(&ready, None).is_none(),
             "work.ready handoff must pass after synth terminal (P1 / merry-wren fix)"
         );
     }
@@ -1097,7 +1116,7 @@ mod tests {
             r#"{"plan_name":"p","plan_path":"docs/plans/p.md","task_id":"t1","task_key":"k1","step":"1","complexity":"small"}"#,
         );
         assert!(
-            tracker.check_semantic_gates(&ready).is_none(),
+            tracker.check_semantic_gates(&ready, None).is_none(),
             "coordinator bootstrap work.ready must not require prior synth terminal"
         );
     }
@@ -1193,7 +1212,7 @@ mod tests {
             r#"{"plan_name":"p","completed_steps":1,"task_id":"t1","task_key":"k1","verdict":"pass"}"#,
         );
         let finding = tracker
-            .check_semantic_gates(&plan_complete_blocked)
+            .check_semantic_gates(&plan_complete_blocked, None)
             .expect("plan.complete must stay blocked when synth_terminal was never set");
         assert!(
             finding.message.contains("plan_gate_review_not_terminal"),
@@ -1211,7 +1230,7 @@ mod tests {
         tracker.observe_accepted(&passed);
         assert!(
             tracker
-                .check_semantic_gates(&plan_complete_blocked)
+                .check_semantic_gates(&plan_complete_blocked, None)
                 .is_none(),
             "synth_terminal must be set after a well-formed review.passed, \
              so plan.complete must pass the gate"
@@ -1525,7 +1544,7 @@ mod tests {
             r#"{"plan_name":"p","completed_steps":1,"task_id":"t1","task_key":"k1","step":"step-02","verdict":"pass"}"#,
         );
         assert!(
-            tracker.check_semantic_gates(&plan_complete).is_none(),
+            tracker.check_semantic_gates(&plan_complete, None).is_none(),
             "plan-level terminal must let plan.complete pass even when per-step entry is missing"
         );
     }
@@ -1546,7 +1565,7 @@ mod tests {
             r#"{"plan_name":"p","completed_steps":1,"task_id":"t1","task_key":"k1","step":"step-01","verdict":"pass"}"#,
         );
         let finding = tracker
-            .check_semantic_gates(&plan_complete)
+            .check_semantic_gates(&plan_complete, None)
             .expect("verdict=fail must NOT set plan-level terminal");
         assert!(
             finding.message.contains("plan_gate_review_not_terminal"),
@@ -1564,7 +1583,7 @@ mod tests {
             r#"{"plan_name":"p","completed_steps":1,"task_id":"t1","task_key":"k1","step":"step-01","verdict":"pass"}"#,
         );
         let finding = tracker
-            .check_semantic_gates(&plan_complete)
+            .check_semantic_gates(&plan_complete, None)
             .expect("plan.complete without any review observation must be rejected");
         assert!(finding.message.contains("plan_gate_review_not_terminal"));
     }
@@ -1581,7 +1600,7 @@ mod tests {
             "plan-gate",
             r#"{"plan_name":"p","completed_steps":1,"task_id":"t1","task_key":"k1","step":"fix-02","verdict":"pass"}"#,
         );
-        assert!(tracker.check_semantic_gates(&plan_complete).is_none());
+        assert!(tracker.check_semantic_gates(&plan_complete, None).is_none());
     }
 
     #[test]
@@ -1606,7 +1625,7 @@ mod tests {
             r#"{"plan_name":"p","completed_steps":1,"task_id":"finalize","task_key":"kF","step":"step-99","verdict":"pass"}"#,
         );
         let finding = tracker
-            .check_semantic_gates(&plan_complete)
+            .check_semantic_gates(&plan_complete, None)
             .expect("fix_plan_file non-empty must NOT set plan terminal");
         assert!(finding.message.contains("plan_gate_review_not_terminal"));
     }

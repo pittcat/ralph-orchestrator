@@ -170,9 +170,10 @@ fn handle_payload_decision(
 ) -> ValidationResult {
     match decision {
         PolicyDecision::Accept => {
+            let phase_id = ctx.workflow_phase_id();
             let semantic_finding = {
                 let tracker = ctx.review_step_tracker();
-                tracker.check_semantic_gates(event)
+                tracker.check_semantic_gates(event, phase_id.as_deref())
             };
             if let Some(finding) = semantic_finding {
                 record_policy_rejection(&finding, ctx, event);
@@ -185,11 +186,12 @@ fn handle_payload_decision(
             accept_and_observe(ctx, event)
         }
         PolicyDecision::Warn(findings) => {
+            let phase_id = ctx.workflow_phase_id();
             // Warnings still need to run semantic gates; a semantic gate
             // violation is recoverable and fail-closed.
             let semantic_finding = {
                 let tracker = ctx.review_step_tracker();
-                tracker.check_semantic_gates(event)
+                tracker.check_semantic_gates(event, phase_id.as_deref())
             };
             if let Some(finding) = semantic_finding {
                 record_policy_rejection(&finding, ctx, event);

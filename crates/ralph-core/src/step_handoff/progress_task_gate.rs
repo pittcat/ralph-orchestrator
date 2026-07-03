@@ -311,9 +311,16 @@ pub fn check_alignment_with_snapshot(
     step: Option<&str>,
     task_id: Option<&str>,
     payload_completed_steps: Option<&[String]>,
+    workflow_phase_id: Option<&str>,
 ) -> GateDecision {
     if !is_gated_topic(topic) {
         return GateDecision::Inert;
+    }
+
+    if crate::event_loop::phase_authority::progress_gate_helper::progress_gate_should_skip_missing_current_step(
+        workflow_phase_id,
+    ) {
+        return GateDecision::Aligned;
     }
 
     // 1. Empty / missing headings → fail-closed.
@@ -1097,6 +1104,7 @@ mod tests {
             Some("step-02"),
             Some("task-1"),
             Some(&payload),
+            None,
         );
         assert_eq!(decision, GateDecision::Aligned);
     }
@@ -1115,6 +1123,7 @@ mod tests {
             Some("step-02"),
             Some("task-1"),
             Some(&payload),
+            None,
         );
         assert_eq!(
             decision,
@@ -1138,6 +1147,7 @@ mod tests {
             Some("step-02"),
             Some("task-1"),
             Some(&payload),
+            None,
         );
         match decision {
             GateDecision::Mismatch(m) => {
@@ -1163,6 +1173,7 @@ mod tests {
             Some("step-02"),
             None,
             None,
+            None,
         );
         assert_eq!(decision, GateDecision::Aligned);
     }
@@ -1178,6 +1189,7 @@ mod tests {
             Some("step-02"),
             None,
             Some(&[]),
+            None,
         );
         assert_eq!(decision, GateDecision::Aligned);
     }
@@ -1196,6 +1208,7 @@ mod tests {
             Some("step-02"),
             None,
             Some(&payload),
+            None,
         );
         assert_eq!(decision, GateDecision::Aligned);
     }
@@ -1224,6 +1237,7 @@ mod tests {
             "plan.complete",
             Some("step-02"),
             Some("task-1"),
+            None,
             None,
         );
         match decision {

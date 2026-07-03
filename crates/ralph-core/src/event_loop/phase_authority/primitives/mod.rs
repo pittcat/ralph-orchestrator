@@ -6,6 +6,8 @@
 //! `preset_lint::phase_authority::KNOWN_PRIMITIVES`.
 
 pub mod on_event;
+// Plan terminal acceptance (`plan.complete` / `plan.blocked`).
+pub mod on_plan_terminal_accepted;
 // U7: on_test_passed_step — handles `test.passed` topic.
 pub mod on_test_passed_step;
 // U8: on_review_complete_verdict — KTD4 matrix (parameterised

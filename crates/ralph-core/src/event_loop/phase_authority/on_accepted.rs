@@ -16,7 +16,8 @@ use super::primitives::on_review_complete_verdict;
 use super::primitives::on_test_passed_step::StepProgressFixture;
 use super::evaluator::EventFixture;
 use super::snapshot::{PhaseSnapshot, ViolationKind};
-use super::step_parse::parse_test_passed_step;
+use super::step_parse::{parse_test_passed_step, TestPassedRecord};
+use super::step_transition::advance_step_on_test_passed;
 use super::WorkflowPhaseAuthority;
 use serde_json::Value;
 
@@ -59,26 +60,17 @@ pub fn handle_phase_on_event_accepted(
         return (snapshot, PhaseSideEffects::default());
     }
 
-    let fixture = build_fixture(event);
+    let prev_snapshot = authority.snapshot().unwrap_or(snapshot);
+    let fixture = build_fixture(event, authority.is_enabled());
     let next_snapshot = authority.on_event_accepted(&fixture);
 
-    let phase_entered = next_snapshot.phase_id != snapshot.phase_id;
-    let review_walk_closed = !snapshot.review_walk_closed && next_snapshot.review_walk_closed;
+    let phase_entered = next_snapshot.phase_id != prev_snapshot.phase_id;
+    let review_walk_closed =
+        !prev_snapshot.review_walk_closed && next_snapshot.review_walk_closed;
 
-    // Progress.md fragment: render only when the phase
-    // changed. Future presets that want per-event progress
-    // rendering add a U19 directive keyed by event topic
-    // (out of scope for U23).
     let progress_md_fragment = if phase_entered {
         use super::progress_projection::{apply_progress_on_phase_enter, PhaseEnterContext};
-        // Pull the configured projection map out of the
-        // declaration's config — the facade doesn't carry it
-        // directly; we ask the engine for the declaration
-        // and read the projection from there.
-        let cfg = authority
-            .declaration()
-            .and_then(|d| authority_projection_config(d));
-        let cfg = cfg.unwrap_or_default();
+        let cfg = authority.progress_projection().unwrap_or_default();
         let ctx = PhaseEnterContext {
             phase_id: next_snapshot.phase_id.clone(),
             last_completed_step: next_snapshot.last_completed_step.clone(),
@@ -87,15 +79,6 @@ pub fn handle_phase_on_event_accepted(
         apply_progress_on_phase_enter(&cfg, &ctx)
     } else {
         String::new()
-    };
-
-    // Bump violation counter when the engine recorded a
-    // transition into `terminal` or when a `review.walk`
-    // close arrived. U22's budget helpers consume this.
-    let next_snapshot = if review_walk_closed {
-        next_snapshot
-    } else {
-        next_snapshot
     };
 
     (
@@ -111,15 +94,23 @@ pub fn handle_phase_on_event_accepted(
 /// Convenience: build an `EventFixture` from an accepted
 /// event. The runtime calls this once per event and feeds
 /// the fixture into `WorkflowPhaseAuthority::on_event_accepted`.
-pub fn build_fixture<'a>(event: &'a AcceptedEvent<'_>) -> EventFixture<'a> {
+pub fn build_fixture<'a>(
+    event: &'a AcceptedEvent<'_>,
+    phase_authority_enabled: bool,
+) -> EventFixture<'a> {
     match event.topic {
         "test.passed" => {
-            let fixture: StepProgressFixture = parse_test_passed_step(event.payload)
-                .unwrap_or(StepProgressFixture {
+            let fixture = if let Ok(record) =
+                serde_json::from_value::<TestPassedRecord>(event.payload.clone())
+            {
+                advance_step_on_test_passed(phase_authority_enabled, &record)
+            } else {
+                parse_test_passed_step(event.payload).unwrap_or(StepProgressFixture {
                     kind: super::primitives::on_test_passed_step::StepKind::PlanUnit,
                     index: 0,
                     total: 0,
-                });
+                })
+            };
             EventFixture::TestPassed(fixture)
         }
         "review.complete" => EventFixture::ReviewComplete(
@@ -147,25 +138,6 @@ fn parse_verdict(payload: &Value) -> on_review_complete_verdict::Verdict {
         .unwrap_or("pass");
     on_review_complete_verdict::Verdict::from_token(raw)
         .unwrap_or(on_review_complete_verdict::Verdict::Pass)
-}
-
-/// Look up the configured `progress_projection` for the
-/// active declaration. The facade carries the declaration
-/// but not the typed config, so the runtime must keep the
-/// config alongside the engine for projection purposes.
-fn authority_projection_config(
-    decl: &super::declaration::PhaseAuthorityDeclaration,
-) -> Option<super::config::ProgressProjectionConfig> {
-    // U23 does NOT have access to the typed
-    // `PhaseAuthorityConfig` from the declaration alone;
-    // the runtime must hand the projection map explicitly.
-    // For the unit-level tests we expose a hook so callers
-    // can inject the projection config; the runtime does
-    // the same when it persists the engine. Until then the
-    // function returns `None` and the helper emits an
-    // empty fragment.
-    let _ = decl;
-    None
 }
 
 // The runtime consults the snapshot's violation_counts to

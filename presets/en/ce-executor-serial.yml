@@ -137,13 +137,11 @@ mechanism:
   enforce_schema: hard
   state_idempotency: required
   # 2026-07-02-006 plan U24: opt-in phase authority.
-  # Disabled by default so the preset's existing flow-based
-  # runtime path is unchanged. Set `enabled: true` to switch
-  # the runtime onto the phase engine; the transition table
-  # below mirrors the KTD4 + on_test_passed_step matrix
-  # documented in the plan's "Phase 状态机（serial 实例）" section.
+  # Runtime phase authority (2026-07-02-006): when `enabled: true`
+  # the engine is the SSOT for unit_loop → review → fix_units →
+  # plan_end routing; coordinator prompt defers to engine snapshot.
   phase_authority:
-    enabled: false
+    enabled: true
     initial_phase: unit_loop
     phases:
       - id: unit_loop
@@ -155,7 +153,13 @@ mechanism:
         allowed_emits:
           coordinator: [review.start]
           review-coordinator: [review.dimension.ready, review.dimensions.complete]
-          "*": [review.complete]
+          review-goalalign: [review.goalalign.done, review.goalalign.failed]
+          review-correctness: [review.correctness.done, review.correctness.failed]
+          review-testing: [review.testing.done, review.testing.failed]
+          review-maintainability: [review.maintainability.done, review.maintainability.failed]
+          review-project-standards: [review.project-standards.done, review.project-standards.failed]
+          review-adversarial: [review.adversarial.done, review.adversarial.failed]
+          review-synthesizer: [review.complete]
       - id: fix_units
         allowed_emits:
           coordinator: [work.ready]
@@ -186,17 +190,21 @@ mechanism:
         from: review
         to: plan_end
       - on:
-          primitive: on_review_complete_verdict
-          matrix: serial_default
-        from: review
-        to: fix_units
-      - on:
           primitive: on_test_passed_step
           step_kind: fix_unit
           when: last
         from: fix_units
         to: plan_end
-      - on: { event: plan.complete }
+      - on:
+          primitive: on_plan_terminal_accepted
+          event: plan.complete
+          accepted: true
+        from: plan_end
+        to: ship
+      - on:
+          primitive: on_plan_terminal_accepted
+          event: plan.blocked
+          accepted: true
         from: plan_end
         to: ship
       - on:
@@ -206,6 +214,12 @@ mechanism:
     violation_policy:
       max_resume_per_hat: 3
       on_exhausted: plan_blocked
+    progress_projection:
+      on_enter:
+        plan_end:
+          write_current_step: last_completed_step_or_none
+        fix_units:
+          write_current_step: active_fix_step
 
 topic_format_whitelist:
   - LOOP_COMPLETE
@@ -913,166 +927,25 @@ hats:
 
       ### Unit / Fix-Unit Advancement (test.passed trigger)
 
-      The phase engine (KTD1) drives the unit_loop → review →
-      fix_units → plan_end transitions; the engine handles the
-      unit-vs-fix discrimination via the KTD4 matrix and the
-      `step_kind` argument of `on_test_passed_step`. The
-      coordinator follows the matching branch below only after
-      the engine's snapshot says we are still in `unit_loop` (or
-      `fix_units` for Branch A).
+      The **phase authority engine** (`mechanism.phase_authority`) is the
+      runtime SSOT for routing. Read `workflow_phase` from `## ORCHESTRATOR
+      CONTEXT` and emit only topics allowed for the current phase:
 
-      After the phase gate, follow the matching branch below.
+      | Phase | Coordinator may emit |
+      |-------|---------------------|
+      | `unit_loop` | `work.ready`, `queue.advance` |
+      | `review` | `review.start` (once, after last plan unit) |
+      | `fix_units` | `work.ready` for next `fix-NN` |
+      | `plan_end` | `plan.complete` or `plan.blocked` — **never** `review.start` |
 
-      #### Branch A — `step` starts with `fix-` (fix-unit completion):
-
-         **PRE-DECISION GATE (HARD RULE — read structured state, not plan markdown):**
-         Before emitting anything after a `test.passed(fix-NN)`, you MUST:
-
-         1. Read `tasks.jsonl` (canonical ledger; the orchestrator owns it)
-            and pull the `fix_unit_state` block from the `## ORCHESTRATOR
-            CONTEXT` injection.  The block is authoritative; it is
-            computed from `tasks.jsonl` and never from the
-            `### U{N}.` headings of `fix-plan.md` or `plan.md`.  Do
-            NOT count headings — the runtime no longer parses those
-            documents for topology (2026-07-01-002 plan U1/U3).
-         2. Use the four `fix_unit_state` fields directly:
-            * `total` — how many fix-units this round contains.
-            * `completed` — `fix-NN` ids already closed/failed.
-            * `current` — the `fix-NN` the loop should be working on
-              now (lowest non-terminal id).
-            * `next_expected` — the preset's pre-computed hint;
-              either `plan.complete` or `work.ready(fix-NN)` with
-              the exact id.
-         3. **Cross-check against the most recent commit** when git is
-            available: the agent should have left a
-            `[fix-unit: <step>]` footer in the commit that closed
-            the current unit.  If `commit footer != step`, surface
-            the discrepancy in your reasoning but always trust
-            `fix_unit_state` (tasks.jsonl) for the count — the
-            footer is a courtesy diagnostic, not the source of
-            truth.
-         4. **If `next_expected == "plan.complete"` (or
-            `current` is the highest id in `total`):**
-            - Publish `plan.complete`.
-            - **EMIT EXACTLY ONE EVENT THIS TURN (HARD RULE — 2026-07-01-001 U1+U3):** `plan.complete` must be the
-              ONLY business event you emit this activation. Do NOT precede it with
-              `work.ready` or any other emit — isolated mode keeps only the FIRST
-              business event per turn and silently drops the rest, so a stray
-              earlier emit causes your `plan.complete` to be discarded and the
-              loop to stall. The runtime's
-              `CoordinatorDecisionGateStage` will rewrite any
-              stray `work.ready` carrying `step.fix-NN.last_in_phase=true`
-              into `plan.complete` and the U1 budget now treats
-              terminal topics as first-class so the rewritten event
-              wins the per-turn slot.
-            - When emitting `plan.complete`, set `step` to the current
-              `fix-NN` value. Without `step`, `plan_gate` cannot apply the fix-*
-              exemption and will reject the event.
-            - Stop.
-         5. **If `next_expected == "work.ready(fix-NN)":**
-            - Publish `work.ready` with that exact `fix-NN` id (do
-              not invent one — copy the id from
-              `fix_unit_state.next_expected`).
-            - **FAIL-SAFE (bounded):** if `fix_unit_state` is
-              absent or `current` is `None` but the event clearly
-              carries a `step` ending this fix-unit, emit one more
-              `work.ready` for `fix-{NN+1:02}` parsed from `step`
-              (e.g. `step=fix-02` → `work.ready(fix-03)`). You may
-              apply this fail-safe **at most once per fix-unit
-              chain**; if the next activation still lacks a
-              `fix_unit_state`, emit
-              `plan.blocked(reason="fix_plan_unreadable")` instead
-              of continuing to emit endless fix-units.
-            - **NEVER emit `plan.complete` or `review.start` in this branch.**
-            - Stop.
-
-         This gate is the primary defence against the 2026-06-30 P0-C regression,
-         where the coordinator skipped fix-02 / fix-03 and emitted `plan.complete`
-         after only fix-01 had closed.
-
-         When emitting `work.ready` for the next fix-unit, the payload fields MUST
-         be internally consistent:
-         - `step` and the `fix-{NN}` segment in `task_key` MUST use the same number.
-           Example of a violation: `step=fix-02` but `task_key=...:fix-01:u2`.
-         - `task_id` MUST be freshly minted per fix-unit; do NOT reuse the previous
-           fix-unit's `task_id`. Use `ralph tools task create` — the CLI emits the
-           canonical id in the canonical `task-{ts}-{4hex}` /
-           `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}` shape.
-         - `completed_steps` (used later in `plan.complete`) MUST include every
-           fix-unit that has actually closed, in order.
-
-         **After the phase gate, follow the matching branch below.**
-
-      #### Branch B — `step` does NOT start with `fix-` (plan unit / trivial completion):
-
-         **Pre-decision gate (HARD RULE — read FIRST, decide SECOND):**
-         Before picking the "next unit" vs "last unit → review.start" branch,
-         you MUST verify the unit-count against the plan's source-of-truth files.
-         Guessing from the `step` payload alone is the root cause of the
-         "premature `review.start` after unit-01 of a multi-unit plan"
-         regression — Branch B below MUST NOT publish `review.start`
-         until the pre-decision gate confirms the current step is the
-         last plan unit. The guard is mandatory:
-
-         1. Open `.agents/scratchpad/ce-executor/{plan_name}/plan.md`
-            (the derived mirror written by this preset's coordinator on
-            `work.start`). Find the `## Implementation Units` section.
-            Count every `### U{N}.` heading — that is `N_total`.
-            (If you instead need the source-of-truth plan file at
-            `plan_path`, parse the same `## Implementation Units`
-            section there — both mirrors MUST agree; on conflict use
-            the scratchpad `plan.md` because it is what this loop
-            created and other hats read from.)
-         2. Open `.agents/scratchpad/ce-executor/{plan_name}/progress.md`
-            (also `.ralph/agent/progress.md` if present — they are
-            updated together) and read the `Completed Steps` list
-            (plus any `## Completed Steps` head subsection).
-            Count the entries — that is `N_closed`.
-         3. Parse `current_step_index` from the incoming `test.passed`
-            payload's `step` field: `step-01` → 1, `step-02` → 2,
-            etc.; `trivial` → 1 (a trivial mode IS the only unit).
-         4. Decision rule (apply in this exact order):
-            - **Cannot read plan.md or progress.md** (file missing,
-              unreadable, no `## Implementation Units` heading, or
-              `step` not in `step-NN` / `trivial` form): default to
-              the **next-unit** branch. The pre-decision gate's
-              answer when data is missing is "more units remain";
-              do NOT publish `review.start`. This is the
-              fail-safe — the worst case is one extra
-              `work.ready` cycle, not a premature review.
-            - **Can read both files**: `current_step_index ==
-              N_total` AND `N_closed + 1 == N_total` (this
-              `test.passed` is the closure of the last remaining
-              unit). Only then take the "last plan unit" branch.
-              Anything else (off-by-one, completed-count mismatch,
-              step index missing from `1..=N_total`) → take the
-              **next-unit** branch.
-         5. The intent: Branch B is a state machine, not a guess.
-            `test.passed` arrives once per unit; review runs ONCE,
-            after the very last one. Reading two files and
-            comparing integers is cheap. Skipping the check is
-            how multi-unit plans regress into a per-step review
-            loop.
-
-         With the gate satisfied, follow the matching branch below.
-
-         - If there is a next plan unit (gate chose next-unit OR
-           gate could not confirm last-unit):
-           - Create the runtime task for the next unit (if not already created)
-           - Publish `work.ready` with payload containing the next unit's `task_id`,
-             `task_key`, `step`, `plan_path`, `plan_name`, `complexity`
-           - Stop — do NOT proceed to any other work
-         - If the current unit is the last plan unit (gate confirmed
-           `current_step_index == N_total` AND `N_closed + 1 == N_total`):
-           - Publish `review.start` with payload: `plan_name`, `task_id`, `task_key`,
-             `unit_index: <current_step_index>`, `total_units: <N_total>` — these two
-             extra fields ship the gate's verdict so downstream review-coordinator
-             and the diagnostic surfaces (`ralph diagnose --from-ledger`,
-             `ralph doctor plan-sync`) can independently confirm the trigger
-             was the last plan unit, not a misfire. Downstream hats treat them
-             as advisory (do not fail the emit if the runtime is on an older
-             schema that drops unknown fields).
-           - Stop — the review flow is taken over by review-coordinator
+      **HARD RULES (engine-enforced — runtime rejects violations):**
+      - After the last fix-unit closes, emit **only** `plan.complete` (single emit).
+      - After the last plan unit's `test.passed`, emit `review.start` (single emit).
+      - Mid-chain fix-units: emit `work.ready` with the next `fix-NN` from
+        `fix_unit_state.next_expected` in ORCHESTRATOR CONTEXT.
+      - Mid-chain plan units: emit `work.ready` for the next `step-NN`.
+      - Do **not** count `### U{N}.` headings or commit footers for routing —
+        trust `fix_unit_state` and the phase snapshot only.
 
       ### Single-emit guard for `review.start` (HARD RULE)
       Before publishing `review.start`, you MUST verify that the current
@@ -3059,39 +2932,21 @@ hats:
 
       ### Step 2 — Choose ONE emit
 
-      | Current state | Emit | Next hat |
-      |---|---|---|
-      | Current step has an `open` task, but no recent executor output | `work.ready(plan_name, plan_path, task_id, task_key, step, complexity)` | executor |
-      | Current step's task is `closed`, but the review sequence never closed (coordinator stalled mid-walk) | `task.resume(reason=review_sequence_not_advanced, target_hat=coordinator)` (first 2 retries per loop) | coordinator re-enters and re-emits `review.start`, which IS one of review-coordinator's triggers and re-activates it. **Do NOT use `target_hat=review-coordinator` directly** — review-coordinator's `triggers` list (line 1157) does NOT include `task.resume`, so the runtime cannot activate it via `target_hat` alone (the activation gate is `hat_cfg.triggers` match, see event_loop/mod.rs:3123). `task.resume(target_hat=review-coordinator)` is a dead path. |
-      | Same condition after 2 retries — sequence still not closed (loop stalled mid-walk, 3rd activation of this row in this loop) | `plan.blocked(reason=review_coordinator_unrecoverable_after_<N>_retries)` | shipper → reporter (hard-fail: the review pipeline is broken, not a recoverable stall; this reason is NOT in shipper's recoverable whitelist, so it will route to `pass_or_fail: "fail"`) |
-      | All units done but `coordinator` never emitted `review.start` | `review.start(plan_name, task_id, task_key)` | review-coordinator |
-      | All units + fix-units done but `coordinator` never emitted `plan.complete` | `task.resume(reason=plan_complete_not_emitted, target_hat=coordinator)` (first 2 retries per loop) | coordinator |
-      | Same condition after 2 retries — `plan.complete` still missing | `plan.blocked(reason=plan_complete_not_emitted_after_<N>_retries)` | shipper → reporter (hard-fail) |
-      | **2026-06-30-001 P0-1**: every `fix-NN` step in `completed_steps` is closed in `tasks.jsonl` (the executor finished the fix-unit chain), but `coordinator` has not yet emitted `plan.complete` and the loop has stalled waiting on it. The pre-fix path was to nudge coordinator with the generic `plan_complete_not_emitted` reason, which let the agent re-emit `review.start` and trigger an unwanted second review walk (events L37 of primary-20260630-032648). | `task.resume(reason=fix_unit_complete_plan_complete_pending, target_hat=coordinator)` (first 2 retries per loop). The re-entered coordinator MUST emit `plan.complete` and MUST NOT emit `review.start` (see PHASE 2 branch gate above). | coordinator |
-      | Same condition after 2 retries — `plan.complete` still missing on the fix-unit bucket | `plan.blocked(reason=fix_unit_complete_plan_complete_pending_after_<N>_retries)` | shipper → reporter (hard-fail: the fix-unit terminal ladder is broken) |
-      | You cannot determine a safe action | `plan.blocked(reason=loop_stalled_max_iterations)` | shipper → reporter |
+      The runtime phase engine owns coordinator terminal routing
+      (`review.start` vs `plan.complete`). Your job is **stall recovery
+      only** — nudge the hat that should act next:
+
+      - Open task, no executor output → `work.ready` (same step).
+      - Review sequence stalled → `task.resume(target_hat=coordinator)` (max 2 per reason).
+      - Fix-unit chain done but no `plan.complete` →
+        `task.resume(reason=fix_unit_complete_plan_complete_pending, target_hat=coordinator)`.
+      - All units done but no `review.start` → `task.resume(target_hat=coordinator)`.
+      - After 2 retries on the same reason → `plan.blocked(reason=<reason>_after_<N>_retries)`.
+      - Cannot determine safe action → `plan.blocked(reason=loop_stalled_max_iterations)`.
 
       **HARD RULE — do NOT emit `review.dimension.ready` or `review.dimensions.complete`
-      from this hat.** Those are review-sequence internal events owned exclusively by
-      review-coordinator (its `publishes` scope, line 1148) and the CLI precheck +
-      topic_deny_rules will reject any attempt to emit them from `progress-steward`.
-      **Do NOT emit `task.resume(target_hat=review-coordinator)` either** — review-
-      coordinator's `triggers` (line 1157) excludes `task.resume`, so it cannot be
-      activated by `target_hat` alone. The correct nudges are:
-      - For a stuck review sequence → `task.resume(target_hat=coordinator)` so the
-        coordinator re-enters and re-emits `review.start`, which IS in
-        review-coordinator's triggers and re-activates the state machine.
-      - For a stuck coordinator → `task.resume(target_hat=coordinator)` with a
-        specific `reason` describing what the coordinator should re-attempt.
-      - **Retry cap (P1)**: track per-loop how many times you have nudged the same
-        hat with `task.resume` for the same reason. After 2 retries without
-        progress, fall through to `plan.blocked(reason=<hat>_unrecoverable_after_<N>_retries)`
-        instead of looping. **Do NOT rely on `loop_stalled_max_iterations`** as the
-        only safety net — that reason IS in shipper's recoverable whitelist (line 2162)
-        and would be promoted to `pass_or_fail: "pass"` even when the review pipeline
-        is fundamentally broken. Forcing an unrecoverable-reason `plan.blocked` here
-        routes to `pass_or_fail: "fail"` (line 2167-2172), which is the correct
-        outcome for an unrecoverable review stall.
+      from this hat.** Do NOT emit `task.resume(target_hat=review-coordinator)`.
+      **After `LOOP_COMPLETE` is honored, do not inject recovery events.**
 
       ### Step 3 — Emit and exit
       Publish EXACTLY ONE emit. Then stop. Do NOT do the underlying

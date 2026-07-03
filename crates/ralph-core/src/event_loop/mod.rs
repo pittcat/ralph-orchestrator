@@ -469,44 +469,44 @@ fn load_opt_in_flow_declaration(
         .and_then(|yaml| FlowDeclaration::from_yaml(&yaml).ok())
 }
 
+fn effective_mechanism_config(
+    config: &crate::config::RalphConfig,
+) -> Option<&crate::config::MechanismConfig> {
+    config
+        .mechanism
+        .as_ref()
+        .or(config.event_loop.mechanism.as_ref())
+}
+
+fn build_phase_authority_arc(
+    config: &crate::config::RalphConfig,
+) -> std::sync::Arc<crate::event_loop::phase_authority::WorkflowPhaseAuthority> {
+    let authority = effective_mechanism_config(config)
+        .and_then(|m| m.phase_authority.as_ref())
+        .and_then(|cfg| {
+            crate::event_loop::phase_authority::WorkflowPhaseAuthority::from_config(cfg).ok()
+        })
+        .unwrap_or_else(crate::event_loop::phase_authority::WorkflowPhaseAuthority::disabled);
+    std::sync::Arc::new(authority)
+}
+
 fn build_stage_pipeline_from_config(
     config: &crate::config::RalphConfig,
 ) -> (
     crate::event_loop::stage_pipeline::StagePipeline,
     std::collections::HashMap<String, u32>,
+    std::sync::Arc<crate::event_loop::phase_authority::WorkflowPhaseAuthority>,
 ) {
     use crate::event_loop::flow_declaration::FlowDeclaration;
     use crate::event_loop::stage_pipeline::StagePipeline;
     let loop_cfg = Some(&config.event_loop);
-    let phase_authority_enabled = config
-        .event_loop
-        .mechanism
-        .as_ref()
-        .and_then(|m| m.phase_authority.as_ref())
-        .map(|pa| pa.enabled)
-        .unwrap_or(false);
+    let authority = build_phase_authority_arc(config);
+    // Top-level `mechanism:` (preset SSOT) and `event_loop.mechanism`
+    // must both enable the phase pipeline — `build_phase_authority_arc`
+    // already reads `effective_mechanism_config`.
+    let phase_authority_enabled = authority.is_enabled();
 
     if phase_authority_enabled {
-        // 2026-07-02-006 plan U15: phase-authority wiring.
-        // Build the engine from the typed config; on parse
-        // failure the lint should have already rejected the
-        // preset, but we fall back to the disabled engine so
-        // the runtime stays alive.
-        let phase_decl = config
-            .event_loop
-            .mechanism
-            .as_ref()
-            .and_then(|m| m.phase_authority.as_ref())
-            .map(|cfg| {
-                use crate::event_loop::phase_authority::WorkflowPhaseAuthority;
-                WorkflowPhaseAuthority::from_config(cfg)
-            });
-        let authority = match phase_decl {
-            Some(Ok(fac)) => std::sync::Arc::new(fac),
-            _ => std::sync::Arc::new(
-                crate::event_loop::phase_authority::WorkflowPhaseAuthority::disabled(),
-            ),
-        };
         let flow_yaml = load_opt_in_flow_declaration(config)
             .unwrap_or_else(|| FlowDeclaration::from_yaml(minimal_flow_declaration_yaml()).unwrap());
         let step_totals: std::collections::HashMap<String, u32> = flow_yaml
@@ -517,9 +517,9 @@ fn build_stage_pipeline_from_config(
         let pipeline = StagePipeline::with_phase_authority_stages_for_loop_config(
             flow_yaml,
             loop_cfg,
-            authority,
+            authority.clone(),
         );
-        return (pipeline, step_totals);
+        return (pipeline, step_totals, authority);
     }
 
     if let Some(flow_yaml) = load_opt_in_flow_declaration(config) {
@@ -529,10 +529,10 @@ fn build_stage_pipeline_from_config(
             .filter_map(|s| s.total_units.map(|n| (s.id.clone(), n)))
             .collect();
         let pipeline = StagePipeline::with_default_stages_for_loop_config(flow_yaml, loop_cfg);
-        (pipeline, step_totals)
+        (pipeline, step_totals, authority)
     } else {
         let pipeline = StagePipeline::with_hat_only_stages_for_loop_config(loop_cfg);
-        (pipeline, std::collections::HashMap::new())
+        (pipeline, std::collections::HashMap::new(), authority)
     }
 }
 
@@ -1133,7 +1133,8 @@ impl EventLoop {
             }
         };
 
-        let (stage_pipeline, flow_step_totals) = build_stage_pipeline_from_config(&config);
+        let (stage_pipeline, flow_step_totals, phase_authority) =
+            build_stage_pipeline_from_config(&config);
 
         // 2026-06-28-002 U5 P0 fix: after the bootstrap mirror
         // (above) writes per-task idempotent records to disk via a
@@ -1197,6 +1198,7 @@ impl EventLoop {
             // cold-start semantics as
             // stall_recovery_counts).
             precheck_retries: crate::event_loop::precheck_gate_runner::PrecheckRetryRegistry::new(),
+            phase_authority,
         })
     }
 
@@ -1318,7 +1320,8 @@ impl EventLoop {
         state.handoff_tracker = crate::workflow_contract::HandoffTracker::new()
             .with_default_timeout(std::time::Duration::from_secs(handoff_timeout));
 
-        let (stage_pipeline, flow_step_totals) = build_stage_pipeline_from_config(&config);
+        let (stage_pipeline, flow_step_totals, phase_authority) =
+            build_stage_pipeline_from_config(&config);
 
         Self {
             config: config.clone(),
@@ -1357,6 +1360,7 @@ impl EventLoop {
             // matching initialiser in the first
             // `with_context_and_diagnostics` body).
             precheck_retries: crate::event_loop::precheck_gate_runner::PrecheckRetryRegistry::new(),
+            phase_authority,
         }
     }
 
@@ -9080,6 +9084,9 @@ impl EventLoop {
                     .is_some_and(|g| !g.chains.is_empty());
 
             for evt in &events {
+                if let Some(ps) = self.phase_authority.snapshot() {
+                    snapshot.workflow_phase = Some(ps);
+                }
                 let mut ctx = crate::validation::ValidationContext::new(&mut snapshot)
                     .with_policy_runtime_state(&mut policy_state)
                     .with_review_step_tracker(&mut review_step_tracker)
@@ -10639,6 +10646,34 @@ impl EventLoop {
                 // `plan.complete`.
                 continue;
             }
+            if event.topic.as_str() == "REVIEW_COMPLETE"
+                && self.phase_authority_rejects_shipper_emit(event)
+            {
+                tracing::warn!(
+                    iteration = self.state.iteration,
+                    topic = %event.topic,
+                    "phase authority: shipper routing denied REVIEW_COMPLETE"
+                );
+                continue;
+            }
+
+            let gate_key = (
+                event.topic.as_str().to_string(),
+                event.payload.as_str().to_string(),
+            );
+            if matches!(
+                gate_outcomes.get(&gate_key),
+                Some(crate::event_loop::emit_gate::EmitGateOutcome::Reject(reject))
+                    if reject.reason_code == "phase_violation"
+            ) {
+                continue;
+            }
+            if matches!(
+                gate_outcomes.get(&gate_key),
+                Some(crate::event_loop::emit_gate::EmitGateOutcome::AcceptRepairStream)
+            ) {
+                continue;
+            }
 
             // Record topic for event chain validation
             self.state.record_event(event);
@@ -10789,7 +10824,12 @@ impl EventLoop {
             pending
         };
         for event in pending_publish {
-            self.bus.publish(event);
+            self.bus.publish(event.clone());
+            self.diagnose_plan_complete_channel(
+                &event,
+                crate::event_loop::phase_authority::diagnosis::Channel::Main,
+            );
+            self.apply_phase_authority_on_accepted(&event);
         }
 
         // --- U3: Invariant assertion checks ---
@@ -11811,7 +11851,12 @@ impl EventLoop {
                 if self.stage_pipeline.is_terminal(&event) {
                     self.write_loop_termination_record(&event);
                 }
-                self.bus.publish(event);
+                self.bus.publish(event.clone());
+                self.diagnose_plan_complete_channel(
+                    &event,
+                    crate::event_loop::phase_authority::diagnosis::Channel::Main,
+                );
+                self.apply_phase_authority_on_accepted(&event);
             }
             crate::event_loop::emit_gate::EmitGateOutcome::AcceptRepairStream => {
                 // U7 (2026-06-27-002 plan completion): the
@@ -12035,12 +12080,10 @@ impl EventLoop {
         event: &crate::event_reader::Event,
     ) -> crate::event_loop::emit_gate::EmitGateOutcome {
         // Convert JSONL-internal Event to the bus-shaped
-        // ralph_proto::Event the facade expects. We
-        // discard `hat`/`source` metadata that the gate
-        // does not need; the source attribution lands in
-        // the recovery envelope via `record_stage_rejection`.
-        let payload = event.payload.clone().unwrap_or_default();
-        let proto = Event::new(event.topic.as_str(), payload.as_str());
+        // ralph_proto::Event the facade expects. Preserve
+        // `hat`/`source` so `PhaseAuthorityStage` (U13) can
+        // enforce per-phase whitelists on JSONL ingest.
+        let proto: Event = event.clone().into();
         let mut stage_ctx = self.build_stage_context_for(&proto);
         let outcome = crate::event_loop::emit_gate::evaluate_emit_gate(&mut stage_ctx, &proto);
         match &outcome {
@@ -12086,7 +12129,87 @@ impl EventLoop {
     /// .core.workspace_root`. On FS error we log and
     /// continue — the loop must not crash on a
     /// transient disk error.
+    /// 2026-07-02-006 plan U26: R14 dual-check when `plan.complete`
+    /// lands on main vs repair sink.
+    fn diagnose_plan_complete_channel(
+        &mut self,
+        event: &ralph_proto::Event,
+        channel: crate::event_loop::phase_authority::diagnosis::Channel,
+    ) {
+        if !self.phase_authority.is_enabled() {
+            return;
+        }
+        use crate::event_loop::phase_authority::diagnosis::{
+            diagnosis_plan_complete_dual_check, DualCheckInput, DualCheckOutcome,
+        };
+        let outcome = diagnosis_plan_complete_dual_check(&DualCheckInput {
+            topic: event.topic.to_string(),
+            source: event.source.as_ref().map(|h| h.to_string()),
+            channel,
+        });
+        match outcome {
+            DualCheckOutcome::DualSink => {
+                tracing::warn!(
+                    topic = %event.topic,
+                    source = ?event.source,
+                    "R14: plan.complete landed on repair sink — dual-check invariant broken"
+                );
+                let payload = serde_json::json!({
+                    "topic": event.topic.as_str(),
+                    "channel": "repair",
+                    "reason": "plan.complete_dual",
+                });
+                self.bus.publish(ralph_proto::Event::new(
+                    "plan.complete_dual",
+                    payload.to_string(),
+                ));
+            }
+            DualCheckOutcome::UnknownChannel => {
+                tracing::warn!(
+                    topic = %event.topic,
+                    "R14: plan.complete channel unknown — cannot prove dual-check invariant"
+                );
+            }
+            DualCheckOutcome::Ok | DualCheckOutcome::NotApplicable => {}
+        }
+    }
+
+    /// 2026-07-02-006 plan U20: shipper routing when phase engine is on.
+    fn phase_authority_rejects_shipper_emit(&self, event: &ralph_proto::Event) -> bool {
+        if !self.phase_authority.is_enabled() {
+            return false;
+        }
+        use crate::event_loop::phase_authority::shipper_helper::{
+            shipper_requires_plan_complete_when_phase_enabled, ShipperDecision, ShipperRoutingContext,
+        };
+        let reason = self
+            .state
+            .policy_runtime_state
+            .as_ref()
+            .and_then(|s| s.last_plan_blocked_reason.clone());
+        let plan_complete_present = self
+            .state
+            .seen_topics
+            .iter()
+            .any(|t| t.as_str() == "plan.complete")
+            || event.topic.as_str() == "plan.complete";
+        let ctx = ShipperRoutingContext {
+            phase_authority_enabled: true,
+            current_phase: self
+                .phase_authority
+                .snapshot()
+                .map(|s| s.phase_id),
+            reason,
+            plan_complete_present,
+        };
+        matches!(
+            shipper_requires_plan_complete_when_phase_enabled(&ctx),
+            ShipperDecision::Deny
+        )
+    }
+
     fn record_repair_event(&mut self, event: &ralph_proto::Event) {
+        self.diagnose_plan_complete_channel(event, crate::event_loop::phase_authority::diagnosis::Channel::Repair);
         let workspace = std::path::PathBuf::from(&self.config.core.workspace_root);
         if let Err(err) =
             crate::event_loop::repair_stream_sink::record_repair_event(event, &workspace)
@@ -12134,6 +12257,59 @@ impl EventLoop {
     /// synthesise a budget-exhaustion rejection and
     /// assert that the `plan.blocked` escalation is
     /// published on the bus.
+    /// 2026-07-02-006 plan U23: advance workflow phase after a
+    /// business event lands on the main bus.
+    fn apply_phase_authority_on_accepted(&mut self, event: &Event) {
+        if !self.phase_authority.is_enabled() {
+            return;
+        }
+        let payload: serde_json::Value =
+            serde_json::from_str(event.payload.as_str()).unwrap_or(serde_json::Value::Null);
+        let honored = self.stage_pipeline.is_terminal(event);
+        let snap = self
+            .phase_authority
+            .snapshot()
+            .unwrap_or_else(|| {
+                crate::event_loop::phase_authority::PhaseSnapshot::with_phase_id("unit_loop")
+            });
+        let accepted = crate::event_loop::phase_authority::AcceptedEvent {
+            topic: event.topic.as_str(),
+            payload: &payload,
+            honored,
+        };
+        let (next, effects) = crate::event_loop::phase_authority::handle_phase_on_event_accepted(
+            &self.phase_authority,
+            snap,
+            &accepted,
+        );
+        if let Some(ledger) = self.state.state_ledger.as_mut() {
+            ledger.snapshot_mut().workflow_phase = Some(next.clone());
+        }
+        if !effects.progress_md_fragment.is_empty() {
+            let progress_path = self
+                .config
+                .core
+                .workspace_root
+                .join(".ralph")
+                .join("agent")
+                .join("progress.md");
+            if let Ok(mut existing) = std::fs::read_to_string(&progress_path) {
+                existing.push_str(&effects.progress_md_fragment);
+                let _ = std::fs::write(progress_path, existing);
+            }
+        }
+        if effects.review_walk_closed {
+            tracing::debug!("phase authority: review walk closed");
+        }
+        if effects.phase_entered {
+            tracing::debug!(
+                phase = %next.phase_id,
+                topic = %event.topic,
+                "phase authority: entered new workflow phase"
+            );
+        }
+    }
+
     pub(crate) fn record_stage_rejection(
         &mut self,
         event: &Event,
@@ -12166,6 +12342,59 @@ impl EventLoop {
             reject.stage_name, reject.reason_code, event.topic
         )];
         let _ = self.record_recovery_envelope(&envelope, notes);
+
+        if reject.reason_code == "phase_violation" {
+            let hat = event
+                .source
+                .as_ref()
+                .map(|h| h.as_str())
+                .unwrap_or("unknown");
+            let snap = self.phase_authority.record_phase_violation(hat);
+            if let Some(ledger) = self.state.state_ledger.as_mut() {
+                ledger.snapshot_mut().workflow_phase = Some(snap.clone());
+            }
+            if let Some(policy) = self.phase_authority.violation_policy() {
+                use crate::event_loop::phase_authority::resume_budget::{
+                    on_exhausted_action, should_admit_resume_from_snapshot, BudgetDecision,
+                    ExhaustedAction,
+                };
+                use crate::event_loop::phase_authority::ViolationKind;
+                match should_admit_resume_from_snapshot(
+                    &policy,
+                    &snap,
+                    hat,
+                    ViolationKind::PhaseViolation,
+                ) {
+                    BudgetDecision::Admit => {
+                        let resume_payload = serde_json::json!({
+                            "reason_code": "phase_violation",
+                            "topic": event.topic.as_str(),
+                            "hat": hat,
+                            "loop_id": self.loop_id_label(),
+                        });
+                        self.bus.publish(ralph_proto::Event::new(
+                            "task.resume",
+                            resume_payload.to_string(),
+                        ));
+                    }
+                    BudgetDecision::Exhausted => match on_exhausted_action(&policy) {
+                        ExhaustedAction::PlanBlocked => {
+                            let blocked_payload = serde_json::json!({
+                                "reason": "phase_violation_exhausted",
+                                "topic": event.topic.as_str(),
+                                "hat": hat,
+                                "loop_id": self.loop_id_label(),
+                            });
+                            self.bus.publish(ralph_proto::Event::new(
+                                "plan.blocked",
+                                blocked_payload.to_string(),
+                            ));
+                        }
+                        ExhaustedAction::SilentDrop => {}
+                    },
+                }
+            }
+        }
 
         // P1-1 (2026-06-28 review): when the
         // rejection comes from a budget exhaustion on
@@ -12715,7 +12944,7 @@ mod hat_only_pipeline_tests {
     #[test]
     fn config_without_mechanism_uses_hat_only_emit_pipeline() {
         let config = RalphConfig::default();
-        let (pipeline, step_totals) = build_stage_pipeline_from_config(&config);
+        let (pipeline, step_totals, _authority) = build_stage_pipeline_from_config(&config);
         assert!(step_totals.is_empty());
         assert_eq!(
             pipeline.names(),

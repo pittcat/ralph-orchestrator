@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use super::declaration::PhaseAuthorityDeclaration;
 use super::primitives::{
-    on_event, on_loop_complete_honored, on_review_complete_verdict,
-    on_test_passed_step::{self, StepProgressFixture},
+    on_event, on_loop_complete_honored, on_plan_terminal_accepted,
+    on_review_complete_verdict, on_test_passed_step::{self, StepProgressFixture},
 };
 use super::snapshot::PhaseSnapshot;
 
@@ -83,20 +83,33 @@ impl TransitionEvaluator {
                 continue;
             }
 
-            if let Some(target) = evaluate_transition(&tr.on.0, fixture) {
-                return apply_transition(snapshot, &tr.to);
+            if let Some(target) = evaluate_transition(&tr.on.0, fixture, &tr.to) {
+                return apply_transition(snapshot, &target);
             }
         }
         snapshot
     }
 }
 
-fn evaluate_transition(on: &serde_yaml::Value, fixture: &EventFixture<'_>) -> Option<String> {
-    match fixture {
-        EventFixture::Bare(_) => on_event::evaluate(on, fixture.topic()),
+fn evaluate_transition(
+    on: &serde_yaml::Value,
+    fixture: &EventFixture<'_>,
+    transition_to: &str,
+) -> Option<String> {
+    let primitive = on
+        .as_mapping()
+        .and_then(|m| m.get(&serde_yaml::Value::String("primitive".into())))
+        .and_then(|v| v.as_str());
+
+    let resolved = match fixture {
+        EventFixture::Bare(_) => {
+            if primitive == Some("on_plan_terminal_accepted") {
+                on_plan_terminal_accepted::evaluate(on, fixture.topic(), true)
+            } else {
+                on_event::evaluate(on, fixture.topic())
+            }
+        }
         EventFixture::TestPassed(fx) => {
-            // U7 only inspects `test.passed`; for any other
-            // topic it returns None.
             on_test_passed_step::evaluate(on, fixture.topic(), fx)
         }
         EventFixture::ReviewComplete(fx) => {
@@ -105,7 +118,14 @@ fn evaluate_transition(on: &serde_yaml::Value, fixture: &EventFixture<'_>) -> Op
         EventFixture::LoopComplete { honored } => {
             on_loop_complete_honored::evaluate(on, fixture.topic(), *honored)
         }
-    }
+    }?;
+
+    // Matrix / honored primitives return the target phase id directly.
+    let target = match primitive {
+        Some("on_review_complete_verdict") | Some("on_loop_complete_honored") => resolved,
+        _ => transition_to.to_string(),
+    };
+    Some(target)
 }
 
 fn apply_transition(snapshot: PhaseSnapshot, target: &str) -> PhaseSnapshot {

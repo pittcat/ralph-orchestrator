@@ -7,9 +7,8 @@
 //! has a definitive answer.
 //!
 //! **Convention (this unit only):**
-//! - When the engine is disabled (`phase_id == None`) the
-//!   helper returns `true`: the engine has no opinion, so
-//!   the gate keeps its pre-006 baseline.
+//! - When `phase_id` is `None` (engine disabled or snapshot not
+//!   projected), the gate runs normally — return `false`.
 //! - When the engine is enabled and the phase is one of the
 //!   pre-flight values (`unit_loop`, `fix_units`), the gate
 //!   should SKIP its check — the engine will eventually
@@ -25,9 +24,7 @@
 /// Pure decision.
 pub fn plan_gate_should_skip_review_not_terminal(phase_id: Option<&str>) -> bool {
     match phase_id {
-        // Engine disabled → keep pre-006 behaviour, which is
-        // "skip when the gate sees no review step yet".
-        None => true,
+        None => false,
         // Engine says we're not yet at plan_end; gate can
         // safely skip.
         Some("unit_loop") | Some("fix_units") => true,
@@ -43,7 +40,7 @@ mod tests {
 
     #[test]
     fn disabled_engine_keeps_pre_006_behaviour() {
-        assert!(skip(None));
+        assert!(!skip(None));
     }
 
     #[test]
