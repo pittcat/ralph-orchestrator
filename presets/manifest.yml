@@ -38,3 +38,4 @@ embedded:
   # whether to promote it back into the public set or remove the file
   # outright. See `presets/en/hatless-baseline.yml` for contents.
   - merge-loop
+  - merge-batch

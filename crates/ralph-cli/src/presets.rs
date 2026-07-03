@@ -56,6 +56,12 @@ const PRESETS: &[EmbeddedPreset] = &[
         content: include_str!(concat!(env!("OUT_DIR"), "/presets/merge-loop.yml")),
         public: false,
     },
+    EmbeddedPreset {
+        name: "merge-batch",
+        description: "Git-first batch merge: review design intent, merge multiple worktree branches, stabilize with verify-fix loop, write merge report",
+        content: include_str!(concat!(env!("OUT_DIR"), "/presets/merge-batch.yml")),
+        public: true,
+    },
 ];
 
 /// WRC-U5 (2026-06-12-003) / KTD-WRC-5: Tier-0 list of builtin

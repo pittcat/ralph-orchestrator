@@ -62,6 +62,7 @@ _RALPH_BUILTIN_HAT_VALUES=(
   # builtin:ce-executor-wave  # deleted 2026-06-23
   "builtin:debug"
   "builtin:autoresearch"
+  "builtin:merge-batch"
 )
 
 _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
@@ -70,6 +71,7 @@ _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
   # Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping  # deleted 2026-06-23
   "Bug investigation, root-cause analysis, and adversarial fix verification"
   "Autonomous experiment loop: try ideas, measure, keep what works"
+  "Git-first batch merge: review design intent, merge multiple worktree branches, stabilize with verify-fix loop, write merge report"
 )
 
 # =============================================================================

@@ -1,0 +1,382 @@
+# Merge Batch Preset
+#
+# Git-first batch merge: review design intent and conflict strategy, merge
+# multiple worktree branches into a target branch, stabilize with
+# verify-fix-retest self-loop, then write a merge report.
+#
+# Prompt contract (operator provides ONLY):
+#   - Target branch (e.g. main)
+#   - Ordered list of branches to merge (from `git worktree list`)
+#
+# Does NOT use ralph loops list, merge queue, or mark-merged commands.
+#
+# Usage:
+#   ralph run -H builtin:merge-batch -P merge.prompt.md
+#   ralph run -c ralph.merge.yml -H builtin:merge-batch
+#
+# Artifacts (preset-owned paths under .ralph/merge/):
+#   .ralph/merge/stabilize-log.md
+#   .ralph/merge/stabilize-state.json
+#   .ralph/merge/reports/<timestamp>.md
+
+topic_format_whitelist:
+  - merge.batch.complete
+
+# No `mechanism.flow` block: flat hat-only linear chain with one stabilizer
+# self-loop (`merge.retest`). Routing comes from hat triggers/publishes and
+# isolated mode. FlowStepScope is skipped when a preset does not opt into
+# `mechanism.flow`.
+#
+# Completion is split from protocol tokens on purpose (P0-5 / merge-loop
+# pattern): `merge.stabilized` is a required workflow event; only `reporter`
+# may emit `merge.batch.complete` (the completion_promise). This blocks
+# text-path `MERGE_COMPLETE` races before the report is written.
+
+tasks:
+  enabled: false
+
+event_loop:
+  execution_mode: isolated
+  prompt: |
+    Batch-merge git worktree branches into the target branch named in the prompt.
+
+    Read the prompt for:
+    - Target branch (default: main)
+    - Ordered branch list to merge (from `git worktree list`)
+
+    Do NOT use `ralph loops list`, merge queue, or `ralph loops mark-*` commands.
+    Git is the source of truth.
+  completion_promise: "merge.batch.complete"
+  required_events:
+    - "merge.stabilized"
+  max_iterations: 40
+  max_runtime_seconds: 7200
+  starting_event: "merge.start"
+
+cli:
+  backend: "auto"
+
+core:
+  specs_dir: "./specs/"
+  guardrails:
+    - "GIT-ONLY: Use `git worktree list`, branch names, and prompt branch order as the sole merge inputs. Never read or write `.ralph/loops.json`, `.ralph/merge-queue.jsonl`, or invoke `ralph loops mark-merged` / `mark-needs-review`."
+    - "ALLOWED `.ralph/` writes: only under `.ralph/merge/` (stabilize logs, state, reports). Do not modify other `.ralph/` runtime state."
+    - "Run from the main repository root (first entry in `git worktree list`), not inside a linked worktree."
+    - "ABSOLUTE PROHIBITION: NEVER kill, signal, or terminate any `ralph` / `ralph-orchestrator` process — including `kill`, `pkill`, `killall`, `kill -9`, `kill -TERM`, `kill -HUP`, `taskkill`, or any equivalent process-control command targeting the loop's parent PID, the TUI subprocess PID recorded in `.ralph/loop.lock`, any PID listed in `.ralph/loops.json`, or any PID returned by `ps` / `pgrep` matching `ralph`. Stopping the orchestrator is the operator's decision, not the agent's."
+    - "Do not force-push or rewrite published history."
+    - "Never roll back merge commits that already succeeded; only `git merge --abort` the in-progress step when stuck."
+    - "Integrator: if any branch merge is aborted or cannot complete, STOP merging remaining branches; publish merge.integrated with integration_complete: false."
+    - "Stabilizer: publish merge.stabilized with passed: true ONLY when integration_complete was true AND verification passes. Publish merge.stabilized with passed: false when merge was incomplete, stabilization is exhausted (attempt ≥ 35), or verification cannot be fixed. Never publish merge.retest without updating stabilize-log and stabilize-state."
+
+hats:
+  reviewer:
+    name: "Merge Reviewer"
+    description: "Deep design review, cross-branch risk analysis, and conflict resolution strategy before merging."
+    exempt_topics: ["merge.reviewed"]
+    triggers: ["merge.start"]
+    publishes: ["merge.reviewed"]
+    default_publishes: "merge.reviewed"
+    terminal_events: ["merge.reviewed"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    instructions: |
+      ## MERGE REVIEWER MODE
+
+      Read-only analysis. Do NOT run `git merge` or modify the working tree.
+
+      ### Step 1: Parse prompt
+
+      Extract:
+      - **Target branch** (default `main` if omitted)
+      - **Ordered branch list** to merge
+
+      ### Step 2: Discover worktrees
+
+      ```bash
+      git worktree list
+      git branch -a
+      ```
+
+      Verify every prompt branch exists. Record each branch's worktree path.
+
+      ### Step 3: Per-branch design understanding
+
+      For each branch (in prompt order):
+
+      ```bash
+      git log <target>..<branch> --oneline
+      git diff --stat <target>...<branch>
+      git diff <target>...<branch> -- <key-files>
+      ```
+
+      Read relevant source, commits, and any plan/design docs inside the worktree.
+
+      Document for each branch:
+      - **Design intent** — what problem it solves and how
+      - **Key logic changes** — files and mechanisms touched
+      - **Bug / regression risks** — test gaps, edge cases, smells
+
+      ### Step 4: Cross-branch analysis
+
+      Compare branches pairwise:
+      - Overlapping files and functions
+      - Complementary vs conflicting intent
+      - Merge order implications
+
+      ### Step 5: Conflict prediction and resolution strategy
+
+      For each predicted conflict (use `git merge-tree` when helpful):
+
+      ```bash
+      git merge-tree $(git merge-base <target> <branch>) <target> <branch>
+      ```
+
+      For each conflict point write:
+      - **Conflict type** (textual / semantic / architectural)
+      - **Resolution method** — preserve both intents, merge logic, ordering, etc.
+      - **Rationale** tied to design understanding (not blind HEAD/theirs)
+
+      ### Step 6: Publish
+
+      Publish **`merge.reviewed`** with a structured payload summarizing:
+      - target branch
+      - branch order
+      - per-branch design intent and risks
+      - cross-branch interactions
+      - predicted conflicts and resolution methods
+
+      Merge WILL proceed after review — your job is to enable safe merging, not to block.
+
+  integrator:
+    name: "Branch Integrator"
+    description: "Merges all prompt branches into the target branch using reviewer conflict strategy."
+    exempt_topics: ["merge.integrated"]
+    triggers: ["merge.reviewed"]
+    publishes: ["merge.integrated"]
+    default_publishes: "merge.integrated"
+    terminal_events: ["merge.integrated"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    instructions: |
+      ## BRANCH INTEGRATOR MODE
+
+      Merge ALL prompt branches into the target branch. Use the `merge.reviewed`
+      payload and prompt branch order.
+
+      ### Step 1: Prepare
+
+      ```bash
+      git checkout <target>
+      git status
+      ```
+
+      Ensure working tree is clean before merging.
+
+      ### Step 2: Sequential merge
+
+      For each branch in order:
+
+      1. Review diff summary:
+         ```bash
+         git log <target>..<branch> --oneline
+         git diff --stat <target>...<branch>
+         ```
+
+      2. Merge:
+         ```bash
+         git merge <branch> --no-ff -m "merge: <summary> (<branch>)"
+         ```
+
+      3. **If conflicts occur:**
+         - Apply the resolution method from `merge.reviewed`
+         - Understand BOTH sides' design intent before editing
+         - Resolve markers, `git add`, complete the merge commit
+         - If a conflict was not predicted, reason from design intent
+         - If truly stuck after reasonable effort:
+           ```bash
+           git merge --abort
+           ```
+           **STOP** — do NOT merge any remaining branches
+           Record which branch failed and why
+
+      4. Skip branches already merged (`git branch --merged <target>`).
+
+      ### Step 3: Publish
+
+      Publish **`merge.integrated`** with payload fields:
+      - `integration_complete`: **true** only if EVERY prompt branch is merged
+        (merged this run or already merged); **false** if any branch was
+        aborted, failed, or skipped while still outstanding
+      - `ready_for_stabilization`: same as `integration_complete` (false → skip verify loop)
+      - `branches_merged` — successfully merged this run
+      - `branches_skipped` — already on target before this run
+      - `branches_failed` — aborted or could not merge (with reasons)
+      - `merge_commit_shas` — SHAs for commits made this run
+
+  stabilizer:
+    name: "Stabilizer"
+    description: "Discovers project verification, fixes failures with classified retry loop until green."
+    exempt_topics: ["merge.retest", "merge.stabilized"]
+    triggers: ["merge.integrated", "merge.retest"]
+    publishes: ["merge.retest", "merge.stabilized"]
+    default_publishes: "merge.retest"
+    terminal_events: ["merge.retest", "merge.stabilized"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    instructions: |
+      ## STABILIZER MODE
+
+      Verify the merged tree and fix failures until green. Use a self-loop via
+      **`merge.retest`** (fresh iteration).
+
+      ### Entry gate (on `merge.integrated`)
+
+      Read the `merge.integrated` payload first.
+
+      If `integration_complete` is **false** OR `ready_for_stabilization` is
+      **false**:
+      - Write a short note to `stabilize-log.md` explaining merge was incomplete
+      - Publish **`merge.stabilized`** immediately with:
+        - `passed: false`
+        - `reason: merge_incomplete`
+        - `branches_failed` from the integrator payload
+      - Do NOT run verification or enter the fix loop
+
+      ### Artifact paths (create `.ralph/merge/` if missing)
+
+      - `.ralph/merge/stabilize-log.md` — human-readable attempt log
+      - `.ralph/merge/stabilize-state.json` — structured handoff between attempts
+
+      ### EVERY stabilization attempt checklist
+
+      1. **Read** `stabilize-log.md` and `stabilize-state.json` (if missing, start attempt 1)
+      2. **Verification command** (pin on attempt 1, reuse thereafter):
+         - If `stabilize-state.json` has `verification_command`, reuse it
+         - Else discover from the repo — NEVER assume a fixed stack:
+           `-c` backpressure gates → AGENTS.md / CLAUDE.md / CONTRIBUTING.md → CI
+           workflows → package.json / pyproject.toml / Cargo.toml / Makefile / justfile
+         - Save chosen command to `stabilize-state.json` as `verification_command`
+      3. **Exhaustion check**: if `attempt >= 35`, skip fixes; publish
+         **`merge.stabilized`** with `passed: false`, `reason: stabilization_exhausted`
+      4. **Run** the pinned verification command
+      5. If **PASS** → update log with RESOLVED → publish **`merge.stabilized`**
+         with `passed: true`
+      6. If **FAIL** → follow failure protocol below → publish **`merge.retest`**
+         (unless exhaustion applies on the next entry)
+
+      ### Failure protocol (before each fix)
+
+      **A. Classify** (mandatory — write in log):
+      - **test_problem** — outdated assertion, fixture, env; product behavior is correct
+      - **business_problem** — logic error, regression, bad merge resolution, missing init
+
+      **B. Compare with previous attempt:**
+      - Read `why_not_fixed` from stabilize-state
+      - Do NOT repeat a fix that already failed
+
+      **C. Fix plan with confidence** (mandatory before editing):
+      - Goal, steps, files
+      - **Confidence**: ≥80 proceed; 50–80 proceed + note uncertainty; <50 investigate more or narrow scope first
+      - If <50: prefer more diagnosis this attempt over blind edits
+
+      **D. Execute** minimal fix; commit on target branch if needed
+
+      **E. Re-run** the pinned verification command
+
+      **F. Record** in stabilize-log.md and stabilize-state.json:
+      ```json
+      {
+        "attempt": <n>,
+        "verification_command": "<pinned command>",
+        "classification": "test_problem|business_problem",
+        "confidence": <0-100>,
+        "fix_applied": "<summary>",
+        "outcome": "failed|passed",
+        "why_not_fixed": "<if failed>",
+        "next_hint": "<actionable guidance for next attempt>"
+      }
+      ```
+
+      ### Publish rules
+
+      - **PASS** (and merge was complete) → `merge.stabilized` with `passed: true`
+      - **FAIL after fix attempt** (and attempt < 35) → `merge.retest`
+      - **Merge incomplete** (integrator gate) → `merge.stabilized` with `passed: false`, `reason: merge_incomplete`
+      - **Attempt ≥ 35 still failing** → `merge.stabilized` with `passed: false`, `reason: stabilization_exhausted`
+      - **NEVER** publish `merge.stabilized` with `passed: true` while verification is failing
+
+  reporter:
+    name: "Merge Reporter"
+    description: "Writes merge report, cleans up worktrees on success, emits merge.batch.complete."
+    exempt_topics: ["merge.batch.complete"]
+    triggers: ["merge.stabilized"]
+    publishes: ["merge.batch.complete"]
+    default_publishes: "merge.batch.complete"
+    terminal_events: ["merge.batch.complete"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    instructions: |
+      ## MERGE REPORTER MODE
+
+      Write the final report and signal completion.
+
+      ### Report path
+
+      ```
+      .ralph/merge/reports/<YYYY-MM-DDTHH-MM-SS>.md
+      ```
+
+      Create `.ralph/merge/reports/` if missing.
+
+      ### Report contents
+
+      ```markdown
+      # Merge Batch Report
+
+      ## Target and branches
+      ## Design understanding (per branch)
+      ## Cross-branch risks identified
+      ## Conflicts and resolution (predicted vs actual)
+      ## Merge results (SHAs, order)
+      ## Stabilization (attempts, classifications, fixes)
+      ## Verification (commands run, outcome)
+      ## Residual concerns
+      ## Repository state (remaining worktrees/branches)
+      ```
+
+      Check `merge.stabilized` payload (`passed`, `reason`) and git state.
+
+      ### On success (`passed: true` from `merge.stabilized`)
+
+      For each branch listed in `branches_merged` from the integrator payload
+      (only branches merged in this batch — not `branches_skipped`):
+
+      ```bash
+      git worktree list
+      git branch --merged <target>   # confirm before delete
+      git worktree remove <path>
+      git branch -d <branch>
+      git worktree prune
+      ```
+
+      Use `-D` only when `--merged` confirms the branch is fully integrated.
+
+      ### On failure (`passed: false`, merge incomplete, or stabilization exhausted)
+
+      - Do NOT remove worktrees or delete branches
+      - Document exact state for human follow-up
+      - Include stabilize-log summary, `reason`, and `next_hint`
+
+      ### Publish
+
+      Publish **`merge.batch.complete`** (sole completion token) with payload:
+      - `success: true|false` (true ONLY when `merge.stabilized.passed` is true)
+      - `report_path`
+      - `merged_branches`
+      - `failed_stage` / `reason` (if any)
+
+      Do NOT emit `MERGE_COMPLETE` — that token is not used by this preset.
