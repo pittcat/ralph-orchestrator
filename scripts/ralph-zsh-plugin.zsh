@@ -227,6 +227,10 @@ _RALPH_TASK_CMDS=(
   "fail:Mark a task as failed"
   "reopen:Reopen a closed or failed task"
   "show:Show a single task"
+  # U4 (2026-07-04-001 plan): zero-write Precheck — same authorization
+  # kernel as mutation verbs but never writes to tasks.jsonl. Includes
+  # `verify-emit-bridge` for task_id/task_key/step three-field checks.
+  "verify:Zero-write Precheck; mirrors add/ensure/start/close/fail/reopen auth (U4)"
 )
 
 # =============================================================================
@@ -554,6 +558,10 @@ _ralph_hooks_args() {
 # preview command accepts exactly the same spec syntax as the runtime command.
 _RALPH_INSPECT_CMDS=(
   "profiles:Preview profile overlay resolution (does not modify RalphConfig)"
+  # U5 (2026-07-04-001 plan): read-only loop + hat identity diagnostic.
+  # Returns loop_id, iteration, current_hat, HatIdentitySnapshot, events
+  # path resolution, and hat-channel size — OPAC Observe source of truth.
+  "loop:Read-only loop + hat identity diagnostic (OPAC Observe; U22 adds supervisor summary)"
 )
 
 _ralph_profile_spec() {
@@ -567,8 +575,25 @@ _ralph_profile_spec() {
     'user:[~/.config/ralph/profiles/<name>]:name'
 }
 
+# U5: `ralph inspect loop` supports `--format human|json` (default: human).
+_RALPH_INSPECT_LOOP_ARGS=(
+  '(--format)'--format'[output format]:format:(human json)'
+)
+
+(( $+functions[_ralph_inspect_loop_args] )) ||
+_ralph_inspect_loop_args() {
+  _describe -o 'inspect loop argument' _RALPH_INSPECT_LOOP_ARGS
+}
+
 (( $+functions[_ralph_inspect_subcmd] )) ||
 _ralph_inspect_subcmd() {
+  # Dispatch to per-subcommand arg helper so `ralph inspect loop --format <TAB>`
+  # shows the format values.
+  local -a words=( "${words[@]}" )
+  if [[ ${words[3]} == "loop" ]]; then
+    _ralph_inspect_loop_args
+    return
+  fi
   _describe 'inspect command' _RALPH_INSPECT_CMDS
 }
 
@@ -778,6 +803,13 @@ _ralph_wave_subcmd() {
     emit)
       _ralph_wave_emit_args
       ;;
+    # U21 (2026-07-04-001 plan): zero-write batch precheck for wave
+    # payloads. Shares the same `policy_check` kernel as `wave emit`,
+    # but never writes to the events ledger. Dispatcher hats run this
+    # before `wave emit` (U15 enforce).
+    verify)
+      _ralph_wave_verify_args
+      ;;
   esac
 }
 
@@ -795,6 +827,16 @@ _ralph_wave_emit_args() {
     '--policy-check[Validate all payloads against event policy before writing]' \
     '--unsafe-no-policy-check[Bypass the mandatory policy check (only honored if config permits)]' \
     '*:payload args:_default'
+}
+
+# =============================================================================
+# Wave Verify Arguments (U21: zero-write batch precheck)
+# =============================================================================
+(( $+functions[_ralph_wave_verify_args] )) ||
+_ralph_wave_verify_args() {
+  _arguments \
+    '--payloads-stdin[Read payloads from stdin, one per line]' \
+    '--output+[Output format]:output:(text json)'
 }
 
 # =============================================================================
