@@ -1670,10 +1670,25 @@ hats:
       Then stop. Alignment will be triggered next.
 
       ### Failure Handling
-      - If an actionable Unit cannot be completed: add to `fixes_skipped`, continue.
-      - If full suite cannot reach green after honest attempts: still emit
-        `fix.done` with `fixes_skipped` reflecting unapplied Units — alignment
-        and reporter record the regression; do NOT emit `work.failed`.
+      The response to failure depends on `review_verdict` from
+      `review.complete`.
+
+      - **Blocked verdict (`review_verdict == "blocked"`)**
+        Every actionable P0/P1 Unit in the fix-plan MUST be applied.
+        - If any actionable P0/P1 Unit cannot be completed, or if the full
+          suite cannot reach green after honest attempts, do NOT emit
+          `fix.done`. Stop, document the blocker in
+          `.ralph/agent/decisions.md`, and wait for operator resume/abort.
+        - Emitting `fix.done` with `review_verdict == "blocked"` and
+          `fixes_skipped > 0` is a contract violation.
+
+      - **Non-blocked verdict (`pass` / `pass_with_residuals`)**
+        - If an actionable Unit cannot be completed: add to `fixes_skipped`,
+          continue with remaining Units, then emit `fix.done` with
+          `fixes_skipped` reflecting unapplied Units.
+        - If the full suite cannot reach green after honest attempts: still
+          emit `fix.done` with `fixes_skipped` reflecting unapplied Units —
+          alignment and reporter record the regression.
 
   alignment:
     name: "Alignment"
