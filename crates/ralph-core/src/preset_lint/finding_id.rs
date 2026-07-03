@@ -384,3 +384,54 @@ pub const FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE: &str =
 /// Always `Error`.
 pub const FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC: &str =
     "preset.supervisor_hat_publishes_coord_topic";
+
+// ──────────────────────────────────────────────────────────────────────────
+// OPAC instructions lint finding IDs (2026-07-04-001 plan U11)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Hat `instructions:` reference the fictional `ralph tools task create`
+/// (or `ralph task create`) command. The real CLI exposes only `add` and
+/// `ensure`. Agents copy-pasting this string will hit a hard CLI error at
+/// runtime; surface the anti-pattern at preset-load time.
+/// Default `Error`; `--strict` makes it fail preset startup.
+pub const FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL: &str =
+    "preset.instructions_task_create_literal";
+
+/// A coordinator hat (or hat whose `publishes` contains `work.ready`)
+/// references `fix-unit` / `fix unit` / `fresh mint` in its instructions
+/// but does NOT cite `task ensure --for-fix-unit` (or
+/// `ensure.*--for-fix-unit`). Per 002 plan U14a, the canonical fix-unit
+/// mint path is `ralph tools task ensure --for-fix-unit` — any other shape
+/// will produce stale task ids that break the step handoff chain.
+/// Always `Error`.
+pub const FINDING_INSTRUCTIONS_FIX_UNIT_MINT_TEMPLATE_MISSING: &str =
+    "preset.instructions_fix_unit_mint_template_missing";
+
+/// Hat `instructions:` include non-empty `publishes` but neither
+/// `ralph-tools-opac` nor `ralph-tools-emit` §5 precheck is cited. Per
+/// 2026-07-04-001 plan R12 agents should *reference* the OPAC skill rather
+/// than copy command strings — without the reference the agent cannot
+/// reliably reach the Observe / Precheck / Confirm stages.
+/// Always `Error`.
+pub const FINDING_INSTRUCTIONS_OPAC_SKILL_REFERENCE_MISSING: &str =
+    "preset.instructions_opac_skill_reference_missing";
+
+/// Hat `instructions:` reference reading or tailing internal Ralph state
+/// files that are runtime-private (`.ralph/events.jsonl`,
+/// `.ralph/supervisor.db`, `.ralph/loops.json`) or call
+/// `ralph diagnose --supervisor`. Per HARD RULE 4, agents must NOT reach
+/// into runtime ledgers directly; they go through `ralph tools task …`
+/// or `ralph inspect loop` instead.
+/// Always `Error`.
+pub const FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER: &str =
+    "preset.instructions_read_internal_ledger";
+
+/// Hat `instructions:` direct the agent to `ralph emit` (or
+/// `ralph wave emit`) a supervisor-only coordination topic
+/// (`*.wave.complete` / `*.unit.ready` etc.). Per `event_origin`
+/// these are denied for agent origin, so the agent's emit will silently
+/// drop — surfaces as the F-019 incident in
+/// `presets/en/ce-executor-supervisor.yml`.
+/// Always `Error`.
+pub const FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC: &str =
+    "preset.instructions_supervisor_coordination_topic";

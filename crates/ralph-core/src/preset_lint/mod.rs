@@ -29,6 +29,12 @@ pub mod finding_id;
 pub mod fix_unit_task_id;
 pub mod flow_declaration;
 pub mod hat_scope_invariant;
+// 2026-07-04-001 plan U11: instructions OPAC lint rule family.
+// Catches five anti-patterns in hat `instructions:` text that cause
+// agent misbehavior in isolated mode (fictional `task create`,
+// reading runtime-private ledgers, emit of supervisor coord topics,
+// missing OPAC skill reference, missing fix-unit mint template).
+pub mod instructions_opac;
 pub mod metadata_runtime_drift;
 pub mod multi_hat;
 pub mod ownership;
@@ -90,6 +96,7 @@ pub use fix_unit_task_id::{
     FINDING_FIX_UNIT_TASK_ID_NOT_HELPER_DERIVED, check_fix_unit_task_id_helper_derived,
 };
 pub use hat_scope_invariant::check_hat_scope_invariant;
+pub use instructions_opac::check_instructions_opac;
 pub use metadata_runtime_drift::check_metadata_runtime_drift;
 pub use multi_hat::check_multi_hat_isolation;
 pub use ownership::{check_owner_references, check_ownership_rules};
@@ -470,6 +477,16 @@ pub fn run_preset_lint(
     if let Some(text) = raw_yaml {
         let sup_findings = check_supervisor_rules(text);
         findings.extend(lint_findings_to_contract_findings(&sup_findings));
+    }
+
+    // 2026-07-04-001 plan U11: instructions OPAC lint rule family.
+    // Five rules over hat `instructions:` text — task_create literal,
+    // fix-unit mint template, OPAC skill reference, internal-ledger
+    // reads, supervisor coord-topic emits. Always Error; raw_yaml
+    // is required so the lint can scan the YAML-original text.
+    if let Some(text) = raw_yaml {
+        let opac_findings = check_instructions_opac(text);
+        findings.extend(lint_findings_to_contract_findings(&opac_findings));
     }
 
     // Plan 001 §4.5 R1: every hat `publishes` topic must have a schema
