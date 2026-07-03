@@ -99,10 +99,11 @@ pub struct DiagnoseArgs {
     /// diagnosis report. Surfaces `active_waves`, `queue_depth`,
     /// and `dedup_hits` so operators debugging a stuck loop can
     /// distinguish "no waves" from "queued waves" without
-    /// shelling out to sqlite. Default is JSON to keep the
-    /// section machine-readable; pass `--supervisor human` for
-    /// a one-line-per-hat summary.
-    #[arg(long, value_enum, default_value_t = SupervisorFormat::Json)]
+    /// shelling out to sqlite. Default is `off` to keep the
+    /// regular diagnose output stable; pass `--supervisor json`
+    /// for a machine-readable section or `--supervisor human`
+    /// for a one-line-per-field summary.
+    #[arg(long, value_enum, default_value_t = SupervisorFormat::Off)]
     pub supervisor: SupervisorFormat,
 }
 
