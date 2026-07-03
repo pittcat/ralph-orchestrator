@@ -1,4 +1,5 @@
 ---
+superseded_by: docs/brainstorms/2026-07-03-supervisor-rusqlite-parallel-preset-requirements.md
 date: 2026-06-18
 topic: supervisor-wave-protocol-upgrade
 type: requirements
