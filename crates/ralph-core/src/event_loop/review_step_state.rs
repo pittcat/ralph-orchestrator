@@ -874,6 +874,7 @@ mod tests {
                 ],
                 allowed_values: HashMap::new(),
                 hat_allowed_values: HashMap::new(),
+                ..Default::default()
             },
         );
         config.schemas.insert(
@@ -892,6 +893,7 @@ mod tests {
                 ],
                 allowed_values: HashMap::new(),
                 hat_allowed_values: HashMap::new(),
+                ..Default::default()
             },
         );
         config

@@ -423,6 +423,7 @@ mod tests {
                 required_fields: vec!["plan_name".to_string(), "task_id".to_string()],
                 allowed_values: HashMap::new(),
                 hat_allowed_values: HashMap::new(),
+                ..Default::default()
             },
         );
         schemas.insert(
@@ -432,6 +433,7 @@ mod tests {
                 required_fields: vec![],
                 allowed_values: HashMap::new(),
                 hat_allowed_values: HashMap::new(),
+                ..Default::default()
             },
         );
 

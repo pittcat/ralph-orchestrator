@@ -142,17 +142,14 @@ mod tests {
         EventSchema {
             payload: Some(PayloadType::JsonObject),
             required_fields: fields.iter().map(|s| s.to_string()).collect(),
-            allowed_values: HashMap::new(),
-            hat_allowed_values: HashMap::new(),
+            ..Default::default()
         }
     }
 
     fn string_schema() -> EventSchema {
         EventSchema {
             payload: Some(PayloadType::String),
-            required_fields: vec![],
-            allowed_values: HashMap::new(),
-            hat_allowed_values: HashMap::new(),
+            ..Default::default()
         }
     }
 
@@ -335,9 +332,7 @@ mod tests {
     fn example_payload_types_render_distinct_shapes() {
         let array_schema = EventSchema {
             payload: Some(PayloadType::Array),
-            required_fields: vec![],
-            allowed_values: HashMap::new(),
-            hat_allowed_values: HashMap::new(),
+            ..Default::default()
         };
         assert_eq!(
             format_emit_json_example("t", &array_schema),
@@ -346,9 +341,7 @@ mod tests {
 
         let number_schema = EventSchema {
             payload: Some(PayloadType::Number),
-            required_fields: vec![],
-            allowed_values: HashMap::new(),
-            hat_allowed_values: HashMap::new(),
+            ..Default::default()
         };
         assert_eq!(
             format_emit_json_example("t", &number_schema),
@@ -357,9 +350,7 @@ mod tests {
 
         let bool_schema = EventSchema {
             payload: Some(PayloadType::Bool),
-            required_fields: vec![],
-            allowed_values: HashMap::new(),
-            hat_allowed_values: HashMap::new(),
+            ..Default::default()
         };
         assert_eq!(
             format_emit_json_example("t", &bool_schema),

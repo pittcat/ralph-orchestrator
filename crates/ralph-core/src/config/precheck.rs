@@ -128,9 +128,7 @@ pub fn inject_precheck_event_schemas(
         .entry(proposed)
         .or_insert_with(|| EventSchema {
             payload: Some(PayloadType::JsonObject),
-            required_fields: Vec::new(),
-            allowed_values: HashMap::new(),
-            hat_allowed_values: HashMap::new(),
+            ..Default::default()
         });
 
     let rejected = format!("{topic}.rejected");
@@ -139,8 +137,7 @@ pub fn inject_precheck_event_schemas(
         .or_insert_with(|| EventSchema {
             payload: Some(PayloadType::JsonObject),
             required_fields: vec!["failed_checks".into(), "reason".into()],
-            allowed_values: HashMap::new(),
-            hat_allowed_values: HashMap::new(),
+            ..Default::default()
         });
 
     // Gate hat publishes bare `<X>` on pass; ensure a schema exists
@@ -149,8 +146,6 @@ pub fn inject_precheck_event_schemas(
         .entry(topic.to_string())
         .or_insert_with(|| EventSchema {
             payload: Some(PayloadType::JsonObject),
-            required_fields: Vec::new(),
-            allowed_values: HashMap::new(),
-            hat_allowed_values: HashMap::new(),
+            ..Default::default()
         });
 }

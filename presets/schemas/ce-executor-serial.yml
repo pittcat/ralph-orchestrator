@@ -196,9 +196,10 @@ schemas:
   # status list; the synthesizer does NOT need to read review-sequence.json
   # to know which dimensions completed. The `dimensions` array element shape
   # (dimension / status / optional findings_file / optional reason) is
-  # enforced by agent prompt discipline and by the coordinator + synthesizer
-  # instructions, not by EventSchema, because the current EventSchema only
-  # validates top-level fields and has no nested array-element validation.
+  # enforced by the new `element_constraints` block below (2026-07-03-005
+  # plan P0 fix C7), so the agent can no longer fabricate a 6-dimension
+  # summary by setting `status: done, findings_file: null` on the
+  # un-walked dimensions.
   review.dimensions.complete:
     # 2026-06-18-004 plan U0 (R4, KTD3): fix_round is the dedup SSOT for
     # `review.dimensions.complete`. The policy layer keys dedup on
@@ -214,6 +215,19 @@ schemas:
       - dimensions
       - fix_round
     payload: json_object
+    # 2026-07-03-005 plan (P0 fix C7): per-element shape constraint for
+    # the `dimensions` array. Closes the 30-day 12x silent-drop bug where
+    # review-coordinator could fabricate a 6-dimension summary by setting
+    # `status: done, findings_file: null` on the un-walked dimensions. The
+    # `findings_file` element is required (and must be non-null) ONLY when
+    # sibling `status` equals `"done"`; `status: "skipped"` or `"failed"`
+    # legitimately allow a null findings_file.
+    element_constraints:
+      dimensions:
+        field: findings_file
+        required_when:
+          status: done
+        forbid_null_when_required: true
 
   # 2026-06-24 plan U2: review-synthesizer only emits `review.complete`
   # (no `review.passed` / `review.failed` pair). The `fix_plan_file`

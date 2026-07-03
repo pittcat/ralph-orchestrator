@@ -1401,15 +1401,24 @@ mod tests {
         // (events-20260701-220911.jsonl iter 22/24/26/34)
         // all hit this gap; without these entries the
         // shipper still routes them to hard-fail.
+        //
+        // 2026-07-03-005 plan (P0 fix C2+C8): the two entries
+        // were REMOVED. They previously masked the mechanism-
+        // side silent drop → retry → stall escalation as
+        // `pass_with_residuals`, hiding the real root cause
+        // (M-1 isolated budget + M-2 handoff_dispatch routing).
+        // The hard-fail path now exposes the truth via
+        // REVIEW_COMPLETE(fail) instead of self-closing the
+        // loop. The `recovery_exhausted:stall_recovery:...`
+        // drift-engine promotion path is preserved by the
+        // `starts_with` fallback in `shipper_reason.rs`.
         assert!(
-            content.contains("stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*"),
-            "shipper must list stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:* as recoverable (P1-B)"
+            !content.contains("stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*"),
+            "shipper must NOT list stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:* as recoverable (P0 fix C2+C8 / 2026-07-03-005)"
         );
         assert!(
-            content.contains(
-                "stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:*"
-            ),
-            "shipper must list stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:* as recoverable (P1-B)"
+            !content.contains("stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:*"),
+            "shipper must NOT list stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:* as recoverable (P0 fix C2+C8 / 2026-07-03-005)"
         );
         // Hard-fail reasons must be listed.
         assert!(

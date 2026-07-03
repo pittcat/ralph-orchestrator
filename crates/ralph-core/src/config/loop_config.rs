@@ -24,7 +24,7 @@ pub struct HatAllowedValues {
 }
 
 /// Schema for validating events of a specific topic.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EventSchema {
     /// Expected payload type.
     #[serde(default)]
@@ -43,6 +43,48 @@ pub struct EventSchema {
     /// review-synthesizer may use 'aggregate_timeout'".
     #[serde(default)]
     pub hat_allowed_values: HashMap<String, Vec<HatAllowedValues>>,
+    /// 2026-07-03-005 plan (P0 fix C7): per-element shape constraint for
+    /// array fields in the payload. Key = array field name (e.g.
+    /// `"dimensions"`); value = element-level field shape. When `None` or
+    /// empty, no element-level validation runs and existing call sites
+    /// (which build `EventSchema { ... }` without this field) remain
+    /// valid thanks to `Default` + `#[serde(default)]` propagation.
+    ///
+    /// Today only one consumer: `review.dimensions.complete` validates
+    /// that each element of the `dimensions` array has the
+    /// `{dimension, status, findings_file}` triple. Status `done` requires
+    /// a non-null `findings_file` (no silent-drop of fake "done" elements).
+    #[serde(default)]
+    pub element_constraints: HashMap<String, ElementConstraint>,
+}
+
+/// 2026-07-03-005 plan (P0 fix C7): per-array-field element shape
+/// constraint. Applied to every element of the named array field.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ElementConstraint {
+    /// Field name on each element (e.g. `"dimension"`).
+    pub field: String,
+    /// When `true`, this field must exist on every element.
+    #[serde(default)]
+    pub required: bool,
+    /// Optional allowed-values list. When non-empty, the field value
+    /// must be in this list (compared as JSON value, not string).
+    #[serde(default)]
+    pub allowed_values: Vec<serde_json::Value>,
+    /// When this map is non-empty, the field is required only when the
+    /// referenced field (key) equals the value (compared as JSON). E.g.
+    /// `{"status": "done"}` means the `findings_file` field is required
+    /// when `status == "done"`. The key/value are JSON values so the
+    /// check is type-strict.
+    #[serde(default)]
+    pub required_when: HashMap<String, serde_json::Value>,
+    /// Optional required-only-when-this-element-field-is-non-null
+    /// check. When `true`, this field is required AND must not be `null`
+    /// when the element's other field (named by `required_when` key)
+    /// matches its value. Used to forbid `findings_file: null` for
+    /// `status: done` elements.
+    #[serde(default)]
+    pub forbid_null_when_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

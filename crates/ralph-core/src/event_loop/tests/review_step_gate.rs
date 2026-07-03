@@ -43,6 +43,7 @@ fn session_b_fixture_lines_rejected_by_policy() {
             ],
             allowed_values: HashMap::new(),
             hat_allowed_values: HashMap::new(),
+            ..Default::default()
         },
     );
     config.schemas.insert(
@@ -61,6 +62,7 @@ fn session_b_fixture_lines_rejected_by_policy() {
             ],
             allowed_values: HashMap::new(),
             hat_allowed_values: HashMap::new(),
+            ..Default::default()
         },
     );
 

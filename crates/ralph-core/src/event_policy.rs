@@ -1859,6 +1859,51 @@ pub fn validate_event_with_hat(
         findings.push(finding);
     }
 
+    // 2026-07-03-005 plan (P0 fix C7): per-element shape validation for
+    // array fields declared in the schema's `element_constraints` map.
+    // Today this single-handedly closes the
+    // `review.dimensions.complete` silent-drop bug — when the agent
+    // fabricates a `status: done` element with a null findings_file,
+    // the schema rejects the element and the runtime surfaces the
+    // real cause instead of accepting the inflated review summary.
+    if !config.schemas.is_empty()
+        && let Some(p) = payload
+        && let Ok(Value::Object(_)) = serde_json::from_str::<Value>(p)
+    {
+        let topic_schema = config.schemas.get(topic);
+        if let Some(schema) = topic_schema
+            && !schema.element_constraints.is_empty()
+            && let Some(value) = serde_json::from_str::<Value>(p).ok()
+        {
+            for (array_field, constraint) in &schema.element_constraints {
+                if let Some(field) = obj_get(&value, array_field) {
+                    if let Value::Array(elements) = field {
+                        for (idx, element) in elements.iter().enumerate() {
+                            if let Some(finding) = validate_element_shape(
+                                topic, array_field, idx, element, constraint,
+                            ) {
+                                findings.push(finding);
+                            }
+                        }
+                    } else {
+                        findings.push(PolicyFinding {
+                            topic: topic.to_string(),
+                            violation_type: ViolationType::PayloadTypeMismatch {
+                                expected: "array".to_string(),
+                                actual: type_name(&field).to_string(),
+                            },
+                            message: format!(
+                                "element_constraints: field '{}' must be an array, got {}",
+                                array_field,
+                                type_name(&field)
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     if findings.is_empty() {
         if topic == "plan.blocked" {
             state.last_plan_blocked_reason =
@@ -1910,10 +1955,111 @@ fn type_name(value: &Value) -> &'static str {
     }
 }
 
+/// 2026-07-03-005 plan (P0 fix C7): look up a top-level field on a JSON
+/// value (avoids the dot-notation `extract_json_field` semantics, which
+/// would split on `.` and is wrong for array element field names that
+/// may contain dots in the future). Returns `Some(value)` for both
+/// present-and-null and present-with-value.
+fn obj_get<'a>(value: &'a Value, field: &str) -> Option<&'a Value> {
+    value.as_object()?.get(field)
+}
+
+/// 2026-07-03-005 plan (P0 fix C7): validate one element of an array
+/// field against its `ElementConstraint`. Returns `Some(PolicyFinding)`
+/// on the first violation per element, or `None` if the element
+/// passes. The constraint covers: existence (`required`), value
+/// restriction (`allowed_values`), conditional existence
+/// (`required_when` + `forbid_null_when_required`).
+fn validate_element_shape(
+    topic: &str,
+    array_field: &str,
+    idx: usize,
+    element: &Value,
+    constraint: &crate::config::ElementConstraint,
+) -> Option<PolicyFinding> {
+    // 1. required field exists
+    let present = obj_get(element, &constraint.field);
+    if constraint.required && present.is_none() {
+        return Some(PolicyFinding {
+            topic: topic.to_string(),
+            violation_type: ViolationType::MissingRequiredField {
+                field: format!("{}[{}].{}", array_field, idx, constraint.field),
+            },
+            message: format!(
+                "element_constraints: {}[{}] is missing required field '{}'",
+                array_field, idx, constraint.field
+            ),
+        });
+    }
+
+    // 2. allowed_values check
+    if !constraint.allowed_values.is_empty()
+        && let Some(value) = present
+        && !constraint.allowed_values.iter().any(|v| v == value)
+    {
+        return Some(PolicyFinding {
+            topic: topic.to_string(),
+            violation_type: ViolationType::InvalidFieldValue {
+                field: format!("{}[{}].{}", array_field, idx, constraint.field),
+                value: value.clone(),
+            },
+            message: format!(
+                "element_constraints: {}[{}].{} = {} not in allowed list {:?}",
+                array_field,
+                idx,
+                constraint.field,
+                type_name(value),
+                constraint.allowed_values
+            ),
+        });
+    }
+
+    // 3. required_when + forbid_null_when_required
+    if !constraint.required_when.is_empty() {
+        let mut all_conditions_match = true;
+        for (key, expected) in &constraint.required_when {
+            let actual = obj_get(element, key);
+            if actual != Some(expected) {
+                all_conditions_match = false;
+                break;
+            }
+        }
+        if all_conditions_match {
+            if present.is_none() {
+                return Some(PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::MissingRequiredField {
+                        field: format!("{}[{}].{}", array_field, idx, constraint.field),
+                    },
+                    message: format!(
+                        "element_constraints: {}[{}].{} is required when sibling conditions {:?} match",
+                        array_field, idx, constraint.field, constraint.required_when
+                    ),
+                });
+            }
+            if constraint.forbid_null_when_required && matches!(present, Some(Value::Null)) {
+                return Some(PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::InvalidFieldValue {
+                        field: format!("{}[{}].{}", array_field, idx, constraint.field),
+                        value: Value::Null,
+                    },
+                    message: format!(
+                        "element_constraints: {}[{}].{} is null but must be non-null when sibling conditions {:?} match",
+                        array_field, idx, constraint.field, constraint.required_when
+                    ),
+                });
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{EventSchema, HatAllowedValues, TopicDenyRule};
+    use crate::config::{ElementConstraint, EventSchema, HatAllowedValues, TopicDenyRule};
     use std::collections::HashMap;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -1948,6 +2094,7 @@ mod tests {
 
             allowed_values: HashMap::new(),
             hat_allowed_values: HashMap::new(),
+            ..Default::default()
         };
         config.schemas.insert("test".to_string(), schema);
         let mut state = PolicyRuntimeState::default();
@@ -1964,6 +2111,7 @@ mod tests {
 
             allowed_values: HashMap::new(),
             hat_allowed_values: HashMap::new(),
+            ..Default::default()
         };
         config.schemas.insert("test".to_string(), schema);
         let mut state = PolicyRuntimeState::default();
@@ -1980,6 +2128,7 @@ mod tests {
 
             allowed_values: HashMap::new(),
             hat_allowed_values: HashMap::new(),
+            ..Default::default()
         };
         config.schemas.insert("test".to_string(), schema);
         let mut state = PolicyRuntimeState::default();
@@ -1996,6 +2145,7 @@ mod tests {
 
             allowed_values: HashMap::new(),
             hat_allowed_values: HashMap::new(),
+            ..Default::default()
         };
         schema.allowed_values.insert(
             "decision".to_string(),
@@ -2036,6 +2186,7 @@ mod tests {
 
             allowed_values: HashMap::new(),
             hat_allowed_values: HashMap::new(),
+            ..Default::default()
         };
         config.schemas.insert("test".to_string(), schema);
         let mut state = PolicyRuntimeState::default();
@@ -2052,6 +2203,7 @@ mod tests {
 
             allowed_values: HashMap::new(),
             hat_allowed_values: HashMap::new(),
+            ..Default::default()
         };
         config.schemas.insert("test".to_string(), schema);
         let mut state = PolicyRuntimeState::default();
@@ -2090,6 +2242,7 @@ mod tests {
             required_fields: vec!["task_key".to_string()],
             allowed_values: HashMap::new(),
             hat_allowed_values: HashMap::new(),
+            ..Default::default()
         };
         config.schemas.insert("test".to_string(), schema);
         let mut state = PolicyRuntimeState::default();
@@ -2108,6 +2261,7 @@ mod tests {
             required_fields: vec![],
             allowed_values: HashMap::new(),
             hat_allowed_values: HashMap::new(),
+            ..Default::default()
         };
         schema.allowed_values.insert(
             "evaluation.decision".to_string(),
@@ -2405,6 +2559,7 @@ mod tests {
             ],
             allowed_values: HashMap::new(),
             hat_allowed_values: HashMap::new(),
+            ..Default::default()
         };
         config
             .schemas
@@ -2891,6 +3046,7 @@ mod tests {
             ],
             allowed_values: HashMap::new(),
             hat_allowed_values: HashMap::new(),
+            ..Default::default()
         };
         // Mirror the ce-executor.yml U4 allowlist exactly.
         schema.allowed_values.insert(
@@ -4977,6 +5133,7 @@ mod tests {
                 ],
                 allowed_values: HashMap::new(),
                 hat_allowed_values: HashMap::new(),
+                ..Default::default()
             },
         );
         let mut state = PolicyRuntimeState::default();
@@ -5024,6 +5181,7 @@ mod tests {
                 ],
                 allowed_values: HashMap::new(),
                 hat_allowed_values: HashMap::new(),
+                ..Default::default()
             },
         );
         let mut state = PolicyRuntimeState::default();
@@ -5035,6 +5193,180 @@ mod tests {
             decision,
             PolicyDecision::Accept,
             "P0-D positive: string \"null\" must be accepted, got {:?}",
+            decision
+        );
+    }
+
+    // 2026-07-03-005 plan (P0 fix C7): element_constraints rejects
+    // `review.dimensions.complete` with `status: done` and a null
+    // `findings_file`. Without this, the agent fabricates 4 of 6
+    // dimensions as `status: done, findings_file: null` and the shipper
+    // walks `pass_with_residuals` based on the inflated summary.
+
+    fn insert_review_dimensions_schema(
+        config: &mut EventPolicyConfig,
+        field: &str,
+        required: bool,
+        allowed: Vec<serde_json::Value>,
+        required_when: HashMap<String, serde_json::Value>,
+        forbid_null: bool,
+    ) {
+        let mut constraint = ElementConstraint {
+            field: field.to_string(),
+            required,
+            allowed_values: allowed,
+            required_when,
+            forbid_null_when_required: forbid_null,
+            ..Default::default()
+        };
+        // Default field is empty for callers that don't set it; set here.
+        constraint.field = field.to_string();
+        let mut ec = HashMap::new();
+        ec.insert("dimensions".to_string(), constraint);
+        config.schemas.insert(
+            "review.dimensions.complete".to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: vec!["dimensions".to_string()],
+                element_constraints: ec,
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    fn c7_review_dimensions_complete_silent_drop_done_with_null_findings() {
+        let mut config = test_config_with_enforce_and_resume();
+        let mut rw = HashMap::new();
+        rw.insert("status".to_string(), serde_json::json!("done"));
+        insert_review_dimensions_schema(
+            &mut config,
+            "findings_file",
+            true,
+            Vec::new(),
+            rw,
+            true,
+        );
+        let mut state = PolicyRuntimeState::default();
+        // 6 dimensions, last 4 are fake `status: done, findings_file: null`.
+        let payload = r#"{
+            "dimensions": [
+                {"dimension":"goal-alignment","status":"done","findings_file":"/tmp/ga.md"},
+                {"dimension":"correctness","status":"done","findings_file":"/tmp/co.md"},
+                {"dimension":"testing","status":"done","findings_file":null},
+                {"dimension":"maintainability","status":"done","findings_file":null},
+                {"dimension":"project-standards","status":"done","findings_file":null},
+                {"dimension":"adversarial","status":"done","findings_file":null}
+            ]
+        }"#;
+        let decision = validate_event(
+            "review.dimensions.complete",
+            Some(payload),
+            &config,
+            &mut state,
+        );
+        assert!(
+            matches!(decision, PolicyDecision::RejectWithResume(_)),
+            "C7: status=done with null findings_file MUST be rejected, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn c7_review_dimensions_complete_accepts_skipped_with_null_findings() {
+        let mut config = test_config_with_enforce_and_resume();
+        let mut rw = HashMap::new();
+        rw.insert("status".to_string(), serde_json::json!("done"));
+        insert_review_dimensions_schema(
+            &mut config,
+            "findings_file",
+            true,
+            Vec::new(),
+            rw,
+            true,
+        );
+        let mut state = PolicyRuntimeState::default();
+        // `status: skipped` with null findings_file must be accepted.
+        let payload = r#"{
+            "dimensions": [
+                {"dimension":"goal-alignment","status":"done","findings_file":"/tmp/ga.md"},
+                {"dimension":"correctness","status":"skipped","findings_file":null}
+            ]
+        }"#;
+        let decision = validate_event(
+            "review.dimensions.complete",
+            Some(payload),
+            &config,
+            &mut state,
+        );
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "C7 positive: status=skipped with null findings_file is allowed, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn c7_review_dimensions_complete_allowed_values_on_status() {
+        let mut config = test_config_with_enforce_and_resume();
+        insert_review_dimensions_schema(
+            &mut config,
+            "status",
+            true,
+            vec![
+                serde_json::json!("done"),
+                serde_json::json!("skipped"),
+                serde_json::json!("failed"),
+            ],
+            HashMap::new(),
+            false,
+        );
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{
+            "dimensions": [
+                {"dimension":"goal-alignment","status":"bogus"}
+            ]
+        }"#;
+        let decision = validate_event(
+            "review.dimensions.complete",
+            Some(payload),
+            &config,
+            &mut state,
+        );
+        assert!(
+            matches!(decision, PolicyDecision::RejectWithResume(_)),
+            "C7 allowed_values: status='bogus' MUST be rejected, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn c7_review_dimensions_complete_missing_required_field() {
+        let mut config = test_config_with_enforce_and_resume();
+        insert_review_dimensions_schema(
+            &mut config,
+            "findings_file",
+            true,
+            Vec::new(),
+            HashMap::new(),
+            false,
+        );
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{
+            "dimensions": [
+                {"dimension":"goal-alignment"}
+            ]
+        }"#;
+        let decision = validate_event(
+            "review.dimensions.complete",
+            Some(payload),
+            &config,
+            &mut state,
+        );
+        assert!(
+            matches!(decision, PolicyDecision::RejectWithResume(_)),
+            "C7 required: missing findings_file MUST be rejected, got {:?}",
             decision
         );
     }
@@ -5053,6 +5385,7 @@ mod tests {
                 required_fields: vec!["dimension".to_string(), "plan_name".to_string()],
                 allowed_values: HashMap::new(),
                 hat_allowed_values: HashMap::new(),
+                ..Default::default()
             },
         );
         let mut state = PolicyRuntimeState::default();
@@ -5078,6 +5411,7 @@ mod tests {
                 required_fields: vec!["dimension".to_string()],
                 allowed_values: HashMap::new(),
                 hat_allowed_values: HashMap::new(),
+                ..Default::default()
             },
         );
         let mut state = PolicyRuntimeState::default();

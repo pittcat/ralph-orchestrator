@@ -248,6 +248,7 @@ mod tests {
                 required_fields: vec!["plan_name".to_string()],
                 allowed_values: HashMap::new(),
                 hat_allowed_values: HashMap::new(),
+                ..Default::default()
             },
         );
         EventPolicyConfig {
@@ -362,6 +363,7 @@ mod tests {
                 required_fields: vec![], // empty list — canonicalised to absent
                 allowed_values: HashMap::new(),
                 hat_allowed_values: HashMap::new(),
+                ..Default::default()
             },
         );
         config.event_loop.event_policy = Some(EventPolicyConfig {
