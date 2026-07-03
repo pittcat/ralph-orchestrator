@@ -328,9 +328,16 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     fn list_worktree_paths(&self, wave_id: &str) -> SupervisorStoreResult<Vec<SlotResource>>;
 }
 
+pub use coordinator::{CoordinatorAction, SupervisorCoordinator};
+pub use merge_sink::{EventMergeSink, InMemoryMergeSink, MergeSinkError};
 pub use memory::InMemorySupervisorStore;
+pub use phase::{evaluate_phase, FailedReason, PhaseDecision, PhaseInputs};
 #[cfg(feature = "supervisor-db")]
 pub use rusqlite::RusqliteSupervisorStore;
+pub use worktree_bind::{
+    DefaultWorktreeFactory, WorktreeBinding, WorktreeError, WorktreeFactory,
+    assert_isolation_matches, bind_slot_worktree, env_keys as worktree_env_keys,
+};
 
 mod coordinator;
 mod merge_sink;

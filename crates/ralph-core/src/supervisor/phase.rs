@@ -26,6 +26,21 @@ pub struct PhaseInputs {
     pub cancel_requested: bool,
 }
 
+impl Default for PhaseInputs {
+    fn default() -> Self {
+        // The default budget matches `SupervisorConfig`'s default of
+        // 600s; `elapsed_secs == 0` means "no timeout elapsed" and
+        // `cancel_requested == false` keeps the wave ticking. U8
+        // ticks always overwrite the elapsed field before evaluating,
+        // so the default is safe for tests / dry-runs.
+        Self {
+            aggregate_timeout_secs: 600,
+            elapsed_secs: 0,
+            cancel_requested: false,
+        }
+    }
+}
+
 /// Per-tick fan-in decision returned by `evaluate_phase`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PhaseDecision {
