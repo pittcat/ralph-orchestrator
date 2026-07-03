@@ -337,14 +337,51 @@ pub(crate) fn append_runtime_config_block(base_prompt: String, max_residuals: u3
 /// topic as exempt from the per-turn single-business-event budget.
 /// Returns false for `None` config (no exemption), missing config,
 /// or empty `exempt_topics` (default behaviour preserved).
+///
+/// 2026-07-04-001 plan U13 (KTD-11): also returns true when `topic`
+/// appears in `event_policy_business_topics` or
+/// `event_policy_terminal_topics` AND the hat has it in `publishes`.
+/// This is the SSOT for "completion-class" carve-out — a single
+/// `business_topics` declaration covers every hat that can publish the
+/// topic (e.g. `review.dimension.ready` exempts both `review-coordinator`
+/// and any future dimension walker). Per-hat `exempt_topics` still
+/// takes precedence for backwards compatibility with the
+/// `ce-executor-serial` preset, which declared
+/// `exempt_topics: ["review.dimension.ready", "review.dimensions.complete"]`.
 fn is_isolated_exempt_topic(
     config: Option<&crate::config::hat::HatConfig>,
     topic: &str,
+    event_policy_business_topics: &[String],
+    event_policy_terminal_topics: &[String],
 ) -> bool {
     let Some(cfg) = config else {
         return false;
     };
-    cfg.exempt_topics.iter().any(|t| {
+    // Per-hat positive list (existing behaviour, set by ce-executor-serial).
+    if cfg.exempt_topics.iter().any(|t| {
+        let pattern = ralph_proto::Topic::new(t);
+        let topic_obj = ralph_proto::Topic::new(topic);
+        pattern.matches(&topic_obj)
+    }) {
+        return true;
+    }
+    // 2026-07-04-001 plan U13 (KTD-11): derived carve-out from
+    // `event_policy.business_topics` ∪ `terminal_topics`. The topic is
+    // exempt if (a) the resolved config declares it as a business or
+    // terminal topic, AND (b) the calling hat has it in `publishes`.
+    let in_class = |class: &[String]| {
+        class.iter().any(|t| {
+            let pattern = ralph_proto::Topic::new(t);
+            let topic_obj = ralph_proto::Topic::new(topic);
+            pattern.matches(&topic_obj)
+        })
+    };
+    let is_completion_class =
+        in_class(event_policy_business_topics) || in_class(event_policy_terminal_topics);
+    if !is_completion_class {
+        return false;
+    }
+    cfg.publishes.iter().any(|t| {
         let pattern = ralph_proto::Topic::new(t);
         let topic_obj = ralph_proto::Topic::new(topic);
         pattern.matches(&topic_obj)
@@ -1699,7 +1736,14 @@ impl EventLoop {
     /// walking 6 `review.dimension.ready` events) without consuming
     /// the `non_wave_business_event_accepted` slot.
     pub fn isolated_exempt_topic(&self, hat: &HatId, topic: &str) -> bool {
-        is_isolated_exempt_topic(self.registry.get_config(hat), topic)
+        let (business, terminal) = self
+            .config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .map(|ep| (ep.business_topics.as_slice(), ep.terminal_topics.as_slice()))
+            .unwrap_or((&[], &[]));
+        is_isolated_exempt_topic(self.registry.get_config(hat), topic, business, terminal)
     }
 
     /// Enforce isolated publish scope on a batch of wave events.
@@ -8604,12 +8648,29 @@ impl EventLoop {
                     // terminal event displaces the earlier
                     // non-terminal business event.
                     true
-                } else if is_isolated_exempt_topic(
-                    self.registry.get_config(
-                        isolated_hat_owned.as_ref().unwrap_or(&HatId::from("")),
-                    ),
-                    &event.topic,
-                ) {
+                } else if !non_wave_business_event_accepted
+                    && {
+                        let (business, terminal) = self
+                            .config
+                            .event_loop
+                            .event_policy
+                            .as_ref()
+                            .map(|ep| {
+                                (
+                                    ep.business_topics.as_slice(),
+                                    ep.terminal_topics.as_slice(),
+                                )
+                            })
+                            .unwrap_or((&[], &[]));
+                        is_isolated_exempt_topic(
+                            self.registry.get_config(
+                                isolated_hat_owned.as_ref().unwrap_or(&HatId::from("")),
+                            ),
+                            &event.topic,
+                            business,
+                            terminal,
+                        )
+                    } {
                     // 2026-07-03-005 plan (P0 fix M-1): declared
                     // serial walk exemption. The isolated hat has
                     // listed this topic in its `exempt_topics` (a

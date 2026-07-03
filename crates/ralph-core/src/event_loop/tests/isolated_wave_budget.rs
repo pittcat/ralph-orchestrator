@@ -482,6 +482,8 @@ hats:
     let dropped = !crate::event_loop::is_isolated_exempt_topic(
         registry.get_config(&ralph_proto::HatId::from("coordinator")),
         "review.dimension.ready",
+        &[],
+        &[],
     );
     assert!(dropped, "M-1: non-exempt hat must report false");
 
@@ -490,6 +492,8 @@ hats:
         crate::event_loop::is_isolated_exempt_topic(
             registry.get_config(&hat),
             "review.dimension.ready",
+            &[],
+            &[],
         )
     });
     assert!(admitted, "M-1: declared serial walk must admit all 6 emits");
@@ -499,6 +503,8 @@ hats:
     let not_exempt = !crate::event_loop::is_isolated_exempt_topic(
         registry.get_config(&hat),
         "work.ready",
+        &[],
+        &[],
     );
     assert!(not_exempt, "M-1: exempt_topics is a positive list, not a wildcard");
 }
@@ -511,7 +517,128 @@ fn m1_exempt_topic_falls_back_to_default_when_unregistered() {
     );
     let unknown = ralph_proto::HatId::from("does-not-exist");
     assert!(
-        !crate::event_loop::is_isolated_exempt_topic(registry.get_config(&unknown), "any.topic"),
+        !crate::event_loop::is_isolated_exempt_topic(
+            registry.get_config(&unknown),
+            "any.topic",
+            &[],
+            &[],
+        ),
         "M-1: unknown hat must report false (no crash, no false-positive exemption)"
+    );
+}
+
+#[test]
+fn u13_business_topics_carve_out_admits_serial_walk() {
+    // 2026-07-04-001 plan U13 (KTD-11): a hat that has a topic in its
+    // `publishes` list AND the same topic is declared in
+    // `event_policy.business_topics` is exempt from the per-turn
+    // budget — even without an explicit `exempt_topics` declaration.
+    // This is the SSOT for the carve-out: derive from config, not
+    // per-hat whitelist.
+    let yaml = r#"
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    subscribes_to: [queue.advance]
+    publishes:
+      - review.dimension.ready
+  coordinator:
+    name: "Coordinator"
+    subscribes_to: [task.start]
+    publishes:
+      - queue.advance
+"#;
+    let cfg: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let registry = crate::hat_registry::HatRegistry::from_config(&cfg);
+
+    let business_topics = vec!["review.dimension.ready".to_string()];
+    let terminal_topics: Vec<String> = vec![];
+
+    // review-coordinator: business_topics has the topic AND hat
+    // publishes it → exempt.
+    let admitted = crate::event_loop::is_isolated_exempt_topic(
+        registry.get_config(&ralph_proto::HatId::from("review-coordinator")),
+        "review.dimension.ready",
+        &business_topics,
+        &terminal_topics,
+    );
+    assert!(
+        admitted,
+        "U13: hat whose publishes intersects business_topics must be exempt"
+    );
+
+    // coordinator: hat does NOT publish review.dimension.ready → not
+    // exempt even though the topic is in business_topics (SSOT).
+    let not_admitted = !crate::event_loop::is_isolated_exempt_topic(
+        registry.get_config(&ralph_proto::HatId::from("coordinator")),
+        "review.dimension.ready",
+        &business_topics,
+        &terminal_topics,
+    );
+    assert!(
+        not_admitted,
+        "U13: hat that does not publish the topic must NOT be exempt"
+    );
+}
+
+#[test]
+fn u13_terminal_topics_carve_out_admits_serial_walk() {
+    // 2026-07-04-001 plan U13 (KTD-11): the same carve-out also
+    // applies to `event_policy.terminal_topics`. Per-step terminal
+    // events declared in terminal_topics are exempt from the budget
+    // when the calling hat publishes them.
+    let yaml = r#"
+hats:
+  fixer:
+    name: "Fixer"
+    subscribes_to: [fix.unit.ready]
+    publishes:
+      - fix.applied
+"#;
+    let cfg: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let registry = crate::hat_registry::HatRegistry::from_config(&cfg);
+
+    let business_topics: Vec<String> = vec![];
+    let terminal_topics = vec!["fix.applied".to_string()];
+
+    let admitted = crate::event_loop::is_isolated_exempt_topic(
+        registry.get_config(&ralph_proto::HatId::from("fixer")),
+        "fix.applied",
+        &business_topics,
+        &terminal_topics,
+    );
+    assert!(
+        admitted,
+        "U13: terminal_topics carve-out must admit hat that publishes the topic"
+    );
+}
+
+#[test]
+fn u13_business_topics_carve_out_does_not_admit_unrelated_hat() {
+    // Negative: a topic not declared in business_topics or
+    // terminal_topics is NOT exempt even if the hat publishes it.
+    let yaml = r#"
+hats:
+  implementer:
+    name: "Implementer"
+    subscribes_to: [work.ready]
+    publishes:
+      - work.done
+"#;
+    let cfg: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let registry = crate::hat_registry::HatRegistry::from_config(&cfg);
+
+    let business_topics = vec!["something.else".to_string()];
+    let terminal_topics: Vec<String> = vec![];
+
+    let not_admitted = !crate::event_loop::is_isolated_exempt_topic(
+        registry.get_config(&ralph_proto::HatId::from("implementer")),
+        "work.done",
+        &business_topics,
+        &terminal_topics,
+    );
+    assert!(
+        not_admitted,
+        "U13: topics not in business_topics/terminal_topics must NOT be exempt"
     );
 }
