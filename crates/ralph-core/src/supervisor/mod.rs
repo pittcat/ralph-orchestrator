@@ -340,6 +340,7 @@ mod phase;
 mod migrations;
 #[cfg(feature = "supervisor-db")]
 mod rusqlite;
+mod worktree_bind;
 #[cfg(test)]
 mod memory_protocol_tests;
 #[cfg(test)]
