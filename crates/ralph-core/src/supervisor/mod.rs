@@ -368,6 +368,18 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// integrator and the worktree cleanup at loop end).
     fn list_worktree_paths(&self, wave_id: &str) -> SupervisorStoreResult<Vec<SlotResource>>;
 
+    /// 2026-07-03-001 plan U8: read a single slot's
+    /// resource binding. Used by the rebind path to fetch
+    /// the prior worktree path before calling
+    /// `cleanup_worktree` (F-008). Returns `None` when the
+    /// slot has not been bound yet (fresh wave, never
+    /// bound) or when the slot doesn't exist on the wave.
+    fn get_slot_resource(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<SlotResource>>;
+
     /// Set the wave's phase directly. Used by the
     /// recovery path (U11) to mark in-flight waves past
     /// `aggregate_timeout_secs` as `Failed` (F-006 / R-C3).

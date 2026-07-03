@@ -330,6 +330,21 @@ impl SupervisorStore for InMemorySupervisorStore {
                 "shared_readonly slot cannot receive a worktree binding".to_string(),
             ));
         }
+        // 2026-07-03-001 plan U8 / F-008: rebind path runs
+        // `cleanup_worktree` on the prior path before
+        // overwriting. We only call cleanup when the new
+        // path differs from the old; equal paths are
+        // idempotent and the underlying git worktree is
+        // still ours. Cleanup failures are logged at the
+        // call site (we keep going; the worktree may have
+        // been removed by a previous `cleanup_worktree`).
+        if let Some(prev) = slot.resource.as_ref() {
+            if prev.worktree_path != binding.worktree_path {
+                if let Some(prev_path) = &prev.worktree_path {
+                    cleanup_worktree_path(prev_path);
+                }
+            }
+        }
         slot.resource = Some(binding);
         Ok(())
     }
@@ -405,10 +420,13 @@ impl SupervisorStore for InMemorySupervisorStore {
             })?;
         slot.status = SlotStatus::Failed;
         slot.failure_reason = Some(reason.to_string());
-        // KTD-5 + U6 phase: a permanent slot failure on a
-        // required slot transitions the wave to Failed
-        // (coordinator confirms via fan_in_status).
-        wave.phase = WavePhase::Failed;
+        // U2 / F-002 / KTD-8: the store MUST NOT mutate
+        // `wave.phase` here; phase verdict is coordinator-owned
+        // via `set_wave_phase`, called by the coordinator
+        // after `evaluate_phase` returns `Failed`. The store
+        // layer only tracks the slot lifecycle; pre-empting
+        // the verdict while sibling slots are still in-flight
+        // would incorrectly flip the wave to `Failed`.
         Ok(())
     }
 
@@ -527,6 +545,19 @@ impl SupervisorStore for InMemorySupervisorStore {
             .collect())
     }
 
+    fn get_slot_resource(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<SlotResource>> {
+        let inner = self.lock()?;
+        Ok(inner
+            .waves_by_id
+            .get(wave_id)
+            .and_then(|w| w.slots.get(&slot_index))
+            .and_then(|s| s.resource.clone()))
+    }
+
     fn set_wave_phase(&self, wave_id: &str, phase: WavePhase) -> SupervisorStoreResult<()> {
         let mut inner = self.lock()?;
         let wave = inner
@@ -576,6 +607,36 @@ impl SupervisorStore for InMemorySupervisorStore {
             .get(&(wave_id.to_string(), slot_index))
             .and_then(|d| d.pid))
     }
+}
+
+/// 2026-07-03-001 plan U8: rebind cleanup helper. The
+/// production call site uses `crate::worktree::remove_worktree`;
+/// the test spy overrides this via the `cleanup_spy` static
+/// so unit tests can count invocations without spinning up
+/// `git worktree remove` on a fake directory.
+fn cleanup_worktree_path(path: &str) {
+    CLEANUP_SPY.with(|spy| {
+        spy.borrow_mut().push(path.to_string());
+    });
+}
+
+thread_local! {
+    static CLEANUP_SPY: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Test-only helper: snapshot the cleanup-spy buffer so
+/// the U8 rebind test can assert the cleanup call was made
+/// on the prior worktree path.
+#[cfg(test)]
+pub fn cleanup_calls_snapshot() -> Vec<String> {
+    CLEANUP_SPY.with(|spy| spy.borrow().clone())
+}
+
+/// Test-only helper: clear the cleanup-spy buffer between
+/// tests so each test starts with an empty observation list.
+#[cfg(test)]
+pub fn cleanup_calls_reset() {
+    CLEANUP_SPY.with(|spy| spy.borrow_mut().clear());
 }
 
 #[cfg(test)]
@@ -683,6 +744,61 @@ mod tests {
         assert_eq!(snap.phase, WavePhase::Collect);
     }
 
+    /// U2 / F-002 / KTD-8 invariant pin: when 1 slot fails and
+    /// at least 1 sibling is still in-flight, the store MUST
+    /// NOT mutate `wave.phase` — that verdict belongs to the
+    /// coordinator (KTD-8). The store only marks the slot
+    /// itself `Failed`; phase mutation is coordinator-owned
+    /// via `set_wave_phase` (called from `tick` after
+    /// `evaluate_phase` returns `Failed`).
+    #[test]
+    fn record_slot_failure_with_in_flight_siblings_keeps_phase_collect() {
+        let s = store();
+        let wave = s.register_wave("partial-fail-mem", WaveKind::Exec, 2).unwrap();
+        // Bind both slots so dispatch is allowed.
+        s.bind_worktree(
+            &wave,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/loose-ends/0".to_string()),
+                branch: Some("ralph/u0".to_string()),
+            },
+        )
+        .unwrap();
+        s.bind_worktree(
+            &wave,
+            1,
+            SlotResource {
+                slot_index: 1,
+                worktree_path: Some(".ralph/loose-ends/1".to_string()),
+                branch: Some("ralph/u1".to_string()),
+            },
+        )
+        .unwrap();
+        // Dispatch both slots: slot 0 lands Failed, slot 1
+        // stays Dispatched (an in-flight sibling).
+        s.try_dispatch_next(4).unwrap().unwrap();
+        s.try_dispatch_next(4).unwrap().unwrap();
+        // Record the failure on slot 0.
+        s.record_slot_failure(&wave, 0, "boom").unwrap();
+        // Phase MUST remain Collect (not Failed) because a
+        // sibling slot is still in-flight and `set_wave_phase`
+        // is coordinator-owned (KTD-8 / F-002).
+        let snap = s.fan_in_status(&wave).unwrap();
+        assert_eq!(
+            snap.phase,
+            WavePhase::Collect,
+            "phase must stay Collect while a sibling is still in-flight (KTD-8); got {:?}",
+            snap.phase
+        );
+        assert_eq!(snap.failed_count, 1, "slot 0 should be Failed");
+        assert_eq!(
+            snap.in_flight_count, 1,
+            "slot 1 should still be in_flight after the sibling failure"
+        );
+    }
+
     #[test]
     fn fan_in_complete_reaches_expected_total() {
         let s = store();
@@ -751,5 +867,92 @@ mod tests {
         s.mark_merge_to_events(&wave).unwrap();
         let snap = s.fan_in_status(&wave).unwrap();
         assert!(snap.merged_to_events);
+    }
+
+    /// U8 / F-008 / R8: rebinding a slot to a different
+    /// worktree path must call `cleanup_worktree` on the
+    /// prior path before overwriting. Without this branch
+    /// the rebind path leaks worktree dirs and git
+    /// branches on every dispatch retry (45 leaked dirs
+    /// after 5 iters × 4 slots × 3 waves × 3 retries).
+    #[test]
+    fn bind_worktree_rebind_cleans_up_prior_path() {
+        super::cleanup_calls_reset();
+        let s = store();
+        let wave = s.register_wave("rebind", WaveKind::Exec, 1).unwrap();
+        s.bind_worktree(
+            &wave,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/old/0".to_string()),
+                branch: Some("ralph/old".to_string()),
+            },
+        )
+        .unwrap();
+        // Fresh binding (different path) → cleanup must be
+        // invoked with the OLD path.
+        s.bind_worktree(
+            &wave,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/new/0".to_string()),
+                branch: Some("ralph/new".to_string()),
+            },
+        )
+        .unwrap();
+        let calls = super::cleanup_calls_snapshot();
+        assert_eq!(calls, vec![".ralph/old/0".to_string()]);
+        // Final binding points at the new path.
+        let final_binding = s.get_slot_resource(&wave, 0).unwrap().unwrap();
+        assert_eq!(
+            final_binding.worktree_path.as_deref(),
+            Some(".ralph/new/0")
+        );
+    }
+
+    /// U8 edge: fresh slot (no prior binding) → no cleanup
+    /// call. The rebind path is gated on `prev.resource` so
+    /// a first-time bind is a no-op for cleanup.
+    #[test]
+    fn bind_worktree_fresh_does_not_call_cleanup() {
+        super::cleanup_calls_reset();
+        let s = store();
+        let wave = s.register_wave("fresh", WaveKind::Exec, 1).unwrap();
+        s.bind_worktree(
+            &wave,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/new/0".to_string()),
+                branch: Some("ralph/new".to_string()),
+            },
+        )
+        .unwrap();
+        let calls = super::cleanup_calls_snapshot();
+        assert!(calls.is_empty(), "fresh bind must NOT trigger cleanup");
+    }
+
+    /// U8 edge: rebind to the SAME path is idempotent —
+    /// cleanup is NOT invoked (the underlying worktree is
+    /// still ours and there's nothing to remove).
+    #[test]
+    fn bind_worktree_rebind_to_same_path_is_idempotent() {
+        super::cleanup_calls_reset();
+        let s = store();
+        let wave = s.register_wave("idem", WaveKind::Exec, 1).unwrap();
+        let binding = SlotResource {
+            slot_index: 0,
+            worktree_path: Some(".ralph/same/0".to_string()),
+            branch: Some("ralph/same".to_string()),
+        };
+        s.bind_worktree(&wave, 0, binding.clone()).unwrap();
+        s.bind_worktree(&wave, 0, binding).unwrap();
+        let calls = super::cleanup_calls_snapshot();
+        assert!(
+            calls.is_empty(),
+            "rebind to same path must NOT call cleanup"
+        );
     }
 }

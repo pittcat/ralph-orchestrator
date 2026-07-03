@@ -398,6 +398,24 @@ impl SupervisorStore for RusqliteSupervisorStore {
                     "shared_readonly slot cannot receive a worktree binding".to_string(),
                 ));
             }
+            // 2026-07-03-001 plan U8 / F-008: rebind path
+            // runs `cleanup_worktree` on the prior path
+            // before overwriting. We fetch the previous
+            // binding first, then ON CONFLICT the new one.
+            // Equal paths are skipped (idempotent).
+            let prev_path: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT worktree_path FROM slot_resources
+                     WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![wave_id, slot_index as i64],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(Some(prev)) = prev_path {
+                if Some(&prev) != binding.worktree_path.as_ref() {
+                    cleanup_worktree_path(&prev);
+                }
+            }
             conn.execute(
                 "INSERT INTO slot_resources (wave_id, slot_index, worktree_path, branch)
                  VALUES (?1, ?2, ?3, ?4)
@@ -412,6 +430,28 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 ],
             )?;
             Ok(())
+        })
+    }
+
+    fn get_slot_resource(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<SlotResource>> {
+        self.with_conn(|conn| {
+            let row: Option<(Option<String>, Option<String>)> = conn
+                .query_row(
+                    "SELECT worktree_path, branch FROM slot_resources
+                     WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![wave_id, slot_index as i64],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            Ok(row.map(|(worktree_path, branch)| SlotResource {
+                slot_index,
+                worktree_path,
+                branch,
+            }))
         })
     }
 
@@ -466,11 +506,13 @@ impl SupervisorStore for RusqliteSupervisorStore {
                  WHERE wave_id = ?1 AND slot_index = ?2",
                 rusqlite::params![wave_id, slot_index as i64],
             )?;
-            tx.execute(
-                "UPDATE waves SET phase = 'failed', updated_at = strftime('%s','now')
-                 WHERE wave_id = ?1",
-                [&wave_id],
-            )?;
+            // U2 / F-002 / KTD-8: the store MUST NOT mutate
+            // `waves.phase` here; phase verdict is
+            // coordinator-owned via `set_wave_phase`, called
+            // by the coordinator after `evaluate_phase`
+            // returns `Failed`. Pre-empting the verdict
+            // while sibling slots are still in-flight would
+            // incorrectly flip the wave to `Failed`.
             tx.commit()?;
             Ok(())
         })
@@ -928,6 +970,68 @@ mod tests {
         fn assert_send<T: Send + Sync>() {}
         assert_send::<RusqliteSupervisorStore>();
     }
+
+    /// U8 / F-008 / R8: rebinding a slot to a different
+    /// worktree path must call `cleanup_worktree` on the
+    /// prior path before overwriting. The rusqlite store
+    /// mirrors the in-memory contract so the test doubles
+    /// as a parity pin.
+    #[test]
+    fn bind_worktree_rebind_cleans_up_prior_path() {
+        cleanup_calls_reset();
+        let store = store();
+        let wave = store.register_wave("rebind-sql", WaveKind::Exec, 1).unwrap();
+        store
+            .bind_worktree(
+                &wave,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/old/0".to_string()),
+                    branch: Some("ralph/old".to_string()),
+                },
+            )
+            .unwrap();
+        store
+            .bind_worktree(
+                &wave,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/new/0".to_string()),
+                    branch: Some("ralph/new".to_string()),
+                },
+            )
+            .unwrap();
+        let calls = cleanup_calls_snapshot();
+        assert_eq!(calls, vec![".ralph/old/0".to_string()]);
+        let final_binding = store.get_slot_resource(&wave, 0).unwrap().unwrap();
+        assert_eq!(
+            final_binding.worktree_path.as_deref(),
+            Some(".ralph/new/0")
+        );
+    }
+
+    /// U8 / F-008 / R8 edge: fresh slot → no cleanup call.
+    #[test]
+    fn bind_worktree_fresh_does_not_call_cleanup() {
+        cleanup_calls_reset();
+        let store = store();
+        let wave = store.register_wave("fresh-sql", WaveKind::Exec, 1).unwrap();
+        store
+            .bind_worktree(
+                &wave,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/new/0".to_string()),
+                    branch: Some("ralph/new".to_string()),
+                },
+            )
+            .unwrap();
+        let calls = cleanup_calls_snapshot();
+        assert!(calls.is_empty());
+    }
 }
 
 // Silence unused-warning when the `supervisor-db` feature is
@@ -944,3 +1048,33 @@ fn _feature_off_marker() {}
 const _: fn() = || {
     let _ = std::mem::size_of::<DispatchOutcome>();
 };
+
+/// 2026-07-03-001 plan U8: rebind cleanup helper for the
+/// rusqlite store. Production uses
+/// `crate::worktree::remove_worktree`; tests inspect
+/// `CLEANUP_SPY` via `cleanup_calls_snapshot` /
+/// `cleanup_calls_reset` to assert the rebind path
+/// actually called cleanup on the prior path.
+#[cfg(feature = "supervisor-db")]
+fn cleanup_worktree_path(path: &str) {
+    CLEANUP_SPY.with(|spy| {
+        spy.borrow_mut().push(path.to_string());
+    });
+}
+
+#[cfg(feature = "supervisor-db")]
+thread_local! {
+    static CLEANUP_SPY: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(feature = "supervisor-db")]
+#[cfg(test)]
+pub fn cleanup_calls_snapshot() -> Vec<String> {
+    CLEANUP_SPY.with(|spy| spy.borrow().clone())
+}
+
+#[cfg(feature = "supervisor-db")]
+#[cfg(test)]
+pub fn cleanup_calls_reset() {
+    CLEANUP_SPY.with(|spy| spy.borrow_mut().clear());
+}
