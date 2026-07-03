@@ -339,3 +339,37 @@ pub const FINDING_PHASE_AUTHORITY_PIPELINE_NOT_ALLOWED: &str =
 /// state to track, so the lint surfaces the misconfiguration
 /// rather than letting the loop run inert. Always `Error`.
 pub const FINDING_PHASE_AUTHORITY_EMPTY: &str = "preset.phase_authority_empty";
+
+// ──────────────────────────────────────────────────────────────────────────
+// 2026-07-03-001 plan U9: supervisor preset lint finding IDs
+// ──────────────────────────────────────────────────────────────────────────
+
+/// `event_loop.supervisor.enabled: true` was declared without
+/// `event_loop.execution_mode: isolated`. Per R4 the supervisor
+/// path requires the isolated mode contract (3-hat coordinator
+/// ceiling does not apply, but isolation is mandatory).
+/// Always `Error` so the preset fails to load with a clear
+/// remediation hint.
+pub const FINDING_SUPERVISOR_REQUIRES_ISOLATED: &str = "preset.supervisor_requires_isolated";
+
+/// An integrator-style hat (`exec-integrator` /
+/// `fix-integrator`) declares `*.unit.done` (the per-slot
+/// `exec.unit.done` / `fix.unit.done` topic) in its
+/// `triggers:` list. Per KTD-6 the integrator's handoff
+/// trigger is the wave-complete coord event, NOT the
+/// per-slot done topic. `*.unit.done` belongs to the
+/// worker fan-out side; including it in the integrator's
+/// triggers leaks slot-level semantics into the merge path.
+/// Always `Error`.
+pub const FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE: &str =
+    "preset.supervisor_integrator_triggers_slot_done";
+
+/// A hat's `publishes:` list contains one of the six
+/// supervisor coordination topics (`*.wave.complete` /
+/// `*.wave.failed`). Per R14 only the supervisor itself may
+/// inject those; agents that declare them as `publishes`
+/// will silently lose their emits to the origin guard. The
+/// lint surfaces the misconfiguration at preset-load time.
+/// Always `Error`.
+pub const FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC: &str =
+    "preset.supervisor_hat_publishes_coord_topic";
