@@ -198,6 +198,39 @@ mod tests {
         pending: u32,
         cancel: bool,
     ) -> (WaveSnapshot, PhaseInputs) {
+        // U3 / F-003: build `slots` so it matches the count
+        // contract. Each row carries a synthetic status
+        // mapping the count split (the helper leaves the
+        // exact indices opaque, so callers that care about
+        // which slot is blocking must construct their own
+        // snapshot — see the U3 tests).
+        //
+        // Layout: [completed..., failed..., in_flight..., pending...]
+        // The slice sizes sum to expected_total.
+        let mut slots: Vec<(u32, SlotStatus)> = Vec::new();
+        let mut idx = 0u32;
+        for _ in 0..completed {
+            slots.push((idx, SlotStatus::Completed));
+            idx += 1;
+        }
+        for _ in 0..failed {
+            slots.push((idx, SlotStatus::Failed));
+            idx += 1;
+        }
+        for _ in 0..in_flight {
+            slots.push((idx, SlotStatus::Dispatched));
+            idx += 1;
+        }
+        for _ in 0..pending {
+            slots.push((idx, SlotStatus::Pending));
+            idx += 1;
+        }
+        // If there is a mismatch (caller passed counts that
+        // don't sum to expected_total), pad with Pending.
+        while idx < expected_total {
+            slots.push((idx, SlotStatus::Pending));
+            idx += 1;
+        }
         let s = WaveSnapshot {
             wave_id: "w-1".into(),
             kind: crate::supervisor::WaveKind::Exec,
@@ -210,13 +243,7 @@ mod tests {
             cancel_requested: cancel,
             merged_to_events: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
-            // U3 / F-003: snap helper builds a slots vec that
-            // mirrors the count aggregate so the
-            // pre-fix-range-based blocking_slots call site
-            // (the `blocking_slots_index_helper_is_stable`
-            // test) keeps its semantic anchor. The new
-            // U3 tests build their own `slots` explicitly.
-            slots: Vec::new(),
+            slots,
         };
         let i = PhaseInputs {
             aggregate_timeout_secs: 60,
@@ -241,7 +268,10 @@ mod tests {
                 reason: FailedReason::RequiredSlotFailure,
                 blocking_slots,
             } => {
-                assert!(!blocking_slots.is_empty(), "blocking_slots must list the failed slot");
+                assert!(
+                    !blocking_slots.is_empty(),
+                    "blocking_slots must list the failed slot"
+                );
             }
             other => panic!("expected RequiredSlotFailure, got {other:?}"),
         }
@@ -386,13 +416,13 @@ mod tests {
             cancel_requested: false,
             merged_to_events: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
-            slots: vec![
-                (0, SlotStatus::Completed),
-                (1, SlotStatus::Completed),
-            ],
+            slots: vec![(0, SlotStatus::Completed), (1, SlotStatus::Completed)],
         };
         let blocking = snap.blocking_slot_indices();
-        assert!(blocking.is_empty(), "no failures → no blocking slots: {blocking:?}");
+        assert!(
+            blocking.is_empty(),
+            "no failures → no blocking slots: {blocking:?}"
+        );
     }
 
     #[test]
@@ -463,10 +493,7 @@ mod tests {
         finalize.pending_count = 0;
         finalize.in_flight_count = 0;
         finalize.completed_count = 5;
-        assert_eq!(
-            evaluate_phase(&finalize, &inputs),
-            PhaseDecision::Integrate
-        );
+        assert_eq!(evaluate_phase(&finalize, &inputs), PhaseDecision::Integrate);
         let _ = SlotStatus::Pending; // ensures the import is used in tests.
     }
 }

@@ -20,7 +20,10 @@ mod imp {
     /// Bumped whenever the schema below changes. The migrations
     /// list is ordered; running each migration brings the
     /// database up to that version.
-    pub const CURRENT_VERSION: i64 = 1;
+    ///
+    /// U4 bump: `wave_id_seq` autoincrement table replaces the
+    /// pre-fix `SELECT COUNT(*) + 1 FROM waves` allocator.
+    pub const CURRENT_VERSION: i64 = 2;
 
     /// Apply migrations sequentially. Each migration is a
     /// closure that performs the SQL DDL and bumps the
@@ -64,10 +67,23 @@ mod imp {
     }
 
     fn migrations() -> &'static [Migration] {
-        &[Migration {
-            version: CURRENT_VERSION,
-            ddl: include_str!("migrations/v1.sql"),
-        }]
+        // U4 / F-004 / R4: `wave_id_seq` autoincrement
+        // replaces the `SELECT COUNT(*) + 1 FROM waves`
+        // allocator. v1 keeps the original schema; v2 adds
+        // the singleton seq row used by `register_wave`.
+        // The migration is idempotent because v2 uses
+        // `CREATE TABLE IF NOT EXISTS`; existing v1
+        // databases auto-upgrade.
+        &[
+            Migration {
+                version: 1,
+                ddl: include_str!("migrations/v1.sql"),
+            },
+            Migration {
+                version: 2,
+                ddl: include_str!("migrations/v2.sql"),
+            },
+        ]
     }
 }
 
@@ -121,6 +137,11 @@ mod tests {
             "worker_results",
             "wave_queue",
             "compensation_jobs",
+            // U4: `wave_id_seq` is the atomic wave_id
+            // allocator; the migration test pins its
+            // existence so a future DDL drop would surface
+            // before runtime.
+            "wave_id_seq",
         ];
         for table in tables {
             let count: i64 = conn

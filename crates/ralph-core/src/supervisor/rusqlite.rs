@@ -20,12 +20,12 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension};
 
+#[cfg(feature = "supervisor-db")]
+use super::migrations;
 use super::{
     DispatchOutcome, IsolationMode, SlotResource, SlotStatus, SupervisorStore,
     SupervisorStoreError, SupervisorStoreResult, WaveKind, WavePhase, WaveSnapshot,
 };
-#[cfg(feature = "supervisor-db")]
-use super::migrations;
 
 /// Persistent `SupervisorStore` backed by SQLite (WAL mode,
 /// foreign keys ON, see `migrations::run`). The store is
@@ -47,17 +47,10 @@ impl RusqliteSupervisorStore {
     /// (R-C4). The path is created if missing.
     pub fn open(path: impl AsRef<Path>) -> SupervisorStoreResult<Self> {
         let path = path.as_ref();
-        let conn = Connection::open(path).map_err(|err| {
-            SupervisorStoreError::Open(format!(
-                "{}: {err}",
-                path.display()
-            ))
-        })?;
+        let conn = Connection::open(path)
+            .map_err(|err| SupervisorStoreError::Open(format!("{}: {err}", path.display())))?;
         migrations::run(&conn).map_err(|err| {
-            SupervisorStoreError::Open(format!(
-                "migration failed on {}: {err}",
-                path.display()
-            ))
+            SupervisorStoreError::Open(format!("migration failed on {}: {err}", path.display()))
         })?;
         Ok(Self {
             inner: Arc::new(Mutex::new(conn)),
@@ -68,18 +61,17 @@ impl RusqliteSupervisorStore {
     /// Used by tests so they can pass `:memory:` connections.
     /// Migrations still run here so the same invariant holds.
     pub fn from_connection(connection: Connection) -> SupervisorStoreResult<Self> {
-        migrations::run(&connection).map_err(|err| {
-            SupervisorStoreError::Open(format!("migration failed: {err}"))
-        })?;
+        migrations::run(&connection)
+            .map_err(|err| SupervisorStoreError::Open(format!("migration failed: {err}")))?;
         Ok(Self {
             inner: Arc::new(Mutex::new(connection)),
         })
     }
 
     fn lock(&self) -> SupervisorStoreResult<std::sync::MutexGuard<'_, Connection>> {
-        self.inner.lock().map_err(|_| {
-            SupervisorStoreError::Storage("rusqlite store mutex poisoned".to_string())
-        })
+        self.inner
+            .lock()
+            .map_err(|_| SupervisorStoreError::Storage("rusqlite store mutex poisoned".to_string()))
     }
 
     /// Convenience: acquire the connection once and run `f` so
@@ -103,8 +95,7 @@ impl Default for RusqliteSupervisorStore {
         // instance here points at a throwaway path so accidental
         // `Default::default()` calls never touch the operator's
         // workspace.
-        Self::open(db_path_for_tests_helper())
-            .expect("throwaway rusqlite store must open")
+        Self::open(db_path_for_tests_helper()).expect("throwaway rusqlite store must open")
     }
 }
 
@@ -241,19 +232,27 @@ impl SupervisorStore for RusqliteSupervisorStore {
                     idempotency_key.to_string(),
                 ));
             }
-            // Allocate a wave_id by counting existing waves;
-            // matches the in-memory store's "w-N" shape so
-            // debugging across stores stays consistent.
-            let next_seq: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) + 1 FROM waves",
-                    [],
-                    |row| row.get(0),
-                )?;
+            // U4 / F-004 / R4: allocate the wave_id atomically
+            // via the `wave_id_seq` autoincrement table. The
+            // pre-fix `SELECT COUNT(*) + 1 FROM waves` was
+            // racy under concurrent register_wave callers
+            // because two transactions could observe the same
+            // count and pick identical PKs; the seq table
+            // guarantees one row per INSERT.
+            //
+            // We use `RETURNING seq` so the value lands in the
+            // same atomic step as the insert. The subsequent
+            // INSERT into `waves` reuses the seq value as the
+            // primary key.
+            let tx = conn.transaction()?;
+            let next_seq: i64 = tx.query_row(
+                "INSERT INTO wave_id_seq DEFAULT VALUES RETURNING seq",
+                [],
+                |row| row.get(0),
+            )?;
             let wave_id = format!("w-{next_seq}");
             let isolation = default_isolation_for(kind);
 
-            let tx = conn.transaction()?;
             tx.execute(
                 "INSERT INTO waves (wave_id, idempotency_key, kind, expected_total, phase)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -383,12 +382,10 @@ impl SupervisorStore for RusqliteSupervisorStore {
                     |row| row.get(0),
                 )
                 .map_err(|err| match err {
-                    rusqlite::Error::QueryReturnedNoRows => {
-                        SupervisorStoreError::UnknownSlot {
-                            wave_id: wave_id.to_string(),
-                            slot_index,
-                        }
-                    }
+                    rusqlite::Error::QueryReturnedNoRows => SupervisorStoreError::UnknownSlot {
+                        wave_id: wave_id.to_string(),
+                        slot_index,
+                    },
                     other => SupervisorStoreError::Storage(other.to_string()),
                 })?;
             if isolation == "shared_readonly"
@@ -748,11 +745,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
         })
     }
 
-    fn pid_for_slot(
-        &self,
-        wave_id: &str,
-        slot_index: u32,
-    ) -> SupervisorStoreResult<Option<u32>> {
+    fn pid_for_slot(&self, wave_id: &str, slot_index: u32) -> SupervisorStoreResult<Option<u32>> {
         self.with_conn(|conn| {
             let pid: Option<Option<i64>> = conn
                 .query_row(
@@ -796,6 +789,63 @@ mod tests {
             worktree_path: Some(format!(".ralph/wt/{slot}")),
             branch: Some(format!("ralph/u{slot}")),
         }
+    }
+
+    /// U4 / F-004 / R4 regression pin: concurrent
+    /// `register_wave` calls MUST allocate distinct `wave_id`s
+    /// (autoincrement via `wave_id_seq`). 10 threads × 10
+    /// calls with distinct idempotency keys → 100 distinct
+    /// wave_ids.
+    #[test]
+    fn register_wave_concurrent_calls_get_unique_ids() {
+        use rusqlite::Connection;
+        use std::sync::Arc;
+        // Open an in-memory DB and share the connection via
+        // a guarded Arc so multiple threads can hammer the
+        // store trait simultaneously. The store trait takes
+        // `&self`, so a single instance can be shared.
+        let conn = Connection::open_in_memory().unwrap();
+        let store = Arc::new(RusqliteSupervisorStore::from_connection(conn).unwrap());
+        // 10 threads × 10 calls = 100 register_wave calls
+        // (each with a unique idempotency_key).
+        let n_threads = 10u32;
+        let calls_per_thread = 10u32;
+        let store_for_threads = store.clone();
+        let wave_ids: Vec<String> = std::thread::scope(|s| {
+            let mut handles = Vec::new();
+            for t in 0..n_threads {
+                let store = store_for_threads.clone();
+                handles.push(s.spawn(move || {
+                    let mut ids = Vec::new();
+                    for c in 0..calls_per_thread {
+                        let key = format!("k-{t}-{c}");
+                        let id = store
+                            .register_wave(&key, WaveKind::Exec, 1)
+                            .expect("register_wave must succeed");
+                        ids.push(id);
+                    }
+                    ids
+                }));
+            }
+            let mut all_ids: Vec<String> = Vec::new();
+            for h in handles {
+                all_ids.extend(h.join().expect("thread must not panic"));
+            }
+            all_ids
+        });
+        // All 100 wave_ids must be distinct.
+        let total = wave_ids.len();
+        let mut sorted = wave_ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            total,
+            "concurrent register_wave MUST allocate distinct wave_ids (got {} dup of {})",
+            total - sorted.len(),
+            total
+        );
+        assert_eq!(total, (n_threads * calls_per_thread) as usize);
     }
 
     /// U5 migration + reopen path. Confirms `open` is callable
@@ -966,10 +1016,7 @@ mod tests {
         store.try_dispatch_next(2).unwrap().unwrap();
         let snap = store.fan_in_status(&wave).unwrap();
         assert_eq!(
-            snap.completed_count
-                + snap.failed_count
-                + snap.in_flight_count
-                + snap.pending_count,
+            snap.completed_count + snap.failed_count + snap.in_flight_count + snap.pending_count,
             snap.expected_total
         );
     }
@@ -1055,7 +1102,9 @@ mod tests {
     fn bind_worktree_rebind_cleans_up_prior_path() {
         cleanup_calls_reset();
         let store = store();
-        let wave = store.register_wave("rebind-sql", WaveKind::Exec, 1).unwrap();
+        let wave = store
+            .register_wave("rebind-sql", WaveKind::Exec, 1)
+            .unwrap();
         store
             .bind_worktree(
                 &wave,
@@ -1081,10 +1130,7 @@ mod tests {
         let calls = cleanup_calls_snapshot();
         assert_eq!(calls, vec![".ralph/old/0".to_string()]);
         let final_binding = store.get_slot_resource(&wave, 0).unwrap().unwrap();
-        assert_eq!(
-            final_binding.worktree_path.as_deref(),
-            Some(".ralph/new/0")
-        );
+        assert_eq!(final_binding.worktree_path.as_deref(), Some(".ralph/new/0"));
     }
 
     /// U8 / F-008 / R8 edge: fresh slot → no cleanup call.
