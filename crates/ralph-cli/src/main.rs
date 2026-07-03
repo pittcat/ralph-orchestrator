@@ -749,10 +749,38 @@ mod tests {
             iteration: None,
             format: OutputFormat::Table,
             file: None,
+            events_source: crate::commands::events::EventsSource::Auto,
             clear: false,
             confirm: None,
         }));
         assert!(!is_diagnostics_eligible_command(command.as_ref()));
+    }
+
+    #[test]
+    fn test_events_parses_events_source_flag() {
+        let cli = Cli::try_parse_from(["ralph", "events", "--events-source", "hat-channel"])
+            .expect("CLI parse failed");
+        let args = match cli.command.expect("events subcommand") {
+            Commands::Events(args) => args,
+            other => panic!("expected Events, got {other:?}"),
+        };
+        assert_eq!(
+            args.events_source,
+            crate::commands::events::EventsSource::HatChannel
+        );
+    }
+
+    #[test]
+    fn test_events_parses_default_events_source_auto() {
+        let cli = Cli::try_parse_from(["ralph", "events"]).expect("CLI parse failed");
+        let args = match cli.command.expect("events subcommand") {
+            Commands::Events(args) => args,
+            other => panic!("expected Events, got {other:?}"),
+        };
+        assert_eq!(
+            args.events_source,
+            crate::commands::events::EventsSource::Auto
+        );
     }
 
     // ── U2: subprocess TUI parent must use trace_only mode (2026-06-14) ──

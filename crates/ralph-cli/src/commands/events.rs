@@ -1,10 +1,23 @@
 use crate::cli::{ColorMode, OutputFormat, resolve_marker_target, resolve_workspace_root};
 use crate::display::colors;
+use crate::operation_guard::OperationContext;
 use anyhow::{Result, bail};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use ralph_core::EventHistory;
 use std::fs;
 use std::path::PathBuf;
+
+/// Source of events for `ralph events`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum EventsSource {
+    /// Automatically select: hat-channel in agent context, main otherwise.
+    #[default]
+    Auto,
+    /// Read from the main events ledger (current-events marker or events.jsonl).
+    Main,
+    /// Read from the per-hat write channel (current-hat-events marker).
+    HatChannel,
+}
 
 /// Arguments for the events subcommand.
 #[derive(Parser, Debug)]
@@ -28,6 +41,10 @@ pub struct EventsArgs {
     /// Path to events file (default: auto-detects current run)
     #[arg(long)]
     pub file: Option<PathBuf>,
+
+    /// Which events ledger to read: main loop ledger, per-hat channel, or auto-detect.
+    #[arg(long, value_enum, default_value_t = EventsSource::Auto)]
+    pub events_source: EventsSource,
 
     /// Clear the event history. Requires --confirm <loop_id> to match the
     /// active loop, so accidental or agent-triggered clears are blocked.
@@ -72,18 +89,79 @@ pub(crate) fn check_events_clear_confirm(
     }
 }
 
+const HAT_EVENTS_MARKER: &str = ".ralph/current-hat-events";
+
+/// Resolve the events file path according to the requested source.
+///
+/// - `Main` always returns the main loop ledger (`current-events` marker or `.ralph/events.jsonl`).
+/// - `HatChannel` returns the path from `.ralph/current-hat-events`; errors if the marker is missing.
+/// - `Auto` returns the hat-channel path when running in an agent context and a marker exists;
+///   otherwise falls back to the main ledger. A missing/empty hat-channel in agent context logs
+///   a warning and falls back to main, matching the hat-channel routing fallback diagnostics.
+pub fn resolve_events_source(ctx: &OperationContext, source_arg: EventsSource) -> Result<PathBuf> {
+    let main_path = ctx
+        .resolve_accepted_events_path()
+        .unwrap_or_else(|| ctx.workspace_root.join(".ralph/events.jsonl"));
+
+    match source_arg {
+        EventsSource::Main => Ok(main_path),
+        EventsSource::HatChannel => match resolve_hat_channel_path(ctx) {
+            Some(path) => Ok(path),
+            None => bail!(
+                "No hat-channel marker found at {}. \
+                 `--events-source hat-channel` can only be used inside an isolated hat activation.",
+                ctx.workspace_root.join(HAT_EVENTS_MARKER).display()
+            ),
+        },
+        EventsSource::Auto => {
+            if ctx.is_agent() {
+                if let Some(hat_path) = resolve_hat_channel_path(ctx) {
+                    if hat_path.exists()
+                        && fs::metadata(&hat_path)
+                            .map(|m| m.len() > 0)
+                            .unwrap_or(false)
+                    {
+                        return Ok(hat_path);
+                    }
+                    // Empty or missing channel file: warn and fall back to main.
+                    tracing::warn!(
+                        hat_channel = %hat_path.display(),
+                        fallback = %main_path.display(),
+                        "agent context hat-channel is empty or missing; falling back to main events"
+                    );
+                } else {
+                    tracing::warn!(
+                        marker = %ctx.workspace_root.join(HAT_EVENTS_MARKER).display(),
+                        fallback = %main_path.display(),
+                        "agent context has no current-hat-events marker; falling back to main events"
+                    );
+                }
+            }
+            Ok(main_path)
+        }
+    }
+}
+
+/// Resolve the per-hat channel events path from the marker, if present and non-empty.
+fn resolve_hat_channel_path(ctx: &OperationContext) -> Option<PathBuf> {
+    let marker = ctx.workspace_root.join(HAT_EVENTS_MARKER);
+    let raw = fs::read_to_string(&marker).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(resolve_marker_target(&ctx.workspace_root, trimmed))
+}
+
 pub fn events_command(color_mode: ColorMode, args: EventsArgs) -> Result<()> {
     let use_colors = color_mode.should_use_colors();
     let workspace_root = resolve_workspace_root(None);
-    let current_events_marker = workspace_root.join(".ralph/current-events");
+    let ctx = OperationContext::detect(workspace_root.clone());
 
-    // Read events path from marker file, fall back to default if marker doesn't exist
-    // This ensures `ralph events` reads from the same events file as the active run
+    // Explicit --file always wins. Otherwise resolve from --events-source.
     let history = match args.file {
         Some(path) => EventHistory::new(path),
-        None => fs::read_to_string(&current_events_marker)
-            .map(|s| EventHistory::new(resolve_marker_target(&workspace_root, &s)))
-            .unwrap_or_else(|_| EventHistory::new(workspace_root.join(".ralph/events.jsonl"))),
+        None => EventHistory::new(resolve_events_source(&ctx, args.events_source)?),
     };
 
     // Handle clear command. P8: require --confirm <loop_id> matching the
@@ -166,6 +244,24 @@ pub fn events_command(color_mode: ColorMode, args: EventsArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::operation_guard::OperationContext;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn empty_env() -> impl Fn(&str) -> Option<String> {
+        |_| None
+    }
+
+    fn env_with(key: &'static str, value: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |k| {
+            if k == key {
+                Some(value.to_string())
+            } else {
+                None
+            }
+        }
+    }
+
     #[test]
     fn test_events_clear_without_confirm_rejected() {
         let result = check_events_clear_confirm(None, Some("loop-1"));
@@ -199,5 +295,105 @@ mod tests {
         assert!(result.is_ok());
         let result = check_events_clear_confirm(Some("loop-1"), None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_events_source_agent_auto_prefers_hat_channel() {
+        let tmp = TempDir::new().unwrap();
+        let ralph_dir = tmp.path().join(".ralph");
+        let agent_dir = ralph_dir.join("agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let channel = agent_dir.join("events-hat-executor-loop-1.jsonl");
+        fs::write(&channel, r#"{"topic":"work.ready","payload":{}}"#).unwrap();
+        fs::write(
+            ralph_dir.join("current-hat-events"),
+            ".ralph/agent/events-hat-executor-loop-1.jsonl",
+        )
+        .unwrap();
+
+        let ctx = OperationContext::detect_with_env(
+            tmp.path().to_path_buf(),
+            env_with("RALPH_CURRENT_HAT", "executor"),
+        );
+        let resolved = resolve_events_source(&ctx, EventsSource::Auto).unwrap();
+        assert_eq!(resolved, channel);
+    }
+
+    #[test]
+    fn test_resolve_events_source_human_auto_uses_main_events() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = OperationContext::detect_with_env(tmp.path().to_path_buf(), empty_env());
+        let resolved = resolve_events_source(&ctx, EventsSource::Auto).unwrap();
+        assert_eq!(resolved, tmp.path().join(".ralph/events.jsonl"));
+    }
+
+    #[test]
+    fn test_resolve_events_source_human_auto_uses_current_events_marker() {
+        let tmp = TempDir::new().unwrap();
+        let ralph_dir = tmp.path().join(".ralph");
+        fs::create_dir_all(&ralph_dir).unwrap();
+        fs::write(
+            ralph_dir.join("current-events"),
+            ".ralph/events-20260704.jsonl",
+        )
+        .unwrap();
+
+        let ctx = OperationContext::detect_with_env(tmp.path().to_path_buf(), empty_env());
+        let resolved = resolve_events_source(&ctx, EventsSource::Auto).unwrap();
+        assert_eq!(resolved, tmp.path().join(".ralph/events-20260704.jsonl"));
+    }
+
+    #[test]
+    fn test_resolve_events_source_explicit_hat_channel_missing_marker_errors() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = OperationContext::detect_with_env(tmp.path().to_path_buf(), empty_env());
+        let err = resolve_events_source(&ctx, EventsSource::HatChannel).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("hat-channel"),
+            "error should mention hat-channel: {msg}"
+        );
+        assert!(
+            msg.contains("current-hat-events"),
+            "error should mention the marker: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_events_source_agent_auto_falls_back_when_hat_channel_missing() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = OperationContext::detect_with_env(
+            tmp.path().to_path_buf(),
+            env_with("RALPH_CURRENT_HAT", "executor"),
+        );
+        let resolved = resolve_events_source(&ctx, EventsSource::Auto).unwrap();
+        assert_eq!(resolved, tmp.path().join(".ralph/events.jsonl"));
+    }
+
+    #[test]
+    fn test_resolve_events_source_roundtrip_emit_then_events() {
+        let tmp = TempDir::new().unwrap();
+        let ralph_dir = tmp.path().join(".ralph");
+        let agent_dir = ralph_dir.join("agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let channel = agent_dir.join("events-hat-executor-loop-2.jsonl");
+        fs::File::create(&channel).unwrap();
+        fs::write(
+            ralph_dir.join("current-hat-events"),
+            ".ralph/agent/events-hat-executor-loop-2.jsonl",
+        )
+        .unwrap();
+
+        // Simulate `ralph emit` writing a business event into the hat-channel.
+        fs::write(&channel, r#"{"topic":"work.ready","payload":{}}"#).unwrap();
+
+        let ctx = OperationContext::detect_with_env(
+            tmp.path().to_path_buf(),
+            env_with("RALPH_CURRENT_HAT", "executor"),
+        );
+        let resolved = resolve_events_source(&ctx, EventsSource::Auto).unwrap();
+        assert_eq!(resolved, channel);
+        let content = fs::read_to_string(&resolved).unwrap();
+        assert!(content.contains("work.ready"));
     }
 }
