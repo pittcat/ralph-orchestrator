@@ -627,6 +627,55 @@ impl SupervisorStore for RusqliteSupervisorStore {
             Ok(())
         })
     }
+
+    fn record_slot_pid(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        pid: u32,
+    ) -> SupervisorStoreResult<()> {
+        self.with_conn(|conn| {
+            let slot_exists: bool = conn
+                .query_row(
+                    "SELECT 1 FROM wave_slots WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![wave_id, slot_index as i64],
+                    |_| Ok(true),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !slot_exists {
+                return Err(SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                });
+            }
+            conn.execute(
+                "INSERT INTO dispatch_records (wave_id, slot_index, pid, outcome)
+                 VALUES (?1, ?2, ?3, NULL)
+                 ON CONFLICT(wave_id, slot_index) DO UPDATE SET
+                   pid = excluded.pid",
+                rusqlite::params![wave_id, slot_index as i64, pid as i64],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn pid_for_slot(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<u32>> {
+        self.with_conn(|conn| {
+            let pid: Option<Option<i64>> = conn
+                .query_row(
+                    "SELECT pid FROM dispatch_records WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![wave_id, slot_index as i64],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(pid.flatten().map(|p| p.max(0) as u32))
+        })
+    }
 }
 
 #[cfg(feature = "supervisor-db")]

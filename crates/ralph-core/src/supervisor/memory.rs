@@ -536,6 +536,46 @@ impl SupervisorStore for InMemorySupervisorStore {
         wave.phase = phase;
         Ok(())
     }
+
+    fn record_slot_pid(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        pid: u32,
+    ) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        if let Some(wave) = inner.waves_by_id.get(wave_id) {
+            if !wave.slots.contains_key(&slot_index) {
+                return Err(SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                });
+            }
+        } else {
+            return Err(SupervisorStoreError::UnknownWave(wave_id.to_string()));
+        }
+        inner
+            .dispatches
+            .entry((wave_id.to_string(), slot_index))
+            .or_insert(DispatchRecord {
+                pid: Some(pid),
+                outcome: None,
+            })
+            .pid = Some(pid);
+        Ok(())
+    }
+
+    fn pid_for_slot(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<u32>> {
+        let inner = self.lock()?;
+        Ok(inner
+            .dispatches
+            .get(&(wave_id.to_string(), slot_index))
+            .and_then(|d| d.pid))
+    }
 }
 
 #[cfg(test)]

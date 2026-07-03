@@ -324,6 +324,32 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// PID (out of scope for the store layer, R-B4).
     fn cancel_wave(&self, wave_id: &str) -> SupervisorStoreResult<()>;
 
+    /// 2026-07-03-001 plan U7: record the OS-level PID of
+    /// a worker the dispatcher spawned for a slot. U12 uses
+    /// this so `cancel_wave` can call
+    /// `nix::sys::signal::kill` (R-B4). Idempotent:
+    /// re-recording the same `(wave, slot)` overwrites the
+    /// prior PID (the dispatch loop may respawn the worker
+    /// after a backoff).
+    fn record_slot_pid(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        pid: u32,
+    ) -> SupervisorStoreResult<()>;
+
+    /// 2026-07-03-001 plan U7: look up the PID the runtime
+    /// recorded for `(wave, slot)`. Returns `None` when no
+    /// worker was recorded (test fixtures, completed slots
+    /// where the dispatch row was reclaimed, etc.). The
+    /// cancel path uses this to walk the slot → PID
+    /// mapping without re-reading the snapshot.
+    fn pid_for_slot(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<u32>>;
+
     /// Return the current slot/lifecycle snapshot for the phase
     /// decision pure function (U6).
     fn fan_in_status(&self, wave_id: &str) -> SupervisorStoreResult<WaveSnapshot>;
