@@ -16,6 +16,18 @@ use crate::event_policy::{PolicyFinding, ViolationType};
 /// so a coordinator silence that triggered runtime default-injection was
 /// still hard-failed by `check_review_complete_shipper_routing`. Both the
 /// preset (agent guidance) and this module (mechanism) must agree.
+///
+/// 2026-07-03-005 plan (P0 fix C2+C8): explicitly removed
+/// `stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*` and
+/// `stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:*`.
+/// These two retry_keys represent the "mechanism-side silent drop → retry
+/// loop → stall counter escalation" path that the shipper previously
+/// translated into `pass_with_residuals`, masking the true root cause
+/// (M-1 isolated budget + M-2 handoff_dispatch routing). After removal, the
+/// escalation path takes the hard-fail branch, surfacing the real cause
+/// through `REVIEW_COMPLETE(fail)`. The `recovery_exhausted:stall_recovery:...`
+/// drift-engine promotion path is preserved by the `starts_with` fallback
+/// in `is_recoverable_plan_blocked_reason` (see 2026-07-02-005 U7).
 const RECOVERABLE_REASONS: &[&str] = &[
     "loop_stalled_max_iterations",
     "steward_escalation",
@@ -24,8 +36,6 @@ const RECOVERABLE_REASONS: &[&str] = &[
     "review_failed",
     "precheck_failed",
     "default_publishes",
-    "stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*",
-    "stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:*",
 ];
 
 /// Normalize a `plan.blocked.reason` for whitelist lookup.
@@ -154,5 +164,54 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    // 2026-07-03-005 plan (P0 fix C2+C8): stall_recovery:* retry_keys are no
+    // longer recoverable. The escalation path must take the hard-fail branch
+    // so the shipper surfaces the real root cause instead of masking it as
+    // pass_with_residuals.
+    #[test]
+    fn stall_recovery_coordinator_retry_key_no_longer_recoverable() {
+        assert!(!is_recoverable_plan_blocked_reason(
+            "stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*"
+        ));
+        assert!(!is_recoverable_plan_blocked_reason(
+            "  STALL_RECOVERY:COORDINATOR:TASK_RESUME:HANDOFF_DISPATCH_TIMEOUT:* "
+        ));
+    }
+
+    #[test]
+    fn stall_recovery_dimension_reviewer_retry_key_no_longer_recoverable() {
+        assert!(!is_recoverable_plan_blocked_reason(
+            "stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:*"
+        ));
+    }
+
+    // Regression: shipper must hard-fail pass promotion after a stall_recovery
+    // plan.blocked, instead of letting it through as pass_with_residuals.
+    #[test]
+    fn review_complete_pass_after_stall_recovery_blocked() {
+        let finding = check_review_complete_shipper_routing(
+            Some(r#"{"pass_or_fail":"pass","verdict":"pass_with_residuals"}"#),
+            Some("stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*"),
+        )
+        .expect("stall_recovery must be hard-failed, not pass_with_residuals");
+        assert!(
+            finding
+                .message
+                .contains("shipper_non_recoverable_reason_promoted_to_pass")
+        );
+    }
+
+    // Regression: drift-engine promotion `recovery_exhausted:stall_recovery:*`
+    // (different prefix) must still pass through the `starts_with` fallback.
+    #[test]
+    fn recovery_exhausted_drift_engine_promotion_still_recoverable() {
+        assert!(is_recoverable_plan_blocked_reason(
+            "recovery_exhausted:stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:drift-engine"
+        ));
+        assert!(is_recoverable_plan_blocked_reason(
+            "recovery_exhausted:coordinator:task_resume:handoff"
+        ));
     }
 }
