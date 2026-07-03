@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 use super::{
     DispatchOutcome, IdempotencyKey, IsolationMode, SlotResource, SlotStatus, SupervisorStore,
@@ -29,6 +30,13 @@ struct WaveRow {
     phase: WavePhase,
     cancel_requested: bool,
     merged_to_events: bool,
+    /// 2026-07-03-001 plan U6: wall-clock instant the wave
+    /// was registered. Recovery (U11) uses this to decide
+    /// the `Failed` timeout verdict; the in-memory store
+    /// records `SystemTime::now()` on `register_wave`.
+    /// Mirrors the `waves.created_at` column on the rusqlite
+    /// store.
+    created_at: SystemTime,
     slots: BTreeMap<u32, SlotRow>,
 }
 
@@ -152,6 +160,28 @@ impl InMemorySupervisorStore {
             .filter(|s| matches!(s.status, SlotStatus::Dispatched | SlotStatus::Running))
             .count() as u32
     }
+
+    /// Test-only helper: backdate a wave's `created_at` so
+    /// recovery (U11) can simulate an in-flight wave that
+    /// has been running longer than `aggregate_timeout_secs`
+    /// without sleeping the test for the full budget. The
+    /// production contract is unaffected because the helper
+    /// is `#[cfg(test)]` and never compiled into the
+    /// released binary.
+    #[cfg(test)]
+    pub fn backdate_wave_for_test(
+        &self,
+        wave_id: &str,
+        new_created_at: SystemTime,
+    ) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        let wave = inner
+            .waves_by_id
+            .get_mut(wave_id)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
+        wave.created_at = new_created_at;
+        Ok(())
+    }
 }
 
 impl SupervisorStore for InMemorySupervisorStore {
@@ -200,6 +230,7 @@ impl SupervisorStore for InMemorySupervisorStore {
             phase: WavePhase::Dispatch,
             cancel_requested: false,
             merged_to_events: false,
+            created_at: SystemTime::now(),
             slots,
         };
         inner.waves_by_id.insert(wave_id.clone(), row);
@@ -431,6 +462,7 @@ impl SupervisorStore for InMemorySupervisorStore {
             in_flight_count: in_flight,
             cancel_requested: wave.cancel_requested,
             merged_to_events: wave.merged_to_events,
+            started_at: wave.created_at,
         })
     }
 
@@ -476,6 +508,7 @@ impl SupervisorStore for InMemorySupervisorStore {
                 in_flight_count: in_flight,
                 cancel_requested: wave.cancel_requested,
                 merged_to_events: wave.merged_to_events,
+                started_at: wave.created_at,
             });
         }
         Ok(out)
@@ -492,6 +525,16 @@ impl SupervisorStore for InMemorySupervisorStore {
             .values()
             .filter_map(|s| s.resource.clone())
             .collect())
+    }
+
+    fn set_wave_phase(&self, wave_id: &str, phase: WavePhase) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        let wave = inner
+            .waves_by_id
+            .get_mut(wave_id)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
+        wave.phase = phase;
+        Ok(())
     }
 }
 

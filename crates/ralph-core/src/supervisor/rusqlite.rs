@@ -496,7 +496,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
         self.with_conn(|conn| {
             let wave = conn
                 .query_row(
-                    "SELECT wave_id, phase, expected_total, cancel_requested, merged_to_events
+                    "SELECT wave_id, phase, expected_total, cancel_requested, merged_to_events, created_at
                      FROM waves WHERE wave_id = ?1",
                     [&wave_id],
                     |row| {
@@ -506,12 +506,13 @@ impl SupervisorStore for RusqliteSupervisorStore {
                             row.get::<_, i64>(2)? as u32,
                             row.get::<_, i64>(3)? != 0,
                             row.get::<_, i64>(4)? != 0,
+                            row.get::<_, i64>(5)?,
                         ))
                     },
                 )
                 .optional()?
                 .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
-            let (wave_id_row, phase_str, expected_total, cancel, merged) = wave;
+            let (wave_id_row, phase_str, expected_total, cancel, merged, created_at_unix) = wave;
             let phase = parse_phase(&phase_str)?;
             let kind = {
                 let kind_str: String = conn
@@ -524,7 +525,6 @@ impl SupervisorStore for RusqliteSupervisorStore {
                     .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
                 parse_kind(&kind_str)?
             };
-            // Count slot states via a single aggregation.
             let row = conn.query_row(
                 "SELECT
                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END),
@@ -543,6 +543,15 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 },
             )?;
             let (completed, failed, in_flight, pending) = row;
+            // 2026-07-03-001 plan U6: convert `created_at`
+            // (unix seconds) into `SystemTime` so the
+            // recovery path can compute `elapsed_secs` via
+            // `SystemTime::duration_since`.
+            let started_at = std::time::UNIX_EPOCH
+                .checked_add(std::time::Duration::from_secs(
+                    created_at_unix.max(0) as u64,
+                ))
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             Ok(WaveSnapshot {
                 wave_id: wave_id_row,
                 kind,
@@ -554,6 +563,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 in_flight_count: in_flight,
                 cancel_requested: cancel,
                 merged_to_events: merged,
+                started_at,
             })
         })
     }
@@ -604,6 +614,17 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
+        })
+    }
+
+    fn set_wave_phase(&self, wave_id: &str, phase: WavePhase) -> SupervisorStoreResult<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE waves SET phase = ?2, updated_at = strftime('%s','now')
+                 WHERE wave_id = ?1",
+                rusqlite::params![wave_id, phase_to_str(phase)],
+            )?;
+            Ok(())
         })
     }
 }

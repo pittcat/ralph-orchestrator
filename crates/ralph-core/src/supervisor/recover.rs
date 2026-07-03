@@ -34,6 +34,7 @@
 //! end-to-end without spinning a real loop.
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use crate::supervisor::{
     SupervisorStore, SupervisorStoreResult, WavePhase, WaveSnapshot,
@@ -68,47 +69,44 @@ pub fn recover_active_waves_at_startup(
     let mut report = RecoveryReport::default();
     let snapshots = store.recover_active_waves()?;
     report.inspected = snapshots.len();
+    let now = SystemTime::now();
     for snapshot in snapshots {
         if snapshot.merged_to_events {
             report.already_merged.push(snapshot.wave_id.clone());
             continue;
         }
-        // Any slot that is still in `Dispatched` or `Running`
-        // AND the wave is past its budget moves to `Failed`
-        // with reason `timeout` (R-C3). The coordinator or a
-        // host-side consumer can read this from `recover_active_waves`
-        // on the next loop iteration.
+        // Cancel + still-flying workers: the runtime has
+        // already killed the workers via PID; the wave stays
+        // in Collect until the dispatcher reconciles.
         if snapshot.in_flight_count > 0 && snapshot.cancel_requested {
-            // Cancel + still-flying workers: the runtime has
-            // already killed the workers via PID; the wave
-            // stays in Collect until the dispatcher reconciles.
-            // No DB mutation needed here. Continue so the
-            // report records the wave as inspected.
             continue;
         }
         if snapshot.in_flight_count == 0 {
-            // No in-flight workers; recovery doesn't need to
-            // enforce timeout. The coordinator picks up on
-            // the next tick and either integrates (all
-            // terminal slots succeeded) or fails (mixed
-            // results, KTD-8).
+            // No in-flight workers; recovery doesn't enforce
+            // timeout. The coordinator picks up on the next
+            // tick and either integrates (all terminal
+            // slots succeeded) or fails (mixed results,
+            // KTD-8).
             continue;
         }
-        // Time-based timeout: if the snapshot's elapsed time
-        // exceeds the budget we treat the wave as timed out.
-        // Without a per-wave `started_at` exposed on the
-        // snapshot, the recovery layer falls back to "any
-        // in-flight slots past the global aggregate timeout"
-        // — a coarse proxy that still fires before the U12
-        // bridge re-tries indefinitely.
-        //
-        // Future U11 follow-up: thread `started_at` through
-        // the snapshot so per-wave elapsed can be exact.
-        let _ = aggregate_timeout_secs; // placeholder for future API
-        // The current snapshot carries no `elapsed_secs` —
-        // recovery can't decide per-wave. We mark it as
-        // inspected and let the next coordinator tick apply
-        // the timeout judgement via `PhaseInputs`.
+        // 2026-07-03-001 plan U6 / F-006 / R-C3: per-wave
+        // timeout. Compute `elapsed = now - started_at`;
+        // if elapsed > aggregate_timeout_secs AND the wave
+        // is still in-flight, transition phase=Failed via
+        // `set_wave_phase` (the store does not own the
+        // phase verdict; recovery applies the verdict the
+        // coordinator would have applied on the next
+        // tick). Record the wave_id in `report.timed_out`
+        // so `ralph diagnose` and the U11 BDD scenario can
+        // assert the mutation.
+        let elapsed_secs = now
+            .duration_since(snapshot.started_at)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if elapsed_secs > aggregate_timeout_secs {
+            store.set_wave_phase(&snapshot.wave_id, WavePhase::Failed)?;
+            report.timed_out.push(snapshot.wave_id.clone());
+        }
     }
     Ok(report)
 }
@@ -132,7 +130,13 @@ pub fn merged_waves_skip_recovery(
 /// (U11 R-C3). This is the re-merge intent marker: recovery
 /// re-plays the merge on next coordinator tick.
 ///
-/// Returns `true` when the recovery rerun cleared the flag.
+/// 2026-07-03-001 plan U6 / F-006: the marker stamp is
+/// idempotent — calling `mark_merge_to_events` is a no-op
+/// when the wave already has the flag set, so re-running
+/// recovery does not double-inject. The function returns
+/// `true` when it transitioned the wave into the
+/// "merge intent stamped" state (i.e. flagged it for the
+/// next coordinator tick to re-merge).
 pub fn restore_unmerged_completed_slot(
     store: Arc<dyn SupervisorStore>,
     wave_id: &str,
@@ -144,13 +148,16 @@ pub fn restore_unmerged_completed_slot(
     if matches!(snapshot.phase, WavePhase::Done | WavePhase::Failed) {
         return Ok(false);
     }
-    // The marker is cleared; the coordinator will re-attempt
-    // the merge on the next tick. The store layer doesn't
-    // expose a "clear_merge" verb (it's idempotent in the
-    // other direction), so we mark it as merged=false (the
-    // default) by leaving it untouched. The flag was already
-    // false — we only flag `true` here so the caller knows
-    // the recovery was a no-op for this wave.
+    // Stamp the merge-intent marker so the next
+    // coordinator tick re-runs the merge (F-006).
+    // `mark_merge_to_events` is the trait-level verb for
+    // this transition; the coordinator's idempotency
+    // contract (U1 / KTD-7) means re-stamping is a no-op
+    // when the flag is already true.
+    if snapshot.completed_count > 0 {
+        store.mark_merge_to_events(wave_id)?;
+        return Ok(true);
+    }
     Ok(false)
 }
 
@@ -258,5 +265,86 @@ mod tests {
         assert_eq!(report.inspected, 0);
         assert!(report.timed_out.is_empty());
         assert!(report.already_merged.is_empty());
+    }
+
+    /// U6 / F-006 / R6 / R-C3: an in-flight wave whose
+    /// `elapsed_secs > aggregate_timeout_secs` is
+    /// transitioned to `phase=Failed` during recovery and
+    /// recorded in `report.timed_out`. Without this branch
+    /// the wave would stay in `Collect` forever and the
+    /// loop would re-poll it on every iteration.
+    #[test]
+    fn in_flight_wave_past_timeout_marked_failed() {
+        let store = InMemorySupervisorStore::new();
+        let wave = store.register_wave("stuck", WaveKind::Exec, 1).unwrap();
+        slot_bound(&store, &wave, 0);
+        // Dispatch so the slot moves to `Dispatched` and
+        // `in_flight_count > 0` for the recovery check.
+        let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        // Backdate the wave so `now - started_at` is huge
+        // (simulate a 2-hour-old in-flight wave).
+        let backdated = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(2 * 60 * 60))
+            .expect("clock supports 2h subtraction");
+        store
+            .backdate_wave_for_test(&wave, backdated)
+            .unwrap();
+        // Recovery with a 60s budget: elapsed (7200s) > 60s.
+        // We pass the same `Arc` to recovery and read back
+        // the mutation on the same store instance.
+        let store_arc = Arc::new(store);
+        let report =
+            recover_active_waves_at_startup(store_arc.clone(), 60).unwrap();
+        assert_eq!(report.timed_out, vec![wave.clone()]);
+        let snap = store_arc.fan_in_status(&wave).unwrap();
+        assert_eq!(snap.phase, WavePhase::Failed);
+    }
+
+    /// U6 / F-006 / R6 edge: in-flight wave within budget
+    /// is NOT mutated (no false positive on a still-fresh
+    /// wave). Regression pin for the `elapsed_secs` math.
+    #[test]
+    fn in_flight_wave_within_timeout_not_marked_failed() {
+        let store = InMemorySupervisorStore::new();
+        let wave = store.register_wave("fresh", WaveKind::Exec, 1).unwrap();
+        slot_bound(&store, &wave, 0);
+        let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        // `aggregate_timeout_secs = 3600` and the wave is
+        // brand-new: no mutation.
+        let store_arc = Arc::new(store);
+        let report =
+            recover_active_waves_at_startup(store_arc.clone(), 3600).unwrap();
+        assert!(report.timed_out.is_empty());
+        let snap = store_arc.fan_in_status(&wave).unwrap();
+        assert_eq!(snap.phase, WavePhase::Collect);
+    }
+
+    /// U6 / F-006 / R6: `restore_unmerged_completed_slot`
+    /// stamps the merge-intent marker (via
+    /// `mark_merge_to_events`) when
+    /// `merged_to_events=0 && completed>0 && phase !=
+    /// Done|Failed`. The coordinator's idempotency contract
+    /// (U1 / KTD-7) means re-stamping is a no-op when the
+    /// flag is already true, so the marker doubles as the
+    /// "merge intent was committed to disk" signal.
+    #[test]
+    fn restore_unmerged_completed_stamps_merge_intent() {
+        let store = InMemorySupervisorStore::new();
+        let wave = store.register_wave("unmerged", WaveKind::Exec, 2).unwrap();
+        slot_bound(&store, &wave, 0);
+        slot_bound(&store, &wave, 1);
+        let _ = store.try_dispatch_next(4).unwrap().unwrap();
+        // Slot 0 completes; slot 1 still in-flight.
+        store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        let snap = store.fan_in_status(&wave).unwrap();
+        assert!(!snap.merged_to_events);
+        assert_eq!(snap.completed_count, 1);
+        // Recovery helper stamps the merge-intent marker.
+        let store_arc = Arc::new(store);
+        let did =
+            restore_unmerged_completed_slot(store_arc.clone(), &wave).unwrap();
+        assert!(did, "completed > 0 must stamp the merge intent");
+        let snap = store_arc.fan_in_status(&wave).unwrap();
+        assert!(snap.merged_to_events);
     }
 }

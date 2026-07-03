@@ -205,6 +205,7 @@ mod tests {
             in_flight_count: in_flight,
             cancel_requested: cancel,
             merged_to_events: false,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
         };
         let i = PhaseInputs {
             aggregate_timeout_secs: 60,
@@ -352,6 +353,7 @@ mod tests {
             in_flight_count: 2,
             cancel_requested: false,
             merged_to_events: false,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
         };
         let inputs = PhaseInputs {
             aggregate_timeout_secs: 60,

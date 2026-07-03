@@ -13,6 +13,7 @@ mod tests {
         IsolationMode, SlotResource, SlotStatus, SupervisorStoreError, WaveKind, WavePhase,
         WaveSnapshot,
     };
+    use std::time::SystemTime;
 
     #[test]
     fn wave_kind_serializes_to_snake_case_strings() {
@@ -134,6 +135,7 @@ mod tests {
             in_flight_count: 0,
             cancel_requested: false,
             merged_to_events: false,
+            started_at: SystemTime::UNIX_EPOCH,
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let back: WaveSnapshot = serde_json::from_str(&json).unwrap();

@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::time::SystemTime;
 
 /// Which wave category a registered wave belongs to.
 ///
@@ -205,6 +206,20 @@ pub struct WaveSnapshot {
     pub in_flight_count: u32,
     pub cancel_requested: bool,
     pub merged_to_events: bool,
+    /// 2026-07-03-001 plan U6: wall-clock instant the wave
+    /// was registered. Recovery (U11) uses this to decide
+    /// the `Failed` timeout verdict; both stores populate
+    /// it from their `created_at` source.
+    #[serde(default = "default_started_at")]
+    pub started_at: SystemTime,
+}
+
+fn default_started_at() -> SystemTime {
+    // `UNIX_EPOCH` keeps the snapshot serializable across
+    // the existing JSONL envelope without forcing callers
+    // to plumb a `None` analog. Tests construct the
+    // snapshot directly and overwrite the field.
+    SystemTime::UNIX_EPOCH
 }
 
 /// Errors a store implementation may return. `SupervisorStore`
@@ -326,6 +341,14 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// List the resource bindings a wave allocated (used by the
     /// integrator and the worktree cleanup at loop end).
     fn list_worktree_paths(&self, wave_id: &str) -> SupervisorStoreResult<Vec<SlotResource>>;
+
+    /// Set the wave's phase directly. Used by the
+    /// recovery path (U11) to mark in-flight waves past
+    /// `aggregate_timeout_secs` as `Failed` (F-006 / R-C3).
+    /// The store MUST NOT mutate the phase from any other
+    /// entry point (KTD-8 — phase ownership is coordinator
+    /// only).
+    fn set_wave_phase(&self, wave_id: &str, phase: WavePhase) -> SupervisorStoreResult<()>;
 }
 
 pub use coordinator::{CoordinatorAction, SupervisorCoordinator};
