@@ -328,8 +328,14 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
 }
 
 pub use memory::InMemorySupervisorStore;
+#[cfg(feature = "supervisor-db")]
+pub use rusqlite::RusqliteSupervisorStore;
 
 mod memory;
+#[cfg(feature = "supervisor-db")]
+mod migrations;
+#[cfg(feature = "supervisor-db")]
+mod rusqlite;
 #[cfg(test)]
 mod memory_protocol_tests;
 #[cfg(test)]

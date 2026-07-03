@@ -1,5 +1,5 @@
 
-Implement dev plan:@docs/plans/2026-07-02-006-feat-ce-executor-serial-runtime-phase-authority-plan.md
+Implement dev plan:docs/plans/2026-07-03-001-feat-supervisor-rusqlite-parallel-preset-plan.md
 
 ### Note
 

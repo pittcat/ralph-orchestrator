@@ -6,7 +6,15 @@ license.workspace = true
 description = "Core orchestration loop, configuration, and state management for Ralph Orchestrator"
 
 [features]
+default = []
 recording = []
+# 2026-07-03-001 plan U5: opt-in rusqlite-backed supervisor
+# store. The feature is OFF by default so the framework binary
+# does not link the SQLite engine when supervisors are disabled
+# (KTD-1). CI runs the workspace twice — once with the default
+# feature set and once with `--features supervisor-db` — to
+# validate both branches.
+supervisor-db = ["dep:rusqlite"]
 
 [lints]
 workspace = true
@@ -31,6 +39,15 @@ keyring.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
+
+# 2026-07-03-001 plan U5: rusqlite is gated behind
+# `supervisor-db`. The default workspace build does NOT
+# pull SQLite in — operators opt in via
+# `event_loop.supervisor.enabled: true` plus the
+# `--features supervisor-db` build. The `bundled` feature
+# ensures the SQLite engine is statically linked so the
+# binary works on hosts without a libsqlite3 shared object.
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 # For Unix file locking (flock)
 [target.'cfg(unix)'.dependencies]
