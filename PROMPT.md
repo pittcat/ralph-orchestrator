@@ -1,5 +1,5 @@
+Implement dev plan:docs/plans/2026-07-04-001-feat-opac-isolated-agent-discipline-plan.md,必须要确保每个单元都要完成,从git log，以及开发计划里面确认进度
 
-Implement dev plan:docs/plans/2026-07-04-001-feat-opac-isolated-agent-discipline-plan.md
 ### Note
 
 注意每个角色要各司其职,不能越权
