@@ -74,3 +74,123 @@ schemas:
     required_fields:
       - wave_id
       - dimension
+
+  # Worker-ready topics: minimal contract so the CLI emit gate
+  # has a schema surface. Payloads carry the wave/slot identity
+  # the worker needs to bind to its worktree.
+  exec.unit.ready:
+    required_fields:
+      - wave_id
+      - slot_index
+      - plan_name
+  fix.unit.ready:
+    required_fields:
+      - wave_id
+      - slot_index
+      - plan_name
+
+  # Main workflow handoff topics (mirrors ce-executor-serial
+  # schema shapes where applicable).
+  work.ready:
+    required_fields:
+      - plan_name
+      - plan_path
+      - task_id
+      - task_key
+      - step
+      - complexity
+    payload: json_object
+
+  work.done:
+    required_fields:
+      - plan_name
+      - plan_path
+      - task_id
+      - task_key
+      - step
+      - commit_count
+      - changed_lines
+    payload: json_object
+
+  work.failed:
+    required_fields:
+      - plan_name
+      - task_id
+      - task_key
+      - step
+      - reason
+    payload: json_object
+
+  review.start:
+    required_fields:
+      - plan_name
+      - task_id
+      - task_key
+    payload: json_object
+
+  fix.done:
+    required_fields:
+      - plan_name
+      - plan_path
+      - executor_head_sha
+      - fix_plan_file
+      - review_verdict
+      - fixes_applied
+      - fixes_skipped
+    payload: json_object
+
+  fix.applied:
+    required_fields:
+      - plan_name
+      - fix_round
+      - applied_count
+      - failed_count
+      - task_id
+      - task_key
+      - step
+      - commit_count
+      - changed_lines
+    payload: json_object
+
+  fix.exhausted:
+    required_fields:
+      - plan_name
+      - fix_round
+      - task_id
+      - task_key
+      - step
+      - reason
+    payload: json_object
+
+  plan.complete:
+    required_fields:
+      - plan_name
+      - completed_steps
+      - task_id
+      - task_key
+      - step
+      - verdict
+      - final_findings_count
+      - fix_round
+    payload: json_object
+
+  plan.blocked:
+    required_fields:
+      - plan_name
+      - task_id
+      - task_key
+      - step
+      - reason
+    payload: json_object
+
+  task.resume:
+    required_fields:
+      - reason
+      - target_hat
+      - kind
+    payload: json_object
+
+  LOOP_COMPLETE:
+    required_fields:
+      - reason
+    payload: json_object

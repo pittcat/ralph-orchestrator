@@ -93,6 +93,17 @@ event_loop:
   required_events:
     - work.done
     - LOOP_COMPLETE
+  starting_event: plan.ready
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+
+tasks:
+  enabled: true
+  coordinator_hats:
+    - coordinator
+    - progress-steward
 
 # 16 functional hats + progress-steward. Per-hat `publishes`
 # and `triggers` are deliberately minimal: the supervisor
@@ -103,56 +114,136 @@ event_loop:
 hats:
   coordinator:
     name: "Coordinator"
+    description: "Dispatches plan units via the supervisor and integrates wave results into the main workflow."
     triggers:
       - plan.ready
-      - exec.wave.complete
-      - review.wave.complete
-      - fix.wave.complete
+      - fix.applied
+      - fix.exhausted
     publishes:
       - work.ready
       - plan.complete
       - LOOP_COMPLETE
+    event_filter:
+      enabled: true
+      events:
+      - plan.ready
+      - fix.applied
+      - fix.exhausted
+    exempt_topics:
+      - work.ready
+      - plan.complete
+      - LOOP_COMPLETE
+    terminal_events:
+      - LOOP_COMPLETE
 
   task-planner:
     name: "Task Planner"
+    description: "Emits per-unit execution readiness events to fan out work across supervisor slots."
     triggers:
       - work.ready
     publishes:
       - exec.unit.ready
+    event_filter:
+      enabled: true
+      events:
+      - work.ready
+    exempt_topics:
+      - exec.unit.ready
+    terminal_events:
+      - exec.unit.ready
 
   worker:
     name: "Worker"
+    description: "Per-slot TDD implementation hat running in an isolated worktree."
     triggers:
       - exec.unit.ready
     publishes:
       - exec.unit.done
+    event_filter:
+      enabled: true
+      events:
+      - exec.unit.ready
+    exempt_topics:
+      - exec.unit.done
+    terminal_events:
+      - exec.unit.done
 
   exec-integrator:
     name: "Exec Integrator"
+    description: "Merges completed execution waves and runs the full test suite."
     triggers:
       - exec.wave.complete
     publishes:
       - work.done
+    event_filter:
+      enabled: true
+      events:
+      - exec.wave.complete
+    exempt_topics:
+      - work.done
+    terminal_events:
+      - work.done
+
+  exec-failure-handler:
+    name: "Exec Failure Handler"
+    description: "Converts a failed execution wave into a work.failed event for the fixer."
+    triggers:
+      - exec.wave.failed
+    publishes:
+      - work.failed
+    event_filter:
+      enabled: true
+      events:
+      - exec.wave.failed
+    exempt_topics:
+      - work.failed
+    terminal_events:
+      - work.failed
 
   review-coordinator:
     name: "Review Coordinator"
+    description: "Fans out review work across the six dimension reviewers."
     triggers:
       - work.done
     publishes:
       - review.unit.ready
+    event_filter:
+      enabled: true
+      events:
+      - work.done
+    exempt_topics:
+      - review.unit.ready
+    terminal_events:
+      - review.unit.ready
 
   review-batch-worker:
     name: "Review Batch Worker"
+    description: "Runs one review dimension and emits a per-dimension verdict."
     triggers:
       - review.unit.ready
     publishes:
       - review.unit.done
+    event_filter:
+      enabled: true
+      events:
+      - review.unit.ready
+    exempt_topics:
+      - review.unit.done
+    terminal_events:
+      - review.unit.done
 
   review-synthesizer:
     name: "Review Synthesizer"
+    description: "Aggregates dimension review results into a fix plan and review wave completion."
     triggers:
       - review.unit.done
     publishes:
+      - review.wave.complete
+    event_filter:
+      enabled: true
+      events:
+      - review.unit.done
+    exempt_topics:
       - review.wave.complete
     # NOTE: this `publishes:` entry is allowed by the
     # supervisor lint whitelist
@@ -165,62 +256,148 @@ hats:
     # supervisor-only emit; agent emits are rejected at the
     # origin guard. F-019 / R-19 captures the follow-up to
     # split the production rule from the whitelist shape.
+    terminal_events:
+      - review.wave.complete
 
   fix-task-planner:
     name: "Fix Task Planner"
+    description: "Emits per-fix-unit readiness events to fan out fix work across supervisor slots."
     triggers:
       - review.wave.complete
     publishes:
       - fix.unit.ready
+    event_filter:
+      enabled: true
+      events:
+      - review.wave.complete
+    exempt_topics:
+      - fix.unit.ready
+    terminal_events:
+      - fix.unit.ready
 
   fix-worker:
     name: "Fix Worker"
+    description: "Per-slot fix implementation hat running in an isolated worktree."
     triggers:
       - fix.unit.ready
     publishes:
       - fix.unit.done
+    event_filter:
+      enabled: true
+      events:
+      - fix.unit.ready
+    exempt_topics:
+      - fix.unit.done
+    terminal_events:
+      - fix.unit.done
 
   fix-integrator:
     name: "Fix Integrator"
+    description: "Merges completed fix waves and verifies the full test suite is green."
     triggers:
       - fix.wave.complete
     publishes:
       - fix.done
+    event_filter:
+      enabled: true
+      events:
+      - fix.wave.complete
+    exempt_topics:
+      - fix.done
+    terminal_events:
+      - fix.done
 
   alignment:
     name: "Alignment"
+    description: "Performs final alignment pass and emits plan.complete."
     triggers:
       - fix.done
     publishes:
       - plan.complete
+    event_filter:
+      enabled: true
+      events:
+      - fix.done
+    exempt_topics:
+      - plan.complete
+    terminal_events:
+      - plan.complete
 
   shipper:
     name: "Shipper"
+    description: "Promotes the plan completion event through the workflow."
     triggers:
       - plan.complete
     publishes:
+      - plan.complete
+    event_filter:
+      enabled: true
+      events:
+      - plan.complete
+    exempt_topics:
+      - plan.complete
+    trigger_multi_consumer_topics:
+      - plan.complete
+    terminal_events:
       - plan.complete
 
   reporter:
     name: "Reporter"
+    description: "Produces the manager-facing report and terminates the loop."
     triggers:
       - plan.complete
     publishes:
       - LOOP_COMPLETE
+    event_filter:
+      enabled: true
+      events:
+      - plan.complete
+    exempt_topics:
+      - LOOP_COMPLETE
+    trigger_multi_consumer_topics:
+      - plan.complete
+    terminal_events:
+      - LOOP_COMPLETE
 
   fixer:
     name: "Fixer"
+    description: "Hard fallback hat that attempts recovery on work.failed."
     triggers:
       - work.failed
     publishes:
       - fix.applied
       - fix.exhausted
+    event_filter:
+      enabled: true
+      events:
+      - work.failed
+    terminal_events:
+      - fix.applied
+      - fix.exhausted
+    exempt_topics:
+      - fix.applied
+      - fix.exhausted
 
   progress-steward:
     name: "Progress Steward"
+    description: "Loop-level fallback hat that recovers or escalates on stall."
     triggers:
       - loop.stalled
     publishes:
+      - work.ready
+      - review.start
+      - task.resume
+      - plan.blocked
+    event_filter:
+      enabled: true
+      events:
+      - loop.stalled
+    terminal_events:
+      - plan.blocked
+    exempt_topics:
+      - work.ready
+      - review.start
+      - task.resume
       - plan.blocked
 
 # Default publishes fallback so cli/agents can emit any of

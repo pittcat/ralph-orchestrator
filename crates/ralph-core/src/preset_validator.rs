@@ -152,26 +152,28 @@ fn topic_matches(topic: &str, pattern: &str) -> bool {
 }
 
 /// Bipartite graph of topics <-> hats.
-struct TopologyGraph<'a> {
-    /// topic -> hats that subscribe to it
-    topic_to_hats: HashMap<String, Vec<&'a Hat>>,
+struct TopologyGraph {
+    /// topic -> hat IDs that subscribe to it
+    topic_to_hats: HashMap<String, Vec<String>>,
     /// hat -> topics it can publish (including default_publishes)
     hat_to_topics: HashMap<String, Vec<String>>,
 }
 
-impl<'a> TopologyGraph<'a> {
-    fn build(config: &RalphConfig, registry: &'a HatRegistry) -> Self {
-        let mut topic_to_hats: HashMap<String, Vec<&'a Hat>> = HashMap::new();
+impl TopologyGraph {
+    fn build(config: &RalphConfig, registry: &HatRegistry) -> Self {
+        let mut topic_to_hats: HashMap<String, Vec<String>> = HashMap::new();
         let mut hat_to_topics: HashMap<String, Vec<String>> = HashMap::new();
 
         // Index configured hats from the registry. Runtime-only fallback hats
         // such as builtin `ralph` subscribe to `*`; including them here would
         // make disconnected branches appear reachable.
         for hat in registry.all().filter(|hat| !hat.is_fallback_only()) {
+            let hat_id = hat.id.as_str().to_string();
+
             // subscriptions (triggers)
             for sub in &hat.subscriptions {
                 let topic_str = sub.as_str().to_string();
-                topic_to_hats.entry(topic_str).or_default().push(hat);
+                topic_to_hats.entry(topic_str).or_default().push(hat_id.clone());
             }
 
             // publishes
@@ -198,7 +200,7 @@ impl<'a> TopologyGraph<'a> {
                 }
             }
 
-            hat_to_topics.insert(hat.id.as_str().to_string(), publishes);
+            hat_to_topics.insert(hat_id, publishes);
         }
 
         // Also index hats from config that might not be in registry yet
@@ -222,6 +224,32 @@ impl<'a> TopologyGraph<'a> {
                 topic_to_hats.entry(topic_str).or_default();
             }
             hat_to_topics.insert(hat_name.clone(), publishes);
+        }
+
+        // 2026-07-03-001 plan U13: when supervisor is enabled, model the
+        // virtual supervisor hat in the topology graph. It consumes slot-level
+        // *.unit.done/*.unit.failed topics and emits wave-level
+        // *.wave.complete/*.wave.failed topics, closing the fan-in paths that
+        // the runtime implements via system_injected events.
+        if config.event_loop.supervisor.enabled {
+            const SUPERVISOR_ID: &str = "supervisor";
+            const SUPERVISOR_SLOT_TO_WAVE: &[(&str, &str)] = &[
+                ("exec.unit.done", "exec.wave.complete"),
+                ("exec.unit.failed", "exec.wave.failed"),
+                ("fix.unit.done", "fix.wave.complete"),
+                ("fix.unit.failed", "fix.wave.failed"),
+                ("review.unit.done", "review.wave.complete"),
+                ("review.unit.failed", "review.wave.failed"),
+            ];
+            let mut supervisor_publishes = Vec::new();
+            for (slot_topic, wave_topic) in SUPERVISOR_SLOT_TO_WAVE {
+                topic_to_hats
+                    .entry((*slot_topic).to_string())
+                    .or_default()
+                    .push(SUPERVISOR_ID.to_string());
+                supervisor_publishes.push((*wave_topic).to_string());
+            }
+            hat_to_topics.insert(SUPERVISOR_ID.to_string(), supervisor_publishes);
         }
 
         Self {
@@ -254,16 +282,16 @@ impl<'a> TopologyGraph<'a> {
             }
 
             // Find hats that subscribe to this topic (exact match or wildcard)
-            let subscribing_hats: Vec<&Hat> = self
+            let subscribing_hats: Vec<&str> = self
                 .topic_to_hats
                 .iter()
                 .filter(|(t, _)| topic_matches(&topic, t))
-                .flat_map(|(_, hats)| hats.iter().copied())
+                .flat_map(|(_, hats)| hats.iter().map(String::as_str))
                 .collect();
 
-            for hat in subscribing_hats {
+            for hat_id in subscribing_hats {
                 // Get topics this hat can publish
-                if let Some(publishes) = self.hat_to_topics.get(hat.id.as_str()) {
+                if let Some(publishes) = self.hat_to_topics.get(hat_id) {
                     for pub_topic in publishes {
                         if visited_topics.insert(pub_topic.clone()) {
                             queue.push_back(pub_topic.clone());
@@ -326,16 +354,16 @@ impl<'a> TopologyGraph<'a> {
             }
 
             // Find hats that subscribe to this topic (exact or wildcard match)
-            let subscribing_hats: Vec<&Hat> = self
+            let subscribing_hats: Vec<&str> = self
                 .topic_to_hats
                 .iter()
                 .filter(|(t, _)| topic_matches(&topic, t))
-                .flat_map(|(_, hats)| hats.iter().copied())
+                .flat_map(|(_, hats)| hats.iter().map(String::as_str))
                 .collect();
 
-            for hat in subscribing_hats {
+            for hat_id in subscribing_hats {
                 // Get topics this hat can publish (excluding the required topic)
-                if let Some(publishes) = self.hat_to_topics.get(hat.id.as_str()) {
+                if let Some(publishes) = self.hat_to_topics.get(hat_id) {
                     let hat_publishes_required = publishes.iter().any(|topic| topic == required);
                     for pub_topic in publishes {
                         if pub_topic == required {
