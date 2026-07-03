@@ -122,6 +122,31 @@ const ORCHESTRATOR_DIAGNOSTIC_TOPICS: &[&str] = &[
 /// They bypass the per-hat `can_publish` check and the isolated
 /// single-event budget because they are not agent business events.
 ///
+/// 2026-07-03-001 plan U7: the supervisor injects these six
+/// coordination topics via `system_injected` when fan-in
+/// succeeds. They are NOT agent topics — agents must not be
+/// allowed to publish them via `ralph emit`, and `event_origin`
+/// must `Accepted` them only when `system_injected == Some(true)`
+/// (the pre-existing P0-1 branch handles that). This constant
+/// is the single allowlist the loop_runner / preset_lint / CLI
+/// cli cite to keep the topic family consistent.
+pub const SUPERVISOR_COORDINATION_TOPICS: &[&str] = &[
+    "exec.wave.complete",
+    "exec.wave.failed",
+    "fix.wave.complete",
+    "fix.wave.failed",
+    "review.wave.complete",
+    "review.wave.failed",
+];
+
+/// 2026-07-03-001 plan U7: `true` when `topic` is one of the six
+/// supervisor coordination topics, regardless of the hat
+/// publishing it. Used by lint rules (U9) and CLI emit guard
+/// to deny agents from forging the fan-in signal.
+pub fn is_supervisor_coordination_topic(topic: &str) -> bool {
+    SUPERVISOR_COORDINATION_TOPICS.contains(&topic)
+}
+
 /// P1-1 fix: explicit allowlist (see `ORCHESTRATOR_DIAGNOSTIC_TOPICS`)
 /// instead of `event.*` prefix match.
 pub fn is_orchestrator_diagnostic_topic(topic: &str) -> bool {
@@ -1234,6 +1259,109 @@ hats:
             "loop.cancel",
             Some("hat_a"),
         ));
+    }
+
+    /// U7: An agent hat that tries to forge `exec.wave.complete`
+    /// is rejected, mirroring the existing
+    /// `ralph_control_only` defense. Pin this contract before
+    /// the U12 dispatcher bridge lands — agents must not be
+    /// able to short-circuit `*.wave.complete` via `ralph emit`.
+    #[test]
+    fn test_agent_forge_exec_wave_complete_is_rejected() {
+        let registry = runtime_registry_with_hats(
+            r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+"#,
+        );
+        let mut event = make_event("exec.wave.complete", Some("executor"));
+        event.system_injected = None;
+        assert!(matches!(
+            validate_event_origin(&event, &registry, "", ""),
+            OriginCheck::Rejected { .. }
+        ));
+    }
+
+    /// U7: The same `exec.wave.complete` topic MUST be
+    /// accepted when the runtime injects it via
+    /// `persist_system_injected_jsonl_event` (R14 / R-COORD-1).
+    /// The P0-1 branch in `validate_event_origin` handles this;
+    /// this test pins the contract at the `is_supervisor_coordination_topic`
+    /// layer too.
+    #[test]
+    fn test_supervisor_coordination_topic_id_helper() {
+        for topic in [
+            "exec.wave.complete",
+            "exec.wave.failed",
+            "fix.wave.complete",
+            "fix.wave.failed",
+            "review.wave.complete",
+            "review.wave.failed",
+        ] {
+            assert!(
+                super::is_supervisor_coordination_topic(topic),
+                "{topic} must be recognised as a supervisor coordination topic"
+            );
+        }
+        // Negative: ordinary agent topics stay outside the
+        // supervisor allowlist.
+        for topic in ["work.done", "exec.unit.done", "review.complete"] {
+            assert!(
+                !super::is_supervisor_coordination_topic(topic),
+                "{topic} must NOT be a supervisor coordination topic"
+            );
+        }
+    }
+
+    /// U7: system_injected=true lets the supervisor inject
+    /// `*.wave.complete` even when no registered hat could have
+    /// produced it. This is the runtime's only path to inject
+    /// coord events (R-COORD-2 — agents may not forge them).
+    #[test]
+    fn test_system_injected_exec_wave_complete_is_accepted() {
+        let registry = runtime_registry_with_hats(
+            r#"
+hats:
+  integrator:
+    name: "Integrator"
+    triggers: ["exec.wave.complete"]
+    publishes: ["work.done"]
+"#,
+        );
+        let event = make_system_injected_event("exec.wave.complete", Some("integrator"));
+        assert_eq!(
+            validate_event_origin(&event, &registry, "", ""),
+            OriginCheck::Accepted,
+            "system_injected exec.wave.complete must be accepted"
+        );
+        // The same event WITHOUT system_injected must be
+        // rejected to confirm the bypass only applies via the
+        // coord injection path.
+        let mut forged = make_event("exec.wave.complete", Some("integrator"));
+        forged.system_injected = None;
+        assert!(matches!(
+            validate_event_origin(&forged, &registry, "", ""),
+            OriginCheck::Rejected { .. }
+        ));
+    }
+
+    /// U7 sanity: the allowlist covers exactly the six
+    /// supervisor coordination topics — neither more nor fewer.
+    /// A drift in either direction breaks the lint rule U9.
+    #[test]
+    fn test_supervisor_coordination_topic_allowlist_size_is_six() {
+        use super::SUPERVISOR_COORDINATION_TOPICS;
+        assert_eq!(SUPERVISOR_COORDINATION_TOPICS.len(), 6);
+        // Distinct entries — the lint rule (U9) iterates and
+        // would silently double-count duplicates.
+        let mut sorted: Vec<&str> = SUPERVISOR_COORDINATION_TOPICS.to_vec();
+        sorted.sort();
+        let original: Vec<&str> = SUPERVISOR_COORDINATION_TOPICS.to_vec();
+        sorted.dedup();
+        assert_eq!(sorted.len(), original.len());
     }
 
     /// P0-1: system-injected events bypass the origin guard entirely, including
