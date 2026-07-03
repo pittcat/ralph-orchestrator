@@ -287,6 +287,37 @@ mod tests {
         let _ = bridge.coordinator();
     }
 
+    /// U1 / F-001 / KTD-7 bridge pin: when the coordinator
+    /// returns `AlreadyDone` after a successful merge, the
+    /// bridge's downstream code path (the JSONL append
+    /// layer) MUST skip the `system_injected` envelope and
+    /// treat the tick as a no-op success. This test pins
+    /// the producer (coordinator) and consumer (bridge)
+    /// agree on `AlreadyDone` semantics so the dispatcher's
+    /// `system_injected` append sees the no-op signal.
+    #[test]
+    fn mock_bridge_returns_continue_collect_after_already_done() {
+        let bridge = MockSupervisorBridge::new();
+        // Queue `AlreadyDone` (the U1 KTD-7 success path on
+        // a post-merge re-tick). The mock bridge delivers
+        // FIFO.
+        bridge.push_actions(vec![CoordinatorAction::AlreadyDone]);
+        let action = bridge
+            .tick("w-1", PhaseInputs::default())
+            .expect("tick must succeed");
+        // The `AlreadyDone` variant propagates through the
+        // bridge unchanged; downstream consumers (U12
+        // dispatcher's JSONL append path) translate it to a
+        // no-op so we never re-inject `system_injected: true`.
+        assert_eq!(action, CoordinatorAction::AlreadyDone);
+        // Subsequent tick with empty queue → ContinueCollect
+        // default (no spurious AlreadyDone re-emission).
+        let next = bridge
+            .tick("w-1", PhaseInputs::default())
+            .expect("tick must succeed");
+        assert_eq!(next, CoordinatorAction::ContinueCollect);
+    }
+
     #[test]
     fn production_bridge_holds_coordinator_and_store() {
         let bridge = CoordinatorSupervisorBridge::with_in_memory_store();

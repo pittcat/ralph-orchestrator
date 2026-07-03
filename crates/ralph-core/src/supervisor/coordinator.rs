@@ -41,6 +41,13 @@ pub type SharedMergeSink = Arc<dyn EventMergeSink>;
 pub enum CoordinatorAction {
     /// No terminal action yet; more slots need to finish.
     ContinueCollect,
+    /// U1 / KTD-7: the wave was already merged into the
+    /// JSONL event stream on a prior tick. Subsequent ticks
+    /// MUST NOT re-inject the coord event (fix-plan F-001).
+    /// The runtime treats `AlreadyDone` as a no-op success
+    /// path; the bridge skips the `system_injected` JSONL
+    /// append for this variant.
+    AlreadyDone,
     /// Fan-in succeeded; the merge ran, the coord event was
     /// injected, the wave advanced to `Done`.
     InjectedComplete { topic: String, blocking_slots: Vec<u32> },
@@ -109,23 +116,22 @@ impl SupervisorCoordinator {
     }
 
     /// Mutate the wave to `Done` after a successful merge.
-    /// Idempotency: if `merged_to_events` is already true, we
-    /// do not re-merge; recovery (U11) relies on this flag
-    /// to skip double injection.
+    /// U1 / F-001 / KTD-7: when `merged_to_events` is already
+    /// true, return `AlreadyDone` so the JSONL append layer
+    /// never re-injects `*.wave.complete`. Subsequent ticks
+    /// are pure no-ops.
     fn merge_and_complete(
         &self,
         snapshot: &WaveSnapshot,
     ) -> SupervisorStoreResult<CoordinatorAction> {
         if snapshot.merged_to_events {
-            // Re-tick path; nothing to do. The wave is in
-            // Integrate but the merge already happened; we
-            // advance to Done.
-            // U12 may re-enter here on recovery — keep idempotent.
-            let _ = self.store.mark_merge_to_events(&snapshot.wave_id)?;
-            return Ok(CoordinatorAction::InjectedComplete {
-                topic: coordinator_topic(snapshot.kind, true),
-                blocking_slots: Vec::new(),
-            });
+            // U1 / F-001 / KTD-7: do NOT re-merge and do NOT
+            // re-emit `InjectedComplete`. Return `AlreadyDone`
+            // so the bridge can short-circuit (no JSONL
+            // append) and downstream consumers can distinguish
+            // "freshly merged" from "already done on a prior
+            // tick". Recovery (U11) re-tick path lands here.
+            return Ok(CoordinatorAction::AlreadyDone);
         }
         // Slot events (the runtime provides these externally;
         // the in-memory store tracks `worker_results` and
@@ -355,9 +361,82 @@ mod tests {
         }
     }
 
+    /// U1 / F-001 / KTD-7 regression pin: after a wave has
+    /// been merged, subsequent ticks MUST NOT re-emit
+    /// `InjectedComplete`. The old code re-emitted on every
+    /// tick after `merged_to_events=true` (F-001), violating
+    /// KTD-7.
+    #[test]
+    fn tick_after_merge_to_events_emits_exactly_once() {
+        let store = Arc::new(InMemorySupervisorStore::new());
+        let wave = store.register_wave("idem-once", WaveKind::Exec, 1).unwrap();
+        store
+            .bind_worktree(
+                &wave,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/y".to_string()),
+                    branch: Some("ralph/y".to_string()),
+                },
+            )
+            .unwrap();
+        let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        let coord =
+            SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
+        let inputs = PhaseInputs {
+            aggregate_timeout_secs: 60,
+            elapsed_secs: 0,
+            cancel_requested: false,
+        };
+        // Tick #1: emits InjectedComplete and flips
+        // merged_to_events.
+        let action1 = coord.tick(&wave, inputs.clone()).unwrap();
+        assert!(
+            matches!(
+                action1,
+                CoordinatorAction::InjectedComplete { ref topic, .. } if topic == "exec.wave.complete"
+            ),
+            "tick #1 must emit exec.wave.complete, got {action1:?}"
+        );
+        // Tick #2..#5: MUST NOT re-emit InjectedComplete
+        // (KTD-7). They return either AlreadyDone or
+        // ContinueCollect.
+        for n in 2..=5 {
+            let action = coord.tick(&wave, inputs.clone()).unwrap();
+            assert!(
+                !matches!(action, CoordinatorAction::InjectedComplete { .. }),
+                "tick #{n} must NOT re-emit InjectedComplete; got {action:?}"
+            );
+            assert!(
+                matches!(
+                    action,
+                    CoordinatorAction::AlreadyDone | CoordinatorAction::ContinueCollect
+                ),
+                "tick #{n} must return AlreadyDone or ContinueCollect, got {action:?}"
+            );
+        }
+        // Pin: no post-merge InjectedComplete across 5 more
+        // ticks after the original merge.
+        let mut post_merge_inject_count = 0;
+        for _ in 0..5 {
+            if matches!(
+                coord.tick(&wave, inputs.clone()).unwrap(),
+                CoordinatorAction::InjectedComplete { .. }
+            ) {
+                post_merge_inject_count += 1;
+            }
+        }
+        assert_eq!(
+            post_merge_inject_count, 0,
+            "no post-merge InjectedComplete must emit (U1 KTD-7)"
+        );
+    }
+
     /// U8 idempotency: calling tick twice on the same wave
     /// must NOT inject the coord event twice (the `mark_merge_to_events`
-    /// flag short-circuits the second call to advance to Done).
+    /// flag short-circuits the second call).
     #[test]
     fn tick_after_merge_to_events_is_idempotent() {
         let store = Arc::new(InMemorySupervisorStore::new());
@@ -400,10 +479,16 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(matches!(
-            action2,
-            CoordinatorAction::InjectedComplete { ref topic, .. } if topic == "exec.wave.complete"
-        ));
+        // U1 / KTD-7: post-merge tick MUST return
+        // AlreadyDone or ContinueCollect, not
+        // InjectedComplete (F-001 regression pin).
+        assert!(
+            matches!(
+                action2,
+                CoordinatorAction::AlreadyDone | CoordinatorAction::ContinueCollect
+            ),
+            "tick #2 after merge must return AlreadyDone or ContinueCollect, got {action2:?}"
+        );
     }
 
     /// U8 cancel: cancel_requested → injected failed with
