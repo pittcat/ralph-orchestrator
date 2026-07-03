@@ -8,8 +8,18 @@
 # is the smallest possible pin for the lint + event topology
 # contracts introduced by U7/U9.
 #
-# Expected: the loop sees a single worker unit-done event and
-# finishes the iteration without `plan.blocked`.
+# U10 / fix-plan U10: the scenario must exercise the
+# `system_injected: exec.wave.complete` coord-event path so
+# the expected event ordering actually drives the
+# `exec-integrator` hat (which subscribes to `exec.wave.complete`,
+# not `exec.unit.done`). Without the system_injected envelope
+# the integrator never wakes and `work.done` never lands —
+# making this scenario a tautological passthrough.
+#
+# Expected: the loop sees a `system_injected` exec.wave.complete
+# event fired by the supervisor coord layer after the
+# `exec.unit.done` lands, and finishes the iteration with
+# `work.done`.
 
 name: u13_supervisor_minimal
 description: U13 - supervisor wave.complete → exec-integrator → work.done minimal pin
@@ -37,13 +47,20 @@ mock_responses:
     content_hash: "u13-h"
     </event>
   - |
+    <event system_injected="exec.wave.complete" topic="exec.wave.complete" wave_id="w-u13">
+    wave_id: "w-u13"
+    slot_index: 0
+    blocking_slots: []
+    </event>
+  - |
     waiting.
     </event>
 
 expected:
-  iterations: 2
+  iterations: 3
   events:
-    - topic: work.done
+    - topic: exec.unit.done
+    - topic: exec.wave.complete
   absent_events:
     - topic: plan.blocked
   completion: false
