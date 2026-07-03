@@ -1,0 +1,68 @@
+# OPAC ACL-1: worker (non-coordinator) attempts out-of-scope emit → rejected by isolated scope check.
+#
+# HatCommandPolicy + isolated scope enforcement: a worker hat may only publish
+# topics declared in its `publishes` list. Out-of-scope emits are dropped by
+# `check_isolated_scope` and a `task.resume` recovery event is injected.
+#
+# Generic 2-hat fixture (not ce-executor-prefixed) per R10.
+
+name: opac_acl_worker_out_of_scope_denied
+description: Worker hat cannot emit topics outside its publishes list; runtime injects task.resume recovery
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  hats:
+    coordinator:
+      subscribes_to:
+        - task.start
+      publishes:
+        - experiment.planned
+        - LOOP_COMPLETE
+    worker:
+      subscribes_to:
+        - experiment.planned
+      publishes:
+        - experiment.ready
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+
+# Turn 1: coordinator emits experiment.planned (legit).
+# Turn 2: worker attempts to emit experiment.evaluated (NOT in worker's publishes).
+#         Isolated scope check denies; runtime injects task.resume to worker.
+# Turn 3: worker emits experiment.ready (the only allowed business topic).
+# Turn 4: coordinator emits LOOP_COMPLETE.
+mock_responses:
+  - |
+    <event topic="experiment.planned">
+    plan: "Build the feature"
+    </event>
+  - |
+    <event topic="experiment.evaluated">
+    verdict: "approved"
+    </event>
+  - |
+    <event topic="experiment.ready">
+    status: "implemented"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Done.
+    </event>
+
+expected:
+  iterations: 4
+  events:
+    - topic: experiment.planned
+    - topic: experiment.ready
+  # experiment.evaluated must never be accepted: not in worker's publishes.
+  absent_events:
+    - topic: experiment.evaluated
+  # Recovery path: task.resume injected to inform worker of the violation.
+  prompt_contains:
+    - hat: worker
+      substrings:
+        - "task.resume"
+  # LOOP_COMPLETE honored as completion (sets completion_honored).
+  completion: true

@@ -1,0 +1,53 @@
+# OPAC CH-1: Confirm path reads hat-channel events written by `ralph emit`.
+#
+# Verifies that events written by emit appear in the hat-channel ledger that
+# Confirm (ralph events --events-source hat-channel) reads from. Mock outputs
+# arrive in the events ledger and are observable across turns.
+
+name: opac_ch_confirm_hat_channel_roundtrip
+description: Events emitted by hats appear in hat-channel and are readable for Confirm
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    coordinator:
+      subscribes_to:
+        - task.start
+      publishes:
+        - experiment.planned
+        - LOOP_COMPLETE
+    implementer:
+      subscribes_to:
+        - experiment.planned
+      publishes:
+        - experiment.ready
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+
+# Turn 1: coordinator emits experiment.planned → hat-channel ledger records it.
+# Turn 2: implementer emits experiment.ready → hat-channel records it.
+# Turn 3: coordinator emits LOOP_COMPLETE.
+mock_responses:
+  - |
+    <event topic="experiment.planned">
+    plan: "Build the feature"
+    </event>
+  - |
+    <event topic="experiment.ready">
+    status: "implemented"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Done.
+    </event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: experiment.planned
+    - topic: experiment.ready
+  # The events are recorded in the ledger and become visible to subsequent
+  # hat activations (Confirm path).
+  completion: true

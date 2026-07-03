@@ -3493,3 +3493,35 @@ fn test_ce_executor_serial_shipper_hard_fail_promotion() {
     );
     run_workflow_guard_scenario(yaml);
 }
+
+// 2026-07-04-001 plan U10: BDD scenarios for OPAC agent discipline.
+// ACL-1: non-coordinator worker attempting out-of-scope emit is
+// rejected and routed through task.resume recovery.
+#[test]
+fn test_opac_acl_worker_out_of_scope_denied() {
+    let yaml =
+        load_scenario("tests/scenarios/opac/acl_worker_task_create_denied.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// 2026-07-04-001 plan U10: BDD scenarios for OPAC agent discipline.
+// CH-1: events emitted by hats are recorded in the hat-channel and
+// visible across turns (Confirm path round-trip).
+#[test]
+fn test_opac_ch_confirm_hat_channel_roundtrip() {
+    let yaml =
+        load_scenario("tests/scenarios/opac/ch_confirm_hat_channel_roundtrip.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// 2026-07-04-001 plan U10: BDD scenarios for OPAC agent discipline.
+// BUD-1: a single activation may emit only ONE business event;
+// extra in-scope emits are dropped and the runtime injects a
+// targeted task.resume recovery so the hat can re-emit exactly one.
+#[test]
+fn test_opac_bud_isolated_double_business_dropped() {
+    let yaml = load_scenario(
+        "tests/scenarios/opac/bud_isolated_double_business_dropped.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}

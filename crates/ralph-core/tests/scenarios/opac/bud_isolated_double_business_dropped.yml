@@ -1,0 +1,58 @@
+# OPAC BUD-1: Isolated budget — double business emit in same activation → second event dropped.
+#
+# In isolated mode a single backend call may only advance ONE business event.
+# Extra in-scope events are dropped by the budget gate, and the runtime injects
+# `task.resume` (reason=`isolated_extra_business_event_dropped`) for the next
+# turn so the hat can re-emit EXACTLY ONE event.
+#
+# Mirrors `isolated_boundary_violation.yml` shape but with a 2-hat fixture
+# (coordinator over-emits experiment.planned + experiment.ready in one turn).
+
+name: opac_bud_isolated_double_business_dropped
+description: Isolated mode drops the second business event in a single activation and injects task.resume
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  hats:
+    coordinator:
+      subscribes_to:
+        - task.start
+      publishes:
+        - experiment.planned
+        - experiment.ready
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+
+# Turn 1: coordinator over-emits experiment.planned + experiment.ready in same turn.
+#         First is accepted; second dropped; recovery task.resume injected.
+# Turn 2: coordinator re-activated by recovery, emits LOOP_COMPLETE.
+mock_responses:
+  - |
+    <event topic="experiment.planned">
+    plan: "Build the feature"
+    </event>
+    <event topic="experiment.ready">
+    status: "premature"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Done.
+    </event>
+
+expected:
+  iterations: 2
+  events:
+    - topic: experiment.planned
+  # The dropped second business event must never be accepted.
+  absent_events:
+    - topic: experiment.ready
+  # Recovery path: task.resume is injected so the same hat is re-activated
+  # on the next turn with the "EXACTLY ONE business event" hint.
+  prompt_contains:
+    - hat: coordinator
+      substrings:
+        - "EXACTLY ONE business event"
+  completion: true
