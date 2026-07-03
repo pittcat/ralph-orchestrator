@@ -382,6 +382,12 @@ pub const LOOP_RUNNER_INTERNAL_TOPICS: &[&str] = &[
     "repair.close",
     "task.relocate",
     "task.relocate_legacy",
+    // 2026-06-28 plan U10 (R10): `plan.blocked` is the loop's
+    // self-stop signal. In an automated preset the `ralph` pseudo-
+    // hat emits it, and the `progress-steward` hat may also publish
+    // it as a fallback. No hat subscribes to it because it is a
+    // terminal control event consumed by the loop runner itself.
+    "plan.blocked",
 ];
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -390,6 +396,9 @@ pub const LOOP_RUNNER_INTERNAL_TOPICS: &[&str] = &[
 
 use crate::config::ConfigError;
 use crate::config::ConfigWarning;
+use crate::event_origin::{
+    is_supervisor_coordination_topic, is_supervisor_slot_topic,
+};
 use crate::hat_registry::HatRegistry;
 use crate::payload_contract::{
     PayloadContractError, PayloadContractErrorKind, PayloadContractValidationResult,
@@ -704,6 +713,10 @@ fn payload_warning_finding(warning: &str) -> RuntimeContractFinding {
 ///    (loop-level gates consumed by the loop runner's
 ///    `missing_required_events` check).
 /// 3. Any topic in [`LOOP_RUNNER_INTERNAL_TOPICS`] (e.g. `build.blocked`).
+/// 4. Supervisor-managed slot topics (`*.unit.done` / `*.unit.failed`)
+///    when `event_loop.supervisor.enabled` is true. The supervisor is
+///    the runtime-managed consumer of these events; the absence of a
+///    hat subscriber is by design (KTD-6 / R14).
 ///
 /// The function uses `HatRegistry::has_specific_subscriber` so the
 /// runtime fallback `ralph`'s `*` subscription does NOT count as a
@@ -737,6 +750,11 @@ pub fn detect_orphan_topics(
                 continue;
             }
             if LOOP_RUNNER_INTERNAL_TOPICS.contains(&topic) {
+                continue;
+            }
+            // 2026-07-03-001 plan U13: supervisor-managed slot topics
+            // are consumed by the runtime supervisor, not by a hat.
+            if config.event_loop.supervisor.enabled && is_supervisor_slot_topic(topic) {
                 continue;
             }
             if !registry.has_specific_subscriber(topic) {
@@ -822,6 +840,12 @@ pub fn detect_required_topic_gaps(
         if LOOP_RUNNER_INTERNAL_TOPICS.contains(&topic.as_str()) {
             continue;
         }
+        // 2026-07-03-001 plan U13: supervisor-managed coordination topics
+        // are runtime-injected / runtime-consumed by the supervisor, not
+        // by hats.  Do not flag them as publisher/subscriber gaps.
+        if config.event_loop.supervisor.enabled && is_supervisor_coordination_topic(topic) {
+            continue;
+        }
 
         let has_publisher = registry
             .all()
@@ -874,7 +898,12 @@ pub fn detect_required_topic_gaps(
             .with_detail("topic", topic.clone());
             findings.push(finding);
         }
-        if !has_subscriber && !publishing_hat_also_publishes_completion {
+        // Skip the no_subscriber check for terminal workflow events
+        // and for supervisor-managed slot topics that are consumed by
+        // the runtime supervisor rather than a hat.
+        let is_supervisor_slot = config.event_loop.supervisor.enabled
+            && is_supervisor_slot_topic(topic.as_str());
+        if !has_subscriber && !publishing_hat_also_publishes_completion && !is_supervisor_slot {
             let finding = RuntimeContractFinding::try_new_core(
                 "required.no_subscriber",
                 FindingSource::Topology,
@@ -967,8 +996,15 @@ pub fn detect_obligation_topics_not_in_publishes(
 ///    `SchemaMissingForRequiredTopic` per the strict flag passed in.
 /// 5. `detect_orphan_topics()` — every real orphan becomes a
 ///    `source=orphan` warning finding. Completion promise,
-///    `required_events`, and `LOOP_RUNNER_INTERNAL_TOPICS` are
-///    exempt.
+///    `required_events`, `LOOP_RUNNER_INTERNAL_TOPICS`, and
+///    supervisor-managed slot topics are exempt.
+///
+/// 6. `detect_required_topic_gaps()` — supervisor-managed wave
+///    topics (`*.wave.complete` / `*.wave.failed`) and slot topics
+///    (`*.unit.done` / `*.unit.failed`) are exempt from the publisher /
+///    subscriber gap checks when `event_loop.supervisor.enabled` is
+///    true, because the supervisor is the runtime-managed single
+///    writer / consumer of these coordination events (R14 / KTD-6).
 ///
 /// # Inputs
 ///

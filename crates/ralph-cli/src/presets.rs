@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        assert_eq!(presets.len(), 5, "Expected 5 public presets");
+        assert_eq!(presets.len(), 6, "Expected 6 public presets");
     }
 
     #[test]
@@ -293,10 +293,11 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
         assert!(names.contains(&"autoresearch"));
         assert!(names.contains(&"ce-executor-pipeline"));
         assert!(names.contains(&"ce-executor-serial"));
+        assert!(names.contains(&"ce-executor-supervisor"));
         assert!(names.contains(&"debug"));
         assert!(names.contains(&"merge-batch"));
     }
@@ -1807,6 +1808,7 @@ mod tests {
         let zsh_values: std::collections::BTreeSet<String> = [
             "builtin:ce-executor-serial",
             "builtin:ce-executor-pipeline",
+            "builtin:ce-executor-supervisor",
             "builtin:debug",
             "builtin:autoresearch",
             "builtin:merge-batch",
@@ -2107,6 +2109,16 @@ mod tests {
             // consolidation). Topology is structurally valid; the EGRESS
             // finding is a known bound artifact.
             "ce-executor-pipeline",
+            // ce-executor-supervisor: 2026-07-03-001 plan U13. The supervisor
+            // preset has intentional branching completion paths: a failed exec
+            // wave (`exec.wave.failed`) routes through `exec-failure-handler` →
+            // `work.failed` → `fixer` instead of through `work.done`. The
+            // static topology validator therefore flags `work.done` as not on
+            // all paths from `plan.ready`. This is by design — `work.done` is
+            // the success-path handoff, while the failure path is handled by
+            // the fix wave. The runtime still requires `work.done` on every
+            // successful completion.
+            "ce-executor-supervisor",
         ];
 
         // Per-preset finding-id exemptions for the non-strict authoring
@@ -2275,11 +2287,21 @@ mod tests {
         // `report.done` (required_events) and `LOOP_COMPLETE`
         // (completion_promise). Topology is structurally valid; the EGRESS
         // finding is a known bound artifact.
+        //
+        // ce-executor-supervisor: 2026-07-03-001 plan U13. The supervisor
+        // preset has intentional branching completion paths: a failed exec
+        // wave routes through `exec-failure-handler` → `work.failed` →
+        // `fixer` instead of through `work.done`. The static topology
+        // validator flags `work.done` as not on all paths from `plan.ready`.
+        // This is by design — `work.done` is the success-path handoff, while
+        // the failure path is handled by the fix wave. The runtime still
+        // requires `work.done` on every successful completion.
         let topology_exempt: &[&str] = &[
             "autoresearch",
             "debug",
             "ce-executor-serial",
             "ce-executor-pipeline",
+            "ce-executor-supervisor",
         ];
 
         // Per-preset finding-id exemptions (P2 #16 + #22).

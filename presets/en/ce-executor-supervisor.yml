@@ -99,6 +99,9 @@ event_loop:
     mode: enforce
     on_violation: reject_with_resume
 
+topic_format_whitelist:
+  - LOOP_COMPLETE
+
 tasks:
   enabled: true
   coordinator_hats:
@@ -159,14 +162,17 @@ hats:
       - exec.unit.ready
     publishes:
       - exec.unit.done
+      - exec.unit.failed
     event_filter:
       enabled: true
       events:
       - exec.unit.ready
     exempt_topics:
       - exec.unit.done
+      - exec.unit.failed
     terminal_events:
       - exec.unit.done
+      - exec.unit.failed
 
   exec-integrator:
     name: "Exec Integrator"
@@ -205,12 +211,14 @@ hats:
     description: "Fans out review work across the six dimension reviewers."
     triggers:
       - work.done
+      - review.start
     publishes:
       - review.unit.ready
     event_filter:
       enabled: true
       events:
       - work.done
+      - review.start
     exempt_topics:
       - review.unit.ready
     terminal_events:
@@ -282,14 +290,17 @@ hats:
       - fix.unit.ready
     publishes:
       - fix.unit.done
+      - fix.unit.failed
     event_filter:
       enabled: true
       events:
       - fix.unit.ready
     exempt_topics:
       - fix.unit.done
+      - fix.unit.failed
     terminal_events:
       - fix.unit.done
+      - fix.unit.failed
 
   fix-integrator:
     name: "Fix Integrator"
@@ -340,6 +351,25 @@ hats:
       - plan.complete
     terminal_events:
       - plan.complete
+    instructions: |
+      ## SHIPPER MODE — Plan Completion Gate
+
+      You are the hand-off hat for `plan.complete`. Your only job is to
+      forward the completion signal to downstream consumers (e.g. reporter).
+
+      ### `plan.blocked` reason routing (P0-2 STRICT-MATCH)
+      If you are ever triggered by `plan.blocked` instead of `plan.complete`,
+      route as follows using **STRICT EXACT MATCH** on the `reason` field:
+
+      1. Normalise `reason` with `trim()` + `to_lowercase()`.
+      2. Compare the normalised string with `==` against the whitelist below.
+         Substring, "starts with", or narrative prefix matching is **forbidden**.
+      3. Recoverable reasons that may route to forward-after-verification:
+         - `loop_stalled_max_iterations`
+         - `steward_escalation`
+         - `review_terminal_drift`
+      4. Any other reason is a hard-fail: forward as blocked and do not promote
+         to completion.
 
   reporter:
     name: "Reporter"

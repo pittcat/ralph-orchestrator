@@ -147,6 +147,25 @@ pub fn is_supervisor_coordination_topic(topic: &str) -> bool {
     SUPERVISOR_COORDINATION_TOPICS.contains(&topic)
 }
 
+/// 2026-07-03-001 plan U13: `true` when `topic` is a supervisor-managed
+/// slot-level topic (`*.unit.done` or `*.unit.failed`). These are emitted
+/// by worker hats and consumed by the supervisor at fan-in time, so
+/// topology/orphan checks must not treat the absence of a hat subscriber
+/// as an error.
+pub fn is_supervisor_slot_topic(topic: &str) -> bool {
+    let prefix = topic.split('.').next().unwrap_or("");
+    matches!(
+        topic,
+        "exec.unit.done"
+            | "exec.unit.failed"
+            | "fix.unit.done"
+            | "fix.unit.failed"
+            | "review.unit.done"
+            | "review.unit.failed"
+    ) || (matches!(prefix, "exec" | "fix" | "review") && topic.ends_with(".unit.done"))
+        || (matches!(prefix, "exec" | "fix" | "review") && topic.ends_with(".unit.failed"))
+}
+
 /// P1-1 fix: explicit allowlist (see `ORCHESTRATOR_DIAGNOSTIC_TOPICS`)
 /// instead of `event.*` prefix match.
 pub fn is_orchestrator_diagnostic_topic(topic: &str) -> bool {
