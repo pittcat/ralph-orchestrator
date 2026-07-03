@@ -331,4 +331,6 @@ pub use memory::InMemorySupervisorStore;
 
 mod memory;
 #[cfg(test)]
+mod memory_protocol_tests;
+#[cfg(test)]
 mod types_tests;
