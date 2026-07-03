@@ -277,7 +277,7 @@ fn run_wave_precheck(
     use crate::policy_check::{
         OnConfigError, OutputMode, PolicyCheckFlags, PolicyCheckMode, ValidationFailure,
         emit_policy_validation_failure, enabled_event_policy, load_policy_config_for_cli_emit,
-        resolve_policy_check_mode, validate_batch_against_config,
+        resolve_policy_check_mode_with_ctx, validate_batch_against_config,
     };
 
     // Load workspace config. We `Warn` on broken configs so a typo in
@@ -337,7 +337,12 @@ fn run_wave_precheck(
         policy_check: policy_check_flag,
         no_policy_check: no_policy_check_flag,
     };
-    let mode = resolve_policy_check_mode(&flags, config.as_ref());
+    // U15: agent context defaults to strict policy-check even when the
+    // resolved config does not enable `require_policy_check_for_cli_emit`.
+    let op_ctx = crate::operation_guard::OperationContext::detect(
+        std::env::current_dir().unwrap_or_default(),
+    );
+    let mode = resolve_policy_check_mode_with_ctx(&flags, config.as_ref(), op_ctx.is_agent_context);
 
     // No policy in play → only the JSON-object shape check ran
     // already in `validate_payload_shape`. Nothing more to do.

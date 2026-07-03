@@ -62,25 +62,61 @@ pub fn resolve_policy_check_mode(
     flags: &PolicyCheckFlags,
     config: Option<&RalphConfig>,
 ) -> PolicyCheckMode {
+    resolve_policy_check_mode_with_ctx(flags, config, false)
+}
+
+/// U15: agent-context-aware variant of [`resolve_policy_check_mode`].
+///
+/// When `is_agent_context` is true, callers behave **as if**
+/// `event_loop.event_policy.require_policy_check_for_cli_emit: true`,
+/// irrespective of the resolved config. This closes the gap where an
+/// agent path fell through to `Skip` because the preset author did
+/// not enable `event_policy.enabled` — agents must always pass the
+/// schema precheck before writing an event.
+///
+/// Preset opt-out via `event_policy.allow_unsafe_cli_emit: true` is
+/// still honoured: an agent calling `ralph emit --unsafe-no-policy-check`
+/// on such a preset gets `Skip` (with a deprecation warning emitted
+/// via [`crate::commands::emit::emit_unsafe_bypass_deprecation`]).
+/// Human CLI (`is_agent_context == false`) keeps the legacy semantics.
+pub fn resolve_policy_check_mode_with_ctx(
+    flags: &PolicyCheckFlags,
+    config: Option<&RalphConfig>,
+    is_agent_context: bool,
+) -> PolicyCheckMode {
     if flags.policy_check {
         return PolicyCheckMode::ExplicitCheck;
     }
 
-    if let Some(config) = config {
-        if let Some(policy) = config.event_loop.event_policy.as_ref() {
-            let strict = policy.enabled && policy.require_policy_check_for_cli_emit;
-            if strict {
-                if flags.no_policy_check && policy.allow_unsafe_cli_emit {
-                    return PolicyCheckMode::Skip;
-                }
-                return PolicyCheckMode::Enforce;
-            }
+    let config_strict = config
+        .and_then(|c| c.event_loop.event_policy.as_ref())
+        .map(|p| p.enabled && p.require_policy_check_for_cli_emit)
+        .unwrap_or(false);
+    let allow_unsafe_bypass = config
+        .and_then(|c| c.event_loop.event_policy.as_ref())
+        .map(|p| p.allow_unsafe_cli_emit)
+        .unwrap_or(false);
+
+    // The effective strict flag is "config-says-strict OR agent-context
+    // defaults to strict". Human CLI strictly follows the config.
+    let effective_strict = config_strict || is_agent_context;
+
+    if effective_strict {
+        if flags.no_policy_check && allow_unsafe_bypass {
+            return PolicyCheckMode::Skip;
         }
+        return PolicyCheckMode::Enforce;
     }
 
-    // When no config is loaded and no explicit flags were given, skip.
+    // When neither config nor agent-context asks for strict, skip.
     // `--unsafe-no-policy-check` without strict config is a no-op.
     PolicyCheckMode::Skip
+}
+
+/// Backwards-compatible re-export of [`resolve_policy_check_mode`]
+/// without operation context. Human CLI keep the legacy semantics.
+pub fn legacy_resolve(flags: &PolicyCheckFlags, config: Option<&RalphConfig>) -> PolicyCheckMode {
+    resolve_policy_check_mode_with_ctx(flags, config, false)
 }
 
 /// Try to load the workspace `ralph.yml` config for policy check. Returns
@@ -1564,6 +1600,111 @@ event_loop:
         assert_eq!(
             resolve_policy_check_mode(&flags, Some(&cfg)),
             PolicyCheckMode::Skip
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // U15: agent context defaults to strict policy-check.
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn agent_ctx_config() -> RalphConfig {
+        // Config without `require_policy_check_for_cli_emit` — agent
+        // context should still default to strict via U15.
+        let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: false
+    mode: enforce
+    allow_unsafe_cli_emit: false
+"#;
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    fn agent_ctx_config_optout() -> RalphConfig {
+        // Preset author opts out for agent context.
+        let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    allow_unsafe_cli_emit: true
+"#;
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn test_u15_agent_context_enforce_even_when_config_disabled() {
+        let cfg = agent_ctx_config();
+        let flags = PolicyCheckFlags {
+            policy_check: false,
+            no_policy_check: false,
+        };
+        // Human CLI: skip (config says no enforce).
+        assert_eq!(
+            resolve_policy_check_mode_with_ctx(&flags, Some(&cfg), false),
+            PolicyCheckMode::Skip
+        );
+        // Agent CLI: enforce despite the disabled config (U15 default).
+        assert_eq!(
+            resolve_policy_check_mode_with_ctx(&flags, Some(&cfg), true),
+            PolicyCheckMode::Enforce
+        );
+    }
+
+    #[test]
+    fn test_u15_agent_context_explicit_check_wins() {
+        let cfg = agent_ctx_config();
+        let flags = PolicyCheckFlags {
+            policy_check: true,
+            no_policy_check: false,
+        };
+        assert_eq!(
+            resolve_policy_check_mode_with_ctx(&flags, Some(&cfg), true),
+            PolicyCheckMode::ExplicitCheck
+        );
+    }
+
+    #[test]
+    fn test_u15_agent_unsafe_bypass_blocked_when_disallowed() {
+        let cfg = agent_ctx_config();
+        let flags = PolicyCheckFlags {
+            policy_check: false,
+            no_policy_check: true,
+        };
+        // Config has `allow_unsafe_cli_emit: false` so the bypass
+        // flag is rejected with Enforce even in agent context.
+        assert_eq!(
+            resolve_policy_check_mode_with_ctx(&flags, Some(&cfg), true),
+            PolicyCheckMode::Enforce
+        );
+    }
+
+    #[test]
+    fn test_u15_agent_unsafe_bypass_allowed_when_optout_set() {
+        let cfg = agent_ctx_config_optout();
+        let flags = PolicyCheckFlags {
+            policy_check: false,
+            no_policy_check: true,
+        };
+        // Preset opts out → agent can bypass.
+        assert_eq!(
+            resolve_policy_check_mode_with_ctx(&flags, Some(&cfg), true),
+            PolicyCheckMode::Skip
+        );
+    }
+
+    #[test]
+    fn test_u15_human_cli_unchanged_by_agent_default() {
+        // Backwards compat: human CLI uses the config flag verbatim.
+        let cfg = agent_ctx_config();
+        let flags = PolicyCheckFlags {
+            policy_check: false,
+            no_policy_check: false,
+        };
+        // Same call as legacy resolve_policy_check_mode.
+        assert_eq!(
+            resolve_policy_check_mode_with_ctx(&flags, Some(&cfg), false),
+            resolve_policy_check_mode(&flags, Some(&cfg))
         );
     }
 

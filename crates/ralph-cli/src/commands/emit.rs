@@ -4,7 +4,10 @@ use crate::cli::{
 };
 use crate::config_resolution;
 use crate::display::colors;
-use crate::policy_check::{PolicyCheckFlags, ValidationFailure, resolve_policy_check_mode};
+use crate::policy_check::{
+    PolicyCheckFlags, ValidationFailure, resolve_policy_check_mode,
+    resolve_policy_check_mode_with_ctx,
+};
 use anyhow::{Context, Result};
 use clap::Parser;
 use ralph_core::config::HatExecutionMode;
@@ -176,12 +179,33 @@ pub use crate::policy_check::PolicyCheckMode;
 /// that bridges `EmitArgs` → `PolicyCheckFlags` for symmetry with the
 /// shared helper. Preserved for backward compatibility with existing
 /// callers and tests.
+///
+/// U15: the agent-context-aware helper accepts `is_agent_context` so
+/// emit callers that know whether the call came from an agent (true)
+/// or from the human CLI (false) can pass that signal through. Most
+/// callers should prefer the ctx-aware form.
 pub fn should_policy_check_emit(args: &EmitArgs, config: Option<&RalphConfig>) -> PolicyCheckMode {
     let flags = PolicyCheckFlags {
         policy_check: args.policy_check,
         no_policy_check: args.no_policy_check,
     };
     resolve_policy_check_mode(&flags, config)
+}
+
+/// U15 ctx-aware emit policy-check resolver. Detects the operation
+/// context from the live environment and forwards `is_agent_context`
+/// to the shared helper.
+pub fn should_policy_check_emit_with_ctx(
+    args: &EmitArgs,
+    config: Option<&RalphConfig>,
+    workspace_root: &std::path::Path,
+) -> PolicyCheckMode {
+    let flags = PolicyCheckFlags {
+        policy_check: args.policy_check,
+        no_policy_check: args.no_policy_check,
+    };
+    let ctx = crate::operation_guard::OperationContext::detect(workspace_root.to_path_buf());
+    resolve_policy_check_mode_with_ctx(&flags, config, ctx.is_agent_context)
 }
 
 /// Emit an event to the current run's events file with proper JSON formatting.
@@ -497,8 +521,14 @@ fn emit_command_with_root_and_hats(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("missing event topic (required unless --schema is set)"))?;
 
-    // Determine whether policy validation is required.
-    let check_mode = should_policy_check_emit(&args, config.as_ref());
+    // Determine whether policy validation is required. U15: agent
+    // context (env-detected) defaults to strict policy-check, even
+    // when the preset author did not flip
+    // `require_policy_check_for_cli_emit`.
+    let workspace_root = root
+        .cloned()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let check_mode = should_policy_check_emit_with_ctx(&args, config.as_ref(), &workspace_root);
 
     // Phase 2: in isolated mode the runner controls hat provenance. When the
     // agent is running inside a hat context (RALPH_CURRENT_HAT is set), the
