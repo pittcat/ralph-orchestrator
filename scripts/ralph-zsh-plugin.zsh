@@ -59,6 +59,12 @@ unset _ralph_fn
 _RALPH_BUILTIN_HAT_VALUES=(
   "builtin:ce-executor-serial"
   "builtin:ce-executor-pipeline"
+  # 2026-07-03-001 plan U13: supervisor-driven parallel preset.
+  # Requires `--features supervisor-db` at build time and
+  # `event_loop.supervisor.enabled: true` + isolated mode at
+  # run time; the lint in `crates/ralph-core/src/preset_lint/supervisor.rs`
+  # enforces both.
+  "builtin:ce-executor-supervisor"
   # builtin:ce-executor-wave  # deleted 2026-06-23
   "builtin:debug"
   "builtin:autoresearch"
@@ -67,6 +73,7 @@ _RALPH_BUILTIN_HAT_VALUES=(
 _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
   "Isolated-mode plan-driven work execution with serial code review (no wave), auto-fix, shipping, and manager report"
   "Isolated-mode linear one-shot plan execution: review plan → execute (TDD) → 6 serial dimension reviewers → fix → align → report → complete"
+  "Isolated-mode plan-driven work with parallel worker fan-out via rusqlite supervisor: per-slot worktrees, fan-in merge, parallel 6-dim review, parallel fix, integration + report"
   # Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping  # deleted 2026-06-23
   "Bug investigation, root-cause analysis, and adversarial fix verification"
   "Autonomous experiment loop: try ideas, measure, keep what works"

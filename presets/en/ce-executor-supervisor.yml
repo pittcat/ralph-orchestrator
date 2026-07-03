@@ -1,0 +1,224 @@
+# ce-executor-supervisor: Isolated Mode Plan-Driven Work with Supervisor Wave Orchestration
+# Pattern (2026-07-03-001 plan): plan.ready → parallel worker fan-out via
+# SupervisorStore rusqlite → per-slot worktrees → fan-in merge → integrator
+# runs full suite → work.done → parallel review wave → fix wave → fix.done
+# → progress-steward / reporter → LOOP_COMPLETE.
+#
+# 16 + 1 functional hats + progress-steward:
+# - coordinator: dispatch units to the supervisor + integrate waves
+# - task-planner: emit work.ready per plan unit (with --payloads batch)
+# - worker: per-slot TDD implementation (worktree isolated)
+# - exec-integrator: subscribed to exec.wave.complete; merges + full-suite
+# - review-coordinator: emits 6 review-batch payloads (single emit,
+#   KTD-12) so review-synthesizer gets the aggregate fan-in
+# - review-batch-worker (×6): one per dimension; emits review.dimension.done
+# - review-synthesizer: synthesizes fix plan; emits review.complete
+# - fix-task-planner: emits fix.unit.ready per fix unit
+# - fix-worker: parallel fix worktrees
+# - fix-integrator: subscribed to fix.wave.complete; merges + tests
+# - alignment: alignment pass
+# - reporter: manager-facing report
+# - fixer: hard fallback for isolated failures
+# - progress-steward: loop-level fallback on stall
+#
+# Topological contract (KTD-1 / KTD-5 / KTD-8):
+# - supervisor.enabled: true + execution_mode: isolated (R-SW-1 lint)
+# - workers (worker, fix-worker, review-batch-worker) declare `*.unit.done`
+#   as their published topic — the supervisor collects them fan-in.
+# - integrators subscribe to `*.wave.complete` only (lint R-SW-2).
+# - No hat declares a supervisor coordination topic in `publishes:`
+#   (lint R-COORD-4). The supervisor is the only writer.
+#
+# Usage:
+#   ralph run -H builtin:ce-executor-supervisor \
+#     --features supervisor-db \
+#     -p docs/plans/my-plan.md
+
+# 2026-06-27 mechanism foundation U10: declarative flow metadata.
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: unit_loop
+        kind: foreach
+        over: plan.units
+        allowed_emits:
+          - work.ready
+          - work.done
+      - id: exec_wave
+        kind: side_effect
+        runs: supervisor.exec.wave
+        allowed_emits:
+          - exec.wave.complete
+          - exec.wave.failed
+      - id: exec_integrate
+        kind: await
+        on: exec.wave.complete
+        allowed_emits:
+          - work.done
+      - id: review_loop
+        kind: side_effect
+        runs: supervisor.review.wave
+        allowed_emits:
+          - review.wave.complete
+          - review.wave.failed
+      - id: fix_loop
+        kind: side_effect
+        runs: supervisor.fix.wave
+        allowed_emits:
+          - fix.wave.complete
+          - fix.wave.failed
+      - id: plan_end
+        kind: terminal
+        allowed_emits:
+          - plan.complete
+          - LOOP_COMPLETE
+    repair_budget: 3
+    enforce_schema: hard
+    state_idempotency: required
+
+# Top-level config (R-SW-1 + R-D-rusqlite).
+event_loop:
+  execution_mode: isolated
+  supervisor:
+    enabled: true
+    db_path: .ralph/supervisor.db
+    max_concurrent_workers: 4
+    aggregate_timeout_secs: 600
+  ephemeral_isolation: true
+  enforce_current_unit: true
+  enforce_hat_scope: true
+  required_events:
+    - work.done
+    - LOOP_COMPLETE
+
+# 16 functional hats + progress-steward. Per-hat `publishes`
+# and `triggers` are deliberately minimal: the supervisor
+# owns the wave.complete/failed topics, integrators subscribe
+# to those (lint R-SW-2 enforced), workers publish per-slot
+# `*.unit.done` (lint R-COORD-4 keeps them out of integration
+# paths).
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers:
+      - plan.ready
+      - exec.wave.complete
+      - review.wave.complete
+      - fix.wave.complete
+    publishes:
+      - work.ready
+      - plan.complete
+      - LOOP_COMPLETE
+
+  task-planner:
+    name: "Task Planner"
+    triggers:
+      - work.ready
+    publishes:
+      - exec.unit.ready
+
+  worker:
+    name: "Worker"
+    triggers:
+      - exec.unit.ready
+    publishes:
+      - exec.unit.done
+
+  exec-integrator:
+    name: "Exec Integrator"
+    triggers:
+      - exec.wave.complete
+    publishes:
+      - work.done
+
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers:
+      - work.done
+    publishes:
+      - review.unit.ready
+
+  review-batch-worker:
+    name: "Review Batch Worker"
+    triggers:
+      - review.unit.ready
+    publishes:
+      - review.unit.done
+
+  review-synthesizer:
+    name: "Review Synthesizer"
+    triggers:
+      - review.unit.done
+    publishes:
+      - review.wave.complete
+    # The supervisor injects `review.wave.complete` on
+    # fan-in; this hat declares the topic in its `triggers:`
+    # list so the dispatcher's origin guard routes the
+    # system_injected coord event into review-synthesizer.
+    # Declaring the topic in `publishes:` would falsely
+    # advertise it as a producer trigger — the lint lets
+    # the exception through via `review-synthesizer` hat id.
+
+  fix-task-planner:
+    name: "Fix Task Planner"
+    triggers:
+      - review.wave.complete
+    publishes:
+      - fix.unit.ready
+
+  fix-worker:
+    name: "Fix Worker"
+    triggers:
+      - fix.unit.ready
+    publishes:
+      - fix.unit.done
+
+  fix-integrator:
+    name: "Fix Integrator"
+    triggers:
+      - fix.wave.complete
+    publishes:
+      - fix.done
+
+  alignment:
+    name: "Alignment"
+    triggers:
+      - fix.done
+    publishes:
+      - plan.complete
+
+  shipper:
+    name: "Shipper"
+    triggers:
+      - plan.complete
+    publishes:
+      - plan.complete
+
+  reporter:
+    name: "Reporter"
+    triggers:
+      - plan.complete
+    publishes:
+      - LOOP_COMPLETE
+
+  fixer:
+    name: "Fixer"
+    triggers:
+      - work.failed
+    publishes:
+      - fix.applied
+      - fix.exhausted
+
+  progress-steward:
+    name: "Progress Steward"
+    triggers:
+      - loop.stalled
+    publishes:
+      - plan.blocked
+
+# Default publishes fallback so cli/agents can emit any of
+# the work.ready family without an explicit `publishes`.
+default_publishes: [work.ready]

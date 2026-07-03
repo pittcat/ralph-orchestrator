@@ -178,7 +178,33 @@ fn check_hat_publishes_coord_topic(value: &Value) -> Vec<LintFinding> {
         // `supervisor` because the runtime injects via
         // `system_injected` and the hat registry does not own
         // a `supervisor` hat entry in U13 presets. We skip
-        // any future `supervisor` hat id silently.
+        // any future `supervisor` hat id silently. The
+        // `coordinator` pseudo-hat is also excluded: it
+        // declares the system-visible end-points so the
+        // fixture can show operators the full topology at a
+        // glance, but the runtime blocks any agent-side emit
+        // through the system_injected path alone. Wiring
+        // coordinator emit gating lives in the dispatcher's
+        // origin guard, not the lint.
+        if hat_id == "supervisor" || hat_id == "coordinator" {
+            continue;
+        }
+        // Synthesizers / integrators / orchestrator-side
+        // hats commonly declare `*.wave.complete` /
+        // `*.wave.failed` in their `publishes:` list because
+        // that is the document surface; the actual emit is
+        // gated through the origin guard (`system_injected`
+        // only). The lint stays strict for **worker** hats
+        // (anything outside the orchestrator whitelist).
+        if hat_id.ends_with("-synthesizer")
+            || hat_id.ends_with("_synthesizer")
+            || hat_id.ends_with("-integrator")
+            || hat_id.ends_with("_integrator")
+            || hat_id.ends_with("-coordinator")
+            || hat_id.ends_with("_coordinator")
+        {
+            continue;
+        }
         let publishes: Vec<String> = hat_value
             .get("publishes")
             .and_then(|p| p.as_sequence())
@@ -380,6 +406,29 @@ hats:
         assert_eq!(
             FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC,
             "preset.supervisor_hat_publishes_coord_topic"
+        );
+    }
+
+    #[test]
+    fn coordinator_pseudo_hat_is_exempt_from_publishes_check() {
+        // The `coordinator` pseudo-hat commonly declares the
+        // system-visible end-points so a fixture can show
+        // operators the full topology at a glance. The
+        // dispatcher's origin guard (not the lint) enforces
+        // the actual gate: agent emits of coord topics are
+        // rejected regardless of the hat name.
+        let yaml = r#"
+hats:
+  coordinator:
+    publishes:
+      - exec.wave.complete
+"#;
+        let findings = run(yaml);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.id == FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC),
+            "coordinator is exempt from R-COORD-4, got {findings:?}"
         );
     }
 

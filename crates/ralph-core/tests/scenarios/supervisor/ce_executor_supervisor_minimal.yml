@@ -1,0 +1,49 @@
+# 2026-07-03-001 plan U13: supervisor minimal BDD smoke.
+#
+# Pinned to `ce-executor-supervisor` topology: validates the
+# `exec.unit.done → exec.wave.complete (system_injected) →
+# exec-integrator → work.done` happy path inside a single
+# isolated mode iteration. Full 16-hat fan-out is exercised
+# in the integration smoke test in U12; this BDD file
+# is the smallest possible pin for the lint + event topology
+# contracts introduced by U7/U9.
+#
+# Expected: the loop sees a single worker unit-done event and
+# finishes the iteration without `plan.blocked`.
+
+name: u13_supervisor_minimal
+description: U13 - supervisor wave.complete → exec-integrator → work.done minimal pin
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 2
+  hats:
+    worker:
+      subscribes_to:
+        - exec.unit.ready
+      publishes:
+        - exec.unit.done
+    exec-integrator:
+      subscribes_to:
+        - exec.wave.complete
+      publishes:
+        - work.done
+
+mock_responses:
+  - |
+    <event topic="exec.unit.done">
+    wave_id: "w-u13"
+    slot_index: 0
+    content_hash: "u13-h"
+    </event>
+  - |
+    waiting.
+    </event>
+
+expected:
+  iterations: 2
+  events:
+    - topic: work.done
+  absent_events:
+    - topic: plan.blocked
+  completion: false

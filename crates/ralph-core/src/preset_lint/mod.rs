@@ -54,6 +54,9 @@ mod tests;
 #[cfg(test)]
 mod phase_authority_tests;
 
+#[cfg(test)]
+mod supervisor_preset_test;
+
 pub use coordinator::check_coordinator_rules;
 pub use finding_id::{
     FINDING_ACTIVATION_EGRESS_MISSING, FINDING_COORDINATOR_MISSING,

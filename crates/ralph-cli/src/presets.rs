@@ -44,6 +44,20 @@ const PRESETS: &[EmbeddedPreset] = &[
         content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-serial.yml")),
         public: true,
     },
+    // 2026-07-03-001 plan U13: supervisor parallel preset.
+    // 16 functional hats + progress-steward. Requires the
+    // `supervisor-db` feature at build time so the rusqlite
+    // store links; isolated mode + supervisor.enabled: true is
+    // required (R-SW-1 lint enforces).
+    EmbeddedPreset {
+        name: "ce-executor-supervisor",
+        description: "Isolated-mode plan-driven work execution with parallel worker fan-out via rusqlite supervisor: per-slot worktrees, fan-in merge, parallel 6-dim review, parallel fix, integration + report",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/presets/ce-executor-supervisor.yml"
+        )),
+        public: true,
+    },
     EmbeddedPreset {
         name: "debug",
         description: "Bug investigation, root-cause analysis, and adversarial fix verification",
