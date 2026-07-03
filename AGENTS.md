@@ -200,6 +200,14 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
   # 或精确复用指定 worktree
   ralph run --worktree --reuse-worktree --worktree-name 2026-06-25-002-feat-profiles-for-preset-role-tuning-plan-lucky-reed
   ```
+- **Hat `instructions:` 必须用 hat 视角编写(HARD RULE 4)**:**preset 中每个 hat 的 `instructions:` 字段是写给「该 hat 在自己那一轮 activation 里的 agent」看的**,不是给 preset 作者看的,也不是给该 hat 能看到的其它 hat 看的。**`event_loop.execution_mode: isolated` 是 preset 的默认且唯一的执行模式**(2026-06-18 起全 preset 收敛到 isolated;coordinator 模式已弃用),在此模式下:
+  1. **每个 activation 是隔离的进程级单元**:该 hat 看不到其它 hat 的进程、状态、history,只能通过 runtime 注入的环境变量(`RALPH_CURRENT_HAT` / `RALPH_CURRENT_LOOP_ID` / `RALPH_EVENTS_FILE` / `RALPH_HATS_SOURCE` 等)与 `ralph tools task <cmd>` / `ralph emit` / `ralph wave emit` 这些 **runtime API** 通信。
+  2. **单业务事件预算**:`ralph emit` 在同一 activation 内只保留**第一个**业务事件,后续业务事件被 runtime 静默丢弃;**终态事件(`plan.complete` / `LOOP_COMPLETE` / `plan.blocked`)前面绝不要夹带其它业务事件**,否则终态事件会被丢弃。
+  3. **专有名词必须讲「该 hat 上下文里的语义」**:不要在 hat instructions 里展开 `enforce_hat_scope` / `exempt_topics` / `origin guard` / `repair_budget` / `mechanism.flow` / `enforce_current_unit` / `ephemeral_isolation` 等**框架级实现细节**——这些是 preset 作者视角,agent 看不见也不需要理解。讲到具体 topic / 命令时,直接列它在本 hat 上下文里**能发什么 / 不能发什么 / 必填字段是什么**即可。
+  4. **不要预设 hat 知道拓扑**:不要在 instructions 里说"worker hat 写代码、reviewer hat 评审"等**拓扑内相对位置**的描述——该 hat 看不到其它 hat,这些信息会误导它越权。**只**说"你的职责是 X、不要做 Y、做完发 Z"——X/Y/Z 都是该 hat 自己**直接可观测**或**直接可调用**的。
+  5. **不要让 hat 直接读 `.ralph/events.jsonl` / `.ralph/supervisor.db` / `.ralph/loops.json`**:这些是 runtime / supervisor 的内部 ledger,hat 进程级不可见。**共享状态只能通过 `ralph tools task <cmd>`**(runtime task API,所有 hat 可见)。
+  6. **违规示例(已发现并修复)**:2026-07-03 `ce-executor-supervisor` preset 的 `coordinator` hat 第一版 instructions 写"read `.ralph/events.jsonl` tail"——coordinator 看不到 events.jsonl,因为 events.jsonl 是 supervisor 内部 ledger,只有 supervisor / runtime 进程能写。正确写法是"用 `ralph tools task list -s done` 查 unit 状态"。
+  7. **enforcement**:新加 / 改 hat `instructions:` 时,作者必须先问自己「该 hat 在自己 activation 里**能直接看到**什么?能**直接调用**什么?」——如果某条 instruction 要求 hat 去看 / 调它**看不到 / 调不到**的东西,就违反本规则,必须改写。**Lint**:目前 preset_lint 暂无 hat-instructions 视角的静态检查(U13 follow-up),改写时人工 review。
 
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
