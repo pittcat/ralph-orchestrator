@@ -4089,7 +4089,7 @@ impl EventLoop {
                 // from pending `task.resume` events so the agent sees
                 // behaviour guidance before the skill index.
                 let base_prompt = self.prepend_recovery_directives(base_prompt, &regular_events);
-                let with_skills = self.prepend_auto_inject_skills(base_prompt);
+                let with_skills = self.prepend_auto_inject_skills(base_prompt, hat_id);
                 let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
                 let with_state_files = self.prepend_state_files(with_scratchpad);
                 let final_prompt = self.prepend_ready_tasks(with_state_files);
@@ -4379,7 +4379,7 @@ impl EventLoop {
                 // 2026-06-28-003: prepend recovery directives derived
                 // from pending `task.resume` events.
                 let base_prompt = self.prepend_recovery_directives(base_prompt, &regular_events);
-                let with_skills = self.prepend_auto_inject_skills(base_prompt);
+                let with_skills = self.prepend_auto_inject_skills(base_prompt, hat_id);
                 let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
                 let with_state_files = self.prepend_state_files(with_scratchpad);
                 let final_prompt = self.prepend_ready_tasks(with_state_files);
@@ -4570,7 +4570,7 @@ impl EventLoop {
             // 2026-06-28-003: prepend recovery directives derived
             // from pending `task.resume` events.
             let base_prompt = self.prepend_recovery_directives(base_prompt, &regular_events);
-            let with_skills = self.prepend_auto_inject_skills(base_prompt);
+            let with_skills = self.prepend_auto_inject_skills(base_prompt, hat_id);
             let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
             let with_state_files = self.prepend_state_files(with_scratchpad);
             let final_prompt = self.prepend_ready_tasks(with_state_files);
@@ -5404,14 +5404,14 @@ impl EventLoop {
     /// Note (2026-06-25 refactor): the former step 2 was "RObot interaction skill (gated by
     /// `robot.enabled`)", which was removed together with the `ralph-telegram` crate; the
     /// `human.guidance` / `task.resume` recovery channel is unrelated and preserved.
-    fn prepend_auto_inject_skills(&self, prompt: String) -> String {
+    fn prepend_auto_inject_skills(&self, prompt: String, hat_id: &HatId) -> String {
         let mut prefix = String::new();
 
         // 1. Memory data + ralph-tools skill — special case with data loading
-        self.inject_memories_and_tools_skill(&mut prefix);
+        self.inject_memories_and_tools_skill(&mut prefix, hat_id);
 
         // 2. Other auto-inject skills from the registry
-        self.inject_custom_auto_skills(&mut prefix);
+        self.inject_custom_auto_skills(&mut prefix, hat_id);
 
         if prefix.is_empty() {
             return prompt;
@@ -5429,7 +5429,7 @@ impl EventLoop {
     /// both tasks and memories CLI usage).
     /// Memory data is gated by `memories.enabled && memories.inject == Auto`.
     /// The ralph-tools skill is injected when either memories or tasks are enabled.
-    fn inject_memories_and_tools_skill(&self, prefix: &mut String) {
+    fn inject_memories_and_tools_skill(&self, prefix: &mut String, hat_id: &HatId) {
         let memories_config = &self.config.memories;
 
         // Inject memory DATA if memories are enabled with auto-inject
@@ -5532,20 +5532,55 @@ impl EventLoop {
             ));
             debug!("Injected ralph-tools-memories skill from registry");
         }
+
+        // U8: ralph-tools-opac — four-stage discipline (Observe →
+        // Precheck → Apply → Confirm). Always-injected under the same
+        // gate as ralph-tools (any of tasks / memories enabled).
+        if (memories_config.enabled || tasks_enabled)
+            && let Some(skill) = self.skill_registry.get("ralph-tools-opac")
+        {
+            // Honour per-hat restriction so a hat-restricted OPAC
+            // variant would only land in its target hat; the
+            // always-on variant has no hat restriction in its
+            // frontmatter so this gate degenerates to "everyone".
+            if self
+                .skill_registry
+                .is_hat_eligible("ralph-tools-opac", hat_id.as_str())
+            {
+                if !prefix.is_empty() {
+                    prefix.push_str("\n\n");
+                }
+                prefix.push_str(&format!(
+                    "<ralph-tools-opac-skill>\n{}\n</ralph-tools-opac-skill>",
+                    skill.content.trim()
+                ));
+                debug!("Injected ralph-tools-opac skill from registry");
+            }
+        }
     }
 
     /// Injects any user-configured auto-inject skills (excluding built-in skills handled separately).
-    fn inject_custom_auto_skills(&self, prefix: &mut String) {
-        for skill in self.skill_registry.auto_inject_skills(None) {
+    fn inject_custom_auto_skills(&self, prefix: &mut String, hat_id: &HatId) {
+        // U8: the per-hat filter was previously dropped on the floor
+        // (None), so hat-restricted skills were being injected into
+        // every hat. Threading `hat_id` here is what the plan KTD calls
+        // out as the "auto_inject_skills(None) → auto_inject_skills(Some(...))"
+        // fix.
+        for skill in self.skill_registry.auto_inject_skills(Some(hat_id.as_str())) {
             // Skip built-in skills handled above
             //
             // 2026-06-25 refactor: `robot-interaction` was removed because its
             // only content was `human.interact` / `human.guidance` Telegram
             // guidance; the `ralph-telegram` crate was deleted (see plan
             // 2026-06-25-001). No other Telegram-specific skills remain.
+            //
+            // U8: `ralph-tools-opac` is also handled above (it lives
+            // in the ralph-tools injection block so the agent gets one
+            // consolidated skill doc, not three at the bottom).
             if matches!(
                 skill.name.as_str(),
                 "ralph-tools" | "ralph-tools-tasks" | "ralph-tools-memories"
+                    | "ralph-tools-opac"
             ) {
                 continue;
             }

@@ -46,6 +46,11 @@ const RALPH_TOOLS_CMDREF_SKILL_RAW: &str = include_str!("../data/ralph-tools-cmd
 const RALPH_TOOLS_RECOVERY_DIRECTIVES_SKILL_RAW: &str =
     include_str!("../data/ralph-tools-recovery-directives.md");
 
+/// U8: OPAC four-stage discipline (Observe → Precheck → Apply → Confirm).
+/// Auto-injected whenever tasks or memories are enabled, mirroring the
+/// `ralph-tools` base skill behaviour.
+const RALPH_TOOLS_OPAC_SKILL_RAW: &str = include_str!("../data/ralph-tools-opac.md");
+
 /// Registry of all available skills for the current loop.
 pub struct SkillRegistry {
     /// All skills indexed by name.
@@ -89,7 +94,8 @@ impl SkillRegistry {
     }
 
     /// Register built-in skills (ralph-tools, ralph-tools-tasks, ralph-tools-memories,
-    /// ralph-tools-emit, ralph-tools-wave, ralph-tools-precheck, ralph-tools-cmdref).
+    /// ralph-tools-emit, ralph-tools-wave, ralph-tools-precheck, ralph-tools-cmdref,
+    /// ralph-tools-opac, ralph-tools-recovery-directives).
     ///
     /// 2026-06-25 refactor: `robot-interaction` was removed because its
     /// only content was `human.interact` / `human.guidance` Telegram guidance
@@ -104,6 +110,11 @@ impl SkillRegistry {
         self.register_builtin("ralph-tools-wave", RALPH_TOOLS_WAVE_SKILL_RAW)?;
         self.register_builtin("ralph-tools-precheck", RALPH_TOOLS_PRECHECK_SKILL_RAW)?;
         self.register_builtin("ralph-tools-cmdref", RALPH_TOOLS_CMDREF_SKILL_RAW)?;
+        // OPAC four-stage discipline (Observe → Precheck → Apply → Confirm).
+        // U8: always-injected under the same gate as ralph-tools, so every
+        // hat sees the workflow sketch and the cross-references to the
+        // detailed per-stage skill docs.
+        self.register_builtin("ralph-tools-opac", RALPH_TOOLS_OPAC_SKILL_RAW)?;
         // Auto-injected on task.resume events that carry recovery_directives.
         // See plan 2026-06-28-003.
         self.register_builtin(
@@ -300,6 +311,20 @@ impl SkillRegistry {
             .collect()
     }
 
+    /// Hat eligibility predicate mirroring [`Self::is_visible`] but
+    /// exposed for callers (the event-loop skill injector) that already
+    /// know `auto_inject_skills` is filtered but want a final
+    /// belt-and-braces check before pushing the skill into the prompt.
+    ///
+    /// U8: needed so per-hat skill restriction is honoured even when the
+    /// built-in `ralph-tools-opac` is supplied unconditionally.
+    pub fn is_hat_eligible(&self, skill_name: &str, hat_id: &str) -> bool {
+        if let Some(skill) = self.skills.get(skill_name) {
+            return self.is_visible(skill, Some(hat_id));
+        }
+        false
+    }
+
     /// Check if a skill is visible given the current hat and backend.
     fn is_visible(&self, skill: &SkillEntry, hat_id: Option<&str>) -> bool {
         // Backend filtering
@@ -404,6 +429,89 @@ mod tests {
         assert!(registry.get("ralph-tools-precheck").is_some());
         assert!(registry.get("ralph-tools-cmdref").is_some());
         assert!(registry.get("ralph-tools-recovery-directives").is_some());
+        // U8: OPAC four-stage discipline skill is always-injected when
+        // tasks or memories are enabled.
+        assert!(registry.get("ralph-tools-opac").is_some());
+    }
+
+    #[test]
+    fn test_opac_skill_visible_to_every_hat() {
+        // The OPAC skill has no `hats:` frontmatter restriction, so it
+        // is eligible for every hat (including unknown ones — the
+        // registry falls through to "show" when the hat restriction
+        // list is empty).
+        let mut registry = SkillRegistry::new(None);
+        registry.register_builtins().unwrap();
+        assert!(registry.is_hat_eligible("ralph-tools-opac", "coordinator"));
+        assert!(registry.is_hat_eligible("ralph-tools-opac", "worker"));
+        assert!(registry.is_hat_eligible("ralph-tools-opac", "reviewer"));
+    }
+
+    #[test]
+    fn test_opac_skill_ineligible_for_unknown_skill() {
+        let registry = SkillRegistry::new(None);
+        assert!(!registry.is_hat_eligible("nonexistent-skill", "any"));
+    }
+
+    #[test]
+    fn test_per_hat_restriction_honoured_by_skills_for_hat() {
+        // U8: previously `auto_inject_skills(None)` bypassed the hat
+        // filter. Now the `skills_for_hat` and `auto_inject_skills`
+        // entry points both thread the hat through `is_visible`, so
+        // a skill restricted to a hat list is invisible to any hat
+        // outside that list.
+        let mut registry = SkillRegistry::new(None);
+        let yaml = r#"---
+name: hat-only-skill
+description: only for the coord hat
+hats: [coord]
+---
+body
+"#;
+        registry.register_builtin("hat-only-skill", yaml).unwrap();
+
+        assert!(
+            registry
+                .skills_for_hat(Some("coord"))
+                .iter()
+                .any(|s| s.name == "hat-only-skill"),
+            "coord hat must see its restricted skill"
+        );
+        assert!(
+            registry
+                .skills_for_hat(Some("worker"))
+                .iter()
+                .all(|s| s.name != "hat-only-skill"),
+            "worker hat must NOT see the coord-only skill"
+        );
+    }
+
+    #[test]
+    fn test_auto_inject_skills_threads_hat_id() {
+        // Regression for U8 `auto_inject_skills(None)` → Some(hat).
+        // Built-ins default `auto_inject: false`, so to exercise the
+        // auto-inject path we flip one of them at the registry level
+        // post-registration; the test asserts the function honours the
+        // hat filter on the way through.
+        let mut registry = SkillRegistry::new(None);
+        registry.register_builtins().unwrap();
+        // mark ralph-tools as auto_inject + restrict to coord hat;
+        // the frontmatter parser doesn't handle list-of-hats mutation,
+        // so we mutate the entry directly.
+        if let Some(skill) = registry.skills.get_mut("ralph-tools") {
+            skill.auto_inject = true;
+            skill.hats = vec!["coord".to_string()];
+        }
+        let inject_for_coord = registry.auto_inject_skills(Some("coord"));
+        let inject_for_worker = registry.auto_inject_skills(Some("worker"));
+        assert!(
+            inject_for_coord.iter().any(|s| s.name == "ralph-tools"),
+            "coord hat must see ralph-tools when restricted"
+        );
+        assert!(
+            inject_for_worker.iter().all(|s| s.name != "ralph-tools"),
+            "worker hat must NOT see coord-restricted ralph-tools"
+        );
     }
 
     #[test]
