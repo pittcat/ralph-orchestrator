@@ -1,6 +1,5 @@
 
-Implement dev plan:docs/plans/2026-07-03-001-feat-supervisor-rusqlite-parallel-preset-plan.md
-
+Implement dev plan:docs/plans/2026-07-04-001-feat-opac-isolated-agent-discipline-plan.md
 ### Note
 
 注意每个角色要各司其职,不能越权
