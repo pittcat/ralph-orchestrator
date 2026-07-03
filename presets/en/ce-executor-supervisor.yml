@@ -154,13 +154,17 @@ hats:
       - review.unit.done
     publishes:
       - review.wave.complete
-    # The supervisor injects `review.wave.complete` on
-    # fan-in; this hat declares the topic in its `triggers:`
-    # list so the dispatcher's origin guard routes the
-    # system_injected coord event into review-synthesizer.
-    # Declaring the topic in `publishes:` would falsely
-    # advertise it as a producer trigger — the lint lets
-    # the exception through via `review-synthesizer` hat id.
+    # NOTE: this `publishes:` entry is allowed by the
+    # supervisor lint whitelist
+    # (crates/ralph-core/src/preset_lint/supervisor.rs:199),
+    # NOT by the runtime origin guard. Production lint
+    # permits `*-integrator` / `*-coordinator` / `*-synthesizer`
+    # hat ids to declare supervision coordination topics
+    # in `publishes:` so the topology reads naturally. The
+    # runtime still treats `review.wave.complete` as a
+    # supervisor-only emit; agent emits are rejected at the
+    # origin guard. F-019 / R-19 captures the follow-up to
+    # split the production rule from the whitelist shape.
 
   fix-task-planner:
     name: "Fix Task Planner"
