@@ -2703,21 +2703,18 @@ hats:
           # widening requires an explicit P0/P1 fix-plan entry.
           - `recovery_exhausted`
           - `review_failed`
-          # 2026-07-02 P1-B: stall_recovery retry_key family. v0 baseline above
-          # covers the 3 string literals the recovery_runtime emits
-          # directly; the v1 extension below covers the structured
-          # retry_key shape that the diagnosis responder synthesises
-          # when a handoff_dispatch_timeout triggers task.resume. The
-          # comparison is still STRICT-MATCH: the agent must check
-          # `reason == "stall_recovery:<hat>:<topic>:handoff_dispatch_timeout:*"`
-          # (i.e. literal `:*` suffix, not arbitrary payload text). The
-          # 4 shipper fails in the 2026-07-01 ralph-e2e run
-          # (events-20260701-220911.jsonl iter 22/24/26/34) all hit
-          # this gap and were promoted to `pass` after checks 1-2;
-          # adding these two entries prevents the same run from
-          # logging 4 misleading `REVIEW_COMPLETE(fail)` reports.
-          - `stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*`
-          - `stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:*`
+          # 2026-07-03-005 plan (P0 fix C2+C8): the two stall_recovery:*
+          # entries previously added (2026-07-02 P1-B) are REMOVED. They
+          # masked the mechanism-side silent drop → retry → stall
+          # escalation as `pass_with_residuals`, which surfaced the
+          # symptom but never the real cause (M-1 isolated budget +
+          # M-2 handoff_dispatch misrouting). Removal forces the
+          # hard-fail branch on those retry_keys, exposing the true
+          # root cause via REVIEW_COMPLETE(fail) instead of
+          # self-closing the loop as pass_with_residuals.
+          # The `recovery_exhausted:stall_recovery:...` drift-engine
+          # promotion path is preserved by the Rust-side `starts_with`
+          # fallback in `shipper_reason.rs::is_recoverable_plan_blocked_reason`.
           # 2026-07-03-002 plan U3: coordinator 沉默是 backpressure 而非
           # 实现失败。runtime 注入 plan.blocked(reason=default_publishes)
           # 后,验证 1-2(test + build/lint/typecheck)通过时路由到
@@ -2726,7 +2723,7 @@ hats:
           # 后任何 hat 沉默都会被路由到 pass — 必须配合 shipper verification
           # 1-2 双重检查(见 line 2676 下方规则)。
           - `default_publishes`
-          For recoverable reasons (after trim+lowercase == whitelist entry): run checks 1-2 (test suite + build/lint/typecheck). If BOTH pass, publish `REVIEW_COMPLETE` with `pass_or_fail: "pass"`, `verdict: "pass_with_residuals"`, and `residual_findings_summary: "plan.blocked with recoverable reason '<reason>'; verification passed"`. If either check fails, fall through to the hard-fail path.
+          For recoverable reasons (after trim+lowercase == whitelist entry): run checks 1-2 (test suite + build/lint/typecheck). If BOTH pass, publish `REVIEW_COMPLETE` with `pass_or_fail: "pass"`, `verdict: "pass_with_residuals"`, and `residual_findings_summary: "plan.blocked with recoverable reason '<reason>'; verification passed; stall_recovery_observed: <true|false>"`. Set `stall_recovery_observed: true` when the recovered reason is `recovery_exhausted` (drift-engine promotion path) or when the orchestrator has logged ≥1 `stall_recovery:*` envelope in `.ralph/recovery.jsonl` for this run; otherwise `false`. This marker is the dashboard signal that a `pass_with_residuals` verdict may be masking a stall pipeline — it does NOT change the verdict, only annotates the summary so the operator can correlate with `recovery.jsonl`. If either check fails, fall through to the hard-fail path.
         - **Hard-fail reasons** (the unit, review, or fix pipeline itself broke; verification cannot rescue it):
           - `executor failed: <detail>` (coordinator emitted on `work.failed`)
           - `work_failed`
