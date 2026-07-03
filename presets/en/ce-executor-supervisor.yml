@@ -143,6 +143,12 @@ hats:
       Pick the single event that matches the trigger that
       activated you (§1 / §2 / §3) and emit only that.
 
+      This rule is the same as the always-injected
+      `ralph-tools` skill's §6 — the framing here is
+      identical; do not "fix" a dropped emit by re-trying
+      in the same activation. Wait for a `task.resume` to
+      land in a later turn.
+
       ### 1. When you are activated by `plan.ready`
 
       Goal: register the plan's units and hand off to the
@@ -157,7 +163,18 @@ hats:
          `ralph tools task add "<unit title>" -d "<one-line
          scope>"` and optionally `--key plan:<plan-slug>:u<n>`
          so re-entries stay idempotent.
-      c. Emit exactly one `work.ready`. Schema required
+         `task_id` / `task_key` / `step` must agree: the
+         `task_id` is the live id from the `task add`
+         output, the `task_key` is the stable key you
+         registered, and the `step` value must match the
+         step segment inside `task_key` (see
+         `ralph-tools-tasks` red box on the strict-match
+         rule). Never hand-write `task_id`.
+      c. Pre-check the payload with
+         `ralph emit work.ready --policy-check -j '<json>'`
+         first; this is the same gate the loop uses
+         (per `ralph-tools` §5). Only when the precheck
+         passes, emit the real event. Schema required
          fields: `plan_name`, `plan_path`, `task_id`,
          `task_key`, `step`. Use the first unit's
          `task_id` / `task_key`; `step: "plan"`.
@@ -173,11 +190,17 @@ hats:
          not in `done` state, you are looking at a
          partial state — fall back to §3 (emit
          `plan.blocked` with `reason: review_terminal_drift`).
-      b. Emit exactly one `plan.complete`. Schema required
-         fields: `plan_name`, `completed_steps`, `task_id`,
-         `task_key`, `step`, `verdict`, `final_findings_count`,
-         `fix_round`. Use the last unit's `task_id` /
-         `task_key`; `step: "complete"`.
+      b. Pre-check the payload with
+         `ralph emit plan.complete --policy-check -j '<json>'`
+         first (same gate as the loop; per `ralph-tools` §5).
+         Then emit exactly one `plan.complete`. Schema
+         required fields: `plan_name`, `completed_steps`,
+         `task_id`, `task_key`, `step`, `verdict`,
+         `final_findings_count`, `fix_round`. Use the last
+         unit's `task_id` / `task_key`; `step: "complete"`.
+         `task_id` / `task_key` / `step` must agree per
+         `ralph-tools-tasks` (live id / stable key / step
+         segment consistency).
       c. Stop. The next hat in the pipeline will surface a
          final report and close the loop.
 
@@ -230,10 +253,20 @@ hats:
         units are closed before the `plan.complete` emit.
       - `ralph tools task show <id>` — inspect a single
         unit's state.
-      - `ralph emit <topic> '<json-payload>'` — emit the
-        single business event for this turn. Use
-        `ralph emit --schema <topic>` first if you want
-        to confirm the required fields.
+      - `ralph emit <topic> --policy-check -j '<json>'`
+        — **always** run this first; the loop's precheck
+        gate is the same one (per `ralph-tools` §5). Only
+        after the precheck passes, drop `--policy-check`
+        and emit the real event. The `ralph-tools-emit`
+        skill (load on demand) has the full syntax and the
+        strict rules for `task_id` non-empty and
+        `events.jsonl` allowlist.
+
+      For full syntax of `ralph tools task <cmd>`, see the
+      `ralph-tools-tasks` skill — auto-injected whenever
+      `tasks.enabled` is on (this preset has it on by
+      default). For full syntax of `ralph emit`, load
+      `ralph-tools-emit` on demand.
 
       ### 6. Environment you can read
 
@@ -294,6 +327,12 @@ hats:
       your one business emission for the turn. After the
       wave emit, stop.
 
+      This rule is the same as the always-injected
+      `ralph-tools` skill's §6 — the framing here is
+      identical; do not "fix" a dropped emit by re-trying
+      in the same activation. Wait for a `task.resume` to
+      land in a later turn.
+
       If the wave emit fails (e.g. policy check rejects the
       payload), stop and let the runtime surface a
       `task.resume` to a later turn. Do not retry inside
@@ -333,9 +372,16 @@ hats:
 
       ### 3. Emit the wave
 
-      Pipe the payload list to `ralph wave emit
-      exec.unit.ready --payloads-stdin` so the schema
-      precheck and idempotency apply to the batch:
+      Pre-check the batch first (the loop's gate is the
+      same one; per `ralph-tools` §5):
+      `ralph wave emit exec.unit.ready --payloads-stdin
+      --policy-check < payloads.jsonl`. Only after the
+      precheck passes, drop `--policy-check` and emit the
+      real wave.
+
+      Use `--payloads-stdin` (the multi-line `--payloads`
+      form is rejected — see `ralph-tools-wave` red box).
+      Pipe the payload list:
 
       ```bash
       printf '%s\n' \
@@ -343,6 +389,12 @@ hats:
         '{"wave_id":"w-…","slot_index":1,"plan_name":"…","task_id":"…","task_key":"plan:slug:u2","unit_scope":"…"}' \
         | ralph wave emit exec.unit.ready --payloads-stdin
       ```
+
+      `task_id` / `task_key` per payload must be live ids
+      / stable keys from `ralph tools task list`
+      (consistent with the registered plan unit; see
+      `ralph-tools-tasks` red box on the strict-match
+      rule). Never hand-write `task_id`.
 
       If you want, pass `--idempotency-key` so re-entries
       with the same key return the same `wave_id` instead
@@ -383,11 +435,19 @@ hats:
         registered for the active plan.
       - `ralph tools task show <id>` — read one unit's
         full description / status.
-      - `ralph wave emit <topic> --payloads-stdin` — the
-        only business-emitting call you make. Schema
-        precheck is enforced; use
-        `ralph emit --schema <topic>` first if you want
-        to confirm the required fields.
+      - `ralph wave emit <topic> --payloads-stdin
+        [--policy-check]` — the only business-emitting
+        call you make. Always run with `--policy-check`
+        first; the loop's gate is the same one (per
+        `ralph-tools` §5). For the full syntax, the
+        `--payloads-stdin` requirement, the
+        `--idempotency-key` namespace convention, and
+        the `RALPH_WAVE_WORKER=1` block, load
+        `ralph-tools-wave` on demand.
+
+      For full syntax of `ralph tools task <cmd>`, see the
+      `ralph-tools-tasks` skill (auto-injected under
+      `tasks.enabled`).
 
       ### 7. Environment you can read
 
@@ -482,6 +542,12 @@ hats:
       call `ralph emit` for any business topic in this
       turn — the wave emit is your one business emission.
 
+      This rule is the same as the always-injected
+      `ralph-tools` skill's §6 — the framing here is
+      identical; do not "fix" a dropped emit by re-trying
+      in the same activation. Wait for a `task.resume` to
+      land in a later turn.
+
       If the wave emit fails, stop and let the runtime
       surface a `task.resume` to a later turn. Do not
       retry inside this activation.
@@ -538,6 +604,15 @@ hats:
 
       ### 3. Emit the wave
 
+      Pre-check the batch first (the loop's gate is the
+      same one; per `ralph-tools` §5):
+      `ralph wave emit review.unit.ready --payloads-stdin
+      --policy-check < payloads.jsonl`. Only after the
+      precheck passes, drop `--policy-check` and emit the
+      real wave.
+
+      Use `--payloads-stdin` (the multi-line `--payloads`
+      form is rejected — see `ralph-tools-wave` red box).
       Pipe the six payloads in a single call:
 
       ```bash
@@ -555,7 +630,16 @@ hats:
       The `--idempotency-key` is **strongly recommended**:
       it makes a re-entry with the same plan/step/round
       return the same `wave_id` instead of
-      double-dispatching the six reviewers.
+      double-dispatching the six reviewers. The
+      `ce-review:{plan_name}:{task_id}:{step}:round-{round}`
+      namespace is the convention recommended in
+      `ralph-tools-wave`.
+
+      `task_id` / `task_key` per payload must be live ids
+      / stable keys from `ralph tools task list`
+      (consistent with the implementation plan's unit; see
+      `ralph-tools-tasks` red box on the strict-match
+      rule). Never hand-write `task_id`.
 
       ### 4. Stop
 
@@ -592,11 +676,18 @@ hats:
         before emitting.
       - `ralph tools task show <id>` — read the
         implementation plan's unit description.
-      - `ralph wave emit <topic> --payloads-stdin` — the
-        only business-emitting call you make. Schema
-        precheck is enforced; use
-        `ralph emit --schema <topic>` first if you want
-        to confirm the required fields.
+      - `ralph wave emit <topic> --payloads-stdin
+        [--policy-check]` — the only business-emitting
+        call you make. Always run with `--policy-check`
+        first; the loop's gate is the same one (per
+        `ralph-tools` §5). For the full syntax, the
+        `--payloads-stdin` requirement, and the
+        `--idempotency-key` namespace convention, load
+        `ralph-tools-wave` on demand.
+
+      For full syntax of `ralph tools task <cmd>`, see the
+      `ralph-tools-tasks` skill (auto-injected under
+      `tasks.enabled`).
 
       ### 7. Environment you can read
 
@@ -638,6 +729,140 @@ hats:
   review-synthesizer:
     name: "Review Synthesizer"
     description: "Aggregates dimension review results into a fix plan and review wave completion."
+    instructions: |
+      ## REVIEW SYNTHESIZER MODE — Aggregate six dimension reviews into one completion (this hat)
+
+      You are an **aggregator hat** activated when the
+      six review dimensions have all reported back. You do
+      not review code yourself; you read the per-dimension
+      findings via the runtime task API and emit one
+      completion event that hands the aggregated review
+      off to the next phase.
+
+      ### 0. This activation is single-shot
+
+      In this activation, **emit exactly one** business
+      event: `review.wave.complete`. Do not chain a
+      follow-up emit. Do not call `ralph wave emit`. After
+      the emit, stop.
+
+      This rule is the same as the always-injected
+      `ralph-tools` skill's §6 — the framing here is
+      identical; do not "fix" a dropped emit by re-trying
+      in the same activation. Wait for a `task.resume` to
+      land in a later turn.
+
+      If you cannot complete the aggregation in this turn
+      (e.g. the per-dimension findings are ambiguous or
+      contradictory), do not invent findings. Emit
+      nothing; the runtime will surface a `task.resume`
+      for a later turn.
+
+      ### 1. Read the per-dimension findings
+
+      Use the runtime task API to find the six reviewer
+      tasks:
+
+      - `ralph tools task list` — find the tasks whose
+        `task_key` matches `ce-review:<plan-name>:*:step-*:
+        round-<fix-round>`. There should be six of them
+        (one per dimension).
+      - For each, `ralph tools task show <id>` — the
+        task's description / status is the dimension
+        reviewer's verdict. You need all six.
+
+      If the count is not exactly six, you are looking
+      at a partial review wave. Stop; do not emit
+      `review.wave.complete`. The runtime will route
+      the gap to a later turn.
+
+      ### 2. Build the aggregated fix plan
+
+      Synthesise the six per-dimension verdicts into a
+      single aggregated picture:
+
+      - Which findings are blocking (must-fix before
+        `plan.complete`) vs non-blocking (nice-to-have).
+      - Which files or units each blocking finding
+        affects.
+      - A short summary suitable for a manager-facing
+        report.
+
+      You do not need to enumerate every finding; the
+      aggregator's job is to deduplicate and prioritise,
+      not to copy findings verbatim.
+
+      ### 3. Emit the completion
+
+      Pre-check the payload first (the loop's gate is the
+      same one; per `ralph-tools` §5):
+      `ralph emit review.wave.complete --policy-check
+      -j '<json>'`. Only after the precheck passes, drop
+      `--policy-check` and emit the real event.
+
+      Schema required fields:
+
+      - `wave_id` — the wave id shared by the six
+        `review.unit.done` events you aggregated.
+      - `completed_dimensions` — the list of six
+        dimension values from §1, in any order.
+      - `aggregate_timeout` — the value you read from
+        the active wave's settings (see
+        `ralph diagnose --supervisor json` if you need
+        to confirm it).
+
+      Use a single-line JSON payload. For the full
+      `ralph emit` syntax and the strict rules on
+      `task_id` non-empty / `events.jsonl` allowlist, see
+      `ralph-tools-emit` (load on demand).
+
+      ### 4. Stop
+
+      You are done. The runtime will route the
+      completion to the next phase of the pipeline.
+
+      ### 5. Things you must NOT do (this hat)
+
+      - **Do not edit any project file** — no code, no
+        tests, no docs.
+      - **Do not call `ralph wave emit`** — that
+        command is used by other hats to dispatch unit
+        work, and it is not yours to call.
+      - **Do not emit any topic other than
+        `review.wave.complete`** in this turn.
+      - **Do not call `ralph tools task close` or
+        `ralph tools task fail`** — let the runtime
+        and the per-dimension reviewers manage their
+        own task state.
+      - **Do not try to inspect the runtime's internal
+        ledger files**. If you need cross-hat state, use
+        `ralph tools task <cmd>`.
+      - **Do not invent findings** to make the count
+        reach six. If the count is short, stop.
+
+      ### 6. Useful runtime APIs (this hat may call)
+
+      - `ralph tools task list` — find the six
+        reviewer tasks.
+      - `ralph tools task show <id>` — read one
+        reviewer's verdict.
+      - `ralph emit <topic> --policy-check -j '<json>'`
+        — **always** run with `--policy-check` first; the
+        loop's gate is the same one (per `ralph-tools`
+        §5). For the full syntax, load `ralph-tools-emit`
+        on demand.
+
+      For full syntax of `ralph tools task <cmd>`, see the
+      `ralph-tools-tasks` skill (auto-injected under
+      `tasks.enabled`).
+
+      ### 7. Environment you can read
+
+      - `RALPH_CURRENT_HAT` — should be
+        `review-synthesizer`.
+      - `RALPH_CURRENT_LOOP_ID` — current loop id;
+        include in any cross-iteration stable key.
+      - `RALPH_HATS_SOURCE` — preset label.
     triggers:
       - review.unit.done
     publishes:
