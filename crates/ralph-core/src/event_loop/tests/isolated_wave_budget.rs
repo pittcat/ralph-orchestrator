@@ -451,3 +451,67 @@ fn test_u1_regression_non_wave_first_then_wave_admitted() {
         "preceding non-wave business event must be admitted alongside the wave group"
     );
 }
+
+// 2026-07-03-005 plan (P0 fix M-1): declared serial walk exemption.
+// The isolated-mode per-turn single-business-event budget normally
+// drops subsequent business events after the first. A hat that has
+// declared an exempt_topics entry for a topic may emit that topic
+// repeatedly without consuming the slot. The classic case is
+// review-coordinator walking 6 review.dimension.ready events.
+
+#[test]
+fn m1_exempt_topic_admits_repeated_emits_in_serial_walk() {
+    // 1. Set up an isolated hat whose `exempt_topics` lists the
+    //    topic we want to emit. The build path for this in a real
+    //    preset is `hats.<hat>.exempt_topics: [...]`; here we use
+    //    the in-process HatRegistry::from_config so the test is
+    //    self-contained.
+    let yaml = r#"
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["review.dimension.done"]
+    publishes: ["review.dimension.ready", "review.dimensions.complete"]
+    exempt_topics: ["review.dimension.ready"]
+"#;
+    let cfg: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let registry = crate::hat_registry::HatRegistry::from_config(&cfg);
+    let hat = ralph_proto::HatId::from("review-coordinator");
+
+    // 2. Without exemption, the second emit would be dropped.
+    let dropped = !crate::event_loop::is_isolated_exempt_topic(
+        registry.get_config(&ralph_proto::HatId::from("coordinator")),
+        "review.dimension.ready",
+    );
+    assert!(dropped, "M-1: non-exempt hat must report false");
+
+    // 3. With exemption, all 6 emits in a serial walk are admitted.
+    let admitted = (0..6).all(|_| {
+        crate::event_loop::is_isolated_exempt_topic(
+            registry.get_config(&hat),
+            "review.dimension.ready",
+        )
+    });
+    assert!(admitted, "M-1: declared serial walk must admit all 6 emits");
+
+    // 4. Negative: an exempt topic is a positive list — other topics
+    //    on the same hat are NOT exempt.
+    let not_exempt = !crate::event_loop::is_isolated_exempt_topic(
+        registry.get_config(&hat),
+        "work.ready",
+    );
+    assert!(not_exempt, "M-1: exempt_topics is a positive list, not a wildcard");
+}
+
+#[test]
+fn m1_exempt_topic_falls_back_to_default_when_unregistered() {
+    // Unknown hat → no exemption (default behaviour preserved).
+    let registry = crate::hat_registry::HatRegistry::from_config(
+        &crate::config::RalphConfig::default(),
+    );
+    let unknown = ralph_proto::HatId::from("does-not-exist");
+    assert!(
+        !crate::event_loop::is_isolated_exempt_topic(registry.get_config(&unknown), "any.topic"),
+        "M-1: unknown hat must report false (no crash, no false-positive exemption)"
+    );
+}

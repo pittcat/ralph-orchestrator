@@ -330,6 +330,27 @@ pub(crate) fn append_runtime_config_block(base_prompt: String, max_residuals: u3
 /// `### HUMAN GUIDANCE` block plus its inline variants) was
 /// removed in plan 2026-06-28-005 together with the
 /// `human.guidance` topic. We still need to drop the block
+/// 2026-07-03-005 plan (P0 fix M-1): free-function helper used in
+/// the `should_admit` 6th branch (see isolated-budget escape). Returns
+/// true when the given optional `HatConfig` declares `topic` in its
+/// `exempt_topics` list — i.e. the hat has positively declared this
+/// topic as exempt from the per-turn single-business-event budget.
+/// Returns false for `None` config (no exemption), missing config,
+/// or empty `exempt_topics` (default behaviour preserved).
+fn is_isolated_exempt_topic(
+    config: Option<&crate::config::hat::HatConfig>,
+    topic: &str,
+) -> bool {
+    let Some(cfg) = config else {
+        return false;
+    };
+    cfg.exempt_topics.iter().any(|t| {
+        let pattern = ralph_proto::Topic::new(t);
+        let topic_obj = ralph_proto::Topic::new(topic);
+        pattern.matches(&topic_obj)
+    })
+}
+
 /// from scratchpads that pre-date 2026-06-28 so the bootstrap
 /// path does not surface stale guidance text to a fresh
 /// agent. New scratchpads will not contain the block (the
@@ -1667,6 +1688,18 @@ impl EventLoop {
     /// — see U4 plan §4 KTD-U4-1 / A2.
     pub fn isolated_publish_allowed(&self, hat: &HatId, topic: &str) -> bool {
         self.registry.can_publish(hat, topic)
+    }
+
+    /// 2026-07-03-005 plan (P0 fix M-1): check whether the given
+    /// isolated-mode hat has declared the given topic as exempt from
+    /// the per-turn single-business-event budget. Returns false when
+    /// the hat is not registered, has no `HatConfig`, or its
+    /// `exempt_topics` list does not contain `topic`. The caller uses
+    /// this to admit declared serial walks (e.g. review-coordinator
+    /// walking 6 `review.dimension.ready` events) without consuming
+    /// the `non_wave_business_event_accepted` slot.
+    pub fn isolated_exempt_topic(&self, hat: &HatId, topic: &str) -> bool {
+        is_isolated_exempt_topic(self.registry.get_config(hat), topic)
     }
 
     /// Enforce isolated publish scope on a batch of wave events.
@@ -8500,6 +8533,28 @@ impl EventLoop {
                     // U1: terminal-priority override — the
                     // terminal event displaces the earlier
                     // non-terminal business event.
+                    true
+                } else if is_isolated_exempt_topic(
+                    self.registry.get_config(
+                        isolated_hat_owned.as_ref().unwrap_or(&HatId::from("")),
+                    ),
+                    &event.topic,
+                ) {
+                    // 2026-07-03-005 plan (P0 fix M-1): declared
+                    // serial walk exemption. The isolated hat has
+                    // listed this topic in its `exempt_topics` (a
+                    // preset-declared positive list of topics that
+                    // are exempt from the per-turn business-event
+                    // budget), so we admit the event without
+                    // consuming the `non_wave_business_event_accepted`
+                    // slot. Critical for hats that walk N events
+                    // one-per-turn (e.g. review-coordinator walking
+                    // 6 review.dimension.ready events in
+                    // ce-executor-serial — see preset's
+                    // `exempt_topics: ["review.dimension.ready",
+                    // "review.dimensions.complete"]`). Empty
+                    // exempt_topics = no exemption (default
+                    // behaviour preserved).
                     true
                 } else {
                     is_dual_publish_step_handoff
