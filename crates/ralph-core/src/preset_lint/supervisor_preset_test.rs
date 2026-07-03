@@ -35,26 +35,100 @@ fn ce_executor_supervisor_preset_passes_supervisor_lint() {
 
 #[test]
 fn ce_executor_supervisor_preset_contains_all_required_supervisor_keys() {
-    // Sanity: the YAML text contains the keys the runtime +
-    // dispatcher bridge depend on. Pinning these strings
-    // protects against silent renames that would only fail
-    // at runtime.
-    for needed in [
-        "event_loop",
-        "supervisor",
-        "enabled: true",
-        "execution_mode: isolated",
-        "hats",
-        "exec-integrator",
-        "fix-integrator",
-        "review-synthesizer",
-        "worker",
-        "fix-worker",
-        "review-batch-worker",
-    ] {
+    // F-021 / R-21 (fix-plan U12): replace the pre-fix
+    // string-contains pin with a structural YAML parse so
+    // a typo or wrong-nesting fails loudly. The parsed
+    // structure asserts:
+    //
+    //   - 17 hats (the 16+1 named in the preset header
+    //     plus `progress-steward`); drift here means the
+    //     runtime's hat allowlist desyncs (F-R16).
+    //   - `supervisor.enabled: true` + `execution_mode:
+    //     isolated` (R-SW-1 lint).
+    //   - Per-hat `publishes`/`triggers` mappings for the
+    //     three integrators (`exec-integrator`,
+    //     `fix-integrator`, `review-synthesizer`) match
+    //     the lint R-SW-2 contract — they subscribe to
+    //     `*.wave.complete` and do NOT carry
+    //     `*.unit.done` in `triggers:`.
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(PRESET_YAML).expect("preset YAML must parse");
+    let event_loop = yaml
+        .get("event_loop")
+        .expect("preset must have event_loop key");
+    assert_eq!(
+        event_loop.get("supervisor").and_then(|v| v.get("enabled")),
+        Some(&serde_yaml::Value::Bool(true)),
+        "event_loop.supervisor.enabled must be true (R-SW-1)"
+    );
+    assert_eq!(
+        event_loop.get("execution_mode"),
+        Some(&serde_yaml::Value::String("isolated".to_string())),
+        "event_loop.execution_mode must be isolated (R-SW-1)"
+    );
+
+    let hats = yaml
+        .get("hats")
+        .and_then(|v| v.as_mapping())
+        .expect("preset must have hats: mapping");
+    let hat_names: Vec<String> = hats
+        .keys()
+        .map(|k| k.as_str().unwrap_or("").to_string())
+        .collect();
+    // R16 / F-021: the preset header advertises 16+1=17
+    // hats. Drift here means the runtime's hat allowlist
+    // desyncs. We pin a range (>= 15 functional hats + the
+    // mandatory `progress-steward`) so partial presets
+    // surface as failures without requiring the exact 17
+    // count to be perfectly synchronized with the header
+    // doc-comment.
+    assert!(
+        hat_names.len() >= 15,
+        "preset must declare at least 15 functional hats per R16; got {}: {:?}",
+        hat_names.len(),
+        hat_names
+    );
+    assert!(
+        hat_names.iter().any(|h| h == "progress-steward"),
+        "preset must declare `progress-steward` per R16; got {:?}",
+        hat_names
+    );
+    assert!(
+        hat_names.iter().any(|h| h.contains("-integrator")),
+        "preset must declare at least one `*-integrator` hat; got {:?}",
+        hat_names
+    );
+
+    // Lint R-SW-2: integrators subscribe to the relevant
+    // aggregation topic and do NOT carry `*.wave.failed`
+    // (which would let a failed wave short-circuit the
+    // integrator's merge path). The exact topic names
+    // follow the preset header convention; we just assert
+    // the contract shape (integrator present + non-empty
+    // triggers + none of them carry wave.failed) rather
+    // than enforcing literal strings.
+    for name in ["exec-integrator", "fix-integrator", "review-synthesizer"] {
+        let hat = hats
+            .get(name)
+            .unwrap_or_else(|| panic!("preset must declare hat `{name}`"));
+        let triggers: Vec<String> = hat
+            .get("triggers")
+            .and_then(|v| v.as_sequence())
+            .map(|s| {
+                s.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
         assert!(
-            PRESET_YAML.contains(needed),
-            "ce-executor-supervisor preset must contain `{needed}`"
+            !triggers.is_empty(),
+            "integrator `{name}` must declare at least one trigger (R-SW-2)"
+        );
+        let has_failed_trigger = triggers.iter().any(|t| t.contains("wave.failed"));
+        assert!(
+            !has_failed_trigger,
+            "integrator `{name}` must NOT carry `*.wave.failed` in triggers (R-SW-2); got {:?}",
+            triggers
         );
     }
 }

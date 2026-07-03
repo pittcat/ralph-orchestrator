@@ -60,7 +60,7 @@ In `execution_mode: isolated`, **all agent terminal states** (completion, review
 4. `presets/index.json` (if user-visible)
 5. Sync update CLAUDE.md "Presets & Hats System" builtin list + `scripts/ralph-zsh-plugin.zsh` zsh completion
 
-**Builtin presets**: `autoresearch`, `ce-executor-pipeline` (12-hat linear one-shot: plan-reviewer → executor → 6 serial dimension hats → review-synthesizer → fixer → alignment → reporter), `ce-executor-serial` (10-hat: TDD executor + validator + 6-dim overall review: goal-alignment → correctness → testing → maintainability → project-standards → adversarial), `ce-executor-lite` (template), `debug`, `merge-loop` (bare `ce-executor` / `ce-executor-isolated` / `ce-executor-wave` all deleted: all plan-driven execution uses `ce-executor-serial`; template-only use `ce-executor-lite`).
+**Builtin presets**: `autoresearch`, `ce-executor-pipeline` (12-hat linear one-shot: plan-reviewer → executor → 6 serial dimension hats → review-synthesizer → fixer → alignment → reporter), `ce-executor-serial` (10-hat: TDD executor + validator + 6-dim overall review: goal-alignment → correctness → testing → maintainability → project-standards → adversarial), `ce-executor-supervisor` (2026-07-03-001 plan: 16-hat + progress-steward; rusqlite-backed supervisor wave orchestration, per-slot worktrees, fan-in merge, parallel review/fix; requires `--features supervisor-db` and `event_loop.supervisor.enabled: true`), `ce-executor-lite` (template), `debug`, `merge-loop` (bare `ce-executor` / `ce-executor-isolated` / `ce-executor-wave` all deleted: all plan-driven execution uses `ce-executor-serial`; template-only use `ce-executor-lite`).
 
 ## Wave Config Fields
 

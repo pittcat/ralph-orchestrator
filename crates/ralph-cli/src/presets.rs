@@ -976,6 +976,27 @@ mod tests {
         );
     }
 
+    /// U12 (fix-plan U12 / F-020 / R-20): the
+    /// `ce-executor-supervisor` preset must satisfy the
+    /// same SSOT byte-equality contract as
+    /// `ce-executor-serial` — the embedded copy must equal
+    /// the merge of the canonical preset YAML with the
+    /// supervisor schema SSOT. Drift between canonical +
+    /// schema breaks the lint surface (M-12) because the
+    /// lint reads from the canonical copy while the
+    /// runtime reads from the embedded merge.
+    #[test]
+    fn test_ce_executor_supervisor_root_preset_matches_embedded() {
+        let merged = merge_root_with_ssot("ce-executor-supervisor");
+        let preset = get_preset("ce-executor-supervisor")
+            .expect("ce-executor-supervisor preset should exist");
+        assert_eq!(
+            merged, preset.content,
+            "Embedded ce-executor-supervisor must equal merge(canonical preset, schema SSOT). \
+             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-supervisor.yml."
+        );
+    }
+
     // -------------------------------------------------------------------------
     // 2026-06-17-002 U4: ce-executor-serial preset tests
     // -------------------------------------------------------------------------
