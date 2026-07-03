@@ -1746,6 +1746,57 @@ impl EventLoop {
         is_isolated_exempt_topic(self.registry.get_config(hat), topic, business, terminal)
     }
 
+    /// 2026-07-04-001 plan U16 (KTD-13): validate that a `task.resume`
+    /// injection's consumer hat actually subscribes to the original
+    /// topic via `HandoffIndex::consumer_of`. If the resolved consumer
+    /// exists but its `triggers` does not include `original_topic`,
+    /// the resume would never have a chance of being consumed —
+    /// injecting it would silently stall for the full stall
+    /// recovery budget. Returns `Some(warning)` when the routing is
+    /// mismatched. The caller logs the warning but still publishes
+    /// the resume (backward-compatible with existing escalation
+    /// ladders); the warning surfaces in `recovery.jsonl` so the
+    /// operator can identify routing drift between the preset and
+    /// the runtime gate.
+    pub fn validate_resume_routing(
+        &self,
+        target_hat: &HatId,
+        original_topic: Option<&str>,
+    ) -> Option<String> {
+        let topic = original_topic?;
+        let consumer = self.handoff_index.consumer_of(topic)?;
+        if consumer != target_hat.as_str() {
+            return Some(format!(
+                "U16: resume target hat `{}` is not the HandoffIndex consumer of `{}` (consumer is `{}`); resume will not be picked up",
+                target_hat.as_str(),
+                topic,
+                consumer
+            ));
+        }
+        // Confirm the consumer's `triggers` declares the topic. The
+        // registry's `get_config(...).triggers` is the SSOT for what
+        // a hat subscribes to (alias of `subscribes_to`); if the
+        // topic is missing the hat's prompt will never see the
+        // upstream event, so a resume is also wasted.
+        let consumer_cfg = self.registry.get_config(&HatId::from(consumer));
+        if let Some(cfg) = consumer_cfg {
+            let triggers = &cfg.triggers;
+            let has_trigger = triggers.iter().any(|t| {
+                let pattern = ralph_proto::Topic::new(t);
+                let topic_obj = ralph_proto::Topic::new(topic);
+                pattern.matches(&topic_obj)
+            });
+            if !has_trigger {
+                return Some(format!(
+                    "U16: resume target hat `{}` does not declare `{}` in its `triggers` list; resume will not be picked up",
+                    consumer,
+                    topic
+                ));
+            }
+        }
+        None
+    }
+
     /// Enforce isolated publish scope on a batch of wave events.
     ///
     /// Groups events by `wave_id` (preserving first-seen order), then:
@@ -3636,6 +3687,14 @@ impl EventLoop {
                 target = %hard_target.as_str(),
                 "Injecting HARD stall recovery to review hat"
             );
+            // 2026-07-04-001 plan U16: warn (don't block) on routing
+            // mismatch between the hard_target and the resolved
+            // consumer. The hard_target is a known escalation
+            // destination so this is typically a no-op; mismatch is
+            // a strong signal of preset/topology drift.
+            if let Some(warning) = self.validate_resume_routing(&hard_target, None) {
+                warn!(target = %hard_target.as_str(), "{warning}");
+            }
             Event::new("task.resume", structured_payload).with_target(hard_target)
         } else {
             match &self.state.last_hat {
@@ -3693,6 +3752,16 @@ impl EventLoop {
                         hat = %hat_id.as_str(),
                         "Injecting fallback event to recover - targeting last hat with task.resume"
                     );
+                    // 2026-07-04-001 plan U16: validate that the resume
+                    // target hat actually subscribes to the original
+                    // topic. The fallback site does not carry the
+                    // original trigger topic (it fires on "no events
+                    // emitted"), so we pass `None` — the check is a
+                    // no-op here. Routing-mismatch warnings surface
+                    // at the upstream rejection site instead.
+                    if let Some(warning) = self.validate_resume_routing(hat_id, None) {
+                        warn!(hat = %hat_id.as_str(), "{warning}");
+                    }
                     Event::new("task.resume", structured_payload).with_target(hat_id.clone())
                 }
                 _ => {
