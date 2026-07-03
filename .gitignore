@@ -140,3 +140,6 @@ LEAN-CTX.md
 # but project-level rules must be tracked.
 .cursor/*
 !.cursor/rules/
+
+# Trae IDE local config
+.trae/
