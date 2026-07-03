@@ -22,7 +22,7 @@
 //! production bridge via `SupervisorBridge::open` after the
 //! config check.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -186,12 +186,31 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
 #[derive(Debug, Clone, Default)]
 pub struct MockSupervisorBridge {
     ticks: Arc<std::sync::Mutex<Vec<(String, PhaseInputs)>>>,
-    actions: Arc<std::sync::Mutex<Vec<CoordinatorAction>>>,
+    /// Pre-scripted actions the bridge will return on the next
+    /// `tick` calls. Stored in a `VecDeque` so we deliver them
+    /// in FIFO order (push_back + pop_front); the previous
+    /// `Vec::pop` shape silently reversed the order, which
+    /// would mask any contract drift in U12 dispatcher tests
+    /// that push >1 action (fix-plan U5, F-005).
+    actions: Arc<std::sync::Mutex<VecDeque<CoordinatorAction>>>,
 }
 
 impl MockSupervisorBridge {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Pre-script the next actions the bridge will return on
+    /// the next `tick` calls. Stored in push order, so the
+    /// first pushed action is the first returned (FIFO). This
+    /// mirrors the production bridge's
+    /// `SupervisorCoordinator::tick` call path so dispatch
+    /// tests can pin the round-trip ordering.
+    pub fn push_actions(&self, actions: Vec<CoordinatorAction>) {
+        let mut guard = self.actions.lock().unwrap();
+        for action in actions {
+            guard.push_back(action);
+        }
     }
 
     /// Snapshot the recorded ticks + the next action the
@@ -200,7 +219,7 @@ impl MockSupervisorBridge {
     pub fn snapshot(&self) -> (Vec<(String, PhaseInputs)>, Vec<CoordinatorAction>) {
         (
             self.ticks.lock().unwrap().clone(),
-            self.actions.lock().unwrap().clone(),
+            self.actions.lock().unwrap().iter().cloned().collect(),
         )
     }
 }
@@ -215,12 +234,16 @@ impl SupervisorBridge for MockSupervisorBridge {
             .lock()
             .unwrap()
             .push((wave_id.to_string(), inputs.clone()));
-        // Pop the next action if any, else ContinueCollect.
+        // Pop the next action in FIFO order; if none queued,
+        // fall back to `ContinueCollect`. The previous
+        // `Vec::pop` shape returned the most-recently pushed
+        // action first (LIFO) which masked contract drift in
+        // tests that pushed >1 action; F-005 pins the fix.
         let action = self
             .actions
             .lock()
             .unwrap()
-            .pop()
+            .pop_front()
             .unwrap_or(CoordinatorAction::ContinueCollect);
         Ok(action)
     }
@@ -427,6 +450,72 @@ mod tests {
             )
             .unwrap();
         // Default state has no action queued → ContinueCollect.
+        assert_eq!(result, CoordinatorAction::ContinueCollect);
+    }
+
+    /// U5 / F-005 / R5: the mock bridge MUST return actions
+    /// in push order (FIFO). Pre-fix the test would have
+    /// observed `[InjectedFailed, InjectedComplete]` (LIFO
+    /// from `Vec::pop`); the fix-plan F-005 pins the
+    /// `VecDeque` + `pop_front` shape.
+    #[test]
+    fn mock_bridge_returns_queued_actions_in_fifo_order() {
+        let bridge = MockSupervisorBridge::new();
+        bridge.push_actions(vec![
+            CoordinatorAction::InjectedComplete {
+                topic: "exec.wave.complete".to_string(),
+                blocking_slots: vec![],
+            },
+            CoordinatorAction::InjectedFailed {
+                topic: "exec.wave.failed".to_string(),
+                reason: "required_slot_failure",
+                blocking_slots: vec![0],
+            },
+        ]);
+
+        // Tick #1: returns the first pushed action.
+        let first = bridge
+            .tick("w-1", PhaseInputs::default())
+            .expect("tick must succeed");
+        // Tick #2: returns the second pushed action (FIFO).
+        let second = bridge
+            .tick("w-1", PhaseInputs::default())
+            .expect("tick must succeed");
+        // Tick #3: queue empty → ContinueCollect default.
+        let third = bridge
+            .tick("w-1", PhaseInputs::default())
+            .expect("tick must succeed");
+
+        assert!(matches!(
+            first,
+            CoordinatorAction::InjectedComplete { ref topic, .. } if topic == "exec.wave.complete"
+        ));
+        assert!(matches!(
+            second,
+            CoordinatorAction::InjectedFailed { ref topic, .. } if topic == "exec.wave.failed"
+        ));
+        assert_eq!(third, CoordinatorAction::ContinueCollect);
+
+        // Snapshot still records all three tick calls in order.
+        let (ticks, remaining) = bridge.snapshot();
+        assert_eq!(ticks.len(), 3, "every tick records a wave/inputs pair");
+        assert!(ticks.iter().all(|(w, _)| w == "w-1"));
+        assert!(
+            remaining.is_empty(),
+            "all pre-scripted actions were drained in FIFO order"
+        );
+    }
+
+    /// U5 / F-005 edge: empty actions queue → default
+    /// `ContinueCollect`. Mirrors the pre-fix `pop` behaviour
+    /// for the no-action case so the F-005 fix is scoped to
+    /// ordering only.
+    #[test]
+    fn mock_bridge_returns_continue_collect_when_queue_empty() {
+        let bridge = MockSupervisorBridge::new();
+        let result = bridge
+            .tick("w-1", PhaseInputs::default())
+            .expect("tick must succeed");
         assert_eq!(result, CoordinatorAction::ContinueCollect);
     }
 }
