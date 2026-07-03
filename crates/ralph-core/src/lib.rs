@@ -13,6 +13,7 @@
 pub mod agent_doc_sync;
 #[cfg(feature = "recording")]
 mod cli_capture;
+pub mod completion_emit;
 pub mod config;
 /// U7a deterministic-correction injection — replaces
 /// `task.resume` events on the policy rejection path with
