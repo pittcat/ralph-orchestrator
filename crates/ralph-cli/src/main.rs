@@ -627,6 +627,7 @@ mod tests {
         };
         let profiles_args = match args.command.expect("profiles subcommand") {
             crate::commands::inspect::InspectCommands::Profiles(p) => p,
+            other => panic!("expected Profiles, got {other:?}"),
         };
         assert!(profiles_args.profiles.is_empty());
         assert!(!profiles_args.no_default_profiles);
@@ -659,6 +660,7 @@ mod tests {
         };
         let profiles_args = match args.command.expect("profiles subcommand") {
             crate::commands::inspect::InspectCommands::Profiles(p) => p,
+            other => panic!("expected Profiles, got {other:?}"),
         };
         assert_eq!(
             profiles_args.profiles,

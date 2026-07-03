@@ -22,12 +22,15 @@
 //! namespace.
 
 use crate::display::colors;
+use crate::operation_guard::OperationContext;
 use crate::preflight;
 use crate::{ConfigSource, HatsSource};
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use ralph_proto::HatId;
 use ralph_core::RalphConfig;
 use ralph_core::config::profiles::ProfileSpec;
+use ralph_core::hat_identity::HatIdentitySnapshot;
 use ralph_core::profiles::ResolvedProfileFragments;
 use std::io::Write;
 use std::path::PathBuf;
@@ -51,6 +54,38 @@ pub enum InspectCommands {
     /// Does **not** modify `RalphConfig`; pair with `ralph run` /
     /// `ralph plan` when you actually want the fragments appended.
     Profiles(InspectProfilesArgs),
+
+    /// Read-only diagnostic of the active loop + hat identity (U5).
+    ///
+    /// Resolves the same `HatIdentitySnapshot` that the `## HAT IDENTITY`
+    /// prompt block uses, surfaces the events-file resolution (main +
+    /// hat-channel), and emits the loop marker / current hat context.
+    /// Pair with `ralph events --events-source hat-channel` to close the
+    /// OPAC Confirm loop. Read-only; never starts or mutates a loop.
+    Loop(InspectLoopArgs),
+}
+
+/// Arguments for `ralph inspect loop`.
+///
+/// Workspace root defaults to the current directory; pass `--root` to
+/// point at another workspace (e.g. when inspecting a worktree from
+/// the main repo). `--hat <ID>` overrides the live `RALPH_CURRENT_HAT`
+/// when an operator wants to preview what the prompt block would look
+/// like for a different hat.
+#[derive(Parser, Debug)]
+pub struct InspectLoopArgs {
+    /// Optional hat id override (defaults to live `RALPH_CURRENT_HAT`).
+    #[arg(long)]
+    pub hat: Option<String>,
+
+    /// Output format (human or json). JSON output is the SSOT that
+    /// test fixtures and BDD scenarios assert against.
+    #[arg(long, value_enum, default_value_t = InspectProfilesFormat::Human)]
+    pub format: InspectProfilesFormat,
+
+    /// Workspace root (default: current directory).
+    #[arg(long)]
+    pub root: Option<PathBuf>,
 }
 
 /// Arguments for `ralph inspect profiles`.
@@ -101,6 +136,9 @@ pub async fn execute(
     match args.command {
         Some(InspectCommands::Profiles(profiles_args)) => {
             inspect_profiles_command(config_sources, hats_source, profiles_args, use_colors).await
+        }
+        Some(InspectCommands::Loop(loop_args)) => {
+            inspect_loop_command(config_sources, hats_source, loop_args, use_colors).await
         }
         None => {
             // No subcommand: print help so users learn the surface.
@@ -224,6 +262,232 @@ pub async fn inspect_profiles_command(
 
     let view = build_view(&defaults, &specs, &preset_name, &resolved);
     emit_view(&view, args.format, use_colors)
+}
+
+/// Read-only diagnostic of the current loop's identity + event channel.
+///
+/// Builds a `LoopInspectView` from resolved config + `OperationContext`
+/// (live loop marker, env hat id, events file) without ever starting or
+/// mutating a loop. The JSON shape is the SSOT that test fixtures and
+/// BDD scenarios assert against (U5 / R5); the human view is a
+/// readable version of the same data with diagnostics appended.
+///
+/// Pair with `ralph events --events-source hat-channel` for the OPAC
+/// Confirm stage. When the user has `RALPH_CURRENT_HAT` set in their
+/// shell the command surfaces that hat's identity block; when no hat
+/// is set, the human output points the user at `ralph run ...` so they
+/// have an actionable next step.
+pub async fn inspect_loop_command(
+    config_sources: &[ConfigSource],
+    hats_source: Option<&HatsSource>,
+    args: InspectLoopArgs,
+    use_colors: bool,
+) -> Result<()> {
+    let config = preflight::load_config_for_preflight(config_sources, hats_source).await?;
+    let root = match args.root.clone() {
+        Some(r) => r,
+        None => std::env::current_dir().context("resolve current dir")?,
+    };
+    let ctx = crate::operation_guard::OperationContext::detect(root.clone());
+
+    // Hat resolution order:
+    //   1. --hat override (operator preview)
+    //   2. live `RALPH_CURRENT_HAT` (already in `ctx.current_hat_id`)
+    //   3. None — surface a hint instead of fabricating an identity.
+    let hat_id = args
+        .hat
+        .clone()
+        .or_else(|| ctx.current_hat_id.clone());
+
+    let hat_identity = hat_id
+        .as_deref()
+        .and_then(|h| ralph_core::hat_identity::HatIdentitySnapshot::from_config(
+            &config,
+            &ralph_proto::HatId::new(h.to_string()),
+        ));
+
+    // Resolve the events file allowlist pair (main + hat-channel) by
+    // surface area only — we never read the files ourselves, only stat
+    // them so the operator can see whether the channels are alive.
+    let (main_events, hat_channel_events) = resolve_event_paths(&root, &ctx);
+    let main_size = std::fs::metadata(&main_events).map(|m| m.len()).unwrap_or(0);
+    let hat_size = std::fs::metadata(&hat_channel_events)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let mut warnings = Vec::new();
+    if ctx.current_loop_id.is_none() {
+        warnings.push(
+            "no current-loop-id marker at <root>/.ralph/current-loop-id; \
+             run `ralph run ...` to create one"
+                .to_string(),
+        );
+    }
+    if ctx.current_hat_id.is_none() && args.hat.is_none() {
+        warnings.push(
+            "no current hat in environment (RALPH_CURRENT_HAT unset) and no --hat override; \
+             hat_identity will be null. Pass `--hat <id>` to preview a hat identity."
+                .to_string(),
+        );
+    }
+    if hat_channel_events.exists() && hat_size == 0 {
+        warnings.push(format!(
+            "hat-channel file exists but is 0 bytes: {}",
+            hat_channel_events.display()
+        ));
+    }
+    if !hat_channel_events.exists() && ctx.is_agent_context {
+        warnings.push(
+            "hat-channel marker (.ralph/current-hat-events) missing — \
+             emit will fall back to main events; inspect after the first hat activation"
+                .to_string(),
+        );
+    }
+
+    let view = LoopInspectView {
+        workspace_root: root.display().to_string(),
+        loop_id: ctx.current_loop_id.clone(),
+        current_hat: hat_id.clone(),
+        is_agent_context: ctx.is_agent_context,
+        hat_identity: hat_identity
+            .as_ref()
+            .map(|s| s.to_json())
+            .unwrap_or(serde_json::Value::Null),
+        events_file: main_events.display().to_string(),
+        hat_channel_file: hat_channel_events.display().to_string(),
+        events_size: main_size,
+        hat_channel_size: hat_size,
+        warnings,
+        schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
+    };
+
+    match args.format {
+        InspectProfilesFormat::Json => {
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            serde_json::to_writer_pretty(&mut handle, &view)?;
+            writeln!(handle)?;
+        }
+        InspectProfilesFormat::Human => print_loop_view(&view, use_colors),
+    }
+    Ok(())
+}
+
+/// Versioned schema for the JSON output of `ralph inspect loop`.
+/// Bumped when the field set changes shape; tests and BDD scenarios
+/// pin against this value so version drift fails fast.
+pub const LOOP_INSPECT_SCHEMA_VERSION: &str = "loop_inspect.v1";
+
+/// Serializable view of the inspection result. Both human and JSON
+/// output are derived from this struct so the two surfaces cannot drift.
+#[derive(Debug, Clone, serde::Serialize)]
+struct LoopInspectView {
+    /// Workspace root (where the `.ralph/` markers live).
+    workspace_root: String,
+    /// Current loop id from `.ralph/current-loop-id` marker, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    loop_id: Option<String>,
+    /// Resolved hat id (override > env > null).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_hat: Option<String>,
+    /// Whether the caller is in agent context (env-driven).
+    is_agent_context: bool,
+    /// Same struct the prompt block uses (R5 SSOT).
+    /// `null` when the hat is unknown — fail-closed by design.
+    hat_identity: serde_json::Value,
+    /// Resolved path to the main events file (workspace-rooted).
+    events_file: String,
+    /// Resolved path to the hat-channel events file.
+    hat_channel_file: String,
+    /// Size of the main events file in bytes (0 if missing).
+    events_size: u64,
+    /// Size of the hat-channel events file in bytes (0 if missing).
+    hat_channel_size: u64,
+    /// Non-fatal warnings (missing marker, empty channel, etc.).
+    warnings: Vec<String>,
+    /// Schema version — bump on field-set changes.
+    schema_version: String,
+}
+
+/// Resolve the canonical main + hat-channel events file paths for a
+/// given workspace root. The function only composes paths; it does not
+/// stat or read the files (callers decide). The `ctx` argument is kept
+/// for future hooks (e.g. honour an explicit events-file override when
+/// the runner exposes one); today only the workspace matters.
+fn resolve_event_paths(root: &std::path::Path, _ctx: &OperationContext) -> (PathBuf, PathBuf) {
+    let ralph_dir = root.join(".ralph");
+    let main = ralph_dir.join("events.jsonl");
+    let hat_channel = ralph_dir.join("current-hat-events");
+    (main, hat_channel)
+}
+
+fn print_loop_view(view: &LoopInspectView, use_colors: bool) {
+    let cyan = if use_colors { colors::CYAN } else { "" };
+    let dim = if use_colors { colors::DIM } else { "" };
+    let reset = if use_colors { colors::RESET } else { "" };
+    let yellow = if use_colors { colors::YELLOW } else { "" };
+
+    println!("{cyan}Loop inspection{reset} ({} )", view.schema_version);
+    println!("  workspace:  {}", view.workspace_root);
+    match &view.loop_id {
+        Some(id) => println!("  loop_id:    {id}"),
+        None => println!("  loop_id:    {yellow}(no marker){reset}"),
+    }
+    match &view.current_hat {
+        Some(h) => println!("  current_hat: {h}"),
+        None => println!("  current_hat: {yellow}(unset){reset}"),
+    }
+    println!(
+        "  agent_ctx:  {}",
+        if view.is_agent_context {
+            "true"
+        } else {
+            "false"
+        }
+    );
+    println!("  events_file: {} ({} bytes)", view.events_file, view.events_size);
+    println!(
+        "  hat_channel: {} ({} bytes)",
+        view.hat_channel_file, view.hat_channel_size
+    );
+
+    if !view.hat_identity.is_null() {
+        println!("  hat_identity:");
+        match &view.hat_identity {
+            serde_json::Value::Object(map) => {
+                if let Some(allowed) = map.get("allowed_task_commands").and_then(|v| v.as_array()) {
+                    println!("    allowed_task_commands:");
+                    for v in allowed {
+                        println!("      - {v}");
+                    }
+                }
+                if let Some(denied) = map.get("denied_task_commands").and_then(|v| v.as_array()) {
+                    if !denied.is_empty() {
+                        println!("    denied_task_commands:");
+                        for v in denied {
+                            println!("      - {v}");
+                        }
+                    }
+                }
+                if let Some(pubs) = map.get("publishes").and_then(|v| v.as_array()) {
+                    println!("    publishes:");
+                    for v in pubs {
+                        println!("      - {v}");
+                    }
+                }
+            }
+            _ => println!("    {dim}(unparseable){reset}"),
+        }
+    } else {
+        println!("  hat_identity: {yellow}null{reset}");
+    }
+
+    if !view.warnings.is_empty() {
+        println!("  {yellow}warnings:{reset}");
+        for w in &view.warnings {
+            println!("    - {w}");
+        }
+    }
 }
 
 /// `InspectProfilesArgs` implements [`crate::commands::profile_args::ProfileArgs`]
@@ -512,6 +776,7 @@ mod tests {
             InspectArgs::try_parse_from(["inspect", "profiles"]).expect("CLI parse failed");
         let profiles_args = match parsed.command.expect("profiles subcommand") {
             InspectCommands::Profiles(p) => p,
+            other => panic!("expected Profiles, got {other:?}"),
         };
         assert!(profiles_args.profiles.is_empty());
         assert!(!profiles_args.no_default_profiles);
@@ -531,6 +796,7 @@ mod tests {
         .expect("CLI parse failed");
         let profiles_args = match parsed.command.expect("profiles subcommand") {
             InspectCommands::Profiles(p) => p,
+            other => panic!("expected Profiles, got {other:?}"),
         };
         assert_eq!(
             profiles_args.profiles,
@@ -544,6 +810,7 @@ mod tests {
             .expect("CLI parse failed");
         let profiles_args = match parsed.command.expect("profiles subcommand") {
             InspectCommands::Profiles(p) => p,
+            other => panic!("expected Profiles, got {other:?}"),
         };
         assert!(profiles_args.no_default_profiles);
     }
@@ -554,6 +821,7 @@ mod tests {
             .expect("CLI parse failed");
         let profiles_args = match parsed.command.expect("profiles subcommand") {
             InspectCommands::Profiles(p) => p,
+            other => panic!("expected Profiles, got {other:?}"),
         };
         assert_eq!(profiles_args.format, InspectProfilesFormat::Json);
     }
@@ -990,5 +1258,148 @@ mod tests {
         assert_eq!(inspect_specs, run_specs);
         assert_eq!(inspect_specs.len(), 1);
         assert_eq!(inspect_specs[0].to_string(), "user:extra");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // U5 — `ralph inspect loop` (read-only diagnostic for OPAC Observe).
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// CLI parser coverage for `ralph inspect loop [--hat X] [--format json]`.
+    #[test]
+    fn cli_parses_inspect_loop_minimal() {
+        let parsed = InspectArgs::try_parse_from(["inspect", "loop"]).expect("CLI parse failed");
+        let loop_args = match parsed.command.expect("loop subcommand") {
+            InspectCommands::Loop(l) => l,
+            _ => panic!("expected Loop"),
+        };
+        assert!(loop_args.hat.is_none());
+        assert_eq!(loop_args.format, InspectProfilesFormat::Human);
+        assert!(loop_args.root.is_none());
+    }
+
+    #[test]
+    fn cli_parses_inspect_loop_with_hat_override_and_json() {
+        let parsed = InspectArgs::try_parse_from([
+            "inspect", "loop", "--hat", "coordinator", "--format", "json",
+        ])
+        .expect("CLI parse failed");
+        let loop_args = match parsed.command.expect("loop subcommand") {
+            InspectCommands::Loop(l) => l,
+            _ => panic!("expected Loop"),
+        };
+        assert_eq!(loop_args.hat.as_deref(), Some("coordinator"));
+        assert_eq!(loop_args.format, InspectProfilesFormat::Json);
+    }
+
+    /// Schema version is exposed via the constant; pin it so the JSON
+    /// shape's compatibility surface is explicit.
+    #[test]
+    fn loop_inspect_schema_version_pinned() {
+        assert_eq!(LOOP_INSPECT_SCHEMA_VERSION, "loop_inspect.v1");
+    }
+
+    /// `resolve_event_paths` returns `<root>/.ralph/events.jsonl` for the
+    /// main channel and `<root>/.ralph/current-hat-events` for the
+    /// hat-channel; both are workspace-rooted.
+    #[test]
+    fn resolve_event_paths_uses_workspace_relative() {
+        let tmp = TempDir::new().expect("temp dir");
+        let ctx = crate::operation_guard::OperationContext::detect_with_env(
+            tmp.path().to_path_buf(),
+            |_| None,
+        );
+        let (main, hat_channel) = resolve_event_paths(tmp.path(), &ctx);
+        assert_eq!(main, tmp.path().join(".ralph/events.jsonl"));
+        assert_eq!(hat_channel, tmp.path().join(".ralph/current-hat-events"));
+    }
+
+    /// Empty workspace + no marker → warnings list is non-empty (no
+    /// loop-id + no hat) and JSON shape stays stable.
+    #[test]
+    fn inspect_loop_view_stable_when_no_markers() {
+        // Build the view directly so we cover the warning paths without
+        // touching async / config loading.
+        let tmp = TempDir::new().expect("temp dir");
+        let ctx = crate::operation_guard::OperationContext::detect_with_env(
+            tmp.path().to_path_buf(),
+            |_| None,
+        );
+        let (main, hat_channel) = resolve_event_paths(tmp.path(), &ctx);
+        let view = LoopInspectView {
+            workspace_root: tmp.path().display().to_string(),
+            loop_id: None,
+            current_hat: None,
+            is_agent_context: false,
+            hat_identity: serde_json::Value::Null,
+            events_file: main.display().to_string(),
+            hat_channel_file: hat_channel.display().to_string(),
+            events_size: 0,
+            hat_channel_size: 0,
+            warnings: vec![
+                "no current-loop-id marker at <root>/.ralph/current-loop-id; \
+                 run `ralph run ...` to create one"
+                    .to_string(),
+                "no current hat in environment (RALPH_CURRENT_HAT unset) and no --hat override; \
+                 hat_identity will be null. Pass `--hat <id>` to preview a hat identity."
+                    .to_string(),
+            ],
+            schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
+        };
+        assert!(view.loop_id.is_none());
+        assert!(view.current_hat.is_none());
+        assert_eq!(view.warnings.len(), 2);
+        let json = serde_json::to_value(&view).expect("serialise");
+        assert_eq!(json["schema_version"], serde_json::json!("loop_inspect.v1"));
+        assert_eq!(json["loop_id"], serde_json::Value::Null);
+        assert_eq!(json["hat_identity"], serde_json::Value::Null);
+    }
+
+    /// Hat identity block appears in the JSON output when a known hat
+    /// is resolved (R5 / U1 SSOT).
+    #[test]
+    fn inspect_loop_view_includes_hat_identity_when_known() {
+        use ralph_core::config::hat::HatConfig;
+
+        let mut cfg = RalphConfig::default();
+        cfg.tasks.coordinator_hats = vec!["coordinator".to_string()];
+        cfg.hats.insert(
+            "coordinator".to_string(),
+            HatConfig {
+                publishes: vec!["work.ready".to_string(), "work.done".to_string()],
+                ..HatConfig::default()
+            },
+        );
+
+        let snapshot = HatIdentitySnapshot::from_config(
+            &cfg,
+            &HatId::new("coordinator".to_string()),
+        )
+        .expect("snapshot for known hat");
+        let view = LoopInspectView {
+            workspace_root: "/tmp/x".into(),
+            loop_id: Some("loop-x".into()),
+            current_hat: Some("coordinator".into()),
+            is_agent_context: true,
+            hat_identity: snapshot.to_json(),
+            events_file: "/tmp/x/.ralph/events.jsonl".into(),
+            hat_channel_file: "/tmp/x/.ralph/current-hat-events".into(),
+            events_size: 0,
+            hat_channel_size: 0,
+            warnings: vec![],
+            schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
+        };
+
+        let json = serde_json::to_value(&view).expect("serialise");
+        assert_eq!(json["current_hat"], serde_json::json!("coordinator"));
+        let identity = &json["hat_identity"];
+        assert_eq!(identity["hat_id"], serde_json::json!("coordinator"));
+        assert_eq!(identity["is_coordinator"], serde_json::json!(true));
+        let allowed = identity["allowed_task_commands"].as_array().unwrap();
+        assert!(
+            allowed.iter().any(|v| v.as_str() == Some("add")),
+            "coord allowed_task_commands missing 'add': {allowed:?}"
+        );
+        let denied = identity["denied_task_commands"].as_array().unwrap();
+        assert!(denied.is_empty(), "coordinator denied list must be empty");
     }
 }
