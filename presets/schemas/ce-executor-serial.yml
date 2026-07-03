@@ -357,6 +357,14 @@ schemas:
         # `build_exhausted_payload` already stamps the reason,
         # so the runtime does not need a schema exception.
         - precheck_failed
+        # 2026-07-03-002 plan U3: runtime 在 coordinator 沉默时注入
+        # `plan.blocked(reason=default_publishes)`(见 event_loop/mod.rs
+        # `check_default_publishes` line 6752-6753)。U11 commit 5a58b8ac
+        # 已做注入侧持久化,但 schema allowed_values 和 shipper
+        # recoverable_whitelist 都未跟进,导致 075227 run 走 hard-fail。
+        # 本项扩 schema 入口白名单;shipper 侧在 preset yml 同步扩
+        # recoverable_whitelist。
+        - default_publishes
 
   loop.cancel:
     required_fields:

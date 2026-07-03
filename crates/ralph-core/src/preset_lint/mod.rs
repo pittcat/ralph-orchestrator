@@ -26,6 +26,7 @@ use crate::runtime_contract::{
 pub mod coordinator;
 pub mod dimension_reviewer_write_paths;
 pub mod finding_id;
+pub mod fix_unit_task_id;
 pub mod flow_declaration;
 pub mod hat_scope_invariant;
 pub mod metadata_runtime_drift;
@@ -84,6 +85,9 @@ pub use flow_declaration::check_flow_declaration;
 // (KTD-2: WAC always-on, severity by strictness).
 pub use dimension_reviewer_write_paths::{
     FINDING_DIMENSION_REVIEWER_WRITE_PLAN, check_dimension_reviewer_write_paths,
+};
+pub use fix_unit_task_id::{
+    FINDING_FIX_UNIT_TASK_ID_NOT_HELPER_DERIVED, check_fix_unit_task_id_helper_derived,
 };
 pub use hat_scope_invariant::check_hat_scope_invariant;
 pub use metadata_runtime_drift::check_metadata_runtime_drift;
@@ -416,6 +420,20 @@ pub fn run_preset_lint(
     // mode; severity is `Error` for all three rules (structural
     // invariants, not style warnings).
     findings.extend(check_hat_scope_invariant(config));
+
+    // 2026-07-03-002 plan U1: fix-unit task_id minting lint. A
+    // coordinator hat that handles fix-unit dispatch MUST include
+    // a `ralph tools task create` CLI template AND reference the
+    // canonical `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}` shape.
+    // 093813 root cause: preset had the `MUST be freshly minted`
+    // HARD RULE but no CLI parameter template, so the agent
+    // hand-composed a task_id reusing a prior step's id, which
+    // `state_projector/task.rs:253-260` rejected. This lint
+    // surfaces the gap at preset-load time rather than mid-run.
+    // Always-on `Error` severity — the rule is structural.
+    findings.extend(lint_findings_to_contract_findings(
+        &check_fix_unit_task_id_helper_derived(config, strictness),
+    ));
 
     // Plan 2026-06-20-001 U1 KTD-3: state_projection work.done action
     // chain order assertion. Always-on — order is semantic; the

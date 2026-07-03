@@ -3417,10 +3417,18 @@ async fn run_loop_impl_inner(
                 display_hat.as_str(),
                 Some(&config),
             ) {
-                warn!(
+                // 2026-07-03-002 plan U4: 从 warn! 升级为 error! + emit 诊断文件。
+                // 093813 run 暴露:merge 失败仅 warn! 导致 operator 看不到 events
+                // 丢失风险。emit 诊断让 operator 能看到,loop 继续走 fallback。
+                crate::loop_runner::hat_channel::emit_channel_routing_fallback_diagnostic(
+                    &ctx,
+                    display_hat.as_str(),
+                    "merge_hat_channel_failed",
+                );
+                error!(
                     error = %e,
                     hat = %display_hat.as_str(),
-                    "Failed to merge isolated hat channel; events may be lost"
+                    "Failed to merge isolated hat channel; events may be lost (see diagnostic file)"
                 );
             }
         }

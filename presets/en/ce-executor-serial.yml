@@ -1007,6 +1007,31 @@ hats:
            - `complexity: "small"`
            - `fix_plan_file` (carry forward so the executor knows where to read its U-ID section)
          - Stop — DO NOT use the generic "unit advancement logic" for subsequent fix-units; the `test.passed` handler above has its OWN fix-unit branch (Branch A) that takes precedence. See the 2026-06-24 P0-A regression comment above for why mixing the two paths is forbidden.
+
+      ### Fix-Unit Task ID Minting (2026-07-03-002 plan U1)
+
+      Before emitting `work.ready` for any `fix-NN` step, coordinator MUST:
+      1. Call `ralph tools task create` to mint a fresh task_id. The CLI
+         derives the canonical shape `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}`
+         (the same shape `Task::fix_unit_task_id(plan, fix_round, fix_unit_index, unix_ts)`
+         produces in Rust). DO NOT hand-compose the suffix; hand-written ids
+         like `task-1783073243-0087` (reusing a prior step's id) will be
+         rejected by `state_projector/task.rs:253-260` with
+         `task_id_reused_across_keys`.
+      2. The minted task_id MUST be unique per (plan_name, fix_round,
+         fix_unit_index). Reusing a task_id bound to a prior step or fix-unit
+         violates this HARD RULE and is the root cause of the 093813 run
+         stall at fix-01 dispatch.
+      3. CLI invocation template (fill in `<plan_name>`, `<fix_round>`,
+         `<fix_unit_index>` from the fix-plan):
+         ```
+         ralph tools task create --plan-name <plan_name> --fix-unit <fix_round> <fix_unit_index>
+         ```
+         Read back the canonical `task_id` from the CLI output before
+         publishing `work.ready`.
+      4. Verify `task_id` matches `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}`
+         shape before emit. If it does not, do NOT emit `work.ready`; emit
+         `plan.blocked(reason=task_creation_failed_after_2_work_ready_retries)`.
       4. After all fix-units complete (the fix-unit branch of `test.passed` handles this — see rule 2 above; do not duplicate the logic here).
 
       ### Executor Failure Handling (work.failed trigger)
@@ -1290,6 +1315,26 @@ hats:
         6. ralph tools task close <task_id>     ← missing → contract rejection
         7. Evaluate incremental commit
       ```
+
+      ### Task Closure & Event Emission (2026-07-03-002 plan U2)
+
+      After `ralph tools task close <task_id>`, you MUST immediately emit
+      `work.done` (or `work.failed` on failure) within the SAME turn.
+      Closing the task without emitting `work.done` breaks the fix-unit
+      chain — the validator never wakes (it subscribes only to `work.done`
+      and `fix.applied`), no `test.passed` is produced, and the loop stalls
+      until progress-steward intervenes (which by default requires 3
+      consecutive no-progress turns).
+
+      Mandatory sequence (after step 6 above):
+      1. `ralph tools task close <task_id>`
+      2. `ralph emit work.done --json '{...}'` (within the same turn)
+      3. On emit failure: `ralph emit work.failed --json '{"reason":"missing_work_done_after_close"}'`
+
+      DO NOT close the task and exit without emitting. The 093813 run
+      stalled at fix-01 because executor closed task-1783073243-0087
+      (tasks.jsonl:4 status:closed) but never emitted `work.done`, leaving
+      the validator with no trigger and the fix-unit chain broken.
 
       **Test Discovery:** Before modifying files, find related test files via import/pattern search.
 
@@ -2673,6 +2718,14 @@ hats:
           # logging 4 misleading `REVIEW_COMPLETE(fail)` reports.
           - `stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*`
           - `stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:*`
+          # 2026-07-03-002 plan U3: coordinator 沉默是 backpressure 而非
+          # 实现失败。runtime 注入 plan.blocked(reason=default_publishes)
+          # 后,验证 1-2(test + build/lint/typecheck)通过时路由到
+          # pass_with_residuals。075227 run 因此从 REVIEW_COMPLETE(fail)
+          # 变为可恢复路径。注意:default_publishes 是兜底 topic,扩白名单
+          # 后任何 hat 沉默都会被路由到 pass — 必须配合 shipper verification
+          # 1-2 双重检查(见 line 2676 下方规则)。
+          - `default_publishes`
           For recoverable reasons (after trim+lowercase == whitelist entry): run checks 1-2 (test suite + build/lint/typecheck). If BOTH pass, publish `REVIEW_COMPLETE` with `pass_or_fail: "pass"`, `verdict: "pass_with_residuals"`, and `residual_findings_summary: "plan.blocked with recoverable reason '<reason>'; verification passed"`. If either check fails, fall through to the hard-fail path.
         - **Hard-fail reasons** (the unit, review, or fix pipeline itself broke; verification cannot rescue it):
           - `executor failed: <detail>` (coordinator emitted on `work.failed`)
@@ -2941,6 +2994,16 @@ hats:
       - Fix-unit chain done but no `plan.complete` →
         `task.resume(reason=fix_unit_complete_plan_complete_pending, target_hat=coordinator)`.
       - All units done but no `review.start` → `task.resume(target_hat=coordinator)`.
+      - **Task closed but no `work.done` within 1 iteration (2026-07-03-002 plan U2) →**
+        `task.resume(target_hat=executor, reason=missing_work_done,
+        kind=task_closure_without_emit)`. This is a FAST PATH — do NOT
+        wait for 3 consecutive no-progress turns. Read
+        `.ralph/agent/tasks.jsonl` for rows with `status:closed` and
+        cross-check against `events.jsonl` for a matching `work.done`
+        within the same iteration. Missing → emit `task.resume` immediately.
+        The 093813 run stalled at fix-01 because executor closed the task
+        but never emitted `work.done`; without this fast path the loop
+        waited 3 turns before progress-steward could intervene.
       - After 2 retries on the same reason → `plan.blocked(reason=<reason>_after_<N>_retries)`.
       - Cannot determine safe action → `plan.blocked(reason=loop_stalled_max_iterations)`.
 

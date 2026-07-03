@@ -144,6 +144,16 @@ pub fn merge_hat_channel(
                 )
             })?;
         }
+    } else {
+        // 2026-07-03-002 plan U4: hat-channel 0 字节文件不再静默跳过。
+        // emit 诊断到 .ralph/diagnostics/channel-routing-fallback-{ts}.md,
+        // 让 operator 能看到 isolated 模式 hat-channel 路由失效。不
+        // fail-closed(避免阻塞 loop),但升级日志级别为 error。
+        emit_channel_routing_fallback_diagnostic(
+            ctx,
+            authoritative_hat,
+            "hat_channel_empty_after_activation",
+        );
     }
 
     fs::remove_file(&channel_path).with_context(|| {
@@ -171,6 +181,38 @@ fn derive_triggered_for_topic(topic: &str, config: &RalphConfig) -> Option<Strin
     }
     let index = ralph_core::workflow_contract::HandoffIndex::from_config(config);
     index.consumer_of(topic).map(|id| id.to_string())
+}
+
+/// 2026-07-03-002 plan U4: emit a diagnostic file when hat-channel routing
+/// falls back (0-byte channel file or merge failure). Not fail-closed —
+/// the loop continues on the main events fallback path, but the operator
+/// gets a visible artifact in `.ralph/diagnostics/` and an `error!` log.
+pub(crate) fn emit_channel_routing_fallback_diagnostic(
+    ctx: &LoopContext,
+    hat_id: &str,
+    reason: &str,
+) {
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S");
+    let diagnostics_dir = ctx.ralph_dir().join("diagnostics");
+    let _ = fs::create_dir_all(&diagnostics_dir);
+    let path = diagnostics_dir.join(format!("channel-routing-fallback-{}.md", ts));
+    let content = format!(
+        "# Hat-Channel Routing Fallback\n\n\
+         - **hat**: {}\n\
+         - **reason**: {}\n\
+         - **timestamp**: {}\n\
+         - **impact**: isolated mode hat-channel routing failed; events fall back to main events.jsonl\n\
+         - **action**: check whether `prepare_hat_channel` was interrupted by a hat crash/timeout; \
+           verify `.ralph/current-hat-events` marker is not stale (pointing at a prior hat's channel)\n",
+        hat_id, reason, ts
+    );
+    let _ = fs::write(&path, content);
+    tracing::error!(
+        hat = %hat_id,
+        reason = %reason,
+        diagnostic_path = %path.display(),
+        "hat-channel routing fallback (see diagnostic file)"
+    );
 }
 
 #[cfg(test)]
@@ -337,6 +379,67 @@ mod tests {
             lines[2].contains("\"triggered\":\"explicit-reviewer\""),
             "explicit triggered should be preserved: {}",
             lines[2]
+        );
+    }
+
+    #[test]
+    fn test_merge_hat_channel_empty_file_emits_diagnostic() {
+        // 2026-07-03-002 plan U4: 0 字节 channel 文件不再静默跳过,
+        // 必须 emit 诊断文件到 .ralph/diagnostics/channel-routing-fallback-*.md
+        let tmp = TempDir::new().unwrap();
+        let ctx = make_ctx(&tmp);
+
+        // prepare 创建空文件,不写任何内容
+        let channel = prepare_hat_channel(&ctx, "executor", "primary-005", 1).unwrap();
+        assert_eq!(fs::read_to_string(&channel).unwrap(), "");
+
+        let target = tmp.path().join(".ralph/events-main.jsonl");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "existing\n").unwrap();
+
+        merge_hat_channel(&ctx, &target, "executor", None).unwrap();
+
+        // target 应未被修改(空 channel 不 merge 任何内容)
+        assert_eq!(fs::read_to_string(&target).unwrap(), "existing\n");
+
+        // 诊断文件应存在
+        let diagnostics_dir = ctx.ralph_dir().join("diagnostics");
+        let mut entries: Vec<_> = fs::read_dir(&diagnostics_dir)
+            .expect("diagnostics dir should exist")
+            .map(|e| e.unwrap().path())
+            .collect();
+        entries.sort();
+        assert!(
+            !entries.is_empty(),
+            "diagnostic file should be emitted for empty channel"
+        );
+        let diag_path = &entries[0];
+        assert!(
+            diag_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("channel-routing-fallback-"),
+            "diagnostic file name should start with channel-routing-fallback-, got {:?}",
+            diag_path
+        );
+        let diag_content = fs::read_to_string(diag_path).unwrap();
+        assert!(
+            diag_content.contains("hat_channel_empty_after_activation"),
+            "diagnostic should mention the reason, got {}",
+            diag_content
+        );
+        assert!(
+            diag_content.contains("executor"),
+            "diagnostic should mention the hat id, got {}",
+            diag_content
+        );
+
+        // channel 文件和 marker 仍应被清理
+        assert!(!channel.exists(), "channel file should still be removed");
+        assert!(
+            !ctx.ralph_dir().join("current-hat-events").exists(),
+            "marker should still be removed"
         );
     }
 }

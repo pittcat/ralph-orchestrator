@@ -1,0 +1,63 @@
+# 2026-07-03-002 plan U3 (P0-2 fix): `default_publishes` reason
+# must route through shipper's recoverable whitelist and reach
+# `REVIEW_COMPLETE(pass_with_residuals)` rather than hard-failing.
+#
+# 075227 incident root cause: shipper `recoverable_whitelist` did
+# NOT include `default_publishes`, so a coordinator silence that
+# triggered runtime default-injection was treated as a hard shipper
+# failure and the loop stuck in `plan.blocked`. U3 added
+# `default_publishes` to the whitelist (presets/en/ce-executor-serial.yml)
+# and to the schema allowed_values
+# (presets/schemas/ce-executor-serial.yml).
+#
+# AE3 acceptance: `plan.blocked(reason=default_publishes)` → shipper
+# verification passes → `REVIEW_COMPLETE(pass_with_residuals)`.
+
+name: ce_executor_serial_shipper_default_publishes_recoverable
+description: U3 — default_publishes reason routes to pass_with_residuals
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  event_loop:
+    execution_mode: isolated
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        plan.blocked:
+          payload: json_object
+          required_fields: [reason]
+        REVIEW_COMPLETE:
+          payload: json_object
+          required_fields: [pass_or_fail, verdict]
+  hats:
+    coordinator:
+      subscribes_to: [work.done]
+      publishes: [plan.blocked]
+    shipper:
+      subscribes_to: [plan.blocked]
+      publishes: [REVIEW_COMPLETE]
+
+mock_responses:
+  - |
+    <event topic="plan.blocked">
+    {"plan_name":"dp-demo","reason":"default_publishes","task_id":"t1","task_key":"k1","message":"coordinator emitted no events; orchestrator injected default topic plan.blocked"}
+    </event>
+  - |
+    <event topic="REVIEW_COMPLETE">
+    {"plan_name":"dp-demo","verdict":"pass_with_residuals","pass_or_fail":"pass","residual_findings_summary":"recoverable reason default_publishes; verification passed"}
+    </event>
+  - |
+    waiting.
+
+expected:
+  iterations: 3
+  events:
+    - topic: plan.blocked
+    - topic: REVIEW_COMPLETE
+  event_topic_counts:
+    - topic: REVIEW_COMPLETE
+      count: 1
+  completion: false

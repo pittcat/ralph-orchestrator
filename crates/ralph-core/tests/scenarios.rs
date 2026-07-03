@@ -3452,6 +3452,17 @@ fn test_ce_executor_serial_shipper_recoverable_reasons() {
 }
 
 #[test]
+fn test_ce_executor_serial_shipper_default_publishes_recoverable() {
+    // 2026-07-03-002 plan U3 (P0-2 fix): `default_publishes` reason
+    // must route through shipper recoverable whitelist to
+    // REVIEW_COMPLETE(pass_with_residuals) rather than hard-failing.
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_serial_shipper_default_publishes_recoverable.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
 fn test_serial_phase_violation_resume_budget() {
     let yaml = load_scenario("tests/scenarios/serial_phase_violation_resume_budget.yml");
     run_workflow_guard_scenario(yaml);

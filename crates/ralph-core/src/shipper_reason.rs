@@ -9,6 +9,13 @@ use crate::event_policy::{PolicyFinding, ViolationType};
 
 /// Canonical recoverable `plan.blocked.reason` literals (trim + lowercase exact
 /// match). Mirrors `presets/en/ce-executor-serial.yml` shipper STRICT-MATCH list.
+///
+/// 2026-07-03-002 plan U3 (P0-2 fix): added `default_publishes`. The 075227
+/// incident root cause was that the preset prompt + schema listed
+/// `default_publishes` as recoverable but this mechanism backstop did NOT,
+/// so a coordinator silence that triggered runtime default-injection was
+/// still hard-failed by `check_review_complete_shipper_routing`. Both the
+/// preset (agent guidance) and this module (mechanism) must agree.
 const RECOVERABLE_REASONS: &[&str] = &[
     "loop_stalled_max_iterations",
     "steward_escalation",
@@ -16,6 +23,7 @@ const RECOVERABLE_REASONS: &[&str] = &[
     "recovery_exhausted",
     "review_failed",
     "precheck_failed",
+    "default_publishes",
     "stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*",
     "stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:*",
 ];
@@ -97,6 +105,11 @@ mod tests {
         assert!(is_recoverable_plan_blocked_reason(
             "recovery_exhausted:coordinator:task.resume:handoff"
         ));
+        // 2026-07-03-002 U3: default_publishes must be recoverable so that
+        // runtime-injected plan.blocked (coordinator silence) routes to
+        // REVIEW_COMPLETE(pass_with_residuals) instead of hard-failing.
+        assert!(is_recoverable_plan_blocked_reason("default_publishes"));
+        assert!(is_recoverable_plan_blocked_reason("  Default_Publishes "));
     }
 
     #[test]

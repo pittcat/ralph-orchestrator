@@ -315,6 +315,17 @@ pub const FINDING_METADATA_RUNTIME_DRIFT: &str = "preset.metadata_runtime_drift"
 pub const FINDING_STRICT_REASON_ROUTING_MISSING: &str = "preset.strict_reason_routing_missing";
 
 // ──────────────────────────────────────────────────────────────────────────
+// 2026-07-03-002 plan U1: fix-unit task_id minting lint finding ID
+// ──────────────────────────────────────────────────────────────────────────
+
+/// 2026-07-03-002 plan U1: coordinator fix-unit dispatch 没有给出
+/// `ralph tools task create` 调用模板或 `Task::fix_unit_task_id` shape 示范。
+/// 093813 根因:preset 有 `MUST be freshly minted` 文案但无 CLI 参数模板,
+/// agent 推不出参数导致手写 id 被 state_projector 拒。Always `Error`.
+pub const FINDING_FIX_UNIT_TASK_ID_NOT_HELPER_DERIVED: &str =
+    "preset.fix_unit_task_id_not_helper_derived";
+
+// ──────────────────────────────────────────────────────────────────────────
 // 2026-07-02-006 plan U3: `mechanism.phase_authority` lint finding IDs
 // ──────────────────────────────────────────────────────────────────────────
 
