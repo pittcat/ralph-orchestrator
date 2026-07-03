@@ -338,6 +338,7 @@ mod memory;
 mod phase;
 #[cfg(feature = "supervisor-db")]
 mod migrations;
+mod recover;
 #[cfg(feature = "supervisor-db")]
 mod rusqlite;
 mod worktree_bind;
