@@ -332,6 +332,7 @@ pub use memory::InMemorySupervisorStore;
 pub use rusqlite::RusqliteSupervisorStore;
 
 mod memory;
+mod phase;
 #[cfg(feature = "supervisor-db")]
 mod migrations;
 #[cfg(feature = "supervisor-db")]
