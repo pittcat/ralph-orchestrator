@@ -628,6 +628,7 @@ _ralph_events_args() {
     '--topic+[Filter by topic]:topic:_default'
     '--iteration+[Filter by iteration number]:number:_default'
     '--format+[Output format]:format:(table json)'
+    '--events-source+[Events ledger source]:source:(auto main hat-channel)'
     '--file+[Path to events file]:file:_files'
     '--clear[Clear the event history. Requires --confirm <loop_id> to authorize.]'
     '--confirm+[Confirmation token: must equal the active loop id (or "current"/"default" when no marker exists)]:loop_id:_default'
