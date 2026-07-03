@@ -422,6 +422,7 @@ impl SupervisorStore for InMemorySupervisorStore {
         }
         Ok(WaveSnapshot {
             wave_id: wave.wave_id.clone(),
+            kind: wave.kind,
             phase: wave.phase,
             expected_total: wave.expected_total,
             completed_count: completed,
@@ -466,6 +467,7 @@ impl SupervisorStore for InMemorySupervisorStore {
             }
             out.push(WaveSnapshot {
                 wave_id: wave.wave_id.clone(),
+                kind: wave.kind,
                 phase: wave.phase,
                 expected_total: wave.expected_total,
                 completed_count: completed,

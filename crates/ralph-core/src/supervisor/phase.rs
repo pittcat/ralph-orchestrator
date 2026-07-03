@@ -181,6 +181,7 @@ mod tests {
     ) -> (WaveSnapshot, PhaseInputs) {
         let s = WaveSnapshot {
             wave_id: "w-1".into(),
+            kind: crate::supervisor::WaveKind::Exec,
             phase: WavePhase::Collect,
             expected_total,
             completed_count: completed,
@@ -327,6 +328,7 @@ mod tests {
         // must stay ContinueCollect.
         let snap_struct = WaveSnapshot {
             wave_id: "w-mix".into(),
+            kind: crate::supervisor::WaveKind::Exec,
             phase: WavePhase::Collect,
             expected_total: 5,
             completed_count: 1,

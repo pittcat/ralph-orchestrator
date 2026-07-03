@@ -191,6 +191,7 @@ impl SlotResource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaveSnapshot {
     pub wave_id: String,
+    pub kind: WaveKind,
     pub phase: WavePhase,
     pub expected_total: u32,
     pub completed_count: u32,
@@ -331,6 +332,8 @@ pub use memory::InMemorySupervisorStore;
 #[cfg(feature = "supervisor-db")]
 pub use rusqlite::RusqliteSupervisorStore;
 
+mod coordinator;
+mod merge_sink;
 mod memory;
 mod phase;
 #[cfg(feature = "supervisor-db")]

@@ -513,6 +513,17 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
             let (wave_id_row, phase_str, expected_total, cancel, merged) = wave;
             let phase = parse_phase(&phase_str)?;
+            let kind = {
+                let kind_str: String = conn
+                    .query_row(
+                        "SELECT kind FROM waves WHERE wave_id = ?1",
+                        [&wave_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
+                parse_kind(&kind_str)?
+            };
             // Count slot states via a single aggregation.
             let row = conn.query_row(
                 "SELECT
@@ -534,6 +545,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
             let (completed, failed, in_flight, pending) = row;
             Ok(WaveSnapshot {
                 wave_id: wave_id_row,
+                kind,
                 phase,
                 expected_total,
                 completed_count: completed,

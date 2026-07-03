@@ -125,6 +125,7 @@ mod tests {
     fn wave_snapshot_round_trips_through_serde() {
         let snapshot = WaveSnapshot {
             wave_id: "w-snap".to_string(),
+            kind: WaveKind::Exec,
             phase: WavePhase::Collect,
             expected_total: 5,
             completed_count: 2,
