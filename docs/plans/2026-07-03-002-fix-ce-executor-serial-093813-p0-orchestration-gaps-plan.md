@@ -1,13 +1,22 @@
 ---
 title: fix: ce-executor-serial 093813 P0 编排链 + 机制白名单 gap 修复（与 2026-07-02-005 解耦）
 type: fix
-status: active
+status: superseded
 date: 2026-07-03
+superseded_by: docs/plans/2026-07-04-001-feat-opac-isolated-agent-discipline-plan.md#u14
 origin:
   - docs/report/2026-07-03-ce-executor-serial-primary-20260703-093813-diagnosis.md
   - docs/report/2026-07-03-ce-executor-serial-primary-20260703-075227-diagnosis.md
 related_plan: docs/achieved/plan/2026-07-02-005-fix-ce-executor-serial-p0-terminal-path-plan.md
 ---
+
+> **2026-07-04 supersession notice**: this plan is fully absorbed by U14 of the OPAC plan (`docs/plans/2026-07-04-001-feat-opac-isolated-agent-discipline-plan.md#u14`). The four P0 items — fix-unit mint via `ralph tools task ensure --for-fix-unit`, progress-steward `missing_work_done` resume, shipper `default_publishes` whitelist, and hat-channel diagnostic — landed as separate commits before the OPAC plan was opened:
+>
+> - `61602a0f fix(ce-executor-serial): 修复 093813/075227 P0-1~P0-4 编排链路阻断`
+> - `54687b25 fix(ce-executor-serial): 同步 shipper_reason 移除 stall_recovery:* 兜底条目`
+> - `d18f6e04 fix(shipper+supervisor): P0 修复 stall_recovery 静默升级 + coordinator hat 视角 instructions`
+>
+> Future work on this surface lives in the OPAC plan; do not re-open this file.
 
 # fix: ce-executor-serial 093813 P0 编排链 + 机制白名单 gap 修复
 
