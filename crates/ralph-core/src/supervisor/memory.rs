@@ -461,6 +461,7 @@ impl SupervisorStore for InMemorySupervisorStore {
         let mut failed = 0u32;
         let mut in_flight = 0u32;
         let mut pending = 0u32;
+        let mut slots: Vec<(u32, SlotStatus)> = Vec::with_capacity(wave.slots.len());
         for slot in wave.slots.values() {
             match slot.status {
                 SlotStatus::Completed => completed += 1,
@@ -468,7 +469,12 @@ impl SupervisorStore for InMemorySupervisorStore {
                 SlotStatus::Dispatched | SlotStatus::Running => in_flight += 1,
                 SlotStatus::Pending | SlotStatus::Cancelled => pending += 1,
             }
+            // U3 / F-003: emit per-slot status so the phase
+            // function reads REAL failures (not a fabricated
+            // range from `expected_total - completed_count`).
+            slots.push((slot.slot_index, slot.status));
         }
+        slots.sort_by_key(|(idx, _)| *idx);
         Ok(WaveSnapshot {
             wave_id: wave.wave_id.clone(),
             kind: wave.kind,
@@ -481,6 +487,7 @@ impl SupervisorStore for InMemorySupervisorStore {
             cancel_requested: wave.cancel_requested,
             merged_to_events: wave.merged_to_events,
             started_at: wave.created_at,
+            slots,
         })
     }
 
@@ -507,6 +514,7 @@ impl SupervisorStore for InMemorySupervisorStore {
             let mut failed = 0u32;
             let mut in_flight = 0u32;
             let mut pending = 0u32;
+            let mut slots: Vec<(u32, SlotStatus)> = Vec::with_capacity(wave.slots.len());
             for slot in wave.slots.values() {
                 match slot.status {
                     SlotStatus::Completed => completed += 1,
@@ -514,7 +522,9 @@ impl SupervisorStore for InMemorySupervisorStore {
                     SlotStatus::Dispatched | SlotStatus::Running => in_flight += 1,
                     SlotStatus::Pending | SlotStatus::Cancelled => pending += 1,
                 }
+                slots.push((slot.slot_index, slot.status));
             }
+            slots.sort_by_key(|(idx, _)| *idx);
             out.push(WaveSnapshot {
                 wave_id: wave.wave_id.clone(),
                 kind: wave.kind,
@@ -527,6 +537,7 @@ impl SupervisorStore for InMemorySupervisorStore {
                 cancel_requested: wave.cancel_requested,
                 merged_to_events: wave.merged_to_events,
                 started_at: wave.created_at,
+                slots,
             });
         }
         Ok(out)

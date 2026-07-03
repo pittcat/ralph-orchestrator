@@ -212,6 +212,16 @@ pub struct WaveSnapshot {
     /// it from their `created_at` source.
     #[serde(default = "default_started_at")]
     pub started_at: SystemTime,
+    /// 2026-07-03-001 plan U3 / F-003: per-slot status list.
+    /// The phase-decision pure function reads this to populate
+    /// the `blocking_slots` payload instead of fabricating a
+    /// range from `expected_total - completed_count` (which
+    /// mis-classified legitimately completed slots as blocking
+    /// in the pre-fix code, dropping the actual failed slot).
+    /// Both stores populate this via JOIN against
+    /// `wave_slots.status`.
+    #[serde(default)]
+    pub slots: Vec<(u32, SlotStatus)>,
 }
 
 fn default_started_at() -> SystemTime {

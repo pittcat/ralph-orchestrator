@@ -585,6 +585,51 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 },
             )?;
             let (completed, failed, in_flight, pending) = row;
+            // U3 / F-003: emit per-slot status via JOIN so the
+            // phase function reads REAL failures (not a
+            // fabricated range from
+            // `expected_total - completed_count`).
+            let mut stmt_slots = conn
+                .prepare("SELECT slot_index, status FROM wave_slots WHERE wave_id = ?1 ORDER BY slot_index ASC")?;
+            let slots: Vec<(u32, SlotStatus)> = stmt_slots
+                .query_map([&wave_id], |row| {
+                    let idx: i64 = row.get(0)?;
+                    let status_str: String = row.get(1)?;
+                    // Convert the supervisor parse error into
+                    // a `rusqlite::Error` so the closure's
+                    // `?` operator stays in its native error
+                    // type. The store trait surfaces it via
+                    // `SupervisorStoreError::Storage`.
+                    let status = parse_status(&status_str)
+                        .map_err(|e| {
+                            // Wrap into a small anonymous error
+                            // type so the closure's `?` keeps
+                            // using the `rusqlite::Error` arm.
+                            // The store trait re-translates via
+                            // `From<rusqlite::Error> for
+                            // SupervisorStoreError` upstream.
+                            struct SlotStatusParseError(String);
+                            impl std::fmt::Display for SlotStatusParseError {
+                                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                                    f.write_str(&self.0)
+                                }
+                            }
+                            impl std::fmt::Debug for SlotStatusParseError {
+                                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                                    f.debug_tuple("SlotStatusParseError").field(&self.0).finish()
+                                }
+                            }
+                            impl std::error::Error for SlotStatusParseError {}
+                            rusqlite::Error::FromSqlConversionFailure(
+                                1,
+                                rusqlite::types::Type::Text,
+                                Box::new(SlotStatusParseError(e.to_string())),
+                            )
+                        })?;
+                    Ok((idx as u32, status))
+                })?
+                .collect::<Result<_, _>>()?;
+            drop(stmt_slots);
             // 2026-07-03-001 plan U6: convert `created_at`
             // (unix seconds) into `SystemTime` so the
             // recovery path can compute `elapsed_secs` via
@@ -606,6 +651,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 cancel_requested: cancel,
                 merged_to_events: merged,
                 started_at,
+                slots,
             })
         })
     }

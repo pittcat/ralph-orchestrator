@@ -136,6 +136,7 @@ mod tests {
             cancel_requested: false,
             merged_to_events: false,
             started_at: SystemTime::UNIX_EPOCH,
+            slots: vec![(0, SlotStatus::Completed), (1, SlotStatus::Failed)],
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let back: WaveSnapshot = serde_json::from_str(&json).unwrap();

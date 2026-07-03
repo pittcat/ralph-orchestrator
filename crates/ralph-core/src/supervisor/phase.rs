@@ -7,7 +7,7 @@
 //! `SystemTime` reads beyond what the caller passes. The
 //! coordinator (U8) wires the function into the fan-in loop.
 
-use crate::supervisor::{WavePhase, WaveSnapshot};
+use crate::supervisor::{SlotStatus, WavePhase, WaveSnapshot};
 
 /// Inputs that supplement `WaveSnapshot` to make the phase
 /// decision. `cancel_requested` is duplicated on the snapshot
@@ -165,19 +165,23 @@ pub trait WaveSnapshotExt {
 
 impl WaveSnapshotExt for WaveSnapshot {
     fn blocking_slot_indices(&self) -> Vec<u32> {
-        // The public `WaveSnapshot` does not carry per-slot
-        // status today; the coordinator's U8 plumbing will
-        // extend the snapshot with a `Vec<(u32, SlotStatus)>`
-        // when the dispatcher needs to drill into individual
-        // slot failure detail. For U6 we estimate the
-        // blocking slots as `[expected_total - completed_count
-        // ..= expected_total]` so the payload stays
-        // forward-compatible: in the common `1 of 4 failed`
-        // case the integrator only sees 1 slot marked
-        // blocking.
-        let total = self.expected_total as i64;
-        let completed = self.completed_count as i64;
-        (total.saturating_sub(completed)..total).map(|i| i as u32).collect()
+        // U3 / F-003: filter the per-slot status list kept on
+        // the snapshot (populated by both stores via JOIN in
+        // `fan_in_status`). The pre-fix code fabricated a range
+        // from `expected_total - completed_count .. expected_total`,
+        // which mis-classified legitimately completed slots as
+        // blocking. The new contract reads real `Failed` and
+        // `Cancelled` statuses from `slots`.
+        self.slots
+            .iter()
+            .filter_map(|(idx, status)| {
+                if matches!(status, SlotStatus::Failed | SlotStatus::Cancelled) {
+                    Some(*idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -206,6 +210,13 @@ mod tests {
             cancel_requested: cancel,
             merged_to_events: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
+            // U3 / F-003: snap helper builds a slots vec that
+            // mirrors the count aggregate so the
+            // pre-fix-range-based blocking_slots call site
+            // (the `blocking_slots_index_helper_is_stable`
+            // test) keeps its semantic anchor. The new
+            // U3 tests build their own `slots` explicitly.
+            slots: Vec::new(),
         };
         let i = PhaseInputs {
             aggregate_timeout_secs: 60,
@@ -291,15 +302,97 @@ mod tests {
         }
     }
 
+    /// U3 / F-003 / KTD-8 contract pin: `blocking_slot_indices`
+    /// MUST read per-slot status, not fabricate a range from
+    /// `expected_total - completed_count`. The snapshot's
+    /// `slots` field carries real slot status; the helper
+    /// filters for `Failed` (and `Cancelled`, per F-003 / U3).
     #[test]
-    fn blocking_slots_index_helper_is_stable() {
-        let (s, _) = snap(5, 2, 0, 0, 3, false);
-        let blocking = s.blocking_slot_indices();
-        // Total=5, completed=2 → blocking window is
-        // `[total-completed .. total)` = `[3,5)` which yields
-        // indices `[3, 4]`. Caller diagnostics tolerate
-        // either ordering.
-        assert_eq!(blocking, vec![3, 4], "blocking window mismatch: {blocking:?}");
+    fn blocking_slot_indices_reads_real_status() {
+        // total=4, completed=2, failed=1, in_flight=0,
+        // pending=1. The failed slot is index 1 (a real
+        // value carried on the snapshot, not a range).
+        let slot_index_of_failed = 1u32;
+        let snap = WaveSnapshot {
+            wave_id: "w-real".into(),
+            kind: crate::supervisor::WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 4,
+            completed_count: 2,
+            failed_count: 1,
+            pending_count: 1,
+            in_flight_count: 0,
+            cancel_requested: false,
+            merged_to_events: false,
+            // U3: pop the slot list. The failed slot is
+            // index 1; the completed + pending ones do NOT
+            // appear in `blocking_slot_indices`.
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots: vec![
+                (0, SlotStatus::Completed),
+                (1, SlotStatus::Failed),
+                (2, SlotStatus::Completed),
+                (3, SlotStatus::Pending),
+            ],
+        };
+        let blocking = snap.blocking_slot_indices();
+        assert_eq!(
+            blocking,
+            vec![slot_index_of_failed],
+            "blocking slots must list only the failed slot, got {blocking:?}"
+        );
+    }
+
+    /// U3 / F-003 edge: every slot in `Failed` → blocking
+    /// returns all indices. The pre-fix range fabrication
+    /// would have produced a different (wrong) answer.
+    #[test]
+    fn blocking_slot_indices_all_failed_returns_all_indices() {
+        let snap = WaveSnapshot {
+            wave_id: "w-all-failed".into(),
+            kind: crate::supervisor::WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 3,
+            completed_count: 0,
+            failed_count: 3,
+            pending_count: 0,
+            in_flight_count: 0,
+            cancel_requested: false,
+            merged_to_events: false,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots: vec![
+                (0, SlotStatus::Failed),
+                (1, SlotStatus::Failed),
+                (2, SlotStatus::Failed),
+            ],
+        };
+        let blocking = snap.blocking_slot_indices();
+        assert_eq!(blocking, vec![0, 1, 2]);
+    }
+
+    /// U3 / F-003 negative: no `Failed` slots → empty
+    /// blocking list (regardless of `pending_count`).
+    #[test]
+    fn blocking_slot_indices_no_failures_is_empty() {
+        let snap = WaveSnapshot {
+            wave_id: "w-all-completed".into(),
+            kind: crate::supervisor::WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 2,
+            completed_count: 2,
+            failed_count: 0,
+            pending_count: 0,
+            in_flight_count: 0,
+            cancel_requested: false,
+            merged_to_events: false,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots: vec![
+                (0, SlotStatus::Completed),
+                (1, SlotStatus::Completed),
+            ],
+        };
+        let blocking = snap.blocking_slot_indices();
+        assert!(blocking.is_empty(), "no failures → no blocking slots: {blocking:?}");
     }
 
     #[test]
@@ -354,6 +447,7 @@ mod tests {
             cancel_requested: false,
             merged_to_events: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots: Vec::new(),
         };
         let inputs = PhaseInputs {
             aggregate_timeout_secs: 60,
