@@ -72,6 +72,16 @@ pub(crate) fn default_core_value() -> Result<Value> {
             // the preset opt-in (8 for ce-executor-serial) survives
             // `merge_hats_overlay`.
             "max_residuals",
+            // 2026-07-03-001 plan U1: supervisor is opt-in.
+            // The framework default is fully populated
+            // (`enabled: false`, db_path=".ralph/supervisor.db",
+            // ...), so without this strip the
+            // `merge_hats_overlay()` `!contains_key` guard
+            // always sees the key as present and silently keeps
+            // the framework default `enabled: false`, blocking
+            // the preset opt-in (e.g. ce-executor-supervisor's
+            // `supervisor.enabled: true`).
+            "supervisor",
         ];
         if let Some(event_loop) = mapping
             .get_mut(&Value::String("event_loop".to_string()))
@@ -297,6 +307,13 @@ event_loop:
             "workflow_contract",
             "ephemeral_isolation",
             "enforce_current_unit",
+            // 2026-07-03-001 plan U1: supervisor opt-in. The
+            // framework default is fully populated
+            // (`enabled: false` + concrete defaults), so the
+            // strip is required for the preset opt-in
+            // (`supervisor.enabled: true`) to survive operator
+            // omission.
+            "supervisor",
         ] {
             let key_value = Value::String(key.to_string());
             assert!(
@@ -336,6 +353,46 @@ event_loop:
              (framework default `true` would block preset opt-in via \
              `contains_key` guard in `merge_hats_overlay`); got {:?}",
             tasks_enabled
+        );
+
+        // 2026-07-03-001 plan U1: the supervisor opt-in must
+        // round-trip through `merge_yaml_values` so a preset
+        // declaring `supervisor.enabled: true` reaches the
+        // dispatcher branch (U12) even when the operator's
+        // ralph.yml omits the `event_loop.supervisor` block.
+        // This pins the end-to-end strip + merge contract.
+        let preset_value: Value = serde_yaml::from_str(
+            r#"
+event_loop:
+  supervisor:
+    enabled: true
+    max_concurrent_workers: 16
+"#,
+        )
+        .expect("preset snippet must parse");
+        let merged = merge_yaml_values(default_value, preset_value)
+            .expect("merge must succeed");
+        let enabled = merged
+            .get("event_loop")
+            .and_then(|v| v.get("supervisor"))
+            .and_then(|v| v.get("enabled"))
+            .and_then(|v| v.as_bool());
+        assert_eq!(
+            enabled,
+            Some(true),
+            "preset supervisor.enabled must survive merge_yaml_values; got {:?}",
+            enabled
+        );
+        let max_workers = merged
+            .get("event_loop")
+            .and_then(|v| v.get("supervisor"))
+            .and_then(|v| v.get("max_concurrent_workers"))
+            .and_then(|v| v.as_u64());
+        assert_eq!(
+            max_workers,
+            Some(16),
+            "preset supervisor.max_concurrent_workers must reach merged value; got {:?}",
+            max_workers
         );
     }
 }

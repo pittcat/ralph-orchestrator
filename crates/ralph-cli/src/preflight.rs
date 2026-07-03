@@ -754,6 +754,18 @@ const PRESET_OPT_IN_WHEN_OPERATOR_OMITS: &[&str] = &[
     // because the merge-hats-overlay strip sees the key as
     // present.
     "max_residuals",
+    // 2026-07-03-001 plan U1: supervisor is opt-in. The
+    // framework default is fully-populated (enabled=false,
+    // db_path=".ralph/supervisor.db", max_concurrent_workers=4,
+    // aggregate_timeout_secs=600), so the
+    // `merge_hats_overlay()` strip in `default_core_value()`
+    // (see `config_resolution.rs`) is required for the preset
+    // opt-in (e.g. ce-executor-supervisor's
+    // `supervisor.enabled: true`) to survive operator-omits;
+    // otherwise the `!contains_key` guard in merge_hats_overlay
+    // always sees the key as present and silently keeps the
+    // framework default `enabled: false`.
+    "supervisor",
 ];
 
 fn hats_disallowed_keys(mapping: &Mapping) -> Vec<String> {
