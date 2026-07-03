@@ -180,6 +180,14 @@ impl SlotResource {
 /// Snapshot of the wave's slot counts at a moment in time. The
 /// coordinator passes this to the U6 phase-decision pure function
 /// alongside the `cancel_requested` and timeout flags.
+///
+/// Counting contract:
+/// - `completed_count` slots reached `Completed`
+/// - `failed_count` slots reached `Failed`
+/// - `in_flight_count` slots are `Dispatched` or `Running`
+/// - `pending_count` slots are `Pending` or `Cancelled`
+/// (cancelled slots never advance on their own)
+/// - `expected_total == completed + failed + in_flight + pending`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaveSnapshot {
     pub wave_id: String,
@@ -188,6 +196,12 @@ pub struct WaveSnapshot {
     pub completed_count: u32,
     pub failed_count: u32,
     pub pending_count: u32,
+    /// 2026-07-03-001 plan U3: slots currently Dispatched or
+    /// Running. Surfaced so the U6 phase pure function can
+    /// distinguish "actively in flight" from "still pending"
+    /// when computing aggregate_timeout.
+    #[serde(default)]
+    pub in_flight_count: u32,
     pub cancel_requested: bool,
     pub merged_to_events: bool,
 }
@@ -313,135 +327,8 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     fn list_worktree_paths(&self, wave_id: &str) -> SupervisorStoreResult<Vec<SlotResource>>;
 }
 
+pub use memory::InMemorySupervisorStore;
+
+mod memory;
 #[cfg(test)]
-mod tests {
-    //! U2 closed-circuit tests: type-level invariants and
-    //! enum-string surface checks. Behavioural tests for the
-    //! in-memory and rusqlite stores live in U3-U5.
-
-    use super::*;
-
-    #[test]
-    fn wave_kind_serializes_to_snake_case_strings() {
-        for (kind, expected) in [
-            (WaveKind::Exec, "\"exec\""),
-            (WaveKind::Fix, "\"fix\""),
-            (WaveKind::Review, "\"review\""),
-        ] {
-            let json = serde_json::to_string(&kind).unwrap();
-            assert_eq!(json, expected, "WaveKind serialization mismatch");
-        }
-    }
-
-    #[test]
-    fn isolation_mode_serializes_to_snake_case_strings() {
-        for (mode, expected) in [
-            (IsolationMode::Worktree, "\"worktree\""),
-            (IsolationMode::SharedReadonly, "\"shared_readonly\""),
-        ] {
-            let json = serde_json::to_string(&mode).unwrap();
-            assert_eq!(json, expected, "IsolationMode serialization mismatch");
-        }
-    }
-
-    #[test]
-    fn wave_phase_serializes_to_snake_case_strings() {
-        for (phase, expected) in [
-            (WavePhase::Dispatch, "\"dispatch\""),
-            (WavePhase::Collect, "\"collect\""),
-            (WavePhase::Integrate, "\"integrate\""),
-            (WavePhase::Done, "\"done\""),
-            (WavePhase::Failed, "\"failed\""),
-        ] {
-            let json = serde_json::to_string(&phase).unwrap();
-            assert_eq!(json, expected, "WavePhase serialization mismatch");
-        }
-    }
-
-    #[test]
-    fn slot_status_serializes_to_snake_case_strings() {
-        for (status, expected) in [
-            (SlotStatus::Pending, "\"pending\""),
-            (SlotStatus::Dispatched, "\"dispatched\""),
-            (SlotStatus::Running, "\"running\""),
-            (SlotStatus::Completed, "\"completed\""),
-            (SlotStatus::Failed, "\"failed\""),
-            (SlotStatus::Cancelled, "\"cancelled\""),
-        ] {
-            let json = serde_json::to_string(&status).unwrap();
-            assert_eq!(json, expected, "SlotStatus serialization mismatch");
-        }
-    }
-
-    #[test]
-    fn display_matches_serde_for_each_enum() {
-        // The runtime diagnostics + log lines + JSON payloads all
-        // assume `Display` and serde agree (e.g. `merged_to_events`
-        // recovery is keyed on the phase string).
-        assert_eq!(WaveKind::Exec.to_string(), "exec");
-        assert_eq!(WaveKind::Fix.to_string(), "fix");
-        assert_eq!(WaveKind::Review.to_string(), "review");
-        assert_eq!(IsolationMode::Worktree.to_string(), "worktree");
-        assert_eq!(IsolationMode::SharedReadonly.to_string(), "shared_readonly");
-        assert_eq!(WavePhase::Dispatch.to_string(), "dispatch");
-        assert_eq!(WavePhase::Collect.to_string(), "collect");
-        assert_eq!(WavePhase::Integrate.to_string(), "integrate");
-        assert_eq!(WavePhase::Done.to_string(), "done");
-        assert_eq!(WavePhase::Failed.to_string(), "failed");
-        assert_eq!(SlotStatus::Pending.to_string(), "pending");
-        assert_eq!(SlotStatus::Dispatched.to_string(), "dispatched");
-        assert_eq!(SlotStatus::Running.to_string(), "running");
-        assert_eq!(SlotStatus::Completed.to_string(), "completed");
-        assert_eq!(SlotStatus::Failed.to_string(), "failed");
-        assert_eq!(SlotStatus::Cancelled.to_string(), "cancelled");
-    }
-
-    #[test]
-    fn slot_resource_distinguishes_worktree_vs_shared_readonly() {
-        let exec_binding = SlotResource {
-            slot_index: 0,
-            worktree_path: Some(".ralph/worktrees/u1".to_string()),
-            branch: Some("ralph/u1".to_string()),
-        };
-        assert!(!exec_binding.is_shared_readonly());
-        let review_binding = SlotResource {
-            slot_index: 0,
-            worktree_path: None,
-            branch: None,
-        };
-        assert!(review_binding.is_shared_readonly());
-    }
-
-    #[test]
-    fn supervisor_store_error_renders_context() {
-        // The runtime + tests consume `Display` for context
-        // messages (`task.resume` payload violation field), so the
-        // error variants must carry the data through Display.
-        let err = SupervisorStoreError::UnknownSlot {
-            wave_id: "w-1".to_string(),
-            slot_index: 2,
-        };
-        let rendered = err.to_string();
-        assert!(
-            rendered.contains("w-1") && rendered.contains("2"),
-            "Display must carry slot context; got {rendered}"
-        );
-    }
-
-    #[test]
-    fn wave_snapshot_round_trips_through_serde() {
-        let snapshot = WaveSnapshot {
-            wave_id: "w-snap".to_string(),
-            phase: WavePhase::Collect,
-            expected_total: 5,
-            completed_count: 2,
-            failed_count: 1,
-            pending_count: 2,
-            cancel_requested: false,
-            merged_to_events: false,
-        };
-        let json = serde_json::to_string(&snapshot).unwrap();
-        let back: WaveSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, snapshot);
-    }
-}
+mod types_tests;
