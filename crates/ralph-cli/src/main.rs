@@ -28,6 +28,7 @@ mod loops;
 mod mcp;
 mod memory;
 mod migrate_state;
+mod hat_command_policy;
 mod operation_guard;
 mod policy_check;
 mod preflight;

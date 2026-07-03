@@ -11,8 +11,8 @@
 //! - `show`: Show a single task by ID
 
 use crate::{
-    display::colors, operation_guard::OperationContext, resolve_path_from_workspace,
-    resolve_workspace_root,
+    display::colors, hat_command_policy::HatCommandPolicy, operation_guard::OperationContext,
+    resolve_path_from_workspace, resolve_workspace_root,
 };
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -296,6 +296,31 @@ fn authorize_lifecycle(
     )
 }
 
+/// Bridge `HatCommandPolicy::PolicyDecision` to the `anyhow::Result`
+/// exit used by the rest of the task CLI.
+///
+/// On `Allow` we proceed silently (human warnings are not yet wired —
+/// the existing `authorize_lifecycle` handles the human cross-loop
+/// warning path). On `Deny` we `bail!` with a stable, machine-grepable
+/// prefix that the agent can match on to recover.
+fn enforce_command_policy(
+    ctx: &OperationContext,
+    config: &ralph_core::config::RalphConfig,
+    verb: &str,
+) -> Result<()> {
+    use crate::hat_command_policy::PolicyDecision;
+    match HatCommandPolicy::check_task(ctx, config, verb) {
+        PolicyDecision::Allow { .. } => Ok(()),
+        PolicyDecision::Deny { reason, hint } => bail!(
+            "hat_command_policy denied '{verb}' for hat '{hat}': [{reason}] {hint}",
+            verb = verb,
+            hat = ctx.current_hat_id.as_deref().unwrap_or("<none>"),
+            reason = reason,
+            hint = hint,
+        ),
+    }
+}
+
 fn add_common_task_fields(
     mut task: Task,
     ctx: &OperationContext,
@@ -462,13 +487,14 @@ fn filter_tasks_for_ready(
 pub fn execute(args: TaskArgs, use_colors: bool) -> Result<()> {
     let root = args.root.clone();
     let coordinator_hats = load_coordinator_hats(root.as_ref());
+    let config = load_config_or_default(root.as_ref());
 
     match args.command {
         TaskCommands::Add(add_args) => {
-            execute_add(add_args, root.as_ref(), &coordinator_hats, use_colors)
+            execute_add(add_args, root.as_ref(), &coordinator_hats, &config, use_colors)
         }
         TaskCommands::Ensure(ensure_args) => {
-            execute_ensure(ensure_args, root.as_ref(), &coordinator_hats, use_colors)
+            execute_ensure(ensure_args, root.as_ref(), &coordinator_hats, &config, use_colors)
         }
         TaskCommands::List(list_args) => execute_list(list_args, root.as_ref(), use_colors),
         TaskCommands::Ready(ready_args) => execute_ready(ready_args, root.as_ref(), use_colors),
@@ -476,7 +502,7 @@ pub fn execute(args: TaskArgs, use_colors: bool) -> Result<()> {
             execute_start(start_args, root.as_ref(), &coordinator_hats, use_colors)
         }
         TaskCommands::Close(close_args) => {
-            execute_close(close_args, root.as_ref(), &coordinator_hats, use_colors)
+            execute_close(close_args, root.as_ref(), &coordinator_hats, &config, use_colors)
         }
         TaskCommands::Fail(fail_args) => {
             execute_fail(fail_args, root.as_ref(), &coordinator_hats, use_colors)
@@ -521,16 +547,42 @@ fn load_coordinator_hats(root: Option<&PathBuf>) -> Vec<String> {
     Vec::new()
 }
 
+/// Loads the full `RalphConfig` from the workspace, falling back to
+/// an empty default when the file is missing or unreadable.
+///
+/// The fallback is intentionally silent because the L2 CLI ACL is
+/// best-effort: a human operator without a `ralph.yml` must not be
+/// locked out of task tooling. The downstream `HatCommandPolicy`
+/// reads the same allowlist (`tasks.coordinator_hats`), so missing
+/// config yields an empty allowlist → fail-closed for agent add/ensure.
+fn load_config_or_default(root: Option<&PathBuf>) -> ralph_core::config::RalphConfig {
+    let workspace = resolve_workspace_root(root);
+    for name in ["ralph.yml", "ralph.yaml"] {
+        let path = workspace.join(name);
+        if !path.exists() {
+            continue;
+        }
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Ok(cfg) = serde_yaml::from_str::<ralph_core::config::RalphConfig>(&raw) {
+                return cfg;
+            }
+        }
+    }
+    serde_yaml::from_str("event_loop:\n  execution_mode: isolated\n").unwrap_or_default()
+}
+
 fn execute_add(
     args: AddArgs,
     root: Option<&PathBuf>,
     coordinator_hats: &[String],
+    config: &ralph_core::config::RalphConfig,
     use_colors: bool,
 ) -> Result<()> {
     let path = get_tasks_path(root);
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
     let ctx = operation_context_for(root);
 
+    enforce_command_policy(&ctx, config, "add")?;
     add_task_with_args(&mut store, &args, &ctx, coordinator_hats, use_colors)?;
     Ok(())
 }
@@ -585,10 +637,14 @@ fn execute_ensure(
     args: EnsureArgs,
     root: Option<&PathBuf>,
     coordinator_hats: &[String],
+    config: &ralph_core::config::RalphConfig,
     use_colors: bool,
 ) -> Result<()> {
     let path = get_tasks_path(root);
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
+    let ctx = operation_context_for(root);
+    enforce_command_policy(&ctx, config, "ensure")?;
+
     // R4 (2026-06-14-003 plan): opt into the single-U contract.
     // Two signals are accepted (env var takes precedence; the
     // marker file is the safe fallback for `ralph run` because the
@@ -610,7 +666,6 @@ fn execute_ensure(
             store.set_enforce_current_unit(true);
         }
     }
-    let ctx = operation_context_for(root);
 
     ensure_task_with_args(&mut store, &args, &ctx, coordinator_hats, use_colors)?;
     Ok(())
@@ -987,11 +1042,18 @@ fn execute_close(
     args: CloseArgs,
     root: Option<&PathBuf>,
     coordinator_hats: &[String],
+    config: &ralph_core::config::RalphConfig,
     use_colors: bool,
 ) -> Result<()> {
     let path = get_tasks_path(root);
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
     let ctx = operation_context_for(root);
+    // U3 close-time role gate (mirrors add/ensure). close itself
+    // is not in `COORDINATOR_ONLY` so the gate is permissive —
+    // `authorize_lifecycle` below still enforces ownership. The
+    // call here keeps the entry-point message shape uniform with
+    // add/ensure for future policy tightening.
+    enforce_command_policy(&ctx, config, "close")?;
     close_task_with_context(&mut store, &args.id, &ctx, coordinator_hats, use_colors)
 }
 
@@ -1617,6 +1679,91 @@ mod tests {
         let err = start_task_with_context(&mut store, &owned_id, &ctx, &[], false)
             .expect_err("cross-hat start should fail");
         assert!(err.to_string().contains("reviewer"));
+    }
+
+    // ---- U3 wiring tests: enforce_command_policy bridge ----
+
+    fn isolated_config_with_coordinator() -> ralph_core::config::RalphConfig {
+        let yaml = r#"
+event_loop:
+  execution_mode: isolated
+tasks:
+  enabled: true
+  coordinator_hats:
+    - coordinator
+hats:
+  coordinator:
+    name: "Coordinator"
+    publishes: ["work.ready"]
+  worker:
+    name: "Worker"
+    publishes: ["work.done"]
+"#;
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn enforce_command_policy_allows_coordinator_add() {
+        let cfg = isolated_config_with_coordinator();
+        let ctx = ctx_for(Path::new("/tmp"), Some("loop-a"), Some("coordinator"));
+        assert!(enforce_command_policy(&ctx, &cfg, "add").is_ok());
+    }
+
+    #[test]
+    fn enforce_command_policy_denies_worker_add_with_hint() {
+        let cfg = isolated_config_with_coordinator();
+        let ctx = ctx_for(Path::new("/tmp"), Some("loop-a"), Some("worker"));
+        let err = enforce_command_policy(&ctx, &cfg, "add")
+            .expect_err("worker must be denied at add entry");
+        let msg = err.to_string();
+        assert!(msg.contains("hat_command_policy denied 'add'"));
+        assert!(msg.contains("worker"));
+        assert!(msg.contains("non_coordinator_owner"));
+    }
+
+    #[test]
+    fn enforce_command_policy_denies_worker_ensure_with_hint() {
+        let cfg = isolated_config_with_coordinator();
+        let ctx = ctx_for(Path::new("/tmp"), Some("loop-a"), Some("worker"));
+        let err = enforce_command_policy(&ctx, &cfg, "ensure")
+            .expect_err("worker must be denied at ensure entry");
+        assert!(err.to_string().contains("non_coordinator_owner"));
+    }
+
+    #[test]
+    fn enforce_command_policy_allows_worker_close() {
+        let cfg = isolated_config_with_coordinator();
+        let ctx = ctx_for(Path::new("/tmp"), Some("loop-a"), Some("worker"));
+        assert!(
+            enforce_command_policy(&ctx, &cfg, "close").is_ok(),
+            "close passes the role gate; ownership is enforced by authorize_lifecycle"
+        );
+    }
+
+    #[test]
+    fn enforce_command_policy_human_cli_unaffected() {
+        let cfg = isolated_config_with_coordinator();
+        let ctx = ctx_for(Path::new("/tmp"), None, None);
+        assert!(enforce_command_policy(&ctx, &cfg, "add").is_ok());
+        assert!(enforce_command_policy(&ctx, &cfg, "ensure").is_ok());
+    }
+
+    #[test]
+    fn enforce_command_policy_empty_coordinator_hats_fails_closed_for_agent() {
+        let yaml = r#"
+event_loop:
+  execution_mode: isolated
+tasks:
+  enabled: true
+  coordinator_hats: []
+"#;
+        let cfg: ralph_core::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let ctx = ctx_for(Path::new("/tmp"), Some("loop-a"), Some("coordinator"));
+        let err = enforce_command_policy(&ctx, &cfg, "add")
+            .expect_err("empty coordinator_hats must fail closed for agents");
+        let msg = err.to_string();
+        assert!(msg.contains("non_coordinator_owner"));
+        assert!(msg.contains("tasks.coordinator_hats is empty"));
     }
 
     #[test]
