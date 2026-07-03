@@ -16,14 +16,17 @@
 //! - forwarding recovery (`recover_active_waves_at_startup`) at
 //!   loop startup so U11's idempotency guarantee holds
 //!
-//! The bridge is trait-abstracted (`SupervisorBridge`) so
-//! existing wave tests can substitute a mock without spinning
-//! real workers. The CLI's loop_runner constructs the
-//! production bridge via `SupervisorBridge::open` after the
-//! config check.
+//! 2026-07-03-001 supervisor real-wiring: the trait + supporting
+//! types (`SupervisorBridge`, `SlotBinding`, `BridgeError`,
+//! `BridgeDispatchOutcome`, `is_supervisor_path_enabled`) were
+//! sunk down to `ralph_core::supervisor::bridge` so the BDD
+//! scenarios in `ralph-core` can construct a real bridge
+//! without depending on `ralph-cli`. This file now re-exports
+//! those sunk types and keeps only the production
+//! (`CoordinatorSupervisorBridge`) and CLI-test mock
+//! (`MockSupervisorBridge`) implementations.
 
-use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use ralph_core::supervisor::PhaseInputs;
@@ -31,76 +34,15 @@ use ralph_core::supervisor::{
     CoordinatorAction, InMemorySupervisorStore, SupervisorCoordinator, SupervisorStore, WaveKind,
     WaveSnapshot,
 };
-
-/// Outcome of dispatching a single slot through the bridge.
-/// The runtime logs the action and forwards it to the
-/// `ralph diagnose` aggregator.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BridgeDispatchOutcome {
-    /// Bridge accepted the slot and either returned a binding
-    /// (worker is going to spawn on the worktree) or none
-    /// (review shared_readonly → no env, no worker spawn).
-    BoundOrShared,
-    /// Bridge recorded the binding but the slot is already
-    /// in a non-dispatchable state (failed, cancelled, etc.).
-    /// The runtime surfaces it as a `task.resume`.
-    NotDispatchable(String),
-    /// Bridge opened the store and reports it is fully wired.
-    Started,
-}
-
-/// Trait surface so U8-coordinator callers can substitute a
-/// mock for tests (and so the
-/// `loop_runner::tests::wave_supervisor::` family can mock the
-/// supervisor without bringing up git).
-pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
-    /// Run one tick of the supervisor fan-in for `wave_id`.
-    /// Returns the coordinator action so tests can assert
-    /// the bridge called through to U8.
-    fn tick(
-        &self,
-        wave_id: &str,
-        inputs: PhaseInputs,
-    ) -> Result<CoordinatorAction, BridgeError>;
-
-    /// Open a slot dispatch decision: returns the binding (or
-    /// `None` for `SharedReadonly`) so the dispatcher knows
-    /// whether to spawn a real worker process. The trait
-    /// shapes the slot-bound side of the contract; U12's
-    /// production bridge delegates to U10's helper.
-    fn bind_slot(
-        &self,
-        kind: WaveKind,
-        wave_id: &str,
-        slot_index: u32,
-    ) -> Result<Option<SlotBinding>, BridgeError>;
-
-    /// Snapshot helper for tests and the `ralph diagnose`
-    /// surface.
-    fn recover(&self) -> Result<Vec<WaveSnapshot>, BridgeError>;
-}
-
-/// Lightweight binding bundle for the dispatcher hot path —
-/// the trait does NOT hand back a full `SlotResource` so
-/// the worker process can construct one from the
-/// `DispatchOutcome` events that arrive back through JSONL.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlotBinding {
-    pub slot_index: u32,
-    pub env: HashMap<String, String>,
-    pub worktree_path: Option<PathBuf>,
-}
-
-/// Bridge-side errors (mirrors `SupervisorStoreError`).
-#[derive(Debug, thiserror::Error)]
-pub enum BridgeError {
-    #[error("supervisor store error: {0}")]
-    Store(String),
-    #[error("dispatch not allowed: {0}")]
-    NotDispatchable(String),
-    #[error("supervisor bridge is not wired (supervisor.enabled: false)")]
-    Disabled,
-}
+// 2026-07-03-001 supervisor real-wiring: re-export the sunk
+// types so existing `crate::loop_runner::wave::*` imports keep
+// working. The types live in `ralph_core::supervisor::bridge`
+// but the module itself is private — we import from the
+// `ralph_core::supervisor` re-export surface.
+pub use ralph_core::supervisor::{
+    BridgeDispatchOutcome, BridgeError, SlotBinding, SupervisorBridge,
+    is_supervisor_path_enabled,
+};
 
 /// Production bridge: holds an `Arc<dyn SupervisorStore>` +
 /// `SupervisorCoordinator`. Construction is gated behind the
@@ -178,6 +120,43 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         self.store
             .recover_active_waves()
             .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn register_wave_if_absent(
+        &self,
+        kind: WaveKind,
+        wave_id: &str,
+        expected_total: u32,
+    ) -> Result<String, BridgeError> {
+        use ralph_core::supervisor::SupervisorStoreError;
+        match self.store.register_wave(wave_id, kind, expected_total) {
+            Ok(id) => Ok(id),
+            Err(SupervisorStoreError::DuplicateKey(_)) => Ok(wave_id.to_string()),
+            Err(err) => Err(BridgeError::Store(err.to_string())),
+        }
+    }
+
+    fn record_slot_result(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        content_hash: &str,
+        event_count: usize,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .record_slot_result(wave_id, slot_index, content_hash, event_count)?;
+        Ok(())
+    }
+
+    fn record_slot_failure(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        reason: &str,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .record_slot_failure(wave_id, slot_index, reason)?;
+        Ok(())
     }
 }
 
@@ -260,14 +239,34 @@ impl SupervisorBridge for MockSupervisorBridge {
     fn recover(&self) -> Result<Vec<WaveSnapshot>, BridgeError> {
         Ok(Vec::new())
     }
-}
 
-/// Decide whether a `loop_runner` instance should activate the
-/// supervisor bridge. Mirrors `enabled === true && execution_mode === isolated`
-/// without coupling to `RalphConfig` (the caller's job to
-/// pass the relevant config slice).
-pub fn is_supervisor_path_enabled(enabled: bool, execution_mode_isolated: bool) -> bool {
-    enabled && execution_mode_isolated
+    fn register_wave_if_absent(
+        &self,
+        _kind: WaveKind,
+        wave_id: &str,
+        _expected_total: u32,
+    ) -> Result<String, BridgeError> {
+        Ok(wave_id.to_string())
+    }
+
+    fn record_slot_result(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+        _content_hash: &str,
+        _event_count: usize,
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
+    fn record_slot_failure(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+        _reason: &str,
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -408,12 +407,12 @@ mod tests {
 
     #[test]
     fn slot_binding_shape_is_transparent() {
-        let mut env = HashMap::new();
+        let mut env = std::collections::HashMap::new();
         env.insert("X".to_string(), "Y".to_string());
         let binding = SlotBinding {
             slot_index: 3,
             env,
-            worktree_path: Some(PathBuf::from("/tmp/w")),
+            worktree_path: Some(std::path::PathBuf::from("/tmp/w")),
         };
         assert_eq!(binding.slot_index, 3);
         assert_eq!(binding.env.get("X").map(String::as_str), Some("Y"));

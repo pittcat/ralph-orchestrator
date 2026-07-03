@@ -568,6 +568,84 @@ pub async fn run_loop_impl(
     result
 }
 
+/// 2026-07-03-001 supervisor real-wiring: build the production
+/// `CoordinatorSupervisorBridge` from `SupervisorConfig`.
+///
+/// Resolves `db_path` relative to the loop workspace when it is
+/// not absolute (the plan says "Relative paths resolve against
+/// `<workspace>/.ralph/`"). When the `supervisor-db` cargo feature
+/// is off, the bridge falls back to the in-memory store so
+/// dry-runs in dev builds still exercise the coordinator path
+/// without a SQLite dependency.
+///
+/// Errors surface as `anyhow` so the caller can fail-closed
+/// (R-C4) without leaking `SupervisorStoreError` across module
+/// boundaries.
+pub(crate) fn build_supervisor_bridge(
+    cfg: &ralph_core::config::SupervisorConfig,
+    ctx: &ralph_core::LoopContext,
+) -> std::result::Result<
+    crate::loop_runner::wave::CoordinatorSupervisorBridge,
+    anyhow::Error,
+> {
+    use crate::loop_runner::wave::CoordinatorSupervisorBridge;
+
+    // Resolve db_path: absolute paths honoured as-is; relative
+    // paths resolve against `<workspace>/.ralph/` so a preset
+    // that ships `db_path: "supervisor.db"` lands at
+    // `<workspace>/.ralph/supervisor.db` (the same convention
+    // the rest of the runtime uses for `.ralph/` artifacts).
+    let db_path = std::path::Path::new(&cfg.db_path);
+    let resolved_db_path: std::path::PathBuf = if db_path.is_absolute() {
+        db_path.to_path_buf()
+    } else {
+        ctx.ralph_dir().join(db_path)
+    };
+
+    // Ensure the parent directory exists so `RusqliteSupervisorStore::open`
+    // does not fail on a fresh workspace where `.ralph/` has not been
+    // materialised yet (R-C4 fail-closed would otherwise abort the
+    // loop on a first-run preset).
+    if let Some(parent) = resolved_db_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    #[cfg(feature = "supervisor-db")]
+    {
+        // The cargo feature is on: open a real SQLite store backed
+        // by `rusqlite`. `RusqliteSupervisorStore::open` runs
+        // migrations (U5) so the returned store is ready for
+        // `register_wave` / `tick` calls.
+        let store = ralph_core::supervisor::RusqliteSupervisorStore::open(&resolved_db_path)
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "failed to open supervisor db at {}: {err}",
+                    resolved_db_path.display()
+                )
+            })?;
+        let store: std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore> =
+            std::sync::Arc::new(store);
+        Ok(CoordinatorSupervisorBridge::from_store(store))
+    }
+
+    #[cfg(not(feature = "supervisor-db"))]
+    {
+        // Feature off: fall back to the in-memory store. The
+        // coordinator path still runs end-to-end, but wave state
+        // does not survive a process restart. Acceptable for
+        // dry-runs and the BDD scenarios that do not enable the
+        // cargo feature.
+        warn!(
+            db_path = %resolved_db_path.display(),
+            "supervisor-db cargo feature is off; falling back to in-memory store \
+             (wave state will not persist across restarts)"
+        );
+        let store: std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore> =
+            std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        Ok(CoordinatorSupervisorBridge::from_store(store))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_loop_impl_inner(
     mut config: RalphConfig,
@@ -1083,6 +1161,78 @@ async fn run_loop_impl_inner(
             .map(|w| w.stop_on_exit)
             .unwrap_or(false)
     };
+
+    // ── 2026-07-03-001 supervisor real-wiring: construct the ──────────
+    // bridge when `event_loop.supervisor.enabled: true` AND the
+    // preset is `execution_mode: isolated`. The bridge owns the
+    // `RusqliteSupervisorStore` (when `supervisor-db` feature is
+    // on) and the `SupervisorCoordinator`. When the feature is off
+    // or the gate is closed, `supervisor_bridge` stays `None` and
+    // the dispatcher takes the legacy `WaveTracker` path (R3 /
+    // KTD-7). Recovery runs unconditionally when the bridge is
+    // present so in-flight waves from a prior crash are reconciled
+    // (U11 R-C3) before the loop accepts new events.
+    let supervisor_cfg = &config.event_loop.supervisor;
+    let supervisor_path_enabled = is_supervisor_path_enabled(
+        supervisor_cfg.enabled,
+        matches!(
+            config.event_loop.execution_mode,
+            ralph_core::config::HatExecutionMode::Isolated
+        ),
+    );
+    let supervisor_bridge: Option<Arc<dyn ralph_core::supervisor::SupervisorBridge>> =
+        if supervisor_path_enabled {
+            match build_supervisor_bridge(supervisor_cfg, &ctx) {
+                Ok(concrete) => {
+                    // U11: reconcile in-flight waves before the loop
+                    // accepts new events. We clone the store out of
+                    // the concrete bridge *before* erasing it into a
+                    // trait object because `SupervisorBridge` itself
+                    // does not expose `store()`. Failures here are
+                    // logged but non-fatal — a corrupted store
+                    // surfaces on the next `tick` and the dispatcher
+                    // falls back to the legacy path (KTD-7 R3).
+                    let store = concrete.store();
+                    if let Err(err) = ralph_core::supervisor::recover_active_waves_at_startup(
+                        store,
+                        supervisor_cfg.aggregate_timeout_secs,
+                    ) {
+                        warn!(
+                            error = %err,
+                            "supervisor recover_active_waves_at_startup failed; \
+                             recovery will be retried on next tick"
+                        );
+                    }
+                    info!(
+                        db_path = %supervisor_cfg.db_path,
+                        max_concurrent_workers = supervisor_cfg.max_concurrent_workers,
+                        aggregate_timeout_secs = supervisor_cfg.aggregate_timeout_secs,
+                        "supervisor bridge wired (execution_mode=isolated, supervisor.enabled=true)"
+                    );
+                    let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+                        Arc::new(concrete);
+                    Some(bridge)
+                }
+                Err(err) => {
+                    // R-C4 fail-closed: a supervisor-enabled preset
+                    // that cannot open its store MUST NOT silently
+                    // fall back to the legacy path — that would
+                    // hide operator misconfiguration and lose wave
+                    // state across restarts. Surface the error and
+                    // abort the loop.
+                    error!(
+                        db_path = %supervisor_cfg.db_path,
+                        error = %err,
+                        "supervisor store open failed (R-C4 fail-closed); aborting loop"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "supervisor store open failed (R-C4 fail-closed): {err}"
+                    ));
+                }
+            }
+        } else {
+            None
+        };
 
     // Initialize event logger for history/observability (uses context for path resolution).
     // This writes to the history file, NOT the trusted events file consumed by EventReader.
@@ -4085,6 +4235,12 @@ async fn run_loop_impl_inner(
                     // `event_policy.schemas` even when the parent
                     // process env does not carry RALPH_HATS_SOURCE.
                     hats_source_label.as_deref(),
+                    // 2026-07-03-001 supervisor real-wiring: pass
+                    // the loop-wide bridge through so the dispatcher
+                    // takes the supervisor path when `enabled &&
+                    // isolated`. `None` keeps the legacy
+                    // `WaveTracker` shape (R3 / KTD-7).
+                    supervisor_bridge.as_ref(),
                 )
                 .await;
                 Some(outcome)

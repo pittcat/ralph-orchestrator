@@ -36,6 +36,7 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use crate::supervisor::phase::{evaluate_phase, FailedReason, PhaseDecision, PhaseInputs};
 use crate::supervisor::{
     SupervisorStore, SupervisorStoreResult, WavePhase, WaveSnapshot,
 };
@@ -90,22 +91,39 @@ pub fn recover_active_waves_at_startup(
             continue;
         }
         // 2026-07-03-001 plan U6 / F-006 / R-C3: per-wave
-        // timeout. Compute `elapsed = now - started_at`;
-        // if elapsed > aggregate_timeout_secs AND the wave
-        // is still in-flight, transition phase=Failed via
-        // `set_wave_phase` (the store does not own the
-        // phase verdict; recovery applies the verdict the
-        // coordinator would have applied on the next
-        // tick). Record the wave_id in `report.timed_out`
-        // so `ralph diagnose` and the U11 BDD scenario can
-        // assert the mutation.
+        // timeout. Compute `elapsed = now - started_at` and
+        // delegate to the U6 pure function `evaluate_phase`.
+        // Recovery only enforces the `Timeout` verdict — the
+        // other Failed reasons (`Cancelled` /
+        // `RequiredSlotFailure`) are the coordinator's job
+        // (it owns phase writes via `fail_wave`). Keeping
+        // phase-write authority in one place prevents
+        // recovery and the coordinator from racing on the
+        // same snapshot.
         let elapsed_secs = now
             .duration_since(snapshot.started_at)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        if elapsed_secs > aggregate_timeout_secs {
-            store.set_wave_phase(&snapshot.wave_id, WavePhase::Failed)?;
-            report.timed_out.push(snapshot.wave_id.clone());
+        let inputs = PhaseInputs {
+            aggregate_timeout_secs,
+            elapsed_secs,
+            cancel_requested: snapshot.cancel_requested,
+        };
+        match evaluate_phase(&snapshot, &inputs) {
+            PhaseDecision::Failed {
+                reason: FailedReason::Timeout,
+                ..
+            } => {
+                store.set_wave_phase(&snapshot.wave_id, WavePhase::Failed)?;
+                report.timed_out.push(snapshot.wave_id.clone());
+            }
+            // Cancelled / RequiredSlotFailure / ExpectedTotalZero:
+            // leave the phase alone — the coordinator's next
+            // `tick` will call `fail_wave` and write the phase
+            // itself. Recovery only short-circuits the Timeout
+            // branch because a timed-out wave may never tick
+            // again (no slots left to record).
+            _ => {}
         }
     }
     Ok(report)

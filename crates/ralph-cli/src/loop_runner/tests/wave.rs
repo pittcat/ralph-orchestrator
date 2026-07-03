@@ -2596,6 +2596,7 @@ async fn test_run_wave_worker_acp_timeout_with_partial_events_keeps_events_visib
         tx,
         None,
         None,
+        None,
     )
     .await;
 
@@ -2619,6 +2620,7 @@ async fn test_run_wave_worker_acp_timeout_with_partial_events_keeps_events_visib
         expected_source_hat: None,
         assigned_dimensions: std::collections::HashMap::new(),
         dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: Vec::new(),
     };
 
     merge_wave_results_to_events_file(
@@ -2752,6 +2754,7 @@ async fn test_run_wave_worker_pty_surfaces_spawn_failure() {
         tx,
         None,
         None,
+        None,
     )
     .await;
 
@@ -2787,6 +2790,7 @@ fn test_merge_wave_results_to_events_file_synthesizes_failure_events() {
         expected_source_hat: None,
         assigned_dimensions: std::collections::HashMap::new(),
         dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: Vec::new(),
     };
 
     merge_wave_results_to_events_file(

@@ -123,6 +123,11 @@ pub(crate) struct WorkerRequest {
     /// any emitted `review.dimension.done` with a mismatched
     /// dimension (R4).
     assigned_dimension: Option<String>,
+    /// 2026-07-03-001 supervisor real-wiring: per-worker cwd
+    /// sourced from `SlotBinding.worktree_path`. `None` keeps the
+    /// legacy `std::env::current_dir()` behaviour (the non-supervisor
+    /// dispatcher path always sets `None` here).
+    cwd: Option<PathBuf>,
 }
 
 /// Dispatcher-internal seam that abstracts "run one wave worker".
@@ -163,6 +168,11 @@ impl WaveWorkerExecutor for ProductionExecutor {
                 request.progress_tx,
                 request.worker_rpc_tx.take(),
                 request.worker_tui_state.take(),
+                // 2026-07-03-001 supervisor real-wiring: forward
+                // the per-worker cwd (from `SlotBinding.worktree_path`)
+                // to the spawned worker process. `None` keeps the
+                // legacy `std::env::current_dir()` behaviour.
+                request.cwd.as_deref(),
             )
             .await
         })
@@ -286,6 +296,12 @@ pub async fn handle_wave_events(
     // wave worker so its in-process `ralph emit` / `ralph wave emit`
     // inherits the loop's `event_policy.schemas` via `RALPH_HATS_SOURCE`.
     hats_source_label: Option<&str>,
+    // 2026-07-03-001 supervisor real-wiring: when `Some`, the
+    // dispatcher takes the supervisor path (`register_wave_if_absent`
+    // → `bind_slot` per slot → `dispatch_wave_inner` with per-worker
+    // cwd → `run_supervisor_fan_in`). When `None`, the legacy
+    // `WaveTracker` path runs unchanged (R3 / KTD-7).
+    supervisor_bridge: Option<&Arc<dyn ralph_core::supervisor::SupervisorBridge>>,
 ) -> HandleWaveOutcome {
     let max_wave_total = event_loop.config().event_loop.max_wave_total;
     // U4-C3: accumulator for the per-wave outcomes. Set to true
@@ -434,6 +450,10 @@ pub async fn handle_wave_events(
             // each wave worker's `ralph emit` / `ralph wave emit`
             // inherits the loop's `event_policy.schemas`.
             out.hats_source_label.as_deref(),
+            // 2026-07-03-001 supervisor real-wiring: forward the
+            // optional supervisor bridge so the dispatcher can take
+            // the per-slot worktree path when `supervisor.enabled: true`.
+            supervisor_bridge,
         )
         .await;
 
@@ -820,6 +840,10 @@ pub async fn execute_wave(
         // Legacy wrapper has no runner-supplied hat-source label;
         // the dispatcher falls back to the parent process env var.
         None,
+        // 2026-07-03-001 supervisor real-wiring: legacy wrapper
+        // has no supervisor bridge; the dispatcher takes the
+        // `WaveTracker` path.
+        None,
     )
     .await;
 
@@ -876,8 +900,34 @@ pub async fn execute_wave_structured(
     // the parent process env var — this preserves the legacy wrapper
     // path for callers that have not yet threaded the label.
     hats_source_label: Option<&str>,
+    // 2026-07-03-001 supervisor real-wiring: when `Some`, the
+    // dispatcher delegates to `execute_wave_via_supervisor`
+    // (per-slot worktree + `register_wave_if_absent` + `bind_slot`).
+    // When `None`, the legacy `WaveTracker` path runs unchanged.
+    supervisor_bridge: Option<&Arc<dyn ralph_core::supervisor::SupervisorBridge>>,
 ) -> WaveDispatchOutcome {
     use ralph_core::{WaveTracker, WaveWorkerContext, build_wave_worker_prompt};
+
+    // 2026-07-03-001 supervisor real-wiring: take the supervisor
+    // branch when a bridge is supplied. The legacy path below
+    // stays unchanged (R3 / KTD-7 — `supervisor.enabled: false`
+    // keeps the `WaveTracker` shape).
+    if let Some(bridge) = supervisor_bridge {
+        return execute_wave_via_supervisor(
+            wave,
+            global_backend,
+            main_events_file,
+            show_progress,
+            use_colors,
+            rpc_event_tx,
+            tui_state,
+            loop_id,
+            limits,
+            hats_source_label,
+            bridge,
+        )
+        .await;
+    }
 
     let concurrency = wave.hat_config.concurrency as usize;
     let wave_timeout = Duration::from_secs(wave.per_worker_timeout_secs());
@@ -1028,6 +1078,11 @@ pub async fn execute_wave_structured(
             worker_rpc_tx,
             worker_tui_state,
             assigned_dimension,
+            // 2026-07-03-001 supervisor real-wiring: legacy path
+            // has no per-worker worktree; `None` keeps the
+            // `std::env::current_dir()` behaviour. The supervisor
+            // path overrides this via `execute_wave_via_supervisor`.
+            cwd: None,
         });
     }
 
@@ -1074,6 +1129,464 @@ pub async fn execute_wave_structured(
         },
     )
     .await
+}
+
+/// 2026-07-03-001 supervisor real-wiring: dispatch a wave
+/// through the supervisor path. This mirrors
+/// `execute_wave_structured`'s worker-build loop but:
+/// 1. calls `bridge.register_wave_if_absent` once per wave
+/// 2. calls `bridge.bind_slot` per slot to obtain the
+///    `SlotBinding { env, worktree_path }`
+/// 3. merges `binding.env` into `worker_backend.env_vars`
+///    (overwriting same-name keys)
+/// 4. sets `WorkerRequest.cwd = binding.worktree_path`
+/// 5. uses an empty `WaveTracker::new()` (spawn mechanism is
+///    fully reused via `dispatch_wave_inner`; the supervisor
+///    path does not consume the tracker's count)
+///
+/// The fan-in (`run_supervisor_fan_in`) is invoked by
+/// `handle_wave_events` AFTER this function returns, so this
+/// function only owns spawn + collect.
+async fn execute_wave_via_supervisor(
+    wave: &ralph_core::DetectedWave,
+    global_backend: &CliBackend,
+    main_events_file: &Path,
+    show_progress: bool,
+    use_colors: bool,
+    rpc_event_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
+    tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
+    loop_id: &str,
+    limits: WaveDispatchLimits,
+    hats_source_label: Option<&str>,
+    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+) -> WaveDispatchOutcome {
+    use ralph_core::{WaveTracker, WaveWorkerContext, build_wave_worker_prompt};
+    use ralph_core::supervisor::{WaveKind, SupervisorBridge as _};
+
+    let concurrency = wave.hat_config.concurrency as usize;
+    let wave_timeout = Duration::from_secs(wave.per_worker_timeout_secs());
+    let aggregate_timeout =
+        if wave.has_explicit_aggregate_timeout() || wave.consumer_aggregate_timeout.is_some() {
+            Duration::from_secs(wave.aggregate_timeout_secs())
+        } else {
+            aggregate_timeout_for(wave_timeout, wave.events.len(), concurrency)
+        };
+
+    // 2026-07-03-001 supervisor real-wiring: infer the wave
+    // kind from the first event's topic. `review.wave.*` →
+    // Review, `fix.*` → Fix, everything else → Exec (the
+    // default for `exec.unit.ready` / `exec.wave.ready`).
+    let trigger_topic = wave.events.first().map(|e| e.topic.as_str()).unwrap_or("");
+    let wave_kind = if trigger_topic.starts_with("review.wave.") {
+        WaveKind::Review
+    } else if trigger_topic.starts_with("fix.") {
+        WaveKind::Fix
+    } else {
+        WaveKind::Exec
+    };
+
+    // Idempotently register the wave in the supervisor store.
+    // The store allocates its own `w-{seq}` id; we keep using
+    // the dispatcher's wave_id for logs but use the store id
+    // for subsequent `bind_slot` / `record_slot_result` / `tick`
+    // calls so the coordinator reads the same row.
+    let store_wave_id = match bridge.register_wave_if_absent(
+        wave_kind,
+        &wave.wave_id,
+        wave.total,
+    ) {
+        Ok(id) => id,
+        Err(err) => {
+            warn!(
+                wave_id = %wave.wave_id,
+                error = %err,
+                "supervisor register_wave_if_absent failed; falling back to legacy dispatch"
+            );
+            // Defensive: fall back to the legacy path. The
+            // supervisor store is the source of truth, but a
+            // transient error should not lose the wave.
+            //
+            // Boxed to break the async recursion cycle
+            // (`execute_wave_structured` → here → itself); see
+            // rustc E0733.
+            return Box::pin(execute_wave_structured(
+                wave,
+                global_backend,
+                main_events_file,
+                show_progress,
+                use_colors,
+                rpc_event_tx,
+                tui_state,
+                loop_id,
+                limits,
+                hats_source_label,
+                None,
+            ))
+            .await;
+        }
+    };
+
+    // Supervisor path uses an empty tracker; the spawn mechanism
+    // (permit queue, JoinSet, deadline checks) is fully reused
+    // via `dispatch_wave_inner`. The tracker's count is not
+    // consumed because fan-in is driven by `bridge.tick`, not by
+    // `take_wave_results`.
+    let mut tracker = WaveTracker::new();
+    tracker.register_wave_with_source(
+        wave.wave_id.clone(),
+        wave.total,
+        Some(wave.target_hat.clone()),
+    );
+
+    let wave_dir = main_events_file
+        .parent()
+        .unwrap_or(Path::new(".ralph"))
+        .to_path_buf();
+    let payload_previews: Vec<String> = wave
+        .events
+        .iter()
+        .map(|e| e.payload.as_deref().unwrap_or("").replace('\n', " "))
+        .collect();
+
+    let mut worker_requests: Vec<WorkerRequest> = Vec::with_capacity(wave.events.len());
+    let mut assigned_dimensions: std::collections::HashMap<u32, String> =
+        std::collections::HashMap::new();
+
+    for (index, event) in wave.events.iter().enumerate() {
+        let wave_id = wave.wave_id.clone();
+        let index_u32 = index as u32;
+        let hat_config = wave.hat_config.clone();
+        let assigned_dimension = parse_assigned_dimension(event.payload.as_deref());
+
+        let worker_events_file = wave_dir.join(format!("wave-{}-{}.jsonl", wave_id, index_u32));
+        let ctx = WaveWorkerContext {
+            wave_id: wave_id.clone(),
+            wave_index: index_u32,
+            wave_total: wave.total,
+            result_topics: hat_config.publishes.clone(),
+            assigned_dimension: assigned_dimension.clone(),
+        };
+        let prompt = build_wave_worker_prompt(&hat_config, event, &ctx);
+
+        let mut worker_backend = if let Some(ref hat_backend) = hat_config.backend {
+            CliBackend::from_hat_backend(hat_backend).unwrap_or_else(|_| global_backend.clone())
+        } else {
+            global_backend.clone()
+        };
+
+        worker_backend.env_vars.extend([
+            ("RALPH_WAVE_WORKER".into(), "1".into()),
+            ("RALPH_WAVE_ID".into(), wave_id.clone()),
+            ("RALPH_WAVE_INDEX".into(), index_u32.to_string()),
+            (
+                "RALPH_EVENTS_FILE".into(),
+                worker_events_file.display().to_string(),
+            ),
+        ]);
+
+        if let Some(ref dim) = assigned_dimension {
+            worker_backend
+                .env_vars
+                .push(("RALPH_WAVE_DIMENSION".into(), dim.clone()));
+        }
+
+        inject_hat_execution_env(
+            &mut worker_backend,
+            wave.target_hat.as_str(),
+            loop_id,
+            &worker_events_file,
+            None,
+            hats_source_label,
+        );
+
+        if let Some(ref args) = hat_config.backend_args {
+            worker_backend.args.extend(args.iter().cloned());
+        }
+
+        // 2026-07-03-001 supervisor real-wiring: per-slot
+        // binding. The bridge returns a `SlotBinding` with env
+        // vars (RALPH_WAVE_WORKTREE_PATH etc.) and an optional
+        // `worktree_path` that becomes the worker's cwd.
+        // `None` for SharedReadonly (review) slots.
+        let binding = match bridge.bind_slot(wave_kind, &store_wave_id, index_u32) {
+            Ok(opt) => opt,
+            Err(err) => {
+                warn!(
+                    wave_id = %wave.wave_id,
+                    slot_index = index_u32,
+                    error = %err,
+                    "supervisor bind_slot failed; slot will dispatch without binding"
+                );
+                None
+            }
+        };
+
+        let slot_cwd = binding.as_ref().and_then(|b| b.worktree_path.clone());
+        if let Some(ref b) = binding {
+            // Merge binding env (overwriting same-name keys).
+            // `extend` on `Vec<(K, V)>` does not deduplicate, so
+            // we drain-rebuild to keep the last-write-wins
+            // semantics the plan calls for.
+            let binding_env: std::collections::HashMap<String, String> =
+                b.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            worker_backend.env_vars.retain(|(k, _)| !binding_env.contains_key(k));
+            worker_backend
+                .env_vars
+                .extend(b.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+
+        let (progress_tx, _) = tokio::sync::mpsc::unbounded_channel::<(u32, bool, Duration)>();
+        let worker_rpc_tx = rpc_event_tx.clone();
+        let worker_tui_state = tui_state.clone();
+
+        if let Some(dim) = assigned_dimension.as_ref() {
+            assigned_dimensions.insert(index_u32, dim.clone());
+        }
+
+        worker_requests.push(WorkerRequest {
+            index: index_u32,
+            backend: worker_backend,
+            prompt,
+            worker_events_path: worker_events_file,
+            worker_timeout: wave_timeout,
+            progress_tx,
+            worker_rpc_tx,
+            worker_tui_state,
+            assigned_dimension,
+            cwd: slot_cwd,
+        });
+    }
+
+    let executor: Arc<ProductionExecutor> = Arc::new(ProductionExecutor);
+
+    dispatch_wave_inner(
+        tracker,
+        worker_requests,
+        DispatchContext::build(
+            wave,
+            wave_timeout,
+            aggregate_timeout,
+            payload_previews,
+            show_progress,
+            use_colors,
+            limits,
+            assigned_dimensions,
+        ),
+        executor,
+        ProgressChannels {
+            rpc_event_tx,
+            tui_state,
+        },
+    )
+    .await
+}
+
+/// 2026-07-03-001 supervisor real-wiring: fan-in outcome.
+///
+/// `Merged` — the supervisor path merged worker events into
+/// the main events file and persisted the `*.wave.complete`
+/// coordination event. The caller MUST skip the legacy
+/// `merge_wave_results_to_events_file` block.
+///
+/// `Failed` — the supervisor path persisted the
+/// `*.wave.failed` coordination event (KTD-8 partial = fail).
+/// The caller MUST skip the legacy merge block.
+///
+/// `AlreadyDone` — KTD-7 idempotency: a prior tick already
+/// merged the wave. The caller MUST skip the legacy merge
+/// block (no double-inject).
+///
+/// `Collecting` — the wave is still in flight; the caller
+/// SHOULD fall through to the legacy merge block so the wave
+/// result is not lost (defensive — the coordinator will
+/// re-tick on the next iteration).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorFanInOutcome {
+    Merged,
+    Failed,
+    AlreadyDone,
+    Collecting,
+}
+
+/// 2026-07-03-001 supervisor real-wiring: run the supervisor
+/// fan-in for a completed wave. Records each slot's result /
+/// failure on the bridge, ticks the coordinator, and handles
+/// the returned `CoordinatorAction`:
+/// - `InjectedComplete` → merge worker events to the main
+///   events file + persist `*.wave.complete` (system_injected)
+/// - `InjectedFailed` → persist `*.wave.failed` (no merge;
+///   KTD-8 partial = fail)
+/// - `AlreadyDone` → no-op (KTD-7)
+/// - `ContinueCollect` → no-op (wave still in flight)
+/// - `MergeFailed` → no-op (leave Collect for recovery; KTD-7)
+async fn run_supervisor_fan_in(
+    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+    completed: &ralph_core::CompletedWave,
+    detected: &ralph_core::DetectedWave,
+    main_events_file: &Path,
+    event_loop: &mut ralph_core::EventLoop,
+    aggregate_timeout_secs: u64,
+) -> SupervisorFanInOutcome {
+    use ralph_core::supervisor::{CoordinatorAction, PhaseInputs, SupervisorBridge as _};
+
+    // 2026-07-03-001 supervisor real-wiring: infer wave kind
+    // from the trigger topic (mirrors `execute_wave_via_supervisor`).
+    let trigger_topic = detected
+        .events
+        .first()
+        .map(|e| e.topic.as_str())
+        .unwrap_or("");
+    let wave_kind = if trigger_topic.starts_with("review.wave.") {
+        ralph_core::supervisor::WaveKind::Review
+    } else if trigger_topic.starts_with("fix.") {
+        ralph_core::supervisor::WaveKind::Fix
+    } else {
+        ralph_core::supervisor::WaveKind::Exec
+    };
+
+    // Register + record each slot's terminal state on the
+    // bridge so the coordinator's `tick` sees the updated
+    // fan-in counts.
+    let store_wave_id = match bridge.register_wave_if_absent(wave_kind, &detected.wave_id, detected.total) {
+        Ok(id) => id,
+        Err(err) => {
+            warn!(
+                wave_id = %detected.wave_id,
+                error = %err,
+                "supervisor fan-in register_wave_if_absent failed; skipping tick"
+            );
+            return SupervisorFanInOutcome::Collecting;
+        }
+    };
+
+    for result in &completed.results {
+        let content_hash = format!("wave-{}-{}", completed.wave_id, result.index);
+        let event_count = result.events.len();
+        if let Err(err) = bridge.record_slot_result(
+            &store_wave_id,
+            result.index,
+            &content_hash,
+            event_count,
+        ) {
+            warn!(
+                wave_id = %store_wave_id,
+                slot_index = result.index,
+                error = %err,
+                "supervisor record_slot_result failed"
+            );
+        }
+    }
+    for failure in &completed.failures {
+        if let Err(err) = bridge.record_slot_failure(
+            &store_wave_id,
+            failure.index,
+            "wave_worker_failure",
+        ) {
+            warn!(
+                wave_id = %store_wave_id,
+                slot_index = failure.index,
+                error = %err,
+                "supervisor record_slot_failure failed"
+            );
+        }
+    }
+
+    // Compute elapsed from the wave's duration for the phase
+    // decision (Timeout check). `cancel_requested` is false —
+    // the dispatcher does not request cancels; that's the
+    // runner's job.
+    let elapsed_secs = completed.duration.as_secs();
+    let inputs = PhaseInputs {
+        aggregate_timeout_secs,
+        elapsed_secs,
+        cancel_requested: false,
+    };
+
+    let action = match bridge.tick(&store_wave_id, inputs) {
+        Ok(action) => action,
+        Err(err) => {
+            warn!(
+                wave_id = %store_wave_id,
+                error = %err,
+                "supervisor tick failed; skipping coord-event persist"
+            );
+            return SupervisorFanInOutcome::Collecting;
+        }
+    };
+
+    match action {
+        CoordinatorAction::InjectedComplete { ref topic, ref blocking_slots } => {
+            // Merge worker events into the main events file so
+            // the integrator / aggregator hat sees them. The
+            // merge function reads `result.events` directly
+            // (per-worker JSONL), so `completed.worker_events`
+            // is not consumed here — it's a forward-compat
+            // field for the future in-memory merge sink path.
+            if let Err(e) = merge_wave_results_to_events_file(
+                completed,
+                main_events_file,
+                &detected.hat_config.publishes,
+                detected.target_hat.as_str(),
+                None,
+            ) {
+                warn!(error = %e, "supervisor fan-in: failed to merge wave results to events file");
+            }
+
+            // Persist the `*.wave.complete` coordination event
+            // with `system_injected: true` and advance the
+            // reader cursor so the next `process_events_from_jsonl`
+            // does not double-publish (KTD-7).
+            let payload = serde_json::json!({
+                "wave_id": completed.wave_id,
+                "blocking_slots": blocking_slots,
+            });
+            event_loop.persist_system_injected_jsonl_event(
+                &detected.target_hat,
+                topic,
+                &payload,
+            );
+            SupervisorFanInOutcome::Merged
+        }
+        CoordinatorAction::InjectedFailed { ref topic, ref reason, .. } => {
+            // KTD-8 partial = fail: do NOT merge worker events.
+            // Only persist the `*.wave.failed` coordination
+            // event so the integrator can surface the failure.
+            let payload = serde_json::json!({
+                "wave_id": completed.wave_id,
+                "reason": reason,
+            });
+            event_loop.persist_system_injected_jsonl_event(
+                &detected.target_hat,
+                topic,
+                &payload,
+            );
+            SupervisorFanInOutcome::Failed
+        }
+        CoordinatorAction::AlreadyDone => {
+            // KTD-7: the wave was already merged on a prior
+            // tick. No-op — do NOT re-merge or re-inject.
+            SupervisorFanInOutcome::AlreadyDone
+        }
+        CoordinatorAction::ContinueCollect => {
+            // Wave is still in flight (some slots have not
+            // reached a terminal state). The dispatcher's
+            // `Completed` branch falls through to the legacy
+            // merge so the wave result is not lost.
+            SupervisorFanInOutcome::Collecting
+        }
+        CoordinatorAction::MergeFailed { ref topic, ref error } => {
+            // KTD-6: the merge itself failed (e.g. content
+            // hash mismatch). Leave the wave in Collect for
+            // recovery; do NOT write `*.wave.complete`.
+            warn!(
+                wave_id = %store_wave_id,
+                topic = %topic,
+                error = %error,
+                "supervisor fan-in: merge failed; leaving wave in Collect for recovery"
+            );
+            SupervisorFanInOutcome::Collecting
+        }
+    }
 }
 
 /// Compute the aggregate timeout from per-worker timeout and the
@@ -2305,6 +2818,7 @@ hats: {}
             worker_rpc_tx: None,
             worker_tui_state: None,
             assigned_dimension,
+            cwd: None,
         }
     }
 
@@ -2961,6 +3475,7 @@ hats: {}
             expected_source_hat: None,
             assigned_dimensions: assigned_dimensions.clone(),
             dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
         };
 
         let (_mismatches, pending) = merge_wave_results_to_events_file(
@@ -3088,6 +3603,7 @@ hats: {}
             expected_source_hat: None,
             assigned_dimensions: assigned_dimensions.clone(),
             dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
         };
 
         let (_m1, p1) = merge_wave_results_to_events_file(
@@ -3148,6 +3664,7 @@ hats: {}
             // tracker→CompletedWave transfer that gives us
             // cross-round persistence).
             dimension_retry_counts: completed_round1.dimension_retry_counts.clone(),
+            worker_events: Vec::new(),
         };
 
         let (_m2, p2) = merge_wave_results_to_events_file(
@@ -3210,6 +3727,7 @@ hats: {}
             expected_source_hat: None,
             assigned_dimensions: std::collections::HashMap::new(),
             dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
         };
 
         let (_m, p) = merge_wave_results_to_events_file(
@@ -3507,6 +4025,9 @@ hats: {}
             // Plan 001 §4.3 C1: hats_source_label is irrelevant for
             // empty input but is now part of the signature.
             None,
+            // 2026-07-03-001 supervisor real-wiring: legacy test
+            // path; `None` keeps the WaveTracker shape.
+            None,
         )
         .await;
 
@@ -3639,6 +4160,7 @@ hats: {}
             expected_source_hat: Some(ralph_proto::HatId::new("dimension-reviewer")),
             assigned_dimensions: std::collections::HashMap::new(),
             dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
         };
 
         merge_wave_results_to_events_file(

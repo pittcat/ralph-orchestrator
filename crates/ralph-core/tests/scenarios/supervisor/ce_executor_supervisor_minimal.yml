@@ -8,18 +8,18 @@
 # is the smallest possible pin for the lint + event topology
 # contracts introduced by U7/U9.
 #
-# U10 / fix-plan U10: the scenario must exercise the
-# `system_injected: exec.wave.complete` coord-event path so
-# the expected event ordering actually drives the
-# `exec-integrator` hat (which subscribes to `exec.wave.complete`,
-# not `exec.unit.done`). Without the system_injected envelope
-# the integrator never wakes and `work.done` never lands —
-# making this scenario a tautological passthrough.
-#
-# Expected: the loop sees a `system_injected` exec.wave.complete
-# event fired by the supervisor coord layer after the
-# `exec.unit.done` lands, and finishes the iteration with
-# `work.done`.
+# Phase 6 BDD realization (2026-07-03-001): the
+# `system_injected: exec.wave.complete` mock response is gone.
+# The scenario runner's `run_bdd_supervisor_fan_in` drives the
+# real `SupervisorCoordinator` via `InMemoryCoordinatorBridge`
+# after `process_events_from_jsonl` sees `exec.unit.done`, so
+# the coordination event is produced by the production code
+# path (U8/U10) instead of being faked via a YAML fixture.
+# The `event_loop.supervisor.enabled: true` +
+# `execution_mode: isolated` block opts the scenario into the
+# supervisor path; without it `run_bdd_supervisor_fan_in` is
+# never called and the test degrades to a tautological
+# passthrough (the original F-010 finding).
 
 name: u13_supervisor_minimal
 description: U13 - supervisor wave.complete → exec-integrator → work.done minimal pin
@@ -27,6 +27,11 @@ description: U13 - supervisor wave.complete → exec-integrator → work.done mi
 config:
   prompt_file: PROMPT.md
   max_iterations: 2
+  event_loop:
+    execution_mode: isolated
+    supervisor:
+      enabled: true
+      aggregate_timeout_secs: 60
   hats:
     worker:
       subscribes_to:
@@ -47,10 +52,8 @@ mock_responses:
     content_hash: "u13-h"
     </event>
   - |
-    <event system_injected="exec.wave.complete" topic="exec.wave.complete" wave_id="w-u13">
-    wave_id: "w-u13"
-    slot_index: 0
-    blocking_slots: []
+    <event topic="work.done">
+    status: "complete"
     </event>
   - |
     waiting.

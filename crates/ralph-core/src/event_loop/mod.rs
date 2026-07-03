@@ -6872,7 +6872,15 @@ impl EventLoop {
     /// The JSONL copy is marked `system_injected: true` and the reader
     /// position is advanced past it so the next
     /// `process_events_from_jsonl` pass does not double-publish.
-    fn persist_system_injected_jsonl_event(
+    ///
+    /// 2026-07-03-001 supervisor real-wiring: this method is `pub`
+    /// because `ralph-cli`'s dispatcher calls it after a supervisor
+    /// `tick` returns `InjectedComplete` / `InjectedFailed` to write
+    /// the `*.wave.complete` / `*.wave.failed` coordination event and
+    /// advance the reader cursor. The BDD scenarios in
+    /// `ralph-core/tests/scenarios.rs` also call it from
+    /// `run_bdd_supervisor_fan_in`.
+    pub fn persist_system_injected_jsonl_event(
         &mut self,
         hat_id: &HatId,
         topic: &str,

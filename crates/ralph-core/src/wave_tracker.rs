@@ -166,6 +166,16 @@ pub struct CompletedWave {
     /// reset on every dispatch round, allowing a permanent
     /// mismatch to loop indefinitely.
     pub dimension_retry_counts: std::collections::HashMap<u32, u32>,
+    /// 2026-07-03-001 supervisor real-wiring: per-wave worker
+    /// events drained from the merge sink. The supervisor
+    /// path's `run_supervisor_fan_in` reads this field (instead
+    /// of re-reading the per-worker JSONL files) to merge worker
+    /// events into the main events file when the coordinator
+    /// returns `InjectedComplete`. The legacy `WaveTracker`
+    /// path leaves this empty — its merge function reads
+    /// `result.events` directly, so the field is a no-op for
+    /// non-supervisor dispatch.
+    pub worker_events: Vec<crate::Event>,
 }
 
 impl Default for CompletedWave {
@@ -180,6 +190,7 @@ impl Default for CompletedWave {
             expected_source_hat: None,
             assigned_dimensions: std::collections::HashMap::new(),
             dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
         }
     }
 }
@@ -441,6 +452,10 @@ impl WaveTracker {
             // mismatched slot, with the budget surviving across
             // dispatch rounds (P0#1 fix).
             dimension_retry_counts: state.dimension_retry_counts,
+            // 2026-07-03-001 supervisor real-wiring: the tracker
+            // path leaves worker_events empty; the dispatcher's
+            // supervisor branch fills this from the merge sink.
+            worker_events: Vec::new(),
         })
     }
 
@@ -468,6 +483,7 @@ impl WaveTracker {
             // per-slot assignments before the merge layer reads it.
             assigned_dimensions: std::collections::HashMap::new(),
             dimension_retry_counts: state.dimension_retry_counts,
+            worker_events: Vec::new(),
         })
     }
 

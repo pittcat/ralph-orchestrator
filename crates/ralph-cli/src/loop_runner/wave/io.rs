@@ -861,6 +861,7 @@ mod tests {
             expected_source_hat: None,
             assigned_dimensions,
             dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
         };
 
         let (mismatches, _pending_resumes) = merge_wave_results_to_events_file(
@@ -983,6 +984,7 @@ mod tests {
             expected_source_hat: None,
             assigned_dimensions: std::collections::HashMap::new(),
             dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
         };
 
         let (mismatches, _pending_resumes) = merge_wave_results_to_events_file(
@@ -1068,6 +1070,7 @@ mod tests {
             expected_source_hat: None,
             assigned_dimensions,
             dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
         };
 
         let (mismatches, _pending_resumes) = merge_wave_results_to_events_file(

@@ -410,6 +410,7 @@ pub use worktree_bind::{
     assert_isolation_matches, bind_slot_worktree, env_keys as worktree_env_keys,
 };
 
+mod bridge;
 mod coordinator;
 mod merge_sink;
 mod memory;
@@ -424,3 +425,19 @@ mod worktree_bind;
 mod memory_protocol_tests;
 #[cfg(test)]
 mod types_tests;
+
+// 2026-07-03-001 supervisor real-wiring: re-export the sunk-down
+// bridge surface so `ralph-cli` and the BDD scenarios can depend on
+// `ralph_core::supervisor::bridge::*` without duplicating the trait.
+pub use bridge::{
+    BridgeDispatchOutcome, BridgeError, InMemoryCoordinatorBridge, SlotBinding, SupervisorBridge,
+    is_supervisor_path_enabled,
+};
+
+// 2026-07-03-001 supervisor real-wiring: expose the recovery
+// entrypoint so the runner can call it once at startup before the
+// loop accepts new events (U11 R-C3). The module itself stays
+// private so its helpers (`merged_waves_skip_recovery`,
+// `restore_unmerged_completed_slot`) do not leak into the public
+// API; only the top-level orchestrator function is re-exported.
+pub use recover::recover_active_waves_at_startup;

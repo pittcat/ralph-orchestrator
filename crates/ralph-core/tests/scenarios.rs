@@ -8,10 +8,17 @@
 //! - Mixed backends
 //! - AutoResearch workflow guards
 
+use ralph_core::supervisor::{
+    CoordinatorAction, InMemoryCoordinatorBridge, InMemorySupervisorStore, PhaseInputs,
+    SupervisorBridge, SupervisorStore, WaveKind,
+};
 use ralph_core::testing::{MockBackend, Scenario, ScenarioRunner};
-use ralph_core::{EventLoop, EventParser, HatConfig, LoopContext, RalphConfig, TerminationReason};
+use ralph_core::{
+    EventLoop, EventParser, HatConfig, LoopContext, RalphConfig, TerminationReason,
+};
 use serde::Deserialize;
 use std::fs;
+use std::sync::Arc;
 
 /// 2026-06-20-002 plan U3 review: production-side prompt headings
 /// (preset/engine/lint_mirror.rs:28, :52) hoisted to test-side
@@ -478,6 +485,260 @@ fn load_scenario(path: &str) -> ScenarioYaml {
 /// `prompt_contains`, `workflow_progress`, completion, and
 /// `assert_state`).
 ///
+/// 2026-07-03-001 Phase 6 BDD helper: append a supervisor-
+/// injected coordination event directly to the trusted events
+/// JSONL WITHOUT advancing the `EventReader` cursor. The
+/// follow-up `process_events_from_jsonl` call in the runner
+/// then picks it up through the normal acceptance path (origin
+/// guard → policy → state machine → bus → `seen_topics`).
+///
+/// We bypass `EventLoop::persist_system_injected_jsonl_event`
+/// because that method advances the reader cursor past the
+/// injected line (correct for production to avoid double-
+/// processing, but wrong for the BDD stub runner which needs
+/// the re-read to surface the event in `seen_topics`).
+fn bdd_append_supervisor_event(
+    event_loop: &EventLoop,
+    topic: &str,
+    payload: &serde_json::Value,
+    hat_id: &str,
+) {
+    use std::io::Write;
+    let events_path = event_loop
+        .loop_context()
+        .map(|ctx| ctx.events_path())
+        .unwrap_or_else(|| std::path::PathBuf::from(".ralph/events.jsonl"));
+    let ts = chrono::Utc::now().to_rfc3339();
+    let record = serde_json::json!({
+        "topic": topic,
+        "payload": payload,
+        "ts": ts,
+        "hat": hat_id,
+        "source": hat_id,
+        "system_injected": true,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events_path)
+    {
+        let _ = writeln!(file, "{}", record);
+    }
+}
+
+/// 2026-07-03-001 plan U10 / fix-plan U10 + Phase 6 BDD
+/// realization: drive the supervisor coordinator `tick` from the
+/// BDD scenario runner so the `*.wave.complete` coordination
+/// event is produced by the real `SupervisorCoordinator` (via
+/// `InMemoryCoordinatorBridge`) instead of being faked via a
+/// mock `system_injected` response in the YAML fixture.
+///
+/// Contract:
+/// - Called AFTER `process_events_from_jsonl` so the accepted
+///   events are visible to the bus.
+/// - Scans `accepted_events` for `exec.unit.done` (and
+///   `fix.unit.done`) events that carry a `wave_id` +
+///   `slot_index` payload. Each one represents a slot
+///   completion the dispatcher would have recorded via
+///   `record_slot_result` in the production path.
+/// - For each unique `wave_id`, calls `register_wave_if_absent`
+///   (idempotent), then `record_slot_result` for every slot.
+/// - Calls `bridge.tick` with the configured
+///   `aggregate_timeout_secs`. On `InjectedComplete` /
+///   `InjectedFailed`, persists the coordination event via
+///   `EventLoop::persist_system_injected_jsonl_event` so the
+///   next iteration's `process_events_from_jsonl` picks it up
+///   (the reader cursor is advanced past the injected line).
+/// - On `AlreadyDone` / `ContinueCollect`, no-op.
+///
+/// Returns the count of `system_injected` events persisted so
+/// the caller can assert the supervisor path actually fired.
+fn run_bdd_supervisor_fan_in(
+    event_loop: &mut EventLoop,
+    bridge: &InMemoryCoordinatorBridge,
+    accepted_events: &[ralph_proto::Event],
+    aggregate_timeout_secs: u64,
+) -> usize {
+    use ralph_proto::HatId;
+
+    // Bucket slot completions by wave_id. The payload shape is
+    // JSON; we extract `wave_id`, `slot_index`, and
+    // `content_hash` defensively (the scenario fixtures may
+    // omit `content_hash`, in which case we fall back to a
+    // stable placeholder).
+    let mut waves: std::collections::HashMap<String, Vec<(u32, String, usize)>> =
+        std::collections::HashMap::new();
+    let mut wave_kind: std::collections::HashMap<String, WaveKind> =
+        std::collections::HashMap::new();
+
+    for ev in accepted_events {
+        // BDD fixtures use YAML-formatted payloads (the same
+        // shape `EventParser::parse` produces from `<event>`
+        // blocks). Parse as YAML so we can extract `wave_id` /
+        // `slot_index` without forcing fixtures to switch to
+        // JSON.
+        let payload: serde_yaml::Value = match serde_yaml::from_str(&ev.payload) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let is_exec_done = ev.topic.as_str() == "exec.unit.done";
+        let is_fix_done = ev.topic.as_str() == "fix.unit.done";
+        if !is_exec_done && !is_fix_done {
+            continue;
+        }
+        let wave_id = payload
+            .get("wave_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("bdd-wave");
+        let slot_index = payload
+            .get("slot_index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let content_hash = payload
+            .get("content_hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("bdd-hash")
+            .to_string();
+        let kind = if is_fix_done {
+            WaveKind::Fix
+        } else {
+            WaveKind::Exec
+        };
+        wave_kind.entry(wave_id.to_string()).or_insert(kind);
+        waves
+            .entry(wave_id.to_string())
+            .or_default()
+            .push((slot_index, content_hash, 1));
+    }
+
+    let mut injected = 0usize;
+    for (wave_id, slots) in waves {
+        let kind = wave_kind.remove(&wave_id).unwrap_or(WaveKind::Exec);
+        // Register the wave (idempotent). The bridge returns the
+        // store-assigned id; we reuse it for subsequent calls.
+        let store_id = match bridge.register_wave_if_absent(kind, &wave_id, slots.len() as u32) {
+            Ok(id) => id,
+            Err(err) => {
+                eprintln!(
+                    "[bdd-supervisor] register_wave_if_absent failed for {wave_id}: {err}"
+                );
+                continue;
+            }
+        };
+
+        // BDD fixture: bind a dummy worktree so the store accepts
+        // `record_slot_result` (Worktree isolation requires a
+        // binding). The path is unused — no real worker spawns
+        // here. We skip the bind for `SharedReadonly` (review)
+        // kinds, but exec/fix always use Worktree isolation.
+        for (slot_index, _, _) in &slots {
+            use ralph_core::supervisor::SlotResource;
+            if let Err(err) = bridge.store().bind_worktree(
+                &store_id,
+                *slot_index,
+                SlotResource {
+                    slot_index: *slot_index,
+                    worktree_path: Some(format!(".ralph/bdd/{wave_id}/{slot_index}")),
+                    branch: Some(format!("ralph/bdd/{wave_id}/{slot_index}")),
+                },
+            ) {
+                eprintln!(
+                    "[bdd-supervisor] bind_worktree failed for {wave_id}/{slot_index}: {err}"
+                );
+            }
+            // Mark the slot dispatched so `record_slot_result`
+            // transitions it to `Completed` instead of rejecting
+            // the state transition.
+            if let Err(err) = bridge.store().try_dispatch_next(64) {
+                eprintln!("[bdd-supervisor] try_dispatch_next failed: {err}");
+            }
+        }
+
+        for (slot_index, content_hash, event_count) in &slots {
+            if let Err(err) = bridge.record_slot_result(
+                &store_id,
+                *slot_index,
+                content_hash,
+                *event_count,
+            ) {
+                eprintln!(
+                    "[bdd-supervisor] record_slot_result failed for {wave_id}/{slot_index}: {err}"
+                );
+            }
+        }
+
+        // Tick the coordinator. The aggregate_timeout is the
+        // scenario's configured value; `elapsed_secs=0` because
+        // the BDD runner does not model wall-clock progression.
+        let inputs = PhaseInputs {
+            aggregate_timeout_secs,
+            elapsed_secs: 0,
+            cancel_requested: false,
+        };
+        let action = match bridge.tick(&store_id, inputs) {
+            Ok(a) => a,
+            Err(err) => {
+                eprintln!("[bdd-supervisor] tick failed for {wave_id}: {err}");
+                continue;
+            }
+        };
+        match action {
+            CoordinatorAction::InjectedComplete {
+                topic,
+                blocking_slots,
+            } => {
+                let payload = serde_json::json!({
+                    "wave_id": wave_id,
+                    "slot_index": slots.first().map(|(i, _, _)| *i).unwrap_or(0),
+                    "blocking_slots": blocking_slots,
+                });
+                // 2026-07-03-001 Phase 6: write to JSONL for audit
+                // + publish to bus + record in seen_topics so the
+                // scenario's `expected.events` assertion sees the
+                // coordination event. We bypass
+                // `persist_system_injected_jsonl_event` because it
+                // advances the reader cursor past the injected
+                // line (production-correct but BDD-hostile). The
+                // BDD stub runner does not re-read from JSONL for
+                // supervisor events; it relies on the direct
+                // bus publish + seen_topics record here.
+                bdd_append_supervisor_event(event_loop, &topic, &payload, "supervisor");
+                let proto_event = ralph_proto::Event::new(topic.as_str(), payload.to_string())
+                    .with_source(ralph_proto::HatId::new("supervisor"));
+                event_loop.publish_event(proto_event.clone());
+                event_loop.state_mut().record_event(&proto_event);
+                injected += 1;
+            }
+            CoordinatorAction::InjectedFailed {
+                topic,
+                reason,
+                blocking_slots,
+            } => {
+                let payload = serde_json::json!({
+                    "wave_id": wave_id,
+                    "reason": reason,
+                    "blocking_slots": blocking_slots,
+                });
+                bdd_append_supervisor_event(event_loop, &topic, &payload, "supervisor");
+                let proto_event = ralph_proto::Event::new(topic.as_str(), payload.to_string())
+                    .with_source(ralph_proto::HatId::new("supervisor"));
+                event_loop.publish_event(proto_event.clone());
+                event_loop.state_mut().record_event(&proto_event);
+                injected += 1;
+            }
+            CoordinatorAction::AlreadyDone | CoordinatorAction::ContinueCollect => {}
+            other => {
+                eprintln!("[bdd-supervisor] unexpected action for {wave_id}: {other:?}");
+            }
+        }
+    }
+
+    injected
+}
+
+/// Runs a scenario through the real EventLoop and captures
+/// per-iteration snapshots for post-loop assertions.
+///
 /// The caller supplies `extra_config` for scenario-specific
 /// overrides (hat map, `event_loop` block, `core` block, etc.).
 /// The baseline config sets `task_resume_ttl_seconds = Some(0)`
@@ -542,6 +803,31 @@ fn run_scenario_with_snapshots(
     // source of truth for `workspace_root` regardless of
     // what callers did in `extra_config`.
     config.core.workspace_root = temp_dir.path().to_path_buf();
+
+    // 2026-07-03-001 Phase 6 BDD realization: snapshot the
+    // supervisor config BEFORE `config` is moved into
+    // `EventLoop::with_context`. When the scenario opts in
+    // (`supervisor.enabled: true` + `execution_mode: isolated`),
+    // we construct an `InMemoryCoordinatorBridge` and drive the
+    // coordinator `tick` from `run_bdd_supervisor_fan_in` after
+    // every `process_events_from_jsonl` pass. The bridge owns an
+    // in-memory store so the BDD path does not depend on the
+    // `supervisor-db` cargo feature.
+    let supervisor_path_enabled = {
+        use ralph_core::config::HatExecutionMode;
+        ralph_core::supervisor::is_supervisor_path_enabled(
+            config.event_loop.supervisor.enabled,
+            matches!(config.event_loop.execution_mode, HatExecutionMode::Isolated),
+        )
+    };
+    let supervisor_aggregate_timeout_secs = config.event_loop.supervisor.aggregate_timeout_secs;
+    let supervisor_bridge: Option<InMemoryCoordinatorBridge> = if supervisor_path_enabled {
+        let store: Arc<dyn SupervisorStore> =
+            Arc::new(InMemorySupervisorStore::new());
+        Some(InMemoryCoordinatorBridge::from_store(store))
+    } else {
+        None
+    };
 
     let context = LoopContext::primary(temp_dir.path().to_path_buf());
 
@@ -623,6 +909,25 @@ fn run_scenario_with_snapshots(
             *accepted_topic_counts
                 .entry(e.topic.to_string())
                 .or_insert(0) += 1;
+        }
+
+        // 2026-07-03-001 Phase 6 BDD realization: when the
+        // scenario opts into the supervisor path, drive the
+        // coordinator `tick` here so `*.wave.complete` /
+        // `*.wave.failed` events are produced by the real
+        // `SupervisorCoordinator` (not faked via mock YAML
+        // responses). The fan-in helper writes the injected
+        // event to JSONL for audit, publishes it to the bus,
+        // and records it in `seen_topics` so the scenario's
+        // `expected.events` assertion sees it without relying
+        // on a second `process_events_from_jsonl` pass.
+        if let Some(ref bridge) = supervisor_bridge {
+            let _ = run_bdd_supervisor_fan_in(
+                &mut event_loop,
+                bridge,
+                &result.accepted_events,
+                supervisor_aggregate_timeout_secs,
+            );
         }
 
         // Evaluate checkpoints tied to this response index (1-based in YAML)

@@ -2752,6 +2752,7 @@ fn u3_wave_merge_stamps_wave_total_on_every_record() {
         expected_source_hat: None,
         assigned_dimensions: std::collections::HashMap::new(),
         dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: Vec::new(),
     };
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2835,6 +2836,7 @@ fn u3_wave_merge_emits_synthetic_events_on_failure_with_wave_total() {
         expected_source_hat: None,
         assigned_dimensions: std::collections::HashMap::new(),
         dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: Vec::new(),
     };
     let tmp = tempfile::TempDir::new().unwrap();
     let events_path = tmp.path().join("events.jsonl");
@@ -2905,6 +2907,7 @@ fn u3_wave_merge_handles_duplicate_indexes_without_panicking() {
         expected_source_hat: None,
         assigned_dimensions: std::collections::HashMap::new(),
         dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: Vec::new(),
     };
     let tmp = tempfile::TempDir::new().unwrap();
     let events_path = tmp.path().join("events.jsonl");
@@ -3977,6 +3980,7 @@ async fn u3_partial_wave_does_not_activate_aggregator_until_full_set() {
         expected_source_hat: None,
         assigned_dimensions: std::collections::HashMap::new(),
         dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: Vec::new(),
     };
     merge_wave_results_to_events_file(
         &partial,
@@ -4508,6 +4512,7 @@ fn test_adv2_hat_spoofing_rejected_at_merge_layer() {
         expected_source_hat: Some(ralph_proto::HatId::new("worker")),
         assigned_dimensions: std::collections::HashMap::new(),
         dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: Vec::new(),
     };
 
     merge_wave_results_to_events_file(
@@ -4578,6 +4583,7 @@ fn test_adv2_hat_spoofing_omitted_source_rejected_at_merge_layer() {
         expected_source_hat: Some(ralph_proto::HatId::new("worker")),
         assigned_dimensions: std::collections::HashMap::new(),
         dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: Vec::new(),
     };
 
     merge_wave_results_to_events_file(

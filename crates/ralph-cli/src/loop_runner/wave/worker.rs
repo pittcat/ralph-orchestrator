@@ -105,6 +105,10 @@ pub async fn run_wave_worker(
     tx: tokio::sync::mpsc::UnboundedSender<(u32, bool, Duration)>,
     worker_rpc_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
     worker_tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
+    // 2026-07-03-001 supervisor real-wiring: per-worker cwd
+    // sourced from `SlotBinding.worktree_path`. `None` keeps
+    // the legacy `std::env::current_dir()` behaviour.
+    worker_cwd: Option<&Path>,
 ) -> (u32, WaveWorkerOutcome) {
     match wave_worker_execution_mode(worker_backend.output_format) {
         WaveWorkerExecutionMode::Pty => {
@@ -117,6 +121,7 @@ pub async fn run_wave_worker(
                 tx,
                 worker_rpc_tx,
                 worker_tui_state,
+                worker_cwd,
             )
             .await
         }
@@ -130,6 +135,7 @@ pub async fn run_wave_worker(
                 tx,
                 worker_rpc_tx,
                 worker_tui_state,
+                worker_cwd,
             )
             .await
         }
@@ -144,6 +150,8 @@ pub async fn execute_wave_worker_acp_prompt(
     wave_timeout: Duration,
     worker_rpc_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
     worker_tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
+    // 2026-07-03-001 supervisor real-wiring: per-worker cwd.
+    worker_cwd: Option<&Path>,
 ) -> AcpWaveExecutionResult {
     #[cfg(test)]
     {
@@ -169,7 +177,13 @@ pub async fn execute_wave_worker_acp_prompt(
         }
     }
 
-    let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // 2026-07-03-001 supervisor real-wiring: prefer the
+    // per-worker cwd (from `SlotBinding.worktree_path`) when
+    // supplied; fall back to the process CWD for the legacy
+    // dispatcher path.
+    let workspace_root = worker_cwd
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let executor = AcpExecutor::new(worker_backend.clone(), workspace_root);
     let mut handler = WaveWorkerStreamHandler::new(index, worker_rpc_tx, worker_tui_state);
 
@@ -189,6 +203,7 @@ pub async fn run_wave_worker_acp(
     tx: tokio::sync::mpsc::UnboundedSender<(u32, bool, Duration)>,
     worker_rpc_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
     worker_tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
+    worker_cwd: Option<&Path>,
 ) -> (u32, WaveWorkerOutcome) {
     let start = std::time::Instant::now();
     let result = execute_wave_worker_acp_prompt(
@@ -199,6 +214,7 @@ pub async fn run_wave_worker_acp(
         wave_timeout,
         worker_rpc_tx,
         worker_tui_state,
+        worker_cwd,
     )
     .await;
     let duration = start.elapsed();
@@ -254,6 +270,7 @@ pub async fn run_wave_worker_pty(
     tx: tokio::sync::mpsc::UnboundedSender<(u32, bool, Duration)>,
     worker_rpc_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
     worker_tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
+    worker_cwd: Option<&Path>,
 ) -> (u32, WaveWorkerOutcome) {
     let start = std::time::Instant::now();
 
@@ -264,7 +281,13 @@ pub async fn run_wave_worker_pty(
     let (cmd, args, stdin_input, _temp_file_guard) = worker_backend.build_command(prompt, false);
     let mut stdin_prompt_file = None;
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // 2026-07-03-001 supervisor real-wiring: prefer the
+    // per-worker cwd (from `SlotBinding.worktree_path`) when
+    // supplied; fall back to the process CWD for the legacy
+    // dispatcher path.
+    let cwd = worker_cwd
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let output_format = worker_backend.output_format;
 
     #[cfg(test)]

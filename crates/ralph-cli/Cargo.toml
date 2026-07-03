@@ -16,6 +16,13 @@ dist = true
 # without the crate owning a `presets/` mirror directory.
 build = "build.rs"
 
+# 2026-07-03-001 supervisor real-wiring: pass-through so `ralph-cli`
+# can gate its `build_supervisor_bridge` SQLite branch on the same
+# feature that `ralph-core` exposes. Operators opt in via
+# `cargo build -p ralph-cli --features supervisor-db`.
+[features]
+supervisor-db = ["ralph-core/supervisor-db"]
+
 # `build.rs` deep-merges `presets/schemas/<name>.yml` (schema SSOT)
 # into `presets/en/<name>.yml` before writing the merged copy to
 # `$OUT_DIR/presets/`. `serde_yaml` is therefore needed at build time
