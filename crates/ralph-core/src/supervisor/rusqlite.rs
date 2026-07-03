@@ -788,6 +788,35 @@ mod tests {
         assert!(matches!(err, SupervisorStoreError::DuplicateKey(_)));
     }
 
+    /// U2 / F-002 / KTD-8 invariant pin (rusqlite variant):
+    /// when 1 slot fails and at least 1 sibling is still
+    /// in-flight, the store MUST NOT mutate `wave.phase` —
+    /// that verdict belongs to the coordinator (KTD-8).
+    #[test]
+    fn record_slot_failure_with_in_flight_siblings_keeps_phase_collect() {
+        let store = store();
+        let wave = store
+            .register_wave("partial-fail-rs", WaveKind::Exec, 2)
+            .unwrap();
+        for i in 0..2 {
+            store.bind_worktree(&wave, i, bind(i)).unwrap();
+        }
+        // Dispatch both slots.
+        store.try_dispatch_next(4).unwrap().unwrap();
+        store.try_dispatch_next(4).unwrap().unwrap();
+        // Fail slot 0; slot 1 stays in-flight.
+        store.record_slot_failure(&wave, 0, "boom").unwrap();
+        let snap = store.fan_in_status(&wave).unwrap();
+        assert_eq!(
+            snap.phase,
+            WavePhase::Collect,
+            "phase must stay Collect while a sibling is still in-flight (KTD-8); got {:?}",
+            snap.phase
+        );
+        assert_eq!(snap.failed_count, 1);
+        assert_eq!(snap.in_flight_count, 1);
+    }
+
     /// R-A2: backpressure returns None when cap is hit.
     #[test]
     fn backpressure_blocks_when_cap_is_hit() {

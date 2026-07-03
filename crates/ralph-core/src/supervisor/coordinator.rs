@@ -166,6 +166,15 @@ impl SupervisorCoordinator {
     /// skip the merge gate because `failed` waves don't
     /// produce integrable events; their coord event still
     /// carries the `blocking_slots` payload.
+    ///
+    /// U2 / F-002 / KTD-8: the coordinator owns the phase
+    /// verdict transition. We call `set_wave_phase(Failed)`
+    /// here so the wave's terminal state is recorded in the
+    /// store exactly once and AFTER all sibling slot rows
+    /// have settled. The store's `record_slot_failure` no
+    /// longer flips the phase — `evaluate_phase` decides
+    /// when `Failed` is correct (KTD-8 forbids partial =
+    /// fail until all slots are terminal).
     fn fail_wave(
         &self,
         snapshot: &WaveSnapshot,
@@ -173,6 +182,14 @@ impl SupervisorCoordinator {
         blocking_slots: Vec<u32>,
     ) -> SupervisorStoreResult<CoordinatorAction> {
         let topic = coordinator_topic(snapshot.kind, false);
+        // U2: apply the verdict to the store. Idempotent —
+        // `set_wave_phase` writes the same Failed phase on
+        // repeat calls, but we only reach this branch when
+        // `evaluate_phase` returned `Failed`, so re-entry on
+        // a subsequent tick is expected (the verdict stays
+        // stable across ticks).
+        self.store
+            .set_wave_phase(&snapshot.wave_id, WavePhase::Failed)?;
         Ok(CoordinatorAction::InjectedFailed {
             topic,
             reason: reason.as_str(),
@@ -488,6 +505,81 @@ mod tests {
                 CoordinatorAction::AlreadyDone | CoordinatorAction::ContinueCollect
             ),
             "tick #2 after merge must return AlreadyDone or ContinueCollect, got {action2:?}"
+        );
+    }
+
+    /// U2 / KTD-8 verdict pin: a 2-slot wave where slot 0
+    /// fails and slot 1 succeeds must transition to phase
+    /// `Failed` (with reason `required_slot_failure`) ONLY
+    /// AFTER all slots settle. The store-level phase mutation
+    /// path is coordinator-owned (U2 / F-002).
+    #[test]
+    fn coordinator_moves_wave_to_failed_only_after_siblings_settle() {
+        let store = Arc::new(InMemorySupervisorStore::new());
+        let wave = store.register_wave("mixed-fail", WaveKind::Exec, 2).unwrap();
+        store
+            .bind_worktree(
+                &wave,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/c/0".to_string()),
+                    branch: Some("ralph/c0".to_string()),
+                },
+            )
+            .unwrap();
+        store
+            .bind_worktree(
+                &wave,
+                1,
+                SlotResource {
+                    slot_index: 1,
+                    worktree_path: Some(".ralph/c/1".to_string()),
+                    branch: Some("ralph/c1".to_string()),
+                },
+            )
+            .unwrap();
+        // Dispatch + complete only slot 0 (success).
+        let (w0, i0) = store.try_dispatch_next(4).unwrap().unwrap();
+        assert_eq!(w0, wave);
+        store.record_slot_result(&w0, i0, "h0", 1).unwrap();
+        // At this point slot 1 is still pending → phase
+        // must stay Collect (KTD-8 forbids partial = fail).
+        let snap_before = store.fan_in_status(&wave).unwrap();
+        assert_eq!(snap_before.phase, WavePhase::Collect);
+        // Now fail slot 1 (the pending sibling) and complete
+        // the fan-in: phase must transition to Failed.
+        store.record_slot_failure(&wave, 1, "boom").unwrap();
+        let coord =
+            SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
+        let action = coord
+            .tick(
+                &wave,
+                PhaseInputs {
+                    aggregate_timeout_secs: 60,
+                    elapsed_secs: 0,
+                    cancel_requested: false,
+                },
+            )
+            .unwrap();
+        match action {
+            CoordinatorAction::InjectedFailed {
+                topic,
+                reason,
+                blocking_slots,
+            } => {
+                assert_eq!(topic, "exec.wave.failed");
+                assert_eq!(reason, "required_slot_failure");
+                assert!(!blocking_slots.is_empty());
+            }
+            other => panic!("expected InjectedFailed, got {other:?}"),
+        }
+        // Coordinator-owned mutation: phase now Failed.
+        let snap_after = store.fan_in_status(&wave).unwrap();
+        assert_eq!(
+            snap_after.phase,
+            WavePhase::Failed,
+            "phase must be Failed after coordinator applies the verdict (U2 KTD-8)"
         );
     }
 

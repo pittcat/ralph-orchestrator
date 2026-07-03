@@ -193,12 +193,13 @@ fn cancel_wave_does_not_force_running_to_failed() {
 }
 
 /// R-F2/R-F4: compensation on failure must surface in
-/// `fan_in_status`. The in-memory store records the wave's
-/// terminal state (`Failed`) plus the cancellation flag so the
-/// runtime/host (out of scope for the store layer) can execute
-/// compensation jobs at the dispatch bridge. This pins the
-/// read-side contract; U11's recovery module owns the worker
-/// that walks the queue and runs the comp entries.
+/// `fan_in_status`. The in-memory store records the slot's
+/// terminal state plus the cancellation flag; U2 / KTD-8
+/// moved the wave's `phase = Failed` verdict into the
+/// coordinator's `set_wave_phase` call. The compensation
+/// jobs themselves (out of scope for the store layer) live
+/// in the dispatch bridge; the recovery module owns the
+/// worker that runs them. This pins the read-side contract.
 #[test]
 fn compensation_records_failure_state_on_wave() {
     let s = store();
@@ -210,6 +211,18 @@ fn compensation_records_failure_state_on_wave() {
     let snap = s.fan_in_status(&wave).unwrap();
     assert!(snap.cancel_requested, "cancel flag must persist on terminal");
     assert_eq!(snap.failed_count, 1);
+    // U2 / KTD-8: the store does NOT mutate `phase`. The
+    // coordinator's `fail_wave` applies `set_wave_phase`
+    // when `evaluate_phase` returns `Failed`. Until then,
+    // the wave stays in its initial non-terminal phase
+    // (`Dispatch` from `register_wave`).
+    assert!(
+        !matches!(snap.phase, WavePhase::Failed | WavePhase::Done),
+        "phase must stay non-terminal until the coordinator applies the verdict (U2 KTD-8); got {:?}",
+        snap.phase
+    );
+    // Simulate the coordinator applying the verdict.
+    s.set_wave_phase(&wave, WavePhase::Failed).unwrap();
     // The wave reached the Failed phase, so it is **excluded**
     // from `recover_active_waves` (terminal phase filter); this
     // is the contract that prevents re-injection on restart.
@@ -225,12 +238,22 @@ fn compensation_records_failure_state_on_wave() {
 /// contract: recovered waves retain their slot counts so the
 /// coordinator can decide whether to re-merge, timeout, or
 /// re-dispatch.
+///
+/// U2 / KTD-8: a `Failed` wave reaches terminal phase only
+/// after the coordinator applies the verdict via
+/// `set_wave_phase` — `record_slot_failure` alone does NOT
+/// flip the phase. The test below uses both endpoints to
+/// cover the storage-only AND the verdict-applied paths.
 #[test]
 fn recover_active_waves_returns_all_non_terminal_phases() {
     let s = store();
     let live = wave_into(&s, "live", WaveKind::Exec, 2).unwrap();
     let failed = wave_into(&s, "failed", WaveKind::Exec, 1).unwrap();
     s.record_slot_failure(&failed, 0, "boom").unwrap();
+    // U2: store leaves the wave in Collect; simulate the
+    // coordinator verdict with `set_wave_phase(Failed)` so
+    // it becomes terminal.
+    s.set_wave_phase(&failed, WavePhase::Failed).unwrap();
     let snaps: HashMap<String, WaveSnapshot> = s
         .recover_active_waves()
         .unwrap()
@@ -238,7 +261,7 @@ fn recover_active_waves_returns_all_non_terminal_phases() {
         .map(|s| (s.wave_id.clone(), s))
         .collect();
     assert!(snaps.contains_key(&live), "live wave must surface");
-    // The failed wave transitions to Failed phase, so it is
+    // The failed wave is now in Failed phase, so it is
     // skipped by `recover_active_waves` (its phase is terminal).
     assert!(
         !snaps.contains_key(&failed),
