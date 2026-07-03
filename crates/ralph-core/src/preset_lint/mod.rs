@@ -36,6 +36,13 @@ pub mod ownership;
 // `WorkflowPhaseAuthority` engine.
 pub mod phase_authority;
 pub mod schema_parity;
+// 2026-07-03-001 plan U9: supervisor preset lint rule family.
+// Three rules (R-SW-1, R-SW-2, R-COORD-4) over the raw preset
+// YAML. Pure-YAML entry point so the lint is stable across
+// `RalphConfig` refactors. Wired into `run_preset_lint` near
+// the phase_authority block so the operator sees a single
+// coordinated report.
+pub mod supervisor;
 pub mod state_projection;
 pub mod strict_reason_routing;
 pub mod topic_format;
@@ -46,6 +53,9 @@ mod tests;
 
 #[cfg(test)]
 mod phase_authority_tests;
+
+#[cfg(test)]
+mod supervisor_preset_test;
 
 pub use coordinator::check_coordinator_rules;
 pub use finding_id::{
@@ -81,6 +91,14 @@ pub use multi_hat::check_multi_hat_isolation;
 pub use ownership::{check_owner_references, check_ownership_rules};
 pub use state_projection::check_work_done_action_chain_order;
 pub use strict_reason_routing::check_strict_reason_routing;
+// 2026-07-03-001 plan U9: export the supervisor lint entry
+// point so `ralph preset check` / `run_preset_lint` callers
+// can wire it (next line: into the unified orchestrator).
+pub use supervisor::{
+    FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC,
+    FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE, FINDING_SUPERVISOR_REQUIRES_ISOLATED,
+    check_supervisor_rules,
+};
 pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,
     validate_all_topics, validate_topic_format,
@@ -420,6 +438,21 @@ pub fn run_preset_lint(
     // preset half so the failure surfaces at preset-load time
     // rather than mid-run.
     findings.extend(check_metadata_runtime_drift(config));
+
+    // 2026-07-03-001 plan U9: supervisor preset rules — R-SW-1
+    // (supervisor requires isolated), R-SW-2 (integrator must
+    // not subscribe to *.unit.done), R-COORD-4 (hat publishes
+    // must not claim supervisor coord topics). The lint reads
+    // the raw preset text when available; otherwise it falls
+    // back to the typed-config dump (which lacks the `hats:`
+    // map's per-hat details — the supervisor rules therefore
+    // require `raw_yaml` to be useful, so `ralph preset check`
+    // must pass it). U13's preset loader wires raw text
+    // explicitly; unit tests below exercise both paths.
+    if let Some(text) = raw_yaml {
+        let sup_findings = check_supervisor_rules(text);
+        findings.extend(lint_findings_to_contract_findings(&sup_findings));
+    }
 
     // Plan 001 §4.5 R1: every hat `publishes` topic must have a schema
     // entry under `event_policy.schemas`. Without this gate, the CLI

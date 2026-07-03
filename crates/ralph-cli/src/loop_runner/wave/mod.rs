@@ -3,6 +3,7 @@
 mod acp_mock;
 mod dispatcher;
 mod io;
+mod supervisor_bridge;
 mod worker;
 
 pub use acp_mock::AcpWaveExecutionResult;
@@ -13,6 +14,12 @@ pub use io::{
     extract_readable_delta, merge_wave_results_to_events_file, push_to_tui_iteration,
     push_to_wave_worker_buffer, read_worker_events, read_worker_events_with_retry,
     truncate_wave_worker_preview,
+};
+// 2026-07-03-001 plan U12: export the supervisor bridge so the
+// runtime can spawn it when `supervisor.enabled: true`.
+pub use supervisor_bridge::{
+    BridgeDispatchOutcome, BridgeError, CoordinatorSupervisorBridge, MockSupervisorBridge,
+    SlotBinding, SupervisorBridge, is_supervisor_path_enabled,
 };
 pub use worker::{
     WaveWorkerExecutionMode, WaveWorkerOutcome, WaveWorkerStreamHandler,

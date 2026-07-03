@@ -1110,6 +1110,21 @@ fn test_plan_gate_dual_publish_handoff() {
     run_workflow_guard_scenario(yaml);
 }
 
+// 2026-07-03-001 plan U10 / fix-plan U10: register the
+// U13 supervisor minimal scenario via
+// `run_workflow_guard_scenario` (NOT the stub
+// `run_scenario`). The YAML file is extended with a
+// `system_injected: exec.wave.complete` mock response so
+// the test actually exercises the supervisor coord-event
+// path (F-010 / AE1 — the original fixture was a
+// tautological passthrough that never drove the
+// `exec-integrator` hat).
+#[test]
+fn test_u13_supervisor_minimal() {
+    let yaml = load_scenario("tests/scenarios/supervisor/ce_executor_supervisor_minimal.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 // 2026-06-20-001 plan U6: serial-lint BDD scenarios were
 // considered but deferred. The first iteration (commit
 // 0083f5b) shipped 3 YAML scenarios + 3 #[test] functions, but

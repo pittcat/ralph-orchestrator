@@ -1,0 +1,196 @@
+# Authoring SSOT for `ce-executor-supervisor` `event_policy.schemas`.
+#
+# 2026-07-03-001 plan U13: schema SSOT for the six supervisor
+# coordination topics + a handful of slot-level worker events.
+# Builds.rs merges this file's `schemas:` mapping into the
+# inline `event_policy.schemas:` block of
+# `presets/en/ce-executor-supervisor.yml`. See the
+# `presets/en/ce-executor-serial.yml` schema for the full
+# schema-format reference.
+#
+# All entries here MUST round-trip through
+# `EventSchema.required_fields` checks at CLI emit time;
+# U13 BDD scenario asserts the worker fan-out + integrator
+# merge path. Wave-coord payloads are system-injected by the
+# supervisor (U8 / U12); agents must NOT emit them.
+
+schemas:
+  exec.wave.complete:
+    required_fields:
+      - wave_id
+      - completed_slots
+      - merge_root_event_id
+  exec.wave.failed:
+    required_fields:
+      - wave_id
+      - blocking_slots
+      - reason
+  fix.wave.complete:
+    required_fields:
+      - wave_id
+      - completed_slots
+      - merge_root_event_id
+  fix.wave.failed:
+    required_fields:
+      - wave_id
+      - blocking_slots
+      - reason
+  review.wave.complete:
+    required_fields:
+      - wave_id
+      - completed_dimensions
+      - aggregate_timeout
+  review.wave.failed:
+    required_fields:
+      - wave_id
+      - missing_dimensions
+      - reason
+  exec.unit.done:
+    required_fields:
+      - wave_id
+      - slot_index
+      - content_hash
+  exec.unit.failed:
+    required_fields:
+      - wave_id
+      - slot_index
+      - reason
+  fix.unit.done:
+    required_fields:
+      - wave_id
+      - slot_index
+      - content_hash
+  fix.unit.failed:
+    required_fields:
+      - wave_id
+      - slot_index
+      - reason
+  review.unit.done:
+    required_fields:
+      - wave_id
+      - dimension
+      - findings
+  review.unit.ready:
+    required_fields:
+      - wave_id
+      - dimension
+
+  # Worker-ready topics: minimal contract so the CLI emit gate
+  # has a schema surface. Payloads carry the wave/slot identity
+  # the worker needs to bind to its worktree.
+  exec.unit.ready:
+    required_fields:
+      - wave_id
+      - slot_index
+      - plan_name
+  fix.unit.ready:
+    required_fields:
+      - wave_id
+      - slot_index
+      - plan_name
+
+  # Main workflow handoff topics (mirrors ce-executor-serial
+  # schema shapes where applicable).
+  work.ready:
+    required_fields:
+      - plan_name
+      - plan_path
+      - task_id
+      - task_key
+      - step
+      - complexity
+    payload: json_object
+
+  work.done:
+    required_fields:
+      - plan_name
+      - plan_path
+      - task_id
+      - task_key
+      - step
+      - commit_count
+      - changed_lines
+    payload: json_object
+
+  work.failed:
+    required_fields:
+      - plan_name
+      - task_id
+      - task_key
+      - step
+      - reason
+    payload: json_object
+
+  review.start:
+    required_fields:
+      - plan_name
+      - task_id
+      - task_key
+    payload: json_object
+
+  fix.done:
+    required_fields:
+      - plan_name
+      - plan_path
+      - executor_head_sha
+      - fix_plan_file
+      - review_verdict
+      - fixes_applied
+      - fixes_skipped
+    payload: json_object
+
+  fix.applied:
+    required_fields:
+      - plan_name
+      - fix_round
+      - applied_count
+      - failed_count
+      - task_id
+      - task_key
+      - step
+      - commit_count
+      - changed_lines
+    payload: json_object
+
+  fix.exhausted:
+    required_fields:
+      - plan_name
+      - fix_round
+      - task_id
+      - task_key
+      - step
+      - reason
+    payload: json_object
+
+  plan.complete:
+    required_fields:
+      - plan_name
+      - completed_steps
+      - task_id
+      - task_key
+      - step
+      - verdict
+      - final_findings_count
+      - fix_round
+    payload: json_object
+
+  plan.blocked:
+    required_fields:
+      - plan_name
+      - task_id
+      - task_key
+      - step
+      - reason
+    payload: json_object
+
+  task.resume:
+    required_fields:
+      - reason
+      - target_hat
+      - kind
+    payload: json_object
+
+  LOOP_COMPLETE:
+    required_fields:
+      - reason
+    payload: json_object

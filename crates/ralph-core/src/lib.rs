@@ -41,6 +41,12 @@ mod hatless_ralph;
 pub mod hooks;
 pub mod recovery_runtime;
 pub mod shipper_reason;
+/// 2026-07-03-001 plan U2: rusqlite-backed wave orchestration
+/// domain types + persistence trait. U3-U5 introduce the in-memory
+/// and SQLite implementations; U8 wires the coordinator; U11/U12
+/// surface the dispatcher/recover branches. Until then this module
+/// stays open: only the type-level contract exists.
+pub mod supervisor;
 pub use emit_schema_hint::{
     build_publish_emit_section, fix_hint_for_hat_topic, format_emit_json_example,
 };

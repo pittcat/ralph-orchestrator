@@ -76,3 +76,4 @@ mod hard_gate_payload_contract;
 mod hooks;
 mod legacy;
 mod wave;
+mod wave_supervisor;

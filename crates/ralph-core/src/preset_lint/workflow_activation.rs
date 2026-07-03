@@ -64,13 +64,20 @@ impl HandoffGraph {
     /// does not consult `phase_triggers`: the WAC rules evaluate the
     /// full surface of triggers a hat *could* receive. Hat names are
     /// read as the hashmap keys; phases are not part of the graph.
+    ///
+    /// 2026-07-03-001 plan U9/U13: when `event_loop.supervisor.enabled`
+    /// is `true`, a virtual `supervisor` node is wired into the graph.
+    /// It consumes the slot-level `*.unit.done` / `*.unit.failed` topics
+    /// and emits the corresponding wave-level `*.wave.complete` /
+    /// `*.wave.failed` topics. This lets the WAC rules see the fan-in
+    /// handoff that the runtime implements via `system_injected`, so
+    /// worker hats are not flagged as dead ends.
     pub fn from_config(config: &RalphConfig) -> Self {
         let mut topic_publishers: HashMap<String, Vec<String>> = HashMap::new();
         let mut topic_subscribers: HashMap<String, Vec<String>> = HashMap::new();
         let mut wildcard_subscribers: Vec<String> = Vec::new();
         let mut hat_publishes: HashMap<String, Vec<String>> = HashMap::new();
         let mut hat_order: Vec<String> = config.hats.keys().cloned().collect();
-        hat_order.sort();
 
         for (hat_id, hat) in &config.hats {
             for topic in &hat.publishes {
@@ -94,6 +101,37 @@ impl HandoffGraph {
                 }
             }
         }
+
+        // U13 supervisor fan-in: add virtual supervisor edges so WAC
+        // sees slot-to-wave handoffs as closed paths.
+        if config.event_loop.supervisor.enabled {
+            const SUPERVISOR_SLOT_TO_WAVE: &[(&str, &str)] = &[
+                ("exec.unit.done", "exec.wave.complete"),
+                ("exec.unit.failed", "exec.wave.failed"),
+                ("fix.unit.done", "fix.wave.complete"),
+                ("fix.unit.failed", "fix.wave.failed"),
+                ("review.unit.done", "review.wave.complete"),
+                ("review.unit.failed", "review.wave.failed"),
+            ];
+            let supervisor_id = "supervisor".to_string();
+            hat_order.push(supervisor_id.clone());
+            for (slot_topic, wave_topic) in SUPERVISOR_SLOT_TO_WAVE {
+                topic_subscribers
+                    .entry((*slot_topic).to_string())
+                    .or_default()
+                    .push(supervisor_id.clone());
+                topic_publishers
+                    .entry((*wave_topic).to_string())
+                    .or_default()
+                    .push(supervisor_id.clone());
+                hat_publishes
+                    .entry(supervisor_id.clone())
+                    .or_default()
+                    .push((*wave_topic).to_string());
+            }
+        }
+
+        hat_order.sort();
 
         // Sort the value vectors for deterministic test output.
         for v in topic_publishers.values_mut() {

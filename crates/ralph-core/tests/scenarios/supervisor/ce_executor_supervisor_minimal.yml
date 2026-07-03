@@ -1,0 +1,66 @@
+# 2026-07-03-001 plan U13: supervisor minimal BDD smoke.
+#
+# Pinned to `ce-executor-supervisor` topology: validates the
+# `exec.unit.done → exec.wave.complete (system_injected) →
+# exec-integrator → work.done` happy path inside a single
+# isolated mode iteration. Full 16-hat fan-out is exercised
+# in the integration smoke test in U12; this BDD file
+# is the smallest possible pin for the lint + event topology
+# contracts introduced by U7/U9.
+#
+# U10 / fix-plan U10: the scenario must exercise the
+# `system_injected: exec.wave.complete` coord-event path so
+# the expected event ordering actually drives the
+# `exec-integrator` hat (which subscribes to `exec.wave.complete`,
+# not `exec.unit.done`). Without the system_injected envelope
+# the integrator never wakes and `work.done` never lands —
+# making this scenario a tautological passthrough.
+#
+# Expected: the loop sees a `system_injected` exec.wave.complete
+# event fired by the supervisor coord layer after the
+# `exec.unit.done` lands, and finishes the iteration with
+# `work.done`.
+
+name: u13_supervisor_minimal
+description: U13 - supervisor wave.complete → exec-integrator → work.done minimal pin
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 2
+  hats:
+    worker:
+      subscribes_to:
+        - exec.unit.ready
+      publishes:
+        - exec.unit.done
+    exec-integrator:
+      subscribes_to:
+        - exec.wave.complete
+      publishes:
+        - work.done
+
+mock_responses:
+  - |
+    <event topic="exec.unit.done">
+    wave_id: "w-u13"
+    slot_index: 0
+    content_hash: "u13-h"
+    </event>
+  - |
+    <event system_injected="exec.wave.complete" topic="exec.wave.complete" wave_id="w-u13">
+    wave_id: "w-u13"
+    slot_index: 0
+    blocking_slots: []
+    </event>
+  - |
+    waiting.
+    </event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: exec.unit.done
+    - topic: exec.wave.complete
+  absent_events:
+    - topic: plan.blocked
+  completion: false

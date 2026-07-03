@@ -30,6 +30,14 @@ embedded:
   - autoresearch
   - ce-executor-pipeline
   - ce-executor-serial
+  # 2026-07-03-001 plan U13: supervisor-driven parallel preset.
+  # Built on top of `ce-executor-serial` topology; swaps the
+  # in-process WaveTracker for the rusqlite-backed
+  # SupervisorStore (U2/U3/U5/U8/U12) and exposes the
+  # six supervisor coordination topics via
+  # `event_loop.supervisor.enabled: true` + isolated mode
+  # (R-SW-1 lint enforces the contract).
+  - ce-executor-supervisor
   # - ce-executor-wave  # deleted 2026-06-23
   - debug
   # - hatless-baseline  # P3 #29: legacy experimental preset; kept on disk

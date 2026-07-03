@@ -339,6 +339,16 @@ pub struct EventLoopConfig {
     /// intervenes. Default: 8 (see `default_max_residuals`).
     #[serde(default = "default_max_residuals")]
     pub max_residuals: u32,
+
+    /// 2026-07-03-001 plan U1: opt-in rusqlite-backed wave
+    /// orchestrator. When `enabled == false` (default) the runtime
+    /// preserves the legacy `WaveTracker` path (R1/R3). When
+    /// `true` the dispatcher branches to `SupervisorCoordinator`
+    /// (U8/U11/U12). The block is opt-in: presets opt in via
+    /// `event_loop.supervisor.enabled: true` and the operator may
+    /// override per-workspace in `ralph.yml`.
+    #[serde(default)]
+    pub supervisor: SupervisorConfig,
 }
 
 /// 2026-06-16-001 U5: per-preset configuration for the loop-level
@@ -447,6 +457,11 @@ impl Default for EventLoopConfig {
             // Presets that declare a `mechanism:` block
             // override this via YAML.
             mechanism: None,
+            // 2026-07-03-001 plan U1: supervisor is opt-in.
+            // Default is `enabled == false` so R3's
+            // zero-regression contract holds even when older
+            // RalphConfig default serialisations flow through.
+            supervisor: SupervisorConfig::default(),
         }
     }
 }
@@ -596,6 +611,166 @@ max_steward_iterations: 3
     // 2026-06-23: T1 — `max_fix_rounds` field removed in 2026-06-24
     // (fixer hardcodes max 10 in instructions; the config field was
     // never enforced by Rust code and contradicted the instructions).
+
+    /// 2026-07-03-001 plan U1: a complete `event_loop.supervisor`
+    /// block round-trips through serde_yaml with the documented
+    /// fields (db_path, max_concurrent_workers,
+    /// aggregate_timeout_secs) populated to the exact YAML-declared
+    /// values. Required: this is the configuration SSOT used by the
+    /// runtime to decide whether to spin up the rusqlite-backed
+    /// SupervisorCoordinator.
+    #[test]
+    fn u1_supervisor_config_parses_full_block() {
+        let yaml = r#"
+enabled: true
+db_path: ".ralph/supervisor.db"
+max_concurrent_workers: 8
+aggregate_timeout_secs: 900
+"#;
+        let cfg: SupervisorConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.db_path, ".ralph/supervisor.db");
+        assert_eq!(cfg.max_concurrent_workers, 8);
+        assert_eq!(cfg.aggregate_timeout_secs, 900);
+    }
+
+    /// U1 default shape: when YAML omits the block entirely, the
+    /// default is fully populated with `enabled == false` and the
+    /// documented defaults for the rest. Required: presets and the
+    /// legacy event loop must silently match `EventLoopConfig::default()`
+    /// (the disabled branch) so R3 keeps its zero-regression contract.
+    #[test]
+    fn u1_supervisor_config_defaults_to_disabled() {
+        let cfg = SupervisorConfig::default();
+        assert!(!cfg.enabled, "default must be disabled to preserve R3");
+        assert_eq!(cfg.db_path, ".ralph/supervisor.db");
+        assert_eq!(cfg.max_concurrent_workers, 4);
+        assert_eq!(cfg.aggregate_timeout_secs, 600);
+    }
+
+    /// U1 negative parsing: an unknown key is rejected by
+    /// serde_yaml so the operator immediately learns the field is
+    /// not honoured. Required: prevents silent typos like
+    /// `database_path` from silently no-op'ing.
+    #[test]
+    fn u1_supervisor_config_rejects_unknown_field() {
+        let yaml = r#"
+enabled: true
+bogus_field: 1
+"#;
+        let result: Result<SupervisorConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "unknown supervisor field must produce a deserialization error"
+        );
+    }
+
+    /// U1 nesting contract: omitting `event_loop.supervisor`
+    /// entirely from a complete YAML still yields the EventLoopConfig
+    /// defaults (`enabled == false`) so R3's "no regression" path is
+    /// intact.
+    #[test]
+    fn u1_event_loop_config_omits_supervisor_block() {
+        let yaml = r#"
+prompt_file: "PROMPT.md"
+"#;
+        let cfg: EventLoopConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            !cfg.supervisor.enabled,
+            "event_loop config without supervisor block must default to disabled"
+        );
+        assert_eq!(cfg.supervisor.max_concurrent_workers, 4);
+        assert_eq!(cfg.supervisor.aggregate_timeout_secs, 600);
+        assert_eq!(cfg.supervisor.db_path, ".ralph/supervisor.db");
+    }
+
+    /// U1 nesting with explicit supervisor.enabled = true survives
+    /// a full EventLoopConfig parse. Required: this is the scenario
+    /// U12/U13 will exercise when wiring the dispatcher branch.
+    #[test]
+    fn u1_event_loop_config_supervises_when_enabled_true() {
+        let yaml = r#"
+supervisor:
+  enabled: true
+  max_concurrent_workers: 16
+"#;
+        let cfg: EventLoopConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.supervisor.enabled);
+        assert_eq!(cfg.supervisor.max_concurrent_workers, 16);
+        // Fields left at framework defaults must round-trip too.
+        assert_eq!(cfg.supervisor.aggregate_timeout_secs, 600);
+    }
+}
+
+/// 2026-07-03-001 plan U1: `event_loop.supervisor` block SSOT.
+///
+/// `SupervisorConfig` toggles the rusqlite-backed wave orchestrator.
+/// When `enabled == false` (default) the runtime never instantiates
+/// the supervisor store: no `.ralph/supervisor.db` is created and
+/// the legacy `WaveTracker` path takes over unchanged (R3).
+///
+/// All fields are documented in
+/// `docs/brainstorms/2026-07-03-supervisor-rusqlite-parallel-preset-requirements.md`
+/// and exist for the preset (U13) and runtime wiring (U8/U11/U12)
+/// to read. The default values must stay small enough that an
+/// accidental `enabled: true` does not consume excessive resources.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorConfig {
+    /// Master switch. When `false` the supervisor runtime path is
+    /// dormant: `SupervisorStore::open` is never called, the DB file
+    /// is not created, and the dispatcher falls back to the legacy
+    /// `WaveTracker` (R1/R3).
+    #[serde(default = "default_supervisor_enabled")]
+    pub enabled: bool,
+
+    /// SQLite database file path. Relative paths resolve against the
+    /// loop workspace (`<workspace>/.ralph/`); absolute paths are
+    /// honoured as-is. The runtime MUST refuse to start the
+    /// supervisor when the file is not openable (R-C4 / fail-closed).
+    #[serde(default = "default_supervisor_db_path")]
+    pub db_path: String,
+
+    /// Maximum number of worker slots active concurrently across all
+    /// waves. Acts as a soft backpressure ceiling: when active
+    /// workers reach this number, additional waves sit in the FIFO
+    /// `wave_queue` table until a slot frees (R-A2 / R6).
+    #[serde(default = "default_supervisor_max_concurrent_workers")]
+    pub max_concurrent_workers: u32,
+
+    /// Wall-clock budget for one wave's collect phase. When the
+    /// budget expires, partial waves are marked `timeout` and the
+    /// supervisor injects `*.wave.failed(reason=timeout)` rather
+    /// than running compensation silently (R-C3 / KTD-8).
+    #[serde(default = "default_supervisor_aggregate_timeout_secs")]
+    pub aggregate_timeout_secs: u64,
+}
+
+fn default_supervisor_enabled() -> bool {
+    false
+}
+
+fn default_supervisor_db_path() -> String {
+    ".ralph/supervisor.db".to_string()
+}
+
+fn default_supervisor_max_concurrent_workers() -> u32 {
+    4
+}
+
+fn default_supervisor_aggregate_timeout_secs() -> u64 {
+    600
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_supervisor_enabled(),
+            db_path: default_supervisor_db_path(),
+            max_concurrent_workers: default_supervisor_max_concurrent_workers(),
+            aggregate_timeout_secs: default_supervisor_aggregate_timeout_secs(),
+        }
+    }
 }
 
 /// P0-3 (2026-06-27 adversarial review): typed

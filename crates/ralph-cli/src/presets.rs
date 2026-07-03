@@ -44,6 +44,20 @@ const PRESETS: &[EmbeddedPreset] = &[
         content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-serial.yml")),
         public: true,
     },
+    // 2026-07-03-001 plan U13: supervisor parallel preset.
+    // 16 functional hats + progress-steward. Requires the
+    // `supervisor-db` feature at build time so the rusqlite
+    // store links; isolated mode + supervisor.enabled: true is
+    // required (R-SW-1 lint enforces).
+    EmbeddedPreset {
+        name: "ce-executor-supervisor",
+        description: "Isolated-mode plan-driven work execution with parallel worker fan-out via rusqlite supervisor: per-slot worktrees, fan-in merge, parallel 6-dim review, parallel fix, integration + report",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/presets/ce-executor-supervisor.yml"
+        )),
+        public: true,
+    },
     EmbeddedPreset {
         name: "debug",
         description: "Bug investigation, root-cause analysis, and adversarial fix verification",
@@ -966,6 +980,27 @@ mod tests {
             merged, preset.content,
             "Embedded ce-executor-serial must equal merge(canonical preset, schema SSOT). \
              Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-serial.yml."
+        );
+    }
+
+    /// U12 (fix-plan U12 / F-020 / R-20): the
+    /// `ce-executor-supervisor` preset must satisfy the
+    /// same SSOT byte-equality contract as
+    /// `ce-executor-serial` — the embedded copy must equal
+    /// the merge of the canonical preset YAML with the
+    /// supervisor schema SSOT. Drift between canonical +
+    /// schema breaks the lint surface (M-12) because the
+    /// lint reads from the canonical copy while the
+    /// runtime reads from the embedded merge.
+    #[test]
+    fn test_ce_executor_supervisor_root_preset_matches_embedded() {
+        let merged = merge_root_with_ssot("ce-executor-supervisor");
+        let preset = get_preset("ce-executor-supervisor")
+            .expect("ce-executor-supervisor preset should exist");
+        assert_eq!(
+            merged, preset.content,
+            "Embedded ce-executor-supervisor must equal merge(canonical preset, schema SSOT). \
+             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-supervisor.yml."
         );
     }
 
