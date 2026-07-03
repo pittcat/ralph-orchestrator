@@ -52,12 +52,17 @@ pub fn prepare_hat_channel(
 /// Merge the current hat channel into the target events file.
 ///
 /// Every JSONL record has its `hat` field (and `source` mirror) overwritten
-/// with `authoritative_hat`, then the record is appended to `target_file`.
+/// with `authoritative_hat`. In isolated mode, when `config` is provided and
+/// the record has no explicit `triggered` field, the runner backfills it from
+/// the topic's registered subscriber. This prevents the round-robin "next hat"
+/// from leaking into `triggered` (e.g. `review.dimension.ready` being tagged
+/// with `shipper` instead of `dimension-reviewer`).
 /// The channel file and its marker are removed after a successful merge.
 pub fn merge_hat_channel(
     ctx: &LoopContext,
     target_file: &Path,
     authoritative_hat: &str,
+    config: Option<&RalphConfig>,
 ) -> Result<()> {
     let Some(channel_path) = crate::loop_runner::paths::resolve_hat_channel_events_path(ctx) else {
         return Ok(());
@@ -106,6 +111,23 @@ pub fn merge_hat_channel(
                             "source".to_string(),
                             serde_json::Value::String(authoritative_hat.to_string()),
                         );
+                        // Backfill `triggered` from the topic's real subscriber
+                        // when the agent did not provide one.
+                        if !obj.contains_key("triggered") {
+                            if let Some(topic) = obj
+                                .get("topic")
+                                .and_then(|v| v.as_str())
+                            {
+                                if let Some(derived) = config
+                                    .and_then(|c| derive_triggered_for_topic(topic, c))
+                                {
+                                    obj.insert(
+                                        "triggered".to_string(),
+                                        serde_json::Value::String(derived),
+                                    );
+                                }
+                            }
+                        }
                     }
                     serde_json::to_string(&value)?
                 }
@@ -133,6 +155,22 @@ pub fn merge_hat_channel(
     let _ = fs::remove_file(crate::loop_runner::paths::current_hat_events_marker(ctx));
 
     Ok(())
+}
+
+/// Derive the `triggered` field for a business topic from the handoff index.
+///
+/// The handoff index records topics with a unique downstream consumer.
+/// Multi-consumer topics, wildcard subscribers, and control/diagnostic
+/// topics intentionally leave `triggered` unset so we do not misattribute
+/// a target.
+fn derive_triggered_for_topic(topic: &str, config: &RalphConfig) -> Option<String> {
+    if ralph_core::event_origin::is_ralph_control_topic(topic)
+        || ralph_core::is_orchestrator_diagnostic_topic(topic)
+    {
+        return None;
+    }
+    let index = ralph_core::workflow_contract::HandoffIndex::from_config(config);
+    index.consumer_of(topic).map(|id| id.to_string())
 }
 
 #[cfg(test)]
@@ -180,7 +218,8 @@ mod tests {
         .unwrap();
 
         let target = tmp.path().join(".ralph/events-main.jsonl");
-        merge_hat_channel(&ctx, &target, "review-synthesizer").unwrap();
+        merge_hat_channel(&ctx, &target, "review-synthesizer", None
+        ).unwrap();
 
         let merged = fs::read_to_string(&target).unwrap();
         assert!(merged.contains("\"topic\":\"review.passed\""));
@@ -208,7 +247,8 @@ mod tests {
         fs::write(&channel, "not-a-json-line\n").unwrap();
 
         let target = tmp.path().join(".ralph/events-main.jsonl");
-        merge_hat_channel(&ctx, &target, "executor").unwrap();
+        merge_hat_channel(&ctx, &target, "executor", None
+        ).unwrap();
 
         let merged = fs::read_to_string(&target).unwrap();
         assert!(merged.contains("not-a-json-line"));
@@ -223,9 +263,80 @@ mod tests {
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(&target, "existing\n").unwrap();
 
-        merge_hat_channel(&ctx, &target, "executor").unwrap();
+        merge_hat_channel(&ctx, &target, "executor", None
+        ).unwrap();
 
         let merged = fs::read_to_string(&target).unwrap();
         assert_eq!(merged.trim(), "existing");
+    }
+
+    #[test]
+    fn test_merge_hat_channel_backfills_triggered_from_subscriber() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = make_ctx(&tmp);
+
+        let mut config = RalphConfig::default();
+        config.event_loop.execution_mode =
+            ralph_core::config::HatExecutionMode::Isolated;
+        config.hats.insert(
+            "review-coordinator".to_string(),
+            ralph_core::HatConfig {
+                name: "Review Coordinator".to_string(),
+                triggers: vec!["review.start".to_string()],
+                publishes: vec![
+                    "review.dimension.ready".to_string(),
+                    "review.dimensions.complete".to_string(),
+                ],
+                ..Default::default()
+            },
+        );
+        config.hats.insert(
+            "dimension-reviewer".to_string(),
+            ralph_core::HatConfig {
+                name: "Dimension Reviewer".to_string(),
+                triggers: vec!["review.dimension.ready".to_string()],
+                publishes: vec![
+                    "review.dimension.done".to_string(),
+                    "review.dimension.failed".to_string(),
+                ],
+                ..Default::default()
+            },
+        );
+
+        let channel = prepare_hat_channel(&ctx, "review-coordinator", "primary-004", 1
+        )
+        .unwrap();
+        fs::write(
+            &channel,
+            r#"{"topic":"review.dimension.ready","payload":{"dimension":"goal-alignment"},"ts":"2026-07-03T00:00:00Z"}
+{"topic":"loop.cancel","payload":{},"ts":"2026-07-03T00:00:01Z"}
+{"topic":"review.dimension.ready","payload":{"dimension":"correctness"},"ts":"2026-07-03T00:00:02Z","triggered":"explicit-reviewer"}
+"#,
+        )
+        .unwrap();
+
+        let target = tmp.path().join(".ralph/events-main.jsonl");
+        merge_hat_channel(&ctx, &target, "review-coordinator", Some(&config)
+        )
+        .unwrap();
+
+        let merged = fs::read_to_string(&target).unwrap();
+        let lines: Vec<&str> = merged.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(
+            lines[0].contains("\"triggered\":\"dimension-reviewer\""),
+            "missing triggered should be backfilled from subscriber: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[1].contains("\"triggered\""),
+            "control topic should stay without triggered: {}",
+            lines[1]
+        );
+        assert!(
+            lines[2].contains("\"triggered\":\"explicit-reviewer\""),
+            "explicit triggered should be preserved: {}",
+            lines[2]
+        );
     }
 }

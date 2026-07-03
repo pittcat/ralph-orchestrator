@@ -2915,7 +2915,17 @@ async fn run_loop_impl_inner(
         let events_path = hat_channel_path
             .clone()
             .unwrap_or_else(|| resolve_emit_events_path(&ctx, state_machine_enabled));
-        let triggered_hat = event_loop.triggered_hat().map(|h| h.as_str().to_string());
+        // 2026-07-03: in isolated mode the runner no longer injects a global
+        // `RALPH_TRIGGERED_HAT`. The round-robin `next_hat` value is frequently
+        // wrong for topic-based routing (e.g. `review.dimension.ready` was being
+        // tagged with `triggered: shipper`). Instead, each `ralph emit` derives
+        // `triggered` from the topic's registered subscriber when no explicit
+        // `--triggered` / `RALPH_TRIGGERED_HAT` is provided.
+        let triggered_hat = if isolated_mode {
+            None
+        } else {
+            event_loop.triggered_hat().map(|h| h.as_str().to_string())
+        };
         inject_hat_execution_env(
             &mut effective_backend,
             display_hat.as_str(),
@@ -3255,6 +3265,7 @@ async fn run_loop_impl_inner(
                 &ctx,
                 &target_events_path,
                 display_hat.as_str(),
+                Some(&config),
             ) {
                 warn!(
                     error = %e,

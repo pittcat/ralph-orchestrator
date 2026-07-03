@@ -57,8 +57,12 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 |------|------|
 | `RALPH_EVENTS_FILE` | 非空时，直接作为事件文件路径（最高优先级） |
 | `RALPH_CURRENT_HAT` | 回退到 `--hat` |
-| `RALPH_TRIGGERED_HAT` | 回退到 `--triggered` |
+| `RALPH_TRIGGERED_HAT` | 回退到 `--triggered`。在 `execution_mode: isolated` 下，loop runner 不再注入该变量；`ralph emit` 会根据当前 topic 在 preset 中的唯一下游消费者自动推导 `triggered`；推导不出时保持为空。你不需要关心当前是什么模式，按需显式传 `--triggered` 即可，显式值始终优先。 |
 | `RALPH_EVENT_SOURCE` | 回退到 `--source` |
+
+> **`triggered` 自动推导规则**：`ralph emit` 会读取当前 workspace 配置。如果当前是 isolated 模式、你已处于某个 hat 上下文中（`RALPH_CURRENT_HAT` 已设置）、且没有显式传 `--triggered` / `RALPH_TRIGGERED_HAT`，`ralph emit` 会尝试把 `triggered` 填为当前 topic 的唯一下游目标。只有当拓扑能唯一确定下游 hat 时才填充；多消费者、无明确下游、控制/诊断 topic 都会保持 `triggered` 为空。Coordinator 模式或没有配置时保持原有注入行为不变。
+>
+> **对 agent 来说**：不需要检测当前模式。只要记住两条规则：1) 若 prompt 明确要求你触发某个 hat， emit 时带上 `--triggered <hat>`；2) 没要求时直接 emit，runner / CLI 会自动处理。
 
 **事件文件解析优先级：**
 1. 显式 `RALPH_EVENTS_FILE` 或非默认 `--file`（必须命中本 loop 的 events allowlist，否则 `ralph emit` 拒绝写入并报错；不静默回退到 marker）

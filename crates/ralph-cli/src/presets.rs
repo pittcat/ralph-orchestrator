@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        assert_eq!(presets.len(), 4, "Expected 4 public presets");
+        assert_eq!(presets.len(), 5, "Expected 5 public presets");
     }
 
     #[test]
@@ -279,11 +279,12 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 5);
         assert!(names.contains(&"autoresearch"));
         assert!(names.contains(&"ce-executor-pipeline"));
         assert!(names.contains(&"ce-executor-serial"));
         assert!(names.contains(&"debug"));
+        assert!(names.contains(&"merge-batch"));
     }
 
     #[test]
@@ -1773,6 +1774,7 @@ mod tests {
             "builtin:ce-executor-pipeline",
             "builtin:debug",
             "builtin:autoresearch",
+            "builtin:merge-batch",
         ]
         .iter()
         .map(|s| s.to_string())

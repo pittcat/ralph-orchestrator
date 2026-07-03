@@ -7,9 +7,23 @@ metadata:
 
 # Ralph CLI 核心参考
 
-> **前提**：本 skill 仅在 `memories.enabled` 或 `tasks.enabled` 至少一个启用时被注入（`crates/ralph-core/src/event_loop/mod.rs:5334-5436` `inject_memories_and_tools_skill`，门控条件在 `5399`）。速查表中的"已注入"列均受此条件约束。
+> **前提**：本 skill 仅在 `memories.enabled` 或 `tasks.enabled` 至少一个启用时被注入。速查表中的"已注入"列均受此条件约束。
 
 > **遇到不确定的命令语法时，先 `ralph <cmd> --help` 再执行。**
+
+## Runner 注入的环境变量
+
+当 `ralph run` 启动一个 hat 时，子进程会自动获得以下环境变量：
+
+| 变量 | 含义 | 何时为空 |
+|------|------|----------|
+| `RALPH_CURRENT_HAT` | 当前激活的 hat id，例如 `coordinator`、`executor` | 非 loop 场景下直接调用 `ralph emit` 时 |
+| `RALPH_CURRENT_LOOP_ID` | 当前 loop id | 同上 |
+| `RALPH_EVENTS_FILE` | 当前 loop 的事件文件路径 | 同上 |
+| `RALPH_TRIGGERED_HAT` | `ralph emit` 时默认的 `triggered` 回退值 | isolated 模式下 runner 不再注入；多消费者/无明确下游 topic 时也可能为空 |
+| `RALPH_HATS_SOURCE` | hats 来源标签，例如 `builtin:ce-executor-serial` | 无预设时 |
+
+这些变量由 runner 在每次 hat activation 前注入，agent 可直接读取，但**不要**假设某个变量一定非空。
 
 ## AI 决策速查：我现在该做什么？
 
@@ -88,7 +102,7 @@ metadata:
 | `ralph inspect profiles` | 预览 profile overlay 解析结果（只读，不启动 loop） | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph hats validate [--strict]` | 拓扑/payload/orphan/lint 校验 | `crates/ralph-cli/src/hats.rs:170`（strict 时启用 lint 所有权检查） |
 
-> **按需加载需要 hat 上下文**：`ralph tools skill load` 在 agent 上下文中要求 `RALPH_CURRENT_HAT` 已设置（`crates/ralph-cli/src/skill_cli.rs:77-87`），否则会以非零退出。如加载失败，先检查 `echo $RALPH_CURRENT_HAT` 是否非空。
+> **按需加载需要 hat 上下文**：`ralph tools skill load` 在 agent 上下文中要求 `RALPH_CURRENT_HAT` 已设置，否则会以非零退出。如加载失败，先检查 `echo $RALPH_CURRENT_HAT` 是否非空。
 
 ## 通用错误恢复
 
@@ -106,73 +120,3 @@ metadata:
 | `StateLedger replay failed` / ledger 损坏 | 进程崩溃导致 ledger 文件不完整 | `ralph loops clean --ledger` 截断损坏文件；下次启动自动 cold start 重建 |
 | `plan.blocked` / `progress_task_mismatch` | 当前 step 的 task 状态与预期不一致 | 检查 `ralph tools task list`，按需关闭/重开相关 task |
 | 任何命令失败 | 通用恢复 | 1. `ralph <cmd> --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
-
-## Agent Output Governance（2026-06-14 计划 003 — `ce-executor-serial` only）
-
-`ce-executor-serial` preset 在四个卡点上加硬规则。agent 可能遇到如下机制 — 当以下块 / 变量 / 行为出现时，按对应说明处理。
-
-### `## WAVE CONTEXT` Block（R1 — review-synthesizer only）
-
-当 `review-synthesizer` hat 被激活时，runner 在 prompt 顶部注入固定格式块：
-
-```text
-## WAVE CONTEXT
-The following wave metadata is injected by the runner. Do not count events manually — use this context.
-
-```json
-{
-  "wave_id": "w-abc",
-  "wave_total": 7,
-  "received_count": 7,
-  "expected_dimensions": ["correctness", "testing", "..."],
-  "missing_dimensions": [],
-  "ALL_DIMENSIONS_RECEIVED": true,
-  "AGGREGATE_TIMEOUT": false
-}
-```
-```
-
-- 不要重新数 `events.jsonl` — 使用此上下文。`received_count` 已经包含 dimension done 事件的最新计数。
-- 当 `ALL_DIMENSIONS_RECEIVED: true` 且 `AGGREGATE_TIMEOUT: false` 时，直接 emit `review.passed`。
-- 当 `AGGREGATE_TIMEOUT: true` 时，list 中维度未齐，按 plan 的 `skip_reason=aggregate_timeout` 走。
-- 当 `missing_dimensions` 非空时，复核是否还有未收的 worker。
-
-**等效 env var**：`RALPH_WAVE_CONTEXT`（JSON 字符串，可 `echo $RALPH_WAVE_CONTEXT | jq`）。
-
-#### Wave worker 环境变量
-
-`ralph wave emit` 派发的 dimension worker 进程会注入以下 env var：
-
-- `RALPH_WAVE_WORKER`：固定值 `1`（标记当前进程是 wave worker）。
-- `RALPH_WAVE_ID`：当前 wave 的 `wave_id`。
-- `RALPH_WAVE_INDEX`：当前 worker 在 wave 内的 0-based 索引。
-- `RALPH_EVENTS_FILE`：当前 worker 专属的 events.jsonl 路径。
-- `RALPH_WAVE_DIMENSION`：当前 worker 的分配维度；emit `review.dimension.done` 时必须用**精确等于**此值的 `dimension` 字段。
-- `RALPH_WAVE_CONTEXT`：wave 元数据 JSON，review-synthesizer / synthesizer 路径用。
-
-### `## EPHEMERAL RELOCATED` Block（R3 — review-synthesizer / executor / fixer / shipper）
-
-当 agent 在源码树下写了 `scratchpad.md` / `notes.md` / `tmp*.md` / `*.bak` 等运行时产物时，runner 在下一轮 prompt 顶部注入：
-
-```text
-## EPHEMERAL RELOCATED
-The following runtime artefacts were moved out of the source tree by the runner. Do NOT recreate these files inside the source tree; write runtime notes to `.ralph/agent/` instead.
-
-- `crates/ralph-core/scratchpad.md` → `.ralph/agent/scratchpad-{loop_id}.md` (1234 bytes appended)
-```
-
-- 已经迁移的内容在 `.ralph/agent/scratchpad-{loop_id}.md`。`cat .ralph/agent/scratchpad-*.md` 可读。
-- 不要再在源码树下重建这些文件（触发 review wave + P0 finding）。
-- 该块被首次读取后消费（`std::mem::take`），后续 hat activation 看不到 — 这是设计。
-
-### `ralph tools task ensure` 与 R4 Single-U 契约
-
-**默认关闭**。当 `ce-executor-serial` preset 启动后，`ralph run` 写 `.ralph/agent/.ralph-enforce-current-unit` marker，子进程 `ralph tools task ensure` 检测后激活契约。standalone CLI 用户可设环境变量 `RALPH_ENFORCE_CURRENT_UNIT=1`。
-
-**契约**：
-
-- key 形如 `ce-executor:{plan}:step-XX:uN-impl`（N 是数字）才被 gate。`u1a-impl` / `u1b-impl` 塌缩到 `u1`，允许并存。
-- 同一 `(loop_id, plan_name, step)` 下已 open U1 task，再 ensure `u2-impl` 时：CLI 退出非零，stderr 输出 `rejected by R4 single-U contract: ...`；ensure 返回已存在的 U1 task。
-- 同 key 重复 ensure 是幂等的 — 返回同一 task。
-- 旧 key / 非 `uN-` 形状（`step-99-impl`、`review-bug-impl` 等）**不被 gate** — 这是已知边界，**不要**依赖 R4 保护非 canonical keys。
-- 失败时不要重试同一 key — 切换到下一 U 或关闭冲突 task。

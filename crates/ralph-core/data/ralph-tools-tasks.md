@@ -64,9 +64,7 @@ ralph tools task show <task-id> [--format table|json|quiet]
 
 ### Cross-Loop and Cross-Hat Authorization
 
-When `ralph tools task` is invoked from inside a loop (`RALPH_CURRENT_HAT`
-or `RALPH_CURRENT_LOOP_ID` is set in the env, and `.ralph/current-loop-id`
-points to a real loop), the following rules apply:
+`ralph tools task` 在 loop 中调用时，runner 已注入 `RALPH_CURRENT_HAT` 和 `RALPH_CURRENT_LOOP_ID`，同时 `.ralph/current-loop-id` marker 指向真实 loop。满足这些条件时适用以下规则：
 
 - New tasks are stamped with the **current loop id** and the **current
   hat id** (`owner_hat_id`). They are not visible across loops without
@@ -84,20 +82,6 @@ points to a real loop), the following rules apply:
 - A human CLI invocation (no runtime env) may still mutate any task
   for diagnostics; a warning is printed when the target task's
   `loop_id` differs from the current marker.
-
-### Single-U Contract（2026-06-14 计划 003 R4 — `ce-executor-serial` only）
-
-**默认关闭**。当 `ce-executor-serial` preset 启动后，`ralph run` 写 `.ralph/agent/.ralph-enforce-current-unit` marker，子进程 `ralph tools task ensure` 检测后激活契约。standalone CLI 用户可设环境变量 `RALPH_ENFORCE_CURRENT_UNIT=1`。
-
-**契约规则**：
-
-- key 形如 `ce-executor:{plan}:step-XX:uN-impl`（N 是数字）才被 gate。`u1a-impl` / `u1b-impl` 塌缩到 `u1`，允许并存。
-- 同一 `(loop_id, plan_name, step)` 下已 open U1 task，再 ensure `u2-impl` 时：
-  - CLI 退出非零，stderr 输出 `rejected by R4 single-U contract: ...`。
-  - ensure 返回已存在的 U1 task（id 与 requested key 不一致）。
-- 同 key 重复 ensure 是幂等的 — 返回同一 task。
-- 旧 key / 非 `uN-` 形状（`step-99-impl`、`review-bug-impl` 等）**不被 gate** — 这是已知边界，**不要**依赖 R4 保护非 canonical keys。
-- 失败时不要重试同一 key — 切换到下一 U 或关闭冲突 task。
 
 Configure coordinator hats globally:
 

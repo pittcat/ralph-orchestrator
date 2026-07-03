@@ -300,6 +300,46 @@ pub fn emit_command_with_root(
     emit_command_with_root_and_hats(color_mode, args, root, None)
 }
 
+/// Isolated-mode helper: derive `triggered` from the handoff index when
+/// the runner injected the hat context and the agent did not explicitly
+/// request a target.
+///
+/// The handoff index records topics with a *unique* downstream consumer.
+/// In isolated mode those topics are exactly the deterministic handoffs.
+/// When a topic has multiple consumers, a wildcard subscriber, or is not
+/// registered as a handoff topic, `HandoffIndex::consumer_of` returns
+/// `None` and we leave `triggered` empty rather than guessing.
+fn maybe_derive_triggered_for_isolated(
+    topic: &str,
+    hat: Option<&str>,
+    triggered: Option<String>,
+    config: Option<&RalphConfig>,
+) -> Option<String> {
+    let Some(cfg) = config else {
+        return triggered;
+    };
+    if cfg.event_loop.execution_mode != HatExecutionMode::Isolated {
+        return triggered;
+    }
+    if hat.is_none() {
+        return triggered;
+    }
+    if triggered.is_some() {
+        return triggered;
+    }
+    if ralph_core::event_origin::is_ralph_control_topic(topic)
+        || ralph_core::is_orchestrator_diagnostic_topic(topic)
+    {
+        return triggered;
+    }
+
+    let index = ralph_core::workflow_contract::HandoffIndex::from_config(cfg);
+    index
+        .consumer_of(topic)
+        .map(|id| id.to_string())
+        .or(triggered)
+}
+
 fn emit_command_with_root_and_hats(
     color_mode: ColorMode,
     args: EmitArgs,
@@ -460,18 +500,19 @@ fn emit_command_with_root_and_hats(
     // Determine whether policy validation is required.
     let check_mode = should_policy_check_emit(&args, config.as_ref());
 
-    // Resolve provenance values: CLI flag > env var > empty
-    let (hat, triggered, source) =
-        resolve_provenance(args.hat.clone(), args.triggered, args.source, |key| {
-            std::env::var(key).ok()
-        });
-
     // Phase 2: in isolated mode the runner controls hat provenance. When the
     // agent is running inside a hat context (RALPH_CURRENT_HAT is set), the
     // CLI flag --hat is ignored and must not disagree with the environment.
     let env_hat = std::env::var("RALPH_CURRENT_HAT")
         .ok()
         .filter(|s| !s.is_empty());
+
+    // Resolve provenance values: CLI flag > env var > empty
+    let (hat, triggered, source) =
+        resolve_provenance(args.hat.clone(), args.triggered, args.source, |key| {
+            std::env::var(key).ok()
+        });
+
     let hat = if config
         .as_ref()
         .is_some_and(|c| c.event_loop.execution_mode == HatExecutionMode::Isolated)
@@ -496,6 +537,15 @@ fn emit_command_with_root_and_hats(
     } else {
         hat
     };
+
+    // 2026-07-03: isolated mode auto-derive `triggered` from the topic's
+    // registered subscriber. The runner previously set RALPH_TRIGGERED_HAT to
+    // the round-robin "next hat", which caused events like
+    // `review.dimension.ready` to be routed to the wrong hat (e.g. `shipper`
+    // instead of `dimension-reviewer`). When the agent is inside a runner-
+    // injected hat context and did not explicitly request a target, derive the
+    // target from the preset topology so the event bus routes correctly.
+    let triggered = maybe_derive_triggered_for_isolated(topic, hat.as_deref(), triggered, config.as_ref());
 
     // Enforce provenance requirements when hat is missing.
     //
@@ -993,6 +1043,10 @@ mod tests {
     use crate::cli::load_config_with_overrides;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    fn parse_config(yaml: &str) -> RalphConfig {
+        serde_yaml::from_str(yaml).expect("valid test config")
+    }
     #[test]
     fn test_emit_command_resolves_marker_relative_to_workspace_root_from_nested_dir() {
         let temp_dir = TempDir::new().expect("temp dir");
@@ -2970,6 +3024,249 @@ event_loop:
         let events =
             std::fs::read_to_string(workspace.join(".ralph/events.jsonl")).expect("read events");
         assert!(events.contains("\"task_id\":\"task-123-abc\""));
+    }
+
+    #[test]
+    fn test_emit_isolated_auto_derives_triggered_from_subscriber() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+        std::fs::write(
+            workspace.join("ralph.yml"),
+            r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["review.start", "review.dimension.done", "review.dimension.failed"]
+    publishes: ["review.dimension.ready", "review.dimensions.complete"]
+  dimension-reviewer:
+    name: "Dimension Reviewer"
+    triggers: ["review.dimension.ready"]
+    publishes: ["review.dimension.done", "review.dimension.failed"]
+  shipper:
+    name: "Shipper"
+    triggers: ["plan.complete", "plan.blocked"]
+    publishes: ["REVIEW_COMPLETE"]
+"#,
+        )
+        .unwrap();
+
+        emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: Some("review.dimension.ready".to_string()),
+                payload: r#"{"dimension":"goal-alignment","plan_name":"p","task_id":"t"}"#.to_string(),
+                json: true,
+                file: PathBuf::from(".ralph/events.jsonl"),
+                policy_check: false,
+                no_policy_check: false,
+                hat: Some("review-coordinator".to_string()),
+                triggered: None,
+                source: None,
+                schema: None,
+            },
+            Some(&workspace),
+        )
+        .expect("emit should succeed");
+
+        let events =
+            std::fs::read_to_string(workspace.join(".ralph/events.jsonl")).expect("read events");
+        assert!(
+            events.contains("\"triggered\":\"dimension-reviewer\""),
+            "expected triggered to be auto-derived to dimension-reviewer; got: {events}"
+        );
+    }
+
+    #[test]
+    fn test_emit_isolated_respects_explicit_triggered_override() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+        std::fs::write(
+            workspace.join("ralph.yml"),
+            r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["review.start", "review.dimension.done", "review.dimension.failed"]
+    publishes: ["review.dimension.ready", "review.dimensions.complete"]
+  dimension-reviewer:
+    name: "Dimension Reviewer"
+    triggers: ["review.dimension.ready"]
+    publishes: ["review.dimension.done", "review.dimension.failed"]
+  shipper:
+    name: "Shipper"
+    triggers: ["plan.complete", "plan.blocked"]
+    publishes: ["REVIEW_COMPLETE"]
+"#,
+        )
+        .unwrap();
+
+        emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: Some("review.dimension.ready".to_string()),
+                payload: r#"{"dimension":"goal-alignment","plan_name":"p","task_id":"t"}"#.to_string(),
+                json: true,
+                file: PathBuf::from(".ralph/events.jsonl"),
+                policy_check: false,
+                no_policy_check: false,
+                hat: Some("review-coordinator".to_string()),
+                triggered: Some("shipper".to_string()),
+                source: None,
+                schema: None,
+            },
+            Some(&workspace),
+        )
+        .expect("emit should succeed");
+
+        let events =
+            std::fs::read_to_string(workspace.join(".ralph/events.jsonl")).expect("read events");
+        assert!(
+            events.contains("\"triggered\":\"shipper\""),
+            "expected explicit triggered override to be preserved; got: {events}"
+        );
+        assert!(
+            !events.contains("\"triggered\":\"dimension-reviewer\""),
+            "auto-derivation should not override explicit value; got: {events}"
+        );
+    }
+
+    #[test]
+    fn test_emit_isolated_no_auto_trigger_for_control_topic() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
+        std::fs::write(
+            workspace.join("ralph.yml"),
+            r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["work.start", "task.resume", "test.passed", "review.complete", "work.failed"]
+    publishes: ["work.ready", "review.start", "plan.complete", "plan.blocked", "LOOP_COMPLETE"]
+"#,
+        )
+        .unwrap();
+
+        emit_command_with_root(
+            ColorMode::Never,
+            EmitArgs {
+                topic: Some("loop.cancel".to_string()),
+                payload: String::new(),
+                json: false,
+                file: PathBuf::from(".ralph/events.jsonl"),
+                policy_check: false,
+                no_policy_check: false,
+                hat: Some("ralph".to_string()),
+                triggered: None,
+                source: None,
+                schema: None,
+            },
+            Some(&workspace),
+        )
+        .expect("emit should succeed");
+
+        let events =
+            std::fs::read_to_string(workspace.join(".ralph/events.jsonl")).expect("read events");
+        assert!(
+            !events.contains("\"triggered\""),
+            "control topic should not get auto-derived triggered; got: {events}"
+        );
+    }
+
+    #[test]
+    fn test_maybe_derive_triggered_for_isolated() {
+        let config = parse_config(
+            r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["review.start", "review.dimension.done", "review.dimension.failed"]
+    publishes: ["review.dimension.ready", "review.dimensions.complete"]
+  dimension-reviewer:
+    name: "Dimension Reviewer"
+    triggers: ["review.dimension.ready"]
+    publishes: ["review.dimension.done", "review.dimension.failed"]
+"#,
+        );
+
+        // Auto-derives to the concrete subscriber.
+        assert_eq!(
+            maybe_derive_triggered_for_isolated(
+                "review.dimension.ready",
+                Some("review-coordinator"),
+                None,
+                Some(&config)
+            ),
+            Some("dimension-reviewer".to_string())
+        );
+
+        // Explicit value is preserved.
+        assert_eq!(
+            maybe_derive_triggered_for_isolated(
+                "review.dimension.ready",
+                Some("review-coordinator"),
+                Some("shipper".to_string()),
+                Some(&config)
+            ),
+            Some("shipper".to_string())
+        );
+
+        // Control topics are skipped.
+        assert_eq!(
+            maybe_derive_triggered_for_isolated(
+                "loop.cancel",
+                Some("ralph"),
+                None,
+                Some(&config)
+            ),
+            None
+        );
+
+        // Missing hat context is skipped.
+        assert_eq!(
+            maybe_derive_triggered_for_isolated(
+                "review.dimension.ready",
+                None,
+                None,
+                Some(&config)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_maybe_derive_triggered_for_coordinator_mode_is_noop() {
+        let config = parse_config(
+            r#"
+event_loop:
+  execution_mode: coordinator
+hats:
+  review-coordinator:
+    name: "Review Coordinator"
+    triggers: ["review.dimension.ready"]
+    publishes: ["review.dimension.ready"]
+"#,
+        );
+
+        assert_eq!(
+            maybe_derive_triggered_for_isolated(
+                "review.dimension.ready",
+                Some("review-coordinator"),
+                None,
+                Some(&config)
+            ),
+            None
+        );
     }
 }
 
