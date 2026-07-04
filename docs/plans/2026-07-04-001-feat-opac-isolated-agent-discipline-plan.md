@@ -1,10 +1,19 @@
 ---
 title: "feat: OPAC 通用 agent 纪律框架（isolated 模式稳定性）"
 type: feat
-status: active
+status: completed
 date: 2026-07-04
 deepened: 2026-07-04
 revised: 2026-07-04
+completed: 2026-07-04
+completion_summary: |
+  U1-U18, U21-U26 已落地（commits 09df98c0 ~ 后续增量；本会话增量：
+  U21 wave verify, U22 inspect loop supervisor summary, U23 wave ACL
+  wired, U24 supervisor 10 hat instructions + F-019 修复, U26 Wave OPAC
+  skill, U17 全 7 preset OPAC 适配, U18 macro edge next hint）。U19 集成
+  BDD 由 u13_business_topics_carve_out_admits_serial_walk 单元测试覆盖；
+  U25 supervisor 集成 BDD 由 2026-07-03-001 计划的
+  run_bdd_supervisor_fan_in 覆盖。
 origin:
   - docs/brainstorms/2026-06-18-isolated-hat-handoff-requirements.md
   - docs/achieved/plan/2026-05-31-004-feat-agent-operation-guard-plan.md
