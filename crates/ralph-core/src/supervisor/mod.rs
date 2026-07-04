@@ -441,3 +441,67 @@ pub use bridge::{
 // `restore_unmerged_completed_slot`) do not leak into the public
 // API; only the top-level orchestrator function is re-exported.
 pub use recover::recover_active_waves_at_startup;
+
+// U22: agent-safe supervisor summary surface for `ralph inspect loop`.
+// Reads ONLY via the SupervisorStore trait (so the implementation
+// decides where the data lives) and emits no internal paths or db
+// handles — agents see `{ active_waves, queue_depth, slot_summary[] }`
+// and nothing else.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct SupervisorInspectSummary {
+    /// Waves that have not yet reached a terminal phase.
+    pub active_waves: Vec<ActiveWaveSummary>,
+    /// Total non-terminal slot count across all active waves.
+    pub queue_depth: u32,
+    /// Per-slot digest (no `wave_id` map leaks beyond what the agent
+    /// already knows via `task_id`).
+    pub slot_summary: Vec<SlotSummaryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ActiveWaveSummary {
+    pub wave_id: String,
+    pub phase: crate::supervisor::WavePhase,
+    pub pending_units: u32,
+    pub done_units: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SlotSummaryEntry {
+    pub slot_id: u32,
+    pub hat: String,
+    pub status: String,
+}
+
+/// Build a SupervisorInspectSummary from any SupervisorStore. Pure
+/// reader — never mutates state. Hat-aware callers can post-filter
+/// `slot_summary` by their own hat_id before display.
+pub fn summarize(store: &dyn SupervisorStore) -> SupervisorInspectSummary {
+    let waves = match store.recover_active_waves() {
+        Ok(ws) => ws,
+        Err(_) => return SupervisorInspectSummary::default(),
+    };
+    let mut out = SupervisorInspectSummary::default();
+    for w in waves {
+        let pending = w.pending_count + w.in_flight_count;
+        let done = w.completed_count + w.failed_count;
+        out.active_waves.push(ActiveWaveSummary {
+            wave_id: w.wave_id,
+            phase: w.phase,
+            pending_units: pending,
+            done_units: done,
+        });
+        out.queue_depth += pending;
+    }
+    // `slot_summary` requires a per-wave read; only populate when a
+    // single active wave is present (the agent-safe `inspect loop`
+    // contract is "what's blocking my slot", not "full state dump").
+    if out.active_waves.len() == 1 {
+        let only = &out.active_waves[0];
+        // No dedicated list-slots API yet; surface the aggregate only.
+        // The per-slot digest can be expanded when U25 ships the
+        // supervisor BDD harness that needs it.
+        let _ = only;
+    }
+    out
+}

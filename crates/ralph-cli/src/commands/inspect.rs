@@ -359,6 +359,7 @@ pub async fn inspect_loop_command(
         hat_channel_size: hat_size,
         warnings,
         schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
+        supervisor: build_supervisor_summary(&config, &root),
     };
 
     match args.format {
@@ -407,6 +408,58 @@ struct LoopInspectView {
     warnings: Vec<String>,
     /// Schema version — bump on field-set changes.
     schema_version: String,
+    /// U22: agent-safe supervisor summary, present only when
+    /// `event_loop.supervisor.enabled` is true and the supervisor
+    /// store can be opened. `None` → JSON has no `supervisor` key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supervisor: Option<ralph_core::supervisor::SupervisorInspectSummary>,
+}
+
+/// U22: produce an agent-safe supervisor summary block for `inspect loop`.
+/// Returns `None` (so the JSON key is omitted) when supervisor is disabled
+/// in config; returns `Some(default)` (active_waves: [], queue_depth: 0)
+/// when the supervisor is enabled but the db is missing / cannot be opened.
+///
+/// When the `supervisor-db` feature is on AND the db is reachable the
+/// function opens the rusqlite store, calls
+/// `ralph_core::supervisor::summarize(&store)` to populate
+/// `active_waves` / `queue_depth` from the live store, and emits the
+/// resulting struct verbatim. `slot_summary[]` stays empty until U25
+/// ships the per-slot list API.
+fn build_supervisor_summary(
+    config: &RalphConfig,
+    workspace_root: &std::path::Path,
+) -> Option<ralph_core::supervisor::SupervisorInspectSummary> {
+    let supervisor_enabled = config.event_loop.supervisor.enabled;
+    if !supervisor_enabled {
+        return None;
+    }
+
+    let db_path = workspace_root.join(".ralph/supervisor.db");
+    if !db_path.exists() {
+        return Some(ralph_core::supervisor::SupervisorInspectSummary::default());
+    }
+
+    // Best-effort open: a missing / corrupt db must NOT abort the
+    // inspect command (Observe stage is read-only and best-effort).
+    // Failure paths collapse to a default summary; supervisors that
+    // need a hard signal should check `LoopState.diagnostics` instead.
+    #[cfg(feature = "supervisor-db")]
+    {
+        match ralph_core::supervisor::RusqliteSupervisorStore::open(&db_path) {
+            Ok(store) => Some(ralph_core::supervisor::summarize(&store)),
+            Err(_) => Some(ralph_core::supervisor::SupervisorInspectSummary::default()),
+        }
+    }
+    #[cfg(not(feature = "supervisor-db"))]
+    {
+        // Without the rusqlite feature the binary cannot open the
+        // supervisor store. Surface a default summary so the JSON
+        // shape stays stable; consumers pin `loop_inspect.v1` and
+        // know `active_waves: []` is the contract for "store
+        // unreachable".
+        Some(ralph_core::supervisor::SupervisorInspectSummary::default())
+    }
 }
 
 /// Resolve the canonical main + hat-channel events file paths for a
@@ -1344,6 +1397,7 @@ mod tests {
                     .to_string(),
             ],
             schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
+            supervisor: None,
         };
         assert!(view.loop_id.is_none());
         assert!(view.current_hat.is_none());
@@ -1387,6 +1441,7 @@ mod tests {
             hat_channel_size: 0,
             warnings: vec![],
             schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
+            supervisor: None,
         };
 
         let json = serde_json::to_value(&view).expect("serialise");
@@ -1401,5 +1456,30 @@ mod tests {
         );
         let denied = identity["denied_task_commands"].as_array().unwrap();
         assert!(denied.is_empty(), "coordinator denied list must be empty");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // U22 — `ralph inspect loop` supervisor summary block.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Supervisor disabled → no `supervisor` key in JSON.
+    #[test]
+    fn build_supervisor_summary_omitted_when_disabled() {
+        let cfg = RalphConfig::default();
+        let tmp = TempDir::new().expect("temp dir");
+        let out = build_supervisor_summary(&cfg, tmp.path());
+        assert!(out.is_none());
+    }
+
+    /// Supervisor enabled + no db file → default summary (empty active_waves).
+    #[test]
+    fn build_supervisor_summary_enabled_no_db_returns_default() {
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop.supervisor.enabled = true;
+        let tmp = TempDir::new().expect("temp dir");
+        let out = build_supervisor_summary(&cfg, tmp.path());
+        let summary = out.expect("enabled must yield Some");
+        assert!(summary.active_waves.is_empty());
+        assert_eq!(summary.queue_depth, 0);
     }
 }
