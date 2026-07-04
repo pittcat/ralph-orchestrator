@@ -2352,7 +2352,12 @@ hats:
       - **Missing required fields** (title, severity, file, line,
         confidence, autofix_class, owner): drop that individual
         finding, log count in Coverage.
-      - **All dimensions failed** (every `status: "failed"`): emit
+      - **All dimensions failed check**:
+        # ONLY when all 6 dimensions have status == "failed" publish
+        plan.blocked(reason="all_dimensions_failed").
+        # Mixed (some done + some failed): route through normal
+        verdict path; failed dimensions count toward residual_risks.
+        (every `status: "failed"`): emit
         `plan.blocked` with `reason: "all_dimensions_failed"` and
         the per-dim `reason` array in `details`. Do NOT emit
         `review.passed` — there is no signal to summarize.

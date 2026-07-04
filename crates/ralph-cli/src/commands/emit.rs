@@ -745,6 +745,18 @@ fn emit_command_with_root_and_hats(
                                 eprintln!("Policy warning: {}", finding.message);
                             }
                         }
+                        ralph_core::PolicyDecision::AcknowledgeAndForward(finding) => {
+                            // U2 (plan 2026-07-04-004): CLI emit
+                            // path sees the dedup carve-out. We
+                            // surface the dedup hint as a warning
+                            // and forward the event as the runtime
+                            // would; `--policy-check` callers see
+                            // the same hint via stderr.
+                            eprintln!(
+                                "Policy acknowledge+forward: {}",
+                                finding.message
+                            );
+                        }
                         ralph_core::PolicyDecision::RejectWithResume(finding)
                         | ralph_core::PolicyDecision::Hold(finding)
                         | ralph_core::PolicyDecision::Block(finding)
@@ -778,6 +790,20 @@ fn emit_command_with_root_and_hats(
                         for finding in findings {
                             eprintln!("Policy warning: {}", finding.message);
                         }
+                    }
+                    ralph_core::PolicyDecision::AcknowledgeAndForward(finding) => {
+                        // U2 (plan 2026-07-04-004): CLI precheck +
+                        // emit path sees the dedup carve-out. We
+                        // log the dedup hint as a warning and let
+                        // the event reach the bus so `--policy-check`
+                        // callers can confirm the silent-success
+                        // lane is active. Real emit (without
+                        // --policy-check) writes to the events file
+                        // as the runtime would.
+                        eprintln!(
+                            "Policy acknowledge+forward: {}",
+                            finding.message
+                        );
                     }
                     ralph_core::PolicyDecision::RejectWithResume(finding)
                     | ralph_core::PolicyDecision::Hold(finding)
@@ -2322,9 +2348,16 @@ event_loop:
 
             let loop_decision =
                 validate_event(topic, payload.as_deref(), &policy_config, &mut state);
+            // U2 (plan 2026-07-04-004): `AcknowledgeAndForward` is
+            // an "accept" from the bus-forwarding perspective. The
+            // dedup finding is logged but the event reaches the
+            // state machine. Parity test fixtures must NOT treat
+            // AcknowledgeAndForward as a rejection.
             let loop_accept = matches!(
                 loop_decision,
-                PolicyDecision::Accept | PolicyDecision::Warn(_)
+                PolicyDecision::Accept
+                    | PolicyDecision::Warn(_)
+                    | PolicyDecision::AcknowledgeAndForward(_)
             );
 
             // -- CLI path --

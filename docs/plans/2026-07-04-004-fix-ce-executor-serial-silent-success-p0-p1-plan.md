@@ -45,12 +45,12 @@ cargo nextest run -p ralph-core -- <本 Unit 测试名 substring>
 |------|--------|-------|----------------------|
 | **1** | `LoopInspectView.loop_anchor` 字段 + `LoopAnchorView` + schema bump v2 | **P0-1** | loop_anchor 在 attached / unattached 两种状态下的序列化 |
 | **2** | `PolicyDecision::AcknowledgeAndForward` 变体 + `review.dimensions.complete` dedup 拒收走 fallback | **P0-2** | 单元 enum 5 变体 + dedup 拒收不触发 task.resume |
-| **3** | preset `all_dimensions_failed` 硬门改"全 6 failed" + review-trace.json 字段写入要求 | **P0-3** | preset_lint `FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD` + trace schema |
+| **3** | preset `all_dimensions_failed` 硬门改"全 6 failed" + 新增 `FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD` 防漂移 lint | **P0-3** | preset_lint `FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD` + 现有 review-trace schema（`ce-executor-serial.yml:1642-1650` 已含 5 字段）保持 |
 | **4** | preset coordinator routing 注释升级 hard rule + `FINDING_REVIEW_COMPLETE_MISROUTED` lint | **P0-4** | preset_lint 扫描 coordinator instructions 含显式 `findings_count==0` 路由 |
 | **5** | `audit_file_modifications` 改 hard-reject（RejectWithResume）+ 新增 scope_violation policy | **P0-5** | dimension-reviewer 6 次修改 plan.md frontmatter 全部被拒 |
 | **6** | `DuplicateWorkDoneHint::ReviewDimensionsComplete` 新增 + reason_code 完整分离 | **P1-2** | review.dimensions.complete 重复 dedup 返回 distinct reason_code |
 | **7** | 用户工作区 `ralph-e2e-serial/ralph.yml` 删除 `coordinator_hats` 段 | **P1-3** | 删除后 OPAC U7 收窄生效，executor 不能创建任务 |
-| **8** | preset `mechanism.flow.unit_loop.body` 加 `review.complete` + `exempt_topics` 双轨清理 | **P1-4 + P2-1** | flow_declaration.rs lint 通过 + exempt_topics SSOT 单一 |
+| **8** | flow_declaration 新增 lint：禁止 `review.complete` 出现在 `unit_loop.body`（防漂移护栏） | **P1-4** | flow_declaration.rs lint 通过 + 现有 review_walk 拓扑不变 |
 | **9** | skill 文档同步 + drift 脚本 + 5 次 SC1 金丝雀回归 | 全部 | 5 次同 plan 同 prompt run，silent-success 永不复发 |
 
 **关键依赖关系**：
@@ -135,7 +135,7 @@ Unit 1 完结。
 
 | 测试名 | 输入 | 断言 |
 |--------|------|------|
-| `test_policy_decision_has_acknowledge_and_forward_variant` | enum shape 检查 | `PolicyDecision::AcknowledgeAndForward(PolicyFinding)` 存在 |
+| `test_policy_decision_has_acknowledge_and_forward_variant` | enum shape 检查 | `PolicyDecision::AcknowledgeAndForward(PolicyFinding)` 存在（enum 当前 6 变体：Accept / Warn / RejectWithResume / Hold / Block / Ignore；新增后 7 变体）|
 | `test_review_dimensions_complete_dedup_hit_returns_acknowledge_and_forward` | 同一 dedup_key 第二次 emit | 返回 `AcknowledgeAndForward(PolicyFinding{reason_code: "duplicate_review_dimensions_complete", ...})`，**不**返回 `RejectWithResume` |
 | `test_review_dimensions_complete_first_emit_still_accepts` | 第一次 emit | 仍返回 `Accept` |
 | `test_other_topic_dedup_still_rejects_with_resume` | `work.done` dedup 第二次 | 仍返回 `RejectWithResume`（保留原行为）|
@@ -147,15 +147,15 @@ cargo nextest run -p ralph-core -- dedup_fallback_tests
 
 ### GREEN
 
-1. `PolicyDecision` enum 加 `AcknowledgeAndForward(PolicyFinding)` 变体（位置在 `Accept` 之后）
-2. `event_policy.rs:1486-1499` `review.dimensions.complete` dedup 命中分支改返回 `AcknowledgeAndForward` 而非 `RejectWithResume`
+1. `PolicyDecision` enum 加 `AcknowledgeAndForward(PolicyFinding)` 变体（位置在 `Accept` 之后；当前 6 变体 → 7 变体）
+2. `event_policy.rs:1499` `review.dimensions.complete` dedup 命中分支改返回 `AcknowledgeAndForward` 而非 `RejectWithResume`
 3. `PolicyFinding` 复用现有结构（`reason_code` 字段填 `"duplicate_review_dimensions_complete"` 占位，U6 单元再细分）
 4. 跑测试至全绿
 
 ### REFACTOR
 
 - 检查 `event_loop/mod.rs` 所有 match `PolicyDecision` 的站点（grep `match.*PolicyDecision`），新增变体的 `_` 兜底必须是 `Accept`（不能让循环静默）
-- 当前已知 `PolicyDecision` 在 `event_policy.rs:170` enum 定义本身已经是 4 态，加第 5 态不影响 sealed-style
+- 当前已知 `PolicyDecision` 在 `event_policy.rs:170` enum 定义本身已经是 6 态（Accept / Warn / RejectWithResume / Hold / Block / Ignore），加第 7 态不影响 sealed-style
 
 ### 验收（Unit 2 完结门槛）
 
@@ -177,13 +177,16 @@ Unit 2 完结。
 ### 范围（孤岛）
 
 - **只改**：
-  - `presets/en/ce-executor-serial.yml:2355-2363`（review-synthesizer `all_dimensions_failed` 硬门措辞）
-  - `presets/en/ce-executor-serial.yml:1641-1650`（review-coordinator trace 写入字段必含 `loop_id / plan_path / plan_name`）
+  - `presets/en/ce-executor-serial.yml:2355-2358`（review-synthesizer `all_dimensions_failed` 硬门措辞改为「全 6 维度」显式约束）
   - `crates/ralph-core/src/preset_lint/review_synthesizer_block_guard.rs`（新子模块）
   - `crates/ralph-core/src/preset_lint/finding_id.rs`（新增 `FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD`）
   - `crates/ralph-core/src/preset_lint/mod.rs`（`pub mod` + `pub use` + `run_preset_lint` 调用链）
 - **禁止**：改 review-synthesizer Rust 实现（无独立 Rust 模块，仅 preset instructions 驱动）；改 dedup 逻辑；改 event_loop
 - **测试 mod**：`review_synthesizer_block_guard.rs` 内 `mod review_synthesizer_block_guard_tests`
+
+> **事实校正（plan-reviewer 2026-07-04 在位修订）**：
+> 1. `review-trace.json` schema（`ce-executor-serial.yml:1642-1650`）已包含 `loop_id / plan_path / plan_name / verified_at / review_coordinator_invocation` 全部 5 个字段——由更早的 plan 已合并；本 Unit 不再需要补 trace 字段。
+> 2. 本 Unit 的实际工作只剩 review-synthesizer `all_dimensions_failed` 措辞收紧 + 新增 `FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD` lint 防止后续漂移。
 
 ### RED（先写测试，预期失败）
 
@@ -192,23 +195,18 @@ Unit 2 完结。
 | `test_no_findings_when_no_block_guard_text` | preset `review-synthesizer` instructions 不含 "all_dimensions_failed" 字样 | 0 findings |
 | `test_warning_when_block_guard_text_uses_vague_word` | 含 "All dimensions failed" 缺 "全 6" 显式约束 | 1 finding `FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD` warn |
 | `test_no_findings_when_block_guard_text_explicit_six_dimensions` | 含 "仅当全部 6 维度 `status == \"failed\"` 时才 plan.blocked" | 0 findings |
-| `test_review_trace_required_fields_present` | preset `review-coordinator` trace 写入含 `loop_id / plan_path / plan_name` | 0 findings |
-| `test_review_trace_missing_loop_id_field_warns` | trace schema 缺 `loop_id` | 1 finding |
 
-```bash
-cargo nextest run -p ralph-cli --bin ralph -- review_synthesizer_block_guard
-# 预期：全 FAIL（finding_id 尚无 + preset 仍用旧措辞）
-```
+> 原 plan 列出的 `test_review_trace_required_fields_present` / `test_review_trace_missing_loop_id_field_warns` 已删除——trace schema 在 002 plan 已合并到位（per `ce-executor-serial.yml:1642-1650`），本 Unit 不再覆盖。
 
 ### GREEN
 
-1. preset `ce-executor-serial.yml:2355-2363` 改为：
+1. preset `ce-executor-serial.yml:2355-2358` 改为：
    ```yaml
    # All dimensions failed check:
    # ONLY when all 6 dimensions have status == "failed" publish plan.blocked(reason="all_dimensions_failed").
    # Mixed (some done + some failed): route through normal verdict path; failed dimensions count toward residual_risks.
    ```
-2. preset `ce-executor-serial.yml:1641-1650` review-coordinator trace 写入 schema 改为必含 `loop_id / plan_path / plan_name / verified_at / review_coordinator_invocation`
+2. （已合并的 trace schema 不再变更）
 3. `finding_id.rs` 新增 `pub const FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD: &str = "preset.review_synthesizer_block_guard";`
 4. 新增 `review_synthesizer_block_guard.rs` 实现 `pub fn check_review_synthesizer_block_guard(config: &RalphConfig, strictness: LintStrictness) -> Vec<LintFinding>`
 5. `preset_lint/mod.rs` 加 `pub mod review_synthesizer_block_guard; pub use review_synthesizer_block_guard::{FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD, check_review_synthesizer_block_guard};`，并在 `run_preset_lint` 调用链插入
@@ -306,34 +304,36 @@ Unit 2 完结（`PolicyDecision` 新变体可复用）。
 ### 范围（孤岛）
 
 - **只改**：
-  - `crates/ralph-core/src/event_loop/mod.rs:7652-7719`（`audit_file_modifications` 改 hard-reject）
-  - `crates/ralph-core/src/event_loop/audit.rs`（`AuditSeverity` 新增 `BlockLoop { reason: String }` 变体）
-  - `crates/ralph-core/src/event_loop/types.rs:158-167`（`TerminationReason` 新增 `ScopeViolationHardRejected` 变体）
+  - `crates/ralph-core/src/event_loop/mod.rs:7704-7712`（`audit_file_modifications` 中 dimension-reviewer scope_violation 路径改 hard-reject：从 `Fail { add_failures: 1 }` 改为 `BlockLoop { reason: "scope_violation" }`）
+  - `crates/ralph-core/src/event_loop/types.rs:158-167`（`TerminationReason` 新增 `ScopeViolationHardRejected` 变体；与已有 `ScopeViolationCircuitBreakerTripped` 并存）
   - `crates/ralph-core/src/event_loop/mod.rs:2141-2157`（`check_termination` 末尾接入新终止原因）
-- **禁止**：改 preset；改 dimension-reviewer instructions（已有 HARD RULE 831d0626 兜底）；改其它 audit 路径
+  - `crates/ralph-core/src/preset/engine/gates.rs:57-105`（`RejectionKind` enum 新增 `ScopeViolation` 变体，替换 `MissingField` 占位）
+- **禁止**：改 preset；改 dimension-reviewer instructions（已有 HARD RULE 831d0626 兜底）；改其它 audit 路径；**不新增** `AuditSeverity::BlockLoop` 变体（`event_loop/audit.rs:32` 已存在）；**不新增** `AuditDispatcher::dispatch` 分支（`event_loop/audit.rs:78-86` 已存在）
 - **测试 mod**：`event_loop/mod.rs` 内 `mod scope_violation_hard_reject_tests`
+
+> **事实校正（plan-reviewer 2026-07-04 在位修订）**：`AuditSeverity::BlockLoop { reason: String }` 变体（`event_loop/audit.rs:32`）与 `AuditDispatcher::dispatch` 的 BlockLoop 分支（`event_loop/audit.rs:78-86`）已由 2026-06-23-005 U3 + 2026-06-23-005 U4 实现；本 Unit 的实际工作是**将 `audit_file_modifications` 当前对 dimension-reviewer scope_violation 走的 `Fail { add_failures: 1 }` 路径改走 `BlockLoop { reason: "scope_violation" }` 路径**，并补齐 `check_termination` 的终止原因路由。
 
 ### RED（先写测试，预期失败）
 
 | 测试名 | 输入 | 断言 |
 |--------|------|------|
-| `test_audit_severity_has_block_loop_variant` | enum shape | `AuditSeverity::BlockLoop { reason: String }` 存在 |
-| `test_dimension_reviewer_writing_plan_md_frontmatter_emits_block_loop_audit` | mock dimension-reviewer 调 `Edit` 改 `docs/plans/X.md` frontmatter | 返回 `AuditSeverity::BlockLoop { reason: "scope_violation" }` 而非 `Fail { add_failures: 1 }` |
-| `test_other_hat_writing_plan_md_still_emits_fail_audit` | mock coordinator 调 `Edit` 改 `docs/plans/X.md` | 仍返回 `Fail { add_failures: 1 }`（scope hard-reject 仅 dimension-reviewer）|
+| `test_rejection_kind_has_scope_violation_variant` | enum shape | `RejectionKind::ScopeViolation` 存在（非 exhaustive，新变体编译过） |
+| `test_dimension_reviewer_writing_plan_md_frontmatter_emits_block_loop_audit` | mock dimension-reviewer 调 `Edit` 改 `docs/plans/X.md` frontmatter | `audit_file_modifications` 调用 `AuditDispatcher::dispatch` 收到 `AuditSeverity::BlockLoop { reason: "scope_violation" }` 而非 `Fail { add_failures: 1 }`；可通过 `consecutive_failures` 不递增 + `AuditContext::kind == ScopeViolation` 验证 |
+| `test_other_hat_writing_plan_md_still_emits_fail_audit` | mock coordinator 调 `Edit` 改 `docs/plans/X.md` | 仍走 `Fail { add_failures: 1 }`（scope hard-reject 仅 dimension-reviewer）|
 | `test_check_termination_handles_scope_violation_hard_rejected` | mock `TerminationReason::ScopeViolationHardRejected` | loop 立即终止，返回 LOOP_COMPLETE reason=`scope_violation_hard_rejected` |
-| `test_block_loop_severity_does_not_increment_consecutive_failures` | 同 test 2 路径 | `consecutive_failures` 不递增（避免影响后续 unit dispatch）|
+| `test_block_loop_severity_does_not_increment_consecutive_failures` | 同 test 2 路径 | `consecutive_failures` 不递增（验证 `AuditSeverity::BlockLoop` 分支已被走到，per `event_loop/audit.rs:78-86` 已存在行为）|
 
 ```bash
 cargo nextest run -p ralph-core -- scope_violation_hard_reject
-# 预期：全 FAIL（AuditSeverity 尚无 BlockLoop 变体）
+# 预期：除 `test_rejection_kind_has_scope_violation_variant` 外全 FAIL（AuditSeverity::BlockLoop 已存在但 dispatch 未走；`RejectionKind::ScopeViolation` 变体缺失；`check_termination` 未处理新终止原因）
 ```
 
 ### GREEN
 
-1. `AuditSeverity` enum 加 `BlockLoop { reason: String }` 变体（位置在 `BlockLoop { reason: "scope_violation" }` 现有块之后，参考 `event_loop/types.rs:158-167` 已有 `TerminationReason::ScopeViolationCircuitBreakerTripped`）
-2. `audit_file_modifications` 在 `dimension-reviewer` 路径（已用 `allowed_write_paths` 静态 lint 拦截的 hat）触发时返回 `AuditSeverity::BlockLoop { reason: "scope_violation" }` 而非 `Fail { add_failures: 1 }`
-3. `AuditDispatcher::dispatch` 新增 BlockLoop 分支：设置 `TerminationReason::ScopeViolationHardRejected`，**不**递增 `consecutive_failures`
-4. `check_termination` 末尾读取 `TerminationReason::ScopeViolationHardRejected` 触发 LOOP_COMPLETE 终止，reason 为 `"scope_violation_hard_rejected"`
+1. `RejectionKind` enum（`crates/ralph-core/src/preset/engine/gates.rs:57`）新增 `ScopeViolation` 变体（位置在 `OpenTasksBlocking` 之后），作为 `AuditContext::kind` 的 typed kind，替代 dimension-reviewer scope_violation 当前用的 `MissingField` 占位（per `event_loop/mod.rs:7708` 注释"scope_violation does not yet have a dedicated RejectionKind variant"）
+2. `event_loop/mod.rs:7704-7712` 的 `audit_file_modifications` 中调用 `AuditDispatcher::dispatch` 时，对 dimension-reviewer（**仅**此 hat，其它 hat 仍走 `Fail { add_failures: 1 }`）scope_violation 路径改为 `AuditSeverity::BlockLoop { reason: "scope_violation" }`；`AuditContext::kind` 同步改为 `RejectionKind::ScopeViolation`
+3. `TerminationReason` enum（`event_loop/types.rs:158-167`）新增 `ScopeViolationHardRejected` 变体（位置在 `ScopeViolationCircuitBreakerTripped` 之后，参考其字段结构）
+4. `event_loop/mod.rs:2141-2157` 的 `check_termination` 末尾读取 `TerminationReason::ScopeViolationHardRejected` 触发 LOOP_COMPLETE 终止，reason 为 `"scope_violation_hard_rejected"`；`AuditDispatcher::dispatch` 的 BlockLoop 分支（已存在）需要新增 effect：推送 `TerminationTrigger::BlockLoop` 到 state，或在 `check_termination` 读 `consecutive_failures` 旁的 audit-derived flag
 5. 跑测试至全绿
 
 ### REFACTOR
@@ -470,32 +470,34 @@ Unit 2 完结（dedup 后不再触发风暴，可安全扩展拓扑）。
 ### 范围（孤岛）
 
 - **只改**：
-  - `presets/en/ce-executor-serial.yml:74-94`（`unit_loop` step 的 `body` 列表加 `review.complete`，**仅**在末 unit 时触发）
-  - `presets/en/ce-executor-serial.yml:1522`（review-coordinator `exempt_topics` 块移除 `review.dimension.ready` / `review.dimensions.complete`，保持 SSOT 在 line 470-471）
-  - `crates/ralph-core/src/preset_lint/flow_declaration.rs`（如有 `unit_loop.body` 元素校验，新增 `review.complete` 校验）
-- **禁止**：改 event_loop 拓扑白名单实现；改其它 preset；改 hat routing
+  - `crates/ralph-core/src/preset_lint/flow_declaration.rs`（如有 `unit_loop.body` 元素校验，新增 lint 防止错误地把 `review.complete` 加进 `unit_loop.body`——`review.complete` 只属于 `review_walk.body`，per `ce-executor-serial.yml:108-112`；原 plan 想「加 review.complete 到 unit_loop.body」是错的）
+- **禁止**：改 event_loop 拓扑白名单实现；改其它 preset；改 hat routing；**不动** `exempt_topics` 块（review-coordinator 的 `exempt_topics` 已在 002 plan U6 删除，per `ce-executor-serial.yml:1553-1558` 注释；SSOT 单一在 line 470-471 `business_topics`）
 - **测试 mod**：`preset_lint/flow_declaration.rs` 内 `mod flow_review_complete_tests`
+
+> **事实校正（plan-reviewer 2026-07-04 在位修订）**：
+> 1. `exempt_topics` 双轨清理已由 002 plan U6 完成（per `ce-executor-serial.yml:1553-1558`「exempt_topics removed」注释）；本 Unit 不再修改 preset 该段。
+> 2. `review.complete` 不应加入 `unit_loop.body`（`unit_loop` 是 foreach over plan units，`review.complete` 在所有 unit_done 后由 `review_walk` step 触发）；原 plan 想加 `review.complete` 到 `unit_loop.body` 的设计意图与现有 flow 拓扑（`ce-executor-serial.yml:79-98` + `99-113`）冲突。
+> 3. 本 Unit 调整为：**新增 lint 防止后续误把 `review.complete` 加进 `unit_loop.body`**（防漂移护栏），覆盖原 plan §P2-1 意图但用更安全的方向。
 
 ### RED（先写测试，预期失败）
 
 | 测试名 | 输入 | 断言 |
 |--------|------|------|
-| `test_flow_declaration_accepts_review_complete_in_unit_loop_body` | preset `unit_loop.body` 含 `review.complete` | 0 findings |
-| `test_flow_declaration_warns_review_complete_in_first_unit_only` | preset `body` 在 first unit 含 `review.complete` | 1 finding（review.complete 仅允许在末 unit）|
-| `test_review_coordinator_exempt_topics_does_not_contain_serial_walk_topics` | preset review-coordinator `exempt_topics` 不含 `review.dimension.ready` / `review.dimensions.complete` | 0 findings（SSOT 在 business_topics）|
-| `test_review_coordinator_exempt_topics_warning_when_contains_serial_walk_topic` | preset review-coordinator `exempt_topics` 含 `review.dimension.ready` | 1 finding error |
+| `test_flow_declaration_accepts_review_complete_in_review_walk_body` | preset `review_walk.body` 含 `review.complete` | 0 findings（per `ce-executor-serial.yml:108-112`）|
+| `test_flow_declaration_rejects_review_complete_in_unit_loop_body` | preset `unit_loop.body` 含 `review.complete` | 1 finding error（lint 护栏：unit_loop 是 foreach over plan units，不应包含跨 unit 的 review.complete）|
+| `test_no_findings_when_other_step_body_has_review_complete` | 非 unit_loop / 非 review_walk 的 step body 含 `review.complete` | 0 findings（lint 仅约束 unit_loop 与 review_walk 两个已知位置）|
+| `test_regression_existing_review_walk_topology_unchanged` | 跑完整 preset_lint 全套 | 现有 67 个 BDD scenarios + preset_lint 全绿（确认未破坏 review_walk 既有拓扑）|
 
 ```bash
 cargo nextest run -p ralph-cli --bin ralph -- flow_review_complete
-# 预期：全 FAIL（preset 仍缺 review.complete + exempt_topics 仍双轨）
+# 预期：`test_flow_declaration_accepts_review_complete_in_review_walk_body` 全过（review.complete 在正确位置），`test_flow_declaration_rejects_review_complete_in_unit_loop_body` 与防漂移 lint 实现相关，先红再绿
 ```
 
 ### GREEN
 
-1. preset `ce-executor-serial.yml:74-94` 的 `unit_loop.body` 列表加 `review.complete`(条件约束注释："ONLY when this unit_loop is the last unit AND test.passed fired")
-2. preset `ce-executor-serial.yml:1522` review-coordinator `exempt_topics` 块移除 `review.dimension.ready` / `review.dimensions.complete`（保持 SSOT 单一在 line 470-471 的 `business_topics`）
-3. `preset_lint/flow_declaration.rs`（如有）加 `review.complete` 元素校验（仅允许末 unit）
-4. 跑测试至全绿
+1. `preset_lint/flow_declaration.rs` 新增 lint：扫描 preset flow 的 `unit_loop.body` 列表，**禁止**包含 `review.complete`（应在 `review_walk.body` 而非 `unit_loop.body`）；`unit_loop.body` 仅允许 `work.ready / work.done / work.failed / test.passed / test.failed / fix.applied / fix.exhausted`（per `ce-executor-serial.yml:83-93`）
+2. （review-coordinator `exempt_topics` 已在 002 plan U6 删除，本 Unit 不再改 preset）
+3. 跑测试至全绿
 
 ### REFACTOR
 

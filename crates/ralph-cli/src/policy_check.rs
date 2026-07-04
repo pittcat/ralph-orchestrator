@@ -1364,6 +1364,14 @@ fn finding_to_validation_error(decision: &PolicyDecision, _topic: &str) -> Optio
             let _ = findings; // intentionally not propagated as errors
             return None;
         }
+        // U2 (plan 2026-07-04-004): AcknowledgeAndForward is the
+        // dedup-carve-out return for `review.dimensions.complete`
+        // re-emits. Treat the same as `Accept` from the
+        // CLI batch-validator's perspective — the dedup finding
+        // is logged by the runtime but the payload reaches the
+        // bus. Surfacing it as an error here would defeat the
+        // carve-out (perky-maple silent-success root cause).
+        PolicyDecision::AcknowledgeAndForward(_finding) => return None,
         PolicyDecision::RejectWithResume(f)
         | PolicyDecision::Hold(f)
         | PolicyDecision::Block(f)

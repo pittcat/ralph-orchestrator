@@ -42,6 +42,11 @@ pub mod ownership;
 // rule family. Pure-YAML entry point; pairs with the
 // `WorkflowPhaseAuthority` engine.
 pub mod phase_authority;
+// 2026-07-04-004 plan U3: review-synthesizer block-guard drift
+// lint. Catches presets whose `review-synthesizer` `instructions:`
+// drift away from the explicit "all 6 dimensions status == failed"
+// invariant that the runtime relies on for silent-success detection.
+pub mod review_synthesizer_block_guard;
 pub mod schema_parity;
 // 2026-07-03-001 plan U9: supervisor preset lint rule family.
 // Three rules (R-SW-1, R-SW-2, R-COORD-4) over the raw preset
@@ -99,6 +104,12 @@ pub use hat_scope_invariant::check_hat_scope_invariant;
 pub use instructions_opac::check_instructions_opac;
 pub use metadata_runtime_drift::check_metadata_runtime_drift;
 pub use multi_hat::check_multi_hat_isolation;
+// 2026-07-04-004 plan U3: review-synthesizer block-guard drift
+// lint exported here so `run_preset_lint` (further down) and BDD
+// scenarios can call it without reaching into the submodule.
+pub use review_synthesizer_block_guard::{
+    check_review_synthesizer_block_guard, FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD,
+};
 pub use ownership::{check_owner_references, check_ownership_rules};
 pub use state_projection::check_work_done_action_chain_order;
 pub use strict_reason_routing::check_strict_reason_routing;
@@ -510,6 +521,18 @@ pub fn run_preset_lint(
     // preset-load hard gate rejects the offending preset.
     findings.extend(lint_findings_to_contract_findings(
         &check_dimension_reviewer_write_paths(config, strictness),
+    ));
+
+    // 2026-07-04-004 plan U3: review-synthesizer block-guard drift
+    // lint. Catches presets whose `review-synthesizer`
+    // `instructions:` drift away from the explicit "全 6 维度
+    // status == failed" invariant. The runtime relies on the
+    // explicit phrasing to decide between plan.blocked and the
+    // residual-risks path; loose wording is exactly what produced
+    // the 2026-07-04 silent-success run. Severity graded by
+    // strictness (Warn in default, Error in strict).
+    findings.extend(lint_findings_to_contract_findings(
+        &check_review_synthesizer_block_guard(config, strictness),
     ));
 
     // 2026-06-30-001 P0-2 (primary-20260630-032648 diagnosis):

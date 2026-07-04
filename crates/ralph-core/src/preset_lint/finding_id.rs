@@ -435,3 +435,31 @@ pub const FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER: &str =
 /// Always `Error`.
 pub const FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC: &str =
     "preset.instructions_supervisor_coordination_topic";
+
+// ──────────────────────────────────────────────────────────────────────────
+// U3 + U4 of plan 2026-07-04-004: review-synthesizer + coordinator
+// routing drift guards. The two rules below are *drift* guards
+// rather than correctness checks: they fire when the agent-facing
+// text drifts away from the "全 6 维度 + findings_count==0"
+// invariants that the runtime depends on for silent-success
+// detection. Future edits that loosen the wording are caught
+// here before they ship.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// U3 (plan 2026-07-04-004): review-synthesizer's
+/// `all_dimensions_failed` hard-gate text drifted away from the
+/// "全 6 维度 status == failed" explicit invariant. The runtime
+/// reads the synthesized text to decide whether the agent
+/// published `plan.blocked` vs `plan.complete`; loose wording
+/// (e.g. "All dimensions failed", "if any dimension failed") is
+/// exactly what produced the 2026-07-04 silent-success run.
+pub const FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD: &str =
+    "preset.review_synthesizer_block_guard";
+
+/// U4 (plan 2026-07-04-004): coordinator routing drifted away
+/// from the explicit "findings_count == 0 → plan.complete"
+/// invariant. Without this guard the runtime accepted
+/// `review.complete(verdict=blocked, findings_count=0)` as a
+/// legitimate block, which is the exact shape the silent-success
+/// run produced.
+pub const FINDING_REVIEW_COMPLETE_MISROUTED: &str = "preset.review_complete_misrouted";
