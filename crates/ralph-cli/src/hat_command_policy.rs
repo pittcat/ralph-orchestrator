@@ -122,6 +122,50 @@ pub enum PolicyDecision {
     Deny { reason: &'static str, hint: String },
 }
 
+/// U1: distinguishable configuration faults that map to the four
+/// "empty in ralph.yml" failure modes the policy can detect when an
+/// agent triggers Rule 4 (coordinator-only verb, non-coordinator hat).
+///
+/// Each variant carries its own `hint()` text so the operator sees the
+/// specific missing piece instead of the generic "tasks.coordinator_hats
+/// is empty" message we had before. The ACL upstream surfaces these in
+/// the `Deny { reason, hint }` payload; the hint is machine-stable but
+/// human-readable so `ralph` agents can match on it for recovery.
+///
+/// The split here replaces a previous split-brain design where
+/// `task_cli::load_coordinator_hats` parsed `ralph.yml` ad-hoc while
+/// `HatCommandPolicy::check_task` read the same field through
+/// `RalphConfig.tasks.coordinator_hats`. With both paths now reading
+/// the same config object, the only thing left to disambiguate is the
+/// shape of the failure — which is what `ConfigFault` captures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigFault {
+    /// `ralph.yml` (or `ralph.yaml`) does not exist in the workspace root.
+    MissingRalphYml,
+    /// `ralph.yml` exists but does not declare a `tasks:` section.
+    MissingTasksSection,
+    /// `ralph.yml` declares `tasks:` but no `coordinator_hats` key inside it.
+    MissingCoordinatorHatsKey,
+    /// `tasks.coordinator_hats` is present but empty (`[]` or missing entries).
+    CoordinatorHatsEmpty,
+}
+
+impl ConfigFault {
+    /// Human-readable, operator-actionable recovery hint.
+    ///
+    /// Each hint is intentionally different enough that an operator (or
+    /// an LLM agent) can match the failure shape from the message alone
+    /// and apply the right fix without re-reading `ralph.yml`.
+    pub fn hint(&self) -> String {
+        match self {
+            Self::MissingRalphYml => "no ralph.yml in workspace; create one with `tasks: { coordinator_hats: [coordinator] }` or run from a hat that owns the task".into(),
+            Self::MissingTasksSection => "ralph.yml has no `tasks:` section; add one with `coordinator_hats: [coordinator]`".into(),
+            Self::MissingCoordinatorHatsKey => "ralph.yml `tasks:` block exists but does not declare `coordinator_hats`; add `coordinator_hats: [coordinator]`".into(),
+            Self::CoordinatorHatsEmpty => "tasks.coordinator_hats is empty in ralph.yml; add the hat id (e.g. `coordinator`) to tasks.coordinator_hats before dispatching work".into(),
+        }
+    }
+}
+
 impl PolicyDecision {
     pub fn is_allow(&self) -> bool {
         matches!(self, Self::Allow { .. })
@@ -482,5 +526,51 @@ hats:
             let parsed = TaskCommand::parse(&s).expect("display output should parse");
             assert_eq!(*cmd, parsed);
         }
+    }
+
+    // ---- U1 deny hint 区分 4 类配置失败 ----
+
+    #[test]
+    fn deny_hint_distinguishes_missing_ralph_yml() {
+        // 缺 ralph.yml → ConfigFault::MissingRalphYml → hint 含 "ralph.yml" / "missing"
+        let fault = ConfigFault::MissingRalphYml;
+        let hint = fault.hint();
+        assert!(
+            hint.contains("ralph.yml"),
+            "MissingRalphYml hint should mention ralph.yml: {hint}"
+        );
+        assert!(
+            hint.to_lowercase().contains("missing") || hint.contains("create"),
+            "MissingRalphYml hint should signal 'missing' or 'create': {hint}"
+        );
+    }
+
+    #[test]
+    fn deny_hint_distinguishes_missing_tasks_section() {
+        let fault = ConfigFault::MissingTasksSection;
+        let hint = fault.hint();
+        assert!(
+            hint.contains("tasks:") && hint.contains("coordinator_hats"),
+            "MissingTasksSection hint should mention `tasks:` and `coordinator_hats`: {hint}"
+        );
+        // 与 MissingRalphYml 区分开(不出现 "no ralph.yml" 字面)
+        assert!(
+            !hint.contains("no ralph.yml"),
+            "MissingTasksSection should NOT say 'no ralph.yml': {hint}"
+        );
+    }
+
+    #[test]
+    fn deny_hint_distinguishes_missing_coordinator_hats_key() {
+        let fault = ConfigFault::MissingCoordinatorHatsKey;
+        let hint = fault.hint();
+        assert!(
+            hint.contains("coordinator_hats"),
+            "MissingCoordinatorHatsKey hint should mention coordinator_hats: {hint}"
+        );
+        assert!(
+            hint.contains("tasks:"),
+            "MissingCoordinatorHatsKey hint should reference tasks: block: {hint}"
+        );
     }
 }

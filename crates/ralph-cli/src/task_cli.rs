@@ -679,8 +679,8 @@ fn filter_tasks_for_ready(
 /// Executes task CLI commands.
 pub fn execute(args: TaskArgs, use_colors: bool) -> Result<()> {
     let root = args.root.clone();
-    let coordinator_hats = load_coordinator_hats(root.as_ref());
     let config = load_config_or_default(root.as_ref());
+    let coordinator_hats = config.tasks.coordinator_hats.clone();
 
     match args.command {
         TaskCommands::Add(add_args) => {
@@ -709,39 +709,6 @@ pub fn execute(args: TaskArgs, use_colors: bool) -> Result<()> {
             execute_verify_emit_bridge(bridge_args, root.as_ref())
         }
     }
-}
-
-/// Loads `tasks.coordinator_hats` from the workspace config, if any.
-///
-/// Returns an empty vec when the config file is missing, unreadable,
-/// or does not declare coordinator hats. Errors are swallowed because
-/// coordinator-hats lookup is best-effort — security defaults to
-/// "no coordinator" rather than failing the whole command.
-fn load_coordinator_hats(root: Option<&PathBuf>) -> Vec<String> {
-    let workspace = resolve_workspace_root(root);
-    for name in ["ralph.yml", "ralph.yaml"] {
-        let path = workspace.join(name);
-        if !path.exists() {
-            continue;
-        }
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&raw) else {
-            continue;
-        };
-        let Some(tasks) = value.get("tasks") else {
-            continue;
-        };
-        let Some(arr) = tasks.get("coordinator_hats").and_then(|v| v.as_sequence()) else {
-            continue;
-        };
-        return arr
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect();
-    }
-    Vec::new()
 }
 
 /// Loads the full `RalphConfig` from the workspace, falling back to
@@ -1667,8 +1634,8 @@ fn execute_verify(
     use_colors: bool,
 ) -> Result<()> {
     let root = args.root.clone();
-    let coordinator_hats = load_coordinator_hats(root.as_ref());
     let config = load_config_or_default(root.as_ref());
+    let coordinator_hats = config.tasks.coordinator_hats.clone();
     let cmd = args.command;
 
     let path = get_tasks_path(root.as_ref());
@@ -2808,10 +2775,10 @@ tasks:
         assert!(err.to_string().contains("legacy"));
     }
 
-    // ---- 协调员配置加载辅助函数测试 ----
+    // ---- U1 SSOT 回归 ----
 
     #[test]
-    fn test_load_coordinator_hats_reads_yaml() {
+    fn load_coordinator_hats_via_config_matches_explicit_yaml() {
         let temp_dir = TempDir::new().expect("temp dir");
         let root = temp_dir.path().to_path_buf();
         std::fs::write(
@@ -2820,19 +2787,34 @@ tasks:
         )
         .expect("write ralph.yml");
 
-        let hats = load_coordinator_hats(Some(&root));
+        // 不再调用旧 loader,改为通过 config 读取
+        let config = load_config_or_default(Some(&root));
         assert_eq!(
-            hats,
+            config.tasks.coordinator_hats,
             vec!["coordinator".to_string(), "executor".to_string()]
         );
     }
 
     #[test]
-    fn test_load_coordinator_hats_missing_config_is_empty() {
+    fn load_config_or_default_handles_missing_ralph_yml() {
         let temp_dir = TempDir::new().expect("temp dir");
         let root = temp_dir.path().to_path_buf();
-        let hats = load_coordinator_hats(Some(&root));
-        assert!(hats.is_empty());
+        let config = load_config_or_default(Some(&root));
+        // 缺 ralph.yml → Default::default() (event_loop.execution_mode = isolated)
+        assert!(config.tasks.coordinator_hats.is_empty());
+    }
+
+    #[test]
+    fn load_config_or_default_handles_missing_tasks_section() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path().to_path_buf();
+        std::fs::write(
+            root.join("ralph.yml"),
+            "event_loop:\n  execution_mode: isolated\n",
+        )
+        .expect("write ralph.yml");
+        let config = load_config_or_default(Some(&root));
+        assert!(config.tasks.coordinator_hats.is_empty());
     }
 
     // ---- empty task_id guard tests ----
