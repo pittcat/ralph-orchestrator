@@ -4687,6 +4687,11 @@ impl EventLoop {
             let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
             let with_state_files = self.prepend_state_files(with_scratchpad);
             let final_prompt = self.prepend_ready_tasks(with_state_files);
+            // U18: macro edge next hint — when `event_loop.macro_edge_next_hint.enabled`
+            // is true, prepend a one-line `## NEXT ACTION` derived from the most recent
+            // accepted business event payload's `next_hint` field (≤120 chars). When the
+            // feature is disabled or no hint is available the prepend is a no-op.
+            let final_prompt = self.prepend_macro_next_hint(final_prompt, &regular_events, hat_id);
             // U4b: see solo-mode comment above. In isolated
             // mode the lint hint routes to the *source* hat
             // (the one that emitted the rejected event), so the
@@ -6337,6 +6342,57 @@ impl EventLoop {
     /// hat has nothing to fix. Solo / coordinator modes always
     /// inject because `hat_id` is `"ralph"` (the orchestrator
     /// itself, which sees every hat's alerts).
+    fn prepend_macro_next_hint(
+        &self,
+        prompt: String,
+        regular_events: &[ralph_proto::Event],
+        hat_id: &HatId,
+    ) -> String {
+        // U18 (P2): macro edge next hint. The flag defaults to disabled;
+        // when off we are a no-op so existing loops are unaffected.
+        let flag = self
+            .config
+            .event_loop
+            .macro_edge_next_hint
+            .enabled;
+        if !flag {
+            return prompt;
+        }
+
+        // Only the dispatcher hat (the one that received the macro
+        // edge event) sees the hint; coordinators do not need it
+        // because the runtime already routes them.
+        if hat_id.as_str() == "ralph" {
+            return prompt;
+        }
+
+        // Find the most recent accepted business event whose payload
+        // carries a `next_hint` string. We scan backwards so the
+        // latest hint wins (older hints are stale).
+        let mut hint: Option<String> = None;
+        for ev in regular_events.iter().rev() {
+            let payload_str = ev.payload.to_string();
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload_str) {
+                if let Some(s) = val.get("next_hint").and_then(|v| v.as_str()) {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        // Cap at 120 chars (U18 contract). Truncate at
+                        // a char boundary so multi-byte codepoints are
+                        // not sliced.
+                        let cap = trimmed.chars().take(120).collect::<String>();
+                        hint = Some(cap);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let Some(hint) = hint else { return prompt };
+        format!(
+            "## NEXT ACTION\n\n{hint}\n\n---\n\n{prompt}",
+        )
+    }
+
     fn inject_pending_lint_resume(&mut self, prompt: String, hat_id: &HatId) -> String {
         let Some(hint) = self.state.pending_lint_resume.take() else {
             return prompt;

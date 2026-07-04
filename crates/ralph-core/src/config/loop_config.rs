@@ -391,6 +391,22 @@ pub struct EventLoopConfig {
     /// override per-workspace in `ralph.yml`.
     #[serde(default)]
     pub supervisor: SupervisorConfig,
+
+    /// U18 (P2): macro edge next hint — when `enabled` is true, the
+    /// loop prepends a one-line `## NEXT ACTION` block derived from the
+    /// most recent accepted business event payload's optional
+    /// `next_hint` field (≤120 chars). Defaults to disabled so existing
+    /// loops are unaffected.
+    #[serde(default)]
+    pub macro_edge_next_hint: MacroEdgeNextHintConfig,
+}
+
+/// Configuration for the macro-edge next hint (U18 P2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MacroEdgeNextHintConfig {
+    /// Whether to inject the `## NEXT ACTION` block.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// 2026-06-16-001 U5: per-preset configuration for the loop-level
@@ -504,6 +520,8 @@ impl Default for EventLoopConfig {
             // zero-regression contract holds even when older
             // RalphConfig default serialisations flow through.
             supervisor: SupervisorConfig::default(),
+            // U18: macro edge next hint defaults to disabled.
+            macro_edge_next_hint: MacroEdgeNextHintConfig::default(),
         }
     }
 }
