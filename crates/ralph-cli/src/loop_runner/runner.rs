@@ -1871,6 +1871,13 @@ async fn run_loop_impl_inner(
                     // `source` field on the payload carries the
                     // classification.
                     TerminationReason::CompletionStuck(_) => "completion_stuck",
+                    // U5 (plan 2026-07-04-004): dimension-reviewer
+                    // scope_violation hard-reject. Stable string
+                    // for history / loop-termination-reason.json
+                    // aggregation; matches `as_str()`.
+                    TerminationReason::ScopeViolationHardRejected { .. } => {
+                        "scope_violation_hard_rejected"
+                    }
                 };
 
                 if matches!(reason, TerminationReason::Interrupted) {
@@ -1970,6 +1977,18 @@ async fn run_loop_impl_inner(
                         // for the merge-queue needs-review label.
                         TerminationReason::CompletionStuck(_) => {
                             "completion stuck (correction exhausted or structural rejection)"
+                        }
+                        // U5 (plan 2026-07-04-004): dimension-reviewer
+                        // scope_violation hard-reject. Merge-queue
+                        // surfaces this as a typed needs-review
+                        // label so dashboards can filter on it.
+                        TerminationReason::ScopeViolationHardRejected { hat, diff_stat } => {
+                            // Inline format keeps the merge-queue
+                            // record terse; full payload lives in
+                            // `loop-termination-reason.json` via
+                            // the variant fields.
+                            let _ = (hat, diff_stat);
+                            "dimension-reviewer scope_violation (hard-rejected)"
                         }
                     };
                     if let Err(e) = queue.mark_needs_review(loop_id, reason_str) {

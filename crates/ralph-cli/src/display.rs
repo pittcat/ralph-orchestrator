@@ -297,6 +297,17 @@ pub fn print_termination(
             "⏸",
             "Completion stuck (correction exhausted or structural rejection)",
         ),
+        // U5 (plan 2026-07-04-004): dimension-reviewer
+        // scope_violation hard-reject. Same red `✗` glyph as
+        // the related `ScopeViolationCircuitBreakerTripped`
+        // row so operators see the same severity class. The
+        // label distinguishes the two so dashboards can tell
+        // "first violation" from "4 retries then tripped".
+        TerminationReason::ScopeViolationHardRejected { .. } => (
+            RED,
+            "✗",
+            "dimension-reviewer scope_violation (hard-rejected)",
+        ),
     };
 
     let separator = "-".repeat(58);

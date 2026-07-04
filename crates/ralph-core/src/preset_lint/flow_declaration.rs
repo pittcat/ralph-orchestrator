@@ -30,7 +30,7 @@ use crate::preset_lint::LintFinding;
 use crate::preset_lint::finding_id::{
     FINDING_FLOW_DECLARATION_MISSING, FINDING_FLOW_PARTIAL_BRANCH_EMPTY,
     FINDING_FLOW_PARTIAL_STATE_UNDECLARED, FINDING_FLOW_TERMINAL_EMIT_MISSING,
-    FINDING_FLOW_UNKNOWN_EMIT_REJECTED,
+    FINDING_FLOW_UNKNOWN_EMIT_REJECTED, FINDING_FLOW_REVIEW_COMPLETE_IN_UNIT_LOOP_BODY,
 };
 use serde_yaml::Value;
 
@@ -147,7 +147,94 @@ pub fn check_flow_declaration(raw_yaml: &str) -> Result<Vec<LintFinding>, FlowPa
         }
     }
 
+    // 4. U8 (plan 2026-07-04-004): `review.complete` MUST NOT
+    //    appear in `unit_loop.body`. The unit_loop is
+    //    `foreach over plan units`; `review.complete` only
+    //    fires after all units are done via the `review_walk`
+    //    step. Mixing the two produces a state machine where
+    //    the runtime tries to route a single per-unit
+    //    iteration through the per-plan review pipeline —
+    //    exactly the shape that produced the 2026-07-04
+    //    silent-success run. Severity is `Error` regardless of
+    //    strictness because the rule is purely structural.
+    findings.extend(check_review_complete_not_in_unit_loop_body(raw_yaml));
+
     Ok(findings)
+}
+
+/// U8 (plan 2026-07-04-004) helper: scan the raw YAML's
+/// `mechanism.flow.steps[]` list; for any step whose `id` is
+/// `unit_loop`, ensure `body` does NOT include `review.complete`.
+///
+/// `review.complete` is the terminal topic of the per-plan
+/// `review_walk` step (after all units are done). It belongs in
+/// `review_walk.body` (or the review step's `terminal_emits`),
+/// NOT in `unit_loop.body`. Surfacing this guard at preset-load
+/// time prevents the silent-success anti-pattern where the
+/// runtime tries to fire per-plan review inside a per-unit loop.
+///
+/// Returns zero findings when no `unit_loop` step is declared
+/// (presets without the foreach semantics — e.g.
+/// `ce-executor-pipeline` — are out of scope).
+fn check_review_complete_not_in_unit_loop_body(raw_yaml: &str) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Ok(value) = serde_yaml::from_str::<Value>(raw_yaml) else {
+        return findings;
+    };
+
+    let Some(steps) = value
+        .get("mechanism")
+        .and_then(|m| m.get("flow"))
+        .and_then(|f| f.get("steps"))
+        .and_then(|s| s.as_sequence())
+    else {
+        return findings;
+    };
+
+    for step in steps {
+        let id = step.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if id != "unit_loop" {
+            continue;
+        }
+        let Some(body) = step.get("body").and_then(|b| b.as_sequence()) else {
+            continue;
+        };
+        for topic in body {
+            let topic_name = topic.as_str().unwrap_or("");
+            // Match `review.complete` and any topic that
+            // starts with `review.complete` (e.g.
+            // `review.complete.foo`) so a future topic
+            // family cannot smuggle in the anti-pattern.
+            if topic_name == "review.complete" || topic_name.starts_with("review.complete.") {
+                let mut f = LintFinding::new(
+                    FINDING_FLOW_REVIEW_COMPLETE_IN_UNIT_LOOP_BODY,
+                    format!(
+                        "step 'unit_loop' body contains `{}`; review.complete is the \
+                         per-plan review_walk terminal topic (after all units are done) \
+                         and MUST NOT appear in unit_loop.body. The unit_loop is \
+                         `foreach over plan units`; review.complete belongs in \
+                         review_walk.body or the review step's terminal_emits. \
+                         Mixing the two produces the silent-success shape where the \
+                         runtime tries to fire per-plan review inside a per-unit loop.",
+                        topic_name
+                    ),
+                );
+                // `unit_loop` step id for the dashboard filter.
+                f.hat = Some("unit_loop".to_string());
+                f.action_hint = Some(format!(
+                    "Move `{}` from unit_loop.body to review_walk.body (or to the \
+                     review step's terminal_emits). The unit_loop only emits per-unit \
+                     events: work.ready, work.done, work.failed, test.passed, \
+                     test.failed, fix.applied, fix.exhausted.",
+                    topic_name
+                ));
+                // Severity stays Error — structural mismatch.
+                findings.push(f);
+            }
+        }
+    }
+
+    findings
 }
 
 fn missing_flow_finding(detail: &str) -> LintFinding {

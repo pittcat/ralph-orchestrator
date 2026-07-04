@@ -18,6 +18,18 @@ pub const FINDING_INVALID_TOPIC_FORMAT: &str = "preset.invalid_topic_format";
 /// `Pass` severity for informational purposes.
 pub const FINDING_WHITELIST_EXEMPT_TOPIC: &str = "preset.whitelist_exempt_topic";
 
+/// U8 (plan 2026-07-04-004): `mechanism.flow.<step>.body` contains
+/// `review.complete` on a `unit_loop`-shaped step. The unit_loop
+/// is `foreach over plan units`; `review.complete` only fires
+/// after all units are done via the `review_walk` step. Mixing
+/// the two produces a state machine where the runtime tries to
+/// route a single per-unit iteration through the per-plan review
+/// pipeline — exactly the shape that produced the 2026-07-04
+/// silent-success run. Severity: `Error` (structural
+/// topology mismatch; not a stylistic warning).
+pub const FINDING_FLOW_REVIEW_COMPLETE_IN_UNIT_LOOP_BODY: &str =
+    "preset.flow_review_complete_in_unit_loop_body";
+
 // ──────────────────────────────────────────────────────────────────────────
 // U2: Ownership & coordinator finding IDs
 // ──────────────────────────────────────────────────────────────────────────
