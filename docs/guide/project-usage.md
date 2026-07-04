@@ -55,12 +55,12 @@ ralph init --list-presets
 
 ```bash
 cargo build
-cargo test
-cargo test -p ralph-core smoke_runner
+./scripts/run-tests.sh
+cargo nextest run -p ralph-core --features recording --test smoke_runner
 cargo run -p ralph-e2e -- --mock
 ```
 
-本仓库的 `AGENTS.md` 要求：改完代码前至少跑 `cargo test`；事件循环和运行时改动还应优先跑 replay-based smoke tests。
+本仓库的 `AGENTS.md` 要求：改完代码前至少跑 `./scripts/run-tests.sh`；事件循环和运行时改动还应优先跑 replay-based smoke tests。如果全量基线出现竞态/时序 flake（如 `ralph-cli` `loop_runner` 相关测试报 Mutex/timeout 错误），先用 `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` 强制单线程 cargo test 兜底；serial fallback 仍失败才是真失败。
 
 ## Ralph 启动后发生什么
 
@@ -365,7 +365,7 @@ ralph run -c ralph.yml -c core.specs_dir=.ralph/specs -p "按 spec 实现"
 
 ## `ralph.yml`
 
-`ralph.yml` 是项目默认配置。当前仓库的 `ralph.yml` 用的是 Pi 后端，并定义了一个适合 Rust workspace 的多 hat 工作流。
+`ralph.yml` 是项目默认配置。当前仓库的 `ralph.yml` 用的是 **Claude** 后端，并定义了一个适合 Rust workspace 的多 hat 工作流。
 
 核心结构：
 
@@ -377,7 +377,7 @@ event_loop:
   starting_event: work.start
 
 cli:
-  backend: pi
+  backend: claude
 
 core:
   specs_dir: ./specs/
@@ -439,7 +439,7 @@ flowchart LR
 
 ```yaml
 cli:
-  backend: pi
+  backend: claude
   prompt_mode: arg
 ```
 
@@ -473,7 +473,9 @@ cli:
 
 ### `backpressure`
 
-当前 `ralph.yml` 里有 backpressure gates：
+> **注意**：`backpressure` 不是 Ralph 配置 schema 的正式字段（不在 `RalphConfig` 中）。它只是本项目的本地约定 / 外部工具 gate，写在 `ralph.yml` 里供外部脚本或 agent guardrail 消费；Ralph 运行时本身不会解析或执行该块。
+
+当前 `ralph.yml` 里的 backpressure gates 示例：
 
 ```yaml
 backpressure:
@@ -483,10 +485,10 @@ backpressure:
     - name: clippy
       command: cargo clippy --all-targets --all-features -- -D warnings
     - name: test
-      command: cargo test --all
+      command: ./scripts/run-tests.sh
 ```
 
-backpressure 的目标不是“教 agent 每一步怎么做”，而是让不合格结果不能通过。比如 build 或 review 事件缺少测试、lint、typecheck 证据时，Ralph 可以拒绝它并把原因反馈给下一轮。
+它的目标是“让不合格结果不能通过”。由于 Ralph 不会直接解析 `backpressure`，实际门禁需要由 agent 的 guardrail、hook 或外部工具来实现。
 
 ### `memories` 和 `tasks`
 
@@ -574,9 +576,9 @@ Rules of engagement:
 - 加回归测试
 
 ## Verification
-- `cargo test -p ralph-core task_store`
-- `cargo test -p ralph-cli resume`
-- 最终运行 `cargo test`
+- `cargo nextest run -p ralph-core -- task_store`
+- `cargo nextest run -p ralph-cli --bin ralph -- resume`
+- 最终运行 `./scripts/run-tests.sh`
 
 ## Completion
 完成后输出 `LOOP_COMPLETE`。
@@ -623,10 +625,12 @@ ralph run -c ralph.yml -H builtin:debug -p "排查某个问题"
 
 | preset | 适合场景 | 特点 |
 |---|---|---|
-| `ce-executor-serial` | 默认实现任务 | Plan-driven 执行、wave review、auto-fix、manager report |
-| `ce-executor-serial` | 并行计划执行 | 多维并行 review + aggregate，适合大 plan step |
-| `debug` | bug 排查 | 先复现和假设，再修复和验证 |
 | `autoresearch` | 指标驱动实验 | 尝试想法、测量、保留有效改动、丢弃无效改动 |
+| `ce-executor-pipeline` | 单阶段计划执行 | 一次执行整个 plan，6 维串行 review + aggregate，适合中小型 plan |
+| `ce-executor-serial` | 默认实现任务 | Plan-driven 分 unit 执行、TDD executor + validator、6 维串行 review、auto-fix、manager report |
+| `ce-executor-supervisor` | 大型计划执行 | supervisor 派发 per-slot worktree，并行 review/fix，需要 `--features supervisor-db` |
+| `debug` | bug 排查 | 先复现和假设，再修复和验证 |
+| `merge-batch` | 批量 merge | Git-first 多 worktree 批量 merge：review → integrate → stabilize → report |
 
 仓库里还有 `presets/wave-review.yml`，用于演示 wave 并行审查；`presets/hatless-baseline.yml` 用于测试无 hats 基线。
 
@@ -655,7 +659,7 @@ ralph run -c ralph.yml -H builtin:debug -p "排查某个问题"
 
 | 文件 | 用途 | 典型命令 |
 |---|---|---|
-| `ralph.yml` | 当前项目默认开发工作流，Pi 后端，planner/builder/reviewer/finalizer | `ralph run -c ralph.yml -P PROMPT.md` |
+| `ralph.yml` | 当前项目默认开发工作流，Claude 后端，planner/builder/reviewer/finalizer | `ralph run -c ralph.yml -P PROMPT.md` |
 | `ralph.qa.yml` | 事件循环、TUI、路由、backpressure、配置解析等高风险改动的 QA 工作流 | `ralph run -H ralph.qa.yml -p "QA event loop changes"` |
 | `ralph.reviewer.yml` | 回归感知 PR 审查，会用 worktree 隔离 checkout 并跑测试 | `ralph run -H ralph.reviewer.yml -p "Review PR #207"` |
 | `ralph.e2e.yml` | E2E 测试开发/修复专用，使用独立 scratchpad | `ralph run -c ralph.e2e.yml -p ".ralph/specs/e2e-test-fixes.spec.md"` |
@@ -707,7 +711,7 @@ event 是 hats 之间传递控制权的消息。它至少有 topic，通常还�
 发布事件：
 
 ```bash
-ralph emit "subtask.done" "Implemented config parser test; cargo test -p ralph-core passed"
+ralph emit "subtask.done" "Implemented config parser test; cargo nextest run -p ralph-core passed"
 ```
 
 发布 JSON payload：
@@ -959,10 +963,12 @@ ralph run -c ralph.yml -H .ralph/hats/my-workflow.yml -p "实现一个小功能"
 
 | 位置 | 用途 |
 |---|---|
-| `presets/*.yml` | canonical preset 源文件 |
-| `presets/index.json` | 内置 preset 列表 |
-| `crates/ralph-cli/presets/*.yml` | CLI embedded mirror |
-| `scripts/sync-embedded-files.sh` | 同步脚本 |
+| `presets/en/<name>.yml` | canonical preset 源文件 |
+| `presets/manifest.yml` | `embedded:` 列表 |
+| `crates/ralph-cli/src/presets.rs` | 内嵌 `PRESETS` 数组 |
+| `presets/index.json` | 对用户可见的内置 preset 索引（public preset） |
+| `CLAUDE.md` / `AGENTS.md` | 项目 guidance 里的 preset 列表 |
+| `scripts/ralph-zsh-plugin.zsh` | `builtin:<name>` 的 zsh 补全 |
 
 ## 配置排错清单
 

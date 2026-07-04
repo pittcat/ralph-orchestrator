@@ -16,8 +16,11 @@ ralph run -c ralph.yml -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
 | Collection | Hats | Best for | Notes |
 |---|---|---|---|
 | `autoresearch` | autonomous experiment loop | Try ideas, measure, keep what works | Optimization loop with self-scoring |
-| `ce-executor-serial` | plan-driven work exec with serial code review, auto-fix, shipping, manager report | Plan-driven implementation | Recommended default; isolated multi-hat |
+| `ce-executor-pipeline` | linear pipeline: plan reviewer → executor → 6 serial dimension reviewers → synthesizer → fixer → alignment → reporter | Plan-driven implementation | One-shot whole-plan execution; isolated multi-hat |
+| `ce-executor-serial` | `coordinator`, `executor`, `validator`, `fixer`, `review-coordinator`, `dimension-reviewer`, `review-synthesizer`, `shipper`, `reporter`, `progress-steward` | Plan-driven implementation | Recommended default; per-unit TDD + validator + 6-dimension serial review; isolated multi-hat |
+| `ce-executor-supervisor` | supervisor + per-slot worktrees + parallel workers + parallel 6-dim review/fix + integrator + reporter | Large plan-driven implementation | Requires `--features supervisor-db`; isolated multi-hat |
 | `debug` | `investigator`, `tester`, `fixer`, `verifier` | Root-cause debugging | Strong on repro and fix verification |
+| `merge-batch` | reviewer → integrator → stabilizer (self-loop) → reporter | Git-first batch merge across worktrees | Isolated multi-hat |
 
 ## Internal Presets
 
@@ -61,19 +64,27 @@ ralph run -c ralph.yml -H .ralph/hats/my-flow.yml -p "..."
 | Collection | Canonical source | Hats | Start event | Completion | Best for |
 |---|---|---|---|---|---|
 | `autoresearch` | `presets/en/autoresearch.yml` | experiment loop | `experiment.start` (default) | `LOOP_COMPLETE` (default) | Autonomous idea/measure/keep/discard loop |
-| `bugfix` | `presets/bugfix.yml` | `reproducer`, `fixer`, `verifier`, `committer` | `repro.start` | `LOOP_COMPLETE` (default) | Reproduce/fix/verify/commit bug workflow |
+| `ce-executor-pipeline` | `presets/en/ce-executor-pipeline.yml` | linear pipeline: plan reviewer → executor → 6 serial dimension reviewers → synthesizer → fixer → alignment → reporter | `work.start` | `LOOP_COMPLETE` | One-shot plan-driven execution with serial 6-dimension review, auto-fix, and manager report (isolated mode) |
+| `ce-executor-serial` | `presets/en/ce-executor-serial.yml` | `coordinator`, `executor`, `validator`, `fixer`, `review-coordinator`, `dimension-reviewer`, `review-synthesizer`, `shipper`, `reporter`, `progress-steward` | `work.start` | `LOOP_COMPLETE` | Plan-driven execution with per-unit TDD, validator, serial 6-dimension review (goal-alignment → correctness → testing → maintainability → project-standards → adversarial), auto-fix, and manager report (isolated mode) |
+| `ce-executor-supervisor` | `presets/en/ce-executor-supervisor.yml` | supervisor + per-slot worktrees + parallel workers + parallel 6-dim review/fix + integrator + reporter | `work.start` | `LOOP_COMPLETE` | Large plan-driven execution with supervisor fan-out, parallel review/fix, and merge report (requires `--features supervisor-db`; isolated mode) |
 | `debug` | `presets/en/debug.yml` | `investigator`, `tester`, `fixer`, `verifier` | `debug.start` | `DEBUG_COMPLETE` | Root-cause debugging and hypothesis testing |
+| `merge-batch` | `presets/en/merge-batch.yml` | reviewer → integrator → stabilizer (self-loop) → reporter | `merge.start` | `MERGE_COMPLETE` | Git-first batch merge across worktrees |
+| `merge-loop` | `presets/en/merge-loop.yml` | `merger`, `resolver`, `tester`, `cleaner`, `failure_handler` | `merge.start` | `MERGE_COMPLETE` | Internal merge/worktree automation |
+
+The presets above are the supported builtin and internal presets. The rows below are historical workflow **examples** that are **not shipped as builtins**; use them as templates or author your own.
+
+| Collection | Canonical source | Hats | Start event | Completion | Best for |
+|---|---|---|---|---|---|
+| `bugfix` | `presets/bugfix.yml` | `reproducer`, `fixer`, `verifier`, `committer` | `repro.start` | `LOOP_COMPLETE` (default) | Reproduce/fix/verify/commit bug workflow |
 | `deploy` | `presets/deploy.yml` | `builder`, `deployer`, `verifier` | `task.start` (default) | `LOOP_COMPLETE` | Deployment and release workflows |
 | `docs` | `presets/docs.yml` | `writer`, `reviewer` | `task.start` (default) | `DOCS_COMPLETE` | Documentation writing and review |
 | `feature` | `presets/feature.yml` | `builder`, `reviewer` | `task.start` (default) | `LOOP_COMPLETE` | Feature development with integrated review |
 | `fresh-eyes` | `presets/fresh-eyes.yml` | `builder`, `fresh_eyes_auditor`, `fresh_eyes_gatekeeper` | `fresh_eyes.start` | `LOOP_COMPLETE` | Enforced repeated skeptical self-review passes |
 | `gap-analysis` | `presets/gap-analysis.yml` | `analyzer`, `verifier`, `reporter` | `gap.start` | `GAP_ANALYSIS_COMPLETE` | Spec-vs-implementation auditing |
-| `merge-loop` | `presets/en/merge-loop.yml` | `merger`, `resolver`, `tester`, `cleaner`, `failure_handler` | `merge.start` | `MERGE_COMPLETE` | Internal merge/worktree automation |
 | `pr-review` | `presets/pr-review.yml` | `correctness_reviewer`, `security_reviewer`, `architecture_reviewer`, `synthesizer` | `task.start` (default) | `LOOP_COMPLETE` | Multi-perspective PR review |
 | `refactor` | `presets/refactor.yml` | `refactorer`, `verifier` | `task.start` (default) | `REFACTOR_COMPLETE` | Incremental, verified refactoring |
 | `spec-driven` | `presets/spec-driven.yml` | `spec_writer`, `spec_reviewer`, `implementer`, `verifier` | `spec.start` | `LOOP_COMPLETE` (default) | Specification-driven implementation |
 | `wave-review` | `presets/zh/wave-review-zh.yml` (zh-only reference) | `coordinator`, `reviewer` (x3), `synthesizer` | `review.start` | `LOOP_COMPLETE` | Specialized parallel code review (wave-enabled) |
-| `ce-executor-serial` | `presets/en/ce-executor-serial.yml` | `coordinator`, `executor`, `review-coordinator`, `dimension-reviewer` (serial), `review-synthesizer` (aggregate), `fixer`, `plan-gate`, `shipper`, `reporter` | `work.start` | `LOOP_COMPLETE` | Plan-driven execution with serial 4-dimension review (correctness → testing → maintainability → requirements), auto-fix, and manager report (isolated mode) |
 
 ## Why The Builtin Set Is Small
 
@@ -105,14 +116,17 @@ ralph run -c ralph.yml -H builtin:debug -p "Investigate why login fails on mobil
 
 ### ce-executor Workflow
 
-`ce-executor-serial` is the only plan-driven execution builtin. It uses serial 4-dimension code review, auto-fix, and manager reporting.
+`ce-executor-serial`, `ce-executor-pipeline`, and `ce-executor-supervisor` are the plan-driven execution builtins. `ce-executor-serial` uses per-unit TDD execution, a validator, and serial 6-dimension code review, auto-fix, and manager reporting.
 
-**Key characteristics:**
+**`ce-executor-serial` key characteristics:**
 - Does not auto-create feature branches (runs on current checkout)
 - Records `start_sha` at startup to anchor review scope
-- Review stage walks 4 dimensions strictly serially (correctness → testing → maintainability → requirements)
+- Executor writes tests first, then implements; validator runs the full test suite after each unit
+- Review stage walks 6 dimensions strictly serially (goal-alignment → correctness → testing → maintainability → project-standards → adversarial)
 - Blocks all push operations (local commit only)
-- Includes a `plan-gate` hat that reconciles review verdict against `plan.md` / `progress.md` and decides whether to advance to the next step or complete the plan
+- Coordinator directly advances units and creates fix-unit tasks from the review synthesizer's fix plan
+
+For one-shot whole-plan execution, use `ce-executor-pipeline`. For large plans with supervisor fan-out to per-slot worktrees, use `ce-executor-supervisor` (requires `--features supervisor-db`).
 
 **When to use `--worktree`:**
 - Multiple parallel ce-executor-serial runs
@@ -276,7 +290,7 @@ If any required event is not on all completion paths, adjust your hat topology s
 The same topology validator also runs automatically during `ralph preflight` and `ralph run` (as the `preset-topology` preflight check). This catches bad preset configurations before any backend API call is made:
 
 ```bash
-ralph preflight -c ralph.yml -H builtin:ce-executor
+ralph preflight -c ralph.yml -H builtin:ce-executor-serial
 # Checks: starting event reachability, completion path, required events all-of coverage
 ```
 
@@ -284,6 +298,11 @@ The `preset-topology` check is included in `PreflightRunner::default_checks_with
 
 ## Source of Truth and Sync
 
-- Canonical preset files: `presets/*.yml`
-- Embedded CLI mirror: `crates/ralph-cli/presets/*.yml`
-- Sync script: `./scripts/sync-embedded-files.sh`
+Builtin presets are embedded from `presets/en/*.yml`; there is no separate automatic sync script. When adding, renaming, removing, or changing a builtin preset, keep these locations consistent:
+
+1. `presets/en/<name>.yml` — canonical preset source file
+2. `presets/manifest.yml` — `embedded:` list
+3. `crates/ralph-cli/src/presets.rs` — `PRESETS` array
+4. `presets/index.json` — user-facing preset index (if public)
+5. `CLAUDE.md` / `AGENTS.md` — preset list in project guidance
+6. `scripts/ralph-zsh-plugin.zsh` — zsh completion for `builtin:<name>`

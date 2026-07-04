@@ -1375,6 +1375,20 @@ hats:
       Each Implementation Unit (U-ID) that passes its tests MUST be committed independently.
       Do NOT batch multiple U-IDs into a single commit.
 
+      Commit message format (HARD RULE — required for plan traceability):
+      - Read `plan_name`, `task_id`, `task_key`, `step` from the `work.ready` payload (SSOT).
+      - Build the commit subject using the template below. Replace placeholders with
+        values from the payload, NOT from memory.
+      - plan-unit (step matches `step-NN` or `trivial`):
+          `feat({plan_name}): {step} u{N}-impl: <description>`
+      - fix-unit (step matches `fix-NN`):
+          `fix({plan_name}): {step} u{N}-fix: <root-cause one-liner>`
+        where `{N}` is the Implementation Unit index parsed from the fix-plan
+        `### U{N}.` heading that matches this `step`.
+      - Examples:
+          plan-unit: `feat(my-plan): step-03 u3-impl: add validator topic-deny rule`
+          fix-unit:  `fix(my-plan): fix-02 u2-fix: close stale review.dimension.ready emitter gap`
+
       Commit when:
       - A U-ID is complete and its tests pass
       - About to switch context (backend → frontend)
@@ -1388,7 +1402,7 @@ hats:
       Commit flow:
       1. Verify tests pass
       2. `git add <relevant files>` (not `git add .`)
-      3. `git commit -m "feat(scope): U-ID description"`
+      3. `git commit -m "<subject built from the format above>"`
       4. Record the commit hash in `progress.md` under the completed U-ID
 
       Exception: If the current runtime task explicitly represents an incomplete logical
@@ -2603,7 +2617,16 @@ hats:
          - Stage the relevant changed files (not `git add -A` — keep the commit focused on this fix round):
            ```bash
            git add <relevant files for this fix>
-           git commit -m "fix(<step>): <root-cause one-liner>
+           # Format (HARD RULE — required for plan traceability):
+           #   fix({plan_name}): {step} u{N}-fix: <root-cause one-liner>
+           # - {plan_name}: derived from the plan file basename (no extension); the
+           #   plan_file is carried in the current fix-unit's task description via
+           #   `ralph tools task show`. Same value as `plan_name` in work.ready payload.
+           # - {step}: literal value from the work.ready / task.resume payload
+           #   (e.g. `step-03`, `fix-02`). For fix-units it matches `fix-{NN}`.
+           # - {N}: Implementation Unit index from the fix-plan `### U{N}.` heading
+           #   that maps to this step.
+           git commit -m "fix(<plan_name>): <step> u<N>-fix: <root-cause one-liner>
 
            - diagnosis: <1-line causal chain>
            - findings: <comma-separated finding IDs from this round>"
@@ -2738,9 +2761,22 @@ hats:
       - On `plan.blocked`: write a brief "Blocked" note to `shipping.md` with the reason.
 
       ### Commit (plan.complete ONLY)
+      Commit message format (HARD RULE — required for plan traceability):
+      - Read `plan_name`, `verdict`, `final_findings_count` from the `plan.complete` payload.
+      - Compute `total_units` by counting entries in `progress.md` Completed Steps section
+        (parse `### Step {NN}. ...` headings; both `step-NN` and `fix-NN` count toward total).
+      - Build the subject:
+          base:    `feat({plan_name}): {total_units} units complete - {plan_summary}`
+          with residuals (final_findings_count > 0):
+                   `feat({plan_name}): {total_units} units complete - {plan_summary} [residuals: {final_findings_count}]`
+        where `{plan_summary}` is a ≤ 60-char human-readable summary derived from
+        the plan title and primary outcome (e.g. "introduce preset_lint step-deny gate").
+      - Examples:
+          clean:   `feat(my-plan): 8 units complete - introduce preset_lint step-deny gate`
+          with residuals: `feat(my-plan): 8 units complete - introduce preset_lint step-deny gate [residuals: 2]`
       - `git status --porcelain` to check for uncommitted changes
       - `git add <relevant files>` (not `git add .`)
-      - `git commit -m "feat(scope): <plan summary>"`
+      - `git commit -m "<subject built from the format above>"`
       - **UNDER NO CIRCUMSTANCES push to origin or any remote — this is a hard boundary**
       - Record final commit hash in `shipping.md`
       - On `plan.blocked`: do NOT create a final commit.

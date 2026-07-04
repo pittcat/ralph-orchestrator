@@ -1,93 +1,127 @@
 # Cost Management Guide
 
-Effective cost management is crucial when running AI orchestration at scale. This guide helps you optimize spending while maintaining task quality.
+Effective cost management is crucial when running AI orchestration at scale. This guide helps you optimize spending while maintaining task quality with the Rust `ralph` CLI.
 
 ## Understanding Costs
 
-### Token Pricing
+### Backend Pricing Guidance
 
-Current pricing per million tokens:
+Actual pricing depends on your API provider and model. The table below gives rough guidance for comparing backends in typical Ralph tasks:
 
-| Agent | Input Cost | Output Cost | Avg Cost/Task |
-|-------|------------|-------------|---------------|
-| **Claude** | $3.00 | $15.00 | $5-50 |
-| **Q Chat** | $0.50 | $1.50 | $1-10 |
-| **Gemini** | $0.50 | $1.50 | $1-10 |
+| Backend | Relative Input Cost | Relative Output Cost | Typical Range / Task |
+|---------|---------------------|----------------------|----------------------|
+| **Claude** | High | High | $5 - $50 |
+| **Codex** | Medium-High | Medium-High | $3 - $30 |
+| **Kiro** | Medium | Medium | $2 - $20 |
+| **Gemini** | Low-Medium | Low-Medium | $1 - $15 |
+| **OpenCode** | Low | Low | $1 - $10 |
+| **Amp** | Low | Low | $1 - $10 |
+| **Copilot** | Low | Low | $1 - $10 |
+| **Pi** | Low | Low | $1 - $10 |
+| **Custom** | Varies | Varies | Varies |
+
+> These are illustrative ranges. Always check your provider's current pricing and bill against your actual usage.
 
 ### Cost Calculation
 
-```python
-total_cost = (input_tokens / 1_000_000 * input_price) + 
-             (output_tokens / 1_000_000 * output_price)
+For a single API call:
+
+```
+total_cost = (input_tokens / 1_000_000 * input_price_per_1m) +
+             (output_tokens / 1_000_000 * output_price_per_1m)
 ```
 
 **Example:**
-- Task uses 100K input tokens, 50K output tokens
-- With Claude: (0.1 × $3) + (0.05 × $15) = $1.05
-- With Q Chat: (0.1 × $0.50) + (0.05 × $1.50) = $0.125
+- Task uses 100K input tokens and 50K output tokens
+- With a $3 / 1M input and $15 / 1M output backend: (0.1 × $3) + (0.05 × $15) = $1.05
+
+Ralph does not bill you directly; it routes calls to the backend configured in your preset or adapter config. Cost control is enforced at the orchestrator level.
 
 ## Cost Control Mechanisms
 
-### 1. Hard Limits
+### 1. Hard Cost Limits
 
-Set maximum spending caps:
+Set a maximum spending cap in `ralph.yml`:
 
-```bash
-# Strict $10 limit
-python ralph_orchestrator.py --max-cost 10.0
-
-# Conservative token limit
-python ralph_orchestrator.py --max-tokens 100000
+```yaml
+event_loop:
+  max_cost_usd: 10.0
 ```
 
-### 2. Context Management
+When cumulative estimated cost exceeds this value, Ralph stops the loop. There is no default limit; if omitted, cost is unbounded.
 
-Reduce token usage through smart context handling:
+### 2. Iteration and Runtime Limits
 
-```bash
-# Aggressive context management
-python ralph_orchestrator.py \
-  --context-window 50000 \
-  --context-threshold 0.6  # Summarize at 60% full
-```
+Cap total work by iteration count or elapsed time.
 
-### 3. Agent Selection
-
-Choose cost-effective agents:
+CLI:
 
 ```bash
-# Development: Use cheaper agents
-python ralph_orchestrator.py --agent q --max-cost 5.0
-
-# Production: Use quality agents with limits
-python ralph_orchestrator.py --agent claude --max-cost 50.0
+# Strict iteration budget
+ralph run --max-iterations 20
 ```
+
+Config:
+
+```yaml
+event_loop:
+  max_iterations: 20
+  max_runtime_seconds: 3600
+```
+
+`max_iterations` defaults to `100`. `max_runtime_seconds` defaults to `14400` (4 hours).
+
+### 3. Checkpoint Interval
+
+Control how frequently Ralph checkpoints state:
+
+```yaml
+event_loop:
+  checkpoint_interval: 5
+```
+
+The default is `5`. There is no `--checkpoint-interval` CLI flag.
+
+### 4. Context and Token Management
+
+Ralph does not provide global context-window or context-threshold settings. Instead, manage context through:
+
+- **Prompt design**: keep prompts focused and reference external files rather than inlining large specs.
+- **Guardrails**: use hat instructions and preset rules to prevent unbounded work.
+- **Memory budget**: limit how much memory context is retained:
+
+```yaml
+memories:
+  budget: 4000
+```
+
+- **Per-hat instructions**: each hat's `instructions:` define what it may read, emit, and retry, preventing runaway loops.
 
 ## Optimization Strategies
 
-### 1. Tiered Agent Strategy
+### 1. Tiered Backend Strategy
 
-Use different agents for different task phases:
+Use different backends for different task phases:
 
 ```bash
-# Phase 1: Research with Q (cheap)
-echo "Research the problem" > research.md
-python ralph_orchestrator.py --agent q --prompt research.md --max-cost 2.0
+# Phase 1: Research with a cheap backend
+ralph run -H opencode --max-iterations 5 --prompt research.md
 
-# Phase 2: Implementation with Claude (quality)
-echo "Implement the solution" > implement.md
-python ralph_orchestrator.py --agent claude --prompt implement.md --max-cost 20.0
+# Phase 2: Implementation with a stronger backend
+ralph run -H claude --max-iterations 20 --prompt implement.md
 
-# Phase 3: Testing with Q (cheap)
-echo "Test the solution" > test.md
-python ralph_orchestrator.py --agent q --prompt test.md --max-cost 2.0
+# Phase 3: Testing with a cheap backend
+ralph run -H gemini --max-iterations 10 --prompt test.md
 ```
+
+Alternatively, configure backends in a preset's `ralph.yml` and switch presets between phases.
 
 ### 2. Prompt Optimization
 
 Reduce token usage through efficient prompts:
 
 #### Before (Expensive)
+
 ```markdown
 Please create a comprehensive web application with the following features:
 - User authentication system with registration, login, password reset
@@ -99,6 +133,7 @@ Please create a comprehensive web application with the following features:
 ```
 
 #### After (Optimized)
+
 ```markdown
 Build user auth API:
 - Register/login endpoints
@@ -108,115 +143,85 @@ Build user auth API:
 See spec.md for details.
 ```
 
-### 3. Context Window Management
+### 3. Iteration Optimization
 
-#### Automatic Summarization
-
-```bash
-# Trigger summarization early to save tokens
-python ralph_orchestrator.py \
-  --context-window 100000 \
-  --context-threshold 0.5  # Summarize at 50%
-```
-
-#### Manual Context Control
-
-```markdown
-## Context Management
-When context reaches 50%, summarize:
-- Keep only essential information
-- Remove completed task details
-- Compress verbose outputs
-```
-
-### 4. Iteration Optimization
-
-Fewer, smarter iterations save money:
+Fewer, focused iterations save money:
 
 ```bash
-# Many quick iterations (expensive)
-python ralph_orchestrator.py --max-iterations 100  # ❌
+# Many unbounded iterations (expensive)
+ralph run --max-iterations 100   # ❌
 
-# Fewer, focused iterations (economical)
-python ralph_orchestrator.py --max-iterations 20   # ✅
+# Tight, focused budget (economical)
+ralph run --max-iterations 20    # ✅
+```
+
+Set both limits in `ralph.yml`:
+
+```yaml
+event_loop:
+  max_iterations: 20
+  max_runtime_seconds: 1800
 ```
 
 ## Cost Monitoring
 
-### Real-time Tracking
+### Runtime Diagnosis
 
-Monitor costs during execution:
+Enable diagnostics to emit telemetry JSONL under `.ralph/diagnostics/`:
 
 ```bash
-# Verbose cost reporting
-python ralph_orchestrator.py \
-  --verbose \
-  --metrics-interval 1
+RALPH_DIAGNOSTICS=1 ralph run --prompt task.md
 ```
 
-**Output:**
+Or enable it persistently in `ralph.yml`:
+
+```yaml
+telemetry:
+  runtime_diagnosis: true
 ```
-[INFO] Iteration 5: Tokens: 25,000 | Cost: $1.25 | Remaining: $48.75
+
+Then inspect the loop:
+
+```bash
+ralph diagnose
 ```
 
-### Cost Reports
+This surfaces iteration counts, per-backend call patterns, and runtime events that help you understand where cost accumulates.
 
-Access detailed cost breakdowns:
+### Inspecting Telemetry
 
-```python
-import json
-from pathlib import Path
+Diagnostics are written as JSONL files in `.ralph/diagnostics/`. Query them with standard tools:
 
-# Load metrics
-metrics_dir = Path('.agent/metrics')
-total_cost = 0
+```bash
+# Total iterations recorded
+jq -r 'select(.event_type == "iteration_start") | .iteration' .ralph/diagnostics/events.jsonl | wc -l
 
-for metric_file in metrics_dir.glob('metrics_*.json'):
-    with open(metric_file) as f:
-        data = json.load(f)
-        total_cost += data.get('cost', 0)
-
-print(f"Total cost: ${total_cost:.2f}")
+# Last few events
+jq . .ralph/diagnostics/events.jsonl | tail -n 40
 ```
 
 ### Cost Dashboards
 
-Create monitoring dashboards:
+You can build a dashboard from `.ralph/diagnostics/*.jsonl` or backend invoices. Ralph does not ship a built-in dashboard, but the telemetry schema is stable enough to pipe into your own tooling.
 
-```python
-#!/usr/bin/env python3
-import json
-import matplotlib.pyplot as plt
-from pathlib import Path
+Example: export a simple CSV of events:
 
-costs = []
-iterations = []
-
-for metric_file in sorted(Path('.agent/metrics').glob('*.json')):
-    with open(metric_file) as f:
-        data = json.load(f)
-        costs.append(data.get('total_cost', 0))
-        iterations.append(data.get('iteration', 0))
-
-plt.plot(iterations, costs)
-plt.xlabel('Iteration')
-plt.ylabel('Cumulative Cost ($)')
-plt.title('Ralph Orchestrator Cost Progression')
-plt.savefig('cost_report.png')
+```bash
+jq -r '[.timestamp, .event_type, .hat // "-"] | @csv' .ralph/diagnostics/events.jsonl > events.csv
 ```
 
 ## Budget Planning
 
 ### Task Cost Estimation
 
-| Task Type | Complexity | Recommended Budget | Agent |
-|-----------|------------|-------------------|--------|
-| Simple Script | Low | $0.50 - $2 | Q Chat |
-| Web API | Medium | $5 - $20 | Gemini/Claude |
-| Full Application | High | $20 - $100 | Claude |
-| Data Analysis | Medium | $5 - $15 | Gemini |
-| Documentation | Low-Medium | $2 - $10 | Q/Claude |
-| Debugging | Variable | $5 - $50 | Claude |
+| Task Type | Complexity | Recommended Budget | Backend Suggestion |
+|-----------|------------|-------------------:|-------------------|
+| Simple Script | Low | $0.50 - $2 | OpenCode / Gemini / Amp |
+| Web API | Medium | $5 - $20 | Gemini / Kiro / Claude |
+| Full Application | High | $20 - $100 | Claude / Codex |
+| Data Analysis | Medium | $5 - $15 | Gemini / Copilot |
+| Documentation | Low-Medium | $2 - $10 | Pi / OpenCode / Claude |
+| Debugging | Variable | $5 - $50 | Claude / Codex |
 
 ### Monthly Budget Planning
 
@@ -230,65 +235,80 @@ monthly_budget = tasks_per_month * avg_cost_per_task * safety_margin
 print(f"Recommended monthly budget: ${monthly_budget}")
 ```
 
+Use `event_loop.max_cost_usd` per run as a guardrail, and track actual spend via your backend billing dashboard.
+
 ## Cost Optimization Profiles
 
 ### Minimal Cost Profile
 
 Maximum savings, acceptable quality:
 
+```yaml
+event_loop:
+  max_cost_usd: 2.0
+  max_iterations: 15
+  max_runtime_seconds: 900
+  checkpoint_interval: 10
+```
+
+Run with:
+
 ```bash
-python ralph_orchestrator.py \
-  --agent q \
-  --max-tokens 50000 \
-  --max-cost 2.0 \
-  --context-window 30000 \
-  --context-threshold 0.5 \
-  --checkpoint-interval 10
+ralph run -H opencode --prompt task.md
 ```
 
 ### Balanced Profile
 
 Good quality, reasonable cost:
 
+```yaml
+event_loop:
+  max_cost_usd: 10.0
+  max_iterations: 30
+  max_runtime_seconds: 1800
+  checkpoint_interval: 5
+```
+
+Run with:
+
 ```bash
-python ralph_orchestrator.py \
-  --agent gemini \
-  --max-tokens 200000 \
-  --max-cost 10.0 \
-  --context-window 100000 \
-  --context-threshold 0.7 \
-  --checkpoint-interval 5
+ralph run -H gemini --prompt task.md
 ```
 
 ### Quality Profile
 
 Best results, controlled spending:
 
+```yaml
+event_loop:
+  max_cost_usd: 50.0
+  max_iterations: 50
+  max_runtime_seconds: 3600
+  checkpoint_interval: 3
+```
+
+Run with:
+
 ```bash
-python ralph_orchestrator.py \
-  --agent claude \
-  --max-tokens 500000 \
-  --max-cost 50.0 \
-  --context-window 200000 \
-  --context-threshold 0.8 \
-  --checkpoint-interval 3
+ralph run -H claude --prompt task.md
 ```
 
 ## Advanced Cost Management
 
-### Dynamic Agent Switching
+### Dynamic Backend Switching
 
-Switch agents based on budget remaining:
+Switch presets or backends based on remaining budget. Example pseudo-code:
 
 ```python
-# Pseudo-code for dynamic switching
 if remaining_budget > 20:
-    agent = "claude"
+    backend = "claude"
 elif remaining_budget > 5:
-    agent = "gemini"
+    backend = "gemini"
 else:
-    agent = "q"
+    backend = "opencode"
 ```
+
+In Ralph, switch by running a different preset or overriding the backend with `-H <backend>`.
 
 ### Cost-Aware Prompts
 
@@ -304,18 +324,17 @@ Include cost considerations in prompts:
 
 ### Batch Processing
 
-Combine multiple small tasks:
+Combine related small tasks into one run with a clear plan:
 
 ```bash
-# Inefficient: Multiple orchestrations
-python ralph_orchestrator.py --prompt task1.md  # $5
-python ralph_orchestrator.py --prompt task2.md  # $5
-python ralph_orchestrator.py --prompt task3.md  # $5
+# Inefficient: multiple isolated runs
+ralph run --prompt task1.md   # $5
+ralph run --prompt task2.md   # $5
+ralph run --prompt task3.md   # $5
 # Total: $15
 
-# Efficient: Batched orchestration
-cat task1.md task2.md task3.md > batch.md
-python ralph_orchestrator.py --prompt batch.md  # $10
+# Efficient: single batched run with a plan
+ralph run --prompt batch_plan.md
 # Total: $10 (33% savings)
 ```
 
@@ -323,38 +342,40 @@ python ralph_orchestrator.py --prompt batch.md  # $10
 
 ### Setting Up Alerts
 
+You can monitor `.ralph/diagnostics/events.jsonl` for anomalous loop activity:
+
 ```bash
 #!/bin/bash
 # cost_monitor.sh
 
-COST_LIMIT=25.0
-CURRENT_COST=$(python -c "
-import json
-with open('.agent/metrics/state_latest.json') as f:
-    print(json.load(f)['total_cost'])
-")
+ITER_LIMIT=50
+CURRENT_ITER=$(jq -r 'select(.event_type == "iteration_start") | .iteration' .ralph/diagnostics/events.jsonl | tail -n 1)
 
-if (( $(echo "$CURRENT_COST > $COST_LIMIT" | bc -l) )); then
-    echo "ALERT: Cost exceeded $COST_LIMIT" | mail -s "Ralph Cost Alert" admin@example.com
+if [ "$CURRENT_ITER" -gt "$ITER_LIMIT" ]; then
+    echo "ALERT: Run exceeded $ITER_LIMIT iterations" | mail -s "Ralph Cost Alert" admin@example.com
 fi
 ```
 
 ### Automated Stops
 
-Implement circuit breakers:
+Use `event_loop.max_cost_usd` as a built-in circuit breaker. For external automation, inspect the latest diagnostic event:
 
-```python
-# cost_breaker.py
-import json
-import sys
+```bash
+#!/bin/bash
+PERCENT=90
+LIMIT=50.0
 
-with open('.agent/metrics/state_latest.json') as f:
-    state = json.load(f)
-    
-if state['total_cost'] > state['max_cost'] * 0.9:
-    print("WARNING: 90% of budget consumed")
-    sys.exit(1)
+# Placeholder: replace with your actual billing API or telemetry-derived cost
+CURRENT_COST=45.0
+THRESHOLD=$(echo "$LIMIT * $PERCENT / 100" | bc -l)
+
+if (( $(echo "$CURRENT_COST > $THRESHOLD" | bc -l) )); then
+    echo "WARNING: ${PERCENT}% of budget consumed"
+    exit 1
+fi
 ```
+
+Ralph's own `max_cost_usd` enforces the hard stop so you do not need a custom breaker for runtime safety.
 
 ## ROI Analysis
 
@@ -377,7 +398,7 @@ print(f"ROI: {roi:.1f}%")
 ### Cost-Benefit Matrix
 
 | Task | Manual Hours | Manual Cost | AI Cost | Savings |
-|------|-------------|-------------|---------|---------|
+|------|-------------:|------------:|--------:|--------:|
 | API Development | 40h | $2000 | $50 | $1950 |
 | Documentation | 20h | $1000 | $20 | $980 |
 | Testing Suite | 30h | $1500 | $30 | $1470 |
@@ -391,45 +412,54 @@ Test with minimal budgets first:
 
 ```bash
 # Test run
-python ralph_orchestrator.py --max-cost 1.0 --max-iterations 5
+ralph run --max-iterations 5 --prompt task.md
 
 # Scale up if successful
-python ralph_orchestrator.py --max-cost 10.0 --max-iterations 50
+ralph run --max-iterations 25 --prompt task.md
+```
+
+Set a low `max_cost_usd` for exploratory work:
+
+```yaml
+event_loop:
+  max_cost_usd: 1.0
+  max_iterations: 5
 ```
 
 ### 2. Monitor Continuously
 
-Track costs in real-time:
+Track runtime behavior:
 
 ```bash
-# Terminal 1: Run orchestration
-python ralph_orchestrator.py --verbose
+# Run with diagnostics enabled
+RALPH_DIAGNOSTICS=1 ralph run --prompt task.md
 
-# Terminal 2: Monitor costs
-watch -n 5 'tail -n 20 .agent/metrics/state_latest.json'
+# Inspect the latest events
+ralph diagnose
+jq . .ralph/diagnostics/events.jsonl | tail -n 20
 ```
 
 ### 3. Optimize Iteratively
 
-- Analyze cost reports
+- Analyze diagnostic events
 - Identify expensive operations
-- Refine prompts and settings
-- Test optimizations
+- Refine prompts and hat instructions
+- Test optimizations with a small `max_iterations`
 
 ### 4. Set Realistic Budgets
 
 - Development: 50% of production budget
 - Testing: 25% of production budget
-- Production: Full budget with safety margin
+- Production: full budget with safety margin
 
 ### 5. Document Costs
 
 Keep records for analysis:
 
 ```bash
-# Save cost report after each run
-python ralph_orchestrator.py && \
-  cp .agent/metrics/state_latest.json "reports/run_$(date +%Y%m%d_%H%M%S).json"
+# Save diagnostic snapshot after each run
+ralph diagnose && \
+  cp .ralph/diagnostics/events.jsonl "reports/run_$(date +%Y%m%d_%H%M%S).jsonl"
 ```
 
 ## Troubleshooting
@@ -437,22 +467,22 @@ python ralph_orchestrator.py && \
 ### Common Issues
 
 1. **Unexpected high costs**
-   - Check token usage in metrics
+   - Check iteration count in diagnostics
    - Review prompt efficiency
-   - Verify context settings
+   - Verify hat instructions are not over-calling backends
 
 2. **Budget exceeded quickly**
-   - Lower context window
-   - Increase summarization threshold
-   - Use cheaper agent
+   - Lower `max_iterations`
+   - Shorten `max_runtime_seconds`
+   - Use a cheaper backend
 
 3. **Poor results with budget constraints**
-   - Increase budget slightly
+   - Increase `max_cost_usd` slightly
    - Optimize prompts
-   - Consider phased approach
+   - Consider a phased approach
 
 ## Next Steps
 
-- Review [Agent Selection](agents.md) for cost-effective choices
+- Review [Backend Selection](backends.md) for cost-effective choices
 - Optimize [Prompts](prompts.md) for efficiency
 - Explore [Examples](../examples/index.md) for cost-optimized patterns

@@ -8,15 +8,27 @@ Practical guides for using Ralph Orchestrator effectively.
 |-------|-------------|
 | [Configuration](configuration.md) | Full core config reference |
 | [Presets](presets.md) | Built-in hat collections |
+| [Preset Authoring](preset-authoring.md) | Creating and validating your own presets |
+| [OPAC Agent Discipline](opac.md) | Observe → Precheck → Apply → Confirm workflow for isolated mode |
 | [CLI Reference](cli-reference.md) | Command-line interface |
 | [Backends](backends.md) | Supported AI backends |
+| [Roo Backend](roo-backend.md) | Roo Code / Roo Cline backend specifics |
+| [Kiro Migration](kiro-migration.md) | Migrating to the Kiro backend |
+| [Agents](agents.md) | Backend selection and configuration |
 | [Writing Prompts](prompts.md) | Prompt engineering tips |
 | [Cost Management](cost-management.md) | Controlling API costs |
 | [Harness Extensions](harness-extensions.md) | Event filter / projection / state injection / preflight hooks |
 | [Payload Contracts](payload-contracts.md) | Schema-based field enforcement between hats |
 | [Execution Contracts](execution-contracts.md) | `work.done` completion gate (task closed, git evidence, tests) |
 | [Precheck Gates](precheck-gates.md) | Opt-in LLM-as-judge gate before key topics (`event_loop.precheck`) |
+| [Runtime Contracts](runtime-contracts.md) | Unified preset/workflow quality gates |
 | [Runtime Diagnosis](runtime-diagnosis.md) | Recovery / drift journals, `ralph diagnose` offline report, telemetry config |
+| [Iteration Boundary Hooks & Skills](iteration-boundary-hooks-and-skills.md) | Hooks, skills, and mutate extensions |
+| [Managed Blocks](managed-blocks.md) | `CLAUDE.md` / `AGENTS.md` managed block sync |
+| [Project Usage](project-usage.md) | Using Ralph in this repository |
+| [Overview](overview.md) | High-level concepts and safety mechanisms |
+| [Web Search](websearch.md) | Web search configuration |
+| [Zsh Plugin](zsh-plugin.md) | Shell completion and zsh plugin setup |
 
 ## Quick Links
 

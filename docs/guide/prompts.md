@@ -1,12 +1,12 @@
 # Prompt Engineering Guide
 
-Effective prompt engineering is crucial for successful Ralph Orchestrator tasks. This guide covers best practices, patterns, and techniques for writing prompts that get results.
+Effective prompt engineering is crucial for successful Ralph tasks. This guide covers best practices, patterns, and techniques for writing prompts that get results.
 
 ## Prompt File Basics
 
 ### File Format
 
-Ralph Orchestrator uses Markdown files for prompts:
+Ralph uses Markdown files for prompts:
 
 ```markdown
 # Task Title
@@ -23,7 +23,7 @@ The task is complete when:
 - Criterion 1 is met
 - Criterion 2 is met
 
-The orchestrator will run until iteration/time/cost limits are reached.
+The loop will run until `event_loop.max_iterations` or `event_loop.max_runtime_seconds` is reached.
 ```
 
 ### File Location
@@ -31,8 +31,20 @@ The orchestrator will run until iteration/time/cost limits are reached.
 Default prompt file: `PROMPT.md`
 
 Custom location:
+
 ```bash
-python ralph_orchestrator.py --prompt path/to/task.md
+# Use a prompt file
+ralph run -P path/to/task.md
+
+# Or pass inline prompt text
+ralph run -p "inline prompt text"
+```
+
+You can also set the default in `ralph.yml`:
+
+```yaml
+event_loop:
+  prompt_file: "path/to/task.md"
 ```
 
 ## Prompt Structure
@@ -77,7 +89,7 @@ The task is complete when:
 [Additional guidance or hints]
 
 ---
-The orchestrator will continue iterations until limits are reached.
+The loop will continue until limits are reached.
 ```
 
 ## Prompt Patterns
@@ -117,7 +129,7 @@ Create a RESTful API for user management with authentication.
 - [ ] API documentation generated
 - [ ] Authentication working
 
-The orchestrator will run until completion criteria are met or limits reached.
+The loop will run until completion criteria are met or limits are reached.
 ```
 
 ### 2. Documentation Pattern
@@ -160,7 +172,7 @@ docs/
 - [ ] Reviewed for clarity
 - [ ] No broken links
 
-The orchestrator will continue iterations until limits are reached.
+The loop will continue until limits are reached.
 ````
 
 ### 3. Data Analysis Pattern
@@ -195,7 +207,7 @@ Analyze Q4 sales data and generate insights report.
 - [ ] Insights documented
 - [ ] Code reproducible
 
-The orchestrator will run until limits are reached.
+The loop will run until limits are reached.
 ```
 
 ### 4. Debugging Pattern
@@ -232,7 +244,7 @@ Users report application crashes when uploading large files.
 - [ ] Tests passing
 - [ ] No regressions
 
-The orchestrator will continue verification iterations until limits are reached.
+The loop will continue verification iterations until limits are reached.
 ```
 
 ## Best Practices
@@ -323,7 +335,7 @@ Expected Output:
 
 ## Iterative Prompts
 
-Ralph Orchestrator modifies the prompt file during execution. Design prompts that support iteration:
+Ralph can update the prompt file during execution. Design prompts that support iteration:
 
 ### Self-Documenting Progress
 
@@ -420,7 +432,7 @@ If you encounter errors:
 
 ### Sanitization
 
-Ralph Orchestrator automatically sanitizes prompts for:
+Ralph sanitizes prompts for:
 - Command injection attempts
 - Path traversal attacks
 - Malicious patterns
@@ -434,15 +446,6 @@ Do not modify system files
 Create backups before changes
 ```
 
-### Size Limits
-
-Default maximum prompt size: 10MB
-
-Adjust if needed:
-```bash
-python ralph_orchestrator.py --max-prompt-size 20971520  # 20MB
-```
-
 ## Testing Prompts
 
 ### Dry Run
@@ -450,15 +453,15 @@ python ralph_orchestrator.py --max-prompt-size 20971520  # 20MB
 Test prompts without execution:
 
 ```bash
-python ralph_orchestrator.py --dry-run --prompt test.md
+ralph run --dry-run -P test.md
 ```
 
 ### Limited Iterations
 
-Test with few iterations:
+Test with a small iteration budget:
 
 ```bash
-python ralph_orchestrator.py --max-iterations 3 --prompt test.md
+ralph run --max-iterations 3 -P test.md
 ```
 
 ### Verbose Mode
@@ -466,7 +469,7 @@ python ralph_orchestrator.py --max-iterations 3 --prompt test.md
 Debug prompt processing:
 
 ```bash
-python ralph_orchestrator.py --verbose --prompt test.md
+ralph run -v -P test.md
 ```
 
 ## Common Pitfalls
@@ -489,7 +492,7 @@ python ralph_orchestrator.py --verbose --prompt test.md
 Forgetting to specify when the task is done
 
 ✅ **Instead:**
-Always include clear completion criteria that the orchestrator can work towards
+Always include clear completion criteria that Ralph can work towards
 
 ### 3. Overly Complex Prompts
 
@@ -512,14 +515,13 @@ Include input/output examples and edge cases
 ### Starter Templates
 
 1. [Web API Development](../examples/web-api.md)
-2. [CLI Tool Creation](../examples/cli-tool.md)
-3. [Data Analysis](../examples/data-analysis.md)
-4. [Documentation Writing](../examples/documentation.md)
-5. [Bug Fixing](../examples/bug-fix.md)
-6. [Testing Suite](../examples/testing.md)
+2. [CLI Tool Creation](../examples/cli_tool.md)
+3. [Web Scraping](../examples/web_scraper.md)
+4. [Simple Task](../examples/simple-task.md)
+5. [Simple Function](../examples/simple_function.md)
 
 ## Next Steps
 
 - Explore [Cost Management](cost-management.md) for efficient prompts
-- Review [Agent Selection](agents.md) for optimal results
-- See [Examples](../examples/index.md) for real-world prompts
+- Review [Backend Selection](agents.md) for optimal results
+- See the `examples/` directory for real-world prompts

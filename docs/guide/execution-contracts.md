@@ -88,9 +88,9 @@ event_loop:
 3. 指导发布到 `plan.blocked`（2026-06-28-005 之前是 `human.guidance`，已废弃）
 4. 下游 hat **不会**收到该事件
 
-## ce-executor 示例
+## ce-executor-serial 示例
 
-`ce-executor` 预设使用执行契约来保护 executor：
+`ce-executor-serial` 预设使用执行契约来保护 executor：
 
 ```yaml
 event_loop:
@@ -130,6 +130,6 @@ event_loop:
 运行执行契约测试：
 
 ```bash
-cargo test -p ralph-core execution_contract -- --nocapture
-cargo test -p ralph-core event_loop::tests::test_execution_contract -- --nocapture
+cargo nextest run -p ralph-core -- execution_contract
+cargo nextest run -p ralph-core --test scenarios -- execution_contract
 ```

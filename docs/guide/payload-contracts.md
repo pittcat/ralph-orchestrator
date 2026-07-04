@@ -192,7 +192,7 @@ was broken for builtin presets — `resolve_schema_files` has no
 on-disk anchor to resolve the relative path against, so the schemas
 silently went unloaded and the payload contract hard gate failed
 with `SchemaMissingForRequiredTopic` for every topic the preset
-declared. (Symptom: `ralph -H builtin:ce-executor run` reports
+declared. (Symptom: `ralph run -H builtin:ce-executor-serial -p "..."` reports
 "Subprocess exited before starting the orchestration loop" with the
 real cause buried in `.ralph/diagnostics/logs/`.)
 
@@ -201,22 +201,22 @@ the relative `schema_file` form still works, but the inline form is
 preferred for consistency and for portability across install
 locations.
 
-The `presets/schemas/` directory is kept as a deprecated reference
-copy of the inlined schemas:
+The `presets/schemas/` directory is the authoring SSOT for builtin
+preset schemas. It is merged into the embedded preset at compile time
+by `crates/ralph-cli/build.rs`.
 
 | Schema file | Preset that owns the schemas | Status |
 |---|---|---|
-| `ce-executor.yml`         | `ce-executor`        | Deprecated reference copy (inlined into `presets/en/ce-executor.yml`) |
+| `presets/schemas/ce-executor-serial.yml` | `ce-executor-serial` | Authoring SSOT (merged into `presets/en/ce-executor-serial.yml` at build time) |
 
 When adding a new schema to a builtin preset:
 
-1. Add the `event_policy.schemas.<topic>` entry directly in
-   `presets/en/<name>.yml`. Do NOT use `event_policy.schema_file`.
-2. If you also want a sibling reference copy in `presets/schemas/`,
-   add it there too (deprecated, for diff review only). The mirror
-   `crates/ralph-cli/presets/schemas/` and `MIRRORED_FILES` /
-   `scripts/sync-embedded-files.sh` no longer apply — that whole
-   mirroring pipeline was tied to the broken `schema_file` approach.
+1. Edit `presets/schemas/<name>.yml` for the schema SSOT, or add an
+   `event_policy.schemas.<topic>` entry directly in `presets/en/<name>.yml`
+   as an override layer.
+2. Keep `presets/en/<name>.yml` and `presets/schemas/<name>.yml` in sync;
+   run `cargo nextest run -p ralph-cli --bin ralph -- test_ce_executor_root_preset_matches_embedded`
+   for SSOT byte-equality where applicable.
 3. Run `ralph hats validate --strict -H builtin:<name>` to confirm
    no schema warnings or errors.
 
@@ -226,15 +226,13 @@ When adding a new schema to a builtin preset:
 
 ```bash
 # Default mode: report warnings; do not fail.
-ralph hats validate --config presets/ce-executor.yml \
-                     --hats presets/ce-executor.yml
+ralph hats validate -c ralph.yml -H .ralph/hats/my-flow.yml
 
 # Strict mode: report errors; exit non-zero on any payload contract violation.
-ralph hats validate --strict --config presets/ce-executor.yml \
-                                --hats presets/ce-executor.yml
+ralph hats validate --strict -c ralph.yml -H .ralph/hats/my-flow.yml
 
 # `ralph run` automatically runs the strict hard gate. There is no skip flag.
-ralph run -c ralph.yml -H builtin:ce-executor -p "..."
+ralph run -c ralph.yml -H builtin:ce-executor-serial -p "..."
 ```
 
 ---

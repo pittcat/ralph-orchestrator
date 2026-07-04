@@ -106,8 +106,9 @@ BDD 参考场景：
 
 每个 `rules.<X>` 会 **合成一个 gate hat**，计入 hat 总数：
 
-- coordinator 模式：**≤3 hats**；加 gate 可能超限
-- **≥4 hats** 或脱糖后超限：须 `event_loop.execution_mode: isolated`
+- coordinator 模式已弃用（2026-06-18 起 isolated 为唯一支持模式）；文档保留此条仅为历史对照
+- **isolated 模式：无 hat 数上限**，但每个 `rules.<X>` 会合成一个 gate hat，脱糖后仍需通过 `preset_lint` 校验
+- 若 hat 数 ≥4 或加 gate 后拓扑不合法：须 `event_loop.execution_mode: isolated`
 
 `preset_lint` 的 `multi_hat` / `workflow_activation` 在 **normalize 后的图**上运行；配置错会在 `ralph preset check` 报错，而不是 runtime 静默失败。
 

@@ -103,7 +103,7 @@ Multiple layers of protection ensure safe operation:
 
   ┌───────────────────┐     ┌───────────────────┐     ┌───────────────────┐
   │  Iteration Limit  │     │   Runtime Limit   │     │    Cost Limit     │
-  │ (default: 100)    │     │   (default: 4h)   │     │   (default: $10)  │
+  │ (default: 100)    │     │   (default: 4h)   │     │ (no default)      │
   └───────────────────┘     └───────────────────┘     └───────────────────┘
             │                         │                         │
             │                         │                         │
@@ -116,7 +116,7 @@ Multiple layers of protection ensure safe operation:
             │                         │                         │
   ┌───────────────────┐     ┌───────────────────┐     ┌───────────────────┐
   │ Consecutive Fails │     │   Loop Detection  │     │ Completion Marker │
-  │   (default: 5)    │     │   (90% similar)   │     │ [x] TASK_COMPLETE │
+  │   (default: 3)    │     │ (similarity-based)│     │ [x] LOOP_COMPLETE │
   └───────────────────┘     └───────────────────┘     └───────────────────┘
 ```
 
@@ -127,23 +127,20 @@ Multiple layers of protection ensure safe operation:
 graph { label: "🛡️ Five Safety Mechanisms"; flow: south; }
 [ Iteration Limit (default: 100) ] -> [ SafetyGuard.check() ] { border: double; }
 [ Runtime Limit (default: 4h) ] -> [ SafetyGuard.check() ]
-[ Cost Limit (default: $10) ] -> [ SafetyGuard.check() ]
-[ Consecutive Fails (default: 5) ] -> [ SafetyGuard.check() ]
-[ Loop Detection (90% similar) ] -> [ SafetyGuard.check() ]
-[ Completion Marker [x] TASK_COMPLETE ] -> [ SafetyGuard.check() ]
+[ Cost Limit (no default) ] -> [ SafetyGuard.check() ]
+[ Consecutive Fails (default: 3) ] -> [ SafetyGuard.check() ]
+[ Loop Detection (similarity-based) ] -> [ SafetyGuard.check() ]
+[ Completion Marker [x] LOOP_COMPLETE ] -> [ SafetyGuard.check() ]
 ```
 
 </details>
 
 - **Input validation**: Sanitizes prompts to prevent injection attacks
-- **Resource limits**: Enforces iteration, runtime, and cost boundaries
-- **Completion markers**: Early exit when `- [x] TASK_COMPLETE` detected in prompt file
-- **Completion promises**: Early exit when agent output contains a configured string (default: `LOOP_COMPLETE`)
-- **Loop detection**: Stops when agent outputs are ≥90% similar to recent history
-- **Consecutive failure limit**: Stops after repeated failures (default: 5)
-- **Context overflow**: Automatically summarizes when approaching limits
+- **Resource limits**: Enforces iteration, runtime, and (when configured) cost boundaries
+- **Completion markers**: Early exit when the configured `completion_promise` string is emitted (default: `LOOP_COMPLETE`)
+- **Consecutive failure limit**: Stops after repeated failures (default: 3)
 - **Graceful shutdown**: Handles interrupts and saves state
-- **Error recovery**: Retries with exponential backoff
+- **Error recovery**: Injects recovery guidance rather than silently retrying
 
 See [Loop Detection](../advanced/loop-detection.md) for detailed documentation on output similarity detection.
 
@@ -267,8 +264,9 @@ graph LR
 
     subgraph "AI Agents"
         H[Claude]
-        I[Q Chat]
+        I[Kiro]
         J[Gemini]
+        K[Codex]
     end
 
     subgraph "Persistence"

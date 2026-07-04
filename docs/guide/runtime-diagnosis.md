@@ -20,7 +20,7 @@ Runtime Diagnosis 是 2026-06 drift-auto-calibration 计划（U0–U8）引入�
 
 ```bash
 # 1) 跑一个 loop，强制开启全量诊断 session。
-RALPH_DIAGNOSTICS=1 ralph run -c ralph.yml -H builtin:ce-executor -p "fix flaky test" --max-iterations 20
+RALPH_DIAGNOSTICS=1 ralph run -c ralph.yml -H builtin:ce-executor-serial -p "fix flaky test" --max-iterations 20
 
 # 2) 看 .ralph/diagnostics/<session>/ 下生成了哪些文件
 ls -1 .ralph/diagnostics/$(ls -1 .ralph/diagnostics/ | grep -E '^[0-9]{4}-' | tail -1)/
@@ -574,7 +574,7 @@ ralph diagnose --diagnostics-root /var/log/ralph/sessions
 
 ## 12. Serial review 链 recovery 形状（2026-06-17-004）
 
-`builtin:ce-executor-serial` 把 4 个 review 维度串行走完。当 `dimension-reviewer` 声称 emit 了事件但实际上没有写入时，orchestrator 会注入一条 `task.resume` 并把它 pin 回同一个 hat。为了让 reviewer 在第二次激活时知道该 review 哪个维度，`task.resume` payload 必须携带原始触发上下文：
+`builtin:ce-executor-serial` 把 6 个 review 维度串行走完。当 `dimension-reviewer` 声称 emit 了事件但实际上没有写入时，orchestrator 会注入一条 `task.resume` 并把它 pin 回同一个 hat。为了让 reviewer 在第二次激活时知道该 review 哪个维度，`task.resume` payload 必须携带原始触发上下文：
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
@@ -730,7 +730,7 @@ emit 失败 / 拒收
 
 ---
 
-## 10. `--from-ledger` 选项(U8 + U11-T3)
+## 16. `--from-ledger` 选项(U8 + U11-T3)
 
 `ralph diagnose --from-ledger` 优先读取 `.ralph/recovery.jsonl` 和 `.ralph/ledger.jsonl`,
 输出由 `correction::emit_correction_context` 写入的结构化 `RejectionRecord` 列表,
