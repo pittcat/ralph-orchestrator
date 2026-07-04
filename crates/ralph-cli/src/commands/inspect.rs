@@ -381,6 +381,18 @@ pub async fn inspect_loop_command(
         );
     }
 
+    // U1 (plan 2026-07-04-004): derive the loop anchor view. When
+    // there is no plan attached (no `event_loop.prompt_file` pointing
+    // at a plan-shaped file, no persisted plan baseline marker) we
+    // surface a warning so operators know the inspect command has
+    // nothing to anchor against. The anchor struct stays `None` on
+    // the view so the JSON key is omitted — backward-compatible.
+    let loop_anchor =
+        build_loop_anchor_summary(&config, &root, ctx.current_loop_id.as_deref());
+    if loop_anchor.is_none() {
+        warnings.push(loop_anchor_unattached_warning().to_string());
+    }
+
     let view = LoopInspectView {
         workspace_root: root.display().to_string(),
         loop_id: ctx.current_loop_id.clone(),
@@ -396,6 +408,7 @@ pub async fn inspect_loop_command(
         hat_channel_size: hat_size,
         warnings,
         schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
+        loop_anchor,
         supervisor: build_supervisor_summary(&config, &root),
     };
 
@@ -414,7 +427,45 @@ pub async fn inspect_loop_command(
 /// Versioned schema for the JSON output of `ralph inspect loop`.
 /// Bumped when the field set changes shape; tests and BDD scenarios
 /// pin against this value so version drift fails fast.
-pub const LOOP_INSPECT_SCHEMA_VERSION: &str = "loop_inspect.v1";
+///
+/// v1 → v2 (Unit 1 of plan 2026-07-04-004): adds the optional
+/// `loop_anchor` block (`plan_path` / `plan_name` / `plan_baseline_sha` /
+/// `loop_start_sha` / `attached_at`). The key is omitted when no
+/// plan is attached so v1 consumers continue to parse cleanly
+/// (`skip_serializing_if = "Option::is_none"`).
+pub const LOOP_INSPECT_SCHEMA_VERSION: &str = "loop_inspect.v2";
+
+/// U1 (plan 2026-07-04-004): anchor block summarising the loop's
+/// attached plan. `None` when no plan is attached (no plan path on
+/// disk + no persisted baseline + no plan_baseline_sha marker). The
+/// agent-safe surface gives the OPAC Observe stage one place to
+/// find what plan this loop is actually driving, instead of asking
+/// the agent to fish around in `.ralph/agent/` or reconstruct the
+/// plan name from `event_loop.prompt_file` heuristics.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LoopAnchorView {
+    /// Repo-relative or absolute path to the plan file driving this
+    /// loop (sourced from `event_loop.prompt_file` when it points
+    /// at a `.md` / `.html` file under `docs/plans/`).
+    pub plan_path: std::path::PathBuf,
+    /// Derived from `plan_path.file_stem()` — e.g.
+    /// `2026-07-04-004-fix-ce-executor-serial-silent-success-p0-p1-plan`.
+    pub plan_name: String,
+    /// SHA captured at plan start (file
+    /// `.ralph/agent/plan-baseline.sha`). `None` when no baseline
+    /// marker is on disk (loop never ran a baseline-enable step).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_baseline_sha: Option<String>,
+    /// `loop_start_sha` from `LoopState` (line 461) — the SHA at
+    /// which the loop runner started. `None` when no
+    /// `.ralph/loops.json` entry matches the current loop marker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loop_start_sha: Option<String>,
+    /// ISO-8601 UTC timestamp from `.ralph/loops.json`'s loop
+    /// entry (`started` field). `None` when no entry matches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attached_at: Option<chrono::DateTime<chrono::Utc>>,
+}
 
 /// Serializable view of the inspection result. Both human and JSON
 /// output are derived from this struct so the two surfaces cannot drift.
@@ -445,11 +496,111 @@ struct LoopInspectView {
     warnings: Vec<String>,
     /// Schema version — bump on field-set changes.
     schema_version: String,
+    /// U1 (plan 2026-07-04-004): agent-safe plan anchor when a
+    /// plan is attached. `None` when no plan marker / baseline is on
+    /// disk — the key is then omitted from JSON for forward compat
+    /// with v1 consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    loop_anchor: Option<LoopAnchorView>,
     /// U22: agent-safe supervisor summary, present only when
     /// `event_loop.supervisor.enabled` is true and the supervisor
     /// store can be opened. `None` → JSON has no `supervisor` key.
     #[serde(skip_serializing_if = "Option::is_none")]
     supervisor: Option<ralph_core::supervisor::SupervisorInspectSummary>,
+}
+
+/// U1 (plan 2026-07-04-004): build the loop anchor summary from on-disk
+/// markers + the loaded `event_loop` config. Returns `None` when no
+/// plan path can be determined (no `prompt_file`, no `.ralph/loops.json`
+/// entry). The function is intentionally read-only — it never mutates
+/// any marker. Sources, in priority order:
+///
+/// 1. `config.event_loop.prompt_file` — when non-empty and pointing at
+///    a `.md`/`.html` file (heuristic: extension matches one of the
+///    two) it is treated as the canonical plan path.
+/// 2. Persisted `.ralph/agent/plan-baseline.sha` — used to populate
+///    `plan_baseline_sha` (not for `plan_path`, which must come from
+///    a real file path).
+/// 3. `.ralph/loops.json` — supplies `attached_at` via the entry
+///    whose `id` matches the live `current-loop-id` marker (read
+///    separately by the caller). `loop_start_sha` is intentionally
+///    left as `None` in this Unit: `LoopEntry` does not currently
+///    persist a git HEAD-at-startup SHA; future Units that wire the
+///    ledger can populate it without changing this signature.
+///
+/// The `current_loop_id` argument is the resolved loop marker value
+/// (may be `None`); when `None` the loops.json lookup is skipped, so
+/// unattached loops surface `attached_at: None` instead of
+/// fabricating timestamps.
+fn build_loop_anchor_summary(
+    config: &RalphConfig,
+    workspace_root: &std::path::Path,
+    current_loop_id: Option<&str>,
+) -> Option<LoopAnchorView> {
+    // Source 1 — plan_path: prefer the loaded config's `prompt_file`
+    // when it points at a markdown / html file. Anything else
+    // (default sentinel `"PROMPT.md"`, a directory, a non-plan file)
+    // falls through and we report unattached. The sentinel matches
+    // `ralph_core::config::loop_config::default_prompt_file()` —
+    // keep the two in sync if the default ever moves.
+    const DEFAULT_PROMPT_FILE_SENTINEL: &str = "PROMPT.md";
+    let prompt_file = &config.event_loop.prompt_file;
+    let plan_path = if prompt_file.is_empty() || prompt_file == DEFAULT_PROMPT_FILE_SENTINEL {
+        None
+    } else {
+        let pb = std::path::PathBuf::from(prompt_file);
+        let ext_is_plan = pb
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("html"))
+            .unwrap_or(false);
+        if ext_is_plan { Some(pb) } else { None }
+    };
+    let plan_path = plan_path?;
+
+    let plan_name = plan_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    if plan_name.is_empty() {
+        return None;
+    }
+
+    // Source 2 — plan_baseline_sha from persisted marker.
+    let plan_baseline_sha = ralph_core::plan_baseline::read_plan_baseline(workspace_root, None);
+
+    // Source 3 — attached_at from `.ralph/loops.json`. The list is
+    // allowed to be empty (no persisted loops) without an error.
+    // `loop_start_sha` stays None per the contract documented above.
+    let attached_at = match current_loop_id {
+        Some(loop_id) => ralph_core::loop_registry::LoopRegistry::new(workspace_root)
+            .list()
+            .ok()
+            .and_then(|entries| entries.into_iter().find(|e| e.id == loop_id))
+            .map(|entry| entry.started),
+        None => None,
+    };
+
+    Some(LoopAnchorView {
+        plan_path,
+        plan_name,
+        plan_baseline_sha,
+        loop_start_sha: None,
+        attached_at,
+    })
+}
+
+/// U1 (plan 2026-07-04-004): canonical unattached-loop-anchor
+/// warning string. Surfaced by [`inspect_loop_command`] when
+/// [`build_loop_anchor_summary`] returns `None`. The literal is
+/// pinned (vs. inlined) so tests, lint, and BDD scenarios can
+/// match it byte-for-byte without copying the warning into every
+/// site. The leading fragment `"loop_anchor not attached"` is the
+/// stable needle used by downstream tools.
+pub fn loop_anchor_unattached_warning() -> &'static str {
+    "loop_anchor not attached; preset hats requiring loop_anchor will receive null. \
+     Pass --plan <path> to attach a plan, or run inside an active loop"
 }
 
 /// U22 + U8 of plan 2026-07-04-002: produce an agent-safe supervisor
@@ -1393,7 +1544,7 @@ mod tests {
     /// shape's compatibility surface is explicit.
     #[test]
     fn loop_inspect_schema_version_pinned() {
-        assert_eq!(LOOP_INSPECT_SCHEMA_VERSION, "loop_inspect.v1");
+        assert_eq!(LOOP_INSPECT_SCHEMA_VERSION, "loop_inspect.v2");
     }
 
     /// `resolve_event_paths` returns `<root>/.ralph/events.jsonl` for the
@@ -1442,13 +1593,14 @@ mod tests {
                     .to_string(),
             ],
             schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
+            loop_anchor: None,
             supervisor: None,
         };
         assert!(view.loop_id.is_none());
         assert!(view.current_hat.is_none());
         assert_eq!(view.warnings.len(), 2);
         let json = serde_json::to_value(&view).expect("serialise");
-        assert_eq!(json["schema_version"], serde_json::json!("loop_inspect.v1"));
+        assert_eq!(json["schema_version"], serde_json::json!("loop_inspect.v2"));
         assert_eq!(json["loop_id"], serde_json::Value::Null);
         assert_eq!(json["hat_identity"], serde_json::Value::Null);
     }
@@ -1486,6 +1638,7 @@ mod tests {
             hat_channel_size: 0,
             warnings: vec![],
             schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
+            loop_anchor: None,
             supervisor: None,
         };
 
@@ -1649,5 +1802,135 @@ mod tests {
         assert_eq!(json["queue_depth"], serde_json::json!(0));
         assert_eq!(json["slot_summary"], serde_json::json!([]));
         assert_eq!(json["last_coordination_topics"], serde_json::json!([]));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // U1 of plan 2026-07-04-004 — `ralph inspect loop` exposes a
+    // `loop_anchor` block describing the attached plan (P0-1). Schema
+    // bumped from `loop_inspect.v1` → `loop_inspect.v2`. Tests cover
+    // attached vs. unattached serialisation + warning semantics so
+    // downstream consumers can rely on the field set without
+    // re-reading the inspect source.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `LOOP_INSPECT_SCHEMA_VERSION` is bumped to `loop_inspect.v2`
+    /// when the field set changes shape (U1 / P0-1).
+    #[test]
+    fn test_loop_inspect_schema_version_bumped_to_v2() {
+        assert_eq!(LOOP_INSPECT_SCHEMA_VERSION, "loop_inspect.v2");
+    }
+
+    /// When a plan is attached (`prompt_file` is a `.md` under
+    /// `docs/plans/`) the JSON contains `loop_anchor` with the
+    /// five canonical fields. `plan_baseline_sha` is `None` when no
+    /// baseline marker is on disk; `attached_at` is `None` when no
+    /// matching `loops.json` entry exists; `loop_start_sha` is
+    /// omitted entirely via `skip_serializing_if`.
+    #[test]
+    fn test_inspect_loop_view_includes_loop_anchor_when_attached() {
+        let tmp = TempDir::new().expect("temp dir");
+        let plan_dir = tmp.path().join("docs").join("plans");
+        std::fs::create_dir_all(&plan_dir).expect("plan dir");
+        let plan_path =
+            plan_dir.join("2026-07-04-004-fix-ce-executor-serial-silent-success-p0-p1-plan.md");
+        std::fs::write(&plan_path, "# plan").expect("write plan");
+
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop.prompt_file = plan_path.to_string_lossy().to_string();
+
+        let anchor = build_loop_anchor_summary(&cfg, tmp.path(), None)
+            .expect("anchor must be Some when prompt_file points at a plan");
+        assert_eq!(anchor.plan_path, plan_path);
+        assert_eq!(
+            anchor.plan_name,
+            "2026-07-04-004-fix-ce-executor-serial-silent-success-p0-p1-plan"
+        );
+        assert!(anchor.plan_baseline_sha.is_none());
+        assert!(anchor.loop_start_sha.is_none());
+        assert!(anchor.attached_at.is_none());
+
+        // Serialise the anchor struct and confirm the JSON shape.
+        let json = serde_json::to_value(&anchor).expect("serialise");
+        assert_eq!(
+            json["plan_name"],
+            serde_json::json!(
+                "2026-07-04-004-fix-ce-executor-serial-silent-success-p0-p1-plan"
+            )
+        );
+        assert_eq!(json["plan_path"], serde_json::json!(plan_path));
+        assert_eq!(json["plan_baseline_sha"], serde_json::Value::Null);
+        // `loop_start_sha` and `attached_at` are `skip_serializing_if`,
+        // so they are omitted entirely (not present at all in the
+        // serialised form). Pinning that contract prevents accidental
+        // null-flooding of the JSON payload.
+        assert!(
+            json.get("loop_start_sha").is_none(),
+            "loop_start_sha must be skipped when None"
+        );
+        assert!(
+            json.get("attached_at").is_none(),
+            "attached_at must be skipped when None"
+        );
+    }
+
+    /// When no plan path is on the loaded config (`prompt_file` is
+    /// the default sentinel `"PROMPT.md"`) the `loop_anchor` is
+    /// `None` so the JSON key is omitted entirely (forward compat
+    /// with v1 consumers; per `skip_serializing_if =
+    /// "Option::is_none"`).
+    #[test]
+    fn test_inspect_loop_view_omits_loop_anchor_when_unattached() {
+        let tmp = TempDir::new().expect("temp dir");
+        let cfg = RalphConfig::default();
+        // Default config has prompt_file == "PROMPT.md"; explicitly
+        // confirm the helper short-circuits in that state.
+        assert_eq!(cfg.event_loop.prompt_file, "PROMPT.md");
+
+        let anchor = build_loop_anchor_summary(&cfg, tmp.path(), None);
+        assert!(anchor.is_none(), "default RalphConfig has no plan attached");
+
+        // Render through the same view struct `inspect_loop_command`
+        // builds so the JSON-shape contract is pinned end-to-end.
+        let view = LoopInspectView {
+            workspace_root: tmp.path().display().to_string(),
+            loop_id: None,
+            current_hat: None,
+            is_agent_context: false,
+            hat_identity: serde_json::Value::Null,
+            events_file: tmp.path().join(".ralph/events.jsonl").display().to_string(),
+            hat_channel_file: tmp.path().join(".ralph/current-hat-events").display().to_string(),
+            events_size: 0,
+            hat_channel_size: 0,
+            warnings: vec![],
+            schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
+            loop_anchor: None,
+            supervisor: None,
+        };
+        let json = serde_json::to_value(&view).expect("serialise");
+        assert!(
+            json.get("loop_anchor").is_none(),
+            "JSON must omit the `loop_anchor` key when None"
+        );
+    }
+
+    /// Inspect commands which cannot resolve a plan anchor must push
+    /// a stable warning string into the warnings list so operators
+    /// have an actionable hint instead of silently dropping the
+    /// field. The canonical warning is exported via
+    /// [`loop_anchor_unattached_warning`] so tests and runtime
+    /// reference the same literal.
+    #[test]
+    fn test_loop_anchor_warning_when_unattached() {
+        let warning = loop_anchor_unattached_warning();
+        let needle = "loop_anchor not attached";
+        assert!(
+            warning.contains(needle),
+            "warning literal must contain `{needle}` so downstream lint and BDD scenarios can match"
+        );
+        // Pin the actionable hint so operators know how to recover.
+        assert!(
+            warning.contains("--plan"),
+            "warning must mention `--plan` as the recovery hint"
+        );
     }
 }
