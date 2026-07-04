@@ -30,6 +30,23 @@ metadata:
 3. **任务当前状态**：`ralph tools task list` + `ready` 子命令
 4. **我刚刚发的事件落到哪了**：同 activation 内用 `ralph events --events-source hat-channel`；跨 hat / 调试用 `--events-source main`
 5. **supervisor 在做什么（仅当 `event_loop.supervisor.enabled: true`）**：`ralph inspect loop --format json` 的 `supervisor` 键
+6. **loop 锚定的 plan 是哪个（U1 of 2026-07-04-004）**：`ralph inspect loop --format json` 的 `loop_anchor` 键
+
+## loop_anchor 摘要（U1 of 2026-07-04-004）
+
+当 loop 已 attach 到某个 plan（`config.event_loop.prompt_file` 指向 `.md`/`.html` 文件且不是默认 `PROMPT.md` 哨兵）时,`ralph inspect loop --format json` 的 `loop_anchor` 字段会带五段信息:
+
+| 字段 | 含义 | 来源 |
+|------|------|------|
+| `plan_path` | 计划文件绝对或 workspace-相对路径 | `config.event_loop.prompt_file` |
+| `plan_name` | `plan_path.file_stem()` 派生的稳定 key | `plan_path` 派生 |
+| `plan_baseline_sha` | plan 启动时的 git HEAD SHA | `.ralph/agent/plan-baseline.sha` |
+| `loop_start_sha` | loop runner 启动时的 git HEAD SHA（`LoopState.loop_start_sha`，line 461） | 未来 ledger 字段；当前为 `None` |
+| `attached_at` | loop 注册时间（`.ralph/loops.json` 的 `started` 字段） | `LoopRegistry::list()` |
+
+**未 attach 时**：`loop_anchor` 键整体省略（`skip_serializing_if = "Option::is_none"`），同时 `warnings` 数组会含 `"loop_anchor not attached; preset hats requiring loop_anchor will receive null. Pass --plan <path> to attach a plan, or run inside an active loop"`。
+
+**schema bump**：v1 → v2 (`loop_inspect.v2`)；v1 消费者继续兼容（`loop_anchor` 与 `loop_id` 等新增键都是可选）。
 
 ## supervisor 摘要（U8 of 2026-07-04-002）
 
