@@ -59,6 +59,13 @@ cli:
 core:
   specs_dir: "./specs/"
   guardrails:
+    # OPAC 四阶段纪律 (plan 2026-07-04-001 U17): 所有 hat 遵循
+    # Observe → Precheck → Apply → Confirm。详见
+    # `crates/ralph-core/data/ralph-tools-opac.md`。
+    - "OPAC Observe: `ralph inspect loop` + `ralph tools task list`. 不要读 `.ralph/events.jsonl`."
+    - "OPAC Precheck: `ralph emit --policy-check` 或 `ralph wave verify`. agent context 默认 enforce（U15）."
+    - "OPAC Apply: 一次 activation 一条业务事件（isolated 单事件预算）；不要在同 activation 重试 dropped emit."
+    - "OPAC Confirm: `ralph events --events-source hat-channel`（单 emit）或 `--events-source main`（wave emit 写入主 ledger）."
     - "GIT-ONLY: Use `git worktree list`, branch names, and prompt branch order as the sole merge inputs. Never read or write `.ralph/loops.json`, `.ralph/merge-queue.jsonl`, or invoke `ralph loops mark-merged` / `mark-needs-review`."
     - "ALLOWED `.ralph/` writes: only under `.ralph/merge/` (stabilize logs, state, reports). Do not modify other `.ralph/` runtime state."
     - "Run from the main repository root (first entry in `git worktree list`), not inside a linked worktree."

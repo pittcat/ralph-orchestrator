@@ -51,6 +51,14 @@ cli:
 core:
   specs_dir: "./specs/"
   guardrails:
+    # OPAC 四阶段纪律 (plan 2026-07-04-001 U17): 所有 hat 遵循
+    # Observe → Precheck → Apply → Confirm。详见
+    # `crates/ralph-core/data/ralph-tools-opac.md`；hat `instructions:`
+    # 引用 skill 而不复述命令语法。
+    - "OPAC Observe: `ralph inspect loop` + `ralph tools task list`. 不要读 `.ralph/events.jsonl`."
+    - "OPAC Precheck: `ralph emit --policy-check` 或 `ralph wave verify`. agent context 默认 enforce（U15）."
+    - "OPAC Apply: 一次 activation 一条业务事件（isolated 单事件预算）；不要在同 activation 重试 dropped emit."
+    - "OPAC Confirm: `ralph events --events-source hat-channel`（单 emit）或 `--events-source main`（wave emit 写入主 ledger）."
     - "ABSOLUTE PROHIBITION: NEVER kill, signal, or terminate any `ralph` / `ralph-orchestrator` process — including `kill`, `pkill`, `killall`, `kill -9`, `kill -TERM`, `kill -HUP`, `taskkill`, or any equivalent process-control command targeting the loop's parent PID, the TUI subprocess PID recorded in `.ralph/loop.lock`, any PID listed in `.ralph/loops.json`, or any PID returned by `ps` / `pgrep` matching `ralph`. The currently running ralph IS the parent process of this very agent iteration — killing it ends the agent itself mid-thought and corrupts orchestration state (stale lock, in_progress tasks, lost events, partial commits). If the loop needs to restart to pick up new configuration, emit `loop.cancel`, surface a `merge.failed` / `MERGE_COMPLETE` with a clear reason, or instruct the human operator to run `ralph loops stop <loop_id>`. Stopping the orchestrator is the operator's decision, not the agent's."
 
 hats:

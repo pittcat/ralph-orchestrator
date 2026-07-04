@@ -105,6 +105,16 @@ cli:
 core:
   specs_dir: ./specs/
   guardrails:
+  # OPAC \u56db\u9636\u6bb5\u7eaa\u5f8b (plan 2026-07-04-001 U17): \u6240\u6709 hat \u5728\u6b64 preset
+  # \u5185\u9075\u5faa Observe \u2192 Precheck \u2192 Apply \u2192 Confirm \u56db\u9636\u6bb5\u3002\u4efb\u4f55
+  # state-changing \u64cd\u4f5c\uff08emit / wave emit / task mutate\uff09\u5fc5\u987b\u5148
+  # \u8d70 precheck\uff0c\u518d\u6b63\u5f0f\u5199\u76d8\uff0c\u6700\u540e\u901a\u8fc7 Confirm \u9a8c\u771f\u3002\u8be6\u89c1
+  # `crates/ralph-core/data/ralph-tools-opac.md`\uff1b\u4e0d\u8981\u5728 hat
+  # `instructions:` \u5185\u590d\u8ff0\u547d\u4ee4\u8bed\u6cd5\u2014\u2014\u53ea\u5f15\u7528 skill\u3002
+  - "OPAC Observe: `ralph inspect loop` + `ralph tools task list`. \u4e0d\u8981\u8bfb `.ralph/events.jsonl` / `.ralph/supervisor.db`\uff08HARD RULE 4\uff09."
+  - "OPAC Precheck: `ralph emit --policy-check` \u6216 `ralph wave verify --payloads-stdin`. agent context \u9ed8\u8ba4 enforce\uff08U15\uff09."
+  - "OPAC Apply: \u4e00\u6b21 activation \u4e00\u6761\u4e1a\u52a1\u4e8b\u4ef6\uff08isolated \u5355\u4e8b\u4ef6\u9884\u7b97\uff09\uff1b\u4e0d\u8981\u5728\u540c activation \u91cd\u8bd5 dropped emit."
+  - "OPAC Confirm: `ralph events --events-source hat-channel`\uff08\u5355 emit\uff09\u6216 `--events-source main`\uff08wave emit \u5199\u5165\u4e3b ledger\uff09."
   - "ABSOLUTE PROHIBITION: NEVER kill, signal, or terminate any `ralph` / `ralph-orchestrator` process \u2014 including `kill`, `pkill`, `killall`, `kill -9`, `kill -TERM`, `kill -HUP`, `taskkill`, or any equivalent process-control command targeting the loop's parent PID, the TUI subprocess PID recorded in `.ralph/loop.lock`, any PID listed in `.ralph/loops.json`, or any PID returned by `ps` / `pgrep` matching `ralph`. The currently running ralph IS the parent process of this very agent iteration \u2014 killing it ends the agent itself mid-thought and corrupts orchestration state (stale lock, in_progress tasks, lost events, partial commits). If the loop needs to restart to pick up new configuration, emit `loop.cancel`, surface a `fix.failed` / `DEBUG_COMPLETE` with a clear reason, or instruct the human operator to run `ralph loops stop <loop_id>`. Stopping the orchestrator is the operator's decision, not the agent's."
 hats:
   investigator:

@@ -701,6 +701,13 @@ cli:
 core:
   specs_dir: ".agents/scratchpad/"
   guardrails:
+    # OPAC 四阶段纪律 (plan 2026-07-04-001 U17): 所有 hat 遵循
+    # Observe → Precheck → Apply → Confirm。详见
+    # `crates/ralph-core/data/ralph-tools-opac.md`。
+    - "OPAC Observe: `ralph inspect loop` + `ralph tools task list`. 不要读 `.ralph/events.jsonl`."
+    - "OPAC Precheck: `ralph emit --policy-check` 或 `ralph wave verify`. agent context 默认 enforce（U15）."
+    - "OPAC Apply: 一次 activation 一条业务事件（isolated 单事件预算）；不要在同 activation 重试 dropped emit."
+    - "OPAC Confirm: `ralph events --events-source hat-channel`（单 emit）或 `--events-source main`（wave emit 写入主 ledger）."
     - "Fresh context each iteration — save learnings to memories for next time"
     - "Verification is mandatory — tests/typecheck/lint/audit must pass"
     - "YAGNI ruthlessly — no speculative features"
