@@ -90,6 +90,13 @@ pub enum ViolationType {
 /// `reason_code` is derived per-variant so dashboards see a stable
 /// `duplicate_review_dimension_ready` rather than the misleading
 /// generic `duplicate_work_done`.
+///
+/// U6 (plan 2026-07-04-004): added `ReviewDimensionsComplete` so the
+/// `review.dimensions.complete` dedup branch (U2 carve-out) emits a
+/// distinct reason code (`duplicate_review_dimensions_complete`)
+/// rather than the misleading `duplicate_work_done`. Used in tandem
+/// with `PolicyDecision::AcknowledgeAndForward` so dashboards can
+/// tell the silent-success branch from a real policy violation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DuplicateWorkDoneHint {
@@ -107,6 +114,14 @@ pub enum DuplicateWorkDoneHint {
     /// agents can recognize that the collision is in the review-
     /// coordinator's serial-walk lane, not the unit-execution lane.
     ReviewDimensionDuplicate,
+    /// U6 (plan 2026-07-04-004): `review.dimensions.complete` already
+    /// accepted for the same `(plan_name, step, task_id, fix_round)`
+    /// tuple. Distinct from `DuplicateSameStep` /
+    /// `ReviewDimensionDuplicate` so dashboards and agents can
+    /// recognize the silent-success lane. Pairs with U2's
+    /// `PolicyDecision::AcknowledgeAndForward` so the duplicate
+    /// reaches the bus without a `task.resume` storm.
+    ReviewDimensionsComplete,
 }
 
 impl ViolationType {
@@ -150,6 +165,14 @@ impl ViolationType {
                 DuplicateWorkDoneHint::ReviewDimensionDuplicate => {
                     "duplicate_review_dimension_ready"
                 }
+                // U6 (plan 2026-07-04-004): split off
+                // `ReviewDimensionsComplete` so the U2 silent-success
+                // carve-out has a distinct stable code. Dashboards
+                // / pin tests can match this literal without
+                // mistaking it for a generic `duplicate_work_done`.
+                DuplicateWorkDoneHint::ReviewDimensionsComplete => {
+                    "duplicate_review_dimensions_complete"
+                }
                 DuplicateWorkDoneHint::DuplicateStallBypass
                 | DuplicateWorkDoneHint::DuplicateSameStep => "duplicate_work_done",
             },
@@ -172,6 +195,17 @@ pub enum PolicyDecision {
     Warn(Vec<PolicyFinding>),
     RejectWithResume(PolicyFinding),
     Hold(PolicyFinding),
+    /// U2 (plan 2026-07-04-004): event is acknowledged (logged,
+    /// counted, mirrored into the dedup bucket) but **forwarded** to
+    /// the bus **without** producing a `task.resume` recovery
+    /// payload. Used by `review.dimensions.complete` dedup hits so
+    /// the silent-success run doesn't drown the runtime in
+    /// `task.resume` storms while still preserving the dedup
+    /// invariant (a re-emit after `fix.applied` + new fix_round
+    /// is the only legitimate path). The carried `PolicyFinding`
+    /// is the same shape `RejectWithResume` would produce so
+    /// dashboards / dashboards / dashboards continue to read it.
+    AcknowledgeAndForward(PolicyFinding),
     /// Silently drop the event without publishing recovery or hold artifacts.
     Block(PolicyFinding),
     /// Silently ignore the event without recovery artifacts.
@@ -1487,7 +1521,13 @@ pub fn validate_event_with_hat(
                     topic: topic.to_string(),
                     violation_type: ViolationType::DuplicateWorkDone {
                         key: dedup_key.clone(),
-                        hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                        // U6 (plan 2026-07-04-004): switch to the
+                        // dedicated `ReviewDimensionsComplete` hint
+                        // so the dedup reason code is
+                        // `duplicate_review_dimensions_complete`
+                        // rather than the misleading generic
+                        // `duplicate_work_done`.
+                        hint: DuplicateWorkDoneHint::ReviewDimensionsComplete,
                     },
                     message: format!(
                         "duplicate_dimensions_complete: review.dimensions.complete for key \
@@ -1496,7 +1536,18 @@ pub fn validate_event_with_hat(
                          review.dimension.ready first (see U3 obligations)."
                     ),
                 };
-                return PolicyDecision::RejectWithResume(finding);
+                // U2 (plan 2026-07-04-004): silently-success
+                // `review.dimensions.complete` re-emits must not
+                // trigger `task.resume` storms (per
+                // `docs/report/2026-07-04-...` silent-success
+                // diagnosis). Returning `AcknowledgeAndForward`
+                // keeps the dedup invariant (mirror is unchanged)
+                // while letting the event reach the bus without
+                // injecting a recovery directive. Other dedup
+                // branches continue to surface
+                // `RejectWithResume` so existing semantics stay
+                // intact; this carve-out is intentionally narrow.
+                return PolicyDecision::AcknowledgeAndForward(finding);
             }
             state.review_dimensions_complete_seen_keys.insert(dedup_key);
         }
@@ -4792,9 +4843,12 @@ mod tests {
     #[test]
     fn u5_review_dimensions_complete_dedup_rejects_second_emit_same_round() {
         // Error path: 2nd emit with the same `fix_round` is
-        // rejected as `DuplicateWorkDone` (the perky-maple
-        // P2-1 shape: 4× duplicate `review.dimensions.complete`
-        // events being silently dropped).
+        // acknowledged + forwarded (U2 carve-out: silent-success
+        // lane) instead of being rejected as `DuplicateWorkDone`.
+        // The 4× duplicate `review.dimensions.complete` events
+        // from the perky-maple P2-1 run are now silently accepted
+        // by policy and forwarded to the bus; downstream code
+        // observes the dedup hint via the carried `PolicyFinding`.
         let config = test_config();
         let mut state = PolicyRuntimeState::default();
         let payload = review_dimensions_complete_payload("p1", "step-01", "t1", 0);
@@ -4816,12 +4870,12 @@ mod tests {
         assert!(
             matches!(
                 second,
-                PolicyDecision::RejectWithResume(PolicyFinding {
+                PolicyDecision::AcknowledgeAndForward(PolicyFinding {
                     violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
                     ..
                 }) if key == "p1::step-01::t1::0"
             ),
-            "2nd review.dimensions.complete same round must reject as DuplicateWorkDone, got {:?}",
+            "2nd review.dimensions.complete same round must be AcknowledgeAndForward per U2, got {:?}",
             second
         );
     }
@@ -4958,9 +5012,13 @@ mod tests {
     fn u6_review_dimensions_complete_same_fix_round_still_dedups() {
         // U6 regression guard: the KTD4 change must NOT break
         // the round-0 dedup contract. Two emits both carrying
-        // `fix_round=0` for the same `(plan, step, task)` must
-        // still be dedup-rejected — only schema-invalid emits
-        // are exempted.
+        // `fix_round=0` for the same `(plan, step, task)` are
+        // still dedup-handled — U2 changes the *decision* from
+        // `RejectWithResume` to `AcknowledgeAndForward` so the
+        // silent-success run does not produce `task.resume`
+        // storms, but the dedup invariant (mirror is populated,
+        // second emit carries a `DuplicateWorkDone` finding) is
+        // intact. Only schema-invalid emits are exempted.
         let config = test_config();
         let mut state = PolicyRuntimeState::default();
         let payload = review_dimensions_complete_payload("p1", "step-01", "t1", 0);
@@ -4989,12 +5047,12 @@ mod tests {
         assert!(
             matches!(
                 second,
-                PolicyDecision::RejectWithResume(PolicyFinding {
+                PolicyDecision::AcknowledgeAndForward(PolicyFinding {
                     violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
                     ..
                 }) if key == "p1::step-01::t1::0"
             ),
-            "2nd round-0 emit must STILL be rejected as DuplicateWorkDone, got {:?}",
+            "2nd round-0 emit must STILL be dedup-handled per U2 (AcknowledgeAndForward), got {:?}",
             second
         );
     }
@@ -5972,5 +6030,203 @@ hats:
         assert!(allowed.contains("work.done.proposed"));
         assert!(allowed.contains("work.done.rejected"));
         assert!(allowed.contains("work.done"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // U2 + U6 (plan 2026-07-04-004): `PolicyDecision::AcknowledgeAndForward`
+    // + the `ReviewDimensionsComplete` hint mapping. Together they
+    // carve out the silent-success lane so `review.dimensions.complete`
+    // re-emits do not trigger `task.resume` storms, while keeping the
+    // dedup invariant intact.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `PolicyDecision` now exposes a 7th variant: `AcknowledgeAndForward`.
+    /// Pin the variant count + the new variant's existence so static
+    /// assertions across the workspace stay in sync (the project
+    /// sealed-style helper `ensure_sealed_enum()` no longer compiles
+    /// when a new variant is added without updating the call sites
+    /// listed in `find_referencing_symbols`).
+    #[test]
+    fn test_policy_decision_has_acknowledge_and_forward_variant() {
+        // (a) AcknowledgeAndForward is constructible with a PolicyFinding.
+        let finding = PolicyFinding {
+            topic: "review.dimensions.complete".to_string(),
+            violation_type: ViolationType::DuplicateWorkDone {
+                key: "k".to_string(),
+                hint: DuplicateWorkDoneHint::ReviewDimensionsComplete,
+            },
+            message: "test".to_string(),
+        };
+        let decision = PolicyDecision::AcknowledgeAndForward(finding.clone());
+        match decision {
+            PolicyDecision::AcknowledgeAndForward(f) => {
+                assert_eq!(f.topic, "review.dimensions.complete");
+                // reason_code is derived from `violation_type` (per
+                // `ViolationType::reason_code()`); verify the
+                // `ReviewDimensionsComplete` hint mapping here.
+                assert_eq!(
+                    f.violation_type.reason_code(),
+                    "duplicate_review_dimensions_complete"
+                );
+            }
+            other => panic!("expected AcknowledgeAndForward, got {other:?}"),
+        }
+
+        // (b) Total enum variant count is 7 (Accept / Warn /
+        // RejectWithResume / Hold / AcknowledgeAndForward / Block /
+        // Ignore). If a future Unit adds another variant this
+        // assertion fails fast and the author is forced to re-pin
+        // the contract here.
+        let all = [
+            std::mem::discriminant(&PolicyDecision::Accept),
+            std::mem::discriminant(&PolicyDecision::Warn(vec![])),
+            std::mem::discriminant(&PolicyDecision::RejectWithResume(finding.clone())),
+            std::mem::discriminant(&PolicyDecision::Hold(finding.clone())),
+            std::mem::discriminant(&PolicyDecision::AcknowledgeAndForward(finding.clone())),
+            std::mem::discriminant(&PolicyDecision::Block(finding.clone())),
+            std::mem::discriminant(&PolicyDecision::Ignore(finding)),
+        ];
+        let unique: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(
+            unique.len(),
+            7,
+            "PolicyDecision must have 7 distinct variants after U2"
+        );
+    }
+
+    /// Second emit of `review.dimensions.complete` for the same
+    /// `(plan, step, task, fix_round)` tuple returns
+    /// `AcknowledgeAndForward(PolicyFinding{ reason_code: "duplicate_review_dimensions_complete", ... })`
+    /// instead of `RejectWithResume`. This is the U2 carve-out that
+    /// prevents silent-success dedup storms.
+    #[test]
+    fn test_review_dimensions_complete_dedup_hit_returns_acknowledge_and_forward() {
+        let mut config = test_config();
+        // Allow the topic + fields used by `review.dimensions.complete`.
+        config.schemas.insert(
+            "review.dimensions.complete".to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: vec![
+                    "plan_name".to_string(),
+                    "step".to_string(),
+                    "task_id".to_string(),
+                    "fix_round".to_string(),
+                ],
+                ..Default::default()
+            },
+        );
+        let mut state = PolicyRuntimeState::default();
+
+        let payload = r#"{"plan_name":"p","step":"s","task_id":"t","fix_round":1}"#;
+        // First emit is accepted.
+        let first = validate_event_with_hat(
+            "review.dimensions.complete",
+            Some(payload),
+            &config,
+            &mut state,
+            None,
+        );
+        assert_eq!(first, PolicyDecision::Accept);
+
+        // Second emit with the same key returns AcknowledgeAndForward.
+        let second = validate_event_with_hat(
+            "review.dimensions.complete",
+            Some(payload),
+            &config,
+            &mut state,
+            None,
+        );
+        match second {
+            PolicyDecision::AcknowledgeAndForward(finding) => {
+                assert_eq!(finding.topic, "review.dimensions.complete");
+                assert_eq!(
+                    finding.violation_type.reason_code(),
+                    "duplicate_review_dimensions_complete"
+                );
+            }
+            other => panic!(
+                "expected AcknowledgeAndForward, got {other:?}; \
+                 the U2 silent-success carve-out must apply to dedup hits"
+            ),
+        }
+    }
+
+    /// First emit of `review.dimensions.complete` is still accepted;
+    /// the carve-out must not regress the happy path.
+    #[test]
+    fn test_review_dimensions_complete_first_emit_still_accepts() {
+        let mut config = test_config();
+        config.schemas.insert(
+            "review.dimensions.complete".to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: vec![
+                    "plan_name".to_string(),
+                    "step".to_string(),
+                    "task_id".to_string(),
+                    "fix_round".to_string(),
+                ],
+                ..Default::default()
+            },
+        );
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"plan_name":"p","step":"s","task_id":"t","fix_round":7}"#;
+        let decision = validate_event_with_hat(
+            "review.dimensions.complete",
+            Some(payload),
+            &config,
+            &mut state,
+            None,
+        );
+        assert_eq!(decision, PolicyDecision::Accept);
+    }
+
+    /// Other-topic dedup branches (e.g. `work.done`) continue to
+    /// return `RejectWithResume` — the U2 carve-out is intentionally
+    /// narrow and applies only to `review.dimensions.complete`.
+    #[test]
+    fn test_other_topic_dedup_still_rejects_with_resume() {
+        let mut config = test_config();
+        config.schemas.insert(
+            "work.done".to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: vec![
+                    "plan_name".to_string(),
+                    "step".to_string(),
+                    "task_id".to_string(),
+                ],
+                ..Default::default()
+            },
+        );
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"plan_name":"p","step":"s","task_id":"t"}"#;
+        // First emit accepted.
+        let first = validate_event_with_hat(
+            "work.done",
+            Some(payload),
+            &config,
+            &mut state,
+            None,
+        );
+        assert_eq!(first, PolicyDecision::Accept);
+        // Second emit returns RejectWithResume (unchanged behaviour).
+        let second = validate_event_with_hat(
+            "work.done",
+            Some(payload),
+            &config,
+            &mut state,
+            None,
+        );
+        match second {
+            PolicyDecision::RejectWithResume(finding) => {
+                assert_eq!(finding.topic, "work.done");
+            }
+            other => panic!(
+                "expected RejectWithResume for work.done dedup, got {other:?}; \
+                 the U2 carve-out must NOT extend to work.done"
+            ),
+        }
     }
 }

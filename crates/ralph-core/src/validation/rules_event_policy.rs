@@ -133,6 +133,15 @@ fn handle_completion_decision(
             finding.message,
             false,
         ),
+        // U2 (plan 2026-07-04-004): completion guard does not
+        // surface AcknowledgeAndForward today (the carve-out is
+        // gated on the `review.dimensions.complete` topic which is
+        // never a completion topic), but we still need to handle
+        // the variant for exhaustive-match. Forward as a warning
+        // so the event reaches the bus.
+        PolicyDecision::AcknowledgeAndForward(finding) => {
+            accept_with_warning(ctx, event, std::slice::from_ref(&finding))
+        }
     }
 }
 
@@ -158,6 +167,16 @@ fn handle_topic_deny_decision(
         }
         PolicyDecision::Ignore(finding) => {
             reject(ReasonCode::EVENT_POLICY_IGNORED, finding.message, false)
+        }
+        // U2 (plan 2026-07-04-004): treat `AcknowledgeAndForward`
+        // the same way the runner does — accept the event but
+        // surface the dedup hint as a warning. This is the
+        // silent-success carve-out for `review.dimensions.complete`
+        // dedup hits. `record_policy_rejection` keeps the
+        // diagnostic visible without aborting the flow.
+        PolicyDecision::AcknowledgeAndForward(finding) => {
+            record_policy_rejection(&finding, ctx, event);
+            accept_with_warning(ctx, event, std::slice::from_ref(&finding))
         }
     }
 }
@@ -220,6 +239,14 @@ fn handle_payload_decision(
         }
         PolicyDecision::Ignore(finding) => {
             reject(ReasonCode::EVENT_POLICY_IGNORED, finding.message, false)
+        }
+        // U2 (plan 2026-07-04-004): the main event-policy validator
+        // also sees `AcknowledgeAndForward`. Forward to the bus
+        // (accepted=true) but record the dedup hint so dashboards
+        // see why this re-emit was a duplicate.
+        PolicyDecision::AcknowledgeAndForward(finding) => {
+            record_policy_rejection(&finding, ctx, event);
+            accept_with_warning(ctx, event, std::slice::from_ref(&finding))
         }
     }
 }
