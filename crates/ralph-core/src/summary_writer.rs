@@ -396,6 +396,14 @@ impl SummaryWriter {
             // stop. The summary uses the `source` field for
             // disambiguation when the operator drills in.
             TerminationReason::CompletionStuck(_) => "Failed: completion stuck (see last_reason)",
+            // U5 (plan 2026-07-04-004): dimension-reviewer
+            // scope_violation hard-reject. The summary surfaces
+            // the explicit class so the operator / dashboard sees
+            // the silent-success guard fire as a typed failure
+            // rather than a generic "loop paused" message.
+            TerminationReason::ScopeViolationHardRejected { .. } => {
+                "Failed: dimension-reviewer scope_violation (hard-rejected)"
+            }
         }
     }
 

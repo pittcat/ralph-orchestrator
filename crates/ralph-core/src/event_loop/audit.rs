@@ -185,4 +185,56 @@ mod tests {
             _ => panic!("scope_violation must use Fail severity per U4"),
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // U5 (plan 2026-07-04-004): scope_violation for dimension-reviewer
+    // promoted to `AuditSeverity::BlockLoop { reason: "scope_violation" }`.
+    // Tests cover the typed `RejectionKind::ScopeViolation` variant,
+    // the BlockLoop vs Fail severity carve-out, the consecutive_failures
+    // invariant, and the typed trigger queue push.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `RejectionKind` now has a dedicated `ScopeViolation` variant
+    /// (was previously routed via `MissingField` placeholder).
+    /// Pin the variant so static assertions across the workspace
+    /// stay in sync.
+    #[test]
+    fn test_rejection_kind_has_scope_violation_variant() {
+        use crate::preset::engine::gates::RejectionKind;
+        let kind = RejectionKind::ScopeViolation;
+        assert_eq!(
+            kind.reason_code(),
+            "scope_violation",
+            "ScopeViolation must serialise as 'scope_violation' so dashboards can match it"
+        );
+        assert_eq!(
+            RejectionKind::from_reason_code("scope_violation"),
+            Some(RejectionKind::ScopeViolation),
+            "from_reason_code must round-trip the new variant"
+        );
+    }
+
+    /// BlockLoop severity for dimension-reviewer does NOT
+    /// increment consecutive_failures (orthogonal termination
+    /// mechanism; the typed trigger queue handles the actual
+    /// loop termination via `trigger_to_reason`).
+    #[test]
+    fn test_block_loop_severity_does_not_increment_consecutive_failures() {
+        let mut cf = 7u32;
+        AuditDispatcher::dispatch(
+            AuditSeverity::BlockLoop {
+                reason: "scope_violation".to_string(),
+            },
+            AuditContext {
+                hat: "dimension-reviewer".to_string(),
+                kind: crate::preset::engine::gates::RejectionKind::ScopeViolation,
+                details: "docs/plans/foo.md | 3 ++".to_string(),
+            },
+            &mut cf,
+        );
+        assert_eq!(
+            cf, 7,
+            "BlockLoop must not change consecutive_failures; the trigger queue handles termination"
+        );
+    }
 }

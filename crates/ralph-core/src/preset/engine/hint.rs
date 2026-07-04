@@ -40,6 +40,12 @@ pub enum LintFailureClass {
     /// Topic emitted by a hat that does not own it. Routes back
     /// to the source hat to discourage cross-hat publishing.
     TopicOwnership,
+    /// U5 (plan 2026-07-04-004): dimension-reviewer
+    /// scope_violation — hard-reject audit class. Routes to
+    /// `SourceHat` (the dimension-reviewer itself) so the agent
+    /// sees the violation and stops rewriting; the loop
+    /// terminates via the matching typed termination trigger.
+    ScopeViolation,
 }
 
 impl LintFailureClass {
@@ -87,6 +93,13 @@ impl LintResumeTarget {
             LintFailureClass::PayloadError => Self::SourceHat,
             LintFailureClass::UpstreamStateMissing => Self::PlanGate,
             LintFailureClass::TopicOwnership => Self::SourceHat,
+            // U5 (plan 2026-07-04-004): dimension-reviewer
+            // scope_violation routes to the source hat (the
+            // dimension-reviewer itself) so the agent sees the
+            // violation and stops rewriting; the loop terminates
+            // via the matching typed termination trigger so the
+            // resume hint is informational only.
+            LintFailureClass::ScopeViolation => Self::SourceHat,
         }
     }
 }

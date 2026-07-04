@@ -102,6 +102,21 @@ pub enum RejectionKind {
     /// or reopen outstanding tasks before the loop can honour the
     /// completion promise. Routes to `CoordinatorDispatcher::ReEmitWorkReady`.
     OpenTasksBlocking,
+    /// U5 (plan 2026-07-04-004): dedicated typed kind for the
+    /// `dimension-reviewer` scope_violation path. Replaces the
+    /// previous `MissingField` placeholder (which the audit chain
+    /// used only because no dedicated variant existed) so
+    /// dashboards / lint can match the silent-success root cause
+    /// class directly. Pairs with
+    /// `AuditSeverity::BlockLoop { reason: "scope_violation" }`
+    /// in `audit_file_modifications` to produce a hard-reject
+    /// termination rather than the legacy `add_failures: 1`
+    /// counting path. The carve-out is intentionally narrow —
+    /// only `dimension-reviewer` carries the block-loop severity;
+    /// other hats still route through the counting path so
+    /// legitimate fixes (coordinator writing plan files,
+    /// executor committing code) are not blocked.
+    ScopeViolation,
 }
 
 impl RejectionKind {
@@ -129,6 +144,12 @@ impl RejectionKind {
             // tasks still pending).
             RejectionKind::PersistentLoopActive => LintFailureClass::PayloadError,
             RejectionKind::OpenTasksBlocking => LintFailureClass::PayloadError,
+            // U5 (plan 2026-07-04-004): dimension-reviewer
+            // scope_violation is a hard-reject, not a payload
+            // error per se. Map to a dedicated `ScopeViolation`
+            // class so dashboards can distinguish the silent-
+            // success guard from generic payload errors.
+            RejectionKind::ScopeViolation => LintFailureClass::ScopeViolation,
         }
     }
 
@@ -153,6 +174,11 @@ impl RejectionKind {
             // surface — do not rename without a migration plan.
             RejectionKind::PersistentLoopActive => "persistent_loop_active",
             RejectionKind::OpenTasksBlocking => "open_tasks_blocking",
+            // U5 (plan 2026-07-04-004): dimension-reviewer
+            // scope_violation hard-reject reason code. Distinct
+            // from `contract_violation` so dashboards can match
+            // the silent-success guard fire directly.
+            RejectionKind::ScopeViolation => "scope_violation",
         }
     }
 
@@ -174,6 +200,9 @@ impl RejectionKind {
             "contract_violation" => Some(Self::ContractViolation),
             "persistent_loop_active" => Some(Self::PersistentLoopActive),
             "open_tasks_blocking" => Some(Self::OpenTasksBlocking),
+            // U5 (plan 2026-07-04-004): dimension-reviewer
+            // scope_violation reverse-lookup.
+            "scope_violation" => Some(Self::ScopeViolation),
             _ => None,
         }
     }

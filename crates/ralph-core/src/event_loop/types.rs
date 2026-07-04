@@ -200,6 +200,25 @@ pub enum TerminationReason {
     /// classified once and either be allowed `U2_REJECTION_RETRY_LIMIT`
     /// correction rounds, or be hard-stopped on first sight.
     CompletionStuck(Box<CompletionStuck>),
+    /// U5 (plan 2026-07-04-004): `dimension-reviewer` scope_violation
+    /// was promoted from the legacy `add_failures: 1` counting path
+    /// to a typed `AuditSeverity::BlockLoop { reason: "scope_violation" }`
+    /// hard-reject. The loop terminates on the next `check_termination`
+    /// call with this reason. Distinct from
+    /// `ScopeViolationCircuitBreakerTripped` (which fires for the
+    /// isolated-scope sub-path after N retries) — this variant
+    /// fires on the FIRST dimension-reviewer scope_violation so a
+    /// silent-success run cannot iterate forever before tripping
+    /// the breaker. Carries the offending hat + the git diff stat
+    /// so the summary report can surface the actual file
+    /// modifications the reviewer tried to make.
+    ScopeViolationHardRejected {
+        /// Hat that modified files despite Edit/Write being
+        /// disallowed (per its registry config).
+        hat: String,
+        /// Human-readable diff stat (e.g. `path/to/file.md | 3 ++`).
+        diff_stat: String,
+    },
 }
 
 /// 2026-06-26 plan U1: shared shape of a "we tried, the agent did

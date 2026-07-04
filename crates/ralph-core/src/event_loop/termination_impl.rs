@@ -69,5 +69,15 @@ pub fn termination_status_text(reason: &TerminationReason) -> &'static str {
         TerminationReason::CompletionStuck(_) => {
             "Completion stuck - correction budget exhausted or structural rejection."
         }
+        // U5 (plan 2026-07-04-004): dimension-reviewer
+        // scope_violation hard-reject. Surfaces as a typed
+        // termination so dashboards can distinguish the silent-
+        // success guard from a generic payload contract violation.
+        // The full hat + diff_stat context lives in the variant
+        // fields; the status text points operators at the audit
+        // chain.
+        TerminationReason::ScopeViolationHardRejected { .. } => {
+            "dimension-reviewer scope_violation - hard-rejected, loop terminated."
+        }
     }
 }

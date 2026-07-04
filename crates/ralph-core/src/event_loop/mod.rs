@@ -223,6 +223,12 @@ impl TerminationReason {
             // stop. Both are non-zero exits — the operator must see
             // the loop end and consult `loop.terminate.last_reason`.
             TerminationReason::CompletionStuck(_) => 1,
+            // U5 (plan 2026-07-04-004): dimension-reviewer
+            // scope_violation hard-reject — exit 1 (failure,
+            // not a clean completion) so dashboards / CI surfaces
+            // the silent-success guard fire as an error rather
+            // than a limit.
+            TerminationReason::ScopeViolationHardRejected { .. } => 1,
             TerminationReason::MaxIterations
             | TerminationReason::MaxRuntime
             | TerminationReason::MaxCost => 2,
@@ -268,6 +274,13 @@ impl TerminationReason {
             // across the log; the structured `source` field on the
             // payload carries the classification.
             TerminationReason::CompletionStuck(_) => "completion_stuck",
+            // U5 (plan 2026-07-04-004): dimension-reviewer
+            // scope_violation hard-reject. Stable reason string
+            // (matches the variant name; downstream consumers pin
+            // against this literal).
+            TerminationReason::ScopeViolationHardRejected { .. } => {
+                "scope_violation_hard_rejected"
+            }
         }
     }
 
@@ -2153,6 +2166,21 @@ impl EventLoop {
                     "Scope violation circuit breaker tripped: terminating loop"
                 );
             }
+            return Some(reason);
+        }
+
+        // U5 (plan 2026-07-04-004): drain the typed termination
+        // trigger queue for hard-reject triggers pushed by the
+        // audit chain (e.g. dimension-reviewer scope_violation).
+        // The legacy `process_output` consumer is still TODO per
+        // F4 docs; we read the queue here so the U5 hard-reject
+        // shape is observable without waiting for the F4 single-
+        // match dispatch migration. The trigger converts to a
+        // typed `TerminationReason::ScopeViolationHardRejected`
+        // (or `PayloadContractViolation` for non-ScopeViolation
+        // kinds) via `trigger_to_reason`.
+        if let Some(trigger) = self.state.pop_termination_trigger() {
+            let reason = crate::event_loop::termination::trigger_to_reason(trigger);
             return Some(reason);
         }
 
@@ -7690,26 +7718,79 @@ impl EventLoop {
                 );
                 self.bus.publish(violation);
 
-                // 2026-06-23-005 U4 (R5+KTD-8): scope_violation is
-                // promoted from Warn to Fail. Use the typed
-                // AuditSeverity SSOT + AuditDispatcher so the
-                // consecutive_failures increment goes through the
-                // single audit dispatch path. `MissingField` is used
-                // as the typed kind placeholder; scope_violation does
-                // not yet have a dedicated RejectionKind variant — the
-                // next plan can add `ScopeViolation` if drift_monitor
-                // classification wants it. The consecutive_failures
-                // increment is the contract that matters for the U4
-                // kill-switch behaviour (KTD-4 + KTD-8).
+                // U5 (plan 2026-07-04-004): scope_violation for the
+                // `dimension-reviewer` hat (and only this hat) is
+                // promoted from the legacy `add_failures: 1` counting
+                // path to a typed `AuditSeverity::BlockLoop` hard
+                // reject. Without the carve-out the 6× silent-success
+                // frontmatter rewrites shipped as counting failures
+                // that the budget reset on every fix.applied; the
+                // loop kept running and the reviewer kept rewriting.
+                //
+                // The other hats still route through `Fail { add_failures: 1 }`
+                // because their scope_violation can be a legitimate
+                // fix (coordinator writing plan files, executor
+                // committing code). The hard-reject is the explicit
+                // shape `dimension-reviewer` is the only hat that
+                // cannot legitimately touch plan files (see
+                // `dimension_reviewer_write_paths` lint + the
+                // preset instructions).
+                //
+                // The BlockLoop arm does NOT increment
+                // `consecutive_failures` (orthogonal termination
+                // mechanism); instead it pushes a typed
+                // `TerminationTrigger::DeadLetter` which
+                // `check_termination` converts to
+                // `TerminationReason::ScopeViolationHardRejected`
+                // on the next call.
+                let is_dimension_reviewer = hat_id.as_str() == "dimension-reviewer";
+                let severity = if is_dimension_reviewer {
+                    crate::event_loop::audit::AuditSeverity::BlockLoop {
+                        reason: "scope_violation".to_string(),
+                    }
+                } else {
+                    crate::event_loop::audit::AuditSeverity::Fail { add_failures: 1 }
+                };
+                let kind = if is_dimension_reviewer {
+                    crate::preset::engine::gates::RejectionKind::ScopeViolation
+                } else {
+                    // Pre-U5 placeholder retained for non-dimension-reviewer
+                    // hats so the audit chain stays backwards-compatible.
+                    crate::preset::engine::gates::RejectionKind::MissingField
+                };
                 crate::event_loop::audit::AuditDispatcher::dispatch(
-                    crate::event_loop::audit::AuditSeverity::Fail { add_failures: 1 },
+                    severity,
                     crate::event_loop::audit::AuditContext {
                         hat: hat_id.as_str().to_string(),
-                        kind: crate::preset::engine::gates::RejectionKind::MissingField,
+                        kind,
                         details: diff_stat.clone(),
                     },
                     &mut self.state.consecutive_failures,
                 );
+
+                // Push the typed termination trigger so
+                // `check_termination` produces the matching
+                // `TerminationReason::ScopeViolationHardRejected`.
+                // Only for `dimension-reviewer` (the BlockLoop arm).
+                // The trigger carries the hat + diff stat so
+                // `trigger_to_reason` produces a fully-populated
+                // `TerminationReason` without further enrichment.
+                if is_dimension_reviewer {
+                    if let Err(e) = self
+                        .state
+                        .push_termination_trigger(
+                            crate::event_loop::termination::TerminationTrigger::ScopeViolation {
+                                hat: hat_id.as_str().to_string(),
+                                diff_stat: diff_stat.clone(),
+                            },
+                        )
+                    {
+                        warn!(
+                            error = %e,
+                            "scope_violation_hard_rejected: failed to push termination trigger"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 debug!(error = %e, "Could not run git diff for file-modification audit");
