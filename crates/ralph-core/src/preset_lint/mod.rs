@@ -47,6 +47,13 @@ pub mod phase_authority;
 // drift away from the explicit "all 6 dimensions status == failed"
 // invariant that the runtime relies on for silent-success detection.
 pub mod review_synthesizer_block_guard;
+// 2026-07-04-004 plan U4: review-complete misrouting drift lint.
+// Catches presets whose `coordinator` `instructions:` drift away
+// from the explicit `findings_count == 0 → plan.complete` rule.
+// Severity graded by strictness (Warn in default, Error in strict);
+// `Error` when the hat carries verdict-only routing (silent-success
+// root cause class).
+pub mod review_complete_misrouted;
 pub mod schema_parity;
 // 2026-07-03-001 plan U9: supervisor preset lint rule family.
 // Three rules (R-SW-1, R-SW-2, R-COORD-4) over the raw preset
@@ -109,6 +116,11 @@ pub use multi_hat::check_multi_hat_isolation;
 // scenarios can call it without reaching into the submodule.
 pub use review_synthesizer_block_guard::{
     check_review_synthesizer_block_guard, FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD,
+};
+// 2026-07-04-004 plan U4: review-complete misrouting drift lint
+// exported alongside U3 so callers have a single import surface.
+pub use review_complete_misrouted::{
+    check_review_complete_misrouted, FINDING_REVIEW_COMPLETE_MISROUTED,
 };
 pub use ownership::{check_owner_references, check_ownership_rules};
 pub use state_projection::check_work_done_action_chain_order;
@@ -533,6 +545,17 @@ pub fn run_preset_lint(
     // strictness (Warn in default, Error in strict).
     findings.extend(lint_findings_to_contract_findings(
         &check_review_synthesizer_block_guard(config, strictness),
+    ));
+
+    // 2026-07-04-004 plan U4: review-complete misrouting drift
+    // lint. Catches presets whose `coordinator` `instructions:`
+    // drift away from the explicit `findings_count == 0 →
+    // plan.complete` rule. Severity graded by strictness
+    // (Warn in default, Error in strict); Error when the hat
+    // carries verdict-only routing (silent-success root cause
+    // class).
+    findings.extend(lint_findings_to_contract_findings(
+        &check_review_complete_misrouted(config, strictness),
     ));
 
     // 2026-06-30-001 P0-2 (primary-20260630-032648 diagnosis):

@@ -1003,6 +1003,13 @@ hats:
          **HARD RULE — `fix_plan_file` MUST be the literal string `"null"`** (4 chars:
          double-quote, n, u, l, l, double-quote) when there are no P0/P1 findings.
          A JSON `null` literal is NOT acceptable — the runtime will reject the event.
+      # HARD RULE — review.complete routing:
+         # When review.complete payload has findings_count == 0, ALWAYS publish
+         # plan.complete(verdict="pass_with_residuals", final_findings_count=0),
+         # REGARDLESS of the verdict field. The verdict field reflects synthesizer
+         # technical verdicts (which may have been escalations from a partial-failed
+         # dimension); findings_count=0 means there are no real code defects to fix.
+         # Only when findings_count > 0 does the verdict field drive plan.blocked routing.
       2. If `fix_plan_file` is the literal string `"null"` or the file does not exist (no issues to fix):
          - Publish `plan.complete` with payload: `plan_name`, `completed_steps`, `task_id`, `task_key`, **`step`** (set to the current step, e.g. `"step-01"` — required by schema for `plan.complete` since 2026-06-30 P0-A), `verdict: "pass"`, `final_findings_count: <int>` (carry forward from the most recent `review.complete` payload's `findings_count` field; should be 0 here but the field is REQUIRED for shipper's verdict-promotion gate), `fix_round: <int>` (carry forward; 0 if not present)
          - Stop
