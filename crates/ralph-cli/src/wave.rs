@@ -25,6 +25,37 @@ pub struct WaveArgs {
 pub enum WaveCommands {
     /// Emit multiple events as a wave for parallel execution
     Emit(WaveEmitArgs),
+    /// U21: Zero-disk precheck — validate payloads against the active
+    /// event policy without writing the JSONL. Mirrors `ralph wave emit`
+    /// schema / origin-guard checks but stops before the write step.
+    /// Returns the same `{ok, wave_id?, error?}` shape so agents can
+    /// treat verify and emit uniformly. Intended for OPAC Precheck stage.
+    Verify(WaveVerifyArgs),
+}
+
+/// Arguments for `ralph wave verify`.
+#[derive(Parser, Debug)]
+pub struct WaveVerifyArgs {
+    /// Event topic that would be emitted (e.g., "review.file")
+    pub topic: String,
+
+    /// Payloads to validate (one per parallel worker)
+    #[arg(long, num_args = 1.., group = "verify_payload_source")]
+    pub payloads: Vec<String>,
+
+    /// Read payloads from stdin, one per line
+    #[arg(long, group = "verify_payload_source")]
+    pub payloads_stdin: bool,
+
+    /// Output format: `text` (default; "ok" on stdout) or `json`
+    /// (`{ok: true, topic, count}` for U5 machine verification).
+    #[arg(long, value_enum, default_value_t = WaveOutputFormat::Text)]
+    pub output: WaveOutputFormat,
+
+    /// Explicit path to a `ralph.yml` for the policy precheck.
+    /// Mirrors the global `-c` flag at the top-level command.
+    #[arg(long = "config", short = 'c', value_name = "CONFIG", global = true)]
+    pub config: Vec<String>,
 }
 
 /// Arguments for `ralph wave emit`.
@@ -125,11 +156,83 @@ pub struct IdempotencyOutcome {
 pub fn execute(args: WaveArgs, use_colors: bool) -> Result<()> {
     match args.command {
         WaveCommands::Emit(emit_args) => execute_emit(emit_args, use_colors),
+        WaveCommands::Verify(verify_args) => execute_verify(verify_args),
     }
+}
+
+/// U23: Hat-level wave ACL gate. Mirrors `HatCommandPolicy::check_wave_emit`
+/// so worker hats cannot dispatch waves (they must use `ralph emit`).
+fn enforce_wave_acl(_verb: &str) -> Result<()> {
+    use crate::hat_command_policy::HatCommandPolicy;
+    use crate::operation_guard::OperationContext;
+    use crate::policy_check::load_policy_config_for_cli_emit;
+    use crate::policy_check::OnConfigError;
+
+    let workspace_root = std::env::current_dir().unwrap_or_default();
+    let ctx = OperationContext::detect(workspace_root.clone());
+    let config = load_policy_config_for_cli_emit(None, OnConfigError::Warn)?;
+    let config = match config {
+        Some(c) => c,
+        None => return Ok(()), // no config → no policy → bypass
+    };
+
+    match HatCommandPolicy::check_wave_emit(&ctx, &config) {
+        crate::hat_command_policy::PolicyDecision::Allow { .. } => Ok(()),
+        crate::hat_command_policy::PolicyDecision::Deny { reason, hint } => {
+            bail!("wave ACL denied: {reason}; {hint}")
+        }
+    }
+}
+
+/// Execute `ralph wave verify` — zero-disk precheck. Validates payloads
+/// against the active event policy without writing any JSONL.
+fn execute_verify(args: WaveVerifyArgs) -> Result<()> {
+    enforce_wave_acl("verify")?;
+    let payloads = if args.payloads_stdin {
+        read_payloads_from_stdin()?
+    } else {
+        args.payloads
+    };
+
+    if payloads.is_empty() {
+        bail!("At least one payload is required (use --payloads or --payloads-stdin)");
+    }
+    validate_payload_shape(&payloads)?;
+
+    let events_file = resolve_events_file();
+
+    // Reuse the same precheck as `wave emit` so verify/apply share a
+    // single authorization core. The `false` / `false` flags mean
+    // we never invoke --policy-check / --unsafe-no-policy-check
+    // gating — verify is a pure dry-run.
+    run_wave_precheck(
+        &args.topic,
+        false,
+        false,
+        args.output,
+        &payloads,
+        &events_file,
+        &args.config,
+    )?;
+
+    match args.output {
+        WaveOutputFormat::Text => println!("ok"),
+        WaveOutputFormat::Json => {
+            let payload = serde_json::json!({
+                "ok": true,
+                "topic": args.topic,
+                "count": payloads.len(),
+            });
+            println!("{}", serde_json::to_string(&payload)?);
+        }
+    }
+
+    Ok(())
 }
 
 /// Execute `ralph wave emit` — write N tagged events atomically.
 fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
+    enforce_wave_acl("emit")?;
     // Nested wave prevention: bail if running inside a wave worker
     if std::env::var("RALPH_WAVE_WORKER").is_ok_and(|v| v == "1") {
         bail!(
@@ -1073,6 +1176,55 @@ mod tests {
 
         let result = write_wave_events("test.topic", &[], &events_path);
         assert!(result.is_err());
+    }
+
+    /// U21: `execute_verify` returns Ok and writes nothing to disk.
+    #[test]
+    fn test_execute_verify_does_not_write_jsonl() {
+        let tmp = TempDir::new().unwrap();
+        // Use a stable path under tmp; verify must NOT create this file.
+        let events_path = tmp.path().join("events.jsonl");
+
+        // Run verify with two JSON-object payloads against a topic without policy.
+        let args = WaveVerifyArgs {
+            topic: "verify.dry".to_string(),
+            payloads: vec![
+                r#"{"task_key":"k1"}"#.to_string(),
+                r#"{"task_key":"k2"}"#.to_string(),
+            ],
+            payloads_stdin: false,
+            output: WaveOutputFormat::Text,
+            config: vec![],
+        };
+
+        // Override CWD so resolve_events_file points into tmp.
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let result = execute_verify(args);
+        std::env::set_current_dir(&prev).unwrap();
+
+        assert!(result.is_ok(), "verify should pass without policy: {result:?}");
+        assert!(
+            !events_path.exists(),
+            "verify must not create the events file (was: {})",
+            events_path.display()
+        );
+    }
+
+    /// U21: verify rejects empty payloads with a clear error.
+    #[test]
+    fn test_execute_verify_empty_payloads_rejected() {
+        let args = WaveVerifyArgs {
+            topic: "verify.dry".to_string(),
+            payloads: vec![],
+            payloads_stdin: false,
+            output: WaveOutputFormat::Text,
+            config: vec![],
+        };
+        let result = execute_verify(args);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("payload"), "missing 'payload' hint: {err}");
     }
 
     #[test]
