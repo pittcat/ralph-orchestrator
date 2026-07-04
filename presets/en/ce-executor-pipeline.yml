@@ -484,6 +484,10 @@ hats:
       Then stop. Reporter will receive the blocked event and emit the loop
       completion with verdict `blocked`.
 
+      ### OPAC reference
+      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
+      and `ralph-tools-emit` §5 for precheck rules before every emit.
+
   executor:
     name: "Executor (whole-plan TDD)"
     description: "Whole-plan execution with TDD (write/update tests first, then implement). Hard DoD = full test suite green. No per-unit task breakdown."
@@ -675,7 +679,7 @@ hats:
       ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"path/to/plan.md","executor_head_sha":"abc123...","tests_run":12,"tests_passed":12,"changed_lines":85,"commit_count":3}'
       ```
 
-      MUST NOT append to `.ralph/events.jsonl` directly; use `ralph emit`.
+      MUST NOT write events directly; use `ralph emit`.
 
       ### Failure Path
 
@@ -691,6 +695,10 @@ hats:
       - >80: Proceed autonomously
       - 50-80: Proceed + document in `.ralph/agent/decisions.md`
       - <50: Choose safe default + document in `.ralph/agent/decisions.md`
+
+      ### OPAC reference
+      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
+      and `ralph-tools-emit` §5 for precheck rules before every emit.
 
   dim:goal-alignment:
     name: "🔍 Dimension Reviewer — Goal Alignment"
@@ -1563,6 +1571,10 @@ hats:
       ```
       Then stop. Fixer will be triggered next.
 
+      ### OPAC reference
+      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
+      and `ralph-tools-emit` §5 for precheck rules before every emit.
+
   fixer:
     name: "Fixer"
     description: "Reads fix_plan_file from review-synthesizer and applies ONLY that fix plan (never re-executes the original plan). Empty fix plan → no-op + fix.done{fixes_applied:0}."
@@ -1814,15 +1826,13 @@ hats:
 
       ### Read upstream events (HARD RULE — isolated mode shows only trigger)
       Your `event_filter` exposes the trigger event only. For happy-path
-      fields from earlier hats, read `.ralph/events.jsonl` (or the active
-      loop events file under `.ralph/`):
+      fields from earlier hats, query the runtime event ledger:
 
       ```bash
-      EVENTS=".ralph/events.jsonl"
-      jq -c 'select(.topic=="plan.ready")' "$EVENTS" | tail -1
-      jq -c 'select(.topic=="work.done")' "$EVENTS" | tail -1
-      jq -c 'select(.topic=="review.complete")' "$EVENTS" | tail -1
-      jq -c 'select(.topic=="fix.done")' "$EVENTS" | tail -1
+      ralph events --events-source main --output json | jq -c 'select(.topic=="plan.ready")' | tail -1
+      ralph events --events-source main --output json | jq -c 'select(.topic=="work.done")' | tail -1
+      ralph events --events-source main --output json | jq -c 'select(.topic=="review.complete")' | tail -1
+      ralph events --events-source main --output json | jq -c 'select(.topic=="fix.done")' | tail -1
       ```
 
       Parse the JSON `payload` field from each line. Do NOT invent
@@ -1901,3 +1911,7 @@ hats:
         `pass_with_residuals_v2`.
       - `LOOP_COMPLETE` is the `completion_promise`. The runner
         shuts the loop on this event.
+
+      ### OPAC reference
+      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
+      and `ralph-tools-emit` §5 for precheck rules before every emit.

@@ -282,7 +282,6 @@ hats:
 
       Anything you cannot observe via the runtime APIs
       listed in §5 / §6, you do not have. Do not assume.
-
     triggers:
       - plan.ready
       - fix.applied
@@ -508,10 +507,9 @@ hats:
 
       - 不能调 `ralph wave emit` / `ralph wave verify`（U23 wave ACL——
         worker 没有 `.unit.ready` 发布权）。
-      - 不能读 `.ralph/supervisor.db` / `.ralph/events.jsonl`（HARD RULE 4）。
+      - 不能读 supervisor 内部状态存储 / runtime event ledger（HARD RULE 4）。
       - 一条业务事件即停（isolated 单事件预算）；不要在同一 activation
         重试 dropped emit，等 `task.resume`。
-
   exec-integrator:
     name: "Exec Integrator"
     description: "Merges completed execution waves and runs the full test suite."
@@ -553,6 +551,7 @@ hats:
         emit 它们。
       - 不能调 `ralph wave emit` / `ralph wave verify`（U23）。
 
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   exec-failure-handler:
     name: "Exec Failure Handler"
     description: "Converts a failed execution wave into a work.failed event for the fixer."
@@ -587,6 +586,7 @@ hats:
       - 不要试图重新 dispatch worker slot——那是 supervisor 的活。
       - 一条业务事件即停。
 
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   review-coordinator:
     name: "Review Coordinator"
     description: "Fans out review work across the six dimension reviewers."
@@ -816,7 +816,6 @@ hats:
       - 不能 emit `review.complete` / `review.wave.complete`——
         那是 review-synthesizer 与 supervisor 的活。
       - 一条业务事件即停（isolated 单事件预算）。
-
   review-synthesizer:
     name: "Review Synthesizer"
     description: "Aggregates dimension review results into a fix plan and review wave completion."
@@ -903,7 +902,7 @@ hats:
       - `aggregate_timeout` — the value you read from
         the active wave's settings (see `ralph inspect
         loop --format json` — the supervisor block carries
-        `active_waves`, not `ralph diagnose --supervisor`,
+        `active_waves`, not the runtime-private diagnose command,
         which is reserved for runtime/diagnose tooling).
 
       Use a single-line JSON payload. For the full
@@ -1166,6 +1165,8 @@ hats:
       - `RALPH_CURRENT_LOOP_ID` — current loop id;
         include in any cross-iteration stable key.
       - `RALPH_HATS_SOURCE` — preset label.
+
+      For fix-unit task minting, use the canonical template `ralph tools task ensure --for-fix-unit --key <key>` (see `ralph-tools-tasks`).
     triggers:
       - review.complete
     publishes:
@@ -1216,7 +1217,6 @@ hats:
 
       - 不能调 wave emit（U23）。
       - 一条业务事件即停。
-
   fix-integrator:
     name: "Fix Integrator"
     description: "Merges completed fix waves and verifies the full test suite is green."
@@ -1249,7 +1249,6 @@ hats:
 
       - 不能调 wave emit。
       - 协调 topic 由 supervisor 注入。
-
   alignment:
     name: "Alignment"
     description: "Performs final alignment pass and emits plan.complete."
@@ -1284,6 +1283,7 @@ hats:
       - 一条业务事件即停（isolated 单事件预算）。
       - 不能调 wave emit。
 
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   shipper:
     name: "Shipper"
     description: "Promotes the plan completion event through the workflow."
@@ -1321,6 +1321,7 @@ hats:
       4. Any other reason is a hard-fail: forward as blocked and do not promote
          to completion.
 
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   reporter:
     name: "Reporter"
     description: "Produces the manager-facing report and terminates the loop."
@@ -1356,7 +1357,6 @@ hats:
       ### Constraints
 
       - 一条业务事件即停。
-
   fixer:
     name: "Fixer"
     description: "Hard fallback hat that attempts recovery on work.failed."
@@ -1397,6 +1397,7 @@ hats:
       - 一条业务事件即停（isolated 单事件预算）。
       - 不能调 wave emit。
 
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   progress-steward:
     name: "Progress Steward"
     description: "Loop-level fallback hat that recovers or escalates on stall."
@@ -1441,6 +1442,8 @@ hats:
         （U16 routing 校验）。
       - 不能调 wave emit。
 
-# Default publishes fallback so cli/agents can emit any of
-# the work.ready family without an explicit `publishes`.
-default_publishes: [work.ready]
+      # Default publishes fallback so cli/agents can emit any of
+      # the work.ready family without an explicit `publishes`.
+      default_publishes: [work.ready]
+
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.

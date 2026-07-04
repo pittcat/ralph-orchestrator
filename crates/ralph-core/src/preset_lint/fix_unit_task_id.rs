@@ -3,9 +3,9 @@
 //! Static scan of coordinator hats' instructions: when a coordinator
 //! hat **publishes `work.ready`** (the dispatch signal) AND its
 //! instructions mention fix-unit dispatch (`fix-NN` / `fix_unit` /
-//! `fix-01` etc.), it MUST include a `ralph tools task create` CLI
-//! invocation template AND reference the canonical
-//! `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}` shape (the output of
+//! `fix-01` etc.), it MUST include a `ralph tools task ensure --for-fix-unit`
+//! (or legacy `ralph tools task create`) CLI invocation template AND reference
+//! the canonical `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}` shape (the output of
 //! `Task::fix_unit_task_id` in `crates/ralph-core/src/task.rs:143-158`).
 //!
 //! 093813 root cause: `presets/en/ce-executor-serial.yml:988-994` had
@@ -72,12 +72,14 @@ const CANONICAL_SHAPE_MARKERS: &[&str] = &[
     "Task::fix_unit_task_id",
 ];
 
-/// Marker that the instructions give the agent a concrete CLI template
-/// to call `ralph tools task create`. The literal command name is the
-/// minimum; a full parameter template is preferred but the lint only
-/// enforces presence, not parameter completeness (the latter is a
-/// documentation concern, not a structural invariant).
-const CLI_TEMPLATE_MARKER: &str = "ralph tools task create";
+/// Markers that the instructions give the agent a concrete CLI template
+/// to mint a fix-unit task id. Both the legacy `ralph tools task create`
+/// spelling and the current `ralph tools task ensure --for-fix-unit`
+/// spelling satisfy the rule.
+const CLI_TEMPLATE_MARKERS: &[&str] = &[
+    "ralph tools task create",
+    "ralph tools task ensure --for-fix-unit",
+];
 
 /// Run the U1 lint against `config`. Returns zero or more findings.
 ///
@@ -150,7 +152,9 @@ pub fn check_fix_unit_task_id_helper_derived(
             continue;
         }
 
-        let has_cli_template = body.contains(CLI_TEMPLATE_MARKER);
+        let has_cli_template = CLI_TEMPLATE_MARKERS
+            .iter()
+            .any(|marker| body.contains(marker));
         let has_canonical_shape = CANONICAL_SHAPE_MARKERS
             .iter()
             .any(|marker| body.contains(marker));

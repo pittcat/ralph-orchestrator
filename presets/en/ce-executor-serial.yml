@@ -861,7 +861,7 @@ hats:
         - DO NOT emit `from_key:*` synthetic IDs — preset line 1179
           (below) forbids these and the runner will reject them too.
         - If `.ralph/agent/tasks.jsonl` is empty for your U-ID, call
-          `ralph tools task create` first to seed the ledger, then
+          `ralph tools task add` first to seed the ledger, then
           read back the canonical `task_id` before publishing
           `work.ready`.
       - **2026-07-01-001 plan U4 — fix-unit `task_id` MUST be helper-derived**:
@@ -869,7 +869,7 @@ hats:
         timestamps are now rejected at the projection boundary
         (the runtime validator window-checks the embedded unix_ts
         against the current loop time). Always call
-        `ralph tools task create` to mint the `task_id` —
+        `ralph tools task ensure --for-fix-unit --key <task_key>` to mint the `task_id` —
         never hand-compose the suffix.
       - **Trivial mode**: create one summary task, key `ce-executor:{plan_name}:trivial`
 
@@ -960,8 +960,11 @@ hats:
       `(plan_name, task_id)`:
       1. Inspect the live events file:
          ```bash
-         events_file="$(cat .ralph/current-events 2>/dev/null || echo .ralph/events.jsonl)"
-         grep '"topic":"review.start"' "$events_file" | grep "\"plan_name\":\"$PLAN_NAME\"" | grep "\"task_id\":\"$TASK_ID\"" | tail -1
+         ralph events --events-source main --output json \
+         | grep '"topic":"review.start"' \
+         | grep "\"plan_name\":\"$PLAN_NAME\"" \
+         | grep "\"task_id\":\"$TASK_ID\"" \
+         | tail -1
          ```
       2. If a matching `review.start` already exists, **DO NOT emit another
          one**. The review-coordinator is already walking the 6-dimension
@@ -994,7 +997,7 @@ hats:
            - `plan_name`
            - `task_id`: MUST be freshly minted for this fix-unit. Do NOT reuse an
              existing task id from a prior step or fix-unit. Call
-             `ralph tools task create` to mint it — the CLI emits the
+             `ralph tools task ensure --for-fix-unit --key <task_key>` to mint it — the CLI emits the
              canonical `task-{unix_ts}-{4hex}` /
              `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}` shape. Hand-written
              suffixes such as `u2` or `f002` are invalid and will be
@@ -1018,7 +1021,7 @@ hats:
       ### Fix-Unit Task ID Minting (2026-07-03-002 plan U1)
 
       Before emitting `work.ready` for any `fix-NN` step, coordinator MUST:
-      1. Call `ralph tools task create` to mint a fresh task_id. The CLI
+      1. Call `ralph tools task ensure --for-fix-unit --key <task_key>` to mint a fresh task_id. The CLI
          derives the canonical shape `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}`
          (the same shape `Task::fix_unit_task_id(plan, fix_round, fix_unit_index, unix_ts)`
          produces in Rust). DO NOT hand-compose the suffix; hand-written ids
@@ -1032,7 +1035,7 @@ hats:
       3. CLI invocation template (fill in `<plan_name>`, `<fix_round>`,
          `<fix_unit_index>` from the fix-plan):
          ```
-         ralph tools task create --plan-name <plan_name> --fix-unit <fix_round> <fix_unit_index>
+         ralph tools task ensure --for-fix-unit --key ce-executor:<plan_name>:fix-<NN>:<slug>
          ```
          Read back the canonical `task_id` from the CLI output before
          publishing `work.ready`.
@@ -1058,7 +1061,7 @@ hats:
         - `preflight_checks`: list of hard prerequisites the executor must verify before implementation
       - Stop — do not continue to other work
       - **Stop immediately after publishing work.ready** — do NOT continue any other work, including simulating other hats' behavior or emitting other events
-      - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit work.ready --json '{...}'` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
+      - MUST NOT write events directly; use `ralph emit work.ready --json '{...}'` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
 
       ### Constraints
       - MUST NOT implement code
@@ -1145,6 +1148,7 @@ hats:
       - Do NOT leave `status: active` after U1 closes; the next activation must move it to `u1-closed-u2-pending` (or `stalled-after-u1` if U2 cannot start).
       - `ralph doctor plan-sync --plan <path>` will fail with `Plan frontmatter drift detected` if the frontmatter disagrees with `.ralph/agent/tasks.jsonl`. Coordinator MUST run it (or its CI gate) before declaring the plan complete.
 
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   executor:
     name: "⚙️ Executor"
     description: "TDD implementer — write/update tests first, then implement code, run unit tests on completion."
@@ -1215,7 +1219,7 @@ hats:
       ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"docs/plans/my-plan.md","task_id":"task-1747016430-a1b2","task_key":"ce-executor:my-plan:step-01:u0-impl","step":"step-01","commit_count":1,"changed_lines":42}'
       ```
 
-      MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
+      MUST NOT write events directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
 
       - `build.done` is **prohibited** for the executor hat. The preset's
         `topic_deny_rules` already rejects `executor → build.done`; emitting it
@@ -1420,6 +1424,9 @@ hats:
       - <50: Choose safe default + document in `decisions.md`
       - `decisions.md` format: ID (DEC-NNN), confidence, alternatives, reasoning, reversibility
 
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+
+      For fix-unit task minting, use the canonical template `ralph tools task ensure --for-fix-unit --key <key>` (see `ralph-tools-tasks`).
   validator:
     name: "✅ Validator"
     description: "Runs the full test suite, publishes test.passed or test.failed."
@@ -1492,7 +1499,7 @@ hats:
       }'
       ```
 
-      MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit` only.
+      MUST NOT write events directly; use `ralph emit` only.
 
       ### Constraints
       - MUST NOT implement code
@@ -1502,6 +1509,7 @@ hats:
       - MUST run the full test suite (not just unit tests — that is the executor's job)
       - MUST parse and report accurate test counts
 
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   review-coordinator:
     name: "🔍 Review Coordinator (Serial)"
     description: "Overall review sequence state machine. On review.start, walks the 6-dimension sequence (goal-alignment → correctness → testing → maintainability → project-standards → adversarial); advances one dimension per turn; emits review.dimensions.complete when all dimensions finish."
@@ -1589,7 +1597,7 @@ hats:
       set by the orchestrator at loop start.
 
       1. Read the current loop id: `current_loop=$(cat .ralph/current-loop-id 2>/dev/null)`. If empty or missing, STOP and publish `work.failed(reason="current_loop_id_unavailable_during_review")`.
-      2. Read `.ralph/loops.json` (the loop registry; written by the orchestrator at loop start) and find the entry where `loop_id == $current_loop`. Extract that entry's `plan_path` and `plan_name` — these are the loop-anchor SSOT. If no entry matches, STOP with `work.failed(reason="loop_anchor_not_found: $current_loop")`.
+      2. Read `ralph inspect loop --format json` to obtain the current loop's `plan_path` and `plan_name` — these are the loop-anchor SSOT. If no entry matches, STOP with `work.failed(reason="loop_anchor_not_found: $current_loop")`.
       3. Compare the loop-anchor `plan_name` against the trigger payload's `plan_name`:
          - Match: proceed.
          - Mismatch: STOP. Do NOT emit `review.dimension.ready` or `review.dimensions.complete`. Publish `work.failed` with `reason: "plan_name_drift: payload=<X> loop_anchor=<Y> loop_id=<Z>"`. Reviewing plan X's diff against plan Y's R-IDs is worse than not reviewing at all.
@@ -1655,9 +1663,9 @@ hats:
 
       Data sources (use the same sources Scope Detection uses, do NOT re-derive from `## ORCHESTRATOR CONTEXT` block — that block is rendered by state projector from these same sources):
       - `TRIGGER` — read the most recent event's `.topic` from the events file: `jq -r '.topic' "$(ls -t .ralph/events-*.jsonl | grep -v history | head -1 | xargs tail -1)"`. The first `review.start` walk; `review.dimension.done` and `review.dimension.failed` are continuations.
-      - `DIFF_BASE` — read from the persisted baseline file: `cat .ralph/agent/plan-baseline-prompt-*.sha`. This is the same value the `## ORCHESTRATOR CONTEXT` block's `plan_baseline_sha` field renders from; reading the file directly avoids the prompt-text grep. If the file is missing/empty, fall back to `loop_start_sha` from `.ralph/loops.json` → `git log -1 --format=%H .ralph` (or `git rev-parse HEAD~1` if no .ralph commits), then `origin/main` → `origin/master` → `main` → `master` → `HEAD~1` (last-resort chain).
+      - `DIFF_BASE` — read from the persisted baseline file: `cat .ralph/agent/plan-baseline-prompt-*.sha`. This is the same value the `## ORCHESTRATOR CONTEXT` block's `plan_baseline_sha` field renders from; reading the file directly avoids the prompt-text grep. If the file is missing/empty, fall back to `loop_start_sha` from `ralph inspect loop --format json | jq -r '.loop_start_sha'` → `git log -1 --format=%H .ralph` (or `git rev-parse HEAD~1` if no .ralph commits), then `origin/main` → `origin/master` → `main` → `master` → `HEAD~1` (last-resort chain).
       - `DIFF_BASE_FALLBACK` — empty string when `DIFF_BASE` came from `plan-baseline-prompt-*.sha`; set to `"no_plan_baseline_sha"` if it came from `loop_start_sha`; set to `"no_loop_start_sha"` if it came from the base detection chain. (Mirror Scope Detection's `diff_base_fallback` tag exactly.)
-      - `PLAN_NAME` — read from `.ralph/loops.json` (no `plan_name` field there; derive by matching the loop's prompt text to a plan file basename) OR scan `.agents/scratchpad/ce-executor/*/context.md` for one whose `start_sha` matches `DIFF_BASE`. The latter is more reliable.
+      - `PLAN_NAME` — read from ``ralph inspect loop --format json`` (no `plan_name` field there; derive by matching the loop's prompt text to a plan file basename) OR scan `.agents/scratchpad/ce-executor/*/context.md` for one whose `start_sha` matches `DIFF_BASE`. The latter is more reliable.
 
       Steps (run as one shell block on `review.start` only — skip entirely on walk continuations):
 
@@ -1807,12 +1815,12 @@ hats:
       `(plan_name, task_id, step, dimension)`:
       1. Inspect the live events file:
          ```bash
-         events_file="$(cat .ralph/current-events 2>/dev/null || echo .ralph/events.jsonl)"
-         grep '"topic":"review.dimension.ready"' "$events_file" \
-           | grep "\"plan_name\":\"$PLAN_NAME\"" \
-           | grep "\"task_id\":\"$TASK_ID\"" \
-           | grep "\"dimension\":\"$DIMENSION\"" \
-           | tail -1
+         ralph events --events-source main --output json \
+         | grep '"topic":"review.dimension.ready"' \
+         | grep "\"plan_name\":\"$PLAN_NAME\"" \
+         | grep "\"task_id\":\"$TASK_ID\"" \
+         | grep "\"dimension\":\"$DIMENSION\"" \
+         | tail -1
          ```
       2. If a matching `review.dimension.ready` already exists, **DO NOT
          emit another one**. The dimension-reviewer has already been
@@ -1872,7 +1880,7 @@ hats:
         ```
       - `fix_round` MUST match the value carried by `review.dimension.ready` payloads in the same sequence (it stays constant across the 6-dim walk). After `fix.applied(fix_round=N)` is accepted, the next round MUST use `fix_round: N+1` and emit a fresh `review.dimension.ready` first — NEVER re-emit `review.dimensions.complete` with the same `fix_round` (U5 dedup rejects it).
       - Do NOT use `ralph wave emit` — there is no wave in this preset.
-      - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
+      - MUST NOT write events directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
       - **HARD RULE — never assume `ralph emit` succeeded.** This preset enables strict policy precheck (`event_policy.require_policy_check_for_cli_emit: true`, `allow_unsafe_cli_emit: false`), so an emit with missing required fields is rejected BEFORE the event is written. If the CLI exits non-zero, the event did NOT happen — no record was appended to jsonl. Always re-run with `--output json` and parse the response to fix the payload. Never proceed as if the event succeeded; the runner will hard-gate you on `missing_event_gate` instead.
 
       ### Persist `last_reviewed_sha` After Sequence Close (wave-closed gate analog)
@@ -1908,6 +1916,7 @@ hats:
       - MUST write `review-sequence.json` atomically (temp + rename) — no Read+Write race window
       - MUST accept a minimal `review.dimension.failed` payload (only `dimension` + `reason` required by contract) and continue the walk — do NOT block on missing fields
 
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   dimension-reviewer:
     name: "🔬 Dimension Reviewer (Serial)"
     description: "Reviews a single dimension. Emits review.dimension.done with the findings file, or review.dimension.failed with the reason. No concurrency, no wave dispatcher."
@@ -2060,7 +2069,7 @@ hats:
       fix-plan.
 
       1. Re-derive the current loop id: `current_loop=$(cat .ralph/current-loop-id 2>/dev/null)`. If empty or missing, emit `review.dimension.failed` immediately with `reason: "current_loop_id_unavailable"`. Do not produce findings for a plan you cannot anchor.
-      2. Read `.ralph/loops.json`, find `loop_id == $current_loop`, extract `plan_path` and `plan_name`. If not found, emit `review.dimension.failed(reason="loop_anchor_not_found: $current_loop")`.
+      2. Read `ralph inspect loop --format json` to obtain the current loop's `plan_path` and `plan_name`. If either is empty, emit `review.dimension.failed(reason="loop_anchor_not_found: $current_loop")`.
       3. Compare the loop-anchor `plan_name` against the payload's `plan_name`:
          - Match: proceed.
          - Mismatch: emit `review.dimension.failed` with `reason: "plan_name_drift: payload=<X> loop_anchor=<Y> loop_id=<Z> dimension=<this dimension>"`. Do not produce findings for the wrong plan.
@@ -2143,7 +2152,7 @@ hats:
       }'
       ```
 
-      MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
+      MUST NOT write events directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
 
       - **HARD RULE — Hat Identity**: Emit with top-level hat provenance `dimension-reviewer` (`--hat dimension-reviewer` or the runner-provided `RALPH_CURRENT_HAT`). Do NOT put `hat` inside the JSON payload, and do NOT change your hat name to `reviewer-standards`, `standards-reviewer`, or any variant. Origin guard rejects unknown top-level hats, which voids the entire review result.
 
@@ -2218,6 +2227,7 @@ hats:
       - **Maintenance cost and rollback safety**: magic numbers, hard-coded paths, copy-pasted logic that should be parameterised; comments that say *what* but not *why*; modules that violate single-responsibility and have grown by accretion; new dependencies (crates, binaries) without a clear payoff; in production, can the change be safely reverted (feature flag, staged rollout, dual-write, idempotent migration)?
       Do NOT flag: pure style preferences, missing doc comments, opinions about variable naming taste, "this could be a one-liner" rewrites, or pre-existing issues that are not introduced by this diff. Findings you cannot back up with a concrete file:line or reproducible input should be marked `confidence <= 50` and must not block the release on their own.
 
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   review-synthesizer:
     name: "🧩 Review Synthesizer (Serial)"
     description: "Overall review synthesizer. Reads all per-dimension findings, writes a fix-plan markdown file to scratchpad, publishes review.complete with fix_plan_file path."
@@ -2246,7 +2256,7 @@ hats:
 
       ### Read Inputs
       - `review.dimensions.complete` payload: `plan_name`, `task_id`, `task_key`, `step`, `dimensions`
-      - **Plan identity cross-check (HARD RULE)** — read `.ralph/loops.json` and `.ralph/current-loop-id`, extract the current loop's `plan_name` and `plan_path`. Verify ALL of:
+      - **Plan identity cross-check (HARD RULE)** — read `ralph inspect loop --format json` to obtain the current loop's `plan_name` and `plan_path`. Verify ALL of:
         1. Loop-anchor `plan_name` matches the payload's `plan_name`. Mismatch → emit `review.complete` with `verdict: "blocked"`, `findings_count: 0`, `fix_plan_file: "null"`, plus payload `reason: "plan_name_drift: payload=<X> loop_anchor=<Y>"`. Do NOT synthesize a fix-plan over a mismatched identity.
         2. The original plan file at the loop-anchor `plan_path` exists and is readable. Missing → same `verdict: "blocked"`, `reason: "plan_file_missing_during_synthesis: <plan_path>"`.
         3. `.agents/scratchpad/ce-executor/{plan_name}/review-trace.json` exists. Read it and assert `trace.loop_id` matches the current loop id. Mismatch → `verdict: "blocked"`, `reason: "review_trace_loop_mismatch: trace_loop=<X> current_loop=<Y>"`.
@@ -2480,6 +2490,9 @@ hats:
       - MUST report Coverage data: promoted count, demoted count, suppressed count, validator drops
       - MUST NOT publish `review.passed` or `review.failed` — only `review.complete`
 
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+
+      For fix-unit task minting, use the canonical template `ralph tools task ensure --for-fix-unit --key <key>` (see `ralph-tools-tasks`).
   fixer:
     name: "🔧 Fixer"
     description: "Diagnoses and fixes test failures. Merges debug-resolver capability: locate max 10 + fix max 10."
@@ -2598,6 +2611,9 @@ hats:
       - MUST pass the causal chain gate before applying a fix
       - MUST NOT emit `test.passed` or `test.failed` — those are owned by validator
 
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+
+      For fix-unit task minting, use the canonical template `ralph tools task ensure --for-fix-unit --key <key>` (see `ralph-tools-tasks`).
   shipper:
     name: "📦 Shipper"
     description: "Final validation, plan status update, final commit."
@@ -2744,7 +2760,7 @@ hats:
           For hard-fail reasons: publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"` and `verdict: "fail"`. Include the reason in `residual_findings_summary`. Do NOT disguise it as pass.
 
       ### Event Publishing guardrail
-      - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit REVIEW_COMPLETE --json '{...}'` only.
+      - MUST NOT write events directly; use `ralph emit REVIEW_COMPLETE --json '{...}'` only.
 
       ### Constraints
       - MUST NOT modify code (except simplify on plan.complete)
@@ -2752,7 +2768,6 @@ hats:
       - MUST record all residual findings to shipping.md
       - MUST update plan status ONLY on `plan.complete`; on `plan.blocked` do NOT mark plan as completed
       - MUST NOT push to origin or create PRs
-
   reporter:
     name: "📊 Reporter"
     description: "Generates manager-facing completion report."
@@ -2909,7 +2924,7 @@ hats:
         ```json
         {"report_path": "docs/report/.../r.md", "awaiting_decision": true, "pass_or_fail": "fail", "verdict": "fail"}
         ```
-      - MUST NOT append or write to `.ralph/events.jsonl` directly; use `ralph emit report.done --json '{...}'` (or `ralph emit LOOP_COMPLETE --json '{...}'`) only.
+      - MUST NOT write events directly; use `ralph emit report.done --json '{...}'` (or `ralph emit LOOP_COMPLETE --json '{...}'`) only.
       - **HARD RULE — pass_or_fail="fail"**: If `pass_or_fail` from the `REVIEW_COMPLETE` payload is `"fail"`, the reporter MUST:
         1. NOT publish `LOOP_COMPLETE`
         2. Write the report with an explicit "Awaiting decision" section
@@ -2926,24 +2941,26 @@ hats:
       - MUST handle same-day path conflicts (append HHMM)
       - MUST write sections 1–6 before any appendix content
 
-  # progress-steward is the loop-level fallback hat. It is auto-woken
-  # when the runtime detects
-  # `consecutive_no_progress_turns >= progress_steward.max_steward_iterations`.
-  # The serial preset narrows the steward's auto-wake path to
-  # `loop.stalled` only — the serial preset does not consume
-  # `human.guidance`. The `human.guidance` topic schema was removed
-  # in plan 2026-06-28-005; automated recovery flows through
-  # `task.resume` (see U2/U3 in 2026-06-17-003 plan). The 2026-06-25
-  # refactor retired the Telegram-driven RObot producer; the
-  # recovery channel itself is preserved.
-  # The recovery emit set is reduced to topics that are
-  # (a) in the steward hat's `publishes` scope and (b) routing
-  # signals, NOT review-sequence internal events:
-  # - No `review.dimension.ready` / `review.dimensions.complete` —
-  #   these belong exclusively to review-coordinator (its `publishes` scope, line
-  #   1148) and would be rejected by ownership precheck + topic_deny_rules if
-  #   emitted from this hat. Steward nudges the coordinator via `task.resume`
-  #   instead, letting the coordinator re-enter the state machine.
+      # progress-steward is the loop-level fallback hat. It is auto-woken
+      # when the runtime detects
+      # `consecutive_no_progress_turns >= progress_steward.max_steward_iterations`.
+      # The serial preset narrows the steward's auto-wake path to
+      # `loop.stalled` only — the serial preset does not consume
+      # `human.guidance`. The `human.guidance` topic schema was removed
+      # in plan 2026-06-28-005; automated recovery flows through
+      # `task.resume` (see U2/U3 in 2026-06-17-003 plan). The 2026-06-25
+      # refactor retired the Telegram-driven RObot producer; the
+      # recovery channel itself is preserved.
+      # The recovery emit set is reduced to topics that are
+      # (a) in the steward hat's `publishes` scope and (b) routing
+      # signals, NOT review-sequence internal events:
+      # - No `review.dimension.ready` / `review.dimensions.complete` —
+      #   these belong exclusively to review-coordinator (its `publishes` scope, line
+      #   1148) and would be rejected by ownership precheck + topic_deny_rules if
+      #   emitted from this hat. Steward nudges the coordinator via `task.resume`
+      #   instead, letting the coordinator re-enter the state machine.
+
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   progress-steward:
     name: "🛟 Progress Steward"
     description: "Loop-level fallback hat — wakes on stall to read state and emit a single recovery event."
@@ -2984,7 +3001,7 @@ hats:
 
       OPTIONAL secondary reads (only when ORCHESTRATOR CONTEXT is insufficient):
       - `plan.md` — current step and required deliverables
-      - `.ralph/events.jsonl` — last 200 lines of bus events (look for `work.done`, `test.passed`, `review.complete`, `plan.complete`, `task.resume`, `loop.stalled`)
+      - `ralph events --events-source main --output json | tail -200` — recent bus events (look for `work.done`, `test.passed`, `review.complete`, `plan.complete`, `task.resume`, `loop.stalled`)
       - `.agents/scratchpad/ce-executor/{plan_name}/review-sequence.json` — read the current sequence status to decide whether the coordinator is mid-walk or stalled.
 
       ### Step 2 — Choose ONE emit
@@ -3027,3 +3044,7 @@ hats:
         `review.dimensions.complete`, `review.complete`) — route through
         coordinator or review-coordinator instead.
       - If unsure, choose `plan.blocked(reason=loop_stalled_max_iterations)`.
+
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+
+      For fix-unit task minting, use the canonical template `ralph tools task ensure --for-fix-unit --key <key>` (see `ralph-tools-tasks`).
