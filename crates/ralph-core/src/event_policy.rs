@@ -7,7 +7,7 @@ use crate::event_reader::EventReader;
 use ralph_proto::Topic;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 // Re-export config types for convenience
 pub use crate::config::{
@@ -305,6 +305,14 @@ pub struct PolicyRuntimeState {
     /// for **in-batch** dedup (when the same `work.done` appears
     /// twice in the same `process_output` batch).
     pub work_done_seen_keys: HashSet<String>,
+    /// U-fixes-2026-07-04: canonical `task_id` → `task_key`
+    /// binding observed on the first accepted `work.done`.
+    /// Used to surface `task_id_task_key_mismatch` BEFORE
+    /// dedup so agent retry storms that swap `task_key` on
+    /// re-emit get an actionable error (not a generic
+    /// "duplicate"). Per-loop lifetime set; pruned on
+    /// step boundaries alongside `work_done_seen_tasks`.
+    pub work_done_task_id_to_key: HashMap<String, String>,
     /// U5 (2026-06-17-003 plan, R6): dedup set for
     /// `review.dimension.ready` events. Key format:
     /// `{plan_name}::{step}::{task_id}::{dimension}`. Populated
@@ -452,6 +460,12 @@ impl PolicyRuntimeState {
         let prefix = format!("{plan_name}::{step}::");
         self.work_done_seen_keys
             .retain(|key| !key.starts_with(&prefix));
+        // U-fixes-2026-07-04: step boundary invalidates every
+        // (task_id, task_key) binding too — task_ids from a
+        // closed step can be re-minted under a new task_key in
+        // the next step, so keeping stale bindings would
+        // produce false `task_id_task_key_mismatch` rejections.
+        self.work_done_task_id_to_key.clear();
     }
 
     /// U5 (2026-06-18-004 plan, R4): prune every
@@ -616,10 +630,20 @@ impl PolicyRuntimeState {
                 let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
                 let step = obj.get("step").and_then(|v| v.as_str());
                 let task_id = obj.get("task_id").and_then(|v| v.as_str());
+                let task_key = obj.get("task_key").and_then(|v| v.as_str());
                 if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
                     state
                         .work_done_seen_keys
                         .insert(format!("{pn}::{st}::{ti}"));
+                    // U-fixes-2026-07-04: mirror (task_id) →
+                    // task_key binding so rehydrate produces
+                    // the same task_id_task_key_mismatch
+                    // detection as the live accept path.
+                    if let Some(tk) = task_key {
+                        state
+                            .work_done_task_id_to_key
+                            .insert(ti.to_string(), tk.to_string());
+                    }
                 }
             }
             // 2026-07-02-004 U7: replay precheck gate lifecycle.
@@ -1217,8 +1241,37 @@ pub fn validate_event_with_hat(
         let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
         let step = obj.get("step").and_then(|v| v.as_str());
         let task_id = obj.get("task_id").and_then(|v| v.as_str());
+        let task_key = obj.get("task_key").and_then(|v| v.as_str());
         if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
             let dedup_key = format!("{pn}::{st}::{ti}");
+            // U-fixes-2026-07-04: (task_id, task_key) binding check
+            // must come BEFORE dedup. Without it, an agent that
+            // changes task_key on retry is misclassified as a
+            // duplicate and routed to `task.resume` with no
+            // actionable hint. We track the canonical
+            // `(task_id) -> task_key` binding seen on the first
+            // accept and reject later emits that disagree.
+            if let Some(seen_key) = state.work_done_task_id_to_key.get(ti).cloned()
+                && let Some(tk) = task_key
+                && seen_key != tk
+            {
+                let finding = PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::InvalidFieldValue {
+                        field: "task_key".to_string(),
+                        value: Value::String(tk.to_string()),
+                    },
+                    message: format!(
+                        "task_id_task_key_mismatch: work.done task_id '{ti}' was first \
+                         accepted with task_key '{seen_key}', but this emit uses \
+                         task_key '{tk}'. Re-emit with the SAME task_key that \
+                         coordinator published in work.ready, OR mint a fresh \
+                         task_id via `ralph tools task ensure` before re-sending \
+                         work.done."
+                    ),
+                };
+                return PolicyDecision::RejectWithResume(finding);
+            }
             if state.work_done_seen_keys.contains(&dedup_key) {
                 let finding = PolicyFinding {
                     topic: topic.to_string(),
@@ -1241,6 +1294,19 @@ pub fn validate_event_with_hat(
             // `LoopState::work_done_seen_tasks` and is pruned
             // on step-boundary events.
             state.work_done_seen_keys.insert(dedup_key);
+            // Track (task_id) → task_key binding so a later
+            // emit with the same task_id but a different
+            // task_key is rejected as InvalidFieldValue (not
+            // DuplicateWorkDone). Without this, retry storms
+            // from agents that swap task_key on re-emit
+            // silently cycle through dedup rejections with no
+            // actionable hint. Pruned alongside
+            // `work_done_seen_tasks` on step boundaries.
+            if let Some(tk) = task_key {
+                state
+                    .work_done_task_id_to_key
+                    .insert(ti.to_string(), tk.to_string());
+            }
         }
     }
 
@@ -4371,6 +4437,66 @@ mod tests {
             "from_events must mirror prior work.done into work_done_seen_keys, got {:?}",
             state.work_done_seen_keys
         );
+    }
+
+    #[test]
+    fn u_fixes_2026_07_04_task_id_task_key_mismatch_surfaces_invalid_field_value() {
+        // Regression test: agent emits work.done with same
+        // task_id as the prior accepted event but a different
+        // task_key. Must be rejected as InvalidFieldValue
+        // (`task_id_task_key_mismatch`), NOT DuplicateWorkDone,
+        // so the resume hint is actionable.
+        let mut state = PolicyRuntimeState::default();
+        let config = test_config();
+        let payload1 = serde_json::json!({
+            "plan_name": "p1",
+            "step": "step-01",
+            "task_id": "t1",
+            "task_key": "ce-executor:p1:step-01:u1-skeleton",
+            "commit_count": 1,
+            "changed_lines": 10,
+        })
+        .to_string();
+        let payload2 = serde_json::json!({
+            "plan_name": "p1",
+            "step": "step-01",
+            "task_id": "t1",
+            "task_key": "ce-executor:p1:step-01:u0-impl",
+            "commit_count": 1,
+            "changed_lines": 10,
+        })
+        .to_string();
+        let first = super::validate_event(
+            "work.done",
+            Some(&payload1),
+            &config,
+            &mut state,
+        );
+        assert!(matches!(first, super::PolicyDecision::Accept));
+        let second = super::validate_event(
+            "work.done",
+            Some(&payload2),
+            &config,
+            &mut state,
+        );
+        match second {
+            super::PolicyDecision::RejectWithResume(finding) => {
+                assert!(
+                    matches!(
+                        finding.violation_type,
+                        super::ViolationType::InvalidFieldValue { .. }
+                    ),
+                    "expected InvalidFieldValue(task_id_task_key_mismatch), got {:?}",
+                    finding.violation_type
+                );
+                assert!(
+                    finding.message.contains("task_id_task_key_mismatch"),
+                    "message should name the failure mode, got: {}",
+                    finding.message
+                );
+            }
+            other => panic!("expected RejectWithResume, got {other:?}"),
+        }
     }
 
     #[test]
