@@ -6229,4 +6229,180 @@ hats:
             ),
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // U6 (plan 2026-07-04-004): `DuplicateWorkDoneHint::ReviewDimensionsComplete`
+    // split. The hint + reason_code are distinct from the legacy
+    // `DuplicateSameStep` / `duplicate_work_done` so dashboards
+    // can match the silent-success dedup lane independently.
+    // The hint was added in U2 alongside `AcknowledgeAndForward`;
+    // U6 pins the reason_code mapping via dedicated tests so
+    // future renames of the code literal are caught.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `DuplicateWorkDoneHint` exposes 4 variants after U6
+    /// (DuplicateStallBypass / DuplicateSameStep /
+    /// ReviewDimensionDuplicate / ReviewDimensionsComplete).
+    /// Pin the variant count so static assertions across the
+    /// workspace stay in sync.
+    #[test]
+    fn test_duplicate_work_done_hint_has_review_dimensions_complete_variant() {
+        let all = [
+            DuplicateWorkDoneHint::DuplicateStallBypass,
+            DuplicateWorkDoneHint::DuplicateSameStep,
+            DuplicateWorkDoneHint::ReviewDimensionDuplicate,
+            DuplicateWorkDoneHint::ReviewDimensionsComplete,
+        ];
+        let unique: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(
+            unique.len(),
+            4,
+            "DuplicateWorkDoneHint must have 4 distinct variants after U6"
+        );
+    }
+
+    /// `ReviewDimensionsComplete` hint maps to a distinct
+    /// `duplicate_review_dimensions_complete` reason code (NOT
+    /// the misleading generic `duplicate_work_done`). The
+    /// distinct code is what dashboards / BDD scenarios pin
+    /// against to match the silent-success dedup lane.
+    #[test]
+    fn test_review_dimensions_complete_duplicate_emits_distinct_reason_code() {
+        let finding = PolicyFinding {
+            topic: "review.dimensions.complete".to_string(),
+            violation_type: ViolationType::DuplicateWorkDone {
+                key: "p::s::t::0".to_string(),
+                hint: DuplicateWorkDoneHint::ReviewDimensionsComplete,
+            },
+            message: "test".to_string(),
+        };
+        assert_eq!(
+            finding.violation_type.reason_code(),
+            "duplicate_review_dimensions_complete",
+            "ReviewDimensionsComplete hint MUST map to its own distinct reason_code"
+        );
+    }
+
+    /// `ReviewDimensionDuplicate` hint (used by
+    /// `review.dimension.ready` dedup) keeps its distinct
+    /// `duplicate_review_dimension_ready` reason code; U6
+    /// must NOT regress that mapping.
+    #[test]
+    fn test_review_dimension_ready_duplicate_still_uses_review_dimension_duplicate() {
+        let finding = PolicyFinding {
+            topic: "review.dimension.ready".to_string(),
+            violation_type: ViolationType::DuplicateWorkDone {
+                key: "p::s::t::d".to_string(),
+                hint: DuplicateWorkDoneHint::ReviewDimensionDuplicate,
+            },
+            message: "test".to_string(),
+        };
+        assert_eq!(
+            finding.violation_type.reason_code(),
+            "duplicate_review_dimension_ready",
+            "ReviewDimensionDuplicate hint must keep its distinct code (regression guard)"
+        );
+    }
+
+    /// `DuplicateStallBypass` / `DuplicateSameStep` continue to
+    /// emit the legacy `duplicate_work_done` reason code so
+    /// dashboards / CLI precheck JSON / existing static
+    /// assertions stay backwards-compatible.
+    #[test]
+    fn test_other_topics_dedup_still_use_duplicate_work_done() {
+        for hint in [
+            DuplicateWorkDoneHint::DuplicateStallBypass,
+            DuplicateWorkDoneHint::DuplicateSameStep,
+        ] {
+            let finding = PolicyFinding {
+                topic: "work.done".to_string(),
+                violation_type: ViolationType::DuplicateWorkDone {
+                    key: "p::s::t".to_string(),
+                    hint,
+                },
+                message: "test".to_string(),
+            };
+            assert_eq!(
+                finding.violation_type.reason_code(),
+                "duplicate_work_done",
+                "{hint:?} must keep the legacy duplicate_work_done code"
+            );
+        }
+    }
+
+    /// The 4 hint → reason_code mappings are pairwise distinct
+    /// across the three "named" lanes (StallBypass + SameStep
+    /// share the legacy `duplicate_work_done` code by design —
+    /// see plan 2026-07-04-004 KTD-2: keep those two collapsed
+    /// so existing dashboards / CLI precheck JSON / static
+    /// assertions remain green). The U6 invariant is therefore
+    /// "3 distinct codes" not "4 distinct codes"; this test
+    /// guards against accidentally collapsing a `review.*` lane
+    /// into the legacy generic code (which would re-introduce
+    /// the silent-success misclassification).
+    #[test]
+    fn test_distinct_reason_codes_invariant() {
+        let codes = [
+            (
+                "DuplicateStallBypass",
+                ViolationType::DuplicateWorkDone {
+                    key: "k".to_string(),
+                    hint: DuplicateWorkDoneHint::DuplicateStallBypass,
+                }
+                .reason_code(),
+            ),
+            (
+                "DuplicateSameStep",
+                ViolationType::DuplicateWorkDone {
+                    key: "k".to_string(),
+                    hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                }
+                .reason_code(),
+            ),
+            (
+                "ReviewDimensionDuplicate",
+                ViolationType::DuplicateWorkDone {
+                    key: "k".to_string(),
+                    hint: DuplicateWorkDoneHint::ReviewDimensionDuplicate,
+                }
+                .reason_code(),
+            ),
+            (
+                "ReviewDimensionsComplete",
+                ViolationType::DuplicateWorkDone {
+                    key: "k".to_string(),
+                    hint: DuplicateWorkDoneHint::ReviewDimensionsComplete,
+                }
+                .reason_code(),
+            ),
+        ];
+        let mut unique = std::collections::HashSet::new();
+        for (_, code) in &codes {
+            unique.insert(*code);
+        }
+        // The "review.*" lanes must stay distinct from the
+        // legacy generic code; StallBypass + SameStep share
+        // the legacy code by design (see KTD-2). Anything
+        // beyond that (e.g. merging ReviewDimensionsComplete
+        // into duplicate_work_done) would re-introduce the
+        // silent-success misclassification — fail fast.
+        assert_eq!(
+            unique.len(),
+            3,
+            "expected 3 distinct reason codes (StallBypass+SameStep share by design, \
+             both review.* lanes must stay distinct); got {codes:?}"
+        );
+        assert!(
+            unique.contains("duplicate_work_done"),
+            "legacy code must remain stable"
+        );
+        assert!(
+            unique.contains("duplicate_review_dimension_ready"),
+            "review.dimension.ready lane must stay distinct"
+        );
+        assert!(
+            unique.contains("duplicate_review_dimensions_complete"),
+            "review.dimensions.complete lane must stay distinct (U6 invariant)"
+        );
+    }
 }
