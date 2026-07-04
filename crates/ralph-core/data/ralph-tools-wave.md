@@ -17,6 +17,42 @@ metadata:
 
 > `wave` 命令没有 `root` 和 `format` 选项（root，format）。
 
+### Wave OPAC 四阶段 (U26/U21)
+
+Wave OPAC 与单 emit OPAC 并列——同样四阶段，差别只在 Confirm 路径：
+
+| 阶段 | 命令 | 关键约束 |
+|------|------|----------|
+| **Observe** | `ralph inspect loop` + `ralph tools task list` | 不要读 `.ralph/events.jsonl` / `supervisor.db`（HARD RULE 4） |
+| **Precheck** | `ralph wave verify --payloads-stdin`（U21） | 零写盘；与 emit 同源 `policy_check` / origin guard |
+| **Apply** | `ralph wave emit --payloads-stdin` | agent context 默认 enforce `--policy-check`（U15）；不通过 verify 不能直发 |
+| **Confirm** | `ralph events --events-source main --output json \| jq 'select(.wave_id == ...)'` | wave 写主 ledger，不走 hat-channel |
+
+**Confirm 路径与单 emit 不同**：`ralph wave emit` 写入 `current-events`（参见 `crates/ralph-cli/src/wave.rs:resolve_events_file`），不走 hat-channel。所以 Confirm 不能用 `ralph events --events-source hat-channel`——必须从 main ledger 验。
+
+**反模式**：
+
+- ❌ 跳过 `wave verify` 直接 `wave emit`（U15 agent default enforce 会拒写盘；预设 opt-out 用 `event_policy.allow_unsafe_cli_emit: true`）
+- ❌ 在 worker hat 内调用 `ralph wave emit`（U23 wave ACL：仅 dispatcher hat——`publishes` 含 `*.unit.ready` 或 `review.wave.ready`——可调用）
+- ❌ Confirm 阶段读 `current-hat-events`（那是单 emit 通道，看不到 wave 写入）
+- ❌ 试图让 agent emit `*.wave.complete` / `*.unit.ready` 等 supervisor 协调 topic（origin guard 拒收，参见下方表格）
+
+### `ralph wave verify` (U21)
+
+零写盘批预检；与 `wave emit` 共用同源 `ValidationPipeline` / schema / origin guard。
+
+```bash
+cat payloads.jsonl | ralph wave verify review.wave.ready --payloads-stdin --output json
+# {"ok":true,"topic":"review.wave.ready","count":7}
+```
+
+通过后去掉 `--verify` 真正 emit：
+
+```bash
+# 同源 path，不重写 payload
+cat payloads.jsonl | ralph wave emit review.wave.ready --payloads-stdin --policy-check
+```
+
 ### `ralph wave emit`
 
 将多个 payload 作为 wave 事件发射，每个 payload 成为一个独立事件，共享同一个 `wave_id`。
