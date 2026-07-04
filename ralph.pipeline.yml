@@ -6,7 +6,7 @@ event_loop:
   max_runtime_seconds: 28800 # 新增
   completion_promise: LOOP_COMPLETE
   max_iterations: 500
-  prompt_file: PROMPT.md
+  prompt_file: PROMPT.pipeline.md  # 固定编排契约；换 plan 只改 execution.target
 
 telemetry:
   runtime_diagnosis:
