@@ -83,6 +83,13 @@ pub enum ViolationType {
 /// [`ViolationType::DuplicateWorkDone`]. Lets the runner pick the
 /// correct recovery payload (stall-bypass has a different message
 /// from pure duplicate-same-step).
+///
+/// 2026-07-04-024019 run P0-1: added `ReviewDimensionDuplicate` so the
+/// runtime can distinguish a `review.dimension.ready` collision from
+/// a generic `work.done` collision in logs / dashboard / agent context.
+/// `reason_code` is derived per-variant so dashboards see a stable
+/// `duplicate_review_dimension_ready` rather than the misleading
+/// generic `duplicate_work_done`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DuplicateWorkDoneHint {
@@ -94,6 +101,12 @@ pub enum DuplicateWorkDoneHint {
     /// progress. The agent simply re-emitted `work.done` for a
     /// step that has already closed.
     DuplicateSameStep,
+    /// 2026-07-04-024019 run P0-1: `review.dimension.ready` already
+    /// accepted for the same `(plan_name, step, task_id, dimension)`
+    /// tuple. Distinct from `DuplicateSameStep` so dashboards and
+    /// agents can recognize that the collision is in the review-
+    /// coordinator's serial-walk lane, not the unit-execution lane.
+    ReviewDimensionDuplicate,
 }
 
 impl ViolationType {
@@ -124,7 +137,22 @@ impl ViolationType {
             Self::InvalidTopicFormat { .. } => "invalid_topic_format",
             Self::TopicDenied { .. } => "topic_denied",
             Self::SemanticGateViolation { .. } => "semantic_gate_violation",
-            Self::DuplicateWorkDone { .. } => "duplicate_work_done",
+            Self::DuplicateWorkDone { hint, .. } => match hint {
+                // 2026-07-04-024019 run P0-1: surface the review-dim
+                // collision under its own code so dashboards /
+                // agents don't confuse it with `duplicate_work_done`.
+                // The other two hints (DuplicateStallBypass /
+                // DuplicateSameStep) deliberately keep the legacy
+                // `"duplicate_work_done"` code so dashboards / CLI
+                // precheck JSON / existing static assertions
+                // (test_u4_duplicate_work_done_hint_mapped_to_reason_code)
+                // remain green.
+                DuplicateWorkDoneHint::ReviewDimensionDuplicate => {
+                    "duplicate_review_dimension_ready"
+                }
+                DuplicateWorkDoneHint::DuplicateStallBypass
+                | DuplicateWorkDoneHint::DuplicateSameStep => "duplicate_work_done",
+            },
         }
     }
 }
@@ -1251,7 +1279,10 @@ pub fn validate_event_with_hat(
                     topic: topic.to_string(),
                     violation_type: ViolationType::DuplicateWorkDone {
                         key: dedup_key.clone(),
-                        hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                        // 2026-07-04-024019 run P0-1: distinct hint so
+                        // `reason_code` reports `duplicate_review_dimension_ready`
+                        // instead of `duplicate_work_done_same_step`.
+                        hint: DuplicateWorkDoneHint::ReviewDimensionDuplicate,
                     },
                     message: format!(
                         "duplicate_dimension_ready: review.dimension.ready for key '{dedup_key}' \

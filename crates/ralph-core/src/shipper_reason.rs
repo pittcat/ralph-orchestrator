@@ -38,6 +38,37 @@ const RECOVERABLE_REASONS: &[&str] = &[
     "default_publishes",
 ];
 
+/// 2026-07-04-024019 run P0-3: explicit allowlist of
+/// `recovery_exhausted:<retry_key>` prefixes that the drift engine is
+/// known to emit. The previous `starts_with("recovery_exhausted:")`
+/// blanket admitted any structured suffix, which surfaced as
+/// `REVIEW_COMPLETE(pass_with_residuals)` for retry_keys we never
+/// meant to whitelist (e.g. an unknown drift-engine escalation). New
+/// rules: keep admitting the prefixes that shipper routing knows
+/// how to translate; reject any other `recovery_exhausted:<...>` as
+/// not recoverable (fail-close).
+///
+/// Note: drift-engine emit paths use BOTH dotted (`task.resume`) and
+/// underscored (`task_resume`) retry-key formats depending on which
+/// uploader invoked them (`event_loop/mod.rs:5543` + loop_runner
+/// `runner.rs:1855`). Both variants are pinned here so the
+/// `is_recoverable_plan_blocked_reason` decision matches existing
+/// test fixtures (`recoverable_literals_match` asserts
+/// `recovery_exhausted:coordinator:task.resume:handoff` is recoverable).
+const RECOVERABLE_RECOVERY_EXHAUSTED_PREFIXES: &[&str] = &[
+    // Dotted retry-key variants (legacy / drift-engine direct emit)
+    "recovery_exhausted:coordinator:task.resume",
+    "recovery_exhausted:dimension_reviewer:review.dimension.ready",
+    // Underscored retry-key variants (2026-07-03-005 plan / P0-1 path)
+    "recovery_exhausted:coordinator:task_resume",
+    "recovery_exhausted:dimension_reviewer:review_dimension_ready",
+    // Stall-recovery escalation paths (2026-07-03-005 explicitly closed these)
+    "recovery_exhausted:stall_recovery:coordinator:task_resume:handoff_dispatch_timeout",
+    "recovery_exhausted:stall_recovery:coordinator:task.resume:handoff_dispatch_timeout",
+    "recovery_exhausted:stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout",
+    "recovery_exhausted:stall_recovery:dimension_reviewer:review.dimension.ready:handoff_dispatch_timeout",
+];
+
 /// Normalize a `plan.blocked.reason` for whitelist lookup.
 pub fn normalize_plan_blocked_reason(reason: &str) -> String {
     reason.trim().to_lowercase()
@@ -45,16 +76,24 @@ pub fn normalize_plan_blocked_reason(reason: &str) -> String {
 
 /// True when `reason` is on the shipper recoverable whitelist.
 ///
-/// `recovery_exhausted:{retry_key}` (drift engine) is treated as recoverable
-/// because the schema whitelist entry is the bare literal `recovery_exhausted`
-/// while production emits a structured suffix — still STRICT, not substring
-/// promotion of unrelated recovery buckets like `stall_no_events recovery:`.
+/// `recovery_exhausted:<retry_key>` (drift engine) is treated as recoverable
+/// only when `<retry_key>` is on the explicit prefix allowlist (see
+/// `RECOVERABLE_RECOVERY_EXHAUSTED_PREFIXES`). The bare literal
+/// `recovery_exhausted` is also recoverable. Anything else
+/// (`recovery_exhausted:foo`, `recovery_exhausted:stall_recovery:...:weird`,
+/// etc.) is NOT recoverable — fail-close into
+/// `REVIEW_COMPLETE(pass_or_fail=fail)`.
 pub fn is_recoverable_plan_blocked_reason(reason: &str) -> bool {
     let normalized = normalize_plan_blocked_reason(reason);
     if RECOVERABLE_REASONS.contains(&normalized.as_str()) {
         return true;
     }
-    normalized.starts_with("recovery_exhausted:")
+    // 2026-07-04-024019 run P0-3: replace blanket `starts_with("recovery_exhausted:")`
+    // with an explicit prefix allowlist so the drift engine cannot widen
+    // shipper routing to new retry_keys.
+    RECOVERABLE_RECOVERY_EXHAUSTED_PREFIXES
+        .iter()
+        .any(|p| normalized.starts_with(p))
 }
 
 /// Extract `reason` from a `plan.blocked` JSON payload.
@@ -212,6 +251,46 @@ mod tests {
         ));
         assert!(is_recoverable_plan_blocked_reason(
             "recovery_exhausted:coordinator:task_resume:handoff"
+        ));
+    }
+
+    // 2026-07-04-024019 run P0-3: an UNKNOWN `recovery_exhausted:<retry_key>`
+    // (not on the explicit prefix allowlist) must NOT translate into
+    // `pass_with_residuals`. The drift engine's blanket `starts_with`
+    // promotion has been replaced with a prefix allowlist so unknown
+    // retry_keys fail-close into `REVIEW_COMPLETE(pass_or_fail=fail)`.
+    #[test]
+    fn unknown_recovery_exhausted_prefix_fail_closes() {
+        assert!(!is_recoverable_plan_blocked_reason(
+            "recovery_exhausted:unknown:retry:key"
+        ));
+        assert!(!is_recoverable_plan_blocked_reason(
+            "recovery_exhausted:stall_recovery:coordinator:task_resume:NOT_in_allowlist"
+        ));
+        // still recoverable: the four allowlisted prefixes
+        assert!(is_recoverable_plan_blocked_reason(
+            "recovery_exhausted:stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:anything-else"
+        ));
+    }
+
+    // 2026-07-04-024019 run P0-3: BOTH dotted (`task.resume`) and
+    // underscored (`task_resume`) retry-key variants must keep their
+    // recoverable status. `recoverable_literals_match` and the existing
+    // `recovery_exhausted_drift_engine_promotion_still_recoverable`
+    // tests already assert the dotted form; this regression asserts
+    // the underscored form remains recoverable after we replaced the
+    // blanket `starts_with("recovery_exhausted:")` with a prefix
+    // allowlist.
+    #[test]
+    fn recovery_exhausted_underscored_variants_recoverable() {
+        assert!(is_recoverable_plan_blocked_reason(
+            "recovery_exhausted:coordinator:task_resume:handoff"
+        ));
+        assert!(is_recoverable_plan_blocked_reason(
+            "recovery_exhausted:dimension_reviewer:review_dimension_ready:handoff"
+        ));
+        assert!(is_recoverable_plan_blocked_reason(
+            "recovery_exhausted:stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:drift-engine"
         ));
     }
 }

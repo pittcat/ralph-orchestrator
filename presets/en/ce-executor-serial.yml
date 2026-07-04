@@ -1855,6 +1855,40 @@ hats:
          be the **only** business event you emit in the activation that
          publishes it. Do not precede it with any other emit.
 
+      ### Silent-drop fallback for `review.dimension.ready` (HARD RULE — 2026-07-04 P0-2)
+      The single-emit guard above relies on `ralph events` grep showing
+      a prior emit. But isolated mode **silently drops** surplus emits
+      without publishing a diagnostic event the hat can observe. If you
+      re-activate for a dimension you already emitted and the grep
+      above returns NOTHING (because the earlier emit was silent-dropped,
+      not in the events file yet), do NOT emit `review.dimension.ready`
+      again for the same `dimension`. Instead emit `review.dimension.failed`
+      (a topic this hat *is* authorized to publish per the schema,
+      `publishes` declaration, and `topic_deny_rules` block above):
+
+          ralph emit review.dimension.failed \
+            --task_id=$TASK_ID --task_key=$TASK_KEY --step=$STEP \
+            --dimension=$DIMENSION \
+            --reason=isolated_silent_drop_recovery \
+            --plan_name=$PLAN_NAME
+
+      Emitting `review.dimension.failed` lets the runtime advance the
+      sequence past the ambiguous dimension via the standard
+      `review.dimension.failed` → review-synthesizer path, instead of
+      falling through to the runtime-injected
+      `plan.blocked(review_terminal_drift)` which previously routed
+      through the shipper recoverable bucket and surfaced as a fake
+      `REVIEW_COMPLETE(pass_with_residuals)`. After emitting
+      `review.dimension.failed`, stop emitting further business events
+      this turn; the next activation will continue the walk from step 2
+      (find the next pending dimension).
+
+      Only do this if the `ralph events` grep returns NOTHING (silent-
+      drop signature). Do NOT use this fallback if the grep returns a
+      matching prior emit — that case is handled by the regular single-
+      emit guard above (skip the next dim and wait for
+      `review.dimension.done`).
+
       ### Per-dimension focus strings (copy-pasteable)
       - `goal-alignment`    → `"Goal-to-plan-to-code alignment: core objective traceability, logical gaps, missing or divergent implementation steps"`
       - `correctness`       → `"Logic correctness, edge cases, error propagation, state machine consistency"`
