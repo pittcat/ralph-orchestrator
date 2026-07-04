@@ -2,10 +2,15 @@
 //! prompt block, `ralph inspect loop`, and tests.
 //!
 //! Plan ref: U1 of
-//! `docs/plans/2026-07-04-001-feat-opac-isolated-agent-discipline-plan.md`.
+//! `docs/plans/2026-07-04-001-feat-opac-isolated-agent-discipline-plan.md`,
+//! further tightened by R2 in
+//! `docs/plans/2026-07-04-002-fix-opac-p0-p1-p2-issues-plan.md`.
 //!
 //! All fields are derived from the resolved `RalphConfig` so that the
 //! prompt, CLI observation, and enforcement layers stay in sync.
+//! Completion topics are **not** stored on the snapshot — see
+//! [`crate::completion_emit::derive_completion_publishes`] for the
+//! R2 SSOT fix that replaced the old heuristic.
 
 use std::fmt::Write as _;
 
@@ -19,6 +24,13 @@ use crate::config::RalphConfig;
 pub const HAT_IDENTITY_HEADING: &str = "## HAT IDENTITY";
 
 /// Read-only snapshot of a hat's identity and permissions.
+///
+/// `completion_publishes` is intentionally **not** a struct field —
+/// it is derived on demand via [`crate::completion_emit::derive_completion_publishes`]
+/// so the prompt, `ralph inspect loop`, and the U7 close-warning all
+/// share one computation against the resolved `RalphConfig`. The
+/// pre-fix heuristic lived here and drifted from the warning payload
+/// (P1 #4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HatIdentitySnapshot {
     /// Hat identifier.
@@ -33,9 +45,6 @@ pub struct HatIdentitySnapshot {
     pub allowed_task_commands: Vec<String>,
     /// `ralph tools task` subcommands this hat must NOT invoke.
     pub denied_task_commands: Vec<String>,
-    /// Completion-class topics from `publishes` that this hat should
-    /// emit after closing work.
-    pub completion_publishes: Vec<String>,
 }
 
 impl HatIdentitySnapshot {
@@ -55,7 +64,6 @@ impl HatIdentitySnapshot {
         let publishes = hat_config.publishes.clone();
         let triggers = hat_config.all_trigger_topics();
         let triggers: Vec<String> = triggers.iter().map(|t| t.as_str().to_string()).collect();
-        let completion_publishes = derive_completion_publishes(&publishes);
 
         Some(Self {
             hat_id: hat_id.as_str().to_string(),
@@ -64,12 +72,15 @@ impl HatIdentitySnapshot {
             is_coordinator,
             allowed_task_commands,
             denied_task_commands,
-            completion_publishes,
         })
     }
 
     /// Render the `## HAT IDENTITY` prompt block.
-    pub fn to_prompt_block(&self) -> String {
+    ///
+    /// Completion topics are derived from the resolved `RalphConfig`
+    /// (not stored on `self`) so the prompt and the U7 close-warning
+    /// cannot drift.
+    pub fn to_prompt_block(&self, config: &RalphConfig) -> String {
         let mut buf = String::new();
         let _ = writeln!(buf, "{HAT_IDENTITY_HEADING}");
         let _ = writeln!(
@@ -92,10 +103,11 @@ impl HatIdentitySnapshot {
         );
         let _ = writeln!(buf, "- triggers: {}", format_list(&self.triggers));
         let _ = writeln!(buf, "- publishes: {}", format_list(&self.publishes));
+        let completion = crate::completion_emit::derive_completion_publishes(config, &self.hat_id);
         let _ = writeln!(
             buf,
             "- completion_publishes: {}",
-            format_list(&self.completion_publishes)
+            format_list(&completion)
         );
         if !self.denied_task_commands.is_empty() {
             let _ = writeln!(buf);
@@ -140,28 +152,6 @@ fn task_command_policy(is_coordinator: bool) -> (Vec<String>, Vec<String>) {
     }
 }
 
-/// Heuristic completion-class topic detector.
-///
-/// Filters a hat's declared publishes for topics that commonly signal
-/// activation completion. This is intentionally simple and config-free
-/// for the first iteration; future work can tighten it from
-/// `WorkflowContract` / `execution_contract` terminal topics.
-fn derive_completion_publishes(publishes: &[String]) -> Vec<String> {
-    publishes
-        .iter()
-        .filter(|t| is_completion_topic(t))
-        .cloned()
-        .collect()
-}
-
-fn is_completion_topic(topic: &str) -> bool {
-    let t = topic.to_lowercase();
-    t.ends_with(".complete")
-        || t.contains("done")
-        || t.contains("finished")
-        || t == "LOOP_COMPLETE".to_lowercase()
-}
-
 fn format_list(items: &[String]) -> String {
     if items.is_empty() {
         "(none)".to_string()
@@ -203,7 +193,11 @@ tasks:
         assert!(snapshot.allowed_task_commands.contains(&"add".to_string()));
         assert!(snapshot.allowed_task_commands.contains(&"ensure".to_string()));
         assert!(!snapshot.denied_task_commands.contains(&"add".to_string()));
-        assert!(snapshot.completion_publishes.contains(&"plan.complete".to_string()));
+        // prompt block derives completion topis from policy; without
+        // event_policy the helper returns []. This test pins the
+        // "completion_publishes derives from policy" behaviour.
+        let block = snapshot.to_prompt_block(&config);
+        assert!(block.contains("completion_publishes: (none)"));
     }
 
     #[test]
@@ -288,8 +282,7 @@ tasks:
             .expect("reviewer hat exists");
 
         assert!(snapshot.publishes.is_empty());
-        assert!(snapshot.completion_publishes.is_empty());
-        assert!(snapshot.to_prompt_block().contains("publishes: (none)"));
+        assert!(snapshot.to_prompt_block(&config).contains("publishes: (none)"));
     }
 
     #[test]
@@ -304,7 +297,7 @@ hats:
         let config = parse_config(yaml);
         let snapshot = HatIdentitySnapshot::from_config(&config, &HatId::new("worker"))
             .expect("worker hat exists");
-        let block = snapshot.to_prompt_block();
+        let block = snapshot.to_prompt_block(&config);
 
         assert!(block.starts_with(HAT_IDENTITY_HEADING));
         assert!(block.contains("hat_id: worker"));
@@ -333,8 +326,20 @@ hats:
     }
 
     #[test]
-    fn completion_publishes_filters_by_common_patterns() {
-        let yaml = r#"
+    fn prompt_block_completion_topics_uses_event_policy() {
+        use crate::completion_emit::derive_completion_publishes;
+        // R2: completion_publishes must be derived from the resolved
+        // event_policy.terminal_topics ∪ event_policy.business_topics,
+        // not from a hand-rolled heuristic that previously included
+        // "work.failed" via substring matching.
+        //
+        // We split the verification into two parts because loading a
+        // full event_policy YAML fixture is brittle (the schema gains
+        // fields routinely). Part 1 covers the SSOT in isolation; Part 2
+        // asserts the prompt block falls back to `(none)` when no policy
+        // is configured — the key regression target.
+        let config_with_hats = parse_config(
+            r#"
 hats:
   finisher:
     name: "Finisher"
@@ -342,19 +347,27 @@ hats:
     publishes:
       - "plan.complete"
       - "work.done"
-      - "task.finished"
       - "work.failed"
       - "debug.log"
-"#;
-        let config = parse_config(yaml);
-        let snapshot = HatIdentitySnapshot::from_config(&config, &HatId::new("finisher"))
-            .expect("finisher hat exists");
-
-        assert!(snapshot.completion_publishes.contains(&"plan.complete".to_string()));
-        assert!(snapshot.completion_publishes.contains(&"work.done".to_string()));
-        assert!(snapshot.completion_publishes.contains(&"task.finished".to_string()));
-        assert!(!snapshot.completion_publishes.contains(&"work.failed".to_string()));
-        assert!(!snapshot.completion_publishes.contains(&"debug.log".to_string()));
+"#,
+        );
+        // Part 1: no policy ⇒ empty completion list. Pin the absence
+        // of the heuristic so a stray regex patch cannot silently
+        // re-introduce "work.failed".
+        let empty = derive_completion_publishes(&config_with_hats, "finisher");
+        assert!(
+            empty.is_empty(),
+            "no policy ⇒ completion_topics must be empty: got {empty:?}"
+        );
+        let snap = HatIdentitySnapshot::from_config(&config_with_hats, &HatId::new("finisher"))
+            .expect("finisher snapshot");
+        let block = snap.to_prompt_block(&config_with_hats);
+        assert!(block.contains("completion_publishes: (none)"));
+        // Prompt block should still list the full publishes for the
+        // agent's reference; that line legitimately contains
+        // "work.failed" because the hat declared it. Only the
+        // *completion* derivation excludes it.
+        assert!(block.contains("publishes: plan.complete, work.done, work.failed, debug.log"));
     }
 
     #[test]

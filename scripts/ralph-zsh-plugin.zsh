@@ -975,6 +975,53 @@ _ralph_task_args() {
       _arguments -C \
         '--status+[Filter by status]:status:(open in_progress closed)'
       ;;
+    # U4 (2026-07-04-001 plan): zero-write Precheck — mirrors the
+    # mutation verbs above so the agent can copy its real command,
+    # prepend `verify`, and see the same auth gate output. The nested
+    # verb mirrors start/close/fail/reopen auth (R7).
+    verify)
+      _ralph_task_verify_args
+      ;;
+    # U4 (2026-07-04-001 plan): three-field consistency check for the
+    # task_id/task_key/step emit-bridge (R16). All three flags are
+    # required; `_default` value lets the agent TAB-complete values
+    # from `ralph tools task list` output.
+    verify-emit-bridge)
+      _arguments -C \
+        '--task-id+[Live task_id from `ralph tools task list`]:task_id:_default' \
+        '--task-key+[Stable task_key to embed on the emit payload]:task_key:_default' \
+        '--step+[Step number/slug matching the `:step-<n>:` segment in task_key]:step:_default' \
+        '--format+[Output format]:format:(table json)'
+      ;;
+  esac
+}
+
+# =============================================================================
+# Task Verify Sub-Subcommand Arguments (U4)
+# =============================================================================
+# Mirrors the mutation verb arg shapes under `ralph tools task verify <verb>`
+# so the agent can copy its real command and prepend `verify`. None of these
+# variants writes to tasks.jsonl — they only echo the authorization message
+# the mutation would have produced.
+(( $+functions[_ralph_task_verify_args] )) ||
+_ralph_task_verify_args() {
+  local verify_verb=$words[$((CURRENT))]
+  case $verify_verb in
+    add|ensure)
+      _arguments -C \
+        '-p+[Priority]:priority:(1 2 3 4 5)' \
+        '-d+[Description]:description:_default' \
+        '--blocked-by+[Blocked by task IDs]:ids:_default' \
+        '--key+[Stable task key]:key:_default' \
+        '1:title:_default'
+      ;;
+    start|close|fail|reopen)
+      _arguments '1:task id:_default'
+      ;;
+    *)
+      _arguments \
+        '1:verify verb:(add ensure start close fail reopen)'
+      ;;
   esac
 }
 

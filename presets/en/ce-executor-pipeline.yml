@@ -715,6 +715,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## DIM:goal-alignment — read-only single-dimension reviewer
 
       ### Dimension focus
@@ -842,6 +843,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## DIM:correctness — read-only single-dimension reviewer
 
       ### Dimension focus
@@ -923,6 +925,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## DIM:testing — read-only single-dimension reviewer
 
       ### Dimension focus
@@ -1002,6 +1005,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## DIM:maintainability — read-only single-dimension reviewer
 
       ### Dimension focus
@@ -1079,6 +1083,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## DIM:project-standards — read-only single-dimension reviewer
 
       ### Dimension focus
@@ -1157,6 +1162,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## DIM:adversarial — read-only single-dimension reviewer
 
       ### Dimension focus
@@ -1589,6 +1595,7 @@ hats:
     timeout: 3600
     missing_event_grace_secs: 540
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## FIXER MODE — Apply the synthesizer fix plan only (NOT the original plan)
 
       You apply the **fix-plan file** produced by `review-synthesizer`.
@@ -1724,6 +1731,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## ALIGNMENT MODE — Cross-check original plan vs fix-plan execution
 
       You audit **two separate plans** against git evidence:

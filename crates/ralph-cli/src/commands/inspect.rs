@@ -21,6 +21,7 @@
 //! scaffold?" confusion that arises when too many verbs share one
 //! namespace.
 
+use crate::cli::resolve_hat_channel_file;
 use crate::display::colors;
 use crate::operation_guard::OperationContext;
 use crate::preflight;
@@ -311,9 +312,42 @@ pub async fn inspect_loop_command(
     // them so the operator can see whether the channels are alive.
     let (main_events, hat_channel_events) = resolve_event_paths(&root, &ctx);
     let main_size = std::fs::metadata(&main_events).map(|m| m.len()).unwrap_or(0);
-    let hat_size = std::fs::metadata(&hat_channel_events)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    // For hat-channel, resolve the marker to the real channel file
+    // before statting — the marker itself is a tiny path string
+    // (~/.ralph/agent/events-hat-X.jsonl) and reporting its size
+    // would mislead operators into thinking the channel is empty
+    // when in fact the channel sits one dereference away (U4 P1 #6).
+    let (hat_channel_label, hat_size, hat_channel_warning) = match resolve_hat_channel_file(&root)
+    {
+        None => (
+            hat_channel_events.display().to_string(),
+            std::fs::metadata(&hat_channel_events)
+                .map(|m| m.len())
+                .unwrap_or(0),
+            Some(
+                "hat-channel marker (.ralph/current-hat-events) missing or empty; \
+                 inspect after the first hat activation so the runtime can publish it"
+                    .to_string(),
+            ),
+        ),
+        Some((resolved, exists)) => {
+            let size = if exists {
+                std::fs::metadata(&resolved).map(|m| m.len()).unwrap_or(0)
+            } else {
+                0
+            };
+            let warn = if !exists {
+                Some(
+                    "hat-channel marker resolves to a path that does not yet exist on disk; \
+                     emit will fall back to main events until the runner creates it"
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+            (resolved.display().to_string(), size, warn)
+        }
+    };
 
     let mut warnings = Vec::new();
     if ctx.current_loop_id.is_none() {
@@ -322,6 +356,9 @@ pub async fn inspect_loop_command(
              run `ralph run ...` to create one"
                 .to_string(),
         );
+    }
+    if let Some(w) = hat_channel_warning {
+        warnings.push(w);
     }
     if ctx.current_hat_id.is_none() && args.hat.is_none() {
         warnings.push(
@@ -354,7 +391,7 @@ pub async fn inspect_loop_command(
             .map(|s| s.to_json())
             .unwrap_or(serde_json::Value::Null),
         events_file: main_events.display().to_string(),
-        hat_channel_file: hat_channel_events.display().to_string(),
+        hat_channel_file: hat_channel_label.clone(),
         events_size: main_size,
         hat_channel_size: hat_size,
         warnings,
@@ -415,17 +452,25 @@ struct LoopInspectView {
     supervisor: Option<ralph_core::supervisor::SupervisorInspectSummary>,
 }
 
-/// U22: produce an agent-safe supervisor summary block for `inspect loop`.
-/// Returns `None` (so the JSON key is omitted) when supervisor is disabled
-/// in config; returns `Some(default)` (active_waves: [], queue_depth: 0)
-/// when the supervisor is enabled but the db is missing / cannot be opened.
+/// U22 + U8 of plan 2026-07-04-002: produce an agent-safe supervisor
+/// summary block for `inspect loop`. Returns `None` (so the JSON key
+/// is omitted) when supervisor is disabled in config; returns
+/// `Some(default)` (active_waves: [], queue_depth: 0,
+/// slot_summary: [], last_coordination_topics: []) when the
+/// supervisor is enabled but the db is missing / cannot be opened.
 ///
 /// When the `supervisor-db` feature is on AND the db is reachable the
 /// function opens the rusqlite store, calls
 /// `ralph_core::supervisor::summarize(&store)` to populate
-/// `active_waves` / `queue_depth` from the live store, and emits the
-/// resulting struct verbatim. `slot_summary[]` stays empty until U25
-/// ships the per-slot list API.
+/// `active_waves` / `queue_depth` / `slot_summary` /
+/// `last_coordination_topics` from the live store, and emits the
+/// resulting struct verbatim.
+///
+/// Output safety (R11): the struct never includes the supervisor db
+/// path, event-log contents, or any other internal ledger field;
+/// only the public `slot_summary[]` and `last_coordination_topics[]`
+/// derived from the active wave's kind and the public
+/// `SUPERVISOR_COORDINATION_TOPICS` whitelist are surfaced.
 fn build_supervisor_summary(
     config: &RalphConfig,
     workspace_root: &std::path::Path,
@@ -1481,5 +1526,128 @@ mod tests {
         let summary = out.expect("enabled must yield Some");
         assert!(summary.active_waves.is_empty());
         assert_eq!(summary.queue_depth, 0);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // U8 of plan 2026-07-04-002 — `ralph inspect loop` supervisor summary
+    // must populate `slot_summary[]` and `last_coordination_topics[]`
+    // (R11 supervisor 摘要部分). The `build_supervisor_summary` helper
+    // needs a real rusqlite db on disk; for unit-level coverage we drive
+    // `ralph_core::supervisor::summarize` directly with an
+    // `InMemorySupervisorStore` (the trait object contract is identical
+    // for the live store, so the field-population contract is what we
+    // are pinning here).
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Supervisor enabled + one active Exec wave + a slot → `slot_summary`
+    /// contains the slot with stable `hat` and `status` fields, and
+    /// `last_coordination_topics` lists the matching Exec kind's
+    /// coordination topics (no db path / internal ledger leakage).
+    #[test]
+    fn summarize_populates_slot_and_coordination_topics_for_active_wave() {
+        use ralph_core::supervisor::{
+            InMemorySupervisorStore, SupervisorStore, WaveKind, summarize,
+        };
+        let store = InMemorySupervisorStore::new();
+        let wave = store
+            .register_wave("u8-summarize", WaveKind::Exec, 2)
+            .expect("register_wave");
+        // Bind both slots so dispatch is allowed; then mark slot 0
+        // Completed and slot 1 still Pending so we have a mix.
+        store
+            .bind_worktree(
+                &wave,
+                0,
+                ralph_core::supervisor::SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/u8/0".to_string()),
+                    branch: Some("ralph/u8-0".to_string()),
+                },
+            )
+            .unwrap();
+        store
+            .bind_worktree(
+                &wave,
+                1,
+                ralph_core::supervisor::SlotResource {
+                    slot_index: 1,
+                    worktree_path: Some(".ralph/u8/1".to_string()),
+                    branch: Some("ralph/u8-1".to_string()),
+                },
+            )
+            .unwrap();
+        store.record_slot_result(&wave, 0, "h0", 1).unwrap();
+
+        let summary = summarize(&store);
+        assert_eq!(summary.active_waves.len(), 1);
+        assert_eq!(summary.active_waves[0].wave_id, wave);
+        // One pending slot (slot 1 still Pending after slot 0 Completed).
+        assert_eq!(summary.queue_depth, 1);
+        assert_eq!(summary.slot_summary.len(), 2);
+        // Slot 0 → completed; slot 1 → pending.
+        assert_eq!(summary.slot_summary[0].slot_id, 0);
+        assert_eq!(summary.slot_summary[0].status, "completed");
+        assert_eq!(summary.slot_summary[0].hat, "exec-worker");
+        assert_eq!(summary.slot_summary[1].slot_id, 1);
+        assert_eq!(summary.slot_summary[1].status, "pending");
+        assert_eq!(summary.slot_summary[1].hat, "exec-worker");
+        // Exec wave → two Exec coordination topics, in stable order.
+        assert_eq!(
+            summary.last_coordination_topics,
+            vec!["exec.wave.complete".to_string(), "exec.wave.failed".to_string()],
+        );
+        // Output-safety: the struct must NOT leak any path / db fields.
+        let json = serde_json::to_value(&summary).expect("serialise");
+        assert!(json.get("db_path").is_none(), "must not leak db_path");
+        assert!(json.get("event_log").is_none(), "must not leak event_log");
+    }
+
+    /// No active waves → default summary (empty `slot_summary`,
+    /// empty `last_coordination_topics`). The agent-safe Observe
+    /// contract is "non-empty wave list → non-empty fields", so the
+    /// empty case stays empty rather than fabricating topics.
+    #[test]
+    fn summarize_empty_store_yields_empty_slot_and_coordination_fields() {
+        use ralph_core::supervisor::{InMemorySupervisorStore, summarize};
+        let store = InMemorySupervisorStore::new();
+        let summary = summarize(&store);
+        assert!(summary.active_waves.is_empty());
+        assert_eq!(summary.queue_depth, 0);
+        assert!(summary.slot_summary.is_empty());
+        assert!(summary.last_coordination_topics.is_empty());
+    }
+
+    /// Fix wave → `last_coordination_topics` lists Fix coordination
+    /// topics; `slot_summary` is empty when zero waves are active.
+    /// Pin the per-kind topic derivation contract.
+    #[test]
+    fn summarize_fix_wave_uses_fix_coordination_topics() {
+        use ralph_core::supervisor::{
+            InMemorySupervisorStore, SupervisorStore, WaveKind, summarize,
+        };
+        let store = InMemorySupervisorStore::new();
+        store
+            .register_wave("u8-fix", WaveKind::Fix, 1)
+            .expect("register_wave");
+        let summary = summarize(&store);
+        assert_eq!(
+            summary.last_coordination_topics,
+            vec!["fix.wave.complete".to_string(), "fix.wave.failed".to_string()],
+        );
+    }
+
+    /// The default (no active waves) summary serialises with the
+    /// stable agent-safe JSON shape: `active_waves: []`,
+    /// `queue_depth: 0`, `slot_summary: []`,
+    /// `last_coordination_topics: []`. Pin against the schema so the
+    /// `loop_inspect.v1` JSON consumers can rely on the field set.
+    #[test]
+    fn supervisor_summary_default_json_shape_is_stable() {
+        let s = ralph_core::supervisor::SupervisorInspectSummary::default();
+        let json = serde_json::to_value(&s).expect("serialise");
+        assert_eq!(json["active_waves"], serde_json::json!([]));
+        assert_eq!(json["queue_depth"], serde_json::json!(0));
+        assert_eq!(json["slot_summary"], serde_json::json!([]));
+        assert_eq!(json["last_coordination_topics"], serde_json::json!([]));
     }
 }

@@ -1333,9 +1333,12 @@ fn close_task_with_context_and_config(
     // U7: completion-emit guard. Only fires in agent context AND only
     // when the CLI has a config + workspace root to derive completion
     // topics from. The legacy CLI callers (which pass `None`) keep the
-    // pre-U7 behaviour: silent close, no warning.
+    // pre-U7 behaviour: silent close, no warning. The caller hat is
+    // taken from `ctx.current_hat_id` (not the task owner) so a
+    // coordinator hat that closes someone else's task still warns based
+    // on its own completion contract.
     if let (Some(cfg), Some(root_path)) = (config, root) {
-        if let Some(caller_hat) = owner_hat.or_else(|| ctx.current_hat_id.clone()) {
+        if let Some(caller_hat) = ctx.current_hat_id.clone() {
             emit_close_completion_warning(root_path, cfg, &caller_hat);
         }
     }
@@ -1371,35 +1374,41 @@ fn emit_close_completion_warning(
     if expected.is_empty() {
         return; // nothing for this hat to emit; no warning.
     }
-    let ralph_dir = root.join(".ralph");
-    let marker = ralph_dir.join("current-hat-events");
-    let channel_empty_hint = "hat-channel file is empty or missing; \
-                              run `ralph inspect loop` to confirm the marker is set";
-    let tail_topics = if marker.exists() {
-        match std::fs::read_to_string(&marker) {
-            Ok(content) => parse_topics_from_jsonl(&content),
-            Err(_) => {
-                eprintln!(
-                    "{} {{ \"code\": \"close_without_completion_emit\", \
-                     \"hat\": \"{caller_hat}\", \"expected_topics\": {expected:?}, \
-                     \"reason\": \"hat_channel_unreadable\", \
-                     \"hint\": \"{channel_empty_hint}\" }}",
-                    ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX
-                );
-                return;
-            }
-        }
-    } else {
+    let channel_hint = "hat-channel file is empty or missing; \
+                        run `ralph inspect loop` to confirm the marker is set";
+    let Some((channel_path, exists)) =
+        crate::cli::resolve_hat_channel_file(root)
+    else {
         eprintln!(
             "{} {{ \"code\": \"close_without_completion_emit\", \
              \"hat\": \"{caller_hat}\", \"expected_topics\": {expected:?}, \
              \"reason\": \"hat_channel_missing_marker\", \
-             \"hint\": \"{channel_empty_hint}\" }}",
+             \"hint\": \"{channel_hint}\" }}",
             ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX
         );
         return;
     };
-
+    if !exists {
+        eprintln!(
+            "{} {{ \"code\": \"close_without_completion_emit\", \
+             \"hat\": \"{caller_hat}\", \"expected_topics\": {expected:?}, \
+             \"reason\": \"hat_channel_unreadable\", \
+             \"hint\": \"{channel_hint}\" }}",
+            ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX
+        );
+        return;
+    }
+    let Ok(content) = std::fs::read_to_string(&channel_path) else {
+        eprintln!(
+            "{} {{ \"code\": \"close_without_completion_emit\", \
+             \"hat\": \"{caller_hat}\", \"expected_topics\": {expected:?}, \
+             \"reason\": \"hat_channel_unreadable\", \
+             \"hint\": \"{channel_hint}\" }}",
+            ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX
+        );
+        return;
+    };
+    let tail_topics = parse_topics_from_jsonl_tail(&content, TAIL_SCAN_LINES);
     if tail_topics.iter().any(|t| expected.iter().any(|e| e == t)) {
         return; // close + completion topics both recorded.
     }
@@ -1412,19 +1421,26 @@ fn emit_close_completion_warning(
          \"observed_topics\": {tail_topics:?}, \
          \"next_step\": \"{next}\" }}",
         ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX,
-        // tail_topics used; if empty, observed_topics serialises as []
         caller_hat = caller_hat,
     );
 }
 
+/// How many trailing JSONL lines `emit_close_completion_warning` scans
+/// when looking for the expected completion topic. The agent's
+/// same-activation write channel rarely grows large — a worker hat may
+/// emit a handful of events before closing — so a small fixed window
+/// is enough for Confirm. Reading the whole file was P1 #7's source of
+/// false negatives on multi-hour activations.
+const TAIL_SCAN_LINES: usize = 50;
+
 /// Light-weight JSONL topic extractor — pulls the `topic` field from
-/// each line that looks like a valid event envelope. Tolerant of
-/// malformed lines (skipped silently) because the hat-channel may
-/// carry lines from multiple sources when working-tree features are
-/// toggled.
-fn parse_topics_from_jsonl(content: &str) -> Vec<String> {
+/// each of the trailing N lines that look like a valid event envelope.
+/// Tolerant of malformed lines (skipped silently) because the
+/// hat-channel may carry lines from multiple sources when working-tree
+/// features are toggled.
+fn parse_topics_from_jsonl_tail(content: &str, max_lines: usize) -> Vec<String> {
     let mut out = Vec::new();
-    for line in content.lines() {
+    for line in content.lines().rev().take(max_lines).collect::<Vec<_>>().into_iter().rev() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -3176,7 +3192,9 @@ tasks:
             make_event_envelope("chat.out"),
             make_event_envelope("work.done"),
         );
-        let topics = parse_topics_from_jsonl(&content);
+        // Pass a high max_lines so the whole content is scanned; tail
+        // mode is exercised in test_parse_topics_from_jsonl_tail.
+        let topics = parse_topics_from_jsonl_tail(&content, usize::MAX);
         assert_eq!(
             topics,
             vec![
@@ -3191,8 +3209,21 @@ tasks:
     fn test_parse_topics_from_jsonl_skips_malformed_lines() {
         let content =
             format!("{}\nnot-json\n{}\n", make_event_envelope("a"), make_event_envelope("b"));
-        let topics = parse_topics_from_jsonl(&content);
+        let topics = parse_topics_from_jsonl_tail(&content, usize::MAX);
         assert_eq!(topics, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_topics_from_jsonl_tail_truncates_to_last_n_lines() {
+        let content = format!(
+            "{}\n{}\n{}\n",
+            make_event_envelope("work.ready"),
+            make_event_envelope("chat.out"),
+            make_event_envelope("work.done"),
+        );
+        let topics = parse_topics_from_jsonl_tail(&content, 1);
+        // Only the last envelope should be returned.
+        assert_eq!(topics, vec!["work.done".to_string()]);
     }
 
     #[test]

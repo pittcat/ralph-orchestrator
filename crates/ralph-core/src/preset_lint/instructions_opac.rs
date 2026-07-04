@@ -31,33 +31,14 @@ use super::finding_id::{
 };
 use super::LintFinding;
 
-/// Topics whose presence in a hat's `publishes` makes that hat an "emitter"
-/// for OPAC purposes. The set is intentionally broad — anything that
-/// causes a JSONL write counts.
-const EMITTER_TOPICS: &[&str] = &[
-    "work.ready",
-    "work.done",
-    "work.failed",
-    "test.passed",
-    "test.failed",
-    "fix.applied",
-    "fix.ready",
-    "review.complete",
-    "review.failed",
-    "review.dimensions.complete",
-    "review.dimension.ready",
-    "review.dimension.failed",
-    "queue.advance",
-    "plan.complete",
-    "plan.blocked",
-    "loop.stalled",
-    "task.resume",
-    "shipper.review",
-    "report.done",
-];
-
 /// Supervisor-only coordination topics. Agents emitting these will be
 /// silently dropped by `event_origin::is_supervisor_coordination_topic`.
+/// **Only** used by `check_supervisor_coordination_emit` below — the
+/// emitter判定 (which hat needs to cite `ralph-tools-opac`) is no
+/// longer driven by a fixed topic whitelist. Per 2026-07-04-002 plan
+/// KTD-10, every hat whose `publishes:` is non-empty is treated as an
+/// emitter for OPAC purposes (any JSONL write counts), so the rule is
+/// derived from `hat.publishes` rather than a hard-coded list.
 const SUPERVISOR_COORD_TOPICS: &[&str] = &[
     "exec.wave.complete",
     "exec.wave.failed",
@@ -108,13 +89,17 @@ pub fn check_instructions_opac(raw_yaml: &str) -> Vec<LintFinding> {
         check_internal_ledger_read(hat_id_str, &instructions, &mut findings);
         check_supervisor_coordination_emit(hat_id_str, &instructions, &mut findings);
 
+        // 2026-07-04-002 plan KTD-10: derive emitter判定 from the hat's own
+        // `publishes` list. Any non-empty publishes list means the hat can
+        // write a JSONL event during its activation, which is what makes it
+        // an emitter for OPAC purposes. The previous fixed
+        // `EMITTER_TOPICS` whitelist was too narrow — builtin presets
+        // ship business topics that were not on that list
+        // (e.g. `experiment.measured`, `merge.reviewed`,
+        // `hypothesis.confirmed`), so the OPAC skill reference rule
+        // silently failed to fire for those emitters.
         if !publishes.is_empty() {
-            let is_emitter = publishes
-                .iter()
-                .any(|t| EMITTER_TOPICS.iter().any(|et| t.eq_ignore_ascii_case(et)));
-            if is_emitter {
-                check_opac_skill_reference(hat_id_str, &instructions, &mut findings);
-            }
+            check_opac_skill_reference(hat_id_str, &instructions, &mut findings);
             let talks_fix_unit = mentions_fix_unit(&instructions);
             if talks_fix_unit {
                 check_fix_unit_mint_template(hat_id_str, &instructions, &mut findings);

@@ -1,0 +1,107 @@
+# Authoring SSOT for `merge-loop` `event_policy.schemas`.
+#
+# Plan 2026-07-04-002 U10: schema SSOT for the merge-loop preset.
+# `build.rs` deep-merges this file's `schemas:` mapping into
+# `event_loop.event_policy.schemas` of `presets/en/merge-loop.yml`
+# at compile time (plan 2026-06-16-002 Unit 1). Edit ONLY this file
+# when changing payload contract requirements for any hat below;
+# the next `cargo build` propagates the change to the CLI precheck,
+# the loop gate, the drift engine, and the prompt builder.
+#
+# Topic coverage (5 hats):
+#   merger             -> merge.done / conflict.detected / merge.failed
+#   resolver           -> conflict.resolved / conflict.unresolvable
+#   tester             -> tests.passed / tests.failed
+#   cleaner            -> merge.handled (terminal completion token)
+#   failure_handler    -> merge.handled (terminal completion token)
+#
+# 2026-07-04-002 U10: completion is split from protocol tokens on
+# purpose (P0-5 / merge-batch pattern): `merge.done` is the merger
+# success handoff; only `cleaner` / `failure_handler` may emit
+# `merge.handled` (the completion_promise). This blocks text-path
+# `MERGE_COMPLETE` races before the worktree is cleaned up.
+#
+# Topic deny rules live in `presets/en/merge-loop.yml`
+# `event_policy.topic_deny_rules` (not in this SSOT); the schema
+# SSOT only owns payload field shapes.
+
+schemas:
+  # merger → post-merge success handoff. The cleaner hat picks
+  # this up to remove the worktree + branch and emit
+  # `merge.handled`. `merge_commit_sha` is the SHA the tester
+  # verified `cargo test` against so downstream hats can
+  # reproduce the build if needed.
+  merge.done:
+    required_fields:
+      - merge_commit_sha
+      - tests_passed
+    payload: json_object
+
+  # merger → conflict detected mid-merge. Resolver hat picks
+  # this up. `conflicted_files` lists the offending paths so the
+  # resolver can `git add` each one without re-reading the
+  # working-tree status from scratch.
+  conflict.detected:
+    required_fields:
+      - conflicted_files
+    payload: json_object
+
+  # merger → hard merge failure (network, fs error, unknown).
+  # Failure-handler hat picks this up. `reason` is the
+  # human-readable diagnostic; `merge_aborted` is the boolean
+  # flag the failure-handler checks before deciding to abort an
+  # in-progress merge.
+  merge.failed:
+    required_fields:
+      - reason
+      - merge_aborted
+    payload: json_object
+
+  # resolver → all conflicts resolved via `git add`. Tester hat
+  # picks this up to run `cargo test`. `resolved_files` mirrors
+  # the merge.failed/conflict.detected conflicted_files list
+  # so the tester can spot-check that no markers survived.
+  conflict.resolved:
+    required_fields:
+      - resolved_files
+    payload: json_object
+
+  # resolver → conflict is not safely auto-resolvable. Carries
+  # the structured explanation the failure-handler logs to
+  # `.ralph/merge-queue.jsonl` and prints for the human operator.
+  conflict.unresolvable:
+    required_fields:
+      - conflicted_files
+      - reason
+      - decision_required
+    payload: json_object
+
+  # tester → full test suite passed post-merge. Cleaner hat picks
+  # this up. `tests_run` / `tests_passed` mirror the validator
+  # contract from ce-executor-serial so a future migration to a
+  # shared `tests.*` schema is trivial.
+  tests.passed:
+    required_fields:
+      - tests_run
+      - tests_passed
+    payload: json_object
+
+  # tester → tests failed post-merge. Failure-handler picks this
+  # up. `failures` is the array of failing test names;
+  # `test_errors` is the optional stderr summary so the operator
+  # does not have to re-run to triage.
+  tests.failed:
+    required_fields:
+      - failures
+    payload: json_object
+
+  # cleaner → terminal completion token. The merger path emits
+  # this when the worktree has been removed and the branch
+  # deleted. The failure-handler path also emits this (see the
+  # `merge.failed` / `tests.failed` triggers) so the loop
+  # always terminates via a single completion token regardless
+  # of branch.
+  merge.handled:
+    required_fields:
+      - cleanup_status
+    payload: json_object

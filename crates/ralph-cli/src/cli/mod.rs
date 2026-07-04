@@ -30,6 +30,6 @@ pub(crate) use config_loader::{
     load_config_with_overrides, resolve_path_from_workspace, resolve_workspace_root,
     urgent_steer_path_from_workspace,
 };
-pub(crate) use emit_path::{resolve_emit_path, resolve_marker_target};
+pub(crate) use emit_path::{resolve_emit_path, resolve_hat_channel_file, resolve_marker_target};
 pub(crate) use panic_hook::install_panic_hook;
 pub(crate) use shared::{ColorMode, ConfigSource, HatsSource, OutputFormat, Verbosity};

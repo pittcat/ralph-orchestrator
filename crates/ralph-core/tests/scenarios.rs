@@ -3525,3 +3525,70 @@ fn test_opac_bud_isolated_double_business_dropped() {
     );
     run_workflow_guard_scenario(yaml);
 }
+
+// 2026-07-04-002 plan U9 (R11 BDD): FV-1 ce-executor-serial
+// fix-unit chain 事件链完整性 — fresh mint → work.ready → close
+// → work.done → test.passed。每条业务事件 accept 恰好 1 次,
+// 无 silent drop,无 plan.complete/LOOP_COMPLETE 误触发。
+// 用 `run_workflow_guard_scenario` (真 EventLoop runner,
+// 2026-06-24 P0-2/P0-3 教训: 不用 `run_scenario` stub)。
+#[test]
+fn test_opac_fv1_serial_fix_unit_chain() {
+    let yaml = load_scenario(
+        "tests/scenarios/opac/ce_executor_serial_fix_unit_chain.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+// 2026-07-04-002 plan U9 (R11 BDD): FV-2 ce-executor-serial
+// 6-dim serial walk — 6 个 activation 各 emit 一条
+// `review.dimension.ready`,断言全部 6 条 accept,
+// 用 `event_topic_counts: count: 6` 防止 silent drop。
+// R11 覆盖:6 维 serial review 不该静默丢任何维度。
+#[test]
+fn test_opac_fv2_serial_walk_6dim() {
+    let yaml = load_scenario(
+        "tests/scenarios/opac/ce_executor_serial_serial_walk_6dim.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+// 2026-07-04-002 plan U9 (R11 BDD): ME-1 macro-edge next_hint
+// → ## NEXT ACTION prompt injection。Emitter hat 在 business
+// event payload 携带 `next_hint`;下游 hat 的 prompt 顶部应当
+// 出现 `## NEXT ACTION` heading 与 hint 原文(per
+// `prepend_macro_next_hint` 实现契约: ≤120 chars, scan
+// backwards 取最近)。
+#[test]
+fn test_opac_me1_macro_edge_next_hint() {
+    let yaml = load_scenario("tests/scenarios/opac/macro_edge_next_hint.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// 2026-07-04-002 plan U9 (R11 BDD): SB-1 supervisor exec wave
+// fan-out 3 unit → exec.wave.complete. 走 `run_workflow_guard_scenario`
+// 真 EventLoop runner,通过 supervisor.enabled: true 触发
+// `run_bdd_supervisor_fan_in`,让 SupervisorCoordinator 真的
+// emit `exec.wave.complete` (而不是 mock 伪造)。
+// 验证 event_topic_counts: exec.unit.ready ×3, exec.unit.done ×3,
+// exec.wave.complete ×1。
+#[test]
+fn test_opac_sb1_supervisor_exec_wave_fanout() {
+    let yaml = load_scenario(
+        "tests/scenarios/supervisor/ce_executor_supervisor_exec_wave_fanout.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+// 2026-07-04-002 plan U9 (R11 BDD): SB-2 review batch +
+// agent-forged `review.wave.complete` 被 origin guard reject
+// (R-COORD-2 / U7)。`review.complete` (agent business topic)
+// accept;`review.wave.complete` (supervisor-only coordination
+// topic) 被拒收,绝不能进入 seen_topics。
+#[test]
+fn test_opac_sb2_supervisor_review_batch_origin_guard() {
+    let yaml = load_scenario(
+        "tests/scenarios/supervisor/ce_executor_supervisor_review_batch.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}

@@ -98,6 +98,53 @@ event_loop:
     enabled: true
     mode: enforce
     on_violation: reject_with_resume
+    # 2026-07-04-002 plan U6 (R8): explicit fail-closed policy
+    # for the supervisor preset. The supervisor preset's default
+    # is "enforce + reject"; with the previous configuration
+    # (no `business_topics` / `terminal_topics` / `completion_after_terminal`),
+    # the gate silently passed everything that wasn't covered by
+    # `topic_deny_rules`, which let agents bypass the CLI precheck
+    # and inject post-terminal events. The fields below close the
+    # gap: every hat emit must be in `business_topics` (for
+    # business-class signals) or `terminal_topics` (for loop-end
+    # signals), and any further emit after `LOOP_COMPLETE` /
+    # `plan.complete` is rejected.
+    terminal_topics:
+      - "LOOP_COMPLETE"
+      - "plan.complete"
+    business_topics:
+      # Handoff topics — main workflow chain.
+      - "work.ready"
+      - "work.done"
+      - "work.failed"
+      - "review.start"
+      - "review.complete"
+      - "fix.applied"
+      - "fix.exhausted"
+      - "fix.done"
+      # Sub-loop coordination topics emitted by hats that the
+      # supervisor aggregates fan-in / fan-out for.
+      - "exec.unit.ready"
+      - "exec.unit.done"
+      - "exec.unit.failed"
+      - "review.unit.ready"
+      - "review.unit.done"
+      - "fix.unit.ready"
+      - "fix.unit.done"
+      - "fix.unit.failed"
+      # Diagnostic / progress signal used by progress-steward.
+      - "task.resume"
+    completion_after_terminal:
+      duplicate_terminal: reject
+      business_after_completion: reject
+      write_diagnostic_event: true
+    # 2026-07-04-002 plan U6 (R8): force every `ralph emit` to
+    # pre-validate against this event_policy schema BEFORE writing
+    # to the events file. The `--unsafe-no-policy-check` escape
+    # hatch is removed — there is no other way to write a
+    # non-conforming event under this preset.
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: false
 
 topic_format_whitelist:
   - LOOP_COMPLETE
@@ -307,6 +354,7 @@ hats:
     name: "Task Planner"
     description: "Emits per-unit execution readiness events to fan out work across supervisor slots."
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## TASK PLANNER MODE — Single-shot wave fan-out (this hat)
 
       You are a **dispatcher hat** activated when a plan is
@@ -487,6 +535,7 @@ hats:
       - exec.unit.done
       - exec.unit.failed
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## WORKER MODE — One TDD implementation per activation
 
       You are a **slot-scoped worker** running in an isolated
@@ -591,6 +640,7 @@ hats:
     name: "Review Coordinator"
     description: "Fans out review work across the six dimension reviewers."
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## REVIEW COORDINATOR MODE — Single batch of six review units (this hat)
 
       You are a **dispatcher hat** activated when the
@@ -793,6 +843,7 @@ hats:
     terminal_events:
       - review.unit.done
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## REVIEW BATCH WORKER MODE — One dimension review per activation
 
       You are a **slot-scoped dimension reviewer**. Your
@@ -982,6 +1033,7 @@ hats:
     name: "Fix Task Planner"
     description: "Emits per-fix-unit readiness events to fan out fix work across supervisor slots."
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## FIX TASK PLANNER MODE — Single batch of fix units (this hat)
 
       You are a **dispatcher hat** activated when the
@@ -1199,6 +1251,7 @@ hats:
       - fix.unit.done
       - fix.unit.failed
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## FIX WORKER MODE — One fix per activation (TDD)
 
       Mirror of `worker` MODE, scoped to a fix-round unit.
@@ -1233,6 +1286,7 @@ hats:
     terminal_events:
       - fix.done
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## FIX INTEGRATOR MODE — Merge fix wave
 
       Mirror of `exec-integrator` for fix waves. Activated
@@ -1340,6 +1394,7 @@ hats:
     terminal_events:
       - LOOP_COMPLETE
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## REPORTER MODE — Manager-facing report + terminate
 
       Activated by `plan.complete`. Produce a manager-facing

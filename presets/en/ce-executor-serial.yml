@@ -451,6 +451,21 @@ event_loop:
       - "review.complete"
       - "fix.applied"
       - "fix.exhausted"
+      # 2026-07-04-002 plan U6 (R9): review-coordinator's serial-walk
+      # topics used to live on the hat's `exempt_topics` list, which
+      # made the budget-admission carve-out (U13) treat them as a
+      # scope exception instead of a first-class business signal.
+      # Moving them here makes them flow through the standard
+      # `event_policy.business_topics` gate (terminal_after / completion
+      # derivation / state-machine business-class check) so the 6
+      # activation walk admits one `review.dimension.ready` each
+      # without bypassing the completion-after-terminal guard.
+      # Topic-deny rules (lines below) keep them pinned to
+      # review-coordinator / dimension-reviewer / ralph-pseudo,
+      # so deleting the hat-level `exempt_topics` does not weaken
+      # scope ownership.
+      - "review.dimension.ready"
+      - "review.dimensions.complete"
     # 2026-06-25: prevent post-completion re-runs.
     # After LOOP_COMPLETE is honored, the loop MUST stay quiet —
     # any business event must be rejected, and a duplicate
@@ -1518,8 +1533,12 @@ hats:
     # - review.dimension.done/failed → advance to next dimension or close the sequence
     triggers: ["review.start", "review.dimension.done", "review.dimension.failed"]
     publishes: ["review.dimension.ready", "review.dimensions.complete"]
-    # 2026-06-26 plan U7: self-declared emit scope.
-    exempt_topics: ["review.dimension.ready", "review.dimensions.complete"]
+    # 2026-07-04-002 plan U6 (R9): `exempt_topics` removed — the two
+    # serial-walk topics now live on `event_policy.business_topics`
+    # (the SSOT path used by completion_after_terminal /
+    # state_machine / completion_emit). Scope ownership of these
+    # topics is preserved by the `topic_deny_rules` block below
+    # (review-coordinator is the only hat NOT denied either topic).
     terminal_events: ["review.dimension.ready", "review.dimensions.complete"]
     event_filter:
       enabled: true
@@ -2631,6 +2650,7 @@ hats:
         - plan.complete
         - plan.blocked
     instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## SHIPPER MODE — Final Validation, Plan Completion, and Delivery
 
       You are the final gate before delivery.

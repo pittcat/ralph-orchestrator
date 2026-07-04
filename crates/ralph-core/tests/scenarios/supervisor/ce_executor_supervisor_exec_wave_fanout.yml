@@ -1,0 +1,124 @@
+# 2026-07-04-002 plan U9 (R11 BDD): supervisor exec wave fan-out 拓扑 pin
+#
+# R11 覆盖点: 验证 supervisor wave 拓扑在 OPAC-event 路径下
+# 不发生 silent drop。3 个 `exec.unit.ready` (不同 slot_index)
+# + 3 个 `exec.unit.done` (不同 slot_index) 全部被 runtime
+# accept 一次,无 silent drop,无 absent rejection。
+#
+# 与 `supervisor/ce_executor_supervisor_minimal.yml` (U13 1-unit
+# pin) 的差别: 本 fixture 是 3-unit fan-out 拓扑 pin (R11 覆盖),
+# 不测 supervisor coordinator 的 multi-slot fan-in (那是
+# `supervisor/coordinator.rs::tests` 的单元测试职责,U8 已经覆盖)。
+# 本 fixture **不启用** supervisor path,因为:
+#   - supervisor.enabled=false 时 3 个 `exec.unit.ready`/done 仍是
+#     普通业务事件,runtime origin guard 接受。
+#   - 6 个 mock_responses 跨 6 个 iteration 各自 emit 1 个 event,
+#     满足 isolated mode 单业务事件预算(per activation)。
+#
+# 用 `run_workflow_guard_scenario` (真 EventLoop runner,
+# 2026-06-24 P0-2/P0-3 教训: 不用 `run_scenario` stub)。
+
+name: sb1_supervisor_exec_wave_fanout
+description: SB-1 - supervisor exec wave fan-out 3 unit (event_topic_counts R11 覆盖)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  event_loop:
+    execution_mode: isolated
+    supervisor:
+      enabled: false
+  hats:
+    exec-coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - exec.unit.ready
+    unit-executor:
+      subscribes_to:
+        - exec.unit.ready
+      publishes:
+        - exec.unit.done
+
+mock_responses:
+  # Iter 1: exec-coordinator emits slot-0 unit.ready
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "sb1-wave"
+      slot_index: 0
+      complexity: "small"
+      next_hint: "fix unit: implement slot 0"
+      </event>
+    hat: exec-coordinator
+  # Iter 2: unit-executor emits slot-0 unit.done
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "sb1-wave"
+      slot_index: 0
+      content_hash: "sb1-h-0"
+      </event>
+    hat: unit-executor
+  # Iter 3: exec-coordinator emits slot-1 unit.ready
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "sb1-wave"
+      slot_index: 1
+      complexity: "small"
+      next_hint: "fix unit: implement slot 1"
+      </event>
+    hat: exec-coordinator
+  # Iter 4: unit-executor emits slot-1 unit.done
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "sb1-wave"
+      slot_index: 1
+      content_hash: "sb1-h-1"
+      </event>
+    hat: unit-executor
+  # Iter 5: exec-coordinator emits slot-2 unit.ready
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "sb1-wave"
+      slot_index: 2
+      complexity: "small"
+      next_hint: "fix unit: implement slot 2"
+      </event>
+    hat: exec-coordinator
+  # Iter 6: unit-executor emits slot-2 unit.done
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "sb1-wave"
+      slot_index: 2
+      content_hash: "sb1-h-2"
+      </event>
+    hat: unit-executor
+
+expected:
+  iterations: 6
+  events:
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+  # R11 (BDD 覆盖): 3 个 exec.unit.ready + 3 个 exec.unit.done
+  # 全部 accept 1 次, no silent drop。
+  event_topic_counts:
+    - topic: exec.unit.ready
+      count: 3
+    - topic: exec.unit.done
+      count: 3
+  # supervisor 路径在本 fixture 中未启用,exec.wave.complete
+  # 不会被注入 → 必须 absent。supervisor coordinator 的 multi-slot
+  # fan-in 是 `supervisor/coordinator.rs::tests` 单元测试覆盖的范围
+  # (U8),不是本 fixture 职责。
+  absent_events:
+    - topic: exec.wave.complete
+    - topic: exec.wave.failed
+    - topic: fix.wave.complete
+    - topic: fix.wave.failed
+    - topic: review.wave.complete
+    - topic: review.wave.failed
+    - topic: plan.blocked
+  completion: false

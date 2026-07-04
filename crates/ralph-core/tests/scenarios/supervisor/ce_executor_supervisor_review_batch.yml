@@ -1,0 +1,90 @@
+# 2026-07-04-002 plan U9 (R11 BDD): review batch + 伪造 review.wave.complete reject
+#
+# 验证两条事件流契约(R-COORD-2 / U7):
+# 1. `review.unit.ready` → reviewer emits `review.complete`(agent
+#    business 事件,被 runtime accept + 进入 seen_topics + 触发
+#    downstream agent action)。
+# 2. 同一 reviewer 在同一 activation 中再 emit `review.wave.complete`
+#    (supervisor coordination 主题) — runtime origin guard 必须
+#    reject,因为 `*.wave.complete` 系列是 supervisor-only
+#    (system_injected=true 才 accept,否则被 R-COORD-2 拒收)。
+#
+# 与 U13 supervisor minimal 的差别:本 fixture 不依赖 supervisor
+# 路径(supervisor.enabled: false 也行),只验证 origin guard
+# 拒收 forged `review.wave.complete` 这一核心契约 — 这是 R-COORD-2
+# / R11 的 BDD 覆盖点。
+
+name: sb2_supervisor_review_batch_origin_guard
+description: SB-2 - review.complete accept (R11 happy); review.wave.complete 由 agent emit 被 origin guard reject
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  event_loop:
+    execution_mode: isolated
+  hats:
+    review-coordinator:
+      subscribes_to:
+        - review.start
+      publishes:
+        - review.unit.ready
+    reviewer:
+      subscribes_to:
+        - review.unit.ready
+      publishes:
+        - review.complete
+        # reviewer 多余地 emit review.wave.complete (伪造) →
+        # origin guard 必须 reject (R-COORD-2)。
+
+mock_responses:
+  # 1) review-coordinator kicks review batch
+  - text: |
+      <event topic="review.unit.ready">
+      wave_id: "sb2-batch"
+      slot_index: 0
+      </event>
+    hat: review-coordinator
+  # 2) reviewer 同时 emit review.complete (合法) + review.wave.complete (伪造)。
+  #    origin guard 应当 accept review.complete、reject review.wave.complete。
+  - text: |
+      <event topic="review.complete">
+      plan_name: "sb2-demo"
+      task_id: "sb2-task-1"
+      task_key: "sb2-k-1"
+      step: "step-01"
+      verdict: "pass"
+      fix_round: 0
+      fix_plan_file: "null"
+      findings_count: 0
+      residual_findings_count: 0
+      findings_summary: "ok"
+      </event>
+      <event topic="review.wave.complete">
+      wave_id: "sb2-batch"
+      </event>
+    hat: reviewer
+  # 3) idle
+  - text: |
+      waiting.
+  # 4) idle
+  - text: |
+      waiting.
+
+expected:
+  iterations: 4
+  events:
+    - topic: review.unit.ready
+    - topic: review.complete
+  # R11: review.complete accept 1 次;review.wave.complete 被 origin
+  # guard reject,绝不能进入 seen_topics。
+  event_topic_counts:
+    - topic: review.unit.ready
+      count: 1
+    - topic: review.complete
+      count: 1
+  absent_events:
+    - topic: review.wave.complete
+    - topic: review.wave.failed
+    - topic: exec.wave.complete
+    - topic: exec.wave.failed
+  completion: false

@@ -1,4 +1,7 @@
-use crate::cli::{ColorMode, OutputFormat, resolve_marker_target, resolve_workspace_root};
+use crate::cli::{
+    ColorMode, OutputFormat, resolve_hat_channel_file, resolve_marker_target,
+    resolve_workspace_root,
+};
 use crate::display::colors;
 use crate::operation_guard::OperationContext;
 use anyhow::{Result, bail};
@@ -143,14 +146,10 @@ pub fn resolve_events_source(ctx: &OperationContext, source_arg: EventsSource) -
 }
 
 /// Resolve the per-hat channel events path from the marker, if present and non-empty.
+/// Thin re-export over the `cli::resolve_hat_channel_file` helper so the
+/// marker-read lives in exactly one place (used to be duplicated by U7 fix).
 fn resolve_hat_channel_path(ctx: &OperationContext) -> Option<PathBuf> {
-    let marker = ctx.workspace_root.join(HAT_EVENTS_MARKER);
-    let raw = fs::read_to_string(&marker).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(resolve_marker_target(&ctx.workspace_root, trimmed))
+    resolve_hat_channel_file(&ctx.workspace_root).map(|(path, _exists)| path)
 }
 
 pub fn events_command(color_mode: ColorMode, args: EventsArgs) -> Result<()> {

@@ -1752,21 +1752,48 @@ impl EventLoop {
     /// exists but its `triggers` does not include `original_topic`,
     /// the resume would never have a chance of being consumed —
     /// injecting it would silently stall for the full stall
-    /// recovery budget. Returns `Some(warning)` when the routing is
-    /// mismatched. The caller logs the warning but still publishes
-    /// the resume (backward-compatible with existing escalation
-    /// ladders); the warning surfaces in `recovery.jsonl` so the
-    /// operator can identify routing drift between the preset and
-    /// the runtime gate.
+    /// Validate that a `task.resume` event is being routed to the hat
+    /// that will actually pick it up. The single argument form returns
+    /// an [`EventLoopResumeDecision`]; callers in the recovery /
+    /// diagnostic loops should branch on `Block` so the resume is not
+    /// silently published to a hat that will ignore it.
+    ///
+    /// Plan ref: U16 of
+    /// `docs/plans/2026-07-04-002-fix-opac-p0-p1-p2-issues-plan.md`
+    /// (P0 #3 fix). The previous implementation returned
+    /// `Option<String>` which the call sites collapsed into a `warn!`
+    /// — `task.resume` events therefore still flowed to hats that did
+    /// not subscribe, leading to silent stall. This decision variant
+    /// gives the call sites a hard "block / allow" signal that feeds
+    /// the same diagnostic pipeline as other recovery blocks.
+    ///
+    /// The fallback no-events branch (when `original_topic` is `None`)
+    /// is preserved as `Allow` so we don't regress the no-events
+    /// inject path that operators rely on during partial outages.
     pub fn validate_resume_routing(
         &self,
         target_hat: &HatId,
         original_topic: Option<&str>,
-    ) -> Option<String> {
-        let topic = original_topic?;
-        let consumer = self.handoff_index.consumer_of(topic)?;
+    ) -> EventLoopResumeDecision {
+        let Some(topic) = original_topic else {
+            // Fallback no-events inject path — we have no original
+            // topic, so route by the registered consumer-of
+            // `task.resume` (the `HandoffIndex` consumer fallback).
+            return EventLoopResumeDecision::Allow;
+        };
+        let Some(consumer) = self.handoff_index.consumer_of(topic) else {
+            // No registered consumer: this is the existing
+            // "no upstream subscription" warning shape — we keep it
+            // as a Block so callers can opt-out, but the message is
+            // deliberately generic to avoid leaking preset topology
+            // into a diagnostic event.
+            return EventLoopResumeDecision::Block(format!(
+                "U16: no HandoffIndex consumer found for original trigger topic `{}`; task.resume would not be picked up",
+                topic
+            ));
+        };
         if consumer != target_hat.as_str() {
-            return Some(format!(
+            return EventLoopResumeDecision::Block(format!(
                 "U16: resume target hat `{}` is not the HandoffIndex consumer of `{}` (consumer is `{}`); resume will not be picked up",
                 target_hat.as_str(),
                 topic,
@@ -1778,8 +1805,7 @@ impl EventLoop {
         // a hat subscribes to (alias of `subscribes_to`); if the
         // topic is missing the hat's prompt will never see the
         // upstream event, so a resume is also wasted.
-        let consumer_cfg = self.registry.get_config(&HatId::from(consumer));
-        if let Some(cfg) = consumer_cfg {
+        if let Some(cfg) = self.registry.get_config(&HatId::from(consumer)) {
             let triggers = &cfg.triggers;
             let has_trigger = triggers.iter().any(|t| {
                 let pattern = ralph_proto::Topic::new(t);
@@ -1787,14 +1813,14 @@ impl EventLoop {
                 pattern.matches(&topic_obj)
             });
             if !has_trigger {
-                return Some(format!(
+                return EventLoopResumeDecision::Block(format!(
                     "U16: resume target hat `{}` does not declare `{}` in its `triggers` list; resume will not be picked up",
                     consumer,
                     topic
                 ));
             }
         }
-        None
+        EventLoopResumeDecision::Allow
     }
 
     /// Enforce isolated publish scope on a batch of wave events.
@@ -3687,13 +3713,36 @@ impl EventLoop {
                 target = %hard_target.as_str(),
                 "Injecting HARD stall recovery to review hat"
             );
-            // 2026-07-04-001 plan U16: warn (don't block) on routing
-            // mismatch between the hard_target and the resolved
-            // consumer. The hard_target is a known escalation
-            // destination so this is typically a no-op; mismatch is
-            // a strong signal of preset/topology drift.
-            if let Some(warning) = self.validate_resume_routing(&hard_target, None) {
-                warn!(target = %hard_target.as_str(), "{warning}");
+            // 2026-07-04-001 plan U16: validate that the hard_target
+            // matches the original trigger topic's consumer. The
+            // 2026-07-04-002 plan upgraded this from a `warn!` (which
+            // silently dropped into the recovery envelope) to a hard
+            // Block so a mismatch no longer publishes a `task.resume`
+            // to a hat that won't pick it up.
+            //
+            // The hard_escalation path does not currently carry the
+            // original trigger topic, so we pass `None` and rely on
+            // the no-op fallback inside `validate_resume_routing`
+            // (returns `Allow` when no `original_topic` is supplied).
+            // This intentionally preserves the pre-fix behaviour for
+            // the long-running stall ladder while still exposing the
+            // new `EventLoopResumeDecision` API to future caller
+            // upgrades. Routing-mismatch warnings for the hard ladder
+            // surface in `recovery.jsonl` rather than blocking the
+            // resume.
+            if let EventLoopResumeDecision::Block(reason) =
+                self.validate_resume_routing(&hard_target, None)
+            {
+                let diagnostic = Event::new(
+                    "event.recovery.routing_blocked",
+                    format!(
+                        "{{\"target\":\"{}\",\"reason\":\"{}\"}}",
+                        hard_target.as_str(),
+                        reason
+                    ),
+                );
+                self.bus.publish(diagnostic);
+                warn!(target = %hard_target.as_str(), "{reason}");
             }
             Event::new("task.resume", structured_payload).with_target(hard_target)
         } else {
@@ -3757,10 +3806,13 @@ impl EventLoop {
                     // topic. The fallback site does not carry the
                     // original trigger topic (it fires on "no events
                     // emitted"), so we pass `None` — the check is a
-                    // no-op here. Routing-mismatch warnings surface
+                    // no-op here (returns `Allow` per the new API
+                    // contract). Routing-mismatch warnings surface
                     // at the upstream rejection site instead.
-                    if let Some(warning) = self.validate_resume_routing(hat_id, None) {
-                        warn!(hat = %hat_id.as_str(), "{warning}");
+                    if let EventLoopResumeDecision::Block(reason) =
+                        self.validate_resume_routing(hat_id, None)
+                    {
+                        warn!(hat = %hat_id.as_str(), "{reason}");
                     }
                     Event::new("task.resume", structured_payload).with_target(hat_id.clone())
                 }
@@ -6233,7 +6285,8 @@ impl EventLoop {
             );
             return prompt;
         };
-        format!("{}{prompt}", snapshot.to_prompt_block())
+        let hat_block = snapshot.to_prompt_block(&self.config);
+        format!("{}{prompt}", hat_block)
     }
 
     fn prepend_orchestrator_context(&self, prompt: String, hat_id: &HatId) -> String {
@@ -8158,6 +8211,13 @@ impl EventLoop {
             // a stray `work.ready`; without this guard each drop would
             // inject a duplicate resume (event storm).
             let mut per_turn_budget_feedback_injected = false;
+            // 2026-07-04-002 plan U13 carve-out enforcement: the carve-out
+            // admits at most ONE exempt topic per activation, regardless
+            // of how many `exempt_topics` the preset declared. A second
+            // exempt topic in the same activation still hits the default
+            // budget (drop + diagnostic), preserving the plan's
+            // "serial walk at most once per turn" invariant.
+            let mut exempt_topic_carveout_used = false;
             let mut accepted_wave_id: Option<String> = None;
             // 2026-06-13-004 P0 #4 review fix (U7 envelope disk
             // storm): per-turn dedup set for scope_drop retry_keys.
@@ -8773,7 +8833,7 @@ impl EventLoop {
                     // terminal event displaces the earlier
                     // non-terminal business event.
                     true
-                } else if !non_wave_business_event_accepted
+                } else if !exempt_topic_carveout_used
                     && {
                         let (business, terminal) = self
                             .config
@@ -8811,6 +8871,17 @@ impl EventLoop {
                     // "review.dimensions.complete"]`). Empty
                     // exempt_topics = no exemption (default
                     // behaviour preserved).
+                    //
+                    // 2026-07-04-002 plan (P0 #2 fix): the
+                    // `!non_wave_business_event_accepted` guard in
+                    // the previous revision was structurally dead —
+                    // the earlier `else if !non_wave_business_event_accepted`
+                    // branch always returned `true` first. Removing
+                    // it makes this branch reachable when the
+                    // per-turn slot is already occupied. A second
+                    // exempt topic in the *same* turn still falls
+                    // through to the default budget (drop + bound),
+                    // because we do not consume the slot here.
                     true
                 } else {
                     is_dual_publish_step_handoff
@@ -8840,6 +8911,41 @@ impl EventLoop {
                     // so subsequent admits (this turn) see
                     // the slot as open.
                     non_wave_business_event_accepted = false;
+                }
+
+                // 2026-07-04-002 plan (P0 #2): record the carve-out
+                // usage so a SECOND exempt topic in the same
+                // activation falls through to the default budget
+                // (drop + diagnostic). We only flip the flag when
+                // the carve-out actually admitted — admits via
+                // other branches (wave, terminal-priority, fresh
+                // slot) keep the carve-out unused for this turn.
+                if should_admit
+                    && !non_wave_business_event_accepted
+                    && !admitted_under_wave
+                {
+                    let (business, terminal) = self
+                        .config
+                        .event_loop
+                        .event_policy
+                        .as_ref()
+                        .map(|ep| {
+                            (
+                                ep.business_topics.as_slice(),
+                                ep.terminal_topics.as_slice(),
+                            )
+                        })
+                        .unwrap_or((&[], &[]));
+                    if is_isolated_exempt_topic(
+                        self.registry.get_config(
+                            isolated_hat_owned.as_ref().unwrap_or(&HatId::from("")),
+                        ),
+                        &event.topic,
+                        business,
+                        terminal,
+                    ) {
+                        exempt_topic_carveout_used = true;
+                    }
                 }
 
                 if !should_admit {
@@ -12801,6 +12907,18 @@ impl EventLoop {
             .as_nanos();
         format!("{:x}", nanos % 0xFFFF_FFFF)
     }
+}
+
+/// Outcome of `EventLoop::validate_resume_routing`. Callers in the
+/// recovery / diagnostic loops branch on this and avoid publishing a
+/// `task.resume` when `Block(reason)` is returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventLoopResumeDecision {
+    /// Routing is consistent with the original trigger topic.
+    Allow,
+    /// Routing would target a hat that won't pick the resume up;
+    /// `reason` is a stable operator-grepable message.
+    Block(String),
 }
 
 /// A user prompt that requires human input.

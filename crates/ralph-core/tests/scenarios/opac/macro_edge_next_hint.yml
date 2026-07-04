@@ -1,0 +1,78 @@
+# OPAC ME-1: macro-edge next_hint → ## NEXT ACTION prompt injection
+#
+# 2026-07-04-002 plan U9 (R11 BDD): 验证 U18 (P2) macro-edge
+# next_hint 的 prompt injection 契约。
+#
+# 链路:
+#   coordinator emit work.ready 时携带 `next_hint: "fix unit: ..."` →
+#   executor 在下一 activation 看到 ## NEXT ACTION 块 (在 prompt 顶部)
+#
+# 验证:
+# - work.ready 被 accept
+# - executor 的 prompt 包含 "## NEXT ACTION" 字面 heading
+# - executor 的 prompt 也包含 next_hint 的内容(确保 hint 内容真的被
+#   prepend,而不是空的 heading 单独被注入)
+#
+# 与 `ralph_core::event_loop::prepend_macro_next_hint` (mod.rs:6398)
+# 实现契约对齐:≤120 chars,scan backwards 取最近一个,format 为
+# `## NEXT ACTION\n\n{hint}\n\n---\n\n{prompt}`。
+#
+# 用 `run_workflow_guard_scenario`(真 EventLoop runner),用
+# `prompt_contains` (per hat) 断言 prompt 内容。
+
+name: opac_me1_macro_edge_next_hint
+description: ME-1 - event payload next_hint → 下游 hat prompt 顶部 ## NEXT ACTION 注入
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  event_loop:
+    execution_mode: isolated
+    macro_edge_next_hint:
+      enabled: true
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - work.ready
+    executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+
+mock_responses:
+  # 1) coordinator mint work.ready 携带 next_hint
+  - text: |
+      <event topic="work.ready">
+      {"plan_name":"me1-demo","plan_path":"docs/plans/me1.md","task_id":"me1-t-1","task_key":"me1-k-1","step":"step-01","complexity":"small","next_hint":"fix unit: 立即检查 work.done 的 schema 字段"}
+      </event>
+    hat: coordinator
+  # 2) executor 应当在 prompt 顶部看到 ## NEXT ACTION 后再执行
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"me1-demo","plan_path":"docs/plans/me1.md","task_id":"me1-t-1","task_key":"me1-k-1","step":"step-01","commit_count":1,"changed_lines":5}
+      </event>
+    hat: executor
+  # 3) idle
+  - text: |
+      waiting.
+
+expected:
+  iterations: 3
+  events:
+    - topic: work.ready
+    - topic: work.done
+  # R11: executor 在 iter 2 (iter 1 后) 看到 macro-edge 注入,
+  # prompt 顶部存在 ## NEXT ACTION heading 以及 hint 原文。
+  prompt_contains:
+    - hat: executor
+      substrings:
+        - "## NEXT ACTION"
+        - "fix unit: 立即检查 work.done 的 schema 字段"
+  absent_events:
+    - topic: plan.complete
+    - topic: work.failed
+    - topic: LOOP_COMPLETE
+  completion: false

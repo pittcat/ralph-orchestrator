@@ -1,0 +1,89 @@
+# OPAC FV-1: ce-executor-serial fix-unit chain 事件链完整性
+#
+# 2026-07-04-002 plan U9 (R11 BDD): 验证 fix-unit 完整事件链
+#   fresh mint → work.ready → close → work.done → test.passed
+# 全部被 runtime accept,无 silent drop,无 absent rejection。
+#
+# 与 `2026-06-30-001-u3-fix-unit-terminal-guard.yml` 的差别:
+# - 本 scenario 不测 exhausted/rejected path,只覆盖 happy-path 事件链
+#   在 fix-unit 上下文中的 round-trip。
+# - 通过 `event_topic_counts` 精确断言每条事件被 accept 1 次 (R11
+#   覆盖)。
+# - 用 `run_workflow_guard_scenario`(真 EventLoop runner),
+#   不依赖 run_scenario stub (2026-06-24 P0-2/P0-3 教训)。
+# - Path: coordinator mint fix-unit → fixer 接 work.ready →
+#   fixer 发 work.done → validator 接 work.done 发 test.passed。
+
+name: opac_fv1_serial_fix_unit_chain
+description: FV-1 - ce-executor-serial fix-unit 事件链 fresh mint → work.ready → work.done → test.passed
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  event_loop:
+    execution_mode: isolated
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - work.ready
+    fixer:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+    validator:
+      subscribes_to:
+        - work.done
+      publishes:
+        - test.passed
+
+mock_responses:
+  # 1) coordinator mints a fresh fix-unit via work.ready
+  - text: |
+      <event topic="work.ready">
+      {"plan_name":"fv1-fix-chain","plan_path":"docs/plans/fv1.md","task_id":"fv1-task-fix-01","task_key":"ce-executor:fv1-fix-chain:fix-01:u1","step":"fix-01","complexity":"small"}
+      </event>
+    hat: coordinator
+  # 2) fixer completes the fix-unit via work.done
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"fv1-fix-chain","plan_path":"docs/plans/fv1.md","task_id":"fv1-task-fix-01","task_key":"ce-executor:fv1-fix-chain:fix-01:u1","step":"fix-01","commit_count":1,"changed_lines":5}
+      </event>
+    hat: fixer
+  # 3) validator emits test.passed after fix-unit applied
+  - text: |
+      <event topic="test.passed">
+      {"plan_name":"fv1-fix-chain","task_id":"fv1-task-fix-01","task_key":"ce-executor:fv1-fix-chain:fix-01:u1","step":"fix-01","tests_run":3,"tests_passed":3}
+      </event>
+    hat: validator
+  # remaining iterations: idle (waiting)
+  - text: |
+      waiting.
+  - text: |
+      waiting.
+  - text: |
+      waiting.
+
+expected:
+  iterations: 6
+  events:
+    - topic: work.ready
+    - topic: work.done
+    - topic: test.passed
+  # R11: 每条业务事件 accept 恰好 1 次,无 silent drop。
+  event_topic_counts:
+    - topic: work.ready
+      count: 1
+    - topic: work.done
+      count: 1
+    - topic: test.passed
+      count: 1
+  absent_events:
+    - topic: work.failed
+    - topic: test.failed
+    - topic: plan.complete
+    - topic: LOOP_COMPLETE
+    - topic: plan.blocked
+  completion: false

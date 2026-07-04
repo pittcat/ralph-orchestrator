@@ -215,12 +215,46 @@ fn execute_verify(args: WaveVerifyArgs) -> Result<()> {
         &args.config,
     )?;
 
+    // Origin guard (U5 / P1 #8): supervisor-only coordination topics must be rejected by verify
+    // with the same error shape as `wave emit`, so an attacker-craftable verify cannot pass and
+    // emit anyway. Agents have no legitimate way to emit `*.wave.complete` / `*.wave.failed`,
+    // so a verify call against one of those is always a hard reject. The supervisor itself
+    // uses `system_injected` writes that bypass this CLI gate (see
+    // `ralph_core::event_origin::SUPERVISOR_COORDINATION_TOPICS`).
+    if ralph_core::event_origin::is_supervisor_coordination_topic(&args.topic) {
+        bail!(
+            "ralph wave verify refused: topic `{}` is a supervisor coordination topic; \
+             it must be emitted by the supervisor, not via CLI. \
+             Allowed agent topics are declared in `event_loop.event_policy.business_topics`.",
+            args.topic
+        );
+    }
+
+    let wave_id_for_output = if matches!(args.output, WaveOutputFormat::Json) {
+        // KTD-6 (P1 #7): emit a synthetic stable hash of (topic, payload digest, optional
+        // idempotency key) so verify JSON carries a deterministic `wave_id`. The real wave_id
+        // is minted at `wave emit` time; this hash lets agents correlate verify + emit without
+        // breaking the "verify never writes" contract.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        args.topic.hash(&mut hasher);
+        for p in &payloads {
+            p.hash(&mut hasher);
+        }
+        let hex = format!("{:x}", hasher.finish());
+        format!("verify:{hex}")
+    } else {
+        String::new()
+    };
+
     match args.output {
         WaveOutputFormat::Text => println!("ok"),
         WaveOutputFormat::Json => {
             let payload = serde_json::json!({
                 "ok": true,
-                "topic": args.topic,
+                "wave_id": wave_id_for_output,
+                "topics": [&args.topic],
                 "count": payloads.len(),
             });
             println!("{}", serde_json::to_string(&payload)?);

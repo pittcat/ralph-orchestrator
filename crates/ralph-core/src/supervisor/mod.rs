@@ -445,8 +445,8 @@ pub use recover::recover_active_waves_at_startup;
 // U22: agent-safe supervisor summary surface for `ralph inspect loop`.
 // Reads ONLY via the SupervisorStore trait (so the implementation
 // decides where the data lives) and emits no internal paths or db
-// handles — agents see `{ active_waves, queue_depth, slot_summary[] }`
-// and nothing else.
+// handles — agents see `{ active_waves, queue_depth, slot_summary[],
+// last_coordination_topics[] }` and nothing else.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct SupervisorInspectSummary {
     /// Waves that have not yet reached a terminal phase.
@@ -454,8 +454,21 @@ pub struct SupervisorInspectSummary {
     /// Total non-terminal slot count across all active waves.
     pub queue_depth: u32,
     /// Per-slot digest (no `wave_id` map leaks beyond what the agent
-    /// already knows via `task_id`).
+    /// already knows via `task_id`). Empty when the supervisor
+    /// reports zero or many active waves (the U8 contract surfaces
+    /// "what's blocking my slot" only when the agent is reasonably
+    /// looking at a single wave).
     pub slot_summary: Vec<SlotSummaryEntry>,
+    /// Names of the supervisor coordination topics the active waves
+    /// may emit (e.g. `exec.wave.complete` for an Exec wave).
+    /// Derived purely from the `SUPERVISOR_COORDINATION_TOPICS`
+    /// whitelist crossed with each active wave's kind — never read
+    /// from the runtime event log or the store's internal ledger.
+    /// Empty when no waves are active or when the active wave's
+    /// kind has no coordination topics (currently all three kinds
+    /// have entries, so the empty case only arises when there are
+    /// zero active waves).
+    pub last_coordination_topics: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -476,32 +489,93 @@ pub struct SlotSummaryEntry {
 /// Build a SupervisorInspectSummary from any SupervisorStore. Pure
 /// reader — never mutates state. Hat-aware callers can post-filter
 /// `slot_summary` by their own hat_id before display.
+///
+/// Field population contract (U8 of plan 2026-07-04-002):
+/// - `active_waves`: one entry per non-terminal wave; mirrors the
+///   `WaveSnapshot` rows from `recover_active_waves`.
+/// - `queue_depth`: total non-terminal slot count across all active
+///   waves (same definition as before).
+/// - `slot_summary`: populated ONLY when exactly one wave is active
+///   (the agent-safe "what is blocking my slot" contract). Each
+///   entry carries `slot_id` (from `WaveSnapshot.slots`),
+///   `status` (stringified `SlotStatus`) and a stable `hat` label
+///   derived from the wave's `WaveKind`. When multiple waves are
+///   active the field stays empty to avoid leaking a wave_id →
+///   slot map the agent already knows through other channels.
+/// - `last_coordination_topics`: derived from the
+///   `SUPERVISOR_COORDINATION_TOPICS` whitelist crossed with each
+///   active wave's `WaveKind`. This is the agent-safe summary of
+///   "what coordination topics the supervisor may emit next" — it
+///   intentionally does NOT read the runtime event log or any db
+///   ledger (R11 output safety rule: no internal paths, no event
+///   payload contents).
 pub fn summarize(store: &dyn SupervisorStore) -> SupervisorInspectSummary {
-    let waves = match store.recover_active_waves() {
+    let snapshots = match store.recover_active_waves() {
         Ok(ws) => ws,
         Err(_) => return SupervisorInspectSummary::default(),
     };
     let mut out = SupervisorInspectSummary::default();
-    for w in waves {
-        let pending = w.pending_count + w.in_flight_count;
-        let done = w.completed_count + w.failed_count;
+    for snap in &snapshots {
+        let pending = snap.pending_count + snap.in_flight_count;
+        let done = snap.completed_count + snap.failed_count;
         out.active_waves.push(ActiveWaveSummary {
-            wave_id: w.wave_id,
-            phase: w.phase,
+            wave_id: snap.wave_id.clone(),
+            phase: snap.phase,
             pending_units: pending,
             done_units: done,
         });
         out.queue_depth += pending;
+        // Coordinate topics are derived deterministically from each
+        // active wave's kind crossed with the supervisor coordination
+        // whitelist — no store reads, no event-log reads, no internal
+        // paths.
+        for topic in coordination_topics_for_kind(snap.kind) {
+            if !out.last_coordination_topics.iter().any(|t| t == topic) {
+                out.last_coordination_topics.push((*topic).to_string());
+            }
+        }
     }
     // `slot_summary` requires a per-wave read; only populate when a
     // single active wave is present (the agent-safe `inspect loop`
     // contract is "what's blocking my slot", not "full state dump").
     if out.active_waves.len() == 1 {
-        let only = &out.active_waves[0];
-        // No dedicated list-slots API yet; surface the aggregate only.
-        // The per-slot digest can be expanded when U25 ships the
-        // supervisor BDD harness that needs it.
-        let _ = only;
+        if let Some(snap) = snapshots.first() {
+            let hat_label = wave_kind_hat_label(snap.kind);
+            out.slot_summary = snap
+                .slots
+                .iter()
+                .map(|(idx, status)| SlotSummaryEntry {
+                    slot_id: *idx,
+                    hat: hat_label.to_string(),
+                    status: status.to_string(),
+                })
+                .collect();
+        }
     }
     out
+}
+
+/// Stable string label for the "hat" side of a `SlotSummaryEntry`.
+///
+/// The supervisor store does not persist a per-slot hat id (slots are
+/// identified by index + status only); the agent sees the wave kind as
+/// the umbrella under which the slot lives. The mapping is a public
+/// label — not an internal path — so it is safe to surface verbatim.
+fn wave_kind_hat_label(kind: WaveKind) -> &'static str {
+    match kind {
+        WaveKind::Exec => "exec-worker",
+        WaveKind::Fix => "fix-worker",
+        WaveKind::Review => "review-worker",
+    }
+}
+
+/// Subset of `SUPERVISOR_COORDINATION_TOPICS` that an active wave of
+/// the given kind may emit. Pure derivation from the whitelist;
+/// never reads the store.
+fn coordination_topics_for_kind(kind: WaveKind) -> &'static [&'static str] {
+    match kind {
+        WaveKind::Exec => &["exec.wave.complete", "exec.wave.failed"],
+        WaveKind::Fix => &["fix.wave.complete", "fix.wave.failed"],
+        WaveKind::Review => &["review.wave.complete", "review.wave.failed"],
+    }
 }

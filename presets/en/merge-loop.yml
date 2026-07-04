@@ -44,6 +44,79 @@ event_loop:
   max_iterations: 15
   max_runtime_seconds: 1800
   starting_event: "merge.start"
+  # 2026-07-04-002 U10: payload schemas come from the SSOT file
+  # `presets/schemas/merge-loop.yml`; build.rs deep-merges them
+  # into `event_policy.schemas` at compile time (plan
+  # 2026-06-16-002 Unit 1). topic_deny_rules below pin hat
+  # ownership for each merge topic — mirrors ce-executor-serial
+  # rule structure so a future `verify` payload check rejects
+  # any hat that tries to publish a topic it does not own.
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: false
+    require_emit_provenance: true
+    terminal_topics:
+      - "merge.handled"
+    business_topics:
+      - "merge.done"
+      - "conflict.detected"
+      - "merge.failed"
+      - "conflict.resolved"
+      - "conflict.unresolvable"
+      - "tests.passed"
+      - "tests.failed"
+    completion_after_terminal:
+      duplicate_terminal: reject
+      business_after_completion: reject
+      write_diagnostic_event: true
+    topic_deny_rules:
+      # merger owns merge.done / conflict.detected / merge.failed
+      - {hat_id: resolver, topic: merge.done}
+      - {hat_id: tester, topic: merge.done}
+      - {hat_id: cleaner, topic: merge.done}
+      - {hat_id: failure_handler, topic: merge.done}
+      - {hat_id: resolver, topic: conflict.detected}
+      - {hat_id: tester, topic: conflict.detected}
+      - {hat_id: cleaner, topic: conflict.detected}
+      - {hat_id: failure_handler, topic: conflict.detected}
+      - {hat_id: merger, topic: merge.failed}
+      - {hat_id: resolver, topic: merge.failed}
+      - {hat_id: tester, topic: merge.failed}
+      - {hat_id: cleaner, topic: merge.failed}
+      # resolver owns conflict.resolved / conflict.unresolvable
+      - {hat_id: merger, topic: conflict.resolved}
+      - {hat_id: tester, topic: conflict.resolved}
+      - {hat_id: cleaner, topic: conflict.resolved}
+      - {hat_id: failure_handler, topic: conflict.resolved}
+      - {hat_id: merger, topic: conflict.unresolvable}
+      - {hat_id: tester, topic: conflict.unresolvable}
+      - {hat_id: cleaner, topic: conflict.unresolvable}
+      - {hat_id: failure_handler, topic: conflict.unresolvable}
+      # tester owns tests.passed / tests.failed
+      - {hat_id: merger, topic: tests.passed}
+      - {hat_id: resolver, topic: tests.passed}
+      - {hat_id: cleaner, topic: tests.passed}
+      - {hat_id: failure_handler, topic: tests.passed}
+      - {hat_id: merger, topic: tests.failed}
+      - {hat_id: resolver, topic: tests.failed}
+      - {hat_id: cleaner, topic: tests.failed}
+      - {hat_id: failure_handler, topic: tests.failed}
+      # terminal completion token: only cleaner (success) and
+      # failure_handler (any branch failure) may emit it.
+      - {hat_id: merger, topic: merge.handled}
+      - {hat_id: resolver, topic: merge.handled}
+      - {hat_id: tester, topic: merge.handled}
+      - {hat_id: ralph, topic: merge.handled}
+      - {hat_id: ralph, topic: merge.done}
+      - {hat_id: ralph, topic: merge.failed}
+      - {hat_id: ralph, topic: conflict.detected}
+      - {hat_id: ralph, topic: conflict.resolved}
+      - {hat_id: ralph, topic: conflict.unresolvable}
+      - {hat_id: ralph, topic: tests.passed}
+      - {hat_id: ralph, topic: tests.failed}
 
 cli:
   backend: "auto"
@@ -81,6 +154,8 @@ hats:
       ## BRANCH MERGER MODE
 
       Merge the completed Ralph loop branch into main.
+
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
 
       ### Step 1: Identify the Loop
 
@@ -179,6 +254,8 @@ hats:
 
       Resolve merge conflicts by understanding the intent of both sides.
 
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
+
       ### Process
 
       1. **List conflicted files:**
@@ -253,6 +330,8 @@ hats:
 
       Verify the merge by running the complete test suite.
 
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
+
       ### Process
 
       1. **Run the test suite:**
@@ -301,6 +380,8 @@ hats:
 
       Clean up the worktree and branch after successful merge, then signal
       loop completion by publishing `merge.handled`.
+
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
 
       ### Step 1: Get Loop ID
 
@@ -366,6 +447,8 @@ hats:
 
       Handle merge failures by marking the loop for manual review, then
       signal loop completion by publishing `merge.handled`.
+
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
 
       ### Step 1: Assess the Failure
 

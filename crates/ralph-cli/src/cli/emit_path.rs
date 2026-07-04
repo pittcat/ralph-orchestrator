@@ -22,6 +22,40 @@ pub(crate) fn resolve_marker_target(workspace_root: &Path, marker_value: &str) -
     }
 }
 
+/// Marker file written by the runtime so isolated agents and
+/// cross-cutting commands agree on the active hat's write channel.
+pub(crate) const HAT_EVENTS_MARKER: &str = ".ralph/current-hat-events";
+
+/// Resolve the real hat-channel file path under a workspace.
+///
+/// The marker `.ralph/current-hat-events` holds a path (relative to the
+/// workspace root) of the JSONL file the runtime has marked as this
+/// activation's write channel. This helper reads that marker and returns
+/// the real channel path; previously each call site re-implemented the
+/// read-and-trim, and `task_cli::emit_close_completion_warning` ended
+/// up treating the marker itself as JSONL (the P0 #1 bug).
+///
+/// Return value:
+///
+/// - `Some((path, exists))` — marker was present and parsed to a
+///   non-empty path; `exists` indicates whether the channel file itself
+///   is currently on disk.
+/// - `None` — marker missing or empty (the legacy fallback case used by
+///   `ralph events --events-source auto`).
+pub(crate) fn resolve_hat_channel_file(
+    workspace_root: &Path,
+) -> Option<(PathBuf, bool)> {
+    let marker = workspace_root.join(HAT_EVENTS_MARKER);
+    let raw = fs::read_to_string(&marker).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let channel = resolve_marker_target(workspace_root, trimmed);
+    let exists = fs::metadata(&channel).is_ok();
+    Some((channel, exists))
+}
+
 /// P6: resolve the final events file path for `ralph emit` against an
 /// allowlist. The allowlist is the set of paths the active loop has marked
 /// as legitimate targets: the `current-candidate-events` marker target

@@ -1,0 +1,86 @@
+# Authoring SSOT for `merge-batch` `event_policy.schemas`.
+#
+# Plan 2026-07-04-002 U10: schema SSOT for the merge-batch preset.
+# `build.rs` deep-merges this file's `schemas:` mapping into
+# `event_loop.event_policy.schemas` of `presets/en/merge-batch.yml`
+# at compile time (plan 2026-06-16-002 Unit 1). Edit ONLY this file
+# when changing payload contract requirements for any hat below;
+# the next `cargo build` propagates the change to the CLI precheck,
+# the loop gate, the drift engine, and the prompt builder.
+#
+# Topic coverage (4 hats):
+#   reviewer    -> merge.reviewed
+#   integrator  -> merge.integrated
+#   stabilizer  -> merge.retest / merge.stabilized
+#   reporter    -> merge.batch.complete (terminal completion token)
+#
+# 2026-07-04-002 U10: completion is split from protocol tokens on
+# purpose (P0-5 / merge-loop pattern): `merge.stabilized` is a
+# required workflow event; only `reporter` may emit
+# `merge.batch.complete` (the completion_promise). This blocks
+# text-path `MERGE_COMPLETE` races before the report is written.
+#
+# Topic deny rules live in `presets/en/merge-batch.yml`
+# `event_policy.topic_deny_rules` (not in this SSOT); the schema
+# SSOT only owns payload field shapes.
+
+schemas:
+  # reviewer → review complete, integrator picks this up. The
+  # payload carries the per-branch design understanding,
+  # cross-branch risk analysis, and predicted conflicts +
+  # resolution methods that the integrator consumes verbatim
+  # when applying each `git merge`. `target_branch` and
+  # `branch_order` are the canonical merge inputs the
+  # integrator feeds to `git checkout` / `git merge` so the
+  # integrator does not need to re-derive order from the prompt.
+  merge.reviewed:
+    required_fields:
+      - target_branch
+      - branch_order
+      - per_branch_intent
+    payload: json_object
+
+  # integrator → all prompt branches merged (or skipped because
+  # already merged). Stabilizer picks this up. The integration
+  # gate is `integration_complete`: true iff every prompt branch
+  # is merged (this run or pre-merged); false aborts
+  # stabilization immediately. `merge_commit_shas` is the list
+  # of commits made this run so the reporter can include them
+  # in the final report.
+  merge.integrated:
+    required_fields:
+      - integration_complete
+      - ready_for_stabilization
+      - branches_merged
+      - branches_skipped
+      - branches_failed
+      - merge_commit_shas
+    payload: json_object
+
+  # stabilizer → self-loop retry signal. The hat itself emits
+  # this after a fix attempt; the next activation re-enters
+  # the stabilizer. `attempt` and `classification` mirror the
+  # stabilizer-state.json shape so the next attempt can read
+  # `why_not_fixed` without re-deriving the failure class.
+  merge.retest:
+    required_fields:
+      - attempt
+      - classification
+    payload: json_object
+
+  # stabilizer → terminal workflow event. Reporter picks this
+  # up to write the report and emit `merge.batch.complete`.
+  # `passed: true` is the ONLY signal the reporter uses to
+  # choose between success / failure cleanup paths.
+  merge.stabilized:
+    required_fields:
+      - passed
+    payload: json_object
+
+  # reporter → sole completion token for merge-batch. Mirrors
+  # the `merge.handled` shape in merge-loop: a single required
+  # boolean that the runtime completion guard checks.
+  merge.batch.complete:
+    required_fields:
+      - success
+    payload: json_object

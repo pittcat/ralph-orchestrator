@@ -52,6 +52,59 @@ event_loop:
   max_iterations: 40
   max_runtime_seconds: 7200
   starting_event: "merge.start"
+  # 2026-07-04-002 U10: payload schemas come from the SSOT file
+  # `presets/schemas/merge-batch.yml`; build.rs deep-merges them
+  # into `event_policy.schemas` at compile time (plan
+  # 2026-06-16-002 Unit 1). topic_deny_rules below pin hat
+  # ownership for each batch merge topic — mirrors
+  # ce-executor-serial rule structure so a future `verify`
+  # payload check rejects any hat that tries to publish a
+  # topic it does not own.
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: false
+    require_emit_provenance: true
+    terminal_topics:
+      - "merge.batch.complete"
+    business_topics:
+      - "merge.reviewed"
+      - "merge.integrated"
+      - "merge.retest"
+      - "merge.stabilized"
+    completion_after_terminal:
+      duplicate_terminal: reject
+      business_after_completion: reject
+      write_diagnostic_event: true
+    topic_deny_rules:
+      # reviewer owns merge.reviewed
+      - {hat_id: integrator, topic: merge.reviewed}
+      - {hat_id: stabilizer, topic: merge.reviewed}
+      - {hat_id: reporter, topic: merge.reviewed}
+      # integrator owns merge.integrated
+      - {hat_id: reviewer, topic: merge.integrated}
+      - {hat_id: stabilizer, topic: merge.integrated}
+      - {hat_id: reporter, topic: merge.integrated}
+      # stabilizer owns merge.retest / merge.stabilized
+      - {hat_id: reviewer, topic: merge.retest}
+      - {hat_id: integrator, topic: merge.retest}
+      - {hat_id: reporter, topic: merge.retest}
+      - {hat_id: reviewer, topic: merge.stabilized}
+      - {hat_id: integrator, topic: merge.stabilized}
+      - {hat_id: reporter, topic: merge.stabilized}
+      # terminal completion token: only reporter may emit it.
+      - {hat_id: reviewer, topic: merge.batch.complete}
+      - {hat_id: integrator, topic: merge.batch.complete}
+      - {hat_id: stabilizer, topic: merge.batch.complete}
+      # ralph loop-runner fallback hat is locked out of every
+      # workflow topic that downstream hats own.
+      - {hat_id: ralph, topic: merge.reviewed}
+      - {hat_id: ralph, topic: merge.integrated}
+      - {hat_id: ralph, topic: merge.retest}
+      - {hat_id: ralph, topic: merge.stabilized}
+      - {hat_id: ralph, topic: merge.batch.complete}
 
 cli:
   backend: "auto"
@@ -91,6 +144,8 @@ hats:
       ## MERGE REVIEWER MODE
 
       Read-only analysis. Do NOT run `git merge` or modify the working tree.
+
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
 
       ### Step 1: Parse prompt
 
@@ -172,6 +227,8 @@ hats:
       Merge ALL prompt branches into the target branch. Use the `merge.reviewed`
       payload and prompt branch order.
 
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
+
       ### Step 1: Prepare
 
       ```bash
@@ -238,6 +295,8 @@ hats:
 
       Verify the merged tree and fix failures until green. Use a self-loop via
       **`merge.retest`** (fresh iteration).
+
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
 
       ### Entry gate (on `merge.integrated`)
 
@@ -330,6 +389,8 @@ hats:
       ## MERGE REPORTER MODE
 
       Write the final report and signal completion.
+
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
 
       ### Report path
 

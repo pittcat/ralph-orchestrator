@@ -16,7 +16,7 @@ metadata:
 
 | 阶段 | 目的 | 工具 |
 |------|------|------|
-| **O — Observe** | 「我现在是谁？系统是什么状态？」 | `ralph inspect loop` + `ralph tools task list` + 必要时 `ralph events --events-source hat-channel\|main` |
+| **O — Observe** | 「我现在是谁？系统是什么状态？」 | `ralph inspect loop` + `ralph tools task list` + 必要时 `ralph events --events-source hat-channel\|main`;**`event_loop.supervisor.enabled: true` 时 inspect loop JSON 含 supervisor 块**（`active_waves` / `slot_summary` / `last_coordination_topics`） |
 | **P — Precheck** | 「这次操作会成功吗？写盘后会留下什么？」 | `ralph tools task verify <verb>` 或 `ralph emit/wave emit --policy-check` |
 | **A — Apply** | 「实际写盘」 | `ralph tools task <verb>` 或 `ralph emit` / `ralph wave emit`（去掉 `--policy-check`） |
 | **C — Confirm** | 「我真的写下去了吗？下一步要做什么？」 | `ralph events --events-source hat-channel`（单 emit）或 `--events-source main`（wave emit），跟 task close 后的 stderr warning（`close_without_completion_emit`）一起看 |
@@ -29,6 +29,38 @@ metadata:
 2. **loop 处于哪一阶段**：`## ORCHESTRATOR CONTEXT` 段
 3. **任务当前状态**：`ralph tools task list` + `ready` 子命令
 4. **我刚刚发的事件落到哪了**：同 activation 内用 `ralph events --events-source hat-channel`；跨 hat / 调试用 `--events-source main`
+5. **supervisor 在做什么（仅当 `event_loop.supervisor.enabled: true`）**：`ralph inspect loop --format json` 的 `supervisor` 键
+
+## supervisor 摘要（U8 of 2026-07-04-002）
+
+当 `event_loop.supervisor.enabled: true` 时,`ralph inspect loop --format json` 的 `supervisor` 字段会带四段信息:
+
+| 字段 | 含义 | 来源 |
+|------|------|------|
+| `active_waves[]` | 当前未到终态的 wave 列表 | `SupervisorStore::recover_active_waves` |
+| `queue_depth` | 所有 active wave 的非终态 slot 总和 | 同上 |
+| `slot_summary[]` | **单一 active wave 时填充**：`{slot_id, hat, status}` 三元组,`hat` 是 wave kind 的稳定字符串标签（`exec-worker` / `fix-worker` / `review-worker`） | 同上 + `WaveSnapshot.slots` |
+| `last_coordination_topics[]` | 每个 active wave 可能产出的 supervisor 协调 topic（`exec.wave.complete` / `exec.wave.failed` 等 6 个白名单项中按 wave kind 派生） | `SUPERVISOR_COORDINATION_TOPICS` ∩ wave kind,纯派生,无 db 读取 |
+
+**字段填充契约**:
+
+- `slot_summary` 仅当 `active_waves.len() == 1` 时填充——agent-safe 语义是"我的 slot 被什么 block",不是"全量状态 dump"
+- `last_coordination_topics` 在 `active_waves` 为空时返回空数组,不伪造任何潜在 topic
+- 输出**绝不**包含 db 路径、event log 内容或其他内部 ledger 字段
+- 多次调用结果完全确定（同 store 状态 → 同 JSON）,适合机读 + 离线断言
+
+**典型用法**:
+
+```bash
+# 收到 `ralph emit` 拒收 → supervisor wave 还在路上
+ralph inspect loop --format json | jq '.supervisor.slot_summary[] | select(.status=="dispatched")'
+
+# 想确认这条 wave 落地后会出什么协调 topic
+ralph inspect loop --format json | jq '.supervisor.last_coordination_topics'
+
+# supervisor 没启用 → JSON 没有 `supervisor` 键（不要假设 key 存在）
+ralph inspect loop --format json | jq 'has("supervisor")'
+```
 
 ## Precheck 阶段关键命令
 
@@ -78,3 +110,4 @@ agent context 默认 `--events-source auto` 优先 hat-channel；显式 `--event
 3. 用 `ralph events` 不带 `--events-source` 假设读 main — agent context 下默认 hat-channel
 4. close 后立即走人 — 漏掉 Confirm 的 `close_without_completion_emit` warning
 5. 跨 activation 共享一个 `task_id` — close 是 terminal，第二次 emit 一定被拒
+6. 在 hat instructions 里写"读 `.ralph/supervisor.db`"或"运行 `ralph diagnose --supervisor`" — supervisor 的内部 ledger 与诊断输出都不在 hat 可观测范围；Observe 阶段用 `ralph inspect loop --format json` 的 `supervisor` 块即可
