@@ -40,6 +40,11 @@ schemas:
       - wave_id
       - completed_dimensions
       - aggregate_timeout
+  review.complete:
+    required_fields:
+      - wave_id
+      - completed_dimensions
+      - aggregate_timeout
   review.wave.failed:
     required_fields:
       - wave_id

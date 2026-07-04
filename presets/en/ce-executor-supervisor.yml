@@ -487,6 +487,30 @@ hats:
     terminal_events:
       - exec.unit.done
       - exec.unit.failed
+    instructions: |
+      ## WORKER MODE — One TDD implementation per activation
+
+      You are a **slot-scoped worker** running in an isolated
+      worktree. Your activation is short: read the unit task,
+      implement the change, emit exactly one business topic.
+
+      ### OPAC 四阶段 (本 hat 视角)
+
+      - **Observe**: `ralph tools task list -s open` + `ralph inspect loop`
+        — 你看不到其它 slot 的状态，不能跨 slot 通讯。
+      - **Precheck**: `ralph emit --policy-check` 必须先通过再去掉
+        `--policy-check` 真正写盘（U15 agent default enforce）。
+      - **Apply**: TDD — 最小实现让单测绿，不做「顺手优化」。
+      - **Confirm**: `ralph events --events-source hat-channel --output json`
+        — 在你自己的 hat-channel 验单条 `exec.unit.done` 已落盘。
+
+      ### Constraints
+
+      - 不能调 `ralph wave emit` / `ralph wave verify`（U23 wave ACL——
+        worker 没有 `.unit.ready` 发布权）。
+      - 不能读 `.ralph/supervisor.db` / `.ralph/events.jsonl`（HARD RULE 4）。
+      - 一条业务事件即停（isolated 单事件预算）；不要在同一 activation
+        重试 dropped emit，等 `task.resume`。
 
   exec-integrator:
     name: "Exec Integrator"
@@ -503,6 +527,31 @@ hats:
       - work.done
     terminal_events:
       - work.done
+    instructions: |
+      ## EXEC INTEGRATOR MODE — Merge a completed exec wave
+
+      You are activated when supervisor emits `exec.wave.complete`
+      after all `exec.unit.ready` slots have either `Completed` or
+      been marked `Failed`. Your job is to merge the surviving
+      worktrees into the main branch and run the full test suite.
+
+      ### OPAC 四阶段 (本 hat 视角)
+
+      - **Observe**: `ralph inspect loop` — supervisor block 里的
+        `active_waves` 应为空（exec.wave 已 terminal）。Worktrees
+        由 supervisor 跟踪，不要去读 `supervisor.db`。
+      - **Precheck**: 走 `ralph tools task list -s open` 核对没有
+        残留 in-flight work。如果有，发出 `work.failed` 而不是
+        强行 merge。
+      - **Apply**: merge（fan-in），跑全测；如果失败发 `work.failed`。
+      - **Confirm**: `ralph events --events-source main --output json`
+        验刚发的 `work.done` 已落主 ledger。
+
+      ### Constraints
+
+      - 协调 topic (`*.wave.complete`) 由 supervisor 注入，你不能
+        emit 它们。
+      - 不能调 `ralph wave emit` / `ralph wave verify`（U23）。
 
   exec-failure-handler:
     name: "Exec Failure Handler"
@@ -519,6 +568,24 @@ hats:
       - work.failed
     terminal_events:
       - work.failed
+    instructions: |
+      ## EXEC FAILURE HANDLER MODE — Translate exec.wave.failed → work.failed
+
+      You are activated when supervisor reports an exec wave as
+      unrecoverable. Your job is to emit a single `work.failed`
+      with a `reason` so the fixer path picks it up.
+
+      ### OPAC 四阶段 (本 hat 视角)
+
+      - **Observe**: 读 `exec.wave.failed` payload（含失败 slot 列表 + 原因）。
+      - **Precheck**: `ralph emit work.failed --policy-check`（U15）。
+      - **Apply**: emit `work.failed`。
+      - **Confirm**: `ralph events --events-source main` 验 `work.failed`。
+
+      ### Constraints
+
+      - 不要试图重新 dispatch worker slot——那是 supervisor 的活。
+      - 一条业务事件即停。
 
   review-coordinator:
     name: "Review Coordinator"
@@ -725,6 +792,30 @@ hats:
       - review.unit.done
     terminal_events:
       - review.unit.done
+    instructions: |
+      ## REVIEW BATCH WORKER MODE — One dimension review per activation
+
+      You are a **slot-scoped dimension reviewer**. Your
+      activation scores exactly one dimension (passed via
+      `review.unit.ready` payload). One activation = one
+      `review.unit.done` event.
+
+      ### OPAC 四阶段 (本 hat 视角)
+
+      - **Observe**: 读 `review.unit.ready` payload（含 `dimension`、
+        `focus`、`task_id`、`task_key`）。
+      - **Precheck**: `ralph emit review.unit.done --policy-check`
+        验证 `task_id` 与当前 live id 同源（U4 verify-emit-bridge）。
+      - **Apply**: 在分配的 worktree 跑该维度评审；emit 评分。
+      - **Confirm**: `ralph events --events-source hat-channel` 验
+        刚发的 `review.unit.done`。
+
+      ### Constraints
+
+      - 不能调 `ralph wave emit` / `ralph wave verify`（U23）。
+      - 不能 emit `review.complete` / `review.wave.complete`——
+        那是 review-synthesizer 与 supervisor 的活。
+      - 一条业务事件即停（isolated 单事件预算）。
 
   review-synthesizer:
     name: "Review Synthesizer"
@@ -742,7 +833,10 @@ hats:
       ### 0. This activation is single-shot
 
       In this activation, **emit exactly one** business
-      event: `review.wave.complete`. Do not chain a
+      event: `review.complete` (NOT `review.wave.complete`
+      — that topic is supervisor-only; origin guard rejects
+      agent emit per `crates/ralph-core/src/event_origin.rs
+      ::SUPERVISOR_COORDINATION_TOPICS`). Do not chain a
       follow-up emit. Do not call `ralph wave emit`. After
       the emit, stop.
 
@@ -796,7 +890,7 @@ hats:
 
       Pre-check the payload first (the loop's gate is the
       same one; per `ralph-tools` §5):
-      `ralph emit review.wave.complete --policy-check
+      `ralph emit review.complete --policy-check
       -j '<json>'`. Only after the precheck passes, drop
       `--policy-check` and emit the real event.
 
@@ -807,9 +901,10 @@ hats:
       - `completed_dimensions` — the list of six
         dimension values from §1, in any order.
       - `aggregate_timeout` — the value you read from
-        the active wave's settings (see
-        `ralph diagnose --supervisor json` if you need
-        to confirm it).
+        the active wave's settings (see `ralph inspect
+        loop --format json` — the supervisor block carries
+        `active_waves`, not `ralph diagnose --supervisor`,
+        which is reserved for runtime/diagnose tooling).
 
       Use a single-line JSON payload. For the full
       `ralph emit` syntax and the strict rules on
@@ -829,7 +924,9 @@ hats:
         command is used by other hats to dispatch unit
         work, and it is not yours to call.
       - **Do not emit any topic other than
-        `review.wave.complete`** in this turn.
+        `review.complete`** in this turn. The
+        `review.wave.complete` topic is supervisor-only;
+        origin guard rejects agent emit.
       - **Do not call `ralph tools task close` or
         `ralph tools task fail`** — let the runtime
         and the per-dimension reviewers manage their
@@ -864,28 +961,23 @@ hats:
         include in any cross-iteration stable key.
       - `RALPH_HATS_SOURCE` — preset label.
     triggers:
-      - review.unit.done
-    publishes:
       - review.wave.complete
+    publishes:
+      - review.complete
     event_filter:
       enabled: true
       events:
-      - review.unit.done
+      - review.wave.complete
     exempt_topics:
-      - review.wave.complete
-    # NOTE: this `publishes:` entry is allowed by the
-    # supervisor lint whitelist
-    # (crates/ralph-core/src/preset_lint/supervisor.rs:199),
-    # NOT by the runtime origin guard. Production lint
-    # permits `*-integrator` / `*-coordinator` / `*-synthesizer`
-    # hat ids to declare supervision coordination topics
-    # in `publishes:` so the topology reads naturally. The
-    # runtime still treats `review.wave.complete` as a
-    # supervisor-only emit; agent emits are rejected at the
-    # origin guard. F-019 / R-19 captures the follow-up to
-    # split the production rule from the whitelist shape.
+      - review.complete
+    # 2026-07-04-001 plan U24 / F-019 fix: `review.wave.complete` is now
+    # supervisor-only via `event_origin::SUPERVISOR_COORDINATION_TOPICS`;
+    # agent emits of it are rejected at the origin guard. The
+    # aggregator hat emits `review.complete` (which IS agent-allowed)
+    # and the runtime / supervisor bridge separately injects
+    # `review.wave.complete` for fan-in accounting.
     terminal_events:
-      - review.wave.complete
+      - review.complete
 
   fix-task-planner:
     name: "Fix Task Planner"
@@ -1075,13 +1167,13 @@ hats:
         include in any cross-iteration stable key.
       - `RALPH_HATS_SOURCE` — preset label.
     triggers:
-      - review.wave.complete
+      - review.complete
     publishes:
       - fix.unit.ready
     event_filter:
       enabled: true
       events:
-      - review.wave.complete
+      - review.complete
     exempt_topics:
       - fix.unit.ready
     terminal_events:
@@ -1105,6 +1197,25 @@ hats:
     terminal_events:
       - fix.unit.done
       - fix.unit.failed
+    instructions: |
+      ## FIX WORKER MODE — One fix per activation (TDD)
+
+      Mirror of `worker` MODE, scoped to a fix-round unit.
+      You are a **slot-scoped fix implementer**. The fix plan
+      and dimension findings are in your `fix.unit.ready`
+      payload.
+
+      ### OPAC 四阶段 (本 hat 视角)
+
+      - **Observe**: 读 `fix.unit.ready` payload。
+      - **Precheck**: `ralph emit fix.unit.done --policy-check`。
+      - **Apply**: TDD——最小修复让单测绿，不扩散范围。
+      - **Confirm**: `ralph events --events-source hat-channel`。
+
+      ### Constraints
+
+      - 不能调 wave emit（U23）。
+      - 一条业务事件即停。
 
   fix-integrator:
     name: "Fix Integrator"
@@ -1121,6 +1232,23 @@ hats:
       - fix.done
     terminal_events:
       - fix.done
+    instructions: |
+      ## FIX INTEGRATOR MODE — Merge fix wave
+
+      Mirror of `exec-integrator` for fix waves. Activated
+      when supervisor emits `fix.wave.complete`.
+
+      ### OPAC 四阶段 (本 hat 视角)
+
+      - **Observe**: `ralph inspect loop` supervisor block。
+      - **Precheck**: `ralph tools task list -s open`。
+      - **Apply**: merge + 跑全测；通过则 emit `fix.done`。
+      - **Confirm**: `ralph events --events-source main`。
+
+      ### Constraints
+
+      - 不能调 wave emit。
+      - 协调 topic 由 supervisor 注入。
 
   alignment:
     name: "Alignment"
@@ -1137,6 +1265,24 @@ hats:
       - plan.complete
     terminal_events:
       - plan.complete
+    instructions: |
+      ## ALIGNMENT MODE — Final alignment pass
+
+      Activated by `fix.done`. Do a final alignment pass:
+      re-read the spec, confirm all acceptance criteria met,
+      then emit `plan.complete`.
+
+      ### OPAC 四阶段 (本 hat 视角)
+
+      - **Observe**: `ralph inspect loop` + 读 `fix.done` payload。
+      - **Precheck**: `ralph emit plan.complete --policy-check`。
+      - **Apply**: emit `plan.complete`。
+      - **Confirm**: `ralph events --events-source main`。
+
+      ### Constraints
+
+      - 一条业务事件即停（isolated 单事件预算）。
+      - 不能调 wave emit。
 
   shipper:
     name: "Shipper"
@@ -1192,6 +1338,24 @@ hats:
       - plan.complete
     terminal_events:
       - LOOP_COMPLETE
+    instructions: |
+      ## REPORTER MODE — Manager-facing report + terminate
+
+      Activated by `plan.complete`. Produce a manager-facing
+      summary and emit `LOOP_COMPLETE`.
+
+      ### OPAC 四阶段 (本 hat 视角)
+
+      - **Observe**: `ralph tools task list -s done` + 读
+        `plan.complete` payload。
+      - **Precheck**: `ralph emit LOOP_COMPLETE --policy-check`
+        （LOOP_COMPLETE 是 terminal，需含合规摘要）。
+      - **Apply**: 写报告，emit `LOOP_COMPLETE`。
+      - **Confirm**: `ralph events --events-source main`。
+
+      ### Constraints
+
+      - 一条业务事件即停。
 
   fixer:
     name: "Fixer"
@@ -1211,6 +1375,27 @@ hats:
     exempt_topics:
       - fix.applied
       - fix.exhausted
+    instructions: |
+      ## FIXER MODE — Hard fallback recovery
+
+      Activated by `work.failed`. Try a targeted fix; emit
+      `fix.applied` on success or `fix.exhausted` when you
+      give up. Do **not** chain: one activation = one
+      outcome event.
+
+      ### OPAC 四阶段 (本 hat 视角)
+
+      - **Observe**: `ralph tools task list` + 读 `work.failed`
+        payload（含失败原因 + task_key）。
+      - **Precheck**: `ralph emit fix.applied --policy-check` 或
+        `fix.exhausted`。
+      - **Apply**: 尝试恢复；emit 终态。
+      - **Confirm**: `ralph events --events-source hat-channel`。
+
+      ### Constraints
+
+      - 一条业务事件即停（isolated 单事件预算）。
+      - 不能调 wave emit。
 
   progress-steward:
     name: "Progress Steward"
@@ -1233,6 +1418,28 @@ hats:
       - review.start
       - task.resume
       - plan.blocked
+    instructions: |
+      ## PROGRESS STEWARD MODE — Loop-level stall recovery
+
+      Activated by `loop.stalled`. Recover the stalled
+      sequence by emitting `work.ready` (mint fresh unit),
+      `review.start` (re-dispatch review), `task.resume`
+      (U16: HandoffIndex consumer triggers routing
+      validation), or `plan.blocked` (escalate to operator).
+
+      ### OPAC 四阶段 (本 hat 视角)
+
+      - **Observe**: `ralph inspect loop` + `ralph tools task list`。
+      - **Precheck**: `ralph emit <chosen topic> --policy-check`。
+      - **Apply**: emit 单条 rescue 事件。
+      - **Confirm**: `ralph events --events-source main`。
+
+      ### Constraints
+
+      - 一条业务事件即停。
+      - `task.resume` 必须引用已知 consumer 的 `triggers`
+        （U16 routing 校验）。
+      - 不能调 wave emit。
 
 # Default publishes fallback so cli/agents can emit any of
 # the work.ready family without an explicit `publishes`.
