@@ -60,6 +60,7 @@ serde_yaml.workspace = true
 futures.workspace = true
 regex.workspace = true
 keyring.workspace = true
+sha2.workspace = true
 
 # For raw mode handling in PTY mode / terminal restore
 crossterm.workspace = true

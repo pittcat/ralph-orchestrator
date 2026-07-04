@@ -97,6 +97,8 @@ tasks:
 >
 > **OPAC Confirm (close 后)**: agent context 下 `task close` 成功后若 hat-channel 无 completion topic，CLI 会 stderr 输出 `close_without_completion_emit` warning，含 `expected_topics` + `next_step`——**忽略它等于进入 stall 30s 等待 rescue**。详见 `ralph-tools-opac` Confirm 段。
 
+> **U7 两步式 task verify gate（agent 强制）**: 当 preset 启用 `tasks.require_verify_for_cli_mutate: true`（ce-executor-serial 默认开），agent 调 `task add` / `task ensure` **必须**先 `ralph tools task verify <verb> <args…>`（Allow 后 runtime 自动写 ticket）→ 再用**完全相同**参数调 `ralph tools task <verb>`。漂移（参数变了 / 跨 hat / 没先 verify）会被 `task_verify_gate denied` 拒收，**不写盘**。人类 CLI 永远 bypass；`tasks.allow_unsafe_task_mutate: true` 是 escape hatch（recovery 专用）。详见 `ralph-tools-opac` "Apply 阶段两步式 task verify gate" 段。
+
 ### First thing every iteration
 ```bash
 ralph tools task ready    # What's open? Pick one. Don't create duplicates.

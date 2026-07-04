@@ -206,7 +206,8 @@ impl HatCommandPolicy {
     /// 5. **Otherwise** → `Allow`.
     pub fn check_task(
         ctx: &OperationContext,
-        config: &RalphConfig,
+        coordinator_hats: &[String],
+        coordinator_err: Option<&crate::task_cli::CoordinatorHatsError>,
         verb: &str,
     ) -> PolicyDecision {
         let Some(cmd) = TaskCommand::parse(verb) else {
@@ -236,24 +237,33 @@ impl HatCommandPolicy {
 
         // Rule 4: coordinator-only verbs hard-deny non-coordinators.
         if TaskCommand::COORDINATOR_ONLY.contains(&cmd) {
-            let is_coordinator = config
-                .tasks
-                .coordinator_hats
-                .iter()
-                .any(|h| h == caller_hat);
+            let is_coordinator = coordinator_hats.iter().any(|h| h == caller_hat);
             if !is_coordinator {
-                let allow_hint = if config.tasks.coordinator_hats.is_empty() {
-                    "tasks.coordinator_hats is empty in ralph.yml; add the hat id (e.g. `coordinator`) \
-                     to tasks.coordinator_hats before dispatching work."
-                } else {
-                    "ask the coordinator hat to invoke `ralph tools task add/ensure` on your behalf."
+                // Surface the typed `CoordinatorHatsError` (if any) so
+                // the operator sees the *shape* of the failure
+                // (missing ralph.yml / missing tasks: / missing key /
+                // empty value) instead of a generic "is empty" line.
+                let allow_hint = match coordinator_err {
+                    Some(err) => err.to_string(),
+                    None => {
+                        if coordinator_hats.is_empty() {
+                            "tasks.coordinator_hats is empty in ralph.yml; add the hat id \
+                             (e.g. `coordinator`) to tasks.coordinator_hats before dispatching \
+                             work."
+                                .to_string()
+                        } else {
+                            "ask the coordinator hat to invoke `ralph tools task add/ensure` on \
+                             your behalf."
+                                .to_string()
+                        }
+                    }
                 };
                 return PolicyDecision::Deny {
                     reason: "non_coordinator_owner",
                     hint: format!(
                         "task {verb}: hat '{caller_hat}' is not in tasks.coordinator_hats {:?}; \
                          only coordinator hats may create tasks. {allow_hint}",
-                        config.tasks.coordinator_hats
+                        coordinator_hats
                     ),
                 };
             }
@@ -364,30 +374,43 @@ hats:
         serde_yaml::from_str(yaml).unwrap()
     }
 
+    fn isolated_coordinator_slice() -> &'static [String] {
+        // Mirrors the previous `isolated_config_with_coordinator`
+        // builder: a single coordinator hat named "coordinator".
+        // Returned as a static slice so check_task's `&[String]`
+        // argument can borrow from it without lifetime gymnastics.
+        // Construct the slice on the stack to avoid `static` mutability.
+        // This is a 1-element helper so the allocation cost is
+        // negligible across the 7 existing tests.
+        // We deliberately leak the box to obtain `'static` lifetime
+        // for the tests below.
+        Box::leak(Box::new(vec!["coordinator".to_string()]))
+    }
+
     #[test]
     fn unknown_verb_is_allow() {
-        let cfg = isolated_config_with_coordinator();
-        let decision = HatCommandPolicy::check_task(&empty_ctx(), &cfg, "future-verb");
+        let hats = isolated_coordinator_slice();
+        let decision = HatCommandPolicy::check_task(&empty_ctx(), hats, None, "future-verb");
         assert!(decision.is_allow());
     }
 
     #[test]
     fn human_cli_task_add_is_allowed() {
-        let cfg = isolated_config_with_coordinator();
-        let decision = HatCommandPolicy::check_task(&empty_ctx(), &cfg, "add");
+        let hats = isolated_coordinator_slice();
+        let decision = HatCommandPolicy::check_task(&empty_ctx(), hats, None, "add");
         assert!(decision.is_allow(), "human CLI must not be locked out: {decision:?}");
     }
 
     #[test]
     fn agent_without_hat_is_denied() {
-        let cfg = isolated_config_with_coordinator();
+        let hats = isolated_coordinator_slice();
         let ctx = OperationContext {
             workspace_root: PathBuf::from("/tmp"),
             current_loop_id: Some("loop-1".to_string()),
             current_hat_id: None,
             is_agent_context: true,
         };
-        let decision = HatCommandPolicy::check_task(&ctx, &cfg, "add");
+        let decision = HatCommandPolicy::check_task(&ctx, hats, None, "add");
         let deny = match decision {
             PolicyDecision::Deny { reason, .. } => reason,
             other => panic!("expected deny, got {other:?}"),
@@ -397,15 +420,15 @@ hats:
 
     #[test]
     fn coordinator_hat_can_add() {
-        let cfg = isolated_config_with_coordinator();
-        let decision = HatCommandPolicy::check_task(&agent_ctx("coordinator"), &cfg, "add");
+        let hats = isolated_coordinator_slice();
+        let decision = HatCommandPolicy::check_task(&agent_ctx("coordinator"), hats, None, "add");
         assert!(decision.is_allow(), "coordinator must be allowed: {decision:?}");
     }
 
     #[test]
     fn worker_hat_add_is_denied() {
-        let cfg = isolated_config_with_coordinator();
-        let decision = HatCommandPolicy::check_task(&agent_ctx("worker"), &cfg, "add");
+        let hats = isolated_coordinator_slice();
+        let decision = HatCommandPolicy::check_task(&agent_ctx("worker"), hats, None, "add");
         let deny = match decision {
             PolicyDecision::Deny { reason, hint } => (reason, hint),
             other => panic!("expected deny, got {other:?}"),
@@ -417,15 +440,15 @@ hats:
 
     #[test]
     fn worker_hat_ensure_is_denied() {
-        let cfg = isolated_config_with_coordinator();
-        let decision = HatCommandPolicy::check_task(&agent_ctx("worker"), &cfg, "ensure");
+        let hats = isolated_coordinator_slice();
+        let decision = HatCommandPolicy::check_task(&agent_ctx("worker"), hats, None, "ensure");
         assert!(decision.is_deny());
     }
 
     #[test]
     fn worker_hat_close_is_allowed_for_owner() {
-        let cfg = isolated_config_with_coordinator();
-        let decision = HatCommandPolicy::check_task(&agent_ctx("worker"), &cfg, "close");
+        let hats = isolated_coordinator_slice();
+        let decision = HatCommandPolicy::check_task(&agent_ctx("worker"), hats, None, "close");
         assert!(
             decision.is_allow(),
             "lifecycle verbs pass the role gate; ownership is enforced by authorize_lifecycle: {decision:?}"
@@ -434,18 +457,7 @@ hats:
 
     #[test]
     fn empty_coordinator_hats_fail_closed() {
-        let yaml = r#"
-event_loop:
-  execution_mode: isolated
-tasks:
-  enabled: true
-  coordinator_hats: []
-hats:
-  ghost:
-    name: "Ghost"
-"#;
-        let cfg: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-        let decision = HatCommandPolicy::check_task(&agent_ctx("ghost"), &cfg, "add");
+        let decision = HatCommandPolicy::check_task(&agent_ctx("ghost"), &[], None, "add");
         let deny = match decision {
             PolicyDecision::Deny { reason, hint } => (reason, hint),
             other => panic!("expected deny, got {other:?}"),
@@ -572,5 +584,68 @@ hats:
             hint.contains("tasks:"),
             "MissingCoordinatorHatsKey hint should reference tasks: block: {hint}"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // U7 (2026-07-04-003 plan): `check_task` with external
+    // `coordinator_hats` slice + `CoordinatorHatsError` hint.
+    //
+    // These tests intentionally do NOT read ralph.yml from disk.
+    // The slice + typed error are passed in directly so the policy
+    // surface is testable without an actual workspace.
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn agent_worker_not_in_slice_denies_and_lists_slice() {
+        let hats: &[String] = &["coordinator".to_string()];
+        let decision = HatCommandPolicy::check_task(&agent_ctx("executor"), hats, None, "add");
+        let deny = match decision {
+            PolicyDecision::Deny { reason, hint } => (reason, hint),
+            other => panic!("expected Deny, got {other:?}"),
+        };
+        assert_eq!(deny.0, "non_coordinator_owner");
+        assert!(
+            deny.1.contains("coordinator"),
+            "hint should list the allowed slice: {hint}",
+            hint = deny.1
+        );
+        assert!(
+            !deny.1.contains("empty in ralph.yml"),
+            "hint should NOT contain the misleading 'empty in ralph.yml' line: {hint}",
+            hint = deny.1
+        );
+    }
+
+    #[test]
+    fn agent_coordinator_in_slice_allowed() {
+        let hats: &[String] = &["coordinator".to_string()];
+        let decision = HatCommandPolicy::check_task(&agent_ctx("coordinator"), hats, None, "add");
+        assert!(decision.is_allow(), "coordinator must be allowed: {decision:?}");
+    }
+
+    #[test]
+    fn empty_slice_denies_with_typed_error_hint() {
+        let err = crate::task_cli::CoordinatorHatsError::MissingRalphYml;
+        let decision =
+            HatCommandPolicy::check_task(&agent_ctx("executor"), &[], Some(&err), "add");
+        let deny = match decision {
+            PolicyDecision::Deny { reason, hint } => (reason, hint),
+            other => panic!("expected Deny, got {other:?}"),
+        };
+        assert_eq!(deny.0, "non_coordinator_owner");
+        // The typed error should be surfaced verbatim instead of
+        // the generic "empty in ralph.yml" line.
+        assert!(
+            deny.1.contains("no ralph.yml in workspace"),
+            "hint should surface the typed CoordinatorHatsError, got: {hint}",
+            hint = deny.1
+        );
+    }
+
+    #[test]
+    fn human_cli_always_allowed_even_with_typed_error() {
+        let err = crate::task_cli::CoordinatorHatsError::MissingRalphYml;
+        let decision = HatCommandPolicy::check_task(&empty_ctx(), &[], Some(&err), "add");
+        assert!(decision.is_allow(), "human CLI must always be allowed: {decision:?}");
     }
 }

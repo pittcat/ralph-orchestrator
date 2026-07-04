@@ -39,6 +39,7 @@ mod rpc_stdin;
 mod skill_cli;
 mod sop_runner;
 mod task_cli;
+mod task_verify_gate;
 #[cfg(test)]
 mod test_support;
 mod tools;

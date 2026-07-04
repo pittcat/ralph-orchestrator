@@ -1009,6 +1009,61 @@ mod tests {
     // 2026-06-17-002 U4: ce-executor-serial preset tests
     // -------------------------------------------------------------------------
 
+    /// U7 (2026-07-04-003 plan): `ce-executor-serial` must narrow
+    /// its `coordinator_hats` allowlist to exactly
+    /// `[coordinator, progress-steward]` and must enable the
+    /// two-step verify gate.
+    ///
+    /// This is the closed-list assertion that locks the
+    /// 2026-07-04-003 narrowing; the wider 7-hat allowlist
+    /// previously shipped here made `tasks.coordinator_hats`
+    /// so permissive that worker hats could self-create tasks
+    /// without going through the coordinator. Worker hats
+    /// (executor, validator, fixer, shipper, reporter) must
+    /// NOT appear in this list.
+    #[test]
+    fn test_ce_executor_serial_coordinator_hats_narrowed_to_two() {
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
+        let hats = yaml
+            .get("tasks")
+            .and_then(|t| t.get("coordinator_hats"))
+            .and_then(|c| c.as_sequence())
+            .expect("tasks.coordinator_hats must be a sequence");
+        let names: Vec<&str> = hats.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["coordinator", "progress-steward"],
+            "ce-executor-serial coordinator_hats must be narrowed to exactly 2 hats; \
+             wider allowlists re-introduce the worker-self-create drift window"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_serial_has_two_step_verify_gate() {
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
+        let require = yaml
+            .get("tasks")
+            .and_then(|t| t.get("require_verify_for_cli_mutate"))
+            .and_then(|v| v.as_bool())
+            .expect("tasks.require_verify_for_cli_mutate must be present");
+        assert!(require, "ce-executor-serial must require verify for add/ensure");
+        let unsafe_hatch = yaml
+            .get("tasks")
+            .and_then(|t| t.get("allow_unsafe_task_mutate"))
+            .and_then(|v| v.as_bool())
+            .expect("tasks.allow_unsafe_task_mutate must be present");
+        assert!(
+            !unsafe_hatch,
+            "ce-executor-serial must keep the unsafe escape hatch OFF by default"
+        );
+    }
+
     /// U4: ce-executor-serial must use `report.done` as its sole completion
     /// gate, mirroring ce-executor-serial. Without this, the loop would
     /// never reach `LOOP_COMPLETE` and stall at the missing-event gate.

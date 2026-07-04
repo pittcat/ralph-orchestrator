@@ -237,6 +237,8 @@ mod tests {
             tasks: crate::config::TasksConfig {
                 enabled: true,
                 coordinator_hats: vec!["coordinator".to_string()],
+                require_verify_for_cli_mutate: false,
+                allow_unsafe_task_mutate: false,
             },
             ..RalphConfig::default()
         }
@@ -337,6 +339,8 @@ mod tests {
             tasks: crate::config::TasksConfig {
                 enabled: true,
                 coordinator_hats: vec!["coordinator".to_string()],
+                require_verify_for_cli_mutate: false,
+                allow_unsafe_task_mutate: false,
             },
             ..RalphConfig::default()
         };
@@ -363,6 +367,8 @@ mod tests {
             tasks: crate::config::TasksConfig {
                 enabled: true,
                 coordinator_hats: vec![],
+                require_verify_for_cli_mutate: false,
+                allow_unsafe_task_mutate: false,
             },
             ..RalphConfig::default()
         };
@@ -394,6 +400,8 @@ mod tests {
             tasks: crate::config::TasksConfig {
                 enabled: true,
                 coordinator_hats: vec!["executor".to_string()],
+                require_verify_for_cli_mutate: false,
+                allow_unsafe_task_mutate: false,
             },
             ..RalphConfig::default()
         };
@@ -425,6 +433,8 @@ mod tests {
             tasks: crate::config::TasksConfig {
                 enabled: true,
                 coordinator_hats: vec!["coordinator".to_string()],
+                require_verify_for_cli_mutate: false,
+                allow_unsafe_task_mutate: false,
             },
             ..RalphConfig::default()
         };
@@ -475,6 +485,8 @@ mod tests {
             tasks: crate::config::TasksConfig {
                 enabled: true,
                 coordinator_hats: vec!["progress-steward".to_string()],
+                require_verify_for_cli_mutate: false,
+                allow_unsafe_task_mutate: false,
             },
             ..RalphConfig::default()
         };

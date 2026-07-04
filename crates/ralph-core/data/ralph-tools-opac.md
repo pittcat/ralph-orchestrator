@@ -69,6 +69,21 @@ ralph inspect loop --format json | jq 'has("supervisor")'
 - **wave emit**：`ralph wave verify --payloads-stdin`（零写盘 batch precheck）。**worker hat 不可 wave emit**（已在 `HatCommandPolicy` / dispatcher hat 限定）
 - **shell 残留 `RALPH_CURRENT_HAT`**：operator 在 agent shell 残留变量是常见误用源；如发现 context 错乱，先 `unset RALPH_CURRENT_HAT`
 
+## Apply 阶段两步式 task verify gate（U7 of 2026-07-04-003）
+
+> **强制**：当 preset 启用了 `tasks.require_verify_for_cli_mutate: true`（ce-executor-serial 默认开），agent 调用 `task add` / `task ensure` 必须先走两步：
+
+1. **P — Precheck record**：`ralph tools task verify <verb> [args…]` 通过后（Allow），runtime 在 `<workspace>/.ralph/agent/.ralph-task-verify-ticket` 写一个 one-shot ticket（SHA-256 fingerprint of `verb + canonical_payload + loop_id + hat_id`）
+2. **A — Apply consume**：紧接着用**完全相同**的参数调 `ralph tools task <verb>` → gate 读 ticket、匹配 fingerprint、consume ticket、放行写盘
+
+**漂移触发拒绝**（gate 必拒）：
+
+- 没先 verify → `task_verify_gate denied '<verb>': no verify ticket at ... — run ralph tools task verify <verb> <args...> first`
+- verify 后改了参数再 add → `task_verify_gate denied '<verb>': ticket fingerprint mismatch (on-disk=... pending=...)`
+- 跨 hat 重放 ticket → `task_verify_gate denied '<verb>': ticket (loop, hat) = (...) but caller is (...)`
+
+**人类 CLI 永远 bypass**（`is_agent_context == false`）；agent 在 `tasks.allow_unsafe_task_mutate: true` 时也 bypass（仅用于 recovery 紧急情况）。
+
 ## Apply 阶段红线
 
 - 跨 loop/跨 hat 调用 `task add` / `task ensure` → **Deny**（agent context；人类 bypass + warning）

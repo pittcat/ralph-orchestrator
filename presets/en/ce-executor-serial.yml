@@ -233,17 +233,20 @@ topic_format_whitelist:
 
 tasks:
   enabled: true
+  # U7 (2026-07-04-003 plan): narrow the coordinator allowlist to
+  # exactly two hats — `coordinator` (the planning hat) and
+  # `progress-steward` (the loop-level fallback that publishes
+  # `task.resume` to nudge a stuck hat). Executor/validator/
+  # fixer/shipper/reporter are *workers* and must NOT bypass
+  # the role gate to create or ensure cross-hat tasks. The
+  # two-step verify gate (`require_verify_for_cli_mutate: true`)
+  # is also enabled so all `add` / `ensure` mutations from
+  # agents must go through `task verify <verb>` first.
   coordinator_hats:
     - coordinator
-    - executor
-    - validator
-    - fixer
-    - shipper
-    - reporter
-    # progress-steward is a loop-level fallback hat that publishes
-    # `task.resume` to nudge a stuck hat. It is therefore a
-    # coordinator-style hat for the `tasks` workflow contract.
     - progress-steward
+  require_verify_for_cli_mutate: true
+  allow_unsafe_task_mutate: false
 
 event_loop:
   execution_mode: isolated
