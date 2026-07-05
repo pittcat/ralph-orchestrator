@@ -6333,8 +6333,36 @@ impl EventLoop {
         // the runner at loop start and are not part of the state projector's
         // ledgers.
         snap.loop_start_sha = self.state.loop_start_sha.clone();
-        snap.plan_baseline_sha = self.state.plan_baseline_sha.clone();
+        // B-layer reconciliation (2026-07-05 plan): prefer the SHA on disk
+        // (`.ralph/agent/plan-baseline-{key}.sha`) over the in-memory
+        // LoopState copy, which is stale when plan-reviewer's
+        // §Step 2.5b reconciliation rewrites the file mid-run. Falls
+        // back to LoopState on missing/unreadable files.
+        snap.plan_baseline_sha = self.resolve_reconciled_plan_baseline_sha();
         format!("{}{prompt}", snap.to_prompt_block())
+    }
+
+    /// Read the latest plan baseline SHA from disk on every hat prompt.
+    /// The reader is intentionally read-only and ignores errors: the
+    /// caller keeps the LoopState fallback when disk is unavailable,
+    /// the derivation key cannot be computed, or `loop_context` was
+    /// not provided (e.g. unit tests using `EventLoop::new` directly).
+    fn resolve_reconciled_plan_baseline_sha(&self) -> Option<String> {
+        use crate::plan_baseline::{derive_baseline_key, read_plan_baseline};
+        if let Some(ctx) = self.loop_context.as_ref() {
+            let plan_key = derive_baseline_key(
+                &self.config.event_loop.prompt_file,
+                None,
+                self.config.event_loop.prompt.as_deref(),
+                Some(ctx.workspace()),
+            );
+            if let Some(key) = plan_key.as_deref() {
+                if let Some(sha) = read_plan_baseline(ctx.workspace(), Some(key)) {
+                    return Some(sha);
+                }
+            }
+        }
+        self.state.plan_baseline_sha.clone()
     }
 
     /// R3 (2026-06-14-003 plan): invoke the ephemeral isolation engine
