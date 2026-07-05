@@ -6081,6 +6081,13 @@ mod tests {
 
     #[test]
     fn p1_3_fix_applied_prunes_work_ready_bucket() {
+        // U5 of plan 2026-07-05-005 (fix-plan §R8): the dedup
+        // counter is observation, not dedup state. The bucket
+        // classification moves to `pruned_work_ready_buckets`,
+        // but the dedup entries (and their counts) survive the
+        // prune. Update the assertion accordingly: keys under
+        // the pruned bucket stay in `work_ready_seen_keys`, and
+        // keys outside it are untouched.
         let mut state = PolicyRuntimeState::default();
         state.work_ready_seen_keys.insert("p1::step-01::t1".into(), 1);
         state.work_ready_seen_keys.insert("p1::step-01::t2".into(), 1);
@@ -6088,10 +6095,15 @@ mod tests {
 
         state.prune_work_ready_bucket("p1", "step-01");
 
-        assert!(!state.work_ready_seen_keys.contains_key("p1::step-01::t1"));
-        assert!(!state.work_ready_seen_keys.contains_key("p1::step-01::t2"));
-        // Different step preserved
-        assert!(state.work_ready_seen_keys.contains_key("p1::step-02::t1"));
+        // Pruned keys survive with their counts intact.
+        assert_eq!(state.work_ready_seen_keys.get("p1::step-01::t1").copied(), Some(1));
+        assert_eq!(state.work_ready_seen_keys.get("p1::step-01::t2").copied(), Some(1));
+        // Different step preserved.
+        assert_eq!(state.work_ready_seen_keys.get("p1::step-02::t1").copied(), Some(1));
+        // Bucket side-table records the prune.
+        assert!(state.pruned_work_ready_buckets.contains("p1::step-01::t1"));
+        assert!(state.pruned_work_ready_buckets.contains("p1::step-01::t2"));
+        assert!(!state.pruned_work_ready_buckets.contains("p1::step-02::t1"));
     }
 
     // 2026-07-02-004 U7: precheck `<X>.proposed` dedup (R6).
@@ -6696,33 +6708,34 @@ hats:
         for (_, code) in &codes {
             unique.insert(*code);
         }
-        // U4 of plan 2026-07-05-005: StallBypass and SameStep
-        // now each carry their own literal code, so all four
-        // hints must produce distinct reason codes. Merging
-        // any two would re-introduce the silent-success
-        // misclassification or hide the stall-bypass lane —
-        // fail fast.
+        // U3 of plan 2026-07-05-005 (fix-plan §R3 / KTD-3): StallBypass
+        // and SameStep share the legacy `duplicate_work_done`
+        // reason_code per the stable external contract; the
+        // disambiguation hint string travels on
+        // `RecoveryDiagnosisEnvelope.hint`. The three "named"
+        // lanes (StallBypass+SameStep collapsed, plus
+        // ReviewDimensionDuplicate and ReviewDimensionsComplete)
+        // must produce **3 distinct** codes. Merging any of
+        // them would re-introduce the silent-success
+        // misclassification — fail fast.
         assert_eq!(
             unique.len(),
-            4,
-            "expected 4 distinct reason codes (StallBypass / SameStep / \
-             ReviewDimensionDuplicate / ReviewDimensionsComplete); got {codes:?}"
+            3,
+            "expected 3 distinct reason codes (StallBypass+SameStep collapsed → \
+             duplicate_work_done, plus ReviewDimensionDuplicate and ReviewDimensionsComplete); \
+             got {codes:?}"
         );
         assert!(
-            unique.contains("duplicate_work_done_same_step"),
-            "DuplicateSameStep must surface its own code under U4"
-        );
-        assert!(
-            unique.contains("duplicate_work_done_stall_bypass"),
-            "DuplicateStallBypass must surface its own code under U4"
+            unique.contains("duplicate_work_done"),
+            "DuplicateSameStep+DuplicateStallBypass must collapse to duplicate_work_done under U3"
         );
         assert!(
             unique.contains("duplicate_review_dimension_ready"),
-            "review.dimension.ready lane must stay distinct"
+            "ReviewDimensionDuplicate keeps its distinct code under U3"
         );
         assert!(
             unique.contains("duplicate_review_dimensions_complete"),
-            "review.dimensions.complete lane must stay distinct (U6 invariant)"
+            "ReviewDimensionsComplete keeps its distinct code under U3"
         );
     }
 }
