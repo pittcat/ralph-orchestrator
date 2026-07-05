@@ -1,0 +1,74 @@
+cli:
+  backend: claude
+  autonomous_idle_timeout_secs: 900
+
+event_loop:
+  max_runtime_seconds: 28800 # 新增
+  completion_promise: LOOP_COMPLETE
+  max_iterations: 500
+  prompt_file: PROMPT.md
+
+
+tasks:
+  enabled: true
+  # 必须显式声明 coordinator_hats：独立的 `ralph tools task add` 子命令
+  # 通过 load_coordinator_hats 直接读本文件的 tasks.coordinator_hats 键，
+  # 不做 preset 合并——键缺失/注释掉都会被 CLI 视为空 [] → 连 coordinator
+  # 自己建任务都被拒（报错 [non_coordinator_owner] ... coordinator_hats []）。
+  # 值对齐 ce-executor-serial preset 默认 [coordinator, progress-steward]：
+  # 去掉旧漂移 executor（worker 不该有建任务权限），保留 progress-steward
+  # （loop 级 fallback，卡住时发 task.resume 唤醒 hat）。
+  coordinator_hats:
+    - coordinator
+    - progress-steward
+  # 两步校验闸门：true 时 agent 建任务须先 `task verify add` 再 `task add`
+  # （防 agent 任务漂移）。手动 CLI 调用豁免，不影响 operator 手动 add。
+  require_verify_for_cli_mutate: true
+  # 紧急逃生阀：true 才让 agent 跳过上面的校验，仅用于预检本身损坏的救场。
+  # 正常运行永远 false。
+  allow_unsafe_task_mutate: false
+
+
+telemetry:
+  runtime_diagnosis:
+    enabled: true
+    write_artifacts: true
+    prompt_injection_enabled: true     # 让 agent 在 prompt 看到 "## Runtime Diagnosis Alert"
+    max_repeated_recoveries: 2         # 从默认 3 降到 2：第 2 次同 retry_key 直接 escalation
+    max_prompt_findings: 8             # 从默认 5 提到 8：更早暴露问题
+    artifact_retention: 20             # 从默认 10 提到 20：留更多回溯
+    max_prompt_chars: 4096             # 从默认 2000 提到 4096：容下 8 条较长 finding 不被截断
+    retry_window_iterations: 8         # 从默认 5 提到 8：拉长短期记忆到 4 小时（配合长 iter 时间）
+    drift:                             # U5 烟雾报警器：三个传感器阈值（多 hat preset 必配）
+      field_completeness_threshold: 0.85   # 从默认 0.9 降到 0.85：兼容"先占位后补全"的两阶段发事件
+      coord_join_mode: serial              # ce-executor-serial 4-dim 串行链,默认 parallel 的 60% 阈值会误报;operator 接管 telemetry 后此模式生效
+      coord_join_rate_threshold: 0.6       # 默认 0.6：多 hat 协作上下衔接率底线
+      emit_cadence_sigma: 2.0              # 默认 2.0：节拍器灵敏度 2σ（工业界标准）
+
+
+
+
+core:
+  guardrails:
+    - "Fresh context each iteration — re-read scratchpad and plan."
+    - "Commit after each completed step. Never commit Ralph files."
+    - "Verification is mandatory — `just ci` must pass (fmt, clippy, tests). See AGENTS.md."
+    - "Acceptance tests must be real — no placeholder/pending/stub acceptance scenarios when emitting LOOP_COMPLETE."
+    - "BDD acceptance checks must verify runtime behavior; comment-only or `Ok(())`-only evaluator passes are invalid."
+    - "Confidence protocol: >80 proceed; 50-80 proceed + note in scratchpad; <50 choose safe default + note."
+    - "Preserve primary sources — capture referenced code snippets with file:line attribution in scratchpad."
+    - "Run targeted tests per crate via `cargo nextest run -p <crate>` during subtasks; full `./scripts/run-tests.sh` (nextest + doctest) only at final step. 若全量基线出现竞态/时序 flake（如 ralph-cli loop_runner Mutex/timeout 错误），先用 `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` 强制单线程 cargo test 兜底；serial 仍失败才是真失败。详见 CLAUDE.md / AGENTS.md「Build & Test」段 HARD RULE 1+2、「并行 vs 串行分级表」与「开发基线 vs CI 基线」段。"
+
+
+
+backpressure:
+  gates:
+    - name: fmt
+      command: cargo fmt --all -- --check
+      on_fail: "Formatting failed. Run `cargo fmt --all` and retry."
+    - name: clippy
+      command: cargo clippy --all-targets --all-features -- -D warnings
+      on_fail: "Clippy lint failures. Fix all warnings before proceeding."
+    - name: test
+      command: ./scripts/run-tests.sh
+      on_fail: "Tests failed. 先判断是否为竞态/时序 flake（特征：ralph-cli loop_runner 相关测试
