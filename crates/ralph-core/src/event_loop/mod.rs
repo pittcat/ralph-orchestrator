@@ -1818,14 +1818,17 @@ impl EventLoop {
         // a hat subscribes to (alias of `subscribes_to`); if the
         // topic is missing the hat's prompt will never see the
         // upstream event, so a resume is also wasted.
+        //
+        // U8 of plan 2026-07-05-005: the inline `triggers.iter().any(...)`
+        // loop is replaced with a call to the shared
+        // `check_hat_triggers` helper so all three handoff paths
+        // (`next_hat`, `process_output` handoff escalation, this
+        // `validate_resume_routing`) consult the same predicate.
         if let Some(cfg) = self.registry.get_config(&HatId::from(consumer)) {
-            let triggers = &cfg.triggers;
-            let has_trigger = triggers.iter().any(|t| {
-                let pattern = ralph_proto::Topic::new(t);
-                let topic_obj = ralph_proto::Topic::new(topic);
-                pattern.matches(&topic_obj)
-            });
-            if !has_trigger {
+            if let Err(_err) = crate::workflow_contract::handoff_index::check_hat_triggers(
+                &cfg.triggers,
+                topic,
+            ) {
                 return EventLoopResumeDecision::Block(format!(
                     "U16: resume target hat `{}` does not declare `{}` in its `triggers` list; resume will not be picked up",
                     consumer,

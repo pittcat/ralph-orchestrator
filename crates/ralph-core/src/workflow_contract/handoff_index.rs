@@ -241,6 +241,64 @@ impl HandoffIndex {
     }
 }
 
+/// U8 of plan 2026-07-05-005 (R5): shared hat-triggers checker
+/// for the three handoff paths (`next_hat`, `process_output`
+/// handoff escalation, `validate_resume_routing`). The
+/// underlying logic — "does the hat's `triggers` list match
+/// the topic?" — was previously inlined only at
+/// `validate_resume_routing` (U16). Pulling it out as a
+/// stand-alone helper means a hat that has the topic in its
+/// `triggers` list is the single source of truth across all
+/// three call sites. No new validation is added; the helper
+/// just unifies the existing check.
+pub fn check_hat_triggers(
+    hat_triggers: &[String],
+    topic: &str,
+) -> Result<(), HandoffRoutingError> {
+    let topic_obj = ralph_proto::Topic::new(topic);
+    let matches = hat_triggers.iter().any(|t| {
+        let pattern = ralph_proto::Topic::new(t);
+        pattern.matches(&topic_obj)
+    });
+    if matches {
+        Ok(())
+    } else {
+        Err(HandoffRoutingError::HatDoesNotConsume {
+            hat_triggers: hat_triggers.to_vec(),
+            topic: topic.to_string(),
+        })
+    }
+}
+
+/// U8 of plan 2026-07-05-005: error variants returned by
+/// [`check_hat_triggers`]. The variant mirrors the existing
+/// `validate_resume_routing` block-message style so callers can
+/// surface the same diagnostic without inventing a new shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandoffRoutingError {
+    /// The hat's `triggers` list does not declare the topic;
+    /// routing the event to this hat would result in the
+    /// activation dropping on the floor.
+    HatDoesNotConsume {
+        hat_triggers: Vec<String>,
+        topic: String,
+    },
+}
+
+impl std::fmt::Display for HandoffRoutingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HandoffRoutingError::HatDoesNotConsume { hat_triggers, topic } => write!(
+                f,
+                "hat does not declare `{topic}` in its `triggers` list (declared: {:?})",
+                hat_triggers
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HandoffRoutingError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,5 +477,47 @@ hats:
             .expect("work.ready must be in index");
         assert_eq!(entry.consumer, None);
         assert!(!index.has_any_priority());
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // U8 of plan 2026-07-05-005 (R5): shared hat-triggers checker.
+    // The helper is the single source of truth for the
+    // "does this hat subscribe to this topic?" predicate used
+    // across the three handoff paths.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn u8_check_hat_triggers_matches_exact_topic() {
+        let triggers = vec!["work.ready".to_string(), "task.resume".to_string()];
+        check_hat_triggers(&triggers, "work.ready").expect("exact match");
+    }
+
+    #[test]
+    fn u8_check_hat_triggers_matches_topic_pattern() {
+        // The Topic::matches predicate supports `*` wildcard
+        // segments (each `*` matches one topic segment). Pin
+        // the helper so a future refactor of pattern matching
+        // does not silently desync from the handoff_index's
+        // `consumer_of` lookup.
+        let triggers = vec!["review.*".to_string()];
+        check_hat_triggers(&triggers, "review.dimension").expect("single-segment pattern match");
+    }
+
+    #[test]
+    fn u8_check_hat_triggers_rejects_undeclared_topic() {
+        let triggers = vec!["work.ready".to_string()];
+        let err = check_hat_triggers(&triggers, "plan.complete").unwrap_err();
+        match err {
+            HandoffRoutingError::HatDoesNotConsume { topic, hat_triggers } => {
+                assert_eq!(topic, "plan.complete");
+                assert_eq!(hat_triggers, vec!["work.ready".to_string()]);
+            }
+        }
+    }
+
+    #[test]
+    fn u8_check_hat_triggers_rejects_empty_triggers_list() {
+        let err = check_hat_triggers(&[], "any.topic").unwrap_err();
+        assert!(matches!(err, HandoffRoutingError::HatDoesNotConsume { .. }));
     }
 }
