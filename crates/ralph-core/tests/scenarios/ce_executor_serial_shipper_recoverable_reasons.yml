@@ -1,7 +1,13 @@
 # 2026-07-02-005 U7 runtime: recoverable plan.blocked → REVIEW_COMPLETE(pass)
+# 2026-07-06 U3 (DEV-003): bare `recovery_exhausted` is no longer
+# recoverable — it would mask the underlying stall retry_key. This
+# scenario now exercises a still-recoverable literal reason
+# (`loop_stalled_max_iterations`) to verify the recoverable path
+# continues to admit REVIEW_COMPLETE(pass) after the fail-close
+# tightening.
 
 name: ce_executor_serial_shipper_recoverable_reasons
-description: U7 shipper runtime — recovery_exhausted allows REVIEW_COMPLETE pass
+description: U7 shipper runtime — recoverable reason (loop_stalled_max_iterations) allows REVIEW_COMPLETE pass
 
 config:
   prompt_file: PROMPT.md
@@ -30,11 +36,11 @@ config:
 mock_responses:
   - |
     <event topic="plan.blocked">
-    {"plan_name":"rec-demo","reason":"recovery_exhausted","task_id":"t1","task_key":"k1"}
+    {"plan_name":"rec-demo","reason":"loop_stalled_max_iterations","task_id":"t1","task_key":"k1"}
     </event>
   - |
     <event topic="REVIEW_COMPLETE">
-    {"plan_name":"rec-demo","verdict":"pass_with_residuals","pass_or_fail":"pass","residual_findings_summary":"recoverable reason recovery_exhausted; verification passed"}
+    {"plan_name":"rec-demo","verdict":"pass_with_residuals","pass_or_fail":"pass","residual_findings_summary":"recoverable reason loop_stalled_max_iterations; verification passed"}
     </event>
   - |
     waiting.

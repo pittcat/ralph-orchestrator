@@ -531,6 +531,7 @@ mod tests {
             last_active_hat_ids: Vec::new(),
             last_activation_events: Vec::new(),
             seen_topics: std::collections::HashSet::new(),
+            step_work_done_seen: std::collections::HashSet::new(),
             last_emitted_signature: None,
             consecutive_same_signature: 0,
             cancellation_requested: false,

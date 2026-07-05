@@ -32,7 +32,13 @@ const RECOVERABLE_REASONS: &[&str] = &[
     "loop_stalled_max_iterations",
     "steward_escalation",
     "review_terminal_drift",
-    "recovery_exhausted",
+    // 2026-07-06 U3 (DEV-003 fix): bare `recovery_exhausted` removed.
+    // No current code path emits a plan.blocked reason with the bare
+    // literal (runtime-recovery injects `recovery_exhausted:<retry_key>`
+    // since the 2026-07-06 U2 record_event fix). The bare literal
+    // short-circuit was a fail-open that masked unknown retry_keys
+    // (`recovery_exhausted:stall_recovery:validator:work_done:*`); with
+    // the prefix allowlist tightened below, fail-close is the default.
     "review_failed",
     "precheck_failed",
     "default_publishes",
@@ -78,8 +84,9 @@ pub fn normalize_plan_blocked_reason(reason: &str) -> String {
 ///
 /// `recovery_exhausted:<retry_key>` (drift engine) is treated as recoverable
 /// only when `<retry_key>` is on the explicit prefix allowlist (see
-/// `RECOVERABLE_RECOVERY_EXHAUSTED_PREFIXES`). The bare literal
-/// `recovery_exhausted` is also recoverable. Anything else
+/// `RECOVERABLE_RECOVERY_EXHAUSTED_PREFIXES`). Bare `recovery_exhausted`
+/// (no retry_key) is **not** recoverable — fail-close into
+/// `REVIEW_COMPLETE(pass_or_fail=fail)`. Anything else
 /// (`recovery_exhausted:foo`, `recovery_exhausted:stall_recovery:...:weird`,
 /// etc.) is NOT recoverable — fail-close into
 /// `REVIEW_COMPLETE(pass_or_fail=fail)`.
@@ -149,7 +156,13 @@ mod tests {
 
     #[test]
     fn recoverable_literals_match() {
-        assert!(is_recoverable_plan_blocked_reason("recovery_exhausted"));
+        // 2026-07-06 U3 (DEV-003 fix): bare `recovery_exhausted` is
+        // NOT recoverable any more. The runtime always emits
+        // `recovery_exhausted:<retry_key>` (see event_loop/mod.rs
+        // ForcePlanBlocked payload), so bare literal would only appear
+        // from a malformed drift-engine path; fail-close is the
+        // intended behavior.
+        assert!(!is_recoverable_plan_blocked_reason("recovery_exhausted"));
         assert!(is_recoverable_plan_blocked_reason("  REVIEW_FAILED "));
         assert!(is_recoverable_plan_blocked_reason(
             "recovery_exhausted:coordinator:task.resume:handoff"
@@ -159,6 +172,18 @@ mod tests {
         // REVIEW_COMPLETE(pass_with_residuals) instead of hard-failing.
         assert!(is_recoverable_plan_blocked_reason("default_publishes"));
         assert!(is_recoverable_plan_blocked_reason("  Default_Publishes "));
+    }
+
+    #[test]
+    fn stall_recovery_validator_not_recoverable() {
+        // 2026-07-06 U3 (DEV-003 fix): the validator-stall retry_key
+        // was specifically removed from the prefix allowlist in
+        // 2026-07-03-005 (P0 fix C2+C8) because it masked the
+        // mechanism-side silent drop / handoff_dispatch misroute as
+        // pass_with_residuals. Verify it remains fail-close.
+        assert!(!is_recoverable_plan_blocked_reason(
+            "recovery_exhausted:stall_recovery:validator:work_done:handoff_dispatch_timeout:*"
+        ));
     }
 
     #[test]
@@ -196,12 +221,24 @@ mod tests {
 
     #[test]
     fn review_complete_pass_after_recoverable_reason_allowed() {
+        // 2026-07-06 U3 (DEV-003 fix): bare `recovery_exhausted` is
+        // NOT recoverable any more. REVIEW_COMPLETE(pass) after a
+        // bare `recovery_exhausted` plan.blocked reason must be
+        // rejected by `check_review_complete_shipper_routing` so
+        // shipper fail-closes instead of masking the stall as
+        // pass_with_residuals. Previously this test asserted that
+        // bare `recovery_exhausted` admitted pass — that was the
+        // exact fail-open path that masked the silent-success
+        // mechanism defect fixed in DEV-002.
+        let finding = check_review_complete_shipper_routing(
+            Some(r#"{"pass_or_fail":"pass","verdict":"pass_with_residuals"}"#),
+            Some("recovery_exhausted"),
+        )
+        .expect("bare recovery_exhausted must NOT admit pass after DEV-003 fix");
         assert!(
-            check_review_complete_shipper_routing(
-                Some(r#"{"pass_or_fail":"pass","verdict":"pass_with_residuals"}"#),
-                Some("recovery_exhausted"),
-            )
-            .is_none()
+            finding
+                .message
+                .contains("shipper_non_recoverable_reason_promoted_to_pass")
         );
     }
 

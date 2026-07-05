@@ -5576,9 +5576,15 @@ impl EventLoop {
             match action {
                 RecoveryAction::PublishEvent { topic, payload } => {
                     debug!(topic = %topic, "runtime-recovery: publishing corrective event");
-                    self.bus.publish(
-                        Event::new(topic.as_str(), payload).with_source(HatId::from("ralph")),
-                    );
+                    let event = Event::new(topic.as_str(), payload).with_source(HatId::from("ralph"));
+                    // 2026-07-06 U2 (DEV-002): persist runtime-recovery
+                    // corrective events to events.jsonl alongside the
+                    // bus publish. Without this the trusted events stream
+                    // diverges from the in-memory bus and downstream
+                    // shipper routing gates (see shipper_reason.rs) miss
+                    // the recovery context.
+                    self.state.record_event(&event);
+                    self.bus.publish(event);
                 }
                 RecoveryAction::ForcePlanBlocked { reason, retry_key } => {
                     warn!(%reason, %retry_key, "runtime-recovery: forcing plan.blocked");
@@ -5586,11 +5592,16 @@ impl EventLoop {
                         "reason": format!("recovery_exhausted:{retry_key}"),
                         "runtime_recovery_reason": reason,
                     });
-                    self.bus.publish(
-                        Event::new("plan.blocked", payload.to_string())
-                            .with_source(HatId::from("ralph"))
-                            .with_target(HatId::from("shipper")),
-                    );
+                    let blocked = Event::new("plan.blocked", payload.to_string())
+                        .with_source(HatId::from("ralph"))
+                        .with_target(HatId::from("shipper"));
+                    // 2026-07-06 U2 (DEV-002): persist the terminal
+                    // plan.blocked to events.jsonl. Previously only
+                    // bus.publish was called, leaving events.jsonl
+                    // silent while the in-memory bus still routed
+                    // shipper downstream — silent-success path.
+                    self.state.record_event(&blocked);
+                    self.bus.publish(blocked);
                 }
                 RecoveryAction::InjectDirective { text } => {
                     warn!(%text, "runtime-recovery: directive injection requested");
@@ -8342,6 +8353,12 @@ impl EventLoop {
             // budget (drop + diagnostic), preserving the plan's
             // "serial walk at most once per turn" invariant.
             let mut exempt_topic_carveout_used = false;
+            // 2026-07-06 U2 (DEV-001): track when an event was admitted
+            // via the exempt_topics carve-out so the slot-bump at
+            // line 9191-9208 can be skipped, preserving the
+            // non_wave_business_event_accepted=false slot for the
+            // rest of the serial walk within the same turn.
+            let mut admitted_via_carveout = false;
             let mut accepted_wave_id: Option<String> = None;
             // 2026-06-13-004 P0 #4 review fix (U7 envelope disk
             // storm): per-turn dedup set for scope_drop retry_keys.
@@ -9008,6 +9025,12 @@ impl EventLoop {
                     // exempt topic in the *same* turn still falls
                     // through to the default budget (drop + bound),
                     // because we do not consume the slot here.
+                    //
+                    // 2026-07-06 U2 (DEV-001): record that this
+                    // admission was via the carve-out so the
+                    // slot-bump path below can be skipped, letting
+                    // the serial walk continue within the same turn.
+                    admitted_via_carveout = true;
                     true
                 } else {
                     is_dual_publish_step_handoff
@@ -9187,14 +9210,34 @@ impl EventLoop {
                             }
                         }
                         None => {
-                            non_wave_business_event_accepted = true;
+                            // 2026-07-06 U2 (DEV-001): exempt_topics
+                            // carve-out admissions must NOT consume
+                            // the per-turn non_wave_business_event_accepted
+                            // slot, otherwise the serial walk (e.g.
+                            // review-coordinator walking 6
+                            // review.dimension.ready) drops N-1 events
+                            // and review-synthesizer receives incomplete
+                            // data. The pre-existing carve-out branch
+                            // already sets admitted_via_carveout = true
+                            // above.
+                            if !admitted_via_carveout {
+                                non_wave_business_event_accepted = true;
+                            }
                         }
                     }
                     // U3 P0 fix: write the sticky per-turn budget flag so
                     // `check_default_publishes` (which runs later in the same
                     // turn when JSONL had zero events, or earlier when JSONL
                     // had business events) sees a consistent view.
-                    self.state.isolated_turn_business_event_accepted = true;
+                    //
+                    // 2026-07-06 U2 (DEV-001): carve-out admissions must
+                    // also keep isolated_turn_business_event_accepted
+                    // false so the default_publishes guard does not
+                    // see the slot as occupied and refuse the next
+                    // exempt topic in the serial walk.
+                    if !admitted_via_carveout {
+                        self.state.isolated_turn_business_event_accepted = true;
+                    }
                     // 2026-06-16-001 U5: mark the per-turn
                     // stall-detector flag so the post-validation
                     // stall detector resets the counters.
@@ -10458,6 +10501,55 @@ impl EventLoop {
             contract_validation_input_count > 0
         };
 
+        // 2026-07-06 U5 (DEV-005): synthesize a `task.resume` for any
+        // `TaskNotTerminal` contract rejection so the rejecting hat
+        // (typically executor) gets reactivated and can close its
+        // own task before retrying. Without this the rejected hat
+        // never sees a recovery signal and the task is stuck open
+        // forever (executor cannot close a coordinator-owned task,
+        // and the rejection is silently dropped after the
+        // `task.resume` target elsewhere is wrong).
+        //
+        // Only synthesize when the rejected event has a source hat
+        // (i.e. it came from a real agent, not the loop itself) so
+        // we do not loop `ralph → ralph`.
+        for rejection in &contract_rejections {
+            if let crate::execution_contract::ExecutionContractViolationKind::TaskNotTerminal {
+                task_id,
+                ..
+            } = &rejection.kind
+            {
+                if let Some(source_hat) = rejection.source_hat.as_ref() {
+                    let resume_payload = serde_json::json!({
+                        "kind": "execution_contract",
+                        "reason": format!(
+                            "task_not_terminal_synthesize_close:{task_id}:{}",
+                            rejection.topic
+                        ),
+                        "target_hat": source_hat,
+                        "task_id": task_id,
+                        "hint": crate::execution_contract::task_not_terminal_hint(task_id),
+                    });
+                    let resume_event = Event::new(
+                        "task.resume",
+                        resume_payload.to_string(),
+                    )
+                    .with_source(HatId::from("ralph"))
+                    .with_target(HatId::from(source_hat.as_str()));
+                    warn!(
+                        task_id = %task_id,
+                        source_hat = %source_hat.as_str(),
+                        topic = %rejection.topic,
+                        "DEV-005: synthesized task.resume for TaskNotTerminal so rejecting hat can close the task"
+                    );
+                    // Persist to events.jsonl (DEV-002 path) AND publish
+                    // to the bus so the hat's next activation sees the hint.
+                    self.state.record_event(&resume_event);
+                    self.bus.publish(resume_event);
+                }
+            }
+        }
+
         let mut has_orphans = false;
 
         // Validate and transform events (apply backpressure for build.done)
@@ -10489,6 +10581,22 @@ impl EventLoop {
         macro_rules! accept_event {
             ($accepted:expr) => {{
                 let accepted = $accepted;
+                // 2026-07-06 U9 (DEV-009): when a work.done is admitted,
+                // record its step so the topology guard at line ~10666
+                // can refuse the next step's work.ready until the
+                // previous step's work.done lands.
+                if accepted.topic.as_str() == "work.done" {
+                    let payload: &str = &accepted.payload;
+                    if let Some(start) = payload.find("\"step\":\"") {
+                        let rest = &payload[start + 8..];
+                        if let Some(end) = rest.find('"') {
+                            let step = &rest[..end];
+                            if step.starts_with("step-") {
+                                self.state.step_work_done_seen.insert(step.to_string());
+                            }
+                        }
+                    }
+                }
                 accepted_log_events.push(accepted.clone());
                 validated_events.push(accepted);
             }};
@@ -10571,6 +10679,74 @@ impl EventLoop {
 
         for (index, event) in events.into_iter().enumerate() {
             let payload = event.payload.clone().unwrap_or_default();
+
+            // 2026-07-06 U9 (DEV-009): topology guard — work.ready for
+            // step-NN where NN > 01 must be preceded by work.done for
+            // step-(NN-1). Without this guard the coordinator can
+            // publish a new step's work.ready before the executor
+            // closed the previous step's work.done, leaving tasks
+            // stuck open across the boundary (observed in
+            // 2026-07-05-153532 run: step-02 work.ready at 15:43 with
+            // step-01 work.done outstanding). Log + drop with a
+            // diagnostic; the coordinator will be re-prompted with
+            // the missing predecessor and re-emit on the next turn.
+            if event.topic == "work.ready" {
+                let step: Option<String> = payload
+                    .find("\"step\":\"")
+                    .map(|i| i + 8)
+                    .and_then(|start| {
+                        let rest = &payload[start..];
+                        rest.find('"').map(|end| rest[..end].to_string())
+                    });
+                if let Some(step) = step {
+                    if let Some(nn) = step.strip_prefix("step-").and_then(|s| s.parse::<u32>().ok())
+                    {
+                        if nn > 1 {
+                            let prev = format!("step-{:02}", nn - 1);
+                            if !self.state.step_work_done_seen.contains(&prev) {
+                                warn!(
+                                    topic = %event.topic,
+                                    step = %step,
+                                    prev_step = %prev,
+                                    "DEV-009: work.ready for step arrived before previous step's work.done; dropping as cross-step handoff violation"
+                                );
+                                let diagnostic = Event::new(
+                                    "event.topology.out_of_order",
+                                    format!(
+                                        "{{\"dropped_topic\":\"work.ready\",\"step\":\"{step}\",\"prev_step\":\"{prev}\",\"reason\":\"work.ready arrived before previous step's work.done\"}}"
+                                    ),
+                                );
+                                self.bus.publish(diagnostic);
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2026-07-06 U7 (DEV-007): topology guard — test.passed
+            // must be preceded by work.done for the same plan/step.
+            // Without this guard a validator hat that activates late
+            // (e.g. after the shipper has already emitted REVIEW_COMPLETE
+            // via the runtime-recovery stall pipeline) can publish a
+            // test.passed event that violates the preset's intended
+            // review-before-publish sequence. Log + drop, do not
+            // diagnose as failure (the test genuinely passed; only
+            // the ordering was wrong).
+            if event.topic == "test.passed" && !self.state.seen_topics.contains("work.done") {
+                warn!(
+                    topic = %event.topic,
+                    "DEV-007: test.passed arrived before any work.done in this loop; dropping as topology-violating"
+                );
+                let diagnostic = Event::new(
+                    "event.topology.out_of_order",
+                    format!(
+                        "{{\"dropped_topic\":\"test.passed\",\"reason\":\"test.passed arrived before any work.done was admitted for this loop\"}}"
+                    ),
+                );
+                self.bus.publish(diagnostic);
+                continue;
+            }
 
             // Detect loop.cancel — unconditional graceful termination
             if !cancellation_topic.is_empty() && event.topic.as_str() == cancellation_topic {

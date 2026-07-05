@@ -319,6 +319,13 @@ pub struct LoopState {
     /// Topics seen during the loop's lifetime (for event chain validation).
     pub seen_topics: HashSet<String>,
 
+    /// 2026-07-06 U9 (DEV-009): step identifiers (`step-NN`) for
+    /// which a `work.done` event has been admitted. Used by the
+    /// topology guard in `process_parse_result` to refuse a
+    /// `work.ready` for `step-NN` (NN > 1) when `step-(NN-1)` is
+    /// not in this set, preventing cross-step handoff races.
+    pub step_work_done_seen: HashSet<String>,
+
     /// The last event signature emitted (for stale loop detection).
     pub last_emitted_signature: Option<EventSignature>,
 
@@ -826,6 +833,7 @@ impl Default for LoopState {
             last_active_hat_ids: Vec::new(),
             last_activation_events: Vec::new(),
             seen_topics: HashSet::new(),
+            step_work_done_seen: HashSet::new(),
             last_emitted_signature: None,
             consecutive_same_signature: 0,
             cancellation_requested: false,

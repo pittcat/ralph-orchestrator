@@ -50,7 +50,7 @@ const TASK_NOT_TERMINAL_HINT_TEMPLATE: &str =
     " Run `ralph tools task close <task_id>` first, then re-emit work.done with task_id=<task_id>.";
 
 /// Render the `TaskNotTerminal` hint with the actual task id substituted in.
-fn task_not_terminal_hint(task_id: &str) -> String {
+pub(crate) fn task_not_terminal_hint(task_id: &str) -> String {
     TASK_NOT_TERMINAL_HINT_TEMPLATE.replace("<task_id>", task_id)
 }
 
