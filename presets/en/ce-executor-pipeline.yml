@@ -277,7 +277,12 @@ event_loop:
     # emit against its schema before writing to the events file.
     schemas:
       plan.ready:
-        required_fields: ["plan_name", "plan_path", "plan_revised", "review_summary"]
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "plan_revised"
+          - "review_summary"
+          - "flow_audit"
       plan.blocked:
         required_fields: ["plan_name", "reason"]
       work.done:
@@ -440,7 +445,41 @@ hats:
       - File empty or placeholder content (e.g. only `TODO` or `<plan TBD>`) → `{"reason": "plan_content_empty_or_placeholder"}`
       - File is otherwise unusable (contradictory requirements, ambiguous scope, missing hard rules) → `{"reason": "plan_unusable: <brief reason>"}`
 
-      ### Step 3 — Plan Review (when file is OK)
+      ### Step 2.5 — Git Flow Audit (HARD RULE — runs BEFORE Step 3)
+      Before any plan-content quality gate, audit whether the plan's
+      implementation has already landed on the current branch. This
+      step **does not** modify the verdict routing — it only enriches
+      the `plan.ready` payload so the next hat (executor) knows whether
+      to skip the re-implementation loop and go straight into
+      review/fix/alignment.
+
+      Audit procedure (read-only):
+      1. Read `plan_path` and extract U-IDs from `## Implementation Units`
+         (regex `### U\d+\.` → list `[U1, U3, U5, ...]`).
+      2. `git log --oneline <plan_baseline_sha>..HEAD` (or
+         `loop_start_sha` if baseline missing — see **Diff base** in
+         dim:goal-alignment instructions) and collect commit subjects.
+      3. For each U-ID, find a commit whose subject contains it
+         (`feat(scope): U3 ...` or `fix(U3): ...`). DO NOT trust
+         frontmatter status — verify against the actual log.
+      4. `git log --oneline <plan_baseline_sha>..HEAD --grep="SC1"` (or
+         `金丝雀` / `gold canary` / `regression run`) and count markers;
+         SC1 markers ≥ 5 means full canary has run.
+      5. Pick the verdict from this table:
+
+         | All U-IDs in commits | SC1 ≥ 5 | frontmatter status | `flow_audit` you emit |
+         |-----------------------|---------|--------------------|------------------------|
+         | ✅ yes              | ✅ yes  | (don't care)       | `post_merge_complete` |
+         | ✅ yes              | ❌ no   | (don't care)       | `post_merge_no_canary` |
+         | ❌ no (any missing)  | (n/a)   | (don't check)      | `first_run`           |
+
+      6. **Never** emit `plan.blocked` because of git-flow status. The
+         verdict "plan already implemented" is **not** a routing signal
+         — it tells the next hat "executor should re-verify and push
+         through to the review/fix chain". Only Step 2 (file errors) or
+         Step 3 (quality gates) trigger `plan.blocked`.
+
+            ### Step 3 — Plan Review (when file is OK)
       Read the plan file end-to-end and check it against these quality gates.
       You may IN-PLACE edit the plan file (preserving U-IDs, R-IDs, and frontmatter
       structure) to fix any deficiency you find. Set `plan_revised: true` if you
@@ -463,14 +502,18 @@ hats:
       - Set `plan_revised: true` if you changed any line; `false` otherwise.
 
       ### Step 4 — Emit `plan.ready` (handoff to executor)
-      When the plan passes all quality gates, emit EXACTLY ONE `plan.ready` event:
+      When the plan passes all quality gates AND Step 2.5 has decided
+      the `flow_audit` verdict, emit EXACTLY ONE `plan.ready` event:
       ```
       <event topic="plan.ready">
-      {"plan_name": "<basename without extension>", "plan_path": "<repo-relative path>", "plan_revised": <true|false>, "review_summary": "<1-2 sentence summary of what you reviewed/changed>"}
+      {"plan_name": "<basename without extension>", "plan_path": "<repo-relative path>", "plan_revised": <true|false>, "review_summary": "<1-2 sentence summary>", "flow_audit": "<post_merge_complete | post_merge_no_canary | first_run>", "matched_uids": ["U1","U3",...], "missing_uids": ["U2",...]}
       </event>
       ```
-      `plan_name`, `plan_path`, `plan_revised`, and `review_summary` are all
-      required by the payload schema (`plan_revised` must be a boolean).
+      `plan_name`, `plan_path`, `plan_revised`, `review_summary`, and
+      `flow_audit` are required by the payload schema (`plan_revised`
+      must be a boolean; `flow_audit` must be one of the three valid
+      strings from Step 2.5). `matched_uids` / `missing_uids` are
+      informational lists for the executor's read-only cross-check.
       Then stop. Do NOT do any of the executor's work.
 
       ### Step 5 — Emit `plan.blocked` (unusable plan)
@@ -548,11 +591,53 @@ hats:
       ### Read State (on every activation)
 
       1. Read the `plan.ready` payload for `plan_name`, `plan_path`,
-         `plan_revised`, `review_summary`.
+         `plan_revised`, `review_summary`, and `flow_audit`. Older
+         presets / hand-rolled runs may not include `flow_audit` —
+         treat absence as `"first_run"`.
       2. Read the plan file end-to-end. The plan-reviewer already
          vetted and possibly revised it; trust its quality.
       3. Search memories for relevant patterns (`ralph tools memory search ...`).
       4. Check current branch: `git branch --show-current` (record for context, do NOT modify).
+
+      ### Step 1.5 — Flow-Audit Cross-Check (HARD RULE — gates Execution Loop)
+      Do **not** start the Execution Loop until this step passes. This
+      is the **verification** half of the preset's "即使 plan 已合并
+      也要走完 chain" invariant — the audit flag says what the
+      plan-reviewer thinks, you **independently verify** with git log
+      + the project's full-suite.
+
+      Cross-check procedure:
+      1. Read `flow_audit` from `plan.ready` payload
+         (`"first_run"` if absent).
+      2. **Skip path** — emit `work.done` immediately without entering
+         the Execution Loop, **iff all of** hold:
+         - `flow_audit == "post_merge_complete"` **or**
+           `flow_audit == "post_merge_no_canary"`.
+         - `git log --oneline <plan_baseline_sha>..HEAD` (or
+           `loop_start_sha` / `origin/main` / `HEAD~1` fallback per
+           **Diff base** below) has at least one commit whose subject
+           contains **every** U-ID listed in
+           `plan_path## Implementation Units`. Re-extract U-IDs from
+           the plan yourself — do not trust the plan-reviewer's
+           `matched_uids` as authoritative.
+         - Full-suite green: discover the authoritative command from
+           repo `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md` (do NOT
+           assume Rust defaults on a foreign repo), run it, exit 0.
+         - Skip-path payload: `executor_action: "flow_audit_verified_skip"`,
+           `commit_count` / `tests_run` / `tests_passed` /
+           `changed_lines` populated from actual git state, and
+           `executor_head_sha` = `git rev-parse HEAD`.
+      3. **Full path** — log a one-line note to
+         `.ralph/agent/decisions.md` (`reason: entering execution loop
+         — <flow_audit value> / uid-check=<passed|failed> /
+         full-suite=<passed|failed>`) and proceed with the Execution
+         Loop below. Do **not** skip the per-Unit TDD even when
+         `flow_audit` says post-merge, if Step 1.5's own re-check
+         finds missing U-IDs or a red full-suite.
+
+      The Full-Suite Green Gate (HARD DoD) is **not** relaxed by the
+      skip path — the skip path short-circuits RED+GREEN+REFACTOR for
+      each U, but it still must emit `work.done` only after exit 0.
 
       ### Execution Loop
 
