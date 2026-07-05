@@ -128,6 +128,7 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 - Presets support Chinese (`*-zh.yml`) variants and chainable configurations
 - Builtin presets: `autoresearch`, `ce-executor-pipeline` (12-hat 线性一条龙: plan-reviewer → executor → 6 串行维度 hat → review-synthesizer → fixer → alignment → reporter), `ce-executor-serial` (10-hat: TDD executor + validator + 6-dim overall review: goal-alignment → correctness → testing → maintainability → project-standards → adversarial), `ce-executor-supervisor` (2026-07-03-001 plan: 16-hat + progress-steward; rusqlite-backed supervisor wave orchestration, per-slot worktrees, fan-in merge, parallel review/fix; 需用 `--features supervisor-db` 编译且 `event_loop.supervisor.enabled: true`), `ce-executor-lite` (template), `debug`, `merge-batch` (Git-first 多 worktree 批量 merge: reviewer → integrator → stabilizer 自环 → reporter), `merge-loop`(内部单 loop 自动 merge;裸 `ce-executor` 已删除:所有 plan-driven 执行请使用 `ce-executor-serial`;仅作模板时可使用 `ce-executor-lite`)
 - `presets/index.json` is the user-facing preset manifest
+- **Operator skills（preset 起草/评审）:** `skills/ralph-preset-author`、`skills/ralph-preset-review`（共享 `skills/ralph-preset-common/references/`）；用户 hats 仍用 `skills/ralph-hats`
 
 **`presets/manifest.yml` 是 builtin preset 的 single source of truth**(`crates/ralph-cli/build.rs` 和 `crates/ralph-cli/src/presets.rs` 都从这里读取并在不一致时 panic)。新增/重命名/删除一个 builtin preset 必须**同步改 4 处**:
 1. `presets/en/<name>.yml`(实际 YAML)
@@ -215,21 +216,140 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
 
-> **完整 RTK 命令手册已迁移到 `.cursor/rules/rtk-token-killer.mdc`**(按 `**/*.sh` glob 按需加载)。本节只保留「Golden Rule」。
-
 ## Golden Rule
 
-**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. Always safe to use.
+**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
 
+**Important**: Even in command chains with `&&`, use `rtk`:
 ```bash
-# Wrong
+# ❌ Wrong
 git add . && git commit -m "msg" && git push
 
-# Correct
+# ✅ Correct
 rtk git add . && rtk git commit -m "msg" && rtk git push
 ```
 
-常用高频: `rtk cargo test` / `rtk cargo clippy` / `rtk cargo build` / `rtk git status` / `rtk git diff`。完整 30+ 命令表见 `.cursor/rules/rtk-token-killer.mdc`。
+## RTK Commands by Workflow
+
+### Build & Compile (80-90% savings)
+```bash
+rtk cargo build         # Cargo build output
+rtk cargo check         # Cargo check output
+rtk cargo clippy        # Clippy warnings grouped by file (80%)
+rtk tsc                 # TypeScript errors grouped by file/code (83%)
+rtk lint                # ESLint/Biome violations grouped (84%)
+rtk prettier --check    # Files needing format only (70%)
+rtk next build          # Next.js build with route metrics (87%)
+```
+
+### Test (60-99% savings)
+```bash
+rtk cargo test          # Cargo test failures only (90%)
+rtk go test             # Go test failures only (90%)
+rtk jest                # Jest failures only (99.5%)
+rtk vitest              # Vitest failures only (99.5%)
+rtk playwright test     # Playwright failures only (94%)
+rtk pytest              # Python test failures only (90%)
+rtk rake test           # Ruby test failures only (90%)
+rtk rspec               # RSpec test failures only (60%)
+rtk test <cmd>          # Generic test wrapper - failures only
+```
+
+### Git (59-80% savings)
+```bash
+rtk git status          # Compact status
+rtk git log             # Compact log (works with all git flags)
+rtk git diff            # Compact diff (80%)
+rtk git show            # Compact show (80%)
+rtk git add             # Ultra-compact confirmations (59%)
+rtk git commit          # Ultra-compact confirmations (59%)
+rtk git push            # Ultra-compact confirmations
+rtk git pull            # Ultra-compact confirmations
+rtk git branch          # Compact branch list
+rtk git fetch           # Compact fetch
+rtk git stash           # Compact stash
+rtk git worktree        # Compact worktree
+```
+
+Note: Git passthrough works for ALL subcommands, even those not explicitly listed.
+
+### GitHub (26-87% savings)
+```bash
+rtk gh pr view <num>    # Compact PR view (87%)
+rtk gh pr checks        # Compact PR checks (79%)
+rtk gh run list         # Compact workflow runs (82%)
+rtk gh issue list       # Compact issue list (80%)
+rtk gh api              # Compact API responses (26%)
+```
+
+### JavaScript/TypeScript Tooling (70-90% savings)
+```bash
+rtk pnpm list           # Compact dependency tree (70%)
+rtk pnpm outdated       # Compact outdated packages (80%)
+rtk pnpm install        # Compact install output (90%)
+rtk npm run <script>    # Compact npm script output
+rtk npx <cmd>           # Compact npx command output
+rtk prisma              # Prisma without ASCII art (88%)
+```
+
+### Files & Search (60-75% savings)
+```bash
+rtk ls <path>           # Tree format, compact (65%)
+rtk read <file>         # Code reading with filtering (60%)
+rtk grep <pattern>      # Search grouped by file (75%)
+rtk find <pattern>      # Find grouped by directory (70%)
+```
+
+### Analysis & Debug (70-90% savings)
+```bash
+rtk err <cmd>           # Filter errors only from any command
+rtk log <file>          # Deduplicated logs with counts
+rtk json <file>         # JSON structure without values
+rtk deps                # Dependency overview
+rtk env                 # Environment variables compact
+rtk summary <cmd>       # Smart summary of command output
+rtk diff                # Ultra-compact diffs
+```
+
+### Infrastructure (85% savings)
+```bash
+rtk docker ps           # Compact container list
+rtk docker images       # Compact image list
+rtk docker logs <c>     # Deduplicated logs
+rtk kubectl get         # Compact resource list
+rtk kubectl logs        # Deduplicated pod logs
+```
+
+### Network (65-70% savings)
+```bash
+rtk curl <url>          # Compact HTTP responses (70%)
+rtk wget <url>          # Compact download output (65%)
+```
+
+### Meta Commands
+```bash
+rtk gain                # View token savings statistics
+rtk gain --history      # View command history with savings
+rtk discover            # Analyze Claude Code sessions for missed RTK usage
+rtk proxy <cmd>         # Run command without filtering (for debugging)
+rtk init                # Add RTK instructions to CLAUDE.md
+rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
+```
+
+## Token Savings Overview
+
+| Category | Commands | Typical Savings |
+|----------|----------|-----------------|
+| Tests | vitest, playwright, cargo test | 90-99% |
+| Build | next, tsc, lint, prettier | 70-87% |
+| Git | status, log, diff, add, commit | 59-80% |
+| GitHub | gh pr, gh run, gh issue | 26-87% |
+| Package Managers | pnpm, npm, npx | 70-90% |
+| Files | ls, read, grep, find | 60-75% |
+| Infrastructure | docker, kubectl | 85% |
+| Network | curl, wget | 65-70% |
+
+Overall average: **60-90% token reduction** on common development operations.
 <!-- /rtk-instructions -->
 
 ## Ralph Managed Blocks
@@ -360,3 +480,36 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+<!-- SEMBLE_START -->
+## Semble Code Search
+
+A `semble` MCP server is available with two tools:
+- `mcp__semble__search` — search the codebase with a natural-language or code query.
+- `mcp__semble__find_related` — find code similar to a specific file and line.
+
+Use `mcp__semble__search` to find where something is implemented — instead of using Grep or Glob to discover files. After semble returns the file and line, navigate there directly and read that file. Do not grep for the same content again.
+
+Pass `--content docs` to search documentation and prose, `--content config` for config files, or `--content all` to search code, docs, and config together.
+
+For CLI fallback or sub-agents without MCP access, use:
+
+```bash
+semble search "authentication flow" ./my-project --max-snippet-lines 10
+semble search "deployment guide" ./my-project --content docs
+semble search "database host port" ./my-project --content config
+semble find-related src/auth.py 42 ./my-project
+semble search "save model to disk" ./my-project --top-k 10
+```
+
+The index is built on first run and cached automatically. If `semble` is not on `$PATH`, use `uvx --from "semble[mcp]" semble`.
+
+### Workflow
+
+1. Call `mcp__semble__search` with a query describing what the code does or its name. The tool returns results with 10 lines of context each (function/class signature + first body lines, enough to confirm the location).
+2. Navigate directly to the top result's file and line. Read only the function or class at that location.
+3. Make the edit. Do not re-search or grep for the same content.
+4. Use `--content docs` for documentation, `--content config` for config files, or `--content all` for everything.
+5. Optionally use `mcp__semble__find_related` with `file_path` and `line` to discover similar code elsewhere.
+6. Use Grep only when you need every occurrence of a literal string across the whole repo (e.g., all callers of a renamed function).
+<!-- SEMBLE_END -->

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Ralph Preset Author"
+  short_description: "Draft Ralph presets with per-hat AAF discipline"
+  default_prompt: "Use $ralph-preset-author to draft or revise a Ralph preset with per-hat AAF tables and preset-author-notes.md."
+
+policy:
+  allow_implicit_invocation: true

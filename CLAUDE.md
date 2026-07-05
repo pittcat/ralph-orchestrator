@@ -128,6 +128,7 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 - Presets support Chinese (`*-zh.yml`) variants and chainable configurations
 - Builtin presets: `autoresearch`, `ce-executor-pipeline` (12-hat 线性一条龙: plan-reviewer → executor → 6 串行维度 hat → review-synthesizer → fixer → alignment → reporter), `ce-executor-serial` (10-hat: TDD executor + validator + 6-dim overall review: goal-alignment → correctness → testing → maintainability → project-standards → adversarial), `ce-executor-supervisor` (2026-07-03-001 plan: 16-hat + progress-steward; rusqlite-backed supervisor wave orchestration, per-slot worktrees, fan-in merge, parallel review/fix; 需用 `--features supervisor-db` 编译且 `event_loop.supervisor.enabled: true`), `ce-executor-lite` (template), `debug`, `merge-batch` (Git-first 多 worktree 批量 merge: reviewer → integrator → stabilizer 自环 → reporter), `merge-loop`(内部单 loop 自动 merge;裸 `ce-executor` 已删除:所有 plan-driven 执行请使用 `ce-executor-serial`;仅作模板时可使用 `ce-executor-lite`)
 - `presets/index.json` is the user-facing preset manifest
+- **Operator skills（preset 起草/评审）:** `skills/ralph-preset-author`、`skills/ralph-preset-review`（共享 `skills/ralph-preset-common/references/`）；用户 hats 仍用 `skills/ralph-hats`
 
 **`presets/manifest.yml` 是 builtin preset 的 single source of truth**(`crates/ralph-cli/build.rs` 和 `crates/ralph-cli/src/presets.rs` 都从这里读取并在不一致时 panic)。新增/重命名/删除一个 builtin preset 必须**同步改 4 处**:
 1. `presets/en/<name>.yml`(实际 YAML)

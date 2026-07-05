@@ -3,15 +3,32 @@
 This directory is the canonical public skill package for external agent
 harnesses that operate Ralph.
 
-It ships two skills:
+It ships operator skills:
 
-- `ralph-hats` for creating, inspecting, validating, and improving hat
-  collections
-- `ralph-loop` for running, monitoring, resuming, merging, and debugging Ralph
-  loops
+| Skill | Purpose |
+|---|---|
+| `ralph-hats` | Create, inspect, validate user `.ralph/hats/` collections |
+| `ralph-loop` | Run, monitor, resume, merge, debug Ralph loops |
+| `ralph-preset-author` | Draft presets (builtin + local) with per-hat AAF tables |
+| `ralph-preset-review` | AAF review + `preset-review-report.md` + mechanical lint |
+
+`ralph-preset-common/` holds shared `references/` and fixtures (not a standalone marketplace skill).
 
 These are public agent skills. They are not part of Ralph's internal
 `ralph tools skill` registry.
+
+## Symlinks (local dev)
+
+Author and review skills symlink `references/` to `ralph-preset-common/references/`:
+
+```bash
+ln -sf ../ralph-preset-common/references skills/ralph-preset-author/references
+ln -sf ../ralph-preset-common/references skills/ralph-preset-review/references
+ln -sf ../../skills/ralph-preset-author .claude/skills/ralph-preset-author
+ln -sf ../../skills/ralph-preset-review .claude/skills/ralph-preset-review
+```
+
+On Windows without symlink support, duplicate `references/` and keep in sync manually.
 
 ## Install with Claude Code
 
@@ -31,12 +48,14 @@ List the skills in this repository:
 npx skills add mikeyobrien/ralph-orchestrator --list
 ```
 
-Install both skills for Claude Code:
+Install hat + loop + preset skills for Claude Code:
 
 ```bash
 npx skills add mikeyobrien/ralph-orchestrator \
   --skill ralph-hats \
   --skill ralph-loop \
+  --skill ralph-preset-author \
+  --skill ralph-preset-review \
   -a claude-code \
   -y
 ```
@@ -45,7 +64,7 @@ Install one skill for Codex-style agents:
 
 ```bash
 npx skills add mikeyobrien/ralph-orchestrator \
-  --skill ralph-loop \
+  --skill ralph-preset-review \
   -a codex \
   -y
 ```

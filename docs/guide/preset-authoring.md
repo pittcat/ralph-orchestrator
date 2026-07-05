@@ -382,6 +382,18 @@ ralph run -c ralph.yml -H .ralph/hats/my-flow.yml --skip-preflight -p "smoke mig
 
 如果第 3 步仍然以退出码 2 失败，stderr 里会打印完整的 finding list（按 `source` 分组：config / topology / payload / orphan）。回到上面的"finding id 速查表"逐条对照即可。
 
+## Agent Skills（operator）
+
+编写与评审 preset 时，使用仓库内 operator skills（非 loop 注入）：
+
+| Skill | 用途 |
+|---|---|
+| [`skills/ralph-preset-author`](../skills/ralph-preset-author/SKILL.md) | 拓扑 + 逐 hat AAF 起草；产出 `preset-author-notes.md` |
+| [`skills/ralph-preset-review`](../skills/ralph-preset-review/SKILL.md) | 独立 AAF 评审 + 机械 lint + `preset-review-report.md` |
+| [`skills/ralph-hats`](../skills/ralph-hats/SKILL.md) | 仅用户 `.ralph/hats/` 集合（不管 builtin preset） |
+
+AAF 模型详见 [`skills/ralph-preset-common/references/agent-native-model.md`](../skills/ralph-preset-common/references/agent-native-model.md)。
+
 ## 相关文档
 
 - [Hat Collections](./presets.md) — builtin preset 和 hat collection 概览

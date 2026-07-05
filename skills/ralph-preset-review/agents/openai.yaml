@@ -1,0 +1,7 @@
+interface:
+  display_name: "Ralph Preset Review"
+  short_description: "AAF review and preset-review-report for Ralph presets"
+  default_prompt: "Use $ralph-preset-review to review this Ralph preset and write preset-review-report.md with P0/P1 findings and confidence scores."
+
+policy:
+  allow_implicit_invocation: true

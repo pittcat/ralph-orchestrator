@@ -8,6 +8,11 @@ description: Create, inspect, validate, explain, and improve Ralph hat collectio
 Use this skill to operate the full Ralph hat lifecycle for user-authored hat
 collections.
 
+**Not this skill:** builtin presets, `presets/schemas/`, AAF 五问表, or
+`preset-author-notes.md` — use **`ralph-preset-author`** / **`ralph-preset-review`**
+instead. If the user is editing a file under `presets/en/` or needs handoff/schema
+SSOT work, switch skills.
+
 ## Use This Skill For
 
 - Creating a new hat collection in `.ralph/hats/`

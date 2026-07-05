@@ -4,18 +4,20 @@
     "name": "mikeyobrien"
   },
   "metadata": {
-    "description": "Public agent skills for operating Ralph hats and loops",
+    "description": "Public agent skills for operating Ralph hats, loops, and presets",
     "version": "1.0.0"
   },
   "plugins": [
     {
       "name": "ralph-orchestrator",
-      "description": "Skills for creating, improving, and operating Ralph hats and loops",
+      "description": "Skills for creating, improving, and operating Ralph hats, loops, and presets",
       "source": "./",
       "strict": false,
       "skills": [
         "./skills/ralph-hats",
-        "./skills/ralph-loop"
+        "./skills/ralph-loop",
+        "./skills/ralph-preset-author",
+        "./skills/ralph-preset-review"
       ]
     }
   ]
