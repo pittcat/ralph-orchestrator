@@ -2168,13 +2168,21 @@ event_loop:
     }
 
     /// Happy path: aligned progress + tasks, `queue.advance` policy-check passes.
-    #[test]
-    fn u1_step_handoff_gate_happy_path_aligned_progress() {
+///
+/// U1 of 2026-07-05-005 (KTD-1): the derived `current_step` accessor
+/// returns `completed_steps.last()`, so the fixture must mark the
+/// inbound event's step as already completed (or this would be a
+/// `step_mismatch`). We re-derive the test against the new rule:
+/// `## Current Step\nstep-02` plus `completed_steps: [step-01, step-02]`
+/// makes the derived `current_step() == Some("step-02")` and the
+/// closed task for `step-02` confirms task-step consistency.
+#[test]
+fn u1_step_handoff_gate_happy_path_aligned_progress() {
         let tmp = workspace();
-        write_closed_task(&tmp, "task-1", "step-01");
+        write_closed_task(&tmp, "task-1", "step-02");
         write_progress(
             &tmp,
-            "## Current Step\nstep-02\n\n## Completed Steps\n- step-01\n",
+            "## Current Step\nstep-02\n\n## Completed Steps\n- step-01\n- step-02\n",
         );
         let payload = r#"{"step":"step-02","task_id":"task-1"}"#;
         let res = check_step_handoff_gate("queue.advance", payload, tmp.path());
