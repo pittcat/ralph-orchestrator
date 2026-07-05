@@ -6223,6 +6223,17 @@ mod tests {
         // Anti-regression: the other 7 seen_keys fields MUST
         // remain HashSet<String>; only work_ready_seen_keys was
         // widened to HashMap<String, u32>.
+        //
+        // Type-system guard: this test is a tautology in the
+        // sense that converting any of these fields from
+        // `HashSet<String>` to `HashMap<String, _>` would be a
+        // compile error (the field types are pinned by the
+        // struct definition). The assert is a sanity belt-and-
+        // suspenders check; the real protection is the type
+        // system. If you see this test "failing" because of a
+        // future refactor, the right answer is to widen
+        // work_ready_seen_keys's pattern to a sibling field
+        // deliberately — not to weaken this assertion.
         use std::collections::HashSet;
         let mut state = PolicyRuntimeState::default();
         let work_done_keys: HashSet<String> = HashSet::new();

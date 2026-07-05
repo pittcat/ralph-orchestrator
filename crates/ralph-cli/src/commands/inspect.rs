@@ -651,6 +651,30 @@ pub(crate) struct AnchorMarker {
 }
 
 impl AnchorMarker {
+    /// U11 of plan 2026-07-05-005 (fix-plan §R9 / S4): single
+    /// constructor that owns `plan_name` derivation
+    /// (`plan_path.file_stem()`) so the 3–4 inline derivations
+    /// across `inspect.rs` and `resume.rs` collapse into one
+    /// site. Caller passes the on-disk fields (plan_path,
+    /// baseline_sha, attached_at); the constructor derives
+    /// `plan_name` and the file stem shape.
+    pub(crate) fn from_plan_path(
+        plan_path: &std::path::Path,
+        plan_baseline_sha: Option<String>,
+        attached_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Self {
+        Self {
+            plan_path: plan_path.to_path_buf(),
+            plan_name: plan_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string(),
+            plan_baseline_sha,
+            attached_at: attached_at.map(|dt| dt.to_rfc3339()),
+        }
+    }
+
     fn into_anchor_view(self) -> LoopAnchorView {
         LoopAnchorView {
             plan_path: self.plan_path,
