@@ -623,38 +623,26 @@ hats:
 
       ### Step 4 — Emit `plan.ready` (handoff to executor)
       When the plan passes all quality gates AND Step 2.5 has decided
-      the `flow_audit` verdict, emit EXACTLY ONE `plan.ready` event.
-      **Hard rule (OPAC Apply):** per `ralph-tools-emit §5`, every
-      `ralph emit` in this preset is two-step — run `--policy-check`
-      first (dry-run gate), then strip the flag and write for real.
-      The preset enforces `require_policy_check_for_cli_emit: true`
-      + `allow_unsafe_cli_emit: false`, so an unflagged emit is
-      rejected by the runtime — this gate is non-optional:
-      ```bash
-      # Step A — dry-run gate (does NOT write events.jsonl)
-      ralph emit plan.ready --policy-check -j '{"plan_name":"<basename without extension>","plan_path":"<repo-relative path>","plan_revised":<true|false>,"review_summary":"<1-2 sentence summary>","flow_audit":"<post_merge_complete | post_merge_no_canary | first_run>","resolved_baseline_sha":"<sha from §Step 2.5b>","matched_uids":["U1","U3",...],"missing_uids":["U2",...]}'
-      # Step B — write for real (only after Step A exits 0)
-      ralph emit plan.ready -j '{"plan_name":"<basename without extension>","plan_path":"<repo-relative path>","plan_revised":<true|false>,"review_summary":"<1-2 sentence summary>","flow_audit":"<post_merge_complete | post_merge_no_canary | first_run>","resolved_baseline_sha":"<sha from §Step 2.5b>","matched_uids":["U1","U3",...],"missing_uids":["U2",...]}'
+      the `flow_audit` verdict, emit EXACTLY ONE `plan.ready` event:
       ```
-      `plan_name`, `plan_path`, `plan_revised`, `review_summary`,
-      `flow_audit`, and `resolved_baseline_sha` are required by the
-      payload schema (`plan_revised` must be a boolean; `flow_audit`
-      must be one of the three valid strings from Step 2.5).
-      `matched_uids` / `missing_uids` are informational lists for the
-      executor's read-only cross-check. If Step A fails (policy-check
-      returns a missing required field), do NOT run Step B — fix the
-      payload and re-run Step A.
+      <event topic="plan.ready">
+      {"plan_name": "<basename without extension>", "plan_path": "<repo-relative path>", "plan_revised": <true|false>, "review_summary": "<1-2 sentence summary>", "flow_audit": "<post_merge_complete | post_merge_no_canary | first_run>", "matched_uids": ["U1","U3",...], "missing_uids": ["U2",...]}
+      </event>
+      ```
+      `plan_name`, `plan_path`, `plan_revised`, `review_summary`, and
+      `flow_audit` are required by the payload schema (`plan_revised`
+      must be a boolean; `flow_audit` must be one of the three valid
+      strings from Step 2.5). `matched_uids` / `missing_uids` are
+      informational lists for the executor's read-only cross-check.
       Then stop. Do NOT do any of the executor's work.
 
       ### Step 5 — Emit `plan.blocked` (unusable plan)
       When the plan fails Step 2 / Step 3 quality gates and you cannot fix it
-      in-place, emit EXACTLY ONE `plan.blocked` event. Same two-step
-      `--policy-check` gate as §Step 4:
-      ```bash
-      # Step A — dry-run gate
-      ralph emit plan.blocked --policy-check -j '{"plan_name":"<basename without extension>","reason":"<one of the reason strings from Step 2, or plan_unusable: <brief reason>>"}'
-      # Step B — write for real
-      ralph emit plan.blocked -j '{"plan_name":"<basename without extension>","reason":"<one of the reason strings from Step 2, or plan_unusable: <brief reason>>"}'
+      in-place, emit EXACTLY ONE `plan.blocked` event:
+      ```
+      <event topic="plan.blocked">
+      {"plan_name": "<basename without extension>", "reason": "<one of the reason strings from Step 2, or 'plan_unusable: <brief reason>'>"}
+      </event>
       ```
       Then stop. Reporter will receive the blocked event and emit the loop
       completion with verdict `blocked`.
@@ -755,11 +743,9 @@ hats:
            `plan_path## Implementation Units`. Re-extract U-IDs from
            the plan yourself — do not trust the plan-reviewer's
            `matched_uids` as authoritative.
-         - Full-suite green: discover the authoritative command per
-           **Full-suite Command Discovery (HARD RULE)** below; do NOT
-           guess from toolchain defaults. If discovery yields no
-           command, fall through to `work.failed` (Step 1.5 exit) — do
-           NOT enter the Execution Loop on a missing gate.
+         - Full-suite green: discover the authoritative command from
+           repo `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md` (do NOT
+           assume Rust defaults on a foreign repo), run it, exit 0.
          - Skip-path payload: `executor_action: "flow_audit_verified_skip"`,
            `commit_count` / `tests_run` / `tests_passed` /
            `changed_lines` populated from actual git state,
@@ -899,48 +885,18 @@ hats:
       - `changed_lines` — integer, insertions + deletions since `<DIFF_BASE>`
       - `commit_count` — integer, commits in `<DIFF_BASE>..HEAD` from executor
 
-      Copy-pasteable example (replace placeholders; two-step
-      `--policy-check` gate per `ralph-tools-emit §5`):
+      Copy-pasteable example (replace placeholders):
       ```bash
-      # Step A — dry-run gate (does NOT write events.jsonl)
-      ralph emit work.done --policy-check -j '{"plan_name":"my-plan","plan_path":"path/to/plan.md","executor_head_sha":"abc123...","resolved_baseline_sha":"<sha from plan.ready §Step 2.5b>","tests_run":12,"tests_passed":12,"changed_lines":85,"commit_count":3}'
-      # Step B — write for real (only after Step A exits 0)
-      ralph emit work.done -j '{"plan_name":"my-plan","plan_path":"path/to/plan.md","executor_head_sha":"abc123...","resolved_baseline_sha":"<sha from plan.ready §Step 2.5b>","tests_run":12,"tests_passed":12,"changed_lines":85,"commit_count":3}'
+      ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"path/to/plan.md","executor_head_sha":"abc123...","resolved_baseline_sha":"<sha from plan.ready §Step 2.5b>","tests_run":12,"tests_passed":12,"changed_lines":85,"commit_count":3}'
       ```
 
       MUST NOT write events directly; use `ralph emit`.
 
-      ### Full-suite Command Discovery (HARD RULE)
-
-      The Full-Suite Green Gate (and the Step 1.5 skip path's
-      verification step) MUST run an authoritative command — never a
-      toolchain default. Discovery order, first hit wins:
-      1. `## Final Verification` in the original plan at `plan_path`.
-      2. `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md` at the repo
-         root (search for `## Test` / `## Verification` / `## Build`
-         sections).
-      3. CONTRIBUTING.md style `make test` / `make ci` targets.
-
-      **Fallback (HARD RULE):** if none of the three sources yields a
-      concrete command after one read pass per source, **do not
-      guess**. Emit `work.failed` with
-      `reason: "no_full_suite_command_discovered: <list of sources
-      searched>"` and stop. The reporter will record the blocked
-      verdict and the loop ends. Guessing from toolchain defaults
-      (`cargo nextest run`, `pytest`, `npm test`, etc.) is a contract
-      violation — the preset is cross-language and the repo's
-      authoritative command is the only valid gate.
-
       ### Failure Path
 
-      If the full suite cannot reach green, or §Full-suite Command
-      Discovery fallback triggers, emit `work.failed` (two-step gate,
-      same shape as `work.done`):
+      If the full suite cannot reach green:
       ```bash
-      # Step A — dry-run gate
-      ralph emit work.failed --policy-check -j '{"plan_name":"<plan>","reason":"<one of: tests_not_green: <detail> | build_failed: <detail> | clippy_failed: <detail> | no_full_suite_command_discovered: <sources searched> | unreachable: <detail>>"}'
-      # Step B — write for real
-      ralph emit work.failed -j '{"plan_name":"<plan>","reason":"<one of: tests_not_green: <detail> | build_failed: <detail> | clippy_failed: <detail> | no_full_suite_command_discovered: <sources searched> | unreachable: <detail>>"}'
+      ralph emit work.failed --json '{"plan_name":"<plan>","reason":"<one of: tests_not_green: <detail> | build_failed: <detail> | clippy_failed: <detail> | unreachable: <detail>>"}'
       ```
       Then stop. Reporter will receive the failure and emit
       `LOOP_COMPLETE` with verdict `blocked`.
@@ -1093,12 +1049,8 @@ hats:
 
       ### Step 5 — Emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
-      Two-step `--policy-check` gate per `ralph-tools-emit §5`:
       ```bash
-      # Step A — dry-run gate (does NOT write events.jsonl)
-      ralph emit review.goalalign.done --policy-check -j '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","dimension":"goal-alignment","findings_file":".ralph/review/<plan>/goal-alignment.md","findings_count":<N>}'
-      # Step B — write for real (only after Step A exits 0)
-      ralph emit review.goalalign.done -j '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","dimension":"goal-alignment","findings_file":".ralph/review/<plan>/goal-alignment.md","findings_count":<N>}'
+      ralph emit review.goalalign.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","dimension":"goal-alignment","findings_file":".ralph/review/<plan>/goal-alignment.md","findings_count":<N>}'
       ```
       Then stop. The next dim (`dim:correctness`) will be
       triggered by this event.
@@ -1192,12 +1144,8 @@ hats:
 
       ### Step 5 — Emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
-      Two-step `--policy-check` gate per `ralph-tools-emit §5`:
       ```bash
-      # Step A — dry-run gate (does NOT write events.jsonl)
-      ralph emit review.correctness.done --policy-check -j '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.goalalign.done>","dimension":"correctness","findings_file":".ralph/review/<plan>/correctness.md","findings_count":<N>}'
-      # Step B — write for real (only after Step A exits 0)
-      ralph emit review.correctness.done -j '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.goalalign.done>","dimension":"correctness","findings_file":".ralph/review/<plan>/correctness.md","findings_count":<N>}'
+      ralph emit review.correctness.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.goalalign.done>","dimension":"correctness","findings_file":".ralph/review/<plan>/correctness.md","findings_count":<N>}'
       ```
       Then stop. The next dim (`dim:testing`) will be triggered.
 
@@ -1288,12 +1236,8 @@ hats:
 
       ### Step 5 — Emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
-      Two-step `--policy-check` gate per `ralph-tools-emit §5`:
       ```bash
-      # Step A — dry-run gate (does NOT write events.jsonl)
-      ralph emit review.testing.done --policy-check -j '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.correctness.done>","dimension":"testing","findings_file":".ralph/review/<plan>/testing.md","findings_count":<N>}'
-      # Step B — write for real (only after Step A exits 0)
-      ralph emit review.testing.done -j '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.correctness.done>","dimension":"testing","findings_file":".ralph/review/<plan>/testing.md","findings_count":<N>}'
+      ralph emit review.testing.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.correctness.done>","dimension":"testing","findings_file":".ralph/review/<plan>/testing.md","findings_count":<N>}'
       ```
       Then stop. Next dim (`dim:maintainability`) triggered.
 
@@ -1382,12 +1326,8 @@ hats:
 
       ### Step 5 — Emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
-      Two-step `--policy-check` gate per `ralph-tools-emit §5`:
       ```bash
-      # Step A — dry-run gate (does NOT write events.jsonl)
-      ralph emit review.maintainability.done --policy-check -j '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.testing.done>","dimension":"maintainability","findings_file":".ralph/review/<plan>/maintainability.md","findings_count":<N>}'
-      # Step B — write for real (only after Step A exits 0)
-      ralph emit review.maintainability.done -j '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.testing.done>","dimension":"maintainability","findings_file":".ralph/review/<plan>/maintainability.md","findings_count":<N>}'
+      ralph emit review.maintainability.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.testing.done>","dimension":"maintainability","findings_file":".ralph/review/<plan>/maintainability.md","findings_count":<N>}'
       ```
       Then stop. Next dim (`dim:project-standards`) triggered.
 
@@ -1477,12 +1417,8 @@ hats:
 
       ### Step 5 — Emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
-      Two-step `--policy-check` gate per `ralph-tools-emit §5`:
       ```bash
-      # Step A — dry-run gate (does NOT write events.jsonl)
-      ralph emit review.standards.done --policy-check -j '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.maintainability.done>","dimension":"project-standards","findings_file":".ralph/review/<plan>/standards.md","findings_count":<N>}'
-      # Step B — write for real (only after Step A exits 0)
-      ralph emit review.standards.done -j '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.maintainability.done>","dimension":"project-standards","findings_file":".ralph/review/<plan>/standards.md","findings_count":<N>}'
+      ralph emit review.standards.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.maintainability.done>","dimension":"project-standards","findings_file":".ralph/review/<plan>/standards.md","findings_count":<N>}'
       ```
       Then stop. Last dim (`dim:adversarial`) triggered next.
 
@@ -1572,12 +1508,8 @@ hats:
 
       ### Step 5 — Emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
-      Two-step `--policy-check` gate per `ralph-tools-emit §5`:
       ```bash
-      # Step A — dry-run gate (does NOT write events.jsonl)
-      ralph emit review.adversarial.done --policy-check -j '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.standards.done>","dimension":"adversarial","findings_file":".ralph/review/<plan>/adversarial.md","findings_count":<N>}'
-      # Step B — write for real (only after Step A exits 0)
-      ralph emit review.adversarial.done -j '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.standards.done>","dimension":"adversarial","findings_file":".ralph/review/<plan>/adversarial.md","findings_count":<N>}'
+      ralph emit review.adversarial.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.standards.done>","dimension":"adversarial","findings_file":".ralph/review/<plan>/adversarial.md","findings_count":<N>}'
       ```
       Then stop. Last dim done; `review-synthesizer` will be
       triggered next.
@@ -1926,13 +1858,9 @@ hats:
 
       ### Step 8 — Emit event (one terminal per activation)
       Pass through `plan_path` and `executor_head_sha` from the trigger
-      (`review.adversarial.done`). Two-step `--policy-check` gate per
-      `ralph-tools-emit §5`:
+      (`review.adversarial.done`).
       ```bash
-      # Step A — dry-run gate (does NOT write events.jsonl)
-      ralph emit review.complete --policy-check -j '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","fix_plan_file":".ralph/review/<plan>/fix-plan.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
-      # Step B — write for real (only after Step A exits 0)
-      ralph emit review.complete -j '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","fix_plan_file":".ralph/review/<plan>/fix-plan.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
+      ralph emit review.complete --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","fix_plan_file":".ralph/review/<plan>/fix-plan.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
       ```
       Then stop. Fixer will be triggered next.
 
@@ -2051,13 +1979,9 @@ hats:
 
       ### Step 6 — Emit event
       Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`, and
-      `verdict` as `review_verdict`. Two-step `--policy-check` gate per
-      `ralph-tools-emit §5`:
+      `verdict` as `review_verdict`.
       ```bash
-      # Step A — dry-run gate (does NOT write events.jsonl)
-      ralph emit fix.done --policy-check -j '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from review.complete>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>}'
-      # Step B — write for real (only after Step A exits 0)
-      ralph emit fix.done -j '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from review.complete>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>}'
+      ralph emit fix.done --json '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from review.complete>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>}'
       ```
       Then stop. Alignment will be triggered next.
 
@@ -2129,14 +2053,7 @@ hats:
       1. List every Implementation Unit (U-ID) in the **original** plan.
       2. For each U-ID, search
          `git log --oneline <DIFF_BASE>..<executor_head_sha>` for a commit
-         whose subject contains that U-ID **AND** uses the executor's
-         `feat(scope): U<N> ...` prefix (NOT the fixer's
-         `fix(U<N>): ...` prefix — those belong to the fix-plan range,
-         see §Step 3). Use `--grep='feat('` to scope the search; if a
-         project's commit subject convention uses a different prefix,
-         substitute accordingly. Example: `git log --oneline
-         <DIFF_BASE>..<executor_head_sha> --grep='feat('` then filter
-         results by U-ID substring.
+         whose subject contains that U-ID (e.g. `feat(scope): U3 ...`).
       3. Collect `missing_plan_uids` = U-IDs with no matching commit.
       4. `plan_executed: true` iff `missing_plan_uids` is empty; else
          `false` and include missing U-IDs in residuals.
@@ -2164,13 +2081,9 @@ hats:
 
       ### Step 5 — Emit event
       Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`,
-      `review_verdict`. Two-step `--policy-check` gate per
-      `ralph-tools-emit §5`:
+      `review_verdict`.
       ```bash
-      # Step A — dry-run gate (does NOT write events.jsonl)
-      ralph emit align.done --policy-check -j '{"plan_name":"<plan>","plan_path":"<original plan path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from fix.done>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
-      # Step B — write for real (only after Step A exits 0)
-      ralph emit align.done -j '{"plan_name":"<plan>","plan_path":"<original plan path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from fix.done>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
+      ralph emit align.done --json '{"plan_name":"<plan>","plan_path":"<original plan path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from fix.done>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
       ```
       Then stop. Reporter will receive `align.done`.
 
@@ -2270,24 +2183,14 @@ hats:
            "pass_with_residuals"` OR NOT `plan_executed` OR NOT
            `fix_plan_executed` → `verdict: "pass_with_residuals"`
          - Else → `verdict: "pass"`
-      7. Emit `report.done` (two-step `--policy-check` gate per
-         `ralph-tools-emit §5`):
+      7. Emit `report.done`:
          ```bash
-         # Step A — dry-run gate (does NOT write events.jsonl)
-         ralph emit report.done --policy-check -j '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'
-         # Step B — write for real (only after Step A exits 0)
-         ralph emit report.done -j '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'
+         ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'
          ```
       8. Emit `LOOP_COMPLETE` (next activation is OK, or same
-         activation if the runtime allows; usually separate). Same
-         two-step gate (terminal topic, but the policy-check gate
-         still applies under agent context — see
-         `event_policy.require_policy_check_for_cli_emit: true`):
+         activation if the runtime allows; usually separate):
          ```bash
-         # Step A — dry-run gate
-         ralph emit LOOP_COMPLETE --policy-check -j '{"reason":"<1-2 sentence>"}'
-         # Step B — write for real
-         ralph emit LOOP_COMPLETE -j '{"reason":"<1-2 sentence>"}'
+         ralph emit LOOP_COMPLETE --json '{"reason":"<1-2 sentence>"}'
          ```
 
       ### Branch B — Failure path (trigger = `work.failed` or `plan.blocked`)
@@ -2296,16 +2199,8 @@ hats:
       2. If available, read `plan.ready` from events file for plan_path.
       3. Write a blocked report to `.ralph/review/{plan_name}/report.md`
          with verdict `blocked` and upstream `reason` in §1.
-      4. Emit `report.done` with `verdict: "blocked"` (two-step
-         `--policy-check` gate, same shape as Branch A step 7):
-         ```bash
-         # Step A — dry-run gate
-         ralph emit report.done --policy-check -j '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
-         # Step B — write for real
-         ralph emit report.done -j '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
-         ```
-      5. Emit `LOOP_COMPLETE` with `reason: "blocked: <upstream reason>"`
-         (same two-step gate as Branch A step 8).
+      4. Emit `report.done` with `verdict: "blocked"`.
+      5. Emit `LOOP_COMPLETE` with `reason: "blocked: <upstream reason>"`.
 
       Fix/alignment/6-dim sections: mark "not run".
 
