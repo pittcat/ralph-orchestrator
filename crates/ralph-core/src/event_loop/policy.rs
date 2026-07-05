@@ -52,6 +52,7 @@ pub fn publish_correction_via_context(
         // 2026-06-23 fix plan U5 (CB-2): policy-level rejection
         // predates typed-kind plumbing — keep None.
         kind: None,
+        duplicate_work_done_hint: None,
     };
     let retry_key = rejection.compute_retry_key();
 

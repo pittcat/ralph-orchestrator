@@ -169,6 +169,18 @@ pub struct Rejection {
     /// existed deserialises without error (deserialise-as-None).
     #[serde(default)]
     pub kind: Option<crate::preset::engine::gates::RejectionKind>,
+    /// U4 of plan 2026-07-05-005 (fix-plan §R4 / §R9):
+    /// `RecoveryDiagnosisEnvelope::hint` discriminator string
+    /// for `DuplicateWorkDone` rejections. Carries the
+    /// `DuplicateWorkDoneHint::as_hint_str()` value so
+    /// `ralph diagnose --session latest` and the recovery JSONL
+    /// can distinguish `DuplicateSameStep` from
+    /// `DuplicateStallBypass` while `reason_code` stays the
+    /// stable legacy literal `duplicate_work_done` (per KTD-3).
+    /// `#[serde(default)]` so JSONL written before this field
+    /// existed deserialises without error.
+    #[serde(default)]
+    pub duplicate_work_done_hint: Option<crate::event_policy::DuplicateWorkDoneHint>,
 }
 
 impl Rejection {
@@ -198,7 +210,7 @@ impl Rejection {
             original_ts: None,
             // 2026-06-23 fix plan U5 (CB-2): topic-format predates
             // typed-kind plumbing — keep None.
-            kind: None,
+            kind: None, duplicate_work_done_hint: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -228,7 +240,7 @@ impl Rejection {
             original_ts: None,
             // 2026-06-23 fix plan U5 (CB-2): origin-guard predates
             // typed-kind plumbing — keep None.
-            kind: None,
+            kind: None, duplicate_work_done_hint: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -276,7 +288,7 @@ impl Rejection {
             original_ts: None,
             // 2026-06-23 fix plan U5 (CB-2): execution-contract
             // predates typed-kind plumbing — keep None.
-            kind: None,
+            kind: None, duplicate_work_done_hint: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -420,8 +432,8 @@ pub fn rejection_with_key(
         // 2026-06-23 fix plan U5 (CB-2): legacy helper predates
         // typed-kind plumbing — keep None so payload falls back
         // to violation-derived reason.
-        kind: None,
-    }
+        kind: None, duplicate_work_done_hint: None,
+        }
 }
 
 /// Build the payload for a `task.resume` event that re-dispatches the
@@ -529,6 +541,17 @@ pub fn build_task_resume_payload(
     // inject targeted behaviour guidance into the prompt on the next
     // iteration. Empty list is the default and is skipped by the
     // injector.
+    // U4 of plan 2026-07-05-005 (fix-plan §R4): surface
+    // `DuplicateWorkDoneHint` discriminator so the recovery JSONL
+    // carries the variant distinction. The hint string travels
+    // alongside the stable `kind` field; post-mortem tooling and
+    // `ralph diagnose` can read it without parsing `reason_code`.
+    if let Some(ref dup_hint) = rejection.duplicate_work_done_hint {
+        payload.insert(
+            "hint".into(),
+            serde_json::Value::String(dup_hint.as_hint_str().to_string()),
+        );
+    }
     let resolved_target_hat = rejection
         .target_hat
         .as_deref()
@@ -1283,7 +1306,7 @@ mod tests {
             target_hat: Some("explicit-target".into()),
             original_event_id: None,
             original_ts: None,
-            kind: None,
+            kind: None, duplicate_work_done_hint: None,
         };
         let payload1 = build_task_resume_payload(&r1, &[], &[], None, None, None);
         let v1: serde_json::Value = serde_json::from_str(&payload1).unwrap();
@@ -1331,6 +1354,65 @@ mod tests {
         let v4: serde_json::Value = serde_json::from_str(&payload4).unwrap();
         assert_eq!(v4["reason"], "other");
         assert_eq!(v4["target_hat"], "executor");
+    }
+
+    /// U4 of plan 2026-07-05-005 (fix-plan §R4): when a
+    /// `DuplicateWorkDone` rejection carries a `duplicate_work_done_hint`,
+    /// `build_task_resume_payload` surfaces the discriminator string on
+    /// the recovery envelope's `hint` field so `ralph diagnose` and the
+    /// recovery JSONL can distinguish `DuplicateSameStep` from
+    /// `DuplicateStallBypass` without parsing `reason_code` (which
+    /// stays the stable `duplicate_work_done` literal per KTD-3).
+    #[test]
+    fn u4_hint_carried_in_envelope() {
+        use crate::event_policy::DuplicateWorkDoneHint;
+
+        // Same-step hint travels as `duplicate_work_done_same_step`.
+        let r_same = Rejection {
+            stage: RejectionStage::Policy,
+            source_hat: Some("executor".into()),
+            business_hat: Some("executor".into()),
+            topic: "work.done".into(),
+            violation: "duplicate".into(),
+            retry_key: "policy:executor:work.done:duplicate_work_done".into(),
+            retry_eligible: true,
+            non_retryable_reason: None,
+            target_hat: Some("executor".into()),
+            original_event_id: None,
+            original_ts: None,
+            kind: None,
+            duplicate_work_done_hint: Some(DuplicateWorkDoneHint::DuplicateSameStep),
+        };
+        let payload_same = build_task_resume_payload(&r_same, &[], &[], None, None, None);
+        let v_same: serde_json::Value = serde_json::from_str(&payload_same).unwrap();
+        assert_eq!(
+            v_same["hint"], "duplicate_work_done_same_step",
+            "U4: DuplicateSameStep hint must surface on the envelope"
+        );
+
+        // Stall-bypass hint travels as `duplicate_work_done_stall_bypass`.
+        let r_stall = Rejection {
+            duplicate_work_done_hint: Some(DuplicateWorkDoneHint::DuplicateStallBypass),
+            ..r_same.clone()
+        };
+        let payload_stall = build_task_resume_payload(&r_stall, &[], &[], None, None, None);
+        let v_stall: serde_json::Value = serde_json::from_str(&payload_stall).unwrap();
+        assert_eq!(
+            v_stall["hint"], "duplicate_work_done_stall_bypass",
+            "U4: DuplicateStallBypass hint must surface on the envelope"
+        );
+
+        // Hint absent → payload has no `hint` field (legacy behaviour).
+        let r_none = Rejection {
+            duplicate_work_done_hint: None,
+            ..r_same.clone()
+        };
+        let payload_none = build_task_resume_payload(&r_none, &[], &[], None, None, None);
+        let v_none: serde_json::Value = serde_json::from_str(&payload_none).unwrap();
+        assert!(
+            v_none.get("hint").is_none(),
+            "U4: rejection without DuplicateWorkDone hint must omit the field, got: {v_none}"
+        );
     }
 
     /// U2 (2026-06-17-003 plan): the gate helper that audit-logs

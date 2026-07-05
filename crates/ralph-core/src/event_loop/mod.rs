@@ -2706,6 +2706,7 @@ impl EventLoop {
             // 2026-06-23 fix plan U5 (CB-2): completion-correction
             // path predates typed-kind plumbing — keep None.
             kind: None,
+            duplicate_work_done_hint: None,
         };
         let retry_key = rejection.compute_retry_key();
         rejection.retry_key = retry_key.clone();
@@ -8736,6 +8737,7 @@ impl EventLoop {
                             // pass None so the resume payload falls
                             // back to `violation`-derived reason.
                             kind: None,
+                            duplicate_work_done_hint: None,
                         };
                         // 2026-06-16-001 U3: freshness filter — drop
                         // the rejection (and the synthetic
@@ -11781,6 +11783,7 @@ impl EventLoop {
                     original_event_id: None,
                     original_ts: None,
                     kind: Some(RejectionKind::ContractViolation),
+                    duplicate_work_done_hint: None,
                 };
                 rejection.retry_key = rejection.compute_retry_key();
                 let _ctx = crate::correction::emit_correction_context(
