@@ -122,6 +122,114 @@ pub const PROJECTED_TOPICS: &[&str] = &[
     "review.dimensions.complete",
 ];
 
+/// U9 of plan 2026-07-05-005: in-memory versioned projection
+/// field. Mirrors LangGraph's `channel_versions` +
+/// `versions_seen` protocol (`/Users/pittcat/Dev/Python/langgraph/
+/// libs/langgraph/langgraph/_algo.py:262-269`). Carries the
+/// current value alongside a monotonically increasing version
+/// counter and the last writer (hat id, when known). The
+/// companion API `try_write(&mut self, new_value, expected_version)`
+/// enforces the optimistic-concurrency contract: callers
+/// declare which version they observed; the runtime rejects
+/// writes whose expected_version is stale.
+#[derive(Debug, Clone)]
+pub struct ProjectedField<T> {
+    /// Current value.
+    pub value: T,
+    /// Monotonically increasing version. Starts at 0 on first
+    /// construction; bumped on every successful `try_write`.
+    pub version: u64,
+    /// The hat id that produced the most recent accepted write.
+    /// `None` for the initial value or for writes that did not
+    /// carry hat provenance.
+    pub last_writer: Option<String>,
+}
+
+impl<T: Default> Default for ProjectedField<T> {
+    fn default() -> Self {
+        Self {
+            value: T::default(),
+            version: 0,
+            last_writer: None,
+        }
+    }
+}
+
+impl<T> ProjectedField<T> {
+    /// Construct a `ProjectedField` from an explicit value
+    /// (e.g. when seeding from disk). Starts at version 0.
+    pub fn new(value: T) -> Self {
+        Self {
+            value,
+            version: 0,
+            last_writer: None,
+        }
+    }
+
+    /// Optimistic-concurrency write. `expected_version = Some(v)`
+    /// means the caller observed version `v` and asserts no
+    /// concurrent writer has bumped the version since.
+    /// `expected_version = None` means "don't care" — the write
+    /// always succeeds and bumps the version.
+    ///
+    /// Returns `Err(VersionMismatch { actual, expected })` when
+    /// the actual version is strictly greater than
+    /// `expected_version`. The caller can re-read the field and
+    /// decide whether to retry.
+    pub fn try_write(
+        &mut self,
+        new_value: T,
+        expected_version: Option<u64>,
+        writer: Option<&str>,
+    ) -> Result<(), VersionMismatch> {
+        if let Some(expected) = expected_version {
+            if self.version > expected {
+                return Err(VersionMismatch {
+                    actual: self.version,
+                    expected,
+                });
+            }
+        }
+        self.value = new_value;
+        self.version = self.version.saturating_add(1);
+        self.last_writer = writer.map(|s| s.to_string());
+        Ok(())
+    }
+
+    /// Read-only accessor for the current value (used by
+    /// `apply` call sites that want to compute a write without
+    /// taking `&mut self`).
+    pub fn get(&self) -> &T {
+        &self.value
+    }
+}
+
+/// U9 of plan 2026-07-05-005: returned by
+/// [`ProjectedField::try_write`] when the optimistic-concurrency
+/// check fails. The hat that issued the stale write should
+/// re-read the field and decide whether to retry (LangGraph's
+/// "Second writer rejected" pattern at
+/// `_algo.py:317-323`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionMismatch {
+    /// The version the field actually held at write time.
+    pub actual: u64,
+    /// The version the caller asserted they had observed.
+    pub expected: u64,
+}
+
+impl std::fmt::Display for VersionMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "version mismatch: actual={}, expected={}",
+            self.actual, self.expected
+        )
+    }
+}
+
+impl std::error::Error for VersionMismatch {}
+
 /// Build the canonical path to the task ledger under a workspace
 /// root. Phase 1 mandates the legacy `.ralph/agent/tasks.jsonl`
 /// path; we do **not** introduce a new path here.
