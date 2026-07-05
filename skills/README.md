@@ -11,6 +11,7 @@ It ships operator skills:
 | `ralph-loop` | Run, monitor, resume, merge, debug Ralph loops |
 | `ralph-preset-author` | Draft presets (builtin + local) with per-hat AAF tables |
 | `ralph-preset-review` | AAF review + `preset-review-report.md` + mechanical lint |
+| `ralph-run-diagnosis` | Post-run deep diagnosis: artifacts, OPAC, mechanism vs preset attribution |
 
 `ralph-preset-common/` holds shared `references/` and fixtures (not a standalone marketplace skill).
 
@@ -26,6 +27,9 @@ ln -sf ../ralph-preset-common/references skills/ralph-preset-author/references
 ln -sf ../ralph-preset-common/references skills/ralph-preset-review/references
 ln -sf ../../skills/ralph-preset-author .claude/skills/ralph-preset-author
 ln -sf ../../skills/ralph-preset-review .claude/skills/ralph-preset-review
+ln -sf ../../skills/ralph-run-diagnosis .claude/skills/ralph-run-diagnosis
+mkdir -p .cursor/skills
+ln -sf ../../skills/ralph-run-diagnosis .cursor/skills/ralph-run-diagnosis
 ```
 
 On Windows without symlink support, duplicate `references/` and keep in sync manually.
@@ -56,6 +60,7 @@ npx skills add mikeyobrien/ralph-orchestrator \
   --skill ralph-loop \
   --skill ralph-preset-author \
   --skill ralph-preset-review \
+  --skill ralph-run-diagnosis \
   -a claude-code \
   -y
 ```

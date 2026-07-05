@@ -17,7 +17,8 @@
         "./skills/ralph-hats",
         "./skills/ralph-loop",
         "./skills/ralph-preset-author",
-        "./skills/ralph-preset-review"
+        "./skills/ralph-preset-review",
+        "./skills/ralph-run-diagnosis"
       ]
     }
   ]
