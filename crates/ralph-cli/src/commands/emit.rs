@@ -1007,9 +1007,11 @@ fn emit_command_with_root_and_hats(
     // unknown value yields `triggered_not_in_topology` and the
     // apply path bails before JSONL write.
     if let Some(cfg) = config.as_ref() {
-        if let Err(err) =
-            crate::policy_check::check_envelope_triggered(triggered.as_deref(), cfg)
-        {
+        if let Err(err) = crate::policy_check::check_envelope_triggered(
+            &topic,
+            triggered.as_deref(),
+            cfg,
+        ) {
             use ralph_core::{PolicyFinding, ViolationType};
             let finding = PolicyFinding {
                 violation_type: ViolationType::SemanticGateViolation {

@@ -791,7 +791,7 @@ pub fn run_policy_check_unified(
     // topology". Mirrors the apply-path gate so `--policy-check`
     // and the real write share the same rejection surface.
     if let Some(cfg) = config.as_ref() {
-        if let Err(err) = check_envelope_triggered(triggered, cfg) {
+        if let Err(err) = check_envelope_triggered(topic, triggered, cfg) {
             let mut rej = final_report;
             rej.accepted = false;
             rej.reason_codes.push(err.reason_code);
@@ -1176,7 +1176,9 @@ event_loop:
     #[test]
     fn u7_check_envelope_triggered_in_topology_allowed() {
         let cfg = cfg_with_hats(&["review-synthesizer"]);
-        check_envelope_triggered(Some("review-synthesizer"), &cfg)
+        // U7 of 2026-07-05-005: business-topic path; declared
+        // hat must be accepted.
+        check_envelope_triggered("work.done", Some("review-synthesizer"), &cfg)
             .expect("declared hat must be accepted");
     }
 
@@ -1184,17 +1186,55 @@ event_loop:
     fn u7_check_envelope_triggered_missing_allowed() {
         let cfg = cfg_with_hats(&["review-synthesizer"]);
         // R12: missing triggered is allowed.
-        check_envelope_triggered(None, &cfg).expect("missing triggered is allowed");
-        check_envelope_triggered(Some(""), &cfg).expect("empty triggered is allowed");
+        check_envelope_triggered("work.done", None, &cfg)
+            .expect("missing triggered is allowed");
+        check_envelope_triggered("work.done", Some(""), &cfg)
+            .expect("empty triggered is allowed");
     }
 
     #[test]
     fn u7_check_envelope_triggered_not_in_topology_rejected() {
         let cfg = cfg_with_hats(&["review-synthesizer"]);
-        let err = check_envelope_triggered(Some("planner"), &cfg).unwrap_err();
+        let err =
+            check_envelope_triggered("work.done", Some("planner"), &cfg).unwrap_err();
         assert_eq!(err.reason_code, "triggered_not_in_topology");
         assert!(err.message.contains("planner"));
         assert!(err.message.contains("review-synthesizer"));
+    }
+
+    /// U7 of plan 2026-07-05-005 (fix-plan §R11): a ralph-control
+    /// topic carrying `triggered="ralph"` (the runtime pseudo-hat)
+    /// is accepted even when `ralph` is not in the preset hats[].
+    #[test]
+    fn u7_check_envelope_triggered_ralph_control_topic_accepts_pseudo_hat() {
+        let cfg = cfg_with_hats(&["review-synthesizer"]);
+        // task.resume is a ralph-control topic; `ralph` is the
+        // runtime pseudo-hat that injects recovery events.
+        check_envelope_triggered("task.resume", Some("ralph"), &cfg)
+            .expect("ralph-control topic + triggered=ralph must accept");
+    }
+
+    /// U7 of plan 2026-07-05-005 (fix-plan §R11): an
+    /// orchestrator-diagnostic topic carrying an unknown `triggered`
+    /// is accepted (the runtime origin guard handles it).
+    #[test]
+    fn u7_check_envelope_triggered_diagnostic_topic_accepts_unknown() {
+        let cfg = cfg_with_hats(&["review-synthesizer"]);
+        check_envelope_triggered("event.malformed", Some("ralph-runner"), &cfg)
+            .expect("diagnostic topic + unknown triggered must accept");
+    }
+
+    /// U7 of plan 2026-07-05-005 (fix-plan §R11): a business
+    /// topic carrying `triggered="ralph"` (the pseudo-hat, which
+    /// is not in preset hats[]) MUST be rejected — the strict
+    /// business-topic layer applies regardless of the value.
+    #[test]
+    fn u7_check_envelope_triggered_business_topic_rejects_pseudo_hat() {
+        let cfg = cfg_with_hats(&["review-synthesizer"]);
+        let err =
+            check_envelope_triggered("work.done", Some("ralph"), &cfg).unwrap_err();
+        assert_eq!(err.reason_code, "triggered_not_in_topology");
+        assert!(err.message.contains("ralph"));
     }
 
     #[test]
@@ -1329,6 +1369,7 @@ pub fn check_emit_provenance(
 /// preset's `hats[]` map. The error message names the offending
 /// value AND the resolved hat ids so the agent can self-correct.
 pub fn check_envelope_triggered(
+    topic: &str,
     triggered: Option<&str>,
     config: &RalphConfig,
 ) -> std::result::Result<(), ValidationError> {
@@ -1344,6 +1385,23 @@ pub fn check_envelope_triggered(
     // the topic is in the same allowlist that
     // `check_emit_provenance` uses; the runtime origin guard
     // handles downstream validation.
+    //
+    // U7 of plan 2026-07-05-005 (fix-plan §R11): layer the
+    // carve-out by topic-trust so the same matrix as
+    // `check_emit_provenance` applies:
+    //   - ralph-control topics (loop.cancel / task.resume /
+    //     loop.complete / human.*) — `triggered` is allowed
+    //     even if not in preset hats[] (runtime pseudo-hat
+    //     origin is fine).
+    //   - orchestrator diagnostic topics (event.*) — same as
+    //     ralph-control (the runtime injects them).
+    //   - business topics — strict topology check applies;
+    //     `triggered` must be a declared hat id.
+    use ralph_core::event_origin::is_ralph_control_topic;
+    use ralph_core::is_orchestrator_diagnostic_topic;
+    if is_ralph_control_topic(topic) || is_orchestrator_diagnostic_topic(topic) {
+        return Ok(());
+    }
     if config.hats.contains_key(value) {
         return Ok(());
     }
