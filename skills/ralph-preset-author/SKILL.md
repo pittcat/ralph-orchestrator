@@ -55,6 +55,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 - **No whole-file agent perspective** in `instructions:` — no "the reviewer will…", no topology position.
 - **No internal ledger reads** — no `.ralph/events.jsonl`, `.ralph/supervisor.db`, `.ralph/loops.json`.
 - **Emitter hats:** require `--policy-check` before emit; cite `ralph-tools-opac` and `ralph-tools-emit` §5.
+- **`--triggered`:** only use hat ids declared in preset `hats[]`; verify with `ralph emit --policy-check --triggered <hat> …` (see `references/commands.md`).
 - **`task_id` / `task_key` / `step`:** cite `ralph-tools-tasks` red box; never hand-write `task_id`.
 - **Single business event budget** per isolated activation; no business events before terminal emit.
 - **Do not duplicate** `ralph-tools*.md` content into instructions.

@@ -37,6 +37,7 @@ plan-gate / work.start
   → validator
   → review-coordinator（review.start，批量 wave）
   → 6× review dimension hats（review.dimension.done）
+  → review-coordinator 发 `review.dimensions.complete`（须在 `state_projection` 投影，供下游 Observe）
   → review-synthesizer → fixer → alignment → reporter → plan.complete
 ```
 

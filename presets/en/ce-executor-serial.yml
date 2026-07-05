@@ -774,16 +774,21 @@ hats:
     # `review.complete` event (already in this list), so
     # the review-chain signal is not lost.
     triggers: ["work.start", "task.resume", "test.passed", "review.complete", "work.failed"]
-    # 2026-06-28 plan U10 (R10): coordinator may emit
-    # `LOOP_COMPLETE(success=false)` to self-stop the loop
-    # when the automated recovery machinery is exhausted
-    # (U6/U8). The success=true path is the natural
-    # `plan.complete → ship → LOOP_COMPLETE` chain.
-    publishes: ["work.ready", "review.start", "plan.complete", "plan.blocked", "LOOP_COMPLETE"]
+    # 2026-07-05: `LOOP_COMPLETE` removed from coordinator `publishes`.
+    # Originally planned for the auto-self-stop path on recovery
+    # exhaustion (2026-06-28 plan U10 / R10), but the runtime already
+    # denies `coordinator → LOOP_COMPLETE` via `topic_deny_rules` and
+    # the topology lint still saw the BFS edge as a bypass of
+    # `report.done` (required_event_not_on_all_paths). The actual
+    # exhaustion path is `plan.blocked(reason=loop_stalled_max_iterations)`
+    # emitted by `progress-steward`, routed through `shipper` recoverable
+    # whitelist. Success path remains `plan.complete → shipper →
+    # REVIEW_COMPLETE → reporter → LOOP_COMPLETE`.
+    publishes: ["work.ready", "review.start", "plan.complete", "plan.blocked"]
     # 2026-06-26 plan U7: self-declared emit scope.
-    exempt_topics: ["plan.blocked", "plan.complete", "review.start", "work.ready", "LOOP_COMPLETE"]
+    exempt_topics: ["plan.blocked", "plan.complete", "review.start", "work.ready"]
     default_publishes: "plan.blocked"
-    terminal_events: ["work.ready", "review.start", "plan.complete", "plan.blocked", "LOOP_COMPLETE"]
+    terminal_events: ["work.ready", "review.start", "plan.complete", "plan.blocked"]
     # 2026-06-26: restrict coordinator prompt visibility to its own triggers.
     # Prevents isolated-mode coordinator from seeing review-chain events
     # (e.g. review.dimension.*) that it must never emit.
@@ -1256,8 +1261,7 @@ hats:
       1. Determine activation source and read payload fields:
          - `work.ready`: read `task_id`, `task_key`, `plan_path`, `plan_name`, `step`, `complexity`. If the payload contains `fix_plan_file`, this is a fix-unit — see **Fix-Unit Execution** below.
          - `fix.exhausted`: read `plan_name`, `fix_round`, `task_id`, `task_key`, `step`, `reason`. This is the rewrite opportunity after fixer could not fix it; it is NOT a normal plan step. Read `fix-log.md` to understand what fixer already tried and avoid repeating the same fix paths.
-      2. Read runtime task:
-         - `ralph tools task show <task_id> --format json` (informational read only — do NOT use the result to override the `task_id` in the `work.ready` payload; the payload value is the activation's SSOT, see PAYLOAD SCHEMA CHECKLIST above)
+      2. (removed 2026-07-05 — `ralph tools task show` was redundant; `task_id` is SSOT-injected via the `work.ready` payload, see PAYLOAD SCHEMA CHECKLIST above.)
       3. Read `context.md` and `plan.md` and `progress.md`
       4. Search memories for relevant patterns
 

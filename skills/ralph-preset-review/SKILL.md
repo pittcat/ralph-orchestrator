@@ -101,6 +101,7 @@ See `references/finding-rubric.md` for `finding_id` defaults. AAF gaps take prio
 
 - `ralph hats show -H <path> <hat_id>` — hat config snapshot (not full prompt)
 - `ralph emit --schema <topic>` — payload field SSOT
+- `ralph emit --policy-check --triggered <hat-id> <topic> '<payload>' -H <path>` — envelope `triggered` 须在 `hats[]`（与 payload schema 分开校验）
 
 ## Pre-merge Upgrade (not default)
 

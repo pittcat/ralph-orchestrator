@@ -41,6 +41,17 @@ use std::path::{Path, PathBuf};
 
 /// Arguments for the `ralph diagnose` subcommand.
 #[derive(Parser, Debug)]
+#[command(
+    about = "Build an offline diagnosis report from session artifacts",
+    long_about = "Build an offline diagnosis report from `.ralph/diagnostics/<session>/` \
+or the workspace-level `.ralph/recovery.jsonl`.\n\n\
+JSON output (`--format json`) includes:\n\
+- ranked findings with `hint` when `reason_code` is `duplicate_work_done` \
+(use `hint` to tell same-step resend vs stall-bypass resend)\n\
+- `dup_storm_topics`: topics where the same `work.ready` dedup key was \
+rejected 3+ times\n\n\
+See `docs/guide/runtime-diagnosis.md` for field semantics."
+)]
 pub struct DiagnoseArgs {
     /// Session to read from. Accepts:
     /// - "latest" (default) — pick the most recent timestamped session

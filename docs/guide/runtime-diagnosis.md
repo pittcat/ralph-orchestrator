@@ -157,11 +157,23 @@ U2 的 `RecoveryDiagnosisEnvelope`（schema_version=1）是 13 个 `source` × 4
   "safe_target": true,
   "outcome": "pending",
   "timestamp": "2026-06-06T13:45:00Z",
-  "session_id": "2026-06-06T13-45-00"   // 由 U3 logger 回填
+  "session_id": "2026-06-06T13-45-00",   // 由 logger 回填
+  // `duplicate_work_done` 拒收时：reason_code 保持 duplicate_work_done；
+  // 用顶层 hint 区分子类
+  "hint": "duplicate_work_done_same_step",  // 或 duplicate_work_done_stall_bypass 等
+  // work.ready 去重命中次数（仅该 topic 写入）
+  "seen_count": 2
 }
 ```
 
 `retry_key` 格式：`"{source}:{target_or_*}:{topic_or_*}:{reason_code}:{field_or_*}"`，5 段都是 snake_case + 大小写归一化。`ralph diagnose` 用它做跨迭代聚合，因此**改 source 枚举名 / 改 reason_code 字符串是 breaking change**。
+
+### `hint` 与 `seen_count`（duplicate / dedup 诊断）
+
+| 字段 | 何时出现 | 取值 | 怎么用 |
+|---|---|---|---|
+| `hint` | `duplicate_work_done` 拒收 | `duplicate_work_done_same_step`（同 step 误重发）/ `duplicate_work_done_stall_bypass`（stall 后重发）/ `duplicate_review_dimension_ready` / `duplicate_review_dimensions_complete` | `ralph diagnose` ranked findings 的 `hint` 列；区分 same-step vs stall-bypass 时**看 hint，不要只看 reason_code** |
+| `seen_count` | `work.ready` 去重命中 | `1` 首次；`≥2` 重复；`≥3` 视为 dup-storm | workspace `recovery.jsonl`；`ralph diagnose --format json` 的 `dup_storm_topics` 列出 `work.ready` 且 `seen_count ≥ 3` 的 topic |
 
 ### Flow Lifecycle Envelope（flow_lifecycle source）
 
@@ -418,6 +430,15 @@ emit 后 tracker 调用 `close_wave`，避免同 wave 在下一 iteration 重复
 - `max_iterations`：纯算力耗尽。
 - 其他 `*` / 缺失：看 `Recovery timeline` 最后几行的 `outcome == Failed`，再回查 `Suggested next actions`。
 
+### 症状 E："work.ready 重复风暴"
+
+1. `ralph diagnose --session latest --format json | jq '.dup_storm_topics'` — 非空表示某 `work.ready` dedup key 已被拒收 3 次以上。
+2. 在 ranked findings 表看 `hint` 列：`duplicate_work_done_same_step` = 同 step 误重发；`duplicate_work_done_stall_bypass` = stall-recovery 后重发。`reason_code` 可能仍是 `duplicate_work_done`，**以 `hint` 为准**。
+
+### 症状 F："triggered 不在拓扑"
+
+`ralph emit` 返回 `triggered_not_in_topology`：`--triggered` 值不在 preset `hats[]`。用 `ralph hats list` 查合法 id，或省略 `--triggered`。详见 `crates/ralph-core/data/ralph-tools-emit.md`。
+
 ---
 
 ## 9. 命令参考：`ralph diagnose --help` 全参数
@@ -438,7 +459,9 @@ Options:
 
       --format <FORMAT>
           Output format. Markdown (default) is human-readable; JSON is the
-          stable CI contract (schema_version="1").
+          stable CI contract (schema_version="1"). JSON includes
+          `dup_storm_topics` (work.ready dedup rejected 3+ times) and ranked
+          findings with `hint` for duplicate_work_done disambiguation.
           [possible values: markdown, json]
 
       --output <PATH>

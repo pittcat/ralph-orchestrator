@@ -29,7 +29,7 @@ ralph clean --diagnostics
 Above TUI / full diagnostics. Drops back-pressure points (payload / execution contract, workflow guard, stall, loop stale) to `recovery.jsonl`. When U5 drift detector's 3 metrics (field completeness / coord join rate / emit cadence) fall below threshold → `drift.jsonl`. On loop termination, appends `## Diagnostics` section to `.ralph/agent/summary.md` and writes `diagnosis-summary.json` seed.
 
 - **Enable (env preferred)**: `RALPH_DIAGNOSTICS=1 ralph run -c ralph.yml -H builtin:<preset> -p "..."`. Disk-only mode (no prompt alert): set `telemetry.runtime_diagnosis: { enabled: true, write_artifacts: true, prompt_injection_enabled: true, ... }` in `ralph.yml`.
-- **Report**: `ralph diagnose --session latest` (Markdown) or `--format json` (CI, `schema_version="1"`); `--diagnostics-root` overrides default root.
+- **Report**: `ralph diagnose --session latest` (Markdown) or `--format json` (CI, `schema_version="1"`); `--diagnostics-root` overrides default root. JSON 报告含 `dup_storm_topics`（`work.ready` 同 dedup key 重复 ≥3 次的 topic）与 ranked findings 的 `hint` 列（`duplicate_work_done` 时区分 `duplicate_work_done_same_step` / `duplicate_work_done_stall_bypass`）。
 - **Exit codes**: `0` rendered / `2` no session / `3` invalid path / `4` I/O failure.
 - **Recovery count (2026-06-17-004 U4)**: `diagnosis-summary.json`'s `recovery_count` now aggregates workspace-level `<root>/.ralph/recovery.jsonl` (CLI emit rejections) AND session-level `<root>/.ralph/diagnostics/<id>/recovery.jsonl` (hard gate / workflow guard) — two journals; `notes` lists both paths. `ralph diagnose` falls back to workspace journal when session journal is empty, avoiding stale session hiding cli_emit rejections.
 

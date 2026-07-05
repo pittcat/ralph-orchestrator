@@ -10,6 +10,8 @@
 - [ ] 画事件流（topic 箭头，非 prompt 流）
 - [ ] 每条 handoff 边：上游 Q4 emit 字段 ↔ 下游 Q2 Observe 命令/字段
 - [ ] `state_projection.actions` 与 emit payload 字段对齐
+- [ ] 若 hat `publishes` 含 `review.dimensions.complete`，`state_projection.actions_chain` 须有对应投影 action（否则下游 Q2 看不到 review 汇总）
+- [ ] emitter 若 instructions 要求 `--triggered <hat>`，该 `<hat>` 必须在 preset `hats[]` 里声明（否则 runtime 拒收 `triggered_not_in_topology`）
 - [ ] 可参考 `references/patterns.md`（仅拓扑阶段）
 
 ### 阶段 2：起草（单 hat agent 视角）
@@ -18,6 +20,7 @@
 - [ ] 逐 hat 填 AAF 五问表（模板见下）
 - [ ] 禁止拓扑句式抄进 instructions
 - [ ] Emitter hat：引用 `ralph-tools-opac`、`ralph-tools-emit` §5；强制 `--policy-check`
+- [ ] 若 instructions 写明 `--triggered <hat>`，核对 `<hat>` 在 preset `hats[]`；预检示例见 `references/commands.md`
 - [ ] `task_id` / `task_key` / `step`：引用 `ralph-tools-tasks` red box
 - [ ] 不复述 `ralph-tools*.md` 参数表
 
