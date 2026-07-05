@@ -552,6 +552,14 @@ fn format_termination_reason(reason: &TerminationReason) -> String {
         // post-mortem analysis. The literal matches the
         // variant name so dashboards keep parsing it.
         TerminationReason::CompletionStuck(_) => "CompletionStuck".to_string(),
+        // 2026-07-04-004 plan U5: dimension-reviewer scope
+        // violation hard-rejected; variant added in
+        // event_loop/types.rs:215 alongside the existing
+        // circuit-breaker variant. Format as a stable
+        // literal so bench dashboards keep parsing it.
+        TerminationReason::ScopeViolationHardRejected { .. } => {
+            "ScopeViolationHardRejected".to_string()
+        }
     }
 }
 
