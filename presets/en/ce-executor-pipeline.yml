@@ -496,42 +496,71 @@ hats:
       `plan_baseline_sha` (the loop-bootstrap anchor) has been rewritten
       out of history. This step **DOES write to disk** at
       `.ralph/agent/plan-baseline-{plan_key}.sha` — that file is the
-      source of truth the B-layer runtime re-reads on every hat prompt
-      (`crates/ralph-core/src/event_loop/mod.rs:6336+`). Procedure:
+      source of truth the B-layer runtime re-reads on every hat prompt.
+      The {plan_key} here MUST match the key the runtime computes when
+      it reads the file back — else the read falls through to stale
+      state and reconciliation is silently lost. Mirror the runtime
+      logic exactly:
 
-      1. Compute `plan_key`:
+      1. Compute `plan_key` from the prompt file path the loop was
+         started with (visible in the prompt's PROMPT header) and
+         `plan_path` (the repo-relative path you read in Step 1).
+         Follow the same priority the runtime uses:
+         - **plan_path given → use path-based id**: stem from
+           `basename $plan_path .md` (also strip `.html`), and parent
+           directory from `basename $(dirname $plan_path)`. Format:
+           `${parent_dir}-${stem}` — example
+           `docs/plans/2026-07-04-004-fix-...plan.md` →
+           `plans-2026-07-04-004-fix-...plan`.
+         - **plan_path NOT given OR empty → check the prompt file's
+           filename**:
+           - If the file's stem (case-insensitive) is exactly `prompt`,
+             treat it as the default sentinel and fall through.
+           - Otherwise the file's stem IS the key. Example
+             `PROMPT.pipeline.md` → `PROMPT.pipeline` (no parent
+             directory → stem only).
+         - **prompt is inline text (`-p`)**: hash the prompt text with
+           `printf "%s" "$prompt_text" | sha256sum | head -c 16`, prefix
+           `prompt-`.
+         - **prompt file is on disk**: read it, hash the content the
+           same way, prefix `prompt-`.
+         - Otherwise, give up — refuse to emit a `resolved_baseline_sha`
+           and emit `plan.blocked{reason: "baseline_reconciliation_io_failure"}`.
+      2. Use the **Write** tool to write to that exact path:
+         `.ralph/agent/plan-baseline-{plan_key}.sha`. The runtime reads
+         from the same {plan_key}; if the path mismatches it silently
+         falls back to stale state.
+      3. **Read** the current file (if any) to inspect a stale value:
          ```bash
-         PLAN_STEM="$(basename "$plan_path" .md | sed s/.html$//)"
-         PLAN_PARENT_DIR="$(basename "$(dirname "$plan_path")")"
-         PLAN_KEY="${PLAN_PARENT_DIR}-${PLAN_STEM}"
+         CURRENT_SHA="$(cat ".ralph/agent/plan-baseline-${plan_key}.sha" 2>/dev/null || echo "")"
          ```
-         Example: `docs/plans/2026-07-04-004-fix-...-plan.md` →
-         `plans-2026-07-04-004-fix-...-plan`.
-      2. **Read** the current file (if any):
-         ```bash
-         CURRENT_SHA="$(cat ".ralph/agent/plan-baseline-${PLAN_KEY}.sha" 2>/dev/null || echo "")"
-         ```
-      3. **Validate** the current SHA with `git cat-file -t $CURRENT_SHA 2>/dev/null`.
+      4. **Validate** the current SHA with `git cat-file -t $CURRENT_SHA 2>/dev/null`.
          If it does NOT print `commit`, the SHA is **orphaned**
-         (loop-bootstrap anchor was rewritten out of history). Discard it.
-      4. **Recover** — when step 3 discards (or step 2 finds no file):
+         (loop-bootstrap anchor was rewritten out of history). Discard.
+      5. **Recover** — when step 4 discards (or step 3 finds no file):
          ```bash
          git log --reverse --format=%H -- "$plan_path" | tail -1
          ```
          → earliest commit where the plan file entered git. Use that.
-      5. **Last-resort** — if recover yields empty (plan file not yet
+      6. **Last-resort** — if recover yields empty (plan file not yet
          tracked in git): `git rev-parse HEAD`; record in payload as
          `resolved_baseline_sha: "HEAD@loop_start"`.
-      6. **Write back** to disk with the **Write** tool (NOT `ralph tools
-         baseline write` — that command does not exist; you write the
-         file directly). Path:
+      7. **Write** the resolved SHA back to disk via the **Write** tool
+         (NOT `ralph tools baseline write` — that command does not
+         exist; you write the file directly). Path:
          `.ralph/agent/plan-baseline-{plan_key}.sha`. Content:
          `<resolved_baseline_sha>\n`. This is the only legitimate
-         overwrite site for this file (per `plan_baseline.rs` semantics;
-         the runner's `ensure_plan_baseline` uses `O_EXCL` to refuse
-         overwrites, so you must use `Write`, not the guard).
-      7. **Carry forward** `resolved_baseline_sha` in the `plan.ready`
-         payload (mandatory required_field per line 286 schema).
+         overwrite site for this file (the runner's
+         `ensure_plan_baseline` refuses overwrites — see
+         `.ralph/agent/plan-baseline.rs` semantics).
+      8. **Pre-write re-validation (HARD RULE)** — before you call the
+         Write tool, run `git cat-file -t <resolved_baseline_sha>`
+         yourself. If it does NOT print `commit`, abort the write:
+         emit `plan.blocked{reason: "baseline_reconciliation_io_failure"}`.
+         This catches ghost objects (e.g. unreachable after `git gc`)
+         that the read-side format check would otherwise silently accept.
+      9. **Carry forward** `resolved_baseline_sha` in the `plan.ready`
+         payload (mandatory required_field).
 
       ### Step 3 — Plan Review (when file is OK)
       Read the plan file end-to-end and check it against these quality gates.
