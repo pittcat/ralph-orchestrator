@@ -46,6 +46,16 @@ pub struct ResumeArgs {
     /// Record session to JSONL file for replay testing
     #[arg(long, value_name = "FILE")]
     record_session: Option<PathBuf>,
+
+    /// U6 of plan 2026-07-05-005 (R4): attach (or re-attach) the
+    /// resumed loop to a plan file. Writes
+    /// `.ralph/agent/.ralph-anchor.json` so the resume-path
+    /// `inspect loop` call surfaces the plan even when
+    /// `prompt_file` is still the default sentinel (the
+    /// resume command does not rewrite `prompt_file` the way
+    /// `ralph run --plan` does).
+    #[arg(long, value_name = "FILE")]
+    plan: Option<PathBuf>,
 }
 
 /// Resume a previously interrupted loop from existing scratchpad.
@@ -87,6 +97,22 @@ pub async fn resume_command(
         "Found existing scratchpad at '{}', continuing from previous state",
         config.core.scratchpad.path
     );
+
+    // U6 of plan 2026-07-05-005 (R4): when `--plan` is passed,
+    // write the anchor marker so the inspect command can find
+    // the plan attachment without rewriting `prompt_file`.
+    // Resume is the only path where this matters — `ralph run
+    // --plan` rewrites `prompt_file` directly via
+    // `commands/run.rs:859-863`.
+    if let Some(plan_path) = args.plan.as_ref() {
+        if let Err(e) = write_resume_anchor_marker(plan_path) {
+            eprintln!(
+                "{}warning:{} failed to write anchor marker: {e}",
+                colors::YELLOW,
+                colors::RESET
+            );
+        }
+    }
 
     // Apply CLI overrides
     if let Some(max_iter) = args.max_iterations {
@@ -182,5 +208,39 @@ pub async fn resume_command(
         std::process::exit(exit_code);
     }
 
+    Ok(())
+}
+
+/// U6 of plan 2026-07-05-005 (R4): persist the resume-time
+/// anchor marker so `ralph inspect loop` can surface the plan
+/// attachment. The marker lives at
+/// `<workspace>/.ralph/agent/.ralph-anchor.json` and carries the
+/// same fields as [`crate::commands::inspect::AnchorMarker`]
+/// (kept as the SSoT shape — this writer is a thin
+/// serialisation helper).
+fn write_resume_anchor_marker(plan_path: &std::path::Path) -> anyhow::Result<()> {
+    use crate::commands::inspect::AnchorMarker;
+
+    let workspace_root = std::env::current_dir()
+        .context("resume: failed to resolve current_dir for marker write")?;
+    let agent_dir = workspace_root.join(".ralph").join("agent");
+    std::fs::create_dir_all(&agent_dir)
+        .context("resume: failed to create .ralph/agent dir for marker")?;
+    let plan_baseline_sha = ralph_core::plan_baseline::read_plan_baseline(&workspace_root, None);
+    let marker = AnchorMarker {
+        plan_path: plan_path.to_path_buf(),
+        plan_name: plan_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string(),
+        plan_baseline_sha,
+        attached_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+    let json = serde_json::to_string_pretty(&marker)
+        .context("resume: failed to serialise anchor marker")?;
+    let path = agent_dir.join(".ralph-anchor.json");
+    std::fs::write(&path, json).context("resume: failed to write anchor marker")?;
+    info!(path = %path.display(), "U6: wrote resume anchor marker");
     Ok(())
 }

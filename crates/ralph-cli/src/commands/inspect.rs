@@ -537,6 +537,18 @@ fn build_loop_anchor_summary(
     workspace_root: &std::path::Path,
     current_loop_id: Option<&str>,
 ) -> Option<LoopAnchorView> {
+    // U6 of plan 2026-07-05-005: prefer the marker file written
+    // by `ralph resume --plan <file>` (the resume path cannot
+    // rely on `config.event_loop.prompt_file` being rewritten
+    // the way `ralph run --plan` does). The marker reader is
+    // lenient (missing file → `None`, corrupt JSON → warning +
+    // fallback to the prompt-file-extension check) so the
+    // existing inspect behaviour is preserved when no marker is
+    // present.
+    if let Some(marker_view) = read_anchor_marker(workspace_root) {
+        return Some(marker_view);
+    }
+
     // Source 1 — plan_path: prefer the loaded config's `prompt_file`
     // when it points at a markdown / html file. Anything else
     // (default sentinel `"PROMPT.md"`, a directory, a non-plan file)
@@ -589,6 +601,73 @@ fn build_loop_anchor_summary(
         loop_start_sha: None,
         attached_at,
     })
+}
+
+/// U6 of plan 2026-07-05-005: read the resume-path anchor marker
+/// from `<workspace>/.ralph/agent/.ralph-anchor.json`. Returns
+/// `None` when the file does not exist (the common case: `ralph
+/// run --plan` writes `prompt_file` directly, no marker needed).
+/// Corrupt JSON is logged at `warn!` and treated as a miss so
+/// a malformed marker cannot lock the loop out of inspect.
+pub(crate) fn read_anchor_marker(workspace_root: &std::path::Path) -> Option<LoopAnchorView> {
+    let path = workspace_root
+        .join(".ralph")
+        .join("agent")
+        .join(".ralph-anchor.json");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!(
+                "ralph-cli: failed to read anchor marker at {}: {e}; falling back",
+                path.display()
+            );
+            return None;
+        }
+    };
+    match serde_json::from_str::<AnchorMarker>(&raw) {
+        Ok(marker) => Some(marker.into_anchor_view()),
+        Err(e) => {
+            eprintln!(
+                "ralph-cli: anchor marker at {} is corrupt ({e}); falling back",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// On-disk shape of the resume-path anchor marker. Persisted by
+/// `ralph resume --plan <file>` so the inspect command can find
+/// the plan attachment even when the in-memory `prompt_file`
+/// still holds the sentinel value (resume does not rewrite
+/// `prompt_file` like `ralph run --plan` does).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct AnchorMarker {
+    pub plan_path: std::path::PathBuf,
+    pub plan_name: String,
+    pub plan_baseline_sha: Option<String>,
+    pub attached_at: Option<String>,
+}
+
+impl AnchorMarker {
+    fn into_anchor_view(self) -> LoopAnchorView {
+        LoopAnchorView {
+            plan_path: self.plan_path,
+            plan_name: self.plan_name,
+            plan_baseline_sha: self.plan_baseline_sha,
+            loop_start_sha: None,
+            // Parse the RFC3339 timestamp written by
+            // `write_resume_anchor_marker`; fall back to None
+            // when the field is absent or unparseable (the
+            // marker is best-effort — see `read_anchor_marker`).
+            attached_at: self
+                .attached_at
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc)),
+        }
+    }
 }
 
 /// U1 (plan 2026-07-04-004): canonical unattached-loop-anchor
@@ -1818,6 +1897,85 @@ mod tests {
     #[test]
     fn test_loop_inspect_schema_version_bumped_to_v2() {
         assert_eq!(LOOP_INSPECT_SCHEMA_VERSION, "loop_inspect.v2");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // U6 of plan 2026-07-05-005 (R4): resume-path anchor marker.
+    // The marker is the SSoT for the resume path; the
+    // prompt-file-extension check stays as the fallback for the
+    // `ralph run --plan` path.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn write_marker(tmp: &TempDir, plan_path: &std::path::Path) {
+        let agent_dir = tmp.path().join(".ralph").join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        let marker = AnchorMarker {
+            plan_path: plan_path.to_path_buf(),
+            plan_name: plan_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string(),
+            plan_baseline_sha: Some("deadbeef".to_string()),
+            attached_at: Some("2026-07-05T00:00:00Z".to_string()),
+        };
+        let json = serde_json::to_string(&marker).expect("serialise");
+        std::fs::write(agent_dir.join(".ralph-anchor.json"), json).expect("write marker");
+    }
+
+    #[test]
+    fn u6_anchor_marker_present_is_returned() {
+        let tmp = TempDir::new().expect("temp dir");
+        let plan_path = tmp.path().join("plan.md");
+        std::fs::write(&plan_path, "# plan").expect("write plan");
+        write_marker(&tmp, &plan_path);
+
+        // Even with the default config (prompt_file is sentinel),
+        // the marker takes precedence.
+        let cfg = RalphConfig::default();
+        let anchor = build_loop_anchor_summary(&cfg, tmp.path(), None)
+            .expect("anchor must be Some when marker is present");
+        assert_eq!(anchor.plan_path, plan_path);
+        assert_eq!(anchor.plan_name, "plan");
+        assert_eq!(anchor.plan_baseline_sha.as_deref(), Some("deadbeef"));
+        assert!(anchor.attached_at.is_some());
+    }
+
+    #[test]
+    fn u6_anchor_marker_missing_returns_none_when_no_prompt() {
+        let tmp = TempDir::new().expect("temp dir");
+        // No marker AND prompt_file is sentinel → unattached.
+        let cfg = RalphConfig::default();
+        let anchor = build_loop_anchor_summary(&cfg, tmp.path(), None);
+        assert!(
+            anchor.is_none(),
+            "missing marker + sentinel prompt_file must surface unattached"
+        );
+    }
+
+    #[test]
+    fn u6_anchor_marker_corrupt_falls_back_to_prompt_extension() {
+        let tmp = TempDir::new().expect("temp dir");
+        let agent_dir = tmp.path().join(".ralph").join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        std::fs::write(agent_dir.join(".ralph-anchor.json"), "{ not json").expect("write");
+
+        // Fallback to prompt-file-extension path: a .md prompt
+        // file is still parsed and returned.
+        let plan_path = tmp.path().join("plan.md");
+        std::fs::write(&plan_path, "# plan").expect("write plan");
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop.prompt_file = plan_path.to_string_lossy().to_string();
+
+        let anchor = build_loop_anchor_summary(&cfg, tmp.path(), None)
+            .expect("anchor must fall back to prompt extension");
+        assert_eq!(anchor.plan_path, plan_path);
+    }
+
+    #[test]
+    fn u6_read_anchor_marker_returns_none_for_missing_file() {
+        let tmp = TempDir::new().expect("temp dir");
+        assert!(read_anchor_marker(tmp.path()).is_none());
     }
 
     /// When a plan is attached (`prompt_file` is a `.md` under
