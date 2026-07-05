@@ -118,6 +118,38 @@ flowchart TB
 
 ---
 
+## 范围边界 (Scope Boundaries)
+
+**In scope**: 7 个反复故障模式的硬化,落在 4 个族(state_projector / event_policy / commands / workflow_contract)。
+
+**Out of scope**(本计划**不**处理,推到后续计划):
+- 二元操作 reducer(LangGraph `BinaryOperatorAggregate`)——独立大型重构
+- 临时值(LangGraph `EphemeralValue`)全面铺开——独立 plan
+- `seen_keys` 读时版本号协议(LangGraph `versions_seen` 完整对账)——后续 plan
+- `PROJECTED_TOPICS` lint 规则——pre-warning,装饰性
+- Hat scope lint / `dimension-reviewer` scope violation——属于 hat-discipline 硬化计划
+- Loop-state 计数器合并(`consecutive_failures` 与 `consecutive_no_progress_turns`)——属于 loop-state 重构计划
+- `recovery.jsonl` schema 版本 bump(U4 拆 reason_code 后的线上 schema 决定)——推迟到 ce-work
+
+## 需求追踪 (Requirements Trace)
+
+| R-ID | 描述 | 关联 U-IDs |
+|------|------|-----------|
+| R1 | `current_step` 永不与 `completed_steps.last()` 分歧 | U1 |
+| R2 | `PROJECTED_TOPICS` 包含 `review.dimensions.complete` | U3 |
+| R3 | `recovery.jsonl` 顶层 `hint` 字段区分 `DuplicateSameStep` 与 `DuplicateStallBypass` | U4 |
+| R4 | `LoopAnchorView` 在 resume 路径下一定填充 | U6 |
+| R5 | 三处 handoff 共享 hat triggers 校验 | U8 |
+| R6 | `ralph emit` 拒收不在 preset `hats[]` 里的 `triggered` | U7 |
+| R7 | `tasks.jsonl` 在 `TaskStore::save` 中途被打断时,不留 truncated row | U2 |
+| R8 | `recovery.jsonl` 记录 dedup 首次/重复命中 | U5 |
+| R9 | `ralph diagnose` 在故障摘要里区分 DuplicateSameStep/DuplicateStallBypass | U4 |
+| R10 | 没声明 `review.dimensions.complete` 的 preset 继续工作 | U3 |
+| R11 | 现有 `task_verify_gate` 和 `task.resume` 流程不受影响 | U1, U2, U4, U5, U8, U9 |
+| R12 | envelope `triggered` 缺省仍允许 | U7 |
+| R13 | `ralph-tools-emit.md` 记录 `triggered` envelope 校验 | U7 |
+| R14 | v3 walkthrough 成为被引用的设计文档 | U9 完成后的文档落地 |
+
 ## 实施单元
 
 ### U1. `current_step` 从 `completed_steps` 派生
@@ -133,6 +165,7 @@ flowchart TB
   - 边界:无前置步骤时调 `project_mark_step_completed` → `## Current Step (none)`,`## Completed Steps step-01`
   - 边界:对同一 step 重复 `mark_step_completed` → 不重复写入
   - 集成:完整的 `process_parse_result` 跑 `work.ready` + `work.done`,产出的 `progress.md` 里 `current_step` 总是最后一个 `completed_step`
+- **执行意图**:**characterization-first** — 先用现有 step_handoff/progress_task_gate.rs 行为写一组 fixture(test_get_current_step_after_step_completed / test_current_step_after_two_completions / test_completed_steps_idempotent),再删 `current_step = None` 重置;fixture 不变绿不推进。
 - **验证**:`cargo nextest run -p ralph-core --test state_projector` 通过;`event_loop` 里已有的 `step_handoff gate` 集成测试不再因 `progress_missing_current_step` 触发。
 
 ---
@@ -150,6 +183,7 @@ flowchart TB
   - 边界:模拟 tmp-write 和 rename 之间 `kill -9` → 重新加载时,JSONL 是上一个完整状态,无 truncated row
   - 边界:tmp 文件落在与 `tasks.jsonl` 不同目录(如 `/tmp`)→ save 应当返回错误而不是静默截断(防跨文件系统 EXDEV)
   - 集成:`save_with_shared_log` / `save_with_idempotent_log` 两条路径都走 tmp+rename,行为一致
+- **执行意图**:**test-first** — 先写 "save 中断 → 重新加载是上一完整快照" 的故障注入 fixture(test_atomic_save_no_truncated_row / test_tmp_rename_cross_dir_returns_error),再把 `std::fs::write` 换成 tmp+rename;fixture 红→绿驱动实现。
 - **验证**:`cargo nextest run -p ralph-core --test state_projector` 通过,包括新的故障注入测试;在 fixture loop 里手工模拟 `kill -9`,投影 ledger 能恢复。
 
 ---
@@ -167,6 +201,7 @@ flowchart TB
   - 正常路径:batch 里出现 `review.dimensions.complete` → projector 更新视图;`build_orchestrator_context` 包含 `## REVIEW SUMMARY` 块
   - 边界:同一 `(task_key, fix_round)` 两次 `review.dimensions.complete` → 第二次不覆盖第一次(projector 只记录首次,与 `event_policy` dedup 对齐)
   - 边界:`review.dimensions.complete` 缺 required fields → projector 上报 `ProjectionRejection`,orchestrator context 块不带 review summary
+- **执行意图**:**test-first** — 在改 `PROJECTED_TOPICS` 之前先写 `test_review_dimensions_complete_projects_to_view` 与 `test_orchestrator_context_includes_review_summary`(BDD scenario `review_dimensions_complete` 已存在),断言红;再补 `ReviewDimensionsComplete` variant 与 schema chain;变绿即停。
 - **验证**:`cargo nextest run -p ralph-core --test scenarios review_dimensions_complete` 通过;现有 BDD 场景继续通过(R10)。
 
 ---
@@ -183,7 +218,8 @@ flowchart TB
   - 正常路径:review-coordinator 对同一 step 重发 `work.done` → `recovery.jsonl` 里 `duplicate_work_done_same_step`
   - 边界:stall-recovery 在 `TaskWrongLoop` 后重发 `work.done` → `duplicate_work_done_stall_bypass`
   - 边界:`review.dimensions.complete` 重复(已经拆开)→ 不变:`duplicate_review_dimensions_complete`
-- **验证**:`cargo nextest run -p ralph-core event_policy` 通过;更新后的测试断言两个新 code。
+- **执行意图**:**characterization-first** — 先把现有 `test_u4_duplicate_work_done_hint_mapped_to_reason_code` 跑通锁定合并 code;再拆成两个新 code;ktd-3 的过渡行为(同时输出 `legacy_reason_code`)的 fixture 写为 `test_u4_emits_both_reason_codes_for_transition`。
+- **验证**:`cargo nextest run -p ralph-core event_policy` 通过;更新后的测试断言两个新 code 以及过渡字段。
 
 ---
 
@@ -201,6 +237,7 @@ flowchart TB
   - 边界:第 50 次 emit 同 key → 记录 `seen_count: Some(50)`;`fix.applied` 触发 `prune_work_ready_bucket` 后 count 不重置(继续递增)
   - **从 events.jsonl replay**:loop resume 时 `PolicyRuntimeState::from_events` replay `work_ready_seen_keys` 的 count 从历史命中数累加(不是固定为 1)
   - **多字段一致性**:`work_ready_seen_keys` 用 HashMap<String,u32>,其他 7 个 seen_keys 仍用 HashSet<String>(验证没误改)
+- **执行意图**:**test-first** — 先写 `test_dedup_seen_count_first_hit`、`test_dedup_seen_count_increments`、`test_work_ready_prune_preserves_count`、`test_from_events_replay_restores_count` 与 `test_other_seen_keys_still_hashset`(防误改回归);红 → 改 `work_ready_seen_keys: HashSet → HashMap<String, u32>`;绿后再把 `PolicyDecision.seen_count` 接到 `rejection.rs` envelope。
 - **验证**:`cargo nextest run -p ralph-core --test scenarios dedup` 通过(含上述 5 条);`ralph diagnose --session latest` 的 JSON 输出包含 `dup_storm_topics` 字段。
 
 ---
@@ -219,6 +256,7 @@ flowchart TB
   - 边界:`ralph run` 不带 `--plan` 且 `prompt_file` 是 sentinel → 不写 marker,`loop_anchor` 不出现(维持现状)
   - 边界:`ralph resume` 带 `--plan` 写新 marker;`attached_at` 是 resume 时间
   - 边界:marker 文件损坏(无效 JSON) → `build_loop_anchor_summary` 打 warning,fallback 到 prompt-file 路径
+- **执行意图**:**test-first** — 在 `inspect.rs` 加 `read_anchor_marker` 前先写 `test_anchor_marker_present`、`test_anchor_marker_missing_returns_none`、`test_anchor_marker_corrupt_falls_back_prompt_extension`、`test_resume_writes_marker`;红 → 实现;`resume.rs` 接钩子时再补 `test_resume_updates_attached_at`。
 - **验证**:`cargo nextest run -p ralph-cli --bin ralph -- anchor_marker` 通过;手工跑一次 `ralph inspect loop` 后能看到 `loop_anchor` 块填充。
 
 ---
@@ -238,6 +276,7 @@ flowchart TB
   - 边界:`triggered = "planner"` 在 `ce-executor-serial`(无 planner hat)上 → 拒收,带 `TriggeredNotInTopology`
   - 边界:`--policy-check` 时设 `triggered` → 同样检查触发,不写盘
   - 集成:现有 6-dim review 场景继续通过;只有新场景测试拒收路径
+- **执行意图**:**test-first** — 先写 `test_envelope_triggered_in_topology_allowed`、`test_envelope_triggered_missing_allowed`、`test_envelope_triggered_not_in_topology_rejected_apply`、`test_envelope_triggered_policy_check_rejected_no_write`、`test_envelope_triggered_rejection_does_not_pollute_payload_schema`;红 → 加 `validate_envelope`;绿后再把 `ralph-tools-emit.md` 文档同步(走 `scripts/check-cli-doc-drift.sh`)。
 - **验证**:`cargo nextest run -p ralph-cli --bin ralph -- emit envelope` 通过;更新后的 `ralph-tools-emit.md` 段在 doc-drift 扫描里通过。
 
 ---
@@ -256,6 +295,7 @@ flowchart TB
   - 边界:`next_hat` 选中的 hat 在 `triggers` 里没列该 topic → `HandoffRoutingError::HatDoesNotConsume`;写 warning envelope
   - 边界:`process_output` handoff escalation 试图把 `task.resume` 送给不在 `triggers` 里声明 `task.resume` 的 hat → 拒收 envelope,不出现 30 秒 stall
   - 集成:`review-coordinator.task_resume_misroute` 场景(原 P0-3)现在在 timeout 触发之前就阻断误路由
+- **执行意图**:**characterization-first** — 先把现有 `validate_resume_routing` 行为快照为 `test_resume_routing_existing_behavior_char`;再抽 `check_hat_triggers`;在三处替换调用;原行为不变才继续。`test_next_hat_rejects_topic_not_in_triggers` / `test_process_output_handoff_escalation_rejects_misroute` / `test_resume_routing_via_helper_unchanged` 在重构后变绿。
 - **验证**:`cargo nextest run -p ralph-core --test scenarios handoff_misroute` 通过;记录原 P0-3 stall 的 BDD 场景现在记录 early rejection。
 
 ---
@@ -276,6 +316,7 @@ flowchart TB
   - 边界:hat B 在 A 写之前读到 version=0,A 写完后 version=1;B 写 `expected_version = Some(0)` → `VersionMismatch` 拒收
   - 边界:同 loop 内并发写(两个 hat 同时持 version=0) → 第一个写成功后第二个被拒收(等价于 LangGraph LastValue 的"拒绝并发")
   - 集成:loop resume 后(从 `from_events` replay)version 从磁盘投影恢复(连续性)
+- **执行意图**:**test-first** — 先写 `test_version_zero_to_one_direct_write`、`test_version_expected_match_writes`、`test_version_mismatch_rejects`、`test_version_concurrent_writer_second_rejected`、`test_version_resume_replay_continuous`;红 → 引入 `ProjectedField<T>`;改 `process_parse_result` 调用点签名;绿后跑现有 BDD 确认只读路径不变(R11)。
 - **验证**:`cargo nextest run -p ralph-core --test scenarios version_protocol` 通过;现有 BDD 场景继续通过(只读路径不变)。
 
 ---
