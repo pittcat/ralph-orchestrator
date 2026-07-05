@@ -68,30 +68,36 @@
 **输出**：《偏离证据清单》
 
 - 编号 DEV-001…
-- 每条：描述、严重度初判、文件:行号或 event 序号、关联 A 链路步骤
+- 每条：描述、严重度初判、**置信度初估**、证据锚点（file:行号或 event#）、**证据缺口**、关联 A 链路步骤
+
+见 [confidence-rubric.md](confidence-rubric.md) §Agent C。
 
 **禁止**：最终根因分类（留给 D）；可标「疑似 mechanism」但不定论。
 
 ---
 
-## Agent D — 归因与修复
+## Agent D — 归因、置信度与修复
 
-**输入**：Agent C 偏离清单、Agent B 知识库、主仓源码（按需）。
+**输入**：Agent C 偏离清单、Agent B 知识库、主仓源码（按需）、[confidence-rubric.md](confidence-rubric.md)。
 
 **步骤**：
 
 1. 逐条 DEV 判定根因：`preset` / `mechanism` / `agent` / `compound`。
-2. 对 `mechanism` 必须 `file:line`。
-3. 对 `preset` 指向 preset/schema/instructions 具体字段。
-4. 对照 B：是否 **历史复发**；第几次；哪些 plan 未落地。
-5. 分级 P0/P1/P2；写修复建议（短期 workaround / 中期 preset / 长期机制）。
+2. 为每条 P0/P1 打 **confidence 0–100**；附评分依据（双账本、file:line、preset 行号等）。
+3. **confidence < 60**（P0 候选 **< 70**）→ **禁止入 §5**；执行 rubric 加深顺序，记录轮次与分数变化（最多 2 轮）。
+4. 2 轮后仍不足 → 写入 §7「未核实疑点」+ `blocked_by`。
+5. 对 `mechanism` 必须 `file:line` 才能 confidence ≥ 70。
+6. 对 `preset` 必须 preset/schema **具体行号** 才能 confidence ≥ 65。
+7. 对照 B：历史复发、第几次、未落地 plan。
+8. 仅对 §5 入表项写 P0/P1/P2 与三段式修复建议。
 
 **输出**：
 
-- 《问题归因表》
-- 《修复建议》（三段式）
+- 《问题归因表》（含 **置信度**、加深轮次）
+- 《未核实疑点表》（若有）
+- 《修复建议》（每条关联置信度）
 
-**禁止**：重新扫描原始 events（只用 C 的证据）；直接改代码。
+**禁止**：低置信度当定论；重新扫描原始 events（只用 C 的证据）；直接改代码。
 
 ---
 

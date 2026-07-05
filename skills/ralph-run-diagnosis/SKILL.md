@@ -4,7 +4,8 @@ description: >-
   Post-run deep diagnosis for any Ralph preset loop. Inventories .ralph artifacts
   by tier (S/A/B/C), reconciles events/ledger/recovery/logs against preset schema,
   audits OPAC with mode-aware confidence, traces mechanism bugs to source lines,
-  checks docs/report recurrence, writes docs/report/*-diagnosis.md. Use after
+  checks docs/report recurrence, writes docs/report/*-diagnosis.md with per-finding
+  root-cause confidence scores and low-confidence re-investigation. Use after
   ralph run, ralph-e2e, debug.md, loop diagnosis, or orchestration vs mechanism.
 argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file]"
 ---
@@ -31,7 +32,7 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file]"
 1. 执行与 OPAC（须标 **diagnostics 模式 + OPAC 置信度**）
 2. 基座机制是否生效
 3. 编排是否合理
-4. 归因：preset / mechanism / agent / compound
+4. 归因：preset / mechanism / agent / compound（附 **根因置信度**）
 
 ## 执行顺序（硬约束）
 
@@ -41,7 +42,7 @@ Phase 0 盘点（串行，主 Agent）
     → 仅 then ↓
 Phase 1  A∥B（流程 + 历史）
 Phase 2  C（对账，吃 A+B+盘点表）
-Phase 3  D（归因，吃 C+B+源码）
+Phase 3  D（归因 + 置信度评分，吃 C+B+源码；低分加深）
 Phase 4  主 Agent 汇总落盘
 ```
 
@@ -61,13 +62,15 @@ Diagnostics 四档：`FULL` | `MINIMAL` | `LOGS_ONLY` | `DISABLED` — 决定 L2
 
 见 [subagent-charters.md](references/subagent-charters.md)、[verification-pipeline.md](references/verification-pipeline.md)。
 
-**置信度**（采纳 `ralph-preset-review` 规则）：
+**根因置信度**（详见 [confidence-rubric.md](references/confidence-rubric.md)）：
 
-- 有 file:line + 双账本一致 → P0 可 ≥85
-- LOGS_ONLY 下 OPAC 单项 → ≤50，**不得单独升 P0**
-- compound 须写贡献比例
+- **§5 入表门槛**：confidence ≥ 60；**P0 须 ≥ 70**，否则继续深挖或降为 P1
+- **低分强制加深**：< 60 不得写入 §5 定论；按 rubric 补读 recovery/源码/preset 行号/历史，最多 2 轮
+- **仍不足**：移入 §7「未核实疑点」，不得写修复建议
+- 有 `file:line` + 双账本一致 → 可 ≥85；LOGS_ONLY 下 OPAC/agent 单项 ≤50
+- compound 须写贡献比例 + 各成分置信度
 
-**OPAC**：[opac-audit-by-mode.md](references/opac-audit-by-mode.md)
+**OPAC 置信度**：[opac-audit-by-mode.md](references/opac-audit-by-mode.md)
 
 ## Phase 4 落盘
 
@@ -78,7 +81,8 @@ Diagnostics 四档：`FULL` | `MINIMAL` | `LOGS_ONLY` | `DISABLED` — 决定 L2
 - [ ] Phase 0 盘点表在报告中
 - [ ] 只读了 `current-events` 指向的 events
 - [ ] LOGS_ONLY 未因缺 orchestration 标 P0
-- [ ] 每条 P0 有分类 + 证据 +（mechanism）源码行号
+- [ ] 每条 P0/P1 在 §5 有 **置信度**；P0≥70、入表≥60
+- [ ] confidence<60 的候选已加深或落入 §7，未混入 §5/§6
 - [ ] 未引用 ssot-guardrails 禁止项
 - [ ] 报告在主仓 `docs/report/`
 
@@ -87,7 +91,7 @@ Diagnostics 四档：`FULL` | `MINIMAL` | `LOGS_ONLY` | `DISABLED` — 决定 L2
 - [ssot-guardrails.md](references/ssot-guardrails.md) — **过时概念/错误路径禁止清单**
 - [artifact-manifest.md](references/artifact-manifest.md) — Tier S/A/B/C
 - [artifact-discovery.md](references/artifact-discovery.md) — Phase 0
-- [opac-audit-by-mode.md](references/opac-audit-by-mode.md)
+- [confidence-rubric.md](references/confidence-rubric.md) — **根因置信度评分 + 低分加深**
 - [log-reconciliation.md](references/log-reconciliation.md)
 - [mechanism-checklist.md](references/mechanism-checklist.md)
 - [source-trace-guide.md](references/source-trace-guide.md)
