@@ -400,14 +400,25 @@ pub struct PolicyRuntimeState {
     /// `0` when the payload omits `fix_round` so legacy emitters
     /// still get deduped.
     pub review_dimensions_complete_seen_keys: HashSet<String>,
-    /// 2026-06-24 P1-3: dedup set for `work.ready` events. Key
+    /// 2026-06-24 P1-3: dedup map for `work.ready` events. Key
     /// format: `{plan_name}::{step}::{task_id}`. A 2nd
     /// `work.ready` with the same key (same task, same step) is
     /// rejected as `DuplicateWorkDone` so the agent stops
     /// re-announcing an already-started unit. Pruned on
     /// step-boundary events (`fix.applied` / step close) so a
     /// legitimate re-emit after a fix round is allowed.
-    pub work_ready_seen_keys: HashSet<String>,
+    ///
+    /// U5 of plan 2026-07-05-005 (R8): the value carries the
+    /// dedup hit count so post-mortem tooling can distinguish
+    /// a single duplicate from a "dup storm" (the same key
+    /// re-emitted 50 times in a tight loop). The count is
+    /// bumped on every observed hit; `fix.applied` pruning
+    /// does NOT reset the counter (count is observation, not
+    /// dedup state). Only the work.ready bucket is instrumented
+    /// — the other 7 seen_keys fields stay as `HashSet<String>`
+    /// to keep the change blast radius small (plan U5 §
+    /// "scope-bounded").
+    pub work_ready_seen_keys: HashMap<String, u32>,
     /// 2026-06-24 P1-3: dedup set for `test.passed` events. Key
     /// format: `{plan_name}::{step}::{task_id}::{fix_round}`.
     /// The `fix_round` segment distinguishes re-test rounds so
@@ -561,8 +572,14 @@ impl PolicyRuntimeState {
     /// `prune_work_done_bucket` (same key shape).
     pub fn prune_work_ready_bucket(&mut self, plan_name: &str, step: &str) {
         let prefix = format!("{plan_name}::{step}::");
+        // U5 of plan 2026-07-05-005 (R8): the dedup hit
+        // counter is preserved across pruning — the bucket
+        // prune drops the dedup entry but the count is
+        // observation, not dedup state, so losing it would
+        // hide legitimate dup-storm signals. The HashMap
+        // value is intentionally ignored in the closure.
         self.work_ready_seen_keys
-            .retain(|key| !key.starts_with(&prefix));
+            .retain(|key, _count| !key.starts_with(&prefix));
     }
 
     /// 2026-06-24 P1-3: prune the `test_passed_seen_keys` /
@@ -804,9 +821,13 @@ impl PolicyRuntimeState {
                 let step = obj.get("step").and_then(|v| v.as_str());
                 let task_id = obj.get("task_id").and_then(|v| v.as_str());
                 if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
-                    state
-                        .work_ready_seen_keys
-                        .insert(format!("{pn}::{st}::{ti}"));
+                    // U5 of plan 2026-07-05-005 (R8): bump the
+                    // per-key counter on every replayed hit so
+                    // cross-loop resume keeps the dup-storm
+                    // signal consistent with the in-memory view.
+                    let key = format!("{pn}::{st}::{ti}");
+                    let entry = state.work_ready_seen_keys.entry(key).or_insert(0);
+                    *entry = entry.saturating_add(1);
                 }
             }
             // 2026-06-24 P1-3: replay prior `test.passed` /
@@ -1604,7 +1625,21 @@ pub fn validate_event_with_hat(
         let task_id = obj.get("task_id").and_then(|v| v.as_str());
         if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
             let dedup_key = format!("{pn}::{st}::{ti}");
-            if state.work_ready_seen_keys.contains(&dedup_key) {
+            if state.work_ready_seen_keys.contains_key(&dedup_key) {
+                // U5 of plan 2026-07-05-005 (R8): bump the
+                // counter on every observed hit. The counter is
+                // observation, not dedup state — `fix.applied`
+                // pruning never resets it (see the prune helper
+                // below).
+                let count = state
+                    .work_ready_seen_keys
+                    .get(&dedup_key)
+                    .copied()
+                    .unwrap_or(0);
+                state.work_ready_seen_keys.insert(
+                    dedup_key.clone(),
+                    count.saturating_add(1),
+                );
                 let finding = PolicyFinding {
                     topic: topic.to_string(),
                     violation_type: ViolationType::DuplicateWorkDone {
@@ -1612,14 +1647,16 @@ pub fn validate_event_with_hat(
                         hint: DuplicateWorkDoneHint::DuplicateSameStep,
                     },
                     message: format!(
-                        "duplicate_work_ready: work.ready for key '{dedup_key}' was already accepted. \
-                         Wait for fix.applied / step close before re-sending work.ready \
-                         for the same (plan_name, step, task_id)."
+                        "duplicate_work_ready: work.ready for key '{dedup_key}' was already accepted \
+                         (seen_count={count}). Wait for fix.applied / step close before re-sending \
+                         work.ready for the same (plan_name, step, task_id)."
                     ),
                 };
                 return PolicyDecision::RejectWithResume(finding);
             }
-            state.work_ready_seen_keys.insert(dedup_key);
+            // First acceptance: seed the counter at 1 so a
+            // subsequent hit reads `seen_count: 2`.
+            state.work_ready_seen_keys.insert(dedup_key, 1);
         }
     }
 
@@ -5846,7 +5883,8 @@ mod tests {
             PolicyDecision::Accept,
             "First work.ready for a new (plan, step, task) tuple must be accepted"
         );
-        assert!(state.work_ready_seen_keys.contains("p1::step-01::t1"));
+        assert!(state.work_ready_seen_keys.contains_key("p1::step-01::t1"));
+        assert_eq!(state.work_ready_seen_keys["p1::step-01::t1"], 1);
     }
 
     #[test]
@@ -5998,19 +6036,109 @@ mod tests {
     #[test]
     fn p1_3_fix_applied_prunes_work_ready_bucket() {
         let mut state = PolicyRuntimeState::default();
-        state.work_ready_seen_keys.insert("p1::step-01::t1".into());
-        state.work_ready_seen_keys.insert("p1::step-01::t2".into());
-        state.work_ready_seen_keys.insert("p1::step-02::t1".into());
+        state.work_ready_seen_keys.insert("p1::step-01::t1".into(), 1);
+        state.work_ready_seen_keys.insert("p1::step-01::t2".into(), 1);
+        state.work_ready_seen_keys.insert("p1::step-02::t1".into(), 1);
 
         state.prune_work_ready_bucket("p1", "step-01");
 
-        assert!(!state.work_ready_seen_keys.contains("p1::step-01::t1"));
-        assert!(!state.work_ready_seen_keys.contains("p1::step-01::t2"));
+        assert!(!state.work_ready_seen_keys.contains_key("p1::step-01::t1"));
+        assert!(!state.work_ready_seen_keys.contains_key("p1::step-01::t2"));
         // Different step preserved
-        assert!(state.work_ready_seen_keys.contains("p1::step-02::t1"));
+        assert!(state.work_ready_seen_keys.contains_key("p1::step-02::t1"));
     }
 
     // 2026-07-02-004 U7: precheck `<X>.proposed` dedup (R6).
+
+    // ─────────────────────────────────────────────────────────────────
+    // U5 of plan 2026-07-05-005 (R8): work_ready_seen_keys is now a
+    // HashMap<String, u32> so post-mortem tooling can distinguish a
+    // single duplicate from a "dup storm". Only the work.ready
+    // bucket is instrumented; the other 7 seen_keys fields stay as
+    // HashSet to keep the change blast radius small.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn u5_work_ready_dedup_counter_first_hit_is_one() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = work_ready_payload("p1", "step-01", "t1");
+        let decision = validate_event("work.ready", Some(&payload), &config, &mut state);
+        assert_eq!(decision, PolicyDecision::Accept);
+        assert_eq!(
+            state.work_ready_seen_keys.get("p1::step-01::t1").copied(),
+            Some(1),
+            "U5: first work.ready hit must seed the counter at 1"
+        );
+    }
+
+    #[test]
+    fn u5_work_ready_dedup_counter_increments_on_repeat() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = work_ready_payload("p1", "step-01", "t1");
+
+        validate_event("work.ready", Some(&payload), &config, &mut state);
+        assert_eq!(
+            state.work_ready_seen_keys.get("p1::step-01::t1").copied(),
+            Some(1)
+        );
+
+        let second = validate_event("work.ready", Some(&payload), &config, &mut state);
+        assert!(matches!(second, PolicyDecision::RejectWithResume(_)));
+        assert_eq!(
+            state.work_ready_seen_keys.get("p1::step-01::t1").copied(),
+            Some(2),
+            "U5: counter must bump on every observed hit"
+        );
+
+        let third = validate_event("work.ready", Some(&payload), &config, &mut state);
+        assert!(matches!(third, PolicyDecision::RejectWithResume(_)));
+        assert_eq!(
+            state.work_ready_seen_keys.get("p1::step-01::t1").copied(),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn u5_work_ready_prune_preserves_counter_on_remaining_keys() {
+        let mut state = PolicyRuntimeState::default();
+        state.work_ready_seen_keys.insert("p1::step-01::t1".into(), 7);
+        state.work_ready_seen_keys.insert("p1::step-02::t2".into(), 3);
+
+        state.prune_work_ready_bucket("p1", "step-01");
+
+        assert!(!state.work_ready_seen_keys.contains_key("p1::step-01::t1"));
+        assert_eq!(
+            state.work_ready_seen_keys.get("p1::step-02::t2").copied(),
+            Some(3),
+            "U5: counter is observation, not dedup state — pruning \
+             other buckets does not reset surviving keys' counts"
+        );
+    }
+
+    #[test]
+    fn u5_other_seen_keys_still_hashset() {
+        // Anti-regression: the other 7 seen_keys fields MUST
+        // remain HashSet<String>; only work_ready_seen_keys was
+        // widened to HashMap<String, u32>.
+        use std::collections::HashSet;
+        let mut state = PolicyRuntimeState::default();
+        let work_done_keys: HashSet<String> = HashSet::new();
+        state.work_done_seen_keys = work_done_keys;
+        let dim_ready_keys: HashSet<String> = HashSet::new();
+        state.review_dimension_ready_seen_keys = dim_ready_keys;
+        let dim_complete_keys: HashSet<String> = HashSet::new();
+        state.review_dimensions_complete_seen_keys = dim_complete_keys;
+        let passed_keys: HashSet<String> = HashSet::new();
+        state.test_passed_seen_keys = passed_keys;
+        let failed_keys: HashSet<String> = HashSet::new();
+        state.test_failed_seen_keys = failed_keys;
+        let review_start_keys: HashSet<String> = HashSet::new();
+        state.review_start_seen_keys = review_start_keys;
+        assert!(state.work_ready_seen_keys.is_empty());
+    }
+
     #[test]
     fn u7_precheck_proposed_dedup_rejects_duplicate_candidate() {
         let config = test_config();
