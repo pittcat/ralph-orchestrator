@@ -1410,11 +1410,25 @@ event_loop:
         // so the P6 allowlist guard accepts the env-injected target.
         // Test intent (provenance flag preservation) is unchanged.
         let hat = std::env::var("RALPH_CURRENT_HAT").unwrap_or_else(|_| "strategist".to_string());
-        let triggered = std::env::var("RALPH_CURRENT_HAT").unwrap_or_else(|_| "implementer".to_string());
+        // Mirror RALPH_TRIGGERED_HAT when the parent loop sets it; otherwise
+        // fall back to the same hat id as `--hat` so the U7 topology check
+        // (`check_envelope_triggered`) sees a declared id and the
+        // ralph.yml below only needs one entry under `hats:`.
+        let triggered = std::env::var("RALPH_TRIGGERED_HAT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| hat.clone());
+        let triggered_entry = if triggered == hat {
+            String::new()
+        } else {
+            format!(
+                "  {triggered}:\n    name: \"{triggered}\"\n    triggers: []\n    publishes: [\"experiment.planned\", \"*\"]\n"
+            )
+        };
         std::fs::write(
             workspace.join("ralph.yml"),
             format!(
-                "event_loop:\n  execution_mode: coordinator\nhats:\n  {hat}:\n    name: \"{hat}\"\n    triggers: []\n    publishes: [\"experiment.planned\", \"*\"]\n"
+                "event_loop:\n  execution_mode: coordinator\nhats:\n  {hat}:\n    name: \"{hat}\"\n    triggers: []\n    publishes: [\"experiment.planned\", \"*\"]\n{triggered_entry}"
             ),
         )
         .expect("write ralph.yml");
@@ -2463,11 +2477,25 @@ event_loop:
         // the parent loop context (see test_emit_with_provenance_flags for
         // full rationale).
         let hat = std::env::var("RALPH_CURRENT_HAT").unwrap_or_else(|_| "strategist".to_string());
-        let triggered = std::env::var("RALPH_CURRENT_HAT").unwrap_or_else(|_| "implementer".to_string());
+        // Mirror RALPH_TRIGGERED_HAT when the parent loop sets it; otherwise
+        // fall back to the same hat id as `--hat` so the U7 topology check
+        // (`check_envelope_triggered`) sees a declared id and the
+        // ralph.yml below only needs one entry under `hats:`.
+        let triggered = std::env::var("RALPH_TRIGGERED_HAT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| hat.clone());
+        let triggered_entry = if triggered == hat {
+            String::new()
+        } else {
+            format!(
+                "  {triggered}:\n    name: \"{triggered}\"\n    triggers: []\n    publishes: [\"experiment.planned\", \"*\"]\n"
+            )
+        };
         std::fs::write(
             workspace.join("ralph.yml"),
             format!(
-                "event_loop:\n  execution_mode: coordinator\nhats:\n  {hat}:\n    name: \"{hat}\"\n    triggers: []\n    publishes: [\"experiment.planned\", \"*\"]\n"
+                "event_loop:\n  execution_mode: coordinator\nhats:\n  {hat}:\n    name: \"{hat}\"\n    triggers: []\n    publishes: [\"experiment.planned\", \"*\"]\n{triggered_entry}"
             ),
         )
         .expect("write ralph.yml");

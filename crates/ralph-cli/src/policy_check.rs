@@ -1255,7 +1255,7 @@ event_loop:
     mode: enforce
     on_violation: reject_with_resume
 hats:
-  - id: review-synthesizer
+  review-synthesizer:
     name: review-synthesizer
     triggers: ["work.done"]
     publishes: ["review.dimensions.complete"]
