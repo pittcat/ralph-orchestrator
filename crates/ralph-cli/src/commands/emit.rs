@@ -1045,8 +1045,6 @@ fn emit_command_with_root_and_hats(
         // U7 (2026-06-17-004 plan, R7): in isolated mode, when a business topic
         // has no explicit --source and hat is known, default source to the emitting
         // hat so downstream consumers always have a stable attribution field.
-        // has no explicit --source and hat is known, default source to the emitting
-        // hat so downstream consumers always have a stable attribution field.
         // Control topics (loop.cancel, task.resume, etc.) are unchanged.
         record["source"] = serde_json::Value::String(
             hat.as_ref()

@@ -64,6 +64,17 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 >
 > **对 agent 来说**：不需要检测当前模式。只要记住两条规则：1) 若 prompt 明确要求你触发某个 hat， emit 时带上 `--triggered <hat>`；2) 没要求时直接 emit，runner / CLI 会自动处理。
 
+### Envelope 校验（U7 of 2026-07-05-005）
+
+`ralph emit --triggered <hat_id>` 在 apply 路径与 `--policy-check` 路径都会被 envelope 层校验：`triggered` 字段的值必须是当前 preset 声明的 hat 之一（即出现在 `hats[]` map 里），否则返回 `triggered_not_in_topology`。
+
+该校验按 **topic 信任层**分流（与 `check_emit_provenance` 的 ralph-control / orchestrator-diagnostic / business 三层模型对齐）：
+
+- **ralph-control topics**（`task.resume`、`loop.cancel`、`loop.complete`、`human.*` 等）以及 **orchestrator diagnostic topics**（`event.*`）— 跳过 topology check；runtime 注入事件时 `triggered` 经常是 `ralph` 这类 pseudo-hat，不需要在 `hats[]` 中声明。
+- **business topics**（`work.done`、`queue.advance`、`review.dimension.*` 等）— 严格 topology check；`triggered` 必须是当前 preset 的 hat 之一。
+
+`ralph emit` 默认 enforce 这条规则；如需绕开，只能用 `ralph emit --unsafe-no-policy-check`，但该参数在大多数 preset（`ce-executor-serial` 等）下被直接拒绝。
+
 **事件文件解析优先级：**
 1. 显式 `RALPH_EVENTS_FILE` 或非默认 `--file`（必须命中本 loop 的 events allowlist，否则 `ralph emit` 拒绝写入并报错；不静默回退到 marker）
 2. `.ralph/current-candidate-events` marker 文件

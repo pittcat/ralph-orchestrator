@@ -1,0 +1,32 @@
+---
+description: State management / projection design walkthrough and 2026-07-05-005 plan reference
+globs: ["**/crates/ralph-core/src/state_projector/**/*.rs", "**/crates/ralph-core/src/event_loop/mod.rs", "**/crates/ralph-core/src/event_policy.rs", "**/crates/ralph-core/src/step_handoff/**/*.rs", "**/crates/ralph-core/src/state/**/*.rs"]
+alwaysApply: false
+---
+
+# State Management (design SSOT)
+
+State projection primitives (`current_step`, `completed_steps`,
+`work_ready_seen_keys`, `pruned_work_ready_buckets`,
+`DuplicateWorkDoneHint`, etc.) follow the v3 design walkthrough:
+
+`docs/solutions/state-management/proposal-state-projection-design-walkthrough-v3.md`
+
+## Plan 2026-07-05-005 units (referenced from fix-plan + hardening review)
+
+The 9 implementation Units of `docs/plans/2026-07-05-005-refactor-state-management-hardening-plan.md` and the matching fix-plan (`.ralph/review/2026-07-05-005-refactor-state-management-hardening-plan/fix-plan.md`) shape the runtime. Quick map:
+
+| Unit | File anchor | What it owns |
+|------|-------------|--------------|
+| U1 — derived `current_step` | `crates/ralph-core/src/step_handoff/progress_task_gate.rs:216` | `ProgressSnapshot::current_step()` returns `completed_steps.last()`; legacy field is read-time-ignored |
+| U2 — atomic tasks.jsonl | `crates/ralph-core/src/task_store.rs:77-89` | `write_jsonl_atomic` writes tmp + fsync + rename |
+| U3 — projector sees `review.dimensions.complete` | `crates/ralph-core/src/state_projector/*.rs` | New projector action for the U6 completion topic |
+| U4 — `DuplicateWorkDone` reason_code (later collapsed by fix-plan U3) | `crates/ralph-core/src/event_policy.rs:174` | Single `duplicate_work_done` code; hint carries the discriminator |
+| U5 — `work.ready` dedup counter | `crates/ralph-core/src/event_policy.rs:420` + `573` | `HashMap<String, u32>`; `prune_work_ready_bucket` preserves count via `pruned_work_ready_buckets` side-table |
+| U6 — resume-path anchor marker | `crates/ralph-cli/src/commands/resume.rs:215-247` | `write_resume_anchor_marker` writes tmp + fsync + rename |
+| U7 — envelope-layer triggered validation | `crates/ralph-cli/src/policy_check.rs:1331-1390` | Topic-trust layering: control / diagnostic topics skip the topology check |
+| U8 — shared `check_hat_triggers` helper | `crates/ralph-core/src/workflow_contract/handoff_index.rs` | Single predicate across handoff paths; literal-vs-glob divergence documented at `event_loop/mod.rs:1816-1835` |
+| U9 — `ProjectedField<T>` version protocol | (reverted — see fix-plan §U2 + DEC-002) | Dead-on-arrival primitive, revert recommended over half-wiring |
+
+When reading state-management code, start from the v3 walkthrough for the
+design intent, then check the matching Unit above for the current contract.

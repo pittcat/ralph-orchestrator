@@ -62,6 +62,8 @@ In `execution_mode: isolated`, **all agent terminal states** (completion, review
 
 **Builtin presets**: `autoresearch`, `ce-executor-pipeline` (12-hat linear one-shot: plan-reviewer → executor → 6 serial dimension hats → review-synthesizer → fixer → alignment → reporter), `ce-executor-serial` (10-hat: TDD executor + validator + 6-dim overall review: goal-alignment → correctness → testing → maintainability → project-standards → adversarial), `ce-executor-supervisor` (2026-07-03-001 plan: 16-hat + progress-steward; rusqlite-backed supervisor wave orchestration, per-slot worktrees, fan-in merge, parallel review/fix; requires `--features supervisor-db` and `event_loop.supervisor.enabled: true`), `ce-executor-lite` (template), `debug`, `merge-batch` (Git-first multi-worktree batch merge), `merge-loop` (bare `ce-executor` / `ce-executor-isolated` / `ce-executor-wave` all deleted: all plan-driven execution uses `ce-executor-serial`; template-only use `ce-executor-lite`).
 
+State projection design walkthrough v3: `docs/solutions/state-management/proposal-state-projection-design-walkthrough-v3.md`. State-management primitives (current_step derivation, dedup hit counter, envelope `triggered` check, anchor marker) are covered by the U1–U9 units of plan 2026-07-05-005 — see `.cursor/rules/state-management.mdc` for the file-anchor map.
+
 ## Wave Config Fields
 
 ```yaml
