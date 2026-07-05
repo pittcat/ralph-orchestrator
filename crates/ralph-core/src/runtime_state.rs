@@ -573,13 +573,16 @@ mod tests {
     fn snapshot_from_disk_reads_canonical_layout() {
         let tmp = workspace();
         let progress_path = tmp.path().join(".ralph/agent/progress.md");
+        // U1 (KTD-1): `current_step` is derived from
+        // `completed_steps.last()` — keep the on-disk headings aligned
+        // with that SSOT so `snapshot_from_disk` is self-consistent.
         std::fs::write(
             &progress_path,
-            "## Current Step\nstep-03\n\n## Completed Steps\n- step-01\n- step-02\n",
+            "## Current Step\nstep-02\n\n## Completed Steps\n- step-01\n- step-02\n",
         )
         .unwrap();
         let snap = snapshot_from_disk(tmp.path());
-        assert_eq!(snap.current_step.as_deref(), Some("step-03"));
+        assert_eq!(snap.current_step.as_deref(), Some("step-02"));
         assert_eq!(snap.completed_steps, vec!["step-01", "step-02"]);
     }
 

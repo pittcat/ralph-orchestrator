@@ -396,8 +396,10 @@ fn build_orchestrator_context_from_ledger_matches_legacy_shape() {
     task.key = Some("ce-executor:demo:step-01:u1-impl".to_string());
     snap.tasks.push(task);
     let mut progress = ProgressSnapshot::default();
-    progress.current_step = Some("step-02".to_string());
+    // U1 (KTD-1): orchestrator context reads the derived accessor
+    // (`completed_steps.last()`), so keep completed_steps aligned.
     progress.completed_steps.push("step-01".to_string());
+    progress.completed_steps.push("step-02".to_string());
     snap.progress = progress;
 
     let block = proj.build_orchestrator_context_from_ledger(&snap, None, None);
