@@ -218,7 +218,16 @@ pub async fn resume_command(
 /// same fields as [`crate::commands::inspect::AnchorMarker`]
 /// (kept as the SSoT shape — this writer is a thin
 /// serialisation helper).
+///
+/// U9 of plan 2026-07-05-005 (fix-plan §R13 / A6): the write
+/// is atomic — same tmp + fsync + rename pattern as
+/// `task_store::write_jsonl_atomic` so a concurrent
+/// `ralph resume --plan` race never observes a half-written
+/// marker. The tmp path lives in the same directory as the
+/// target so the rename is a single-filesystem call.
 fn write_resume_anchor_marker(plan_path: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::Write;
+
     use crate::commands::inspect::AnchorMarker;
 
     let workspace_root = std::env::current_dir()
@@ -240,7 +249,30 @@ fn write_resume_anchor_marker(plan_path: &std::path::Path) -> anyhow::Result<()>
     let json = serde_json::to_string_pretty(&marker)
         .context("resume: failed to serialise anchor marker")?;
     let path = agent_dir.join(".ralph-anchor.json");
-    std::fs::write(&path, json).context("resume: failed to write anchor marker")?;
-    info!(path = %path.display(), "U6: wrote resume anchor marker");
+    // Atomic write: tmp + fsync + rename (matches
+    // task_store::write_jsonl_atomic). The tmp suffix lives in
+    // the same directory so the rename is single-filesystem.
+    let tmp_path = {
+        let mut candidate = path.clone();
+        let file_name = candidate
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".ralph-anchor.json".to_string());
+        candidate.set_file_name(format!(".{file_name}.tmp"));
+        candidate
+    };
+    {
+        let mut file = std::fs::File::create(&tmp_path)
+            .context("resume: failed to create anchor marker tmp file")?;
+        file.write_all(json.as_bytes())
+            .context("resume: failed to write anchor marker body")?;
+        file.sync_all()
+            .context("resume: failed to fsync anchor marker tmp file")?;
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e).context("resume: failed to atomic-rename anchor marker");
+    }
+    info!(path = %path.display(), "U6: wrote resume anchor marker (atomic)");
     Ok(())
 }

@@ -74,12 +74,35 @@ fn atomic_tmp_path_for(target: &Path) -> std::path::PathBuf {
 /// live in the same directory as `target` (see
 /// [`atomic_tmp_path_for`]). On any error, attempt to clean up
 /// the temp file so a crash does not leave a stray sibling.
+///
+/// U9 of plan 2026-07-05-005 (fix-plan §R12 / A4): call
+/// `sync_all` on the temp file before `rename` so the bytes are
+/// durable before the atomic swap. Without fsync, a power loss
+/// between `write` and `rename` could leave the temp file with
+/// zero bytes (POSIX does not guarantee write ordering against
+/// the directory entry swap), and the target would be unchanged
+/// — except for a stray tmp sibling. On POSIX this closes the
+/// data-durability gap.
 fn write_jsonl_atomic(target: &Path, body: &str) -> io::Result<()> {
+    use std::io::Write;
     let tmp_path = atomic_tmp_path_for(target);
-    if let Err(e) = std::fs::write(&tmp_path, body) {
-        // Best-effort cleanup; ignore ENOENT.
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
+    {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        if let Err(e) = file.write_all(body.as_bytes()) {
+            // Best-effort cleanup; ignore ENOENT.
+            drop(file);
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+        // fsync the temp file before the atomic rename so the
+        // bytes are durably on disk before the directory entry
+        // swap (POSIX rename is atomic only over the directory
+        // entry, not over the file contents).
+        if let Err(e) = file.sync_all() {
+            drop(file);
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
     }
     if let Err(e) = std::fs::rename(&tmp_path, target) {
         let _ = std::fs::remove_file(&tmp_path);
