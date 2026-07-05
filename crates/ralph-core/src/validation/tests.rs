@@ -287,8 +287,12 @@ fn step_handoff_rule_accepts_aligned_state() {
     let view = ProtocolView::from_event_loop(&minimal_config());
     let mut snap = minimal_snapshot();
     let mut progress = ProgressSnapshot::default();
-    progress.current_step = Some("step-02".to_string());
-    progress.completed_steps = vec!["step-01".to_string()];
+    // U1 of plan 2026-07-05-005 (KTD-1): the gate's current
+    // step is derived from `completed_steps.last()`. To pass
+    // step-alignment with an inbound step=step-02, the
+    // completed list must end with step-02. The legacy
+    // `current_step` field is ignored at read time.
+    progress.completed_steps = vec!["step-01".to_string(), "step-02".to_string()];
     snap.progress = progress;
     let task = {
         let mut t = Task::new("step-01".to_string(), 1);
@@ -567,13 +571,13 @@ fn u5_step_handoff_rule_disk_reload_accepts_when_in_memory_empty() {
     use crate::validation::rules_step_handoff::StepHandoffRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
     let mut snap = minimal_snapshot();
-    // Progress: current step = step-02, step-01 completed. The
-    // closed task's title is `step-01`, so the task alignment
-    // branch (3) requires the closed task's title to be in
-    // progress.
+    // Progress: derived `current_step = step-02` (U1 of plan
+    // 2026-07-05-005 KTD-1: derived from completed_steps.last()).
+    // The closed task's title is `step-01`, so the task
+    // alignment branch (3) requires the closed task's title to
+    // be in progress.
     let mut progress = ProgressSnapshot::default();
-    progress.current_step = Some("step-02".to_string());
-    progress.completed_steps = vec!["step-01".to_string()];
+    progress.completed_steps = vec!["step-01".to_string(), "step-02".to_string()];
     snap.progress = progress;
     // In-memory is EMPTY (the stale-view scenario).
     snap.tasks = Vec::new();
@@ -610,13 +614,14 @@ fn u5_step_handoff_rule_disk_reload_accepts_when_in_memory_empty() {
 fn u5_step_handoff_rule_without_tasks_path_keeps_legacy_reject() {
     // Same setup, but `ValidationContext` is built WITHOUT
     // `with_tasks_path`. Legacy behaviour: in-memory miss → reject.
+    // U1 of plan 2026-07-05-005 (KTD-1): derived
+    // `current_step = step-02` (last in completed list).
     use crate::step_handoff::ProgressSnapshot;
     use crate::validation::rules_step_handoff::StepHandoffRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
     let mut snap = minimal_snapshot();
     let mut progress = ProgressSnapshot::default();
-    progress.current_step = Some("step-02".to_string());
-    progress.completed_steps = vec!["step-01".to_string()];
+    progress.completed_steps = vec!["step-01".to_string(), "step-02".to_string()];
     snap.progress = progress;
     snap.tasks = Vec::new();
 
@@ -648,14 +653,15 @@ fn u5_step_handoff_rule_without_tasks_path_keeps_legacy_reject() {
 fn u5_step_handoff_rule_disk_reload_accepts_plan_complete_terminal() {
     // P0-2: plan.complete on a closed task whose in-memory row
     // is missing must still pass through the disk fallback.
+    // U1 of plan 2026-07-05-005 (KTD-1): derived
+    // `current_step = step-02` (last in completed list).
     use crate::step_handoff::ProgressSnapshot;
     use crate::task::{Task, TaskStatus};
     use crate::validation::rules_step_handoff::StepHandoffRule;
     let view = ProtocolView::from_event_loop(&minimal_config());
     let mut snap = minimal_snapshot();
     let mut progress = ProgressSnapshot::default();
-    progress.current_step = Some("step-02".to_string());
-    progress.completed_steps = vec!["step-01".to_string()];
+    progress.completed_steps = vec!["step-01".to_string(), "step-02".to_string()];
     snap.progress = progress;
     snap.tasks = Vec::new();
 
@@ -702,18 +708,23 @@ fn u6_step_handoff_rule_refreshes_stale_progress_from_disk() {
     let mut snap = minimal_snapshot();
     // Stale in-memory: empty completed list, current step is
     // step-05 (does not match event step).
+    // U1 of plan 2026-07-05-005 (KTD-1): the gate's current step
+    // is derived from `completed_steps.last()`; the in-memory
+    // `current_step` field is irrelevant for read.
     let mut progress = ProgressSnapshot::default();
     progress.current_step = Some("step-05".to_string());
     progress.completed_steps = Vec::new();
     snap.progress = progress;
 
-    // Disk has the real state: step-01 done, current step = step-02.
+    // Disk has the real state: step-01 and step-02 done so the
+    // derived current step is step-02 (matching the inbound
+    // event).
     let dir = tempfile::tempdir().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
         agent_dir.join("progress.md"),
-        "## Current Step\nstep-02\n\n## Completed Steps\n- step-01\n",
+        "## Current Step\nstep-99\n\n## Completed Steps\n- step-01\n- step-02\n",
     )
     .unwrap();
     let tasks_path = agent_dir.join("tasks.jsonl");

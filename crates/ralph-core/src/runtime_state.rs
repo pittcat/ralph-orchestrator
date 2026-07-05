@@ -119,7 +119,12 @@ impl RuntimeStateSnapshot {
         let (tasks_ref, _from_ledger) = ctx.task_snapshot();
         let (progress_ref, _from_ledger) = ctx.progress_snapshot();
         let (tasks, progress) = if tasks_ref.is_empty()
-            && progress_ref.current_step.is_none()
+            // U1 of plan 2026-07-05-005 (KTD-1): the cold-cache
+            // detector reads the derived accessor; an empty
+            // `completed_steps` list also means an empty derived
+            // `current_step`, so the original two-branch check is
+            // equivalent and stays correct.
+            && progress_ref.current_step().is_none()
             && progress_ref.completed_steps.is_empty()
         {
             // Cold cache; try disk before giving up. The progress
@@ -132,7 +137,12 @@ impl RuntimeStateSnapshot {
         let progress_done = progress.completed_steps.clone();
         Self {
             plan_name: derive_plan_name(&tasks),
-            current_step: progress.current_step,
+            // U1 of plan 2026-07-05-005 (KTD-1): `current_step` is
+            // derived from `completed_steps.last()` — the
+            // `ProgressSnapshot::current_step()` accessor is the
+            // single source of truth. Reading the deprecated field
+            // here is a KTD-1 violation.
+            current_step: progress.current_step().map(str::to_string),
             completed_steps: progress.completed_steps,
             open_tasks: open_task_summaries(&tasks),
             wave: None, // U4 spike deferred: wave sub-section is

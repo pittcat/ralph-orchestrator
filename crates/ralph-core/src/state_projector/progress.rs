@@ -94,9 +94,13 @@ pub(crate) fn project_mark_step_completed(
         .ok_or_else(|| format!("mark_step_completed: missing pointer '{pointer}'"))?
         .to_string();
     push_completed(&mut ctx.progress_cache, &step);
-    // U3: clear current_step so it doesn't point at the just-closed
-    // step. Agent's next queue.advance will set it again.
-    ctx.progress_cache.current_step = None;
+    // U1 of plan 2026-07-05-005 (KTD-1): the `current_step` field is
+    // no longer the source of truth — it is derived from
+    // `completed_steps.last()` via `ProgressSnapshot::current_step()`.
+    // We deliberately do NOT reset `current_step` to `None` here;
+    // pushing the just-closed step into `completed_steps` is enough
+    // to make the derived view advance. Touching the field is a
+    // KTD-1 violation; the field is read-time-ignored.
     write_progress(&ctx.progress_path, &ctx.progress_cache)
 }
 
@@ -118,7 +122,11 @@ pub(crate) fn project_plan_complete(
     let final_ptr = final_step_pointer.unwrap_or("step");
     if let Some(step) = json_pointer(payload, final_ptr) {
         push_completed(&mut ctx.progress_cache, step);
-        ctx.progress_cache.current_step = Some(step.to_string());
+        // U1 of plan 2026-07-05-005 (KTD-1): do NOT touch the
+        // `current_step` field — the derived view (last completed
+        // step) is the single source of truth for the markdown
+        // heading. The next read will see the just-pushed step as
+        // the current step.
     }
     // Close every still-open AND started task so the ledger
     // matches the plan-complete state. We do NOT re-open tasks
@@ -189,7 +197,13 @@ fn write_progress(path: &Path, snap: &ProgressSnapshot) -> Result<(), String> {
     // `(none)` placeholder is friendlier than emitting a
     // heading-only document the `progress_task_gate`
     // consumer interprets as a fresh empty state.
-    match &snap.current_step {
+    // U1 of plan 2026-07-05-005 (KTD-1): render `## Current Step`
+    // from the derived view (`completed_steps.last()`), NOT from the
+    // deprecated `snap.current_step` field. The field is intentionally
+    // left untouched by this writer so the on-disk markdown and the
+    // in-memory `ProgressSnapshot` stay consistent without a second
+    // source of truth to keep in sync.
+    match snap.current_step() {
         Some(step) => {
             buf.push_str(CURRENT_STEP_HEADING);
             buf.push_str(step);
@@ -270,13 +284,42 @@ mod tests {
         };
         write_progress(&path, &snap).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
+        // U1 of plan 2026-07-05-005 (KTD-1): the heading is derived
+        // from `completed_steps.last()`, not from the `current_step`
+        // field. With `completed_steps = [step-01]` the derived
+        // value is "step-01", so the placeholder path is only hit
+        // when the list is empty (next test).
         assert!(
-            body.contains("## Current Step\n(none)\n"),
-            "current_step = None must render as `(none)` placeholder, got:\n{body}"
+            body.contains("## Current Step\nstep-01\n"),
+            "derived current_step = step-01 must render that value, got:\n{body}"
         );
         assert!(
             body.contains("- step-01"),
             "completed_steps must keep their list-rendering, got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn write_progress_derived_current_step_from_completed_list() {
+        // U1 of plan 2026-07-05-005 (KTD-1): even when the legacy
+        // `current_step` field is set to a different value, the
+        // rendered heading MUST come from `completed_steps.last()`.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("progress.md");
+        let snap = ProgressSnapshot {
+            current_step: Some("STALE_FIELD_VALUE".to_string()),
+            completed_steps: vec!["step-01".to_string(), "step-02".to_string()],
+            empty_headings: false,
+        };
+        write_progress(&path, &snap).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("## Current Step\nstep-02\n"),
+            "derived current_step must equal completed_steps.last(), got:\n{body}"
+        );
+        assert!(
+            !body.contains("STALE_FIELD_VALUE"),
+            "the deprecated `current_step` field must NOT influence the rendered markdown, got:\n{body}"
         );
     }
 
@@ -322,29 +365,36 @@ mod tests {
     }
 
     #[test]
-    fn u3_mark_step_completed_clears_current_step_pointer() {
+    fn u1_mark_step_completed_advances_derived_current_step() {
+        // U1 of plan 2026-07-05-005 (KTD-1): `project_mark_step_completed`
+        // no longer touches the deprecated `current_step` field. After
+        // marking step-01 complete, the DERIVED view
+        // (`completed_steps.last()`) returns step-01 — both the
+        // rendered markdown and the in-memory snapshot agree.
         use crate::state_projector::progress::project_mark_step_completed;
         let dir = tempdir().unwrap();
         let mut ctx = build_ctx_for_test(dir.path());
-        // Pre-condition: context picked up `step-01` from disk.
+        // Pre-condition: context picked up `step-01` from disk (legacy
+        // field; derived view also points at the just-loaded step).
         assert_eq!(ctx.progress_cache.current_step.as_deref(), Some("step-01"));
 
         let payload = serde_json::json!({"step": "step-01"});
         project_mark_step_completed(&mut ctx, &payload, None).unwrap();
 
-        assert_eq!(
-            ctx.progress_cache.current_step, None,
-            "U3: current_step must be cleared after marking so the \
-             writer does not keep the just-closed step as the heading"
-        );
         assert!(
             ctx.progress_cache.is_step_completed("step-01"),
             "step-01 must be listed under Completed Steps"
         );
+        // KTD-1: the derived view must reflect the just-marked step.
+        assert_eq!(
+            ctx.progress_cache.current_step(),
+            Some("step-01"),
+            "U1: derived current_step must equal completed_steps.last()"
+        );
         let body = std::fs::read_to_string(&ctx.progress_path).unwrap();
         assert!(
-            body.contains("## Current Step\n(none)\n"),
-            "rendered progress.md must show `(none)` placeholder, got:\n{body}"
+            body.contains("## Current Step\nstep-01\n"),
+            "rendered progress.md must show the just-marked step as current, got:\n{body}"
         );
     }
 
@@ -363,16 +413,25 @@ mod tests {
     }
 
     #[test]
-    fn u3_mark_step_completed_consecutive_marks_idempotent_on_completed() {
+    fn u1_mark_step_completed_consecutive_advances_derived_step() {
+        // U1 of plan 2026-07-05-005 (KTD-1): consecutive marks must
+        // advance the derived `current_step()` pointer along with
+        // the completed list. After step-01 then step-02 the derived
+        // view is `step-02`.
         use crate::state_projector::progress::project_mark_step_completed;
         let dir = tempdir().unwrap();
         let mut ctx = build_ctx_for_test(dir.path());
         // First mark.
         project_mark_step_completed(&mut ctx, &serde_json::json!({"step": "step-01"}), None).unwrap();
-        // Second mark of a DIFFERENT step — current_step stays None.
+        // Second mark of a DIFFERENT step — derived current_step
+        // advances to step-02.
         project_mark_step_completed(&mut ctx, &serde_json::json!({"step": "step-02"}), None).unwrap();
         assert!(ctx.progress_cache.is_step_completed("step-01"));
         assert!(ctx.progress_cache.is_step_completed("step-02"));
-        assert_eq!(ctx.progress_cache.current_step, None);
+        assert_eq!(
+            ctx.progress_cache.current_step(),
+            Some("step-02"),
+            "U1: derived current_step must track completed_steps.last()"
+        );
     }
 }

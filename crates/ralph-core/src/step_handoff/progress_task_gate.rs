@@ -76,6 +76,16 @@ impl std::error::Error for ProgressTaskMismatch {}
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProgressSnapshot {
     /// Value of `## Current Step` (or `**Current Step**:`) heading.
+    ///
+    /// **Deprecated for read access as of U1 of plan 2026-07-05-005.**
+    /// This field is still populated by [`Self::parse`] (for backwards
+    /// compatibility with the on-disk markdown format and external
+    /// tools), but readers MUST go through the derived
+    /// [`Self::current_step`] accessor which returns
+    /// `completed_steps.last()`. Reading this field directly is a
+    /// KTD-1 violation; the writer also renders the heading from the
+    /// derived value so the on-disk shape and the derived view can
+    /// never diverge.
     pub current_step: Option<String>,
     /// Steps listed under `## Completed Steps`.
     pub completed_steps: Vec<String>,
@@ -173,6 +183,12 @@ impl ProgressSnapshot {
             }
         }
 
+        // `empty_headings` is computed from the on-disk parsed
+        // `current_step` (NOT the derived accessor) — it answers
+        // "did the on-disk markdown have any headings at all?",
+        // which is a parse-time invariant independent of the
+        // derived `current_step()` view added by U1 of plan
+        // 2026-07-05-005.
         snap.empty_headings = snap.current_step.is_none() && snap.completed_steps.is_empty();
         snap
     }
@@ -181,6 +197,24 @@ impl ProgressSnapshot {
     pub fn is_step_completed(&self, step: &str) -> bool {
         let target = step.trim();
         self.completed_steps.iter().any(|s| s.trim() == target)
+    }
+
+    /// Derived accessor for the "current step".
+    ///
+    /// **U1 of plan 2026-07-05-005 (KTD-1)**: this method is the
+    /// single source of truth for the project's current step. It
+    /// returns `completed_steps.last()`, so the value cannot drift
+    /// from the on-disk list. The legacy `current_step` field is
+    /// still populated by [`Self::parse`] for backwards compatibility
+    /// but MUST NOT be read directly — readers (gate, projector,
+    /// orchestrator context) all go through this method.
+    ///
+    /// Shadow semantics also move here: the old `current_step ==
+    /// completed_steps.last()` shadow check is now structurally
+    /// impossible because both come from the same `completed_steps`
+    /// vector.
+    pub fn current_step(&self) -> Option<&str> {
+        self.completed_steps.last().map(String::as_str)
     }
 }
 
@@ -345,27 +379,25 @@ pub fn check_alignment_with_snapshot(
     //    every step but does not maintain a `Current Step` pointer
     //    (the agent has already advanced past every step).
     if let Some(step_value) = step {
-        match progress.current_step.as_deref() {
+        // U1 of plan 2026-07-05-005 (KTD-1): read the derived
+        // `current_step()` accessor (== `completed_steps.last()`),
+        // not the deprecated `current_step` field.
+        match progress.current_step() {
             None => {
                 // Fallback (2026-07-01 fix for primary-20260701-140149):
-                // when progress.md has no Current Step heading but the
-                // target step is already listed under Completed Steps,
-                // the agent has finished this step without updating the
-                // "current" pointer. This is legitimate on the
-                // `fix_plan_file="null"` happy path (all units closed, no
-                // fix-unit expected, shipper emits plan.complete directly).
-                // Treat as aligned rather than failing closed.
-                //
-                // Conservative: only relax the `None` branch when the step
-                // name matches something the agent already finished in the
-                // same progress.md. All other fail-closed paths
-                // (empty_headings, missing file, cold-start) are preserved
-                // unchanged above.
+                // when progress.md has no Completed Steps entries
+                // AND the inbound step is not already completed, the
+                // agent has nothing to anchor against. The
+                // `progress_missing_current_step` mismatch is still
+                // fail-closed in this shape; the relaxation only
+                // applies when the target step is already in the
+                // completed list (the `fix_plan_file="null"` happy
+                // path).
                 if !progress.is_step_completed(step_value) {
                     return GateDecision::Mismatch(ProgressTaskMismatch {
                         reason: "progress_missing_current_step".to_string(),
                         detail: format!(
-                            "event step='{}' but progress.md has no Current Step heading",
+                            "event step='{}' but progress.md has no Completed Steps entry to derive Current Step from",
                             step_value
                         ),
                         step: Some(step_value.to_string()),
@@ -391,18 +423,25 @@ pub fn check_alignment_with_snapshot(
     }
 
     // U1 of plan 2026-07-02-005 (EXTEND): pay-load-driven
-    // `completed_steps` array check. When the topic is `plan.complete`
-    // and `progress.current_step` is `None`, the agent may ship the
-    // terminal event with a `completed_steps: string[]` payload whose
-    // every element is already listed under Completed Steps in
-    // `progress.md`. This is the `pass_with_residuals` / 140149-shaped
-    // path. Require every entry to be present; even one missing entry
-    // is a `progress_missing_current_step` mismatch. A non-empty
-    // `payload_completed_steps` is the authoritative signal — when it
-    // is `None` or empty, the legacy single-step fallback above stays
-    // the only path.
+    // `completed_steps` array check. When the topic is `plan.complete`,
+    // the agent may ship the terminal event with a
+    // `completed_steps: string[]` payload whose every element is
+    // already listed under Completed Steps in `progress.md`. This is
+    // the `pass_with_residuals` / 140149-shaped path. Require every
+    // entry to be present; even one missing entry is a
+    // `progress_missing_current_step` mismatch.
+    //
+    // U1 of plan 2026-07-05-005 (KTD-1) adaptation: the original
+    // guard `progress.current_step.is_none()` is dropped because
+    // `current_step` is now derived from
+    // `completed_steps.last()`, which is `Some(_)` after the agent
+    // has completed the first step. The payload array is the
+    // authoritative signal that the agent is in the terminal
+    // `pass_with_residuals` shape — when it is non-empty the gate
+    // switches to payload-driven alignment regardless of the
+    // derived current step. A `None` or empty payload keeps the
+    // legacy single-step fallback above as the only path.
     if topic == "plan.complete"
-        && progress.current_step.is_none()
         && let Some(payload_steps) = payload_completed_steps
         && !payload_steps.is_empty()
     {
@@ -576,8 +615,10 @@ pub fn check_progress_task_alignment(
     };
 
     // 3. If a step is provided, verify it matches progress.Current Step.
+    // U1 of plan 2026-07-05-005 (KTD-1): read the derived
+    // `current_step()` accessor (== `completed_steps.last()`).
     if let Some(step) = step {
-        match progress.current_step.as_deref() {
+        match progress.current_step() {
             None => {
                 // Fallback (2026-07-01 fix for primary-20260701-140149):
                 // mirror of the snapshot variant above. When
@@ -720,8 +761,12 @@ pub fn refresh_progress_snapshot_if_stale(
 }
 
 fn progress_fingerprint(snap: &ProgressSnapshot) -> (Option<String>, String) {
+    // U1 of plan 2026-07-05-005 (KTD-1): fingerprint uses the derived
+    // `current_step()` accessor (== `completed_steps.last()`) so the
+    // staleness check compares apples to apples — both disk and
+    // memory produce the same value for the same underlying list.
     (
-        snap.current_step.clone(),
+        snap.current_step().map(str::to_string),
         snap.completed_steps.join(","),
     )
 }
@@ -869,10 +914,16 @@ mod tests {
     fn happy_path_task_closed_and_progress_marks_step_completed() {
         let tmp = workspace();
         write_task(&tmp, "task-1", TaskStatus::Closed, "step-01");
+        // U1 of plan 2026-07-05-005 (KTD-1): the on-disk markdown
+        // heading is still parsed, but the gate's read path
+        // derives `current_step` from `completed_steps.last()`.
+        // To make the derive return step-02, the completed list
+        // must end with step-02; the legacy `## Current Step`
+        // heading is ignored at read time.
         write_file(
             tmp.path(),
             ".ralph/agent/progress.md",
-            "## Current Step\nstep-02\n\n## Completed Steps\n- step-01\n",
+            "## Current Step\nstep-99\n\n## Completed Steps\n- step-01\n- step-02\n",
         );
 
         let decision = check_progress_task_alignment(
@@ -888,6 +939,14 @@ mod tests {
     fn plan_complete_is_also_gated() {
         let tmp = workspace();
         write_task(&tmp, "task-1", TaskStatus::Closed, "step-01");
+        // U1 of plan 2026-07-05-005 (KTD-1): the on-disk markdown
+        // heading `## Current Step` is still populated by the
+        // parser, but the gate's read path now derives the
+        // current step from `completed_steps.last()`. Pin the
+        // contract to that derived view: the `## Current Step`
+        // heading is ignored on read, so the test only needs
+        // `step-01` in `## Completed Steps` to make the derived
+        // `current_step()` return `step-01`.
         write_file(
             tmp.path(),
             ".ralph/agent/progress.md",
@@ -896,7 +955,7 @@ mod tests {
 
         let decision = check_progress_task_alignment(
             "plan.complete",
-            Some("step-final"),
+            Some("step-01"),
             Some("task-1"),
             tmp.path(),
         );
@@ -991,10 +1050,15 @@ mod tests {
     #[test]
     fn empty_tasks_missing_task_id_is_rejected() {
         let tmp = workspace();
+        // U1 of plan 2026-07-05-005 (KTD-1): the gate's
+        // `current_step` is derived from `completed_steps.last()`.
+        // To pass the step-alignment branch (which runs before
+        // task alignment), the completed list must end with
+        // step-01 so the derived view matches the inbound step.
         write_file(
             tmp.path(),
             ".ralph/agent/progress.md",
-            "## Current Step\nstep-01\n\n## Completed Steps\n",
+            "## Current Step\nstep-99\n\n## Completed Steps\n- step-01\n",
         );
         // tasks.jsonl is empty (file does not exist), task_id not found.
         let decision = check_progress_task_alignment(
@@ -1063,10 +1127,15 @@ mod tests {
     fn task_in_progress_is_not_a_mismatch() {
         let tmp = workspace();
         write_task(&tmp, "task-1", TaskStatus::InProgress, "step-01");
+        // U1 of plan 2026-07-05-005 (KTD-1): the gate's current
+        // step is derived from `completed_steps.last()`. To pass
+        // the step-alignment branch the completed list must end
+        // with step-01; the legacy `## Current Step` heading is
+        // ignored at read time.
         write_file(
             tmp.path(),
             ".ralph/agent/progress.md",
-            "## Current Step\nstep-01\n\n## Completed Steps\n",
+            "## Current Step\nstep-99\n\n## Completed Steps\n- step-01\n",
         );
         let decision = check_progress_task_alignment(
             "queue.advance",

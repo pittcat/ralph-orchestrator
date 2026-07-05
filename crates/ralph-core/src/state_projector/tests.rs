@@ -159,7 +159,14 @@ fn happy_path_close_task_updates_progress() {
 }
 
 #[test]
-fn happy_path_queue_advance_advances_current_step() {
+fn happy_path_queue_advance_advances_derived_current_step() {
+    // U1 of plan 2026-07-05-005 (KTD-1): the markdown `## Current
+    // Step` heading is now derived from `completed_steps.last()`.
+    // After `queue.advance` records `completed_step: step-01`, the
+    // derived current step is `step-01` (the just-finished step).
+    // The inbound `step: step-02` field is still useful for the
+    // event-driven handoff, but it is no longer the source of
+    // truth for the rendered heading.
     let tmp = workspace();
     let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
     let event = make_event(
@@ -169,7 +176,10 @@ fn happy_path_queue_advance_advances_current_step() {
     let report = proj.apply(&[event]);
     assert_eq!(report.applied, 1);
     let progress = std::fs::read_to_string(tmp.path().join(".ralph/agent/progress.md")).unwrap();
-    assert!(progress.contains("step-02"));
+    assert!(
+        progress.contains("## Current Step\nstep-01\n"),
+        "derived current_step must equal completed_steps.last() = step-01, got:\n{progress}"
+    );
     assert!(progress.contains("- step-01"));
 }
 
@@ -249,9 +259,15 @@ fn serial_preset_queue_advance_payload_drives_progress_with_next_step_pointer() 
     assert_eq!(report.applied, 1);
 
     let progress = std::fs::read_to_string(tmp.path().join(".ralph/agent/progress.md")).unwrap();
+    // U1 of plan 2026-07-05-005 (KTD-1): the rendered `## Current
+    // Step` heading is now derived from `completed_steps.last()`,
+    // so it equals the just-completed step (`step-01`), not the
+    // upcoming `next_step` field. The agent still sees the
+    // completed step as the heading; downstream consumers use the
+    // derived accessor for "what is the current step?".
     assert!(
-        progress.contains("step-02"),
-        "Current Step must advance to next_step value, got:\n{progress}"
+        progress.contains("## Current Step\nstep-01\n"),
+        "derived Current Step must equal completed_steps.last() = step-01, got:\n{progress}"
     );
     assert!(
         progress.contains("- step-01"),
