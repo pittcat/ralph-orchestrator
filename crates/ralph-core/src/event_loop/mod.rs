@@ -1819,11 +1819,19 @@ impl EventLoop {
         // topic is missing the hat's prompt will never see the
         // upstream event, so a resume is also wasted.
         //
-        // U8 of plan 2026-07-05-005: the inline `triggers.iter().any(...)`
-        // loop is replaced with a call to the shared
-        // `check_hat_triggers` helper so all three handoff paths
-        // (`next_hat`, `process_output` handoff escalation, this
-        // `validate_resume_routing`) consult the same predicate.
+        // U8 / U6 of plan 2026-07-05-005: the inline
+        // `triggers.iter().any(...)` loop is replaced with a call
+        // to the shared `check_hat_triggers` helper. **Only this
+        // path** uses the helper today; `next_hat` filters by
+        // `event.target == Some(id)` (a different predicate — the
+        // publisher named a specific hat, not a topic), and
+        // `process_output` handoff escalation at line 4406 uses
+        // literal `t == e.topic.as_str()` matching (Topic::matches
+        // is glob-aware; mixing the two would silently change
+        // routing for any hat whose `triggers` contains a glob).
+        // See fix-plan §U6 option (a): keep the divergence
+        // documented rather than wiring `process_output` through
+        // the helper.
         if let Some(cfg) = self.registry.get_config(&HatId::from(consumer)) {
             if let Err(_err) = crate::workflow_contract::handoff_index::check_hat_triggers(
                 &cfg.triggers,

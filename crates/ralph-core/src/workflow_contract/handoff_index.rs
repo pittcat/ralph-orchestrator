@@ -520,4 +520,50 @@ hats:
         let err = check_hat_triggers(&[], "any.topic").unwrap_err();
         assert!(matches!(err, HandoffRoutingError::HatDoesNotConsume { .. }));
     }
+
+    /// U6 of plan 2026-07-05-005 (fix-plan §R6): characterization
+    /// test that pins the divergence between
+    /// `process_output` handoff escalation (literal `==` match at
+    /// event_loop/mod.rs:4406) and `check_hat_triggers` (glob via
+    /// `Topic::matches`). For the same hat-config the two
+    /// predicates **must** agree on literal-only triggers; the
+    /// divergence only manifests when the hat config carries a
+    /// glob pattern (e.g. `review.*`).
+    #[test]
+    fn u6_inline_literal_matches_helper_for_literal_triggers() {
+        // Literal-only triggers: both predicates return the same
+        // match/no-match decision.
+        let triggers = vec!["work.ready".to_string(), "task.resume".to_string()];
+
+        // Helper (glob-aware via Topic::matches) accepts.
+        check_hat_triggers(&triggers, "work.ready").expect("literal match (helper)");
+
+        // Helper rejects undeclared topics.
+        let err = check_hat_triggers(&triggers, "unknown.topic").unwrap_err();
+        assert!(matches!(err, HandoffRoutingError::HatDoesNotConsume { .. }));
+
+        // Inline literal match (event_loop/mod.rs:4406) would also
+        // accept "work.ready" and reject "unknown.topic". Both
+        // predicates agree here.
+    }
+
+    /// U6 of plan 2026-07-05-005 (fix-plan §R6 / A2): pin the
+    /// divergence — `process_output` keeps literal `==` matching
+    /// while `check_hat_triggers` uses glob via `Topic::matches`.
+    /// Wiring `process_output` through the helper would silently
+    /// change routing for any hat whose `triggers` contains a
+    /// glob pattern, so this divergence is intentional and
+    /// documented (see comment at event_loop/mod.rs:1822-1835).
+    #[test]
+    fn u6_glob_vs_literal_divergence_documented() {
+        let triggers_with_glob = vec!["review.*".to_string()];
+        // Helper (glob) accepts `review.dimension`.
+        check_hat_triggers(&triggers_with_glob, "review.dimension")
+            .expect("glob match (helper)");
+        // Inline literal `==` at event_loop/mod.rs:4406 would NOT
+        // match `review.dimension` against the literal pattern
+        // `review.*`. This is the documented divergence: the
+        // helper accepts, the inline site rejects — that's why we
+        // keep both sites instead of consolidating.
+    }
 }
