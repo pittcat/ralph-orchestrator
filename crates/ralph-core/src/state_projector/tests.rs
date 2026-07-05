@@ -289,7 +289,17 @@ fn projected_topics_list_is_locked() {
     // Phase 2 re-introduction protocol.
     assert_eq!(
         PROJECTED_TOPICS,
-        &["work.ready", "work.done", "queue.advance", "plan.complete",]
+        &[
+            "work.ready",
+            "work.done",
+            "queue.advance",
+            "plan.complete",
+            // U3 of plan 2026-07-05-005: `review.dimensions.complete`
+            // was re-added with the matching
+            // `StateProjectionAction::ReviewDimensionsComplete`
+            // variant — see `state_projector/review.rs`.
+            "review.dimensions.complete",
+        ]
     );
     // Belt-and-suspenders reverse check: if a future refactor
     // ever widens the list without the corresponding

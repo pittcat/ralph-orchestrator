@@ -594,6 +594,19 @@ state_projection:
     plan.complete:
       - kind: plan_complete
         final_step: "step"
+    # U3 of plan 2026-07-05-005: the projector now sees
+    # `review.dimensions.complete` and records an in-memory view
+    # that feeds `## ORCHESTRATOR CONTEXT`. The chain entry
+    # MUST be registered alongside the new
+    # `StateProjectionAction::ReviewDimensionsComplete` variant;
+    # omitting the chain entry makes the projector silently
+    # ignore the event (legacy behaviour for non-chain topics).
+    review.dimensions.complete:
+      - kind: review_dimensions_complete
+        task_key: "task_key"
+        fix_round: "fix_round"
+        dimensions: "dimensions"
+        summary: "summary"
 
 # -----------------------------------------------------------------------------
 # 2026-07-02-006 plan U24: `mechanism.phase_authority` authoring SSOT reference.

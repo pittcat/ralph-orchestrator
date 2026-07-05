@@ -98,8 +98,29 @@ use crate::step_handoff::ProgressSnapshot;
 /// Phase 2 unit that needs them must add the matching
 /// `StateProjectionAction` variant *and* the topic here in the
 /// same commit.
-pub const PROJECTED_TOPICS: &[&str] =
-    &["work.ready", "work.done", "queue.advance", "plan.complete"];
+pub const PROJECTED_TOPICS: &[&str] = &[
+    "work.ready",
+    "work.done",
+    "queue.advance",
+    "plan.complete",
+    // U3 of plan 2026-07-05-005: `review.dimensions.complete` is
+    // routed by the event_policy dedup chain but the projector
+    // was previously INVISIBLE to it (the event was rejected
+    // upstream as a duplicate without the projector ever
+    // seeing it). Adding it here lets the projector update its
+    // "last dimensions-complete" view, which feeds the
+    // `## ORCHESTRATOR CONTEXT` block.
+    //
+    // R10 (backward compatibility): presets that do not declare
+    // `review.dimensions.complete` in their `state_projection`
+    // chain continue to work — this entry is added to the
+    // projector whitelist, not the chain. A preset without the
+    // matching `StateProjectionAction::ReviewDimensionsComplete`
+    // variant in its `actions_chain` simply has the new topic
+    // pass through without projection (same as the legacy
+    // behaviour for any non-chain topic).
+    "review.dimensions.complete",
+];
 
 /// Build the canonical path to the task ledger under a workspace
 /// root. Phase 1 mandates the legacy `.ralph/agent/tasks.jsonl`
@@ -206,6 +227,13 @@ pub struct ProjectionContext {
     /// caller (`EventLoop` or a test) is responsible for seeding
     /// it via [`Self::set_ledger_snapshot`].
     ledger_snapshot: Option<Box<LedgerSnapshot>>,
+    /// U3 of plan 2026-07-05-005: in-memory view of the latest
+    /// `review.dimensions.complete` event. A direct
+    /// `Mutex<Option<...>>` keeps the read path simple and stays
+    /// consistent with the legacy `tasks_cache` / `progress_cache`
+    /// mirrors.
+    pub(crate) review_dimensions_view:
+        std::sync::Mutex<Option<review::ReviewDimensionsView>>,
 }
 
 impl ProjectionContext {
@@ -240,6 +268,10 @@ impl ProjectionContext {
             tasks_cache: Vec::new(),
             progress_cache: ProgressSnapshot::default(),
             ledger_snapshot: None,
+            // U3 of plan 2026-07-05-005: the review summary view
+            // slot starts empty; the projector fills it on the
+            // first `review.dimensions.complete` event.
+            review_dimensions_view: std::sync::Mutex::new(None),
         }
     }
 
@@ -846,6 +878,19 @@ impl StateProjector {
                             step.as_deref(),
                         )
                     }
+                    crate::config::StateProjectionAction::ReviewDimensionsComplete {
+                        task_key,
+                        fix_round,
+                        dimensions,
+                        summary,
+                    } => crate::state_projector::review::project_review_dimensions_complete(
+                        &mut self.ctx,
+                        &parsed,
+                        task_key.as_deref(),
+                        fix_round.as_deref(),
+                        dimensions.as_deref(),
+                        summary.as_deref(),
+                    ),
                 };
                 match outcome {
                     Ok(()) => {
@@ -923,6 +968,7 @@ fn materialize_snapshot_tasks(
 
 pub mod orchestrator_context;
 pub mod progress;
+pub mod review;
 pub mod task;
 
 #[cfg(test)]

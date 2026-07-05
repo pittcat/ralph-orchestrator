@@ -140,4 +140,32 @@ pub enum StateProjectionAction {
         #[serde(default)]
         step: Option<String>,
     },
+    /// U3 of plan 2026-07-05-005: `review.dimensions.complete`
+    /// lands on the projector. The action records the latest
+    /// review summary so the next `## ORCHESTRATOR CONTEXT`
+    /// block can include a `## REVIEW SUMMARY` section without
+    /// re-reading `events.jsonl`. The projector never dedups —
+    /// `event_policy` already de-duplicates by
+    /// `(task_key, fix_round)` upstream, so the action runs at
+    /// most once per dedup window.
+    ///
+    /// Schema fields are JSON pointers (default = literal field
+    /// name) so the action is payload-shape agnostic. `task_key`
+    /// is the stable identity (NOT `task_id`, which can be reused
+    /// across fix-rounds); `fix_round` is the loop counter; the
+    /// remaining pointers feed the review summary block.
+    ReviewDimensionsComplete {
+        /// JSON pointer for the stable task key.
+        #[serde(default)]
+        task_key: Option<String>,
+        /// JSON pointer for the fix-round counter.
+        #[serde(default)]
+        fix_round: Option<String>,
+        /// JSON pointer for the per-dimension verdict map.
+        #[serde(default)]
+        dimensions: Option<String>,
+        /// JSON pointer for the human-readable summary line.
+        #[serde(default)]
+        summary: Option<String>,
+    },
 }
