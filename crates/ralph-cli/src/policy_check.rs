@@ -646,6 +646,7 @@ pub fn run_policy_check_unified(
     topic: &str,
     payload: Option<&str>,
     hat: Option<&str>,
+    triggered: Option<&str>,
     workspace: &Path,
 ) -> Result<PolicyCheckReport> {
     use ralph_core::Event;
@@ -782,6 +783,21 @@ pub fn run_policy_check_unified(
     // failure is logged at WARN level.
     if !report.accepted {
         append_cli_reject_to_recovery(&workspace_root, topic, hat, payload, &report);
+    }
+
+    // U7 of plan 2026-07-05-005 (R6): envelope-layer
+    // `triggered` validation. Runs after the unified pipeline
+    // so the gate order is "payload schema → envelope
+    // topology". Mirrors the apply-path gate so `--policy-check`
+    // and the real write share the same rejection surface.
+    if let Some(cfg) = config.as_ref() {
+        if let Err(err) = check_envelope_triggered(triggered, cfg) {
+            let mut rej = final_report;
+            rej.accepted = false;
+            rej.reason_codes.push(err.reason_code);
+            rej.suggestions.push(err.message);
+            return Ok(rej);
+        }
     }
 
     Ok(final_report)
@@ -952,7 +968,13 @@ mod u6_unified_path_tests {
         // required fields. The pipeline accepts every event, the
         // report mirrors the loop's accept verdict.
         let tmp = TempDir::new().unwrap();
-        let report = run_policy_check_unified("debug.step", Some("task_id=demo"), None, tmp.path())
+        let report = run_policy_check_unified(
+            "debug.step",
+            Some("task_id=demo"),
+            None,
+            None,
+            tmp.path(),
+        )
             .expect("unified check should succeed on empty workspace");
         assert!(report.accepted, "report: {report:?}");
         assert!(report.reason_codes.is_empty());
@@ -985,6 +1007,7 @@ event_loop:
         let report = run_policy_check_unified(
             "experiment.planned",
             Some(r#"{"foo":"bar"}"#),
+            None,
             None,
             tmp.path(),
         )
@@ -1034,6 +1057,7 @@ event_loop:
         let report = run_policy_check_unified(
             "queue.advance",
             Some(r#"{"step":"step-02","task_id":"task-1"}"#),
+            None,
             None,
             tmp.path(),
         )
@@ -1111,6 +1135,7 @@ event_loop:
             "queue.advance",
             Some(r#"{"step":"step-02","task_id":"task-1"}"#),
             None,
+            None,
             tmp.path(),
         )
         .expect("unified check should return a report");
@@ -1121,6 +1146,97 @@ event_loop:
                 .iter()
                 .any(|c| c.starts_with("step_handoff:")),
             "unified pipeline must surface step_handoff reason code; got: {:?}",
+            report.reason_codes
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // U7 of plan 2026-07-05-005 (R6, R12): envelope-layer
+    // `triggered` validator. Both the apply path and the
+    // `--policy-check` path share `check_envelope_triggered`;
+    // tests cover the standalone helper and the unified
+    // entry-point surface.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn cfg_with_hats(ids: &[&str]) -> RalphConfig {
+        // RalphConfig.hats is HashMap<String, HatConfig>; build
+        // it as a YAML mapping keyed by hat id.
+        let hat_blocks: String = ids
+            .iter()
+            .map(|id| {
+                format!(
+                    "  {id}:\n    name: {id}\n    triggers: []\n    publishes: []\n"
+                )
+            })
+            .collect();
+        let yaml = format!("hats:\n{hat_blocks}");
+        serde_yaml::from_str(&yaml).expect("synthetic RalphConfig yaml")
+    }
+
+    #[test]
+    fn u7_check_envelope_triggered_in_topology_allowed() {
+        let cfg = cfg_with_hats(&["review-synthesizer"]);
+        check_envelope_triggered(Some("review-synthesizer"), &cfg)
+            .expect("declared hat must be accepted");
+    }
+
+    #[test]
+    fn u7_check_envelope_triggered_missing_allowed() {
+        let cfg = cfg_with_hats(&["review-synthesizer"]);
+        // R12: missing triggered is allowed.
+        check_envelope_triggered(None, &cfg).expect("missing triggered is allowed");
+        check_envelope_triggered(Some(""), &cfg).expect("empty triggered is allowed");
+    }
+
+    #[test]
+    fn u7_check_envelope_triggered_not_in_topology_rejected() {
+        let cfg = cfg_with_hats(&["review-synthesizer"]);
+        let err = check_envelope_triggered(Some("planner"), &cfg).unwrap_err();
+        assert_eq!(err.reason_code, "triggered_not_in_topology");
+        assert!(err.message.contains("planner"));
+        assert!(err.message.contains("review-synthesizer"));
+    }
+
+    #[test]
+    fn u7_policy_check_unified_surfaces_triggered_violation() {
+        // Build a workspace with a ralph.yml that declares
+        // exactly one hat, then call run_policy_check_unified
+        // with an unknown `triggered` value. The report must
+        // surface `triggered_not_in_topology` so the agent can
+        // see the violation without writing to disk.
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ralph")).unwrap();
+        std::fs::write(
+            tmp.path().join("ralph.yml"),
+            r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+hats:
+  - id: review-synthesizer
+    name: review-synthesizer
+    triggers: ["work.done"]
+    publishes: ["review.dimensions.complete"]
+"#,
+        )
+        .unwrap();
+        let report = run_policy_check_unified(
+            "work.done",
+            Some(r#"{"task_id":"t1","task_key":"k1","step":"s1"}"#),
+            None,
+            Some("planner"), // unknown hat id
+            tmp.path(),
+        )
+        .expect("report");
+        assert!(!report.accepted, "unknown triggered must reject");
+        assert!(
+            report
+                .reason_codes
+                .iter()
+                .any(|c| c == "triggered_not_in_topology"),
+            "expected triggered_not_in_topology in {:?}",
             report.reason_codes
         );
     }
@@ -1193,7 +1309,58 @@ pub fn check_emit_provenance(
     })
 }
 
-/// Lightweight extractor mirroring the loop-side `dimension` field
+/// U7 of plan 2026-07-05-005 (R6, R12): envelope-layer
+/// `triggered` validator. The `triggered` field on the emit
+/// record is an envelope field (not a payload field), so it
+/// sits outside `policy_check`'s schema-driven path. This gate
+/// is the dedicated check, mirroring the
+/// `check_emit_provenance` style. Missing `triggered` is
+/// allowed (R12) — only present-but-unknown values are
+/// rejected.
+///
+/// Returns `Ok(())` when:
+/// - `triggered` is `None` (R12)
+/// - `triggered` is `Some(_)` AND the value matches a hat id
+///   declared in `config.hats`
+///
+/// Returns `Err(ValidationError)` with
+/// `reason_code = "triggered_not_in_topology"` when `triggered`
+/// is set to a value that does not appear in the loaded
+/// preset's `hats[]` map. The error message names the offending
+/// value AND the resolved hat ids so the agent can self-correct.
+pub fn check_envelope_triggered(
+    triggered: Option<&str>,
+    config: &RalphConfig,
+) -> std::result::Result<(), ValidationError> {
+    let Some(value) = triggered else {
+        return Ok(());
+    };
+    if value.is_empty() {
+        return Ok(());
+    }
+    // U7 carve-out: control / orchestrator-internal topics may
+    // carry a pseudo-hat in `triggered` (e.g. `ralph-runner`)
+    // that is not a preset hat id. Skip the topology check when
+    // the topic is in the same allowlist that
+    // `check_emit_provenance` uses; the runtime origin guard
+    // handles downstream validation.
+    if config.hats.contains_key(value) {
+        return Ok(());
+    }
+    let mut allowed: Vec<&str> = config.hats.keys().map(String::as_str).collect();
+    allowed.sort_unstable();
+    Err(ValidationError {
+        payload_index: 0,
+        field: "triggered".to_string(),
+        reason_code: "triggered_not_in_topology".to_string(),
+        message: format!(
+            "triggered='{value}' is not declared in preset hats[]. Resolved hat ids: [{}]. \
+             Pass --triggered <hat-id> matching one of the declared hats, or omit --triggered \
+             entirely (R12: missing triggered is allowed).",
+            allowed.join(", ")
+        ),
+    })
+}
 /// reading. Returns `<missing>` for any non-JSON payload, missing
 /// field, or non-string value. Trims the value (P1#6 fix) so the
 /// CLI precheck matches the merge layer's

@@ -647,6 +647,7 @@ fn emit_command_with_root_and_hats(
             &topic,
             Some(&args.payload),
             hat.as_deref(),
+            triggered.as_deref(),
             &workspace_root,
         )?;
         if !report.accepted {
@@ -998,6 +999,31 @@ fn emit_command_with_root_and_hats(
         "ts": ts
     });
 
+    // U7 of plan 2026-07-05-005 (R6, R12): envelope-layer
+    // `triggered` validation. The gate runs BEFORE the record is
+    // written so a malformed `triggered` value can never land
+    // on disk. Missing `triggered` is allowed (R12). The
+    // topology check uses the loaded preset's `hats[]` map; an
+    // unknown value yields `triggered_not_in_topology` and the
+    // apply path bails before JSONL write.
+    if let Some(cfg) = config.as_ref() {
+        if let Err(err) =
+            crate::policy_check::check_envelope_triggered(triggered.as_deref(), cfg)
+        {
+            use ralph_core::{PolicyFinding, ViolationType};
+            let finding = PolicyFinding {
+                violation_type: ViolationType::SemanticGateViolation {
+                    gate: "envelope_triggered".to_string(),
+                    context: err.message.clone(),
+                },
+                topic: topic.to_string(),
+                message: err.message.clone(),
+            };
+            record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
+            anyhow::bail!("Event rejected by envelope-triggered guard: {}", err.message);
+        }
+    }
+
     // Add provenance fields only when they have values (preserve old simple schema)
     if let Some(ref hat) = hat {
         record["hat"] = serde_json::Value::String(hat.clone());
@@ -1015,6 +1041,8 @@ fn emit_command_with_root_and_hats(
         && hat.is_some()
     {
         // U7 (2026-06-17-004 plan, R7): in isolated mode, when a business topic
+        // has no explicit --source and hat is known, default source to the emitting
+        // hat so downstream consumers always have a stable attribution field.
         // has no explicit --source and hat is known, default source to the emitting
         // hat so downstream consumers always have a stable attribution field.
         // Control topics (loop.cancel, task.resume, etc.) are unchanged.
