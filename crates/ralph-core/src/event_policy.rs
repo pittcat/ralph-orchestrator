@@ -418,6 +418,14 @@ pub struct PolicyRuntimeState {
     /// to keep the change blast radius small (plan U5 §
     /// "scope-bounded").
     pub work_ready_seen_keys: HashMap<String, u32>,
+    /// U5 of plan 2026-07-05-005 (fix-plan §R8): side-table
+    /// recording which `work_ready_seen_keys` entries have
+    /// had their `(plan_name, step)` bucket pruned. The bucket
+    /// classification lives here, separate from the dedup
+    /// count in `work_ready_seen_keys`, so a re-emit after
+    /// `fix.applied` continues to increment the count without
+    /// resetting it.
+    pub pruned_work_ready_buckets: HashSet<String>,
     /// 2026-06-24 P1-3: dedup set for `test.passed` events. Key
     /// format: `{plan_name}::{step}::{task_id}::{fix_round}`.
     /// The `fix_round` segment distinguishes re-test rounds so
@@ -569,16 +577,32 @@ impl PolicyRuntimeState {
     /// on `fix.applied` / step close so a legitimate re-emit
     /// after a fix round is allowed. Mirrors
     /// `prune_work_done_bucket` (same key shape).
+    ///
+    /// U5 of plan 2026-07-05-005 (fix-plan §R8 / §C5): the dedup
+    /// hit counter is **preserved** across pruning — the count is
+    /// observation, not dedup state, so losing it would hide
+    /// legitimate dup-storm signals. We achieve this by:
+    ///
+    /// 1. **Not** removing the pruned entries from
+    ///    `work_ready_seen_keys` (the HashMap value carries the
+    ///    running count and must survive the prune).
+    /// 2. Carrying the bucket classification in a separate
+    ///    `pruned_work_ready_buckets: HashSet<String>` side-table
+    ///    so the dedup validator can recognise "this key is
+    ///    bucket-pruned but the count is still real".
+    ///
+    /// On the next `work.ready` emit, `validate_event_with_hat`
+    /// sees `pruned_work_ready_buckets.contains(&key)` and
+    /// increments `work_ready_seen_keys[key]` (no reset to 1).
     pub fn prune_work_ready_bucket(&mut self, plan_name: &str, step: &str) {
         let prefix = format!("{plan_name}::{step}::");
-        // U5 of plan 2026-07-05-005 (R8): the dedup hit
-        // counter is preserved across pruning — the bucket
-        // prune drops the dedup entry but the count is
-        // observation, not dedup state, so losing it would
-        // hide legitimate dup-storm signals. The HashMap
-        // value is intentionally ignored in the closure.
-        self.work_ready_seen_keys
-            .retain(|key, _count| !key.starts_with(&prefix));
+        // Record the bucket as pruned. We intentionally do NOT
+        // remove the dedup entries — their counts survive.
+        for key in self.work_ready_seen_keys.keys() {
+            if key.starts_with(&prefix) {
+                self.pruned_work_ready_buckets.insert(key.clone());
+            }
+        }
     }
 
     /// 2026-06-24 P1-3: prune the `test_passed_seen_keys` /
@@ -1624,7 +1648,28 @@ pub fn validate_event_with_hat(
         let task_id = obj.get("task_id").and_then(|v| v.as_str());
         if let (Some(pn), Some(st), Some(ti)) = (plan_name, step, task_id) {
             let dedup_key = format!("{pn}::{st}::{ti}");
-            if state.work_ready_seen_keys.contains_key(&dedup_key) {
+            // U5 of plan 2026-07-05-005 (fix-plan §R8): a re-emit
+            // after `fix.applied` pruning is allowed (the bucket
+            // classification is cleared), but the dedup hit
+            // counter must survive — we increment it without
+            // rejecting so the dup-storm signal remains
+            // observable. The bucket prune marks the key in
+            // `pruned_work_ready_buckets`; the check below uses
+            // that side-table to accept the emit and bump the
+            // counter.
+            if state.pruned_work_ready_buckets.contains(&dedup_key) {
+                let count = state
+                    .work_ready_seen_keys
+                    .get(&dedup_key)
+                    .copied()
+                    .unwrap_or(0);
+                state.work_ready_seen_keys.insert(
+                    dedup_key.clone(),
+                    count.saturating_add(1),
+                );
+                // Bucket-pruned emit falls through to Accept —
+                // count is observation, not dedup state.
+            } else if state.work_ready_seen_keys.contains_key(&dedup_key) {
                 // U5 of plan 2026-07-05-005 (R8): bump the
                 // counter on every observed hit. The counter is
                 // observation, not dedup state — `fix.applied`
@@ -1652,10 +1697,11 @@ pub fn validate_event_with_hat(
                     ),
                 };
                 return PolicyDecision::RejectWithResume(finding);
+            } else {
+                // First acceptance: seed the counter at 1 so a
+                // subsequent hit reads `seen_count: 2`.
+                state.work_ready_seen_keys.insert(dedup_key, 1);
             }
-            // First acceptance: seed the counter at 1 so a
-            // subsequent hit reads `seen_count: 2`.
-            state.work_ready_seen_keys.insert(dedup_key, 1);
         }
     }
 
@@ -6108,12 +6154,67 @@ mod tests {
 
         state.prune_work_ready_bucket("p1", "step-01");
 
-        assert!(!state.work_ready_seen_keys.contains_key("p1::step-01::t1"));
+        // U5 of plan 2026-07-05-005 (fix-plan §R8): the dedup
+        // hit counter is observation, not dedup state. The
+        // pruned bucket's entry MUST survive (its count must
+        // survive), only the bucket classification moves to the
+        // side-table `pruned_work_ready_buckets`. Keys outside
+        // the pruned bucket are untouched (counter preserved).
+        assert_eq!(
+            state.work_ready_seen_keys.get("p1::step-01::t1").copied(),
+            Some(7),
+            "U5: pruned key's counter is preserved across pruning"
+        );
+        assert!(state.pruned_work_ready_buckets.contains("p1::step-01::t1"));
         assert_eq!(
             state.work_ready_seen_keys.get("p1::step-02::t2").copied(),
             Some(3),
             "U5: counter is observation, not dedup state — pruning \
              other buckets does not reset surviving keys' counts"
+        );
+        assert!(!state.pruned_work_ready_buckets.contains("p1::step-02::t2"));
+    }
+
+    /// U5 of plan 2026-07-05-005 (fix-plan §R8): after a bucket
+    /// prune, a re-emit with the same `(plan_name, step, task_id)`
+    /// lands as Accept (the bucket classification is cleared), and
+    /// the existing counter is incremented — **not** reset to 1.
+    #[test]
+    fn u5_work_ready_prune_preserves_counter_on_pruned_key() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"plan_name":"p1","step":"step-01","task_id":"t1"}"#;
+
+        // First emit accepted → seed count=1.
+        let first = validate_event("work.ready", Some(payload), &config, &mut state);
+        assert!(matches!(first, PolicyDecision::Accept));
+        assert_eq!(state.work_ready_seen_keys.get("p1::step-01::t1").copied(), Some(1));
+
+        // Second emit (without prune) → RejectWithResume, count=2.
+        let second = validate_event("work.ready", Some(payload), &config, &mut state);
+        assert!(matches!(second, PolicyDecision::RejectWithResume(_)));
+        assert_eq!(state.work_ready_seen_keys.get("p1::step-01::t1").copied(), Some(2));
+
+        // Prune the bucket; dedup entry must survive in the
+        // counter map; the bucket side-table records the prune.
+        state.prune_work_ready_bucket("p1", "step-01");
+        assert_eq!(
+            state.work_ready_seen_keys.get("p1::step-01::t1").copied(),
+            Some(2),
+            "U5: count survives the prune"
+        );
+        assert!(state.pruned_work_ready_buckets.contains("p1::step-01::t1"));
+
+        // Third emit (post-prune) → Accept, count increments to 3.
+        let third = validate_event("work.ready", Some(payload), &config, &mut state);
+        assert!(
+            matches!(third, PolicyDecision::Accept),
+            "U5: post-prune re-emit must accept, got {third:?}"
+        );
+        assert_eq!(
+            state.work_ready_seen_keys.get("p1::step-01::t1").copied(),
+            Some(3),
+            "U5: count is incremented, not reset to 1"
         );
     }
 
