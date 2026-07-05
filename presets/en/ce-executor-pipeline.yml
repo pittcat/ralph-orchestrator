@@ -283,6 +283,7 @@ event_loop:
           - "plan_revised"
           - "review_summary"
           - "flow_audit"
+          - "resolved_baseline_sha"  # written by plan-reviewer §Step 2.5b
       plan.blocked:
         required_fields: ["plan_name", "reason"]
       work.done:
@@ -290,6 +291,7 @@ event_loop:
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
+          - "resolved_baseline_sha"  # pass-through from plan.ready
           - "tests_run"
           - "tests_passed"
           - "changed_lines"
@@ -301,6 +303,7 @@ event_loop:
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
+          - "resolved_baseline_sha"  # pass-through from plan.ready
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -309,6 +312,7 @@ event_loop:
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
+          - "resolved_baseline_sha"  # pass-through
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -317,6 +321,7 @@ event_loop:
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
+          - "resolved_baseline_sha"  # pass-through
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -325,6 +330,7 @@ event_loop:
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
+          - "resolved_baseline_sha"  # pass-through
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -333,6 +339,7 @@ event_loop:
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
+          - "resolved_baseline_sha"  # pass-through
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -341,6 +348,7 @@ event_loop:
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
+          - "resolved_baseline_sha"  # pass-through (last dim; review-synthesizer reads it)
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -349,6 +357,7 @@ event_loop:
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
+          - "resolved_baseline_sha"  # pass-through from plan.ready
           - "fix_plan_file"
           - "findings_count"
           - "p0_count"
@@ -360,6 +369,7 @@ event_loop:
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
+          - "resolved_baseline_sha"  # pass-through from review.complete
           - "fix_plan_file"
           - "review_verdict"
           - "fixes_applied"
@@ -369,6 +379,7 @@ event_loop:
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
+          - "resolved_baseline_sha"  # pass-through from fix.done
           - "fix_plan_file"
           - "review_verdict"
           - "plan_executed"
@@ -479,7 +490,50 @@ hats:
          through to the review/fix chain". Only Step 2 (file errors) or
          Step 3 (quality gates) trigger `plan.blocked`.
 
-            ### Step 3 — Plan Review (when file is OK)
+      ### Step 2.5b — Baseline Reconciliation (HARD RULE — runs AFTER Step 2.5 Audit)
+      Decide `resolved_baseline_sha` so the downstream chain can find the
+      plan's true diff base even when the runtime-stamped
+      `plan_baseline_sha` (the loop-bootstrap anchor) has been rewritten
+      out of history. This step **DOES write to disk** at
+      `.ralph/agent/plan-baseline-{plan_key}.sha` — that file is the
+      source of truth the B-layer runtime re-reads on every hat prompt
+      (`crates/ralph-core/src/event_loop/mod.rs:6336+`). Procedure:
+
+      1. Compute `plan_key`:
+         ```bash
+         PLAN_STEM="$(basename "$plan_path" .md | sed s/.html$//)"
+         PLAN_PARENT_DIR="$(basename "$(dirname "$plan_path")")"
+         PLAN_KEY="${PLAN_PARENT_DIR}-${PLAN_STEM}"
+         ```
+         Example: `docs/plans/2026-07-04-004-fix-...-plan.md` →
+         `plans-2026-07-04-004-fix-...-plan`.
+      2. **Read** the current file (if any):
+         ```bash
+         CURRENT_SHA="$(cat ".ralph/agent/plan-baseline-${PLAN_KEY}.sha" 2>/dev/null || echo "")"
+         ```
+      3. **Validate** the current SHA with `git cat-file -t $CURRENT_SHA 2>/dev/null`.
+         If it does NOT print `commit`, the SHA is **orphaned**
+         (loop-bootstrap anchor was rewritten out of history). Discard it.
+      4. **Recover** — when step 3 discards (or step 2 finds no file):
+         ```bash
+         git log --reverse --format=%H -- "$plan_path" | tail -1
+         ```
+         → earliest commit where the plan file entered git. Use that.
+      5. **Last-resort** — if recover yields empty (plan file not yet
+         tracked in git): `git rev-parse HEAD`; record in payload as
+         `resolved_baseline_sha: "HEAD@loop_start"`.
+      6. **Write back** to disk with the **Write** tool (NOT `ralph tools
+         baseline write` — that command does not exist; you write the
+         file directly). Path:
+         `.ralph/agent/plan-baseline-{plan_key}.sha`. Content:
+         `<resolved_baseline_sha>\n`. This is the only legitimate
+         overwrite site for this file (per `plan_baseline.rs` semantics;
+         the runner's `ensure_plan_baseline` uses `O_EXCL` to refuse
+         overwrites, so you must use `Write`, not the guard).
+      7. **Carry forward** `resolved_baseline_sha` in the `plan.ready`
+         payload (mandatory required_field per line 286 schema).
+
+      ### Step 3 — Plan Review (when file is OK)
       Read the plan file end-to-end and check it against these quality gates.
       You may IN-PLACE edit the plan file (preserving U-IDs, R-IDs, and frontmatter
       structure) to fix any deficiency you find. Set `plan_revised: true` if you
@@ -607,7 +661,10 @@ hats:
       + the project's full-suite.
 
       Cross-check procedure:
-      1. Read `flow_audit` from `plan.ready` payload
+      1. Read `flow_audit` and `resolved_baseline_sha` from `plan.ready` payload
+         (the latter is the reconciled baseline computed by
+         plan-reviewer's §Step 2.5b; it survives orphaned anchor commits
+         being reset out of history).
          (`"first_run"` if absent).
       2. **Skip path** — emit `work.done` immediately without entering
          the Execution Loop, **iff all of** hold:
@@ -846,13 +903,29 @@ hats:
         products — your review stands alone).
 
       ### Diff base (HARD RULE — shared by all 6 dim hats)
-      Read `plan_baseline_sha`, then `loop_start_sha`, from
-      `## ORCHESTRATOR CONTEXT`. Validate each with
-      `git cat-file -t <sha> 2>/dev/null` == `commit`. Priority:
-      `plan_baseline_sha` → `loop_start_sha` → `origin/main` →
-      `origin/master` → `main` → `master` → `HEAD~1`. Never hardcode
-      `main` when `<DIFF_BASE>` is available. Executor-phase review
-      uses `<DIFF_BASE>..<executor_head_sha>` (from trigger payload).
+      Resolution order (first valid SHA wins, validate every choice
+      with `git cat-file -t <sha> 2>/dev/null` == `commit` before using):
+      1. **`resolved_baseline_sha`** from this dim hat's trigger
+         payload (plan-ready chain). plan-reviewer's §Step 2.5b
+         reconciled this against the orphaned-anchor failure mode; if
+         it is a valid commit SHA, it is the **most reliable** choice.
+      2. `plan_baseline_sha` from `## ORCHESTRATOR CONTEXT`. The B-layer
+         runtime re-reads `.ralph/agent/plan-baseline-{key}.sha` for
+         this value on every hat prompt (so it is fresh if plan-reviewer
+         already ran §Step 2.5b in this loop).
+      3. `loop_start_sha` from `## ORCHESTRATOR CONTEXT`.
+      4. `origin/main` → `origin/master` → `main` → `master`.
+      5. `HEAD~1`. Never hardcode `main` when 1–4 produce a valid SHA.
+      Executor-phase review uses
+      `<DIFF_BASE>..<executor_head_sha>` (from trigger payload).
+
+      ### Diff base fallback for dim hats that DO NOT receive plan.ready
+      Five sibling dim hats (correctness / testing / maintainability /
+      standards / adversarial) trigger off `review.<prev>.done`, which
+      does NOT carry `resolved_baseline_sha` in its schema. They still
+      read ORCHESTRATOR CONTEXT (steps 2–4 above) — the B-layer
+      re-read on every hat prompt keeps that fresh. They MUST NOT
+      rely on the previous dim's payload for their `<DIFF_BASE>`.
 
       ### Step 2 — Goal-alignment audit (your dimension only)
       For each Implementation Unit in the plan, verify:
@@ -908,7 +981,7 @@ hats:
       ### Step 5 — Emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
       ```bash
-      ralph emit review.goalalign.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","dimension":"goal-alignment","findings_file":".ralph/review/<plan>/goal-alignment.md","findings_count":<N>}'
+      ralph emit review.goalalign.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","dimension":"goal-alignment","findings_file":".ralph/review/<plan>/goal-alignment.md","findings_count":<N>}'
       ```
       Then stop. The next dim (`dim:correctness`) will be
       triggered by this event.
@@ -962,6 +1035,11 @@ hats:
       ### Step 1 — Read context
       - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
         `findings_file` (prior dim, informational).
+      - **Diff base** is resolved per the chain in dim:goal-alignment
+        `## Diff base` (you trigger off `review.<prev>.done` which does
+        NOT carry `resolved_baseline_sha`, so fall back to ORCHESTRATOR
+        CONTEXT plan_baseline_sha, freshly read from disk by the B-layer
+        runtime — see `crates/ralph-core/src/event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see **Diff base** in dim:goal-alignment).
       - Read the **original** plan at `plan_path`.
       - Read `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
@@ -991,7 +1069,7 @@ hats:
       ### Step 5 — Emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
       ```bash
-      ralph emit review.correctness.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","dimension":"correctness","findings_file":".ralph/review/<plan>/correctness.md","findings_count":<N>}'
+      ralph emit review.correctness.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.goalalign.done>","dimension":"correctness","findings_file":".ralph/review/<plan>/correctness.md","findings_count":<N>}'
       ```
       Then stop. The next dim (`dim:testing`) will be triggered.
 
@@ -1044,6 +1122,11 @@ hats:
       ### Step 1 — Read context
       - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
         `findings_file` (prior dim, informational).
+      - **Diff base** is resolved per the chain in dim:goal-alignment
+        `## Diff base` (you trigger off `review.<prev>.done` which does
+        NOT carry `resolved_baseline_sha`, so fall back to ORCHESTRATOR
+        CONTEXT plan_baseline_sha, freshly read from disk by the B-layer
+        runtime — see `crates/ralph-core/src/event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read the **original** plan (look for `**Test scenarios:**` per U).
       - Read `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
@@ -1071,7 +1154,7 @@ hats:
       ### Step 5 — Emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
       ```bash
-      ralph emit review.testing.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","dimension":"testing","findings_file":".ralph/review/<plan>/testing.md","findings_count":<N>}'
+      ralph emit review.testing.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.correctness.done>","dimension":"testing","findings_file":".ralph/review/<plan>/testing.md","findings_count":<N>}'
       ```
       Then stop. Next dim (`dim:maintainability`) triggered.
 
@@ -1123,6 +1206,11 @@ hats:
       ### Step 1 — Read context
       - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
         `findings_file` (prior dim, informational).
+      - **Diff base** is resolved per the chain in dim:goal-alignment
+        `## Diff base` (you trigger off `review.<prev>.done` which does
+        NOT carry `resolved_baseline_sha`, so fall back to ORCHESTRATOR
+        CONTEXT plan_baseline_sha, freshly read from disk by the B-layer
+        runtime — see `crates/ralph-core/src/event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read the **original** plan and
         `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
@@ -1149,7 +1237,7 @@ hats:
       ### Step 5 — Emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
       ```bash
-      ralph emit review.maintainability.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","dimension":"maintainability","findings_file":".ralph/review/<plan>/maintainability.md","findings_count":<N>}'
+      ralph emit review.maintainability.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.testing.done>","dimension":"maintainability","findings_file":".ralph/review/<plan>/maintainability.md","findings_count":<N>}'
       ```
       Then stop. Next dim (`dim:project-standards`) triggered.
 
@@ -1196,6 +1284,11 @@ hats:
       ### Step 1 — Read context
       - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
         `findings_file` (prior dim, informational).
+      - **Diff base** is resolved per the chain in dim:goal-alignment
+        `## Diff base` (you trigger off `review.<prev>.done` which does
+        NOT carry `resolved_baseline_sha`, so fall back to ORCHESTRATOR
+        CONTEXT plan_baseline_sha, freshly read from disk by the B-layer
+        runtime — see `crates/ralph-core/src/event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read `AGENTS.md` and `CLAUDE.md` (project root).
       - Read the **original** plan and
@@ -1228,7 +1321,7 @@ hats:
       ### Step 5 — Emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
       ```bash
-      ralph emit review.standards.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","dimension":"project-standards","findings_file":".ralph/review/<plan>/standards.md","findings_count":<N>}'
+      ralph emit review.standards.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.maintainability.done>","dimension":"project-standards","findings_file":".ralph/review/<plan>/standards.md","findings_count":<N>}'
       ```
       Then stop. Last dim (`dim:adversarial`) triggered next.
 
@@ -1278,6 +1371,11 @@ hats:
       ### Step 1 — Read context
       - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
         `findings_file` (prior dim, informational).
+      - **Diff base** is resolved per the chain in dim:goal-alignment
+        `## Diff base` (you trigger off `review.<prev>.done` which does
+        NOT carry `resolved_baseline_sha`, so fall back to ORCHESTRATOR
+        CONTEXT plan_baseline_sha, freshly read from disk by the B-layer
+        runtime — see `crates/ralph-core/src/event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read the **original** plan and
         `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
@@ -1307,7 +1405,7 @@ hats:
       ### Step 5 — Emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
       ```bash
-      ralph emit review.adversarial.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","dimension":"adversarial","findings_file":".ralph/review/<plan>/adversarial.md","findings_count":<N>}'
+      ralph emit review.adversarial.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.standards.done>","dimension":"adversarial","findings_file":".ralph/review/<plan>/adversarial.md","findings_count":<N>}'
       ```
       Then stop. Last dim done; `review-synthesizer` will be
       triggered next.
@@ -1658,7 +1756,7 @@ hats:
       Pass through `plan_path` and `executor_head_sha` from the trigger
       (`review.adversarial.done`).
       ```bash
-      ralph emit review.complete --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","fix_plan_file":".ralph/review/<plan>/fix-plan.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
+      ralph emit review.complete --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","fix_plan_file":".ralph/review/<plan>/fix-plan.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
       ```
       Then stop. Fixer will be triggered next.
 
@@ -1713,9 +1811,12 @@ hats:
       ### Step 1 — Read context
       - From `review.complete` payload: `plan_name`, `plan_path`
         (original plan — **read-only context**), `executor_head_sha`,
-        `fix_plan_file`, `findings_count`, `p0_count`, `p1_count`,
-        `findings_summary`, `verdict` (emit as `review_verdict` on
-        `fix.done`).
+        `resolved_baseline_sha` (pass-through from plan.ready — used
+        as priority-1 in the §Diff base chain; if this hat's trigger
+        lacks it, fall back to ORCHESTRATOR CONTEXT plan_baseline_sha
+        freshly read by B-layer runtime), `fix_plan_file`,
+        `findings_count`, `p0_count`, `p1_count`, `findings_summary`,
+        `verdict` (emit as `review_verdict` on `fix.done`).
       - Read **only** the fix-plan file at `fix_plan_file`.
       - **Fast path** (jump to Step 4 — no per-Unit code):
         - File starts with `# fix-plan: no fixes required` (§7b), OR
@@ -1776,7 +1877,7 @@ hats:
       Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`, and
       `verdict` as `review_verdict`.
       ```bash
-      ralph emit fix.done --json '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>}'
+      ralph emit fix.done --json '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from review.complete>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>}'
       ```
       Then stop. Alignment will be triggered next.
 
@@ -1837,8 +1938,9 @@ hats:
 
       ### Step 1 — Read context
       - From `fix.done` payload: `plan_name`, `plan_path` (original plan),
-        `executor_head_sha`, `fix_plan_file`, `review_verdict`,
-        `fixes_applied`, `fixes_skipped`.
+        `executor_head_sha`, `resolved_baseline_sha` (pass-through),
+        `fix_plan_file`, `review_verdict`, `fixes_applied`,
+        `fixes_skipped`.
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read the **original** plan at `plan_path`.
       - Read the **fix plan** at `fix_plan_file` (may be placeholder).
@@ -1877,7 +1979,7 @@ hats:
       Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`,
       `review_verdict`.
       ```bash
-      ralph emit align.done --json '{"plan_name":"<plan>","plan_path":"<original plan path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
+      ralph emit align.done --json '{"plan_name":"<plan>","plan_path":"<original plan path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from fix.done>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
       ```
       Then stop. Reporter will receive `align.done`.
 
@@ -1934,9 +2036,10 @@ hats:
       ### Branch A — Happy path (trigger = `align.done`)
 
       1. Read the `align.done` payload: `plan_name`, `plan_path`,
-         `executor_head_sha`, `fix_plan_file`, `review_verdict`,
-         `plan_executed`, `fix_plan_executed`, `residuals_count`,
-         `residuals_summary`.
+         `executor_head_sha`, `resolved_baseline_sha` (pass-through;
+         authoritative SOT for this run), `fix_plan_file`,
+         `review_verdict`, `plan_executed`, `fix_plan_executed`,
+         `residuals_count`, `residuals_summary`.
       2. From events file (above): `plan.ready`, `work.done`,
          `review.complete`, `fix.done` payloads.
       3. Read all 6 dimension products under `.ralph/review/{plan_name}/`.
