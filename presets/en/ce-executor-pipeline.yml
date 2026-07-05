@@ -491,6 +491,20 @@ hats:
          Step 3 (quality gates) trigger `plan.blocked`.
 
       ### Step 2.5b — Baseline Reconciliation (HARD RULE — runs AFTER Step 2.5 Audit)
+      **File mutation contract (read once, you must obey for the rest of
+      this section):** the file `.ralph/agent/plan-baseline-{plan_key}.sha`
+      is **truncate-then-write only**. When you call the **Write** tool
+      on it, the entire file becomes `<resolved_baseline_sha>\n` — just
+      that one line. You do NOT append, you do NOT prepend, you do NOT
+      rewrite a subset. Half-written or duplicated content corrupts
+      reconciliation for every downstream hat in the same run (the
+      reader at `event_loop/mod.rs:6336` takes the **first 40 hex
+      characters** of the file, so any extra lines after the SHA push
+      the second-line value into a miscomputed `plan_key`-suffix hash).
+      Anti-patterns to avoid: `\< file` (append), `echo $sha
+      >> $file` (append), `printf "%s" "$sha" | tee -a $file`
+      (append), copying another file's content first.
+
       Decide `resolved_baseline_sha` so the downstream chain can find the
       plan's true diff base even when the runtime-stamped
       `plan_baseline_sha` (the loop-bootstrap anchor) has been rewritten
@@ -545,14 +559,17 @@ hats:
       6. **Last-resort** — if recover yields empty (plan file not yet
          tracked in git): `git rev-parse HEAD`; record in payload as
          `resolved_baseline_sha: "HEAD@loop_start"`.
-      7. **Write** the resolved SHA back to disk via the **Write** tool
-         (NOT `ralph tools baseline write` — that command does not
-         exist; you write the file directly). Path:
-         `.ralph/agent/plan-baseline-{plan_key}.sha`. Content:
-         `<resolved_baseline_sha>\n`. This is the only legitimate
-         overwrite site for this file (the runner's
+      7. **Write** the resolved SHA back to disk via the **Write**
+         tool. Path: `.ralph/agent/plan-baseline-{plan_key}.sha`.
+         Content: literally `<resolved_baseline_sha>\n` — exactly the
+         SHA plus one newline, nothing else. **Truncate-then-write**
+         (see the file mutation contract at the top of this section):
+         the Write tool replaces the whole file's contents atomically.
+         Do not pre-read or post-concat; do not use `>>` or `tee -a`;
+         do not use shell append/redirection. This is the only
+         legitimate overwrite site for this file (the runner's
          `ensure_plan_baseline` refuses overwrites — see
-         `.ralph/agent/plan-baseline.rs` semantics).
+         `plan_baseline.rs` semantics).
       8. **Pre-write re-validation (HARD RULE)** — before you call the
          Write tool, run `git cat-file -t <resolved_baseline_sha>`
          yourself. If it does NOT print `commit`, abort the write:
