@@ -578,6 +578,26 @@ hats:
          that the read-side format check would otherwise silently accept.
       9. **Carry forward** `resolved_baseline_sha` in the `plan.ready`
          payload (mandatory required_field).
+      10. **Audit trace** (HARD RULE — fail-loud). After the
+          `.ralph/agent/plan-baseline-{plan_key}.sha` write succeeds,
+          append **one** line to the audit ledger
+          `.ralph/agent/decisions.md`. Unlike the baseline file
+          (truncate-then-write, see top of this section), this ledger
+          is **append-only**: preserve every previous line, add exactly
+          one. Use bash `>>` (not the Write tool, not `tee -a`):
+          ```bash
+          ISO_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf '%s step 2.5b: resolved_baseline_sha=%s source=%s plan_key=%s\n' \
+            "$ISO_NOW" "<resolved_baseline_sha>" "<source-of-truth>" "${plan_key}" \
+            >> .ralph/agent/decisions.md
+          ```
+          `source` is one of `git-log-reverse` (step 5), `file-stored`
+          (step 4 still valid), or `HEAD@loop_start` (step 6 last-resort).
+          If appending fails (file not writable, parent missing, etc.),
+          emit `plan.blocked{reason: "baseline_reconciliation_io_failure"}`
+          — refuse to emit `plan.ready` without leaving a trace.
+          Do not include the SHA in any slot other than the literal
+          `<sha>` slot. One line, single trailing newline.
 
       ### Step 3 — Plan Review (when file is OK)
       Read the plan file end-to-end and check it against these quality gates.
@@ -728,8 +748,11 @@ hats:
            assume Rust defaults on a foreign repo), run it, exit 0.
          - Skip-path payload: `executor_action: "flow_audit_verified_skip"`,
            `commit_count` / `tests_run` / `tests_passed` /
-           `changed_lines` populated from actual git state, and
-           `executor_head_sha` = `git rev-parse HEAD`.
+           `changed_lines` populated from actual git state,
+           `executor_head_sha` = `git rev-parse HEAD`, AND
+           `resolved_baseline_sha` carried in from `plan.ready` §Step 2.5b
+           (mandatory required_field in the `work.done` schema — see
+           line 295; missing it triggers schema reject).
       3. **Full path** — log a one-line note to
          `.ralph/agent/decisions.md` (`reason: entering execution loop
          — <flow_audit value> / uid-check=<passed|failed> /
@@ -864,7 +887,7 @@ hats:
 
       Copy-pasteable example (replace placeholders):
       ```bash
-      ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"path/to/plan.md","executor_head_sha":"abc123...","tests_run":12,"tests_passed":12,"changed_lines":85,"commit_count":3}'
+      ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"path/to/plan.md","executor_head_sha":"abc123...","resolved_baseline_sha":"<sha from plan.ready §Step 2.5b>","tests_run":12,"tests_passed":12,"changed_lines":85,"commit_count":3}'
       ```
 
       MUST NOT write events directly; use `ralph emit`.
@@ -1080,12 +1103,19 @@ hats:
 
       ### Step 1 — Read context
       - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
-        `findings_file` (prior dim, informational).
-      - **Diff base** is resolved per the chain in dim:goal-alignment
-        `## Diff base` (you trigger off `review.<prev>.done` which does
-        NOT carry `resolved_baseline_sha`, so fall back to ORCHESTRATOR
-        CONTEXT plan_baseline_sha, freshly read from disk by the B-layer
-        runtime — see `crates/ralph-core/src/event_loop/mod.rs:6336`).
+        `findings_file` (prior dim, informational), AND
+        `resolved_baseline_sha` (pass-through from `plan.ready` via the
+        prior `review.<dim>.done` payload — every dim in the chain
+        schema carries it; you inherit it).
+      - **Diff base priority** (matches the chain in dim:goal-alignment
+        `## Diff base`, but TRUSTED before ORCHESTRATOR here because the
+        field is in your trigger payload, not just on disk):
+        1. `resolved_baseline_sha` from your trigger payload (the prior
+           dim already reconciled it through plan-reviewer §Step 2.5b).
+        2. Otherwise fall through to the dim:goal-alignment chain
+           (ORCHESTRATOR CONTEXT plan_baseline_sha freshly read from
+           `.ralph/agent/plan-baseline-{key}.sha` by the B-layer runtime
+           every hat prompt — see `event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see **Diff base** in dim:goal-alignment).
       - Read the **original** plan at `plan_path`.
       - Read `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
@@ -1167,12 +1197,19 @@ hats:
 
       ### Step 1 — Read context
       - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
-        `findings_file` (prior dim, informational).
-      - **Diff base** is resolved per the chain in dim:goal-alignment
-        `## Diff base` (you trigger off `review.<prev>.done` which does
-        NOT carry `resolved_baseline_sha`, so fall back to ORCHESTRATOR
-        CONTEXT plan_baseline_sha, freshly read from disk by the B-layer
-        runtime — see `crates/ralph-core/src/event_loop/mod.rs:6336`).
+        `findings_file` (prior dim, informational), AND
+        `resolved_baseline_sha` (pass-through from `plan.ready` via the
+        prior `review.<dim>.done` payload — every dim in the chain
+        schema carries it; you inherit it).
+      - **Diff base priority** (matches the chain in dim:goal-alignment
+        `## Diff base`, but TRUSTED before ORCHESTRATOR here because the
+        field is in your trigger payload, not just on disk):
+        1. `resolved_baseline_sha` from your trigger payload (the prior
+           dim already reconciled it through plan-reviewer §Step 2.5b).
+        2. Otherwise fall through to the dim:goal-alignment chain
+           (ORCHESTRATOR CONTEXT plan_baseline_sha freshly read from
+           `.ralph/agent/plan-baseline-{key}.sha` by the B-layer runtime
+           every hat prompt — see `event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read the **original** plan (look for `**Test scenarios:**` per U).
       - Read `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
@@ -1251,12 +1288,19 @@ hats:
 
       ### Step 1 — Read context
       - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
-        `findings_file` (prior dim, informational).
-      - **Diff base** is resolved per the chain in dim:goal-alignment
-        `## Diff base` (you trigger off `review.<prev>.done` which does
-        NOT carry `resolved_baseline_sha`, so fall back to ORCHESTRATOR
-        CONTEXT plan_baseline_sha, freshly read from disk by the B-layer
-        runtime — see `crates/ralph-core/src/event_loop/mod.rs:6336`).
+        `findings_file` (prior dim, informational), AND
+        `resolved_baseline_sha` (pass-through from `plan.ready` via the
+        prior `review.<dim>.done` payload — every dim in the chain
+        schema carries it; you inherit it).
+      - **Diff base priority** (matches the chain in dim:goal-alignment
+        `## Diff base`, but TRUSTED before ORCHESTRATOR here because the
+        field is in your trigger payload, not just on disk):
+        1. `resolved_baseline_sha` from your trigger payload (the prior
+           dim already reconciled it through plan-reviewer §Step 2.5b).
+        2. Otherwise fall through to the dim:goal-alignment chain
+           (ORCHESTRATOR CONTEXT plan_baseline_sha freshly read from
+           `.ralph/agent/plan-baseline-{key}.sha` by the B-layer runtime
+           every hat prompt — see `event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read the **original** plan and
         `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
@@ -1329,12 +1373,19 @@ hats:
 
       ### Step 1 — Read context
       - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
-        `findings_file` (prior dim, informational).
-      - **Diff base** is resolved per the chain in dim:goal-alignment
-        `## Diff base` (you trigger off `review.<prev>.done` which does
-        NOT carry `resolved_baseline_sha`, so fall back to ORCHESTRATOR
-        CONTEXT plan_baseline_sha, freshly read from disk by the B-layer
-        runtime — see `crates/ralph-core/src/event_loop/mod.rs:6336`).
+        `findings_file` (prior dim, informational), AND
+        `resolved_baseline_sha` (pass-through from `plan.ready` via the
+        prior `review.<dim>.done` payload — every dim in the chain
+        schema carries it; you inherit it).
+      - **Diff base priority** (matches the chain in dim:goal-alignment
+        `## Diff base`, but TRUSTED before ORCHESTRATOR here because the
+        field is in your trigger payload, not just on disk):
+        1. `resolved_baseline_sha` from your trigger payload (the prior
+           dim already reconciled it through plan-reviewer §Step 2.5b).
+        2. Otherwise fall through to the dim:goal-alignment chain
+           (ORCHESTRATOR CONTEXT plan_baseline_sha freshly read from
+           `.ralph/agent/plan-baseline-{key}.sha` by the B-layer runtime
+           every hat prompt — see `event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read `AGENTS.md` and `CLAUDE.md` (project root).
       - Read the **original** plan and
@@ -1416,12 +1467,19 @@ hats:
 
       ### Step 1 — Read context
       - From trigger: `plan_name`, `plan_path`, `executor_head_sha`,
-        `findings_file` (prior dim, informational).
-      - **Diff base** is resolved per the chain in dim:goal-alignment
-        `## Diff base` (you trigger off `review.<prev>.done` which does
-        NOT carry `resolved_baseline_sha`, so fall back to ORCHESTRATOR
-        CONTEXT plan_baseline_sha, freshly read from disk by the B-layer
-        runtime — see `crates/ralph-core/src/event_loop/mod.rs:6336`).
+        `findings_file` (prior dim, informational), AND
+        `resolved_baseline_sha` (pass-through from `plan.ready` via the
+        prior `review.<dim>.done` payload — every dim in the chain
+        schema carries it; you inherit it).
+      - **Diff base priority** (matches the chain in dim:goal-alignment
+        `## Diff base`, but TRUSTED before ORCHESTRATOR here because the
+        field is in your trigger payload, not just on disk):
+        1. `resolved_baseline_sha` from your trigger payload (the prior
+           dim already reconciled it through plan-reviewer §Step 2.5b).
+        2. Otherwise fall through to the dim:goal-alignment chain
+           (ORCHESTRATOR CONTEXT plan_baseline_sha freshly read from
+           `.ralph/agent/plan-baseline-{key}.sha` by the B-layer runtime
+           every hat prompt — see `event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read the **original** plan and
         `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
