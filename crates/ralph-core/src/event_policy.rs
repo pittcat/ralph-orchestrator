@@ -125,20 +125,25 @@ pub enum DuplicateWorkDoneHint {
 }
 
 impl DuplicateWorkDoneHint {
-    /// U4 of plan 2026-07-05-005 (R3): stable snake_case string
-    /// for the `RecoveryDiagnosisEnvelope::hint` field. The
-    /// `reason_code` itself stays the legacy literal
-    /// `"duplicate_work_done"` (per KTD-3 — do not break
-    /// dashboards that pin on that literal); the hint carries
-    /// the variant distinction at the envelope top level so
-    /// `ralph diagnose` can render the difference without
-    /// parsing `reason_code`.
+    /// U3 of plan 2026-07-05-005 (fix-plan §R3 / §R4): stable
+    /// snake_case string for the `RecoveryDiagnosisEnvelope::hint`
+    /// field. The `reason_code` itself stays the legacy literal
+    /// `"duplicate_work_done"` (per KTD-3 — do not break dashboards
+    /// that pin on that literal); the hint carries the variant
+    /// distinction at the envelope top level so `ralph diagnose` can
+    /// render the difference without parsing `reason_code`.
     pub fn as_hint_str(&self) -> &'static str {
         match self {
-            DuplicateWorkDoneHint::DuplicateStallBypass => "DuplicateStallBypass",
-            DuplicateWorkDoneHint::DuplicateSameStep => "DuplicateSameStep",
-            DuplicateWorkDoneHint::ReviewDimensionDuplicate => "ReviewDimensionDuplicate",
-            DuplicateWorkDoneHint::ReviewDimensionsComplete => "ReviewDimensionsComplete",
+            // U3 fix-plan §R3: hint strings are the legacy
+            // discriminator literals (`duplicate_work_done_same_step`
+            // / `duplicate_work_done_stall_bypass`) so dashboards and
+            // CLI precheck JSON that previously matched these
+            // strings continue to work after the reason_code
+            // collapse.
+            DuplicateWorkDoneHint::DuplicateStallBypass => "duplicate_work_done_stall_bypass",
+            DuplicateWorkDoneHint::DuplicateSameStep => "duplicate_work_done_same_step",
+            DuplicateWorkDoneHint::ReviewDimensionDuplicate => "duplicate_review_dimension_ready",
+            DuplicateWorkDoneHint::ReviewDimensionsComplete => "duplicate_review_dimensions_complete",
         }
     }
 }
@@ -186,23 +191,17 @@ impl ViolationType {
                 DuplicateWorkDoneHint::ReviewDimensionsComplete => {
                     "duplicate_review_dimensions_complete"
                 }
-                // U4 of plan 2026-07-05-005: surface
+                // U3 of plan 2026-07-05-005 (fix-plan §R3): restore
+                // the stable external contract per KTD-3 — single
+                // `duplicate_work_done` reason_code for the
                 // `DuplicateSameStep` and `DuplicateStallBypass`
-                // under their own codes so post-mortem tooling can
-                // distinguish "agent re-emitted work.done for the
-                // same step" (benign) from "agent is bypassing a
-                // stalled review cycle" (recovery needs different
-                // handling). The legacy `"duplicate_work_done"`
-                // literal is preserved on the recovery envelope
-                // (`RecoveryDiagnosisEnvelope::hint`) for the
-                // transition window; pin tests can match the new
-                // codes directly.
-                DuplicateWorkDoneHint::DuplicateStallBypass => {
-                    "duplicate_work_done_stall_bypass"
-                }
-                DuplicateWorkDoneHint::DuplicateSameStep => {
-                    "duplicate_work_done_same_step"
-                }
+                // variants. The `hint` field on
+                // `RecoveryDiagnosisEnvelope` carries the
+                // discriminator (`duplicate_work_done_same_step` /
+                // `duplicate_work_done_stall_bypass`) so post-mortem
+                // tooling can still distinguish the two paths.
+                DuplicateWorkDoneHint::DuplicateStallBypass
+                | DuplicateWorkDoneHint::DuplicateSameStep => "duplicate_work_done",
             },
         }
     }
@@ -3835,12 +3834,12 @@ mod tests {
 
     #[test]
     fn test_u4_duplicate_work_done_hint_mapped_to_reason_code() {
-        // U4 of plan 2026-07-05-005: the reason_code now distinguishes
-        // `DuplicateSameStep` from `DuplicateStallBypass` so
-        // post-mortem tooling can branch on the literal without
-        // needing to parse the message. The legacy literal
-        // `"duplicate_work_done"` is preserved on the recovery
-        // envelope's `hint` field for the transition window.
+        // U3 of plan 2026-07-05-005 (fix-plan §R3): restore the
+        // single `duplicate_work_done` reason_code for both
+        // `DuplicateSameStep` and `DuplicateStallBypass` per KTD-3.
+        // The `hint` field on `RecoveryDiagnosisEnvelope` carries
+        // the disambiguation so post-mortem tooling can still
+        // distinguish the two paths.
         let same_step = PolicyFinding {
             topic: "work.done".to_string(),
             violation_type: ViolationType::DuplicateWorkDone {
@@ -3851,8 +3850,13 @@ mod tests {
         };
         assert_eq!(
             same_step.violation_type.reason_code(),
+            "duplicate_work_done",
+            "U3: DuplicateSameStep must surface as duplicate_work_done (hint carries the discriminator)"
+        );
+        assert_eq!(
+            DuplicateWorkDoneHint::DuplicateSameStep.as_hint_str(),
             "duplicate_work_done_same_step",
-            "U4: DuplicateSameStep must surface as its own code"
+            "U3: DuplicateSameStep hint string stays stable for recovery envelope"
         );
         let stall = PolicyFinding {
             topic: "work.done".to_string(),
@@ -3864,17 +3868,13 @@ mod tests {
         };
         assert_eq!(
             stall.violation_type.reason_code(),
-            "duplicate_work_done_stall_bypass",
-            "U4: DuplicateStallBypass must surface as its own code"
-        );
-        // Hint helpers stay stable.
-        assert_eq!(
-            DuplicateWorkDoneHint::DuplicateSameStep.as_hint_str(),
-            "DuplicateSameStep"
+            "duplicate_work_done",
+            "U3: DuplicateStallBypass must surface as duplicate_work_done (hint carries the discriminator)"
         );
         assert_eq!(
             DuplicateWorkDoneHint::DuplicateStallBypass.as_hint_str(),
-            "DuplicateStallBypass"
+            "duplicate_work_done_stall_bypass",
+            "U3: DuplicateStallBypass hint string stays stable for recovery envelope"
         );
     }
 
@@ -6490,26 +6490,29 @@ hats:
         );
     }
 
-    /// `DuplicateStallBypass` / `DuplicateSameStep` continue to
-    /// emit the legacy `duplicate_work_done` reason code so
-    /// dashboards / CLI precheck JSON / existing static
-    /// assertions stay backwards-compatible.
+    /// `DuplicateStallBypass` / `DuplicateSameStep` share the legacy
+    /// `duplicate_work_done` reason code (per plan 2026-07-05-005
+    /// fix-plan U3 / KTD-3); the disambiguation hint string travels
+    /// on `RecoveryDiagnosisEnvelope.hint`. The two review-dimension
+    /// hints keep their distinct codes (regression guard).
     #[test]
     fn test_other_topics_dedup_hint_carries_in_envelope() {
-        // U4 of plan 2026-07-05-005 (R3, R9): each DuplicateWorkDone
-        // hint carries its own stable reason_code AND a
-        // disambiguation hint string. The legacy literal
-        // `"duplicate_work_done"` is NOT preserved on reason_code
-        // — instead the hint string on the recovery envelope
-        // carries the disambiguation. This test pins both
-        // surfaces.
+        // U3 of plan 2026-07-05-005 (R3, R9): restore the stable
+        // external contract per KTD-3 — single `duplicate_work_done`
+        // reason_code for the `DuplicateSameStep` and
+        // `DuplicateStallBypass` variants. The `hint` field on
+        // `RecoveryDiagnosisEnvelope` carries the discriminator
+        // (`duplicate_work_done_same_step` /
+        // `duplicate_work_done_stall_bypass`) so post-mortem
+        // tooling can still distinguish the two paths. This test
+        // pins both surfaces.
         let cases = [
-            (DuplicateWorkDoneHint::DuplicateStallBypass, "duplicate_work_done_stall_bypass"),
-            (DuplicateWorkDoneHint::DuplicateSameStep, "duplicate_work_done_same_step"),
-            (DuplicateWorkDoneHint::ReviewDimensionDuplicate, "duplicate_review_dimension_ready"),
-            (DuplicateWorkDoneHint::ReviewDimensionsComplete, "duplicate_review_dimensions_complete"),
+            (DuplicateWorkDoneHint::DuplicateStallBypass, "duplicate_work_done", "duplicate_work_done_stall_bypass"),
+            (DuplicateWorkDoneHint::DuplicateSameStep, "duplicate_work_done", "duplicate_work_done_same_step"),
+            (DuplicateWorkDoneHint::ReviewDimensionDuplicate, "duplicate_review_dimension_ready", "duplicate_review_dimension_ready"),
+            (DuplicateWorkDoneHint::ReviewDimensionsComplete, "duplicate_review_dimensions_complete", "duplicate_review_dimensions_complete"),
         ];
-        for (hint, expected_code) in cases {
+        for (hint, expected_code, expected_hint) in cases {
             let finding = PolicyFinding {
                 topic: "work.done".to_string(),
                 violation_type: ViolationType::DuplicateWorkDone {
@@ -6521,7 +6524,12 @@ hats:
             assert_eq!(
                 finding.violation_type.reason_code(),
                 expected_code,
-                "{hint:?} must surface its own stable code"
+                "{hint:?} must surface its stable reason_code"
+            );
+            assert_eq!(
+                hint.as_hint_str(),
+                expected_hint,
+                "{hint:?} must surface its stable hint string"
             );
         }
     }
