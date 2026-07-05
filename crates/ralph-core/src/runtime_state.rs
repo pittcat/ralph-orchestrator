@@ -21,6 +21,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::state_projector::StateProjector;
+use crate::state_projector::review::{ReviewDimensionsView, render_review_summary_block};
 use crate::task::{Task, TaskStatus};
 use crate::task_store::is_fix_unit_key;
 
@@ -60,6 +61,10 @@ pub struct RuntimeStateSnapshot {
     /// `### U{N}.` headings in `fix-plan.md`.
     #[serde(default)]
     pub fix_unit_state: Option<FixUnitState>,
+    /// U3 of plan 2026-07-05-005: latest `review.dimensions.complete`
+    /// view for the `## REVIEW SUMMARY` prompt block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_dimensions: Option<ReviewDimensionsView>,
 }
 
 /// Per-fix-round view derived from `tasks.jsonl`.  All fields are
@@ -155,6 +160,7 @@ impl RuntimeStateSnapshot {
             plan_baseline_sha: None,
             projection_disabled: !ctx.config.enabled,
             fix_unit_state: derive_fix_unit_state(&tasks, &progress_done),
+            review_dimensions: ctx.review_dimensions_snapshot(),
         }
     }
 
@@ -174,6 +180,7 @@ impl RuntimeStateSnapshot {
             plan_baseline_sha: None,
             projection_disabled: true,
             fix_unit_state: None,
+            review_dimensions: None,
         }
     }
 
@@ -276,6 +283,9 @@ impl RuntimeStateSnapshot {
             }
         }
         let _ = writeln!(buf);
+        if let Some(view) = &self.review_dimensions {
+            buf.push_str(&render_review_summary_block(view));
+        }
         buf
     }
 }
@@ -337,7 +347,7 @@ pub fn snapshot_from_disk(workspace: &Path) -> RuntimeStateSnapshot {
     let progress_done = progress.completed_steps.clone();
     RuntimeStateSnapshot {
         plan_name: derive_plan_name(&tasks),
-        current_step: progress.current_step,
+        current_step: progress.current_step().map(str::to_string),
         completed_steps: progress.completed_steps,
         open_tasks: open_task_summaries(&tasks),
         wave: None,
@@ -345,6 +355,7 @@ pub fn snapshot_from_disk(workspace: &Path) -> RuntimeStateSnapshot {
         plan_baseline_sha: None,
         projection_disabled: true,
         fix_unit_state: derive_fix_unit_state(&tasks, &progress_done),
+        review_dimensions: None,
     }
 }
 
@@ -588,6 +599,7 @@ mod tests {
             plan_baseline_sha: None,
             projection_disabled: false,
             fix_unit_state: None,
+            review_dimensions: None,
         };
         let block = snap.to_prompt_block();
         assert!(block.starts_with(ORCHESTRATOR_CONTEXT_HEADING));

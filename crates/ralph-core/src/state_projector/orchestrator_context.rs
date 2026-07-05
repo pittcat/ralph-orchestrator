@@ -17,6 +17,7 @@ use std::fmt::Write as _;
 
 use crate::config::StateProjectionConfig;
 use crate::state::LedgerSnapshot;
+use crate::state_projector::review::{ReviewDimensionsView, render_review_summary_block};
 use crate::step_handoff::ProgressSnapshot;
 use crate::task::Task;
 
@@ -32,6 +33,7 @@ pub(crate) fn build_block(
     config: &StateProjectionConfig,
     loop_start_sha: Option<&str>,
     plan_baseline_sha: Option<&str>,
+    review: Option<&ReviewDimensionsView>,
 ) -> String {
     let tasks = snapshot.tasks();
     let progress = snapshot.progress();
@@ -56,7 +58,7 @@ pub(crate) fn build_block(
     } else {
         let _ = writeln!(buf, "- plan_name: (none)");
     }
-    match &progress.current_step {
+    match progress.current_step() {
         Some(step) => {
             let _ = writeln!(buf, "- current_step: {step}");
         }
@@ -85,6 +87,9 @@ pub(crate) fn build_block(
         let _ = writeln!(buf, "- loop_start_sha: (none)");
     }
     let _ = writeln!(buf);
+    if let Some(view) = review {
+        buf.push_str(&render_review_summary_block(view));
+    }
     buf
 }
 
@@ -149,7 +154,7 @@ pub(crate) fn heading() -> &'static str {
 #[allow(dead_code)]
 pub(crate) fn render_progress_markdown(snap: &ProgressSnapshot) -> String {
     let mut buf = String::from("# Progress\n\n");
-    match &snap.current_step {
+    match snap.current_step() {
         Some(step) => {
             buf.push_str("## Current Step\n");
             buf.push_str(step);
@@ -189,10 +194,10 @@ mod tests {
         task.key = Some("ce-executor:demo-plan:step-01:u1-impl".to_string());
         task.id = "t-1".to_string();
         snap.tasks.push(task);
-        snap.progress.current_step = Some("step-01".to_string());
         snap.progress.completed_steps.push("step-00".to_string());
+        snap.progress.completed_steps.push("step-01".to_string());
 
-        let block = build_block(&snap, &StateProjectionConfig::default(), None, None);
+        let block = build_block(&snap, &StateProjectionConfig::default(), None, None, None);
         assert!(block.starts_with("## ORCHESTRATOR CONTEXT"));
         assert!(block.contains("plan_name: demo-plan"));
         assert!(block.contains("current_step: step-01"));
@@ -205,7 +210,7 @@ mod tests {
     #[test]
     fn build_block_handles_empty_snapshot() {
         let snap = LedgerSnapshot::cold_start();
-        let block = build_block(&snap, &StateProjectionConfig::default(), None, None);
+        let block = build_block(&snap, &StateProjectionConfig::default(), None, None, None);
         assert!(block.contains("plan_name: (none)"));
         assert!(block.contains("current_step: (none)"));
         assert!(block.contains("completed_steps: (none)"));
@@ -219,7 +224,7 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let block = build_block(&snap, &cfg, None, None);
+        let block = build_block(&snap, &cfg, None, None, None);
         assert!(block.contains("State projection is **disabled**"));
     }
 
@@ -231,16 +236,40 @@ mod tests {
             &StateProjectionConfig::default(),
             Some("loopsha1234567890123456789012345678901234567"),
             Some("plansha12345678901234567890123456789012345678"),
+            None,
         );
         assert!(block.contains("plan_baseline_sha: plansha12345678901234567890123456789012345678"));
         assert!(block.contains("loop_start_sha: loopsha1234567890123456789012345678901234567"));
     }
 
     #[test]
+    fn test_orchestrator_context_includes_review_summary() {
+        let snap = LedgerSnapshot::cold_start();
+        let review = ReviewDimensionsView {
+            task_key: Some("ce-executor:demo:step-01:u1-impl".to_string()),
+            fix_round: Some("0".to_string()),
+            dimensions: Some(serde_json::json!({"correctness": "pass"})),
+            summary: Some("all green".to_string()),
+        };
+        let block = build_block(
+            &snap,
+            &StateProjectionConfig::default(),
+            None,
+            None,
+            Some(&review),
+        );
+        assert!(block.contains("## REVIEW SUMMARY"));
+        assert!(block.contains("task_key: ce-executor:demo:step-01:u1-impl"));
+        assert!(block.contains("fix_round: 0"));
+        assert!(block.contains("summary: all green"));
+        assert!(block.contains("correctness"));
+    }
+
+    #[test]
     fn render_progress_markdown_round_trips_basic() {
         let mut snap = ProgressSnapshot::default();
-        snap.current_step = Some("step-02".to_string());
         snap.completed_steps.push("step-01".to_string());
+        snap.completed_steps.push("step-02".to_string());
         let md = render_progress_markdown(&snap);
         assert!(md.contains("## Current Step"));
         assert!(md.contains("step-02"));

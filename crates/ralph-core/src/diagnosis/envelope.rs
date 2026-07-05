@@ -563,6 +563,15 @@ impl RecoveryDiagnosisEnvelopeBuilder {
         self
     }
 
+    /// U4 of plan 2026-07-05-005 (R3, R9): set the duplicate-work-done
+    /// disambiguation hint (`DuplicateSameStep` /
+    /// `DuplicateStallBypass`) at the envelope top level.
+    #[must_use]
+    pub fn hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+
     /// Set the initial outcome. Defaults to
     /// [`DiagnosisOutcome::Pending`].
     #[must_use]

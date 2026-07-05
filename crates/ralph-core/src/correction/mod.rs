@@ -366,7 +366,7 @@ pub fn emit_correction_context(
     // so ops can detect callers that build Rejection without the
     // typed kind field (a backwards-compat window will close once
     // all rejection sites populate `kind`).
-    let record = match rejection.kind {
+    let mut record = match rejection.kind {
         Some(kind) => crate::state::RejectionRecord::from_typed_rejection(
             ctx.source_hat.clone().unwrap_or_else(|| "unknown".into()),
             ctx.topic.clone(),
@@ -392,6 +392,10 @@ pub fn emit_correction_context(
             )
         }
     };
+    record = record.with_duplicate_work_done_fields(
+        rejection.duplicate_work_done_hint.as_ref(),
+        rejection.seen_count,
+    );
 
     // FIX-9: ledger-first, recovery-second.  When a unified ledger
     // is available, commit the rejection there *before* writing

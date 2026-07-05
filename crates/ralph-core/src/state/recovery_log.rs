@@ -77,6 +77,15 @@ pub struct RejectionRecord {
     /// 老 envelope(无 `kind` 字段)反序列化时为 `None`,保持向前兼容。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// U4 of plan 2026-07-05-005 (R3, R9): duplicate-work-done
+    /// disambiguation (`duplicate_work_done_same_step` /
+    /// `duplicate_work_done_stall_bypass`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// U5 of plan 2026-07-05-005 (R8): `work.ready` dedup hit counter
+    /// for dup-storm detection in `ralph diagnose`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_count: Option<u32>,
 }
 
 impl RejectionRecord {
@@ -95,6 +104,8 @@ impl RejectionRecord {
             retry_count,
             terminal_reason: None,
             kind: None,
+            hint: None,
+            seen_count: None,
         }
     }
 
@@ -115,6 +126,8 @@ impl RejectionRecord {
             retry_count,
             terminal_reason: None,
             kind: Some(code),
+            hint: None,
+            seen_count: None,
         }
     }
 
@@ -171,6 +184,18 @@ impl RejectionRecord {
     /// the mutated value.
     pub fn with_terminal_reason(mut self, reason: impl Into<String>) -> Self {
         self.terminal_reason = Some(reason.into());
+        self
+    }
+
+    /// U4/U5 of plan 2026-07-05-005: copy duplicate-work-done
+    /// disambiguation fields from a policy rejection.
+    pub fn with_duplicate_work_done_fields(
+        mut self,
+        hint: Option<&crate::event_policy::DuplicateWorkDoneHint>,
+        seen_count: Option<u32>,
+    ) -> Self {
+        self.hint = hint.map(|h| h.as_hint_str().to_string());
+        self.seen_count = seen_count;
         self
     }
 

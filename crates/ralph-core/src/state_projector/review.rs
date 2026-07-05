@@ -13,7 +13,7 @@
 
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::state_projector::ProjectionContext;
@@ -25,7 +25,7 @@ use crate::state_projector::json_pointer;
 /// projector is single-threaded today, but future parallelism could
 /// share the same context; the lock keeps the door open for that
 /// without changing the public signature.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewDimensionsView {
     /// Stable task key from the event payload.
     pub task_key: Option<String>,
@@ -90,6 +90,51 @@ fn store_view(ctx: &mut ProjectionContext, view: ReviewDimensionsView) {
     if let Ok(mut guard) = ctx.review_dimensions_view.lock() {
         *guard = Some(view);
     }
+}
+
+const REVIEW_SUMMARY_HEADING: &str = "## REVIEW SUMMARY";
+
+/// Render the `## REVIEW SUMMARY` block appended after
+/// `## ORCHESTRATOR CONTEXT` when a `review.dimensions.complete`
+/// view is present.
+pub(crate) fn render_review_summary_block(view: &ReviewDimensionsView) -> String {
+    use std::fmt::Write as _;
+    let mut buf = String::new();
+    let _ = writeln!(buf, "{REVIEW_SUMMARY_HEADING}");
+    match &view.task_key {
+        Some(k) => {
+            let _ = writeln!(buf, "- task_key: {k}");
+        }
+        None => {
+            let _ = writeln!(buf, "- task_key: (none)");
+        }
+    }
+    match &view.fix_round {
+        Some(r) => {
+            let _ = writeln!(buf, "- fix_round: {r}");
+        }
+        None => {
+            let _ = writeln!(buf, "- fix_round: (none)");
+        }
+    }
+    match &view.summary {
+        Some(s) => {
+            let _ = writeln!(buf, "- summary: {s}");
+        }
+        None => {
+            let _ = writeln!(buf, "- summary: (none)");
+        }
+    }
+    match &view.dimensions {
+        Some(d) => {
+            let _ = writeln!(buf, "- dimensions: {d}");
+        }
+        None => {
+            let _ = writeln!(buf, "- dimensions: (none)");
+        }
+    }
+    let _ = writeln!(buf);
+    buf
 }
 
 #[cfg(test)]

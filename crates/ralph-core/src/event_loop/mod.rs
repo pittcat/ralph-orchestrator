@@ -122,7 +122,9 @@ pub use rejection::{
 // `publish_correction_via_context(...)` invocations in
 // `process_parse_result`) so R3 (public API stable) holds without an
 // extra forwarder layer.
-pub use policy::{build_unified_validation_pipeline, publish_correction_via_context};
+pub use policy::{
+    build_unified_validation_pipeline, policy_finding_for_topic, publish_correction_via_context,
+};
 // U3: re-export the type declarations that were moved from mod.rs to
 // `types.rs`. The `pub use` preserves the existing public API path
 // (`event_loop::TerminationReason`, etc.) so downstream consumers see
@@ -2715,6 +2717,7 @@ impl EventLoop {
             // path predates typed-kind plumbing — keep None.
             kind: None,
             duplicate_work_done_hint: None,
+            seen_count: None,
         };
         let retry_key = rejection.compute_retry_key();
         rejection.retry_key = retry_key.clone();
@@ -8746,6 +8749,7 @@ impl EventLoop {
                             // back to `violation`-derived reason.
                             kind: None,
                             duplicate_work_done_hint: None,
+                            seen_count: None,
                         };
                         // 2026-06-16-001 U3: freshness filter — drop
                         // the rejection (and the synthetic
@@ -9634,24 +9638,26 @@ impl EventLoop {
                 if let Some(ps) = self.phase_authority.snapshot() {
                     snapshot.workflow_phase = Some(ps);
                 }
-                let mut ctx = crate::validation::ValidationContext::new(&mut snapshot)
-                    .with_policy_runtime_state(&mut policy_state)
-                    .with_review_step_tracker(&mut review_step_tracker)
-                    .with_workflow_progress(&mut workflow_progress)
-                    .with_workflow_guard_details(&mut wg_details)
-                    .with_payload_contract_violation(&mut event_policy_violation)
-                    .with_policy_rejections(&mut policy_rejections)
-                    .with_source_hats_by_topic(&source_hats_by_topic)
-                    .with_target_hats_by_topic(&target_hats_by_topic)
-                    // U5 of plan 2026-07-02-005: wire the on-disk
-                    // tasks.jsonl path so the StepHandoffRule can
-                    // best-effort reload on a stale in-memory view
-                    // (140149 / 175407 root cause).
-                    .with_tasks_path(self.config.core.workspace_root
-                        .join(".ralph")
-                        .join("agent")
-                        .join("tasks.jsonl"));
-                let results = pipeline.validate_pre_commit_with_view(&view, &mut ctx, evt);
+                let results = {
+                    let mut ctx = crate::validation::ValidationContext::new(&mut snapshot)
+                        .with_policy_runtime_state(&mut policy_state)
+                        .with_review_step_tracker(&mut review_step_tracker)
+                        .with_workflow_progress(&mut workflow_progress)
+                        .with_workflow_guard_details(&mut wg_details)
+                        .with_payload_contract_violation(&mut event_policy_violation)
+                        .with_policy_rejections(&mut policy_rejections)
+                        .with_source_hats_by_topic(&source_hats_by_topic)
+                        .with_target_hats_by_topic(&target_hats_by_topic)
+                        // U5 of plan 2026-07-02-005: wire the on-disk
+                        // tasks.jsonl path so the StepHandoffRule can
+                        // best-effort reload on a stale in-memory view
+                        // (140149 / 175407 root cause).
+                        .with_tasks_path(self.config.core.workspace_root
+                            .join(".ralph")
+                            .join("agent")
+                            .join("tasks.jsonl"));
+                    pipeline.validate_pre_commit_with_view(&view, &mut ctx, evt)
+                };
                 let mut event_accepted = true;
                 let mut event_warnings: Vec<String> = Vec::new();
                 for r in &results {
@@ -9733,6 +9739,7 @@ impl EventLoop {
                                     state_ledger.as_mut(),
                                     evt,
                                     &reason,
+                                    policy_finding_for_topic(&policy_rejections, evt.topic.as_str()),
                                 );
                                 had_policy_rejections = true;
                                 event_accepted = false;
@@ -9750,6 +9757,7 @@ impl EventLoop {
                                     state_ledger.as_mut(),
                                     evt,
                                     &reason,
+                                    policy_finding_for_topic(&policy_rejections, evt.topic.as_str()),
                                 );
                                 had_policy_rejections = true;
                                 event_accepted = false;
@@ -9768,6 +9776,7 @@ impl EventLoop {
                             state_ledger.as_mut(),
                             evt,
                             &reason,
+                            None,
                         );
                         rejected_topics.insert(evt.topic.clone());
                     }
@@ -9792,7 +9801,21 @@ impl EventLoop {
                 // detail's `reason` concatenates chain details, the
                 // legacy helper does the same).
                 if event_accepted && post_commit_enabled {
-                    let post_results = pipeline.validate_post_commit(&view, &mut ctx, evt);
+                    let post_results = {
+                        let mut ctx = crate::validation::ValidationContext::new(&mut snapshot)
+                            .with_policy_runtime_state(&mut policy_state)
+                            .with_review_step_tracker(&mut review_step_tracker)
+                            .with_workflow_progress(&mut workflow_progress)
+                            .with_workflow_guard_details(&mut wg_details)
+                            .with_payload_contract_violation(&mut event_policy_violation)
+                            .with_source_hats_by_topic(&source_hats_by_topic)
+                            .with_target_hats_by_topic(&target_hats_by_topic)
+                            .with_tasks_path(self.config.core.workspace_root
+                                .join(".ralph")
+                                .join("agent")
+                                .join("tasks.jsonl"));
+                        pipeline.validate_post_commit(&view, &mut ctx, evt)
+                    };
                     for r in &post_results {
                         if r.accepted {
                             continue;
@@ -9833,6 +9856,7 @@ impl EventLoop {
                             state_ledger.as_mut(),
                             evt,
                             &reason,
+                            None,
                         );
                         had_policy_rejections = true;
                         event_accepted = false;
@@ -11792,6 +11816,7 @@ impl EventLoop {
                     original_ts: None,
                     kind: Some(RejectionKind::ContractViolation),
                     duplicate_work_done_hint: None,
+                    seen_count: None,
                 };
                 rejection.retry_key = rejection.compute_retry_key();
                 let _ctx = crate::correction::emit_correction_context(
@@ -12060,12 +12085,14 @@ impl EventLoop {
             let mut accepted_wave_events: Vec<JsonlEvent> = Vec::with_capacity(wave_events.len());
             for evt in &wave_events {
                 let mut snapshot = crate::state::LedgerSnapshot::cold_start();
-                let mut ctx = ValidationContext::new(&mut snapshot)
-                    .with_policy_runtime_state(&mut policy_state)
-                    .with_review_step_tracker(&mut review_step_tracker)
-                    .with_payload_contract_violation(&mut wave_violation)
-                    .with_policy_rejections(&mut wave_rejections);
-                let r = rule.validate(&view, &mut ctx, evt);
+                let r = {
+                    let mut ctx = ValidationContext::new(&mut snapshot)
+                        .with_policy_runtime_state(&mut policy_state)
+                        .with_review_step_tracker(&mut review_step_tracker)
+                        .with_payload_contract_violation(&mut wave_violation)
+                        .with_policy_rejections(&mut wave_rejections);
+                    rule.validate(&view, &mut ctx, evt)
+                };
                 if r.accepted {
                     if r.stage == crate::validation::ValidationStage::EventPolicy
                         && r.reason_code.as_deref()
@@ -12116,6 +12143,7 @@ impl EventLoop {
                             state_ledger.as_mut(),
                             evt,
                             &reason,
+                            policy_finding_for_topic(&wave_rejections, evt.topic.as_str()),
                         );
                     }
                     _ => {
@@ -12130,6 +12158,7 @@ impl EventLoop {
                             state_ledger.as_mut(),
                             evt,
                             &reason,
+                            policy_finding_for_topic(&wave_rejections, evt.topic.as_str()),
                         );
                     }
                 }

@@ -152,6 +152,10 @@ pub struct RankedFinding {
     pub safe_target: bool,
     /// True when the group escalated at least once (`outcome == Escalated`).
     pub escalated: bool,
+    /// U4 of plan 2026-07-05-005 (R9): duplicate-work-done hint when
+    /// present on the latest envelope (`duplicate_work_done_same_step`
+    /// / `duplicate_work_done_stall_bypass`).
+    pub hint: Option<String>,
 }
 
 /// Per-source-hat aggregate used in the "Recovery timeline" section.
@@ -165,6 +169,8 @@ pub struct TimelineRow {
     pub topic: Option<String>,
     pub reason_code: String,
     pub message: String,
+    /// U4 of plan 2026-07-05-005 (R9): duplicate-work-done hint.
+    pub hint: Option<String>,
 }
 
 /// Drift finding summary, lifted from `drift.jsonl` for the
@@ -210,6 +216,9 @@ pub struct Report {
     /// Active hat activation snapshots (U4). Sorted by duration
     /// descending (longest active first).
     pub active_activations: Vec<ActivationSnapshot>,
+    /// U5 of plan 2026-07-05-005 (R8): topics whose `work.ready`
+    /// dedup `seen_count` reached the storm threshold (>= 3).
+    pub dup_storm_topics: Vec<String>,
 }
 
 impl Report {
@@ -219,6 +228,9 @@ impl Report {
     pub fn from_session(data: &SessionData) -> Self {
         let top_findings = aggregate_recovery(&data.recovery);
         let recovery_timeline = recovery_timeline(&data.recovery);
+        let workspace_root = workspace_root_from_session(&data.session_path);
+        let dup_storm_topics =
+            compute_dup_storm_topics(&data.recovery, workspace_root.as_deref());
         // U4: sort active activations by duration descending (longest first).
         let mut active_activations = data.active_activations.clone();
         active_activations.sort_by_key(|a| std::cmp::Reverse(a.duration));
@@ -249,6 +261,7 @@ impl Report {
             errors: data.errors.clone(),
             warnings: data.warnings.clone(),
             active_activations,
+            dup_storm_topics,
         }
     }
 }
@@ -1198,6 +1211,40 @@ fn push_warning(warnings: &mut Vec<String>, message: String) {
     warnings.push(message);
 }
 
+/// Workspace root for a diagnostics session at
+/// `<workspace>/.ralph/diagnostics/<session-id>/`.
+fn workspace_root_from_session(session_path: &Path) -> Option<PathBuf> {
+    session_path
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .map(Path::to_path_buf)
+}
+
+/// U5 of plan 2026-07-05-005 (R8): topics that hit the dup-storm
+/// threshold (`seen_count >= 3` on `work.ready`).
+fn compute_dup_storm_topics(
+    _recovery: &[RecoveryJournalEntry],
+    workspace_root: Option<&Path>,
+) -> Vec<String> {
+    const STORM_THRESHOLD: u32 = 3;
+    let mut storms = BTreeSet::new();
+
+    if let Some(ws) = workspace_root {
+        if let Ok(records) = crate::state::read_rejection_log(ws) {
+            for record in records {
+                if record.topic == "work.ready"
+                    && record.seen_count.unwrap_or(0) >= STORM_THRESHOLD
+                {
+                    storms.insert(record.topic);
+                }
+            }
+        }
+    }
+
+    storms.into_iter().collect()
+}
+
 /// Aggregate `recovery.jsonl` into [`RankedFinding`]s grouped by
 /// `retry_key`. The latest entry in the group wins for severity /
 /// outcome / message; occurrence count and first/last iteration are
@@ -1287,6 +1334,7 @@ impl GroupState {
             evidence: self.latest.evidence.clone(),
             safe_target: self.latest.safe_target,
             escalated: self.escalated,
+            hint: self.latest.hint.clone(),
         }
     }
 }
@@ -1345,6 +1393,7 @@ fn recovery_timeline(entries: &[RecoveryJournalEntry]) -> Vec<TimelineRow> {
             topic: e.envelope.topic.clone(),
             reason_code: e.envelope.reason_code.clone(),
             message: e.envelope.message.clone(),
+            hint: e.envelope.hint.clone(),
         })
         .collect()
 }
@@ -1421,15 +1470,16 @@ fn push_top_findings_md(out: &mut String, findings: &[RankedFinding]) {
         out.push_str("_无 recovery journal。_\n\n");
         return;
     }
-    out.push_str("| severity | source | target | topic | occurrences | first→last iter | outcome | retry_key |\n");
-    out.push_str("|---|---|---|---|---|---|---|---|\n");
+    out.push_str("| severity | source | target | topic | hint | occurrences | first→last iter | outcome | retry_key |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|---|\n");
     for f in findings {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {}→{} | {} | `{}` |\n",
+            "| {} | {} | {} | {} | {} | {} | {}→{} | {} | `{}` |\n",
             f.severity.as_str(),
             f.source,
             f.target_hat.as_deref().unwrap_or("*"),
             f.topic.as_deref().unwrap_or("*"),
+            f.hint.as_deref().unwrap_or("-"),
             f.occurrences,
             f.first_iteration
                 .map(|i| i.to_string())
@@ -1928,6 +1978,7 @@ pub fn render_json(report: &Report) -> Value {
                 "topic": f.topic,
                 "reason_code": f.reason_code,
                 "message": f.message,
+                "hint": f.hint,
                 "occurrences": f.occurrences,
                 "first_iteration": f.first_iteration,
                 "last_iteration": f.last_iteration,
@@ -2048,6 +2099,7 @@ pub fn render_json(report: &Report) -> Value {
                 "linked_task_id": a.linked_task_id,
             })
         }).collect::<Vec<_>>(),
+        "dup_storm_topics": report.dup_storm_topics,
     })
 }
 
@@ -2298,6 +2350,7 @@ mod tests {
                 evidence: vec![],
                 safe_target: false,
                 escalated: false,
+                hint: None,
             },
             RankedFinding {
                 retry_key: "a:1".into(),
@@ -2314,6 +2367,7 @@ mod tests {
                 evidence: vec![],
                 safe_target: true,
                 escalated: false,
+                hint: None,
             },
         ];
         rank_findings(&mut findings);
@@ -2339,6 +2393,7 @@ mod tests {
                 evidence: vec![],
                 safe_target: true,
                 escalated: false,
+                hint: None,
             },
             RankedFinding {
                 retry_key: "esc".into(),
@@ -2355,6 +2410,7 @@ mod tests {
                 evidence: vec![],
                 safe_target: true,
                 escalated: true,
+                hint: None,
             },
         ];
         rank_findings(&mut findings);
@@ -2398,6 +2454,45 @@ mod tests {
         let report = Report::from_session(&data);
         let md = render_markdown(&report);
         assert!(md.contains("无 recovery journal"));
+    }
+
+    #[test]
+    fn u5_render_json_includes_dup_storm_topics_from_workspace_recovery() {
+        let tmp = TempDir::new().unwrap();
+        let session = tmp.path().join(".ralph/diagnostics/sess-1");
+        fs::create_dir_all(&session).unwrap();
+        let mut record = crate::state::RejectionRecord::new(
+            "executor",
+            "work.ready",
+            "duplicate_work_done",
+            2,
+        );
+        record.seen_count = Some(3);
+        crate::state::append_rejection(tmp.path(), &record).unwrap();
+
+        let data = SessionData {
+            session_path: session,
+            ..SessionData::default()
+        };
+        let report = Report::from_session(&data);
+        let value = render_json(&report);
+        let storms = value["dup_storm_topics"].as_array().unwrap();
+        assert_eq!(storms.len(), 1);
+        assert_eq!(storms[0], "work.ready");
+    }
+
+    #[test]
+    fn u4_aggregate_recovery_surfaces_hint_on_ranked_finding() {
+        let mut envelope = env("rk:dup", 1, DiagnosisSeverity::Warning);
+        envelope.hint = Some("duplicate_work_done_same_step".to_string());
+        envelope.topic = Some("work.done".to_string());
+        let entries = vec![RecoveryJournalEntry::from_envelope(envelope, vec![])];
+        let findings = aggregate_recovery(&entries);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].hint.as_deref(),
+            Some("duplicate_work_done_same_step")
+        );
     }
 
     #[test]
@@ -2997,6 +3092,8 @@ mod tests {
             retry_count,
             terminal_reason: None,
             kind: None,
+            hint: None,
+            seen_count: None,
         }
     }
 

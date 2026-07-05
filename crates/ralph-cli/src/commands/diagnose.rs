@@ -1470,6 +1470,7 @@ mod tests {
                     evidence: vec![],
                     safe_target: false,
                     escalated: true,
+                    hint: None,
                 },
                 RankedFinding {
                     retry_key: "payload_contract:reviewer:work.done:missing_field:*".to_string(),
@@ -1486,6 +1487,7 @@ mod tests {
                     evidence: vec![],
                     safe_target: false,
                     escalated: false,
+                    hint: None,
                 },
             ],
             recovery_timeline: vec![],
@@ -1494,6 +1496,7 @@ mod tests {
             errors: vec![],
             warnings: vec![],
             active_activations: vec![],
+            dup_storm_topics: vec![],
         };
         let filtered = filter_report_by_source(report, "agent_doc_sync").unwrap();
         assert_eq!(filtered.top_findings.len(), 1);
@@ -1513,6 +1516,7 @@ mod tests {
             errors: vec![],
             warnings: vec![],
             active_activations: vec![],
+            dup_storm_topics: vec![],
         };
         assert!(filter_report_by_source(report, "no_such_source").is_err());
     }

@@ -78,6 +78,7 @@ impl ValidationRule for EventPolicyRule {
             if let ViolationType::DuplicateWorkDone {
                 ref mut hint,
                 ref key,
+                ..
             } = finding.violation_type
             {
                 if event.wave_id.is_some() {

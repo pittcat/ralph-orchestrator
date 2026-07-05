@@ -181,6 +181,10 @@ pub struct Rejection {
     /// existed deserialises without error.
     #[serde(default)]
     pub duplicate_work_done_hint: Option<crate::event_policy::DuplicateWorkDoneHint>,
+    /// U5 of plan 2026-07-05-005 (R8): `work.ready` dedup hit
+    /// counter surfaced on recovery payloads for storm detection.
+    #[serde(default)]
+    pub seen_count: Option<u32>,
 }
 
 impl Rejection {
@@ -210,7 +214,7 @@ impl Rejection {
             original_ts: None,
             // 2026-06-23 fix plan U5 (CB-2): topic-format predates
             // typed-kind plumbing — keep None.
-            kind: None, duplicate_work_done_hint: None,
+            kind: None, duplicate_work_done_hint: None, seen_count: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -240,7 +244,7 @@ impl Rejection {
             original_ts: None,
             // 2026-06-23 fix plan U5 (CB-2): origin-guard predates
             // typed-kind plumbing — keep None.
-            kind: None, duplicate_work_done_hint: None,
+            kind: None, duplicate_work_done_hint: None, seen_count: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -288,7 +292,7 @@ impl Rejection {
             original_ts: None,
             // 2026-06-23 fix plan U5 (CB-2): execution-contract
             // predates typed-kind plumbing — keep None.
-            kind: None, duplicate_work_done_hint: None,
+            kind: None, duplicate_work_done_hint: None, seen_count: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -432,7 +436,7 @@ pub fn rejection_with_key(
         // 2026-06-23 fix plan U5 (CB-2): legacy helper predates
         // typed-kind plumbing — keep None so payload falls back
         // to violation-derived reason.
-        kind: None, duplicate_work_done_hint: None,
+        kind: None, duplicate_work_done_hint: None, seen_count: None,
         }
 }
 
@@ -550,6 +554,12 @@ pub fn build_task_resume_payload(
         payload.insert(
             "hint".into(),
             serde_json::Value::String(dup_hint.as_hint_str().to_string()),
+        );
+    }
+    if let Some(seen_count) = rejection.seen_count {
+        payload.insert(
+            "seen_count".into(),
+            serde_json::Value::Number(seen_count.into()),
         );
     }
     let resolved_target_hat = rejection
@@ -1306,7 +1316,7 @@ mod tests {
             target_hat: Some("explicit-target".into()),
             original_event_id: None,
             original_ts: None,
-            kind: None, duplicate_work_done_hint: None,
+            kind: None, duplicate_work_done_hint: None, seen_count: None,
         };
         let payload1 = build_task_resume_payload(&r1, &[], &[], None, None, None);
         let v1: serde_json::Value = serde_json::from_str(&payload1).unwrap();
@@ -1382,6 +1392,7 @@ mod tests {
             original_ts: None,
             kind: None,
             duplicate_work_done_hint: Some(DuplicateWorkDoneHint::DuplicateSameStep),
+            seen_count: None,
         };
         let payload_same = build_task_resume_payload(&r_same, &[], &[], None, None, None);
         let v_same: serde_json::Value = serde_json::from_str(&payload_same).unwrap();
@@ -1405,6 +1416,7 @@ mod tests {
         // Hint absent → payload has no `hint` field (legacy behaviour).
         let r_none = Rejection {
             duplicate_work_done_hint: None,
+            seen_count: None,
             ..r_same.clone()
         };
         let payload_none = build_task_resume_payload(&r_none, &[], &[], None, None, None);

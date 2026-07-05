@@ -76,6 +76,9 @@ pub enum ViolationType {
     DuplicateWorkDone {
         key: String,
         hint: DuplicateWorkDoneHint,
+        /// U5 of plan 2026-07-05-005 (R8): dedup hit counter for
+        /// `work.ready` storms. `None` for non-counter dedup lanes.
+        seen_count: Option<u32>,
     },
 }
 
@@ -1280,6 +1283,7 @@ pub fn validate_event_with_hat(
                 violation_type: ViolationType::DuplicateWorkDone {
                     key: key.clone(),
                     hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                        seen_count: None,
                 },
                 message: format!(
                     "duplicate_precheck_proposed: {topic} for key '{key}' was already accepted. \
@@ -1316,6 +1320,7 @@ pub fn validate_event_with_hat(
                     violation_type: ViolationType::DuplicateWorkDone {
                         key: dedup_key.clone(),
                         hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                        seen_count: None,
                     },
                     message: format!(
                         "duplicate_review_start: review.start for key '{dedup_key}' was already accepted. \
@@ -1384,6 +1389,7 @@ pub fn validate_event_with_hat(
                     violation_type: ViolationType::DuplicateWorkDone {
                         key: dedup_key.clone(),
                         hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                        seen_count: None,
                     },
                     message: format!(
                         "duplicate_same_step: work.done for key '{dedup_key}' was already accepted. \
@@ -1455,6 +1461,7 @@ pub fn validate_event_with_hat(
                         // `reason_code` reports `duplicate_review_dimension_ready`
                         // instead of `duplicate_work_done_same_step`.
                         hint: DuplicateWorkDoneHint::ReviewDimensionDuplicate,
+                        seen_count: None,
                     },
                     message: format!(
                         "duplicate_dimension_ready: review.dimension.ready for key '{dedup_key}' \
@@ -1600,6 +1607,7 @@ pub fn validate_event_with_hat(
                         // rather than the misleading generic
                         // `duplicate_work_done`.
                         hint: DuplicateWorkDoneHint::ReviewDimensionsComplete,
+                        seen_count: None,
                     },
                     message: format!(
                         "duplicate_dimensions_complete: review.dimensions.complete for key \
@@ -1684,15 +1692,17 @@ pub fn validate_event_with_hat(
                     dedup_key.clone(),
                     count.saturating_add(1),
                 );
+                let hit_count = count.saturating_add(1);
                 let finding = PolicyFinding {
                     topic: topic.to_string(),
                     violation_type: ViolationType::DuplicateWorkDone {
                         key: dedup_key.clone(),
                         hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                        seen_count: Some(hit_count),
                     },
                     message: format!(
                         "duplicate_work_ready: work.ready for key '{dedup_key}' was already accepted \
-                         (seen_count={count}). Wait for fix.applied / step close before re-sending \
+                         (seen_count={hit_count}). Wait for fix.applied / step close before re-sending \
                          work.ready for the same (plan_name, step, task_id)."
                     ),
                 };
@@ -1745,6 +1755,7 @@ pub fn validate_event_with_hat(
                     violation_type: ViolationType::DuplicateWorkDone {
                         key: dedup_key.clone(),
                         hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                        seen_count: None,
                     },
                     message: format!(
                         "duplicate_test_result: {topic} for key '{dedup_key}' was already accepted \
@@ -3891,6 +3902,7 @@ mod tests {
             violation_type: ViolationType::DuplicateWorkDone {
                 key: "p::s::t".to_string(),
                 hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                        seen_count: None,
             },
             message: "test".to_string(),
         };
@@ -3909,6 +3921,7 @@ mod tests {
             violation_type: ViolationType::DuplicateWorkDone {
                 key: "p::s::t".to_string(),
                 hint: DuplicateWorkDoneHint::DuplicateStallBypass,
+                        seen_count: None,
             },
             message: "test".to_string(),
         };
@@ -6364,6 +6377,7 @@ hats:
             violation_type: ViolationType::DuplicateWorkDone {
                 key: "k".to_string(),
                 hint: DuplicateWorkDoneHint::ReviewDimensionsComplete,
+                        seen_count: None,
             },
             message: "test".to_string(),
         };
@@ -6583,6 +6597,7 @@ hats:
             violation_type: ViolationType::DuplicateWorkDone {
                 key: "p::s::t::0".to_string(),
                 hint: DuplicateWorkDoneHint::ReviewDimensionsComplete,
+                        seen_count: None,
             },
             message: "test".to_string(),
         };
@@ -6604,6 +6619,7 @@ hats:
             violation_type: ViolationType::DuplicateWorkDone {
                 key: "p::s::t::d".to_string(),
                 hint: DuplicateWorkDoneHint::ReviewDimensionDuplicate,
+                        seen_count: None,
             },
             message: "test".to_string(),
         };
@@ -6642,6 +6658,7 @@ hats:
                 violation_type: ViolationType::DuplicateWorkDone {
                     key: "p::s::t".to_string(),
                     hint,
+                    seen_count: None,
                 },
                 message: "test".to_string(),
             };
@@ -6676,6 +6693,7 @@ hats:
                 ViolationType::DuplicateWorkDone {
                     key: "k".to_string(),
                     hint: DuplicateWorkDoneHint::DuplicateStallBypass,
+                        seen_count: None,
                 }
                 .reason_code(),
             ),
@@ -6684,6 +6702,7 @@ hats:
                 ViolationType::DuplicateWorkDone {
                     key: "k".to_string(),
                     hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                        seen_count: None,
                 }
                 .reason_code(),
             ),
@@ -6692,6 +6711,7 @@ hats:
                 ViolationType::DuplicateWorkDone {
                     key: "k".to_string(),
                     hint: DuplicateWorkDoneHint::ReviewDimensionDuplicate,
+                        seen_count: None,
                 }
                 .reason_code(),
             ),
@@ -6700,6 +6720,7 @@ hats:
                 ViolationType::DuplicateWorkDone {
                     key: "k".to_string(),
                     hint: DuplicateWorkDoneHint::ReviewDimensionsComplete,
+                        seen_count: None,
                 }
                 .reason_code(),
             ),

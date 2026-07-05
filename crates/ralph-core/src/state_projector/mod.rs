@@ -348,6 +348,15 @@ impl ProjectionContext {
             (cache, false)
         }
     }
+
+    /// U3 of plan 2026-07-05-005: latest `review.dimensions.complete`
+    /// view for `## REVIEW SUMMARY` prompt injection.
+    pub fn review_dimensions_snapshot(&self) -> Option<review::ReviewDimensionsView> {
+        self.review_dimensions_view
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
 }
 
 /// Result of a single `apply` call.
@@ -715,11 +724,13 @@ impl StateProjector {
         loop_start_sha: Option<&str>,
         plan_baseline_sha: Option<&str>,
     ) -> String {
+        let review = self.ctx.review_dimensions_snapshot();
         self::orchestrator_context::build_block(
             snapshot,
             &self.ctx.config,
             loop_start_sha,
             plan_baseline_sha,
+            review.as_ref(),
         )
     }
 

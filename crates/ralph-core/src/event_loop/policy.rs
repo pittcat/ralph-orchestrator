@@ -17,6 +17,19 @@
 
 use super::*;
 
+/// Look up the most recent [`PolicyFinding`] for a topic in the
+/// batch's policy-rejection accumulator (U5 / U4 wiring).
+pub fn policy_finding_for_topic<'a>(
+    rejections: &'a [crate::event_policy::PolicyRejection],
+    topic: &str,
+) -> Option<&'a crate::event_policy::PolicyFinding> {
+    rejections
+        .iter()
+        .rev()
+        .find(|r| r.topic == topic)
+        .map(|r| &r.finding)
+}
+
 /// A2 (002-adversarial-review): build the unified
 /// `ValidationPipeline` once per batch. The pipeline is always
 /// constructed; the legacy per-rule gate stack has been removed.
@@ -33,7 +46,20 @@ pub fn publish_correction_via_context(
     mut ledger: Option<&mut crate::state::StateLedger>,
     event: &JsonlEvent,
     payload: &str,
+    policy_finding: Option<&crate::event_policy::PolicyFinding>,
 ) {
+    let (duplicate_work_done_hint, seen_count) = policy_finding
+        .and_then(|f| {
+            if let crate::event_policy::ViolationType::DuplicateWorkDone { hint, seen_count, .. } =
+                &f.violation_type
+            {
+                Some((*hint, *seen_count))
+            } else {
+                None
+            }
+        })
+        .map(|(hint, seen_count)| (Some(hint), seen_count))
+        .unwrap_or((None, None));
     // Re-use the same Rejection construction the legacy
     // path uses so the `retry_key` / `topic` / `violation`
     // surface matches the wire format.
@@ -52,7 +78,8 @@ pub fn publish_correction_via_context(
         // 2026-06-23 fix plan U5 (CB-2): policy-level rejection
         // predates typed-kind plumbing — keep None.
         kind: None,
-        duplicate_work_done_hint: None,
+        duplicate_work_done_hint,
+        seen_count,
     };
     let retry_key = rejection.compute_retry_key();
 
