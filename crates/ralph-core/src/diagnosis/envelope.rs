@@ -353,6 +353,19 @@ pub struct RecoveryDiagnosisEnvelope {
     /// should not synthesize a fake target.
     pub safe_target: bool,
 
+    /// U4 of plan 2026-07-05-005 (R3, R9): disambiguate the two
+    /// flavours of `duplicate_work_done` for post-mortem tooling.
+    /// `reason_code` stays the legacy literal
+    /// `"duplicate_work_done"` so dashboards / CLI precheck JSON
+    /// / the existing
+    /// `test_u4_duplicate_work_done_hint_mapped_to_reason_code`
+    /// assertion remain green. The new `hint` field carries the
+    /// `DuplicateSameStep` / `DuplicateStallBypass` distinction
+    /// at the envelope top level so `ralph diagnose` can render
+    /// the difference without parsing `reason_code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+
     /// Current observed outcome. Defaults to [`DiagnosisOutcome::Pending`]
     /// and is updated via [`RecoveryDiagnosisEnvelope::with_outcome`]
     /// by U6.
@@ -401,6 +414,11 @@ impl RecoveryDiagnosisEnvelope {
             retry_key: self.retry_key.clone(),
             retry_attempt,
             safe_target: self.safe_target,
+            // U4 of plan 2026-07-05-005 (R3): optional
+            // disambiguation hint. Forwarded unchanged from the
+            // previous envelope so a `with_outcome` call on a
+            // pre-existing envelope preserves the hint.
+            hint: self.hint.clone(),
             outcome,
             timestamp: self.timestamp,
             session_id: self.session_id.clone(),
@@ -426,6 +444,8 @@ pub struct RecoveryDiagnosisEnvelopeBuilder {
     retry_key: Option<String>,
     retry_attempt: u32,
     safe_target: bool,
+    // U4 of plan 2026-07-05-005: optional disambiguation hint.
+    hint: Option<String>,
     outcome: Option<DiagnosisOutcome>,
     session_id: Option<String>,
 }
@@ -649,6 +669,11 @@ impl RecoveryDiagnosisEnvelopeBuilder {
             retry_key,
             retry_attempt: self.retry_attempt,
             safe_target: self.safe_target,
+            // U4 of plan 2026-07-05-005 (R3): optional
+            // `DuplicateSameStep` / `DuplicateStallBypass`
+            // disambiguation. Defaults to `None` so existing
+            // call sites keep their wire format.
+            hint: self.hint,
             outcome: self.outcome.unwrap_or(DiagnosisOutcome::Pending),
             timestamp: Utc::now(),
             session_id: self.session_id,

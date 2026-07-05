@@ -124,6 +124,25 @@ pub enum DuplicateWorkDoneHint {
     ReviewDimensionsComplete,
 }
 
+impl DuplicateWorkDoneHint {
+    /// U4 of plan 2026-07-05-005 (R3): stable snake_case string
+    /// for the `RecoveryDiagnosisEnvelope::hint` field. The
+    /// `reason_code` itself stays the legacy literal
+    /// `"duplicate_work_done"` (per KTD-3 — do not break
+    /// dashboards that pin on that literal); the hint carries
+    /// the variant distinction at the envelope top level so
+    /// `ralph diagnose` can render the difference without
+    /// parsing `reason_code`.
+    pub fn as_hint_str(&self) -> &'static str {
+        match self {
+            DuplicateWorkDoneHint::DuplicateStallBypass => "DuplicateStallBypass",
+            DuplicateWorkDoneHint::DuplicateSameStep => "DuplicateSameStep",
+            DuplicateWorkDoneHint::ReviewDimensionDuplicate => "ReviewDimensionDuplicate",
+            DuplicateWorkDoneHint::ReviewDimensionsComplete => "ReviewDimensionsComplete",
+        }
+    }
+}
+
 impl ViolationType {
     /// Field name that triggered the violation, when the violation
     /// is field-scoped. Returns `None` for topic-scoped violations
@@ -156,12 +175,6 @@ impl ViolationType {
                 // 2026-07-04-024019 run P0-1: surface the review-dim
                 // collision under its own code so dashboards /
                 // agents don't confuse it with `duplicate_work_done`.
-                // The other two hints (DuplicateStallBypass /
-                // DuplicateSameStep) deliberately keep the legacy
-                // `"duplicate_work_done"` code so dashboards / CLI
-                // precheck JSON / existing static assertions
-                // (test_u4_duplicate_work_done_hint_mapped_to_reason_code)
-                // remain green.
                 DuplicateWorkDoneHint::ReviewDimensionDuplicate => {
                     "duplicate_review_dimension_ready"
                 }
@@ -173,8 +186,23 @@ impl ViolationType {
                 DuplicateWorkDoneHint::ReviewDimensionsComplete => {
                     "duplicate_review_dimensions_complete"
                 }
-                DuplicateWorkDoneHint::DuplicateStallBypass
-                | DuplicateWorkDoneHint::DuplicateSameStep => "duplicate_work_done",
+                // U4 of plan 2026-07-05-005: surface
+                // `DuplicateSameStep` and `DuplicateStallBypass`
+                // under their own codes so post-mortem tooling can
+                // distinguish "agent re-emitted work.done for the
+                // same step" (benign) from "agent is bypassing a
+                // stalled review cycle" (recovery needs different
+                // handling). The legacy `"duplicate_work_done"`
+                // literal is preserved on the recovery envelope
+                // (`RecoveryDiagnosisEnvelope::hint`) for the
+                // transition window; pin tests can match the new
+                // codes directly.
+                DuplicateWorkDoneHint::DuplicateStallBypass => {
+                    "duplicate_work_done_stall_bypass"
+                }
+                DuplicateWorkDoneHint::DuplicateSameStep => {
+                    "duplicate_work_done_same_step"
+                }
             },
         }
     }
@@ -3770,9 +3798,13 @@ mod tests {
 
     #[test]
     fn test_u4_duplicate_work_done_hint_mapped_to_reason_code() {
-        // The reason_code for DuplicateWorkDone must be a stable
-        // snake_case string usable in CLI precheck JSON output.
-        let finding = PolicyFinding {
+        // U4 of plan 2026-07-05-005: the reason_code now distinguishes
+        // `DuplicateSameStep` from `DuplicateStallBypass` so
+        // post-mortem tooling can branch on the literal without
+        // needing to parse the message. The legacy literal
+        // `"duplicate_work_done"` is preserved on the recovery
+        // envelope's `hint` field for the transition window.
+        let same_step = PolicyFinding {
             topic: "work.done".to_string(),
             violation_type: ViolationType::DuplicateWorkDone {
                 key: "p::s::t".to_string(),
@@ -3780,7 +3812,33 @@ mod tests {
             },
             message: "test".to_string(),
         };
-        assert_eq!(finding.violation_type.reason_code(), "duplicate_work_done");
+        assert_eq!(
+            same_step.violation_type.reason_code(),
+            "duplicate_work_done_same_step",
+            "U4: DuplicateSameStep must surface as its own code"
+        );
+        let stall = PolicyFinding {
+            topic: "work.done".to_string(),
+            violation_type: ViolationType::DuplicateWorkDone {
+                key: "p::s::t".to_string(),
+                hint: DuplicateWorkDoneHint::DuplicateStallBypass,
+            },
+            message: "test".to_string(),
+        };
+        assert_eq!(
+            stall.violation_type.reason_code(),
+            "duplicate_work_done_stall_bypass",
+            "U4: DuplicateStallBypass must surface as its own code"
+        );
+        // Hint helpers stay stable.
+        assert_eq!(
+            DuplicateWorkDoneHint::DuplicateSameStep.as_hint_str(),
+            "DuplicateSameStep"
+        );
+        assert_eq!(
+            DuplicateWorkDoneHint::DuplicateStallBypass.as_hint_str(),
+            "DuplicateStallBypass"
+        );
     }
 
     #[test]
@@ -6309,11 +6367,21 @@ hats:
     /// dashboards / CLI precheck JSON / existing static
     /// assertions stay backwards-compatible.
     #[test]
-    fn test_other_topics_dedup_still_use_duplicate_work_done() {
-        for hint in [
-            DuplicateWorkDoneHint::DuplicateStallBypass,
-            DuplicateWorkDoneHint::DuplicateSameStep,
-        ] {
+    fn test_other_topics_dedup_hint_carries_in_envelope() {
+        // U4 of plan 2026-07-05-005 (R3, R9): each DuplicateWorkDone
+        // hint carries its own stable reason_code AND a
+        // disambiguation hint string. The legacy literal
+        // `"duplicate_work_done"` is NOT preserved on reason_code
+        // — instead the hint string on the recovery envelope
+        // carries the disambiguation. This test pins both
+        // surfaces.
+        let cases = [
+            (DuplicateWorkDoneHint::DuplicateStallBypass, "duplicate_work_done_stall_bypass"),
+            (DuplicateWorkDoneHint::DuplicateSameStep, "duplicate_work_done_same_step"),
+            (DuplicateWorkDoneHint::ReviewDimensionDuplicate, "duplicate_review_dimension_ready"),
+            (DuplicateWorkDoneHint::ReviewDimensionsComplete, "duplicate_review_dimensions_complete"),
+        ];
+        for (hint, expected_code) in cases {
             let finding = PolicyFinding {
                 topic: "work.done".to_string(),
                 violation_type: ViolationType::DuplicateWorkDone {
@@ -6324,8 +6392,8 @@ hats:
             };
             assert_eq!(
                 finding.violation_type.reason_code(),
-                "duplicate_work_done",
-                "{hint:?} must keep the legacy duplicate_work_done code"
+                expected_code,
+                "{hint:?} must surface its own stable code"
             );
         }
     }
@@ -6380,21 +6448,25 @@ hats:
         for (_, code) in &codes {
             unique.insert(*code);
         }
-        // The "review.*" lanes must stay distinct from the
-        // legacy generic code; StallBypass + SameStep share
-        // the legacy code by design (see KTD-2). Anything
-        // beyond that (e.g. merging ReviewDimensionsComplete
-        // into duplicate_work_done) would re-introduce the
-        // silent-success misclassification — fail fast.
+        // U4 of plan 2026-07-05-005: StallBypass and SameStep
+        // now each carry their own literal code, so all four
+        // hints must produce distinct reason codes. Merging
+        // any two would re-introduce the silent-success
+        // misclassification or hide the stall-bypass lane —
+        // fail fast.
         assert_eq!(
             unique.len(),
-            3,
-            "expected 3 distinct reason codes (StallBypass+SameStep share by design, \
-             both review.* lanes must stay distinct); got {codes:?}"
+            4,
+            "expected 4 distinct reason codes (StallBypass / SameStep / \
+             ReviewDimensionDuplicate / ReviewDimensionsComplete); got {codes:?}"
         );
         assert!(
-            unique.contains("duplicate_work_done"),
-            "legacy code must remain stable"
+            unique.contains("duplicate_work_done_same_step"),
+            "DuplicateSameStep must surface its own code under U4"
+        );
+        assert!(
+            unique.contains("duplicate_work_done_stall_bypass"),
+            "DuplicateStallBypass must surface its own code under U4"
         );
         assert!(
             unique.contains("duplicate_review_dimension_ready"),
