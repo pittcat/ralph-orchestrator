@@ -399,8 +399,8 @@ event_loop:
   handoff_envelope:
     enabled: true
     prompt_injection: true
-    validate_payload: false
-    emit_result_summary: false
+    validate_payload: true
+    emit_result_summary: true
   # 2026-07-02-004 plan: precheck gate (LLM-as-judge on critical
   # terminal topics). Desugar rewrites each guarded topic's
   # producers to emit `<X>.proposed` and synthesizes a `precheck-<X>`

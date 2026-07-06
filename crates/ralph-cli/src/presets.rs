@@ -1198,6 +1198,65 @@ mod tests {
         }
     }
 
+    /// 2026-07-06-004 plan U10: serial flips `validate_payload`
+    /// and `emit_result_summary` on. Schema SSOT (see
+    /// `presets/schemas/ce-executor-serial.yml`) requires
+    /// `handoff_envelope` on every key business topic.
+    #[test]
+    fn ce_executor_serial_u10_enables_validate_and_summary() {
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
+
+        let block = yaml
+            .get("event_loop")
+            .and_then(|e| e.get("handoff_envelope"))
+            .expect("event_loop.handoff_envelope must be present after U10");
+        assert!(
+            block.get("validate_payload").and_then(|v| v.as_bool()) == Some(true),
+            "ce-executor-serial must turn validate_payload on at U10"
+        );
+        assert!(
+            block.get("emit_result_summary").and_then(|v| v.as_bool()) == Some(true),
+            "ce-executor-serial must turn emit_result_summary on at U10"
+        );
+    }
+
+    /// 2026-07-06-004 plan U10: schema SSOT requires
+    /// `handoff_envelope` on `work.ready` and `work.done`.
+    #[test]
+    fn ce_executor_serial_schema_requires_handoff_envelope_for_work_ready_and_done() {
+        // The SSOT byte-equality invariant means the embedded
+        // copy equals merge(canonical preset, schema SSOT).
+        // Use the merged text directly so the test pins both
+        // halves of the contract: canonical YAML carries the
+        // optional `event_policy.schemas` block, schema SSOT
+        // carries the canonical `schemas:` block, and the build
+        // pipeline deep-merges them.
+        let merged_text = merge_root_with_ssot("ce-executor-serial");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&merged_text).expect("merged YAML must parse");
+        let schemas = yaml
+            .get("event_loop")
+            .and_then(|e| e.get("event_policy"))
+            .and_then(|p| p.get("schemas"))
+            .expect("event_loop.event_policy.schemas must be present after merge");
+        for topic in ["work.ready", "work.done"] {
+            let required = schemas
+                .get(topic)
+                .and_then(|t| t.get("required_fields"))
+                .and_then(|r| r.as_sequence())
+                .expect("topic must carry required_fields");
+            let list: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+            assert!(
+                list.contains(&"handoff_envelope"),
+                "U10 contract: {topic} must require handoff_envelope; got {:?}",
+                list
+            );
+        }
+    }
+
     #[test]
     fn test_ce_executor_serial_has_two_step_verify_gate() {
         let preset =

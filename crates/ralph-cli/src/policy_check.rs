@@ -30,8 +30,8 @@ use ralph_core::step_handoff::progress_task_gate::{
     GateDecision, ProgressTaskMismatch, check_progress_task_alignment, is_gated_topic,
 };
 use ralph_core::{
-    EventPolicyConfig, HatRegistry, PolicyDecision, PolicyRuntimeState, RalphConfig, ViolationType,
-    validate_event,
+    EventLoopHandoffConfig, EventPolicyConfig, HatRegistry, PolicyDecision, PolicyRuntimeState,
+    RalphConfig, ViolationType, validate_event, validate_event_with_options,
 };
 use ralph_proto::HatId;
 
@@ -1517,6 +1517,36 @@ impl BatchValidation {
 /// enforce terminal-monotonicity / duplicate-terminal checks —
 /// the same replay path the loop uses when reading the JSONL.
 #[allow(dead_code)] // Exposed for single-event callers (e.g. ralph emit).
+/// 2026-07-06-004 plan U10: typed entry point that plumbs the
+/// typed handoff envelope config into the policy pipeline. The
+/// legacy `validate_topic_payload_against_config` /
+/// `validate_topic_payload_with_state` keep their default-no-op
+/// behaviour for callers that don't care about handoff envelopes;
+/// new CLI code (e.g. `ralph emit --policy-check`) goes through
+/// this entry point.
+pub fn validate_topic_payload_with_handoff(
+    topic: &str,
+    payload_str: &str,
+    policy: &EventPolicyConfig,
+    events_file: &Path,
+    handoff: &ralph_core::config::HandoffEnvelopeConfig,
+) -> Result<Option<ValidationError>> {
+    let ctx = PolicyCheckContext {
+        events_file: events_file.to_path_buf(),
+    };
+    let mut state = build_policy_state(policy, &ctx);
+    let adapter = EventLoopHandoffConfig { handoff_envelope: handoff };
+    let decision = validate_event_with_options(
+        topic,
+        Some(payload_str),
+        policy,
+        &mut state,
+        None,
+        &adapter,
+    );
+    Ok(finding_to_validation_error(&decision, topic))
+}
+
 pub fn validate_topic_payload_against_config(
     topic: &str,
     payload_str: &str,
@@ -1797,6 +1827,12 @@ event_loop:
     allow_unsafe_cli_emit: false
     schemas:
       review.wave.ready:
+        required_fields:
+          - {field}
+      work.done:
+        required_fields:
+          - {field}
+      work.ready:
         required_fields:
           - {field}
 "#
@@ -2099,6 +2135,104 @@ event_loop:
         .expect("missing depth should produce an error");
         assert_eq!(err.field, "depth");
         assert_eq!(err.reason_code, "missing_required_field");
+    }
+
+    // ------------------------------------------------------------------
+    // 2026-07-06-004 plan U10: end-to-end serial policy-check
+    // exercises the handoff envelope validator through the CLI
+    // entry point. The serial preset enables
+    // `validate_payload: true`, so a missing `handoff_envelope`
+    // must surface as a missing_required_field-style rejection.
+    // ------------------------------------------------------------------
+
+    fn serial_like_handoff_config() -> ralph_core::config::HandoffEnvelopeConfig {
+        ralph_core::config::HandoffEnvelopeConfig {
+            enabled: true,
+            prompt_injection: true,
+            validate_payload: true,
+            emit_result_summary: true,
+        }
+    }
+
+    fn full_handoff_envelope_payload() -> String {
+        r#"{
+            "plan_name":"p1",
+            "task_id":"t1",
+            "task_key":"p1:step-2:implement",
+            "step":"step-2",
+            "commit_count":1,
+            "changed_lines":10,
+            "handoff_envelope":{
+                "schema_version":"handoff-envelope.v1",
+                "root_goal":"ship without regressions",
+                "plan":{
+                    "name":"p1",
+                    "path":"docs/plans/p1.md",
+                    "current_step":"step-2",
+                    "completed_steps":["step-1"]
+                },
+                "state":{
+                    "current_status":"ready_for_review",
+                    "last_signal":"work.done",
+                    "blocking_reason":null
+                },
+                "receiver_contract":{
+                    "to_hat":"reviewer",
+                    "must_do":["review step-2"],
+                    "must_not_do":["regress step-1"],
+                    "success_signal":"work.done",
+                    "failure_signal":"work.failed"
+                }
+            }
+        }"#
+        .to_string()
+    }
+
+    #[test]
+    fn ce_executor_serial_policy_check_accepts_valid_handoff_envelope_payload() {
+        let tmp = TempDir::new().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let policy = strict_policy_with_required("handoff_envelope");
+        let result = validate_topic_payload_with_handoff(
+            "work.done",
+            &full_handoff_envelope_payload(),
+            &policy,
+            &events,
+            &serial_like_handoff_config(),
+        )
+        .unwrap();
+        assert!(
+            result.is_none(),
+            "serial-like config must accept a valid envelope; got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn ce_executor_serial_policy_check_rejects_missing_handoff_envelope_payload() {
+        let tmp = TempDir::new().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let policy = strict_policy_with_required("handoff_envelope");
+        let payload = full_handoff_envelope_payload()
+            .replace("\"handoff_envelope\":{", "\"__stripped__\":{");
+        let err = validate_topic_payload_with_handoff(
+            "work.done",
+            &payload,
+            &policy,
+            &events,
+            &serial_like_handoff_config(),
+        )
+        .unwrap()
+        .expect("missing envelope must reject");
+        // Either the schema-side (required_fields) check or the
+        // handoff-envelope validator side will surface. We
+        // accept either; the contract is "rejected".
+        assert!(
+            err.reason_code == "missing_required_field"
+                || err.message.contains("handoff_envelope"),
+            "rejection must trace to handoff; got {:?}",
+            err
+        );
     }
 
     #[test]

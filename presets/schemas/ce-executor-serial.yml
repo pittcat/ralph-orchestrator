@@ -69,6 +69,10 @@ schemas:
       - task_key
       - step
       - complexity
+      # 2026-07-06-004 plan U10: serial requires a handoff
+      # envelope on every business event the per-step producer
+      # can emit.
+      - handoff_envelope
     payload: json_object
 
   work.done:
@@ -80,6 +84,7 @@ schemas:
       - step
       - commit_count
       - changed_lines
+      - handoff_envelope
     payload: json_object
 
   work.failed:
@@ -93,6 +98,7 @@ schemas:
       - task_key
       - step
       - reason
+      - handoff_envelope
     payload: json_object
 
   # 2026-06-24 plan U2: new test.* topics from validator hat.
@@ -106,6 +112,7 @@ schemas:
       - step
       - tests_run
       - tests_passed
+      - handoff_envelope
     payload: json_object
 
   test.failed:
@@ -116,6 +123,7 @@ schemas:
       - step
       - failures
       - test_errors
+      - handoff_envelope
     payload: json_object
 
   # 2026-06-26 plan U8: review.start emitted by coordinator when all
@@ -127,6 +135,7 @@ schemas:
       - plan_name
       - task_id
       - task_key
+      - handoff_envelope
     payload: json_object
 
   # Serial path replaces the parallel `review.wave.ready` with a per-dimension
@@ -146,6 +155,7 @@ schemas:
       - task_id
       - task_key
       - step
+      - handoff_envelope
     payload: json_object
 
   # Single-dimension completion, mirrors the wave path's `review.dimension.done`
@@ -160,6 +170,7 @@ schemas:
       - task_id
       - task_key
       - step
+      - handoff_envelope
     payload: json_object
 
   # Single-dimension failure, emitted by dimension-reviewer when it cannot
@@ -176,6 +187,7 @@ schemas:
       - task_id
       - task_key
       - step
+      - handoff_envelope
     # 2026-07-02 P1-A: dimension must be in the 6-dimension
     # whitelist so a payload with `dimension=unknown` (the bug
     # surfaced in the 2026-07-01 ralph-e2e run, iter 12
@@ -280,6 +292,7 @@ schemas:
       - step
       - commit_count
       - changed_lines
+      - handoff_envelope
     payload: json_object
 
   # 2026-06-24 plan U2: fix.exhausted now carries `reason` so the
