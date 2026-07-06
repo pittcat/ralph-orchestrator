@@ -31,7 +31,7 @@ pub const EMIT_RESULT_SCHEMA_VERSION: &str = "emit_result.v1";
 ///
 /// 序列化字段顺序稳定：先 schema_version / ok / recorded / topic / phase，
 /// 再 allowed_next / activate_next（按需省略空值），最后 errors / handoff。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct EmitResult {
     /// JSON schema 版本（恒等于 [`EMIT_RESULT_SCHEMA_VERSION`]）。
     pub schema_version: &'static str,
@@ -72,6 +72,13 @@ pub struct EmitResult {
     /// 因此是 **additive** 变更,KTD4 选择不 bump schema version。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub target_path: Option<String>,
+    /// 2026-07-06-004 plan U9: optional handoff envelope summary.
+    /// Only attached when the typed config has
+    /// `handoff_envelope.emit_result_summary == true` AND the
+    /// emitted payload carried a valid envelope. None and
+    /// rejection paths omit the JSON key entirely.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub handoff_envelope: Option<HandoffEnvelopeSummary>,
 }
 
 /// 单条 policy / 校验错误。
@@ -106,4 +113,22 @@ pub struct EmitHandoff {
     pub to_hat: String,
     /// 交接原因短语（preset `handoff_reasons` 表里声明的）。
     pub reason: String,
+}
+
+/// 2026-07-06-004 plan U9: typed summary of the handoff envelope
+/// the agent just emitted. The summary is short (4 fields) so it
+/// fits in the existing `ralph emit` JSON without bumping the
+/// `emit_result.v1` schema version. Additive — old consumers do
+/// not read this field and see no change.
+///
+/// The summary is only attached when the typed config has
+/// `emit_result_summary == true`. When disabled or no envelope was
+/// present in the payload, the field is `None` and the JSON
+/// serializer omits it entirely.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HandoffEnvelopeSummary {
+    pub schema_version: String,
+    pub to_hat: String,
+    pub success_signal: String,
+    pub failure_signal: String,
 }

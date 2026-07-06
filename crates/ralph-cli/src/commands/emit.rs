@@ -539,6 +539,7 @@ fn emit_command_with_root_and_hats(
                 errors: vec![],
                 handoff: None,
                 target_path: None,
+                handoff_envelope: None,
             };
             let pretty = serde_json::to_string_pretty(&view)
                 .context("Failed to serialise EmitResult schema view")?;
@@ -4753,6 +4754,7 @@ hats:
             errors: vec![],
             handoff: None,
             target_path: Some(events_file.display().to_string()),
+            handoff_envelope: None,
         };
         let result_obj = ralph_core::emit_result::EmitResult::assemble(parts);
         let json: serde_json::Value =

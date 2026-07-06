@@ -32,6 +32,7 @@ fn test_emit_result_types_success_json_roundtrip() {
         errors: vec![],
         handoff: None,
         target_path: None,
+        handoff_envelope: None,
     };
     let json: Value =
         serde_json::to_value(&result).expect("EmitResult must serialize to JSON value");
@@ -127,6 +128,7 @@ fn test_emit_result_types_handoff_present_in_json_when_some() {
             reason: "phase_complete".to_string(),
         }),
         target_path: None,
+        handoff_envelope: None,
     };
     let json: Value =
         serde_json::to_value(&result).expect("EmitResult must serialize to JSON value");
@@ -171,6 +173,7 @@ fn test_emit_result_types_with_allowed_next_and_errors_keeps_vecs() {
         }],
         handoff: None,
         target_path: None,
+        handoff_envelope: None,
     };
     let json: Value =
         serde_json::to_value(&result).expect("EmitResult must serialize to JSON value");
@@ -221,6 +224,7 @@ fn test_emit_result_types_roundup() {
         errors: vec![],
         handoff: None,
         target_path: None,
+        handoff_envelope: None,
     };
     let ok_json: Value =
         serde_json::to_value(&ok_result).expect("EmitResult must serialize");

@@ -1750,6 +1750,7 @@ pub fn build_emit_result_parts(
         errors,
         handoff: None,
         target_path,
+        handoff_envelope: None,
     }
 }
 

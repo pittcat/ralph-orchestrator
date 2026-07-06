@@ -19,7 +19,7 @@
 //! `cargo nextest run -p ralph-core -- emit_result_assemble`
 //! substring 一次性命中全部 U5 测试。
 
-use crate::emit_result::{EMIT_RESULT_SCHEMA_VERSION, EmitResult};
+use crate::emit_result::{EMIT_RESULT_SCHEMA_VERSION, EmitResult, HandoffEnvelopeSummary};
 
 /// policy-check / apply 阶段的离散信号输入。
 #[derive(Debug, Clone, Default)]
@@ -44,34 +44,52 @@ pub struct EmitResultParts {
     /// U4 (R5): 真实落盘的绝对路径。`recorded=false` 或 `ok=false`
     /// 时强制为 `None`(对应 JSON 键省略)。
     pub target_path: Option<String>,
+    /// 2026-07-06-004 plan U9: optional handoff envelope summary.
+    /// When `Some`, the JSON serializer attaches the
+    /// `handoff_envelope` key with schema_version / to_hat /
+    /// success_signal / failure_signal. When `None`, the key is
+    /// omitted entirely. The U9 assembly rule is: never attach
+    /// the summary on rejection (`ok == false`) so agents cannot
+    /// be misled into thinking a rejected envelope was
+    /// recognised.
+    pub handoff_envelope: Option<HandoffEnvelopeSummary>,
 }
 
 impl EmitResult {
     /// 把 policy-check / apply 各阶段离散信号合并为 `EmitResult`。
     ///
     /// 规则见模块级文档：`ok==false` → `recorded=false`、清空
-    /// allowed_next / activate_next / handoff / target_path。
+    /// allowed_next / activate_next / handoff / target_path / handoff_envelope。
     pub fn assemble(parts: EmitResultParts) -> Self {
-        let (effective_recorded, effective_allowed_next, effective_activate_next, effective_handoff, effective_target_path) =
-            if parts.ok {
-                (
-                    parts.recorded,
-                    parts.allowed_next,
-                    parts.activate_next,
-                    parts.handoff,
-                    // target_path:仅在 apply 成功路径下填充(由调用方
-                    // 判断)。这里仅防御 `recorded=false` 时的 None。
-                    if parts.recorded {
-                        parts.target_path
-                    } else {
-                        None
-                    },
-                )
-            } else {
-                // 拒收：recorded 强制 false；清空 allowed_next /
-                // activate_next / handoff / target_path。
-                (false, Vec::new(), Vec::new(), None, None)
-            };
+        let (
+            effective_recorded,
+            effective_allowed_next,
+            effective_activate_next,
+            effective_handoff,
+            effective_target_path,
+            effective_handoff_envelope,
+        ) = if parts.ok {
+            (
+                parts.recorded,
+                parts.allowed_next,
+                parts.activate_next,
+                parts.handoff,
+                // target_path:仅在 apply 成功路径下填充(由调用方
+                // 判断)。这里仅防御 `recorded=false` 时的 None。
+                if parts.recorded {
+                    parts.target_path
+                } else {
+                    None
+                },
+                parts.handoff_envelope,
+            )
+        } else {
+            // 拒收：recorded 强制 false；清空 allowed_next /
+            // activate_next / handoff / target_path /
+            // handoff_envelope(关键 U9 规则:拒绝时不能凭 payload
+            // 硬塞 summary,避免给 agent 错觉以为 envelope 被识别)。
+            (false, Vec::new(), Vec::new(), None, None, None)
+        };
 
         Self {
             schema_version: EMIT_RESULT_SCHEMA_VERSION,
@@ -84,6 +102,7 @@ impl EmitResult {
             errors: parts.errors,
             handoff: effective_handoff,
             target_path: effective_target_path,
+            handoff_envelope: effective_handoff_envelope,
         }
     }
 }
@@ -117,6 +136,7 @@ mod tests {
                 reason: "phase_complete".to_string(),
             }),
             target_path: None,
+            handoff_envelope: None,
         };
         let result = EmitResult::assemble(parts);
 
@@ -158,6 +178,7 @@ mod tests {
             errors: vec![],
             handoff: None,
             target_path: None,
+            handoff_envelope: None,
         };
         let result = EmitResult::assemble(parts);
 
@@ -196,6 +217,7 @@ mod tests {
             errors: vec![],
             handoff: None,
             target_path: None,
+            handoff_envelope: None,
         };
         let result = EmitResult::assemble(parts);
 
@@ -226,9 +248,132 @@ mod tests {
             errors: vec![],
             handoff: None,
             target_path: None,
+            handoff_envelope: None,
         };
         let result = EmitResult::assemble(parts);
         assert_eq!(result.schema_version, EMIT_RESULT_SCHEMA_VERSION);
         assert_eq!(result.schema_version, "emit_result.v1");
+    }
+
+    // ------------------------------------------------------------------
+    // 2026-07-06-004 plan U9: optional HandoffEnvelopeSummary
+    // ------------------------------------------------------------------
+
+    fn summary_fixture() -> HandoffEnvelopeSummary {
+        HandoffEnvelopeSummary {
+            schema_version: "handoff-envelope.v1".to_string(),
+            to_hat: "goal-alignment-reviewer".to_string(),
+            success_signal: "work.done".to_string(),
+            failure_signal: "work.failed".to_string(),
+        }
+    }
+
+    /// When the assembly is OK and a summary is supplied, the
+    /// `handoff_envelope` key is present in the assembled struct
+    /// (and therefore in the JSON). The four required fields
+    /// round-trip cleanly.
+    #[test]
+    fn emit_result_includes_handoff_envelope_summary_when_present() {
+        let parts = EmitResultParts {
+            ok: true,
+            recorded: false,
+            topic: "work.done".to_string(),
+            phase: "unit_loop".to_string(),
+            allowed_next: vec![],
+            activate_next: vec![],
+            errors: vec![],
+            handoff: None,
+            target_path: None,
+            handoff_envelope: Some(summary_fixture()),
+        };
+        let result = EmitResult::assemble(parts);
+        let summary = result
+            .handoff_envelope
+            .as_ref()
+            .expect("accepted path must carry the summary");
+        assert_eq!(summary.schema_version, "handoff-envelope.v1");
+        assert_eq!(summary.to_hat, "goal-alignment-reviewer");
+        assert_eq!(summary.success_signal, "work.done");
+        assert_eq!(summary.failure_signal, "work.failed");
+
+        // The JSON form exposes the `handoff_envelope` key with
+        // exactly the four documented fields.
+        let json: Value = serde_json::to_value(&result).expect("must serialize");
+        let obj = json.as_object().expect("must be object");
+        let env = obj
+            .get("handoff_envelope")
+            .and_then(|v| v.as_object())
+            .expect("handoff_envelope must appear in JSON");
+        assert_eq!(env.len(), 4, "summary must contain exactly 4 fields");
+        assert_eq!(
+            env.get("schema_version"),
+            Some(&Value::String("handoff-envelope.v1".into()))
+        );
+    }
+
+    /// When the summary is `None` (e.g. disabled or absent from
+    /// the payload) the `handoff_envelope` key is omitted in
+    /// JSON. Pre-existing emit consumers that don't read this
+    /// field see no change (regression defence contract).
+    #[test]
+    fn emit_result_omits_handoff_envelope_summary_when_disabled_or_absent() {
+        let parts = EmitResultParts {
+            ok: true,
+            recorded: true,
+            topic: "work.done".to_string(),
+            phase: "unit_loop".to_string(),
+            allowed_next: vec![],
+            activate_next: vec![],
+            errors: vec![],
+            handoff: None,
+            target_path: Some("/tmp/x.jsonl".to_string()),
+            handoff_envelope: None,
+        };
+        let result = EmitResult::assemble(parts);
+        assert!(result.handoff_envelope.is_none());
+
+        let json: Value = serde_json::to_value(&result).expect("must serialize");
+        let obj = json.as_object().expect("must be object");
+        assert!(
+            obj.get("handoff_envelope").is_none(),
+            "None summary must omit the JSON key"
+        );
+    }
+
+    /// Critical U9 contract: on rejection (`ok == false`) the
+    /// summary is *cleared* even when the caller supplied one.
+    /// Agents must not be misled into thinking a rejected
+    /// envelope was recognised by the validator.
+    #[test]
+    fn emit_result_rejection_does_not_invent_handoff_envelope_summary() {
+        let parts = EmitResultParts {
+            ok: false,
+            recorded: true, // caller error; assemble forces false
+            topic: "work.done".to_string(),
+            phase: "unit_loop".to_string(),
+            allowed_next: vec!["work.ready".to_string()],
+            activate_next: vec![],
+            errors: vec![EmitError {
+                code: "missing_task_id".to_string(),
+                message: "task_id is required".to_string(),
+                field: Some("task_id".to_string()),
+                suggested_command: None,
+            }],
+            handoff: None,
+            target_path: None,
+            // Caller pre-populated a summary; assemble must still
+            // drop it on rejection.
+            handoff_envelope: Some(summary_fixture()),
+        };
+        let result = EmitResult::assemble(parts);
+        assert!(!result.ok);
+        assert!(
+            result.handoff_envelope.is_none(),
+            "rejection path must clear the summary; got {:?}",
+            result.handoff_envelope
+        );
+        let json: Value = serde_json::to_value(&result).expect("must serialize");
+        let obj = json.as_object().expect("must be object");
+        assert!(obj.get("handoff_envelope").is_none());
     }
 }
