@@ -15,6 +15,8 @@ pub mod handoff;
 pub mod map_errors;
 pub mod tests;
 
+pub use map_errors::map_policy_report_to_errors;
+
 use serde::Serialize;
 
 /// `ralph emit` 响应 JSON 的 schema 版本常量。

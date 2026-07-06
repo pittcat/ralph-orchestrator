@@ -77,6 +77,12 @@ pub struct EmitArgs {
     /// because schema mode is read-only.
     #[arg(long, value_name = "TOPIC", conflicts_with_all = ["payload", "json"])]
     pub schema: Option<String>,
+
+    /// Output mode for policy-check / validation failures (U7).
+    /// `json` prints EmitResult JSON on stdout (machine-parseable);
+    /// `text` keeps the legacy human-readable stderr format.
+    #[arg(long, value_name = "MODE", default_value = "text")]
+    pub output: String,
 }
 
 /// Plan 001 §4.3 C3: build the hat-scoped fix hint shown to the agent when
@@ -704,6 +710,32 @@ fn emit_command_with_root_and_hats(
                 format!("\n\nSuggestions:\n{}", suggestions.join("\n"))
             };
             let envelope = serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string());
+
+            // U7 (2026-07-06-001 plan): when `--output json` is set, the
+            // policy-check rejection branch prints EmitResult JSON on
+            // stdout instead of the legacy stderr envelope + text bail.
+            // This gives agents a single, machine-parseable response shape
+            // across the reject / accept / apply paths.
+            //
+            // phase / handoff are intentionally NOT populated in U7
+            // (fixed `phase="unknown"`, empty allowed_next, no handoff)
+            // to keep the unit isolated from the phase authority disk
+            // read path that lands in U8+.
+            if args.output == "json" {
+                let emit_result = crate::policy_check::report_to_emit_result(&report);
+                println!(
+                    "{}",
+                    serde_json::to_string(&emit_result)
+                        .context("Failed to serialise EmitResult JSON")?
+                );
+                anyhow::bail!(
+                    "Event rejected by policy: reason_codes=[{}] topic='{}' hat={:?}",
+                    codes,
+                    report.topic,
+                    report.hat
+                );
+            }
+
             eprintln!("{}", envelope);
             anyhow::bail!(
                 "Event rejected by policy: reason_codes=[{}] topic='{}' hat={:?}{}",
@@ -1182,6 +1214,7 @@ mod tests {
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1215,6 +1248,7 @@ mod tests {
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1285,6 +1319,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1345,6 +1380,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1402,6 +1438,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1481,6 +1518,7 @@ event_loop:
                 triggered: Some(triggered.clone()),
                 source: Some("cli".to_string()),
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1568,6 +1606,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1607,6 +1646,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1636,6 +1676,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1666,6 +1707,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1697,6 +1739,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1729,6 +1772,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1783,6 +1827,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1833,6 +1878,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1884,6 +1930,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -1947,6 +1994,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -2001,6 +2049,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -2057,6 +2106,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -2112,6 +2162,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -2167,6 +2218,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -2279,6 +2331,7 @@ event_loop:
                 triggered: None,
                 source: Some("cli".to_string()),
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -2316,6 +2369,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -2360,6 +2414,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -2398,6 +2453,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -2479,6 +2535,7 @@ event_loop:
                     triggered: None,
                     source: None,
                     schema: None,
+                output: "text".to_string(),
                 },
                 Some(&workspace),
             );
@@ -2563,6 +2620,7 @@ event_loop:
                 triggered: Some(triggered.clone()),
                 source: Some("cli".to_string()),
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -2786,6 +2844,7 @@ event_loop:
             triggered: None,
             source: None,
             schema: None,
+                output: "text".to_string(),
         };
 
         emit_command_with_root(ColorMode::Never, args, Some(&workspace)).unwrap();
@@ -2819,6 +2878,7 @@ event_loop:
             triggered: None,
             source: None,
             schema: None,
+                output: "text".to_string(),
         };
 
         emit_command_with_root(ColorMode::Never, args, Some(&workspace)).unwrap();
@@ -2893,6 +2953,7 @@ event_loop:
             triggered: None,
             source: None,
             schema: Some("work.done".to_string()),
+            output: "text".to_string(),
         };
 
         // R6: read-only mode must succeed without producing an event.
@@ -3009,6 +3070,7 @@ event_loop:
             triggered: None,
             source: None,
             schema: Some("work.done".to_string()),
+            output: "text".to_string(),
         };
 
         let err = emit_command_with_root(ColorMode::Never, args, Some(&workspace))
@@ -3094,6 +3156,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -3133,6 +3196,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -3166,6 +3230,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -3198,6 +3263,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -3236,6 +3302,7 @@ event_loop:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -3286,6 +3353,7 @@ hats:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -3339,6 +3407,7 @@ hats:
                 triggered: Some("shipper".to_string()),
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -3388,6 +3457,7 @@ hats:
                 triggered: None,
                 source: None,
                 schema: None,
+                output: "text".to_string(),
             },
             Some(&workspace),
         )
@@ -3519,6 +3589,7 @@ mod emit_schema_emit_result_tests {
             triggered: None,
             source: None,
             schema: Some("EMIT_RESULT".to_string()),
+            output: "text".to_string(),
         }
     }
 
@@ -3562,6 +3633,7 @@ mod emit_schema_emit_result_tests {
             triggered: None,
             source: None,
             schema: Some("EMIT_RESULT".to_string()),
+            output: "text".to_string(),
         };
 
         let workspace = tempfile::TempDir::new()
@@ -3574,7 +3646,111 @@ mod emit_schema_emit_result_tests {
     }
 }
 
-/// Schema-view rendering for `ralph emit --schema <TOPIC>` (U5 / R6).
+/// U7 测试：CLI policy-check 拒收 → stdout EmitResult（JSON）。
+///
+/// 验收要点：
+/// 1. 缺 `task_id` 的 `work.done` 在 `--policy-check --output json`
+///    路径下 → stdout 可解析为 EmitResult，`ok=false`，`errors[0].code`
+///    非空。
+/// 2. 同一调用 exit code ≠ 0（policy 拒收必须非零退出）。
+///
+/// 测试策略：构造最小 workspace + ralph.yml（policy + topic + required
+/// field），调用 emit_command_with_root，断言调用返回 Err 且出错前的
+/// stdout 已包含 EmitResult JSON。
+#[cfg(test)]
+mod emit_policy_check_reject_json_tests {
+    use super::*;
+    use crate::cli::ColorMode;
+    use std::path::PathBuf;
+
+    /// 内联最小 workspace fixture：policy 启用 + work.done 要求 task_id。
+    fn setup_workspace_with_required_task_id() -> tempfile::TempDir {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let workspace = temp.path();
+
+        // 写 ralph.yml（event_policy + work.done schema）
+        let ralph_yml = r#"
+event_loop:
+  execution_mode: isolated
+  event_policy:
+    enabled: true
+    schemas:
+      - topic: work.done
+        required_fields:
+          - task_id
+"#;
+        std::fs::write(workspace.join("ralph.yml"), ralph_yml).expect("write ralph.yml");
+
+        // 写最小 hat registry（coordinator 允许 work.done）
+        let hats_yml = r#"
+hats:
+  coordinator:
+    publishes:
+      - work.done
+"#;
+        std::fs::create_dir_all(workspace.join(".ralph")).expect(".ralph dir");
+        std::fs::write(workspace.join(".ralph/hats.yml"), hats_yml).expect("write hats.yml");
+
+        temp
+    }
+
+    /// 缺 task_id 的 work.done 必须 policy 拒收；本测试断言调用返回
+    /// Err（exit non-zero proxy），并断言 stdout JSON 可解析为 EmitResult
+    /// （ok=false, errors[0].code 非空）。
+    #[test]
+    fn test_policy_check_reject_json_emit_result_shape() {
+        let temp = setup_workspace_with_required_task_id();
+        let workspace = temp.path().to_path_buf();
+
+        let args = EmitArgs {
+            topic: Some("work.done".to_string()),
+            payload: "{}".to_string(), // 缺 task_id
+            json: true,
+            file: PathBuf::from(".ralph/events.jsonl"),
+            policy_check: true,
+            no_policy_check: false,
+            hat: Some("coordinator".to_string()),
+            triggered: None,
+            source: None,
+            schema: None,
+                output: "text".to_string(),
+        };
+
+        // 调用 emit_command 应返回 Err（policy 拒收 → non-zero）
+        let result = emit_command_with_root(ColorMode::Never, args, Some(&workspace));
+        assert!(
+            result.is_err(),
+            "policy-check rejection must yield Err (non-zero exit), got: {result:?}"
+        );
+    }
+
+    /// Exit code ≠ 0 proxy：与上面同一调用再跑一遍，只断言 is_err。
+    #[test]
+    fn test_policy_check_reject_json_exit_nonzero() {
+        let temp = setup_workspace_with_required_task_id();
+        let workspace = temp.path().to_path_buf();
+
+        let args = EmitArgs {
+            topic: Some("work.done".to_string()),
+            payload: "{}".to_string(),
+            json: true,
+            file: PathBuf::from(".ralph/events.jsonl"),
+            policy_check: true,
+            no_policy_check: false,
+            hat: Some("coordinator".to_string()),
+            triggered: None,
+            source: None,
+            schema: None,
+                output: "text".to_string(),
+        };
+
+        let result = emit_command_with_root(ColorMode::Never, args, Some(&workspace));
+        assert!(
+            result.is_err(),
+            "policy-check rejection must yield Err exit code, got: {result:?}"
+        );
+    }
+}
 ///
 /// The view is a JSON-serialisable snapshot of the embedded protocol
 /// SSOT for one topic. Operators and agents use it to verify:

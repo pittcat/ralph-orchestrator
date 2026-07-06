@@ -741,6 +741,7 @@ mod tests {
             triggered: None,
             source: None,
             schema: None,
+            output: "text".to_string(),
         }));
         assert!(!is_diagnostics_eligible_command(command.as_ref()));
     }

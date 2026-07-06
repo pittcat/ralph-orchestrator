@@ -1722,6 +1722,38 @@ pub fn emit_policy_validation_failure(
     anyhow::bail!("policy validation failed for topic '{}'", failure.topic);
 }
 
+/// U7 (2026-07-06-001 plan): bridge `PolicyCheckReport` → `EmitResult`
+/// for the `--output json` policy-check rejection path.
+///
+/// **Unit 边界固定**：
+/// - `phase` 固定为 `"unknown"`（phase authority 真实解析留给 U8+）
+/// - `allowed_next` 固定为空（不依赖 preset 磁盘）
+/// - `handoff` 固定 `None`（U4 `handoff_from_fixture_input` 留待 U8+）
+/// - `errors` 通过 U2 `map_policy_report_to_errors` 由
+///   `report.reason_codes + report.suggestions` 一一拼装
+/// - `recorded` 固定 `false`（policy-check 阶段不可能写盘）
+/// - `ok` 固定 `false`（本函数专用于拒收场景；接受场景 U8 单独处理）
+pub fn report_to_emit_result(report: &PolicyCheckReport) -> ralph_core::emit_result::EmitResult {
+    use ralph_core::emit_result::assemble::EmitResultParts;
+
+    let errors = ralph_core::emit_result::map_policy_report_to_errors(
+        &report.reason_codes,
+        &report.suggestions,
+    );
+
+    let parts = EmitResultParts {
+        ok: false,
+        recorded: false,
+        topic: report.topic.clone(),
+        phase: "unknown".to_string(),
+        allowed_next: Vec::new(),
+        activate_next: Vec::new(),
+        errors,
+        handoff: None,
+    };
+    ralph_core::emit_result::EmitResult::assemble(parts)
+}
+
 #[cfg(test)]
 #[allow(deprecated)]
 mod tests {
