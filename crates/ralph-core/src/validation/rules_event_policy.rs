@@ -8,9 +8,9 @@
 //! context so the caller can emit them.
 
 use crate::event_policy::{
-    DuplicateWorkDoneHint, EventPolicyConfig, PolicyDecision, PolicyFinding, PolicyRejection,
-    ViolationType, check_completion_honored, check_topic_deny_rules, is_recoverable_policy_finding,
-    validate_event_with_hat,
+    DuplicateWorkDoneHint, EventPolicyConfig, EventLoopHandoffConfig, PolicyDecision,
+    PolicyFinding, PolicyRejection, ViolationType, check_completion_honored,
+    check_topic_deny_rules, is_recoverable_policy_finding, validate_event_with_options,
 };
 use crate::event_reader::Event;
 use crate::payload_contract::{PayloadContractViolation, PayloadContractViolationKind};
@@ -62,14 +62,31 @@ impl ValidationRule for EventPolicyRule {
         }
 
         // 3. Payload-level policy validation (dedup, schema, terminal monotonicity).
+        //
+        // 2026-07-06-004 fix-plan U1: use the typed
+        // `validate_event_with_options` entry point so the
+        // `check_handoff_envelope` gate (already wired inside
+        // `validate_event_with_options`) actually runs. The
+        // legacy `validate_event_with_hat` short-circuited to
+        // the no-op `DefaultHandoffConfig` — which is what
+        // caused the P0 (correctness:C0 / adversarial:A0 /
+        // testing:T2). The `handoff_envelope` field on
+        // `ProtocolView` is populated from `EventLoopConfig`
+        // at view-construction time (see
+        // `preset/engine/protocol.rs`) so the adapter wires
+        // the real typed config end-to-end.
         let mut decision = {
             let state = ctx.policy_runtime_state();
-            validate_event_with_hat(
+            let handoff_adapter = EventLoopHandoffConfig {
+                handoff_envelope: &protocol_view.handoff_envelope,
+            };
+            validate_event_with_options(
                 &event.topic,
                 event.payload.as_deref(),
                 policy_config,
                 state,
                 event.hat.as_deref(),
+                &handoff_adapter,
             )
         };
 

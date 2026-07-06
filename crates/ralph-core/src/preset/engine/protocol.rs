@@ -23,8 +23,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::config::execution_contracts::{ExecutionContractRule, ExecutionContractsConfig};
 use crate::config::{
-    EventLoopConfig, EventPolicyConfig, EventSchema, StateProjectionConfig, VerdictGateConfig,
-    WorkflowChain, WorkflowContractConfig, WorkflowGuardsConfig,
+    EventLoopConfig, EventPolicyConfig, EventSchema, HandoffEnvelopeConfig,
+    StateProjectionConfig, VerdictGateConfig, WorkflowChain, WorkflowContractConfig,
+    WorkflowGuardsConfig,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -63,6 +64,15 @@ pub struct ProtocolView {
     /// business topics, completion-after-terminal actions). `None`
     /// when the preset does not declare an `event_policy` block.
     pub event_policy: Option<EventPolicyConfig>,
+
+    /// 2026-07-06-004 fix-plan U1: typed handoff envelope config.
+    /// `EventPolicyRule` reads this field to build the
+    /// `EventLoopHandoffConfig<'_>` adapter that
+    /// `validate_event_with_options` requires for the nested
+    /// `check_handoff_envelope` gate. Defaults to a disabled
+    /// config so non-serial presets and ad-hoc emits see the
+    /// same pre-fix behaviour.
+    pub handoff_envelope: HandoffEnvelopeConfig,
 
     /// Protocol hash — stable across `cargo build` cycles AND
     /// Rust versions (SHA-256; P2-4 fix). Used by
@@ -133,6 +143,12 @@ impl ProtocolView {
         let state_projection = Some(config.state_projection.clone());
         let execution_contracts = config.execution_contracts.clone();
 
+        // 2026-07-06-004 fix-plan U1: relay the typed handoff
+        // envelope config so `EventPolicyRule::validate` can
+        // build the `EventLoopHandoffConfig<'_>` adapter without
+        // threading the `EventLoopConfig` through every rule.
+        let handoff_envelope = config.handoff_envelope.clone();
+
         // P2-4: SHA-256 (stable across Rust versions). The previous
         // `DefaultHasher` was Rust-version-dependent and produced
         // false-positive drift warnings after `cargo update`.
@@ -147,6 +163,7 @@ impl ProtocolView {
             state_projection,
             execution_contracts,
             event_policy: config.event_policy.clone(),
+            handoff_envelope,
             protocol_hash,
             feature_flag_enabled: feature_enabled,
         }

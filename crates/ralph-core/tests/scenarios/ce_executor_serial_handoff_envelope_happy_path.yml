@@ -191,17 +191,17 @@ mock_responses:
     hat: coordinator
   - text: |
       <event topic="REVIEW_COMPLETE">
-      {"plan_name":"plan-u12","verdict":"pass","pass_or_fail":"pass","residual_findings_summary":"happy path"}
+      {"plan_name":"plan-u12","verdict":"pass","pass_or_fail":"pass","residual_findings_summary":"happy path","handoff_envelope":{"schema_version":"handoff-envelope.v1","root_goal":"promote to reporter","plan":{"name":"plan-u12","path":"docs/plans/u12.md","current_step":"fix-01","completed_steps":["step-01"]},"state":{"current_status":"reviewed","last_signal":"REVIEW_COMPLETE","blocking_reason":null},"receiver_contract":{"to_hat":"reporter","must_do":["emit report.done"],"must_not_do":["loop indefinitely"],"success_signal":"report.done","failure_signal":"plan.blocked"}}}
       </event>
     hat: shipper
   - text: |
       <event topic="report.done">
-      {"plan_name":"plan-u12","reason":"happy path"}
+      {"plan_name":"plan-u12","reason":"happy path","handoff_envelope":{"schema_version":"handoff-envelope.v1","root_goal":"close the loop","plan":{"name":"plan-u12","path":"docs/plans/u12.md","current_step":"fix-01","completed_steps":["step-01"]},"state":{"current_status":"closing","last_signal":"report.done","blocking_reason":null},"receiver_contract":{"to_hat":"reporter","must_do":["emit LOOP_COMPLETE"],"must_not_do":["regress anything"],"success_signal":"LOOP_COMPLETE","failure_signal":"plan.blocked"}}}
       </event>
     hat: reporter
   - text: |
       <event topic="LOOP_COMPLETE">
-      {"plan_name":"plan-u12","reason":"happy path"}
+      {"plan_name":"plan-u12","reason":"happy path","handoff_envelope":{"schema_version":"handoff-envelope.v1","root_goal":"terminate loop","plan":{"name":"plan-u12","path":"docs/plans/u12.md","current_step":"fix-01","completed_steps":["step-01"]},"state":{"current_status":"done","last_signal":"LOOP_COMPLETE","blocking_reason":null},"receiver_contract":{"to_hat":"reporter","must_do":["stop"],"must_not_do":["restart"],"success_signal":"LOOP_COMPLETE","failure_signal":"plan.blocked"}}}
       </event>
     hat: reporter
 

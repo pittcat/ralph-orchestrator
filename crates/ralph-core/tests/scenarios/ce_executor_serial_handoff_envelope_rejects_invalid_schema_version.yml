@@ -1,0 +1,95 @@
+# ce_executor_serial_handoff_envelope_rejects_invalid_schema_version: 2026-07-06-004
+# fix-plan U1 BDD scenario.
+#
+# P0 root cause (correctness:C0 + adversarial:A0): the CLI boundary
+# `ralph emit --policy-check` never wired `check_handoff_envelope`,
+# so an emit whose envelope `schema_version` is not the literal
+# `handoff-envelope.v1` was silently accepted even though
+# `event_loop.handoff_envelope.validate_payload: true`. This
+# scenario pins the wire-up end-to-end: a work.ready emit with
+# `schema_version: "handoff-envelope.v0"` (deliberately wrong)
+# MUST surface a `task.resume` carrying
+# `handoff_envelope_invalid_schema_version` and the work event
+# MUST NOT land on the bus. Regression defence: any future change
+# that drops the trait `HandoffEnvelopeConfigAccess` from the CLI
+# path, or re-points `EventPolicyRule::validate` at the no-op
+# `validate_event_with_hat` defaults, fails this scenario's
+# `expected.events` / `expected.absent_events` checks.
+
+name: ce_executor_serial_handoff_envelope_rejects_invalid_schema_version
+description: 2026-07-06-004 fix-plan U1 — validate_event_with_options wired into the CLI/loop boundary rejects wrong schema_version.
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - work.ready
+        - plan.complete
+        - plan.blocked
+    executor:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - work.done
+        - work.failed
+
+  event_loop:
+    execution_mode: isolated
+    starting_event: "work.start"
+    completion_promise: "LOOP_COMPLETE"
+    required_events: ["report.done"]
+    # U1: flip the typed handoff envelope switches on so the CLI /
+    # loop boundary validator actually runs.
+    handoff_envelope:
+      enabled: true
+      prompt_injection: true
+      validate_payload: true
+      emit_result_summary: true
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.ready:
+          required_fields:
+            - plan_name
+            - plan_path
+            - task_id
+            - task_key
+            - step
+            - complexity
+            - handoff_envelope
+          payload: json_object
+
+mock_responses:
+  - text: |
+      <event topic="work.start">
+      {"plan_name":"plan-u1-isv","plan_path":"docs/plans/u1-isv.md","task_id":"t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: coordinator
+  # coordinator emits work.ready with WRONG schema_version →
+  # validator must surface task.resume. The string `v0` is
+  # deliberately distinct from the canonical
+  # `handoff-envelope.v1` so the validator has to read the field,
+  # not just pattern-match.
+  - text: |
+      <event topic="work.ready">
+      {"plan_name":"plan-u1-isv","plan_path":"docs/plans/u1-isv.md","task_id":"t1","task_key":"k1","step":"step-01","complexity":"small","handoff_envelope":{"schema_version":"handoff-envelope.v0","root_goal":"ship without regressions","plan":{"name":"plan-u1-isv","path":"docs/plans/u1-isv.md","current_step":"step-01","completed_steps":[]},"state":{"current_status":"ready","last_signal":"work.start","blocking_reason":null},"receiver_contract":{"to_hat":"executor","must_do":["complete step-01"],"must_not_do":["regress baseline"],"success_signal":"work.done","failure_signal":"work.failed"}}}
+      </event>
+    hat: coordinator
+
+expected:
+  iterations: 2
+  events:
+    - topic: task.resume
+  absent_events:
+    - topic: work.ready
+    - topic: work.done
+    - topic: plan.complete
+    - topic: plan.blocked
+    - topic: LOOP_COMPLETE
+  completion: false

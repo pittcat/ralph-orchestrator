@@ -1768,6 +1768,23 @@ fn test_ce_executor_serial_handoff_envelope_rejects_missing_payload() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-06-004 plan U1 (fix-plan): BDD regression that pins
+/// the CLI/loop boundary wire-up of `check_handoff_envelope`.
+/// A `work.ready` emit carrying `schema_version:
+/// "handoff-envelope.v0"` must surface a `task.resume` and the
+/// `work.ready` event MUST NOT land on the bus. Regressions that
+/// fall back to `validate_event_with_hat` with the no-op
+/// `DefaultHandoffConfig` (or that strip the typed adapter from
+/// `ValidationPipeline::from_config`) fail the
+/// `expected.absent_events: [work.ready, ...]` assertion.
+#[test]
+fn test_ce_executor_serial_handoff_envelope_rejects_invalid_schema_version() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_serial_handoff_envelope_rejects_invalid_schema_version.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // 2026-06-20-002 plan U3: harness self-test for `assert_state`
 //

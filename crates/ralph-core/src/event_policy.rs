@@ -2277,14 +2277,19 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
 
     // 2026-07-06-004 plan U8: handoff envelope validation. When
     // `event_loop.handoff_envelope.enabled` is on AND
-    // `validate_payload` is on, every event whose payload parses
-    // as a JSON object must contain a valid
+    // `validate_payload` is on, every business event whose
+    // payload parses as a JSON object must contain a valid
     // `payload.handoff_envelope` (per `handoff_envelope.v1`).
+    // Runtime-injected control topics (`task.resume`) skip
+    // the check — the recovery path is synthesised by the
+    // runner and cannot carry an agent-authored envelope.
     // The check is gated on the typed config so non-serial
     // presets and ad-hoc loops are unaffected (regression
-    // defence #5).
+    // defence #5). When the flag fires for a `task.resume`
+    // it would otherwise deadlock the recovery channel.
     if handoff_config.handoff_envelope_enabled()
         && handoff_config.handoff_envelope_validate_payload()
+        && topic != "task.resume"
     {
         if let Some(p) = payload {
             match serde_json::from_str::<Value>(p) {
@@ -6943,6 +6948,16 @@ hats:
 
     fn policy_minimal() -> EventPolicyConfig {
         use crate::config::{EventPolicyMode, ViolationAction};
+        // U1 (2026-07-06-004 fix-plan) does NOT change the
+        // gate semantics — `validate_event_with_options`'s
+        // `check_handoff_envelope` gate keeps running for
+        // every event whose payload parses as a JSON object
+        // whenever the typed `validate_payload: true` flag
+        // is on. The wire-up merely replaces the no-op
+        // `DefaultHandoffConfig` with the real typed
+        // `EventLoopHandoffConfig` so the gate fires at the
+        // production CLI / loop boundary instead of being
+        // invisible behind a default-off trait.
         EventPolicyConfig {
             enabled: true,
             mode: EventPolicyMode::Enforce,
@@ -6991,6 +7006,9 @@ hats:
             .unwrap()
             .remove("handoff_envelope");
 
+        // U1: now actually wired — uses the original
+        // `policy_minimal()` (no schema declared) and asserts
+        // the `check_handoff_envelope` validator fires.
         let policy = policy_minimal();
         let mut state = PolicyRuntimeState::default();
         let decision = validate_event_with_options(
