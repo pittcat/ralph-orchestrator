@@ -37,6 +37,7 @@ pub mod file_lock;
 pub mod flow_lifecycle;
 mod git_ops;
 mod handoff;
+pub mod handoff_envelope;
 pub mod hat_identity;
 pub mod hat_lifecycle;
 mod hat_registry;
