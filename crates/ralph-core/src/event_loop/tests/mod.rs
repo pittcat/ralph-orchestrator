@@ -48,6 +48,11 @@ mod p1_1_plan_blocked_escalation;
 // 2026-06-23-005 U3: typed dead-letter termination path (R4+R8+AE-3).
 mod plan_blocked_termination;
 mod progress_steward;
+/// 2026-07-06 plan U12: `progress_steward.enabled==false` ⇒ no
+/// `loop.stalled` wake from any code path. Pins the
+/// consumer_stall_repeat gate that U12 adds on top of the
+/// pre-existing U5 stall-detector gate.
+mod progress_steward_disabled;
 mod r5_hard_gate_routing;
 mod recovery_envelope_u7_u8;
 mod replay_light_integration;

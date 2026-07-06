@@ -7540,7 +7540,19 @@ impl EventLoop {
                 .state
                 .handoff_tracker
                 .bump_consumer_stall_count(&esc.consumer);
-            if stall_count >= 2 {
+            if stall_count >= 2
+                && self.config.event_loop.progress_steward.enabled
+            {
+                // 2026-07-06 plan U12: when `progress_steward.enabled`
+                // is `false`, the runtime MUST NOT publish
+                // `loop.stalled` wake events. The ce-executor-serial
+                // preset (U10/U11) removed the `progress-steward`
+                // hat and set this flag to `false`; publishing
+                // `loop.stalled` here would target a non-existent
+                // hat (the bus would silently drop it) and surface
+                // as a phantom-recovery drift. The fail-close
+                // contract is: `enabled==false` ⇒ no
+                // `loop.stalled` wake from any code path.
                 let stalled_payload = serde_json::json!({
                     "reason": "consumer_stall_repeat",
                     "consumer": esc.consumer,
