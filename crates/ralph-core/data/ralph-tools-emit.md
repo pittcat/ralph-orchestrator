@@ -264,6 +264,42 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 - `prompt_injection: true` → 下游 hat activation prompt 顶部显示 `## HANDOFF ENVELOPE` 块
 - `emit_result_summary: true` → `EmitResult.handoff_envelope` 带上述 4 字段摘要
 
+**Envelope 嵌套字段表**（serial preset，2026-07-06-004 fix-plan U9 / R9）：
+
+| 字段路径 | 类型 | required | 说明 / 示例 |
+|----------|------|----------|-------------|
+| `handoff_envelope.schema_version` | string | 是 | 必须等于 `"handoff-envelope.v1"`；其它值触发 `handoff_envelope_invalid_schema_version` |
+| `handoff_envelope.root_goal` | string | 是 | 非空 prose；首句足以让 receiver hat 理解意图 |
+| `handoff_envelope.receiver_contract.to_hat` | string | 是 | 必须是 preset 注册的 hat id；未知值触发 `handoff_envelope_unknown_to_hat` |
+| `handoff_envelope.receiver_contract.must_do` | string[] | 是 | 至少一项；空数组触发 `handoff_envelope_must_do_empty` |
+| `handoff_envelope.receiver_contract.success_signal` | string | 是 | topic 名；必须在 preset 的 hat topology（`triggers` ∪ `publishes`）中 |
+| `handoff_envelope.receiver_contract.failure_signal` | string | 是 | 同上 |
+| `handoff_envelope.plan.name` | string | 是 | 当前 plan 名；非空 |
+| `handoff_envelope.plan.path` | string | 是 | plan 路径；非空 |
+| `handoff_envelope.plan.current_step` | string | 是 | 当前 step 名；非空 |
+| `handoff_envelope.state.current_status` | string | 是 | 状态短语 |
+| `handoff_envelope.state.last_signal` | string | 是 | 最近一次发出的 topic |
+| `handoff_envelope.state.blocking_reason` | string? | 否 | 可选；提供时不能全为空白（触发 `handoff_envelope_blank_blocking_reason`） |
+
+构造模板（最小）：
+
+```json
+{
+  "handoff_envelope": {
+    "schema_version": "handoff-envelope.v1",
+    "root_goal": "ship step-01 cleanly",
+    "receiver_contract": {
+      "to_hat": "executor",
+      "must_do": ["complete step-01"],
+      "success_signal": "work.done",
+      "failure_signal": "work.failed"
+    },
+    "plan": { "name": "<plan>", "path": "<path>", "current_step": "<step>" },
+    "state": { "current_status": "ready", "last_signal": "work.start" }
+  }
+}
+```
+
 参考：`crates/ralph-core/src/handoff_envelope.rs` 是 schema SSOT；`event_policy.rs::check_handoff_envelope` 是 validator 入口。
 
 ### 路径分支矩阵

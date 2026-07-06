@@ -808,6 +808,25 @@ hats:
         - review.complete
         - work.failed
     instructions: |
+      ## Envelopes (handoff contract)
+      Every business emit (`work.ready`, `work.done`, `test.passed`,
+      `test.failed`, `plan.complete`, etc.) carries a
+      `handoff_envelope` field whose nested fields are required:
+      - `schema_version` must equal `handoff-envelope.v1`
+      - `root_goal` (non-empty prose)
+      - `receiver_contract.to_hat` must be a registered hat id
+      - `receiver_contract.success_signal` /
+        `failure_signal` must appear in this preset's hat
+        topology (any hat's `triggers` or `publishes`)
+      - `receiver_contract.must_do` non-empty list
+      - `plan.{name,path,current_step}` non-empty
+      - `state.{current_status,last_signal}` non-empty
+        (optional `blocking_reason`, must be non-blank when present)
+      See `ralph-tools-emit` §5 for the two-step
+      `--policy-check` gate; emit the `--policy-check` form
+      before removing `--policy-check` to actually land the
+      event on disk.
+
       ## EXECUTION MODE — Plan Parsing, Unit Advancement, and Review Triggering
 
       You own plan parsing, unit task creation, unit flow advancement, and overall review triggering.
@@ -1200,6 +1219,25 @@ hats:
         - work.ready
         - fix.exhausted
     instructions: |
+      ## Envelopes (handoff contract)
+      Every business emit (`work.ready`, `work.done`, `test.passed`,
+      `test.failed`, `plan.complete`, etc.) carries a
+      `handoff_envelope` field whose nested fields are required:
+      - `schema_version` must equal `handoff-envelope.v1`
+      - `root_goal` (non-empty prose)
+      - `receiver_contract.to_hat` must be a registered hat id
+      - `receiver_contract.success_signal` /
+        `failure_signal` must appear in this preset's hat
+        topology (any hat's `triggers` or `publishes`)
+      - `receiver_contract.must_do` non-empty list
+      - `plan.{name,path,current_step}` non-empty
+      - `state.{current_status,last_signal}` non-empty
+        (optional `blocking_reason`, must be non-blank when present)
+      See `ralph-tools-emit` §5 for the two-step
+      `--policy-check` gate; emit the `--policy-check` form
+      before removing `--policy-check` to actually land the
+      event on disk.
+
       ## EXECUTOR MODE — TDD Plan-Driven Task Execution
 
       You own implementation. Use TDD mode: write/update tests first, then implement code.
@@ -1491,6 +1529,25 @@ hats:
         - work.done
         - fix.applied
     instructions: |
+      ## Envelopes (handoff contract)
+      Every business emit (`work.ready`, `work.done`, `test.passed`,
+      `test.failed`, `plan.complete`, etc.) carries a
+      `handoff_envelope` field whose nested fields are required:
+      - `schema_version` must equal `handoff-envelope.v1`
+      - `root_goal` (non-empty prose)
+      - `receiver_contract.to_hat` must be a registered hat id
+      - `receiver_contract.success_signal` /
+        `failure_signal` must appear in this preset's hat
+        topology (any hat's `triggers` or `publishes`)
+      - `receiver_contract.must_do` non-empty list
+      - `plan.{name,path,current_step}` non-empty
+      - `state.{current_status,last_signal}` non-empty
+        (optional `blocking_reason`, must be non-blank when present)
+      See `ralph-tools-emit` §5 for the two-step
+      `--policy-check` gate; emit the `--policy-check` form
+      before removing `--policy-check` to actually land the
+      event on disk.
+
       ## VALIDATOR MODE — Full Test Suite Execution
 
       You own running the full test suite. After the executor finishes implementation, you run the full test suite; after the fixer applies a fix, you re-run the full test suite.
@@ -1586,6 +1643,25 @@ hats:
       - on_trigger: "review.dimension.failed"
         must_emit_any_of: ["review.dimension.ready", "review.dimensions.complete"]
     instructions: |
+      ## Envelopes (handoff contract)
+      Every business emit (`work.ready`, `work.done`, `test.passed`,
+      `test.failed`, `plan.complete`, etc.) carries a
+      `handoff_envelope` field whose nested fields are required:
+      - `schema_version` must equal `handoff-envelope.v1`
+      - `root_goal` (non-empty prose)
+      - `receiver_contract.to_hat` must be a registered hat id
+      - `receiver_contract.success_signal` /
+        `failure_signal` must appear in this preset's hat
+        topology (any hat's `triggers` or `publishes`)
+      - `receiver_contract.must_do` non-empty list
+      - `plan.{name,path,current_step}` non-empty
+      - `state.{current_status,last_signal}` non-empty
+        (optional `blocking_reason`, must be non-blank when present)
+      See `ralph-tools-emit` §5 for the two-step
+      `--policy-check` gate; emit the `--policy-check` form
+      before removing `--policy-check` to actually land the
+      event on disk.
+
       ## REVIEW EXECUTION MODE — Serial Sequence State Machine
 
       You own the review-sequence.json state machine. Do NOT review code yourself; do NOT implement fixes.
@@ -2072,6 +2148,25 @@ hats:
     # full 9 minutes before the gate may trip.
     missing_event_grace_secs: 540
     instructions: |
+      ## Envelopes (handoff contract)
+      Every business emit (`work.ready`, `work.done`, `test.passed`,
+      `test.failed`, `plan.complete`, etc.) carries a
+      `handoff_envelope` field whose nested fields are required:
+      - `schema_version` must equal `handoff-envelope.v1`
+      - `root_goal` (non-empty prose)
+      - `receiver_contract.to_hat` must be a registered hat id
+      - `receiver_contract.success_signal` /
+        `failure_signal` must appear in this preset's hat
+        topology (any hat's `triggers` or `publishes`)
+      - `receiver_contract.must_do` non-empty list
+      - `plan.{name,path,current_step}` non-empty
+      - `state.{current_status,last_signal}` non-empty
+        (optional `blocking_reason`, must be non-blank when present)
+      See `ralph-tools-emit` §5 for the two-step
+      `--policy-check` gate; emit the `--policy-check` form
+      before removing `--policy-check` to actually land the
+      event on disk.
+
       ## DIMENSION REVIEWER MODE — Focused {dimension} Review
 
       ### HARD RULE — One Terminal Emit Per Activation (2026-06-18-004 plan U3, R5)
@@ -2359,6 +2454,25 @@ hats:
       events:
         - review.dimensions.complete
     instructions: |
+      ## Envelopes (handoff contract)
+      Every business emit (`work.ready`, `work.done`, `test.passed`,
+      `test.failed`, `plan.complete`, etc.) carries a
+      `handoff_envelope` field whose nested fields are required:
+      - `schema_version` must equal `handoff-envelope.v1`
+      - `root_goal` (non-empty prose)
+      - `receiver_contract.to_hat` must be a registered hat id
+      - `receiver_contract.success_signal` /
+        `failure_signal` must appear in this preset's hat
+        topology (any hat's `triggers` or `publishes`)
+      - `receiver_contract.must_do` non-empty list
+      - `plan.{name,path,current_step}` non-empty
+      - `state.{current_status,last_signal}` non-empty
+        (optional `blocking_reason`, must be non-blank when present)
+      See `ralph-tools-emit` §5 for the two-step
+      `--policy-check` gate; emit the `--policy-check` form
+      before removing `--policy-check` to actually land the
+      event on disk.
+
       ## REVIEW SYNTHESIZER MODE — Merge, Deduplicate, Calibrate, Validate, and Route
 
       You receive the review-coordinator's per-dimension summary
@@ -2629,6 +2743,25 @@ hats:
       events:
         - test.failed
     instructions: |
+      ## Envelopes (handoff contract)
+      Every business emit (`work.ready`, `work.done`, `test.passed`,
+      `test.failed`, `plan.complete`, etc.) carries a
+      `handoff_envelope` field whose nested fields are required:
+      - `schema_version` must equal `handoff-envelope.v1`
+      - `root_goal` (non-empty prose)
+      - `receiver_contract.to_hat` must be a registered hat id
+      - `receiver_contract.success_signal` /
+        `failure_signal` must appear in this preset's hat
+        topology (any hat's `triggers` or `publishes`)
+      - `receiver_contract.must_do` non-empty list
+      - `plan.{name,path,current_step}` non-empty
+      - `state.{current_status,last_signal}` non-empty
+        (optional `blocking_reason`, must be non-blank when present)
+      See `ralph-tools-emit` §5 for the two-step
+      `--policy-check` gate; emit the `--policy-check` form
+      before removing `--policy-check` to actually land the
+      event on disk.
+
       ## FIXER MODE — Diagnose and Fix Test Failures
 
       You own diagnosing the root cause of test failures and fixing them. This merges
@@ -2759,6 +2892,25 @@ hats:
         - plan.complete
         - plan.blocked
     instructions: |
+      ## Envelopes (handoff contract)
+      Every business emit (`work.ready`, `work.done`, `test.passed`,
+      `test.failed`, `plan.complete`, etc.) carries a
+      `handoff_envelope` field whose nested fields are required:
+      - `schema_version` must equal `handoff-envelope.v1`
+      - `root_goal` (non-empty prose)
+      - `receiver_contract.to_hat` must be a registered hat id
+      - `receiver_contract.success_signal` /
+        `failure_signal` must appear in this preset's hat
+        topology (any hat's `triggers` or `publishes`)
+      - `receiver_contract.must_do` non-empty list
+      - `plan.{name,path,current_step}` non-empty
+      - `state.{current_status,last_signal}` non-empty
+        (optional `blocking_reason`, must be non-blank when present)
+      See `ralph-tools-emit` §5 for the two-step
+      `--policy-check` gate; emit the `--policy-check` form
+      before removing `--policy-check` to actually land the
+      event on disk.
+
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## SHIPPER MODE — Final Validation, Plan Completion, and Delivery
 
@@ -2942,6 +3094,25 @@ hats:
                 pass_or_fail: "fail"
             forbid_topics: ["LOOP_COMPLETE"]
     instructions: |
+      ## Envelopes (handoff contract)
+      Every business emit (`work.ready`, `work.done`, `test.passed`,
+      `test.failed`, `plan.complete`, etc.) carries a
+      `handoff_envelope` field whose nested fields are required:
+      - `schema_version` must equal `handoff-envelope.v1`
+      - `root_goal` (non-empty prose)
+      - `receiver_contract.to_hat` must be a registered hat id
+      - `receiver_contract.success_signal` /
+        `failure_signal` must appear in this preset's hat
+        topology (any hat's `triggers` or `publishes`)
+      - `receiver_contract.must_do` non-empty list
+      - `plan.{name,path,current_step}` non-empty
+      - `state.{current_status,last_signal}` non-empty
+        (optional `blocking_reason`, must be non-blank when present)
+      See `ralph-tools-emit` §5 for the two-step
+      `--policy-check` gate; emit the `--policy-check` form
+      before removing `--policy-check` to actually land the
+      event on disk.
+
       ## REPORTER MODE — Manager-Facing Completion Report
 
       Generate a manager-facing report that a non-technical stakeholder can read in 3 minutes and understand what was done, whether it succeeded, and what decisions are needed.
