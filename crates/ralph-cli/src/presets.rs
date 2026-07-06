@@ -1102,10 +1102,9 @@ mod tests {
         );
     }
 
-    /// 2026-07-06-004 plan U7: serial turns on the prompt
-    /// injection half of the handoff envelope (enabled +
-    /// prompt_injection) but keeps validate_payload and
-    /// emit_result_summary off. The contract is read from the
+    /// 2026-07-06-004 plan U7 (extended by U10): serial turns
+    /// on prompt injection (U7), then validate_payload +
+    /// emit_result_summary (U10). The contract is read from the
     /// embedded preset so a future drift between
     /// `presets/en/ce-executor-serial.yml` and the in-binary
     /// embedded copy is caught.
@@ -1138,7 +1137,10 @@ mod tests {
             "ce-executor-serial must turn on prompt_injection after U7"
         );
 
-        // validate_payload / emit_result_summary stay off until U10.
+        // U10 contract: validate_payload + emit_result_summary
+        // are also on. The U7 contract said "stay off until
+        // U10"; U10 is the unit that flips them on, so this
+        // assertion now flips to positive.
         let validate_payload = yaml
             .get("event_loop")
             .and_then(|e| e.get("handoff_envelope"))
@@ -1146,8 +1148,8 @@ mod tests {
             .and_then(|v| v.as_bool())
             .expect("event_loop.handoff_envelope.validate_payload must be present");
         assert!(
-            !validate_payload,
-            "ce-executor-serial must keep validate_payload false at U7; U10 is the unit that flips it on"
+            validate_payload,
+            "ce-executor-serial must enable validate_payload after U10"
         );
         let emit_result_summary = yaml
             .get("event_loop")
@@ -1156,8 +1158,8 @@ mod tests {
             .and_then(|v| v.as_bool())
             .expect("event_loop.handoff_envelope.emit_result_summary must be present");
         assert!(
-            !emit_result_summary,
-            "ce-executor-serial must keep emit_result_summary false at U7; U10 is the unit that flips it on"
+            emit_result_summary,
+            "ce-executor-serial must enable emit_result_summary after U10"
         );
     }
 
