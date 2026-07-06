@@ -139,6 +139,41 @@ pub use verdict::{Verdict, VerdictParseError};
 // sources, surfaced through `TerminationReason::CompletionStuck`.
 pub use types::{CompletionStuck, StuckSource};
 
+// 2026-07-06-004 plan U4: prompt-injection gate helper, exposed
+// at module scope so the U4 tests (and U6 wiring) can reach it
+// without going through `EventLoop`. Stays `pub(crate)` so it
+// never leaks out of `ralph-core`.
+pub(crate) use self::prompt_helpers::prepend_handoff_envelope_if_enabled;
+
+mod prompt_helpers {
+    use crate::config::HandoffEnvelopeConfig;
+    use crate::handoff_envelope::{render_handoff_envelope_prompt, HandoffEnvelopeView};
+
+    /// 2026-07-06-004 plan U4: small private helper that decides
+    /// whether to prepend the rendered `## HANDOFF ENVELOPE`
+    /// block. Default-closed (no-op) when either flag is off or
+    /// no envelope is supplied. U6 calls this from inside the real
+    /// prompt chain with the latest envelope extracted from
+    /// recent events; U4 only tests the gate logic itself.
+    pub(crate) fn prepend_handoff_envelope_if_enabled(
+        prompt: String,
+        config: &HandoffEnvelopeConfig,
+        envelope: Option<&HandoffEnvelopeView>,
+    ) -> String {
+        if !(config.enabled && config.prompt_injection) {
+            return prompt;
+        }
+        let Some(view) = envelope else {
+            return prompt;
+        };
+        let rendered = render_handoff_envelope_prompt(view);
+        // The renderer always emits a trailing newline. Joining
+        // with "---" on its own line keeps the original prompt
+        // body unambiguously separated.
+        format!("{rendered}---\n\n{prompt}")
+    }
+}
+
 use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
 
 use crate::diagnosis::{
