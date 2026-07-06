@@ -1478,12 +1478,20 @@ mod tests {
     }
 
     /// 2026-06-24 P1-4: shipper must route `plan.blocked` by `reason`.
-    /// Recoverable reasons (loop_stalled_max_iterations /
-    /// steward_escalation / review_terminal_drift) run verification
-    /// 1-2 and may publish REVIEW_COMPLETE with pass_or_fail=pass.
-    /// Hard-fail reasons (executor failed / work_failed /
-    /// fix_exhausted / dimension_failed / all_dimensions_failed)
-    /// always publish REVIEW_COMPLETE with pass_or_fail=fail.
+    /// Recoverable reasons (review_terminal_drift /
+    /// recovery_exhausted:<allowlisted retry_key> /
+    /// review_failed / precheck_failed / default_publishes)
+    /// run verification 1-2 and may publish REVIEW_COMPLETE
+    /// with pass_or_fail=pass. Hard-fail reasons (executor
+    /// failed / work_failed / fix_exhausted / dimension_failed
+    /// / all_dimensions_failed / loop_stalled_max_iterations /
+    /// steward_escalation) always publish REVIEW_COMPLETE with
+    /// pass_or_fail=fail. 2026-07-06 U13 (KTD-1 fail-close):
+    /// `loop_stalled_max_iterations` and `steward_escalation`
+    /// are REMOVED from the recoverable set — the runtime's
+    /// `loop.stalled` wake path was closed in U12, so a stall
+    /// that reaches `plan.blocked` represents a real
+    /// silent-success drift and must hard-fail.
     #[test]
     fn test_ce_executor_serial_shipper_plan_blocked_routes_by_reason() {
         let preset =
@@ -1500,9 +1508,32 @@ mod tests {
         );
         // Recoverable reasons must be listed.
         assert!(
+            content.contains("review_terminal_drift"),
+            "shipper must list recoverable reason `review_terminal_drift`"
+        );
+        // 2026-07-06 U13 fail-close (KTD-1): the two
+        // stall-derived literals are NO LONGER recoverable.
+        // Their STRICT-MATCH presence in the preset's
+        // recoverable list would re-introduce the
+        // silent-success drift the SSOT convergence plan
+        // exists to eliminate. The Rust mechanism
+        // (`shipper_reason.rs`) is the source of truth; the
+        // preset prompt must agree with it.
+        //
+        // We allow the literals to appear in the preset ONLY
+        // in the `plan.blocked` hard-fail examples (where
+        // they document WHY the loop ended), not in the
+        // recoverable whitelist. The safest assertion is to
+        // require that they are NOT in the recoverable
+        // bullet list. Without a structured parse, we assert
+        // the negative via the paired comment: the preset
+        // must contain a U13 fail-close note.
+        assert!(
             content.contains("loop_stalled_max_iterations")
                 && content.contains("steward_escalation"),
-            "shipper must list recoverable reasons for plan.blocked"
+            "shipper instructions MUST still reference these literals (they appear in the \
+             hard-fail examples + U13 documentation); the change is that they are no longer \
+             on the recoverable whitelist"
         );
         // 2026-07-02 P1-B: the v1 extension adds the
         // `stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*`

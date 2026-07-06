@@ -29,8 +29,24 @@ use crate::event_policy::{PolicyFinding, ViolationType};
 /// drift-engine promotion path is preserved by the `starts_with` fallback
 /// in `is_recoverable_plan_blocked_reason` (see 2026-07-02-005 U7).
 const RECOVERABLE_REASONS: &[&str] = &[
-    "loop_stalled_max_iterations",
-    "steward_escalation",
+    // 2026-07-06 plan U13 (KTD-1 fail-close): `loop_stalled_max_iterations`
+    // is NO LONGER recoverable. U12 closes the runtime's `loop.stalled`
+    // wake path (the progress-steward hat was removed in U10). With
+    // the wake path closed, a stall that reaches `plan.blocked`
+    // MUST be hard-failed so the operator sees the real root cause
+    // (silent loop, no progress for `max_iter` turns). Promoting to
+    // `pass_with_residuals` would mask the stall as success, which
+    // is the exact silent-success drift the plan exists to eliminate.
+    //
+    // Removed entries:
+    //   - "loop_stalled_max_iterations"
+    //   - "steward_escalation" (no progress-steward hat anymore; the
+    //     escalation branch in `run_stall_detector_on_state` cannot
+    //     fire when `enabled==false`)
+    //
+    // The remaining entries cover: review-terminal drift, hard
+    // review failure, precheck failure (LLM-as-judge), and the
+    // coordinator-silence `default_publishes` injection.
     "review_terminal_drift",
     // 2026-07-06 U3 (DEV-003 fix): bare `recovery_exhausted` removed.
     // No current code path emits a plan.blocked reason with the bare
@@ -329,5 +345,74 @@ mod tests {
         assert!(is_recoverable_plan_blocked_reason(
             "recovery_exhausted:stall_recovery:dimension_reviewer:review_dimension_ready:handoff_dispatch_timeout:drift-engine"
         ));
+    }
+
+    // 2026-07-06 plan U13 (KTD-1 fail-close):
+    // `loop_stalled_max_iterations` is NO LONGER on the
+    // recoverable whitelist. The runtime's `loop.stalled`
+    // wake path was closed in U12 (progress-steward hat
+    // removed in U10, `enabled=false` enforced in U11), so
+    // a stall that reaches `plan.blocked` represents a real
+    // silent-success drift: the loop is stuck and the
+    // operator needs to see it. Promoting to
+    // `pass_with_residuals` would mask the failure as
+    // success — the exact drift the plan exists to
+    // eliminate.
+    #[test]
+    fn loop_stalled_max_iterations_not_recoverable_pass() {
+        // Direct: the literal is no longer on the whitelist.
+        assert!(
+            !is_recoverable_plan_blocked_reason("loop_stalled_max_iterations"),
+            "loop_stalled_max_iterations MUST NOT be recoverable after U13 fail-close"
+        );
+        // Whitespace + case normalize the way the real
+        // shipper path does — must still fail-close.
+        assert!(
+            !is_recoverable_plan_blocked_reason("  LOOP_STALLED_MAX_ITERATIONS "),
+            "normalized variant must also fail-close"
+        );
+        // REVIEW_COMPLETE(pass) after this reason MUST be
+        // rejected by the shipper routing check.
+        let finding = check_review_complete_shipper_routing(
+            Some(r#"{"pass_or_fail":"pass","verdict":"pass_with_residuals"}"#),
+            Some("loop_stalled_max_iterations"),
+        )
+        .expect("loop_stalled_max_iterations MUST hard-fail pass promotion after U13");
+        assert!(
+            finding
+                .message
+                .contains("shipper_non_recoverable_reason_promoted_to_pass"),
+            "finding must use the U13 fail-close gate; got {:?}",
+            finding
+        );
+    }
+
+    // 2026-07-06 plan U13 (companion test):
+    // `steward_escalation` is also removed from the
+    // recoverable whitelist for the same reason as
+    // `loop_stalled_max_iterations`: the progress-steward
+    // hat no longer exists (U10), so the runtime cannot
+    // legitimately emit this reason. Any path that does
+    // emit it represents a stale-hat drift and must
+    // fail-close.
+    #[test]
+    fn steward_escalation_not_recoverable_pass_after_u13() {
+        assert!(
+            !is_recoverable_plan_blocked_reason("steward_escalation"),
+            "steward_escalation MUST NOT be recoverable after U13 fail-close \
+             (the progress-steward hat was removed in U10)"
+        );
+        let finding = check_review_complete_shipper_routing(
+            Some(r#"{"pass_or_fail":"pass","verdict":"pass_with_residuals"}"#),
+            Some("steward_escalation"),
+        )
+        .expect("steward_escalation MUST hard-fail pass promotion after U13");
+        assert!(
+            finding
+                .message
+                .contains("shipper_non_recoverable_reason_promoted_to_pass"),
+            "finding must use the U13 fail-close gate; got {:?}",
+            finding
+        );
     }
 }
