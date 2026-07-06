@@ -13372,9 +13372,6 @@ fn run_stall_detector_on_state(
     registry: &crate::hat_registry::HatRegistry,
     bus: &mut ralph_proto::EventBus,
 ) {
-    if !config_progress_steward.enabled {
-        return;
-    }
     if state.stall_detector_had_events {
         // A business event was admitted in this turn — reset
         // the no-progress counter and clear the per-turn
@@ -13396,14 +13393,36 @@ fn run_stall_detector_on_state(
         state.steward_woken_this_turn = false;
         return;
     }
-    if state.steward_woken_this_turn {
+    if state.steward_woken_this_turn && config_progress_steward.enabled {
         // Self-protection: the steward was already woken in
-        // this turn. Suppress recursive wakes.
+        // this turn. Suppress recursive wakes (enabled path only).
         return;
     }
     state.consecutive_no_progress_turns = state.consecutive_no_progress_turns.saturating_add(1);
     let max_iter = config_progress_steward.max_steward_iterations;
-    if state.consecutive_no_progress_turns >= max_iter
+
+    // 2026-07-06 plan U12 + R9 fail-close: when steward is disabled,
+    // never publish `loop.stalled`, but still hard-fail after
+    // `max_steward_iterations` consecutive no-progress turns.
+    if !config_progress_steward.enabled {
+        if state.consecutive_no_progress_turns >= max_iter {
+            warn!(
+                consecutive_no_progress = state.consecutive_no_progress_turns,
+                max_iter,
+                "isolated loop: no progress for {} turns with progress_steward disabled — \
+                 emitting plan.blocked (fail-close)",
+                max_iter,
+            );
+            let blocked = ralph_proto::Event::new(
+                "plan.blocked",
+                "{\"reason\":\"loop_stalled_max_iterations\"}".to_string(),
+            )
+            .with_target(ralph_proto::HatId::new("shipper"));
+            bus.publish(blocked);
+            state.consecutive_no_progress_turns = 0;
+            state.consecutive_steward_activations = 0;
+        }
+    } else if state.consecutive_no_progress_turns >= max_iter
         && state.consecutive_steward_activations < max_iter
     {
         // 2026-06-16-001 review fix (F-REL-002): cross-validate

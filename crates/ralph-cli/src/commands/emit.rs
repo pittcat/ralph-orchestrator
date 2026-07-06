@@ -711,18 +711,11 @@ fn emit_command_with_root_and_hats(
             };
             let envelope = serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string());
 
-            // U7 (2026-07-06-001 plan): when `--output json` is set, the
-            // policy-check rejection branch prints EmitResult JSON on
-            // stdout instead of the legacy stderr envelope + text bail.
-            // This gives agents a single, machine-parseable response shape
-            // across the reject / accept / apply paths.
-            //
-            // phase / handoff are intentionally NOT populated in U7
-            // (fixed `phase="unknown"`, empty allowed_next, no handoff)
-            // to keep the unit isolated from the phase authority disk
-            // read path that lands in U8+.
+            // phase / allowed_next resolved from phase authority + ledger
+            // via `policy_check::build_emit_result_parts`.
             if args.output == "json" {
-                let emit_result = crate::policy_check::report_to_emit_result(&report);
+                let emit_result =
+                    crate::policy_check::report_to_emit_result(&report, config.as_ref());
                 println!(
                     "{}",
                     serde_json::to_string(&emit_result)
@@ -1131,17 +1124,15 @@ fn emit_command_with_root_and_hats(
         // policy-check 通过的机器可读信号。text 模式保持原有 stdout
         // "Policy check passed" 行不变（向后兼容）。
         if args.output == "json" {
-            use ralph_core::emit_result::assemble::EmitResultParts;
-            let parts = EmitResultParts {
-                ok: true,
-                recorded: false, // policy-check 阶段永远不写盘
-                topic: topic.to_string(),
-                phase: "unknown".to_string(),
-                allowed_next: Vec::new(),
-                activate_next: Vec::new(),
-                errors: Vec::new(),
-                handoff: None,
-            };
+            let parts = crate::policy_check::build_emit_result_parts(
+                topic.to_string(),
+                true,
+                false,
+                Vec::new(),
+                config.as_ref(),
+                &workspace_root,
+                hat.as_deref(),
+            );
             let result = ralph_core::emit_result::EmitResult::assemble(parts);
             println!(
                 "{}",
@@ -1192,17 +1183,15 @@ fn emit_command_with_root_and_hats(
     // EmitResult JSON（ok=true, recorded=true）作为 apply 成功的
     // 机器可读信号。text 模式保持原有 "Event emitted" 行不变。
     if args.output == "json" {
-        use ralph_core::emit_result::assemble::EmitResultParts;
-        let parts = EmitResultParts {
-            ok: true,
-            recorded: true, // apply 阶段：真实写盘
-            topic: topic.to_string(),
-            phase: "unknown".to_string(),
-            allowed_next: Vec::new(),
-            activate_next: Vec::new(),
-            errors: Vec::new(),
-            handoff: None,
-        };
+        let parts = crate::policy_check::build_emit_result_parts(
+            topic.to_string(),
+            true,
+            true,
+            Vec::new(),
+            config.as_ref(),
+            &workspace_root,
+            hat.as_deref(),
+        );
         let result = ralph_core::emit_result::EmitResult::assemble(parts);
         println!(
             "{}",
@@ -3894,6 +3883,79 @@ hats:
             initial_lines, final_lines,
             "policy-check dry-run must not write to events.jsonl (initial={initial_lines}, final={final_lines})"
         );
+    }
+
+    /// R17 follow-up: EmitResult routing resolves real `phase` +
+    /// `allowed_next` when `mechanism.phase_authority` is enabled.
+    #[test]
+    fn test_policy_check_accept_json_includes_phase_and_allowed_next() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let workspace = temp.path();
+
+        let ralph_yml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    business_topics:
+      - work.done
+    schemas:
+      work.done:
+        required_fields:
+          - task_id
+  mechanism:
+    phase_authority:
+      enabled: true
+      initial_phase: unit_loop
+      phases:
+        - id: unit_loop
+          allowed_emits:
+            coordinator:
+              - work.ready
+              - work.done
+"#;
+        std::fs::write(workspace.join("ralph.yml"), ralph_yml).expect("write ralph.yml");
+        std::fs::create_dir_all(workspace.join(".ralph")).expect(".ralph dir");
+        std::fs::write(
+            workspace.join(".ralph/hats.yml"),
+            r#"
+hats:
+  coordinator:
+    publishes:
+      - work.done
+      - work.ready
+"#,
+        )
+        .expect("write hats.yml");
+
+        let config = crate::preflight::load_config_for_preflight_sync(
+            &[ConfigSource::File(workspace.join("ralph.yml"))],
+            None,
+            workspace,
+        )
+        .expect("load config");
+        let routing = ralph_core::emit_result::resolve_emit_routing_from_config(
+            Some(&config),
+            workspace,
+            Some("coordinator"),
+        );
+        assert_eq!(routing.phase, "unit_loop");
+        assert!(routing.allowed_next.contains(&"work.ready".to_string()));
+        assert!(routing.allowed_next.contains(&"work.done".to_string()));
+
+        let parts = crate::policy_check::build_emit_result_parts(
+            "work.done".to_string(),
+            true,
+            false,
+            Vec::new(),
+            Some(&config),
+            workspace,
+            Some("coordinator"),
+        );
+        let result = ralph_core::emit_result::EmitResult::assemble(parts);
+        assert_eq!(result.phase, "unit_loop");
+        assert!(result.allowed_next.contains(&"work.ready".to_string()));
     }
 }
 

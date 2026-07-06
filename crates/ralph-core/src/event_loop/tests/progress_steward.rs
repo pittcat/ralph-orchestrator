@@ -216,11 +216,11 @@ fn test_u5_steward_self_loop_escalates_to_plan_blocked() {
     );
 }
 
-/// U5.DISABLED: setting `progress_steward.enabled = false`
-/// disables the stall detector entirely. The counters never
-/// increment and `loop.stalled` is never emitted.
+/// U5.DISABLED: `progress_steward.enabled = false` skips
+/// `loop.stalled` wake but still fail-closes with `plan.blocked`
+/// after `max_steward_iterations` no-progress turns (R9).
 #[test]
-fn test_u5_disabled_steward_does_not_emit() {
+fn test_u5_disabled_steward_fail_closes_without_loop_stalled() {
     let temp_dir = tempfile::tempdir().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
     let mut event_loop = make_isolated_stall_loop(&events_path);
@@ -248,8 +248,9 @@ fn test_u5_disabled_steward_does_not_emit() {
         "disabled steward must not emit loop.stalled; got {stalled_count}"
     );
     assert_eq!(
-        plan_blocked_count, 0,
-        "disabled steward must not escalate to plan.blocked; got {plan_blocked_count}"
+        plan_blocked_count, 1,
+        "disabled steward must fail-close with plan.blocked when counter \
+         exceeds max_steward_iterations; got {plan_blocked_count}"
     );
 }
 

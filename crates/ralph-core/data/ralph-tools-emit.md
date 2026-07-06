@@ -38,6 +38,7 @@ ralph emit [OPTIONS] <TOPIC> [PAYLOAD]
 | `--triggered <TRIGGERED>` | string | 否 | `$RALPH_TRIGGERED_HAT` | 被此事件触发的目标 hat |
 | `--source <SOURCE>` | string | 否 | `$RALPH_EVENT_SOURCE` | 事件来源标识 |
 | `--schema <TOPIC>` | string | 否 | — | 打印 `<TOPIC>` 的 embedded 协议 JSON 视图 + `protocol_hash`(U5 / R6,plan 2026-06-20-001);**只读,不写 events.jsonl,不消耗 iteration,不触发 lint**;与 `payload` / `--json` / `--policy-check` 互斥。常见用途:检测 authoring YAML 与 embedded 协议 drift、查 `required_fields` / `is_macro_edge`。详见 [`docs/handbook/serial-preset-development.md`](../../../docs/handbook/serial-preset-development.md) §"`ralph emit --schema <TOPIC>`"。 |
+| `--output <MODE>` | string | 否 | `text` | policy-check / apply 响应格式。`json` → stdout 输出 [`EmitResult`](#ralph-emit-响应emitresult) JSON；`text` → 保留旧版人类可读输出（默认） |
 
 **Schema 模式示例：**
 ```bash

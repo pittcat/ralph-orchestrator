@@ -6,7 +6,7 @@
 //!
 //! 1. `run_stall_detector_on_state` (the per-iteration stall
 //!    detector) — was already gated by `enabled==false` since U5
-//!    (see `test_u5_disabled_steward_does_not_emit` in
+//!    (see `test_u5_disabled_steward_fail_closes_without_loop_stalled` in
 //!    `progress_steward.rs`).
 //! 2. The `consumer_stall_repeat` branch in
 //!    `process_output` — was previously unconditional and is
@@ -89,14 +89,9 @@ hats:
 }
 
 /// U12.HAPPY: when `progress_steward.enabled == false`, the
-/// per-iteration stall detector (`run_stall_detector_on_state`)
-/// MUST short-circuit at its `enabled==false` guard and emit no
-/// `loop.stalled` events, even when the no-progress counter has
-/// already crossed the threshold. This test seeds the counter
-/// high enough that the disabled guard is the only thing
-/// preventing the publish — without U12's hardening, a
-/// different code path (`consumer_stall_repeat` in
-/// `process_output`) could still fire.
+/// per-iteration stall detector MUST NOT publish `loop.stalled`,
+/// but MUST fail-close with `plan.blocked` once the no-progress
+/// counter crosses `max_steward_iterations`.
 #[test]
 fn test_progress_steward_disabled_skips_loop_stalled_wake() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -130,9 +125,9 @@ fn test_progress_steward_disabled_skips_loop_stalled_wake() {
         .filter(|t| *t == "plan.blocked")
         .count();
     assert_eq!(
-        plan_blocked_count, 0,
-        "progress_steward.enabled==false MUST NOT escalate to plan.blocked; \
-         got {} from the stall detector path",
+        plan_blocked_count, 1,
+        "progress_steward.enabled==false MUST fail-close with plan.blocked \
+         when no-progress counter >= max_steward_iterations; got {}",
         plan_blocked_count
     );
 

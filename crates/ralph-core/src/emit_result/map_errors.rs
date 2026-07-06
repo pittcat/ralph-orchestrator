@@ -14,11 +14,8 @@ use crate::emit_result::EmitError;
 
 /// 将 policy report 的扁平 lists 按 index 拼装为 `EmitError` 序列。
 ///
-/// - 两 slice 必须等长；调用方负责前置校验（policy 层已做过 zipped
-///   length check）。本函数在「索引对齐」的前提下取 `code_i` 作为
-///   `code`，`message` 暂使用与 `code` 同字符串（U1 contract：message
-///   不可为空），`field` 留 `None`，`suggested_command` 仅当
-///   suggestion **非空字符串** 时填充。
+/// - 两 slice 长度可不等；缺失的 suggestion 视为空字符串（不填充
+///   `suggested_command`）。不会静默丢弃多余的 `reason_codes`。
 /// - 空 / 不匹配的 suggestion 字符串映射为 `None`（U1 的
 ///   `skip_serializing_if` 保证 JSON 输出里整键被省略）。
 pub fn map_policy_report_to_errors(
@@ -27,12 +24,13 @@ pub fn map_policy_report_to_errors(
 ) -> Vec<EmitError> {
     reason_codes
         .iter()
-        .zip(suggestions.iter())
-        .map(|(code, suggestion)| {
+        .enumerate()
+        .map(|(idx, code)| {
+            let suggestion = suggestions.get(idx).map(String::as_str).unwrap_or("");
             let suggested_command = if suggestion.is_empty() {
                 None
             } else {
-                Some(suggestion.clone())
+                Some(suggestion.to_string())
             };
             EmitError {
                 code: code.clone(),
@@ -177,5 +175,24 @@ mod tests {
             "message must be non-empty for every EmitError (code = {})",
             errors[0].code
         );
+    }
+
+    /// suggestions 短于 reason_codes 时仍输出全部 errors（不静默截断）。
+    #[test]
+    fn test_map_policy_report_to_errors_extra_codes_without_suggestions() {
+        let codes = vec![
+            "missing_task_id".to_string(),
+            "orphan_channel_validation".to_string(),
+        ];
+        let suggestions = vec!["ralph tools task list".to_string()];
+        let errors = map_policy_report_to_errors(&codes, &suggestions);
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].code, "missing_task_id");
+        assert_eq!(
+            errors[0].suggested_command.as_deref(),
+            Some("ralph tools task list")
+        );
+        assert_eq!(errors[1].code, "orphan_channel_validation");
+        assert!(errors[1].suggested_command.is_none());
     }
 }
