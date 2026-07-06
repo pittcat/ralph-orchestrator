@@ -90,28 +90,51 @@ impl ValidationRule for EventPolicyRule {
             )
         };
 
-        // 2026-07-06-004 fix-plan U3 (R3): when the typed
-        // `validate_payload` flag is on AND a `HatRegistry`
-        // was supplied via the per-event context, run the
-        // registry-aware validator so an envelope addressed to
-        // a hat the preset has never registered is rejected
-        // (with `handoff_envelope_unknown_to_hat`) before the
-        // event lands on the bus. The validator's shape /
-        // required-field / nested-contract checks still run
-        // inside `validate_event_with_options` above; this
-        // pass is the registry-only check that the no-registry
-        // `check_handoff_envelope` cannot perform.
+        // 2026-07-06-004 fix-plan U3 (R3) + U6 (R6): the typed
+        // `validate_payload` flag is on AND the event's topic
+        // schema lists `handoff_envelope` as a `required_field`
+        // — run the registry-aware + topology-aware validator
+        // so an envelope addressed to an unknown to_hat
+        // (`handoff_envelope_unknown_to_hat`) or declaring a
+        // signal outside the preset's hat topology
+        // (`handoff_envelope_signal_outside_topology`) is
+        // rejected before the event lands on the bus. The
+        // validator's shape / required-field / nested-contract
+        // checks still run inside `validate_event_with_options`
+        // above; this pass is the registry-and-topology-aware
+        // finishing step. The check is schema-bound (mirrors
+        // the production fix-plan U1 smart-gate change) so
+        // topics whose schema does not name `handoff_envelope`
+        // (e.g. `work.start`) skip both the registry check and
+        // the topology check — the boundary only fires when
+        // the preset author has explicitly asked for the
+        // envelope contract on a topic.
         if protocol_view.handoff_envelope.enabled
             && protocol_view.handoff_envelope.validate_payload
             && matches!(decision, PolicyDecision::Accept)
-            && let Some(registry) = ctx.handoff_registry()
+            && policy_config
+                .schemas
+                .get(&event.topic)
+                .map(|s| s.required_fields.iter().any(|f| f == "handoff_envelope"))
+                .unwrap_or(false)
             && let Some(payload) = event.payload.as_deref()
         {
+            let topology_vec: Vec<String> = protocol_view.topology_topics.iter().cloned().collect();
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
-                if let Err(err) = crate::handoff_envelope::validate_handoff_envelope_payload(
-                    &value,
-                    Some(registry),
-                ) {
+                let registry_check = if let Some(registry) = ctx.handoff_registry() {
+                    crate::handoff_envelope::validate_handoff_envelope_payload_with_topology(
+                        &value,
+                        Some(registry),
+                        &topology_vec,
+                    )
+                } else {
+                    crate::handoff_envelope::validate_handoff_envelope_payload_with_topology(
+                        &value,
+                        None,
+                        &topology_vec,
+                    )
+                };
+                if let Err(err) = registry_check {
                     let finding = PolicyFinding {
                         topic: event.topic.clone(),
                         violation_type: ViolationType::MissingRequiredField {

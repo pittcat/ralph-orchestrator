@@ -670,7 +670,16 @@ pub fn run_policy_check_unified(
     // P2-#6 (002-adversarial-review): production-only env
     // read; tests must use `ProtocolView::from_event_loop`
     // (env-free) to stay isolated under `cargo nextest`.
-    let view = ProtocolView::from_event_loop_with_feature_for_env(&event_loop_config);
+    //
+    // 2026-07-06-004 fix-plan U6 (R6): use the hats-aware
+    // variant so the topology whitelist (every hat's
+    // `triggers` ∪ `publishes`) is populated; the
+    // `EventPolicyRule` consults it to reject
+    // `success_signal` / `failure_signal` outside the
+    // declared topology.
+    let hats = config.as_ref().map(|c| c.hats.clone()).unwrap_or_default();
+    let view =
+        ProtocolView::from_event_loop_with_feature_for_env_and_hats(&event_loop_config, &hats);
     let pipeline = ValidationPipeline::from_config(&view, &event_loop_config);
 
     // R12 (U11-T7): load .ralph/events.jsonl into LedgerSnapshot so

@@ -73,6 +73,19 @@ pub struct ProtocolView {
     /// same pre-fix behaviour.
     pub handoff_envelope: HandoffEnvelopeConfig,
 
+    /// 2026-07-06-004 fix-plan U6 (R6): topology topics — the
+    /// union of every hat's `triggers` ∪ `publishes` in the
+    /// loaded preset. `EventPolicyRule` reads this when
+    /// running the topology-aware
+    /// `validate_handoff_envelope_payload_with_topology` pass
+    /// so a `success_signal` / `failure_signal` outside the
+    /// declared topology is rejected as
+    /// `handoff_envelope_signal_outside_topology`. Empty when
+    /// the preset has no `hats:` block (CLI dry-runs / plain
+    /// loops); the topology check is then skipped for
+    /// parity.
+    pub topology_topics: HashSet<String>,
+
     /// Protocol hash — stable across `cargo build` cycles AND
     /// Rust versions (SHA-256; P2-4 fix). Used by
     /// `ralph emit --schema` to detect drift between the
@@ -116,6 +129,21 @@ impl ProtocolView {
         Self::from_event_loop_with_feature(config, feature_flag_enabled)
     }
 
+    /// 2026-07-06-004 fix-plan U6 (R6): production entry
+    /// point that threads the loaded `RalphConfig`'s `hats`
+    /// map into the topology computation. Same env semantics
+    /// as `from_event_loop_with_feature_for_env`.
+    pub fn from_event_loop_with_feature_for_env_and_hats(
+        config: &EventLoopConfig,
+        hats: &HashMap<String, crate::config::HatConfig>,
+    ) -> Self {
+        let feature_flag_enabled = TEST_PROTOCOL_VIEW_ENABLED
+            .get()
+            .map(|cell| cell.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(true);
+        Self::from_event_loop_with_feature_hats(config, hats, feature_flag_enabled)
+    }
+
     /// Build a view with explicit feature-flag control. Used
     /// by tests and by callers that want to opt-in/out of the
     /// unified view independent of the env var.
@@ -148,6 +176,15 @@ impl ProtocolView {
         // threading the `EventLoopConfig` through every rule.
         let handoff_envelope = config.handoff_envelope.clone();
 
+        // 2026-07-06-004 fix-plan U6 (R6): compute the topology
+        // topic set (every hat's `triggers` ∪ `publishes`).
+        // `EventLoopConfig` does not carry the `hats` map (that
+        // lives on `RalphConfig`), so the view populates an
+        // empty set here and `from_event_loop_with_feature_hats`
+        // is the production entry point that threads the hats
+        // map in.
+        let topology_topics: HashSet<String> = HashSet::new();
+
         // P2-4: SHA-256 (stable across Rust versions). The previous
         // `DefaultHasher` was Rust-version-dependent and produced
         // false-positive drift warnings after `cargo update`.
@@ -163,9 +200,35 @@ impl ProtocolView {
             execution_contracts,
             event_policy: config.event_policy.clone(),
             handoff_envelope,
+            topology_topics,
             protocol_hash,
             feature_flag_enabled: feature_enabled,
         }
+    }
+
+    /// 2026-07-06-004 fix-plan U6 (R6): production entry
+    /// point that threads the loaded `RalphConfig`'s `hats`
+    /// map into the topology computation. The view is then
+    /// able to enforce `success_signal` /
+    /// `failure_signal` against the union of every hat's
+    /// `triggers` ∪ `publishes`.
+    pub fn from_event_loop_with_feature_hats(
+        config: &EventLoopConfig,
+        hats: &HashMap<String, crate::config::HatConfig>,
+        feature_enabled: bool,
+    ) -> Self {
+        let mut view = Self::from_event_loop_with_feature(config, feature_enabled);
+        let mut topology: HashSet<String> = HashSet::new();
+        for hat in hats.values() {
+            for t in &hat.triggers {
+                topology.insert(t.clone());
+            }
+            for p in &hat.publishes {
+                topology.insert(p.clone());
+            }
+        }
+        view.topology_topics = topology;
+        view
     }
 
     /// Required field set for a single topic (empty when the

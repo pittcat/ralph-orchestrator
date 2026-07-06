@@ -34,10 +34,15 @@ pub fn policy_finding_for_topic<'a>(
 /// `ValidationPipeline` once per batch. The pipeline is always
 /// constructed; the legacy per-rule gate stack has been removed.
 pub fn build_unified_validation_pipeline(
-    config: &crate::config::EventLoopConfig,
+    ralph_config: &crate::config::RalphConfig,
 ) -> crate::validation::ValidationPipeline {
-    let view = crate::preset::engine::protocol::ProtocolView::from_event_loop(config);
-    crate::validation::ValidationPipeline::from_config(&view, config)
+    let event_loop_config = &ralph_config.event_loop;
+    let view = crate::preset::engine::protocol::ProtocolView::from_event_loop_with_feature_hats(
+        event_loop_config,
+        &ralph_config.hats,
+        true,
+    );
+    crate::validation::ValidationPipeline::from_config(&view, event_loop_config)
 }
 
 pub fn publish_correction_via_context(

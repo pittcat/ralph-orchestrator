@@ -8294,7 +8294,7 @@ impl EventLoop {
         // commits (the full migration requires lifting the
         // workspace path and HatRegistry into the pipeline,
         // which is a non-trivial signature change).
-        let unified_pipeline = build_unified_validation_pipeline(&self.config.event_loop);
+        let unified_pipeline = build_unified_validation_pipeline(&self.config);
         tracing::debug!(
             pre_commit_rules = unified_pipeline.pre_commit_rules.len(),
             post_commit_rules = unified_pipeline.post_commit_rules.len(),

@@ -270,6 +270,9 @@ fn render_truncated_list_iter(items: &[String]) -> Vec<String> {
 /// * `handoff_envelope_missing_to_hat`
 /// * `handoff_envelope_must_do_empty`
 /// * `handoff_envelope_invalid_payload`
+/// * `handoff_envelope_unknown_to_hat` (U3)
+/// * `handoff_envelope_blank_blocking_reason` (U3)
+/// * `handoff_envelope_signal_outside_topology` (U6)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandoffEnvelopeValidationError {
     pub code: &'static str,
@@ -311,6 +314,26 @@ impl std::error::Error for HandoffEnvelopeValidationError {}
 pub fn validate_handoff_envelope_payload(
     value: &serde_json::Value,
     hat_registry: Option<&crate::hat_registry::HatRegistry>,
+) -> Result<HandoffEnvelopePayload, HandoffEnvelopeValidationError> {
+    validate_handoff_envelope_payload_with_topology(value, hat_registry, &[])
+}
+
+/// 2026-07-06-004 fix-plan U6 (R6): topology-aware validator.
+/// Same shape as [`validate_handoff_envelope_payload`] but
+/// also accepts a `topology_topics` list — the union of every
+/// preset hat's `triggers` ∪ `publishes`. When the supplied
+/// `success_signal` / `failure_signal` is not in the topology,
+/// the validator returns
+/// `handoff_envelope_signal_outside_topology` so an agent
+/// cannot declare a signal contract the preset can never
+/// satisfy.
+///
+/// Passing `&[]` disables the topology check; legacy callers
+/// (pure unit tests) keep parity.
+pub fn validate_handoff_envelope_payload_with_topology(
+    value: &serde_json::Value,
+    hat_registry: Option<&crate::hat_registry::HatRegistry>,
+    topology_topics: &[String],
 ) -> Result<HandoffEnvelopePayload, HandoffEnvelopeValidationError> {
     let obj = value
         .as_object()
@@ -466,6 +489,27 @@ pub fn validate_handoff_envelope_payload(
             code: "handoff_envelope_missing_failure_signal",
             message: "receiver_contract.failure_signal must be a non-empty string".to_string(),
         });
+    }
+
+    // 2026-07-06-004 fix-plan U6 (R6): once the structure
+    // validation passes, reject signal values that are not
+    // part of the loaded preset's hat topology (the union of
+    // every hat's `triggers` ∪ `publishes`). An envelope that
+    // declares `success_signal: "fake.topic"` is rejected so
+    // an agent cannot declare a signal contract the preset
+    // can never satisfy. Skipped when `topology_topics` is
+    // empty (legacy callers + unit tests).
+    if !topology_topics.is_empty() {
+        for signal in [&success_signal, &failure_signal] {
+            if !topology_topics.iter().any(|t| t == signal) {
+                return Err(HandoffEnvelopeValidationError {
+                    code: "handoff_envelope_signal_outside_topology",
+                    message: format!(
+                        "receiver_contract signal '{signal}' is not declared in the preset's hat topology (triggers ∪ publishes). Declare the signal in the receiving hat's `publishes`, or pick a value from the preset."
+                    ),
+                });
+            }
+        }
     }
 
     // Plan + state + remaining contract fields go through the
@@ -929,11 +973,9 @@ mod tests {
                 Some("executor"),
             ),
         ];
-        let view: HandoffEnvelopeView = latest_handoff_envelope_payload(
-            &events,
-            "goal-alignment-reviewer",
-        )
-        .expect("most recent envelope addressed to current_hat must be extracted");
+        let view: HandoffEnvelopeView =
+            latest_handoff_envelope_payload(&events, "goal-alignment-reviewer")
+                .expect("most recent envelope addressed to current_hat must be extracted");
         assert_eq!(view.to_hat, "goal-alignment-reviewer");
         assert_eq!(view.plan_current_step, "step-2");
     }
@@ -1101,6 +1143,74 @@ mod tests {
         let err = validate_handoff_envelope_payload(&payload, None)
             .expect_err("blank blocking_reason must reject");
         assert_eq!(err.code, "handoff_envelope_blank_blocking_reason");
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // 2026-07-06-004 fix-plan U6 (R6): topology-whitelist tests.
+    // ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn topology_disabled_accepts_arbitrary_signals() {
+        // Empty topology list = topology check is disabled.
+        // Legacy unit-test shape must keep parity.
+        let payload = full_payload();
+        assert!(
+            validate_handoff_envelope_payload_with_topology(&payload, None, &[]).is_ok(),
+            "empty topology must keep parity with the legacy validator"
+        );
+    }
+
+    #[test]
+    fn validator_rejects_signal_outside_topology() {
+        // U6 (R6): the success_signal / failure_signal must
+        // appear in the preset's hat topology
+        // (`triggers` ∪ `publishes`). An envelope declaring
+        // `success_signal: "fake.topic"` is rejected with
+        // the stable code so the agent can match against the
+        // vocabulary downstream.
+        let topology = vec![
+            "work.start".to_string(),
+            "work.ready".to_string(),
+            "work.done".to_string(),
+            "work.failed".to_string(),
+        ];
+        let mut payload = full_payload();
+        // The fixture's success_signal / failure_signal are
+        // "work.done" / "work.failed", which are in the
+        // topology. Replace success_signal with a value not
+        // in the topology to trigger the rejection.
+        payload["handoff_envelope"]["receiver_contract"]["success_signal"] = json!("fake.topic");
+        let err = validate_handoff_envelope_payload_with_topology(&payload, None, &topology)
+            .expect_err("signal outside topology must reject");
+        assert_eq!(err.code, "handoff_envelope_signal_outside_topology");
+        assert!(
+            err.message.contains("fake.topic"),
+            "message must name the offending signal: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validator_accepts_signal_in_topology() {
+        // Happy path for U6 (R6): when success_signal /
+        // failure_signal are both in the topology the
+        // validator accepts the envelope. The fixture uses
+        // `review.dimension.passed` /
+        // `review.dimension.failed`, so we include review-
+        // related topics in the topology whitelist.
+        let topology = vec![
+            "work.start".to_string(),
+            "work.ready".to_string(),
+            "work.done".to_string(),
+            "work.failed".to_string(),
+            "review.start".to_string(),
+            "review.dimension.passed".to_string(),
+            "review.dimension.failed".to_string(),
+        ];
+        let payload = full_payload();
+        assert!(
+            validate_handoff_envelope_payload_with_topology(&payload, None, &topology).is_ok(),
+            "valid envelope with in-topology signals must surface"
+        );
     }
 
     // keep `unused import` lints quiet for the test-only

@@ -354,6 +354,7 @@ mod tests {
             execution_contracts: Some(ExecutionContractsConfig::default()),
             event_policy: None,
             handoff_envelope: crate::config::HandoffEnvelopeConfig::default(),
+            topology_topics: HashSet::new(),
             protocol_hash: "0".to_string(),
             feature_flag_enabled: false,
         }
