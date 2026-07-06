@@ -33,16 +33,34 @@ pub fn policy_finding_for_topic<'a>(
 /// A2 (002-adversarial-review): build the unified
 /// `ValidationPipeline` once per batch. The pipeline is always
 /// constructed; the legacy per-rule gate stack has been removed.
+///
+/// 2026-07-07-001 plan U1: the handoff `HatRegistry` is now
+/// derived from `RalphConfig` automatically so the registry-
+/// aware `EventPolicyRule` (and its `unknown_to_hat` /
+/// `signal_outside_topology` checks) fire on the same code
+/// path as the runtime. Previously the pipeline was built
+/// with `from_config(&view, ...)` which defaulted the registry
+/// to `None`, silently bypassing those checks at the runtime
+/// boundary. CLI dry-runs (`run_policy_check_unified` without
+/// a workspace config) still produce a `None` registry so
+/// topology-only checks dominate in the no-config path.
 pub fn build_unified_validation_pipeline(
     ralph_config: &crate::config::RalphConfig,
 ) -> crate::validation::ValidationPipeline {
+    use std::sync::Arc;
     let event_loop_config = &ralph_config.event_loop;
     let view = crate::preset::engine::protocol::ProtocolView::from_event_loop_with_feature_hats(
         event_loop_config,
         &ralph_config.hats,
         true,
     );
-    crate::validation::ValidationPipeline::from_config(&view, event_loop_config)
+    // Derive the runtime hat registry so the handoff envelope
+    // `receiver_contract.to_hat` check has a real registry to
+    // consult. `Arc`-wrap for cheap sharing with the pipeline.
+    let registry = Arc::new(crate::hat_registry::HatRegistry::from_runtime_config(
+        ralph_config,
+    ));
+    crate::validation::ValidationPipeline::from_registry(&view, Some(registry))
 }
 
 pub fn publish_correction_via_context(

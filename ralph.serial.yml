@@ -7,6 +7,13 @@ event_loop:
   completion_promise: LOOP_COMPLETE
   max_iterations: 500
   prompt_file: PROMPT.md
+  # ce-executor-serial preset 已开启 handoff envelope；这里也显式声明，
+  # 避免 operator ralph.yml 的 event_loop block 在合并时吞掉 preset opt-in。
+  handoff_envelope:
+    enabled: true
+    prompt_injection: true
+    validate_payload: true
+    emit_result_summary: true
 
 
 tasks:
@@ -15,9 +22,9 @@ tasks:
   # 通过 load_coordinator_hats 直接读本文件的 tasks.coordinator_hats 键，
   # 不做 preset 合并——键缺失/注释掉都会被 CLI 视为空 [] → 连 coordinator
   # 自己建任务都被拒（报错 [non_coordinator_owner] ... coordinator_hats []）。
-  # 值对齐 ce-executor-serial preset 默认 [coordinator, progress-steward]：
-  # 去掉旧漂移 executor（worker 不该有建任务权限），保留 progress-steward
-  # （loop 级 fallback，卡住时发 task.resume 唤醒 hat）。
+  # 值对齐 ce-executor-serial preset 当前默认 [coordinator]：
+  # executor / validator / fixer / reporter 都是 worker，不该有建任务权限。
+  # progress-steward 已从 serial preset 移除，不能再作为 coordinator_hats。
   coordinator_hats:
     - coordinator
   # 两步校验闸门：true 时 agent 建任务须先 `task verify add` 再 `task add`

@@ -223,6 +223,13 @@ schemas:
     # (U1) clears the matching bucket so a re-review round can legally
     # close a new `review.dimensions.complete`. Default to 0 for the
     # empty-diff fast path / pre-fix round.
+    #
+    # 2026-07-07-001 plan U3: review-coordinator's aggregate
+    # `review.dimensions.complete` is payload-bearing and
+    # carries a business handoff to review-synthesizer, so
+    # the serial schema now requires the top-level
+    # `handoff_envelope` field. The nested envelope contract
+    # is validated by the Rust handoff_envelope validator.
     required_fields:
       - plan_name
       - task_id
@@ -230,6 +237,7 @@ schemas:
       - step
       - dimensions
       - fix_round
+      - handoff_envelope
     payload: json_object
     # 2026-07-03-005 plan (P0 fix C7): per-element shape constraint for
     # the `dimensions` array. Closes the 30-day 12x silent-drop bug where
@@ -268,6 +276,12 @@ schemas:
   # `fix_plan_file == "null"` string equality check — leaving
   # `plan.complete` un-emitted.
   review.complete:
+    # 2026-07-07-001 plan U3: review-synthesizer's `review.complete`
+    # is the business handoff to coordinator / fixer / shipper;
+    # it is payload-bearing and the serial schema now requires
+    # the top-level `handoff_envelope` field. The `fix_plan_file`
+    # string literal "null" sentinel and `verdict` enum stay
+    # unchanged — only the envelope addition is in scope.
     required_fields:
       - plan_name
       - fix_round
@@ -279,6 +293,7 @@ schemas:
       - task_key
       - step
       - findings_count
+      - handoff_envelope
     payload: json_object
 
   fix.applied:
@@ -300,6 +315,10 @@ schemas:
   # log/branch on the exhaustion cause. fixer emits this when locate
   # budget (max 10) or fix budget (max 10) is exhausted.
   fix.exhausted:
+    # 2026-07-07-001 plan U3: fix.exhausted is payload-bearing
+    # and emitted by fixer when its budget is exhausted; the
+    # serial schema now requires the top-level `handoff_envelope`
+    # field for parity with `fix.applied`.
     required_fields:
       - plan_name
       - fix_round
@@ -307,6 +326,7 @@ schemas:
       - task_key
       - step
       - reason
+      - handoff_envelope
     payload: json_object
 
   plan.complete:
@@ -317,6 +337,10 @@ schemas:
     # 2026-06-30 P0-A: `step` is required so plan_gate can recognise
     # fix-* exemption path; without it plan.complete from the fix-unit
     # chain is rejected as `plan_gate_review_not_terminal`.
+    # 2026-07-07-001 plan U3: `plan.complete` is a terminal
+    # payload-bearing business handoff (coordinator → shipper /
+    # reporter); the serial schema now requires the top-level
+    # `handoff_envelope` field for parity with `work.done`.
     required_fields:
       - plan_name
       - completed_steps
@@ -326,6 +350,7 @@ schemas:
       - verdict
       - final_findings_count
       - fix_round
+      - handoff_envelope
     payload: json_object
 
   plan.blocked:
@@ -355,6 +380,7 @@ schemas:
     # already enforces that comparison.
     required_fields:
       - reason
+      - handoff_envelope
     payload: json_object
     allowed_values:
       reason:
@@ -408,17 +434,33 @@ schemas:
     payload: json_object
 
   REVIEW_COMPLETE:
+    # 2026-07-07-001 plan U3: shipper's `REVIEW_COMPLETE` is the
+    # canonical verdict-bearing business handoff to reporter
+    # and downstream tooling; the serial schema now requires the
+    # top-level `handoff_envelope` field for parity with the
+    # other terminals (`plan.complete`, `plan.blocked`,
+    # `report.done`).
     required_fields:
       - plan_name
       - verdict
       - pass_or_fail
       - residual_findings_summary
+      - handoff_envelope
     payload: json_object
 
   report.done:
+    # 2026-07-07-001 plan U3: reporter's `report.done` is the
+    # payload-bearing final business handoff in the serial
+    # chain; the serial schema now requires the top-level
+    # `handoff_envelope` field. `LOOP_COMPLETE` is intentionally
+    # NOT envelope-required — see
+    # `crates/ralph-cli/src/presets.rs`
+    # `ce_executor_serial_schema_requires_handoff_envelope_for_all_migrated_topics`
+    # for the documented allowlist.
     required_fields:
       - report_path
       - awaiting_decision
+      - handoff_envelope
     payload: json_object
 
   # 2026-06-16-001 U3/U5: recovery signal used by origin guard,

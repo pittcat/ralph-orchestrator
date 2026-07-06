@@ -18,7 +18,7 @@
 //! existing single-payload path and just delegates to the same
 //! helpers.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -205,19 +205,48 @@ pub fn load_policy_config_for_cli_emit(
     let env_label = std::env::var("RALPH_HATS_SOURCE")
         .ok()
         .filter(|s| !s.is_empty());
+    let workspace_root = resolve_workspace_root(root);
 
-    let base = load_workspace_config(root, on_error)?;
-
-    let Some(label) = env_label else {
-        return Ok(base);
+    let mut base = match load_workspace_config(root, on_error)? {
+        Some(cfg) => cfg,
+        None => {
+            // No `ralph.yml`. If `RALPH_HATS_SOURCE` is set, we
+            // still want to honour the preset's
+            // `event_policy.schemas` so the CLI precheck rejects
+            // bad payloads — fall through to the historic
+            // preset-merge path below. If neither exists, return
+            // `None` (no policy enforcement possible).
+            if env_label.is_none() && !workspace_root.join(".ralph/hats.yml").exists() {
+                return Ok(None);
+            }
+            RalphConfig::default()
+        }
     };
 
-    // Parse the label into a HatsSource so the existing merger can be
-    // reused. Unknown shapes (e.g. plain file paths) are still honoured —
-    // load_config_for_preflight_sync handles the File / Builtin / Remote
-    // variants the same way.
+    // 2026-07-07-001 plan U5: when a workspace `.ralph/hats.yml`
+    // exists alongside the loaded `ralph.yml`, deep-merge its
+    // `hats:` map into `base.hats`. The previous behaviour only
+    // merged `.ralph/hats.yml` when `RALPH_HATS_SOURCE` was set,
+    // which meant CLI `--policy-check` saw a hat registry with
+    // ONLY the builtin `ralph` hat (from `from_runtime_config`)
+    // and rejected every user-defined hat (e.g. `coordinator`)
+    // via `OriginRule::unknown_hat`. The CLI boundary must
+    // honour the same hat map the runtime does, regardless of
+    // whether the operator set `RALPH_HATS_SOURCE`.
+    let hats_yaml_path = workspace_root.join(".ralph/hats.yml");
+    if hats_yaml_path.exists() {
+        merge_workspace_hats_into(&mut base, &hats_yaml_path)?;
+    }
+
+    // If `RALPH_HATS_SOURCE` is set, defer to the historic
+    // preset-merge path so the operator's intent wins. The
+    // `.ralph/hats.yml` merge above is a no-op then because
+    // the env preset already supplies the full hats map.
+    let Some(label) = env_label else {
+        return Ok(Some(base));
+    };
+
     let parsed = Some(HatsSource::parse(&label));
-    let workspace_root = resolve_workspace_root(root);
     let config_path = config_resolution::find_workspace_config_path(&workspace_root)
         .unwrap_or_else(|| workspace_root.join("ralph.yml"));
     let sources: Vec<ConfigSource> = if config_path.exists() {
@@ -247,6 +276,103 @@ pub fn load_policy_config_for_cli_emit(
             Ok(None)
         }
     }
+}
+
+/// 2026-07-07-001 plan U5: when the workspace has no `ralph.yml`
+/// but does have `.ralph/hats.yml`, surface a minimal
+/// `RalphConfig` carrying just the hats map so the CLI
+/// `OriginRule` accepts user-defined hats. `RALPH_HATS_SOURCE`
+/// still wins when set (the historic preset-merge path).
+fn load_policy_config_from_hats_only(
+    root: Option<&PathBuf>,
+    env_label: Option<&str>,
+) -> Result<Option<RalphConfig>> {
+    if env_label.is_some() {
+        return Ok(None);
+    }
+    let workspace_root = resolve_workspace_root(root);
+    let hats_yaml_path = workspace_root.join(".ralph/hats.yml");
+    if !hats_yaml_path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&hats_yaml_path)
+        .with_context(|| format!("Failed to load hats from {:?}", hats_yaml_path))?;
+    let value: serde_yaml::Value = config_resolution::parse_yaml_value(
+        &content,
+        &hats_yaml_path.display().to_string(),
+    )?;
+    let hats_map = match value.get("hats") {
+        Some(serde_yaml::Value::Mapping(m)) => m.clone(),
+        Some(other) => {
+            anyhow::bail!(
+                "`.ralph/hats.yml` top-level `hats` must be a mapping, found {:?}",
+                other
+            );
+        }
+        None => {
+            return Ok(None);
+        }
+    };
+    let mut config = RalphConfig::default();
+    let mut new_hats = std::collections::HashMap::new();
+    for (k, v) in hats_map {
+        let key_str = match k {
+            serde_yaml::Value::String(s) => s,
+            other => {
+                anyhow::bail!(
+                    "`.ralph/hats.yml` hat id must be a string, found {:?}",
+                    other
+                );
+            }
+        };
+        let hat_config: ralph_core::config::HatConfig = serde_yaml::from_value(v)
+            .with_context(|| format!("Failed to parse hat config for `{key_str}`"))?;
+        new_hats.insert(key_str, hat_config);
+    }
+    config.hats = new_hats;
+    Ok(Some(config))
+}
+
+/// 2026-07-07-001 plan U5: deep-merge the `hats:` mapping from a
+/// `.ralph/hats.yml` file into an existing `RalphConfig`'s `hats`
+/// map. Existing entries (from `ralph.yml`) win on key collision
+/// because the workspace `ralph.yml` is the operator's explicit
+/// declaration; `.ralph/hats.yml` only fills gaps.
+fn merge_workspace_hats_into(
+    config: &mut RalphConfig,
+    hats_yaml_path: &std::path::Path,
+) -> Result<()> {
+    let content = std::fs::read_to_string(hats_yaml_path)
+        .with_context(|| format!("Failed to load hats from {:?}", hats_yaml_path))?;
+    let value: serde_yaml::Value = config_resolution::parse_yaml_value(
+        &content,
+        &hats_yaml_path.display().to_string(),
+    )?;
+    let hats_map = match value.get("hats") {
+        Some(serde_yaml::Value::Mapping(m)) => m.clone(),
+        Some(other) => {
+            anyhow::bail!(
+                "`.ralph/hats.yml` top-level `hats` must be a mapping, found {:?}",
+                other
+            );
+        }
+        None => return Ok(()),
+    };
+    for (k, v) in hats_map {
+        let key_str = match k {
+            serde_yaml::Value::String(s) => s,
+            other => {
+                anyhow::bail!(
+                    "`.ralph/hats.yml` hat id must be a string, found {:?}",
+                    other
+                );
+            }
+        };
+        let hat_config: ralph_core::config::HatConfig = serde_yaml::from_value(v)
+            .with_context(|| format!("Failed to parse hat config for `{key_str}`"))?;
+        config.hats.entry(key_str).or_insert(hat_config);
+    }
+    Ok(())
 }
 
 /// Looks up the active `EventPolicyConfig` for the loaded config. Returns
@@ -680,7 +806,21 @@ pub fn run_policy_check_unified(
     let hats = config.as_ref().map(|c| c.hats.clone()).unwrap_or_default();
     let view =
         ProtocolView::from_event_loop_with_feature_for_env_and_hats(&event_loop_config, &hats);
-    let pipeline = ValidationPipeline::from_config(&view, &event_loop_config);
+    // 2026-07-07-001 plan U1: derive the runtime hat registry
+    // from the loaded config so the unified pipeline's
+    // `EventPolicyRule` registry-aware checks
+    // (`unknown_to_hat`, `signal_outside_topology`) fire at
+    // the CLI boundary. Previously the pipeline was built with
+    // `from_config(&view, ...)` which defaulted the registry to
+    // `None`, silently bypassing the `to_hat` check on the CLI
+    // path. The no-config dry-run path still gets `None` so it
+    // does not panic and only enforces schema / topology that
+    // is derivable from the cold-start view.
+    let pipeline = if let Some(cfg) = config.as_ref() {
+        ValidationPipeline::from_ralph_config(&view, cfg)
+    } else {
+        ValidationPipeline::from_config(&view, &event_loop_config)
+    };
 
     // R12 (U11-T7): load .ralph/events.jsonl into LedgerSnapshot so
     // the unified pipeline sees terminal/business state. The legacy
@@ -1151,6 +1291,145 @@ event_loop:
                 .any(|c| c.starts_with("step_handoff:")),
             "unified pipeline must surface step_handoff reason code; got: {:?}",
             report.reason_codes
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-07-07-001 plan U1: CLI `run_policy_check_unified` must
+    // wire the runtime `HatRegistry` from the loaded config so
+    // an envelope addressed to an unknown `receiver_contract.to_hat`
+    // is rejected (the same wire shape as the runtime pipeline).
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Build a workspace whose `ralph.yml` declares a small set of
+    /// hats, an envelope-required schema on `work.done`, and a
+    /// `handoff_envelope` policy block that asks the validator to
+    /// run. Used by the U1 RED tests below.
+    fn workspace_with_serial_handoff_policy() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let yaml = r#"
+hats:
+  executor:
+    name: Executor
+    triggers: ["work.ready"]
+    publishes: ["work.done", "work.failed"]
+    instructions: "execute"
+  reviewer:
+    name: Reviewer
+    triggers: ["work.done"]
+    publishes: ["review.passed"]
+    instructions: "review"
+event_loop:
+  handoff_envelope:
+    enabled: true
+    validate_payload: true
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    schemas:
+      work.done:
+        required_fields: ["handoff_envelope", "task_id", "step"]
+"#;
+        std::fs::write(tmp.path().join("ralph.yml"), yaml).unwrap();
+        tmp
+    }
+
+    /// Local copy of the U10 (2026-07-06-004) envelope fixture
+    /// (defined inside `tests` module below) so the U1 tests can
+    /// stand on their own without depending on the test-module
+    /// access boundary.
+    fn u1_full_envelope(to_hat: &str) -> String {
+        format!(
+            r#"{{
+  "plan_name":"p1",
+  "task_id":"t1",
+  "task_key":"p1:step-2:implement",
+  "step":"step-2",
+  "commit_count":1,
+  "changed_lines":10,
+  "handoff_envelope":{{
+    "schema_version":"handoff-envelope.v1",
+    "root_goal":"ship without regressions",
+    "plan":{{
+      "name":"p1",
+      "path":"docs/plans/p1.md",
+      "current_step":"step-2",
+      "completed_steps":["step-1"]
+    }},
+    "state":{{
+      "current_status":"ready_for_review",
+      "last_signal":"work.done",
+      "blocking_reason":null
+    }},
+    "receiver_contract":{{
+      "to_hat":"{to_hat}",
+      "must_do":["review step-2"],
+      "must_not_do":["regress step-1"],
+      "success_signal":"work.done",
+      "failure_signal":"work.failed"
+    }}
+  }}
+}}"#
+        )
+    }
+
+    #[test]
+    fn policy_check_rejects_unknown_handoff_to_hat_from_builtin_serial_config() {
+        // 2026-07-07-001 plan U1 (P1): CLI --policy-check must
+        // reject an envelope addressed to an unknown to_hat when
+        // the workspace config declares a real hat set. The
+        // unified pipeline inside `run_policy_check_unified` must
+        // be wired with the runtime `HatRegistry` so the
+        // `EventPolicyRule` registry check actually fires.
+        let tmp = workspace_with_serial_handoff_policy();
+        let payload = u1_full_envelope("ghost-hat");
+        let report = run_policy_check_unified(
+            "work.done",
+            Some(&payload),
+            Some("executor"),
+            None,
+            tmp.path(),
+        )
+        .expect("unified check should return a report");
+        assert!(
+            !report.accepted,
+            "unknown to_hat must produce a non-accepting report: {report:?}"
+        );
+        // The CLI report surfaces a stable reason prefix; the
+        // envelope validator's `unknown_to_hat` code must reach
+        // either `reason_codes` or `suggestions` so downstream
+        // tooling can route on it.
+        let reason_blob = format!(
+            "{:?}\n{:?}",
+            report.reason_codes, report.suggestions
+        );
+        assert!(
+            reason_blob.contains("handoff_envelope_unknown_to_hat"),
+            "report must surface the stable unknown-to_hat code; got: {reason_blob}"
+        );
+        assert!(
+            reason_blob.contains("ghost-hat"),
+            "report must name the offending to_hat id; got: {reason_blob}"
+        );
+    }
+
+    #[test]
+    fn policy_check_accepts_known_handoff_to_hat_from_builtin_serial_config() {
+        // Symmetric happy-path: known to_hat must still pass.
+        let tmp = workspace_with_serial_handoff_policy();
+        let payload = u1_full_envelope("reviewer");
+        let report = run_policy_check_unified(
+            "work.done",
+            Some(&payload),
+            Some("executor"),
+            None,
+            tmp.path(),
+        )
+        .expect("unified check should return a report");
+        assert!(
+            report.accepted,
+            "known to_hat must pass; report: {report:?}"
         );
     }
 
@@ -2265,6 +2544,34 @@ event_loop:
             err.reason_code == "missing_required_field" || err.message.contains("handoff_envelope"),
             "rejection must trace to handoff; got {:?}",
             err
+        );
+    }
+
+    #[test]
+    fn load_policy_config_for_cli_emit_rejects_invalid_hats_file() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let root_path = root.to_path_buf();
+        std::fs::create_dir_all(root.join(".ralph")).unwrap();
+        std::fs::write(
+            root.join(".ralph/hats.yml"),
+            r#"
+hats:
+  executor:
+    name: 123
+    triggers: ["work.ready"]
+"#,
+        )
+        .unwrap();
+
+        let err =
+            load_policy_config_for_cli_emit(Some(&root_path), OnConfigError::Fail)
+                .expect_err("invalid hat config must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Failed to parse hat config for `executor`")
+                || msg.contains("`.ralph/hats.yml`"),
+            "unexpected error message: {msg}"
         );
     }
 

@@ -2609,6 +2609,13 @@ event_loop:
     completion_after_terminal:
       duplicate_terminal: reject
       business_after_completion: reject
+hats:
+  strategist:
+    name: strategist
+    triggers:
+      - experiment.planned
+    publishes:
+      - LOOP_COMPLETE
 "#
     }
 
@@ -4449,6 +4456,13 @@ mod emit_policy_check_accept_json_tests {
         let temp = tempfile::TempDir::new().expect("temp dir");
         let workspace = temp.path();
 
+        // 2026-07-07-001 plan U5: declare `coordinator` with both
+        // `triggers` (so the registry-wired `OriginRule` accepts
+        // the topic) and `publishes: [work.done]` in `ralph.yml`
+        // directly. The previous `.ralph/hats.yml`-only fixture
+        // worked when the unified pipeline ran with an empty
+        // `HatRegistry`; the U1 wiring now requires the hat map
+        // to be discoverable from the loaded `RalphConfig`.
         let ralph_yml = r#"
 event_loop:
   event_policy:
@@ -4461,17 +4475,17 @@ event_loop:
       work.done:
         required_fields:
           - task_id
-"#;
-        std::fs::write(workspace.join("ralph.yml"), ralph_yml).expect("write ralph.yml");
-
-        let hats_yml = r#"
 hats:
   coordinator:
+    name: coordinator
+    triggers:
+      - work.start
     publishes:
       - work.done
 "#;
+        std::fs::write(workspace.join("ralph.yml"), ralph_yml).expect("write ralph.yml");
+
         std::fs::create_dir_all(workspace.join(".ralph")).expect(".ralph dir");
-        std::fs::write(workspace.join(".ralph/hats.yml"), hats_yml).expect("write hats.yml");
 
         temp
     }

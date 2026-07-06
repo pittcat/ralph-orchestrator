@@ -393,9 +393,9 @@ event_loop:
     max_steward_iterations: 3
   # 2026-07-06-004 plan U7: handoff envelope prompt injection —
   # serial is the first (and currently the only) preset that
-  # turns this on. Only `enabled` and `prompt_injection` flip on
-  # here; `validate_payload` and `emit_result_summary` stay off
-  # until U10. Default-closed elsewhere (regression defence #4).
+  # turns this on. All four flags are enabled here so the
+  # envelope is injected, validated, and summarized in the
+  # serial path. Default-closed elsewhere (regression defence #4).
   handoff_envelope:
     enabled: true
     prompt_injection: true
@@ -1288,7 +1288,37 @@ hats:
       Copy-pasteable example (replace the placeholders, then run verbatim):
 
       ```bash
-      ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"docs/plans/my-plan.md","task_id":"task-1747016430-a1b2","task_key":"ce-executor:my-plan:step-01:u0-impl","step":"step-01","commit_count":1,"changed_lines":42}'
+      ralph emit work.done --json '{
+        "plan_name": "my-plan",
+        "plan_path": "docs/plans/my-plan.md",
+        "task_id": "task-live-id",
+        "task_key": "ce-executor:my-plan:step-01:u0-impl",
+        "step": "step-01",
+        "commit_count": 1,
+        "changed_lines": 42,
+        "handoff_envelope": {
+          "schema_version": "handoff-envelope.v1",
+          "root_goal": "ship the step without regressions",
+          "plan": {
+            "name": "my-plan",
+            "path": "docs/plans/my-plan.md",
+            "current_step": "step-01",
+            "completed_steps": []
+          },
+          "state": {
+            "current_status": "ready_for_review",
+            "last_signal": "work.done",
+            "blocking_reason": null
+          },
+          "receiver_contract": {
+            "to_hat": "<next-hat>",
+            "must_do": ["review step-01"],
+            "must_not_do": ["regress prior steps"],
+            "success_signal": "review.dimension.passed",
+            "failure_signal": "review.dimension.failed"
+          }
+        }
+      }'
       ```
 
       MUST NOT write events directly; use `ralph emit` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).
@@ -1587,7 +1617,29 @@ hats:
         "task_key": "<task_key>",
         "step": "<step>",
         "tests_run": <int>,
-        "tests_passed": <int>
+        "tests_passed": <int>,
+        "handoff_envelope": {
+          "schema_version": "handoff-envelope.v1",
+          "root_goal": "<why this test pass matters>",
+          "plan": {
+            "name": "<plan_name>",
+            "path": "docs/plans/<plan_name>.md",
+            "current_step": "<step>",
+            "completed_steps": []
+          },
+          "state": {
+            "current_status": "ready_for_review",
+            "last_signal": "test.passed",
+            "blocking_reason": null
+          },
+          "receiver_contract": {
+            "to_hat": "review-coordinator",
+            "must_do": ["start review sequence"],
+            "must_not_do": ["regress prior steps"],
+            "success_signal": "review.dimension.ready",
+            "failure_signal": "review.dimension.failed"
+          }
+        }
       }'
       ```
 
@@ -1599,7 +1651,29 @@ hats:
         "task_key": "<task_key>",
         "step": "<step>",
         "failures": [{"test": "<test_name>", "summary": "<failure summary>"}],
-        "test_errors": ["<error 1>", "<error 2>"]
+        "test_errors": ["<error 1>", "<error 2>"],
+        "handoff_envelope": {
+          "schema_version": "handoff-envelope.v1",
+          "root_goal": "<why this failure matters>",
+          "plan": {
+            "name": "<plan_name>",
+            "path": "docs/plans/<plan_name>.md",
+            "current_step": "<step>",
+            "completed_steps": []
+          },
+          "state": {
+            "current_status": "tests_failed",
+            "last_signal": "test.failed",
+            "blocking_reason": "<one-line summary>"
+          },
+          "receiver_contract": {
+            "to_hat": "fixer",
+            "must_do": ["fix the failing tests"],
+            "must_not_do": ["regress prior steps"],
+            "success_signal": "fix.applied",
+            "failure_signal": "fix.exhausted"
+          }
+        }
       }'
       ```
 
@@ -2018,7 +2092,29 @@ hats:
           "plan_name": "<plan_name>",
           "task_id": "<task_id>",
           "task_key": "<task_key>",
-          "step": "<step>"
+          "step": "<step>",
+          "handoff_envelope": {
+            "schema_version": "handoff-envelope.v1",
+            "root_goal": "<why this dimension review matters>",
+            "plan": {
+              "name": "<plan_name>",
+              "path": "docs/plans/<plan_name>.md",
+              "current_step": "<step>",
+              "completed_steps": []
+            },
+            "state": {
+              "current_status": "ready_for_review",
+              "last_signal": "review.start",
+              "blocking_reason": null
+            },
+            "receiver_contract": {
+              "to_hat": "dimension-reviewer",
+              "must_do": ["review <dim> for the current unit"],
+              "must_not_do": ["modify source code"],
+              "success_signal": "review.dimension.done",
+              "failure_signal": "review.dimension.failed"
+            }
+          }
         }' --source review-coordinator
         ```
       - Emit `review.dimensions.complete` via `ralph emit`:
@@ -2036,7 +2132,29 @@ hats:
             {"dimension": "maintainability",   "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-maintainability-<task>.json"},
             {"dimension": "project-standards", "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-project-standards-<task>.json"},
             {"dimension": "adversarial",       "status": "done", "findings_file": ".agents/scratchpad/ce-executor/<plan>/findings-adversarial-<task>.json"}
-          ]
+          ],
+          "handoff_envelope": {
+            "schema_version": "handoff-envelope.v1",
+            "root_goal": "<why the review sequence close matters>",
+            "plan": {
+              "name": "<plan_name>",
+              "path": "docs/plans/<plan_name>.md",
+              "current_step": "<step>",
+              "completed_steps": []
+            },
+            "state": {
+              "current_status": "review_sequence_complete",
+              "last_signal": "review.dimensions.complete",
+              "blocking_reason": null
+            },
+            "receiver_contract": {
+              "to_hat": "review-synthesizer",
+              "must_do": ["synthesize review.complete"],
+              "must_not_do": ["re-run dimensions"],
+              "success_signal": "review.complete",
+              "failure_signal": "plan.blocked"
+            }
+          }
         }' --source review-coordinator
         ```
       - `fix_round` MUST match the value carried by `review.dimension.ready` payloads in the same sequence (it stays constant across the 6-dim walk). After `fix.applied(fix_round=N)` is accepted, the next round MUST use `fix_round: N+1` and emit a fresh `review.dimension.ready` first — NEVER re-emit `review.dimensions.complete` with the same `fix_round` (U5 dedup rejects it).
@@ -2346,7 +2464,29 @@ hats:
         "task_key": "<task_key>",
         "step": "<step>",
         "p0_count": <int>, "p1_count": <int>, "p2_count": <int>, "p3_count": <int>,
-        "safe_auto_count": <int>, "gated_auto_count": <int>, "manual_count": <int>, "advisory_count": <int>
+        "safe_auto_count": <int>, "gated_auto_count": <int>, "manual_count": <int>, "advisory_count": <int>,
+        "handoff_envelope": {
+          "schema_version": "handoff-envelope.v1",
+          "root_goal": "<why this dimension result matters>",
+          "plan": {
+            "name": "<plan_name>",
+            "path": "docs/plans/<plan_name>.md",
+            "current_step": "<step>",
+            "completed_steps": []
+          },
+          "state": {
+            "current_status": "dimension_done",
+            "last_signal": "review.dimension.done",
+            "blocking_reason": null
+          },
+          "receiver_contract": {
+            "to_hat": "review-coordinator",
+            "must_do": ["record this dimension in the sequence"],
+            "must_not_do": ["re-walk the dimension"],
+            "success_signal": "review.dimensions.complete",
+            "failure_signal": "review.dimension.failed"
+          }
+        }
       }'
       ```
 
@@ -2357,7 +2497,29 @@ hats:
         "plan_name": "<plan_name>",
         "task_id": "<task_id>",
         "task_key": "<task_key>",
-        "step": "<step>"
+        "step": "<step>",
+        "handoff_envelope": {
+          "schema_version": "handoff-envelope.v1",
+          "root_goal": "<why this dimension failed>",
+          "plan": {
+            "name": "<plan_name>",
+            "path": "docs/plans/<plan_name>.md",
+            "current_step": "<step>",
+            "completed_steps": []
+          },
+          "state": {
+            "current_status": "dimension_failed",
+            "last_signal": "review.dimension.failed",
+            "blocking_reason": "<one-line summary>"
+          },
+          "receiver_contract": {
+            "to_hat": "review-coordinator",
+            "must_do": ["move on to the next pending dimension"],
+            "must_not_do": ["retry the same dimension"],
+            "success_signal": "review.dimensions.complete",
+            "failure_signal": "plan.blocked"
+          }
+        }
       }'
       ```
 

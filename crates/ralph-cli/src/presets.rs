@@ -1259,6 +1259,221 @@ mod tests {
         }
     }
 
+    /// 2026-07-07-001 plan U3: extend the U10 schema-contract
+    /// guard so every payload-bearing topic that the R15
+    /// migration set declares as envelope-required
+    /// (`plan.complete`, `plan.blocked`, `REVIEW_COMPLETE`,
+    /// `report.done`, `review.dimensions.complete`,
+    /// `review.complete`, `fix.exhausted`) carries
+    /// `handoff_envelope` in `required_fields`. Topics that are
+    /// payload-less sentinels (`LOOP_COMPLETE`) or non-business
+    /// runtime corrections (`task.resume`) are intentionally
+    /// excluded — the test allowlist keeps the rationale next
+    /// to the assertion.
+    #[test]
+    fn ce_executor_serial_schema_requires_handoff_envelope_for_all_migrated_topics() {
+        // The authoritative R15 topic set with envelope-required
+        // contract. Each entry must list `handoff_envelope` in
+        // its `required_fields`. Topics intentionally absent
+        // (terminal sentinels, runtime corrections) carry a
+        // rationale in the comment column for future maintainers.
+        const ENVELOPE_REQUIRED: &[(&str, &str)] = &[
+            ("work.ready", "executor input; payload-bearing"),
+            ("work.done", "executor output; payload-bearing"),
+            ("work.failed", "executor failure; payload-bearing"),
+            ("test.passed", "validator output; payload-bearing"),
+            ("test.failed", "validator failure; payload-bearing"),
+            ("review.start", "coordinator kick-off; payload-bearing"),
+            (
+                "review.dimension.ready",
+                "review-coordinator kick-off; payload-bearing",
+            ),
+            (
+                "review.dimension.done",
+                "dimension-reviewer output; payload-bearing",
+            ),
+            (
+                "review.dimension.failed",
+                "dimension-reviewer failure; payload-bearing",
+            ),
+            (
+                "review.dimensions.complete",
+                "review-coordinator aggregate; payload-bearing",
+            ),
+            (
+                "review.complete",
+                "review-synthesizer output; payload-bearing",
+            ),
+            ("fix.applied", "fixer output; payload-bearing"),
+            ("fix.exhausted", "fixer failure; payload-bearing"),
+            ("plan.complete", "coordinator terminal; payload-bearing"),
+            ("plan.blocked", "coordinator terminal; payload-bearing"),
+            ("REVIEW_COMPLETE", "shipper terminal; payload-bearing"),
+            ("report.done", "reporter terminal; payload-bearing"),
+        ];
+
+        let merged_text = merge_root_with_ssot("ce-executor-serial");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&merged_text).expect("merged YAML must parse");
+        let schemas = yaml
+            .get("event_loop")
+            .and_then(|e| e.get("event_policy"))
+            .and_then(|p| p.get("schemas"))
+            .expect("event_loop.event_policy.schemas must be present after merge");
+
+        for (topic, rationale) in ENVELOPE_REQUIRED {
+            let entry = schemas
+                .get(*topic)
+                .unwrap_or_else(|| panic!("schema must declare `{topic}` ({rationale})"));
+            let required = entry
+                .get("required_fields")
+                .and_then(|r| r.as_sequence())
+                .unwrap_or_else(|| panic!("`{topic}` must carry required_fields"));
+            let list: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+            assert!(
+                list.contains(&"handoff_envelope"),
+                "U3 contract: `{topic}` ({rationale}) must require handoff_envelope; got {:?}",
+                list
+            );
+        }
+
+        // Explicit allowlist: terminal sentinels and runtime
+        // corrections that the R15 list intentionally excluded.
+        // Pin the absence so a future drift that adds
+        // `handoff_envelope` to one of these surfaces as a test
+        // failure with a documented rationale.
+        const NOT_ENVELOPE_REQUIRED: &[(&str, &str)] = &[
+            (
+                "LOOP_COMPLETE",
+                "terminal sentinel; no payload / no business handoff",
+            ),
+            (
+                "task.resume",
+                "runtime correction injected by the event loop; not a business handoff",
+            ),
+        ];
+        for (topic, rationale) in NOT_ENVELOPE_REQUIRED {
+            let entry = match schemas.get(*topic) {
+                Some(e) => e,
+                None => continue, // topic not in schema at all → consistent with allowlist
+            };
+            let required = match entry.get("required_fields").and_then(|r| r.as_sequence()) {
+                Some(r) => r,
+                None => continue,
+            };
+            let list: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+            assert!(
+                !list.contains(&"handoff_envelope"),
+                "allowlist entry `{topic}` ({rationale}) must NOT require handoff_envelope; got {:?}",
+                list
+            );
+        }
+    }
+
+    /// 2026-07-07-001 plan U4 (P0): every copy-pasteable
+    /// `ralph emit <envelope-required-topic>` example inside the
+    /// serial preset must include the top-level `handoff_envelope`
+    /// field. Without this guard, an agent following the documented
+    /// example emits an event that the runtime / CLI rejects with a
+    /// missing-required-field error — the exact P0 the original
+    /// review flagged. The scan reads the canonical preset text
+    /// and asserts, for each fenced `ralph emit <topic>` block in
+    /// the serial preset's instructions, that the JSON literal
+    /// contains the `handoff_envelope` key.
+    ///
+    /// Topics that the serial preset documents ONLY via prose
+    /// (no fenced `ralph emit` example block — e.g. `work.ready`
+    /// is described in prose, not via a fenced example) are
+    /// skipped: the scan only inspects blocks that exist. Each
+    /// existing block must carry the envelope.
+    #[test]
+    fn ce_executor_serial_emit_examples_include_handoff_envelope() {
+        const ENVELOPE_REQUIRED: &[&str] = &[
+            "work.ready",
+            "work.done",
+            "work.failed",
+            "test.passed",
+            "test.failed",
+            "review.start",
+            "review.dimension.ready",
+            "review.dimension.done",
+            "review.dimension.failed",
+            "review.dimensions.complete",
+            "review.complete",
+            "fix.applied",
+            "fix.exhausted",
+            "plan.complete",
+            "plan.blocked",
+            "REVIEW_COMPLETE",
+            "report.done",
+        ];
+
+        // Read the canonical preset (the user-visible instructions,
+        // not the post-merge embedded copy — the schema SSOT is the
+        // authoritative schema; the canonical preset is the
+        // authoritative docs).
+        let preset_text = read_root_preset("ce-executor-serial.yml");
+        for topic in ENVELOPE_REQUIRED {
+            let outcome = serial_emit_block_status(&preset_text, topic);
+            assert!(
+                !matches!(outcome, EmitBlockStatus::MissingEnvelope),
+                "P0: every copy-pasteable `ralph emit {topic}` block in \
+                 `presets/en/ce-executor-serial.yml` must include a top-level \
+                 `handoff_envelope` field. The agent following the documented \
+                 example would otherwise emit an event the runtime rejects with \
+                 a missing-required-field error. \
+                 (Block status: {outcome:?}; allowed outcomes are `NoBlock` or `CarriesEnvelope`.)"
+            );
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum EmitBlockStatus {
+        /// The topic has no fenced `ralph emit` block in the preset.
+        NoBlock,
+        /// At least one fenced block exists and every such block
+        /// carries `"handoff_envelope"`.
+        CarriesEnvelope,
+        /// At least one fenced block exists and at least one of
+        /// those blocks omits `"handoff_envelope"`.
+        MissingEnvelope,
+    }
+
+    fn serial_emit_block_status(preset_text: &str, topic: &str) -> EmitBlockStatus {
+        let needle = format!("ralph emit {topic} ");
+        let mut in_bash_block = false;
+        let mut in_topic_block = false;
+        let mut any_topic_block = false;
+        let mut any_topic_block_carries_envelope = false;
+        for line in preset_text.lines() {
+            if line.trim_start().starts_with("```bash") {
+                in_bash_block = true;
+                in_topic_block = line.contains(&needle);
+                if in_topic_block {
+                    any_topic_block = true;
+                }
+                continue;
+            }
+            if line.trim_start().starts_with("```") {
+                // Closing fence (matches the first ``` after a
+                // ```bash opener). Reset both flags.
+                in_bash_block = false;
+                in_topic_block = false;
+                continue;
+            }
+            if in_bash_block && in_topic_block && line.contains("\"handoff_envelope\"") {
+                any_topic_block_carries_envelope = true;
+            }
+        }
+        if !any_topic_block {
+            EmitBlockStatus::NoBlock
+        } else if any_topic_block_carries_envelope {
+            EmitBlockStatus::CarriesEnvelope
+        } else {
+            EmitBlockStatus::MissingEnvelope
+        }
+    }
+
     #[test]
     fn test_ce_executor_serial_has_two_step_verify_gate() {
         let preset =

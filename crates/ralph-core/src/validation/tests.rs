@@ -244,6 +244,199 @@ fn required_fields_rule_accepts_malformed_json_to_defer_to_execution_contract() 
 }
 
 // ============================================================
+// 2026-07-07-001 plan U1: runtime unified pipeline must wire
+// the handoff HatRegistry so an envelope addressed to an
+// unknown to_hat is rejected. The previous fix-plan
+// (2026-07-06-004) wired the registry into the *pure*
+// `validate_handoff_envelope_payload` helper but left the
+// `ValidationPipeline::from_config` constructor (and its two
+// production callers) without a registry. This pair of tests
+// pins the wiring end-to-end through the production entry
+// point `build_unified_validation_pipeline`.
+// ============================================================
+
+fn envelope_payload_with_to_hat(to_hat: &str) -> String {
+    format!(
+        r#"{{
+  "plan_name":"p1",
+  "plan_path":"docs/plans/p1.md",
+  "task_id":"t1",
+  "task_key":"p1:step-1:implement",
+  "step":"step-1",
+  "handoff_envelope":{{
+    "schema_version":"handoff-envelope.v1",
+    "root_goal":"ship without regressions",
+    "plan":{{
+      "name":"p1",
+      "path":"docs/plans/p1.md",
+      "current_step":"step-1",
+      "completed_steps":["step-0"]
+    }},
+    "state":{{
+      "current_status":"ready_for_review",
+      "last_signal":"work.done",
+      "blocking_reason":null
+    }},
+    "receiver_contract":{{
+      "to_hat":"{to_hat}",
+      "must_do":["review step-1"],
+      "must_not_do":["regress step-0"],
+      "success_signal":"work.done",
+      "failure_signal":"work.failed"
+    }}
+  }}
+}}"#
+    )
+}
+
+#[test]
+fn runtime_validation_pipeline_rejects_unknown_handoff_to_hat() {
+    // Build the production entry point (`build_unified_validation_pipeline`)
+    // and confirm it wires the registry automatically — no manual
+    // `from_registry` call. If the wiring regresses (e.g. someone drops
+    // the registry back to `None`), this test must fail.
+    use crate::config::RalphConfig;
+    use crate::event_loop::policy::build_unified_validation_pipeline;
+    let yaml = r#"
+hats:
+  executor:
+    name: Executor
+    triggers: ["work.ready"]
+    publishes: ["work.done", "work.failed"]
+    instructions: ""
+  reviewer:
+    name: Reviewer
+    triggers: ["work.done"]
+    publishes: ["review.passed"]
+    instructions: ""
+event_loop:
+  handoff_envelope:
+    enabled: true
+    validate_payload: true
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    schemas:
+      work.done:
+        required_fields: ["handoff_envelope", "task_id", "step"]
+      work.failed:
+        required_fields: ["handoff_envelope", "task_id"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let pipeline = build_unified_validation_pipeline(&config);
+    assert!(
+        pipeline.handoff_registry.is_some(),
+        "build_unified_validation_pipeline must wire the runtime HatRegistry; got None"
+    );
+
+    let view = ProtocolView::from_event_loop_with_feature_hats(
+        &config.event_loop,
+        &config.hats,
+        true,
+    );
+    let mut snap = minimal_snapshot();
+    let mut projected = snap.clone();
+    let mut ctx = ValidationContext::new(&mut snap);
+    let mut projected_ctx = ValidationContext::new(&mut projected);
+
+    let event = make_event(
+        "work.done",
+        &envelope_payload_with_to_hat("ghost-hat"),
+        Some("executor"),
+    );
+    let report =
+        pipeline.validate_with_preview(&view, &mut ctx, &mut projected_ctx, &event);
+    assert!(
+        !report.accepted,
+        "unknown to_hat must surface as a pipeline rejection; report: {report:?}"
+    );
+    // The rejection must originate from EventPolicy (the registry-aware
+    // rule); pin the stage so we don't regress to a different gate.
+    let first_reject = report
+        .first_rejection()
+        .expect("at least one rule must reject the envelope");
+    assert_eq!(
+        first_reject.stage,
+        ValidationStage::EventPolicy,
+        "the registry-aware check is owned by EventPolicyRule"
+    );
+    // The correction hint is the carrier for the unstable envelope
+    // validator's message (which already contains the offending
+    // `ghost-hat` and the stable unknown-to_hat code). Pin both.
+    let hint = first_reject
+        .correction_hint
+        .as_deref()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        hint.contains("handoff_envelope_unknown_to_hat"),
+        "correction_hint must surface the stable unknown-to_hat code; got: {hint}"
+    );
+    assert!(
+        hint.contains("ghost-hat"),
+        "correction_hint must name the offending to_hat id; got: {hint}"
+    );
+}
+
+#[test]
+fn runtime_validation_pipeline_accepts_known_handoff_to_hat() {
+    // Symmetric happy-path: production entry point must wire the
+    // registry and still accept a known to_hat.
+    use crate::config::RalphConfig;
+    use crate::event_loop::policy::build_unified_validation_pipeline;
+    let yaml = r#"
+hats:
+  executor:
+    name: Executor
+    triggers: ["work.ready"]
+    publishes: ["work.done", "work.failed"]
+    instructions: ""
+  reviewer:
+    name: Reviewer
+    triggers: ["work.done"]
+    publishes: ["review.passed"]
+    instructions: ""
+event_loop:
+  handoff_envelope:
+    enabled: true
+    validate_payload: true
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    schemas:
+      work.done:
+        required_fields: ["handoff_envelope", "task_id", "step"]
+      work.failed:
+        required_fields: ["handoff_envelope", "task_id"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let pipeline = build_unified_validation_pipeline(&config);
+    let view = ProtocolView::from_event_loop_with_feature_hats(
+        &config.event_loop,
+        &config.hats,
+        true,
+    );
+    let mut snap = minimal_snapshot();
+    let mut projected = snap.clone();
+    let mut ctx = ValidationContext::new(&mut snap);
+    let mut projected_ctx = ValidationContext::new(&mut projected);
+    let event = make_event(
+        "work.done",
+        &envelope_payload_with_to_hat("reviewer"),
+        Some("executor"),
+    );
+    let report =
+        pipeline.validate_with_preview(&view, &mut ctx, &mut projected_ctx, &event);
+    assert!(
+        report.accepted,
+        "known to_hat must pass; first_rejection={:?}",
+        report.first_rejection()
+    );
+}
+
+// ============================================================
 // StepHandoffRule
 // ============================================================
 

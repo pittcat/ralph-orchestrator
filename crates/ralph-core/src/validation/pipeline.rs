@@ -230,6 +230,24 @@ impl ValidationPipeline {
         self.handoff_registry = registry;
         self
     }
+
+    /// 2026-07-07-001 plan U1: build the canonical pipeline
+    /// directly from a `RalphConfig`. Wires the runtime
+    /// `HatRegistry` (via `from_runtime_config`) so the
+    /// registry-aware `EventPolicyRule` checks fire at the CLI
+    /// boundary. The `from_config(&view, ...)` constructor does
+    /// **not** thread the registry; callers that have a
+    /// `RalphConfig` in hand should use this helper. `lib.rs`
+    /// keeps `hat_registry` private, so this helper is the
+    /// public bridge.
+    pub fn from_ralph_config(
+        protocol_view: &ProtocolView,
+        config: &crate::config::RalphConfig,
+    ) -> Self {
+        use crate::hat_registry::HatRegistry;
+        let registry = std::sync::Arc::new(HatRegistry::from_runtime_config(config));
+        Self::from_registry(protocol_view, Some(registry))
+    }
     /// Run the pre-commit rules against the current snapshot.
     /// Returns one [`ValidationResult`] per rule, in pipeline
     /// order. The caller decides what to do with rejections
