@@ -144,10 +144,20 @@ pub use types::{CompletionStuck, StuckSource};
 // without going through `EventLoop`. Stays `pub(crate)` so it
 // never leaks out of `ralph-core`.
 pub(crate) use self::prompt_helpers::prepend_handoff_envelope_if_enabled;
+// 2026-07-06-004 plan U6: isolated-prompt wiring helper. Used by
+// the real prompt chain (after orchestrator context / wave
+// context) so the wiring test (`u6_handoff_envelope_wiring`) can
+// pin the behaviour without going through EventLoop.
+pub(crate) use self::prompt_helpers::{
+    build_isolated_prompt_with_handoff, IsolatedPromptInputs,
+};
 
 mod prompt_helpers {
     use crate::config::HandoffEnvelopeConfig;
-    use crate::handoff_envelope::{render_handoff_envelope_prompt, HandoffEnvelopeView};
+    use crate::handoff_envelope::{
+        latest_handoff_envelope_payload, render_handoff_envelope_prompt, HandoffEnvelopeView,
+    };
+    use ralph_proto::Event;
 
     /// 2026-07-06-004 plan U4: small private helper that decides
     /// whether to prepend the rendered `## HANDOFF ENVELOPE`
@@ -171,6 +181,31 @@ mod prompt_helpers {
         // with "---" on its own line keeps the original prompt
         // body unambiguously separated.
         format!("{rendered}---\n\n{prompt}")
+    }
+
+    /// 2026-07-06-004 plan U6: typed inputs for
+    /// `build_isolated_prompt_with_handoff`. The struct keeps the
+    /// signature small enough that the wiring tests can construct
+    /// it without instantiating an EventLoop.
+    pub(crate) struct IsolatedPromptInputs<'a> {
+        pub base_prompt: String,
+        pub events: &'a [Event],
+        pub config: &'a HandoffEnvelopeConfig,
+    }
+
+    /// 2026-07-06-004 plan U6: real-prompt wiring helper. Given a
+    /// base prompt, recent events, and the typed config, run the
+    /// extractor (U5) + prepender (U4) and return the final
+    /// string. The real prompt chain in `EventLoop` calls this
+    /// helper from inside the orchestrator-context → macro-next-
+    /// hint stretch (per plan §Unit 6 ordering).
+    pub(crate) fn build_isolated_prompt_with_handoff(inputs: IsolatedPromptInputs<'_>) -> String {
+        let envelope = latest_handoff_envelope_payload(inputs.events);
+        prepend_handoff_envelope_if_enabled(
+            inputs.base_prompt,
+            inputs.config,
+            envelope.as_ref(),
+        )
     }
 }
 
@@ -4822,6 +4857,21 @@ impl EventLoop {
             // accepted business event payload's `next_hint` field (≤120 chars). When the
             // feature is disabled or no hint is available the prepend is a no-op.
             let final_prompt = self.prepend_macro_next_hint(final_prompt, &regular_events, hat_id);
+            // 2026-07-06-004 plan U6: wire the handoff envelope
+            // extractor (U5) + prepender (U4) into the isolated
+            // prompt chain. The helper is gated on
+            // `event_loop.handoff_envelope.enabled &&
+            // prompt_injection` and on a recent event carrying a
+            // valid envelope; default-closed so non-serial presets
+            // and ad-hoc loops are unaffected (regression defence
+            // #3 / #6).
+            let final_prompt = build_isolated_prompt_with_handoff(
+                crate::event_loop::prompt_helpers::IsolatedPromptInputs {
+                    base_prompt: final_prompt,
+                    events: &regular_events,
+                    config: &self.config.event_loop.handoff_envelope,
+                },
+            );
             // U4b: see solo-mode comment above. In isolated
             // mode the lint hint routes to the *source* hat
             // (the one that emitted the rejected event), so the

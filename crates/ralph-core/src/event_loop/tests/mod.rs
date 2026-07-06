@@ -109,6 +109,11 @@ mod u4_repair_sm_unify;
 /// (helper is gated on `HandoffEnvelopeConfig::enabled &&
 /// prompt_injection`, no-op otherwise).
 mod u4_handoff_envelope_prompt;
+/// 2026-07-06-004 plan U6: wire the handoff envelope extractor
+/// into the isolated prompt chain. The helper is a no-op unless
+/// `enabled && prompt_injection` AND recent events carry a valid
+/// envelope.
+mod u6_handoff_envelope_wiring;
 /// U6 (2026-06-27-001 plan): StagePipeline is wired into
 /// EventLoop::publish_event so every hat emit passes through
 /// the locked default stages before reaching the event bus.
