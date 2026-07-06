@@ -1056,6 +1056,11 @@ pub async fn execute_wave_structured(
             worker_backend.args.extend(args.iter().cloned());
         }
 
+        ralph_adapters::apply_hat_tool_policy(
+            &mut worker_backend,
+            &hat_config.disallowed_tools,
+        );
+
         // Build the progress_tx placeholder — the dispatcher overwrites
         // the sender after channel creation. The executor's
         // `progress_tx` field is set by the dispatch loop.
@@ -1302,6 +1307,11 @@ async fn execute_wave_via_supervisor(
         if let Some(ref args) = hat_config.backend_args {
             worker_backend.args.extend(args.iter().cloned());
         }
+
+        ralph_adapters::apply_hat_tool_policy(
+            &mut worker_backend,
+            &hat_config.disallowed_tools,
+        );
 
         // 2026-07-03-001 supervisor real-wiring: per-slot
         // binding. The bridge returns a `SlotBinding` with env

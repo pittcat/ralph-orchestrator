@@ -3066,6 +3066,14 @@ async fn run_loop_impl_inner(
             effective_backend.args.extend(args);
         }
 
+        // Bridge hat.disallowed_tools into Claude --disallowedTools at spawn time.
+        if let Some(hat_cfg) = hat_config_opt {
+            ralph_adapters::apply_hat_tool_policy(
+                &mut effective_backend,
+                &hat_cfg.disallowed_tools,
+            );
+        }
+
         // Phase 2: in isolated mode each hat gets its own write channel so
         // provenance is a property of the channel, not the self-declared `hat`
         // field. The runner stamps every record when merging back to the main

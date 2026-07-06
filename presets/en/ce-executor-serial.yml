@@ -2019,9 +2019,9 @@ hats:
       events:
         - review.dimension.ready
     # 2026-06-17-004 U2 (R2): lock the reviewer to a read-only source-code role;
-    # allow Bash for echo/grep/cat read-only probing, but forbid
-    # cargo/ralph emit etc. — verification is the executor/shipper's
-    # job, not the reviewer's.
+    # allow Bash for read-only probing (grep/cat/git diff/etc.) and git checkout
+    # for the Pre-emit Git Guard; forbid in-place shell edits (sed -i, awk, …).
+    # Verification/build/test is the executor/shipper's job, not the reviewer's.
     #
     # - `Edit` hard-forbidden: the reviewer must not modify any source
     #   code. The runtime detects via `git diff --stat HEAD` after each
@@ -2029,10 +2029,11 @@ hats:
     #   it emits a `<hat>.scope_violation` event, triggering the
     #   scope_violation circuit breaker; `recovery.jsonl` records the
     #   violation reason.
-    # - `Bash` intentionally retained: the reviewer needs echo/grep/cat/find
-    #   and other read-only shell commands to probe source content; the
-    #   forbidden subset (cargo/ralph emit) is constrained by the
-    #   HARD RULE section's whitelist/blacklist wording.
+    # - `Bash` intentionally retained: read-only probe commands (grep, cat, find,
+    #   git diff/status, …) plus `git checkout` for the Pre-emit Git Guard.
+    #   In-place mutators (sed -i, awk, tee into repo files) are forbidden in
+    #   instructions; build/test/lint/format toolchains and `ralph` subcommands
+    #   are forbidden — verification belongs to executor/shipper.
     # - `Write` intentionally retained: the only file the reviewer may
     #   write is the findings JSON
     #   (`.agents/scratchpad/ce-executor/{plan}/findings-{dim}-{task_id}.json`),
@@ -2094,11 +2095,28 @@ hats:
 
       ### HARD RULE — Read-Only Role (2026-06-17-004 U2, R2)
 
-      You are a **read-only** code reviewer. **Forbidden**: running any shell command
-      (including `cargo test` / `cargo nextest` / `cargo build` / `cargo clippy` /
-      `cargo fmt` / any direct `ralph` subcommand). **Forbidden**: modifying any
-      source or in-repo file. **Forbidden**: leaving "drive-by" edits in README /
-      config / docs / tests.
+      You are a **read-only** code reviewer. Your job is to inspect and report —
+      not to implement, verify by running the project's toolchain, or mutate the
+      repo.
+
+      **Forbidden — file mutation (any path)**:
+      - `Edit` / `Write` / `MultiEdit` on any in-repo source, config, docs, plan,
+        or test file (except the findings JSON path below)
+      - Shell that **writes or overwrites** tracked files: `sed -i`, `awk` with
+        in-place output, `tee` into existing paths, redirects (`>` / `>>`) to
+        in-repo files, or any equivalent
+
+      **Forbidden — execution / orchestration** (leave to executor / shipper):
+      - Running the project's build, test, lint, or format toolchain
+      - Any `ralph` CLI subcommand (including `ralph emit` — use the instructions
+        below for your terminal event only)
+
+      **Allowed — read-only inspection**:
+      - `Read`, `Grep`, `Glob`, and Bash used only to **read** or **search**:
+        `cat`, `head`, `tail`, `grep`, `rg`, `find`, `wc`, `git diff`, `git status`,
+        `git log`, `git show`, and similar non-mutating commands
+      - Bash for **Pre-emit Git Guard** (below): `git checkout` to revert tracked
+        files you accidentally modified before emitting
 
       Verification is the **executor / shipper's** responsibility, not yours; the
       reviewer produces findings and lets downstream agents decide how to handle
@@ -2187,6 +2205,17 @@ hats:
       - **gated_auto**: Concrete fix, changes contract/permission boundary.
       - **manual**: Requires design decisions.
       - **advisory**: Report only.
+
+      ### HARD RULE — Pre-emit Git Guard（terminal emit 之前必做）
+
+      在发 `review.dimension.done` 或 `review.dimension.failed` **之前**：
+
+      1. 运行 `git diff --stat HEAD`
+      2. 若输出非空：对 `git diff --name-only HEAD` 列出的每个路径执行
+         `git checkout HEAD -- <path>` 回退，再跑一次 `git diff --stat HEAD` 确认干净
+      3. 若回退后仍非空 → 发 `review.dimension.failed(dimension=<当前>,
+         reason="scope_cleanup_failed: <diff 摘要>")`，**禁止**发 `review.dimension.done`
+      4. 仅在 diff 干净后才允许 emit terminal
 
       ### Output Format
       Write findings to `.agents/scratchpad/ce-executor/{plan_name}/findings-{dimension}-{task_id}.json`

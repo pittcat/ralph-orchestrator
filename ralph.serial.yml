@@ -20,7 +20,6 @@ tasks:
   # （loop 级 fallback，卡住时发 task.resume 唤醒 hat）。
   coordinator_hats:
     - coordinator
-    - progress-steward
   # 两步校验闸门：true 时 agent 建任务须先 `task verify add` 再 `task add`
   # （防 agent 任务漂移）。手动 CLI 调用豁免，不影响 operator 手动 add。
   require_verify_for_cli_mutate: true

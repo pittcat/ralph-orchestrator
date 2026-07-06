@@ -5,6 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > The orchestrator is a thin coordination layer, not a platform. Agents are smart; let them do the work.
 
 > **保持精简**:详细架构、模块路径、多 hat 策略、可观测性、特性用法等已下沉到 `.cursor/rules/*.mdc`(按主题按文件 glob 按需加载)。本文件只保留 always-apply 的硬规则 + 高频命令。
+>
+> **知识库**: `docs/solutions/` — 已解决问题的可检索文档（按 category 组织,YAML frontmatter 含 `module` / `tags` / `problem_type`）;实现、调试 preset / adapter / hat 相关能力时可查阅。`CONCEPTS.md` — 共享域词汇表（hat、dimension-reviewer、scope_violation 等）。
 
 ## Build & Test
 
