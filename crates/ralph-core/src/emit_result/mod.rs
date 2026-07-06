@@ -7,6 +7,9 @@
 //! handoff` / `U5 assemble`）以 **纯函数** 形式扩展；U7+ 才开始 CLI
 //! 接线。
 
+//! U2：`map_policy_report_to_errors` 纯函数的子模块入口。
+
+pub mod map_errors;
 pub mod tests;
 
 use serde::Serialize;
