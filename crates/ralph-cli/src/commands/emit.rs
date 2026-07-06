@@ -1126,7 +1126,29 @@ fn emit_command_with_root_and_hats(
     // probe — validation already ran above; do not append to JSONL.
     // Enforce mode (config-mandated check before write) still writes.
     if check_mode == PolicyCheckMode::ExplicitCheck {
-        if use_colors {
+        // U8 (2026-07-06-001 plan): `--output json` 路径下打印
+        // EmitResult JSON（ok=true, recorded=false）作为
+        // policy-check 通过的机器可读信号。text 模式保持原有 stdout
+        // "Policy check passed" 行不变（向后兼容）。
+        if args.output == "json" {
+            use ralph_core::emit_result::assemble::EmitResultParts;
+            let parts = EmitResultParts {
+                ok: true,
+                recorded: false, // policy-check 阶段永远不写盘
+                topic: topic.to_string(),
+                phase: "unknown".to_string(),
+                allowed_next: Vec::new(),
+                activate_next: Vec::new(),
+                errors: Vec::new(),
+                handoff: None,
+            };
+            let result = ralph_core::emit_result::EmitResult::assemble(parts);
+            println!(
+                "{}",
+                serde_json::to_string(&result)
+                    .context("Failed to serialise EmitResult JSON")?
+            );
+        } else if use_colors {
             println!(
                 "{}✓{} Policy check passed: {} (not written to disk)",
                 colors::GREEN,
@@ -3668,20 +3690,21 @@ mod emit_policy_check_reject_json_tests {
         let temp = tempfile::TempDir::new().expect("temp dir");
         let workspace = temp.path();
 
-        // 写 ralph.yml（event_policy + work.done schema）
         let ralph_yml = r#"
 event_loop:
-  execution_mode: isolated
   event_policy:
     enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    business_topics:
+      - work.done
     schemas:
-      - topic: work.done
+      work.done:
         required_fields:
           - task_id
 "#;
         std::fs::write(workspace.join("ralph.yml"), ralph_yml).expect("write ralph.yml");
 
-        // 写最小 hat registry（coordinator 允许 work.done）
         let hats_yml = r#"
 hats:
   coordinator:
@@ -3751,6 +3774,109 @@ hats:
         );
     }
 }
+
+/// U8 测试：CLI policy-check 通过 → recorded=false（--output json）。
+///
+/// 验收要点：
+/// 1. 合法最小 payload 在 `--policy-check --output json` 路径下 →
+///    stdout EmitResult JSON，`ok=true, recorded=false`。
+/// 2. events.jsonl 行数不变（policy-check 是 dry-run，不能落盘）。
+///
+/// 测试策略：复用 U7 fixture（policy 启用 + work.done 要求 task_id），
+/// 构造合法 payload 调用 emit_command，断言：
+/// - 返回 Ok（policy-check 阶段是 dry-run success）
+/// - **不**在 events.jsonl 写盘
+#[cfg(test)]
+mod emit_policy_check_accept_json_tests {
+    use super::*;
+    use crate::cli::ColorMode;
+    use std::path::PathBuf;
+
+    /// 内联 workspace fixture：policy 启用 + business_topics 含 work.done。
+    fn setup_workspace_with_required_task_id() -> tempfile::TempDir {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let workspace = temp.path();
+
+        let ralph_yml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    business_topics:
+      - work.done
+    schemas:
+      work.done:
+        required_fields:
+          - task_id
+"#;
+        std::fs::write(workspace.join("ralph.yml"), ralph_yml).expect("write ralph.yml");
+
+        let hats_yml = r#"
+hats:
+  coordinator:
+    publishes:
+      - work.done
+"#;
+        std::fs::create_dir_all(workspace.join(".ralph")).expect(".ralph dir");
+        std::fs::write(workspace.join(".ralph/hats.yml"), hats_yml).expect("write hats.yml");
+
+        temp
+    }
+
+    /// 合法最小 payload（带 task_id）通过 policy-check：返回 Ok，
+    /// events.jsonl 不会被创建/写入。
+    #[test]
+    fn test_policy_check_accept_json_recorded_false() {
+        let temp = setup_workspace_with_required_task_id();
+        let workspace = temp.path().to_path_buf();
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        let initial_lines = if events_file.exists() {
+            std::fs::read_to_string(&events_file)
+                .expect("read events")
+                .lines()
+                .count()
+        } else {
+            0
+        };
+
+        let args = EmitArgs {
+            topic: Some("work.done".to_string()),
+            payload: r#"{"task_id":"task-123"}"#.to_string(),
+            json: true,
+            file: PathBuf::from(".ralph/events.jsonl"),
+            policy_check: true,
+            no_policy_check: false,
+            hat: Some("coordinator".to_string()),
+            triggered: None,
+            source: None,
+            schema: None,
+            output: "json".to_string(),
+        };
+
+        let result = emit_command_with_root(ColorMode::Never, args, Some(&workspace));
+        assert!(
+            result.is_ok(),
+            "policy-check with valid payload must return Ok (dry-run success), got: {result:?}"
+        );
+
+        let final_lines = if events_file.exists() {
+            std::fs::read_to_string(&events_file)
+                .expect("read events")
+                .lines()
+                .count()
+        } else {
+            0
+        };
+        assert_eq!(
+            initial_lines, final_lines,
+            "policy-check dry-run must not write to events.jsonl (initial={initial_lines}, final={final_lines})"
+        );
+    }
+}
+
+/// Schema-view rendering for `ralph emit --schema <TOPIC>` (U5 / R6).
 ///
 /// The view is a JSON-serialisable snapshot of the embedded protocol
 /// SSOT for one topic. Operators and agents use it to verify:
