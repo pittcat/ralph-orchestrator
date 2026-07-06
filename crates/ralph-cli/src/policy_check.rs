@@ -1785,7 +1785,7 @@ pub fn build_emit_result_parts(
     let handoff_envelope = if ok && payload.is_some() && envelope_summary_enabled(config) {
         payload.and_then(|p| {
             serde_json::from_str::<serde_json::Value>(p).ok().and_then(
-                |value| match validate_handoff_envelope_payload(&value) {
+                |value| match validate_handoff_envelope_payload(&value, None) {
                     Ok(parsed) => Some(
                         ralph_core::emit_result::HandoffEnvelopeSummary::from(&parsed),
                     ),

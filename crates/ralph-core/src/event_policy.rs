@@ -1017,7 +1017,16 @@ fn apply_completion_after_terminal_action(
 /// prompt-injection path and the policy-check pipeline.
 pub fn check_handoff_envelope(topic: &str, payload: &Value) -> Option<PolicyFinding> {
     use crate::handoff_envelope;
-    match handoff_envelope::validate_handoff_envelope_payload(payload) {
+    // U3 (2026-07-06-004 fix-plan): callers in the CLI
+    // boundary cannot construct a `HatRegistry` from inside
+    // `check_handoff_envelope` (the registry lives on the
+    // pipeline, not on the policy), so the registry check is
+    // performed by callers that hold a registry reference
+    // (production path: `EventPolicyRule::validate` in
+    // `validation/rules_event_policy.rs`). The policy gate
+    // here keeps the no-registry shape for parity with
+    // pre-fix callers.
+    match handoff_envelope::validate_handoff_envelope_payload(payload, None) {
         Ok(_) => None,
         Err(err) => Some(PolicyFinding {
             topic: topic.to_string(),

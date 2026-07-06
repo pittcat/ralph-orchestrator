@@ -90,6 +90,42 @@ impl ValidationRule for EventPolicyRule {
             )
         };
 
+        // 2026-07-06-004 fix-plan U3 (R3): when the typed
+        // `validate_payload` flag is on AND a `HatRegistry`
+        // was supplied via the per-event context, run the
+        // registry-aware validator so an envelope addressed to
+        // a hat the preset has never registered is rejected
+        // (with `handoff_envelope_unknown_to_hat`) before the
+        // event lands on the bus. The validator's shape /
+        // required-field / nested-contract checks still run
+        // inside `validate_event_with_options` above; this
+        // pass is the registry-only check that the no-registry
+        // `check_handoff_envelope` cannot perform.
+        if protocol_view.handoff_envelope.enabled
+            && protocol_view.handoff_envelope.validate_payload
+            && matches!(decision, PolicyDecision::Accept)
+            && let Some(registry) = ctx.handoff_registry()
+            && let Some(payload) = event.payload.as_deref()
+        {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
+                if let Err(err) =
+                    crate::handoff_envelope::validate_handoff_envelope_payload(&value, Some(registry))
+                {
+                    let finding = PolicyFinding {
+                        topic: event.topic.clone(),
+                        violation_type: ViolationType::MissingRequiredField {
+                            field: "handoff_envelope".to_string(),
+                        },
+                        message: format!(
+                            "handoff_envelope validation failed: {}",
+                            err
+                        ),
+                    };
+                    decision = PolicyDecision::RejectWithResume(finding);
+                }
+            }
+        }
+
         // U4: upgrade duplicate work.done hint when a wave is still open.
         if let PolicyDecision::RejectWithResume(ref mut finding) = decision {
             if let ViolationType::DuplicateWorkDone {

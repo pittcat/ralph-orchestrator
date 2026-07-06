@@ -59,6 +59,14 @@ pub struct ValidationContext<'a> {
     /// a stale in-memory view while disk has the row. `None`
     /// preserves the legacy behaviour (no disk fallback).
     tasks_path: Option<std::path::PathBuf>,
+    /// 2026-07-06-004 fix-plan U3: optional shared handoff
+    /// `HatRegistry`. The `EventPolicyRule` reads this when
+    /// validating the `to_hat` field on a business event
+    /// payload's `handoff_envelope`. Production callers set it
+    /// via `ValidationPipeline::handoff_registry`; CLI dry-runs
+    /// and unit tests that don't load a registry leave it as
+    /// `None` (the validator then skips the `to_hat` check).
+    handoff_registry: Option<std::sync::Arc<crate::hat_registry::HatRegistry>>,
 }
 
 impl<'a> ValidationContext<'a> {
@@ -75,7 +83,43 @@ impl<'a> ValidationContext<'a> {
             source_hats_by_topic: None,
             target_hats_by_topic: None,
             tasks_path: None,
+            handoff_registry: None,
         }
+    }
+
+    /// U3 (2026-07-06-004 fix-plan): hand the handoff
+    /// validator an Arc-shared `HatRegistry` so it can verify
+    /// `receiver_contract.to_hat` against the preset's hat
+    /// map. Caller owns the registry for the lifetime of the
+    /// validation round.
+    pub fn with_handoff_registry(
+        mut self,
+        registry: std::sync::Arc<crate::hat_registry::HatRegistry>,
+    ) -> Self {
+        self.handoff_registry = Some(registry);
+        self
+    }
+
+    /// U3 (2026-07-06-004 fix-plan): read-only access to the
+    /// handoff `HatRegistry` when one was supplied via
+    /// `with_handoff_registry`. Returns `None` for the
+    /// no-registry path (CLI dry-runs / unit tests).
+    pub fn handoff_registry(&self) -> Option<&crate::hat_registry::HatRegistry> {
+        self.handoff_registry.as_deref()
+    }
+
+    /// U3 (2026-07-06-004 fix-plan): internal setter used by
+    /// `ValidationPipeline::validate_with_preview` to relay the
+    /// pipeline's `handoff_registry` into the per-event context
+    /// without exposing the field publicly. Kept `pub(crate)`
+    /// so the `validation` module can call it from sibling
+    /// `pipeline` while tests in other crates cannot bypass the
+    /// builder.
+    pub(crate) fn set_handoff_registry_for_pipeline(
+        &mut self,
+        registry: Option<std::sync::Arc<crate::hat_registry::HatRegistry>>,
+    ) {
+        self.handoff_registry = registry;
     }
 
     /// U5 of plan 2026-07-02-005: hand the `StepHandoffRule` a

@@ -132,6 +132,14 @@ pub struct ValidationPipeline {
     /// snapshot per-event — the caller is expected to clone with
     /// an updated hat when the isolated hat changes mid-loop.
     pub default_source_hat: Option<HatId>,
+    /// 2026-07-06-004 fix-plan U3: the registry used to
+    /// validate `receiver_contract.to_hat` in business event
+    /// handoff envelopes. Production callers that build the
+    /// pipeline via `from_registry(registry)` automatically get
+    /// this set; CLI dry-runs and unit tests may build a
+    /// pipeline without a registry (the validator then skips
+    /// the to_hat check).
+    pub handoff_registry: Option<std::sync::Arc<crate::hat_registry::HatRegistry>>,
 }
 impl ValidationPipeline {
     /// Build the canonical pipeline from the runtime config and
@@ -174,7 +182,7 @@ impl ValidationPipeline {
         use super::rules_step_handoff::StepHandoffRule;
         use super::rules_workflow_guard::WorkflowGuardRule;
 
-        let origin_rule: Arc<dyn ValidationRule> = match registry {
+        let origin_rule: Arc<dyn ValidationRule> = match registry.clone() {
             Some(reg) => Arc::new(OriginRule::with_registry(reg)),
             None => Arc::new(OriginRule::default()),
         };
@@ -194,6 +202,11 @@ impl ValidationPipeline {
             post_commit_rules,
             feature_enabled: protocol_view.feature_enabled(),
             default_source_hat: None,
+            // U3: relay the registry so `EventPolicyRule` can
+            // hand it to `validate_handoff_envelope_payload`'s
+            // `hat_registry` parameter for the `to_hat`
+            // registry check.
+            handoff_registry: registry,
         }
     }
 
@@ -202,6 +215,19 @@ impl ValidationPipeline {
     /// start (and again on isolated hat rotation).
     pub fn with_default_source_hat(mut self, hat: Option<HatId>) -> Self {
         self.default_source_hat = hat;
+        self
+    }
+
+    /// U3 (2026-07-06-004 fix-plan): override the registry used
+    /// for handoff envelope `to_hat` validation. Production
+    /// callers usually set this via `from_registry`; tests that
+    /// build the pipeline without a registry can call this
+    /// setter to opt in.
+    pub fn with_handoff_registry(
+        mut self,
+        registry: Option<std::sync::Arc<crate::hat_registry::HatRegistry>>,
+    ) -> Self {
+        self.handoff_registry = registry;
         self
     }
     /// Run the pre-commit rules against the current snapshot.
@@ -266,6 +292,18 @@ impl ValidationPipeline {
         projected_ctx: &mut ValidationContext<'_>,
         event: &Event,
     ) -> ValidationReport {
+        // U3 (2026-07-06-004 fix-plan): relay the pipeline's
+        // handoff_registry into the per-event context so
+        // `EventPolicyRule::validate` can hand it to
+        // `validate_handoff_envelope_payload`'s `hat_registry`
+        // parameter. Both contexts are passed in already
+        // disjoint by the caller (the snapshot / projected
+        // snapshot are split borrows); the registry is an
+        // `Arc` so cloning it is cheap.
+        if let Some(reg) = self.handoff_registry.clone() {
+            attach_handoff_registry(ctx, reg.clone());
+            attach_handoff_registry(projected_ctx, reg);
+        }
         let pre_commit = self.validate_pre_commit_with_view(view, ctx, event);
         let post_commit = self.validate_post_commit(view, projected_ctx, event);
         let post_commit_rejected = post_commit.iter().any(|r| !r.accepted);
@@ -278,6 +316,23 @@ impl ValidationPipeline {
             post_commit_rejected,
         }
     }
+}
+
+/// U3 helper: attach a handoff registry to a context. The
+/// context's `handoff_registry` field is private, so this
+/// free function is the only way to set it from outside the
+/// `validation::context` module. We use `take` + replacement
+/// because the `Arc` is cheap to clone and we want to avoid
+/// pulling the field into `pub`.
+fn attach_handoff_registry(
+    ctx: &mut ValidationContext<'_>,
+    registry: std::sync::Arc<crate::hat_registry::HatRegistry>,
+) {
+    // The context owns `handoff_registry` directly; setting it
+    // through `pub(crate)` would be cleaner, but `context` and
+    // `pipeline` are sibling modules in `validation`. We expose
+    // a thin setter on `ValidationContext` for this purpose.
+    ctx.set_handoff_registry_for_pipeline(Some(registry));
 }
 
 /// Result of [`ValidationPipeline::validate_with_preview`].
