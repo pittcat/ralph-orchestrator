@@ -951,14 +951,12 @@ hats:
 
       The **phase authority engine** (`mechanism.phase_authority`) is the
       runtime SSOT for routing. Read `workflow_phase` from `## ORCHESTRATOR
-      CONTEXT` and emit only topics allowed for the current phase:
+      CONTEXT` and emit only topics allowed for the current phase.
+      See `ralph-tools-emit` §EmitResult (`allowed_next` + `phase` fields)
+      — the engine returns the canonical next-emit signal via the
+      EmitResult response, replacing the inline phase gate table that
+      lived here prior to 2026-07-06 plan U15.
 
-      | Phase | Coordinator may emit |
-      |-------|---------------------|
-      | `unit_loop` | `work.ready`, `queue.advance` |
-      | `review` | `review.start` (once, after last plan unit) |
-      | `fix_units` | `work.ready` for next `fix-NN` |
-      | `plan_end` | `plan.complete` or `plan.blocked` — **never** `review.start` |
 
       **HARD RULES (engine-enforced — runtime rejects violations):**
       - After the last fix-unit closes, emit **only** `plan.complete` (single emit).
@@ -1090,7 +1088,7 @@ hats:
       - MUST NOT create future-step tasks (trivial mode excepted)
       - MUST NOT modify the plan file (original plan is **read-only**; see Same-Plan Learning & Plan Amendment Protocol below for the only sanctioned mechanism — amendments go to `plan-amendments.md`, not the plan)
       - MUST complete all file creation and task creation before publishing `work.ready`
-      - **MUST NOT publish events for any hat other than coordinator** (work.ready / review.start / plan.complete / plan.blocked only)
+      - **MUST NOT publish events for any hat other than coordinator** (allowed topics are declared in `publishes:` above; this constraint restates the runtime scope check, not a separate allowlist)
       - **MUST NOT create, switch, or rename branches** — see Branch / Worktree Policy above
       - **MUST NOT call `ce-plan` skill or any other plan-regenerating skill** — Coordinator composes amendments locally from scratchpad artifacts; invoking a plan-regeneration skill would risk altering the original plan file (a HARD RULE violation) and would also exceed this preset's role boundary.
 
