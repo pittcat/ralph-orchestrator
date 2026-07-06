@@ -77,6 +77,130 @@ pub struct HandoffEnvelopeReceiverContract {
     pub failure_signal: String,
 }
 
+/// 2026-07-06-004 plan U3: lightweight view used by the prompt
+/// renderer. `HandoffEnvelopeView` carries the same fields as
+/// `HandoffEnvelopePayload` but is constructible directly from a
+/// `serde_json::Value` so the renderer can be exercised with hand
+/// written fixtures in unit tests before the event-extraction
+/// logic in U5 lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffEnvelopeView {
+    pub schema_version: String,
+    pub root_goal: String,
+    pub plan_name: String,
+    pub plan_path: String,
+    pub plan_current_step: String,
+    pub plan_completed_steps: Vec<String>,
+    pub state_current_status: String,
+    pub state_last_signal: String,
+    pub state_blocking_reason: Option<String>,
+    pub to_hat: String,
+    pub must_do: Vec<String>,
+    pub must_not_do: Vec<String>,
+    pub success_signal: String,
+    pub failure_signal: String,
+}
+
+impl From<&HandoffEnvelopePayload> for HandoffEnvelopeView {
+    fn from(p: &HandoffEnvelopePayload) -> Self {
+        Self {
+            schema_version: p.schema_version.clone(),
+            root_goal: p.root_goal.clone(),
+            plan_name: p.plan.name.clone(),
+            plan_path: p.plan.path.clone(),
+            plan_current_step: p.plan.current_step.clone(),
+            plan_completed_steps: p.plan.completed_steps.clone(),
+            state_current_status: p.state.current_status.clone(),
+            state_last_signal: p.state.last_signal.clone(),
+            state_blocking_reason: p.state.blocking_reason.clone(),
+            to_hat: p.receiver_contract.to_hat.clone(),
+            must_do: p.receiver_contract.must_do.clone(),
+            must_not_do: p.receiver_contract.must_not_do.clone(),
+            success_signal: p.receiver_contract.success_signal.clone(),
+            failure_signal: p.receiver_contract.failure_signal.clone(),
+        }
+    }
+}
+
+/// 2026-07-06-004 plan U3: prompt renderer. Renders a view into a
+/// stable markdown block prepended to the isolated prompt. The
+/// block always carries a `## HANDOFF ENVELOPE` heading so the
+/// downstream agent can locate it deterministically.
+///
+/// The renderer is a pure function: no template engine, no IO,
+/// no runtime state. Lists longer than `MAX_RENDERED_LIST_ITEMS`
+/// are truncated to that length and a trailing `...` is appended
+/// to make the truncation visible to the reader.
+pub const MAX_RENDERED_LIST_ITEMS: usize = 5;
+
+pub fn render_handoff_envelope_prompt(view: &HandoffEnvelopeView) -> String {
+    let mut out = String::new();
+    out.push_str("## HANDOFF ENVELOPE\n\n");
+    out.push_str(&format!("- Root goal: {}\n", view.root_goal));
+    out.push_str(&format!(
+        "- Current plan: {} ({})\n",
+        view.plan_name, view.plan_path
+    ));
+    out.push_str(&format!("- Current step: {}\n", view.plan_current_step));
+    if !view.plan_completed_steps.is_empty() {
+        out.push_str(&format!(
+            "- Completed steps: {}\n",
+            render_truncated_list(&view.plan_completed_steps)
+        ));
+    }
+    out.push_str(&format!(
+        "- Current state: {} (last_signal={})\n",
+        view.state_current_status, view.state_last_signal
+    ));
+    if let Some(reason) = &view.state_blocking_reason {
+        out.push_str(&format!("- Blocking reason: {}\n", reason));
+    }
+    out.push_str(&format!("- Receiver: {}\n", view.to_hat));
+    out.push_str("- Must do:\n");
+    for item in render_truncated_list_iter(&view.must_do) {
+        out.push_str(&format!("  - {}\n", item));
+    }
+    out.push_str("- Must not do:\n");
+    if view.must_not_do.is_empty() {
+        out.push_str("  - (none)\n");
+    } else {
+        for item in render_truncated_list_iter(&view.must_not_do) {
+            out.push_str(&format!("  - {}\n", item));
+        }
+    }
+    out.push_str(&format!("- Success signal: {}\n", view.success_signal));
+    out.push_str(&format!("- Failure signal: {}\n", view.failure_signal));
+    out
+}
+
+fn render_truncated_list(items: &[String]) -> String {
+    if items.len() <= MAX_RENDERED_LIST_ITEMS {
+        items.join(", ")
+    } else {
+        let head = items
+            .iter()
+            .take(MAX_RENDERED_LIST_ITEMS)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{}, ...", head)
+    }
+}
+
+fn render_truncated_list_iter(items: &[String]) -> Vec<String> {
+    if items.len() <= MAX_RENDERED_LIST_ITEMS {
+        items.to_vec()
+    } else {
+        let mut head = items
+            .iter()
+            .take(MAX_RENDERED_LIST_ITEMS)
+            .cloned()
+            .collect::<Vec<_>>();
+        head.push("...".to_string());
+        head
+    }
+}
+
 /// Stable error envelope for the validator. `code` is a
 /// machine-readable stable string; `message` is human readable.
 ///
@@ -457,5 +581,108 @@ mod tests {
         let err = validate_handoff_envelope_payload(&payload)
             .expect_err("non-object envelope must reject");
         assert_eq!(err.code, "handoff_envelope_invalid_payload");
+    }
+
+    // ------------------------------------------------------------------
+    // U3 tests: prompt renderer
+    // ------------------------------------------------------------------
+
+    fn fixture_view() -> HandoffEnvelopeView {
+        let payload = full_payload();
+        let parsed =
+            validate_handoff_envelope_payload(&payload).expect("fixture payload must validate");
+        HandoffEnvelopeView::from(&parsed)
+    }
+
+    #[test]
+    fn renders_handoff_envelope_heading() {
+        let view = fixture_view();
+        let rendered = render_handoff_envelope_prompt(&view);
+        assert!(
+            rendered.starts_with("## HANDOFF ENVELOPE\n"),
+            "renderer must emit a deterministic heading; got first line: {:?}",
+            rendered.lines().next()
+        );
+    }
+
+    #[test]
+    fn renders_root_goal_and_current_step() {
+        let view = fixture_view();
+        let rendered = render_handoff_envelope_prompt(&view);
+        assert!(rendered.contains("Root goal: implement the requested feature without regressions"));
+        assert!(rendered.contains("Current plan: 2026-07-06-example"));
+        assert!(rendered.contains("Current step: step-3"));
+        assert!(rendered.contains("Current state: ready_for_review (last_signal=work.done)"));
+    }
+
+    #[test]
+    fn renders_receiver_contract_signals() {
+        let view = fixture_view();
+        let rendered = render_handoff_envelope_prompt(&view);
+        assert!(rendered.contains("- Receiver: goal-alignment-reviewer"));
+        assert!(rendered.contains("- Success signal: review.dimension.passed"));
+        assert!(rendered.contains("- Failure signal: review.dimension.failed"));
+        assert!(rendered.contains("- Must do:"));
+        assert!(rendered.contains("- Must not do:"));
+    }
+
+    #[test]
+    fn render_is_stable_for_empty_must_not_do() {
+        // Mutate the parsed view directly to keep must_not_do empty.
+        let payload = full_payload();
+        let mut parsed =
+            validate_handoff_envelope_payload(&payload).expect("fixture must validate");
+        parsed.receiver_contract.must_not_do.clear();
+        let view = HandoffEnvelopeView::from(&parsed);
+        let rendered = render_handoff_envelope_prompt(&view);
+        assert!(
+            rendered.contains("- Must not do:\n  - (none)"),
+            "empty must_not_do must render as (none); got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn render_truncates_long_lists_to_budget() {
+        // Construct a view with more than MAX_RENDERED_LIST_ITEMS
+        // entries in must_do / completed_steps so the renderer has
+        // something to truncate.
+        let payload = full_payload();
+        let mut parsed =
+            validate_handoff_envelope_payload(&payload).expect("fixture must validate");
+        parsed.plan.completed_steps = vec![
+            "step-1".into(),
+            "step-2".into(),
+            "step-3".into(),
+            "step-4".into(),
+            "step-5".into(),
+            "step-6".into(),
+            "step-7".into(),
+        ];
+        parsed.receiver_contract.must_do = vec![
+            "do-a".into(),
+            "do-b".into(),
+            "do-c".into(),
+            "do-d".into(),
+            "do-e".into(),
+            "do-f".into(),
+            "do-g".into(),
+        ];
+        let view = HandoffEnvelopeView::from(&parsed);
+        let rendered = render_handoff_envelope_prompt(&view);
+        // Truncation marker should appear.
+        assert!(
+            rendered.contains("..."),
+            "long must_do list must be truncated with a ... marker"
+        );
+        // Items beyond the budget must NOT appear in the output.
+        assert!(
+            !rendered.contains("do-g"),
+            "items beyond MAX_RENDERED_LIST_ITEMS must be cut"
+        );
+        assert!(
+            !rendered.contains("step-7"),
+            "completed_steps beyond MAX_RENDERED_LIST_ITEMS must be cut"
+        );
     }
 }
