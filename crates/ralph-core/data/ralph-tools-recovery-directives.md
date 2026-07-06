@@ -53,6 +53,22 @@ metadata:
 
 **禁止：** 在收到 recovery_exhausted 后继续重发或尝试绕过。
 
+## RD-HANDOFF-MISROUTE-DETECTED
+
+**Trigger:** Orchestrator emits `task.resume.misrouted` diagnostic event. The diagnostic payload contains the offending `consumer` hat ID and the `topic` that consumer's `triggers` did not declare.
+
+**What this means:**
+- The orchestrator detected that a handoff's target consumer does NOT subscribe to the handoff's topic (via the shared `check_hat_triggers` helper).
+- Without this detection the handoff would silently stall for 600s, then escalate to `task.resume → recovery_exhausted:stall_recovery:...:handoff_dispatch_timeout` and route through shipper's prefix-allowlist as `REVIEW_COMPLETE(pass)` — the silent-success loop family (see `docs/report/2026-07-06-ce-executor-serial-primary-20260705-224028-diagnosis.md`).
+- The orchestrator now skips the 600s pending registration and emits this diagnostic immediately. The producer's topic emissions are also bypassed.
+
+**行为规范：**
+- Do NOT attempt to fix this from the consumer hat — the producer is misrouted, not the consumer.
+- Surface the diagnostic payload to the operator / next human so the producer's `publishes:` scope or the consumer's `triggers:` list can be corrected.
+- If you are the producer hat: stop emitting the topic that was flagged until the topology is repaired.
+
+**禁止：** 在没有 topology 修复的情况下继续走 consumer hat 路径（会再次触发同一种 misroute）。
+
 ---
 
 **对应 runtime 判定函数（reviewer only, not injected）：**

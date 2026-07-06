@@ -5600,6 +5600,24 @@ impl EventLoop {
                     // bus.publish was called, leaving events.jsonl
                     // silent while the in-memory bus still routed
                     // shipper downstream — silent-success path.
+                    //
+                    // ===========================================================================
+                    // P0-1 LINT GUARD (2026-07-06 silent-success regression):
+                    // DO NOT REORDER. `state.record_event(&blocked)` MUST run BEFORE
+                    // `bus.publish(blocked)`. Otherwise the trusted events.jsonl
+                    // diverges from the in-memory bus and shipper's
+                    // `is_recoverable_plan_blocked_reason` lookup reads stale
+                    // data, producing REVIEW_COMPLETE(pass) over a plan.blocked
+                    // that was never persisted. This was the root cause of the
+                    // 9-recurrence silent-success loop family
+                    // (primary-20260705-224028 + 8 prior runs).
+                    //
+                    // If you must change this ordering, first read:
+                    //   - `docs/report/2026-07-06-ce-executor-serial-primary-20260705-224028-diagnosis.md`
+                    //   - `crates/ralph-core/src/recovery_runtime/publish_loop_stalled.rs`
+                    //     (which now emits `recovery_exhausted:<retry_key>` literals
+                    //     to align with this path)
+                    // ===========================================================================
                     self.state.record_event(&blocked);
                     self.bus.publish(blocked);
                 }
@@ -9967,6 +9985,60 @@ impl EventLoop {
                 self.update_bootstrap_flags_from_accepted(&events);
                 for accepted in &events {
                     if let Some(consumer) = self.handoff_index.consumer_of(&accepted.topic) {
+                        // 2026-07-06 silent-success P0-4 fix (long-term U16):
+                        // `HandoffIndex::consumer_of` returns the unique
+                        // consumer hat for `topic`, but the consumer's
+                        // `triggers` list is the SSOT for what it actually
+                        // subscribes to. If the hat does NOT declare
+                        // `topic` in `triggers`, the handoff would silently
+                        // 600s-stall (no activation, escalate to
+                        // `task.resume.misrouted` -> stall_recovery ->
+                        // `recovery_exhausted:stall_recovery:...` ->
+                        // shipper pass translation, the exact silent-success
+                        // path observed in primary-20260705-224028).
+                        //
+                        // Detect this BEFORE registering the pending handoff
+                        // and emit a diagnostic event so the operator sees
+                        // the misroute immediately instead of waiting for
+                        // the 600s window to expire.
+                        let consumer_triggers_ok = self
+                            .registry
+                            .get_config(&HatId::from(consumer))
+                            .map(|cfg| {
+                                crate::workflow_contract::handoff_index::check_hat_triggers(
+                                    &cfg.triggers,
+                                    accepted.topic.as_str(),
+                                )
+                                .is_ok()
+                            })
+                            .unwrap_or(false);
+                        if !consumer_triggers_ok {
+                            warn!(
+                                topic = %accepted.topic,
+                                consumer = %consumer,
+                                "U16 handoff: consumer hat's `triggers` does not declare \
+                                 this topic — emitting task.resume.misrouted diagnostic, \
+                                 skipping 600s pending registration"
+                            );
+                            let diagnostic = Event::new(
+                                "task.resume.misrouted",
+                                format!(
+                                    "U16: consumer hat `{}` does not declare `{}` in its \
+                                     `triggers` list; handoff skipped to avoid 600s stall \
+                                     escalation. Fix: add `{}` to the hat's `triggers:` or \
+                                     remove the producer from this hat's emission scope.",
+                                    consumer, accepted.topic, accepted.topic
+                                ),
+                            )
+                            .with_source(HatId::from("ralph"));
+                            self.state.record_event(&diagnostic);
+                            self.bus.publish(diagnostic);
+                            // Skip the on_handoff_accepted registration —
+                            // this consumer will never activate on this
+                            // topic, so tracking it would just delay the
+                            // escalation through the 600s window.
+                            continue;
+                        }
                         let event_id = format!("{}:{}", accepted.ts, accepted.topic);
                         self.state.handoff_tracker.on_handoff_accepted(
                             accepted.topic.clone(),

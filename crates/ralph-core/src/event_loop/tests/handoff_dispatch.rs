@@ -224,3 +224,69 @@ fn u2_regression_multi_consumer_topic_does_not_pre_empt() {
     // consumers only.
     let _: HatId = sel;
 }
+
+// ----------------------------------------------------------------
+// 2026-07-06 silent-success P0-4 fix (long-term U16): handoff
+// triggers pre-validation. When `HandoffIndex::consumer_of(topic)`
+// returns a hat whose `triggers` list does NOT declare the topic,
+// the previous wire-up registered a 600s pending entry that
+// always escalated to `task.resume` → `recovery_exhausted:stall_recovery:...:handoff_dispatch_timeout`
+// → shipper prefix-allowlist pass translation → silent-success
+// (primary-20260705-224028).
+//
+// The fix (event_loop/mod.rs:9969-10027 in this revision) emits
+// `task.resume.misrouted` diagnostic immediately and skips the
+// pending registration, so the operator sees the misroute on the
+// first event rather than after 600s of silent stall.
+// ----------------------------------------------------------------
+
+/// T-U16-01: `check_hat_triggers` (the shared helper used by
+/// `validate_resume_routing`) rejects a hat whose `triggers` list
+/// does not declare the topic. This pins the helper's contract
+/// that the new misroute wire-up depends on.
+#[test]
+fn u16_check_hat_triggers_rejects_undeclared_topic() {
+    use crate::workflow_contract::handoff_index::check_hat_triggers;
+    let triggers = vec!["work.ready".to_string(), "task.resume".to_string()];
+    let result = check_hat_triggers(&triggers, "build.done");
+    assert!(
+        result.is_err(),
+        "consumer hat whose `triggers` does not declare the topic must be rejected"
+    );
+}
+
+/// T-U16-02: same helper accepts when `triggers` declares the
+/// topic literally (the happy-path: producer emits work.ready,
+/// consumer's triggers has work.ready → on_handoff_accepted is
+/// reached normally).
+#[test]
+fn u16_check_hat_triggers_accepts_declared_topic() {
+    use crate::workflow_contract::handoff_index::check_hat_triggers;
+    let triggers = vec!["work.ready".to_string()];
+    let result = check_hat_triggers(&triggers, "work.ready");
+    assert!(
+        result.is_ok(),
+        "consumer hat whose `triggers` declares the topic must be accepted"
+    );
+}
+
+/// T-U16-03: glob patterns in `triggers` match a single topic
+/// segment (`*` is single-segment per `Topic::matches`, not
+/// `.*`). Pinned so the misroute wire-up does not silently
+/// assume multi-segment matching that the helper doesn't
+/// actually support.
+#[test]
+fn u16_check_hat_triggers_glob_pattern_matches_single_segment() {
+    use crate::workflow_contract::handoff_index::check_hat_triggers;
+    let triggers = vec!["review.*".to_string()];
+    // Single-segment: matches.
+    check_hat_triggers(&triggers, "review.dimension").expect("single-segment matches");
+    // Two-segment (review.dimension.ready): does NOT match the
+    // single-`*` glob. This is the documented `Topic::matches`
+    // behavior — `*` is one segment, not `.*`.
+    let multi_segment = check_hat_triggers(&triggers, "review.dimension.ready");
+    assert!(
+        multi_segment.is_err(),
+        "single-`*` glob must NOT match two-segment topics; use `review.**` (or two patterns) for nested matching"
+    );
+}
