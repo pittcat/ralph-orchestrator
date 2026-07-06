@@ -1145,11 +1145,19 @@ fn emit_command_with_root_and_hats(
         // agents emitting structured events (e.g. work.done) don't get
         // their payload stored as a plain string and rejected by the
         // execution contract validator.
+        let p_clone = payload.clone();
         serde_json::from_str::<serde_json::Value>(&payload)
-            .unwrap_or_else(|_| serde_json::Value::String(payload))
+            .unwrap_or_else(|_| serde_json::Value::String(p_clone))
     } else {
-        serde_json::Value::String(payload)
+        serde_json::Value::String(payload.clone())
     };
+
+    // U2: stash the original payload string before any
+    // downstream borrow consumes it; the JSON `--output`
+    // EmitResult builder uses it to extract the
+    // `handoff_envelope` summary when the typed
+    // `emit_result_summary` flag is on.
+    let payload_for_summary = payload.clone();
 
     // Generic guard: reject an empty task_id in any emitted event payload.
     // An empty task_id is never valid (Ralph task ids are always non-empty
@@ -1249,6 +1257,11 @@ fn emit_command_with_root_and_hats(
                 &workspace_root,
                 hat.as_deref(),
                 None, // policy-check not yet written → no target_path
+                // U2: thread the payload so the
+                // `handoff_envelope` summary can be extracted
+                // when the typed `emit_result_summary` flag
+                // is on.
+                Some(payload_for_summary.as_str()),
             );
             let result = ralph_core::emit_result::EmitResult::assemble(parts);
             println!(
@@ -1395,6 +1408,10 @@ fn emit_command_with_root_and_hats(
             &workspace_root,
             hat.as_deref(),
             Some(target_path_str.clone()),
+            // U2: thread the payload so the `handoff_envelope`
+            // summary can be extracted when the typed
+            // `emit_result_summary` flag is on.
+            Some(payload_for_summary.as_str()),
         );
         let result = ralph_core::emit_result::EmitResult::assemble(parts);
         println!(
@@ -4558,6 +4575,10 @@ hats:
             Some(&config),
             workspace,
             Some("coordinator"),
+            None,
+            // U2: this unit test does not exercise the
+            // handoff_envelope summary path — pass `None`
+            // for parity with the production rejection path.
             None,
         );
         let result = ralph_core::emit_result::EmitResult::assemble(parts);

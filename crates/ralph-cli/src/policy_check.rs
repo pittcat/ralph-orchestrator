@@ -1756,7 +1756,17 @@ pub fn emit_policy_validation_failure(
 ///
 /// U4 (2026-07-06-002 plan, R5): the `target_path` parameter carries the
 /// resolved events file path so it can surface in `EmitResult.target_path`
-/// (`recorded: true` 的 apply 路径有效;其它路径默认 `None`)。
+/// (`recorded: true` 的 apply 路径有效;其它路径默认 `None`).
+///
+/// U2 (2026-07-06-004 fix-plan): the `payload` parameter carries
+/// the JSON payload the caller is about to emit. When `ok=true`
+/// AND the typed `emit_result_summary` config is on AND the
+/// payload contains a valid `handoff_envelope`, the summary is
+/// extracted via `validate_handoff_envelope_payload` →
+/// `HandoffEnvelopeSummary::from(...)` so the agent can confirm
+/// the envelope was recognised. `ok=false` paths always emit
+/// `None` per `assemble.rs` forced-clear logic.
+#[allow(clippy::too_many_arguments)]
 pub fn build_emit_result_parts(
     topic: String,
     ok: bool,
@@ -1766,10 +1776,26 @@ pub fn build_emit_result_parts(
     workspace: &Path,
     hat: Option<&str>,
     target_path: Option<String>,
+    payload: Option<&str>,
 ) -> ralph_core::emit_result::assemble::EmitResultParts {
     use ralph_core::emit_result::resolve_emit_routing_from_config;
+    use ralph_core::handoff_envelope::validate_handoff_envelope_payload;
 
     let routing = resolve_emit_routing_from_config(config, workspace, hat);
+    let handoff_envelope = if ok && payload.is_some() && envelope_summary_enabled(config) {
+        payload.and_then(|p| {
+            serde_json::from_str::<serde_json::Value>(p).ok().and_then(
+                |value| match validate_handoff_envelope_payload(&value) {
+                    Ok(parsed) => Some(
+                        ralph_core::emit_result::HandoffEnvelopeSummary::from(&parsed),
+                    ),
+                    Err(_) => None,
+                },
+            )
+        })
+    } else {
+        None
+    };
     ralph_core::emit_result::assemble::EmitResultParts {
         ok,
         recorded,
@@ -1780,8 +1806,18 @@ pub fn build_emit_result_parts(
         errors,
         handoff: None,
         target_path,
-        handoff_envelope: None,
+        handoff_envelope,
     }
+}
+
+/// Whether the typed `emit_result_summary` config flag is on.
+/// U2 (2026-07-06-004 fix-plan) gates the summary extraction on
+/// this so non-serial presets and ad-hoc emits see no
+/// behavioural change.
+fn envelope_summary_enabled(config: Option<&RalphConfig>) -> bool {
+    config
+        .map(|c| c.event_loop.handoff_envelope.emit_result_summary)
+        .unwrap_or(false)
 }
 
 /// U7 (2026-07-06-001 plan): bridge `PolicyCheckReport` → `EmitResult`
@@ -1803,6 +1839,10 @@ pub fn report_to_emit_result(
         config,
         &report.workspace,
         report.hat.as_deref(),
+        None,
+        // U2: rejection paths never carry a payload summary
+        // because the assemble layer forced-clears the field
+        // when `ok=false`. Pass `None` for clarity.
         None,
     );
     ralph_core::emit_result::EmitResult::assemble(parts)
@@ -2844,5 +2884,151 @@ hats:
         // blanket check (L424-436 in emit.rs) governs.
         assert!(check_emit_provenance(None, "review.passed", &cfg).is_ok());
         assert!(check_emit_provenance(None, "debug.step", &cfg).is_ok());
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // 2026-07-06-004 fix-plan U2: CLI integration test that
+    // `ralph emit --policy-check --output json` returns a JSON
+    // object whose `handoff_envelope` summary is populated when
+    // the typed `emit_result_summary` flag is on AND the payload
+    // contains a valid envelope. The summary carries 4 fields
+    // (schema_version / to_hat / success_signal / failure_signal)
+    // so the agent can confirm the envelope was recognised in
+    // the same CLI round-trip.
+    #[test]
+    fn build_emit_result_parts_attaches_handoff_envelope_summary_when_enabled() {
+        use ralph_core::config::{
+            EventLoopConfig, EventPolicyConfig, HandoffEnvelopeConfig,
+        };
+
+        let envelope_payload = serde_json::json!({
+            "handoff_envelope": {
+                "schema_version": "handoff-envelope.v1",
+                "root_goal": "ship step-01 cleanly",
+                "plan": {
+                    "name": "plan-u2",
+                    "path": "docs/plans/u2.md",
+                    "current_step": "step-01",
+                    "completed_steps": []
+                },
+                "state": {
+                    "current_status": "ready_for_review",
+                    "last_signal": "work.done",
+                    "blocking_reason": null
+                },
+                "receiver_contract": {
+                    "to_hat": "validator",
+                    "must_do": ["run full suite"],
+                    "success_signal": "test.passed",
+                    "failure_signal": "test.failed"
+                }
+            }
+        });
+        let payload_str = envelope_payload.to_string();
+
+        let cfg = RalphConfig {
+            event_loop: EventLoopConfig {
+                handoff_envelope: HandoffEnvelopeConfig {
+                    enabled: true,
+                    prompt_injection: true,
+                    validate_payload: true,
+                    emit_result_summary: true,
+                },
+                event_policy: Some(EventPolicyConfig::default()),
+                ..EventLoopConfig::default()
+            },
+            ..RalphConfig::default()
+        };
+
+        let tmp = TempDir::new().unwrap();
+        let parts = build_emit_result_parts(
+            "work.done".to_string(),
+            true,
+            false,
+            Vec::new(),
+            Some(&cfg),
+            tmp.path(),
+            Some("coordinator"),
+            None,
+            Some(&payload_str),
+        );
+
+        // U2: when the typed `emit_result_summary` flag is on
+        // AND the payload contains a valid envelope, the
+        // summary must be populated with the 4 expected
+        // fields.
+        let summary = parts
+            .handoff_envelope
+            .as_ref()
+            .expect("summary must be populated when emit_result_summary=true");
+        assert_eq!(summary.schema_version, "handoff-envelope.v1");
+        assert_eq!(summary.to_hat, "validator");
+        assert_eq!(summary.success_signal, "test.passed");
+        assert_eq!(summary.failure_signal, "test.failed");
+
+        // Edge: rejected payload (ok=false) must surface as
+        // `None` because the assemble layer's forced-clear
+        // logic overwrites the field when `ok=false`.
+        let parts_reject = build_emit_result_parts(
+            "work.done".to_string(),
+            false,
+            false,
+            vec![ralph_core::emit_result::EmitError {
+                code: "x".to_string(),
+                message: "y".to_string(),
+                field: None,
+                suggested_command: None,
+            }],
+            Some(&cfg),
+            tmp.path(),
+            Some("coordinator"),
+            None,
+            Some(&payload_str),
+        );
+        assert!(
+            parts_reject.handoff_envelope.is_none(),
+            "rejection paths must not surface a handoff_envelope summary: {:?}",
+            parts_reject.handoff_envelope
+        );
+
+        // Edge: missing envelope payload → summary is None
+        // even when the typed flag is on.
+        let parts_no_env = build_emit_result_parts(
+            "work.done".to_string(),
+            true,
+            false,
+            Vec::new(),
+            Some(&cfg),
+            tmp.path(),
+            Some("coordinator"),
+            None,
+            Some(r#"{"plan_name":"no-envelope"}"#),
+        );
+        assert!(
+            parts_no_env.handoff_envelope.is_none(),
+            "missing envelope payload must NOT populate summary: {:?}",
+            parts_no_env.handoff_envelope
+        );
+
+        // Edge: typed flag off → summary is None even with a
+        // valid envelope in the payload.
+        let mut cfg_off = cfg.clone();
+        cfg_off.event_loop.handoff_envelope.emit_result_summary = false;
+        let parts_flag_off = build_emit_result_parts(
+            "work.done".to_string(),
+            true,
+            false,
+            Vec::new(),
+            Some(&cfg_off),
+            tmp.path(),
+            Some("coordinator"),
+            None,
+            Some(&payload_str),
+        );
+        assert!(
+            parts_flag_off.handoff_envelope.is_none(),
+            "emit_result_summary=false must NOT populate summary: {:?}",
+            parts_flag_off.handoff_envelope
+        );
     }
 }

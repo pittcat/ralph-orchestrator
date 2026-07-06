@@ -132,3 +132,14 @@ pub struct HandoffEnvelopeSummary {
     pub success_signal: String,
     pub failure_signal: String,
 }
+
+impl From<&crate::handoff_envelope::HandoffEnvelopePayload> for HandoffEnvelopeSummary {
+    fn from(p: &crate::handoff_envelope::HandoffEnvelopePayload) -> Self {
+        Self {
+            schema_version: p.schema_version.clone(),
+            to_hat: p.receiver_contract.to_hat.clone(),
+            success_signal: p.receiver_contract.success_signal.clone(),
+            failure_signal: p.receiver_contract.failure_signal.clone(),
+        }
+    }
+}
