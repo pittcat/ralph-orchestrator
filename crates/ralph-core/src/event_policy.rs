@@ -1007,6 +1007,65 @@ fn apply_completion_after_terminal_action(
 ///
 /// Returns `None` if the topic is valid (accepted), or `Some(PolicyDecision::Block(...))`
 /// if the topic is not in the whitelist.
+/// 2026-07-06-004 plan U8: handoff envelope validator. When
+/// `event_loop.handoff_envelope.validate_payload` is true, every
+/// event whose payload parses as a JSON object must contain a
+/// valid `payload.handoff_envelope` (per `handoff_envelope.v1`).
+/// Returns `Some(PolicyFinding)` on failure, `None` on success.
+/// The validator delegates to `handoff_envelope::validate_handoff_envelope_payload`
+/// so the (code, message) error envelope is shared between the
+/// prompt-injection path and the policy-check pipeline.
+pub fn check_handoff_envelope(topic: &str, payload: &Value) -> Option<PolicyFinding> {
+    use crate::handoff_envelope;
+    match handoff_envelope::validate_handoff_envelope_payload(payload) {
+        Ok(_) => None,
+        Err(err) => Some(PolicyFinding {
+            topic: topic.to_string(),
+            violation_type: ViolationType::MissingRequiredField {
+                field: "handoff_envelope".to_string(),
+            },
+            message: format!("handoff_envelope validation failed: {}", err),
+        }),
+    }
+}
+
+/// 2026-07-06-004 plan U8: in-process gating helper. Returns
+/// true iff the policy-check pipeline should run
+/// `check_handoff_envelope` for the supplied payload. The
+/// condition is exactly `handoff_config.enabled &&
+/// handoff_config.validate_payload && payload.is_some()`.
+pub fn handoff_envelope_validation_enabled<H: HandoffEnvelopeConfigAccess>(
+    payload: Option<&str>,
+    handoff_config: &H,
+) -> bool {
+    handoff_config.handoff_envelope_enabled()
+        && handoff_config.handoff_envelope_validate_payload()
+        && payload.is_some()
+}
+
+/// 2026-07-06-004 plan U8: typed adapter that bridges
+/// `EventLoopConfig.handoff_envelope` into the policy pipeline
+/// via the `HandoffEnvelopeConfigAccess` trait. Used by the
+/// `ralph emit --policy-check` path once U10 wires the real
+/// config in.
+pub struct EventLoopHandoffConfig<'a> {
+    pub handoff_envelope: &'a crate::config::HandoffEnvelopeConfig,
+}
+
+impl<'a> HandoffEnvelopeConfigAccess for EventLoopHandoffConfig<'a> {
+    fn handoff_envelope_enabled(&self) -> bool {
+        self.handoff_envelope.enabled
+    }
+    fn handoff_envelope_validate_payload(&self) -> bool {
+        self.handoff_envelope.validate_payload
+    }
+}
+
+/// - System/control topics (`event.*`, `human.*`, `loop.cancel`, `task.resume`,
+///   `build.task.abandoned`, completion promise)
+///
+/// Returns `None` if the topic is valid (accepted), or `Some(PolicyDecision::Block(...))`
+/// if the topic is not in the whitelist.
 pub fn check_topic_format(topic: &str, allowed_topics: &HashSet<String>) -> Option<PolicyDecision> {
     if allowed_topics.contains(topic) {
         return None;
@@ -1251,6 +1310,49 @@ pub fn validate_event_with_hat(
     config: &EventPolicyConfig,
     state: &mut PolicyRuntimeState,
     hat: Option<&str>,
+) -> PolicyDecision {
+    validate_event_with_options(
+        topic,
+        payload,
+        config,
+        state,
+        hat,
+        &DefaultHandoffConfig,
+    )
+}
+
+/// 2026-07-06-004 plan U8: the handoff envelope validator is
+/// opt-in per preset. The default no-op implementation returns
+/// `false` so existing call sites see zero behavioural change
+/// (regression defence #5). U10 is the unit that wires the real
+/// config into the policy pipeline.
+pub trait HandoffEnvelopeConfigAccess {
+    fn handoff_envelope_enabled(&self) -> bool;
+    fn handoff_envelope_validate_payload(&self) -> bool;
+}
+
+pub struct DefaultHandoffConfig;
+
+impl HandoffEnvelopeConfigAccess for DefaultHandoffConfig {
+    fn handoff_envelope_enabled(&self) -> bool {
+        false
+    }
+    fn handoff_envelope_validate_payload(&self) -> bool {
+        false
+    }
+}
+
+/// Public entry point used by U8's wiring tests and by the real
+/// `ralph emit --policy-check` path once U10 feeds the typed
+/// config in. Returns the policy decision for the supplied
+/// payload against the supplied event policy.
+pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
+    topic: &str,
+    payload: Option<&str>,
+    config: &EventPolicyConfig,
+    state: &mut PolicyRuntimeState,
+    hat: Option<&str>,
+    handoff_config: &H,
 ) -> PolicyDecision {
     if !config.enabled {
         return PolicyDecision::Accept;
@@ -2168,6 +2270,33 @@ pub fn validate_event_with_hat(
                             ),
                         });
                     }
+                }
+            }
+        }
+    }
+
+    // 2026-07-06-004 plan U8: handoff envelope validation. When
+    // `event_loop.handoff_envelope.enabled` is on AND
+    // `validate_payload` is on, every event whose payload parses
+    // as a JSON object must contain a valid
+    // `payload.handoff_envelope` (per `handoff_envelope.v1`).
+    // The check is gated on the typed config so non-serial
+    // presets and ad-hoc loops are unaffected (regression
+    // defence #5).
+    if handoff_config.handoff_envelope_enabled()
+        && handoff_config.handoff_envelope_validate_payload()
+    {
+        if let Some(p) = payload {
+            match serde_json::from_str::<Value>(p) {
+                Ok(value) => {
+                    if let Some(finding) = check_handoff_envelope(topic, &value) {
+                        findings.push(finding);
+                    }
+                }
+                Err(_) => {
+                    // If the payload does not parse as JSON we
+                    // don't add a finding here — earlier
+                    // validation layers will surface that.
                 }
             }
         }
@@ -6758,5 +6887,236 @@ hats:
             unique.contains("duplicate_review_dimensions_complete"),
             "ReviewDimensionsComplete keeps its distinct code under U3"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // U8 tests: handoff_envelope policy-check wiring.
+    // ------------------------------------------------------------------
+
+    use crate::config::HandoffEnvelopeConfig;
+
+    struct StubHandoff {
+        enabled: bool,
+        validate_payload: bool,
+    }
+
+    impl HandoffEnvelopeConfigAccess for StubHandoff {
+        fn handoff_envelope_enabled(&self) -> bool {
+            self.enabled
+        }
+        fn handoff_envelope_validate_payload(&self) -> bool {
+            self.validate_payload
+        }
+    }
+
+    fn full_payload() -> serde_json::Value {
+        serde_json::json!({
+            "plan_name": "2026-07-06-u8-fixture",
+            "plan_path": "docs/plans/2026-07-06-u8-fixture.md",
+            "task_id": "task-live-id",
+            "task_key": "2026-07-06-u8-fixture:step-3:implement",
+            "step": "step-3",
+            "handoff_envelope": {
+                "schema_version": "handoff-envelope.v1",
+                "root_goal": "ship the plan without regressions",
+                "plan": {
+                    "name": "2026-07-06-u8-fixture",
+                    "path": "docs/plans/2026-07-06-u8-fixture.md",
+                    "current_step": "step-3",
+                    "completed_steps": ["step-1", "step-2"]
+                },
+                "state": {
+                    "current_status": "ready_for_review",
+                    "last_signal": "work.done",
+                    "blocking_reason": null
+                },
+                "receiver_contract": {
+                    "to_hat": "goal-alignment-reviewer",
+                    "must_do": ["review step-3"],
+                    "must_not_do": ["regress step-2"],
+                    "success_signal": "work.done",
+                    "failure_signal": "work.failed"
+                }
+            }
+        })
+    }
+
+    fn policy_minimal() -> EventPolicyConfig {
+        use crate::config::{EventPolicyMode, ViolationAction};
+        EventPolicyConfig {
+            enabled: true,
+            mode: EventPolicyMode::Enforce,
+            on_violation: ViolationAction::RejectWithResume,
+            schemas: HashMap::new(),
+            schema_file: None,
+            terminal_topics: vec![],
+            business_topics: vec![],
+            require_policy_check_for_cli_emit: false,
+            allow_unsafe_cli_emit: true,
+            require_emit_provenance: false,
+            completion_after_terminal: Default::default(),
+            topic_deny_rules: vec![],
+            plan_name_equality_required: false,
+        }
+    }
+
+    #[test]
+    fn policy_check_does_not_require_handoff_envelope_when_disabled() {
+        // Default-closed: no flags set, no envelope required.
+        let policy = policy_minimal();
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event_with_options(
+            "work.done",
+            Some(&serde_json::to_string(&full_payload()).unwrap()),
+            &policy,
+            &mut state,
+            None,
+            &StubHandoff {
+                enabled: false,
+                validate_payload: false,
+            },
+        );
+        assert!(
+            matches!(decision, PolicyDecision::Accept),
+            "disabled flag must not gate; got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn policy_check_rejects_missing_handoff_envelope_when_validation_enabled() {
+        let mut payload = full_payload();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .remove("handoff_envelope");
+
+        let policy = policy_minimal();
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event_with_options(
+            "work.done",
+            Some(&serde_json::to_string(&payload).unwrap()),
+            &policy,
+            &mut state,
+            None,
+            &StubHandoff {
+                enabled: true,
+                validate_payload: true,
+            },
+        );
+        match decision {
+            PolicyDecision::RejectWithResume(f)
+            | PolicyDecision::Hold(f)
+            | PolicyDecision::AcknowledgeAndForward(f) => {
+                assert!(
+                    f.message.contains("handoff_envelope_missing"),
+                    "missing envelope must surface; got finding: {:?}",
+                    f
+                );
+            }
+            other => panic!("expected rejection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn policy_check_rejects_invalid_handoff_envelope_when_validation_enabled() {
+        let mut payload = full_payload();
+        payload["handoff_envelope"]["schema_version"] = serde_json::json!("wrong");
+        let policy = policy_minimal();
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event_with_options(
+            "work.done",
+            Some(&serde_json::to_string(&payload).unwrap()),
+            &policy,
+            &mut state,
+            None,
+            &StubHandoff {
+                enabled: true,
+                validate_payload: true,
+            },
+        );
+        match decision {
+            PolicyDecision::RejectWithResume(f)
+            | PolicyDecision::Hold(f)
+            | PolicyDecision::AcknowledgeAndForward(f) => {
+                assert!(
+                    f.message.contains("handoff_envelope_invalid_schema_version"),
+                    "invalid schema version must surface; got finding: {:?}",
+                    f
+                );
+            }
+            other => panic!("expected rejection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn policy_check_accepts_valid_handoff_envelope_when_validation_enabled() {
+        let policy = policy_minimal();
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event_with_options(
+            "work.done",
+            Some(&serde_json::to_string(&full_payload()).unwrap()),
+            &policy,
+            &mut state,
+            None,
+            &StubHandoff {
+                enabled: true,
+                validate_payload: true,
+            },
+        );
+        assert!(
+            matches!(decision, PolicyDecision::Accept),
+            "valid envelope must accept; got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn handoff_envelope_validation_enabled_gate_is_correct() {
+        let cfg_disabled = StubHandoff {
+            enabled: false,
+            validate_payload: true,
+        };
+        let cfg_validate_only = StubHandoff {
+            enabled: true,
+            validate_payload: false,
+        };
+        let cfg_full = StubHandoff {
+            enabled: true,
+            validate_payload: true,
+        };
+        assert!(!handoff_envelope_validation_enabled(
+            Some("{}"),
+            &cfg_disabled
+        ));
+        assert!(!handoff_envelope_validation_enabled(
+            Some("{}"),
+            &cfg_validate_only
+        ));
+        assert!(handoff_envelope_validation_enabled(
+            Some("{}"),
+            &cfg_full
+        ));
+        assert!(!handoff_envelope_validation_enabled(
+            None, &cfg_full
+        ));
+    }
+
+    #[test]
+    fn event_loop_handoff_config_adapter_projects_typed_config() {
+        let cfg = HandoffEnvelopeConfig {
+            enabled: true,
+            prompt_injection: true,
+            validate_payload: true,
+            emit_result_summary: false,
+        };
+        let adapter = EventLoopHandoffConfig { handoff_envelope: &cfg };
+        assert!(adapter.handoff_envelope_enabled());
+        assert!(adapter.handoff_envelope_validate_payload());
+
+        let cfg_off = HandoffEnvelopeConfig::default();
+        let adapter = EventLoopHandoffConfig { handoff_envelope: &cfg_off };
+        assert!(!adapter.handoff_envelope_enabled());
+        assert!(!adapter.handoff_envelope_validate_payload());
     }
 }
