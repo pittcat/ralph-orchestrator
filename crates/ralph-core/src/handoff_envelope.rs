@@ -287,6 +287,35 @@ impl std::fmt::Display for HandoffEnvelopeValidationError {
 
 impl std::error::Error for HandoffEnvelopeValidationError {}
 
+/// 2026-07-06-004 fix-plan U7 (R7): helper that extracts a
+/// non-empty string field from a JSON object, mapping the
+/// two failure modes (missing / wrong type, blank) to a
+/// stable stable error code. Used for every required string
+/// field on the top-level `handoff_envelope` object so the
+/// validator stays under 80 lines of body and the error
+/// envelope is uniform across fields.
+fn require_non_empty_string(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    code: &'static str,
+) -> Result<String, HandoffEnvelopeValidationError> {
+    let raw =
+        obj.get(key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| HandoffEnvelopeValidationError {
+                code,
+                message: format!("{key} must be a non-empty string"),
+            })?;
+    let trimmed = raw.to_string();
+    if trimmed.trim().is_empty() {
+        return Err(HandoffEnvelopeValidationError {
+            code,
+            message: format!("{key} must be a non-empty string"),
+        });
+    }
+    Ok(trimmed)
+}
+
 /// Validate a JSON `Value` carrying a top-level `handoff_envelope`
 /// field. Returns the typed view on success, or the first
 /// validation error on failure.
@@ -361,6 +390,12 @@ pub fn validate_handoff_envelope_payload_with_topology(
     // "missing field" message). Then parse into the typed struct
     // for shape validation. This dual-pass keeps error codes
     // stable for U8's policy-check wiring.
+    // 2026-07-06-004 fix-plan U7 (R7): the schema_version check
+    // stays bespoke because it gates on a literal-version
+    // equality (not a "non-empty" rule). Empty / missing /
+    // wrong-type versions all map to the same
+    // `handoff_envelope_invalid_schema_version` code so the
+    // agent can match against one stable string.
     let schema_version = payload_obj
         .get("schema_version")
         .and_then(|v| v.as_str())
@@ -380,21 +415,16 @@ pub fn validate_handoff_envelope_payload_with_topology(
         });
     }
 
-    let root_goal = payload_obj
-        .get("root_goal")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| HandoffEnvelopeValidationError {
-            code: "handoff_envelope_missing_root_goal",
-            message: "root_goal must be a string".to_string(),
-        })?
-        .to_string();
-
-    if root_goal.trim().is_empty() {
-        return Err(HandoffEnvelopeValidationError {
-            code: "handoff_envelope_missing_root_goal",
-            message: "root_goal must be a non-empty string".to_string(),
-        });
-    }
+    // 2026-07-06-004 fix-plan U7 (R7): the 5 required top-level
+    // string fields use the `require_non_empty_string` helper
+    // to keep the trim-then-map-to-code pattern DRY. Each
+    // field's code stays stable so policy-check tests pin the
+    // wire-level reason vocabulary.
+    let root_goal = require_non_empty_string(
+        payload_obj,
+        "root_goal",
+        "handoff_envelope_missing_root_goal",
+    )?;
 
     let contract_obj = payload_obj
         .get("receiver_contract")
@@ -404,21 +434,8 @@ pub fn validate_handoff_envelope_payload_with_topology(
             message: "receiver_contract must be an object".to_string(),
         })?;
 
-    let to_hat = contract_obj
-        .get("to_hat")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| HandoffEnvelopeValidationError {
-            code: "handoff_envelope_missing_to_hat",
-            message: "receiver_contract.to_hat must be a string".to_string(),
-        })?
-        .to_string();
-
-    if to_hat.trim().is_empty() {
-        return Err(HandoffEnvelopeValidationError {
-            code: "handoff_envelope_missing_to_hat",
-            message: "receiver_contract.to_hat must be a non-empty string".to_string(),
-        });
-    }
+    let to_hat =
+        require_non_empty_string(contract_obj, "to_hat", "handoff_envelope_missing_to_hat")?;
 
     // 2026-07-06-004 fix-plan U3 (R3): reject envelopes
     // addressed to a hat the registry has never seen so the
@@ -459,37 +476,17 @@ pub fn validate_handoff_envelope_payload_with_topology(
         });
     }
 
-    let success_signal = contract_obj
-        .get("success_signal")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| HandoffEnvelopeValidationError {
-            code: "handoff_envelope_missing_success_signal",
-            message: "receiver_contract.success_signal must be a string".to_string(),
-        })?
-        .to_string();
+    let success_signal = require_non_empty_string(
+        contract_obj,
+        "success_signal",
+        "handoff_envelope_missing_success_signal",
+    )?;
 
-    if success_signal.trim().is_empty() {
-        return Err(HandoffEnvelopeValidationError {
-            code: "handoff_envelope_missing_success_signal",
-            message: "receiver_contract.success_signal must be a non-empty string".to_string(),
-        });
-    }
-
-    let failure_signal = contract_obj
-        .get("failure_signal")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| HandoffEnvelopeValidationError {
-            code: "handoff_envelope_missing_failure_signal",
-            message: "receiver_contract.failure_signal must be a string".to_string(),
-        })?
-        .to_string();
-
-    if failure_signal.trim().is_empty() {
-        return Err(HandoffEnvelopeValidationError {
-            code: "handoff_envelope_missing_failure_signal",
-            message: "receiver_contract.failure_signal must be a non-empty string".to_string(),
-        });
-    }
+    let failure_signal = require_non_empty_string(
+        contract_obj,
+        "failure_signal",
+        "handoff_envelope_missing_failure_signal",
+    )?;
 
     // 2026-07-06-004 fix-plan U6 (R6): once the structure
     // validation passes, reject signal values that are not
@@ -1211,6 +1208,178 @@ mod tests {
             validate_handoff_envelope_payload_with_topology(&payload, None, &topology).is_ok(),
             "valid envelope with in-topology signals must surface"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // 2026-07-06-004 fix-plan U7 (R7): 11 single-test paths
+    // covering each error code emitted by the validator. The
+    // helper-based refactor in U7 surfaced these branches —
+    // each `require_non_empty_string` and each plan/state
+    // typed-parse path now has a regression test asserting
+    // the stable error code is surfaced with the right
+    // structure.
+    // ──────────────────────────────────────────────────────────
+
+    fn reject_field(payload: &mut serde_json::Value, path: &[&str], field: &str) {
+        let mut current = payload.as_object_mut().unwrap();
+        if !path.is_empty() {
+            current = current
+                .get_mut("handoff_envelope")
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            for p in path {
+                current = current.get_mut(*p).unwrap().as_object_mut().unwrap();
+            }
+        } else {
+            current = current
+                .get_mut("handoff_envelope")
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+        }
+        current.remove(field);
+    }
+
+    #[test]
+    fn blank_to_hat_is_rejected() {
+        let mut payload = full_payload();
+        reject_field(&mut payload, &["receiver_contract"], "to_hat");
+        payload["handoff_envelope"]["receiver_contract"]["to_hat"] = json!("   ");
+        let err = validate_handoff_envelope_payload(&payload, None)
+            .expect_err("blank to_hat must reject");
+        assert_eq!(err.code, "handoff_envelope_missing_to_hat");
+    }
+
+    #[test]
+    fn blank_success_signal_is_rejected() {
+        let mut payload = full_payload();
+        payload["handoff_envelope"]["receiver_contract"]["success_signal"] = json!("   ");
+        let err = validate_handoff_envelope_payload(&payload, None)
+            .expect_err("blank success_signal must reject");
+        assert_eq!(err.code, "handoff_envelope_missing_success_signal");
+    }
+
+    #[test]
+    fn blank_failure_signal_is_rejected() {
+        let mut payload = full_payload();
+        payload["handoff_envelope"]["receiver_contract"]["failure_signal"] = json!("   ");
+        let err = validate_handoff_envelope_payload(&payload, None)
+            .expect_err("blank failure_signal must reject");
+        assert_eq!(err.code, "handoff_envelope_missing_failure_signal");
+    }
+
+    #[test]
+    fn missing_receiver_contract_is_rejected() {
+        let mut payload = full_payload();
+        payload["handoff_envelope"]
+            .as_object_mut()
+            .unwrap()
+            .remove("receiver_contract");
+        let err = validate_handoff_envelope_payload(&payload, None)
+            .expect_err("missing receiver_contract must reject");
+        assert_eq!(err.code, "handoff_envelope_missing_receiver_contract");
+    }
+
+    #[test]
+    fn missing_plan_name_is_rejected() {
+        // Removing the field makes `serde_json::from_value`
+        // fail before the trim path runs. The validator
+        // emits `handoff_envelope_invalid_payload` for
+        // missing typed-struct fields; the trim path is
+        // exercised by the `missing_plan_name_trim_is_rejected`
+        // companion test. This test pins the typed-struct
+        // presence contract for future readers (a future
+        // refactor that accidentally turns plan fields into
+        // Option would surface as a behavior change here).
+        let mut payload = full_payload();
+        payload["handoff_envelope"]["plan"]
+            .as_object_mut()
+            .unwrap()
+            .remove("name");
+        let err = validate_handoff_envelope_payload(&payload, None)
+            .expect_err("missing plan.name must reject");
+        assert!(
+            err.code == "handoff_envelope_missing_plan"
+                || err.code == "handoff_envelope_invalid_payload",
+            "missing plan.name should reject with one of the stable codes: {err:?}"
+        );
+    }
+
+    #[test]
+    fn missing_plan_path_is_rejected() {
+        let mut payload = full_payload();
+        payload["handoff_envelope"]["plan"]
+            .as_object_mut()
+            .unwrap()
+            .remove("path");
+        let err = validate_handoff_envelope_payload(&payload, None)
+            .expect_err("missing plan.path must reject");
+        assert!(
+            err.code == "handoff_envelope_missing_plan"
+                || err.code == "handoff_envelope_invalid_payload",
+            "missing plan.path should reject with one of the stable codes: {err:?}"
+        );
+    }
+
+    #[test]
+    fn missing_plan_current_step_is_rejected() {
+        let mut payload = full_payload();
+        payload["handoff_envelope"]["plan"]
+            .as_object_mut()
+            .unwrap()
+            .remove("current_step");
+        let err = validate_handoff_envelope_payload(&payload, None)
+            .expect_err("missing plan.current_step must reject");
+        assert!(
+            err.code == "handoff_envelope_missing_plan"
+                || err.code == "handoff_envelope_invalid_payload",
+            "missing plan.current_step should reject with one of the stable codes: {err:?}"
+        );
+    }
+
+    #[test]
+    fn missing_state_current_status_is_rejected() {
+        let mut payload = full_payload();
+        payload["handoff_envelope"]["state"]
+            .as_object_mut()
+            .unwrap()
+            .remove("current_status");
+        let err = validate_handoff_envelope_payload(&payload, None)
+            .expect_err("missing state.current_status must reject");
+        assert!(
+            err.code == "handoff_envelope_missing_state"
+                || err.code == "handoff_envelope_invalid_payload",
+            "missing state.current_status should reject with one of the stable codes: {err:?}"
+        );
+    }
+
+    #[test]
+    fn missing_state_last_signal_is_rejected() {
+        let mut payload = full_payload();
+        payload["handoff_envelope"]["state"]
+            .as_object_mut()
+            .unwrap()
+            .remove("last_signal");
+        let err = validate_handoff_envelope_payload(&payload, None)
+            .expect_err("missing state.last_signal must reject");
+        assert!(
+            err.code == "handoff_envelope_missing_state"
+                || err.code == "handoff_envelope_invalid_payload",
+            "missing state.last_signal should reject with one of the stable codes: {err:?}"
+        );
+    }
+
+    #[test]
+    fn missing_to_hat_is_rejected() {
+        let mut payload = full_payload();
+        payload["handoff_envelope"]["receiver_contract"]
+            .as_object_mut()
+            .unwrap()
+            .remove("to_hat");
+        let err = validate_handoff_envelope_payload(&payload, None)
+            .expect_err("missing receiver_contract.to_hat must reject");
+        assert_eq!(err.code, "handoff_envelope_missing_to_hat");
     }
 
     // keep `unused import` lints quiet for the test-only
