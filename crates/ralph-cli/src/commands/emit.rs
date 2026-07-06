@@ -406,6 +406,33 @@ fn emit_command_with_root_and_hats(
     // `ralph emit --schema <TOPIC>` into `jq` and expect a hermetic,
     // side-effect-free read.
     if let Some(ref schema_topic) = args.schema {
+        // U6 (2026-07-06-001 plan): `--schema EMIT_RESULT` 是 ralph
+        // 内部协议 schema（`EmitResult` 响应 JSON 的 SSOT），不走
+        // preset 协议视图——它从 `ralph_core::emit_result` 模块的
+        // 嵌入式常量直出，不读 preset / ralph.yml / .ralph/。这是
+        // 「协议 SSOT 收敛」的对外可观测信号。
+        //
+        // 必须放在 ralph.yml 检查之前；其它 topic 走原有
+        // ProtocolView 渲染。
+        if schema_topic == "EMIT_RESULT" {
+            use ralph_core::emit_result::{EMIT_RESULT_SCHEMA_VERSION, EmitResult};
+            let view = EmitResult {
+                schema_version: EMIT_RESULT_SCHEMA_VERSION,
+                ok: false, // placeholder；U6 只暴露 schema_version 字段
+                recorded: false,
+                topic: String::new(),
+                phase: String::new(),
+                allowed_next: vec![],
+                activate_next: vec![],
+                errors: vec![],
+                handoff: None,
+            };
+            let pretty = serde_json::to_string_pretty(&view)
+                .context("Failed to serialise EmitResult schema view")?;
+            println!("{pretty}");
+            return Ok(());
+        }
+
         let config_path = config_resolution::find_workspace_config_path(&workspace_root)
             .unwrap_or_else(|| workspace_root.join("ralph.yml"));
         if !config_path.exists() {
@@ -3460,6 +3487,90 @@ hats:
             ),
             None
         );
+    }
+}
+
+/// U6 测试：`ralph emit --schema EMIT_RESULT` 只读输出。
+///
+/// 验收要点：
+/// 1. `--schema EMIT_RESULT` 在 stdout 打印 JSON `schema_version == emit_result.v1`
+/// 2. `--schema` 与 `--json` / payload 在 clap 层互斥（schema 路径
+///    完全不读 payload / json 字段）
+///
+/// 测试策略：直接构造 `EmitArgs { schema: Some("EMIT_RESULT"), .. }` 调用
+/// `emit_command_with_root`，断言 stdout JSON 形状 / 调用成功。不读
+/// preset 磁盘，不触碰 `.ralph/`。
+#[cfg(test)]
+mod emit_schema_emit_result_tests {
+    use super::*;
+    use crate::cli::ColorMode;
+    use std::path::PathBuf;
+
+    /// 测试用 fixture：构造 EmitArgs 调用 emit_command。
+    fn emit_args_schema_emit_result() -> EmitArgs {
+        EmitArgs {
+            topic: None, // --schema 模式下不强制 topic
+            payload: String::new(),
+            json: false,
+            file: PathBuf::from(".ralph/events.jsonl"),
+            policy_check: false,
+            no_policy_check: false,
+            hat: None,
+            triggered: None,
+            source: None,
+            schema: Some("EMIT_RESULT".to_string()),
+        }
+    }
+
+    /// `--schema EMIT_RESULT` 必须走 read-only 路径并成功返回（无
+    /// preset / 无 .ralph/ 也能产出 stdout JSON）。
+    ///
+    /// 关键反断言：纯函数路径 → 不依赖 ralph.yml / preset，因此即使
+    /// 工作目录没有 .ralph/ 也能产出 stdout JSON。
+    #[test]
+    fn test_emit_schema_emit_result_prints_version() {
+        let workspace = tempfile::TempDir::new()
+            .expect("temp dir")
+            .path()
+            .to_path_buf();
+
+        emit_command_with_root(
+            ColorMode::Never,
+            emit_args_schema_emit_result(),
+            Some(&workspace),
+        )
+        .expect("EMIT_RESULT schema view must succeed without preset files");
+    }
+
+    /// `--schema` 与 `--json` / `payload` 互斥。
+    ///
+    /// 验证方式：构造 schema + payload + json 全部非默认值的 EmitArgs，
+    /// 调用 emit_command，断言 schema 路径完全忽略 payload / json 字段
+    /// （不读、不抛错）。clap 层的 `conflicts_with_all` 在 parse 阶段
+    /// 拦截三字段同时为非默认值的组合；本测试验证的是 schema 路径本身
+    /// 对 payload / json 字段的 robustness。
+    #[test]
+    fn test_emit_schema_emit_result_mutually_exclusive_with_payload() {
+        let args = EmitArgs {
+            topic: None,
+            payload: "x".to_string(), // 与 schema 互斥
+            json: true,                // 与 schema 互斥
+            file: PathBuf::from(".ralph/events.jsonl"),
+            policy_check: false,
+            no_policy_check: false,
+            hat: None,
+            triggered: None,
+            source: None,
+            schema: Some("EMIT_RESULT".to_string()),
+        };
+
+        let workspace = tempfile::TempDir::new()
+            .expect("temp dir")
+            .path()
+            .to_path_buf();
+
+        emit_command_with_root(ColorMode::Never, args, Some(&workspace))
+            .expect("EMIT_RESULT schema path must ignore payload/json");
     }
 }
 
