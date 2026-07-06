@@ -192,6 +192,109 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 
 ---
 
+## `ralph emit` 响应：`EmitResult`
+
+> **2026-07-06 plan U1/U5/U7-U9**: `ralph emit` 通过 `--output json` 返回 **统一** `EmitResult` JSON（SSOT 在 `crates/ralph-core/src/emit_result/`）。
+> 这是 agent 与脚本解析 emit 结果的单一事实源；不要自己 `tail events.jsonl | jq` 来判断 emit 是否落盘。
+
+**启用方式**：所有 `ralph emit` 子命令 + 子路径（policy-check / apply）通过 `--output json` 输出 `EmitResult` 到 stdout，stderr 仅保留警告。
+**未传 `--output`**：默认 text 模式（与旧行为兼容）。
+
+### EmitResult 字段表
+
+| 字段 | 类型 | 必现 | 说明 |
+|------|------|------|------|
+| `schema_version` | string | 是 | 恒等于 `"emit_result.v1"`。consumer 应按此版本路由解析逻辑 |
+| `ok` | bool | 是 | `true` = policy 通过 + 落盘 / 仅 policy-check 通过；`false` = 拒收 |
+| `recorded` | bool | 是 | **真实写盘** 信号。policy-check 阶段恒为 `false`；只有 apply 阶段成功写盘后才为 `true`。脚本判断「是否需要 reconcile」的唯一权威 |
+| `topic` | string | 是 | emit 的业务 topic（如 `work.done` / `work.ready`）。拒收场景亦可填充 |
+| `phase` | string | 是 | 当前 hat 所在 phase（preset phase authority 解析）。未识别时为 `"unknown"` |
+| `allowed_next` | array<string> | 否 | phase authority 允许的 next topic 列表。**空时省略键** |
+| `activate_next` | array<string> | 否 | preset 显式声明的 `activate_next` 候选。**空时省略键** |
+| `errors` | array<EmitError> | 否 | 拒收场景的错误列表。**接受场景省略键** |
+| `handoff` | object<EmitHandoff> | 否 | Agent 上下文交接包。**None 时省略键** |
+
+### EmitError 字段
+
+| 字段 | 类型 | 必现 | 说明 |
+|------|------|------|------|
+| `code` | string | 是 | 稳定错误码（agent 据此路由修复策略） |
+| `message` | string | 是 | 人类可读错误描述 |
+| `field` | string | 否 | 触发的 payload 字段名（如缺 `task_id` 时为 `"task_id"`）。`None` 时省略 |
+| `suggested_command` | string | 否 | 建议 agent 执行的修复命令（含 `ralph` / 字段补全模板）。`None` 时省略 |
+
+### EmitHandoff 字段
+
+| 字段 | 类型 | 必现 | 说明 |
+|------|------|------|------|
+| `from_hat` | string | 是 | 当前 hat 稳定 id |
+| `to_hat` | string | 是 | 接收交接的下游 hat 稳定 id |
+| `reason` | string | 是 | 交接原因短语（preset `handoff_reasons` 表声明） |
+
+### 路径分支矩阵
+
+| 路径 | `ok` | `recorded` | `errors` | 备注 |
+|------|------|------------|----------|------|
+| `--policy-check` policy 拒收 | `false` | `false` | 非空 | agent 读 `errors[].code` 修复 |
+| `--policy-check` policy 通过 | `true` | `false` | 空（省略） | dry-run 探测，可放心后续正式 emit |
+| apply 落盘 | `true` | `true` | 空（省略） | 真实写盘到 events ledger |
+
+### 示例
+
+成功 apply:
+```json
+{
+  "schema_version": "emit_result.v1",
+  "ok": true,
+  "recorded": true,
+  "topic": "work.done",
+  "phase": "unit_loop"
+}
+```
+
+policy-check 拒收:
+```json
+{
+  "schema_version": "emit_result.v1",
+  "ok": false,
+  "recorded": false,
+  "topic": "work.done",
+  "phase": "unknown",
+  "errors": [
+    {
+      "code": "missing_required_field",
+      "message": "payload missing required field `task_id`",
+      "field": "task_id"
+    }
+  ]
+}
+```
+
+带 handoff 的 policy-check 通过:
+```json
+{
+  "schema_version": "emit_result.v1",
+  "ok": true,
+  "recorded": false,
+  "topic": "work.done",
+  "phase": "fix_units",
+  "allowed_next": ["work.ready"],
+  "handoff": {
+    "from_hat": "executor",
+    "to_hat": "validator",
+    "reason": "fix_unit_complete"
+  }
+}
+```
+
+### 反模式
+
+- 🔴 **不要** `tail events.jsonl | jq` 验证 emit 结果；用 `--output json` 直接拿到 `recorded` 字段。
+- 🔴 **不要** 凭 `topic` 字符串做结果路由；用 `ok` + `recorded` 两字段组合判断（policy-check 接受 ≠ 落盘）。
+- 🔴 **不要** 在脚本里 hardcode `schema_version == "emit_result.v1"` 作为版本检查；改用 `>=` / `^` 风格的 semver 比对 — schema 演进时会 bump。
+
+---
+
 ## Unified Pipeline(U11)
 
 `ralph emit --policy-check` 走 **unified validation pipeline**,与 loop 的 `process_parse_result` 使用同一 `ValidationPipeline::validate_pre_commit_with_view`。
