@@ -391,6 +391,16 @@ event_loop:
     enabled: false
     steward_hat_id: "progress-steward"
     max_steward_iterations: 3
+  # 2026-07-06-004 plan U7: handoff envelope prompt injection —
+  # serial is the first (and currently the only) preset that
+  # turns this on. Only `enabled` and `prompt_injection` flip on
+  # here; `validate_payload` and `emit_result_summary` stay off
+  # until U10. Default-closed elsewhere (regression defence #4).
+  handoff_envelope:
+    enabled: true
+    prompt_injection: true
+    validate_payload: false
+    emit_result_summary: false
   # 2026-07-02-004 plan: precheck gate (LLM-as-judge on critical
   # terminal topics). Desugar rewrites each guarded topic's
   # producers to emit `<X>.proposed` and synthesizes a `precheck-<X>`

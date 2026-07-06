@@ -1102,6 +1102,102 @@ mod tests {
         );
     }
 
+    /// 2026-07-06-004 plan U7: serial turns on the prompt
+    /// injection half of the handoff envelope (enabled +
+    /// prompt_injection) but keeps validate_payload and
+    /// emit_result_summary off. The contract is read from the
+    /// embedded preset so a future drift between
+    /// `presets/en/ce-executor-serial.yml` and the in-binary
+    /// embedded copy is caught.
+    #[test]
+    fn ce_executor_serial_enables_handoff_envelope_prompt() {
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
+
+        let enabled = yaml
+            .get("event_loop")
+            .and_then(|e| e.get("handoff_envelope"))
+            .and_then(|h| h.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .expect("event_loop.handoff_envelope.enabled must be present");
+        assert!(
+            enabled,
+            "ce-executor-serial must enable handoff_envelope after U7"
+        );
+
+        let prompt_injection = yaml
+            .get("event_loop")
+            .and_then(|e| e.get("handoff_envelope"))
+            .and_then(|h| h.get("prompt_injection"))
+            .and_then(|v| v.as_bool())
+            .expect("event_loop.handoff_envelope.prompt_injection must be present");
+        assert!(
+            prompt_injection,
+            "ce-executor-serial must turn on prompt_injection after U7"
+        );
+
+        // validate_payload / emit_result_summary stay off until U10.
+        let validate_payload = yaml
+            .get("event_loop")
+            .and_then(|e| e.get("handoff_envelope"))
+            .and_then(|h| h.get("validate_payload"))
+            .and_then(|v| v.as_bool())
+            .expect("event_loop.handoff_envelope.validate_payload must be present");
+        assert!(
+            !validate_payload,
+            "ce-executor-serial must keep validate_payload false at U7; U10 is the unit that flips it on"
+        );
+        let emit_result_summary = yaml
+            .get("event_loop")
+            .and_then(|e| e.get("handoff_envelope"))
+            .and_then(|h| h.get("emit_result_summary"))
+            .and_then(|v| v.as_bool())
+            .expect("event_loop.handoff_envelope.emit_result_summary must be present");
+        assert!(
+            !emit_result_summary,
+            "ce-executor-serial must keep emit_result_summary false at U7; U10 is the unit that flips it on"
+        );
+    }
+
+    /// 2026-07-06-004 plan U7: non-serial presets do NOT opt in
+    /// to the handoff envelope. This guards the regression
+    /// defence #4 — only `ce-executor-serial` is the experiment.
+    /// We sample a handful of presets we expect to see in CI.
+    #[test]
+    fn non_serial_presets_leave_handoff_envelope_disabled() {
+        let samples = [
+            "ce-executor-pipeline",
+            "ce-executor-supervisor",
+            "ce-executor-lite",
+            "autoresearch",
+            "debug",
+        ];
+        for name in samples {
+            let Some(preset) = get_preset(name) else {
+                // Preset may be absent in some build profiles;
+                // skip silently rather than failing the test.
+                continue;
+            };
+            let yaml: serde_yaml::Value =
+                serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
+            // The block may be entirely omitted (default-closed),
+            // in which case `as_bool()` returns None — that's the
+            // desired "disabled" state.
+            let enabled = yaml
+                .get("event_loop")
+                .and_then(|e| e.get("handoff_envelope"))
+                .and_then(|h| h.get("enabled"))
+                .and_then(|v| v.as_bool());
+            assert!(
+                enabled.is_none() || !enabled.unwrap_or(true),
+                "preset {name} must not enable handoff_envelope (U7 contract: serial-only experiment); got {:?}",
+                enabled
+            );
+        }
+    }
+
     #[test]
     fn test_ce_executor_serial_has_two_step_verify_gate() {
         let preset =
