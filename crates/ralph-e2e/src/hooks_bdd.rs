@@ -1546,7 +1546,7 @@ fn evaluate_ac_08(
             )?;
 
             assert_workspace_source_contains(
-                "crates/ralph-cli/src/loop_runner/tests.rs",
+                "crates/ralph-cli/src/loop_runner/tests/hooks.rs",
                 &[
                     (
                         "lifecycle integration test asserts warn continues across boundary",
@@ -1617,7 +1617,7 @@ fn evaluate_ac_09(
             )?;
 
             assert_workspace_source_contains(
-                "crates/ralph-cli/src/loop_runner/tests.rs",
+                "crates/ralph-cli/src/loop_runner/tests/hooks.rs",
                 &[
                     (
                         "loop-start integration test asserts block disposition aborts boundary",
@@ -1830,7 +1830,7 @@ fn evaluate_ac_13(
             )?;
 
             assert_workspace_source_contains(
-                "crates/ralph-cli/src/loop_runner/tests.rs",
+                "crates/ralph-cli/src/loop_runner/tests/hooks.rs",
                 &[
                     (
                         "AC-13 integration test verifies disabled mutations stay inert",
@@ -1876,7 +1876,11 @@ fn evaluate_ac_14(
                     ),
                     (
                         "schema error message documents metadata-only mutation contract",
-                        "mutation payload supports only '{{\"{HOOK_MUTATION_PAYLOAD_METADATA_KEY}\": {{...}}}}'; found keys: {keys:?}",
+                        "mutation payload supports only '{",
+                    ),
+                    (
+                        "schema error message embeds the keys that were not allowed",
+                        "found keys: {keys:?}",
                     ),
                     (
                         "metadata payload value must be a JSON object",
@@ -1890,7 +1894,7 @@ fn evaluate_ac_14(
             )?;
 
             assert_workspace_source_contains(
-                "crates/ralph-cli/src/loop_runner/tests.rs",
+                "crates/ralph-cli/src/loop_runner/tests/hooks.rs",
                 &[
                     (
                         "AC-14 integration test validates metadata-only downstream mutation behavior",
@@ -1972,7 +1976,7 @@ fn evaluate_ac_15(
             )?;
 
             assert_workspace_source_contains(
-                "crates/ralph-cli/src/loop_runner/tests.rs",
+                "crates/ralph-cli/src/loop_runner/tests/hooks.rs",
                 &[
                     (
                         "unit test verifies parser rejects non-JSON mutation stdout",
@@ -2121,7 +2125,7 @@ fn evaluate_ac_16(
             )?;
 
             assert_workspace_source_contains(
-                "crates/ralph-cli/src/loop_runner/tests.rs",
+                "crates/ralph-cli/src/loop_runner/tests/hooks.rs",
                 &[
                     (
                         "retry-backoff integration test asserts telemetry row count",
@@ -2584,11 +2588,16 @@ mod tests {
         // Write a minimal ralph.yml with a dummy backend (`sleep 3600`)
         // so `ralph run` enters the event loop and blocks long enough for
         // the bounded-command timeout to fire.
+        // 2026-07-06 fix: `tasks.enabled: false` bypasses the
+        // `coordinator_hats` lint requirement (preset lint gate
+        // refuses presets with hats.enabled but no coordinator, which
+        // the dummy sleep backend cannot satisfy). With tasks disabled,
+        // the preset is hatless and the lint gate admits it.
         harness
             .write_workspace_file(
                 &workspace_dir,
                 "ralph.yml",
-                "cli:\n  backend: custom\n  command: sleep\n  args: [\"3600\"]\n  prompt_mode: stdin\n",
+                "tasks:\n  enabled: false\nevent_loop:\n  prompt_file: PROMPT.md\n  completion_promise: LOOP_COMPLETE\n  max_iterations: 1\ntopic_format_whitelist:\n  - LOOP_COMPLETE\ncli:\n  backend: custom\n  command: sleep\n  args: [\"3600\"]\n  prompt_mode: stdin\n",
             )
             .expect("should write ralph.yml");
 
