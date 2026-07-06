@@ -19,6 +19,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use ralph_proto::Event;
+
 /// Stable schema version identifier. Bumping this string is the
 /// only way to evolve the contract: any payload whose
 /// `schema_version` differs is rejected with
@@ -418,6 +420,41 @@ pub fn validate_handoff_envelope_payload(
     Ok(parsed)
 }
 
+/// 2026-07-06-004 plan U5: walk an event list backwards and return
+/// the most recent valid `handoff_envelope` payload.
+///
+/// * Events whose payload does not parse as a JSON object, or
+///   whose `payload.handoff_envelope` is missing, are silently
+///   ignored.
+/// * Events whose envelope fails `validate_handoff_envelope_payload`
+///   are silently ignored at extraction time — the prompt
+///   injection path must never crash on a malformed payload. Real
+///   rejection is policy-check's job (U8).
+/// * On the first hit that survives validation, the typed payload
+///   is converted into a `HandoffEnvelopeView` and returned. The
+///   caller (U6) hands that view to the prompt injection gate
+///   from U4.
+pub fn latest_handoff_envelope_payload(events: &[Event]) -> Option<HandoffEnvelopeView> {
+    for ev in events.iter().rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&ev.payload) else {
+            continue;
+        };
+        if validate_handoff_envelope_payload(&value).is_ok() {
+            // Re-parse the validated envelope so we can hand back
+            // the typed view. validate_handoff_envelope_payload
+            // returns the typed payload, so re-walk to it.
+            if let Some(env) = value.get("handoff_envelope") {
+                if let Ok(parsed) =
+                    serde_json::from_value::<HandoffEnvelopePayload>(env.clone())
+                {
+                    return Some(HandoffEnvelopeView::from(&parsed));
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     //! 2026-07-06-004 plan U2 RED tests. These tests exercise
@@ -683,6 +720,129 @@ mod tests {
         assert!(
             !rendered.contains("step-7"),
             "completed_steps beyond MAX_RENDERED_LIST_ITEMS must be cut"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // U5 tests: latest_handoff_envelope_payload extractor
+    // ------------------------------------------------------------------
+
+    fn envelope_value(receiver: &str, step: &str) -> serde_json::Value {
+        json!({
+            "plan_name": "2026-07-06-u5-fixture",
+            "plan_path": "docs/plans/2026-07-06-u5-fixture.md",
+            "task_id": "task-live-id",
+            "task_key": "2026-07-06-u5-fixture:step-2:implement",
+            "step": "step-2",
+            "handoff_envelope": {
+                "schema_version": HANDOFF_ENVELOPE_SCHEMA_VERSION,
+                "root_goal": "ship the plan without regressions",
+                "plan": {
+                    "name": "2026-07-06-u5-fixture",
+                    "path": "docs/plans/2026-07-06-u5-fixture.md",
+                    "current_step": step,
+                    "completed_steps": ["step-1"]
+                },
+                "state": {
+                    "current_status": "ready_for_review",
+                    "last_signal": "work.done",
+                    "blocking_reason": null
+                },
+                "receiver_contract": {
+                    "to_hat": receiver,
+                    "must_do": ["review step-2"],
+                    "must_not_do": ["regress step-1"],
+                    "success_signal": "work.done",
+                    "failure_signal": "work.failed"
+                }
+            }
+        })
+    }
+
+    fn event_with_payload(
+        payload: serde_json::Value,
+        source: Option<&str>,
+    ) -> ralph_proto::Event {
+        ralph_proto::Event {
+            topic: ralph_proto::Topic::new("work.done"),
+            payload: payload.to_string(),
+            source: source.map(|s| ralph_proto::HatId::new(s.to_string())),
+            target: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        }
+    }
+
+    #[test]
+    fn latest_handoff_envelope_ignores_events_without_payload() {
+        // Only "noise" events. None carry a handoff_envelope.
+        let events = vec![
+            event_with_payload(json!({"plan_name": "p"}), Some("plan-reviewer")),
+            event_with_payload(json!({"task_id": "t"}), Some("executor")),
+        ];
+        assert!(
+            latest_handoff_envelope_payload(&events).is_none(),
+            "no envelope in any event must yield None"
+        );
+    }
+
+    #[test]
+    fn latest_handoff_envelope_uses_most_recent_valid_payload() {
+        // Three events: an older valid envelope, a noise event,
+        // and a newer valid envelope from a different sender.
+        // The newer one wins.
+        let events = vec![
+            event_with_payload(envelope_value("plan-reviewer", "step-1"), Some("executor")),
+            event_with_payload(json!({"plan_name": "p"}), Some("executor")),
+            event_with_payload(envelope_value("goal-alignment-reviewer", "step-2"), Some("executor")),
+        ];
+        let view: HandoffEnvelopeView = latest_handoff_envelope_payload(&events)
+            .expect("most recent envelope must be extracted");
+        assert_eq!(view.to_hat, "goal-alignment-reviewer");
+        assert_eq!(view.plan_current_step, "step-2");
+    }
+
+    #[test]
+    fn latest_handoff_envelope_ignores_invalid_payload() {
+        // Two invalid envelopes (schema version, then missing
+        // success_signal), then a valid envelope. The valid one
+        // must still surface; invalid ones are silently skipped
+        // at extraction time.
+        let mut bad_version = envelope_value("reviewer", "step-1");
+        bad_version["handoff_envelope"]["schema_version"] = json!("handoff-envelope.v0");
+
+        let mut bad_success_signal = envelope_value("reviewer", "step-2");
+        let contract = bad_success_signal
+            .get_mut("handoff_envelope")
+            .and_then(|v| v.get_mut("receiver_contract"))
+            .and_then(|v| v.as_object_mut())
+            .expect("contract must be an object");
+        contract.remove("success_signal");
+
+        let events = vec![
+            event_with_payload(bad_version, Some("executor")),
+            event_with_payload(bad_success_signal, Some("executor")),
+            event_with_payload(envelope_value("reviewer", "step-3"), Some("executor")),
+        ];
+        let view = latest_handoff_envelope_payload(&events)
+            .expect("valid envelope must surface even when earlier events were invalid");
+        assert_eq!(view.plan_current_step, "step-3");
+    }
+
+    #[test]
+    fn latest_handoff_envelope_returns_none_when_all_invalid() {
+        let mut bad_version = envelope_value("reviewer", "step-1");
+        bad_version["handoff_envelope"]["schema_version"] = json!("handoff-envelope.v0");
+
+        let events = vec![
+            event_with_payload(bad_version, Some("executor")),
+            event_with_payload(json!({"plan_name": "p"}), Some("executor")),
+        ];
+        assert!(
+            latest_handoff_envelope_payload(&events).is_none(),
+            "all-invalid slice must yield None"
         );
     }
 }
