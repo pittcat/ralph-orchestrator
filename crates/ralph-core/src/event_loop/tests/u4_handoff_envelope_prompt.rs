@@ -11,9 +11,9 @@
 use crate::config::HandoffEnvelopeConfig;
 use crate::event_loop::prepend_handoff_envelope_if_enabled;
 use crate::handoff_envelope::{
-    render_handoff_envelope_prompt, HandoffEnvelopePayload, HandoffEnvelopePlan,
+    HANDOFF_ENVELOPE_SCHEMA_VERSION, HandoffEnvelopePayload, HandoffEnvelopePlan,
     HandoffEnvelopeReceiverContract, HandoffEnvelopeState, HandoffEnvelopeView,
-    HANDOFF_ENVELOPE_SCHEMA_VERSION,
+    render_handoff_envelope_prompt,
 };
 
 fn envelope_fixture() -> HandoffEnvelopePayload {
@@ -64,11 +64,8 @@ fn handoff_envelope_prompt_is_noop_when_disabled() {
 
 #[test]
 fn handoff_envelope_prompt_is_noop_when_missing_payload() {
-    let out = prepend_handoff_envelope_if_enabled(
-        "BASE PROMPT".to_string(),
-        &config(true, true),
-        None,
-    );
+    let out =
+        prepend_handoff_envelope_if_enabled("BASE PROMPT".to_string(), &config(true, true), None);
     assert_eq!(out, "BASE PROMPT", "missing envelope must short-circuit");
 }
 

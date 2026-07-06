@@ -61,9 +61,9 @@ pub mod schema_parity;
 // `RalphConfig` refactors. Wired into `run_preset_lint` near
 // the phase_authority block so the operator sees a single
 // coordinated report.
-pub mod supervisor;
 pub mod state_projection;
 pub mod strict_reason_routing;
+pub mod supervisor;
 pub mod topic_format;
 pub mod workflow_activation;
 
@@ -115,23 +115,22 @@ pub use multi_hat::check_multi_hat_isolation;
 // lint exported here so `run_preset_lint` (further down) and BDD
 // scenarios can call it without reaching into the submodule.
 pub use review_synthesizer_block_guard::{
-    check_review_synthesizer_block_guard, FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD,
+    FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD, check_review_synthesizer_block_guard,
 };
 // 2026-07-04-004 plan U4: review-complete misrouting drift lint
 // exported alongside U3 so callers have a single import surface.
-pub use review_complete_misrouted::{
-    check_review_complete_misrouted, FINDING_REVIEW_COMPLETE_MISROUTED,
-};
 pub use ownership::{check_owner_references, check_ownership_rules};
+pub use review_complete_misrouted::{
+    FINDING_REVIEW_COMPLETE_MISROUTED, check_review_complete_misrouted,
+};
 pub use state_projection::check_work_done_action_chain_order;
 pub use strict_reason_routing::check_strict_reason_routing;
 // 2026-07-03-001 plan U9: export the supervisor lint entry
 // point so `ralph preset check` / `run_preset_lint` callers
 // can wire it (next line: into the unified orchestrator).
 pub use supervisor::{
-    FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC,
-    FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE, FINDING_SUPERVISOR_REQUIRES_ISOLATED,
-    check_supervisor_rules,
+    FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC, FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE,
+    FINDING_SUPERVISOR_REQUIRES_ISOLATED, check_supervisor_rules,
 };
 pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,

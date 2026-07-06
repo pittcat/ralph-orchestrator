@@ -64,11 +64,7 @@ pub mod env_keys {
 /// pass the default factory which calls
 /// `worktree::create_worktree`.
 pub trait WorktreeFactory: std::fmt::Debug + Send + Sync {
-    fn create(
-        &self,
-        repo_root: PathBuf,
-        branch: String,
-    ) -> Result<Worktree, WorktreeError>;
+    fn create(&self, repo_root: PathBuf, branch: String) -> Result<Worktree, WorktreeError>;
 }
 
 /// Production default: delegates to the existing
@@ -79,11 +75,7 @@ pub trait WorktreeFactory: std::fmt::Debug + Send + Sync {
 pub struct DefaultWorktreeFactory;
 
 impl WorktreeFactory for DefaultWorktreeFactory {
-    fn create(
-        &self,
-        repo_root: PathBuf,
-        branch: String,
-    ) -> Result<Worktree, WorktreeError> {
+    fn create(&self, repo_root: PathBuf, branch: String) -> Result<Worktree, WorktreeError> {
         let config = WorktreeConfig::default();
         worktree::create_worktree(&repo_root, &branch, &config).map_err(WorktreeError::from)
     }
@@ -129,7 +121,9 @@ pub fn bind_slot_worktree<F: WorktreeFactory>(
 ) -> SupervisorStoreResult<WorktreeBinding> {
     match kind {
         WaveKind::Review => Ok(review_binding(wave_id, slot_index, kind)),
-        WaveKind::Exec | WaveKind::Fix => exec_binding(factory, repo_root, loop_id, kind, wave_id, slot_index),
+        WaveKind::Exec | WaveKind::Fix => {
+            exec_binding(factory, repo_root, loop_id, kind, wave_id, slot_index)
+        }
     }
 }
 
@@ -149,10 +143,7 @@ fn review_binding(wave_id: &str, slot_index: u32, kind: WaveKind) -> WorktreeBin
         env_keys::RALPH_WAVE_INDEX.to_string(),
         slot_index.to_string(),
     );
-    env.insert(
-        env_keys::RALPH_WAVE_KIND.to_string(),
-        kind.to_string(),
-    );
+    env.insert(env_keys::RALPH_WAVE_KIND.to_string(), kind.to_string());
     WorktreeBinding {
         resource: SlotResource {
             slot_index,
@@ -238,12 +229,11 @@ mod tests {
     }
 
     impl WorktreeFactory for SpyFactory {
-        fn create(
-            &self,
-            repo_root: PathBuf,
-            branch: String,
-        ) -> Result<Worktree, WorktreeError> {
-            self.calls.lock().unwrap().push((repo_root.clone(), branch.clone()));
+        fn create(&self, repo_root: PathBuf, branch: String) -> Result<Worktree, WorktreeError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((repo_root.clone(), branch.clone()));
             Ok(Worktree {
                 path: self.result_worktree_path.join(&branch),
                 branch,
@@ -372,11 +362,12 @@ mod tests {
     fn isolation_matches_kind_round_trips() {
         assert!(assert_isolation_matches(WaveKind::Exec, IsolationMode::Worktree).is_ok());
         assert!(assert_isolation_matches(WaveKind::Fix, IsolationMode::Worktree).is_ok());
-        assert!(
-            assert_isolation_matches(WaveKind::Review, IsolationMode::SharedReadonly).is_ok()
-        );
+        assert!(assert_isolation_matches(WaveKind::Review, IsolationMode::SharedReadonly).is_ok());
         let err = assert_isolation_matches(WaveKind::Exec, IsolationMode::SharedReadonly);
-        assert!(matches!(err, Err(SupervisorStoreError::InvalidTransition(_))));
+        assert!(matches!(
+            err,
+            Err(SupervisorStoreError::InvalidTransition(_))
+        ));
     }
 
     #[test]

@@ -56,16 +56,13 @@ pub fn apply_progress_on_phase_enter(
     // a future preset can experiment without breaking the
     // serial snapshot's behaviour.
     let directive = entry_map
-        .get(&serde_yaml::Value::String(
-            "write_current_step".to_string(),
-        ))
+        .get(&serde_yaml::Value::String("write_current_step".to_string()))
         .and_then(|v| v.as_str());
 
     match directive {
-        Some("last_completed_step_or_none") => render_current_step(
-            &ctx.phase_id,
-            ctx.last_completed_step.as_deref(),
-        ),
+        Some("last_completed_step_or_none") => {
+            render_current_step(&ctx.phase_id, ctx.last_completed_step.as_deref())
+        }
         Some("active_fix_step") => render_current_step(
             &ctx.phase_id,
             if ctx.fix_unit_queue_exhausted {
@@ -93,11 +90,7 @@ mod tests {
     use serde_yaml::Value;
 
     fn entry_with(directive: &str) -> Value {
-        serde_yaml::from_str(&format!(
-            "write_current_step: \"{}\"\n",
-            directive
-        ))
-        .unwrap()
+        serde_yaml::from_str(&format!("write_current_step: \"{}\"\n", directive)).unwrap()
     }
 
     #[test]
@@ -146,10 +139,8 @@ mod tests {
     #[test]
     fn fix_units_renders_active_fix_step_when_queue_open() {
         let mut cfg = ProgressProjectionConfig::default();
-        cfg.on_enter.insert(
-            "fix_units".to_string(),
-            entry_with("active_fix_step"),
-        );
+        cfg.on_enter
+            .insert("fix_units".to_string(), entry_with("active_fix_step"));
         let ctx = PhaseEnterContext {
             phase_id: "fix_units".to_string(),
             last_completed_step: Some("step-05".to_string()),
@@ -162,10 +153,8 @@ mod tests {
     #[test]
     fn fix_units_renders_placeholder_when_queue_exhausted() {
         let mut cfg = ProgressProjectionConfig::default();
-        cfg.on_enter.insert(
-            "fix_units".to_string(),
-            entry_with("active_fix_step"),
-        );
+        cfg.on_enter
+            .insert("fix_units".to_string(), entry_with("active_fix_step"));
         let ctx = PhaseEnterContext {
             phase_id: "fix_units".to_string(),
             last_completed_step: Some("step-05".to_string()),

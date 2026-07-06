@@ -61,15 +61,9 @@ mod tests {
             vec!["work.ready".to_string(), "work.done".to_string()],
         );
         // executor 仅允许 work.done
-        allowed_emits.insert(
-            "executor".to_string(),
-            vec!["work.done".to_string()],
-        );
+        allowed_emits.insert("executor".to_string(), vec!["work.done".to_string()]);
         // 通配：所有 hat 都被允许 review.start
-        allowed_emits.insert(
-            "*".to_string(),
-            vec!["review.start".to_string()],
-        );
+        allowed_emits.insert("*".to_string(), vec!["review.start".to_string()]);
 
         let phases = vec![PhaseDeclConfig {
             id: "unit_loop".to_string(),

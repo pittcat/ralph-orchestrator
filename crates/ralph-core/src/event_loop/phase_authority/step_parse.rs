@@ -48,7 +48,9 @@ pub fn fixture_from_record(record: &TestPassedRecord) -> StepProgressFixture {
         StepKind::PlanUnit
     };
     let total = if record.is_fix_unit {
-        record.total_fix_units.unwrap_or(record.total_units.unwrap_or(0))
+        record
+            .total_fix_units
+            .unwrap_or(record.total_units.unwrap_or(0))
     } else {
         record.total_units.unwrap_or(0)
     };
@@ -76,7 +78,8 @@ pub fn parse_test_passed_step(payload: &serde_json::Value) -> Option<StepProgres
 /// method does the actual comparison; this convenience
 /// helper keeps the call-site terse.
 pub fn is_fix_unit_completion(record: &TestPassedRecord) -> bool {
-    record.is_fix_unit && record.total_fix_units.unwrap_or(0) > 0
+    record.is_fix_unit
+        && record.total_fix_units.unwrap_or(0) > 0
         && record.index >= record.total_fix_units.unwrap_or(0)
 }
 

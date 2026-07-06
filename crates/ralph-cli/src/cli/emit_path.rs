@@ -42,9 +42,7 @@ pub(crate) const HAT_EVENTS_MARKER: &str = ".ralph/current-hat-events";
 ///   is currently on disk.
 /// - `None` — marker missing or empty (the legacy fallback case used by
 ///   `ralph events --events-source auto`).
-pub(crate) fn resolve_hat_channel_file(
-    workspace_root: &Path,
-) -> Option<(PathBuf, bool)> {
+pub(crate) fn resolve_hat_channel_file(workspace_root: &Path) -> Option<(PathBuf, bool)> {
     let marker = workspace_root.join(HAT_EVENTS_MARKER);
     let raw = fs::read_to_string(&marker).ok()?;
     let trimmed = raw.trim();

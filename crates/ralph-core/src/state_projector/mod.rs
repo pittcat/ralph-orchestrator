@@ -232,8 +232,7 @@ pub struct ProjectionContext {
     /// `Mutex<Option<...>>` keeps the read path simple and stays
     /// consistent with the legacy `tasks_cache` / `progress_cache`
     /// mirrors.
-    pub(crate) review_dimensions_view:
-        std::sync::Mutex<Option<review::ReviewDimensionsView>>,
+    pub(crate) review_dimensions_view: std::sync::Mutex<Option<review::ReviewDimensionsView>>,
 }
 
 impl ProjectionContext {

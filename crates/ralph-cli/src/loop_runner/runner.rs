@@ -584,10 +584,7 @@ pub async fn run_loop_impl(
 pub(crate) fn build_supervisor_bridge(
     cfg: &ralph_core::config::SupervisorConfig,
     ctx: &ralph_core::LoopContext,
-) -> std::result::Result<
-    crate::loop_runner::wave::CoordinatorSupervisorBridge,
-    anyhow::Error,
-> {
+) -> std::result::Result<crate::loop_runner::wave::CoordinatorSupervisorBridge, anyhow::Error> {
     use crate::loop_runner::wave::CoordinatorSupervisorBridge;
 
     // Resolve db_path: absolute paths honoured as-is; relative

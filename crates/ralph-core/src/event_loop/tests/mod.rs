@@ -102,13 +102,13 @@ mod u2_publish_emit_gate;
 /// `evaluate_emit_gate` facade so the JSONL ingest path
 /// cannot bypass the gate.
 mod u3_jsonl_emit_gate;
-/// U4 (2026-06-27-002 plan): `stage_pipeline` re-exports
-/// `repair_flow::RepairStateMachine`; the stub is gone.
-mod u4_repair_sm_unify;
 /// 2026-07-06-004 plan U4: prompt injection no-op wiring test
 /// (helper is gated on `HandoffEnvelopeConfig::enabled &&
 /// prompt_injection`, no-op otherwise).
 mod u4_handoff_envelope_prompt;
+/// U4 (2026-06-27-002 plan): `stage_pipeline` re-exports
+/// `repair_flow::RepairStateMachine`; the stub is gone.
+mod u4_repair_sm_unify;
 /// 2026-07-06-004 plan U6: wire the handoff envelope extractor
 /// into the isolated prompt chain. The helper is a no-op unless
 /// `enabled && prompt_injection` AND recent events carry a valid

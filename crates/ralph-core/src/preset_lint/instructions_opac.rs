@@ -22,14 +22,12 @@
 
 use serde_yaml::Value;
 
+use super::LintFinding;
 use super::finding_id::{
     FINDING_INSTRUCTIONS_FIX_UNIT_MINT_TEMPLATE_MISSING,
-    FINDING_INSTRUCTIONS_OPAC_SKILL_REFERENCE_MISSING,
-    FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER,
-    FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC,
-    FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL,
+    FINDING_INSTRUCTIONS_OPAC_SKILL_REFERENCE_MISSING, FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER,
+    FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC, FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL,
 };
-use super::LintFinding;
 
 /// Supervisor-only coordination topics. Agents emitting these will be
 /// silently dropped by `event_origin::is_supervisor_coordination_topic`.
@@ -62,7 +60,9 @@ pub fn check_instructions_opac(raw_yaml: &str) -> Vec<LintFinding> {
     };
 
     for (hat_id, hat_value) in hats {
-        let Some(hat_id_str) = hat_id.as_str() else { continue };
+        let Some(hat_id_str) = hat_id.as_str() else {
+            continue;
+        };
         let hat_value = match hat_value.as_mapping() {
             Some(m) => m,
             None => continue,
@@ -75,9 +75,7 @@ pub fn check_instructions_opac(raw_yaml: &str) -> Vec<LintFinding> {
                 hat_value
                     .get("instructions")
                     .and_then(Value::as_sequence)
-                    .and_then(|s| {
-                        s.iter().next().and_then(|v| v.as_str())
-                    })
+                    .and_then(|s| s.iter().next().and_then(|v| v.as_str()))
             }) {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => continue, // hat with no instructions is not subject to this lint
@@ -141,11 +139,7 @@ fn check_task_create_literal(hat_id: &str, instructions: &str, findings: &mut Ve
     }
 }
 
-fn check_internal_ledger_read(
-    hat_id: &str,
-    instructions: &str,
-    findings: &mut Vec<LintFinding>,
-) {
+fn check_internal_ledger_read(hat_id: &str, instructions: &str, findings: &mut Vec<LintFinding>) {
     // Patterns cover all three categories described in U11:
     //  1. read/tail events.jsonl
     //  2. read supervisor.db / loops.json
@@ -212,11 +206,7 @@ fn check_supervisor_coordination_emit(
     }
 }
 
-fn check_opac_skill_reference(
-    hat_id: &str,
-    instructions: &str,
-    findings: &mut Vec<LintFinding>,
-) {
+fn check_opac_skill_reference(hat_id: &str, instructions: &str, findings: &mut Vec<LintFinding>) {
     let cites_opac = instructions.contains("ralph-tools-opac");
     let cites_emit_precheck = instructions.contains("ralph-tools-emit")
         && (instructions.contains("§5") || instructions.contains("section 5"));
@@ -233,11 +223,7 @@ fn check_opac_skill_reference(
     }
 }
 
-fn check_fix_unit_mint_template(
-    hat_id: &str,
-    instructions: &str,
-    findings: &mut Vec<LintFinding>,
-) {
+fn check_fix_unit_mint_template(hat_id: &str, instructions: &str, findings: &mut Vec<LintFinding>) {
     let cites_template = instructions.contains("--for-fix-unit")
         || instructions.contains("for-fix-unit")
         || instructions.contains("task ensure");
@@ -333,54 +319,68 @@ hats:
 
     #[test]
     fn task_create_literal_is_caught() {
-        let yaml = make_preset(
-            "Use `ralph tools task create` to mint work items.",
-        );
+        let yaml = make_preset("Use `ralph tools task create` to mint work items.");
         let findings = check_instructions_opac(&yaml);
-        assert!(findings.iter().any(|f| f.id
-            == FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL)
+        );
     }
 
     #[test]
     fn ralph_task_create_literal_is_caught() {
         let yaml = make_preset("Run `ralph task create` first.");
         let findings = check_instructions_opac(&yaml);
-        assert!(findings.iter().any(|f| f.id
-            == FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL)
+        );
     }
 
     #[test]
     fn events_jsonl_read_is_caught() {
         let yaml = make_preset("Read tail of .ralph/events.jsonl for audit.");
         let findings = check_instructions_opac(&yaml);
-        assert!(findings.iter().any(|f| f.id
-            == FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER)
+        );
     }
 
     #[test]
     fn supervisor_db_read_is_caught() {
         let yaml = make_preset("Open .ralph/supervisor.db to inspect waves.");
         let findings = check_instructions_opac(&yaml);
-        assert!(findings.iter().any(|f| f.id
-            == FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER)
+        );
     }
 
     #[test]
     fn diagnose_supervisor_is_caught() {
         let yaml = make_preset("Run `ralph diagnose --supervisor` for state.");
         let findings = check_instructions_opac(&yaml);
-        assert!(findings.iter().any(|f| f.id
-            == FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER)
+        );
     }
 
     #[test]
     fn supervisor_coord_emit_is_caught() {
-        let yaml = make_preset(
-            "Use `ralph emit review.wave.complete --json '{...}'` to close.",
-        );
+        let yaml = make_preset("Use `ralph emit review.wave.complete --json '{...}'` to close.");
         let findings = check_instructions_opac(&yaml);
-        assert!(findings.iter().any(|f| f.id
-            == FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC)
+        );
     }
 
     #[test]
@@ -396,8 +396,11 @@ hats:
       Do the work and emit work.done at the end.
 "#;
         let findings = check_instructions_opac(yaml);
-        assert!(findings.iter().any(|f| f.id
-            == FINDING_INSTRUCTIONS_OPAC_SKILL_REFERENCE_MISSING));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_OPAC_SKILL_REFERENCE_MISSING)
+        );
     }
 
     #[test]
@@ -413,8 +416,11 @@ hats:
       Cite ralph-tools-opac and ralph-tools-emit §5.
 "#;
         let findings = check_instructions_opac(yaml);
-        assert!(findings.iter().any(|f| f.id
-            == FINDING_INSTRUCTIONS_FIX_UNIT_MINT_TEMPLATE_MISSING));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_FIX_UNIT_MINT_TEMPLATE_MISSING)
+        );
     }
 
     #[test]
@@ -431,7 +437,9 @@ hats:
 "#;
         let findings = check_instructions_opac(yaml);
         assert!(
-            !findings.iter().any(|f| f.id == FINDING_INSTRUCTIONS_FIX_UNIT_MINT_TEMPLATE_MISSING),
+            !findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_FIX_UNIT_MINT_TEMPLATE_MISSING),
             "fix-unit mint template was cited; should not fire"
         );
     }
@@ -446,6 +454,9 @@ hats:
       - work.done
 "#;
         let findings = check_instructions_opac(yaml);
-        assert!(findings.is_empty(), "hat with no instructions: skip silently");
+        assert!(
+            findings.is_empty(),
+            "hat with no instructions: skip silently"
+        );
     }
 }

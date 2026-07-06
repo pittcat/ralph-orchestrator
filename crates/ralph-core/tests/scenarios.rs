@@ -13,9 +13,7 @@ use ralph_core::supervisor::{
     SupervisorBridge, SupervisorStore, WaveKind,
 };
 use ralph_core::testing::{MockBackend, Scenario, ScenarioRunner};
-use ralph_core::{
-    EventLoop, EventParser, HatConfig, LoopContext, RalphConfig, TerminationReason,
-};
+use ralph_core::{EventLoop, EventParser, HatConfig, LoopContext, RalphConfig, TerminationReason};
 use serde::Deserialize;
 use std::fs;
 use std::sync::Arc;
@@ -619,9 +617,7 @@ fn run_bdd_supervisor_fan_in(
         let store_id = match bridge.register_wave_if_absent(kind, &wave_id, slots.len() as u32) {
             Ok(id) => id,
             Err(err) => {
-                eprintln!(
-                    "[bdd-supervisor] register_wave_if_absent failed for {wave_id}: {err}"
-                );
+                eprintln!("[bdd-supervisor] register_wave_if_absent failed for {wave_id}: {err}");
                 continue;
             }
         };
@@ -655,12 +651,9 @@ fn run_bdd_supervisor_fan_in(
         }
 
         for (slot_index, content_hash, event_count) in &slots {
-            if let Err(err) = bridge.record_slot_result(
-                &store_id,
-                *slot_index,
-                content_hash,
-                *event_count,
-            ) {
+            if let Err(err) =
+                bridge.record_slot_result(&store_id, *slot_index, content_hash, *event_count)
+            {
                 eprintln!(
                     "[bdd-supervisor] record_slot_result failed for {wave_id}/{slot_index}: {err}"
                 );
@@ -822,8 +815,7 @@ fn run_scenario_with_snapshots(
     };
     let supervisor_aggregate_timeout_secs = config.event_loop.supervisor.aggregate_timeout_secs;
     let supervisor_bridge: Option<InMemoryCoordinatorBridge> = if supervisor_path_enabled {
-        let store: Arc<dyn SupervisorStore> =
-            Arc::new(InMemorySupervisorStore::new());
+        let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
         Some(InMemoryCoordinatorBridge::from_store(store))
     } else {
         None
@@ -974,8 +966,9 @@ fn run_scenario_with_snapshots(
                     // `CompletionPromise` again — that still
                     // satisfies "this response did not newly
                     // honor a rejected duplicate".
-                    let newly_honoured = matches!(reason, Some(TerminationReason::CompletionPromise))
-                        && !honored_before;
+                    let newly_honoured =
+                        matches!(reason, Some(TerminationReason::CompletionPromise))
+                            && !honored_before;
                     assert!(
                         !newly_honoured,
                         "{}: After response {}, expected LOOP_COMPLETE to be rejected, but got {:?}",
@@ -1277,12 +1270,9 @@ fn run_workflow_guard_scenario(yaml: ScenarioYaml) {
     run_scenario_with_snapshots(&yaml, |config, yaml| {
         apply_yaml_hats(yaml, config);
         if !yaml.config.mechanism.is_null() {
-            config.mechanism =
-                serde_yaml::from_value(yaml.config.mechanism.clone()).unwrap_or_else(|e| {
-                    panic!(
-                        "{}: failed to parse config.mechanism: {e}",
-                        yaml.name
-                    );
+            config.mechanism = serde_yaml::from_value(yaml.config.mechanism.clone())
+                .unwrap_or_else(|e| {
+                    panic!("{}: failed to parse config.mechanism: {e}", yaml.name);
                 });
         }
         if !yaml.config.event_loop.is_null() {
@@ -1748,9 +1738,7 @@ fn test_ce_executor_serial_review_scenario() {
 /// succeeds silently) fails this scenario's `expected.events`.
 #[test]
 fn test_ce_executor_serial_handoff_envelope_happy_path() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_serial_handoff_envelope_happy_path.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/ce_executor_serial_handoff_envelope_happy_path.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -3268,9 +3256,8 @@ fn test_u1_invalid_step_target_issued_for_unknown_fix_unit() {
 /// targets coordinator (executor cannot close).
 #[test]
 fn test_task_not_terminal_coordinator_recovery_scenario() {
-    let yaml = load_scenario(
-        "tests/scenarios/2026-07-06-task-not-terminal-coordinator-recovery.yml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/2026-07-06-task-not-terminal-coordinator-recovery.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -3478,33 +3465,25 @@ fn test_precheck_gate_exhaust() {
 
 #[test]
 fn test_ce_executor_serial_pass_with_residuals_terminal() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_serial_pass_with_residuals_terminal.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/ce_executor_serial_pass_with_residuals_terminal.yml");
     run_workflow_guard_scenario(yaml);
 }
 
 #[test]
 fn test_ce_executor_serial_fix_unit_terminal() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_serial_fix_unit_terminal.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/ce_executor_serial_fix_unit_terminal.yml");
     run_workflow_guard_scenario(yaml);
 }
 
 #[test]
 fn test_ce_executor_serial_progress_stale_terminal() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_serial_progress_stale_terminal.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/ce_executor_serial_progress_stale_terminal.yml");
     run_workflow_guard_scenario(yaml);
 }
 
 #[test]
 fn test_ce_executor_serial_shipper_recoverable_reasons() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_serial_shipper_recoverable_reasons.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/ce_executor_serial_shipper_recoverable_reasons.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -3545,9 +3524,7 @@ fn test_serial_phase_post_loop_steward_silent() {
 
 #[test]
 fn test_ce_executor_serial_shipper_hard_fail_promotion() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_serial_shipper_hard_fail_promotion.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/ce_executor_serial_shipper_hard_fail_promotion.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -3556,8 +3533,7 @@ fn test_ce_executor_serial_shipper_hard_fail_promotion() {
 // rejected and routed through task.resume recovery.
 #[test]
 fn test_opac_acl_worker_out_of_scope_denied() {
-    let yaml =
-        load_scenario("tests/scenarios/opac/acl_worker_task_create_denied.yml");
+    let yaml = load_scenario("tests/scenarios/opac/acl_worker_task_create_denied.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -3566,8 +3542,7 @@ fn test_opac_acl_worker_out_of_scope_denied() {
 // visible across turns (Confirm path round-trip).
 #[test]
 fn test_opac_ch_confirm_hat_channel_roundtrip() {
-    let yaml =
-        load_scenario("tests/scenarios/opac/ch_confirm_hat_channel_roundtrip.yml");
+    let yaml = load_scenario("tests/scenarios/opac/ch_confirm_hat_channel_roundtrip.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -3577,9 +3552,7 @@ fn test_opac_ch_confirm_hat_channel_roundtrip() {
 // targeted task.resume recovery so the hat can re-emit exactly one.
 #[test]
 fn test_opac_bud_isolated_double_business_dropped() {
-    let yaml = load_scenario(
-        "tests/scenarios/opac/bud_isolated_double_business_dropped.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/opac/bud_isolated_double_business_dropped.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -3591,9 +3564,7 @@ fn test_opac_bud_isolated_double_business_dropped() {
 // 2026-06-24 P0-2/P0-3 教训: 不用 `run_scenario` stub)。
 #[test]
 fn test_opac_fv1_serial_fix_unit_chain() {
-    let yaml = load_scenario(
-        "tests/scenarios/opac/ce_executor_serial_fix_unit_chain.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/opac/ce_executor_serial_fix_unit_chain.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -3604,9 +3575,7 @@ fn test_opac_fv1_serial_fix_unit_chain() {
 // R11 覆盖:6 维 serial review 不该静默丢任何维度。
 #[test]
 fn test_opac_fv2_serial_walk_6dim() {
-    let yaml = load_scenario(
-        "tests/scenarios/opac/ce_executor_serial_serial_walk_6dim.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/opac/ce_executor_serial_serial_walk_6dim.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -3631,9 +3600,8 @@ fn test_opac_me1_macro_edge_next_hint() {
 // exec.wave.complete ×1。
 #[test]
 fn test_opac_sb1_supervisor_exec_wave_fanout() {
-    let yaml = load_scenario(
-        "tests/scenarios/supervisor/ce_executor_supervisor_exec_wave_fanout.yml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/supervisor/ce_executor_supervisor_exec_wave_fanout.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -3644,8 +3612,6 @@ fn test_opac_sb1_supervisor_exec_wave_fanout() {
 // topic) 被拒收,绝不能进入 seen_topics。
 #[test]
 fn test_opac_sb2_supervisor_review_batch_origin_guard() {
-    let yaml = load_scenario(
-        "tests/scenarios/supervisor/ce_executor_supervisor_review_batch.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/supervisor/ce_executor_supervisor_review_batch.yml");
     run_workflow_guard_scenario(yaml);
 }

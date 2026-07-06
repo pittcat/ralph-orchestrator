@@ -398,7 +398,10 @@ hats:
     fn human_cli_task_add_is_allowed() {
         let hats = isolated_coordinator_slice();
         let decision = HatCommandPolicy::check_task(&empty_ctx(), hats, None, "add");
-        assert!(decision.is_allow(), "human CLI must not be locked out: {decision:?}");
+        assert!(
+            decision.is_allow(),
+            "human CLI must not be locked out: {decision:?}"
+        );
     }
 
     #[test]
@@ -422,7 +425,10 @@ hats:
     fn coordinator_hat_can_add() {
         let hats = isolated_coordinator_slice();
         let decision = HatCommandPolicy::check_task(&agent_ctx("coordinator"), hats, None, "add");
-        assert!(decision.is_allow(), "coordinator must be allowed: {decision:?}");
+        assert!(
+            decision.is_allow(),
+            "coordinator must be allowed: {decision:?}"
+        );
     }
 
     #[test]
@@ -486,7 +492,10 @@ hats:
 "#;
         let cfg: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let decision = HatCommandPolicy::check_wave_emit(&agent_ctx("coordinator"), &cfg);
-        assert!(decision.is_allow(), "dispatcher must be allowed: {decision:?}");
+        assert!(
+            decision.is_allow(),
+            "dispatcher must be allowed: {decision:?}"
+        );
     }
 
     #[test]
@@ -620,14 +629,16 @@ hats:
     fn agent_coordinator_in_slice_allowed() {
         let hats: &[String] = &["coordinator".to_string()];
         let decision = HatCommandPolicy::check_task(&agent_ctx("coordinator"), hats, None, "add");
-        assert!(decision.is_allow(), "coordinator must be allowed: {decision:?}");
+        assert!(
+            decision.is_allow(),
+            "coordinator must be allowed: {decision:?}"
+        );
     }
 
     #[test]
     fn empty_slice_denies_with_typed_error_hint() {
         let err = crate::task_cli::CoordinatorHatsError::MissingRalphYml;
-        let decision =
-            HatCommandPolicy::check_task(&agent_ctx("executor"), &[], Some(&err), "add");
+        let decision = HatCommandPolicy::check_task(&agent_ctx("executor"), &[], Some(&err), "add");
         let deny = match decision {
             PolicyDecision::Deny { reason, hint } => (reason, hint),
             other => panic!("expected Deny, got {other:?}"),
@@ -646,6 +657,9 @@ hats:
     fn human_cli_always_allowed_even_with_typed_error() {
         let err = crate::task_cli::CoordinatorHatsError::MissingRalphYml;
         let decision = HatCommandPolicy::check_task(&empty_ctx(), &[], Some(&err), "add");
-        assert!(decision.is_allow(), "human CLI must always be allowed: {decision:?}");
+        assert!(
+            decision.is_allow(),
+            "human CLI must always be allowed: {decision:?}"
+        );
     }
 }

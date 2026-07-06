@@ -98,16 +98,16 @@ pub fn load_coordinator_hats(root: &Path) -> Result<Vec<String>, CoordinatorHats
         if !path.exists() {
             continue;
         }
-        let raw = std::fs::read_to_string(&path).map_err(|e| CoordinatorHatsError::InvalidYaml {
-            path: path.clone(),
-            source: e.to_string(),
-        })?;
-        let value: serde_yaml::Value = serde_yaml::from_str(&raw).map_err(|e| {
-            CoordinatorHatsError::InvalidYaml {
+        let raw =
+            std::fs::read_to_string(&path).map_err(|e| CoordinatorHatsError::InvalidYaml {
                 path: path.clone(),
                 source: e.to_string(),
-            }
-        })?;
+            })?;
+        let value: serde_yaml::Value =
+            serde_yaml::from_str(&raw).map_err(|e| CoordinatorHatsError::InvalidYaml {
+                path: path.clone(),
+                source: e.to_string(),
+            })?;
 
         let tasks = match value.get("tasks") {
             Some(t) => t,
@@ -502,10 +502,9 @@ impl VerifyOutcome {
     pub fn to_human_string(&self, verb: &str) -> String {
         match self {
             VerifyOutcome::Allow => Self::allowed_message(verb),
-            VerifyOutcome::Deny { reason, hint } => format!(
-                "{} '{verb}': [{reason}] {hint}",
-                Self::DENY_PREFIX,
-            ),
+            VerifyOutcome::Deny { reason, hint } => {
+                format!("{} '{verb}': [{reason}] {hint}", Self::DENY_PREFIX,)
+            }
         }
     }
 }
@@ -675,12 +674,8 @@ pub(crate) fn verify_gate_check(
     canonical_payload: &str,
 ) -> anyhow::Result<()> {
     let (loop_id, hat_id) = gate_identifiers(ctx);
-    let fingerprint = crate::task_verify_gate::mutation_fingerprint(
-        verb,
-        canonical_payload,
-        loop_id,
-        hat_id,
-    );
+    let fingerprint =
+        crate::task_verify_gate::mutation_fingerprint(verb, canonical_payload, loop_id, hat_id);
     crate::task_verify_gate::require_ticket(
         &crate::task_verify_gate::ticket_path(workspace),
         &config.tasks,
@@ -1086,12 +1081,8 @@ fn execute_ensure(
     };
     let canonical = canonical_ensure_payload(&args, derived_key.as_deref());
     let (loop_id, hat_id) = gate_identifiers(&ctx);
-    let fingerprint = crate::task_verify_gate::mutation_fingerprint(
-        "ensure",
-        &canonical,
-        loop_id,
-        hat_id,
-    );
+    let fingerprint =
+        crate::task_verify_gate::mutation_fingerprint("ensure", &canonical, loop_id, hat_id);
     let config = load_config_or_default(root);
     crate::task_verify_gate::require_ticket(
         &crate::task_verify_gate::ticket_path(&workspace),
@@ -1490,7 +1481,8 @@ fn execute_close(
     // `authorize_lifecycle` below still enforces ownership. The
     // call here keeps the entry-point message shape uniform with
     // add/ensure for future policy tightening.
-    let coordinator_err: Option<CoordinatorHatsError> = if config.tasks.coordinator_hats.is_empty() {
+    let coordinator_err: Option<CoordinatorHatsError> = if config.tasks.coordinator_hats.is_empty()
+    {
         Some(CoordinatorHatsError::CoordinatorHatsEmpty)
     } else {
         None
@@ -1515,7 +1507,15 @@ fn close_task_with_context(
     coordinator_hats: &[String],
     use_colors: bool,
 ) -> Result<()> {
-    close_task_with_context_and_config(store, task_id, ctx, coordinator_hats, use_colors, None, None)
+    close_task_with_context_and_config(
+        store,
+        task_id,
+        ctx,
+        coordinator_hats,
+        use_colors,
+        None,
+        None,
+    )
 }
 
 /// U7-aware variant of close. When `config` + `root` are provided and
@@ -1621,9 +1621,7 @@ fn emit_close_completion_warning(
     }
     let channel_hint = "hat-channel file is empty or missing; \
                         run `ralph inspect loop` to confirm the marker is set";
-    let Some((channel_path, exists)) =
-        crate::cli::resolve_hat_channel_file(root)
-    else {
+    let Some((channel_path, exists)) = crate::cli::resolve_hat_channel_file(root) else {
         eprintln!(
             "{} {{ \"code\": \"close_without_completion_emit\", \
              \"hat\": \"{caller_hat}\", \"expected_topics\": {expected:?}, \
@@ -1685,7 +1683,14 @@ const TAIL_SCAN_LINES: usize = 50;
 /// features are toggled.
 fn parse_topics_from_jsonl_tail(content: &str, max_lines: usize) -> Vec<String> {
     let mut out = Vec::new();
-    for line in content.lines().rev().take(max_lines).collect::<Vec<_>>().into_iter().rev() {
+    for line in content
+        .lines()
+        .rev()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -1907,10 +1912,7 @@ fn reopen_task_with_context(
 /// mutations. The function never writes to `tasks.jsonl`; it only
 /// exercises the same authorization gates as the real mutation so the
 /// agent can deterministically observe the outcome without committing.
-fn execute_verify(
-    args: VerifyArgs,
-    use_colors: bool,
-) -> Result<()> {
+fn execute_verify(args: VerifyArgs, use_colors: bool) -> Result<()> {
     let root = args.root.clone();
     let config = load_config_or_default(root.as_ref());
     let workspace = resolve_workspace_root(root.as_ref());
@@ -1925,12 +1927,20 @@ fn execute_verify(
     let ctx = operation_context_for(root.as_ref());
 
     let outcome = match &cmd {
-        VerifyCommands::Add(a) => {
-            verify_add(&mut store, &ctx, &coordinator_hats, coordinator_err.as_ref(), a)?
-        }
-        VerifyCommands::Ensure(e) => {
-            verify_ensure(&mut store, &ctx, &coordinator_hats, coordinator_err.as_ref(), e)?
-        }
+        VerifyCommands::Add(a) => verify_add(
+            &mut store,
+            &ctx,
+            &coordinator_hats,
+            coordinator_err.as_ref(),
+            a,
+        )?,
+        VerifyCommands::Ensure(e) => verify_ensure(
+            &mut store,
+            &ctx,
+            &coordinator_hats,
+            coordinator_err.as_ref(),
+            e,
+        )?,
         VerifyCommands::Start(s) => verify_lifecycle(
             &store,
             &ctx,
@@ -1994,7 +2004,11 @@ fn execute_verify(
                 OutputFormat::Table => {
                     let msg = VerifyOutcome::allowed_message(verb);
                     if use_colors {
-                        println!("{}verified (no write):{} {msg}", colors::GREEN, colors::RESET);
+                        println!(
+                            "{}verified (no write):{} {msg}",
+                            colors::GREEN,
+                            colors::RESET
+                        );
                     } else {
                         println!("verified (no write): {msg}");
                     }
@@ -2039,7 +2053,8 @@ fn verify_add(
     let Some(title) = args.title.clone() else {
         return Ok(VerifyOutcome::Deny {
             reason: "missing_title".to_string(),
-            hint: "`task verify add` requires a positional TITLE argument (same as `task add`).".to_string(),
+            hint: "`task verify add` requires a positional TITLE argument (same as `task add`)."
+                .to_string(),
         });
     };
     let task = add_common_task_fields(
@@ -2085,12 +2100,8 @@ fn verify_add(
     };
     let canonical = canonical_add_payload(&real_args);
     let (loop_id, hat_id) = gate_identifiers(ctx);
-    let fingerprint = crate::task_verify_gate::mutation_fingerprint(
-        "add",
-        &canonical,
-        loop_id,
-        hat_id,
-    );
+    let fingerprint =
+        crate::task_verify_gate::mutation_fingerprint("add", &canonical, loop_id, hat_id);
     let _ = crate::task_verify_gate::record_ticket(
         &crate::task_verify_gate::ticket_path(&ctx.workspace_root),
         &fingerprint,
@@ -2122,7 +2133,9 @@ fn verify_ensure(
     let Some(title) = args.title.clone() else {
         return Ok(VerifyOutcome::Deny {
             reason: "missing_title".to_string(),
-            hint: "`task verify ensure` requires a positional TITLE argument (same as `task ensure`).".to_string(),
+            hint:
+                "`task verify ensure` requires a positional TITLE argument (same as `task ensure`)."
+                    .to_string(),
         });
     };
 
@@ -2188,12 +2201,8 @@ fn verify_ensure(
     };
     let canonical = canonical_ensure_payload(&real_args, derived_key.as_deref());
     let (loop_id, hat_id) = gate_identifiers(ctx);
-    let fingerprint = crate::task_verify_gate::mutation_fingerprint(
-        "ensure",
-        &canonical,
-        loop_id,
-        hat_id,
-    );
+    let fingerprint =
+        crate::task_verify_gate::mutation_fingerprint("ensure", &canonical, loop_id, hat_id);
     let _ = crate::task_verify_gate::record_ticket(
         &crate::task_verify_gate::ticket_path(&ctx.workspace_root),
         &fingerprint,
@@ -2284,10 +2293,7 @@ fn emit_bridge_deny(stage: &str, reason: &str, hint: String, message: String) ->
 /// - `task_key` matches the registered key on that task.
 /// - `step` matches the `:step-<n>:` segment inside `task_key`
 ///   (per the `ralph-tools-tasks.md` red-box convention).
-fn execute_verify_emit_bridge(
-    args: VerifyEmitBridgeArgs,
-    root: Option<&PathBuf>,
-) -> Result<()> {
+fn execute_verify_emit_bridge(args: VerifyEmitBridgeArgs, root: Option<&PathBuf>) -> Result<()> {
     let path = get_tasks_path(root);
     let store = TaskStore::load(&path).context("Failed to load tasks")?;
     let ctx = operation_context_for(root);
@@ -2325,8 +2331,7 @@ fn execute_verify_emit_bridge(
     }
 
     if ctx.is_agent_context {
-        if let (Some(current), Some(target)) =
-            (ctx.current_loop_id.as_ref(), task.loop_id.as_ref())
+        if let (Some(current), Some(target)) = (ctx.current_loop_id.as_ref(), task.loop_id.as_ref())
         {
             if current != target {
                 return Err(emit_bridge_deny(
@@ -3311,9 +3316,14 @@ tasks:
         let cfg = base_config_with(&["coordinator"]);
         let before_count = store.all().len();
 
-        let outcome =
-            verify_add(&mut store, &ctx, &["coordinator".into()], None, &verify_add_args("hi"))
-                .expect("verify_add should not error");
+        let outcome = verify_add(
+            &mut store,
+            &ctx,
+            &["coordinator".into()],
+            None,
+            &verify_add_args("hi"),
+        )
+        .expect("verify_add should not error");
         assert!(matches!(outcome, VerifyOutcome::Allow));
 
         // Confirm verify did NOT touch the store.
@@ -3329,9 +3339,14 @@ tasks:
         let ctx = ctx_for(root, Some("loop-x"), Some("worker"));
         let cfg = base_config_with(&["coordinator"]);
 
-        let outcome =
-            verify_add(&mut store, &ctx, &["coordinator".into()], None, &verify_add_args("hi"))
-                .expect("verify_add should not error");
+        let outcome = verify_add(
+            &mut store,
+            &ctx,
+            &["coordinator".into()],
+            None,
+            &verify_add_args("hi"),
+        )
+        .expect("verify_add should not error");
         match outcome {
             VerifyOutcome::Deny { reason, .. } => assert_eq!(reason, "non_coordinator_owner"),
             VerifyOutcome::Allow => panic!("expected Deny for non-coordinator agent"),
@@ -3368,8 +3383,8 @@ tasks:
         let mut args = verify_ensure_args("placeholder", "k");
         args.key = None;
         args.for_fix_unit = None;
-        let outcome = verify_ensure(&mut store, &ctx, &["coordinator".into()], None, &args)
-            .expect("ok");
+        let outcome =
+            verify_ensure(&mut store, &ctx, &["coordinator".into()], None, &args).expect("ok");
         assert!(matches!(
             outcome,
             VerifyOutcome::Deny { ref reason, .. } if reason == "missing_key"
@@ -3378,8 +3393,8 @@ tasks:
         // And missing-title branch.
         let mut args2 = verify_ensure_args("placeholder", "k");
         args2.title = None;
-        let outcome = verify_ensure(&mut store, &ctx, &["coordinator".into()], None, &args2)
-            .expect("ok");
+        let outcome =
+            verify_ensure(&mut store, &ctx, &["coordinator".into()], None, &args2).expect("ok");
         assert!(matches!(
             outcome,
             VerifyOutcome::Deny { ref reason, .. } if reason == "missing_title"
@@ -3480,7 +3495,10 @@ tasks:
         let err = execute_verify_emit_bridge(args, Some(&root.to_path_buf()))
             .expect_err("unknown task_id must be denied");
         let text = format!("{err:#}");
-        assert!(text.contains("task_verify_emit_bridge"), "stable prefix present");
+        assert!(
+            text.contains("task_verify_emit_bridge"),
+            "stable prefix present"
+        );
         assert!(
             text.contains("task_id_resolution") || text.contains("task-missing"),
             "structured context attached"
@@ -3550,8 +3568,8 @@ tasks:
     }
 
     fn config_with_completion_topics(topics: &[&str]) -> ralph_core::config::RalphConfig {
-        use ralph_core::config::hat::HatConfig;
         use ralph_core::config::EventPolicyConfig;
+        use ralph_core::config::hat::HatConfig;
         let mut cfg = ralph_core::config::RalphConfig::default();
         let mut hat = HatConfig::default();
         hat.publishes = topics.iter().map(|s| s.to_string()).collect();
@@ -3587,8 +3605,11 @@ tasks:
 
     #[test]
     fn test_parse_topics_from_jsonl_skips_malformed_lines() {
-        let content =
-            format!("{}\nnot-json\n{}\n", make_event_envelope("a"), make_event_envelope("b"));
+        let content = format!(
+            "{}\nnot-json\n{}\n",
+            make_event_envelope("a"),
+            make_event_envelope("b")
+        );
         let topics = parse_topics_from_jsonl_tail(&content, usize::MAX);
         assert_eq!(topics, vec!["a".to_string(), "b".to_string()]);
     }
@@ -3668,8 +3689,7 @@ mod load_coordinator_hats_tests {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let root = temp_dir.path();
         std::fs::write(root.join("ralph.yml"), "tasks: [").expect("write broken yaml");
-        let err = load_coordinator_hats(root)
-            .expect_err("broken yaml must surface InvalidYaml");
+        let err = load_coordinator_hats(root).expect_err("broken yaml must surface InvalidYaml");
         match err {
             CoordinatorHatsError::InvalidYaml { path, source } => {
                 assert_eq!(path, root.join("ralph.yml"));
@@ -3853,7 +3873,10 @@ mod ensure_for_fix_unit_clap_tests {
         store.save().expect("save");
         // Owner must be pinned to coordinator regardless of ctx.
         assert_eq!(task.owner_hat_id.as_deref(), Some("coordinator"));
-        assert_eq!(task.key.as_deref(), Some("ce-executor:myplan:fix-01:patch-foo"));
+        assert_eq!(
+            task.key.as_deref(),
+            Some("ce-executor:myplan:fix-01:patch-foo")
+        );
     }
 
     #[test]
@@ -3908,7 +3931,10 @@ mod ensure_for_fix_unit_clap_tests {
             TaskCommands::Ensure(args) => {
                 assert_eq!(args.title, "fix-foo");
                 assert!(args.key.is_none(), "--key should be None");
-                assert_eq!(args.for_fix_unit.as_deref(), Some("myplan:fix-01:patch-foo"));
+                assert_eq!(
+                    args.for_fix_unit.as_deref(),
+                    Some("myplan:fix-01:patch-foo")
+                );
             }
             _ => panic!("expected Ensure subcommand"),
         }
@@ -3990,12 +4016,12 @@ mod task_verify_gate_wiring_tests {
         let err = verify_gate_check(root, &cfg, &ctx, "add", &add_payload())
             .expect_err("agent add without verify must deny");
         let msg = err.to_string();
-        assert!(msg.contains("task_verify_gate denied"), "stable prefix: {msg}");
-        assert!(msg.contains("verify"), "must explain verify: {msg}");
         assert!(
-            !ticket_path(root).exists(),
-            "deny must not create a ticket"
+            msg.contains("task_verify_gate denied"),
+            "stable prefix: {msg}"
         );
+        assert!(msg.contains("verify"), "must explain verify: {msg}");
+        assert!(!ticket_path(root).exists(), "deny must not create a ticket");
     }
 
     #[test]
@@ -4006,12 +4032,8 @@ mod task_verify_gate_wiring_tests {
         let ctx = make_ctx("coordinator", "loop-a", true);
         // Step 1: record a ticket with the same fingerprint.
         let (loop_id, hat_id) = gate_identifiers(&ctx);
-        let fp = crate::task_verify_gate::mutation_fingerprint(
-            "add",
-            &add_payload(),
-            loop_id,
-            hat_id,
-        );
+        let fp =
+            crate::task_verify_gate::mutation_fingerprint("add", &add_payload(), loop_id, hat_id);
         record_ticket(&ticket_path(root), &fp, loop_id, hat_id).expect("record");
 
         // Step 2: gate check consumes the ticket and passes.
@@ -4031,15 +4053,10 @@ mod task_verify_gate_wiring_tests {
         let ctx = make_ctx("coordinator", "loop-a", true);
         // First pass: record + verify.
         let (loop_id, hat_id) = gate_identifiers(&ctx);
-        let fp = crate::task_verify_gate::mutation_fingerprint(
-            "add",
-            &add_payload(),
-            loop_id,
-            hat_id,
-        );
+        let fp =
+            crate::task_verify_gate::mutation_fingerprint("add", &add_payload(), loop_id, hat_id);
         record_ticket(&ticket_path(root), &fp, loop_id, hat_id).expect("record");
-        verify_gate_check(root, &cfg, &ctx, "add", &add_payload())
-            .expect("first pass ok");
+        verify_gate_check(root, &cfg, &ctx, "add", &add_payload()).expect("first pass ok");
 
         // Second pass: ticket was consumed → must deny.
         let err = verify_gate_check(root, &cfg, &ctx, "add", &add_payload())

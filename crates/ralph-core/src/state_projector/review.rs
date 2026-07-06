@@ -49,20 +49,22 @@ pub(crate) fn project_review_dimensions_complete(
     dimensions_pointer: Option<&str>,
     summary_pointer: Option<&str>,
 ) -> Result<(), String> {
-    let task_key = json_pointer(payload, task_key_pointer.unwrap_or("task_key"))
-        .map(|s| s.to_string());
-    let fix_round = json_pointer(payload, fix_round_pointer.unwrap_or("fix_round"))
-        .map(|s| s.to_string());
+    let task_key =
+        json_pointer(payload, task_key_pointer.unwrap_or("task_key")).map(|s| s.to_string());
+    let fix_round =
+        json_pointer(payload, fix_round_pointer.unwrap_or("fix_round")).map(|s| s.to_string());
     let dimensions = json_pointer(payload, dimensions_pointer.unwrap_or("dimensions"))
         .map(|v| Value::String(v.to_string()))
         .or_else(|| {
             // Fall back to the raw JSON value if the pointer
             // resolves to a non-string (the typical case for a
             // JSON object of dimension verdicts).
-            payload.get(dimensions_pointer.unwrap_or("dimensions")).cloned()
+            payload
+                .get(dimensions_pointer.unwrap_or("dimensions"))
+                .cloned()
         });
-    let summary = json_pointer(payload, summary_pointer.unwrap_or("summary"))
-        .map(|s| s.to_string());
+    let summary =
+        json_pointer(payload, summary_pointer.unwrap_or("summary")).map(|s| s.to_string());
 
     let view = ReviewDimensionsView {
         task_key: task_key.clone(),
@@ -145,11 +147,7 @@ mod tests {
 
     fn ctx() -> ProjectionContext {
         let dir = tempdir().unwrap();
-        ProjectionContext::new(
-            dir.path(),
-            StateProjectionConfig::default(),
-            false,
-        )
+        ProjectionContext::new(dir.path(), StateProjectionConfig::default(), false)
     }
 
     #[test]
@@ -173,7 +171,10 @@ mod tests {
         project_review_dimensions_complete(&mut c, &payload, None, None, None, None).unwrap();
         let guard = c.review_dimensions_view.lock().unwrap();
         let view = guard.as_ref().expect("view stored");
-        assert_eq!(view.task_key.as_deref(), Some("ce-executor:demo:step-01:u1-impl"));
+        assert_eq!(
+            view.task_key.as_deref(),
+            Some("ce-executor:demo:step-01:u1-impl")
+        );
         assert_eq!(view.fix_round.as_deref(), Some("0"));
         assert_eq!(view.summary.as_deref(), Some("all green"));
     }

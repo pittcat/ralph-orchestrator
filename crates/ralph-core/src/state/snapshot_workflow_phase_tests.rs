@@ -8,9 +8,7 @@
 //! behaviour is exercised by the existing event-loop tests
 //! that read `LedgerSnapshot`.
 
-use crate::event_loop::phase_authority::snapshot::{
-    PhaseSnapshot, ViolationKind,
-};
+use crate::event_loop::phase_authority::snapshot::{PhaseSnapshot, ViolationKind};
 use crate::state::snapshot::LedgerSnapshot;
 
 #[test]

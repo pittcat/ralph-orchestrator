@@ -16,9 +16,7 @@
 #![allow(clippy::needless_update)]
 
 use crate::config::HandoffEnvelopeConfig;
-use crate::event_loop::prompt_helpers::{
-    build_isolated_prompt_with_handoff, IsolatedPromptInputs,
-};
+use crate::event_loop::prompt_helpers::{IsolatedPromptInputs, build_isolated_prompt_with_handoff};
 use crate::handoff_envelope::HANDOFF_ENVELOPE_SCHEMA_VERSION;
 use ralph_proto::{Event, HatId, Topic};
 
@@ -72,7 +70,10 @@ fn isolated_prompt_omits_handoff_envelope_by_default() {
     // Default config: all flags false. Even though the recent
     // events carry a valid envelope, the prompt must NOT include
     // the rendered block.
-    let events = vec![envelope_event(envelope_value("goal-alignment-reviewer", "step-2"))];
+    let events = vec![envelope_event(envelope_value(
+        "goal-alignment-reviewer",
+        "step-2",
+    ))];
     let inputs = IsolatedPromptInputs {
         base_prompt: "BASE PROMPT".to_string(),
         events: &events,
@@ -91,7 +92,10 @@ fn isolated_prompt_includes_handoff_envelope_when_enabled_and_event_has_payload(
     // Master switch + prompt_injection enabled; recent events
     // carry a valid envelope. The prompt must include the
     // rendered block at the very top.
-    let events = vec![envelope_event(envelope_value("goal-alignment-reviewer", "step-2"))];
+    let events = vec![envelope_event(envelope_value(
+        "goal-alignment-reviewer",
+        "step-2",
+    ))];
     let config = HandoffEnvelopeConfig {
         enabled: true,
         prompt_injection: true,

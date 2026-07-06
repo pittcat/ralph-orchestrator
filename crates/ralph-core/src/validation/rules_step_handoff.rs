@@ -113,10 +113,7 @@ impl ValidationRule for StepHandoffRule {
         //      `ValidationContext::with_tasks_path`.
         // If any of those are missing, the legacy path (in-memory
         // only) runs unchanged.
-        let resolved_task: Option<Task> = match (
-            task_id.as_deref(),
-            ctx.tasks_path(),
-        ) {
+        let resolved_task: Option<Task> = match (task_id.as_deref(), ctx.tasks_path()) {
             (Some(tid), Some(path)) => match resolve_task_for_gate(&snapshot.tasks, path, tid) {
                 Ok(t) => t,
                 Err(_) => None, // Treat reload failure as a clean miss;

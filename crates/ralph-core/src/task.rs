@@ -384,7 +384,11 @@ mod tests {
     fn lifecycle_close_delegate_routes_coordinator_owned_task_to_coordinator() {
         let task = Task::new("t1".to_string(), 1).with_owner_hat(Some("coordinator".to_string()));
         let coordinators = vec!["coordinator".to_string()];
-        assert!(!can_hat_mutate_task_lifecycle(&task, "executor", &coordinators));
+        assert!(!can_hat_mutate_task_lifecycle(
+            &task,
+            "executor",
+            &coordinators
+        ));
         assert_eq!(
             lifecycle_close_delegate_hat(&task, "executor", &coordinators),
             "coordinator"
@@ -395,7 +399,11 @@ mod tests {
     fn lifecycle_close_delegate_keeps_owner_executor() {
         let task = Task::new("t1".to_string(), 1).with_owner_hat(Some("executor".to_string()));
         let coordinators = vec!["coordinator".to_string()];
-        assert!(can_hat_mutate_task_lifecycle(&task, "executor", &coordinators));
+        assert!(can_hat_mutate_task_lifecycle(
+            &task,
+            "executor",
+            &coordinators
+        ));
         assert_eq!(
             lifecycle_close_delegate_hat(&task, "executor", &coordinators),
             "executor"
@@ -404,13 +412,10 @@ mod tests {
 
     #[test]
     fn task_lifecycle_denied_message_close_mentions_delegate_coordinator() {
-        let task = Task::new("task-1".to_string(), 1).with_owner_hat(Some("coordinator".to_string()));
-        let msg = task_lifecycle_denied_message(
-            &task,
-            "executor",
-            &["coordinator".to_string()],
-            "close",
-        );
+        let task =
+            Task::new("task-1".to_string(), 1).with_owner_hat(Some("coordinator".to_string()));
+        let msg =
+            task_lifecycle_denied_message(&task, "executor", &["coordinator".to_string()], "close");
         assert!(msg.contains("Ask hat 'coordinator'"));
         assert!(msg.contains("ralph tools task close task-1"));
     }

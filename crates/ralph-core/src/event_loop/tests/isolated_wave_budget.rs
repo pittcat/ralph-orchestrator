@@ -506,15 +506,17 @@ hats:
         &[],
         &[],
     );
-    assert!(not_exempt, "M-1: exempt_topics is a positive list, not a wildcard");
+    assert!(
+        not_exempt,
+        "M-1: exempt_topics is a positive list, not a wildcard"
+    );
 }
 
 #[test]
 fn m1_exempt_topic_falls_back_to_default_when_unregistered() {
     // Unknown hat → no exemption (default behaviour preserved).
-    let registry = crate::hat_registry::HatRegistry::from_config(
-        &crate::config::RalphConfig::default(),
-    );
+    let registry =
+        crate::hat_registry::HatRegistry::from_config(&crate::config::RalphConfig::default());
     let unknown = ralph_proto::HatId::from("does-not-exist");
     assert!(
         !crate::event_loop::is_isolated_exempt_topic(

@@ -354,11 +354,8 @@ mod tests {
         let progress_path = dir.join("progress.md");
         let tasks_path = dir.join("tasks.jsonl");
         std::fs::write(&progress_path, "# Progress\n\n## Current Step\nstep-01\n").unwrap();
-        let mut ctx = ProjectionContext::new(
-            dir,
-            crate::config::StateProjectionConfig::default(),
-            false,
-        );
+        let mut ctx =
+            ProjectionContext::new(dir, crate::config::StateProjectionConfig::default(), false);
         ctx.progress_cache =
             ProgressSnapshot::parse(&std::fs::read_to_string(&progress_path).unwrap());
         ctx
@@ -422,10 +419,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ctx = build_ctx_for_test(dir.path());
         // First mark.
-        project_mark_step_completed(&mut ctx, &serde_json::json!({"step": "step-01"}), None).unwrap();
+        project_mark_step_completed(&mut ctx, &serde_json::json!({"step": "step-01"}), None)
+            .unwrap();
         // Second mark of a DIFFERENT step — derived current_step
         // advances to step-02.
-        project_mark_step_completed(&mut ctx, &serde_json::json!({"step": "step-02"}), None).unwrap();
+        project_mark_step_completed(&mut ctx, &serde_json::json!({"step": "step-02"}), None)
+            .unwrap();
         assert!(ctx.progress_cache.is_step_completed("step-01"));
         assert!(ctx.progress_cache.is_step_completed("step-02"));
         assert_eq!(

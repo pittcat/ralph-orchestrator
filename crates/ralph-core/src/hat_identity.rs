@@ -104,11 +104,7 @@ impl HatIdentitySnapshot {
         let _ = writeln!(buf, "- triggers: {}", format_list(&self.triggers));
         let _ = writeln!(buf, "- publishes: {}", format_list(&self.publishes));
         let completion = crate::completion_emit::derive_completion_publishes(config, &self.hat_id);
-        let _ = writeln!(
-            buf,
-            "- completion_publishes: {}",
-            format_list(&completion)
-        );
+        let _ = writeln!(buf, "- completion_publishes: {}", format_list(&completion));
         if !self.denied_task_commands.is_empty() {
             let _ = writeln!(buf);
             let _ = writeln!(
@@ -191,7 +187,11 @@ tasks:
 
         assert!(snapshot.is_coordinator);
         assert!(snapshot.allowed_task_commands.contains(&"add".to_string()));
-        assert!(snapshot.allowed_task_commands.contains(&"ensure".to_string()));
+        assert!(
+            snapshot
+                .allowed_task_commands
+                .contains(&"ensure".to_string())
+        );
         assert!(!snapshot.denied_task_commands.contains(&"add".to_string()));
         // prompt block derives completion topis from policy; without
         // event_policy the helper returns []. This test pins the
@@ -223,10 +223,22 @@ tasks:
 
         assert!(!snapshot.is_coordinator);
         assert!(snapshot.denied_task_commands.contains(&"add".to_string()));
-        assert!(snapshot.denied_task_commands.contains(&"ensure".to_string()));
+        assert!(
+            snapshot
+                .denied_task_commands
+                .contains(&"ensure".to_string())
+        );
         assert!(!snapshot.allowed_task_commands.contains(&"add".to_string()));
-        assert!(snapshot.allowed_task_commands.contains(&"start".to_string()));
-        assert!(snapshot.allowed_task_commands.contains(&"close".to_string()));
+        assert!(
+            snapshot
+                .allowed_task_commands
+                .contains(&"start".to_string())
+        );
+        assert!(
+            snapshot
+                .allowed_task_commands
+                .contains(&"close".to_string())
+        );
         assert!(snapshot.allowed_task_commands.contains(&"list".to_string()));
     }
 
@@ -263,7 +275,11 @@ tasks:
 
         assert!(!snapshot.is_coordinator);
         assert!(snapshot.denied_task_commands.contains(&"add".to_string()));
-        assert!(snapshot.denied_task_commands.contains(&"ensure".to_string()));
+        assert!(
+            snapshot
+                .denied_task_commands
+                .contains(&"ensure".to_string())
+        );
     }
 
     #[test]
@@ -282,7 +298,11 @@ tasks:
             .expect("reviewer hat exists");
 
         assert!(snapshot.publishes.is_empty());
-        assert!(snapshot.to_prompt_block(&config).contains("publishes: (none)"));
+        assert!(
+            snapshot
+                .to_prompt_block(&config)
+                .contains("publishes: (none)")
+        );
     }
 
     #[test]
@@ -322,7 +342,12 @@ hats:
 
         assert_eq!(json["hat_id"], "worker");
         assert_eq!(json["is_coordinator"], false);
-        assert!(json["denied_task_commands"].as_array().unwrap().contains(&"add".into()));
+        assert!(
+            json["denied_task_commands"]
+                .as_array()
+                .unwrap()
+                .contains(&"add".into())
+        );
     }
 
     #[test]

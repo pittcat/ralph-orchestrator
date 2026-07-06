@@ -23,7 +23,7 @@ use ralph_proto::Event;
 use crate::event_origin::is_supervisor_coordination_topic;
 
 use super::merge_sink::{EventMergeSink, InMemoryMergeSink, MergeSinkError};
-use super::phase::{evaluate_phase, FailedReason, PhaseDecision, PhaseInputs};
+use super::phase::{FailedReason, PhaseDecision, PhaseInputs, evaluate_phase};
 use super::{
     SupervisorStore, SupervisorStoreError, SupervisorStoreResult, WavePhase, WaveSnapshot,
 };
@@ -50,7 +50,10 @@ pub enum CoordinatorAction {
     AlreadyDone,
     /// Fan-in succeeded; the merge ran, the coord event was
     /// injected, the wave advanced to `Done`.
-    InjectedComplete { topic: String, blocking_slots: Vec<u32> },
+    InjectedComplete {
+        topic: String,
+        blocking_slots: Vec<u32>,
+    },
     /// Wave reached a terminal failure; the coord event was
     /// injected, the wave advanced to `Failed`.
     InjectedFailed {
@@ -102,7 +105,11 @@ impl SupervisorCoordinator {
     /// `merged_to_events` flag (mark_merge_to_events runs only
     /// once per wave). Returns the action the runtime should
     /// log/forward to `ralph diagnose`.
-    pub fn tick(&self, wave_id: &str, inputs: PhaseInputs) -> SupervisorStoreResult<CoordinatorAction> {
+    pub fn tick(
+        &self,
+        wave_id: &str,
+        inputs: PhaseInputs,
+    ) -> SupervisorStoreResult<CoordinatorAction> {
         let snapshot = self.store.fan_in_status(wave_id)?;
         // KTD-7 + KTD-6: the merge gate is the only place we
         // mutate the ledger. Evaluate first, then merge, then
@@ -111,7 +118,10 @@ impl SupervisorCoordinator {
         match decision {
             PhaseDecision::ContinueCollect => Ok(CoordinatorAction::ContinueCollect),
             PhaseDecision::Integrate => self.merge_and_complete(&snapshot),
-            PhaseDecision::Failed { reason, blocking_slots } => self.fail_wave(&snapshot, &reason, blocking_slots),
+            PhaseDecision::Failed {
+                reason,
+                blocking_slots,
+            } => self.fail_wave(&snapshot, &reason, blocking_slots),
         }
     }
 
@@ -353,7 +363,8 @@ mod tests {
         // Slot 0 succeeds; slot 1 fails.
         store.record_slot_result(&wave, 0, "h0", 1).unwrap();
         store.record_slot_failure(&wave, 1, "boom").unwrap();
-        let coord = SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
+        let coord =
+            SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
             .tick(
                 &wave,
@@ -471,7 +482,8 @@ mod tests {
             .unwrap();
         let _ = store.try_dispatch_next(2).unwrap().unwrap();
         store.record_slot_result(&wave, 0, "h", 1).unwrap();
-        let coord = SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
+        let coord =
+            SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
             .tick(
                 &wave,
@@ -516,7 +528,9 @@ mod tests {
     #[test]
     fn coordinator_moves_wave_to_failed_only_after_siblings_settle() {
         let store = Arc::new(InMemorySupervisorStore::new());
-        let wave = store.register_wave("mixed-fail", WaveKind::Exec, 2).unwrap();
+        let wave = store
+            .register_wave("mixed-fail", WaveKind::Exec, 2)
+            .unwrap();
         store
             .bind_worktree(
                 &wave,
@@ -601,7 +615,8 @@ mod tests {
             )
             .unwrap();
         store.cancel_wave(&wave).unwrap();
-        let coord = SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
+        let coord =
+            SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
             .tick(
                 &wave,
@@ -638,7 +653,8 @@ mod tests {
                 )
                 .unwrap();
         }
-        let coord = SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
+        let coord =
+            SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
             .tick(
                 &wave,
@@ -716,11 +732,14 @@ mod tests {
     fn merge_sink_error_carries_detail() {
         let sink = InMemoryMergeSink::new();
         sink.fail_with("ledger prune in progress");
-        let err = sink.append_events(vec![Event::new("unit.done", "{}")]).unwrap_err();
+        let err = sink
+            .append_events(vec![Event::new("unit.done", "{}")])
+            .unwrap_err();
         match err {
             MergeSinkError::Rejected(msg) => assert!(msg.contains("ledger prune")),
         }
         sink.clear_failure();
-        sink.append_events(vec![Event::new("unit.done", "{}")]).unwrap();
+        sink.append_events(vec![Event::new("unit.done", "{}")])
+            .unwrap();
     }
 }

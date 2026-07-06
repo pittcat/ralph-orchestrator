@@ -196,9 +196,7 @@ mod tests {
     #[test]
     fn test_no_findings_when_no_coordinator_declared() {
         let cfg = RalphConfig::default();
-        assert!(
-            check_review_complete_misrouted(&cfg, LintStrictness::Default).is_empty()
-        );
+        assert!(check_review_complete_misrouted(&cfg, LintStrictness::Default).is_empty());
     }
 
     #[test]
@@ -294,9 +292,7 @@ mod tests {
 
     #[test]
     fn test_finding_carries_hat_id_and_action_hint() {
-        let cfg = cfg_with_coordinator_instructions(
-            "# If verdict=blocked then plan.blocked.",
-        );
+        let cfg = cfg_with_coordinator_instructions("# If verdict=blocked then plan.blocked.");
         let findings = check_review_complete_misrouted(&cfg, LintStrictness::Default);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].hat.as_deref(), Some(HAT_COORDINATOR));

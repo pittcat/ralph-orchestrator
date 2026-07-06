@@ -135,7 +135,10 @@ when: last
             index: 2,
             total: 2,
         };
-        assert_eq!(evaluate(&trigger, "test.passed", &fixture), Some("last".to_string()));
+        assert_eq!(
+            evaluate(&trigger, "test.passed", &fixture),
+            Some("last".to_string())
+        );
     }
 
     #[test]
@@ -153,7 +156,10 @@ when: last
             index: 8,
             total: 8,
         };
-        assert_eq!(evaluate(&trigger, "test.passed", &fixture), Some("last".to_string()));
+        assert_eq!(
+            evaluate(&trigger, "test.passed", &fixture),
+            Some("last".to_string())
+        );
     }
 
     #[test]
@@ -225,6 +231,9 @@ when: always
             index: 1,
             total: 8,
         };
-        assert_eq!(evaluate(&trigger, "test.passed", &fixture), Some("always".to_string()));
+        assert_eq!(
+            evaluate(&trigger, "test.passed", &fixture),
+            Some("always".to_string())
+        );
     }
 }

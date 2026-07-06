@@ -105,9 +105,7 @@ impl SupervisorBridge for SpyBindingBridge {
         Ok(Some(binding))
     }
 
-    fn recover(
-        &self,
-    ) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
+    fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
         Ok(Vec::new())
     }
 
@@ -273,8 +271,8 @@ fn bridge_off_no_feature_returns_error_path() {
 // open-error unit tests.
 #[test]
 fn build_supervisor_bridge_relative_db_path_resolves_under_ralph_dir() {
-    use ralph_core::config::SupervisorConfig;
     use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let ctx = LoopContext::primary(tmp.path().to_path_buf());
@@ -302,8 +300,8 @@ fn build_supervisor_bridge_relative_db_path_resolves_under_ralph_dir() {
 
 #[test]
 fn build_supervisor_bridge_absolute_db_path_honoured_as_is() {
-    use ralph_core::config::SupervisorConfig;
     use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let ctx = LoopContext::primary(tmp.path().to_path_buf());
@@ -331,8 +329,8 @@ fn build_supervisor_bridge_in_memory_fallback_round_trips() {
     // the fallback path produces a bridge whose `tick` works
     // end-to-end so dry-runs in dev builds still exercise the
     // coordinator path.
-    use ralph_core::config::SupervisorConfig;
     use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
     use ralph_core::supervisor::{PhaseInputs, SlotResource, SupervisorBridge as _};
 
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -404,7 +402,10 @@ fn slot_binding_env_overrides_worker_backend_env_keys() {
     // The worktree_path is surfaced as RALPH_WAVE_WORKTREE_PATH in
     // the binding env so the worker process can read it via env.
     assert_eq!(
-        binding.env.get("RALPH_WAVE_WORKTREE_PATH").map(String::as_str),
+        binding
+            .env
+            .get("RALPH_WAVE_WORKTREE_PATH")
+            .map(String::as_str),
         Some(format!("/tmp/u9-spy/{wave_id}-0").as_str()),
         "RALPH_WAVE_WORKTREE_PATH must come from the binding"
     );
@@ -475,4 +476,3 @@ fn recover_active_waves_at_startup_returns_report_on_empty_store() {
     assert!(report.timed_out.is_empty());
     assert!(report.already_merged.is_empty());
 }
-

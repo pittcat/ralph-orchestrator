@@ -101,18 +101,16 @@ mod tests {
         let cfg = PhaseAuthorityConfig {
             enabled: true,
             initial_phase: Some("plan_end".to_string()),
-            phases: vec![
-                PhaseDeclConfig {
-                    id: "plan_end".to_string(),
-                    label: None,
-                    allowed_emits: [(
-                        "coordinator".to_string(),
-                        vec!["plan.complete".to_string(), "plan.blocked".to_string()],
-                    )]
-                    .into_iter()
-                    .collect(),
-                },
-            ],
+            phases: vec![PhaseDeclConfig {
+                id: "plan_end".to_string(),
+                label: None,
+                allowed_emits: [(
+                    "coordinator".to_string(),
+                    vec!["plan.complete".to_string(), "plan.blocked".to_string()],
+                )]
+                .into_iter()
+                .collect(),
+            }],
             transitions: Vec::new(),
             violation_policy: ViolationPolicyConfig::default(),
             progress_projection: ProgressProjectionConfig::default(),
@@ -140,8 +138,16 @@ mod tests {
         assert_eq!(err.reason_code, "phase_violation");
         // Diagnostic fields are surfaced via `missing_fields` so
         // the runtime can render a useful correction envelope.
-        assert!(err.missing_fields.iter().any(|f| f.contains("phase=plan_end")));
-        assert!(err.missing_fields.iter().any(|f| f.contains("rejected_topic=review.start")));
+        assert!(
+            err.missing_fields
+                .iter()
+                .any(|f| f.contains("phase=plan_end"))
+        );
+        assert!(
+            err.missing_fields
+                .iter()
+                .any(|f| f.contains("rejected_topic=review.start"))
+        );
     }
 
     #[test]

@@ -132,7 +132,11 @@ pub fn check_fix_unit_task_id_helper_derived(
         // fix-plan. The fix-unit dispatch hat triggers on `review.complete`
         // (it wakes to dispatch fix-units after review fails). Only check
         // hats that trigger on review.complete.
-        if !hat_cfg.triggers.iter().any(|t| t == REVIEW_COMPLETE_TRIGGER) {
+        if !hat_cfg
+            .triggers
+            .iter()
+            .any(|t| t == REVIEW_COMPLETE_TRIGGER)
+        {
             continue;
         }
 
@@ -302,8 +306,7 @@ mod tests {
         );
         let f = &findings[0];
         assert!(
-            f.message
-                .contains("task-{plan_slug}-fix{NN}u{NN}-{ts_hex}"),
+            f.message.contains("task-{plan_slug}-fix{NN}u{NN}-{ts_hex}"),
             "finding message must mention missing shape, got {}",
             f.message
         );
@@ -473,8 +476,7 @@ mod tests {
         hats.insert(
             "progress-steward".to_string(),
             HatConfig {
-                instructions: "Re-dispatch fix-01 on stall. No template here."
-                    .to_string(),
+                instructions: "Re-dispatch fix-01 on stall. No template here.".to_string(),
                 publishes: vec!["work.ready".to_string()],
                 triggers: vec!["loop.stalled".to_string()],
                 ..HatConfig::default()

@@ -236,11 +236,8 @@ fn write_resume_anchor_marker(plan_path: &std::path::Path) -> anyhow::Result<()>
     std::fs::create_dir_all(&agent_dir)
         .context("resume: failed to create .ralph/agent dir for marker")?;
     let plan_baseline_sha = ralph_core::plan_baseline::read_plan_baseline(&workspace_root, None);
-    let marker = AnchorMarker::from_plan_path(
-        plan_path,
-        plan_baseline_sha,
-        Some(chrono::Utc::now()),
-    );
+    let marker =
+        AnchorMarker::from_plan_path(plan_path, plan_baseline_sha, Some(chrono::Utc::now()));
     let json = serde_json::to_string_pretty(&marker)
         .context("resume: failed to serialise anchor marker")?;
     let path = agent_dir.join(".ralph-anchor.json");

@@ -28,11 +28,11 @@ use crate::preflight;
 use crate::{ConfigSource, HatsSource};
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
-use ralph_proto::HatId;
 use ralph_core::RalphConfig;
 use ralph_core::config::profiles::ProfileSpec;
 use ralph_core::hat_identity::HatIdentitySnapshot;
 use ralph_core::profiles::ResolvedProfileFragments;
+use ralph_proto::HatId;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -295,30 +295,28 @@ pub async fn inspect_loop_command(
     //   1. --hat override (operator preview)
     //   2. live `RALPH_CURRENT_HAT` (already in `ctx.current_hat_id`)
     //   3. None — surface a hint instead of fabricating an identity.
-    let hat_id = args
-        .hat
-        .clone()
-        .or_else(|| ctx.current_hat_id.clone());
+    let hat_id = args.hat.clone().or_else(|| ctx.current_hat_id.clone());
 
-    let hat_identity = hat_id
-        .as_deref()
-        .and_then(|h| ralph_core::hat_identity::HatIdentitySnapshot::from_config(
+    let hat_identity = hat_id.as_deref().and_then(|h| {
+        ralph_core::hat_identity::HatIdentitySnapshot::from_config(
             &config,
             &ralph_proto::HatId::new(h.to_string()),
-        ));
+        )
+    });
 
     // Resolve the events file allowlist pair (main + hat-channel) by
     // surface area only — we never read the files ourselves, only stat
     // them so the operator can see whether the channels are alive.
     let (main_events, hat_channel_events) = resolve_event_paths(&root, &ctx);
-    let main_size = std::fs::metadata(&main_events).map(|m| m.len()).unwrap_or(0);
+    let main_size = std::fs::metadata(&main_events)
+        .map(|m| m.len())
+        .unwrap_or(0);
     // For hat-channel, resolve the marker to the real channel file
     // before statting — the marker itself is a tiny path string
     // (~/.ralph/agent/events-hat-X.jsonl) and reporting its size
     // would mislead operators into thinking the channel is empty
     // when in fact the channel sits one dereference away (U4 P1 #6).
-    let (hat_channel_label, hat_size, hat_channel_warning) = match resolve_hat_channel_file(&root)
-    {
+    let (hat_channel_label, hat_size, hat_channel_warning) = match resolve_hat_channel_file(&root) {
         None => (
             hat_channel_events.display().to_string(),
             std::fs::metadata(&hat_channel_events)
@@ -387,8 +385,7 @@ pub async fn inspect_loop_command(
     // surface a warning so operators know the inspect command has
     // nothing to anchor against. The anchor struct stays `None` on
     // the view so the JSON key is omitted — backward-compatible.
-    let loop_anchor =
-        build_loop_anchor_summary(&config, &root, ctx.current_loop_id.as_deref());
+    let loop_anchor = build_loop_anchor_summary(&config, &root, ctx.current_loop_id.as_deref());
     if loop_anchor.is_none() {
         warnings.push(loop_anchor_unattached_warning().to_string());
     }
@@ -797,7 +794,10 @@ fn print_loop_view(view: &LoopInspectView, use_colors: bool) {
             "false"
         }
     );
-    println!("  events_file: {} ({} bytes)", view.events_file, view.events_size);
+    println!(
+        "  events_file: {} ({} bytes)",
+        view.events_file, view.events_size
+    );
     println!(
         "  hat_channel: {} ({} bytes)",
         view.hat_channel_file, view.hat_channel_size
@@ -1632,7 +1632,12 @@ mod tests {
     #[test]
     fn cli_parses_inspect_loop_with_hat_override_and_json() {
         let parsed = InspectArgs::try_parse_from([
-            "inspect", "loop", "--hat", "coordinator", "--format", "json",
+            "inspect",
+            "loop",
+            "--hat",
+            "coordinator",
+            "--format",
+            "json",
         ])
         .expect("CLI parse failed");
         let loop_args = match parsed.command.expect("loop subcommand") {
@@ -1724,11 +1729,9 @@ mod tests {
             },
         );
 
-        let snapshot = HatIdentitySnapshot::from_config(
-            &cfg,
-            &HatId::new("coordinator".to_string()),
-        )
-        .expect("snapshot for known hat");
+        let snapshot =
+            HatIdentitySnapshot::from_config(&cfg, &HatId::new("coordinator".to_string()))
+                .expect("snapshot for known hat");
         let view = LoopInspectView {
             workspace_root: "/tmp/x".into(),
             loop_id: Some("loop-x".into()),
@@ -1850,7 +1853,10 @@ mod tests {
         // Exec wave → two Exec coordination topics, in stable order.
         assert_eq!(
             summary.last_coordination_topics,
-            vec!["exec.wave.complete".to_string(), "exec.wave.failed".to_string()],
+            vec![
+                "exec.wave.complete".to_string(),
+                "exec.wave.failed".to_string()
+            ],
         );
         // Output-safety: the struct must NOT leak any path / db fields.
         let json = serde_json::to_value(&summary).expect("serialise");
@@ -1888,7 +1894,10 @@ mod tests {
         let summary = summarize(&store);
         assert_eq!(
             summary.last_coordination_topics,
-            vec!["fix.wave.complete".to_string(), "fix.wave.failed".to_string()],
+            vec![
+                "fix.wave.complete".to_string(),
+                "fix.wave.failed".to_string()
+            ],
         );
     }
 
@@ -2035,9 +2044,7 @@ mod tests {
         let json = serde_json::to_value(&anchor).expect("serialise");
         assert_eq!(
             json["plan_name"],
-            serde_json::json!(
-                "2026-07-04-004-fix-ce-executor-serial-silent-success-p0-p1-plan"
-            )
+            serde_json::json!("2026-07-04-004-fix-ce-executor-serial-silent-success-p0-p1-plan")
         );
         assert_eq!(json["plan_path"], serde_json::json!(plan_path));
         assert_eq!(json["plan_baseline_sha"], serde_json::Value::Null);
@@ -2080,7 +2087,11 @@ mod tests {
             is_agent_context: false,
             hat_identity: serde_json::Value::Null,
             events_file: tmp.path().join(".ralph/events.jsonl").display().to_string(),
-            hat_channel_file: tmp.path().join(".ralph/current-hat-events").display().to_string(),
+            hat_channel_file: tmp
+                .path()
+                .join(".ralph/current-hat-events")
+                .display()
+                .to_string(),
             events_size: 0,
             hat_channel_size: 0,
             warnings: vec![],

@@ -173,7 +173,10 @@ impl TopologyGraph {
             // subscriptions (triggers)
             for sub in &hat.subscriptions {
                 let topic_str = sub.as_str().to_string();
-                topic_to_hats.entry(topic_str).or_default().push(hat_id.clone());
+                topic_to_hats
+                    .entry(topic_str)
+                    .or_default()
+                    .push(hat_id.clone());
             }
 
             // publishes

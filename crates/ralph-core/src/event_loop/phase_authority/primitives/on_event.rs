@@ -42,7 +42,10 @@ mod tests {
     #[test]
     fn matches_work_start_trigger() {
         let trigger: Value = serde_yaml::from_str("event: work.start").unwrap();
-        assert_eq!(evaluate(&trigger, "work.start"), Some("work.start".to_string()));
+        assert_eq!(
+            evaluate(&trigger, "work.start"),
+            Some("work.start".to_string())
+        );
     }
 
     #[test]

@@ -110,14 +110,17 @@ pub fn check_review_synthesizer_block_guard(
     }
 
     let severity = strictness.ownership_severity();
-    let finding = LintFinding::new(FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD, format!(
-        "review-synthesizer 'all_dimensions_failed' hard-gate wording drifted away from \
+    let finding = LintFinding::new(
+        FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD,
+        format!(
+            "review-synthesizer 'all_dimensions_failed' hard-gate wording drifted away from \
          the explicit 'all 6 dimensions status == failed' invariant. The runtime relies on \
          the explicit phrasing to decide between plan.blocked (all 6 failed) and the \
          residual-risks path (mixed done+failed). Loose wording such as 'All dimensions failed' \
          or 'all_dimensions_failed' without '全 6' / '6 个维度' / 'all 6' lets the silent-success \
          shape (verdict=blocked + findings_count=0) slip through as a pass."
-    ))
+        ),
+    )
     .with_hat(HAT_REVIEW_SYNTHESIZER.to_string())
     .with_action_hint(format!(
         "Rewrite the block-guard phrase to make the 6-dimension scope explicit, e.g.: \
@@ -159,9 +162,7 @@ mod tests {
     #[test]
     fn test_no_findings_when_no_synthesizer_declared() {
         let cfg = RalphConfig::default();
-        assert!(
-            check_review_synthesizer_block_guard(&cfg, LintStrictness::Default).is_empty()
-        );
+        assert!(check_review_synthesizer_block_guard(&cfg, LintStrictness::Default).is_empty());
     }
 
     #[test]
@@ -171,9 +172,7 @@ mod tests {
         let cfg = cfg_with_synthesizer_instructions(
             "Synthesize review verdicts from per-dimension outputs.",
         );
-        assert!(
-            check_review_synthesizer_block_guard(&cfg, LintStrictness::Default).is_empty()
-        );
+        assert!(check_review_synthesizer_block_guard(&cfg, LintStrictness::Default).is_empty());
     }
 
     #[test]
@@ -184,11 +183,13 @@ mod tests {
             "- **All dimensions failed** (every `status: \"failed\"`): emit \
              `plan.blocked` with `reason: \"all_dimensions_failed\"`.",
         );
-        let findings =
-            check_review_synthesizer_block_guard(&cfg, LintStrictness::Default);
+        let findings = check_review_synthesizer_block_guard(&cfg, LintStrictness::Default);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD);
-        assert!(matches!(findings[0].severity, super::super::LintSeverity::Warn));
+        assert!(matches!(
+            findings[0].severity,
+            super::super::LintSeverity::Warn
+        ));
         // Verify the message points at the drift root cause.
         assert!(
             findings[0].message.contains("all 6 dimensions"),
@@ -204,10 +205,12 @@ mod tests {
             "- **All dimensions failed** (every `status: \"failed\"`): emit \
              `plan.blocked` with `reason: \"all_dimensions_failed\"`.",
         );
-        let findings =
-            check_review_synthesizer_block_guard(&cfg, LintStrictness::Strict);
+        let findings = check_review_synthesizer_block_guard(&cfg, LintStrictness::Strict);
         assert_eq!(findings.len(), 1);
-        assert!(matches!(findings[0].severity, super::super::LintSeverity::Error));
+        assert!(matches!(
+            findings[0].severity,
+            super::super::LintSeverity::Error
+        ));
     }
 
     #[test]
@@ -232,18 +235,14 @@ mod tests {
             "# ONLY when all 6 dimensions have status == failed publish \
              plan.blocked(reason=all_dimensions_failed).",
         );
-        assert!(
-            check_review_synthesizer_block_guard(&cfg, LintStrictness::Default).is_empty()
-        );
+        assert!(check_review_synthesizer_block_guard(&cfg, LintStrictness::Default).is_empty());
     }
 
     #[test]
     fn test_finding_carries_action_hint() {
-        let cfg = cfg_with_synthesizer_instructions(
-            "- **All dimensions failed**: emit plan.blocked.",
-        );
-        let findings =
-            check_review_synthesizer_block_guard(&cfg, LintStrictness::Default);
+        let cfg =
+            cfg_with_synthesizer_instructions("- **All dimensions failed**: emit plan.blocked.");
+        let findings = check_review_synthesizer_block_guard(&cfg, LintStrictness::Default);
         assert_eq!(findings.len(), 1);
         let hint = findings[0]
             .action_hint
@@ -257,11 +256,9 @@ mod tests {
 
     #[test]
     fn test_finding_carries_hat_id() {
-        let cfg = cfg_with_synthesizer_instructions(
-            "- **All dimensions failed**: emit plan.blocked.",
-        );
-        let findings =
-            check_review_synthesizer_block_guard(&cfg, LintStrictness::Default);
+        let cfg =
+            cfg_with_synthesizer_instructions("- **All dimensions failed**: emit plan.blocked.");
+        let findings = check_review_synthesizer_block_guard(&cfg, LintStrictness::Default);
         assert_eq!(
             findings[0].hat.as_deref(),
             Some(HAT_REVIEW_SYNTHESIZER),

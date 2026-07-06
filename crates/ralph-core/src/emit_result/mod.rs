@@ -17,7 +17,9 @@ pub mod routing;
 pub mod tests;
 
 pub use map_errors::map_policy_report_to_errors;
-pub use routing::{resolve_emit_routing_context, resolve_emit_routing_from_config, EmitRoutingContext};
+pub use routing::{
+    EmitRoutingContext, resolve_emit_routing_context, resolve_emit_routing_from_config,
+};
 
 use serde::Serialize;
 

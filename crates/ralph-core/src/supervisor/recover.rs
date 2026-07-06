@@ -36,10 +36,8 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crate::supervisor::phase::{evaluate_phase, FailedReason, PhaseDecision, PhaseInputs};
-use crate::supervisor::{
-    SupervisorStore, SupervisorStoreResult, WavePhase, WaveSnapshot,
-};
+use crate::supervisor::phase::{FailedReason, PhaseDecision, PhaseInputs, evaluate_phase};
+use crate::supervisor::{SupervisorStore, SupervisorStoreResult, WavePhase, WaveSnapshot};
 
 /// Result of running recovery at startup.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -209,11 +207,7 @@ mod tests {
         let wave = store.register_wave("merge", WaveKind::Exec, 1).unwrap();
         slot_bound(&store, &wave, 0);
         store.mark_merge_to_events(&wave).unwrap();
-        let report = recover_active_waves_at_startup(
-            Arc::new(store.clone()),
-            60,
-        )
-        .unwrap();
+        let report = recover_active_waves_at_startup(Arc::new(store.clone()), 60).unwrap();
         assert_eq!(report.already_merged, vec!["w-1"]);
         // Already-merged waves do NOT trigger the timeout list.
         assert!(report.timed_out.is_empty());
@@ -225,11 +219,7 @@ mod tests {
         let wave = store.register_wave("zero", WaveKind::Exec, 1).unwrap();
         slot_bound(&store, &wave, 0);
         // No dispatch; in_flight = 0.
-        let report = recover_active_waves_at_startup(
-            Arc::new(store.clone()),
-            60,
-        )
-        .unwrap();
+        let report = recover_active_waves_at_startup(Arc::new(store.clone()), 60).unwrap();
         assert_eq!(report.inspected, 1);
         assert!(report.timed_out.is_empty());
     }
@@ -241,11 +231,7 @@ mod tests {
         slot_bound(&store, &wave, 0);
         let _ = store.try_dispatch_next(4).unwrap().unwrap();
         store.cancel_wave(&wave).unwrap();
-        let report = recover_active_waves_at_startup(
-            Arc::new(store.clone()),
-            60,
-        )
-        .unwrap();
+        let report = recover_active_waves_at_startup(Arc::new(store.clone()), 60).unwrap();
         assert_eq!(report.inspected, 1);
         // Snapshot still has in-flight + cancel_requested; we
         // expect no DB mutation and no timeout escalation —
@@ -268,11 +254,7 @@ mod tests {
         let wave = store.register_wave("replay", WaveKind::Exec, 1).unwrap();
         // snapshot.merged_to_events == false (default) — the
         // marker restore is a no-op.
-        let did = restore_unmerged_completed_slot(
-            Arc::new(store.clone()),
-            &wave,
-        )
-        .unwrap();
+        let did = restore_unmerged_completed_slot(Arc::new(store.clone()), &wave).unwrap();
         assert!(!did, "unmerged wave must return false (no-op)");
     }
 
@@ -304,15 +286,12 @@ mod tests {
         let backdated = SystemTime::now()
             .checked_sub(std::time::Duration::from_secs(2 * 60 * 60))
             .expect("clock supports 2h subtraction");
-        store
-            .backdate_wave_for_test(&wave, backdated)
-            .unwrap();
+        store.backdate_wave_for_test(&wave, backdated).unwrap();
         // Recovery with a 60s budget: elapsed (7200s) > 60s.
         // We pass the same `Arc` to recovery and read back
         // the mutation on the same store instance.
         let store_arc = Arc::new(store);
-        let report =
-            recover_active_waves_at_startup(store_arc.clone(), 60).unwrap();
+        let report = recover_active_waves_at_startup(store_arc.clone(), 60).unwrap();
         assert_eq!(report.timed_out, vec![wave.clone()]);
         let snap = store_arc.fan_in_status(&wave).unwrap();
         assert_eq!(snap.phase, WavePhase::Failed);
@@ -330,8 +309,7 @@ mod tests {
         // `aggregate_timeout_secs = 3600` and the wave is
         // brand-new: no mutation.
         let store_arc = Arc::new(store);
-        let report =
-            recover_active_waves_at_startup(store_arc.clone(), 3600).unwrap();
+        let report = recover_active_waves_at_startup(store_arc.clone(), 3600).unwrap();
         assert!(report.timed_out.is_empty());
         let snap = store_arc.fan_in_status(&wave).unwrap();
         assert_eq!(snap.phase, WavePhase::Collect);
@@ -359,8 +337,7 @@ mod tests {
         assert_eq!(snap.completed_count, 1);
         // Recovery helper stamps the merge-intent marker.
         let store_arc = Arc::new(store);
-        let did =
-            restore_unmerged_completed_slot(store_arc.clone(), &wave).unwrap();
+        let did = restore_unmerged_completed_slot(store_arc.clone(), &wave).unwrap();
         assert!(did, "completed > 0 must stamp the merge intent");
         let snap = store_arc.fan_in_status(&wave).unwrap();
         assert!(snap.merged_to_events);

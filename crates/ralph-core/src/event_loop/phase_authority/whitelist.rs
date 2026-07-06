@@ -104,12 +104,10 @@ mod tests {
                 PhaseDeclConfig {
                     id: "plan_end".to_string(),
                     label: None,
-                    allowed_emits: [
-                        (
-                            "coordinator".to_string(),
-                            vec!["plan.complete".to_string(), "plan.blocked".to_string()],
-                        ),
-                    ]
+                    allowed_emits: [(
+                        "coordinator".to_string(),
+                        vec!["plan.complete".to_string(), "plan.blocked".to_string()],
+                    )]
                     .into_iter()
                     .collect(),
                 },

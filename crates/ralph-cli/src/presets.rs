@@ -1270,7 +1270,10 @@ mod tests {
             .and_then(|t| t.get("require_verify_for_cli_mutate"))
             .and_then(|v| v.as_bool())
             .expect("tasks.require_verify_for_cli_mutate must be present");
-        assert!(require, "ce-executor-serial must require verify for add/ensure");
+        assert!(
+            require,
+            "ce-executor-serial must require verify for add/ensure"
+        );
         let unsafe_hatch = yaml
             .get("tasks")
             .and_then(|t| t.get("allow_unsafe_task_mutate"))

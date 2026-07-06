@@ -64,9 +64,7 @@ pub enum DeclarationError {
 
 impl PhaseAuthorityDeclaration {
     /// Pure parse: `PhaseAuthorityConfig` → declaration.
-    pub fn try_from_config(
-        cfg: &PhaseAuthorityConfig,
-    ) -> Result<Self, DeclarationError> {
+    pub fn try_from_config(cfg: &PhaseAuthorityConfig) -> Result<Self, DeclarationError> {
         // Duplicate phase id check.
         let mut seen = std::collections::HashSet::new();
         for phase in &cfg.phases {
@@ -130,9 +128,7 @@ impl PhaseAuthorityConfig {
     /// Sugar so callers can write
     /// `cfg.try_into_declaration()` instead of plumbing the
     /// `try_from_config` static.
-    pub fn try_into_declaration(
-        &self,
-    ) -> Result<PhaseAuthorityDeclaration, DeclarationError> {
+    pub fn try_into_declaration(&self) -> Result<PhaseAuthorityDeclaration, DeclarationError> {
         PhaseAuthorityDeclaration::try_from_config(self)
     }
 }

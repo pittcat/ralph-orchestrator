@@ -347,7 +347,8 @@ pub const FINDING_FIX_UNIT_TASK_ID_NOT_HELPER_DERIVED: &str =
 /// preset is rejected at load time. Always `Error` severity —
 /// adding a new primitive requires both this whitelist and a
 /// corresponding handler in `event_loop::phase_authority::primitives`.
-pub const FINDING_PHASE_AUTHORITY_UNKNOWN_PRIMITIVE: &str = "preset.phase_authority_unknown_primitive";
+pub const FINDING_PHASE_AUTHORITY_UNKNOWN_PRIMITIVE: &str =
+    "preset.phase_authority_unknown_primitive";
 
 /// A hat-only pipeline preset declares
 /// `mechanism.phase_authority` (either enabled or disabled).
@@ -465,8 +466,7 @@ pub const FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC: &str =
 /// published `plan.blocked` vs `plan.complete`; loose wording
 /// (e.g. "All dimensions failed", "if any dimension failed") is
 /// exactly what produced the 2026-07-04 silent-success run.
-pub const FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD: &str =
-    "preset.review_synthesizer_block_guard";
+pub const FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD: &str = "preset.review_synthesizer_block_guard";
 
 /// U4 (plan 2026-07-04-004): coordinator routing drifted away
 /// from the explicit "findings_count == 0 → plan.complete"

@@ -97,8 +97,7 @@ mod tasks_config_gate_fields_tests {
     #[test]
     fn test_tasks_config_missing_fields_default_conservatively() {
         // Only `enabled` set — verify fields must still default to false.
-        let cfg: TasksConfig =
-            serde_yaml::from_str("enabled: true\n").expect("parse minimal yaml");
+        let cfg: TasksConfig = serde_yaml::from_str("enabled: true\n").expect("parse minimal yaml");
         assert!(!cfg.require_verify_for_cli_mutate);
         assert!(!cfg.allow_unsafe_task_mutate);
     }

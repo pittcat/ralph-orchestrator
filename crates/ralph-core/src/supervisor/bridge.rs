@@ -70,11 +70,7 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
     /// Returns the coordinator action so the dispatcher can
     /// decide whether to merge worker events + persist the
     /// `*.wave.complete` / `*.wave.failed` coordination event.
-    fn tick(
-        &self,
-        wave_id: &str,
-        inputs: PhaseInputs,
-    ) -> Result<CoordinatorAction, BridgeError>;
+    fn tick(&self, wave_id: &str, inputs: PhaseInputs) -> Result<CoordinatorAction, BridgeError>;
 
     /// Open a slot dispatch decision: returns the binding (or
     /// `None` for `SharedReadonly`) so the dispatcher knows
@@ -168,9 +164,9 @@ impl InMemoryCoordinatorBridge {
         Self {
             store,
             coordinator,
-            registered: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            registered: std::sync::Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
         }
     }
 
@@ -182,11 +178,7 @@ impl InMemoryCoordinatorBridge {
 }
 
 impl SupervisorBridge for InMemoryCoordinatorBridge {
-    fn tick(
-        &self,
-        wave_id: &str,
-        inputs: PhaseInputs,
-    ) -> Result<CoordinatorAction, BridgeError> {
+    fn tick(&self, wave_id: &str, inputs: PhaseInputs) -> Result<CoordinatorAction, BridgeError> {
         self.coordinator
             .tick(wave_id, inputs)
             .map_err(|err| BridgeError::Store(err.to_string()))
@@ -285,7 +277,9 @@ mod tests {
     #[test]
     fn in_memory_bridge_register_is_idempotent() {
         let store = std::sync::Arc::new(InMemorySupervisorStore::new());
-        let bridge = InMemoryCoordinatorBridge::from_store(store.clone() as std::sync::Arc<dyn SupervisorStore>);
+        let bridge = InMemoryCoordinatorBridge::from_store(
+            store.clone() as std::sync::Arc<dyn SupervisorStore>
+        );
         let store_id = bridge
             .register_wave_if_absent(WaveKind::Exec, "bdd-wave", 1)
             .unwrap();
@@ -301,8 +295,12 @@ mod tests {
     #[test]
     fn in_memory_bridge_records_slot_result_and_ticks() {
         let store = std::sync::Arc::new(InMemorySupervisorStore::new());
-        let bridge = InMemoryCoordinatorBridge::from_store(store.clone() as std::sync::Arc<dyn SupervisorStore>);
-        let store_id = bridge.register_wave_if_absent(WaveKind::Exec, "bdd-wave", 1).unwrap();
+        let bridge = InMemoryCoordinatorBridge::from_store(
+            store.clone() as std::sync::Arc<dyn SupervisorStore>
+        );
+        let store_id = bridge
+            .register_wave_if_absent(WaveKind::Exec, "bdd-wave", 1)
+            .unwrap();
         store
             .bind_worktree(
                 &store_id,

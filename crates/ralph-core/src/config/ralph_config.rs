@@ -170,8 +170,7 @@ impl RalphConfig {
 
             for (hat_id, hat) in &mut self.hats {
                 let publishes_topic = hat.publishes.iter().any(|p| p == topic);
-                let terminal_topic =
-                    hat.terminal_events.iter().any(|t| t == topic);
+                let terminal_topic = hat.terminal_events.iter().any(|t| t == topic);
 
                 if !publishes_topic && !terminal_topic {
                     continue;
@@ -893,9 +892,7 @@ impl RalphConfig {
 fn build_gate_instructions(topic: &str, rule: &PrecheckRule) -> String {
     let mut out = String::new();
     out.push_str(&format!("## PRECHECK GATE: {topic}\n\n"));
-    out.push_str(
-        "You are an LLM-as-judge gate. A upstream hat just published `",
-    );
+    out.push_str("You are an LLM-as-judge gate. A upstream hat just published `");
     out.push_str(&format!("{topic}.proposed"));
     out.push_str("`. You must decide whether the proposed event is acceptable.\n\n");
     out.push_str("### Checklist\n\n");
@@ -4350,10 +4347,7 @@ event_loop:
         let mut cfg = RalphConfig::parse_yaml(yaml).expect("parse");
         cfg.normalize();
 
-        let gate = cfg
-            .hats
-            .get("precheck-review.complete")
-            .expect("gate");
+        let gate = cfg.hats.get("precheck-review.complete").expect("gate");
         let instructions = &gate.instructions;
         assert!(
             instructions.contains("All findings are concrete"),

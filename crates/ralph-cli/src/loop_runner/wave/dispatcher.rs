@@ -1056,10 +1056,7 @@ pub async fn execute_wave_structured(
             worker_backend.args.extend(args.iter().cloned());
         }
 
-        ralph_adapters::apply_hat_tool_policy(
-            &mut worker_backend,
-            &hat_config.disallowed_tools,
-        );
+        ralph_adapters::apply_hat_tool_policy(&mut worker_backend, &hat_config.disallowed_tools);
 
         // Build the progress_tx placeholder — the dispatcher overwrites
         // the sender after channel creation. The executor's
@@ -1165,8 +1162,8 @@ async fn execute_wave_via_supervisor(
     hats_source_label: Option<&str>,
     bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
 ) -> WaveDispatchOutcome {
+    use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
     use ralph_core::{WaveTracker, WaveWorkerContext, build_wave_worker_prompt};
-    use ralph_core::supervisor::{WaveKind, SupervisorBridge as _};
 
     let concurrency = wave.hat_config.concurrency as usize;
     let wave_timeout = Duration::from_secs(wave.per_worker_timeout_secs());
@@ -1195,11 +1192,7 @@ async fn execute_wave_via_supervisor(
     // the dispatcher's wave_id for logs but use the store id
     // for subsequent `bind_slot` / `record_slot_result` / `tick`
     // calls so the coordinator reads the same row.
-    let store_wave_id = match bridge.register_wave_if_absent(
-        wave_kind,
-        &wave.wave_id,
-        wave.total,
-    ) {
+    let store_wave_id = match bridge.register_wave_if_absent(wave_kind, &wave.wave_id, wave.total) {
         Ok(id) => id,
         Err(err) => {
             warn!(
@@ -1308,10 +1301,7 @@ async fn execute_wave_via_supervisor(
             worker_backend.args.extend(args.iter().cloned());
         }
 
-        ralph_adapters::apply_hat_tool_policy(
-            &mut worker_backend,
-            &hat_config.disallowed_tools,
-        );
+        ralph_adapters::apply_hat_tool_policy(&mut worker_backend, &hat_config.disallowed_tools);
 
         // 2026-07-03-001 supervisor real-wiring: per-slot
         // binding. The bridge returns a `SlotBinding` with env
@@ -1339,7 +1329,9 @@ async fn execute_wave_via_supervisor(
             // semantics the plan calls for.
             let binding_env: std::collections::HashMap<String, String> =
                 b.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            worker_backend.env_vars.retain(|(k, _)| !binding_env.contains_key(k));
+            worker_backend
+                .env_vars
+                .retain(|(k, _)| !binding_env.contains_key(k));
             worker_backend
                 .env_vars
                 .extend(b.env.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -1457,27 +1449,25 @@ async fn run_supervisor_fan_in(
     // Register + record each slot's terminal state on the
     // bridge so the coordinator's `tick` sees the updated
     // fan-in counts.
-    let store_wave_id = match bridge.register_wave_if_absent(wave_kind, &detected.wave_id, detected.total) {
-        Ok(id) => id,
-        Err(err) => {
-            warn!(
-                wave_id = %detected.wave_id,
-                error = %err,
-                "supervisor fan-in register_wave_if_absent failed; skipping tick"
-            );
-            return SupervisorFanInOutcome::Collecting;
-        }
-    };
+    let store_wave_id =
+        match bridge.register_wave_if_absent(wave_kind, &detected.wave_id, detected.total) {
+            Ok(id) => id,
+            Err(err) => {
+                warn!(
+                    wave_id = %detected.wave_id,
+                    error = %err,
+                    "supervisor fan-in register_wave_if_absent failed; skipping tick"
+                );
+                return SupervisorFanInOutcome::Collecting;
+            }
+        };
 
     for result in &completed.results {
         let content_hash = format!("wave-{}-{}", completed.wave_id, result.index);
         let event_count = result.events.len();
-        if let Err(err) = bridge.record_slot_result(
-            &store_wave_id,
-            result.index,
-            &content_hash,
-            event_count,
-        ) {
+        if let Err(err) =
+            bridge.record_slot_result(&store_wave_id, result.index, &content_hash, event_count)
+        {
             warn!(
                 wave_id = %store_wave_id,
                 slot_index = result.index,
@@ -1487,11 +1477,9 @@ async fn run_supervisor_fan_in(
         }
     }
     for failure in &completed.failures {
-        if let Err(err) = bridge.record_slot_failure(
-            &store_wave_id,
-            failure.index,
-            "wave_worker_failure",
-        ) {
+        if let Err(err) =
+            bridge.record_slot_failure(&store_wave_id, failure.index, "wave_worker_failure")
+        {
             warn!(
                 wave_id = %store_wave_id,
                 slot_index = failure.index,
@@ -1525,7 +1513,10 @@ async fn run_supervisor_fan_in(
     };
 
     match action {
-        CoordinatorAction::InjectedComplete { ref topic, ref blocking_slots } => {
+        CoordinatorAction::InjectedComplete {
+            ref topic,
+            ref blocking_slots,
+        } => {
             // Merge worker events into the main events file so
             // the integrator / aggregator hat sees them. The
             // merge function reads `result.events` directly
@@ -1550,14 +1541,14 @@ async fn run_supervisor_fan_in(
                 "wave_id": completed.wave_id,
                 "blocking_slots": blocking_slots,
             });
-            event_loop.persist_system_injected_jsonl_event(
-                &detected.target_hat,
-                topic,
-                &payload,
-            );
+            event_loop.persist_system_injected_jsonl_event(&detected.target_hat, topic, &payload);
             SupervisorFanInOutcome::Merged
         }
-        CoordinatorAction::InjectedFailed { ref topic, ref reason, .. } => {
+        CoordinatorAction::InjectedFailed {
+            ref topic,
+            ref reason,
+            ..
+        } => {
             // KTD-8 partial = fail: do NOT merge worker events.
             // Only persist the `*.wave.failed` coordination
             // event so the integrator can surface the failure.
@@ -1565,11 +1556,7 @@ async fn run_supervisor_fan_in(
                 "wave_id": completed.wave_id,
                 "reason": reason,
             });
-            event_loop.persist_system_injected_jsonl_event(
-                &detected.target_hat,
-                topic,
-                &payload,
-            );
+            event_loop.persist_system_injected_jsonl_event(&detected.target_hat, topic, &payload);
             SupervisorFanInOutcome::Failed
         }
         CoordinatorAction::AlreadyDone => {
@@ -1584,7 +1571,10 @@ async fn run_supervisor_fan_in(
             // merge so the wave result is not lost.
             SupervisorFanInOutcome::Collecting
         }
-        CoordinatorAction::MergeFailed { ref topic, ref error } => {
+        CoordinatorAction::MergeFailed {
+            ref topic,
+            ref error,
+        } => {
             // KTD-6: the merge itself failed (e.g. content
             // hash mismatch). Leave the wave in Collect for
             // recovery; do NOT write `*.wave.complete`.

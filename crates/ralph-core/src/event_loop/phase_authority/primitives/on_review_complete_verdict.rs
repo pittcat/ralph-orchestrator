@@ -124,9 +124,15 @@ pub static MATRICES: std::sync::LazyLock<
     // pass — fix_plan ignored
     serial_default.insert((Verdict::Pass, None), "plan_end".to_string());
     // pass_with_residuals + no fix → plan_end
-    serial_default.insert((Verdict::PassWithResiduals, Some(false)), "plan_end".to_string());
+    serial_default.insert(
+        (Verdict::PassWithResiduals, Some(false)),
+        "plan_end".to_string(),
+    );
     // pass_with_residuals + fix → fix_units
-    serial_default.insert((Verdict::PassWithResiduals, Some(true)), "fix_units".to_string());
+    serial_default.insert(
+        (Verdict::PassWithResiduals, Some(true)),
+        "fix_units".to_string(),
+    );
     // fail + fix → fix_units
     serial_default.insert((Verdict::Fail, Some(true)), "fix_units".to_string());
     // fail + no fix → plan_end
@@ -218,7 +224,10 @@ matrix: serial_default
             verdict: Verdict::Fail,
             fix_plan_attached: true,
         };
-        assert_eq!(evaluate(&serial_default_trigger(), "test.passed", &fx), None);
+        assert_eq!(
+            evaluate(&serial_default_trigger(), "test.passed", &fx),
+            None
+        );
     }
 
     #[test]

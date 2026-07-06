@@ -29,10 +29,7 @@ pub enum BudgetDecision {
 /// current candidate resume is admitted. The function
 /// returns `Admit` when `current_count < max`, `Exhausted`
 /// otherwise. U3's lint pins the default `max = 3`.
-pub fn should_admit_resume(
-    policy: &ViolationPolicyConfig,
-    current_count: u32,
-) -> BudgetDecision {
+pub fn should_admit_resume(policy: &ViolationPolicyConfig, current_count: u32) -> BudgetDecision {
     if current_count < policy.max_resume_per_hat {
         BudgetDecision::Admit
     } else {
@@ -102,10 +99,7 @@ mod tests {
         };
         assert_eq!(should_admit_resume(&policy, 6), BudgetDecision::Admit);
         assert_eq!(should_admit_resume(&policy, 7), BudgetDecision::Exhausted);
-        assert_eq!(
-            on_exhausted_action(&policy),
-            ExhaustedAction::SilentDrop
-        );
+        assert_eq!(on_exhausted_action(&policy), ExhaustedAction::SilentDrop);
     }
 
     #[test]
@@ -163,9 +157,6 @@ mod tests {
     #[test]
     fn on_exhausted_action_default_is_plan_blocked() {
         let policy = ViolationPolicyConfig::default();
-        assert_eq!(
-            on_exhausted_action(&policy),
-            ExhaustedAction::PlanBlocked
-        );
+        assert_eq!(on_exhausted_action(&policy), ExhaustedAction::PlanBlocked);
     }
 }

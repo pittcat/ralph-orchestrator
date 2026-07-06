@@ -78,9 +78,9 @@ hats:
     let event_loop = build_loop(yaml);
     let target = HatId::new("coordinator");
     match event_loop.validate_resume_routing(&target, Some("work.ready")) {
-        EventLoopResumeDecision::Allow => panic!(
-            "U16: resume targeting coordinator for work.ready must Block, got Allow"
-        ),
+        EventLoopResumeDecision::Allow => {
+            panic!("U16: resume targeting coordinator for work.ready must Block, got Allow")
+        }
         EventLoopResumeDecision::Block(reason) => {
             assert!(
                 reason.contains("U16") && reason.contains("executor"),
@@ -170,8 +170,8 @@ hats:
     // similar runtime profile overlays).
     match event_loop.validate_resume_routing(&target, Some("foo.bar")) {
         EventLoopResumeDecision::Allow => {}
-        EventLoopResumeDecision::Block(reason) => panic!(
-            "U16: matching consumer with triggers present must Allow, got Block: {reason}"
-        ),
+        EventLoopResumeDecision::Block(reason) => {
+            panic!("U16: matching consumer with triggers present must Allow, got Block: {reason}")
+        }
     }
 }

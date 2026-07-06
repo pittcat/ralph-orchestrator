@@ -344,9 +344,7 @@ event_loop:
             coord_join_mode
         );
 
-        let tasks_enabled = default_value
-            .get("tasks")
-            .and_then(|v| v.get("enabled"));
+        let tasks_enabled = default_value.get("tasks").and_then(|v| v.get("enabled"));
         assert!(
             tasks_enabled.is_none(),
             "default core value must NOT contain tasks.enabled \
@@ -370,8 +368,7 @@ event_loop:
 "#,
         )
         .expect("preset snippet must parse");
-        let merged = merge_yaml_values(default_value, preset_value)
-            .expect("merge must succeed");
+        let merged = merge_yaml_values(default_value, preset_value).expect("merge must succeed");
         let enabled = merged
             .get("event_loop")
             .and_then(|v| v.get("supervisor"))

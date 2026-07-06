@@ -397,8 +397,12 @@ mod emit_reject_summary_tests {
 
     #[test]
     fn test_format_text_mode_emits_rejected_with_code() {
-        let line = format_emit_reject_summary(false, "cwd_workspace_drift", "current_dir=/x workspace_root=/y")
-            .expect("text mode always returns Some");
+        let line = format_emit_reject_summary(
+            false,
+            "cwd_workspace_drift",
+            "current_dir=/x workspace_root=/y",
+        )
+        .expect("text mode always returns Some");
         assert_eq!(
             line,
             "emit rejected [cwd_workspace_drift]: current_dir=/x workspace_root=/y"
@@ -411,10 +415,15 @@ mod emit_reject_summary_tests {
             .expect("json mode always returns Some");
         let parsed: serde_json::Value =
             serde_json::from_str(&line).expect("json mode must produce valid JSON");
-        assert_eq!(parsed.get("emit_rejected"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            parsed.get("emit_rejected"),
+            Some(&serde_json::Value::Bool(true))
+        );
         assert_eq!(
             parsed.get("code"),
-            Some(&serde_json::Value::String("path_resolution_failed".to_string()))
+            Some(&serde_json::Value::String(
+                "path_resolution_failed".to_string()
+            ))
         );
         let detail = parsed
             .get("detail")
@@ -724,7 +733,8 @@ fn emit_command_with_root_and_hats(
     // instead of `dimension-reviewer`). When the agent is inside a runner-
     // injected hat context and did not explicitly request a target, derive the
     // target from the preset topology so the event bus routes correctly.
-    let triggered = maybe_derive_triggered_for_isolated(topic, hat.as_deref(), triggered, config.as_ref());
+    let triggered =
+        maybe_derive_triggered_for_isolated(topic, hat.as_deref(), triggered, config.as_ref());
 
     // Enforce provenance requirements when hat is missing.
     //
@@ -921,10 +931,7 @@ fn emit_command_with_root_and_hats(
                             // and forward the event as the runtime
                             // would; `--policy-check` callers see
                             // the same hint via stderr.
-                            eprintln!(
-                                "Policy acknowledge+forward: {}",
-                                finding.message
-                            );
+                            eprintln!("Policy acknowledge+forward: {}", finding.message);
                         }
                         ralph_core::PolicyDecision::RejectWithResume(finding)
                         | ralph_core::PolicyDecision::Hold(finding)
@@ -969,10 +976,7 @@ fn emit_command_with_root_and_hats(
                         // lane is active. Real emit (without
                         // --policy-check) writes to the events file
                         // as the runtime would.
-                        eprintln!(
-                            "Policy acknowledge+forward: {}",
-                            finding.message
-                        );
+                        eprintln!("Policy acknowledge+forward: {}", finding.message);
                     }
                     ralph_core::PolicyDecision::RejectWithResume(finding)
                     | ralph_core::PolicyDecision::Hold(finding)
@@ -1183,11 +1187,9 @@ fn emit_command_with_root_and_hats(
     // unknown value yields `triggered_not_in_topology` and the
     // apply path bails before JSONL write.
     if let Some(cfg) = config.as_ref() {
-        if let Err(err) = crate::policy_check::check_envelope_triggered(
-            &topic,
-            triggered.as_deref(),
-            cfg,
-        ) {
+        if let Err(err) =
+            crate::policy_check::check_envelope_triggered(&topic, triggered.as_deref(), cfg)
+        {
             use ralph_core::{PolicyFinding, ViolationType};
             let finding = PolicyFinding {
                 violation_type: ViolationType::SemanticGateViolation {
@@ -1198,7 +1200,10 @@ fn emit_command_with_root_and_hats(
                 message: err.message.clone(),
             };
             record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
-            anyhow::bail!("Event rejected by envelope-triggered guard: {}", err.message);
+            anyhow::bail!(
+                "Event rejected by envelope-triggered guard: {}",
+                err.message
+            );
         }
     }
 
@@ -1266,8 +1271,7 @@ fn emit_command_with_root_and_hats(
             let result = ralph_core::emit_result::EmitResult::assemble(parts);
             println!(
                 "{}",
-                serde_json::to_string(&result)
-                    .context("Failed to serialise EmitResult JSON")?
+                serde_json::to_string(&result).context("Failed to serialise EmitResult JSON")?
             );
         } else if use_colors {
             println!(
@@ -1320,7 +1324,8 @@ fn emit_command_with_root_and_hats(
     //   the same crate that introspect drift 后行为而不希望 gate 在
     //   测试进程的 root cwd 上误触发;生产代码不应设置)。
     // - 显式非默认 `--file` 命中 allowlist 的高级场景。
-    let drift_bypass_for_test = std::env::var("RALPH_EMIT_ALLOW_CWD_DRIFT").ok().as_deref() == Some("1");
+    let drift_bypass_for_test =
+        std::env::var("RALPH_EMIT_ALLOW_CWD_DRIFT").ok().as_deref() == Some("1");
     if !drift_bypass_for_test
         && isolated_mode
         && hat.is_some()
@@ -1363,7 +1368,11 @@ fn emit_command_with_root_and_hats(
             // 不依赖 stderr 截断,这里在 `bail!` 前(已经构造了 anyhow::Error)
             // 显式 print 一行机器可读 prefix + 短描述。
             // stderr 上的 tracing 不受影响(详见 emit_channel_routing_fallback_diagnostic)。
-            print_emit_reject_summary(args.output == "json", "path_resolution_failed", &format!("{err:#}"));
+            print_emit_reject_summary(
+                args.output == "json",
+                "path_resolution_failed",
+                &format!("{err:#}"),
+            );
             return Err(err);
         }
     };
@@ -1416,8 +1425,7 @@ fn emit_command_with_root_and_hats(
         let result = ralph_core::emit_result::EmitResult::assemble(parts);
         println!(
             "{}",
-            serde_json::to_string(&result)
-                .context("Failed to serialise EmitResult JSON")?
+            serde_json::to_string(&result).context("Failed to serialise EmitResult JSON")?
         );
     } else if use_colors {
         println!(
@@ -1834,11 +1842,8 @@ event_loop:
         .expect("write ralph.yml");
         let env_events_file = std::env::var("RALPH_EVENTS_FILE").ok();
         if let Some(ref env_path) = env_events_file {
-            std::fs::write(
-                workspace.join(".ralph/current-events"),
-                env_path.as_bytes(),
-            )
-            .expect("write current-events marker");
+            std::fs::write(workspace.join(".ralph/current-events"), env_path.as_bytes())
+                .expect("write current-events marker");
         }
 
         emit_command_with_root(
@@ -2871,7 +2876,7 @@ event_loop:
                     triggered: None,
                     source: None,
                     schema: None,
-                output: "text".to_string(),
+                    output: "text".to_string(),
                 },
                 Some(&workspace),
             );
@@ -2921,11 +2926,8 @@ event_loop:
         .expect("write ralph.yml");
         let env_events_file = std::env::var("RALPH_EVENTS_FILE").ok();
         if let Some(ref env_path) = env_events_file {
-            std::fs::write(
-                workspace.join(".ralph/current-events"),
-                env_path.as_bytes(),
-            )
-            .expect("write current-events marker");
+            std::fs::write(workspace.join(".ralph/current-events"), env_path.as_bytes())
+                .expect("write current-events marker");
         }
 
         let read_target = env_events_file
@@ -3012,8 +3014,14 @@ event_loop:
             ".ralph/events-20260101-000000.jsonl",
         )
         .unwrap();
-        let resolved =
-            resolve_emit_path(&workspace, &workspace.join(".ralph/events.jsonl"), None, None, false).unwrap();
+        let resolved = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         assert!(resolved.ends_with(".ralph/events-20260101-000000.jsonl"));
     }
 
@@ -3026,8 +3034,14 @@ event_loop:
             ".ralph/events-20260101-000000.jsonl",
         )
         .unwrap();
-        let resolved =
-            resolve_emit_path(&workspace, &workspace.join(".ralph/events.jsonl"), None, None, false).unwrap();
+        let resolved = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         assert!(resolved.ends_with(".ralph/events-20260101-000000.jsonl"));
     }
 
@@ -3159,7 +3173,13 @@ event_loop:
         if std::os::unix::fs::symlink(&outside, &link).is_err() {
             return;
         }
-        let result = resolve_emit_path(&workspace, &workspace.join(".ralph/events.jsonl"), None, None, false);
+        let result = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            None,
+            None,
+            false,
+        );
         assert!(result.is_err(), "symlink to outside loop must be rejected");
     }
 
@@ -3413,7 +3433,9 @@ event_loop:
         // current_hat 时 guard 触发,此测试正好满足这两个条件)。
         assert!(
             !malicious_subtree.exists()
-                || std::fs::read_to_string(&malicious_subtree).unwrap().is_empty(),
+                || std::fs::read_to_string(&malicious_subtree)
+                    .unwrap()
+                    .is_empty(),
             "rejected emit must not write to subtree orphan file"
         );
     }
@@ -3467,7 +3489,7 @@ event_loop:
             triggered: None,
             source: None,
             schema: None,
-                output: "text".to_string(),
+            output: "text".to_string(),
         };
 
         emit_command_with_root(ColorMode::Never, args, Some(&workspace)).unwrap();
@@ -3501,7 +3523,7 @@ event_loop:
             triggered: None,
             source: None,
             schema: None,
-                output: "text".to_string(),
+            output: "text".to_string(),
         };
 
         emit_command_with_root(ColorMode::Never, args, Some(&workspace)).unwrap();
@@ -3977,7 +3999,8 @@ hats:
             ColorMode::Never,
             EmitArgs {
                 topic: Some("review.dimension.ready".to_string()),
-                payload: r#"{"dimension":"goal-alignment","plan_name":"p","task_id":"t"}"#.to_string(),
+                payload: r#"{"dimension":"goal-alignment","plan_name":"p","task_id":"t"}"#
+                    .to_string(),
                 json: true,
                 file: PathBuf::from(".ralph/events.jsonl"),
                 policy_check: false,
@@ -4042,7 +4065,8 @@ hats:
             ColorMode::Never,
             EmitArgs {
                 topic: Some("review.dimension.ready".to_string()),
-                payload: r#"{"dimension":"goal-alignment","plan_name":"p","task_id":"t"}"#.to_string(),
+                payload: r#"{"dimension":"goal-alignment","plan_name":"p","task_id":"t"}"#
+                    .to_string(),
                 json: true,
                 file: PathBuf::from(".ralph/events.jsonl"),
                 policy_check: false,
@@ -4168,12 +4192,7 @@ hats:
 
         // Control topics are skipped.
         assert_eq!(
-            maybe_derive_triggered_for_isolated(
-                "loop.cancel",
-                Some("ralph"),
-                None,
-                Some(&config)
-            ),
+            maybe_derive_triggered_for_isolated("loop.cancel", Some("ralph"), None, Some(&config)),
             None
         );
 
@@ -4280,7 +4299,7 @@ mod emit_schema_emit_result_tests {
         let args = EmitArgs {
             topic: None,
             payload: "x".to_string(), // 与 schema 互斥
-            json: true,                // 与 schema 互斥
+            json: true,               // 与 schema 互斥
             file: PathBuf::from(".ralph/events.jsonl"),
             policy_check: false,
             no_policy_check: false,
@@ -4369,7 +4388,7 @@ hats:
             triggered: None,
             source: None,
             schema: None,
-                output: "text".to_string(),
+            output: "text".to_string(),
         };
 
         // 调用 emit_command 应返回 Err（policy 拒收 → non-zero）
@@ -4397,7 +4416,7 @@ hats:
             triggered: None,
             source: None,
             schema: None,
-                output: "text".to_string(),
+            output: "text".to_string(),
         };
 
         let result = emit_command_with_root(ColorMode::Never, args, Some(&workspace));

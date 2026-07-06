@@ -23,9 +23,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::config::execution_contracts::{ExecutionContractRule, ExecutionContractsConfig};
 use crate::config::{
-    EventLoopConfig, EventPolicyConfig, EventSchema, HandoffEnvelopeConfig,
-    StateProjectionConfig, VerdictGateConfig, WorkflowChain, WorkflowContractConfig,
-    WorkflowGuardsConfig,
+    EventLoopConfig, EventPolicyConfig, EventSchema, HandoffEnvelopeConfig, StateProjectionConfig,
+    VerdictGateConfig, WorkflowChain, WorkflowContractConfig, WorkflowGuardsConfig,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};

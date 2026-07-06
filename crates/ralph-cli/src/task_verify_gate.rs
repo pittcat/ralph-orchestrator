@@ -349,12 +349,21 @@ mod task_verify_gate_tests {
         let ctx = make_ctx("loop-1", "executor", true);
         let cfg = default_config(true);
         let fp = mutation_fingerprint("add", "{}", "loop-1", "executor");
-        let err = require_ticket(&path, &cfg, &ctx, "add", &fp)
-            .expect_err("missing ticket must deny");
+        let err =
+            require_ticket(&path, &cfg, &ctx, "add", &fp).expect_err("missing ticket must deny");
         let msg = err.to_string();
-        assert!(msg.starts_with(DENY_PREFIX), "must carry stable prefix: {msg}");
-        assert!(msg.contains("no verify ticket"), "must explain root cause: {msg}");
-        assert!(msg.contains("ralph tools task verify add"), "must include recovery: {msg}");
+        assert!(
+            msg.starts_with(DENY_PREFIX),
+            "must carry stable prefix: {msg}"
+        );
+        assert!(
+            msg.contains("no verify ticket"),
+            "must explain root cause: {msg}"
+        );
+        assert!(
+            msg.contains("ralph tools task verify add"),
+            "must include recovery: {msg}"
+        );
         // The file must not be created by the failed gate.
         assert!(!path.exists(), "deny must not create a ticket");
     }
@@ -367,8 +376,7 @@ mod task_verify_gate_tests {
         let cfg = default_config(true);
         let fp = mutation_fingerprint("add", "{}", "loop-1", "executor");
         // Human CLI with no ticket on disk → still Ok.
-        require_ticket(&path, &cfg, &ctx, "add", &fp)
-            .expect("human must bypass");
+        require_ticket(&path, &cfg, &ctx, "add", &fp).expect("human must bypass");
     }
 
     #[test]
@@ -379,8 +387,7 @@ mod task_verify_gate_tests {
         let ctx = make_ctx("loop-1", "executor", true);
         let cfg = default_config(false);
         let fp = mutation_fingerprint("add", "{}", "loop-1", "executor");
-        require_ticket(&path, &cfg, &ctx, "add", &fp)
-            .expect("gate off must bypass for agent");
+        require_ticket(&path, &cfg, &ctx, "add", &fp).expect("gate off must bypass for agent");
     }
 
     #[test]
@@ -396,8 +403,7 @@ mod task_verify_gate_tests {
         };
         let fp = mutation_fingerprint("add", "{}", "loop-1", "executor");
         // unsafe escape hatch: agent with no ticket is allowed.
-        require_ticket(&path, &cfg, &ctx, "add", &fp)
-            .expect("unsafe escape must bypass");
+        require_ticket(&path, &cfg, &ctx, "add", &fp).expect("unsafe escape must bypass");
     }
 
     #[test]
@@ -408,8 +414,7 @@ mod task_verify_gate_tests {
         let cfg = default_config(true);
         let fp = mutation_fingerprint("add", r#"{"title":"t"}"#, "loop-1", "executor");
         record_ticket(&path, &fp, "loop-1", "executor").expect("record");
-        require_ticket(&path, &cfg, &ctx, "add", &fp)
-            .expect("matching ticket must allow");
+        require_ticket(&path, &cfg, &ctx, "add", &fp).expect("matching ticket must allow");
         // Ticket is consumed.
         assert!(!path.exists(), "matching apply must consume the ticket");
     }
@@ -423,8 +428,8 @@ mod task_verify_gate_tests {
         let on_disk_fp = mutation_fingerprint("add", r#"{"title":"t1"}"#, "loop-1", "executor");
         let pending_fp = mutation_fingerprint("add", r#"{"title":"t2"}"#, "loop-1", "executor");
         record_ticket(&path, &on_disk_fp, "loop-1", "executor").expect("record");
-        let err = require_ticket(&path, &cfg, &ctx, "add", &pending_fp)
-            .expect_err("mismatch must deny");
+        let err =
+            require_ticket(&path, &cfg, &ctx, "add", &pending_fp).expect_err("mismatch must deny");
         let msg = err.to_string();
         assert!(msg.contains("fingerprint mismatch"), "must explain: {msg}");
         // The mismatched ticket is consumed (read+consume) so the
@@ -441,9 +446,12 @@ mod task_verify_gate_tests {
         let cfg = default_config(true);
         let fp = mutation_fingerprint("add", "{}", "loop-1", "executor");
         record_ticket(&path, &fp, "loop-1", "executor").expect("record");
-        let err = require_ticket(&path, &cfg, &ctx, "add", &fp)
-            .expect_err("hat mismatch must deny");
+        let err =
+            require_ticket(&path, &cfg, &ctx, "add", &fp).expect_err("hat mismatch must deny");
         let msg = err.to_string();
-        assert!(msg.contains("ticket (loop, hat)"), "must explain hat binding: {msg}");
+        assert!(
+            msg.contains("ticket (loop, hat)"),
+            "must explain hat binding: {msg}"
+        );
     }
 }

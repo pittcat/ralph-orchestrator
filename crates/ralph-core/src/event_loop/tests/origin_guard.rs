@@ -992,9 +992,8 @@ hats:
 "#;
     let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     config.core.workspace_root = workspace.clone();
-    let diagnostics =
-        crate::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
-            .expect("create diagnostics collector");
+    let diagnostics = crate::diagnostics::DiagnosticsCollector::with_enabled(&workspace, true)
+        .expect("create diagnostics collector");
     let session_dir = diagnostics.session_dir().unwrap().to_path_buf();
     let context = crate::loop_context::LoopContext::primary(workspace);
     let mut event_loop =

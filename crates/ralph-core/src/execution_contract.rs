@@ -1569,7 +1569,8 @@ mod tests {
 
     #[test]
     fn test_task_not_terminal_resume_plan_routes_coordinator_owned_task() {
-        let task = Task::new("task-1".to_string(), 1).with_owner_hat(Some("coordinator".to_string()));
+        let task =
+            Task::new("task-1".to_string(), 1).with_owner_hat(Some("coordinator".to_string()));
         let (target, hint) = super::task_not_terminal_resume_plan(
             "task-1",
             Some(&task),

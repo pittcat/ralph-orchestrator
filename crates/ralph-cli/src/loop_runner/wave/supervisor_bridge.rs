@@ -40,8 +40,7 @@ use ralph_core::supervisor::{
 // but the module itself is private — we import from the
 // `ralph_core::supervisor` re-export surface.
 pub use ralph_core::supervisor::{
-    BridgeDispatchOutcome, BridgeError, SlotBinding, SupervisorBridge,
-    is_supervisor_path_enabled,
+    BridgeDispatchOutcome, BridgeError, SlotBinding, SupervisorBridge, is_supervisor_path_enabled,
 };
 
 /// Production bridge: holds an `Arc<dyn SupervisorStore>` +
@@ -61,10 +60,7 @@ impl CoordinatorSupervisorBridge {
     pub fn with_in_memory_store() -> Self {
         let store = Arc::new(InMemorySupervisorStore::new());
         let coordinator = Arc::new(SupervisorCoordinator::with_in_memory_sink(store.clone()));
-        Self {
-            store,
-            coordinator,
-        }
+        Self { store, coordinator }
     }
 
     /// Access the underlying store. Diagnostics-friendly.
@@ -84,19 +80,12 @@ impl CoordinatorSupervisorBridge {
     /// once and shares it across ticks).
     pub fn from_store(store: Arc<dyn SupervisorStore>) -> Self {
         let coordinator = Arc::new(SupervisorCoordinator::with_in_memory_sink(store.clone()));
-        Self {
-            store,
-            coordinator,
-        }
+        Self { store, coordinator }
     }
 }
 
 impl SupervisorBridge for CoordinatorSupervisorBridge {
-    fn tick(
-        &self,
-        wave_id: &str,
-        inputs: PhaseInputs,
-    ) -> Result<CoordinatorAction, BridgeError> {
+    fn tick(&self, wave_id: &str, inputs: PhaseInputs) -> Result<CoordinatorAction, BridgeError> {
         self.coordinator
             .tick(wave_id, inputs)
             .map_err(|err| BridgeError::Store(err.to_string()))
@@ -204,11 +193,7 @@ impl MockSupervisorBridge {
 }
 
 impl SupervisorBridge for MockSupervisorBridge {
-    fn tick(
-        &self,
-        wave_id: &str,
-        inputs: PhaseInputs,
-    ) -> Result<CoordinatorAction, BridgeError> {
+    fn tick(&self, wave_id: &str, inputs: PhaseInputs) -> Result<CoordinatorAction, BridgeError> {
         self.ticks
             .lock()
             .unwrap()
@@ -328,9 +313,7 @@ mod tests {
     #[test]
     fn mock_bridge_records_tick_calls() {
         let bridge = MockSupervisorBridge::new();
-        let action = bridge
-            .tick("w-1", PhaseInputs::default())
-            .unwrap();
+        let action = bridge.tick("w-1", PhaseInputs::default()).unwrap();
         assert_eq!(action, CoordinatorAction::ContinueCollect);
         let (ticks, _) = bridge.snapshot();
         assert_eq!(ticks.len(), 1);
@@ -361,10 +344,9 @@ mod tests {
             )
             .unwrap();
         let _ = store.try_dispatch_next(2).unwrap().unwrap();
-        store
-            .record_slot_result(&wave, 0, "h", 1)
-            .unwrap();
-        let bridge = CoordinatorSupervisorBridge::from_store(store.clone() as Arc<dyn SupervisorStore>);
+        store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        let bridge =
+            CoordinatorSupervisorBridge::from_store(store.clone() as Arc<dyn SupervisorStore>);
         let action = bridge
             .tick(
                 &wave,
@@ -382,11 +364,14 @@ mod tests {
         // After the coordinator marks `merged_to_events`,
         // the slot stays at the binding's stable state.
         let snap = bridge.store().fan_in_status(&wave).unwrap();
-        assert!(matches!(
-            snap.phase,
-            ralph_core::supervisor::WavePhase::Done | ralph_core::supervisor::WavePhase::Integrate
-        ) || snap.merged_to_events
-            || snap.completed_count == 1);
+        assert!(
+            matches!(
+                snap.phase,
+                ralph_core::supervisor::WavePhase::Done
+                    | ralph_core::supervisor::WavePhase::Integrate
+            ) || snap.merged_to_events
+                || snap.completed_count == 1
+        );
     }
 
     #[test]
@@ -399,9 +384,7 @@ mod tests {
     #[test]
     fn bind_slot_returns_none_for_test_bridge() {
         let bridge = CoordinatorSupervisorBridge::with_in_memory_store();
-        let binding = bridge
-            .bind_slot(WaveKind::Exec, "w-1", 0)
-            .unwrap();
+        let binding = bridge.bind_slot(WaveKind::Exec, "w-1", 0).unwrap();
         assert!(binding.is_none());
     }
 
@@ -436,9 +419,7 @@ mod tests {
             )
             .unwrap();
         let _ = store.try_dispatch_next(2).unwrap().unwrap();
-        store
-            .record_slot_result(&wave, 0, "h", 1)
-            .unwrap();
+        store.record_slot_result(&wave, 0, "h", 1).unwrap();
         let snap = store.fan_in_status(&wave).unwrap();
         // The slot moved out of `pending`. We don't expose
         // per-slot status on the snapshot (it's a counts
@@ -451,9 +432,7 @@ mod tests {
     #[test]
     fn merge_sink_round_trips_through_bridge() {
         let bridge = CoordinatorSupervisorBridge::with_in_memory_store();
-        let _ = bridge
-            .coordinator()
-            .sink_batches();
+        let _ = bridge.coordinator().sink_batches();
     }
 
     #[test]

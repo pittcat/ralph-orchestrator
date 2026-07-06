@@ -58,7 +58,7 @@ pub use hooks::{
 };
 pub use loop_config::{
     ElementConstraint, EventLoopConfig, EventSchema, FlowDeclarationConfig, FlowStepConfig,
-    HatAllowedValues, HandoffEnvelopeConfig, MechanismConfig, PayloadType, Phase, PhaseConfig,
+    HandoffEnvelopeConfig, HatAllowedValues, MechanismConfig, PayloadType, Phase, PhaseConfig,
     ProgressStewardConfig, SupervisorConfig, VerdictGateConfig, WarmupConfig,
 };
 pub use memories::{InjectMode, MemoriesConfig, MemoriesFilter};

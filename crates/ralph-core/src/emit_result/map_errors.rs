@@ -49,8 +49,7 @@ mod tests {
     /// 空 reason_codes + 空 suggestions → 空 Vec。
     #[test]
     fn test_map_policy_report_to_errors_empty_yields_empty_errors() {
-        let errors =
-            map_policy_report_to_errors(&[] as &[String], &[] as &[String]);
+        let errors = map_policy_report_to_errors(&[] as &[String], &[] as &[String]);
         assert!(
             errors.is_empty(),
             "empty inputs must yield empty Vec<EmitError>, got: {errors:?}"
@@ -130,7 +129,10 @@ mod tests {
     /// 缺 suggested_command）。
     #[test]
     fn test_map_policy_report_to_errors_output_serializes_per_u1_contract() {
-        let codes = vec!["missing_task_id".to_string(), "no_suggestion_code".to_string()];
+        let codes = vec![
+            "missing_task_id".to_string(),
+            "no_suggestion_code".to_string(),
+        ];
         let suggestions = vec!["ralph tools task list".to_string(), "".to_string()];
         let errors = map_policy_report_to_errors(&codes, &suggestions);
 

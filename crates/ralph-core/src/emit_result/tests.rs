@@ -36,9 +36,7 @@ fn test_emit_result_types_success_json_roundtrip() {
     };
     let json: Value =
         serde_json::to_value(&result).expect("EmitResult must serialize to JSON value");
-    let obj = json
-        .as_object()
-        .expect("EmitResult JSON must be an object");
+    let obj = json.as_object().expect("EmitResult JSON must be an object");
 
     // 顶层必需键存在
     assert_eq!(
@@ -74,11 +72,8 @@ fn test_emit_result_types_error_optional_fields_omitted_in_json() {
         field: None,
         suggested_command: None,
     };
-    let json: Value =
-        serde_json::to_value(&err).expect("EmitError must serialize to JSON value");
-    let obj = json
-        .as_object()
-        .expect("EmitError JSON must be an object");
+    let json: Value = serde_json::to_value(&err).expect("EmitError must serialize to JSON value");
+    let obj = json.as_object().expect("EmitError JSON must be an object");
 
     // 必需字段
     assert_eq!(
@@ -194,10 +189,7 @@ fn test_emit_result_types_with_allowed_next_and_errors_keeps_vecs() {
         .expect("errors must be JSON array");
     assert_eq!(errors.len(), 1);
     let err0 = errors[0].as_object().expect("error element must be object");
-    assert_eq!(
-        err0.get("field"),
-        Some(&Value::String("task_id".into()))
-    );
+    assert_eq!(err0.get("field"), Some(&Value::String("task_id".into())));
     assert_eq!(
         err0.get("suggested_command"),
         Some(&Value::String("ralph tools task list".into()))
@@ -226,8 +218,7 @@ fn test_emit_result_types_roundup() {
         target_path: None,
         handoff_envelope: None,
     };
-    let ok_json: Value =
-        serde_json::to_value(&ok_result).expect("EmitResult must serialize");
+    let ok_json: Value = serde_json::to_value(&ok_result).expect("EmitResult must serialize");
     let ok_obj = ok_json.as_object().expect("EmitResult JSON must be object");
     assert_eq!(
         ok_obj.get("schema_version"),
@@ -242,8 +233,7 @@ fn test_emit_result_types_roundup() {
         field: None,
         suggested_command: None,
     };
-    let err_json: Value =
-        serde_json::to_value(&err).expect("EmitError must serialize");
+    let err_json: Value = serde_json::to_value(&err).expect("EmitError must serialize");
     let err_obj = err_json.as_object().expect("EmitError JSON must be object");
     assert!(err_obj.get("field").is_none());
     assert!(err_obj.get("suggested_command").is_none());

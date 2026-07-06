@@ -277,7 +277,10 @@ mod tests {
 
     #[test]
     fn gate_topic_strips_prefix() {
-        assert_eq!(gate_topic("precheck-review.complete"), Some("review.complete"));
+        assert_eq!(
+            gate_topic("precheck-review.complete"),
+            Some("review.complete")
+        );
         assert_eq!(gate_topic("precheck-build.done"), Some("build.done"));
         assert_eq!(gate_topic("ralph"), None);
         assert_eq!(gate_topic("builder"), None);
@@ -303,8 +306,14 @@ mod tests {
     #[test]
     fn is_satisfying_emit_matches_terminal_events() {
         assert!(is_satisfying_emit("review.complete", "review.complete"));
-        assert!(is_satisfying_emit("review.complete.rejected", "review.complete"));
-        assert!(!is_satisfying_emit("review.complete.proposed", "review.complete"));
+        assert!(is_satisfying_emit(
+            "review.complete.rejected",
+            "review.complete"
+        ));
+        assert!(!is_satisfying_emit(
+            "review.complete.proposed",
+            "review.complete"
+        ));
         assert!(!is_satisfying_emit("other.event", "review.complete"));
     }
 
@@ -314,10 +323,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["synthetic"], serde_json::Value::Bool(true));
         assert_eq!(parsed["reason"], "gate_silent_or_ambiguous");
-        assert_eq!(
-            parsed["failed_checks"],
-            serde_json::json!([1, 2, 3])
-        );
+        assert_eq!(parsed["failed_checks"], serde_json::json!([1, 2, 3]));
     }
 
     #[test]
@@ -355,22 +361,14 @@ mod tests {
         let obligations = std::collections::VecDeque::from([HatObligation {
             hat_id: HatId::new("precheck-work.done"),
             trigger_topic: "work.done.proposed".to_string(),
-            expected_topics: vec![
-                "work.done".to_string(),
-                "work.done.rejected".to_string(),
-            ],
+            expected_topics: vec!["work.done".to_string(), "work.done.rejected".to_string()],
             created_at: Instant::now(),
             redispatch_count: 0,
         }]);
-        let synthetics = collect_synthetic_precheck_rejections(
-            &obligations,
-            &[],
-            |_| Some(2),
-        );
+        let synthetics = collect_synthetic_precheck_rejections(&obligations, &[], |_| Some(2));
         assert_eq!(synthetics.len(), 1);
         assert_eq!(synthetics[0].guarded_topic, "work.done");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&synthetics[0].payload_json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&synthetics[0].payload_json).unwrap();
         assert_eq!(parsed["synthetic"], true);
     }
 
@@ -383,23 +381,19 @@ mod tests {
         let obligations = std::collections::VecDeque::from([HatObligation {
             hat_id: HatId::new("precheck-work.done"),
             trigger_topic: "work.done.proposed".to_string(),
-            expected_topics: vec![
-                "work.done".to_string(),
-                "work.done.rejected".to_string(),
-            ],
+            expected_topics: vec!["work.done".to_string(), "work.done.rejected".to_string()],
             created_at: Instant::now(),
             redispatch_count: 0,
         }]);
-        let accepted = vec![Event::new(
-            "work.done.rejected",
-            r#"{"failed_checks":[1],"reason":"no","synthetic":false}"#,
-        )
-        .with_source(HatId::new("precheck-work.done"))];
-        let synthetics = collect_synthetic_precheck_rejections(
-            &obligations,
-            &accepted,
-            |_| Some(1),
-        );
+        let accepted = vec![
+            Event::new(
+                "work.done.rejected",
+                r#"{"failed_checks":[1],"reason":"no","synthetic":false}"#,
+            )
+            .with_source(HatId::new("precheck-work.done")),
+        ];
+        let synthetics =
+            collect_synthetic_precheck_rejections(&obligations, &accepted, |_| Some(1));
         assert!(synthetics.is_empty());
     }
 }

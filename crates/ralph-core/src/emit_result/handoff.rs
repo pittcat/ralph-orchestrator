@@ -36,9 +36,7 @@ pub struct EmitHandoffInput {
 ///
 /// 返回 `Some(EmitHandoff)` 的条件：
 /// - 三个字段全部为非空字符串。
-pub fn handoff_from_fixture_input(
-    input: &EmitHandoffInput,
-) -> Option<EmitHandoff> {
+pub fn handoff_from_fixture_input(input: &EmitHandoffInput) -> Option<EmitHandoff> {
     let from_hat = input.from_hat.as_deref().filter(|s| !s.is_empty())?;
     let to_hat = input.to_hat.as_deref().filter(|s| !s.is_empty())?;
     let reason = input.reason.as_deref().filter(|s| !s.is_empty())?;
@@ -71,19 +69,10 @@ mod tests {
         );
         let h = handoff.unwrap();
 
-        let json: Value =
-            serde_json::to_value(&h).expect("EmitHandoff must serialize");
-        let obj = json
-            .as_object()
-            .expect("EmitHandoff JSON must be object");
-        assert_eq!(
-            obj.get("from_hat"),
-            Some(&Value::String("executor".into()))
-        );
-        assert_eq!(
-            obj.get("to_hat"),
-            Some(&Value::String("reviewer".into()))
-        );
+        let json: Value = serde_json::to_value(&h).expect("EmitHandoff must serialize");
+        let obj = json.as_object().expect("EmitHandoff JSON must be object");
+        assert_eq!(obj.get("from_hat"), Some(&Value::String("executor".into())));
+        assert_eq!(obj.get("to_hat"), Some(&Value::String("reviewer".into())));
         assert_eq!(
             obj.get("reason"),
             Some(&Value::String("phase_complete".into()))

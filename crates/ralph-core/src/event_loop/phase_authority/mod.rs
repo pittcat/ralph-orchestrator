@@ -40,14 +40,12 @@ pub mod diagnosis;
 // U27: advance_step_on_test_passed pure fn.
 pub mod step_transition;
 
-pub use on_accepted::{
-    AcceptedEvent, PhaseSideEffects, handle_phase_on_event_accepted,
-};
+pub use on_accepted::{AcceptedEvent, PhaseSideEffects, handle_phase_on_event_accepted};
 
 pub use declaration::PhaseAuthorityDeclaration;
 pub use evaluator::{EventFixture, TransitionEvaluator};
 pub use snapshot::{PhaseSnapshot, ViolationKind};
-pub use whitelist::{allows, WhitelistDecision};
+pub use whitelist::{WhitelistDecision, allows};
 
 use std::sync::{Arc, Mutex};
 
@@ -119,9 +117,7 @@ impl WorkflowPhaseAuthority {
     /// returns `disabled()`. On declaration parse failure the
     /// caller is expected to surface the error via the lint
     /// (U3) and reject the preset before this is called.
-    pub fn from_config(
-        cfg: &PhaseAuthorityConfig,
-    ) -> Result<Self, declaration::DeclarationError> {
+    pub fn from_config(cfg: &PhaseAuthorityConfig) -> Result<Self, declaration::DeclarationError> {
         if !cfg.enabled {
             return Ok(Self::disabled());
         }
@@ -197,25 +193,23 @@ impl WorkflowPhaseAuthority {
 
     /// Accessor for tests / diagnostics. `None` when disabled.
     pub fn declaration(&self) -> Option<PhaseAuthorityDeclaration> {
-        self.inner.as_ref().and_then(|s| {
-            s.lock()
-                .ok()
-                .map(|g| (*g.decl).clone())
-        })
+        self.inner
+            .as_ref()
+            .and_then(|s| s.lock().ok().map(|g| (*g.decl).clone()))
     }
 
     /// Violation policy when the engine is enabled.
     pub fn violation_policy(&self) -> Option<config::ViolationPolicyConfig> {
-        self.inner.as_ref().and_then(|s| {
-            s.lock().ok().map(|g| g.violation_policy.clone())
-        })
+        self.inner
+            .as_ref()
+            .and_then(|s| s.lock().ok().map(|g| g.violation_policy.clone()))
     }
 
     /// Progress projection config when the engine is enabled.
     pub fn progress_projection(&self) -> Option<config::ProgressProjectionConfig> {
-        self.inner.as_ref().and_then(|s| {
-            s.lock().ok().map(|g| g.progress_projection.clone())
-        })
+        self.inner
+            .as_ref()
+            .and_then(|s| s.lock().ok().map(|g| g.progress_projection.clone()))
     }
 
     /// Bump phase-violation counter for a hat after a stage reject.

@@ -6,11 +6,11 @@
 
 use std::path::Path;
 
+use crate::RalphConfig;
 use crate::event_loop::phase_authority::config::PhaseAuthorityConfig;
 use crate::event_loop::phase_authority::declaration::PhaseAuthorityDeclaration;
 use crate::event_loop::phase_authority::snapshot::PhaseSnapshot;
 use crate::state::StateLedger;
-use crate::RalphConfig;
 
 use super::allowed_next::allowed_next_for_hat_phase;
 
@@ -112,7 +112,8 @@ mod tests {
     fn test_resolve_emit_routing_disabled_phase_authority_yields_unknown() {
         let mut cfg = minimal_phase_cfg();
         cfg.enabled = false;
-        let ctx = resolve_emit_routing_context(Some(&cfg), Path::new("/tmp/nope"), Some("coordinator"));
+        let ctx =
+            resolve_emit_routing_context(Some(&cfg), Path::new("/tmp/nope"), Some("coordinator"));
         assert_eq!(ctx.phase, "unknown");
         assert!(ctx.allowed_next.is_empty());
     }
@@ -120,7 +121,8 @@ mod tests {
     #[test]
     fn test_resolve_emit_routing_uses_initial_phase_and_allowed_next() {
         let cfg = minimal_phase_cfg();
-        let ctx = resolve_emit_routing_context(Some(&cfg), Path::new("/tmp/nope"), Some("coordinator"));
+        let ctx =
+            resolve_emit_routing_context(Some(&cfg), Path::new("/tmp/nope"), Some("coordinator"));
         assert_eq!(ctx.phase, "unit_loop");
         assert!(ctx.allowed_next.contains(&"work.ready".to_string()));
         assert!(ctx.allowed_next.contains(&"work.done".to_string()));

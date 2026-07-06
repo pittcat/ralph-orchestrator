@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use super::declaration::PhaseAuthorityDeclaration;
 use super::primitives::{
-    on_event, on_loop_complete_honored, on_plan_terminal_accepted,
-    on_review_complete_verdict, on_test_passed_step::{self, StepProgressFixture},
+    on_event, on_loop_complete_honored, on_plan_terminal_accepted, on_review_complete_verdict,
+    on_test_passed_step::{self, StepProgressFixture},
 };
 use super::snapshot::PhaseSnapshot;
 
@@ -109,9 +109,7 @@ fn evaluate_transition(
                 on_event::evaluate(on, fixture.topic())
             }
         }
-        EventFixture::TestPassed(fx) => {
-            on_test_passed_step::evaluate(on, fixture.topic(), fx)
-        }
+        EventFixture::TestPassed(fx) => on_test_passed_step::evaluate(on, fixture.topic(), fx),
         EventFixture::ReviewComplete(fx) => {
             on_review_complete_verdict::evaluate(on, fixture.topic(), fx)
         }
@@ -274,12 +272,10 @@ primitive: on_loop_complete_honored
         // Step 2: review.complete fail+fix → fix_units
         snap = ev.apply(
             snap,
-            &EventFixture::ReviewComplete(
-                on_review_complete_verdict::ReviewCompleteFixture {
-                    verdict: on_review_complete_verdict::Verdict::Fail,
-                    fix_plan_attached: true,
-                },
-            ),
+            &EventFixture::ReviewComplete(on_review_complete_verdict::ReviewCompleteFixture {
+                verdict: on_review_complete_verdict::Verdict::Fail,
+                fix_plan_attached: true,
+            }),
         );
         assert_eq!(snap.phase_id, "fix_units");
 
@@ -299,10 +295,7 @@ primitive: on_loop_complete_honored
         assert_eq!(snap.phase_id, "ship");
 
         // Step 5: LOOP_COMPLETE honored → terminal
-        snap = ev.apply(
-            snap,
-            &EventFixture::LoopComplete { honored: true },
-        );
+        snap = ev.apply(snap, &EventFixture::LoopComplete { honored: true });
         assert_eq!(snap.phase_id, "terminal");
     }
 

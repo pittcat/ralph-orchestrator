@@ -9,7 +9,7 @@
 //! `drive_step_transition` consumed.
 
 use super::primitives::on_test_passed_step::{StepKind, StepProgressFixture};
-use super::step_parse::{fixture_from_record, TestPassedRecord};
+use super::step_parse::{TestPassedRecord, fixture_from_record};
 
 /// Pure decision: when the engine is disabled, the runtime
 /// continues to drive the step close path. When the

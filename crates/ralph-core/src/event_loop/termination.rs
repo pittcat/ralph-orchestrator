@@ -99,10 +99,7 @@ pub enum TerminationTrigger {
     /// generic payload contract violation. Carries the hat id
     /// and diff stat so `trigger_to_reason` can populate the
     /// matching `ScopeViolationHardRejected` variant directly.
-    ScopeViolation {
-        hat: String,
-        diff_stat: String,
-    },
+    ScopeViolation { hat: String, diff_stat: String },
 }
 
 /// Convert a `TerminationTrigger` into the existing typed

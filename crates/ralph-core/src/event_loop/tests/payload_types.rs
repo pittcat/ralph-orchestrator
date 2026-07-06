@@ -512,12 +512,7 @@ event_loop:
 
     let wrong_hat = vec![mk("report.done", "reporter")];
     assert!(
-        !event_loop.isolated_dual_publish_handoff(
-            "LOOP_COMPLETE",
-            "ralph",
-            "reporter",
-            &wrong_hat
-        ),
+        !event_loop.isolated_dual_publish_handoff("LOOP_COMPLETE", "ralph", "reporter", &wrong_hat),
         "cross-hat handoff must be rejected"
     );
 

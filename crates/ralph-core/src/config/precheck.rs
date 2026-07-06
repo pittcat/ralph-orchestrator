@@ -110,10 +110,7 @@ impl Default for PrecheckOnFail {
 /// Inject `event_policy.schemas` entries for the derived topics
 /// introduced by desugar (`<X>.proposed`, `<X>.rejected`). Idempotent:
 /// existing schema entries are left untouched.
-pub fn inject_precheck_event_schemas(
-    config: &mut crate::config::RalphConfig,
-    topic: &str,
-) {
+pub fn inject_precheck_event_schemas(config: &mut crate::config::RalphConfig, topic: &str) {
     use crate::config::{EventSchema, PayloadType};
     use std::collections::HashMap;
 
@@ -124,21 +121,17 @@ pub fn inject_precheck_event_schemas(
     let schemas = &mut policy.schemas;
 
     let proposed = format!("{topic}.proposed");
-    schemas
-        .entry(proposed)
-        .or_insert_with(|| EventSchema {
-            payload: Some(PayloadType::JsonObject),
-            ..Default::default()
-        });
+    schemas.entry(proposed).or_insert_with(|| EventSchema {
+        payload: Some(PayloadType::JsonObject),
+        ..Default::default()
+    });
 
     let rejected = format!("{topic}.rejected");
-    schemas
-        .entry(rejected)
-        .or_insert_with(|| EventSchema {
-            payload: Some(PayloadType::JsonObject),
-            required_fields: vec!["failed_checks".into(), "reason".into()],
-            ..Default::default()
-        });
+    schemas.entry(rejected).or_insert_with(|| EventSchema {
+        payload: Some(PayloadType::JsonObject),
+        required_fields: vec!["failed_checks".into(), "reason".into()],
+        ..Default::default()
+    });
 
     // Gate hat publishes bare `<X>` on pass; ensure a schema exists
     // (idempotent — presets that already declare `<X>` are untouched).

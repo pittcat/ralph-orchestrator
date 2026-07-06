@@ -146,7 +146,9 @@ impl DuplicateWorkDoneHint {
             DuplicateWorkDoneHint::DuplicateStallBypass => "duplicate_work_done_stall_bypass",
             DuplicateWorkDoneHint::DuplicateSameStep => "duplicate_work_done_same_step",
             DuplicateWorkDoneHint::ReviewDimensionDuplicate => "duplicate_review_dimension_ready",
-            DuplicateWorkDoneHint::ReviewDimensionsComplete => "duplicate_review_dimensions_complete",
+            DuplicateWorkDoneHint::ReviewDimensionsComplete => {
+                "duplicate_review_dimensions_complete"
+            }
         }
     }
 }
@@ -709,8 +711,14 @@ impl PolicyRuntimeState {
                 let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
                 let step = obj.get("step").and_then(|v| v.as_str());
                 let task_id = obj.get("task_id").and_then(|v| v.as_str());
-                let fix_round = obj.get("fix_round").and_then(|v| v.as_u64()).map(|n| n as u32);
-                let total_units = obj.get("total_units").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let fix_round = obj
+                    .get("fix_round")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+                let total_units = obj
+                    .get("total_units")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
                 if let (Some(pn), Some(ti)) = (plan_name, task_id) {
                     state.review_start_seen_keys.insert(review_start_dedup_key(
                         pn,
@@ -761,9 +769,9 @@ impl PolicyRuntimeState {
                     .topic
                     .strip_suffix(".proposed")
                     .unwrap_or(event.topic.as_str());
-                state.precheck_proposed_pending_keys.insert(
-                    precheck_proposed_dedup_key(guarded, p),
-                );
+                state
+                    .precheck_proposed_pending_keys
+                    .insert(precheck_proposed_dedup_key(guarded, p));
             } else if !event.topic.ends_with(".proposed") {
                 state.prune_precheck_proposed_bucket(&event.topic);
             }
@@ -1320,14 +1328,7 @@ pub fn validate_event_with_hat(
     state: &mut PolicyRuntimeState,
     hat: Option<&str>,
 ) -> PolicyDecision {
-    validate_event_with_options(
-        topic,
-        payload,
-        config,
-        state,
-        hat,
-        &DefaultHandoffConfig,
-    )
+    validate_event_with_options(topic, payload, config, state, hat, &DefaultHandoffConfig)
 }
 
 /// 2026-07-06-004 plan U8: the handoff envelope validator is
@@ -1394,7 +1395,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                 violation_type: ViolationType::DuplicateWorkDone {
                     key: key.clone(),
                     hint: DuplicateWorkDoneHint::DuplicateSameStep,
-                        seen_count: None,
+                    seen_count: None,
                 },
                 message: format!(
                     "duplicate_precheck_proposed: {topic} for key '{key}' was already accepted. \
@@ -1421,8 +1422,14 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
         let plan_name = obj.get("plan_name").and_then(|v| v.as_str());
         let step = obj.get("step").and_then(|v| v.as_str());
         let task_id = obj.get("task_id").and_then(|v| v.as_str());
-        let fix_round = obj.get("fix_round").and_then(|v| v.as_u64()).map(|n| n as u32);
-        let total_units = obj.get("total_units").and_then(|v| v.as_u64()).map(|n| n as u32);
+        let fix_round = obj
+            .get("fix_round")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
+        let total_units = obj
+            .get("total_units")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
         if let (Some(pn), Some(ti)) = (plan_name, task_id) {
             let dedup_key = review_start_dedup_key(pn, step, ti, fix_round, total_units);
             if state.review_start_seen_keys.contains(&dedup_key) {
@@ -1782,10 +1789,9 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                     .get(&dedup_key)
                     .copied()
                     .unwrap_or(0);
-                state.work_ready_seen_keys.insert(
-                    dedup_key.clone(),
-                    count.saturating_add(1),
-                );
+                state
+                    .work_ready_seen_keys
+                    .insert(dedup_key.clone(), count.saturating_add(1));
                 // Bucket-pruned emit falls through to Accept —
                 // count is observation, not dedup state.
             } else if state.work_ready_seen_keys.contains_key(&dedup_key) {
@@ -1799,10 +1805,9 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                     .get(&dedup_key)
                     .copied()
                     .unwrap_or(0);
-                state.work_ready_seen_keys.insert(
-                    dedup_key.clone(),
-                    count.saturating_add(1),
-                );
+                state
+                    .work_ready_seen_keys
+                    .insert(dedup_key.clone(), count.saturating_add(1));
                 let hit_count = count.saturating_add(1);
                 let finding = PolicyFinding {
                     topic: topic.to_string(),
@@ -2259,9 +2264,9 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                 if let Some(field) = obj_get(&value, array_field) {
                     if let Value::Array(elements) = field {
                         for (idx, element) in elements.iter().enumerate() {
-                            if let Some(finding) = validate_element_shape(
-                                topic, array_field, idx, element, constraint,
-                            ) {
+                            if let Some(finding) =
+                                validate_element_shape(topic, array_field, idx, element, constraint)
+                            {
                                 findings.push(finding);
                             }
                         }
@@ -4045,7 +4050,7 @@ mod tests {
             violation_type: ViolationType::DuplicateWorkDone {
                 key: "p::s::t".to_string(),
                 hint: DuplicateWorkDoneHint::DuplicateSameStep,
-                        seen_count: None,
+                seen_count: None,
             },
             message: "test".to_string(),
         };
@@ -4064,7 +4069,7 @@ mod tests {
             violation_type: ViolationType::DuplicateWorkDone {
                 key: "p::s::t".to_string(),
                 hint: DuplicateWorkDoneHint::DuplicateStallBypass,
-                        seen_count: None,
+                seen_count: None,
             },
             message: "test".to_string(),
         };
@@ -4596,7 +4601,8 @@ mod tests {
         let config = test_config();
         let mut state = PolicyRuntimeState::default();
         let first = r#"{"plan_name":"p1","task_id":"t1","task_key":"k1"}"#;
-        let second = r#"{"plan_name":"p1","task_id":"t1","task_key":"k1","triggered":"review-coordinator"}"#;
+        let second =
+            r#"{"plan_name":"p1","task_id":"t1","task_key":"k1","triggered":"review-coordinator"}"#;
         assert_eq!(
             validate_event("review.start", Some(first), &config, &mut state),
             PolicyDecision::Accept
@@ -4814,19 +4820,9 @@ mod tests {
             "changed_lines": 10,
         })
         .to_string();
-        let first = super::validate_event(
-            "work.done",
-            Some(&payload1),
-            &config,
-            &mut state,
-        );
+        let first = super::validate_event("work.done", Some(&payload1), &config, &mut state);
         assert!(matches!(first, super::PolicyDecision::Accept));
-        let second = super::validate_event(
-            "work.done",
-            Some(&payload2),
-            &config,
-            &mut state,
-        );
+        let second = super::validate_event("work.done", Some(&payload2), &config, &mut state);
         match second {
             super::PolicyDecision::RejectWithResume(finding) => {
                 assert!(
@@ -5751,14 +5747,7 @@ mod tests {
         let mut config = test_config_with_enforce_and_resume();
         let mut rw = HashMap::new();
         rw.insert("status".to_string(), serde_json::json!("done"));
-        insert_review_dimensions_schema(
-            &mut config,
-            "findings_file",
-            true,
-            Vec::new(),
-            rw,
-            true,
-        );
+        insert_review_dimensions_schema(&mut config, "findings_file", true, Vec::new(), rw, true);
         let mut state = PolicyRuntimeState::default();
         // 6 dimensions, last 4 are fake `status: done, findings_file: null`.
         let payload = r#"{
@@ -5789,14 +5778,7 @@ mod tests {
         let mut config = test_config_with_enforce_and_resume();
         let mut rw = HashMap::new();
         rw.insert("status".to_string(), serde_json::json!("done"));
-        insert_review_dimensions_schema(
-            &mut config,
-            "findings_file",
-            true,
-            Vec::new(),
-            rw,
-            true,
-        );
+        insert_review_dimensions_schema(&mut config, "findings_file", true, Vec::new(), rw, true);
         let mut state = PolicyRuntimeState::default();
         // `status: skipped` with null findings_file must be accepted.
         let payload = r#"{
@@ -6245,17 +6227,32 @@ mod tests {
         // the pruned bucket stay in `work_ready_seen_keys`, and
         // keys outside it are untouched.
         let mut state = PolicyRuntimeState::default();
-        state.work_ready_seen_keys.insert("p1::step-01::t1".into(), 1);
-        state.work_ready_seen_keys.insert("p1::step-01::t2".into(), 1);
-        state.work_ready_seen_keys.insert("p1::step-02::t1".into(), 1);
+        state
+            .work_ready_seen_keys
+            .insert("p1::step-01::t1".into(), 1);
+        state
+            .work_ready_seen_keys
+            .insert("p1::step-01::t2".into(), 1);
+        state
+            .work_ready_seen_keys
+            .insert("p1::step-02::t1".into(), 1);
 
         state.prune_work_ready_bucket("p1", "step-01");
 
         // Pruned keys survive with their counts intact.
-        assert_eq!(state.work_ready_seen_keys.get("p1::step-01::t1").copied(), Some(1));
-        assert_eq!(state.work_ready_seen_keys.get("p1::step-01::t2").copied(), Some(1));
+        assert_eq!(
+            state.work_ready_seen_keys.get("p1::step-01::t1").copied(),
+            Some(1)
+        );
+        assert_eq!(
+            state.work_ready_seen_keys.get("p1::step-01::t2").copied(),
+            Some(1)
+        );
         // Different step preserved.
-        assert_eq!(state.work_ready_seen_keys.get("p1::step-02::t1").copied(), Some(1));
+        assert_eq!(
+            state.work_ready_seen_keys.get("p1::step-02::t1").copied(),
+            Some(1)
+        );
         // Bucket side-table records the prune.
         assert!(state.pruned_work_ready_buckets.contains("p1::step-01::t1"));
         assert!(state.pruned_work_ready_buckets.contains("p1::step-01::t2"));
@@ -6317,8 +6314,12 @@ mod tests {
     #[test]
     fn u5_work_ready_prune_preserves_counter_on_remaining_keys() {
         let mut state = PolicyRuntimeState::default();
-        state.work_ready_seen_keys.insert("p1::step-01::t1".into(), 7);
-        state.work_ready_seen_keys.insert("p1::step-02::t2".into(), 3);
+        state
+            .work_ready_seen_keys
+            .insert("p1::step-01::t1".into(), 7);
+        state
+            .work_ready_seen_keys
+            .insert("p1::step-02::t2".into(), 3);
 
         state.prune_work_ready_bucket("p1", "step-01");
 
@@ -6356,12 +6357,18 @@ mod tests {
         // First emit accepted → seed count=1.
         let first = validate_event("work.ready", Some(payload), &config, &mut state);
         assert!(matches!(first, PolicyDecision::Accept));
-        assert_eq!(state.work_ready_seen_keys.get("p1::step-01::t1").copied(), Some(1));
+        assert_eq!(
+            state.work_ready_seen_keys.get("p1::step-01::t1").copied(),
+            Some(1)
+        );
 
         // Second emit (without prune) → RejectWithResume, count=2.
         let second = validate_event("work.ready", Some(payload), &config, &mut state);
         assert!(matches!(second, PolicyDecision::RejectWithResume(_)));
-        assert_eq!(state.work_ready_seen_keys.get("p1::step-01::t1").copied(), Some(2));
+        assert_eq!(
+            state.work_ready_seen_keys.get("p1::step-01::t1").copied(),
+            Some(2)
+        );
 
         // Prune the bucket; dedup entry must survive in the
         // counter map; the bucket side-table records the prune.
@@ -6520,7 +6527,7 @@ hats:
             violation_type: ViolationType::DuplicateWorkDone {
                 key: "k".to_string(),
                 hint: DuplicateWorkDoneHint::ReviewDimensionsComplete,
-                        seen_count: None,
+                seen_count: None,
             },
             message: "test".to_string(),
         };
@@ -6670,22 +6677,10 @@ hats:
         let mut state = PolicyRuntimeState::default();
         let payload = r#"{"plan_name":"p","step":"s","task_id":"t"}"#;
         // First emit accepted.
-        let first = validate_event_with_hat(
-            "work.done",
-            Some(payload),
-            &config,
-            &mut state,
-            None,
-        );
+        let first = validate_event_with_hat("work.done", Some(payload), &config, &mut state, None);
         assert_eq!(first, PolicyDecision::Accept);
         // Second emit returns RejectWithResume (unchanged behaviour).
-        let second = validate_event_with_hat(
-            "work.done",
-            Some(payload),
-            &config,
-            &mut state,
-            None,
-        );
+        let second = validate_event_with_hat("work.done", Some(payload), &config, &mut state, None);
         match second {
             PolicyDecision::RejectWithResume(finding) => {
                 assert_eq!(finding.topic, "work.done");
@@ -6740,7 +6735,7 @@ hats:
             violation_type: ViolationType::DuplicateWorkDone {
                 key: "p::s::t::0".to_string(),
                 hint: DuplicateWorkDoneHint::ReviewDimensionsComplete,
-                        seen_count: None,
+                seen_count: None,
             },
             message: "test".to_string(),
         };
@@ -6762,7 +6757,7 @@ hats:
             violation_type: ViolationType::DuplicateWorkDone {
                 key: "p::s::t::d".to_string(),
                 hint: DuplicateWorkDoneHint::ReviewDimensionDuplicate,
-                        seen_count: None,
+                seen_count: None,
             },
             message: "test".to_string(),
         };
@@ -6790,10 +6785,26 @@ hats:
         // tooling can still distinguish the two paths. This test
         // pins both surfaces.
         let cases = [
-            (DuplicateWorkDoneHint::DuplicateStallBypass, "duplicate_work_done", "duplicate_work_done_stall_bypass"),
-            (DuplicateWorkDoneHint::DuplicateSameStep, "duplicate_work_done", "duplicate_work_done_same_step"),
-            (DuplicateWorkDoneHint::ReviewDimensionDuplicate, "duplicate_review_dimension_ready", "duplicate_review_dimension_ready"),
-            (DuplicateWorkDoneHint::ReviewDimensionsComplete, "duplicate_review_dimensions_complete", "duplicate_review_dimensions_complete"),
+            (
+                DuplicateWorkDoneHint::DuplicateStallBypass,
+                "duplicate_work_done",
+                "duplicate_work_done_stall_bypass",
+            ),
+            (
+                DuplicateWorkDoneHint::DuplicateSameStep,
+                "duplicate_work_done",
+                "duplicate_work_done_same_step",
+            ),
+            (
+                DuplicateWorkDoneHint::ReviewDimensionDuplicate,
+                "duplicate_review_dimension_ready",
+                "duplicate_review_dimension_ready",
+            ),
+            (
+                DuplicateWorkDoneHint::ReviewDimensionsComplete,
+                "duplicate_review_dimensions_complete",
+                "duplicate_review_dimensions_complete",
+            ),
         ];
         for (hint, expected_code, expected_hint) in cases {
             let finding = PolicyFinding {
@@ -6836,7 +6847,7 @@ hats:
                 ViolationType::DuplicateWorkDone {
                     key: "k".to_string(),
                     hint: DuplicateWorkDoneHint::DuplicateStallBypass,
-                        seen_count: None,
+                    seen_count: None,
                 }
                 .reason_code(),
             ),
@@ -6845,7 +6856,7 @@ hats:
                 ViolationType::DuplicateWorkDone {
                     key: "k".to_string(),
                     hint: DuplicateWorkDoneHint::DuplicateSameStep,
-                        seen_count: None,
+                    seen_count: None,
                 }
                 .reason_code(),
             ),
@@ -6854,7 +6865,7 @@ hats:
                 ViolationType::DuplicateWorkDone {
                     key: "k".to_string(),
                     hint: DuplicateWorkDoneHint::ReviewDimensionDuplicate,
-                        seen_count: None,
+                    seen_count: None,
                 }
                 .reason_code(),
             ),
@@ -6863,7 +6874,7 @@ hats:
                 ViolationType::DuplicateWorkDone {
                     key: "k".to_string(),
                     hint: DuplicateWorkDoneHint::ReviewDimensionsComplete,
-                        seen_count: None,
+                    seen_count: None,
                 }
                 .reason_code(),
             ),
@@ -7010,10 +7021,7 @@ hats:
     #[test]
     fn policy_check_rejects_missing_handoff_envelope_when_validation_enabled() {
         let mut payload = full_payload();
-        payload
-            .as_object_mut()
-            .unwrap()
-            .remove("handoff_envelope");
+        payload.as_object_mut().unwrap().remove("handoff_envelope");
 
         // U1: now actually wired — uses the original
         // `policy_minimal()` (no schema declared) and asserts
@@ -7067,7 +7075,8 @@ hats:
             | PolicyDecision::Hold(f)
             | PolicyDecision::AcknowledgeAndForward(f) => {
                 assert!(
-                    f.message.contains("handoff_envelope_invalid_schema_version"),
+                    f.message
+                        .contains("handoff_envelope_invalid_schema_version"),
                     "invalid schema version must surface; got finding: {:?}",
                     f
                 );
@@ -7120,13 +7129,8 @@ hats:
             Some("{}"),
             &cfg_validate_only
         ));
-        assert!(handoff_envelope_validation_enabled(
-            Some("{}"),
-            &cfg_full
-        ));
-        assert!(!handoff_envelope_validation_enabled(
-            None, &cfg_full
-        ));
+        assert!(handoff_envelope_validation_enabled(Some("{}"), &cfg_full));
+        assert!(!handoff_envelope_validation_enabled(None, &cfg_full));
     }
 
     #[test]
@@ -7137,12 +7141,16 @@ hats:
             validate_payload: true,
             emit_result_summary: false,
         };
-        let adapter = EventLoopHandoffConfig { handoff_envelope: &cfg };
+        let adapter = EventLoopHandoffConfig {
+            handoff_envelope: &cfg,
+        };
         assert!(adapter.handoff_envelope_enabled());
         assert!(adapter.handoff_envelope_validate_payload());
 
         let cfg_off = HandoffEnvelopeConfig::default();
-        let adapter = EventLoopHandoffConfig { handoff_envelope: &cfg_off };
+        let adapter = EventLoopHandoffConfig {
+            handoff_envelope: &cfg_off,
+        };
         assert!(!adapter.handoff_envelope_enabled());
         assert!(!adapter.handoff_envelope_validate_payload());
     }

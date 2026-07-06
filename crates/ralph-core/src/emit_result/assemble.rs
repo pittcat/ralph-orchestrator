@@ -193,8 +193,7 @@ mod tests {
         );
 
         // JSON 形状：errors 键被省略（空 Vec → skip_serializing_if）
-        let json: Value =
-            serde_json::to_value(&result).expect("EmitResult must serialize");
+        let json: Value = serde_json::to_value(&result).expect("EmitResult must serialize");
         let obj = json.as_object().expect("must be object");
         assert_eq!(obj.get("ok"), Some(&Value::Bool(true)));
         assert_eq!(obj.get("recorded"), Some(&Value::Bool(false)));

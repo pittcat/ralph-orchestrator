@@ -968,14 +968,9 @@ mod u6_unified_path_tests {
         // required fields. The pipeline accepts every event, the
         // report mirrors the loop's accept verdict.
         let tmp = TempDir::new().unwrap();
-        let report = run_policy_check_unified(
-            "debug.step",
-            Some("task_id=demo"),
-            None,
-            None,
-            tmp.path(),
-        )
-            .expect("unified check should succeed on empty workspace");
+        let report =
+            run_policy_check_unified("debug.step", Some("task_id=demo"), None, None, tmp.path())
+                .expect("unified check should succeed on empty workspace");
         assert!(report.accepted, "report: {report:?}");
         assert!(report.reason_codes.is_empty());
         assert_eq!(report.topic, "debug.step");
@@ -1163,11 +1158,7 @@ event_loop:
         // it as a YAML mapping keyed by hat id.
         let hat_blocks: String = ids
             .iter()
-            .map(|id| {
-                format!(
-                    "  {id}:\n    name: {id}\n    triggers: []\n    publishes: []\n"
-                )
-            })
+            .map(|id| format!("  {id}:\n    name: {id}\n    triggers: []\n    publishes: []\n"))
             .collect();
         let yaml = format!("hats:\n{hat_blocks}");
         serde_yaml::from_str(&yaml).expect("synthetic RalphConfig yaml")
@@ -1186,17 +1177,14 @@ event_loop:
     fn u7_check_envelope_triggered_missing_allowed() {
         let cfg = cfg_with_hats(&["review-synthesizer"]);
         // R12: missing triggered is allowed.
-        check_envelope_triggered("work.done", None, &cfg)
-            .expect("missing triggered is allowed");
-        check_envelope_triggered("work.done", Some(""), &cfg)
-            .expect("empty triggered is allowed");
+        check_envelope_triggered("work.done", None, &cfg).expect("missing triggered is allowed");
+        check_envelope_triggered("work.done", Some(""), &cfg).expect("empty triggered is allowed");
     }
 
     #[test]
     fn u7_check_envelope_triggered_not_in_topology_rejected() {
         let cfg = cfg_with_hats(&["review-synthesizer"]);
-        let err =
-            check_envelope_triggered("work.done", Some("planner"), &cfg).unwrap_err();
+        let err = check_envelope_triggered("work.done", Some("planner"), &cfg).unwrap_err();
         assert_eq!(err.reason_code, "triggered_not_in_topology");
         assert!(err.message.contains("planner"));
         assert!(err.message.contains("review-synthesizer"));
@@ -1231,8 +1219,7 @@ event_loop:
     #[test]
     fn u7_check_envelope_triggered_business_topic_rejects_pseudo_hat() {
         let cfg = cfg_with_hats(&["review-synthesizer"]);
-        let err =
-            check_envelope_triggered("work.done", Some("ralph"), &cfg).unwrap_err();
+        let err = check_envelope_triggered("work.done", Some("ralph"), &cfg).unwrap_err();
         assert_eq!(err.reason_code, "triggered_not_in_topology");
         assert!(err.message.contains("ralph"));
     }
@@ -1535,15 +1522,11 @@ pub fn validate_topic_payload_with_handoff(
         events_file: events_file.to_path_buf(),
     };
     let mut state = build_policy_state(policy, &ctx);
-    let adapter = EventLoopHandoffConfig { handoff_envelope: handoff };
-    let decision = validate_event_with_options(
-        topic,
-        Some(payload_str),
-        policy,
-        &mut state,
-        None,
-        &adapter,
-    );
+    let adapter = EventLoopHandoffConfig {
+        handoff_envelope: handoff,
+    };
+    let decision =
+        validate_event_with_options(topic, Some(payload_str), policy, &mut state, None, &adapter);
     Ok(finding_to_validation_error(&decision, topic))
 }
 
@@ -1784,14 +1767,16 @@ pub fn build_emit_result_parts(
     let routing = resolve_emit_routing_from_config(config, workspace, hat);
     let handoff_envelope = if ok && payload.is_some() && envelope_summary_enabled(config) {
         payload.and_then(|p| {
-            serde_json::from_str::<serde_json::Value>(p).ok().and_then(
-                |value| match validate_handoff_envelope_payload(&value, None) {
-                    Ok(parsed) => Some(
-                        ralph_core::emit_result::HandoffEnvelopeSummary::from(&parsed),
-                    ),
-                    Err(_) => None,
-                },
-            )
+            serde_json::from_str::<serde_json::Value>(p)
+                .ok()
+                .and_then(
+                    |value| match validate_handoff_envelope_payload(&value, None) {
+                        Ok(parsed) => Some(ralph_core::emit_result::HandoffEnvelopeSummary::from(
+                            &parsed,
+                        )),
+                        Err(_) => None,
+                    },
+                )
         })
     } else {
         None
@@ -2253,8 +2238,8 @@ event_loop:
         let tmp = TempDir::new().unwrap();
         let events = tmp.path().join("events.jsonl");
         let policy = strict_policy_with_required("handoff_envelope");
-        let payload = full_handoff_envelope_payload()
-            .replace("\"handoff_envelope\":{", "\"__stripped__\":{");
+        let payload =
+            full_handoff_envelope_payload().replace("\"handoff_envelope\":{", "\"__stripped__\":{");
         let err = validate_topic_payload_with_handoff(
             "work.done",
             &payload,
@@ -2268,8 +2253,7 @@ event_loop:
         // handoff-envelope validator side will surface. We
         // accept either; the contract is "rejected".
         assert!(
-            err.reason_code == "missing_required_field"
-                || err.message.contains("handoff_envelope"),
+            err.reason_code == "missing_required_field" || err.message.contains("handoff_envelope"),
             "rejection must trace to handoff; got {:?}",
             err
         );
@@ -2456,16 +2440,16 @@ event_loop:
     }
 
     /// Happy path: aligned progress + tasks, `queue.advance` policy-check passes.
-///
-/// U1 of 2026-07-05-005 (KTD-1): the derived `current_step` accessor
-/// returns `completed_steps.last()`, so the fixture must mark the
-/// inbound event's step as already completed (or this would be a
-/// `step_mismatch`). We re-derive the test against the new rule:
-/// `## Current Step\nstep-02` plus `completed_steps: [step-01, step-02]`
-/// makes the derived `current_step() == Some("step-02")` and the
-/// closed task for `step-02` confirms task-step consistency.
-#[test]
-fn u1_step_handoff_gate_happy_path_aligned_progress() {
+    ///
+    /// U1 of 2026-07-05-005 (KTD-1): the derived `current_step` accessor
+    /// returns `completed_steps.last()`, so the fixture must mark the
+    /// inbound event's step as already completed (or this would be a
+    /// `step_mismatch`). We re-derive the test against the new rule:
+    /// `## Current Step\nstep-02` plus `completed_steps: [step-01, step-02]`
+    /// makes the derived `current_step() == Some("step-02")` and the
+    /// closed task for `step-02` confirms task-step consistency.
+    #[test]
+    fn u1_step_handoff_gate_happy_path_aligned_progress() {
         let tmp = workspace();
         write_closed_task(&tmp, "task-1", "step-02");
         write_progress(
@@ -2897,9 +2881,7 @@ hats:
     // the same CLI round-trip.
     #[test]
     fn build_emit_result_parts_attaches_handoff_envelope_summary_when_enabled() {
-        use ralph_core::config::{
-            EventLoopConfig, EventPolicyConfig, HandoffEnvelopeConfig,
-        };
+        use ralph_core::config::{EventLoopConfig, EventPolicyConfig, HandoffEnvelopeConfig};
 
         let envelope_payload = serde_json::json!({
             "handoff_envelope": {

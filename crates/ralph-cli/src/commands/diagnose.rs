@@ -940,9 +940,7 @@ pub struct SupervisorStateSummary {
 /// `(0, 0, 0)` with the path the operator would have
 /// configured, so the JSON is always present and
 /// machine-parseable.
-pub fn compute_supervisor_state(
-    workspace_root: &Path,
-) -> SupervisorStateSummary {
+pub fn compute_supervisor_state(workspace_root: &Path) -> SupervisorStateSummary {
     let db_path = workspace_root.join(".ralph/supervisor.db");
     let db_path_str = db_path.display().to_string();
 
@@ -951,7 +949,10 @@ pub fn compute_supervisor_state(
         use ralph_core::supervisor::SupervisorStore;
         match ralph_core::supervisor::RusqliteSupervisorStore::open(&db_path) {
             Ok(store) => {
-                let active = store.recover_active_waves().map(|w| w.len() as u32).unwrap_or(0);
+                let active = store
+                    .recover_active_waves()
+                    .map(|w| w.len() as u32)
+                    .unwrap_or(0);
                 // Best-effort: derive queue depth from active waves
                 // whose phase is `Dispatch` AND no slots have been
                 // dispatched yet. Until U7's `record_slot_pid` lands
@@ -997,9 +998,7 @@ pub fn compute_supervisor_state(
 /// Render the supervisor section as a JSON document.
 /// Indented (pretty) so operators inspecting on a terminal
 /// can read it; CI scripts use `serde_json` to parse.
-pub fn render_supervisor_section_json(
-    workspace_root: &Path,
-) -> String {
+pub fn render_supervisor_section_json(workspace_root: &Path) -> String {
     let summary = compute_supervisor_state(workspace_root);
     serde_json::to_string_pretty(&summary)
         .unwrap_or_else(|_| "{\"supervisor\": \"render error\"}".to_string())
@@ -1007,16 +1006,11 @@ pub fn render_supervisor_section_json(
 
 /// Render the supervisor section as a one-line-per-field
 /// Markdown summary. Used by `--supervisor human`.
-pub fn render_supervisor_section_human(
-    workspace_root: &Path,
-) -> String {
+pub fn render_supervisor_section_human(workspace_root: &Path) -> String {
     let summary = compute_supervisor_state(workspace_root);
     format!(
         "## Supervisor State\n\n- **active_waves**: {}\n- **queue_depth**: {}\n- **dedup_hits**: {}\n- **db_path**: {}\n",
-        summary.active_waves,
-        summary.queue_depth,
-        summary.dedup_hits,
-        summary.db_path,
+        summary.active_waves, summary.queue_depth, summary.dedup_hits, summary.db_path,
     )
 }
 
@@ -2028,8 +2022,7 @@ mod tests {
         {
             use ralph_core::supervisor::RusqliteSupervisorStore;
             let db_path = ralph_dir.join("supervisor.db");
-            let _store =
-                RusqliteSupervisorStore::open(&db_path).expect("open empty supervisor DB");
+            let _store = RusqliteSupervisorStore::open(&db_path).expect("open empty supervisor DB");
             let json = render_supervisor_section_json(tmp.path());
             // Parse the JSON and assert all three counts are 0.
             let value: serde_json::Value =

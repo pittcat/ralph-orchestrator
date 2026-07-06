@@ -165,8 +165,8 @@ pub fn execute(args: WaveArgs, use_colors: bool) -> Result<()> {
 fn enforce_wave_acl(_verb: &str) -> Result<()> {
     use crate::hat_command_policy::HatCommandPolicy;
     use crate::operation_guard::OperationContext;
-    use crate::policy_check::load_policy_config_for_cli_emit;
     use crate::policy_check::OnConfigError;
+    use crate::policy_check::load_policy_config_for_cli_emit;
 
     let workspace_root = std::env::current_dir().unwrap_or_default();
     let ctx = OperationContext::detect(workspace_root.clone());
@@ -1237,7 +1237,10 @@ mod tests {
         let result = execute_verify(args);
         std::env::set_current_dir(&prev).unwrap();
 
-        assert!(result.is_ok(), "verify should pass without policy: {result:?}");
+        assert!(
+            result.is_ok(),
+            "verify should pass without policy: {result:?}"
+        );
         assert!(
             !events_path.exists(),
             "verify must not create the events file (was: {})",

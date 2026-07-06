@@ -396,9 +396,7 @@ pub const LOOP_RUNNER_INTERNAL_TOPICS: &[&str] = &[
 
 use crate::config::ConfigError;
 use crate::config::ConfigWarning;
-use crate::event_origin::{
-    is_supervisor_coordination_topic, is_supervisor_slot_topic,
-};
+use crate::event_origin::{is_supervisor_coordination_topic, is_supervisor_slot_topic};
 use crate::hat_registry::HatRegistry;
 use crate::payload_contract::{
     PayloadContractError, PayloadContractErrorKind, PayloadContractValidationResult,
@@ -901,8 +899,8 @@ pub fn detect_required_topic_gaps(
         // Skip the no_subscriber check for terminal workflow events
         // and for supervisor-managed slot topics that are consumed by
         // the runtime supervisor rather than a hat.
-        let is_supervisor_slot = config.event_loop.supervisor.enabled
-            && is_supervisor_slot_topic(topic.as_str());
+        let is_supervisor_slot =
+            config.event_loop.supervisor.enabled && is_supervisor_slot_topic(topic.as_str());
         if !has_subscriber && !publishing_hat_also_publishes_completion && !is_supervisor_slot {
             let finding = RuntimeContractFinding::try_new_core(
                 "required.no_subscriber",

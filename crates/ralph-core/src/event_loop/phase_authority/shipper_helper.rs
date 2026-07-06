@@ -171,7 +171,7 @@ mod tests {
             "loop_stalled_max_iterations",
             "stall_recovery",
             "loop_stalled",
-            "STALL_NO_EVENTS", // case-insensitive
+            "STALL_NO_EVENTS",                        // case-insensitive
             "substr_loop_stalled_max_iterations_xyz", // substring
         ] {
             let ctx = ShipperRoutingContext {

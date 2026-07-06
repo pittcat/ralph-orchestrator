@@ -8,7 +8,7 @@
 //! context so the caller can emit them.
 
 use crate::event_policy::{
-    DuplicateWorkDoneHint, EventPolicyConfig, EventLoopHandoffConfig, PolicyDecision,
+    DuplicateWorkDoneHint, EventLoopHandoffConfig, EventPolicyConfig, PolicyDecision,
     PolicyFinding, PolicyRejection, ViolationType, check_completion_honored,
     check_topic_deny_rules, is_recoverable_policy_finding, validate_event_with_options,
 };
@@ -108,18 +108,16 @@ impl ValidationRule for EventPolicyRule {
             && let Some(payload) = event.payload.as_deref()
         {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
-                if let Err(err) =
-                    crate::handoff_envelope::validate_handoff_envelope_payload(&value, Some(registry))
-                {
+                if let Err(err) = crate::handoff_envelope::validate_handoff_envelope_payload(
+                    &value,
+                    Some(registry),
+                ) {
                     let finding = PolicyFinding {
                         topic: event.topic.clone(),
                         violation_type: ViolationType::MissingRequiredField {
                             field: "handoff_envelope".to_string(),
                         },
-                        message: format!(
-                            "handoff_envelope validation failed: {}",
-                            err
-                        ),
+                        message: format!("handoff_envelope validation failed: {}", err),
                     };
                     decision = PolicyDecision::RejectWithResume(finding);
                 }

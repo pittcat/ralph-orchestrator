@@ -12,13 +12,13 @@
 //! owns the engine and persists the returned state.
 //! This module only does the pure translation.
 
+use super::WorkflowPhaseAuthority;
+use super::evaluator::EventFixture;
 use super::primitives::on_review_complete_verdict;
 use super::primitives::on_test_passed_step::StepProgressFixture;
-use super::evaluator::EventFixture;
 use super::snapshot::{PhaseSnapshot, ViolationKind};
-use super::step_parse::{parse_test_passed_step, TestPassedRecord};
+use super::step_parse::{TestPassedRecord, parse_test_passed_step};
 use super::step_transition::advance_step_on_test_passed;
-use super::WorkflowPhaseAuthority;
 use serde_json::Value;
 
 /// Inputs the runtime threads in. `event_payload` is the
@@ -65,11 +65,10 @@ pub fn handle_phase_on_event_accepted(
     let next_snapshot = authority.on_event_accepted(&fixture);
 
     let phase_entered = next_snapshot.phase_id != prev_snapshot.phase_id;
-    let review_walk_closed =
-        !prev_snapshot.review_walk_closed && next_snapshot.review_walk_closed;
+    let review_walk_closed = !prev_snapshot.review_walk_closed && next_snapshot.review_walk_closed;
 
     let progress_md_fragment = if phase_entered {
-        use super::progress_projection::{apply_progress_on_phase_enter, PhaseEnterContext};
+        use super::progress_projection::{PhaseEnterContext, apply_progress_on_phase_enter};
         let cfg = authority.progress_projection().unwrap_or_default();
         let ctx = PhaseEnterContext {
             phase_id: next_snapshot.phase_id.clone(),
@@ -113,8 +112,8 @@ pub fn build_fixture<'a>(
             };
             EventFixture::TestPassed(fixture)
         }
-        "review.complete" => EventFixture::ReviewComplete(
-            on_review_complete_verdict::ReviewCompleteFixture {
+        "review.complete" => {
+            EventFixture::ReviewComplete(on_review_complete_verdict::ReviewCompleteFixture {
                 verdict: parse_verdict(event.payload),
                 fix_plan_attached: !event
                     .payload
@@ -122,9 +121,11 @@ pub fn build_fixture<'a>(
                     .and_then(|v| v.as_str())
                     .map(str::is_empty)
                     .unwrap_or(true),
-            },
-        ),
-        "LOOP_COMPLETE" => EventFixture::LoopComplete { honored: event.honored },
+            })
+        }
+        "LOOP_COMPLETE" => EventFixture::LoopComplete {
+            honored: event.honored,
+        },
         // Other topics drive only `on_event` rules; the
         // evaluator walks the declaration.
         other => EventFixture::Bare(other),
@@ -147,10 +148,10 @@ fn parse_verdict(payload: &Value) -> on_review_complete_verdict::Verdict {
 
 #[cfg(test)]
 mod tests {
+    use super::super::WorkflowPhaseAuthority;
     use super::super::config::*;
     use super::super::declaration::PhaseAuthorityDeclaration;
     use super::super::snapshot::ViolationKind;
-    use super::super::WorkflowPhaseAuthority;
     use super::*;
     use serde_json::json;
 

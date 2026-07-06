@@ -251,10 +251,7 @@ impl HandoffIndex {
 /// `triggers` list is the single source of truth across all
 /// three call sites. No new validation is added; the helper
 /// just unifies the existing check.
-pub fn check_hat_triggers(
-    hat_triggers: &[String],
-    topic: &str,
-) -> Result<(), HandoffRoutingError> {
+pub fn check_hat_triggers(hat_triggers: &[String], topic: &str) -> Result<(), HandoffRoutingError> {
     let topic_obj = ralph_proto::Topic::new(topic);
     let matches = hat_triggers.iter().any(|t| {
         let pattern = ralph_proto::Topic::new(t);
@@ -288,7 +285,10 @@ pub enum HandoffRoutingError {
 impl std::fmt::Display for HandoffRoutingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HandoffRoutingError::HatDoesNotConsume { hat_triggers, topic } => write!(
+            HandoffRoutingError::HatDoesNotConsume {
+                hat_triggers,
+                topic,
+            } => write!(
                 f,
                 "hat does not declare `{topic}` in its `triggers` list (declared: {:?})",
                 hat_triggers
@@ -508,7 +508,10 @@ hats:
         let triggers = vec!["work.ready".to_string()];
         let err = check_hat_triggers(&triggers, "plan.complete").unwrap_err();
         match err {
-            HandoffRoutingError::HatDoesNotConsume { topic, hat_triggers } => {
+            HandoffRoutingError::HatDoesNotConsume {
+                topic,
+                hat_triggers,
+            } => {
                 assert_eq!(topic, "plan.complete");
                 assert_eq!(hat_triggers, vec!["work.ready".to_string()]);
             }
@@ -558,8 +561,7 @@ hats:
     fn u6_glob_vs_literal_divergence_documented() {
         let triggers_with_glob = vec!["review.*".to_string()];
         // Helper (glob) accepts `review.dimension`.
-        check_hat_triggers(&triggers_with_glob, "review.dimension")
-            .expect("glob match (helper)");
+        check_hat_triggers(&triggers_with_glob, "review.dimension").expect("glob match (helper)");
         // Inline literal `==` at event_loop/mod.rs:4406 would NOT
         // match `review.dimension` against the literal pattern
         // `review.*`. This is the documented divergence: the

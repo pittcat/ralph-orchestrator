@@ -302,13 +302,21 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// `active_workers >= max_concurrent_workers`, the call returns
     /// `None` without consuming from the queue (R-A2 / KTD-11
     /// applies the soft cap).
-    fn try_dispatch_next(&self, max_concurrent_workers: u32) -> SupervisorStoreResult<Option<(String, u32)>>;
+    fn try_dispatch_next(
+        &self,
+        max_concurrent_workers: u32,
+    ) -> SupervisorStoreResult<Option<(String, u32)>>;
 
     /// Record a slot's worktree/resource binding before spawn
     /// (U10's helper calls this). Implementations MUST reject
     /// dispatch of a `Worktree`-isolation slot whose
     /// `slot_resources` is unbound (returns `InvalidTransition`).
-    fn bind_worktree(&self, wave_id: &str, slot_index: u32, binding: SlotResource) -> SupervisorStoreResult<()>;
+    fn bind_worktree(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        binding: SlotResource,
+    ) -> SupervisorStoreResult<()>;
 
     /// Mark a slot completed with the produced worker result
     /// (events + content_hash for dedup, R-E1).
@@ -354,11 +362,7 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// where the dispatch row was reclaimed, etc.). The
     /// cancel path uses this to walk the slot → PID
     /// mapping without re-reading the snapshot.
-    fn pid_for_slot(
-        &self,
-        wave_id: &str,
-        slot_index: u32,
-    ) -> SupervisorStoreResult<Option<u32>>;
+    fn pid_for_slot(&self, wave_id: &str, slot_index: u32) -> SupervisorStoreResult<Option<u32>>;
 
     /// Return the current slot/lifecycle snapshot for the phase
     /// decision pure function (U6).
@@ -400,9 +404,9 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
 }
 
 pub use coordinator::{CoordinatorAction, SupervisorCoordinator};
-pub use merge_sink::{EventMergeSink, InMemoryMergeSink, MergeSinkError};
 pub use memory::InMemorySupervisorStore;
-pub use phase::{evaluate_phase, FailedReason, PhaseDecision, PhaseInputs};
+pub use merge_sink::{EventMergeSink, InMemoryMergeSink, MergeSinkError};
+pub use phase::{FailedReason, PhaseDecision, PhaseInputs, evaluate_phase};
 #[cfg(feature = "supervisor-db")]
 pub use rusqlite::RusqliteSupervisorStore;
 pub use worktree_bind::{
@@ -412,19 +416,19 @@ pub use worktree_bind::{
 
 mod bridge;
 mod coordinator;
-mod merge_sink;
 mod memory;
-mod phase;
+#[cfg(test)]
+mod memory_protocol_tests;
+mod merge_sink;
 #[cfg(feature = "supervisor-db")]
 mod migrations;
+mod phase;
 mod recover;
 #[cfg(feature = "supervisor-db")]
 mod rusqlite;
-mod worktree_bind;
-#[cfg(test)]
-mod memory_protocol_tests;
 #[cfg(test)]
 mod types_tests;
+mod worktree_bind;
 
 // 2026-07-03-001 supervisor real-wiring: re-export the sunk-down
 // bridge surface so `ralph-cli` and the BDD scenarios can depend on

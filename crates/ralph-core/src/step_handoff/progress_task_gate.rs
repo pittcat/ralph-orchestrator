@@ -786,7 +786,10 @@ mod refresh_tests {
     fn refresh_progress_snapshot_if_stale_returns_false_on_match() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("progress.md");
-        write_progress(&path, "## Current Step\nstep-02\n\n## Completed Steps\n- step-01\n");
+        write_progress(
+            &path,
+            "## Current Step\nstep-02\n\n## Completed Steps\n- step-01\n",
+        );
         let mut snap = ProgressSnapshot::parse(&std::fs::read_to_string(&path).unwrap());
         let refreshed = refresh_progress_snapshot_if_stale(&path, &mut snap);
         assert!(!refreshed, "matching fingerprint must NOT report refresh");
@@ -799,10 +802,7 @@ mod refresh_tests {
         // list. The reconciler must overwrite.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("progress.md");
-        write_progress(
-            &path,
-            "## Completed Steps\n- step-01\n- step-02\n",
-        );
+        write_progress(&path, "## Completed Steps\n- step-01\n- step-02\n");
         let mut snap = ProgressSnapshot::default(); // stale, empty
         let refreshed = refresh_progress_snapshot_if_stale(&path, &mut snap);
         assert!(refreshed, "stale mirror must be reported as refreshed");
@@ -1181,10 +1181,7 @@ mod tests {
     #[test]
     fn u1_plan_complete_completed_steps_last_step_event_step_aligned() {
         let snap = snapshot_with_completed(&["step-01", "step-02"]);
-        let payload = vec![
-            "step-01".to_string(),
-            "step-02".to_string(),
-        ];
+        let payload = vec!["step-01".to_string(), "step-02".to_string()];
         let decision = check_alignment_with_snapshot(
             &snap,
             &[],
@@ -1313,9 +1310,7 @@ mod tests {
             GateDecision::Mismatch(m) => {
                 assert_eq!(m.reason, "task_closed_but_progress_missing");
             }
-            other => panic!(
-                "expected task_closed_but_progress_missing Mismatch, got {other:?}"
-            ),
+            other => panic!("expected task_closed_but_progress_missing Mismatch, got {other:?}"),
         }
     }
 }

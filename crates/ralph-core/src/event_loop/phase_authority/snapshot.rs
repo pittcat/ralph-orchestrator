@@ -163,8 +163,7 @@ mod tests {
 
     #[test]
     fn last_completed_step_records() {
-        let snap = PhaseSnapshot::with_phase_id("unit_loop")
-            .with_last_completed_step("step-03");
+        let snap = PhaseSnapshot::with_phase_id("unit_loop").with_last_completed_step("step-03");
         assert_eq!(snap.last_completed_step.as_deref(), Some("step-03"));
     }
 }

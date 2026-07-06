@@ -114,12 +114,9 @@ pub fn merge_hat_channel(
                         // Backfill `triggered` from the topic's real subscriber
                         // when the agent did not provide one.
                         if !obj.contains_key("triggered") {
-                            if let Some(topic) = obj
-                                .get("topic")
-                                .and_then(|v| v.as_str())
-                            {
-                                if let Some(derived) = config
-                                    .and_then(|c| derive_triggered_for_topic(topic, c))
+                            if let Some(topic) = obj.get("topic").and_then(|v| v.as_str()) {
+                                if let Some(derived) =
+                                    config.and_then(|c| derive_triggered_for_topic(topic, c))
                                 {
                                     obj.insert(
                                         "triggered".to_string(),
@@ -171,9 +168,7 @@ pub fn merge_hat_channel(
     // 通过 `ralph diagnose` 发现。不 fail-closed loop,与
     // `emit_channel_routing_fallback_diagnostic` 行为一致。
     if let Err(err) = scan_orphan_subtree_events(ctx) {
-        tracing::warn!(
-            "hat_channel: orphan subtree scan failed: {err}"
-        );
+        tracing::warn!("hat_channel: orphan subtree scan failed: {err}");
     }
 
     Ok(())
@@ -204,8 +199,8 @@ fn scan_orphan_subtree_events(ctx: &LoopContext) -> anyhow::Result<()> {
         "target".to_string(),
     ]
     .into_iter()
-        .map(|p| workspace.join(p))
-        .collect();
+    .map(|p| workspace.join(p))
+    .collect();
 
     let mut orphans: Vec<std::path::PathBuf> = Vec::new();
     walk_collect_orphans(&workspace, &skip_paths, 0, 8, &mut orphans);
@@ -289,10 +284,7 @@ fn walk_collect_orphans(
             if !has_ralph_ancestor {
                 continue;
             }
-            let meta_ok = entry
-                .metadata()
-                .map(|m| m.len() > 0)
-                .unwrap_or(false);
+            let meta_ok = entry.metadata().map(|m| m.len() > 0).unwrap_or(false);
             if !meta_ok {
                 continue;
             }
@@ -394,8 +386,7 @@ mod tests {
         .unwrap();
 
         let target = tmp.path().join(".ralph/events-main.jsonl");
-        merge_hat_channel(&ctx, &target, "review-synthesizer", None
-        ).unwrap();
+        merge_hat_channel(&ctx, &target, "review-synthesizer", None).unwrap();
 
         let merged = fs::read_to_string(&target).unwrap();
         assert!(merged.contains("\"topic\":\"review.passed\""));
@@ -423,8 +414,7 @@ mod tests {
         fs::write(&channel, "not-a-json-line\n").unwrap();
 
         let target = tmp.path().join(".ralph/events-main.jsonl");
-        merge_hat_channel(&ctx, &target, "executor", None
-        ).unwrap();
+        merge_hat_channel(&ctx, &target, "executor", None).unwrap();
 
         let merged = fs::read_to_string(&target).unwrap();
         assert!(merged.contains("not-a-json-line"));
@@ -439,8 +429,7 @@ mod tests {
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(&target, "existing\n").unwrap();
 
-        merge_hat_channel(&ctx, &target, "executor", None
-        ).unwrap();
+        merge_hat_channel(&ctx, &target, "executor", None).unwrap();
 
         let merged = fs::read_to_string(&target).unwrap();
         assert_eq!(merged.trim(), "existing");
@@ -452,8 +441,7 @@ mod tests {
         let ctx = make_ctx(&tmp);
 
         let mut config = RalphConfig::default();
-        config.event_loop.execution_mode =
-            ralph_core::config::HatExecutionMode::Isolated;
+        config.event_loop.execution_mode = ralph_core::config::HatExecutionMode::Isolated;
         config.hats.insert(
             "review-coordinator".to_string(),
             ralph_core::HatConfig {
@@ -479,9 +467,7 @@ mod tests {
             },
         );
 
-        let channel = prepare_hat_channel(&ctx, "review-coordinator", "primary-004", 1
-        )
-        .unwrap();
+        let channel = prepare_hat_channel(&ctx, "review-coordinator", "primary-004", 1).unwrap();
         fs::write(
             &channel,
             r#"{"topic":"review.dimension.ready","payload":{"dimension":"goal-alignment"},"ts":"2026-07-03T00:00:00Z"}
@@ -492,9 +478,7 @@ mod tests {
         .unwrap();
 
         let target = tmp.path().join(".ralph/events-main.jsonl");
-        merge_hat_channel(&ctx, &target, "review-coordinator", Some(&config)
-        )
-        .unwrap();
+        merge_hat_channel(&ctx, &target, "review-coordinator", Some(&config)).unwrap();
 
         let merged = fs::read_to_string(&target).unwrap();
         let lines: Vec<&str> = merged.lines().collect();
@@ -652,13 +636,11 @@ mod tests {
 
         // 确认 diagnostics 目录要么不存在,要么不含 orphan-emit-*.md
         let diagnostics_dir = ctx.ralph_dir().join("diagnostics");
-        let has_orphan = diagnostics_dir
-            .is_dir()
-            && (fs::read_dir(&diagnostics_dir).unwrap().flatten().any(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("orphan-emit-")
-            }));
+        let has_orphan = diagnostics_dir.is_dir()
+            && (fs::read_dir(&diagnostics_dir)
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with("orphan-emit-")));
         assert!(
             !has_orphan,
             "no orphan subtree must produce no orphan-emit diagnostic"

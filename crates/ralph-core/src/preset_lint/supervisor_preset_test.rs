@@ -11,14 +11,11 @@
 #![cfg(test)]
 
 use crate::preset_lint::{
-    FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC,
-    FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE,
+    FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC, FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE,
     FINDING_SUPERVISOR_REQUIRES_ISOLATED, check_supervisor_rules,
 };
 
-const PRESET_YAML: &str = include_str!(
-    "../../../../presets/en/ce-executor-supervisor.yml"
-);
+const PRESET_YAML: &str = include_str!("../../../../presets/en/ce-executor-supervisor.yml");
 
 #[test]
 fn ce_executor_supervisor_preset_passes_supervisor_lint() {

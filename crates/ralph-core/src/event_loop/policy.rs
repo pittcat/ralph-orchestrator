@@ -50,8 +50,9 @@ pub fn publish_correction_via_context(
 ) {
     let (duplicate_work_done_hint, seen_count) = policy_finding
         .and_then(|f| {
-            if let crate::event_policy::ViolationType::DuplicateWorkDone { hint, seen_count, .. } =
-                &f.violation_type
+            if let crate::event_policy::ViolationType::DuplicateWorkDone {
+                hint, seen_count, ..
+            } = &f.violation_type
             {
                 Some((*hint, *seen_count))
             } else {

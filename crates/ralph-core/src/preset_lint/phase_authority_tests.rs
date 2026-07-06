@@ -84,7 +84,11 @@ mechanism:
     enabled: false
 "#;
     let findings = check_phase_authority_block(yaml);
-    assert!(findings.is_empty(), "disabled phase_authority must be silent, got {:?}", findings);
+    assert!(
+        findings.is_empty(),
+        "disabled phase_authority must be silent, got {:?}",
+        findings
+    );
 }
 
 #[test]
@@ -95,7 +99,11 @@ hats:
     publishes: [plan.complete]
 "#;
     let findings = check_phase_authority_block(yaml);
-    assert!(findings.is_empty(), "absent phase_authority must be silent, got {:?}", findings);
+    assert!(
+        findings.is_empty(),
+        "absent phase_authority must be silent, got {:?}",
+        findings
+    );
 }
 
 #[test]

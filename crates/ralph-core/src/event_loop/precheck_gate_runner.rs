@@ -146,10 +146,7 @@ pub fn dispatch_rejection(params: &DispatchParams<'_>) -> DispatchOutcome {
         // event loop can render a `plan.blocked` payload with the
         // reason field set explicitly (R8).
         let (topic, reason) = split_on_exhausted(params.on_exhausted);
-        return DispatchOutcome::Exhausted {
-            topic,
-            reason,
-        };
+        return DispatchOutcome::Exhausted { topic, reason };
     }
 
     // Within budget: build a `task.resume` payload that
@@ -186,14 +183,14 @@ fn split_on_exhausted(on_exhausted: &str) -> (String, String) {
         let reason = rest.trim_end_matches(')').trim_end_matches('"').to_string();
         return (topic, reason);
     }
-    (on_exhausted.trim().to_string(), "precheck_failed".to_string())
+    (
+        on_exhausted.trim().to_string(),
+        "precheck_failed".to_string(),
+    )
 }
 
 /// Human-readable failure text for prompt injection (R5 / AE3).
-pub fn format_precheck_failure_message(
-    guarded_topic: &str,
-    rejected_payload_json: &str,
-) -> String {
+pub fn format_precheck_failure_message(guarded_topic: &str, rejected_payload_json: &str) -> String {
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(rejected_payload_json) {
         let reason = parsed
             .get("reason")
@@ -228,14 +225,8 @@ fn build_resume_payload(
     // payload isn't a JSON object (defensive — LLM emits are
     // not always valid JSON).
     let mut obj = serde_json::Map::new();
-    obj.insert(
-        "stage".into(),
-        serde_json::Value::String("precheck".into()),
-    );
-    obj.insert(
-        "topic".into(),
-        serde_json::Value::String(topic.to_string()),
-    );
+    obj.insert("stage".into(), serde_json::Value::String("precheck".into()));
+    obj.insert("topic".into(), serde_json::Value::String(topic.to_string()));
     obj.insert(
         "violation".into(),
         serde_json::Value::String("precheck_rejected".into()),

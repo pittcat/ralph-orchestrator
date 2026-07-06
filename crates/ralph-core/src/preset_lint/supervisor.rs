@@ -28,11 +28,7 @@ use serde_yaml::Value;
 /// Patterns of integrator hat ids the lint matches against.
 /// Future integrators are obvious from naming — `*-integrator`
 /// or `*_integrator`.
-const INTEGRATOR_HAT_NAMES: &[&str] = &[
-    "exec-integrator",
-    "fix-integrator",
-    "review-integrator",
-];
+const INTEGRATOR_HAT_NAMES: &[&str] = &["exec-integrator", "fix-integrator", "review-integrator"];
 
 /// Slot-level done topics the lint rejects on integrators.
 /// These are emitted by the worker-side per-slot hat; the

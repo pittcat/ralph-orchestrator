@@ -1277,7 +1277,9 @@ hats:
         // Sanity: the producer was rewritten to `<X>.proposed`.
         let executor_publishes = &config.hats["executor"].publishes;
         assert!(
-            executor_publishes.iter().any(|p| p == "review.complete.proposed"),
+            executor_publishes
+                .iter()
+                .any(|p| p == "review.complete.proposed"),
             "executor must publish review.complete.proposed, got {executor_publishes:?}"
         );
         assert!(
@@ -1337,7 +1339,10 @@ hats:
         // never `<X>.proposed`.
         let gate = &config.hats["precheck-review.complete"];
         assert!(
-            !gate.publishes.iter().any(|p| p == "review.complete.proposed"),
+            !gate
+                .publishes
+                .iter()
+                .any(|p| p == "review.complete.proposed"),
             "gate hat must never re-publish <X>.proposed, got {gate_publishes:?}",
             gate_publishes = gate.publishes
         );

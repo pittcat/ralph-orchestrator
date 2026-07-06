@@ -124,8 +124,8 @@ mod tests {
     fn emits_recovery_exhausted_prefix_reason_literal() {
         let ctx = RuntimeContext {
             recovery_envelopes: vec![EnvelopeSnapshot {
-                retry_key:
-                    "stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*".to_string(),
+                retry_key: "stall_recovery:coordinator:task_resume:handoff_dispatch_timeout:*"
+                    .to_string(),
                 source: "StallRecovery".to_string(),
                 outcome: "Pending".to_string(),
                 iteration: 5,

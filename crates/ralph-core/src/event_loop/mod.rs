@@ -63,12 +63,12 @@ pub mod termination;
 // See `event_loop::audit` for the typed severity + dispatcher.
 pub mod audit;
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 // 2026-07-02-006 plan U15: build_stage_pipeline_from_config
 // branch tests. Sibling to `tests` so the wiring change is
 // visible without scanning the entire mod.rs.
 mod build_stage_pipeline_phase_branch_tests;
+#[cfg(test)]
+mod tests;
 
 // 2026-06-10-003 U1 scaffold: 10 target submodules (filled in U3-U6).
 // Each placeholder is intentionally empty; `pub use xxx::*` re-exports
@@ -148,14 +148,12 @@ pub(crate) use self::prompt_helpers::prepend_handoff_envelope_if_enabled;
 // the real prompt chain (after orchestrator context / wave
 // context) so the wiring test (`u6_handoff_envelope_wiring`) can
 // pin the behaviour without going through EventLoop.
-pub(crate) use self::prompt_helpers::{
-    build_isolated_prompt_with_handoff, IsolatedPromptInputs,
-};
+pub(crate) use self::prompt_helpers::{IsolatedPromptInputs, build_isolated_prompt_with_handoff};
 
 mod prompt_helpers {
     use crate::config::HandoffEnvelopeConfig;
     use crate::handoff_envelope::{
-        latest_handoff_envelope_payload, render_handoff_envelope_prompt, HandoffEnvelopeView,
+        HandoffEnvelopeView, latest_handoff_envelope_payload, render_handoff_envelope_prompt,
     };
     use ralph_proto::Event;
 
@@ -201,11 +199,7 @@ mod prompt_helpers {
     /// hint stretch (per plan §Unit 6 ordering).
     pub(crate) fn build_isolated_prompt_with_handoff(inputs: IsolatedPromptInputs<'_>) -> String {
         let envelope = latest_handoff_envelope_payload(inputs.events);
-        prepend_handoff_envelope_if_enabled(
-            inputs.base_prompt,
-            inputs.config,
-            envelope.as_ref(),
-        )
+        prepend_handoff_envelope_if_enabled(inputs.base_prompt, inputs.config, envelope.as_ref())
     }
 }
 
@@ -225,7 +219,8 @@ use crate::event_policy::{PolicyDecision, PolicyRuntimeState, check_completion_g
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::execution_contract::{
     DefaultGitEvidenceProvider, ExecutionContractDecision, ExecutionContractFinding,
-    ExecutionContractViolationKind, run_execution_contract_soft_checks, validate_execution_contract,
+    ExecutionContractViolationKind, run_execution_contract_soft_checks,
+    validate_execution_contract,
 };
 use crate::hat_lifecycle::{ActivationKey, ActivationLifecycleTracker, SystemTimeClock};
 use crate::hat_registry::HatRegistry;
@@ -350,9 +345,7 @@ impl TerminationReason {
             // scope_violation hard-reject. Stable reason string
             // (matches the variant name; downstream consumers pin
             // against this literal).
-            TerminationReason::ScopeViolationHardRejected { .. } => {
-                "scope_violation_hard_rejected"
-            }
+            TerminationReason::ScopeViolationHardRejected { .. } => "scope_violation_hard_rejected",
         }
     }
 
@@ -650,8 +643,9 @@ fn build_stage_pipeline_from_config(
     let phase_authority_enabled = authority.is_enabled();
 
     if phase_authority_enabled {
-        let flow_yaml = load_opt_in_flow_declaration(config)
-            .unwrap_or_else(|| FlowDeclaration::from_yaml(minimal_flow_declaration_yaml()).unwrap());
+        let flow_yaml = load_opt_in_flow_declaration(config).unwrap_or_else(|| {
+            FlowDeclaration::from_yaml(minimal_flow_declaration_yaml()).unwrap()
+        });
         let step_totals: std::collections::HashMap<String, u32> = flow_yaml
             .steps
             .iter()
@@ -1905,14 +1899,12 @@ impl EventLoop {
         // documented rather than wiring `process_output` through
         // the helper.
         if let Some(cfg) = self.registry.get_config(&HatId::from(consumer)) {
-            if let Err(_err) = crate::workflow_contract::handoff_index::check_hat_triggers(
-                &cfg.triggers,
-                topic,
-            ) {
+            if let Err(_err) =
+                crate::workflow_contract::handoff_index::check_hat_triggers(&cfg.triggers, topic)
+            {
                 return EventLoopResumeDecision::Block(format!(
                     "U16: resume target hat `{}` does not declare `{}` in its `triggers` list; resume will not be picked up",
-                    consumer,
-                    topic
+                    consumer, topic
                 ));
             }
         }
@@ -5661,7 +5653,8 @@ impl EventLoop {
             match action {
                 RecoveryAction::PublishEvent { topic, payload } => {
                     debug!(topic = %topic, "runtime-recovery: publishing corrective event");
-                    let event = Event::new(topic.as_str(), payload).with_source(HatId::from("ralph"));
+                    let event =
+                        Event::new(topic.as_str(), payload).with_source(HatId::from("ralph"));
                     // 2026-07-06 U2 (DEV-002): persist runtime-recovery
                     // corrective events to events.jsonl alongside the
                     // bus publish. Without this the trusted events stream
@@ -5893,7 +5886,10 @@ impl EventLoop {
         // every hat. Threading `hat_id` here is what the plan KTD calls
         // out as the "auto_inject_skills(None) → auto_inject_skills(Some(...))"
         // fix.
-        for skill in self.skill_registry.auto_inject_skills(Some(hat_id.as_str())) {
+        for skill in self
+            .skill_registry
+            .auto_inject_skills(Some(hat_id.as_str()))
+        {
             // Skip built-in skills handled above
             //
             // 2026-06-25 refactor: `robot-interaction` was removed because its
@@ -5906,8 +5902,7 @@ impl EventLoop {
             // consolidated skill doc, not three at the bottom).
             if matches!(
                 skill.name.as_str(),
-                "ralph-tools" | "ralph-tools-tasks" | "ralph-tools-memories"
-                    | "ralph-tools-opac"
+                "ralph-tools" | "ralph-tools-tasks" | "ralph-tools-memories" | "ralph-tools-opac"
             ) {
                 continue;
             }
@@ -6432,10 +6427,9 @@ impl EventLoop {
         if hat_id.as_str() == "ralph" {
             return prompt;
         }
-        let Some(snapshot) = crate::hat_identity::HatIdentitySnapshot::from_config(
-            &self.config,
-            hat_id,
-        ) else {
+        let Some(snapshot) =
+            crate::hat_identity::HatIdentitySnapshot::from_config(&self.config, hat_id)
+        else {
             tracing::debug!(
                 hat_id = %hat_id.as_str(),
                 "OPAC U2: skipping ## HAT IDENTITY injection for unknown hat"
@@ -6588,11 +6582,7 @@ impl EventLoop {
     ) -> String {
         // U18 (P2): macro edge next hint. The flag defaults to disabled;
         // when off we are a no-op so existing loops are unaffected.
-        let flag = self
-            .config
-            .event_loop
-            .macro_edge_next_hint
-            .enabled;
+        let flag = self.config.event_loop.macro_edge_next_hint.enabled;
         if !flag {
             return prompt;
         }
@@ -6626,9 +6616,7 @@ impl EventLoop {
         }
 
         let Some(hint) = hint else { return prompt };
-        format!(
-            "## NEXT ACTION\n\n{hint}\n\n---\n\n{prompt}",
-        )
+        format!("## NEXT ACTION\n\n{hint}\n\n---\n\n{prompt}",)
     }
 
     fn inject_pending_lint_resume(&mut self, prompt: String, hat_id: &HatId) -> String {
@@ -7625,9 +7613,7 @@ impl EventLoop {
                 .state
                 .handoff_tracker
                 .bump_consumer_stall_count(&esc.consumer);
-            if stall_count >= 2
-                && self.config.event_loop.progress_steward.enabled
-            {
+            if stall_count >= 2 && self.config.event_loop.progress_steward.enabled {
                 // 2026-07-06 plan U12: when `progress_steward.enabled`
                 // is `false`, the runtime MUST NOT publish
                 // `loop.stalled` wake events. The ce-executor-serial
@@ -7945,15 +7931,12 @@ impl EventLoop {
                 // `trigger_to_reason` produces a fully-populated
                 // `TerminationReason` without further enrichment.
                 if is_dimension_reviewer {
-                    if let Err(e) = self
-                        .state
-                        .push_termination_trigger(
-                            crate::event_loop::termination::TerminationTrigger::ScopeViolation {
-                                hat: hat_id.as_str().to_string(),
-                                diff_stat: diff_stat.clone(),
-                            },
-                        )
-                    {
+                    if let Err(e) = self.state.push_termination_trigger(
+                        crate::event_loop::termination::TerminationTrigger::ScopeViolation {
+                            hat: hat_id.as_str().to_string(),
+                            diff_stat: diff_stat.clone(),
+                        },
+                    ) {
                         warn!(
                             error = %e,
                             "scope_violation_hard_rejected: failed to push termination trigger"
@@ -9091,29 +9074,22 @@ impl EventLoop {
                     // terminal event displaces the earlier
                     // non-terminal business event.
                     true
-                } else if !exempt_topic_carveout_used
-                    && {
-                        let (business, terminal) = self
-                            .config
-                            .event_loop
-                            .event_policy
-                            .as_ref()
-                            .map(|ep| {
-                                (
-                                    ep.business_topics.as_slice(),
-                                    ep.terminal_topics.as_slice(),
-                                )
-                            })
-                            .unwrap_or((&[], &[]));
-                        is_isolated_exempt_topic(
-                            self.registry.get_config(
-                                isolated_hat_owned.as_ref().unwrap_or(&HatId::from("")),
-                            ),
-                            &event.topic,
-                            business,
-                            terminal,
-                        )
-                    } {
+                } else if !exempt_topic_carveout_used && {
+                    let (business, terminal) = self
+                        .config
+                        .event_loop
+                        .event_policy
+                        .as_ref()
+                        .map(|ep| (ep.business_topics.as_slice(), ep.terminal_topics.as_slice()))
+                        .unwrap_or((&[], &[]));
+                    is_isolated_exempt_topic(
+                        self.registry
+                            .get_config(isolated_hat_owned.as_ref().unwrap_or(&HatId::from(""))),
+                        &event.topic,
+                        business,
+                        terminal,
+                    )
+                } {
                     // 2026-07-03-005 plan (P0 fix M-1): declared
                     // serial walk exemption. The isolated hat has
                     // listed this topic in its `exempt_topics` (a
@@ -9184,26 +9160,17 @@ impl EventLoop {
                 // the carve-out actually admitted — admits via
                 // other branches (wave, terminal-priority, fresh
                 // slot) keep the carve-out unused for this turn.
-                if should_admit
-                    && !non_wave_business_event_accepted
-                    && !admitted_under_wave
-                {
+                if should_admit && !non_wave_business_event_accepted && !admitted_under_wave {
                     let (business, terminal) = self
                         .config
                         .event_loop
                         .event_policy
                         .as_ref()
-                        .map(|ep| {
-                            (
-                                ep.business_topics.as_slice(),
-                                ep.terminal_topics.as_slice(),
-                            )
-                        })
+                        .map(|ep| (ep.business_topics.as_slice(), ep.terminal_topics.as_slice()))
                         .unwrap_or((&[], &[]));
                     if is_isolated_exempt_topic(
-                        self.registry.get_config(
-                            isolated_hat_owned.as_ref().unwrap_or(&HatId::from("")),
-                        ),
+                        self.registry
+                            .get_config(isolated_hat_owned.as_ref().unwrap_or(&HatId::from(""))),
                         &event.topic,
                         business,
                         terminal,
@@ -9810,10 +9777,14 @@ impl EventLoop {
                         // tasks.jsonl path so the StepHandoffRule can
                         // best-effort reload on a stale in-memory view
                         // (140149 / 175407 root cause).
-                        .with_tasks_path(self.config.core.workspace_root
-                            .join(".ralph")
-                            .join("agent")
-                            .join("tasks.jsonl"));
+                        .with_tasks_path(
+                            self.config
+                                .core
+                                .workspace_root
+                                .join(".ralph")
+                                .join("agent")
+                                .join("tasks.jsonl"),
+                        );
                     pipeline.validate_pre_commit_with_view(&view, &mut ctx, evt)
                 };
                 let mut event_accepted = true;
@@ -9897,7 +9868,10 @@ impl EventLoop {
                                     state_ledger.as_mut(),
                                     evt,
                                     &reason,
-                                    policy_finding_for_topic(&policy_rejections, evt.topic.as_str()),
+                                    policy_finding_for_topic(
+                                        &policy_rejections,
+                                        evt.topic.as_str(),
+                                    ),
                                 );
                                 had_policy_rejections = true;
                                 event_accepted = false;
@@ -9915,7 +9889,10 @@ impl EventLoop {
                                     state_ledger.as_mut(),
                                     evt,
                                     &reason,
-                                    policy_finding_for_topic(&policy_rejections, evt.topic.as_str()),
+                                    policy_finding_for_topic(
+                                        &policy_rejections,
+                                        evt.topic.as_str(),
+                                    ),
                                 );
                                 had_policy_rejections = true;
                                 event_accepted = false;
@@ -9968,10 +9945,14 @@ impl EventLoop {
                             .with_payload_contract_violation(&mut event_policy_violation)
                             .with_source_hats_by_topic(&source_hats_by_topic)
                             .with_target_hats_by_topic(&target_hats_by_topic)
-                            .with_tasks_path(self.config.core.workspace_root
-                                .join(".ralph")
-                                .join("agent")
-                                .join("tasks.jsonl"));
+                            .with_tasks_path(
+                                self.config
+                                    .core
+                                    .workspace_root
+                                    .join(".ralph")
+                                    .join("agent")
+                                    .join("tasks.jsonl"),
+                            );
                         pipeline.validate_post_commit(&view, &mut ctx, evt)
                     };
                     for r in &post_results {
@@ -10539,7 +10520,8 @@ impl EventLoop {
                                             let is_task_not_terminal_delegate = matches!(
                                                 &finding.kind,
                                                 ExecutionContractViolationKind::TaskNotTerminal { .. }
-                                            ) && resolved_hat_id_str != hat_id_str;
+                                            )
+                                                && resolved_hat_id_str != hat_id_str;
                                             if is_task_not_terminal_delegate {
                                                 retry_target = Some(hat_id);
                                             } else {
@@ -10855,15 +10837,18 @@ impl EventLoop {
             // diagnostic; the coordinator will be re-prompted with
             // the missing predecessor and re-emit on the next turn.
             if event.topic == "work.ready" {
-                let step: Option<String> = payload
-                    .find("\"step\":\"")
-                    .map(|i| i + 8)
-                    .and_then(|start| {
-                        let rest = &payload[start..];
-                        rest.find('"').map(|end| rest[..end].to_string())
-                    });
+                let step: Option<String> =
+                    payload
+                        .find("\"step\":\"")
+                        .map(|i| i + 8)
+                        .and_then(|start| {
+                            let rest = &payload[start..];
+                            rest.find('"').map(|end| rest[..end].to_string())
+                        });
                 if let Some(step) = step {
-                    if let Some(nn) = step.strip_prefix("step-").and_then(|s| s.parse::<u32>().ok())
+                    if let Some(nn) = step
+                        .strip_prefix("step-")
+                        .and_then(|s| s.parse::<u32>().ok())
                     {
                         if nn > 1 {
                             let prev = format!("step-{:02}", nn - 1);
@@ -12068,8 +12053,7 @@ impl EventLoop {
             if let Some(guarded) = gate::gate_topic(source_hat.as_str()) {
                 if topic_str == guarded {
                     self.precheck_retries.record_pass(&loop_id, guarded);
-                    self.state
-                        .discharge_hat_obligation(&source_hat, topic_str);
+                    self.state.discharge_hat_obligation(&source_hat, topic_str);
                     continue;
                 }
             }
@@ -12090,8 +12074,7 @@ impl EventLoop {
                 continue;
             };
 
-            self.state
-                .discharge_hat_obligation(&source_hat, topic_str);
+            self.state.discharge_hat_obligation(&source_hat, topic_str);
             self.dispatch_precheck_rejection(
                 &loop_id,
                 &precheck_cfg,
@@ -12120,9 +12103,7 @@ impl EventLoop {
             Some(r) => r,
             None => return,
         };
-        let rejection_count = self
-            .precheck_retries
-            .record_rejection(loop_id, guarded);
+        let rejection_count = self.precheck_retries.record_rejection(loop_id, guarded);
 
         let params = runner::DispatchParams {
             loop_id,
@@ -12205,8 +12186,8 @@ impl EventLoop {
                     "U6: precheck retry budget exhausted; escalating to on_exhausted"
                 );
                 let payload = runner::build_exhausted_payload(&topic, &reason);
-                let blocked =
-                    ralph_proto::Event::new(topic.clone(), payload).with_source(HatId::new(gate_hat_id));
+                let blocked = ralph_proto::Event::new(topic.clone(), payload)
+                    .with_source(HatId::new(gate_hat_id));
                 self.state.record_event(&blocked);
                 self.bus.publish(blocked);
                 self.terminal_event_emitted = true;
@@ -13057,7 +13038,7 @@ impl EventLoop {
             return;
         }
         use crate::event_loop::phase_authority::diagnosis::{
-            diagnosis_plan_complete_dual_check, DualCheckInput, DualCheckOutcome,
+            DualCheckInput, DualCheckOutcome, diagnosis_plan_complete_dual_check,
         };
         let outcome = diagnosis_plan_complete_dual_check(&DualCheckInput {
             topic: event.topic.to_string(),
@@ -13097,7 +13078,8 @@ impl EventLoop {
             return false;
         }
         use crate::event_loop::phase_authority::shipper_helper::{
-            shipper_requires_plan_complete_when_phase_enabled, ShipperDecision, ShipperRoutingContext,
+            ShipperDecision, ShipperRoutingContext,
+            shipper_requires_plan_complete_when_phase_enabled,
         };
         let reason = self
             .state
@@ -13112,10 +13094,7 @@ impl EventLoop {
             || event.topic.as_str() == "plan.complete";
         let ctx = ShipperRoutingContext {
             phase_authority_enabled: true,
-            current_phase: self
-                .phase_authority
-                .snapshot()
-                .map(|s| s.phase_id),
+            current_phase: self.phase_authority.snapshot().map(|s| s.phase_id),
             reason,
             plan_complete_present,
         };
@@ -13126,7 +13105,10 @@ impl EventLoop {
     }
 
     fn record_repair_event(&mut self, event: &ralph_proto::Event) {
-        self.diagnose_plan_complete_channel(event, crate::event_loop::phase_authority::diagnosis::Channel::Repair);
+        self.diagnose_plan_complete_channel(
+            event,
+            crate::event_loop::phase_authority::diagnosis::Channel::Repair,
+        );
         let workspace = std::path::PathBuf::from(&self.config.core.workspace_root);
         if let Err(err) =
             crate::event_loop::repair_stream_sink::record_repair_event(event, &workspace)
@@ -13183,12 +13165,9 @@ impl EventLoop {
         let payload: serde_json::Value =
             serde_json::from_str(event.payload.as_str()).unwrap_or(serde_json::Value::Null);
         let honored = self.stage_pipeline.is_terminal(event);
-        let snap = self
-            .phase_authority
-            .snapshot()
-            .unwrap_or_else(|| {
-                crate::event_loop::phase_authority::PhaseSnapshot::with_phase_id("unit_loop")
-            });
+        let snap = self.phase_authority.snapshot().unwrap_or_else(|| {
+            crate::event_loop::phase_authority::PhaseSnapshot::with_phase_id("unit_loop")
+        });
         let accepted = crate::event_loop::phase_authority::AcceptedEvent {
             topic: event.topic.as_str(),
             payload: &payload,
@@ -13271,11 +13250,11 @@ impl EventLoop {
                 ledger.snapshot_mut().workflow_phase = Some(snap.clone());
             }
             if let Some(policy) = self.phase_authority.violation_policy() {
-                use crate::event_loop::phase_authority::resume_budget::{
-                    on_exhausted_action, should_admit_resume_from_snapshot, BudgetDecision,
-                    ExhaustedAction,
-                };
                 use crate::event_loop::phase_authority::ViolationKind;
+                use crate::event_loop::phase_authority::resume_budget::{
+                    BudgetDecision, ExhaustedAction, on_exhausted_action,
+                    should_admit_resume_from_snapshot,
+                };
                 match should_admit_resume_from_snapshot(
                     &policy,
                     &snap,

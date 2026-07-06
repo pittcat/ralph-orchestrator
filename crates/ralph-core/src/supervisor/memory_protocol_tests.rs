@@ -131,13 +131,9 @@ fn backpressure_releases_after_slot_completes() {
 #[test]
 fn enqueue_wave_drains_fifo_across_waves() {
     let s = store();
-    let w1 = s
-        .enqueue_wave("fifo-1", WaveKind::Exec, 1)
-        .unwrap();
+    let w1 = s.enqueue_wave("fifo-1", WaveKind::Exec, 1).unwrap();
     s.bind_worktree(&w1, 0, bind(0)).unwrap();
-    let w2 = s
-        .enqueue_wave("fifo-2", WaveKind::Exec, 1)
-        .unwrap();
+    let w2 = s.enqueue_wave("fifo-2", WaveKind::Exec, 1).unwrap();
     s.bind_worktree(&w2, 0, bind(0)).unwrap();
     // Cap = 1: only w1's slot can dispatch.
     let first = s.try_dispatch_next(1).unwrap().unwrap();
@@ -209,7 +205,10 @@ fn compensation_records_failure_state_on_wave() {
     // Failure trigger: record a permanent failure on slot 0.
     s.record_slot_failure(&wave, 0, "permanent").unwrap();
     let snap = s.fan_in_status(&wave).unwrap();
-    assert!(snap.cancel_requested, "cancel flag must persist on terminal");
+    assert!(
+        snap.cancel_requested,
+        "cancel flag must persist on terminal"
+    );
     assert_eq!(snap.failed_count, 1);
     // U2 / KTD-8: the store does NOT mutate `phase`. The
     // coordinator's `fail_wave` applies `set_wave_phase`
@@ -294,10 +293,8 @@ fn total_slot_count_partitions_consistently() {
     let (w, i) = s.try_dispatch_next(2).unwrap().unwrap();
     s.record_slot_result(&w, i, "h", 1).unwrap();
     let snap = s.fan_in_status(&wave).unwrap();
-    let total = snap.completed_count
-        + snap.failed_count
-        + snap.in_flight_count
-        + snap.pending_count;
+    let total =
+        snap.completed_count + snap.failed_count + snap.in_flight_count + snap.pending_count;
     assert_eq!(
         total, snap.expected_total,
         "fan_in_status partitioning invariant violated: {:?}",

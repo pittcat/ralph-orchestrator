@@ -229,8 +229,7 @@ impl Report {
         let top_findings = aggregate_recovery(&data.recovery);
         let recovery_timeline = recovery_timeline(&data.recovery);
         let workspace_root = workspace_root_from_session(&data.session_path);
-        let dup_storm_topics =
-            compute_dup_storm_topics(&data.recovery, workspace_root.as_deref());
+        let dup_storm_topics = compute_dup_storm_topics(&data.recovery, workspace_root.as_deref());
         // U4: sort active activations by duration descending (longest first).
         let mut active_activations = data.active_activations.clone();
         active_activations.sort_by_key(|a| std::cmp::Reverse(a.duration));
@@ -1233,8 +1232,7 @@ fn compute_dup_storm_topics(
     if let Some(ws) = workspace_root {
         if let Ok(records) = crate::state::read_rejection_log(ws) {
             for record in records {
-                if record.topic == "work.ready"
-                    && record.seen_count.unwrap_or(0) >= STORM_THRESHOLD
+                if record.topic == "work.ready" && record.seen_count.unwrap_or(0) >= STORM_THRESHOLD
                 {
                     storms.insert(record.topic);
                 }
@@ -2461,12 +2459,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let session = tmp.path().join(".ralph/diagnostics/sess-1");
         fs::create_dir_all(&session).unwrap();
-        let mut record = crate::state::RejectionRecord::new(
-            "executor",
-            "work.ready",
-            "duplicate_work_done",
-            2,
-        );
+        let mut record =
+            crate::state::RejectionRecord::new("executor", "work.ready", "duplicate_work_done", 2);
         record.seen_count = Some(3);
         crate::state::append_rejection(tmp.path(), &record).unwrap();
 

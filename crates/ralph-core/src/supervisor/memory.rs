@@ -234,7 +234,9 @@ impl SupervisorStore for InMemorySupervisorStore {
             slots,
         };
         inner.waves_by_id.insert(wave_id.clone(), row);
-        inner.waves_by_key.insert(idempotency_key.to_string(), wave_id.clone());
+        inner
+            .waves_by_key
+            .insert(idempotency_key.to_string(), wave_id.clone());
         Ok(wave_id)
     }
 
@@ -269,19 +271,14 @@ impl SupervisorStore for InMemorySupervisorStore {
         for wave_id in wave_ids {
             let candidate = {
                 let wave = match inner.waves_by_id.get_mut(&wave_id) {
-                    Some(w)
-                        if matches!(w.phase, WavePhase::Dispatch | WavePhase::Collect) =>
-                    {
-                        w
-                    }
+                    Some(w) if matches!(w.phase, WavePhase::Dispatch | WavePhase::Collect) => w,
                     _ => continue,
                 };
                 wave.slots
                     .iter_mut()
                     .find(|(_, s)| {
                         s.status == SlotStatus::Pending
-                            && (s.isolation != IsolationMode::Worktree
-                                || s.resource.is_some())
+                            && (s.isolation != IsolationMode::Worktree || s.resource.is_some())
                     })
                     .map(|(idx, _)| *idx)
             };
@@ -314,13 +311,13 @@ impl SupervisorStore for InMemorySupervisorStore {
             .waves_by_id
             .get_mut(wave_id)
             .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
-        let slot = wave
-            .slots
-            .get_mut(&slot_index)
-            .ok_or_else(|| SupervisorStoreError::UnknownSlot {
-                wave_id: wave_id.to_string(),
-                slot_index,
-            })?;
+        let slot =
+            wave.slots
+                .get_mut(&slot_index)
+                .ok_or_else(|| SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                })?;
         // R-WT-1: shared_readonly slots MUST NOT receive a
         // worktree binding.
         if slot.isolation == IsolationMode::SharedReadonly
@@ -361,13 +358,13 @@ impl SupervisorStore for InMemorySupervisorStore {
             .waves_by_id
             .get_mut(wave_id)
             .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
-        let slot = wave
-            .slots
-            .get_mut(&slot_index)
-            .ok_or_else(|| SupervisorStoreError::UnknownSlot {
-                wave_id: wave_id.to_string(),
-                slot_index,
-            })?;
+        let slot =
+            wave.slots
+                .get_mut(&slot_index)
+                .ok_or_else(|| SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                })?;
         slot.status = SlotStatus::Completed;
         slot.content_hash = Some(content_hash.to_string());
         slot.event_count = Some(event_count);
@@ -411,13 +408,13 @@ impl SupervisorStore for InMemorySupervisorStore {
             .waves_by_id
             .get_mut(wave_id)
             .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
-        let slot = wave
-            .slots
-            .get_mut(&slot_index)
-            .ok_or_else(|| SupervisorStoreError::UnknownSlot {
-                wave_id: wave_id.to_string(),
-                slot_index,
-            })?;
+        let slot =
+            wave.slots
+                .get_mut(&slot_index)
+                .ok_or_else(|| SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                })?;
         slot.status = SlotStatus::Failed;
         slot.failure_reason = Some(reason.to_string());
         // U2 / F-002 / KTD-8: the store MUST NOT mutate
@@ -607,11 +604,7 @@ impl SupervisorStore for InMemorySupervisorStore {
         Ok(())
     }
 
-    fn pid_for_slot(
-        &self,
-        wave_id: &str,
-        slot_index: u32,
-    ) -> SupervisorStoreResult<Option<u32>> {
+    fn pid_for_slot(&self, wave_id: &str, slot_index: u32) -> SupervisorStoreResult<Option<u32>> {
         let inner = self.lock()?;
         Ok(inner
             .dispatches
@@ -689,7 +682,10 @@ mod tests {
         let wave = s.register_wave("k", WaveKind::Exec, 2).unwrap();
         // No bindings yet: dispatch must yield None.
         let dispatched = s.try_dispatch_next(4).unwrap();
-        assert!(dispatched.is_none(), "no slot should leave Pending without binding");
+        assert!(
+            dispatched.is_none(),
+            "no slot should leave Pending without binding"
+        );
         // Bind slot 0 only.
         s.bind_worktree(
             &wave,
@@ -765,7 +761,9 @@ mod tests {
     #[test]
     fn record_slot_failure_with_in_flight_siblings_keeps_phase_collect() {
         let s = store();
-        let wave = s.register_wave("partial-fail-mem", WaveKind::Exec, 2).unwrap();
+        let wave = s
+            .register_wave("partial-fail-mem", WaveKind::Exec, 2)
+            .unwrap();
         // Bind both slots so dispatch is allowed.
         s.bind_worktree(
             &wave,
@@ -917,10 +915,7 @@ mod tests {
         assert_eq!(calls, vec![".ralph/old/0".to_string()]);
         // Final binding points at the new path.
         let final_binding = s.get_slot_resource(&wave, 0).unwrap().unwrap();
-        assert_eq!(
-            final_binding.worktree_path.as_deref(),
-            Some(".ralph/new/0")
-        );
+        assert_eq!(final_binding.worktree_path.as_deref(), Some(".ralph/new/0"));
     }
 
     /// U8 edge: fresh slot (no prior binding) → no cleanup

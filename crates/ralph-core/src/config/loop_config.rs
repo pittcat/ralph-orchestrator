@@ -1017,8 +1017,7 @@ pub struct MechanismConfig {
     /// `event_loop::phase_authority::config::PhaseAuthorityConfig`
     /// and is re-exported from there.
     #[serde(default)]
-    pub phase_authority:
-        Option<crate::event_loop::phase_authority::config::PhaseAuthorityConfig>,
+    pub phase_authority: Option<crate::event_loop::phase_authority::config::PhaseAuthorityConfig>,
 }
 
 /// P0-3: typed view of a `mechanism.flow`

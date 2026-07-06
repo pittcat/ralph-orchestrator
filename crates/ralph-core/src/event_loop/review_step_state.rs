@@ -412,10 +412,7 @@ impl ReviewStepTracker {
             if let Some(terminal) = self.plan_review_terminal.get(plan_name)
                 && is_pass_class_verdict(&terminal.verdict)
             {
-                let any_failed_pending = self
-                    .steps
-                    .values()
-                    .any(|s| s.failed_pending_fix);
+                let any_failed_pending = self.steps.values().any(|s| s.failed_pending_fix);
                 if !any_failed_pending {
                     return None;
                 }
@@ -521,8 +518,7 @@ impl ReviewStepTracker {
                 // handles that branch).
                 if let Some(p) = event.payload.as_deref()
                     && let Ok(Value::Object(obj)) = serde_json::from_str(p)
-                    && let Some(plan_name) =
-                        obj.get("plan_name").and_then(|v| v.as_str())
+                    && let Some(plan_name) = obj.get("plan_name").and_then(|v| v.as_str())
                     && pass
                 {
                     let fix_plan_file = obj
@@ -962,7 +958,9 @@ mod tests {
             "review-coordinator",
             r#"{"plan_name":"p","task_id":"t1","task_key":"k1","step":"1","findings_count":0,"fix_round":0,"verdict":"pass","skip_reason":"empty_diff"}"#,
         );
-        let finding = tracker.check_semantic_gates(&passed, None).expect("must reject");
+        let finding = tracker
+            .check_semantic_gates(&passed, None)
+            .expect("must reject");
         assert!(finding.message.contains("review_passed_while_wave_open"));
         // U1 (2026-06-17-003 plan): the finding must be the
         // dedicated `SemanticGateViolation` variant — NOT a
@@ -1060,7 +1058,9 @@ mod tests {
             "plan-gate",
             r#"{"plan_name":"p","completed_step":"1","next_step":"2","reviewed_task_id":"t1","reviewed_task_key":"k1"}"#,
         );
-        let finding = tracker.check_semantic_gates(&advance, None).expect("must reject");
+        let finding = tracker
+            .check_semantic_gates(&advance, None)
+            .expect("must reject");
         assert!(finding.message.contains("plan_gate_review_not_terminal"));
     }
 
@@ -1525,7 +1525,8 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────
 
     #[test]
-    fn u2_plan_complete_after_review_complete_pass_with_residuals_accepted_even_with_different_task_id() {
+    fn u2_plan_complete_after_review_complete_pass_with_residuals_accepted_even_with_different_task_id()
+     {
         // 140149-shape: review.complete carries verdict=pass_with_residuals
         // and an EMPTY fix_plan_file. The plan should be marked
         // terminal at the plan level.

@@ -34,11 +34,7 @@ mechanism:
 fn phase_authority_pipeline_includes_phase_authority_stage() {
     let flow = minimal_flow();
     let engine = Arc::new(WorkflowPhaseAuthority::disabled());
-    let pipeline = StagePipeline::with_phase_authority_stages_for_loop_config(
-        flow,
-        None,
-        engine,
-    );
+    let pipeline = StagePipeline::with_phase_authority_stages_for_loop_config(flow, None, engine);
     let names = pipeline.names();
     assert!(
         names.contains(&"PhaseAuthority"),
@@ -51,11 +47,7 @@ fn phase_authority_pipeline_includes_phase_authority_stage() {
 fn phase_authority_stage_runs_before_flow_step_scope() {
     let flow = minimal_flow();
     let engine = Arc::new(WorkflowPhaseAuthority::disabled());
-    let pipeline = StagePipeline::with_phase_authority_stages_for_loop_config(
-        flow,
-        None,
-        engine,
-    );
+    let pipeline = StagePipeline::with_phase_authority_stages_for_loop_config(flow, None, engine);
     let names = pipeline.names();
     let pa = names
         .iter()
@@ -76,11 +68,7 @@ fn phase_authority_stage_runs_before_flow_step_scope() {
 fn phase_authority_pipeline_preserves_other_stages() {
     let flow = minimal_flow();
     let engine = Arc::new(WorkflowPhaseAuthority::disabled());
-    let pipeline = StagePipeline::with_phase_authority_stages_for_loop_config(
-        flow,
-        None,
-        engine,
-    );
+    let pipeline = StagePipeline::with_phase_authority_stages_for_loop_config(flow, None, engine);
     let names = pipeline.names();
     for required in [
         "RepairDispatch",

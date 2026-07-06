@@ -75,7 +75,11 @@ mod tests {
     use crate::config::hat::HatConfig;
     use crate::config::{EventPolicyConfig, RalphConfig};
 
-    fn config_with(publishes: Vec<&str>, policy_terminal: Vec<&str>, policy_business: Vec<&str>) -> RalphConfig {
+    fn config_with(
+        publishes: Vec<&str>,
+        policy_terminal: Vec<&str>,
+        policy_business: Vec<&str>,
+    ) -> RalphConfig {
         let mut cfg = RalphConfig::default();
         let mut hat = HatConfig::default();
         hat.publishes = publishes.iter().map(|s| s.to_string()).collect();
@@ -97,7 +101,10 @@ mod tests {
             vec!["test.passed"],
         );
         let out = derive_completion_publishes(&cfg, "executor");
-        assert_eq!(out, vec!["test.passed".to_string(), "work.done".to_string()]);
+        assert_eq!(
+            out,
+            vec!["test.passed".to_string(), "work.done".to_string()]
+        );
     }
 
     #[test]

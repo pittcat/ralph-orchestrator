@@ -214,7 +214,9 @@ impl Rejection {
             original_ts: None,
             // 2026-06-23 fix plan U5 (CB-2): topic-format predates
             // typed-kind plumbing — keep None.
-            kind: None, duplicate_work_done_hint: None, seen_count: None,
+            kind: None,
+            duplicate_work_done_hint: None,
+            seen_count: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -244,7 +246,9 @@ impl Rejection {
             original_ts: None,
             // 2026-06-23 fix plan U5 (CB-2): origin-guard predates
             // typed-kind plumbing — keep None.
-            kind: None, duplicate_work_done_hint: None, seen_count: None,
+            kind: None,
+            duplicate_work_done_hint: None,
+            seen_count: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -292,7 +296,9 @@ impl Rejection {
             original_ts: None,
             // 2026-06-23 fix plan U5 (CB-2): execution-contract
             // predates typed-kind plumbing — keep None.
-            kind: None, duplicate_work_done_hint: None, seen_count: None,
+            kind: None,
+            duplicate_work_done_hint: None,
+            seen_count: None,
         };
         s.retry_key = s.compute_retry_key();
         s
@@ -436,8 +442,10 @@ pub fn rejection_with_key(
         // 2026-06-23 fix plan U5 (CB-2): legacy helper predates
         // typed-kind plumbing — keep None so payload falls back
         // to violation-derived reason.
-        kind: None, duplicate_work_done_hint: None, seen_count: None,
-        }
+        kind: None,
+        duplicate_work_done_hint: None,
+        seen_count: None,
+    }
 }
 
 /// Build the payload for a `task.resume` event that re-dispatches the
@@ -1316,7 +1324,9 @@ mod tests {
             target_hat: Some("explicit-target".into()),
             original_event_id: None,
             original_ts: None,
-            kind: None, duplicate_work_done_hint: None, seen_count: None,
+            kind: None,
+            duplicate_work_done_hint: None,
+            seen_count: None,
         };
         let payload1 = build_task_resume_payload(&r1, &[], &[], None, None, None);
         let v1: serde_json::Value = serde_json::from_str(&payload1).unwrap();

@@ -62,7 +62,10 @@ impl InMemoryMergeSink {
     /// Snapshot the batches the coordinator attempted to
     /// write. Tests inspect this to confirm fan-in output.
     pub fn batches(&self) -> Vec<Vec<Event>> {
-        self.batches.lock().expect("merge sink mutex poisoned").clone()
+        self.batches
+            .lock()
+            .expect("merge sink mutex poisoned")
+            .clone()
     }
 
     /// Force `append_events` to return `MergeSinkError::Rejected`
@@ -73,16 +76,27 @@ impl InMemoryMergeSink {
 
     /// Clear the forced-failure flag.
     pub fn clear_failure(&self) {
-        self.fail_with.lock().expect("merge sink mutex poisoned").clone_from(&None);
+        self.fail_with
+            .lock()
+            .expect("merge sink mutex poisoned")
+            .clone_from(&None);
     }
 }
 
 impl EventMergeSink for InMemoryMergeSink {
     fn append_events(&self, events: Vec<Event>) -> Result<(), MergeSinkError> {
-        if let Some(msg) = self.fail_with.lock().expect("merge sink mutex poisoned").clone() {
+        if let Some(msg) = self
+            .fail_with
+            .lock()
+            .expect("merge sink mutex poisoned")
+            .clone()
+        {
             return Err(MergeSinkError::Rejected(msg));
         }
-        self.batches.lock().expect("merge sink mutex poisoned").push(events);
+        self.batches
+            .lock()
+            .expect("merge sink mutex poisoned")
+            .push(events);
         Ok(())
     }
 }
