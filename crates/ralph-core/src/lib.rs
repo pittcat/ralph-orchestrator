@@ -22,6 +22,7 @@ pub mod correction;
 pub mod diagnosis;
 pub mod diagnostics;
 pub mod drift;
+pub mod emit_result;
 pub mod emit_schema_hint;
 pub mod ephemeral_isolation;
 mod event_logger;
