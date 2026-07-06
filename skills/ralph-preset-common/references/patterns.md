@@ -24,7 +24,7 @@ debug.start
 
 参考：`presets/en/debug.yml`。
 
-## ce-executor-serial（10 hat，isolated）
+## ce-executor-serial（9 hat，isolated；2026-07-06 plan U10 删除 progress-steward）
 
 Plan-driven 执行 + 串行多维 review。Builtin：`builtin:ce-executor-serial`。
 
