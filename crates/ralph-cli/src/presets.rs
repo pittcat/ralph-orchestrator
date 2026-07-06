@@ -1021,8 +1021,16 @@ mod tests {
     /// without going through the coordinator. Worker hats
     /// (executor, validator, fixer, shipper, reporter) must
     /// NOT appear in this list.
+    /// 2026-07-06 plan U11: the coordinator allowlist is narrowed to
+    /// EXACTLY ONE hat — `coordinator`. The previous U7
+    /// (`coordinator, progress-steward`) carve-out is obsolete
+    /// because `progress-steward` was removed from the preset in
+    /// U10. Wider allowlists re-introduce the worker-self-create
+    /// drift window. Narrower allowlists (zero hats) would
+    /// surface `tasks.enabled=true` with no gate, so the
+    /// single-`coordinator` invariant is the only safe value.
     #[test]
-    fn test_ce_executor_serial_coordinator_hats_narrowed_to_two() {
+    fn test_ce_executor_serial_coordinator_hats_narrowed_to_one_after_u11() {
         let preset =
             get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
         let yaml: serde_yaml::Value =
@@ -1035,9 +1043,62 @@ mod tests {
         let names: Vec<&str> = hats.iter().filter_map(|v| v.as_str()).collect();
         assert_eq!(
             names,
-            vec!["coordinator", "progress-steward"],
-            "ce-executor-serial coordinator_hats must be narrowed to exactly 2 hats; \
-             wider allowlists re-introduce the worker-self-create drift window"
+            vec!["coordinator"],
+            "ce-executor-serial coordinator_hats must be narrowed to exactly 1 hat (`coordinator`); \
+             wider allowlists re-introduce the worker-self-create drift window, narrower \
+             allowlists surface tasks.enabled=true with no gate"
+        );
+    }
+
+    /// 2026-07-06 plan U11: the previous `narrowed_to_two` invariant
+    /// (`coordinator, progress-steward`) is OBSOLETE. `progress-steward`
+    /// was removed from the preset in U10. The test below pins the
+    /// NEGATIVE: `progress-steward` MUST NOT appear in
+    /// `tasks.coordinator_hats` after U11.
+    #[test]
+    fn test_ce_executor_serial_coordinator_hats_excludes_progress_steward_after_u11() {
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
+        let hats = yaml
+            .get("tasks")
+            .and_then(|t| t.get("coordinator_hats"))
+            .and_then(|c| c.as_sequence())
+            .expect("tasks.coordinator_hats must be a sequence");
+        let names: Vec<&str> = hats.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            !names.contains(&"progress-steward"),
+            "ce-executor-serial coordinator_hats MUST NOT contain `progress-steward` after U11 \
+             (the hat was removed in U10); got {:?}",
+            names
+        );
+    }
+
+    /// 2026-07-06 plan U11: `event_loop.progress_steward.enabled`
+    /// MUST be `false` in `ce-executor-serial` after U11. The
+    /// flag is the runtime's kill-switch for the stall detector
+    /// (event_loop/mod.rs U12 reads it; shipper_reason U13
+    /// reads it for the fail-close contract). Setting it back to
+    /// `true` would re-activate `loop.stalled` wake publishes,
+    /// which is the silent-success / phantom-recovery drift
+    /// path the SSOT convergence plan exists to eliminate.
+    #[test]
+    fn test_ce_executor_serial_progress_steward_disabled_after_u11() {
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
+        let enabled = yaml
+            .get("event_loop")
+            .and_then(|e| e.get("progress_steward"))
+            .and_then(|p| p.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .expect("event_loop.progress_steward.enabled must be present");
+        assert!(
+            !enabled,
+            "ce-executor-serial event_loop.progress_steward.enabled MUST be `false` after U11 \
+             (runtime fail-close U12 + shipper_reason U13 rely on this kill-switch); got {enabled}"
         );
     }
 

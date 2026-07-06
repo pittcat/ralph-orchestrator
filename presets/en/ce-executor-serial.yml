@@ -235,18 +235,17 @@ topic_format_whitelist:
 
 tasks:
   enabled: true
-  # U7 (2026-07-04-003 plan): narrow the coordinator allowlist to
-  # exactly two hats — `coordinator` (the planning hat) and
-  # `progress-steward` (the loop-level fallback that publishes
-  # `task.resume` to nudge a stuck hat). Executor/validator/
-  # fixer/shipper/reporter are *workers* and must NOT bypass
-  # the role gate to create or ensure cross-hat tasks. The
-  # two-step verify gate (`require_verify_for_cli_mutate: true`)
-  # is also enabled so all `add` / `ensure` mutations from
-  # agents must go through `task verify <verb>` first.
+  # 2026-07-06 plan U11: narrowed the coordinator allowlist to
+  # `coordinator` ONLY. `progress-steward` was removed in U10;
+  # the loop-level fallback hat no longer exists, so it cannot
+  # be a coordinator. Executor/validator/fixer/shipper/reporter
+  # are *workers* and must NOT bypass the role gate to create
+  # or ensure cross-hat tasks. The two-step verify gate
+  # (`require_verify_for_cli_mutate: true`) remains enabled so
+  # all `add` / `ensure` mutations from agents must go through
+  # `task verify <verb>` first.
   coordinator_hats:
     - coordinator
-    - progress-steward
   require_verify_for_cli_mutate: true
   allow_unsafe_task_mutate: false
 
@@ -381,11 +380,15 @@ event_loop:
           # git-evidence half.
           mode: "commit_only"
           allow_empty_for_steps: ["trivial"]
-  # U5 (2026-06-17-001): progress_steward fallback wakes the
-  # loop-level `progress-steward` hat after
-  # max_steward_iterations consecutive no-progress turns.
+  # 2026-07-06 plan U11: progress_steward fallback DISABLED.
+  # The `progress-steward` hat was removed from this preset in
+  # U10; the runtime stall detector (event_loop/mod.rs, U12)
+  # MUST NOT publish `loop.stalled` wake events. The
+  # `enabled: false` flag is the runtime's kill-switch
+  # (`event_loop::stall_detector`) and pins the fail-close
+  # contract for shipper_reason (U13).
   progress_steward:
-    enabled: true
+    enabled: false
     steward_hat_id: "progress-steward"
     max_steward_iterations: 3
   # 2026-07-02-004 plan: precheck gate (LLM-as-judge on critical
@@ -573,7 +576,6 @@ event_loop:
       - {hat_id: fixer, topic: plan.complete}
       - {hat_id: shipper, topic: plan.complete}
       - {hat_id: reporter, topic: plan.complete}
-      - {hat_id: progress-steward, topic: plan.complete}
       - {hat_id: coordinator, topic: work.failed}
       - {hat_id: validator, topic: work.failed}
       - {hat_id: review-coordinator, topic: work.failed}
@@ -582,14 +584,12 @@ event_loop:
       - {hat_id: fixer, topic: work.failed}
       - {hat_id: shipper, topic: work.failed}
       - {hat_id: reporter, topic: work.failed}
-      - {hat_id: progress-steward, topic: work.failed}
       - {hat_id: coordinator, topic: work.done}
       - {hat_id: review-coordinator, topic: work.done}
       - {hat_id: dimension-reviewer, topic: work.done}
       - {hat_id: review-synthesizer, topic: work.done}
       - {hat_id: shipper, topic: work.done}
       - {hat_id: reporter, topic: work.done}
-      - {hat_id: progress-steward, topic: work.done}
       - {hat_id: coordinator, topic: test.failed}
       - {hat_id: review-coordinator, topic: test.failed}
       - {hat_id: dimension-reviewer, topic: test.failed}
@@ -597,7 +597,6 @@ event_loop:
       - {hat_id: fixer, topic: test.failed}
       - {hat_id: shipper, topic: test.failed}
       - {hat_id: reporter, topic: test.failed}
-      - {hat_id: progress-steward, topic: test.failed}
       - {hat_id: coordinator, topic: test.passed}
       - {hat_id: review-coordinator, topic: test.passed}
       - {hat_id: dimension-reviewer, topic: test.passed}
@@ -605,7 +604,6 @@ event_loop:
       - {hat_id: fixer, topic: test.passed}
       - {hat_id: shipper, topic: test.passed}
       - {hat_id: reporter, topic: test.passed}
-      - {hat_id: progress-steward, topic: test.passed}
       - {hat_id: coordinator, topic: review.dimension.ready}
       - {hat_id: executor, topic: review.dimension.ready}
       - {hat_id: validator, topic: review.dimension.ready}
@@ -625,7 +623,6 @@ event_loop:
       - {hat_id: fixer, topic: review.dimension.done}
       - {hat_id: shipper, topic: review.dimension.done}
       - {hat_id: reporter, topic: review.dimension.done}
-      - {hat_id: progress-steward, topic: review.dimension.done}
       - {hat_id: coordinator, topic: review.dimension.failed}
       - {hat_id: executor, topic: review.dimension.failed}
       - {hat_id: validator, topic: review.dimension.failed}
@@ -633,14 +630,12 @@ event_loop:
       - {hat_id: fixer, topic: review.dimension.failed}
       - {hat_id: shipper, topic: review.dimension.failed}
       - {hat_id: reporter, topic: review.dimension.failed}
-      - {hat_id: progress-steward, topic: review.dimension.failed}
       - {hat_id: coordinator, topic: review.complete}
       - {hat_id: executor, topic: review.complete}
       - {hat_id: validator, topic: review.complete}
       - {hat_id: fixer, topic: review.complete}
       - {hat_id: shipper, topic: review.complete}
       - {hat_id: reporter, topic: review.complete}
-      - {hat_id: progress-steward, topic: review.complete}
       - {hat_id: coordinator, topic: fix.exhausted}
       - {hat_id: executor, topic: fix.exhausted}
       - {hat_id: validator, topic: fix.exhausted}
@@ -649,7 +644,6 @@ event_loop:
       - {hat_id: review-synthesizer, topic: fix.exhausted}
       - {hat_id: shipper, topic: fix.exhausted}
       - {hat_id: reporter, topic: fix.exhausted}
-      - {hat_id: progress-steward, topic: fix.exhausted}
       - {hat_id: coordinator, topic: fix.applied}
       - {hat_id: executor, topic: fix.applied}
       - {hat_id: validator, topic: fix.applied}
@@ -658,7 +652,6 @@ event_loop:
       - {hat_id: review-synthesizer, topic: fix.applied}
       - {hat_id: shipper, topic: fix.applied}
       - {hat_id: reporter, topic: fix.applied}
-      - {hat_id: progress-steward, topic: fix.applied}
       - {hat_id: coordinator, topic: REVIEW_COMPLETE}
       - {hat_id: executor, topic: REVIEW_COMPLETE}
       - {hat_id: validator, topic: REVIEW_COMPLETE}
@@ -667,7 +660,6 @@ event_loop:
       - {hat_id: review-synthesizer, topic: REVIEW_COMPLETE}
       - {hat_id: fixer, topic: REVIEW_COMPLETE}
       - {hat_id: reporter, topic: REVIEW_COMPLETE}
-      - {hat_id: progress-steward, topic: REVIEW_COMPLETE}
       - {hat_id: coordinator, topic: report.done}
       - {hat_id: executor, topic: report.done}
       - {hat_id: validator, topic: report.done}
@@ -676,7 +668,6 @@ event_loop:
       - {hat_id: review-synthesizer, topic: report.done}
       - {hat_id: fixer, topic: report.done}
       - {hat_id: shipper, topic: report.done}
-      - {hat_id: progress-steward, topic: report.done}
       - {hat_id: coordinator, topic: LOOP_COMPLETE}
       - {hat_id: executor, topic: LOOP_COMPLETE}
       - {hat_id: validator, topic: LOOP_COMPLETE}
@@ -685,7 +676,6 @@ event_loop:
       - {hat_id: review-synthesizer, topic: LOOP_COMPLETE}
       - {hat_id: fixer, topic: LOOP_COMPLETE}
       - {hat_id: shipper, topic: LOOP_COMPLETE}
-      - {hat_id: progress-steward, topic: LOOP_COMPLETE}
       - {hat_id: coordinator, topic: task.resume}
       - {hat_id: executor, topic: task.resume}
       - {hat_id: validator, topic: task.resume}
