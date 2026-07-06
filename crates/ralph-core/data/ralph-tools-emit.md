@@ -230,6 +230,7 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 | `activate_next` | array<string> | 否 | preset 显式声明的 `activate_next` 候选。**空时省略键** |
 | `errors` | array<EmitError> | 否 | 拒收场景的错误列表。**接受场景省略键** |
 | `handoff` | object<EmitHandoff> | 否 | Agent 上下文交接包。**None 时省略键** |
+| `handoff_envelope` | object<HandoffEnvelopeSummary> | 否 | 2026-07-06-004 plan U9：仅当 `event_loop.handoff_envelope.emit_result_summary == true` 且 payload 含合法 `handoff_envelope` 时填充；rejection 场景强制清空（避免给 agent 错觉） |
 
 ### EmitError 字段
 
@@ -247,6 +248,23 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 | `from_hat` | string | 是 | 当前 hat 稳定 id |
 | `to_hat` | string | 是 | 接收交接的下游 hat 稳定 id |
 | `reason` | string | 是 | 交接原因短语（preset `handoff_reasons` 表声明） |
+
+### HandoffEnvelopeSummary 字段（2026-07-06-004 plan U9）
+
+| 字段 | 类型 | 必现 | 说明 |
+|------|------|------|------|
+| `schema_version` | string | 是 | 恒等于 `"handoff-envelope.v1"` |
+| `to_hat` | string | 是 | 接收交接的下游 hat 稳定 id |
+| `success_signal` | string | 是 | 该 hat 完成时应发的 success topic |
+| `failure_signal` | string | 是 | 该 hat 失败时应发的 failure topic |
+
+**Handoff Envelope 契约**：`builtin:ce-executor-serial` 是 2026-07-06 时点唯一要求 `payload.handoff_envelope` 的 preset。其它 preset 默认关闭（`event_loop.handoff_envelope.enabled == false`）。**Serial 实验**：
+
+- `validate_payload: true` → `ralph emit --policy-check` 拒缺失或错误 envelope 的 payload
+- `prompt_injection: true` → 下游 hat activation prompt 顶部显示 `## HANDOFF ENVELOPE` 块
+- `emit_result_summary: true` → `EmitResult.handoff_envelope` 带上述 4 字段摘要
+
+参考：`crates/ralph-core/src/handoff_envelope.rs` 是 schema SSOT；`event_policy.rs::check_handoff_envelope` 是 validator 入口。
 
 ### 路径分支矩阵
 
