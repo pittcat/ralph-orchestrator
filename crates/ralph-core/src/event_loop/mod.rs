@@ -189,6 +189,12 @@ mod prompt_helpers {
         pub base_prompt: String,
         pub events: &'a [Event],
         pub config: &'a HandoffEnvelopeConfig,
+        /// 2026-07-06-004 fix-plan U5 (R5): the current hat
+        /// id for the activation. The extractor drops every
+        /// envelope whose `to_hat` does NOT match — the
+        /// trust-boundary check that prevents one hat's
+        /// envelope from influencing another's prompt.
+        pub current_hat: &'a str,
     }
 
     /// 2026-07-06-004 plan U6: real-prompt wiring helper. Given a
@@ -198,7 +204,7 @@ mod prompt_helpers {
     /// helper from inside the orchestrator-context → macro-next-
     /// hint stretch (per plan §Unit 6 ordering).
     pub(crate) fn build_isolated_prompt_with_handoff(inputs: IsolatedPromptInputs<'_>) -> String {
-        let envelope = latest_handoff_envelope_payload(inputs.events);
+        let envelope = latest_handoff_envelope_payload(inputs.events, inputs.current_hat);
         prepend_handoff_envelope_if_enabled(inputs.base_prompt, inputs.config, envelope.as_ref())
     }
 }
@@ -4862,6 +4868,12 @@ impl EventLoop {
                     base_prompt: final_prompt,
                     events: &regular_events,
                     config: &self.config.event_loop.handoff_envelope,
+                    // U5 (2026-07-06-004 fix-plan R5): tighten
+                    // the trust boundary so envelopes addressed
+                    // to a different hat never reach this
+                    // hat's prompt. `hat_id` is the current
+                    // isolated hat id.
+                    current_hat: hat_id.as_str(),
                 },
             );
             // U4b: see solo-mode comment above. In isolated

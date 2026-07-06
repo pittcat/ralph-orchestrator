@@ -77,6 +77,7 @@ fn isolated_prompt_omits_handoff_envelope_by_default() {
     let inputs = IsolatedPromptInputs {
         base_prompt: "BASE PROMPT".to_string(),
         events: &events,
+        current_hat: "goal-alignment-reviewer",
         config: &HandoffEnvelopeConfig::default(),
     };
     let rendered = build_isolated_prompt_with_handoff(inputs);
@@ -105,6 +106,7 @@ fn isolated_prompt_includes_handoff_envelope_when_enabled_and_event_has_payload(
     let inputs = IsolatedPromptInputs {
         base_prompt: "BASE PROMPT".to_string(),
         events: &events,
+        current_hat: "goal-alignment-reviewer",
         config: &config,
     };
     let rendered = build_isolated_prompt_with_handoff(inputs);
@@ -137,6 +139,7 @@ fn isolated_prompt_with_enabled_but_no_envelope_events_stays_clean() {
     let inputs = IsolatedPromptInputs {
         base_prompt: "BASE PROMPT".to_string(),
         events: &events,
+        current_hat: "goal-alignment-reviewer",
         config: &config,
     };
     let rendered = build_isolated_prompt_with_handoff(inputs);

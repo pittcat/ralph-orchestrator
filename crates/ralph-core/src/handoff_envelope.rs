@@ -545,20 +545,28 @@ pub fn validate_handoff_envelope_payload(
 ///   is converted into a `HandoffEnvelopeView` and returned. The
 ///   caller (U6) hands that view to the prompt injection gate
 ///   from U4.
-pub fn latest_handoff_envelope_payload(events: &[Event]) -> Option<HandoffEnvelopeView> {
+///
+/// 2026-07-06-004 fix-plan U5 (R5): tighten the trust boundary
+/// — the extractor silently skips envelopes whose
+/// `receiver_contract.to_hat` does not match `current_hat`. A
+/// `work.ready` addressed to `executor` MUST NOT influence the
+/// prompt of `validator`; an envelope meant for the runner's
+/// downstream hat ONLY. The check is enforced before the
+/// envelope is handed back to the prompt renderer so an
+/// upstream hat cannot poison the receiver hat by spamming
+/// envelopes.
+pub fn latest_handoff_envelope_payload(
+    events: &[Event],
+    current_hat: &str,
+) -> Option<HandoffEnvelopeView> {
     for ev in events.iter().rev() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&ev.payload) else {
             continue;
         };
-        if validate_handoff_envelope_payload(&value, None).is_ok() {
-            // Re-parse the validated envelope so we can hand back
-            // the typed view. validate_handoff_envelope_payload
-            // returns the typed payload, so re-walk to it.
-            if let Some(env) = value.get("handoff_envelope") {
-                if let Ok(parsed) = serde_json::from_value::<HandoffEnvelopePayload>(env.clone()) {
-                    return Some(HandoffEnvelopeView::from(&parsed));
-                }
-            }
+        if let Ok(parsed) = validate_handoff_envelope_payload(&value, None)
+            && parsed.receiver_contract.to_hat == current_hat
+        {
+            return Some(HandoffEnvelopeView::from(&parsed));
         }
     }
     None
@@ -900,16 +908,19 @@ mod tests {
             event_with_payload(json!({"task_id": "t"}), Some("executor")),
         ];
         assert!(
-            latest_handoff_envelope_payload(&events).is_none(),
+            latest_handoff_envelope_payload(&events, "goal-alignment-reviewer").is_none(),
             "no envelope in any event must yield None"
         );
     }
 
     #[test]
     fn latest_handoff_envelope_uses_most_recent_valid_payload() {
-        // Three events: an older valid envelope, a noise event,
-        // and a newer valid envelope from a different sender.
-        // The newer one wins.
+        // Three events: an older valid envelope addressed to
+        // `plan-reviewer`, a noise event, and a newer valid
+        // envelope addressed to `goal-alignment-reviewer`. When
+        // called with current_hat=`goal-alignment-reviewer`,
+        // the older envelope must be skipped (U5 trust boundary)
+        // and the newer one must surface.
         let events = vec![
             event_with_payload(envelope_value("plan-reviewer", "step-1"), Some("executor")),
             event_with_payload(json!({"plan_name": "p"}), Some("executor")),
@@ -918,8 +929,11 @@ mod tests {
                 Some("executor"),
             ),
         ];
-        let view: HandoffEnvelopeView = latest_handoff_envelope_payload(&events)
-            .expect("most recent envelope must be extracted");
+        let view: HandoffEnvelopeView = latest_handoff_envelope_payload(
+            &events,
+            "goal-alignment-reviewer",
+        )
+        .expect("most recent envelope addressed to current_hat must be extracted");
         assert_eq!(view.to_hat, "goal-alignment-reviewer");
         assert_eq!(view.plan_current_step, "step-2");
     }
@@ -946,7 +960,7 @@ mod tests {
             event_with_payload(bad_success_signal, Some("executor")),
             event_with_payload(envelope_value("reviewer", "step-3"), Some("executor")),
         ];
-        let view = latest_handoff_envelope_payload(&events)
+        let view = latest_handoff_envelope_payload(&events, "reviewer")
             .expect("valid envelope must surface even when earlier events were invalid");
         assert_eq!(view.plan_current_step, "step-3");
     }
@@ -961,8 +975,29 @@ mod tests {
             event_with_payload(json!({"plan_name": "p"}), Some("executor")),
         ];
         assert!(
-            latest_handoff_envelope_payload(&events).is_none(),
+            latest_handoff_envelope_payload(&events, "reviewer").is_none(),
             "all-invalid slice must yield None"
+        );
+    }
+
+    #[test]
+    fn extractor_returns_none_when_to_hat_mismatches_current() {
+        // U5 (R5): the trust boundary. An envelope addressed
+        // to a different hat than the current activation
+        // MUST be silently skipped so a `work.ready`
+        // addressed to `executor` cannot influence the
+        // prompt of `validator` (and vice versa).
+        let events = vec![event_with_payload(
+            envelope_value("validator", "step-1"),
+            Some("coordinator"),
+        )];
+        assert!(
+            latest_handoff_envelope_payload(&events, "executor").is_none(),
+            "envelope addressed to validator must NOT surface when current_hat=executor (A5 trust boundary)"
+        );
+        assert!(
+            latest_handoff_envelope_payload(&events, "validator").is_some(),
+            "envelope addressed to validator must surface when current_hat=validator"
         );
     }
 
