@@ -1188,7 +1188,28 @@ fn emit_command_with_root_and_hats(
     writeln!(file, "{}", json_line)?;
 
     // Success message
-    if use_colors {
+    // U9 (2026-07-06-001 plan): apply 路径下 `--output json` 打印
+    // EmitResult JSON（ok=true, recorded=true）作为 apply 成功的
+    // 机器可读信号。text 模式保持原有 "Event emitted" 行不变。
+    if args.output == "json" {
+        use ralph_core::emit_result::assemble::EmitResultParts;
+        let parts = EmitResultParts {
+            ok: true,
+            recorded: true, // apply 阶段：真实写盘
+            topic: topic.to_string(),
+            phase: "unknown".to_string(),
+            allowed_next: Vec::new(),
+            activate_next: Vec::new(),
+            errors: Vec::new(),
+            handoff: None,
+        };
+        let result = ralph_core::emit_result::EmitResult::assemble(parts);
+        println!(
+            "{}",
+            serde_json::to_string(&result)
+                .context("Failed to serialise EmitResult JSON")?
+        );
+    } else if use_colors {
         println!(
             "{}✓{} Event emitted: {}",
             colors::GREEN,
@@ -3872,6 +3893,117 @@ hats:
         assert_eq!(
             initial_lines, final_lines,
             "policy-check dry-run must not write to events.jsonl (initial={initial_lines}, final={final_lines})"
+        );
+    }
+}
+
+/// U9 测试：CLI apply 落盘 → recorded=true。
+///
+/// 验收要点：
+/// 1. 合法 emit 在 `--output json` 路径下 → stdout EmitResult JSON，
+///    `ok=true, recorded=true`。
+/// 2. events.jsonl 行数 +1（apply 阶段真正落盘）。
+///
+/// 测试策略：复用 U8 fixture（policy 启用 + work.done 要求 task_id），
+/// 调用 emit_command 不带 --policy-check（apply 路径），断言：
+/// - 返回 Ok
+/// - events.jsonl 行数 +1
+/// - **不在 isolated mode**（避免 hat-channel 路由，详见
+///   `ralph-emit-hat-channel-routing.md`）
+#[cfg(test)]
+mod emit_apply_recorded_json_tests {
+    use super::*;
+    use crate::cli::ColorMode;
+    use std::path::PathBuf;
+
+    /// 内联 workspace fixture：policy 启用 + business_topics +
+    /// required_fields + 非 isolated mode（让 events.jsonl 落盘）。
+    fn setup_workspace_for_apply() -> tempfile::TempDir {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let workspace = temp.path();
+
+        // 不设置 execution_mode: isolated，让 emit 走 main events.jsonl
+        // 路径而非 hat-channel 路由（参考 ralph-emit-hat-channel-routing.md）。
+        let ralph_yml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    business_topics:
+      - work.done
+    schemas:
+      work.done:
+        required_fields:
+          - task_id
+"#;
+        std::fs::write(workspace.join("ralph.yml"), ralph_yml).expect("write ralph.yml");
+
+        let hats_yml = r#"
+hats:
+  coordinator:
+    publishes:
+      - work.done
+"#;
+        std::fs::create_dir_all(workspace.join(".ralph")).expect(".ralph dir");
+        std::fs::write(workspace.join(".ralph/hats.yml"), hats_yml).expect("write hats.yml");
+
+        temp
+    }
+
+    /// apply 路径（不带 --policy-check）+ 合法 payload → Ok，
+    /// events.jsonl 行数 +1。
+    #[test]
+    fn test_apply_json_recorded_true() {
+        let temp = setup_workspace_for_apply();
+        let workspace = temp.path().to_path_buf();
+        let events_file = workspace.join(".ralph/events.jsonl");
+
+        // Pre-condition: events.jsonl 不存在或为空
+        let initial_lines = if events_file.exists() {
+            std::fs::read_to_string(&events_file)
+                .expect("read events")
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count()
+        } else {
+            0
+        };
+
+        let args = EmitArgs {
+            topic: Some("work.done".to_string()),
+            payload: r#"{"task_id":"task-apply-1"}"#.to_string(),
+            json: true,
+            file: PathBuf::from(".ralph/events.jsonl"),
+            policy_check: false, // apply 路径：不带 --policy-check
+            no_policy_check: false,
+            hat: Some("coordinator".to_string()),
+            triggered: None,
+            source: None,
+            schema: None,
+            output: "json".to_string(),
+        };
+
+        let result = emit_command_with_root(ColorMode::Never, args, Some(&workspace));
+        assert!(
+            result.is_ok(),
+            "apply with valid payload must return Ok, got: {result:?}"
+        );
+
+        // Post-condition: events.jsonl 行数 +1
+        let final_lines = if events_file.exists() {
+            std::fs::read_to_string(&events_file)
+                .expect("read events")
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count()
+        } else {
+            0
+        };
+        assert_eq!(
+            final_lines,
+            initial_lines + 1,
+            "apply must write exactly one new line to events.jsonl (initial={initial_lines}, final={final_lines})"
         );
     }
 }
