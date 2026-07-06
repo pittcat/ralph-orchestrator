@@ -1,0 +1,89 @@
+# 2026-07-06 DEV-005 + M3: coordinator-owned open task → executor
+# emits work.done early → contract rejects → synthesized task.resume
+# routes to coordinator (not executor).
+name: task_not_terminal_coordinator_recovery
+description: TaskNotTerminal rejection routes task.resume to coordinator when executor cannot close the task
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  tasks:
+    enabled: true
+    coordinator_hats:
+      - coordinator
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+        - task.resume
+      publishes:
+        - work.ready
+    executor:
+      subscribes_to:
+        - work.ready
+        - task.resume
+      publishes:
+        - work.done
+        - work.failed
+  event_loop:
+    execution_mode: isolated
+    execution_contracts:
+      enabled: true
+      rules:
+        work.done:
+          require_payload_fields:
+            - plan_name
+            - plan_path
+            - task_id
+            - task_key
+            - step
+          require_task:
+            id_field: task_id
+            key_field: task_key
+            loop_scoped: false
+            allowed_terminal_statuses:
+              - closed
+            auto_close_on_valid: false
+          require_git_change:
+            mode: diff_or_commit
+            allow_empty_for_steps:
+              - trivial
+          require_test_evidence:
+            mode: optional
+
+fixture_files:
+  - path: .ralph/agent/tasks.jsonl
+    content: |
+      {"id":"task-t1","title":"unit-1","key":"k1","status":"open","priority":1,"blocked_by":[],"loop_id":null,"owner_hat_id":"coordinator","created":"2026-07-06T00:00:00Z"}
+
+mock_responses:
+  - text: |
+      <event topic="work.start">
+      {"plan_name":"plan-x","plan_path":"docs/plans/p.md","task_id":"task-t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="work.ready">
+      {"plan_name":"plan-x","plan_path":"docs/plans/p.md","task_id":"task-t1","task_key":"k1","step":"step-01"}
+      </event>
+    hat: coordinator
+  - text: |
+      <event topic="work.done">
+      {"plan_name":"plan-x","plan_path":"docs/plans/p.md","task_id":"task-t1","task_key":"k1","step":"step-01","commit_count":1,"changed_lines":1}
+      </event>
+    hat: executor
+  - text: |
+      waiting for coordinator recovery.
+    hat: coordinator
+
+expected:
+  iterations: 4
+  events:
+    - topic: work.ready
+    - topic: task.resume
+  absent_events:
+    - topic: work.done
+  recovery_contains:
+    - contract:task_not_terminal
+    - '"target_hat":"coordinator"'
+  completion: false

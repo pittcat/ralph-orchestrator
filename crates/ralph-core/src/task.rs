@@ -204,6 +204,70 @@ impl Task {
     }
 }
 
+/// Returns true when `caller_hat` may perform lifecycle mutations
+/// (`start` / `close` / `fail` / `reopen`) on `task`.
+pub fn can_hat_mutate_task_lifecycle(
+    task: &Task,
+    caller_hat: &str,
+    coordinator_hats: &[String],
+) -> bool {
+    if task.owner_hat_id.as_deref() == Some(caller_hat) {
+        return true;
+    }
+    coordinator_hats.iter().any(|h| h == caller_hat)
+}
+
+/// Pick the hat that should close `task` when `source_hat` cannot.
+pub fn lifecycle_close_delegate_hat(
+    task: &Task,
+    source_hat: &str,
+    coordinator_hats: &[String],
+) -> String {
+    if can_hat_mutate_task_lifecycle(task, source_hat, coordinator_hats) {
+        return source_hat.to_string();
+    }
+    if let Some(owner) = task.owner_hat_id.as_deref() {
+        if coordinator_hats.iter().any(|h| h == owner) {
+            return owner.to_string();
+        }
+    }
+    coordinator_hats
+        .first()
+        .cloned()
+        .unwrap_or_else(|| source_hat.to_string())
+}
+
+/// Actionable denial message when `caller_hat` cannot mutate `task`.
+pub fn task_lifecycle_denied_message(
+    task: &Task,
+    caller_hat: &str,
+    coordinator_hats: &[String],
+    operation: &str,
+) -> String {
+    let owner = task.owner_hat_id.as_deref().unwrap_or("?");
+    if operation == "close" {
+        let delegate = lifecycle_close_delegate_hat(task, caller_hat, coordinator_hats);
+        if delegate != caller_hat {
+            return format!(
+                "{operation}: task {tid} is owned by hat '{owner}' and caller '{caller}' cannot close it. \
+                 Ask hat '{delegate}' to run `ralph tools task close {tid}` first, then re-emit work.done with task_id={tid}.",
+                operation = operation,
+                tid = task.id,
+                owner = owner,
+                caller = caller_hat,
+                delegate = delegate,
+            );
+        }
+    }
+    format!(
+        "{operation}: task {tid} is owned by hat '{owner}' but caller is '{caller}' (not in coordinator_hats)",
+        operation = operation,
+        tid = task.id,
+        owner = owner,
+        caller = caller_hat,
+    )
+}
+
 /// Sanitize a plan name into a slug safe to embed in a task_id.
 /// Concretely, lower-case the string and replace anything that
 /// is not an ASCII alnum with `_`. This is used by
@@ -314,6 +378,41 @@ mod tests {
     fn test_with_owner_hat_stamps_owner() {
         let task = Task::new("Test".to_string(), 1).with_owner_hat(Some("executor".to_string()));
         assert_eq!(task.owner_hat_id.as_deref(), Some("executor"));
+    }
+
+    #[test]
+    fn lifecycle_close_delegate_routes_coordinator_owned_task_to_coordinator() {
+        let task = Task::new("t1".to_string(), 1).with_owner_hat(Some("coordinator".to_string()));
+        let coordinators = vec!["coordinator".to_string()];
+        assert!(!can_hat_mutate_task_lifecycle(&task, "executor", &coordinators));
+        assert_eq!(
+            lifecycle_close_delegate_hat(&task, "executor", &coordinators),
+            "coordinator"
+        );
+    }
+
+    #[test]
+    fn lifecycle_close_delegate_keeps_owner_executor() {
+        let task = Task::new("t1".to_string(), 1).with_owner_hat(Some("executor".to_string()));
+        let coordinators = vec!["coordinator".to_string()];
+        assert!(can_hat_mutate_task_lifecycle(&task, "executor", &coordinators));
+        assert_eq!(
+            lifecycle_close_delegate_hat(&task, "executor", &coordinators),
+            "executor"
+        );
+    }
+
+    #[test]
+    fn task_lifecycle_denied_message_close_mentions_delegate_coordinator() {
+        let task = Task::new("task-1".to_string(), 1).with_owner_hat(Some("coordinator".to_string()));
+        let msg = task_lifecycle_denied_message(
+            &task,
+            "executor",
+            &["coordinator".to_string()],
+            "close",
+        );
+        assert!(msg.contains("Ask hat 'coordinator'"));
+        assert!(msg.contains("ralph tools task close task-1"));
     }
 
     #[test]

@@ -84,6 +84,15 @@ event_loop:
 }
 
 fn write_task(tasks_path: &std::path::Path, task_id: &str, status: TaskStatus) {
+    write_task_with_owner(tasks_path, task_id, status, None);
+}
+
+fn write_task_with_owner(
+    tasks_path: &std::path::Path,
+    task_id: &str,
+    status: TaskStatus,
+    owner_hat_id: Option<&str>,
+) {
     let parent = tasks_path.parent().unwrap();
     std::fs::create_dir_all(parent).unwrap();
     let mut store = TaskStore::load(tasks_path).unwrap();
@@ -91,8 +100,58 @@ fn write_task(tasks_path: &std::path::Path, task_id: &str, status: TaskStatus) {
     task.id = task_id.to_string();
     task.key = Some("k1".to_string());
     task.status = status;
+    if let Some(owner) = owner_hat_id {
+        task = task.with_owner_hat(Some(owner.to_string()));
+    }
     store.add(task);
     store.save().unwrap();
+}
+
+fn build_config_with_coordinator(workspace_root: &std::path::Path) -> RalphConfig {
+    let yaml = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["task.resume", "work.start"]
+    publishes: ["work.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["work.ready", "task.resume"]
+    publishes: ["work.done", "work.failed"]
+  reviewer:
+    name: "Reviewer"
+    triggers: ["work.done"]
+    publishes: ["review.done"]
+tasks:
+  enabled: true
+  coordinator_hats:
+    - coordinator
+event_loop:
+  execution_contracts:
+    enabled: true
+    rules:
+      work.done:
+        require_payload_fields:
+          - plan_name
+          - plan_path
+          - task_id
+          - task_key
+          - step
+        require_task:
+          id_field: "task_id"
+          key_field: "task_key"
+          loop_scoped: false
+          allowed_terminal_statuses: ["closed"]
+          auto_close_on_valid: false
+        require_git_change:
+          mode: "diff_or_commit"
+          allow_empty_for_steps: ["trivial"]
+        require_test_evidence:
+          mode: "optional"
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = workspace_root.to_path_buf();
+    config
 }
 
 fn work_done_event(task_id: &str) -> crate::event_reader::Event {
@@ -566,6 +625,78 @@ fn test_rejected_open_task_routes_retry_to_executor_not_reviewer() {
         "executor",
         "After rejected work.done, the next active hat must be executor via \
              targeted retry, not reviewer/ralph. Got: {}",
+        active_hat_id.as_str()
+    );
+}
+
+/// DEV-005 (2026-07-06): coordinator-owned open task → work.done rejected,
+/// targeted `task.resume` routes to coordinator (not executor).
+#[test]
+fn test_rejected_coordinator_owned_task_routes_retry_to_coordinator() {
+    let temp = TempDir::new().unwrap();
+    let workspace = temp.path();
+    init_git_repo(workspace);
+    let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
+    write_task_with_owner(
+        &tasks_path,
+        "test-id-1",
+        TaskStatus::Open,
+        Some("coordinator"),
+    );
+
+    let config = build_config_with_coordinator(workspace);
+    let mut event_loop = make_event_loop(config);
+
+    let mut event = work_done_event("test-id-1");
+    event.hat = Some("executor".to_string());
+    let result = process_events(vec![event], &mut event_loop);
+
+    assert!(
+        !result
+            .accepted_events
+            .iter()
+            .any(|e| e.topic.as_str() == "work.done"),
+        "Rejected work.done must not be accepted"
+    );
+
+    let coordinator_id = ralph_proto::HatId::new("coordinator");
+    let coordinator_pending = event_loop
+        .bus
+        .peek_pending(&coordinator_id)
+        .cloned()
+        .unwrap_or_default();
+    let targeted_retry = coordinator_pending.iter().find(|e| {
+        e.topic.as_str() == "task.resume"
+            && e.target.as_ref().map(|t| t.as_str()) == Some("coordinator")
+    });
+    assert!(
+        targeted_retry.is_some(),
+        "Coordinator must receive task.resume when executor cannot close the task. Pending: {:?}",
+        coordinator_pending
+            .iter()
+            .map(|e| (e.topic.as_str(), e.target.as_ref().map(|t| t.as_str())))
+            .collect::<Vec<_>>()
+    );
+
+    let executor_id = ralph_proto::HatId::new("executor");
+    let executor_pending = event_loop
+        .bus
+        .peek_pending(&executor_id)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !executor_pending.iter().any(|e| {
+            e.topic.as_str() == "task.resume"
+                && e.target.as_ref().map(|t| t.as_str()) == Some("executor")
+        }),
+        "Executor must not receive a self-targeted task.resume when it cannot close the task"
+    );
+
+    let active_hat_id = event_loop.get_active_hat_id();
+    assert_eq!(
+        active_hat_id.as_str(),
+        "coordinator",
+        "Recovery must activate coordinator, got {}",
         active_hat_id.as_str()
     );
 }

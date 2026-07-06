@@ -155,7 +155,7 @@ use crate::event_policy::{PolicyDecision, PolicyRuntimeState, check_completion_g
 use crate::event_reader::{Event as JsonlEvent, EventReader};
 use crate::execution_contract::{
     DefaultGitEvidenceProvider, ExecutionContractDecision, ExecutionContractFinding,
-    run_execution_contract_soft_checks, validate_execution_contract,
+    ExecutionContractViolationKind, run_execution_contract_soft_checks, validate_execution_contract,
 };
 use crate::hat_lifecycle::{ActivationKey, ActivationLifecycleTracker, SystemTimeClock};
 use crate::hat_registry::HatRegistry;
@@ -10410,33 +10410,69 @@ impl EventLoop {
                             // `task.resume` with `target=source_hat` so the next
                             // prompt activates the responsible hat, not the Ralph
                             // fallback.
+                            //
+                            // DEV-005 (2026-07-06): for `TaskNotTerminal`, route
+                            // recovery to the hat that can actually close the task
+                            // (typically coordinator) instead of the emitter.
                             let source_hat_str = finding.source_hat.as_deref();
                             let mut retry_target: Option<HatId> = None;
                             let mut no_retry_reason: Option<String> = None;
+                            let mut task_not_terminal_hint: Option<String> = None;
                             if let Some(hat_id_str) = source_hat_str {
                                 if hat_id_str != "ralph" {
-                                    let hat_id = HatId::new(hat_id_str);
+                                    let resolved_hat_id_str =
+                                        if let ExecutionContractViolationKind::TaskNotTerminal {
+                                            task_id,
+                                            ..
+                                        } = &finding.kind
+                                        {
+                                            use crate::task_store::TaskStore;
+                                            let task_snapshot = TaskStore::load(tasks_path)
+                                                .ok()
+                                                .and_then(|store| store.get(task_id).cloned());
+                                            let (delegate, hint) =
+                                                crate::execution_contract::task_not_terminal_resume_plan(
+                                                    task_id,
+                                                    task_snapshot.as_ref(),
+                                                    hat_id_str,
+                                                    &self.config.tasks.coordinator_hats,
+                                                );
+                                            task_not_terminal_hint = Some(hint);
+                                            delegate
+                                        } else {
+                                            hat_id_str.to_string()
+                                        };
+                                    let hat_id = HatId::new(&resolved_hat_id_str);
                                     match self.registry.get(&hat_id) {
                                         None => {
                                             no_retry_reason = Some(format!(
                                                 "source hat '{}' not registered",
-                                                hat_id_str
+                                                resolved_hat_id_str
                                             ));
                                         }
                                         Some(_) => {
-                                            let can_retry = self
-                                                .registry
-                                                .can_publish(&hat_id, event.topic.as_str());
-                                            let can_fail =
-                                                self.registry.can_publish(&hat_id, "work.failed");
-                                            if !can_retry && !can_fail {
-                                                no_retry_reason = Some(format!(
-                                                    "source hat '{}' cannot publish '{}' or 'work.failed'",
-                                                    hat_id_str,
-                                                    event.topic.as_str()
-                                                ));
-                                            } else {
+                                            let is_task_not_terminal_delegate = matches!(
+                                                &finding.kind,
+                                                ExecutionContractViolationKind::TaskNotTerminal { .. }
+                                            ) && resolved_hat_id_str != hat_id_str;
+                                            if is_task_not_terminal_delegate {
                                                 retry_target = Some(hat_id);
+                                            } else {
+                                                let can_retry = self
+                                                    .registry
+                                                    .can_publish(&hat_id, event.topic.as_str());
+                                                let can_fail = self
+                                                    .registry
+                                                    .can_publish(&hat_id, "work.failed");
+                                                if !can_retry && !can_fail {
+                                                    no_retry_reason = Some(format!(
+                                                        "recovery hat '{}' cannot publish '{}' or 'work.failed'",
+                                                        resolved_hat_id_str,
+                                                        event.topic.as_str()
+                                                    ));
+                                                } else {
+                                                    retry_target = Some(hat_id);
+                                                }
                                             }
                                         }
                                     }
@@ -10461,6 +10497,9 @@ impl EventLoop {
                                             })
                                         },
                                     );
+                                let recovery_reason = task_not_terminal_hint
+                                    .as_deref()
+                                    .unwrap_or(finding.message.as_str());
                                 let retry_payload = serde_json::json!({
                                     "rejected_topic": event.topic.as_str(),
                                     // U2 (2026-06-17-003 plan): add the
@@ -10469,7 +10508,7 @@ impl EventLoop {
                                     // detector counts the contract recovery
                                     // as schema-compliant.
                                     "target_hat": hat_id.as_str(),
-                                    "reason": finding.message,
+                                    "reason": recovery_reason,
                                     "finding_kind": format!("{:?}", finding.kind),
                                     "required_action": format!(
                                         "Fix the issue and emit '{}' again with correct payload, or emit 'work.failed' if unrecoverable.",
@@ -10585,54 +10624,10 @@ impl EventLoop {
             contract_validation_input_count > 0
         };
 
-        // 2026-07-06 U5 (DEV-005): synthesize a `task.resume` for any
-        // `TaskNotTerminal` contract rejection so the rejecting hat
-        // (typically executor) gets reactivated and can close its
-        // own task before retrying. Without this the rejected hat
-        // never sees a recovery signal and the task is stuck open
-        // forever (executor cannot close a coordinator-owned task,
-        // and the rejection is silently dropped after the
-        // `task.resume` target elsewhere is wrong).
-        //
-        // Only synthesize when the rejected event has a source hat
-        // (i.e. it came from a real agent, not the loop itself) so
-        // we do not loop `ralph → ralph`.
-        for rejection in &contract_rejections {
-            if let crate::execution_contract::ExecutionContractViolationKind::TaskNotTerminal {
-                task_id,
-                ..
-            } = &rejection.kind
-            {
-                if let Some(source_hat) = rejection.source_hat.as_ref() {
-                    let resume_payload = serde_json::json!({
-                        "kind": "execution_contract",
-                        "reason": format!(
-                            "task_not_terminal_synthesize_close:{task_id}:{}",
-                            rejection.topic
-                        ),
-                        "target_hat": source_hat,
-                        "task_id": task_id,
-                        "hint": crate::execution_contract::task_not_terminal_hint(task_id),
-                    });
-                    let resume_event = Event::new(
-                        "task.resume",
-                        resume_payload.to_string(),
-                    )
-                    .with_source(HatId::from("ralph"))
-                    .with_target(HatId::from(source_hat.as_str()));
-                    warn!(
-                        task_id = %task_id,
-                        source_hat = %source_hat.as_str(),
-                        topic = %rejection.topic,
-                        "DEV-005: synthesized task.resume for TaskNotTerminal so rejecting hat can close the task"
-                    );
-                    // Persist to events.jsonl (DEV-002 path) AND publish
-                    // to the bus so the hat's next activation sees the hint.
-                    self.state.record_event(&resume_event);
-                    self.bus.publish(resume_event);
-                }
-            }
-        }
+        // 2026-07-06 U5 (DEV-005): TaskNotTerminal recovery is handled
+        // inline in the contract-rejection branch above (routes to the
+        // hat that can close the task). The post-batch synthesis loop
+        // was removed to avoid duplicate `task.resume` events.
 
         let mut has_orphans = false;
 

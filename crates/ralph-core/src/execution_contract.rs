@@ -54,6 +54,31 @@ pub(crate) fn task_not_terminal_hint(task_id: &str) -> String {
     TASK_NOT_TERMINAL_HINT_TEMPLATE.replace("<task_id>", task_id)
 }
 
+/// DEV-005 (2026-07-06): choose the `task.resume` target and hint when
+/// `work.done` is rejected as `TaskNotTerminal`. When `source_hat`
+/// cannot close the referenced task, route recovery to the coordinator
+/// hat that owns the task (or the first configured coordinator hat).
+pub fn task_not_terminal_resume_plan(
+    task_id: &str,
+    task: Option<&crate::task::Task>,
+    source_hat: &str,
+    coordinator_hats: &[String],
+) -> (String, String) {
+    let target = task
+        .map(|t| crate::task::lifecycle_close_delegate_hat(t, source_hat, coordinator_hats))
+        .unwrap_or_else(|| source_hat.to_string());
+    let hint = if target == source_hat {
+        task_not_terminal_hint(task_id)
+    } else {
+        format!(
+            "Task '{task_id}' is not closed. Hat '{source_hat}' cannot close it; \
+             hat '{target}' must run `ralph tools task close {task_id}` first, \
+             then hat '{source_hat}' re-emits work.done with task_id={task_id}."
+        )
+    };
+    (target, hint)
+}
+
 /// Git evidence provider abstraction for testability.
 pub trait GitEvidenceProvider: Send + Sync {
     /// Returns true if the workspace is a git repository.
@@ -1540,6 +1565,20 @@ mod tests {
                 panic!("Expected TaskNotTerminal rejection for open task")
             }
         }
+    }
+
+    #[test]
+    fn test_task_not_terminal_resume_plan_routes_coordinator_owned_task() {
+        let task = Task::new("task-1".to_string(), 1).with_owner_hat(Some("coordinator".to_string()));
+        let (target, hint) = super::task_not_terminal_resume_plan(
+            "task-1",
+            Some(&task),
+            "executor",
+            &["coordinator".to_string()],
+        );
+        assert_eq!(target, "coordinator");
+        assert!(hint.contains("hat 'coordinator' must run"));
+        assert!(hint.contains("hat 'executor'"));
     }
 
     // === F2 Git evidence tests ===

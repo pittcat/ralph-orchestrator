@@ -589,12 +589,12 @@ fn authorize_lifecycle(
     if coordinator_hats.iter().any(|h| h == caller_hat) {
         return Ok(());
     }
-    bail!(
-        "{operation}: task {tid} is owned by hat '{owner}' but caller is '{caller}' (not in coordinator_hats)",
-        tid = task.id,
-        owner = task.owner_hat_id.as_deref().unwrap_or("?"),
-        caller = caller_hat
-    )
+    bail!(ralph_core::task::task_lifecycle_denied_message(
+        task,
+        caller_hat,
+        coordinator_hats,
+        operation,
+    ))
 }
 
 /// U7 (2026-07-04-003 plan): canonicalize a task mutation payload
@@ -2957,6 +2957,28 @@ tasks:
         let err = close_task_with_context(&mut store, &owned_id, &ctx, &[], false)
             .expect_err("missing hat in agent context should fail closed");
         assert!(err.to_string().to_lowercase().contains("hat"));
+    }
+
+    #[test]
+    fn test_task_close_denied_for_coordinator_owned_task_hints_delegate() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-a");
+        let mut store = open_store(root);
+        let owned = Task::new("Owned".to_string(), 1)
+            .with_loop_id(Some("loop-a".to_string()))
+            .with_owner_hat(Some("coordinator".to_string()));
+        let owned_id = owned.id.clone();
+        store.add(owned);
+
+        let ctx = ctx_for(root, Some("loop-a"), Some("executor"));
+        let coordinators = vec!["coordinator".to_string()];
+        let err = close_task_with_context(&mut store, &owned_id, &ctx, &coordinators, false)
+            .expect_err("executor must not close coordinator-owned task");
+        let msg = err.to_string();
+        assert!(msg.contains("Ask hat 'coordinator'"));
+        assert!(msg.contains("ralph tools task close"));
+        assert!(msg.contains("re-emit work.done"));
     }
 
     #[test]

@@ -3217,6 +3217,17 @@ fn test_u1_invalid_step_target_issued_for_unknown_fix_unit() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-06 DEV-005: coordinator-owned open task + premature
+/// `work.done` → contract rejects → synthesized `task.resume`
+/// targets coordinator (executor cannot close).
+#[test]
+fn test_task_not_terminal_coordinator_recovery_scenario() {
+    let yaml = load_scenario(
+        "tests/scenarios/2026-07-06-task-not-terminal-coordinator-recovery.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-30-001 P0-1 BDD coverage for U4 (shipper reason
 /// strict-match whitelist). When `plan.blocked` carries a
 /// recovery-bucket reason that is NOT in the strict whitelist
