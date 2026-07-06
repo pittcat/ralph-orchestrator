@@ -1739,6 +1739,35 @@ fn test_ce_executor_serial_review_scenario() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-06-004 plan U12: BDD regression for the serial
+/// handoff envelope contract. Real EventLoop runner. Mirrors
+/// the 6-dim review scenario but adds a minimal `handoff_envelope`
+/// to every emit payload so the validator + prompt-injection
+/// + EmitResult-summary wiring is exercised end-to-end. A
+/// regression that drops the envelope validator (so the emit
+/// succeeds silently) fails this scenario's `expected.events`.
+#[test]
+fn test_ce_executor_serial_handoff_envelope_happy_path() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_serial_handoff_envelope_happy_path.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-06-004 plan U12: BDD regression for the reject path.
+/// The executor emits `work.done` WITHOUT a handoff envelope;
+/// the validator must reject the emit and surface `task.resume`.
+/// Any future regression that silently drops the validator
+/// (and accepts the bad emit) fails the
+/// `expected.absent_events: [work.done, ...]` assertion.
+#[test]
+fn test_ce_executor_serial_handoff_envelope_rejects_missing_payload() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_serial_handoff_envelope_rejects_missing_payload.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // 2026-06-20-002 plan U3: harness self-test for `assert_state`
 //
