@@ -772,10 +772,14 @@ hats:
     # denies `coordinator → LOOP_COMPLETE` via `topic_deny_rules` and
     # the topology lint still saw the BFS edge as a bypass of
     # `report.done` (required_event_not_on_all_paths). The actual
-    # exhaustion path is `plan.blocked(reason=loop_stalled_max_iterations)`
-    # emitted by `progress-steward`, routed through `shipper` recoverable
-    # whitelist. Success path remains `plan.complete → shipper →
-    # REVIEW_COMPLETE → reporter → LOOP_COMPLETE`.
+    # 2026-07-06-001 U10/U11/U13: the exhaustion path
+    # `plan.blocked(reason=loop_stalled_max_iterations)` is fail-close —
+    # `progress-steward` hat removed (U10), `progress_steward.enabled=false`
+    # (U11), runtime does not publish `loop.stalled` (U12), and the
+    # literal is no longer in `RECOVERABLE_REASONS` (U13). Stalls now
+    # surface as `REVIEW_COMPLETE(pass_or_fail=fail)` instead of being
+    # promoted to `pass_with_residuals`. Success path remains
+    # `plan.complete → shipper → REVIEW_COMPLETE → reporter → LOOP_COMPLETE`.
     publishes: ["work.ready", "review.start", "plan.complete", "plan.blocked"]
     # 2026-06-26 plan U7: self-declared emit scope.
     exempt_topics: ["plan.blocked", "plan.complete", "review.start", "work.ready"]
@@ -2810,10 +2814,17 @@ hats:
       - **2026-06-30-001 P0-2 — STRICT-MATCH whitelist (primary-20260630-032648 diagnosis)**:
         - Read `reason` from the `plan.blocked` payload.
         - The routing is **STRICT EXACT MATCH** on the literal `reason` string. Whitespace and case are normalised (`trim()` + `to_lowercase()`) before the lookup, but the comparison itself is `==` against the canonical reason in the whitelist — substring matching, "starts with", or narrative prefix matching (`"stall_no_events recovery: ..."` etc.) is **forbidden** and routes to hard-fail. Pre-fix prompt wording ("with recoverable reason X") was being interpreted as a substring match by the agent, which promoted recovery-bucket reasons (e.g. `stall_no_events`) to pass even though the underlying recovery reason was outside the whitelist. This is the exact P0-2 failure the diagnosis flags.
-        - **Recoverable reasons** (the work itself may be sound; the block was triggered by a loop-level stall or steward escalation, NOT by a unit/review/fix failure). These are the ONLY reasons that can route to `pass_or_fail: "pass"` after checks 1-2 succeed:
-          - `loop_stalled_max_iterations`
-          - `steward_escalation`
-          - `review_terminal_drift` (legacy; kept for forward-compat with older recovery journals)
+        - **Recoverable reasons** (the work itself may be sound; the block was triggered by a loop-level stall or steward escalation, NOT by a unit/review/fix failure). These are the ONLY reasons that can route to `pass_or_fail: "pass"` after checks 1-2 succeed. The recoverable whitelist MUST stay in lock-step with `shipper_reason.rs::RECOVERABLE_REASONS` and `RECOVERABLE_RECOVERY_EXHAUSTED_PREFIXES` (the agent prompt lists reasons that are recoverable in this preset's perspective; the Rust mechanism is the source of truth — see plan 2026-07-06-001 U13 / U15 for SSOT):
+          # 2026-07-06-001 U13 (KTD-1 fail-close): `loop_stalled_max_iterations`
+          # and `steward_escalation` are REMOVED. U10 removed the
+          # progress-steward hat; U12 closed the runtime's `loop.stalled`
+          # wake path; U13 made these literals non-recoverable in the
+          # Rust mechanism. Promoting them to `pass_with_residuals`
+          # would mask the underlying stall as success — the exact
+          # silent-success drift this plan exists to eliminate.
+          # `default_publishes` now covers the coordinator-silence case
+          # that used to wake progress-steward.
+          - `review_terminal_drift`
           # 2026-07-02 plan 005 U7: prior runs (140149 / 175407) emit
           # `recovery_exhausted` (drift engine promoting Final hint) and
           # `review_failed` (review pipeline gave up); these reasons

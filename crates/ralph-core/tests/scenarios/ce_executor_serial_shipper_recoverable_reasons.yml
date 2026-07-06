@@ -2,12 +2,18 @@
 # 2026-07-06 U3 (DEV-003): bare `recovery_exhausted` is no longer
 # recoverable — it would mask the underlying stall retry_key. This
 # scenario now exercises a still-recoverable literal reason
-# (`loop_stalled_max_iterations`) to verify the recoverable path
+# (`review_terminal_drift`) to verify the recoverable path
 # continues to admit REVIEW_COMPLETE(pass) after the fail-close
 # tightening.
+# 2026-07-06-001 U13 (KTD-1 fail-close): `loop_stalled_max_iterations`
+# is NO LONGER recoverable (removed from `RECOVERABLE_REASONS` in
+# shipper_reason.rs). Scenario must use a reason that remains on
+# the post-U13 whitelist — `review_terminal_drift` is the closest
+# semantic match (stall-adjacent, recoverable, not delegated to
+# progress-steward hat which U10 removed).
 
 name: ce_executor_serial_shipper_recoverable_reasons
-description: U7 shipper runtime — recoverable reason (loop_stalled_max_iterations) allows REVIEW_COMPLETE pass
+description: U7 shipper runtime — recoverable reason (review_terminal_drift) allows REVIEW_COMPLETE pass
 
 config:
   prompt_file: PROMPT.md
@@ -36,11 +42,11 @@ config:
 mock_responses:
   - |
     <event topic="plan.blocked">
-    {"plan_name":"rec-demo","reason":"loop_stalled_max_iterations","task_id":"t1","task_key":"k1"}
+    {"plan_name":"rec-demo","reason":"review_terminal_drift","task_id":"t1","task_key":"k1"}
     </event>
   - |
     <event topic="REVIEW_COMPLETE">
-    {"plan_name":"rec-demo","verdict":"pass_with_residuals","pass_or_fail":"pass","residual_findings_summary":"recoverable reason loop_stalled_max_iterations; verification passed"}
+    {"plan_name":"rec-demo","verdict":"pass_with_residuals","pass_or_fail":"pass","residual_findings_summary":"recoverable reason review_terminal_drift; verification passed"}
     </event>
   - |
     waiting.
