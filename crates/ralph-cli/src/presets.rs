@@ -1152,33 +1152,30 @@ mod tests {
         );
     }
 
-    /// U4 (2026-06-17-003 plan): the `progress-steward` hat in the
-    /// serial preset must trigger on `loop.stalled` ONLY. The serial
-    /// preset does not consume `human.guidance`; the topic schema is
-    /// retained for operator/manual emit, but the steward must not
-    /// subscribe. The 2026-06-17-003 plan records this as the U4
-    /// product decision — automated recovery flows through
-    /// `task.resume`, not `human.guidance`. (The 2026-06-25 refactor
-    /// removed the Telegram-driven RObot producer; this assertion
-    /// predates that refactor and remains valid.)
+    /// 2026-07-06 plan U10: progress-steward hat REMOVED from
+    /// `ce-executor-serial`. Stall recovery is now runtime
+    /// fail-close (`event_loop/mod.rs`, U12) + shipper_reason gate
+    /// (`shipper_reason.rs`, U13). The pre-U10 assertion that the
+    /// preset declared a `progress-steward` hat triggering on
+    /// `loop.stalled` only is obsolete and has been deleted; the
+    /// regression is preserved as a negative expectation below
+    /// (the hat MUST NOT be present in the post-U10 preset).
+
+    /// 2026-07-06 plan U10 negative assertion: the
+    /// `progress-steward` hat MUST NOT be declared in the
+    /// `ce-executor-serial` preset after U10. Stall recovery
+    /// has migrated to runtime fail-close + shipper_reason.
     #[test]
-    fn test_ce_executor_serial_progress_steward_only_loop_stalled() {
+    fn test_ce_executor_serial_no_progress_steward_hat_after_u10() {
         let preset =
             get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
-        let steward = config
-            .hats
-            .get("progress-steward")
-            .expect("ce-executor-serial must define a 'progress-steward' hat");
         assert!(
-            steward.triggers.contains(&"loop.stalled".to_string()),
-            "ce-executor-serial progress-steward must trigger on loop.stalled"
-        );
-        assert!(
-            !steward.triggers.contains(&"human.guidance".to_string()),
-            "ce-executor-serial progress-steward must NOT trigger on human.guidance \
-             (no Telegram channel; automated recovery uses task.resume — U4)"
+            !config.hats.contains_key("progress-steward"),
+            "ce-executor-serial MUST NOT declare a 'progress-steward' hat after 2026-07-06 U10 \
+             (runtime fail-close + shipper_reason replace it); got {:?}",
+            config.hats.keys().collect::<Vec<_>>()
         );
     }
 

@@ -1,14 +1,14 @@
 # ce-executor-serial: Isolated Mode Plan-Driven Work Execution with TDD, Validator, and Manager Report
 # Pattern: Plan → Execute (TDD) → Validate → Fix (if needed) → Review (after all units) → Ship → Report
 #
-# 10-hat topology with TDD executor and validator:
+# 9-hat topology (progress-steward removed in 2026-07-06 plan U10) with TDD executor and validator:
 # - Executor writes tests first, then implements (TDD mode)
 # - Validator runs full test suite after each unit
 # - Fixer handles test failures with diagnosis + fix (merged debug-resolver capability)
 # - Review runs once after all units complete (not per-step)
 # - Coordinator directly advances units (no plan-gate middle layer)
 #
-# 10 Hats:
+# 9 Hats:
 # - Coordinator: Parses plan files, creates unit tasks, advances units on test.passed, triggers review after all units
 # - Executor: TDD implementation — write/update tests first, then implement, run unit tests
 # - Validator: Runs full test suite (auto-discovers test entry point), publishes test.passed / test.failed
@@ -18,7 +18,9 @@
 # - review-synthesizer: Reads per-dimension findings, writes fix-plan file, emits review.complete with fix_plan_file
 # - Shipper: Final validation, plan status update, final commit
 # - Reporter: Generates manager-facing completion report
-# - progress-steward: Loop-level fallback hat, wakes on loop.stalled
+# - progress-steward: REMOVED in 2026-07-06 plan U10; stall recovery is now
+#   runtime fail-close (U12) + shipper reason gate (U13); see presets/schemas
+#   Coverage comment for the new 9-hat topology.
 #
 # Usage:
 #   ralph run -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
@@ -3070,90 +3072,3 @@ hats:
       #   instead, letting the coordinator re-enter the state machine.
 
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
-  progress-steward:
-    name: "🛟 Progress Steward"
-    description: "Loop-level fallback hat — wakes on stall to read state and emit a single recovery event."
-    triggers: ["loop.stalled"]
-    terminal_events: ["plan.blocked"]
-    publishes:
-      - "work.ready"
-      - "review.start"
-      - "task.resume"
-      - "plan.blocked"
-    # 2026-06-29-007 plan U11 (P2-1 preset 注释同步):
-    # stall_recovery retry cap (U3) 在 stall_recovery 注入端
-    # 完成,不依赖 progress-steward 升级 plan.blocked。
-    # 仅 review-coordinator / review-synthesizer + review.*
-    # 链路上的 stall 走 cap;其他 stall 仍走 progress-steward
-    # 自愈。target_hat 必须 ≠ source_hat(U4 target_self_loop
-    # 防御)且 ≠ 上一跳 source_hat(U4 target_last_hop_loop
-    # follow-up)。flow_state_closed(U7)拒绝 phase ∈ {Closed,
-    # Failed} 后的业务事件;LOOP_COMPLETE 不在该 reject 集合,
-    # 走 verdict_gate 白名单。dimension-reviewer 持有
-    # docs/plans/ 写权限(U5a)被 preset_lint 硬拒。
-    event_filter:
-      enabled: true
-      events:
-        - loop.stalled
-    instructions: |
-      ## PROGRESS STEWARD MODE — Read state, decide, emit ONE recovery event
-
-      You are the loop-level fallback hat. You are auto-woken by
-      the runtime when the loop has stalled (no progress for
-      `max_steward_iterations` consecutive turns). Your job is to
-      break the stall, NOT to do the underlying work.
-
-      ### Step 1 — Read the state
-      Your PRIMARY source of truth is the `## ORCHESTRATOR CONTEXT` block injected at the top of this prompt by the orchestrator. Use:
-      - `current_step` / `completed_steps` / `open_tasks` — to understand where the loop is.
-      - If `## ORCHESTRATOR CONTEXT` is missing or projection is disabled, fall back to reading `.ralph/agent/progress.md`.
-
-      OPTIONAL secondary reads (only when ORCHESTRATOR CONTEXT is insufficient):
-      - `plan.md` — current step and required deliverables
-      - `ralph events --events-source main --output json | tail -200` — recent bus events (look for `work.done`, `test.passed`, `review.complete`, `plan.complete`, `task.resume`, `loop.stalled`)
-      - `.agents/scratchpad/ce-executor/{plan_name}/review-sequence.json` — read the current sequence status to decide whether the coordinator is mid-walk or stalled.
-
-      ### Step 2 — Choose ONE emit
-
-      The runtime phase engine owns coordinator terminal routing
-      (`review.start` vs `plan.complete`). Your job is **stall recovery
-      only** — nudge the hat that should act next:
-
-      - Open task, no executor output → `work.ready` (same step).
-      - Review sequence stalled → `task.resume(target_hat=coordinator)` (max 2 per reason).
-      - Fix-unit chain done but no `plan.complete` →
-        `task.resume(reason=fix_unit_complete_plan_complete_pending, target_hat=coordinator)`.
-      - All units done but no `review.start` → `task.resume(target_hat=coordinator)`.
-      - **Task closed but no `work.done` within 1 iteration (2026-07-03-002 plan U2) →**
-        `task.resume(target_hat=executor, reason=missing_work_done,
-        kind=task_closure_without_emit)`. This is a FAST PATH — do NOT
-        wait for 3 consecutive no-progress turns. Read
-        `.ralph/agent/tasks.jsonl` for rows with `status:closed` and
-        cross-check against `events.jsonl` for a matching `work.done`
-        within the same iteration. Missing → emit `task.resume` immediately.
-        The 093813 run stalled at fix-01 because executor closed the task
-        but never emitted `work.done`; without this fast path the loop
-        waited 3 turns before progress-steward could intervene.
-      - After 2 retries on the same reason → `plan.blocked(reason=<reason>_after_<N>_retries)`.
-      - Cannot determine safe action → `plan.blocked(reason=loop_stalled_max_iterations)`.
-
-      **HARD RULE — do NOT emit `review.dimension.ready` or `review.dimensions.complete`
-      from this hat.** Do NOT emit `task.resume(target_hat=review-coordinator)`.
-      **After `LOOP_COMPLETE` is honored, do not inject recovery events.**
-
-      ### Step 3 — Emit and exit
-      Publish EXACTLY ONE emit. Then stop. Do NOT do the underlying
-      work — that is the responsibility of the next hat.
-
-      ### Safety constraints
-      - Every emit MUST carry a `reason` payload describing why you chose it.
-      - Do NOT emit `LOOP_COMPLETE` — that is the orchestrator's terminal event.
-      - Do NOT do the work yourself.
-      - Do NOT emit any review-sequence internal event (`review.dimension.*`,
-        `review.dimensions.complete`, `review.complete`) — route through
-        coordinator or review-coordinator instead.
-      - If unsure, choose `plan.blocked(reason=loop_stalled_max_iterations)`.
-
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
-
-      For fix-unit task minting, use the canonical template `ralph tools task ensure --for-fix-unit --key <key>` (see `ralph-tools-tasks`).

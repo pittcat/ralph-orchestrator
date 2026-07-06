@@ -25,7 +25,11 @@
 # overall review). debug-resolver and plan-gate removed; fixer merges
 # diagnosis capability; coordinator directly advances units.
 #
-# Coverage (10 hats):
+# 2026-07-06 plan U10: progress-steward hat REMOVED. Stall recovery is
+# now runtime fail-close (U12 in event_loop) + shipper_reason gate
+# (U13 in shipper_reason.rs). This shrinks the topology from 10 → 9 hats.
+#
+# Coverage (9 hats):
 #   coordinator         -> work.ready / review.start / plan.complete / plan.blocked
 #   executor            -> work.done / work.failed
 #   validator           -> test.passed / test.failed
@@ -35,7 +39,7 @@
 #   review-synthesizer  -> review.complete (with fix_plan_file)
 #   shipper             -> REVIEW_COMPLETE
 #   reporter            -> report.done / LOOP_COMPLETE
-#   progress-steward    -> task.resume / plan.blocked
+#   (progress-steward REMOVED 2026-07-06 plan U10 — runtime fail-close covers stall)
 #
 # Removed topics (2026-06-24 plan U1/U2):
 #   - review.passed / review.failed  (review-synthesizer only emits review.complete)
@@ -554,7 +558,7 @@ workflow_contract:
   step_handoff:
     progress_task_gate: true
   handoff_topic_seeds:
-    # 2026-06-24 plan U2: 10-hat architecture.
+    # 2026-06-24 plan U2: 10-hat architecture (now 9 after 2026-07-06 U10).
     # Removed: queue.advance, review.passed, review.failed,
     #          fix.plan.ready, debug.exhausted.
     # Added:   test.passed, test.failed, review.start.
