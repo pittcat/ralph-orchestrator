@@ -82,14 +82,30 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 3. `.ralph/current-events` marker 文件
 4. `.ralph/events.jsonl` 默认路径
 
+**`RALPH_WORKSPACE_ROOT` 锚定（plan 2026-07-06-002）：**
+
+emit 全路径用 `resolve_workspace_root` 单一锚点 (priority：`RALPH_WORKSPACE_ROOT` env > `discover_workspace_root(cwd)` > cwd)。runner 通过 `cli_executor::inject_ralph_runtime_env` 已注入 `RALPH_WORKSPACE_ROOT` 和 `PWD` —— hat 进程**不要 unset**。当你 `unset RALPH_EVENTS_FILE; cd sorts/; ralph emit ...` 时，事件可能落到 `sorts/.ralph/events.jsonl` 孤儿路径(参见 `docs/report/2026-07-06-ce-executor-ralph-emit-pwd-sorts-diagnosis.md`)。
+
+**fail-closed 守卫（硬拒绝 + stdout 摘要）：**
+
+- `cwd_workspace_drift`：isolated mode + hat 上下文 + 未注入 `RALPH_EVENTS_FILE` + 默认 `--file` + `canonicalize(cwd) != canonicalize(workspace_root)` → 拒收。stdout 一行：`emit rejected [cwd_workspace_drift]: current_dir=... workspace_root=...`。
+- `orphan_events_path`：resolved 候选路径落在 `subdir/.ralph/...`（非 workspace 根 `.ralph/` 且非 `.ralph/agent/` hat-channel）→ 拒收。
+- 显式非默认 `--file` 命中 allowlist 的高级场景不受 `cwd_workspace_drift` 限制。
+
 **反模式 / 注意事项：**
 - 🔴 **禁止直写 `.ralph/events.jsonl`**：必须通过 `ralph emit` / `ralph wave emit` 写入事件。直接 `echo ... >> .ralph/events.jsonl` 或 heredoc 写入会绕过 CLI pre-publish check；loop 读盘时仍会触发 `event_policy` 校验，并以 `payload_contract_violation` 拒绝整行（最坏情况：`not_retriable` 终止 loop）。文档：`docs/plans/2026-06-15-001-feat-schema-aware-hat-emit-instructions-plan.md` §4.6。
 - 🔴 **`task_id` 字段禁止空字符串**：任何包含 `task_id` 的 payload（`work.ready`、`work.done`、`test.passed`、`queue.advance` 等）必须传非空字符串，如 `task-{timestamp}-{hex}`。`"task_id":""` 会被 `ralph emit` 直接拒绝，且会破坏 step handoff / state projection。
 - 🔴 **不要**在 wave worker 内部使用 `ralph emit` 发射 wave 事件；worker 应直接通过标准输出或 `ralph emit` 返回结果，而不是触发新 wave。
+- 🔴 **禁止 `unset RALPH_EVENTS_FILE` 后从子目录 `cd sorts/; ralph emit ...`**：isolated hat 进程会被 `cwd_workspace_drift` 硬拒绝，事件落不到目标。若 runner 注入的 env 被破坏，恢复 `unset` 前的 env 或 `cd $RALPH_WORKSPACE_ROOT` 后再 emit。
 - 🔴 **发射前确认 hat 作用域**：在 isolated 模式下，发射 topic 前必须确认当前 hat 的 `publishes` 列表包含该 topic。越权 topic 会被拒绝并触发 `task.resume`，连续 4 次越权将触发熔断终止 loop。运行 `ralph hats list` 查看当前 preset 各 hat 的 publishes。
 - 🔴 `--unsafe-no-policy-check` 仅在配置显式允许时可用，否则会导致校验失败。
 - 🔴 `ralph emit` **没有** `format` 选项。
 - 🔴 试图通过 `RALPH_EVENTS_FILE` 或 `--file` 写入其他 worktree 的 events 文件会被 `ralph emit` 拒绝；错误信息会列出当前 allowlist。
+
+**`EmitResult.target_path`（plan 2026-07-06-002 R5）：**
+
+- `--output json` 路径下 `EmitResult.target_path` 字段在 `recorded: true` 时为绝对落盘路径;`recorded: false` 或拒收场景下整键被 `skip_serializing_if` 省略。
+- text 模式成功行追加 `→ <absolute_path>`:例如 `Event emitted: test.passed → /home/.../.ralph/agent/events-hat-validator-001-1.jsonl`。stderr 截断场景下仍能肉眼核对落盘位置。
 
 **Payload 字段自洽检查**
 

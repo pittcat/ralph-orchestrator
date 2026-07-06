@@ -31,6 +31,7 @@ fn test_emit_result_types_success_json_roundtrip() {
         activate_next: vec![],
         errors: vec![],
         handoff: None,
+        target_path: None,
     };
     let json: Value =
         serde_json::to_value(&result).expect("EmitResult must serialize to JSON value");
@@ -125,6 +126,7 @@ fn test_emit_result_types_handoff_present_in_json_when_some() {
             to_hat: "coordinator".to_string(),
             reason: "phase_complete".to_string(),
         }),
+        target_path: None,
     };
     let json: Value =
         serde_json::to_value(&result).expect("EmitResult must serialize to JSON value");
@@ -168,6 +170,7 @@ fn test_emit_result_types_with_allowed_next_and_errors_keeps_vecs() {
             suggested_command: Some("ralph tools task list".to_string()),
         }],
         handoff: None,
+        target_path: None,
     };
     let json: Value =
         serde_json::to_value(&result).expect("EmitResult must serialize to JSON value");
@@ -217,6 +220,7 @@ fn test_emit_result_types_roundup() {
         activate_next: vec![],
         errors: vec![],
         handoff: None,
+        target_path: None,
     };
     let ok_json: Value =
         serde_json::to_value(&ok_result).expect("EmitResult must serialize");

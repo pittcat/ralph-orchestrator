@@ -1723,6 +1723,10 @@ pub fn emit_policy_validation_failure(
 }
 
 /// Build [`EmitResultParts`] for CLI `--output json` paths.
+///
+/// U4 (2026-07-06-002 plan, R5): the `target_path` parameter carries the
+/// resolved events file path so it can surface in `EmitResult.target_path`
+/// (`recorded: true` 的 apply 路径有效;其它路径默认 `None`)。
 pub fn build_emit_result_parts(
     topic: String,
     ok: bool,
@@ -1731,6 +1735,7 @@ pub fn build_emit_result_parts(
     config: Option<&RalphConfig>,
     workspace: &Path,
     hat: Option<&str>,
+    target_path: Option<String>,
 ) -> ralph_core::emit_result::assemble::EmitResultParts {
     use ralph_core::emit_result::resolve_emit_routing_from_config;
 
@@ -1744,6 +1749,7 @@ pub fn build_emit_result_parts(
         activate_next: Vec::new(),
         errors,
         handoff: None,
+        target_path,
     }
 }
 
@@ -1766,6 +1772,7 @@ pub fn report_to_emit_result(
         config,
         &report.workspace,
         report.hat.as_deref(),
+        None,
     );
     ralph_core::emit_result::EmitResult::assemble(parts)
 }

@@ -63,10 +63,26 @@ pub(crate) fn resolve_hat_channel_file(
 /// the default `events.jsonl` only when neither marker exists. Any other
 /// path — from `RALPH_EVENTS_FILE`, `--file`, or a forged marker — is
 /// rejected with a clear error.
+///
+/// U2 (2026-07-06-002 plan, R2/R4): the function gains two optional
+/// parameters so the isolated-mode fail-closed guard can see the live
+/// hat context (set by the loop runner via `RALPH_CURRENT_HAT`) and
+/// whether the resolved config is `event_loop.execution_mode: isolated`.
+///
+/// - `current_hat` — when `Some(_)`, the candidate path is checked
+///   against `current-hat-events` marker so a hat running inside a
+///   subtree cwd cannot re-resolve to a `subdir/.ralph/events*.jsonl`
+///   orphan file (error code `orphan_events_path`).
+/// - `isolated_mode` — when `true` AND the workspace root has a
+///   non-empty `current-hat-events` marker, the resolver refuses to
+///   fall back to `workspace_root/.ralph/events.jsonl` (the legacy
+///   default); the channel marker is the only legitimate fall-through.
 pub(crate) fn resolve_emit_path(
     workspace_root: &Path,
     cli_file: &Path,
     env_events_file: Option<&str>,
+    current_hat: Option<&str>,
+    isolated_mode: bool,
 ) -> Result<PathBuf> {
     fn normalize_path(p: &Path) -> PathBuf {
         let mut out = PathBuf::new();
@@ -82,6 +98,59 @@ pub(crate) fn resolve_emit_path(
             }
         }
         out
+    }
+
+    /// U2 (R2): classify a candidate events path inside the workspace
+    /// as an "orphan subtree" target. Returns `Some(reason)` when the
+    /// path lives under a nested `subdir/.ralph/...` subtree (rather
+    /// than the workspace root `.ralph/...` or `.ralph/agent/...` hat
+    /// channel). Such paths are produced by a hat process running
+    /// inside a subtree cwd (`cd sorts/`) and falling back to
+    /// `cwd/.ralph/events.jsonl` implicit default.
+    ///
+    /// Acceptable forms:
+    ///
+    /// - `workspace_root/.ralph/events*.jsonl` (default / main events)
+    /// - `workspace_root/.ralph/agent/events*.jsonl` (hat-channel)
+    /// - `workspace_root/.ralph/current-events-marker-target` (when the
+    ///   marker itself points back into the workspace root `.ralph/`).
+    ///
+    /// Reject:
+    ///
+    /// - `workspace_root/<subdir>/.ralph/events*.jsonl` where
+    ///   `<subdir>` is non-empty and not equal to `.ralph` or
+    ///   `.ralph/agent`. Example: `sorts/.ralph/events.jsonl`.
+    fn classify_orphan_path(
+        candidate: &Path,
+        workspace_root: &Path,
+        workspace_canon: &Path,
+    ) -> Option<String> {
+        // Strip the workspace root prefix (lexical). If the candidate is
+        // not even inside the workspace_root, it cannot be a "subtree
+        // orphan" of this workspace; that branch is already blocked by
+        // the symlink / outside-workspace guards above.
+        let relative = candidate.strip_prefix(workspace_root).ok().or_else(|| {
+            workspace_canon
+                .strip_prefix(workspace_root)
+                .ok()
+                .and_then(|_| candidate.strip_prefix(workspace_canon).ok())
+        })?;
+        // Walk the components: the first must be `.ralph` for the path
+        // to be a workspace-rooted events file. Anything else indicates
+        // the candidate nests under a real subdirectory, e.g.
+        // `sorts/.ralph/events.jsonl`.
+        let mut comps = relative.components();
+        let first = comps.next()?;
+        let first_os = first.as_os_str();
+        if first_os != ".ralph" {
+            return Some(format!(
+                "candidate path nests under `{}`, not the workspace root `.ralph/`; \
+                 this looks like a hat-PWD subtree default rather than a loop-managed \
+                 events file",
+                first_os.to_string_lossy()
+            ));
+        }
+        None
     }
 
     // Two paths are equivalent when their lexical forms match (after
@@ -200,9 +269,53 @@ pub(crate) fn resolve_emit_path(
         if !trimmed.is_empty() {
             resolve_marker_target(workspace_root, trimmed)
         } else {
-            default_path.clone()
+            // U2 (R4): isolated + hat marker → fall through to channel,
+            // NOT the legacy `events.jsonl` default. The legacy default
+            // path is reserved for non-isolated callers (manual debug,
+            // bootstrap, or `ralph events --events-source main`).
+            if isolated_mode && current_hat.is_some() {
+                let marker_value = fs::read_to_string(&current_hat_marker)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                if let Some(marker_value) = marker_value {
+                    resolve_marker_target(workspace_root, &marker_value)
+                } else {
+                    default_path.clone()
+                }
+            } else {
+                default_path.clone()
+            }
         }
     } else if let Ok(value) = fs::read_to_string(&current_marker) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            resolve_marker_target(workspace_root, trimmed)
+        } else {
+            // U2 (R4): isolated + hat marker → channel.
+            if isolated_mode && current_hat.is_some() {
+                let marker_value = fs::read_to_string(&current_hat_marker)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                if let Some(marker_value) = marker_value {
+                    resolve_marker_target(workspace_root, &marker_value)
+                } else {
+                    default_path.clone()
+                }
+            } else {
+                default_path.clone()
+            }
+        }
+    } else if isolated_mode
+        && current_hat.is_some()
+        && let Ok(value) = fs::read_to_string(&current_hat_marker)
+    {
+        // U2 (R4): isolated mode + hat marker present + no
+        // candidate/current marker → resolve the channel rather than
+        // `workspace_root/.ralph/events.jsonl` default. The hat's
+        // write channel is the legitimate destination for `ralph emit`
+        // under isolated execution.
         let trimmed = value.trim();
         if !trimmed.is_empty() {
             resolve_marker_target(workspace_root, trimmed)
@@ -245,6 +358,31 @@ pub(crate) fn resolve_emit_path(
                     canon.display()
                 );
             }
+
+            // U2 (R2): orphan guard — when a hat is running inside the
+            // loop (current_hat is set), the resolved target must NOT
+            // point at a `subdir/.ralph/events*.jsonl` orphan file. We
+            // accept `subtree=.ralph/...` only when the subtree is the
+            // workspace root itself (i.e. the `agent/` hat-channel
+            // directory under `.ralph/`) OR the path is the workspace
+            // root `.ralph/events*.jsonl` default. Anything like
+            // `sorts/.ralph/events.jsonl` (a nested PWD subtree that
+            // `cwd = sorts/` resolves relative to) is rejected.
+            if current_hat.is_some()
+                && let Some(orphan_reason) =
+                    classify_orphan_path(&normalized, workspace_root, &workspace_canon)
+            {
+                bail!(
+                    "orphan_events_path: refusing to emit event to {} — {}. \
+                     Emits from a hat context must land in the workspace root \
+                     .ralph/ tree (current-events / current-candidate-events / \
+                     current-hat-events / events.jsonl) or .ralph/agent/ hat-channel, \
+                     never in a nested cwd subtree.",
+                    normalized.display(),
+                    orphan_reason
+                );
+            }
+
             return Ok(normalized);
         }
     }

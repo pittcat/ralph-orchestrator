@@ -164,7 +164,141 @@ pub fn merge_hat_channel(
     })?;
     let _ = fs::remove_file(crate::loop_runner::paths::current_hat_events_marker(ctx));
 
+    // U6 (2026-07-06-002 plan, R7): merge 成功后扫描 workspace 内
+    // 是否残留 subtree `*/.ralph/events*.jsonl` 孤儿(常见于 hat 在
+    // 子目录 cwd 内 emit,但未走 hat-channel 路由)。命中时写
+    // `.ralph/diagnostics/orphan-emit-{ts}.md` 便于 operator
+    // 通过 `ralph diagnose` 发现。不 fail-closed loop,与
+    // `emit_channel_routing_fallback_diagnostic` 行为一致。
+    if let Err(err) = scan_orphan_subtree_events(ctx) {
+        tracing::warn!(
+            "hat_channel: orphan subtree scan failed: {err}"
+        );
+    }
+
     Ok(())
+}
+
+/// U6 (R7): scan the workspace for `subdir/.ralph/events*.jsonl`
+/// subtree events files that survived after `merge_hat_channel`. The
+/// main `workspace/.ralph/` tree and the `workspace/.ralph/agent/`
+/// hat-channel tree are excluded; only `**/.ralph/events*.jsonl`
+/// paths that are NOT under those two well-known trees are flagged.
+///
+/// Implementation note: we use `std::fs::read_dir` recursively
+/// (depth-bounded) rather than `walkdir` to avoid adding a
+/// workspace-level dependency for one diagnostic path. The depth
+/// cap + explicit skip list keeps the walk cost small enough to
+/// run on every `merge_hat_channel` invocation.
+fn scan_orphan_subtree_events(ctx: &LoopContext) -> anyhow::Result<()> {
+    use std::collections::HashSet;
+
+    let workspace = ctx.workspace();
+
+    // Skip main tree + hat-channel + .git + node_modules/target.
+    let skip_paths: HashSet<std::path::PathBuf> = [
+        ".ralph".to_string(),
+        ".ralph/agent".to_string(),
+        ".git".to_string(),
+        "node_modules".to_string(),
+        "target".to_string(),
+    ]
+    .into_iter()
+        .map(|p| workspace.join(p))
+        .collect();
+
+    let mut orphans: Vec<std::path::PathBuf> = Vec::new();
+    walk_collect_orphans(&workspace, &skip_paths, 0, 8, &mut orphans);
+
+    if orphans.is_empty() {
+        return Ok(());
+    }
+
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S");
+    let diagnostics_dir = ctx.ralph_dir().join("diagnostics");
+    let _ = fs::create_dir_all(&diagnostics_dir);
+    let path = diagnostics_dir.join(format!("orphan-emit-{}.md", ts));
+    let mut body = String::new();
+    body.push_str("# Hat Subtree Orphan Events\n\n");
+    body.push_str(&format!(
+        "- **timestamp**: {}\n- **workspace**: {}\n- **count**: {}\n\n",
+        ts,
+        workspace.display(),
+        orphans.len()
+    ));
+    body.push_str("Events files landed in a nested `subdir/.ralph/events*.jsonl` rather than the workspace-root `.ralph/` tree or the `.ralph/agent/` hat-channel.\n\n");
+    body.push_str("## Paths\n\n");
+    for orphan in &orphans {
+        body.push_str(&format!("- `{}`\n", orphan.display()));
+    }
+    body.push_str("\n## Action\n\n");
+    body.push_str("- inspect each path with `wc -l <path>` and `tail -1 <path>` to identify what was emitted;\n");
+    body.push_str("- re-emit the events via `ralph emit` with the runner's `RALPH_EVENTS_FILE` in scope, or `cd $RALPH_WORKSPACE_ROOT` before emitting;\n");
+    body.push_str("- delete the orphan files once the events have been re-played or acknowledged as duplicates.\n");
+
+    let _ = fs::write(&path, body);
+    tracing::error!(
+        diagnostic_path = %path.display(),
+        orphan_count = orphans.len(),
+        "hat subtree orphan events detected (see diagnostic file)"
+    );
+    Ok(())
+}
+
+/// U6 helper: depth-bounded recursive scan that **does not** descend
+/// into `skip_paths` (built from main `.ralph/` tree + heavy dirs).
+/// Emits every `events*.jsonl` under a directory whose path
+/// components include `.ralph` and that is non-empty into `orphans`.
+fn walk_collect_orphans(
+    dir: &std::path::Path,
+    skip_paths: &std::collections::HashSet<std::path::PathBuf>,
+    depth: usize,
+    max_depth: usize,
+    orphans: &mut Vec<std::path::PathBuf>,
+) {
+    if depth > max_depth {
+        return;
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Skip if this entry is exactly in `skip_paths` or contained
+        // within one (avoid recursing).
+        if skip_paths.iter().any(|skip| path.starts_with(skip)) {
+            continue;
+        }
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if file_type.is_dir() {
+            walk_collect_orphans(&path, skip_paths, depth + 1, max_depth, orphans);
+        } else if file_type.is_file() {
+            let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !(file_name.starts_with("events") && file_name.ends_with(".jsonl")) {
+                continue;
+            }
+            let has_ralph_ancestor = path.components().any(|c| {
+                matches!(c, std::path::Component::Normal(s) if s == std::ffi::OsStr::new(".ralph"))
+            });
+            if !has_ralph_ancestor {
+                continue;
+            }
+            let meta_ok = entry
+                .metadata()
+                .map(|m| m.len() > 0)
+                .unwrap_or(false);
+            if !meta_ok {
+                continue;
+            }
+            orphans.push(path);
+        }
+    }
 }
 
 /// Derive the `triggered` field for a business topic from the handoff index.
@@ -440,6 +574,94 @@ mod tests {
         assert!(
             !ctx.ralph_dir().join("current-hat-events").exists(),
             "marker should still be removed"
+        );
+    }
+
+    /// U6 (2026-07-06-002 plan, R7): pre-seeded `sorts/.ralph/events.jsonl`
+    /// 孤儿事件文件,在 `merge_hat_channel` 后必须被
+    /// `.ralph/diagnostics/orphan-emit-*.md` 报告。
+    #[test]
+    fn test_merge_hat_channel_orphan_subtree_scan_writes_diagnostic() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = make_ctx(&tmp);
+
+        // 准备一个 hat-channel(无内容可 merge),并预置 subtree 孤儿
+        let channel = prepare_hat_channel(&ctx, "validator", "primary-006", 1).unwrap();
+        assert!(channel.exists(), "empty channel pre-created");
+
+        let sorts_dir = tmp.path().join("sorts");
+        std::fs::create_dir_all(sorts_dir.join(".ralph")).unwrap();
+        let orphan = sorts_dir.join(".ralph/events.jsonl");
+        std::fs::write(&orphan, "{\"topic\":\"test.passed\"}\n").unwrap();
+
+        let target = tmp.path().join(".ralph/events-main.jsonl");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "existing\n").unwrap();
+
+        merge_hat_channel(&ctx, &target, "validator", None).unwrap();
+
+        // 反断言:workspace_root/.ralph/events*.jsonl + 主流事件**不**受影响
+        assert!(
+            target.starts_with(ctx.workspace().join(".ralph")),
+            "main target should be the workspace root .ralph/ tree"
+        );
+
+        // 诊断文件应存在
+        let diagnostics_dir = ctx.ralph_dir().join("diagnostics");
+        let mut entries: Vec<_> = fs::read_dir(&diagnostics_dir)
+            .expect("diagnostics dir should exist")
+            .map(|e| e.unwrap().path())
+            .collect();
+        entries.sort();
+        let orphan_diag: Vec<_> = entries
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("orphan-emit-")
+            })
+            .collect();
+        assert!(
+            !orphan_diag.is_empty(),
+            "orphan-emit diagnostic should exist for {}",
+            orphan.display()
+        );
+        let diag_content = fs::read_to_string(&orphan_diag[0]).unwrap();
+        assert!(
+            diag_content.contains("events.jsonl"),
+            "diagnostic should mention the orphan path, got: {diag_content}"
+        );
+    }
+
+    /// U6 (R7): 无子树孤儿时 `merge_hat_channel` 不写 orphan 诊断。
+    #[test]
+    fn test_merge_hat_channel_no_subtree_orphans_no_diagnostic() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = make_ctx(&tmp);
+
+        // Empty channel — merge 后不应有 orphan 诊断
+        let channel = prepare_hat_channel(&ctx, "executor", "primary-007", 1).unwrap();
+        assert!(channel.exists());
+
+        let target = tmp.path().join(".ralph/events-main.jsonl");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "existing\n").unwrap();
+
+        merge_hat_channel(&ctx, &target, "executor", None).unwrap();
+
+        // 确认 diagnostics 目录要么不存在,要么不含 orphan-emit-*.md
+        let diagnostics_dir = ctx.ralph_dir().join("diagnostics");
+        let has_orphan = diagnostics_dir
+            .is_dir()
+            && (fs::read_dir(&diagnostics_dir).unwrap().flatten().any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("orphan-emit-")
+            }));
+        assert!(
+            !has_orphan,
+            "no orphan subtree must produce no orphan-emit diagnostic"
         );
     }
 }

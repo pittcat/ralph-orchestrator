@@ -41,26 +41,36 @@ pub struct EmitResultParts {
     pub errors: Vec<crate::emit_result::EmitError>,
     /// Agent 上下文交接包（由 U4 `handoff_from_fixture_input` 生成）。
     pub handoff: Option<crate::emit_result::EmitHandoff>,
+    /// U4 (R5): 真实落盘的绝对路径。`recorded=false` 或 `ok=false`
+    /// 时强制为 `None`(对应 JSON 键省略)。
+    pub target_path: Option<String>,
 }
 
 impl EmitResult {
     /// 把 policy-check / apply 各阶段离散信号合并为 `EmitResult`。
     ///
     /// 规则见模块级文档：`ok==false` → `recorded=false`、清空
-    /// allowed_next / activate_next / handoff。
+    /// allowed_next / activate_next / handoff / target_path。
     pub fn assemble(parts: EmitResultParts) -> Self {
-        let (effective_recorded, effective_allowed_next, effective_activate_next, effective_handoff) =
+        let (effective_recorded, effective_allowed_next, effective_activate_next, effective_handoff, effective_target_path) =
             if parts.ok {
                 (
                     parts.recorded,
                     parts.allowed_next,
                     parts.activate_next,
                     parts.handoff,
+                    // target_path:仅在 apply 成功路径下填充(由调用方
+                    // 判断)。这里仅防御 `recorded=false` 时的 None。
+                    if parts.recorded {
+                        parts.target_path
+                    } else {
+                        None
+                    },
                 )
             } else {
                 // 拒收：recorded 强制 false；清空 allowed_next /
-                // activate_next / handoff（policy 拒绝场景下无意义）。
-                (false, Vec::new(), Vec::new(), None)
+                // activate_next / handoff / target_path。
+                (false, Vec::new(), Vec::new(), None, None)
             };
 
         Self {
@@ -73,6 +83,7 @@ impl EmitResult {
             activate_next: effective_activate_next,
             errors: parts.errors,
             handoff: effective_handoff,
+            target_path: effective_target_path,
         }
     }
 }
@@ -105,6 +116,7 @@ mod tests {
                 to_hat: "coordinator".to_string(),
                 reason: "phase_complete".to_string(),
             }),
+            target_path: None,
         };
         let result = EmitResult::assemble(parts);
 
@@ -145,6 +157,7 @@ mod tests {
             activate_next: vec![],
             errors: vec![],
             handoff: None,
+            target_path: None,
         };
         let result = EmitResult::assemble(parts);
 
@@ -182,6 +195,7 @@ mod tests {
             activate_next: vec![],
             errors: vec![],
             handoff: None,
+            target_path: None,
         };
         let result = EmitResult::assemble(parts);
 
@@ -211,6 +225,7 @@ mod tests {
             activate_next: vec![],
             errors: vec![],
             handoff: None,
+            target_path: None,
         };
         let result = EmitResult::assemble(parts);
         assert_eq!(result.schema_version, EMIT_RESULT_SCHEMA_VERSION);

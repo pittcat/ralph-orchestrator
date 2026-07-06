@@ -64,6 +64,14 @@ pub struct EmitResult {
     /// handoff 时填充。`None` 时省略。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub handoff: Option<EmitHandoff>,
+    /// U4 (2026-07-06-002 plan, R5): 事件真实落盘的绝对路径。
+    /// `recorded: true` 时必填;`recorded: false` 或拒收场景
+    /// 设为 `None`(JSON 中整键被 `skip_serializing_if` 省略)。
+    ///
+    /// 旧 `emit_result.v1` 消费方不会读到此字段(`#[serde(default)]`),
+    /// 因此是 **additive** 变更,KTD4 选择不 bump schema version。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub target_path: Option<String>,
 }
 
 /// 单条 policy / 校验错误。
