@@ -399,6 +399,69 @@ pub struct EventLoopConfig {
     /// loops are unaffected.
     #[serde(default)]
     pub macro_edge_next_hint: MacroEdgeNextHintConfig,
+
+    /// 2026-07-06-004 plan (U1): handoff envelope — when
+    /// `enabled` is true the isolated prompt builder (U6),
+    /// policy-check validator (U8), and `EmitResult` summary
+    /// (U9) start honouring the typed `handoff_envelope` field
+    /// in business event payloads. Defaults to disabled so
+    /// non-serial presets and ad-hoc emits are unaffected
+    /// (regression防线 #1).
+    #[serde(default)]
+    pub handoff_envelope: HandoffEnvelopeConfig,
+}
+
+/// 2026-07-06-004 plan U1: typed view of the
+/// `event_loop.handoff_envelope:` block in `presets/en/<name>.yml`.
+///
+/// All four fields default to `false`. The master `enabled` flag
+/// exists so non-serial presets, plain `ralph emit` calls, and
+/// the policy-check dry-run path keep their pre-004 behaviour
+/// with zero changes (regression防线 #1 / #8). The four flags are
+/// orthogonal: U7 only opens `prompt_injection`, U10 is the first
+/// unit that opens `validate_payload` / `emit_result_summary`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffEnvelopeConfig {
+    /// Master switch. When `false` the handoff envelope is dormant
+    /// at every layer: payload validator is skipped, prompt
+    /// renderer is skipped, `EmitResult` summary is omitted.
+    /// `presets/en/ce-executor-serial.yml` is the only preset that
+    /// flips this on (U7), and even there `validate_payload` /
+    /// `emit_result_summary` stay off until U10.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// When true and `enabled` is also true, the isolated prompt
+    /// builder prepends the rendered `## HANDOFF ENVELOPE` block
+    /// derived from the most recent accepted business event
+    /// payload's `handoff_envelope` field (U6).
+    #[serde(default)]
+    pub prompt_injection: bool,
+
+    /// When true and `enabled` is also true, the policy-check
+    /// validation gate rejects payloads that lack a valid
+    /// `handoff_envelope` (U8). Off by default so non-serial
+    /// presets and ad-hoc emits are not affected.
+    #[serde(default)]
+    pub validate_payload: bool,
+
+    /// When true and `enabled` is also true, `EmitResult` includes
+    /// an optional `handoff_envelope` summary so the agent can see
+    /// the envelope it just emitted was recognised (U9).
+    #[serde(default)]
+    pub emit_result_summary: bool,
+}
+
+impl Default for HandoffEnvelopeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            prompt_injection: false,
+            validate_payload: false,
+            emit_result_summary: false,
+        }
+    }
 }
 
 /// Configuration for the macro-edge next hint (U18 P2).
@@ -522,6 +585,10 @@ impl Default for EventLoopConfig {
             supervisor: SupervisorConfig::default(),
             // U18: macro edge next hint defaults to disabled.
             macro_edge_next_hint: MacroEdgeNextHintConfig::default(),
+            // 2026-07-06-004 plan U1: handoff envelope defaults to
+            // disabled (every flag false). U7 is the first unit
+            // that flips any flag on.
+            handoff_envelope: HandoffEnvelopeConfig::default(),
         }
     }
 }
@@ -759,6 +826,91 @@ supervisor:
         assert_eq!(cfg.supervisor.max_concurrent_workers, 16);
         // Fields left at framework defaults must round-trip too.
         assert_eq!(cfg.supervisor.aggregate_timeout_secs, 600);
+    }
+
+    /// 2026-07-06-004 plan U1 RED: default-disabled contract. The
+    /// typed config must exist and every field must default to
+    /// `false` so existing loops, presets, and the policy-check
+    /// pipeline keep zero regression (regression防线 #1 / #8).
+    #[test]
+    fn handoff_envelope_defaults_to_disabled() {
+        let cfg = HandoffEnvelopeConfig::default();
+        assert!(
+            !cfg.enabled,
+            "default must be disabled so non-serial presets and ad-hoc emits are unaffected"
+        );
+        assert!(
+            !cfg.prompt_injection,
+            "default prompt_injection must be false"
+        );
+        assert!(
+            !cfg.validate_payload,
+            "default validate_payload must be false"
+        );
+        assert!(
+            !cfg.emit_result_summary,
+            "default emit_result_summary must be false"
+        );
+    }
+
+    /// 2026-07-06-004 plan U1 RED: explicit flags round-trip
+    /// through serde_yaml. The plan defines four orthogonal flags;
+    /// each must independently honour an explicit `true` /
+    /// `false`. Also asserts `EventLoopConfig` carries the block
+    /// with the same defaults when omitted at the top level.
+    #[test]
+    fn handoff_envelope_deserializes_explicit_flags() {
+        let yaml = r#"
+enabled: true
+prompt_injection: true
+validate_payload: false
+emit_result_summary: false
+"#;
+        let cfg: HandoffEnvelopeConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.enabled);
+        assert!(cfg.prompt_injection);
+        assert!(!cfg.validate_payload);
+        assert!(!cfg.emit_result_summary);
+
+        // U1 negative path: unknown fields must surface a parse
+        // error so silent typos like `validates_payload` cannot
+        // no-op. Mirrors `SupervisorConfig`'s deny_unknown_fields
+        // contract (same regression防线 family).
+        let bad_yaml = r#"
+enabled: true
+bogus_field: 1
+"#;
+        let result: Result<HandoffEnvelopeConfig, _> = serde_yaml::from_str(bad_yaml);
+        assert!(
+            result.is_err(),
+            "unknown handoff_envelope field must produce a deserialization error"
+        );
+
+        // U1 nesting: omitting `event_loop.handoff_envelope` from
+        // a top-level config still yields the disabled defaults.
+        let top_yaml = r#"
+prompt_file: "PROMPT.md"
+"#;
+        let cfg: EventLoopConfig = serde_yaml::from_str(top_yaml).unwrap();
+        assert!(
+            !cfg.handoff_envelope.enabled,
+            "event_loop config without handoff_envelope block must default to disabled"
+        );
+        assert!(!cfg.handoff_envelope.prompt_injection);
+        assert!(!cfg.handoff_envelope.validate_payload);
+        assert!(!cfg.handoff_envelope.emit_result_summary);
+
+        // U1 nesting with explicit enabled = true survives a full
+        // EventLoopConfig parse.
+        let top_yaml2 = r#"
+handoff_envelope:
+  enabled: true
+  validate_payload: true
+"#;
+        let cfg: EventLoopConfig = serde_yaml::from_str(top_yaml2).unwrap();
+        assert!(cfg.handoff_envelope.enabled);
+        assert!(cfg.handoff_envelope.validate_payload);
+        assert!(!cfg.handoff_envelope.prompt_injection);
     }
 }
 
