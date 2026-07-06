@@ -9,6 +9,7 @@
 
 //! U2：`map_policy_report_to_errors` 纯函数的子模块入口。
 
+pub mod allowed_next;
 pub mod map_errors;
 pub mod tests;
 
