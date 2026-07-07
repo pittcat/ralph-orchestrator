@@ -3129,3 +3129,55 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         "every retained scenario must be pipeline, supervisor, or generic; offenders = {offenders:?}"
     );
 }
+
+// 2026-07-07-006 fix-plan U8 (R9 / SR-T2-fix): the three U9 correction
+// scenarios were dropped wholesale when the `ce_executor_serial_*`
+// fixtures were purged (1b91e51b), but they exercise the correction
+// module's general behavior — deterministic escalation, three-step
+// escalation, and `ralph diagnose --from-ledger` ledger replay — not
+// anything serial-specific. The fixtures are already neutral
+// (`correction_*.yml` / `diagnose_from_ledger.yml`), so we restore
+// the test entries with pipeline-named identifiers and the
+// correction-module test helpers that already exist in
+// `ralph_core::correction::set_correction_enabled_for_test` and
+// `event_loop::loop_state::set_lint_circuit_breaker_limit_for_test`.
+
+fn enable_deterministic_correction_for_pipeline_scenario() {
+    ralph_core::correction::set_correction_enabled_for_test(true);
+}
+
+/// BDD regression: a recoverable rejection accumulates a
+/// `CorrectionContext` and the next prompt contains the
+/// `## ORCHESTRATOR CORRECTION` block. Generic correction-module
+/// behavior; re-locked against the pipeline fixture path
+/// (correction_deterministic.yml is fixture-neutral).
+#[test]
+fn test_ce_executor_pipeline_u9_correction_deterministic_scenario() {
+    enable_deterministic_correction_for_pipeline_scenario();
+    let yaml = load_scenario("tests/scenarios/correction_deterministic.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// BDD regression: three rejections on the same retry_key flip
+/// the correction block's `needs_escalation` flag and render the
+/// `ESCALATION` annotation line in the next prompt. Mirrors
+/// U9 of the original serial plan but exercises pipeline paths.
+#[test]
+fn test_ce_executor_pipeline_u9_correction_three_escalation_scenario() {
+    ralph_core::event_loop::loop_state::set_lint_circuit_breaker_limit_for_test(3);
+    enable_deterministic_correction_for_pipeline_scenario();
+    let yaml = load_scenario("tests/scenarios/correction_three_escalation.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// BDD regression: `ralph diagnose --from-ledger` reads the
+/// workspace `.ralph/recovery.jsonl` and surfaces a U7a rejection
+/// record whose `reason_code` matches the CLI binary's
+/// T8.1/T8.3 contract. Generic ledger-to-diagnose mapping; safe
+/// to keep alongside the pipeline BDD surface.
+#[test]
+fn test_ce_executor_pipeline_u9_diagnose_from_ledger_scenario() {
+    enable_deterministic_correction_for_pipeline_scenario();
+    let yaml = load_scenario("tests/scenarios/diagnose_from_ledger.yml");
+    run_workflow_guard_scenario(yaml);
+}
