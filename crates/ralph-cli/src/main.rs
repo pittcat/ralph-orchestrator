@@ -436,7 +436,7 @@ async fn main() -> Result<()> {
             commands::clean::clean_command(&config_sources, cli.color, args)
         }
         Some(Commands::Emit(args)) => {
-            commands::emit::emit_command(cli.color, args, hats_source.as_ref())
+            commands::emit::emit_command(cli.color, args, hats_source.as_ref(), &config_sources)
         }
         Some(Commands::Plan(args)) => {
             commands::plan::plan_command(&config_sources, hats_source.as_ref(), cli.color, args)

@@ -62,10 +62,27 @@
 
 schemas:
   work.ready:
+    # 2026-07-07-005 plan U1: `task_id` removed from
+    # `required_fields`. Coordinator MUST omit `task_id` from
+    # `work.ready` payloads; the state projector derives a
+    # canonical `task-{ts}-{4hex}` id from `Task::generate_id`
+    # when the field is absent (see `state_projector/task.rs`
+    # `project_ensure_task`). Coordinator reads back the
+    # projector-derived id from the next activation's
+    # `## ORCHESTRATOR CONTEXT.open_tasks[0].id` and embeds it
+    # in subsequent `work.done` / `test.passed` / `plan.complete`
+    # payloads for the same unit.
+    #
+    # Rationale: the prior contract required `task_id` non-empty
+    # at schema gate but simultaneously forbade the coordinator
+    # from calling `ralph tools task ensure` (projector SSOT) —
+    # an unsolvable contradiction for the first unit of any
+    # plan. With `task_id` optional, the projector is the sole
+    # writer of the id, matching the SSOT rule the hat
+    # instructions already encode.
     required_fields:
       - plan_name
       - plan_path
-      - task_id
       - task_key
       - step
       - complexity

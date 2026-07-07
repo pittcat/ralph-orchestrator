@@ -317,8 +317,9 @@ pub fn emit_command(
     color_mode: ColorMode,
     args: EmitArgs,
     hats_source: Option<&HatsSource>,
+    config_sources: &[ConfigSource],
 ) -> Result<()> {
-    emit_command_with_root_and_hats(color_mode, args, None, hats_source)
+    emit_command_with_root_and_hats(color_mode, args, None, hats_source, config_sources)
 }
 
 /// U3 (2026-07-06-002 plan, R3): `--file` 仍是 clap 注入的默认
@@ -442,7 +443,7 @@ pub fn emit_command_with_root(
     args: EmitArgs,
     root: Option<&PathBuf>,
 ) -> Result<()> {
-    emit_command_with_root_and_hats(color_mode, args, root, None)
+    emit_command_with_root_and_hats(color_mode, args, root, None, &[])
 }
 
 /// Isolated-mode helper: derive `triggered` from the handoff index when
@@ -490,6 +491,7 @@ fn emit_command_with_root_and_hats(
     args: EmitArgs,
     root: Option<&PathBuf>,
     hats_source: Option<&HatsSource>,
+    config_sources: &[ConfigSource],
 ) -> Result<()> {
     // Plan 001 §4.3 C1: when no `-H` is passed but the parent loop set
     // `RALPH_HATS_SOURCE` (so a backend agent can emit without the explicit
@@ -556,19 +558,29 @@ fn emit_command_with_root_and_hats(
             return Ok(());
         }
 
-        let config_path = config_resolution::find_workspace_config_path(&workspace_root)
-            .unwrap_or_else(|| workspace_root.join("ralph.yml"));
-        if !config_path.exists() {
-            anyhow::bail!(
-                "Cannot render protocol view for `{schema_topic}`: no ralph.yml \
-                 found at {}. The schema view is built from the loaded preset, \
-                 so the workspace must have a discoverable ralph.yml.",
-                config_path.display()
-            );
-        }
-        let config_sources = vec![ConfigSource::File(config_path)];
+        // Prefer explicitly-passed `--config` sources (so operators can
+        // inspect a preset's protocol view without a ralph.yml pointing
+        // at it). Fall back to workspace discovery when none provided.
+        let owned_config_sources: Vec<ConfigSource>;
+        let effective_config_sources: &[ConfigSource] = if !config_sources.is_empty() {
+            config_sources
+        } else {
+            let config_path = config_resolution::find_workspace_config_path(&workspace_root)
+                .unwrap_or_else(|| workspace_root.join("ralph.yml"));
+            if !config_path.exists() {
+                anyhow::bail!(
+                    "Cannot render protocol view for `{schema_topic}`: no ralph.yml \
+                     found at {}. The schema view is built from the loaded preset, \
+                     so the workspace must have a discoverable ralph.yml or pass \
+                     --config <preset-or-ralph.yml>.",
+                    config_path.display()
+                );
+            }
+            owned_config_sources = vec![ConfigSource::File(config_path)];
+            &owned_config_sources
+        };
         let cfg = crate::preflight::load_config_for_preflight_sync(
-            &config_sources,
+            effective_config_sources,
             hats_source,
             &workspace_root,
         )
@@ -584,6 +596,11 @@ fn emit_command_with_root_and_hats(
         let pretty = schema_view::render_pretty(&view, schema_topic)
             .context("Failed to serialise protocol view")?;
         println!("{pretty}");
+        eprintln!(
+            "Tip: use the `required_fields` array above as the authoritative field list \
+             for `{schema_topic}`. To precheck a payload before emitting, run \
+             `ralph emit {schema_topic} --policy-check --hat <hat-id> --json '<payload>'`."
+        );
         return Ok(());
     }
 
@@ -620,11 +637,22 @@ fn emit_command_with_root_and_hats(
         || workspace_root.join(".ralph").is_dir();
 
     let config = if should_load_config {
-        let config_path = config_resolution::find_workspace_config_path(&workspace_root)
+        // Prefer explicitly-passed `--config` sources (so operators can
+        // target a preset without a workspace ralph.yml). Fall back to
+        // workspace discovery when none provided.
+        let owned_config_sources: Vec<ConfigSource>;
+        let effective_config_sources: &[ConfigSource] = if !config_sources.is_empty() {
+            config_sources
+        } else {
+            let config_path = config_resolution::find_workspace_config_path(&workspace_root)
+                .unwrap_or_else(|| workspace_root.join("ralph.yml"));
+            owned_config_sources = vec![ConfigSource::File(config_path.clone())];
+            &owned_config_sources
+        };
+        let discovered_config_path = config_resolution::find_workspace_config_path(&workspace_root)
             .unwrap_or_else(|| workspace_root.join("ralph.yml"));
-        let config_sources = vec![ConfigSource::File(config_path.clone())];
         match crate::preflight::load_config_for_preflight_sync(
-            &config_sources,
+            effective_config_sources,
             hats_source,
             &workspace_root,
         ) {
@@ -642,7 +670,7 @@ fn emit_command_with_root_and_hats(
                 // `ralph.yml` was found — the absence of ralph.yml
                 // is itself a malformed-config condition under a
                 // strict preset.
-                if config_path.exists() || workspace_root.join(".ralph").is_dir() {
+                if discovered_config_path.exists() || workspace_root.join(".ralph").is_dir() {
                     anyhow::bail!(
                         "Config file exists or loop context detected but config could not be loaded: {}. \
                          Fix the config, use --policy-check with a valid config, \
@@ -835,6 +863,17 @@ fn emit_command_with_root_and_hats(
             } else {
                 format!("\n\nSuggestions:\n{}", suggestions.join("\n"))
             };
+            // Always append the schema-discovery hint so agents know to
+            // query `--schema` for the authoritative field list instead
+            // of guessing from error messages.
+            let schema_hint = format!(
+                "\n\nTip: run `ralph emit --schema {} -H builtin:<preset>` \
+                 to list the required fields, or `ralph emit --schema {} \
+                 --config <ralph.yml> -H builtin:<preset>` if the workspace \
+                 has no preset-bearing ralph.yml.",
+                report.topic, report.topic
+            );
+            let suggestions_block = format!("{suggestions_block}{schema_hint}");
             let envelope = serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string());
 
             // phase / allowed_next resolved from phase authority + ledger

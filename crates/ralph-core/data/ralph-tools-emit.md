@@ -52,6 +52,8 @@ cargo build
 ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 ```
 
+**Agent 用法（HARD RULE）：** 在构造任何业务事件 payload 之前，**先**跑 `ralph emit --schema <topic> -H builtin:<preset>`（或在无 preset-bearing `ralph.yml` 的 workspace 跑 `ralph emit --schema <topic> --config <ralph.yml> -H builtin:<preset>`），从返回的 `required_fields` 数组取得字段清单。**不要**靠错误消息逐字段猜。`--schema` 是只读的，不写 events.jsonl、不消耗 iteration。错误消息（如 `receiver_contract.to_hat must be a non-empty string`）用来定位字段层级，`--schema` 用来确认完整字段集——两者配合使用。
+
 **环境变量：**
 
 | 变量 | 作用 |

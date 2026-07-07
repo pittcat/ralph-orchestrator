@@ -892,21 +892,24 @@ hats:
       - Each task description includes: Goal, Files, Approach, Execution note, Verification
       - **Current U Principle (HARD RULE)**: emit `work.ready` ONLY for the *current* U. Do NOT pre-create tasks for U2, U3, etc. — the projector will only create a task for the unit currently routed by the loop, and pre-emitting sibling `work.ready` events leaves orphans. When U1 closes, the validator's `test.passed` triggers another coordinator activation, which emits `work.ready` for U2.
       - **R4 carve-out — sub-units**: when a plan explicitly splits a U into sub-units (`U1a / U1b / U1c`), use keys `...:u1a-impl`, `...:u1b-impl`, `...:u1c-impl`. The runtime collapses these to the same base unit so they coexist alongside the parent `U1` task when needed.
-      - **MANDATORY task_id derivation (HARD RULE — Fix-3, 2026-06-29 primary-072512)**:
-        MUST be a non-empty string. Empty `task_id` is now fail-closed
-        in the projector (`state_projector/task.rs` Fix-1) and the
-        runner will surface a rejection event (`loop_runner/runner.rs` Fix-2)
-        instead of incrementing the hard-gate counter — but emitting a valid
-        `task_id` from the start is still strictly cheaper than retrying.
-        - Recommended workflow:
+      - **MANDATORY task_id derivation (HARD RULE — 2026-07-07-005 plan U1)**:
+        `work.ready` payloads MUST **omit** the `task_id` field. The
+        projector (sole writer) derives a canonical
+        `task-{ts}-{4hex}` id via `Task::generate_id` when the field
+        is absent and writes the row to `.ralph/agent/tasks.jsonl`.
+        Coordinator reads back the projector-derived id from the
+        next activation's `## ORCHESTRATOR CONTEXT.open_tasks[0].id`
+        and embeds it in subsequent `work.done` / `test.passed` /
+        `plan.complete` payloads for the same unit.
+        - Workflow:
           1. Emit `work.ready` with `task_key`, `step`, and plan fields set.
-             On the **first** unit, omit `task_id` (or leave it unset until
-             the projector materializes the row).
+             **Do not include `task_id` in the payload.**
           2. Wait for the next activation's `## ORCHESTRATOR CONTEXT` block,
-             which carries the projector-derived `task_id`.
-          3. Embed that `task_id` in subsequent `work.ready` payloads for
-             the same unit (refresh only — never hand-compose ids).
-        - DO NOT emit `task_id=""` — projector rejects the event.
+             which carries the projector-derived `task_id` in `open_tasks[0].id`.
+          3. Use that `task_id` verbatim in `work.done` / `test.passed` /
+             `plan.complete` for this unit (never hand-compose or refresh
+             the id in `work.ready` — it is projector-owned).
+        - DO NOT emit `task_id=""` (empty string) — projector rejects the event.
         - DO NOT emit `from_key:*` synthetic IDs — preset forbids these.
         - DO NOT call `ralph tools task add` or plain `ralph tools task ensure`
           for plan units while state projection is enabled — runtime denies
@@ -1157,14 +1160,12 @@ hats:
       ### Event Publishing
       - Publish `work.ready` with payload:
         - `plan_path`, `plan_name`, `complexity`
-        - `task_id`: on the first `work.ready` for a unit, omit until
-          `## ORCHESTRATOR CONTEXT` shows the projector-derived id; on
-          refresh emits for the same unit, carry forward that id only
         - `task_key`: the corresponding task key (computed per Runtime Task Creation)
         - `step`: step identifier (e.g., "step-01" or "trivial"). If the payload also
           contains a `task_key`, the step segment inside `task_key` MUST match `step`
           exactly. Do not emit a payload where these two fields disagree.
         - `preflight_checks`: list of hard prerequisites the executor must verify before implementation
+        - **Do NOT include `task_id`** — the projector derives it; see "MANDATORY task_id derivation" above.
       - Stop — do not continue to other work
       - **Stop immediately after publishing work.ready** — do NOT continue any other work, including simulating other hats' behavior or emitting other events
       - MUST NOT write events directly; use `ralph emit work.ready --json '{...}'` only. Direct shell writes bypass the schema precheck and the loop will reject the event with `payload_contract_violation` (likely terminating the loop with `not_retriable`).

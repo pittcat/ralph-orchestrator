@@ -321,6 +321,7 @@ impl std::error::Error for HandoffEnvelopeValidationError {}
 /// envelope is uniform across fields.
 fn require_non_empty_string(
     obj: &serde_json::Map<String, serde_json::Value>,
+    path: &str,
     key: &str,
     code: &'static str,
 ) -> Result<String, HandoffEnvelopeValidationError> {
@@ -329,13 +330,13 @@ fn require_non_empty_string(
             .and_then(|v| v.as_str())
             .ok_or_else(|| HandoffEnvelopeValidationError {
                 code,
-                message: format!("{key} must be a non-empty string"),
+                message: format!("{path}.{key} must be a non-empty string"),
             })?;
     let trimmed = raw.to_string();
     if trimmed.trim().is_empty() {
         return Err(HandoffEnvelopeValidationError {
             code,
-            message: format!("{key} must be a non-empty string"),
+            message: format!("{path}.{key} must be a non-empty string"),
         });
     }
     Ok(trimmed)
@@ -447,6 +448,7 @@ pub fn validate_handoff_envelope_payload_with_topology(
     // wire-level reason vocabulary.
     let root_goal = require_non_empty_string(
         payload_obj,
+        "handoff_envelope",
         "root_goal",
         "handoff_envelope_missing_root_goal",
     )?;
@@ -459,8 +461,12 @@ pub fn validate_handoff_envelope_payload_with_topology(
             message: "receiver_contract must be an object".to_string(),
         })?;
 
-    let to_hat =
-        require_non_empty_string(contract_obj, "to_hat", "handoff_envelope_missing_to_hat")?;
+    let to_hat = require_non_empty_string(
+        contract_obj,
+        "receiver_contract",
+        "to_hat",
+        "handoff_envelope_missing_to_hat",
+    )?;
 
     // 2026-07-06-004 fix-plan U3 (R3): reject envelopes
     // addressed to a hat the registry has never seen so the
@@ -503,12 +509,14 @@ pub fn validate_handoff_envelope_payload_with_topology(
 
     let success_signal = require_non_empty_string(
         contract_obj,
+        "receiver_contract",
         "success_signal",
         "handoff_envelope_missing_success_signal",
     )?;
 
     let failure_signal = require_non_empty_string(
         contract_obj,
+        "receiver_contract",
         "failure_signal",
         "handoff_envelope_missing_failure_signal",
     )?;
@@ -1337,6 +1345,12 @@ mod tests {
         let err = validate_handoff_envelope_payload(&payload, None)
             .expect_err("blank to_hat must reject");
         assert_eq!(err.code, "handoff_envelope_missing_to_hat");
+        // Pin the path-qualified message so agents can locate the
+        // nesting level from the error alone (2026-07-07 fix).
+        assert!(
+            err.message.contains("receiver_contract.to_hat"),
+            "message must include the path-qualified field name: {err:?}"
+        );
     }
 
     #[test]
