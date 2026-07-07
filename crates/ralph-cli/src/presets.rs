@@ -2054,7 +2054,16 @@ mod tests {
     /// 2026-07-07-002 plan Unit 9: generic data skill docs must document correction/bounded retry.
     #[test]
     fn test_data_skill_docs_correction_guidance_unit9() {
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        // CARGO_MANIFEST_DIR points to `crates/ralph-cli`; the data
+        // docs live under `crates/ralph-core/data/` which is two
+        // levels up.  Going only one level up (`..` only) would
+        // land at `crates/` and produce a bogus
+        // `crates/crates/...` path that fails file-existence
+        // checks (DEV-007: pre-fix this test panicked with
+        // NotFound because the join landed outside the repo).
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
         let emit = std::fs::read_to_string(manifest_dir.join("crates/ralph-core/data/ralph-tools-emit.md"))
             .expect("read ralph-tools-emit.md");
         assert!(

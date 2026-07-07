@@ -1331,10 +1331,25 @@ impl LoopState {
     /// belongs to `hat`.  Called when the hat successfully publishes a
     /// legal event, so a single recovery does not leave stale counts
     /// that trigger a premature fuse on a later, unrelated violation.
+    ///
+    /// **2026-07-07-002 U8 (DEV-006) carve-out**: protocol-violation
+    /// reject counts (keys with prefix `protocol:`) are NOT cleared
+    /// here. Protocol violations have their own bounded retry budget
+    /// that must accumulate across rejections to trigger fail-close;
+    /// clearing them on every legal emit would make the budget
+    /// unreachable (every rejected `work.done` would be followed by a
+    /// `work.ready` whose stale `source_hat_id` resolution triggers
+    /// this clear).
     pub fn clear_rejection_keys_for_hat(&mut self, hat: &str) {
         let normalized = crate::diagnosis::normalize_part(hat);
-        self.rejection_retry_counts
-            .retain(|key, _| key.split(':').nth(1) != Some(&normalized));
+        self.rejection_retry_counts.retain(|key, _| {
+            // Keep all `protocol:...` keys intact so the retry budget
+            // can accumulate to fail-close (U8).
+            if key.starts_with("protocol:") {
+                return true;
+            }
+            key.split(':').nth(1) != Some(&normalized)
+        });
     }
 
     /// Build a U4 dedup key from a (plan_name, step, task_id) triple.

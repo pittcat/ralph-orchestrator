@@ -632,6 +632,11 @@ mod tests {
             // 2026-07-01-001 plan U6: no test.passed observed yet.
             last_test_passed_step: None,
             last_test_passed_was_fix_unit: false,
+            // 2026-07-07-002 U6: validator terminal snapshot,
+            // populated by accepted `test.passed` / `test.failed`.
+            last_validator_terminal_step: None,
+            last_validator_terminal_kind: None,
+            last_plan_complete_step: None,
         }
     }
 

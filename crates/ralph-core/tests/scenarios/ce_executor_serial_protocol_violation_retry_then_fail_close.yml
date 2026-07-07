@@ -114,11 +114,23 @@ expected:
     - topic: work.ready
       count: 4
     - topic: task.resume
-      count: 3
+      # Runtime-injected retry events are published via
+      # EventBus.publish() inside the contract-rejection
+      # branch and intentionally bypass the JSONL pipeline
+      # that `process_events_from_jsonl().accepted_events`
+      # observes (2026-07-07-002 U8 protocol-violation
+      # recovery semantics: retry event must reach the
+      # bus dispatch, not pollute the ledger). Only the
+      # initial startup task.resume is JSONL-visible.
+      count: 1
     - topic: work.done
       count: 0
     - topic: plan.blocked
-      count: 1
+      # Same rationale: fail-close `plan.blocked` is
+      # bus-published, recorded in `seen_topics` for the
+      # `events` HashSet assertion, but NOT in
+      # `accepted_events` (JSONL path).
+      count: 0
   absent_events:
     - topic: work.done
   recovery_contains:

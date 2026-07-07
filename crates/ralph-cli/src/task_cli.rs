@@ -3672,6 +3672,114 @@ tasks:
         emit_close_completion_warning(&root.to_path_buf(), &config, "unknown");
         // No assertion needed: the helper bails out early when expected==[].
     }
+
+    // ── 2026-07-07-002 plan Unit 7: live task identity idempotency ─
+    //
+    // ensure / add must not create a second live task row for the
+    // same `(loop_id, key)` locus; a duplicate add should surface
+    // as a bail, not silently append.
+    //
+    // These tests pin the live-task-identity contract described in
+    // the 2026-07-07-002 plan "Requirements Trace R4". BDD coverage
+    // lives in `ce_executor_serial_task_identity_idempotent.yml`;
+    // these unit tests pin the CLI surface independently.
+
+    #[test]
+    fn test_ensure_same_loop_and_key_does_not_append_second_row() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-a");
+        let ctx = ctx_for(root, Some("loop-a"), Some("coordinator"));
+        let mut store = open_store(root);
+        let coordinator_hats = vec!["coordinator".to_string()];
+
+        // First ensure — creates the live record.
+        ensure_task_with_args(
+            &mut store,
+            &ensure_args("Step 01", "ce-executor:idem-test:step-01:u1-impl", None),
+            &ctx,
+            &coordinator_hats,
+            false,
+        )
+        .expect("first ensure must succeed");
+
+        let after_first = store.all();
+        assert_eq!(after_first.len(), 1, "first ensure writes one row");
+        let first_id = after_first[0].id.clone();
+
+        // Second ensure with the same loop + key — must NOT append
+        // a second row and must return the same task id.
+        ensure_task_with_args(
+            &mut store,
+            &ensure_args("Step 01 (re-issued)", "ce-executor:idem-test:step-01:u1-impl", None),
+            &ctx,
+            &coordinator_hats,
+            false,
+        )
+        .expect("second ensure must succeed (idempotent)");
+
+        let after_second = store.all();
+        assert_eq!(
+            after_second.len(),
+            1,
+            "second ensure must not append a second live row"
+        );
+        assert_eq!(after_second[0].id, first_id, "ensure returns same id");
+    }
+
+    #[test]
+    fn test_ensure_different_loop_yields_distinct_live_records() {
+        // Independence regression: two loops that each use the
+        // same `task_key` (the key is namespaced under the plan,
+        // not the loop) must each get their own live record.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-a");
+        let ctx_a = ctx_for(root, Some("loop-a"), Some("coordinator"));
+        let coordinator_hats = vec!["coordinator".to_string()];
+        let mut store = open_store(root);
+
+        ensure_task_with_args(
+            &mut store,
+            &ensure_args("step", "shared:key:v", None),
+            &ctx_a,
+            &coordinator_hats,
+            false,
+        )
+        .expect("first ensure (loop-a) must succeed");
+
+        ensure_task_with_args(
+            &mut store,
+            &ensure_args("step", "shared:key:v", None),
+            &ctx_a,
+            &coordinator_hats,
+            false,
+        )
+        .expect("second ensure same loop must be idempotent");
+
+        // Re-target marker to a different loop and re-issue. The
+        // store must treat this as a fresh locus — i.e. one row
+        // per loop, NOT collision.
+        write_marker(root, "current-loop-id", "loop-b");
+        let ctx_b = ctx_for(root, Some("loop-b"), Some("coordinator"));
+        ensure_task_with_args(
+            &mut store,
+            &ensure_args("step", "shared:key:v", None),
+            &ctx_b,
+            &coordinator_hats,
+            false,
+        )
+        .expect("ensure on a different loop must succeed");
+
+        let saved = store.all();
+        assert_eq!(saved.len(), 2, "two loops => two live records");
+        let loops: std::collections::HashSet<_> = saved
+            .iter()
+            .filter_map(|t| t.loop_id.clone())
+            .collect();
+        assert!(loops.contains("loop-a"));
+        assert!(loops.contains("loop-b"));
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────

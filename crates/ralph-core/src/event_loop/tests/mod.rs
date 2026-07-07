@@ -42,6 +42,13 @@ mod origin_guard;
 mod payload_types;
 mod persistent_mode;
 mod post_terminal_rejection;
+/// 2026-07-07-002 plan Unit 8: protocol-violation bounded retry +
+/// fail-close invariants. Regression guard for the
+/// `clear_rejection_keys_for_hat` carve-out (DEV-006) that lets
+/// the bounded budget actually accumulate to
+/// `U2_REJECTION_RETRY_LIMIT + 1` so the runtime falls through
+/// to `plan.blocked(reason=protocol_violation_repeated:...)`.
+mod protocol_violation_recovery;
 // 2026-07-04-001 plan U16 (KTD-13): task.resume consumer triggers
 // routing validation tests.
 mod u16_resume_routing;

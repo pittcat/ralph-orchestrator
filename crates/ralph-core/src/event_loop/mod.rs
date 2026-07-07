@@ -10595,7 +10595,7 @@ impl EventLoop {
                                     _ => "execution_contract",
                                 };
                                 let source_hat = source_hat_str.unwrap_or("unknown");
-                                let (_, protocol_exhausted) = self
+                                let (protocol_count, protocol_exhausted) = self
                                     .state
                                     .record_protocol_violation_signature(
                                         source_hat,
