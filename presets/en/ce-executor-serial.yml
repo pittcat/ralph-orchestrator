@@ -357,8 +357,12 @@ event_loop:
           loop_scoped: true
           allowed_terminal_statuses: ["closed"]
           auto_close_on_valid: false
+        # `commit_only_clean` requires both a new commit and a clean
+        # working tree before `work.done` can pass.
+        # Absorb every intended change into the U-ID commit first;
+        # do not leave dirty state behind.
         require_git_change:
-          mode: "diff_or_commit"
+          mode: "commit_only_clean"
           allow_empty_for_steps: ["trivial"]
         require_test_evidence:
           mode: "optional"  # "optional" | "required_payload_field"
@@ -1475,13 +1479,26 @@ hats:
 
       Commit flow:
       1. Verify tests pass
-      2. `git add <relevant files>` (not `git add .`)
-      3. `git commit -m "<subject built from the format above>"`
-      4. Record the commit hash in `progress.md` under the completed U-ID
+      2. `git add -A` to absorb the full working tree into the commit.
+         - `.ralph/agent/*` and `.agents/scratchpad/*` are ignored by default and will not be added.
+         - Use `-A`; do not rely on `git add .`.
+      3. `git status --porcelain` must be empty before continuing. If it is not,
+         stop and find which changes were not absorbed.
+      4. `git commit -m "<subject built from the format above>"`
+      5. Record the commit hash in `progress.md` under the completed U-ID
 
       Exception: If the current runtime task explicitly represents an incomplete logical
       unit that spans multiple iterations, you may defer the commit until the logical
       unit is complete. Document the deferral reason in `decisions.md`.
+
+      ### HARD RULE — Working Tree Must Be Clean Before work.done
+
+      Before emitting `work.done`, `git status --porcelain` must return no output.
+      If there is still dirty state, fix it before continuing:
+      1. Preferred: `git add -A && git commit -m "..."` to absorb the remaining changes.
+      2. If some files should not be committed: `git stash push -u -- <file>`, emit `work.done`,
+         then restore with `git stash pop`.
+      3. Never use `git commit --allow-empty` and never emit `work.done` with dirty state left behind.
 
       ### Simplify As You Go
       - Every 2-3 related Implementation Units (or phase boundary), review recent files for simplification

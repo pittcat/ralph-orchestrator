@@ -91,8 +91,8 @@ pub trait GitEvidenceProvider: Send + Sync {
     /// Returns the most recent commit messages reachable from HEAD, in
     /// reverse-chronological order (newest first).  When `since_sha` is
     /// `Some(start)`, only commits in the `start..HEAD` range are returned.
-    /// When `None`, the latest `max_count` commits are returned.  Returns
-    /// an empty `Vec` when the command fails or no commits exist; this
+    /// When `None`, the latest `max_count` commit messages are returned.
+    /// Returns an empty `Vec` when the command fails or no commits exist; this
     /// method must never panic so execution-contract soft checks can
     /// safely call it on broken workspaces.
     fn recent_commit_messages(
@@ -101,6 +101,15 @@ pub trait GitEvidenceProvider: Send + Sync {
         since_sha: Option<&str>,
         max_count: usize,
     ) -> Vec<String>;
+
+    /// Returns the raw `git status --porcelain` output when the working
+    /// tree is dirty (including untracked files outside `.gitignore`), or
+    /// an empty string when the tree is clean / not a git repo / git
+    /// invocation failed.  Used by the `commit_only_clean` execution-
+    /// contract mode (2026-07-07 plan P0-1/P0-2 fix) to surface the
+    /// exact dirty paths in the rejection finding so the agent can
+    /// diagnose without re-running git itself.
+    fn working_tree_porcelain(&self, workspace: &Path) -> String;
 }
 
 /// Production git evidence provider using git CLI.
@@ -217,6 +226,22 @@ impl GitEvidenceProvider for DefaultGitEvidenceProvider {
         }
         messages
     }
+
+    fn working_tree_porcelain(&self, workspace: &Path) -> String {
+        // `git status --porcelain` is the canonical dirty detector:
+        // covers staged + unstaged + untracked (outside .gitignore)
+        // in machine-parseable form.  Failure is non-fatal: we
+        // return an empty string so the contract validator falls
+        // back to `has_uncommitted_changes` semantics.
+        let output = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(workspace)
+            .output();
+        match output {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => String::new(),
+        }
+    }
 }
 
 /// Outcome of an execution contract validation.
@@ -309,6 +334,21 @@ pub enum ExecutionContractViolationKind {
     InvalidStepTarget {
         step: String,
         known_fix_units: Vec<String>,
+    },
+    /// 2026-07-07 plan P0-1/P0-2 fix (`commit_only_clean` mode
+    /// only): there ARE new commits since loop start, but the
+    /// working tree is still dirty.  The agent emitted `work.done`
+    /// (or another gated event) before absorbing every change —
+    /// e.g. an `Edit` on `docs/plans/<plan>.md` frontmatter that
+    /// didn't make it into the U-ID commit.  Diagnostic report:
+    /// `docs/report/2026-07-07-ce-executor-serial-primary-20260706-234147-diagnosis.md` §5 P0-1/P0-2.
+    /// `porcelain` carries the literal `git status --porcelain`
+    /// output (may be empty if git invocation failed, in which
+    /// case the validator still rejects based on
+    /// `has_uncommitted_changes`).
+    WorkingTreeDirtyWithCommits {
+        step: Option<String>,
+        porcelain: String,
     },
 }
 
@@ -974,6 +1014,53 @@ fn validate_git_change(
     let has_uncommitted = git_provider.has_uncommitted_changes(workspace_root);
     let has_new_commits = git_provider.has_new_commits_since(workspace_root, loop_start_sha);
 
+    // 2026-07-07 plan P0-1/P0-2: capture the porcelain output once
+    // (when needed) so the rejection finding can include a useful
+    // "what's still dirty" message without re-invoking git.  Cheap
+    // because it's only called for `commit_only_clean` mode.
+    let porcelain: String = if rule.require_git_change.mode == "commit_only_clean" {
+        git_provider.working_tree_porcelain(workspace_root)
+    } else {
+        String::new()
+    };
+
+    // 2026-07-07 plan P0-1/P0-2: the `commit_only_clean` mode is
+    // checked as a SEPARATE branch (not folded into the generic
+    // `has_evidence` match) because it produces a distinct finding
+    // (`WorkingTreeDirtyWithCommits`) instead of the generic
+    // `NoGitEvidence`.  This lets the agent distinguish:
+    //   - "you didn't commit at all" → NoGitEvidence
+    //   - "you committed but left dirty" → WorkingTreeDirtyWithCommits
+    // Both must be actionable without re-running git to discover the answer.
+    if rule.require_git_change.mode == "commit_only_clean" {
+        if !has_new_commits {
+            return Some(commit_only_clean_no_evidence_finding(
+                event, payload_str, loop_start_sha,
+            ));
+        }
+        if has_uncommitted {
+            let step = step_from_payload(payload_str);
+            let porcelain_for_kind = porcelain.clone();
+            let message = format!(
+                "{} requires working tree to be clean after commit (commit_only_clean mode). \
+                 git status --porcelain returned:\n{}Re-run `git add -A && git commit` (or `git stash`) \
+                 to absorb all dirty state before re-emitting.",
+                event.topic, porcelain
+            );
+            return Some(ExecutionContractFinding {
+                kind: ExecutionContractViolationKind::WorkingTreeDirtyWithCommits {
+                    step,
+                    porcelain: porcelain_for_kind,
+                },
+                message,
+                topic: event.topic.to_string(),
+                ..Default::default()
+            });
+        }
+        // has_new_commits && !has_uncommitted: pass.
+        return None;
+    }
+
     let has_evidence = match rule.require_git_change.mode.as_str() {
         "diff_or_commit" => has_uncommitted || has_new_commits,
         "diff_only" => has_uncommitted,
@@ -1014,6 +1101,41 @@ fn validate_git_change(
     }
 
     None
+}
+
+/// Helper (2026-07-07 plan P0-1/P0-2): build a `NoGitEvidence` finding
+/// for the `commit_only_clean` branch when there are no new commits.
+/// Keeps `validate_git_change` readable by extracting the porcelain/clean
+/// branches first.
+fn commit_only_clean_no_evidence_finding(
+    event: &Event,
+    payload_str: &str,
+    loop_start_sha: Option<&str>,
+) -> ExecutionContractFinding {
+    let step = step_from_payload(payload_str);
+    let detail = if loop_start_sha.is_none() {
+        "No uncommitted changes found. (Loop start SHA not tracked — commit-only evidence unavailable.)"
+    } else {
+        "No new commits since loop start found; commit_only_clean mode requires at least one new commit."
+    };
+    ExecutionContractFinding {
+        kind: ExecutionContractViolationKind::NoGitEvidence { step },
+        message: format!(
+            "{} requires git evidence before downstream review can proceed (commit_only_clean mode). {}",
+            event.topic, detail
+        ),
+        topic: event.topic.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Helper (2026-07-07 plan P0-1/P0-2): extract the `step` field from
+/// an event payload without duplicating the parse-and-unwind ladder in
+/// every branch.
+fn step_from_payload(payload_str: &str) -> Option<String> {
+    serde_json::from_str::<Value>(payload_str)
+        .ok()
+        .and_then(|v| v.get("step").and_then(|s| s.as_str().map(String::from)))
 }
 
 /// Validate that test evidence is present in the payload (if required).
@@ -2158,6 +2280,11 @@ mod recent_commit_messages_tests {
         ) -> Vec<String> {
             self.messages.clone()
         }
+        // 2026-07-07 plan P0-1/P0-2: new trait method.  This
+        // mock isn't used for `commit_only_clean` paths.
+        fn working_tree_porcelain(&self, _workspace: &Path) -> String {
+            String::new()
+        }
     }
 
     fn run_git(args: &[&str], dir: &PathBuf) {
@@ -2346,6 +2473,11 @@ mod fix_unit_footer_soft_check_tests {
             _max_count: usize,
         ) -> Vec<String> {
             self.recent.lock().unwrap().clone()
+        }
+        // 2026-07-07 plan P0-1/P0-2: new trait method.  This
+        // mock isn't used for `commit_only_clean` paths.
+        fn working_tree_porcelain(&self, _workspace: &Path) -> String {
+            String::new()
         }
     }
 

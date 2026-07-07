@@ -207,5 +207,25 @@ fn map_finding(kind: ExecutionContractViolationKind) -> (String, String) {
             ReasonCode::CONTRACT_INVALID_STEP_TARGET.to_string(),
             format!("fix-unit step `{step}` is outside the known chain"),
         ),
+        // 2026-07-07 plan P0-1/P0-2 fix (`commit_only_clean` mode):
+        // a new commit landed but the working tree is still dirty.
+        // The diagnostic report's root cause is that the executor
+        // left `docs/plans/<plan>.md` frontmatter changes in the
+        // working tree, which the downstream dimension-reviewer's
+        // `audit_file_modifications` flagged as scope_violation.
+        // Treat as a git-evidence variant because the contract
+        // violation IS "your commit did not absorb the work".
+        ExecutionContractViolationKind::WorkingTreeDirtyWithCommits { step, porcelain } => (
+            ReasonCode::CONTRACT_NO_GIT_EVIDENCE.to_string(),
+            format!(
+                "commit_only_clean mode: working tree still dirty after commit (step=`{}`).\n{}Re-run `git add -A && git commit` (or `git stash`) to absorb all dirty state.",
+                step.as_deref().unwrap_or("?"),
+                if porcelain.is_empty() {
+                    String::new()
+                } else {
+                    format!("git status --porcelain:\n{porcelain}\n")
+                }
+            ),
+        ),
     }
 }

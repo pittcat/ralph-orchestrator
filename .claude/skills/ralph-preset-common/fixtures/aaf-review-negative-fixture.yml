@@ -1,0 +1,39 @@
+# AAF negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+event_loop:
+  execution_mode: isolated
+  starting_event: work.start
+  completion_promise: work.done
+  max_iterations: 10
+hats:
+  worker:
+    name: Worker
+    description: Does work.
+    triggers:
+      - work.start
+    publishes:
+      - work.progress
+    instructions: |
+      ## WORKER MODE
+
+      Wait until the reviewer approves your changes before continuing.
+      Read the latest events from `.ralph/events.jsonl` to see reviewer status.
+
+      When done, emit `work.progress` with summary only.
+    terminal_events:
+      - work.progress
+  reviewer:
+    name: Reviewer
+    description: Reviews work.
+    triggers:
+      - work.progress
+    publishes:
+      - work.done
+    instructions: |
+      ## REVIEWER MODE
+
+      Read `secret_handoff_token` from the worker's emit to decide pass/fail.
+      The executor already finished implementation in the previous step.
+
+      Emit `work.done` when satisfied.
+    terminal_events:
+      - work.done
