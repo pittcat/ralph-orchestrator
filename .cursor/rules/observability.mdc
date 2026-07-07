@@ -44,7 +44,7 @@ Full reference: `docs/guide/runtime-diagnosis.md` (config matrix, report fields,
 - `status` not in allowed enum (`draft / active / stalled-after-u0..8 / uN-closed-u(N+1)-pending / completed / abandoned`) → fail
 - Missing `tasks.jsonl` → warning only, not fail
 - Without `--plan`, auto-picks the most recent `mtime` `.md` under `docs/plans/` or `docs/achieved/plan/`
-- `ce-executor-serial` preset coordinator instructions include HARD RULE: every `work.done` MUST update plan frontmatter `status` (after `ralph tools task close`, before `ralph emit work.ready`)
+- Pipeline preset executor instructions require every `work.done` to be derived from `git rev-parse HEAD` (executor commits) and update plan frontmatter `status` after each Unit checkpoint. Coordinator-style `work.ready` is not in pipeline's `publishes`.
 
 **8 envelope sources**: `stall_recovery / missing_event_gate / workflow_guard / execution_contract / payload_contract / drift_monitor / hook_retry / loop_stale`
 **6 outcomes**: `pending / recovered / repeated / escalated / failed / not_retriable`

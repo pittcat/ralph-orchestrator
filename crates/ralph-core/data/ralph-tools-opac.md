@@ -92,7 +92,7 @@ ralph inspect loop --format json | jq 'has("supervisor")'
 
 ## Apply 阶段两步式 task verify gate（U7 of 2026-07-04-003）
 
-> **强制**：当 preset 启用了 `tasks.require_verify_for_cli_mutate: true`（ce-executor-serial 默认开），agent 调用 `task add` / `task ensure` 必须先走两步：
+> **强制**：当 preset 启用了 `tasks.require_verify_for_cli_mutate: true`（ce-executor-pipeline 默认开），agent 调用 `task add` / `task ensure` 必须先走两步：
 
 1. **P — Precheck record**：`ralph tools task verify <verb> [args…]` 通过后（Allow），runtime 在 `<workspace>/.ralph/agent/.ralph-task-verify-ticket` 写一个 one-shot ticket（SHA-256 fingerprint of `verb + canonical_payload + loop_id + hat_id`）
 2. **A — Apply consume**：紧接着用**完全相同**的参数调 `ralph tools task <verb>` → gate 读 ticket、匹配 fingerprint、consume ticket、放行写盘

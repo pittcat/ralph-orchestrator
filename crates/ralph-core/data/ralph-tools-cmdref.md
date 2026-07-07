@@ -115,7 +115,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 - 🔴 `--worktree` 创建的隔离目录不会自动合并回主分支（可用 `--no-auto-merge` 控制）。
 - 🔴 **Worktree 复用必须显式**: `--reuse-worktree` 现在要求同时提供 `--plan <plan.md>` 或 `--worktree-name <name>`，不再从 prompt 文本中自动猜测 plan 路径（该行为已废弃）。推荐做法：
   ```bash
-  ralph -H builtin:ce-executor-serial run --worktree --reuse-worktree \
+  ralph -H builtin:ce-executor-pipeline run --worktree --reuse-worktree \
     --plan docs/plans/2026-06-25-002-feat-profiles-for-preset-role-tuning-plan.md
   ```
 - 🔴 `--plan` 与 `--worktree-name` 互斥； `--worktree-name` 会精确匹配 `.worktrees/<NAME>/`，而 `--plan` 使用 plan 文件的 basename 作为前缀并按前缀匹配。

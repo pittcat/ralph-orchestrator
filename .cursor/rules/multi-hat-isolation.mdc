@@ -1,5 +1,5 @@
 ---
-description: Multi-hat isolation policy + agent output governance (ce-executor-serial R1-R6)
+description: Multi-hat isolation policy + agent output governance (single-chain primary path)
 globs: ["**/presets/**/*.yml", "**/presets/**/*.yaml", "**/presets/manifest.yml", "**/crates/ralph-core/src/config/**/*.rs", "**/crates/ralph-core/src/event_loop/**/*.rs", "**/crates/ralph-core/src/event_policy.rs", "**/crates/ralph-core/src/event_origin.rs"]
 alwaysApply: false
 ---
@@ -36,19 +36,31 @@ In `execution_mode: isolated`, **all agent terminal states** (completion, review
 - 4+ hat isolated preset **must simultaneously satisfy**: `execution_mode=isolated` + every terminal topic in `publishes` + no lexicographic-order dependency
 - Any preset validation failure → blocked by `ralph preset check` / `ralph preflight` / `ralph run` startup hard gate — runtime never enters half-started state
 
-## Agent Output Governance (2026-06-14 plan 003 — `ce-executor-serial` only)
+## Historical Anti-Pattern: serial preset agent-output governance
 
-`ce-executor-serial` preset adds hard rules on 5 card-points (mechanism > orchestration patch; default OFF, preset explicit ON):
-
-- **R1 — Wave context injection (review-synthesizer)**: When `review-synthesizer` activates, runner parses last 2000 lines of `events.jsonl` for `review.wave.ready` / `review.dimension.done`, constructs `## WAVE CONTEXT` block at prompt top (`wave_id` / `wave_total` / `received_count` / `expected_dimensions` / `missing_dimensions` / `ALL_DIMENSIONS_RECEIVED` / `AGGREGATE_TIMEOUT`). Same JSON exposed via `RALPH_WAVE_CONTEXT` env var to agent's bash tool. Code: `crates/ralph-core/src/wave_context.rs`, `event_loop/mod.rs::build_wave_context_for_synthesizer`.
-- **R3 — Ephemeral file isolation**: Every `process_output` iteration scans `git ls-files --others --exclude-standard`. Files matching `scratchpad.md` / `notes.md` / `tmp*.md` / `*.tmp.md` / `*.bak` / `*agent-notes.md` patterns AND in source tree (`crates/`, `src/`, `backend/`, `frontend/`, `examples/`, `docs/`) are appended to `.ralph/agent/scratchpad-{loop_id}.md` then deleted. Next prompt top injects `## EPHEMERAL RELOCATED` block. `event_loop.ephemeral_isolation: true` enables. Code: `crates/ralph-core/src/ephemeral_isolation.rs`, `event_loop/mod.rs::run_ephemeral_isolation`.
-- **R4 — Single-U contract (coordinator 单 U principle)**: `TaskStore::ensure` rejects same `(loop_id, plan_name, step)` with open task but different unit (unit form: `uN-` / `uNa-`, N digit). Same U sub-units (`u1a` / `u1b`) collapse to base `u1` allowed. `ralph run` writes `.ralph/agent/.ralph-enforce-current-unit` marker at bootstrap (env var `RALPH_ENFORCE_CURRENT_UNIT` blocked by workspace `forbid(unsafe_code)`), child process `ralph tools task ensure` reads marker to activate contract; same-key ensure triggers CLI exit non-zero. `event_loop.enforce_current_unit: true` enables. Code: `crates/ralph-core/src/task_store.rs::find_unit_collision_idx`, `crates/ralph-cli/src/task_cli.rs::execute_ensure`.
-- **R5 — Hard-gate hat routing stability**: Policy / workflow guard / execution contract / isolated scope rejection producing `task.resume` uses `Event::with_target(event.hat)` routing to source hat (no longer drifts to lex-first hat). Rejection payload carries `wave_id` / `wave_index` / `wave_total` (when source event is wave record). `build_wave_context_for_synthesizer` sets `pending_synthesizer_timeout` pin when `review-synthesizer` is woken by `inject_review_aggregate_timeouts`, first read `.take()` consumes to prevent cross-wave leak. Code: `crates/ralph-core/src/event_loop/mod.rs::publish_policy_rejection_resume`, `rejection.rs::build_task_resume_payload`. **注**：`publish_policy_rejection_resume` 是 legacy completion-rejection helper（U11-T4 起 production 已切到 `CorrectionContext`，但函数本体与 docstring 引用仍存活；本 cleanup 任务（2026-06-23-003）已删除其全部 5 处 docstring 引用，函数本体删除 P0-4 立项）。
-- **R6 — Incomplete wave mechanism shut-down (plan.blocked, 2026-06-17-003 U1+U2)**: When review wave `received < expected` AND `now - last_dimension_at > 0.8 * aggregate_timeout_secs`, **mechanism layer** `EventLoop::maybe_emit_incomplete_wave_blocked` auto-emits `plan.blocked(reason=dimension_reviewers_failed_to_converge)`, routes `review-synthesizer` → `shipper` (`plan-gate.triggers` does NOT contain `plan.blocked`, don't assume plan-gate consumes). `flow_lifecycle` phase must be ∉ `{WorkersActive, Spawning}` (avoid race with U4 aggregate-timeout). Handoff escalation belongs to U3 ladder (not triggered by R6). After emit, tracker `close_wave` prevents re-emission. Meanwhile `review_passed_while_wave_open` (U1) becomes `ViolationType::SemanticGateViolation`, independent recoverable bucket, **NOT** counted in `U2_REJECTION_RETRY_LIMIT`, NOT emitting fatal `PayloadContractViolation`; `task.resume` hint explicitly forbids `empty_diff`, prompts wait for mechanism `plan.blocked` OR complete missing dimensions. Code: `crates/ralph-core/src/flow_lifecycle/incomplete_wave_gate.rs`, `event_loop/mod.rs::maybe_emit_incomplete_wave_blocked`, `event_loop/review_step_state.rs::check_semantic_gates`.
-
-`R1` / `R3` default OFF (preset must explicitly enable `ephemeral_isolation: true` / injection logic activated by `ce-executor-serial` preset). `R4` / `R5` same. `ce-executor-lite` / `autoresearch` / `debug` / `merge-loop` etc. other presets NOT affected.
-
-**R2 (CLI 写入前 enforce `topic_deny_rules`) covered by `2026-06-14-001` plan, not duplicated here.**
+> **Status (2026-07-08)**: With plan 2026-07-07-006 the legacy serial CE
+> preset is removed from the public surface. The hooks below were
+> opt-in flags the dropped preset enabled to defend against its own
+> multi-consumer / fallback-success anti-patterns. After the
+> single-chain refactor, pipeline covers the same semantics through
+> `topic_deny_rules` + isolated terminal authority + `task.resume`
+> recovery; the opt-in flags below are no longer exported by any
+> builtin preset. Kept here so reviewers can recognise the historical
+> anti-patterns if they resurface in a custom preset.
+>
+> | Hook | Purpose (historical) |
+> |------|----------------------|
+> | `event_loop.ephemeral_isolation` | Reclaim stray scratchpad files left in source tree by hat prompts |
+> | `event_loop.enforce_current_unit` | Reject `task ensure` that re-uses `(loop_id, plan_name, step)` for a different unit |
+> | `R1` wave-context injection | Inject last-N-events block when `review-synthesizer` wakes |
+> | `R5` policy-rejection routing | Route `task.resume` back to source hat instead of lex-first |
+> | `R6` incomplete-wave gate | Auto-emit `plan.blocked` when `received < expected` past `0.8 * aggregate_timeout_secs` |
+>
+> **Reviewer signal**: any new preset that re-enables one of these
+> without documenting why single-chain semantics cannot express the
+> need is a regression risk. Prefer pipeline-style (`execution_mode:
+> isolated` + `topic_deny_rules`) and let executor own subagent work
+> internally.
 
 ## Preset System Single-Source-Of-Truth
 
@@ -60,7 +72,7 @@ In `execution_mode: isolated`, **all agent terminal states** (completion, review
 4. `presets/index.json` (if user-visible)
 5. Sync update CLAUDE.md "Presets & Hats System" builtin list + `scripts/ralph-zsh-plugin.zsh` zsh completion
 
-**Builtin presets**: `autoresearch`, `ce-executor-pipeline` (12-hat linear one-shot: plan-reviewer → executor → 6 serial dimension hats → review-synthesizer → fixer → alignment → reporter), `ce-executor-serial` (10-hat: TDD executor + validator + 6-dim overall review: goal-alignment → correctness → testing → maintainability → project-standards → adversarial), `ce-executor-supervisor` (2026-07-03-001 plan: 16-hat + progress-steward; rusqlite-backed supervisor wave orchestration, per-slot worktrees, fan-in merge, parallel review/fix; requires `--features supervisor-db` and `event_loop.supervisor.enabled: true`), `ce-executor-lite` (template), `debug`, `merge-batch` (Git-first multi-worktree batch merge), `merge-loop` (bare `ce-executor` / `ce-executor-isolated` / `ce-executor-wave` all deleted: all plan-driven execution uses `ce-executor-serial`; template-only use `ce-executor-lite`).
+**Builtin presets** (2026-07-08 single-chain refactor): `autoresearch`, `ce-executor-pipeline` (13-hat linear one-shot **Ralph primary path**: plan-reviewer → executor → 6 serial dimension hats → review-synthesizer → fix-planner → fixer → alignment → reporter), `ce-executor-supervisor` (2026-07-03-001 plan: 16-hat; rusqlite-backed supervisor wave orchestration, per-slot worktrees, fan-in merge, parallel review/fix; requires `--features supervisor-db` and `event_loop.supervisor.enabled: true`), `ce-executor-lite` (template), `debug`, `merge-batch` (Git-first multi-worktree batch merge), `merge-loop` (the bare legacy CE preset and all its serial/isolated/wave variants all deleted: all plan-driven execution uses `ce-executor-pipeline`; template-only use `ce-executor-lite`).
 
 State projection design walkthrough v3: `docs/solutions/state-management/proposal-state-projection-design-walkthrough-v3.md`. State-management primitives (current_step derivation, dedup hit counter, envelope `triggered` check, anchor marker) are covered by the U1–U9 units of plan 2026-07-05-005 — see `.cursor/rules/state-management.mdc` for the file-anchor map.
 

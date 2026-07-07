@@ -47,7 +47,7 @@ ralph emit --schema work.done
 
 # 检测 drift:build 前后 protocol_hash 必变
 ralph emit --schema work.done | jq -r .protocol_hash   # 改前
-# 改 presets/schemas/ce-executor-serial.yml 后
+# 改 presets/schemas/ce-executor-pipeline.yml 后
 cargo build
 ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 ```
@@ -76,7 +76,7 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 - **ralph-control topics**（`task.resume`、`loop.cancel`、`loop.complete`、`human.*` 等）以及 **orchestrator diagnostic topics**（`event.*`）— 跳过 topology check；runtime 注入事件时 `triggered` 经常是 `ralph` 这类 pseudo-hat，不需要在 `hats[]` 中声明。
 - **business topics**（`work.done`、`queue.advance`、`review.dimension.*` 等）— 严格 topology check；`triggered` 必须是当前 preset 的 hat 之一。
 
-`ralph emit` 默认 enforce 这条规则；如需绕开，只能用 `ralph emit --unsafe-no-policy-check`，但该参数在大多数 preset（`ce-executor-serial` 等）下被直接拒绝。
+`ralph emit` 默认 enforce 这条规则；如需绕开，只能用 `ralph emit --unsafe-no-policy-check`，但该参数在大多数 preset（包括 `ce-executor-pipeline`）下被直接拒绝。
 
 **事件文件解析优先级：**
 1. 显式 `RALPH_EVENTS_FILE` 或非默认 `--file`（必须命中本 loop 的 events allowlist，否则 `ralph emit` 拒绝写入并报错；不静默回退到 marker）
@@ -174,7 +174,7 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 |------|------|------|
 | `events file not in allowlist` | `RALPH_EVENTS_FILE` / `--file` 命中非 allowlist 路径 | 查看错误信息中列出的 allowlist 条目；优先移除显式参数让 ralph emit 走 marker 解析 |
 | `topic is required` | 缺少位置参数 | 补上 topic |
-| `policy check failed` | payload 不符合策略 | 读 stderr / 用 `--output json` 取 `validation_errors[].field` 一次拿全部缺失字段；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再发。**不要**首选 `--unsafe-no-policy-check`（`ce-executor-serial` preset 默认 `allow_unsafe_cli_emit: false` 时该参数被拒） |
+| `policy check failed` | payload 不符合策略 | 读 stderr / 用 `--output json` 取 `validation_errors[].field` 一次拿全部缺失字段；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再发。**不要**首选 `--unsafe-no-policy-check`（`ce-executor-pipeline` preset 默认 `allow_unsafe_cli_emit: false` 时该参数被拒） |
 | `triggered_not_in_topology` | `--triggered <hat>` 不在当前 preset `hats[]` 里 | 用 `ralph hats list` 或 preset YAML 查合法 hat id；改 `--triggered` 为拓扑内 hat，或省略 `--triggered`（缺省允许）。ralph-control / orchestrator diagnostic topic 跳过此检查 |
 | `agent policy-check required` (U15) | agent context + 业务 topic + 无 `--policy-check` | 先 `ralph emit <TOPIC> --policy-check -j '...'` 通过，再去掉 `--policy-check` 正式 emit。preset `allow_unsafe_cli_emit: true` 可 opt-out（deprecated warning） |
 | `cannot write to events file` | 文件不存在或权限不足 | 确认 `.ralph/` 目录存在，检查权限 |
@@ -227,12 +227,11 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 | `ok` | bool | 是 | `true` = policy 通过 + 落盘 / 仅 policy-check 通过；`false` = 拒收 |
 | `recorded` | bool | 是 | **真实写盘** 信号。policy-check 阶段恒为 `false`；只有 apply 阶段成功写盘后才为 `true`。脚本判断「是否需要 reconcile」的唯一权威 |
 | `topic` | string | 是 | emit 的业务 topic（如 `work.done` / `work.ready`）。拒收场景亦可填充 |
-| `phase` | string | 是 | 当前 hat 所在 phase（preset phase authority 解析）。未识别时为 `"unknown"` |
-| `allowed_next` | array<string> | 否 | phase authority 允许的 next topic 列表。**空时省略键** |
+| `phase` | string | 是 | 当前 hat 所在阶段(由 preset hat 拓扑推断,非运行时 phase authority)。未识别时为 `"unknown"` |
+| `allowed_next` | array<string> | 否 | 当前 hat 在 preset `publishes` 中的可发 topic 列表。**空时省略键** |
 | `activate_next` | array<string> | 否 | preset 显式声明的 `activate_next` 候选。**空时省略键** |
 | `errors` | array<EmitError> | 否 | 拒收场景的错误列表。**接受场景省略键** |
 | `handoff` | object<EmitHandoff> | 否 | Agent 上下文交接包。**None 时省略键** |
-| `handoff_envelope` | object<HandoffEnvelopeSummary> | 否 | 2026-07-06-004 plan U9：仅当 `event_loop.handoff_envelope.emit_result_summary == true` 且 payload 含合法 `handoff_envelope` 时填充；rejection 场景强制清空（避免给 agent 错觉） |
 
 ### EmitError 字段
 
@@ -250,59 +249,6 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 | `from_hat` | string | 是 | 当前 hat 稳定 id |
 | `to_hat` | string | 是 | 接收交接的下游 hat 稳定 id |
 | `reason` | string | 是 | 交接原因短语（preset `handoff_reasons` 表声明） |
-
-### HandoffEnvelopeSummary 字段（2026-07-06-004 plan U9）
-
-| 字段 | 类型 | 必现 | 说明 |
-|------|------|------|------|
-| `schema_version` | string | 是 | 恒等于 `"handoff-envelope.v1"` |
-| `to_hat` | string | 是 | 接收交接的下游 hat 稳定 id |
-| `success_signal` | string | 是 | 该 hat 完成时应发的 success topic |
-| `failure_signal` | string | 是 | 该 hat 失败时应发的 failure topic |
-
-**Handoff Envelope 契约**：`builtin:ce-executor-serial` 是 2026-07-06 时点唯一要求 `payload.handoff_envelope` 的 preset。其它 preset 默认关闭（`event_loop.handoff_envelope.enabled == false`）。**Serial 实验**：
-
-- `validate_payload: true` → `ralph emit --policy-check` 拒缺失或错误 envelope 的 payload
-- `prompt_injection: true` → 下游 hat activation prompt 顶部显示 `## HANDOFF ENVELOPE` 块
-- `emit_result_summary: true` → `EmitResult.handoff_envelope` 带上述 4 字段摘要
-
-**Envelope 嵌套字段表**（serial preset，2026-07-06-004 fix-plan U9 / R9）：
-
-| 字段路径 | 类型 | required | 说明 / 示例 |
-|----------|------|----------|-------------|
-| `handoff_envelope.schema_version` | string | 是 | 必须等于 `"handoff-envelope.v1"`；其它值触发 `handoff_envelope_invalid_schema_version` |
-| `handoff_envelope.root_goal` | string | 是 | 非空 prose；首句足以让 receiver hat 理解意图 |
-| `handoff_envelope.receiver_contract.to_hat` | string | 是 | 必须是 preset 注册的 hat id；未知值触发 `handoff_envelope_unknown_to_hat` |
-| `handoff_envelope.receiver_contract.must_do` | string[] | 是 | 至少一项；空数组触发 `handoff_envelope_must_do_empty` |
-| `handoff_envelope.receiver_contract.success_signal` | string | 是 | topic 名；必须在 preset 的 hat topology（`triggers` ∪ `publishes`）中 |
-| `handoff_envelope.receiver_contract.failure_signal` | string | 是 | 同上 |
-| `handoff_envelope.plan.name` | string | 是 | 当前 plan 名；非空 |
-| `handoff_envelope.plan.path` | string | 是 | plan 路径；非空 |
-| `handoff_envelope.plan.current_step` | string | 是 | 当前 step 名；非空 |
-| `handoff_envelope.state.current_status` | string | 是 | 状态短语 |
-| `handoff_envelope.state.last_signal` | string | 是 | 最近一次发出的 topic |
-| `handoff_envelope.state.blocking_reason` | string? | 否 | 可选；提供时不能全为空白（触发 `handoff_envelope_blank_blocking_reason`） |
-
-构造模板（最小）：
-
-```json
-{
-  "handoff_envelope": {
-    "schema_version": "handoff-envelope.v1",
-    "root_goal": "ship step-01 cleanly",
-    "receiver_contract": {
-      "to_hat": "executor",
-      "must_do": ["complete step-01"],
-      "success_signal": "work.done",
-      "failure_signal": "work.failed"
-    },
-    "plan": { "name": "<plan>", "path": "<path>", "current_step": "<step>" },
-    "state": { "current_status": "ready", "last_signal": "work.start" }
-  }
-}
-```
-
-参考：`crates/ralph-core/src/handoff_envelope.rs` 是 schema SSOT；`event_policy.rs::check_handoff_envelope` 是 validator 入口。
 
 ### 路径分支矩阵
 
@@ -371,7 +317,7 @@ policy-check 拒收:
 | `errors[].code` | 稳定错误码（如 `missing_required_field`、`task_not_terminal`） | 按 code 路由修复策略 |
 | `errors[].field` | 触发的 payload 字段 | 补齐或修正该字段 |
 | `errors[].suggested_command` | 建议命令模板（若有） | 优先采用，仍须 `--policy-check` |
-| `handoff_envelope` | 拒收场景通常省略 | 不要凭 handoff 摘要推断已成功 |
+| `handoff` | 拒收场景通常省略 | 不要凭 handoff 摘要推断已成功 |
 
 **Correction 注入**：拒收后 runner 可能在下一 activation 注入 `## CORRECTION CONTEXT` 或 `task.resume`（含 `required_action` / `forbidden_action` / `target_hat` / live `task_id`+`task_key`+`step`）。规则：
 

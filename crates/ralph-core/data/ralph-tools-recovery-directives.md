@@ -71,7 +71,7 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 
 **What this means:**
 - The orchestrator detected that a handoff's target consumer does NOT subscribe to the handoff's topic (via the shared `check_hat_triggers` helper).
-- Without this detection the handoff would silently stall for 600s, then escalate to `task.resume → recovery_exhausted:stall_recovery:...:handoff_dispatch_timeout` and route through shipper's prefix-allowlist as `REVIEW_COMPLETE(pass)` — the silent-success loop family (see `docs/report/2026-07-06-ce-executor-serial-primary-20260705-224028-diagnosis.md`).
+- Without this detection the handoff would silently stall for 600s, then escalate to `task.resume → recovery_exhausted:stall_recovery:...:handoff_dispatch_timeout` and route through the handoff's prefix-allowlist as `REVIEW_COMPLETE(pass)` — the silent-success loop family (see the historical `docs/report/2026-07-06-ce-executor-primary-*` diagnosis reports for the original root cause; pipeline does not enable the prefix-allowlist promotion path).
 - The orchestrator now skips the 600s pending registration and emits this diagnostic immediately. The producer's topic emissions are also bypassed.
 
 **行为规范：**

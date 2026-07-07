@@ -74,15 +74,15 @@ Create files following the Code Task Format below.
 
 ### 6. Report Results
 
-List generated files with paths. For PDD mode, include the step's demo requirements. Suggest running `ce-executor-serial` on tasks in sequence, or using Ralph for autonomous implementation.
+List generated files with paths. For PDD mode, include the step's demo requirements. Suggest running `ce-executor-pipeline` on tasks in sequence, or using Ralph for autonomous implementation.
 
 ### 7. Offer Ralph Integration
 
 Ask: "Would you like me to set up Ralph to implement these tasks autonomously?"
 
 If yes, create a concise PROMPT.md with objective, spec directory reference, execution order, and acceptance criteria. Suggest the appropriate command:
-- Full pipeline: `ralph run --config presets/ce-executor-serial.yml`
-- Simpler flow: `ralph run -c ralph.yml -H builtin:ce-executor-serial`
+- Full pipeline: `ralph run --config presets/ce-executor-pipeline.yml`
+- Simpler flow: `ralph run -c ralph.yml -H builtin:ce-executor-pipeline`
 
 ## Code Task Format Specification
 
