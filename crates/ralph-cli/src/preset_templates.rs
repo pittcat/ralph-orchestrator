@@ -1139,12 +1139,12 @@ impl TemplateCatalog {
                 category: "development".to_string(),
                 difficulty: TemplateDifficulty::Advanced,
                 // U7 (2026-06-11-003): the legacy `builtin:ce-executor` preset
-                // has been removed (R13–R15). The only complete CE executor
-                // entry point is now `builtin:ce-executor-serial`. This
+                // has been removed (R13–R15). The Ralph primary path is now
+                // `builtin:ce-executor-pipeline` (plan 2026-07-07-006). This
                 // lite template is therefore documented as a lightweight
-                // derivation of the serial preset's coordinator + executor
+                // derivation of the pipeline preset's coordinator + executor
                 // pair, not the legacy multi-hat pipeline.
-                source: Some("builtin:ce-executor-serial".to_string()),
+                source: Some("builtin:ce-executor-pipeline".to_string()),
                 recommended_checks: CheckProfile::Strict,
                 placeholders: vec![
                     TemplatePlaceholder {

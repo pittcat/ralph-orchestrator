@@ -7,10 +7,10 @@
 #
 # U7 (2026-06-11-003): the `source` field in the catalog metadata for this
 # template historically pointed at the legacy `builtin:ce-executor` preset.
-# After U7 removal, the only complete CE executor entry point is
-# `builtin:ce-executor-serial`, so this lite template is a lightweight
-# derivation of the serial preset's coordinator + executor pair (not the
-# legacy multi-hat pipeline). The catalog `source` was updated in
+# After U7 removal, the Ralph primary path is `builtin:ce-executor-pipeline`
+# (plan 2026-07-07-006), so this lite template is a lightweight derivation
+# of the pipeline preset's coordinator + executor pair (not the legacy
+# multi-hat pipeline). The catalog `source` was updated in
 # `crates/ralph-cli/src/preset_templates.rs::get_manifest`.
 
 x_preset:

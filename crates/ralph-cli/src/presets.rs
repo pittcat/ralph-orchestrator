@@ -170,6 +170,41 @@ mod tests {
         );
     }
 
+/// Reverse lock test (plan 2026-07-07-006 fix-plan U1): the
+    /// `ce-executor-lite` template's `source` field must point to
+    /// the Ralph primary path `ce-executor-pipeline`, never to
+    /// the removed `ce-executor-serial`. If a future edit re-points
+    /// the template at a non-pipeline preset (or back at the
+    /// deleted serial), `preset list` / `preset show` will mislead
+    /// first-time readers who copy the printed `Source:` line.
+    #[test]
+    fn test_ce_executor_lite_source_points_to_pipeline() {
+        let manifest = crate::preset_templates::TemplateCatalog::get_manifest("ce-executor-lite")
+            .expect("ce-executor-lite template must exist");
+        assert_eq!(
+            manifest.source.as_deref(),
+            Some("builtin:ce-executor-pipeline"),
+            "ce-executor-lite template source must point to ce-executor-pipeline \
+             (the Ralph primary path); got {:?}",
+            manifest.source
+        );
+        // Belt-and-braces: the deleted serial must never re-appear.
+        assert_ne!(
+            manifest.source.as_deref(),
+            Some("builtin:ce-executor-serial"),
+            "ce-executor-lite template source must not point to removed ce-executor-serial"
+        );
+        // The raw template body must not mention the deleted preset either,
+        // so the template cannot re-introduce serial through a side door.
+        let body = crate::preset_templates::TemplateCatalog::raw_template("ce-executor-lite")
+            .expect("ce-executor-lite raw template must exist");
+        assert!(
+            !body.contains("ce-executor-serial"),
+            "ce-executor-lite raw template body must not mention the removed \
+             ce-executor-serial preset anywhere; plan 2026-07-07-006 forbids it"
+        );
+    }
+
     /// `get_preset("ce-executor-serial")` must return `None`, not a redirect
     /// or an alias to a different preset.
     #[test]
