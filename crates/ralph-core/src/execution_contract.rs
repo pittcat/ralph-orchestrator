@@ -1465,7 +1465,13 @@ mod tests {
         let ralph_dir = temp.path().join(".ralph");
         std::fs::create_dir_all(ralph_dir.join("agent")).unwrap();
         let tasks_path = ralph_dir.join("agent/tasks.jsonl");
-        write_task(&tasks_path, "T", TaskStatus::Open, Some("loop-1"));
+        write_task_with_status_loop_id_and_key(
+            &tasks_path,
+            "T",
+            TaskStatus::Open,
+            Some("loop-1"),
+            "k",
+        );
 
         let rule = make_work_done_rule();
         let event = Event::new(
@@ -1537,7 +1543,13 @@ mod tests {
         let ralph_dir = temp.path().join(".ralph");
         std::fs::create_dir_all(ralph_dir.join("agent")).unwrap();
         let tasks_path = ralph_dir.join("agent/tasks.jsonl");
-        write_task(&tasks_path, "T", TaskStatus::Open, Some("loop-1"));
+        write_task_with_status_loop_id_and_key(
+            &tasks_path,
+            "T",
+            TaskStatus::Open,
+            Some("loop-1"),
+            "k",
+        );
 
         let rule = make_work_done_rule();
         let event = Event::new(
@@ -1659,6 +1671,48 @@ mod tests {
         store.save().unwrap();
     }
 
+    // 2026-07-07-003 follow-up: plan 002 U7 added the
+    // "payload task_key must match the live record key" gate
+    // in `validate_execution_contract` so that an emit cannot
+    // re-bind a closed task to a different key.  Pre-U7
+    // fixtures created tasks without a key, so the gate now
+    // trips them as `TaskNotFound` before they reach the
+    // loop/status checks the tests pin.  This helper threads
+    // the matching key so the tests continue to exercise the
+    // originally intended finding.
+    fn write_task_with_loop_id_and_key(
+        tasks_path: &std::path::Path,
+        task_id: &str,
+        loop_id: Option<&str>,
+        key: &str,
+    ) {
+        let mut store = TaskStore::load(tasks_path).unwrap();
+        let mut task = Task::new(format!("task {task_id}"), 1)
+            .with_key(Some(key.to_string()))
+            .with_loop_id(loop_id.map(str::to_string));
+        task.id = task_id.to_string();
+        task.status = TaskStatus::Closed;
+        store.add(task);
+        store.save().unwrap();
+    }
+
+    fn write_task_with_status_loop_id_and_key(
+        tasks_path: &std::path::Path,
+        task_id: &str,
+        status: TaskStatus,
+        loop_id: Option<&str>,
+        key: &str,
+    ) {
+        let mut store = TaskStore::load(tasks_path).unwrap();
+        let mut task = Task::new(format!("task {task_id}"), 1)
+            .with_key(Some(key.to_string()))
+            .with_loop_id(loop_id.map(str::to_string));
+        task.id = task_id.to_string();
+        task.status = status;
+        store.add(task);
+        store.save().unwrap();
+    }
+
     fn read_marker(temp: &TempDir) -> String {
         let marker = temp.path().join(".ralph/current-loop-id");
         std::fs::read_to_string(&marker).unwrap().trim().to_string()
@@ -1675,7 +1729,12 @@ mod tests {
         )
         .unwrap();
         let tasks_path = ralph_dir.join("agent/tasks.jsonl");
-        write_task_with_loop_id(&tasks_path, "task-1", Some("primary-20260604-091852"));
+        write_task_with_loop_id_and_key(
+            &tasks_path,
+            "task-1",
+            Some("primary-20260604-091852"),
+            "k",
+        );
 
         let rule = make_work_done_rule();
         let event = Event::new(
@@ -1713,7 +1772,12 @@ mod tests {
         )
         .unwrap();
         let tasks_path = ralph_dir.join("agent/tasks.jsonl");
-        write_task_with_loop_id(&tasks_path, "task-1", Some("primary-OTHER-LOOP"));
+        write_task_with_loop_id_and_key(
+            &tasks_path,
+            "task-1",
+            Some("primary-OTHER-LOOP"),
+            "k",
+        );
 
         let rule = make_work_done_rule();
         let event = Event::new(
@@ -1876,7 +1940,12 @@ mod tests {
         )
         .unwrap();
         let tasks_path = ralph_dir.join("agent/tasks.jsonl");
-        write_task_with_loop_id(&tasks_path, "task-1", Some("primary-OTHER"));
+        write_task_with_loop_id_and_key(
+            &tasks_path,
+            "task-1",
+            Some("primary-OTHER"),
+            "k",
+        );
 
         let rule = make_work_done_rule();
         let event = Event::new(
