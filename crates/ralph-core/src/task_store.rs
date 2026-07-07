@@ -681,27 +681,31 @@ impl TaskStore {
 
             // 2026-07-07-002 U7: keyed tasks with the same step locus in
             // one loop must reuse the live record (idempotent ensure).
-            if let Some(locus) = task_locus(key) {
-                if let Some(existing_idx) = self.tasks.iter().position(|existing| {
-                    existing.loop_id.as_deref() == new_loop
-                        && existing
-                            .key
-                            .as_deref()
-                            .and_then(task_locus)
-                            .as_deref()
-                            == Some(locus.as_str())
-                }) {
-                    let existing = &mut self.tasks[existing_idx];
-                    existing.title = task.title;
-                    existing.priority = task.priority;
-                    if task.description.is_some() {
-                        existing.description = task.description;
-                    }
-                    if !task.blocked_by.is_empty() {
-                        existing.blocked_by = task.blocked_by;
-                    }
-                    return &self.tasks[existing_idx];
+            //
+            // 2026-07-07-003 follow-up: the pre-fix code compared only
+            // `task_locus` (which drops the unit slug) and therefore
+            // silently merged sibling-unit and sub-unit tasks under
+            // the same step.  The R4 carve-out requires u1a / u1b to
+            // coexist, and the state-projector R1 path (see
+            // `state_projector::task`) must see distinct sibling tasks
+            // on disk.  Switch the comparison to the full `task_key`
+            // so U7 idempotency only applies when the caller projected
+            // literally the same key — distinct unit slugs in the key
+            // tail therefore stay separate.
+            if let Some(existing_idx) = self.tasks.iter().position(|existing| {
+                existing.loop_id.as_deref() == new_loop
+                    && existing.key.as_deref() == Some(key)
+            }) {
+                let existing = &mut self.tasks[existing_idx];
+                existing.title = task.title;
+                existing.priority = task.priority;
+                if task.description.is_some() {
+                    existing.description = task.description;
                 }
+                if !task.blocked_by.is_empty() {
+                    existing.blocked_by = task.blocked_by;
+                }
+                return &self.tasks[existing_idx];
             }
         }
 
