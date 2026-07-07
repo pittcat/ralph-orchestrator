@@ -1710,313 +1710,6 @@ fn test_ce_executor_bootstrap_recovery_scenario() {
     run_scenario(yaml);
 }
 
-// ──────────────────────────────────────────────────────────────────────
-// 2026-06-17-002 plan U5: serial review chain (no wave) for ce-executor-serial
-// ──────────────────────────────────────────────────────────────────────
-
-#[test]
-fn test_ce_executor_serial_review_scenario() {
-    // 2026-06-24 P0-2/P0-3 rewrite: 2-dim serial review chain (no
-    // plan-gate, no review.passed). The old 4-dim + review.passed +
-    // plan-gate + queue.advance topology was stale and silently passed
-    // via the `run_scenario` stub runner. Now uses
-    // `run_workflow_guard_scenario` (real EventLoop runner) which
-    // asserts on the actual events emitted, catching topology drift.
-    // If a future edit re-introduces the old 4-dim topology or the
-    // review.passed/queue.advance events, the `expected.events` +
-    // `expected.absent_events` assertions in the yml will fire.
-    let yaml = load_scenario("tests/scenarios/ce_executor_serial_review.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-07-06-004 plan U12: BDD regression for the serial
-/// handoff envelope contract. Real EventLoop runner. Mirrors
-/// the 6-dim review scenario but adds a minimal `handoff_envelope`
-/// to every emit payload so the validator + prompt-injection
-/// + EmitResult-summary wiring is exercised end-to-end. A
-/// regression that drops the envelope validator (so the emit
-/// succeeds silently) fails this scenario's `expected.events`.
-#[test]
-fn test_ce_executor_serial_handoff_envelope_happy_path() {
-    let yaml = load_scenario("tests/scenarios/ce_executor_serial_handoff_envelope_happy_path.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-07-06-004 plan U12: BDD regression for the reject path.
-/// The executor emits `work.done` WITHOUT a handoff envelope;
-/// the validator must reject the emit and surface `task.resume`.
-/// Any future regression that silently drops the validator
-/// (and accepts the bad emit) fails the
-/// `expected.absent_events: [work.done, ...]` assertion.
-#[test]
-fn test_ce_executor_serial_handoff_envelope_rejects_missing_payload() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_serial_handoff_envelope_rejects_missing_payload.yml",
-    );
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-07-06-004 plan U1 (fix-plan): BDD regression that pins
-/// the CLI/loop boundary wire-up of `check_handoff_envelope`.
-/// A `work.ready` emit carrying `schema_version:
-/// "handoff-envelope.v0"` must surface a `task.resume` and the
-/// `work.ready` event MUST NOT land on the bus. Regressions that
-/// fall back to `validate_event_with_hat` with the no-op
-/// `DefaultHandoffConfig` (or that strip the typed adapter from
-/// `ValidationPipeline::from_config`) fail the
-/// `expected.absent_events: [work.ready, ...]` assertion.
-#[test]
-fn test_ce_executor_serial_handoff_envelope_rejects_invalid_schema_version() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_serial_handoff_envelope_rejects_invalid_schema_version.yml",
-    );
-    run_workflow_guard_scenario(yaml);
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// 2026-06-20-002 plan U3: harness self-test for `assert_state`
-//
-// This scenario does **not** exercise the serial preset — it
-// exists to prove the new `assert_state` block is wired correctly
-// end-to-end (R-H1, R-H5, R-H6). If this test fails after a
-// harness refactor, the harness is broken; the serial preset
-// scenarios in `serial_lint/` are not the right diagnostic
-// surface for harness regressions.
-#[test]
-fn test_assert_state_harness_smoke() {
-    let yaml = load_scenario("tests/scenarios/serial_lint/assert_state_harness_smoke.yaml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// 2026-06-20-002 plan U4: serial_lint scenario 1-5 (contract
-// invariants). Each scenario targets a single contract that
-// the in-loop lint feedback path (U4b of plan
-// 2026-06-20-001) must satisfy. The five scenarios share a
-// 1-hat executor topology so next_hat() round-robin does
-// not interfere with the assertions; the production serial
-// preset path is exercised by serial_lint scenarios 6+ and
-// 8 (`step_chain_replay`).
-//
-// Scenario 4 (`resume_hint_consumed`) is the load-bearing
-// one — it covers the consume-on-use invariant that review
-// P0 #4 added.
-
-#[test]
-fn test_serial_lint_1_internal_source_bypass() {
-    let yaml =
-        load_scenario("tests/scenarios/serial_lint/serial_lint_1_internal_source_bypass.yaml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_serial_lint_2_rejection_digest() {
-    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_2_rejection_digest.yaml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_serial_lint_4_resume_hint_consumed() {
-    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_4_resume_hint_consumed.yaml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_serial_lint_5_fix_applied_dedup() {
-    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_5_fix_applied_dedup.yaml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// 2026-06-20-002 plan U5: serial_lint scenarios 6-7 (handoff
-// coverage). Scenario 6 exercises the cross-hat consume
-// invariant; scenario 7 is the runtime smoke for the
-// preset-side seed-coverage check that backs the auto-
-// prepare hook.
-
-#[test]
-fn test_serial_lint_6_handoff_auto_prepare() {
-    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_6_handoff_auto_prepare.yaml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// 2026-06-23-006 plan U7 (P0-1): removed
-// `test_serial_lint_7_handoff_seeds_coverage` — its scenario
-// `serial_lint_7_handoff_seeds_coverage.yaml` declared
-// `hat_handoff:` block + 5 hat_handoff references, dependent on
-// hat_handoff_gate (now removed by U5). 2-hat topology smoke is
-// covered by `isolated_multi_hat.yml`.
-
-// ──────────────────────────────────────────────────────────────────────
-// 2026-06-20-002 plan U6: serial_lint scenarios 8-10 (boundary
-// + replay). Scenario 8 is the SC-1 (CI) acceptance
-// scenario for the 12U plan; it chains the contract
-// invariants from scenarios 1-5 in a single 8-iteration run.
-
-#[test]
-fn test_serial_lint_8_step_chain_replay() {
-    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_8_step_chain_replay.yaml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_serial_lint_9_timeout_fail_closed() {
-    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_9_timeout_fail_closed.yaml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_serial_lint_10_circuit_breaker() {
-    let yaml = load_scenario("tests/scenarios/serial_lint/serial_lint_10_circuit_breaker.yaml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// 2026-06-23-006 plan U7 (P0-1): removed
-// `test_serial_lint_11_isolated_unaffected` — its scenario tested
-// "isolated mode is unaffected" via hat_handoff_gate being bypassed;
-// hat_handoff is deleted, no need to pin the bypass.
-
-// ──────────────────────────────────────────────────────────────────────
-// 2026-06-21-002 plan U9: deterministic-correction BDD scenarios
-//
-// Each scenario targets one U7a/U7b/U8 contract that the
-// legacy `task.resume` assertions cannot reach. The five
-// drivers below load the matching YAML fixture and route
-// through `run_workflow_guard_scenario` so the standard
-// per-iteration snapshot + assert_state harness evaluates
-// the new U9 predicates.
-//
-// Per plan §"保守做法" the legacy `task.resume` tests in
-// `event_loop/tests/task_resume_ttl.rs` and
-// `loop_runner/tests.rs` are kept verbatim — these scenarios
-// pin the *new* deterministic-correction path on top.
-//
-// The `UNIFIED_DETERMINISTIC_CORRECTION=1` env var opts into
-// the new path. With nextest's process-per-test model each
-// driver sets the var locally before loading the YAML; the
-// legacy path tests (without the var) keep passing
-// untouched.
-// ──────────────────────────────────────────────────────────────────────
-
-/// Set `UNIFIED_DETERMINISTIC_CORRECTION=1` for the current
-/// test process so the deterministic-correction path is
-/// active. The legacy tests do not call this helper, so the
-/// env var change is scoped to U9 BDD scenarios.
-///
-/// Note: the workspace `forbid(unsafe_code)` prevents
-/// `std::env::set_var`, so we use the public test-only
-/// `set_correction_enabled_for_test` setter on
-/// `ralph_core::correction`. The setter stores into a
-/// process-wide atomic so background worker threads see the
-/// override too; subsequent tests call `reset_correction_enabled_for_test`
-/// to keep overrides from leaking across test boundaries.
-fn enable_deterministic_correction_for_test() {
-    ralph_core::correction::set_correction_enabled_for_test(true);
-}
-
-/// U9 BDD #1: a recoverable rejection accumulates a
-/// `CorrectionContext` and the next prompt contains the
-/// `## ORCHESTRATOR CORRECTION` block. Companion to the
-/// unit-level coverage in `event_loop/tests/u7_correction.rs`.
-#[test]
-fn test_u9_correction_deterministic_scenario() {
-    enable_deterministic_correction_for_test();
-    let yaml = load_scenario("tests/scenarios/correction_deterministic.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// U9 BDD #2: R11 escalation tripwire — three rejections on
-/// the same retry_key flip the correction block's
-/// `needs_escalation` flag and render the `ESCALATION`
-/// annotation line in the next prompt.
-///
-/// P1-1 (P1 follow-up): production `LINT_CIRCUIT_BREAKER_LIMIT=2`
-/// trips the breaker on the 2nd rejection (RISK-6: 1-iter
-/// early warning), which would prevent the 3rd rejection from
-/// reaching `apply_engine_required_field_gate`. The BDD
-/// temporarily relaxes the limit to 3 via the
-/// `set_lint_circuit_breaker_limit_for_test` helper
-/// (mirrors `set_correction_enabled_for_test` — works
-/// under `forbid(unsafe_code)` without `std::env::set_var`).
-/// Production default is unchanged; nextest's process-per-test
-/// model keeps the override from leaking.
-#[test]
-fn test_u9_correction_three_escalation_scenario() {
-    ralph_core::event_loop::loop_state::set_lint_circuit_breaker_limit_for_test(3);
-    enable_deterministic_correction_for_test();
-    let yaml = load_scenario("tests/scenarios/correction_three_escalation.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// 2026-06-23-006 plan U7 (P0-1): removed
-// `test_u9_handoff_auto_generate_scenario` — its scenario
-// `handoff_auto_generate.yml` declared `hat_handoff:` block
-// (line 38) + multiple hat_handoff references; hat_handoff is
-// removed by U5, no `## HAT HANDOFF` prompt injection anymore.
-
-/// U9 BDD #4: `ralph diagnose --from-ledger` runtime surface —
-/// workspace `.ralph/recovery.jsonl` carries a U7a rejection
-/// record whose `reason_code` matches the CLI binary's
-/// T8.1/T8.3 contract.
-#[test]
-fn test_u9_diagnose_from_ledger_scenario() {
-    enable_deterministic_correction_for_test();
-    let yaml = load_scenario("tests/scenarios/diagnose_from_ledger.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// 2026-06-23-006 plan U7 (P0-1): removed
-// `test_u9_cli_runtime_parity_scenario` — its scenario
-// `cli_runtime_parity.yml` declared 6 hat_handoff references
-// testing that the runtime rejection's `reason_code` matches
-// the CLI emit side; the hat_handoff_gate was the source of that
-// reason_code path, removed by U5.
-
-// ──────────────────────────────────────────────────────────────────────
-// 2026-06-17-004 plan U6 (T6.1): silent DR recovery variant
-//
-// This variant mirrors the noble-peacock failure shape (DR silent on
-// first activation, recovers on second) in scenario-runnable form. The
-// mock returns an empty body in iter 4 (the silent turn) and then
-// emits `review.dimension.done` in iter 5. The scenario passes when
-// the wire-level contract (4 ready/done pairs + close + downstream) is
-// preserved across the silence — proving that the orchestrator's
-// recovery wiring (task.resume + trigger replay) carries the
-// `review.dimension.ready` context forward to the second activation.
-// ──────────────────────────────────────────────────────────────────────
-
-#[test]
-fn test_ce_executor_serial_review_silent_reviewer_recovers_scenario() {
-    // 2026-06-24 P0-2/P0-3 rewrite: 2-dim topology with DR silence +
-    // recovery. Now uses `run_workflow_guard_scenario` (real EventLoop
-    // runner) so the `expected.events` + `expected.absent_events`
-    // assertions actually fire on topology drift.
-    let yaml =
-        load_scenario("tests/scenarios/ce_executor_serial_review_silent_reviewer_recovers.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// 2026-06-24 P0-2/P0-3 rewrite: fix → re-test → 2-dim re-review →
-// review.complete for ce-executor-serial.
-//
-// Pins the wire-level contract end-to-end: after `test.failed` the
-// fixer emits `fix.applied(fix_round=1)`, validator re-runs tests
-// (`test.passed`), then review-coordinator walks a fresh 2-dim
-// sequence, review-synthesizer emits `review.complete` (not
-// review.passed), and coordinator emits `plan.complete`.
-//
-// This is the structural smoke alarm for the new 10-hat topology:
-// any future change that re-introduces review.passed/queue.advance
-// or closes the fix recovery window must fail this BDD before
-// integration tests do.
-// ──────────────────────────────────────────────────────────────────────
-
-#[test]
-fn test_ce_executor_serial_fix_applied_rereview_scenario() {
-    let yaml = load_scenario("tests/scenarios/ce_executor_serial_fix_applied_rereview.yml");
-    run_workflow_guard_scenario(yaml);
-}
 
 // ──────────────────────────────────────────────────────────────────────
 // 2026-06-16-002 plan U6: coordinator build.deny deny rule
@@ -3140,244 +2833,6 @@ fn test_mechanism_verdict_gate_terminal_alignment() {
     run_workflow_guard_scenario(yaml);
 }
 
-/// 2026-06-29-007 plan U11: end-to-end BDD scenario for
-/// the post-fix happy path. Exercises the full chain
-/// (coordinator → executor → validator → review chain →
-/// shipper → LOOP_COMPLETE) and asserts no recovery
-/// envelope carries any of the four reject codes that
-/// the P0 fixes introduced (`flow_unknown_emit`,
-/// `target_self_loop`, `flow_state_closed`,
-/// `upstream_review_incomplete`).
-#[test]
-fn test_u11_full_e2e_after_fix() {
-    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u11-full-e2e.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-29-007 plan U8: smoke test for the
-/// `RejectionKind` typed enum. The retry-key computation
-/// and outcome migration are unit-tested in
-/// `rejection_kind::tests`. This scenario verifies the
-/// typed enum does not break the existing happy path.
-#[test]
-fn test_u8_typed_retry_key() {
-    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u8-typed-retry-key.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-29-007 plan U7: smoke test for the
-/// `TerminalStateGuardStage`. The phase-based reject is
-/// unit-tested in
-/// `terminal_state_guard_stage::tests`. This scenario
-/// verifies the new stage does not break the existing
-/// happy path.
-#[test]
-fn test_u7_terminal_state_guard() {
-    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u7-terminal-state.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-29-007 plan U10: smoke test for the
-/// PHASE 2 branch gate. The classify / rewrite logic is
-/// unit-tested in
-/// `coordinator_decision_gate_stage::tests`. This scenario
-/// verifies the rewrite does not break the existing
-/// happy path (a single-step plan that emits work.ready
-/// without `last_in_phase=true`).
-#[test]
-fn test_u10_phase2_branch() {
-    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u10-phase2-branch.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-30-001 P0-1 BDD coverage for U3 (fix-unit terminal
-/// guard). The runtime MUST reject `review.start` after every
-/// fix-NN is closed in `tasks.jsonl`; the smoke test below
-/// confirms the runtime loop keeps `plan.complete →
-/// REVIEW_COMPLETE → report.done → LOOP_COMPLETE` intact when
-/// the pre-fix failure pattern (extra `review.start`) is fed
-/// in. Single-step plan-level coverage lives in
-/// `test_review_start_rejected_after_fix_unit_chain_exhausted`.
-#[test]
-fn test_u3_fix_unit_terminal_guard() {
-    let yaml = load_scenario("tests/scenarios/2026-06-30-001-u3-fix-unit-terminal-guard.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-07-01-002 U3/U4: tasks.jsonl 驱动 fix_unit_state 的
-/// next_expected;coordinator 拿到 `plan.complete` 提示后直接
-/// 发射 plan.complete,不再数 plan 标题。
-#[test]
-fn test_u3_tasks_jsonl_drives_next_expected() {
-    let yaml =
-        load_scenario("tests/scenarios/2026-07-01-002-u3-tasks-jsonl-drives-next-expected.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-07-01-002 U1+U3: 同 activation 内的 stray
-/// `work.ready(last_in_phase=true)` 由 CoordinatorDecisionGateStage
-/// 改写为 `plan.complete`,U1 的终态预算保证 ledger 里只看到
-/// plan.complete。
-#[test]
-fn test_u1u3_stray_work_ready_rewritten_to_plan_complete() {
-    let yaml = load_scenario("tests/scenarios/2026-07-01-002-u1u3-stray-work-ready-rewritten.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-07-01-002 P1-1: range guard rejects a `work.ready(fix-03)`
-/// when `tasks.jsonl` only contains `fix-01`/`fix-02`, and surfaces
-/// a `task.resume` carrying `reason_code=contract:invalid_step_target`.
-/// Covers AE5 in the brainstorm document.
-#[test]
-fn test_u1_invalid_step_target_issued_for_unknown_fix_unit() {
-    let yaml = load_scenario("tests/scenarios/2026-07-01-002-u1-invalid-step-target-redirect.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-07-06 DEV-005: coordinator-owned open task + premature
-/// `work.done` → contract rejects → synthesized `task.resume`
-/// targets coordinator (executor cannot close).
-#[test]
-fn test_task_not_terminal_coordinator_recovery_scenario() {
-    let yaml =
-        load_scenario("tests/scenarios/2026-07-06-task-not-terminal-coordinator-recovery.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-29-007 plan U6b: smoke test for the
-/// `CoordinatorDecisionGateStage`. The
-/// `upstream_review_incomplete` reject logic is
-/// unit-tested in `coordinator_decision_gate_stage::tests`.
-/// This scenario verifies the new stage does not break
-/// the existing happy path.
-#[test]
-fn test_u6b_coordinator_step_guard() {
-    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u6b-coordinator-step-guard.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-29-007 plan U6a: smoke test for the
-/// coordinator trigger update. The preset yml change is
-/// verified by the ce-executor-serial SSOT byte-equality
-/// test (`test_ce_executor_root_preset_matches_embedded`)
-/// in the ralph-cli integration suite. This scenario
-/// exercises the hat-state-machine path so a regression
-/// in the hat trigger matcher is caught.
-#[test]
-fn test_u6a_coordinator_triggers() {
-    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u6a-coordinator-triggers.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-29-007 plan U5b: smoke test for the
-/// `PlanBlockedReason` typed enum. The closed-set
-/// enforcement is unit-tested in
-/// `plan_blocked_reason::tests`. This scenario verifies
-/// the typed enum does not break the existing happy
-/// path emit pattern.
-#[test]
-fn test_u5b_coordinator_reason() {
-    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u5b-coordinator-reason.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-07-07-004 plan U1: integration smoke for the
-/// `task_creation_forbidden_in_preset` fail-stop reason.
-/// Coordinator self-detects the projector-SSOT violation
-/// (duplicate row with owner_hat_id=coordinator) and emits
-/// `plan.blocked(reason=task_creation_forbidden_in_preset)`
-/// instead of `work.ready`. The scenario proves the new
-/// reason string passes the schema `allowed_values` gate
-/// end-to-end.
-#[test]
-fn test_u1_coordinator_task_creation_forbidden_fail_stop() {
-    let yaml = load_scenario(
-        "tests/scenarios/2026-07-07-004-u1-coordinator-task-create-forbidden.yml",
-    );
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-29-007 plan U5a: smoke test for the
-/// `dimension_reviewer_write_paths` lint. The core
-/// "reject docs/plans/ write access for
-/// dimension-reviewer" behaviour is unit-tested in
-/// `dimension_reviewer_write_paths::tests`. This scenario
-/// verifies the lint is wired into the run_preset_lint
-/// path without breaking the existing happy path.
-#[test]
-fn test_u5a_dimension_reviewer_scope() {
-    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u5a-dimension-reviewer-scope.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-29-007 plan U4: smoke test for the
-/// `TargetHatGuardStage`. The scenario exercises the
-/// happy path so we can be sure the new guard stage does
-/// not break any existing emit. The
-/// `target_self_loop` reject is unit-tested in
-/// `target_hat_guard_stage::tests`.
-#[test]
-fn test_u4_target_hat_self_loop() {
-    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u4-target-hat-self-loop.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-29-007 plan U3: smoke test for the
-/// `recovery_runtime::retry_cap` detector. The scenario
-/// exercises the same review-chain happy path as U2
-/// (DEFENSIVE_BYPASS) so we can be sure the new
-/// `detect_retry_cap_escalation` detector does not break
-/// the existing dispatch ordering. The core retry-cap
-/// behaviour is unit-tested in
-/// `recovery_runtime::retry_cap::tests`.
-#[test]
-fn test_u3_stall_recovery_cap() {
-    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u3-stall-recovery-cap.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-29-007 plan U1b: regression for the
-/// `flow_lifecycle.current_step` field transition
-/// triggered by `drive_step_transition` after
-/// `unit_loop.total_units` is reached. Requires U2
-/// (DEFENSIVE_BYPASS 前置) to be green first so the
-/// review chain can drive itself during unit_loop.
-#[test]
-fn test_u1b_step_transition() {
-    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u1b-step-transition.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-29-007 plan U2: regression for the
-/// `FlowStepScopeStage` DEFENSIVE_BYPASS placement
-/// contract. While `current_step == "unit_loop"`, review
-/// chain emits (review.dimensions.complete /
-/// review.dimension.done / review.complete /
-/// REVIEW_COMPLETE / LOOP_COMPLETE) must pass without
-/// consulting `unit_loop.allowed_emits` — the bypass
-/// runs BEFORE the step lookup so the review chain can
-/// drive itself to completion during the unit_loop
-/// phase.
-#[test]
-fn test_u2_flow_step_scope_bypass() {
-    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u2-flow-step-scope-bypass.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-29-007 plan U1a: smoke test for the new
-/// `flow_lifecycle.current_step` dedicated field. The
-/// scenario itself is a 2-step happy path (no `mechanism.flow`
-/// declared, so it stays on the `unit_loop` step the entire
-/// run). The point is to confirm that the field-based
-/// `current_step_id()` lookup does not regress any existing
-/// path: a 2-step plan completes cleanly with no spurious
-/// `flow_unknown_emit` rejections.
-#[test]
-fn test_u1a_current_step_field() {
-    let yaml = load_scenario("tests/scenarios/2026-06-29-007-u1a-current-step-field.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
 /// 2026-06-29-007 plan U19: replay the
 /// 2026-06-26 diagnostic scenario. The loop must NOT
 /// silently burn the budget on a 4/8 partial + silence
@@ -3420,167 +2875,6 @@ fn test_precheck_gate_pass() {
 #[test]
 fn test_precheck_gate_exhaust() {
     let yaml = load_scenario("tests/scenarios/2026-07-02-precheck-gate-exhaust.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// ============================================================
-// plan 2026-07-02-005 Final Verification: pass_with_residuals
-// terminal path (140149 root cause). LOOP_COMPLETE × 1, post-
-// completion business events rejected.
-// ============================================================
-
-#[test]
-fn test_ce_executor_serial_pass_with_residuals_terminal() {
-    let yaml = load_scenario("tests/scenarios/ce_executor_serial_pass_with_residuals_terminal.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_ce_executor_serial_fix_unit_terminal() {
-    let yaml = load_scenario("tests/scenarios/ce_executor_serial_fix_unit_terminal.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_ce_executor_serial_progress_stale_terminal() {
-    let yaml = load_scenario("tests/scenarios/ce_executor_serial_progress_stale_terminal.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_ce_executor_serial_shipper_recoverable_reasons() {
-    let yaml = load_scenario("tests/scenarios/ce_executor_serial_shipper_recoverable_reasons.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_ce_executor_serial_shipper_default_publishes_recoverable() {
-    // 2026-07-03-002 plan U3 (P0-2 fix): `default_publishes` reason
-    // must route through shipper recoverable whitelist to
-    // REVIEW_COMPLETE(pass_with_residuals) rather than hard-failing.
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_serial_shipper_default_publishes_recoverable.yml",
-    );
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_serial_phase_violation_resume_budget() {
-    let yaml = load_scenario("tests/scenarios/serial_phase_violation_resume_budget.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_serial_phase_f3_test_passed_terminal() {
-    let yaml = load_scenario("tests/scenarios/serial_phase_f3_test_passed_terminal.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_serial_phase_f2_multi_fix_units() {
-    let yaml = load_scenario("tests/scenarios/serial_phase_f2_multi_fix_units.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_serial_phase_post_loop_steward_silent() {
-    let yaml = load_scenario("tests/scenarios/serial_phase_post_loop_steward_silent.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_ce_executor_serial_shipper_hard_fail_promotion() {
-    let yaml = load_scenario("tests/scenarios/ce_executor_serial_shipper_hard_fail_promotion.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// 2026-07-07-002 plan Unit 10: true runtime regression scenarios for
-// ce-executor-serial protocol stability (Units 1-8 integration).
-#[test]
-fn test_ce_executor_serial_runtime_protocol_happy_path() {
-    let yaml =
-        load_scenario("tests/scenarios/ce_executor_serial_runtime_protocol_happy_path.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_ce_executor_serial_rejects_post_terminal_business_event() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_serial_rejects_post_terminal_business_event.yml",
-    );
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_ce_executor_serial_shipper_waits_for_validator() {
-    let yaml =
-        load_scenario("tests/scenarios/ce_executor_serial_shipper_waits_for_validator.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_ce_executor_serial_task_identity_idempotent() {
-    let yaml =
-        load_scenario("tests/scenarios/ce_executor_serial_task_identity_idempotent.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-#[test]
-fn test_ce_executor_serial_protocol_violation_retry_then_fail_close() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_serial_protocol_violation_retry_then_fail_close.yml",
-    );
-    run_workflow_guard_scenario(yaml);
-}
-
-// 2026-07-04-001 plan U10: BDD scenarios for OPAC agent discipline.
-// ACL-1: non-coordinator worker attempting out-of-scope emit is
-// rejected and routed through task.resume recovery.
-#[test]
-fn test_opac_acl_worker_out_of_scope_denied() {
-    let yaml = load_scenario("tests/scenarios/opac/acl_worker_task_create_denied.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// 2026-07-04-001 plan U10: BDD scenarios for OPAC agent discipline.
-// CH-1: events emitted by hats are recorded in the hat-channel and
-// visible across turns (Confirm path round-trip).
-#[test]
-fn test_opac_ch_confirm_hat_channel_roundtrip() {
-    let yaml = load_scenario("tests/scenarios/opac/ch_confirm_hat_channel_roundtrip.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// 2026-07-04-001 plan U10: BDD scenarios for OPAC agent discipline.
-// BUD-1: a single activation may emit only ONE business event;
-// extra in-scope emits are dropped and the runtime injects a
-// targeted task.resume recovery so the hat can re-emit exactly one.
-#[test]
-fn test_opac_bud_isolated_double_business_dropped() {
-    let yaml = load_scenario("tests/scenarios/opac/bud_isolated_double_business_dropped.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// 2026-07-04-002 plan U9 (R11 BDD): FV-1 ce-executor-serial
-// fix-unit chain 事件链完整性 — fresh mint → work.ready → close
-// → work.done → test.passed。每条业务事件 accept 恰好 1 次,
-// 无 silent drop,无 plan.complete/LOOP_COMPLETE 误触发。
-// 用 `run_workflow_guard_scenario` (真 EventLoop runner,
-// 2026-06-24 P0-2/P0-3 教训: 不用 `run_scenario` stub)。
-#[test]
-fn test_opac_fv1_serial_fix_unit_chain() {
-    let yaml = load_scenario("tests/scenarios/opac/ce_executor_serial_fix_unit_chain.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// 2026-07-04-002 plan U9 (R11 BDD): FV-2 ce-executor-serial
-// 6-dim serial walk — 6 个 activation 各 emit 一条
-// `review.dimension.ready`,断言全部 6 条 accept,
-// 用 `event_topic_counts: count: 6` 防止 silent drop。
-// R11 覆盖:6 维 serial review 不该静默丢任何维度。
-#[test]
-fn test_opac_fv2_serial_walk_6dim() {
-    let yaml = load_scenario("tests/scenarios/opac/ce_executor_serial_serial_walk_6dim.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -3715,4 +3009,125 @@ fn test_pipeline_work_failed_payload_minimal() {
              `{required}`; got keys = {keys:?}"
         );
     }
+}
+
+// Unit 3 (plan 2026-07-07-006): serial-only scenarios are removed from
+// the scenarios registry. Lock the cleanup so future contributors
+// cannot silently re-add serial-only fixtures to a single-chain world.
+
+const SERIAL_ONLY_PATH_FRAGMENTS: &[&str] = &[
+    "ce_executor_serial",
+    "serial_phase",
+    "2026-06-29-007",
+    "2026-06-30-001",
+    "2026-07-01-002",
+    "2026-07-06-task-not-terminal-coordinator",
+    "2026-07-07-004-u1-coordinator",
+];
+
+fn registered_scenario_paths() -> Vec<String> {
+    // Static scan: every `load_scenario("tests/scenarios/<path>")` call
+    // in this file. We deliberately use a textual scan instead of an
+    // `inventory_scenario!`-style macro so the test reads the actual
+    // registration surface and stays robust to future macro refactors.
+    // Skip comment lines and lines that only mention `tests/scenarios/`
+    // inside doc strings or error messages.
+    let text = fs::read_to_string("tests/scenarios.rs")
+        .expect("read scenarios.rs");
+    let mut paths: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if !line.contains("load_scenario(") {
+            continue;
+        }
+        if let Some(start) = line.find("tests/scenarios/") {
+            let rest = &line[start..];
+            let mut end = rest.len();
+            for (i, c) in rest.char_indices() {
+                if c == '"' {
+                    end = i;
+                    break;
+                }
+            }
+            let path = rest[..end].to_string();
+            if !path.is_empty() {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+#[test]
+fn test_no_serial_only_scenario_registration() {
+    let registered = registered_scenario_paths();
+    let serial_only: Vec<&String> = registered
+        .iter()
+        .filter(|p| {
+            SERIAL_ONLY_PATH_FRAGMENTS
+                .iter()
+                .any(|frag| p.contains(frag))
+        })
+        .collect();
+    assert!(
+        serial_only.is_empty(),
+        "serial-only scenarios must be removed in Unit 3; remaining = {serial_only:?}"
+    );
+}
+
+#[test]
+fn test_retained_scenarios_pipeline_or_generic_only() {
+    // Every remaining scenario registration must belong to one of
+    // {pipeline, supervisor, generic}. We rely on filename convention;
+    // preset binding is asserted by `run_workflow_guard_scenario` at
+    // runtime.
+    const GENERIC_PATH_PREFIXES: &[&str] = &[
+        "tests/scenarios/autoresearch",
+        "tests/scenarios/ce-executor-worktree",
+        "tests/scenarios/ce_executor_bootstrap_recovery",
+        "tests/scenarios/ce_executor_recovery",
+        "tests/scenarios/hat-routing",
+        "tests/scenarios/hat_lifecycle_contract",
+        "tests/scenarios/preset_static_lint",
+        "tests/scenarios/multi_hat_isolation_lint",
+        "tests/scenarios/isolated_",
+        "tests/scenarios/default_publishes",
+        "tests/scenarios/mixed_backends",
+        "tests/scenarios/multi_hat",
+        "tests/scenarios/orphaned_events",
+        "tests/scenarios/solo_mode",
+        "tests/scenarios/precheck-gate",
+        "tests/scenarios/plan_gate_",
+        "tests/scenarios/step_handoff/",
+        "tests/scenarios/flow_reliability/",
+        "tests/scenarios/four-p0-guards/",
+        "tests/scenarios/mechanism/",
+        "tests/scenarios/u6_coordinator_",
+        "tests/scenarios/2026-07-02-",
+        "tests/scenarios/isolated_with_event_projection",
+    ];
+    const SUPERVISOR_PATH_PREFIXES: &[&str] = &[
+        "tests/scenarios/opac/",
+        "tests/scenarios/supervisor/",
+    ];
+    const PIPELINE_PATH_PREFIXES: &[&str] = &[
+        "tests/scenarios/ce_executor_pipeline",
+    ];
+    let registered = registered_scenario_paths();
+    let offenders: Vec<&String> = registered
+        .iter()
+        .filter(|p| {
+            let is_generic = GENERIC_PATH_PREFIXES.iter().any(|g| p.starts_with(g));
+            let is_supervisor = SUPERVISOR_PATH_PREFIXES.iter().any(|g| p.starts_with(g));
+            let is_pipeline = PIPELINE_PATH_PREFIXES.iter().any(|g| p.starts_with(g));
+            !(is_generic || is_supervisor || is_pipeline)
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "every retained scenario must be pipeline, supervisor, or generic; offenders = {offenders:?}"
+    );
 }

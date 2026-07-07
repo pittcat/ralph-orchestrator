@@ -7,14 +7,17 @@
 //! work.failed→plan-gate, etc.) were removed. The preset only needs to
 //! pass strict validation; per-topic routing is covered by the
 //! preset_lint suite and the SSOT merge tests.
+//!
+//! 2026-07-08: pin against `ce-executor-pipeline` (the single-chain
+//! Ralph primary path) instead of the removed `ce-executor-serial`.
 
 use ralph_core::{HatRegistry, RalphConfig};
 
 /// Load the ce-executor builtin preset YAML and build the runtime registry.
 fn load_ce_executor_registry() -> HatRegistry {
-    let yaml = include_str!("../../../presets/en/ce-executor-serial.yml");
+    let yaml = include_str!("../../../presets/en/ce-executor-pipeline.yml");
     let config: RalphConfig =
-        serde_yaml::from_str(yaml).expect("ce-executor-serial.yml must parse as RalphConfig");
+        serde_yaml::from_str(yaml).expect("ce-executor-pipeline.yml must parse as RalphConfig");
     HatRegistry::from_runtime_config(&config)
 }
 
