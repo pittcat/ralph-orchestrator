@@ -2919,14 +2919,11 @@ fn test_opac_sb2_supervisor_review_batch_origin_guard() {
 // payload must carry every unit-evidence field the executor mode
 // promises. Read-only fixture check; the fixture cannot drift away
 // from the schema without this assertion failing first.
-
-const PIPELINE_UNIT_EVIDENCE_FIELDS: &[&str] = &[
-    "executor_head_sha",
-    "tests_run",
-    "tests_passed",
-    "commit_count",
-    "changed_lines",
-];
+//
+// Field set is sourced from the shared
+// `ralph_core::test_support::unit_evidence::UNIT_EVIDENCE_FIELDS`
+// SSOT (fix-plan U7 / SR-M1) so this BDD and `ralph-cli`'s lock
+// test reference the same constant.
 
 /// Extract every mock-response `work.done` payload object from the
 /// pipeline fixture YAML by simple text scan (the fixture uses raw
@@ -2962,10 +2959,11 @@ fn pipeline_work_done_payload_keys() -> std::collections::BTreeSet<String> {
 #[test]
 fn test_pipeline_work_done_payload_carries_unit_evidence() {
     let keys = pipeline_work_done_payload_keys();
-    let needed: std::collections::BTreeSet<String> = PIPELINE_UNIT_EVIDENCE_FIELDS
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let needed: std::collections::BTreeSet<String> =
+        ralph_core::test_support::unit_evidence::UNIT_EVIDENCE_FIELDS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
     let missing: Vec<&String> = needed.difference(&keys).collect();
     assert!(
         missing.is_empty(),

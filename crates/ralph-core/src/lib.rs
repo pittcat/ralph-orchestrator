@@ -101,6 +101,7 @@ mod summary_writer;
 pub mod task;
 pub mod task_definition;
 pub mod task_store;
+pub mod test_support;
 pub mod testing;
 mod text;
 mod urgent_steer;

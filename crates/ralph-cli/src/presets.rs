@@ -306,19 +306,14 @@ mod tests {
     // that pipeline does not depend on runtime unit-loop topics (SC2).
     // Read-only assertions — no pipeline mutation, no schema edits.
 
-    /// Unit-evidence fields the executor must place in `work.done` per
-    /// the executor-mode contract (tests_run, tests_passed, commit_count,
-    /// changed_lines, executor_head_sha). Pipeline's `work.done`
-    /// `required_fields` must be a superset of these so the chain
-    /// (synthesizer → fix-planner → fixer → alignment → reporter) can
-    /// consume the evidence without schema changes.
-    const UNIT_EVIDENCE_FIELDS: &[&str] = &[
-        "executor_head_sha",
-        "tests_run",
-        "tests_passed",
-        "commit_count",
-        "changed_lines",
-    ];
+    /// Unit-evidence fields the executor must place in `work.done`
+    /// per the executor-mode contract. Sourced from the shared
+    /// `ralph_core::test_support::unit_evidence::UNIT_EVIDENCE_FIELDS`
+    /// SSOT (plan 2026-07-07-006 fix-plan U7 / SR-M1); both this
+    /// crate's lock test and the scenarios BDD in `ralph-core`
+    /// reference the same constant so the two lock tests cannot
+    /// drift apart on a future edit.
+    use ralph_core::test_support::unit_evidence::UNIT_EVIDENCE_FIELDS;
 
     fn parse_pipeline_work_done_required_fields() -> std::collections::BTreeSet<String> {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
