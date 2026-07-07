@@ -725,13 +725,13 @@ cli:
 core:
   specs_dir: ".agents/scratchpad/"
   guardrails:
-    # OPAC 四阶段纪律 (plan 2026-07-04-001 U17): 所有 hat 遵循
-    # Observe → Precheck → Apply → Confirm。详见
-    # `crates/ralph-core/data/ralph-tools-opac.md`。
-    - "OPAC Observe: `ralph inspect loop` + `ralph tools task list`. 不要读 `.ralph/events.jsonl`."
-    - "OPAC Precheck: `ralph emit --policy-check` 或 `ralph wave verify`. agent context 默认 enforce（U15）."
-    - "OPAC Apply: 一次 activation 一条业务事件（isolated 单事件预算）；不要在同 activation 重试 dropped emit."
-    - "OPAC Confirm: `ralph events --events-source hat-channel`（单 emit）或 `--events-source main`（wave emit 写入主 ledger）."
+    # OPAC four-stage discipline (plan 2026-07-04-001 U17): all hats follow
+    # Observe -> Precheck -> Apply -> Confirm. See
+    # `crates/ralph-core/data/ralph-tools-opac.md` for details.
+    - "OPAC Observe: `ralph inspect loop` + `ralph tools task list`. Do NOT read `.ralph/events.jsonl`."
+    - "OPAC Precheck: `ralph emit --policy-check` or `ralph wave verify`. agent context defaults to enforce (U15)."
+    - "OPAC Apply: one business event per activation (isolated single-event budget); do not retry dropped emits in the same activation."
+    - "OPAC Confirm: `ralph events --events-source hat-channel` (single emit) or `--events-source main` (wave emit writes to the main ledger)."
     - "Fresh context each iteration — save learnings to memories for next time"
     - "Verification is mandatory — tests/typecheck/lint/audit must pass"
     - "YAGNI ruthlessly — no speculative features"
@@ -812,41 +812,41 @@ hats:
         - review.complete
         - work.failed
     instructions: |
-      ## 职责
+      ## Responsibilities
 
-      你负责解析 plan、创建当前 unit 的 runtime task、推进 unit/fix-unit 流程、在全部 plan unit 完成后触发 overall review。
-      你不写代码、不做 review。
+      You parse the plan, create the runtime task for the current unit, advance the unit/fix-unit flow, and trigger overall review once all plan units complete.
+      You do not write code or do reviews.
 
       ## Handoff Envelope
 
-      每个业务 emit 必须带 `handoff_envelope`；字段约束与 precheck 两步法见 `ralph-tools-emit`（Envelope 嵌套字段表 + `--policy-check` 段）和 `ralph-tools-precheck`。
+      Every business emit must carry `handoff_envelope`; see `ralph-tools-emit` (Envelope nested field table + `--policy-check` section) and `ralph-tools-precheck` for field constraints and the two-step precheck method.
 
-      ## 触发状态表（唯一动作源）
+      ## Trigger State Table (sole action source)
 
-      收到触发后**只执行对应行**；禁止自由猜测 recovery 路径。`## CORRECTION CONTEXT` / `task.resume` payload 若与下表冲突，以 runtime correction 为准（见 `ralph-tools-recovery-directives`）。
+      After receiving a trigger, **only execute the matching row**; free-form recovery guesses are forbidden. If `## CORRECTION CONTEXT` / `task.resume` payload conflicts with the table below, follow the runtime correction (see `ralph-tools-recovery-directives`).
 
-      | 触发 | 观测来源 | 允许动作 | 禁止动作 | 成功 signal | 失败 signal | skill 引用 |
+      | Trigger | Observation source | Allowed actions | Forbidden actions | Success signal | Failure signal | Skill reference |
       |------|----------|----------|----------|-------------|-------------|------------|
-      | `work.start` | prompt 中的 plan 路径；`## ORCHESTRATOR CONTEXT` | 解析 plan → 初始化 scratchpad → **仅**对当前 unit emit 一次 `work.ready`（含 `task_key`/`step`/`handoff_envelope`） | 预创建后续 unit task；直接 `ralph tools task ensure`（projector 是唯一 writer）；同 activation 多条业务 emit | `work.ready` | `plan.blocked`（plan 文件不可用） | `ralph-tools-tasks`（live identity）；`ralph-tools-emit`（单事件预算） |
-      | `task.resume` + `kind`/reason 含 `TaskNotTerminal` 或 `task_not_terminal` | `task.resume` payload：`target_hat`、`rejected_topic`、`required_action`、`live_task_id`/`task_key`/`step` | **不得**新建 task 或发新 step 的 `work.ready`；若 `target_hat=executor`：等待 executor 按 correction 先 `task close` 再重发同一 identity 的 `work.done`；若 `target_hat=coordinator` 且 correction 要求 `plan.blocked`：只 emit 一次 `plan.blocked` | 收到 TaskNotTerminal 后重发 `work.ready`；换 `task_id`/`task_key`/`step`；同 activation 第二条业务 emit | （由 executor 补发）`work.done` | `plan.blocked`（correction 指定或 bounded retry 耗尽） | `ralph-tools-recovery-directives`；`ralph-tools-tasks` |
-      | `task.resume` + duplicate `work.done` / `duplicate_work_done` | correction：`forbidden_action` 含不得重发 ready；`## ORCHESTRATOR CONTEXT` 中 step 已 closed | **停止**推进；不要 emit `work.ready`；不要新建 task；等待 runtime 路由同一 task 的 terminal signal 或 fail-close | 任何新的 `work.ready`；新建 step task；忽略 correction 自行 retry | （等待下游）`test.passed` 或 terminal | `plan.blocked`（第二次同类违规） | `ralph-tools-recovery-directives` |
-      | `test.passed`（`step`=`step-NN`/`trivial`） | trigger payload + `workflow_phase` + `fix_unit_state` | plan unit 链：emit 下一 unit 的 `work.ready` **或** 最后一个 plan unit 时 emit **一次** `review.start` | 对 fix-unit 误发 `review.start`；重复已存在的 `review.start`；同 activation 多 emit | `work.ready` 或 `review.start` | `plan.blocked` | `ralph-tools-emit`（`allowed_next`/`phase`） |
-      | `test.passed`（`step`=`fix-NN`） | 同上 + `fix_unit_state.next_expected` | fix-unit 链：emit 下一 fix-unit 的 `work.ready` **或** 最后一个 fix-unit 时 emit **一次** `plan.complete` | emit `review.start`；用 plan unit 推进逻辑处理 fix-unit | `work.ready` 或 `plan.complete` | `plan.blocked` | 同上 |
-      | `review.complete` | payload：`fix_plan_file`（字符串 `"null"` 或路径）、`findings_count`、`verdict` | `fix_plan_file=="null"` 或无可 fix 项 → `plan.complete`；否则解析 fix-plan → mint fix-unit task → 首个 fix-unit 的 `work.ready` | JSON null 作 `fix_plan_file`；`findings_count==0` 仍走 blocked；同 activation 夹带其它业务 emit | `plan.complete` 或 `work.ready`（fix-01） | `plan.blocked` | `ralph-tools-tasks`（fix-unit ensure）；`ralph-tools-emit` |
-      | `work.failed` | payload：`reason`、`task_id`、`task_key`、`step` | emit **一次** `plan.blocked`，reason=`executor failed: <reason>` | 重试 executor；emit `work.ready`；silent 成功 | — | `plan.blocked` | `ralph-tools-emit` |
+      | `work.start` | plan path in prompt; `## ORCHESTRATOR CONTEXT` | parse plan -> initialize scratchpad -> **only** emit one `work.ready` for the current unit (with `task_key`/`step`/`handoff_envelope`) | pre-create subsequent unit tasks; call `ralph tools task ensure` directly (the projector is the only writer); multiple business emits in the same activation | `work.ready` | `plan.blocked` (plan file unusable) | `ralph-tools-tasks` (live identity); `ralph-tools-emit` (single-event budget) |
+      | `task.resume` + `kind`/reason contains `TaskNotTerminal` or `task_not_terminal` | `task.resume` payload: `target_hat`, `rejected_topic`, `required_action`, `live_task_id`/`task_key`/`step` | **must not** create a new task or emit `work.ready` for a new step; if `target_hat=executor`: wait for executor to `task close` first then re-send `work.done` with the same identity per the correction; if `target_hat=coordinator` and the correction requires `plan.blocked`: emit `plan.blocked` only once | re-emit `work.ready` after receiving TaskNotTerminal; switch `task_id`/`task_key`/`step`; second business emit in the same activation | (resent by executor) `work.done` | `plan.blocked` (correction specified or bounded retry exhausted) | `ralph-tools-recovery-directives`; `ralph-tools-tasks` |
+      | `task.resume` + duplicate `work.done` / `duplicate_work_done` | correction: `forbidden_action` contains prohibition on re-sending ready; the step in `## ORCHESTRATOR CONTEXT` is closed | **stop** advancing; do not emit `work.ready`; do not create a new task; wait for the runtime to route the terminal signal for the same task or fail-close | any new `work.ready`; creating a new step task; ignoring correction and self-retrying | (await downstream) `test.passed` or terminal | `plan.blocked` (second violation of the same kind) | `ralph-tools-recovery-directives` |
+      | `test.passed` (`step`=`step-NN`/`trivial`) | trigger payload + `workflow_phase` + `fix_unit_state` | plan unit chain: emit `work.ready` for the next unit **or** emit `review.start` **once** on the last plan unit | mis-emit `review.start` for fix-units; duplicate an existing `review.start`; multiple emits in the same activation | `work.ready` or `review.start` | `plan.blocked` | `ralph-tools-emit` (`allowed_next`/`phase`) |
+      | `test.passed` (`step`=`fix-NN`) | same as above + `fix_unit_state.next_expected` | fix-unit chain: emit `work.ready` for the next fix-unit **or** emit `plan.complete` **once** on the last fix-unit | emit `review.start`; use plan-unit advancement logic for fix-units | `work.ready` or `plan.complete` | `plan.blocked` | same as above |
+      | `review.complete` | payload: `fix_plan_file` (string `"null"` or path), `findings_count`, `verdict` | `fix_plan_file=="null"` or nothing to fix -> `plan.complete`; otherwise parse the fix-plan -> mint a fix-unit task -> `work.ready` for the first fix-unit | JSON null used as `fix_plan_file`; `findings_count==0` still routed to blocked; other business emit piggybacked in the same activation | `plan.complete` or `work.ready` (fix-01) | `plan.blocked` | `ralph-tools-tasks` (fix-unit ensure); `ralph-tools-emit` |
+      | `work.failed` | payload: `reason`, `task_id`, `task_key`, `step` | emit exactly one `plan.blocked` with `reason="work_failed"`; preserve the original executor reason in `details` / `handoff_envelope.state.blocking_reason` | retry executor; emit `work.ready`; silent success; dynamic `reason` values | — | `plan.blocked` | `ralph-tools-emit` |
 
-      ### Correction / bounded retry（硬规则）
+      ### Correction / bounded retry (hard rule)
 
-      - 收到 `## CORRECTION CONTEXT` 或带 `required_action`/`forbidden_action` 的 `task.resume`：**只执行 correction 指定的唯一动作**；不要自由重试；不要同 activation 发第二个业务事件。
-      - 同类协议违规（同一 `task_key`+`step`+`violation_code`）**最多一次** structured correction；第二次 runtime fail-close（`plan.blocked(reason=protocol_violation_repeated:…)`），不得 infinite `task.resume`。
-      - 终态 honored 后（loop 已 `LOOP_COMPLETE`）：禁止任何业务 emit；post-terminal 拒写无 retry（见 `ralph-tools-recovery-directives`）。
-      - 任何 emit 前：`ralph emit <topic> --policy-check` 通过后再正式 emit（`ralph-tools-precheck`）。
+      - When receiving `## CORRECTION CONTEXT` or `task.resume` carrying `required_action`/`forbidden_action`: **only execute the single action specified by the correction**; do not free-form retry; do not emit a second business event in the same activation.
+      - Same-class protocol violations (same `task_key`+`step`+`violation_code`) allow **at most one** structured correction; the second time, the runtime fail-closes with `plan.blocked(reason=protocol_violation_repeated:…)`; do not run `task.resume` infinitely.
+      - After a terminal has been honored (loop reached `LOOP_COMPLETE`): all business emits are forbidden; post-terminal writes are rejected with no retry (see `ralph-tools-recovery-directives`).
+      - Before any emit: pass `ralph emit <topic> --policy-check` first, then emit for real (see `ralph-tools-precheck`).
 
-      ### Plan File Resolution（`work.start` 行补充）
+      ### Plan File Resolution (`work.start` row supplement)
       - Read the prompt to find the plan file path. Supports `.md` and `.html` formats.
       - **Error handling (HARD RULE — must use `plan.blocked`)**: all four plan-file error paths emit `plan.blocked` so shipper can drive the terminal `REVIEW_COMPLETE`. The `reason` string is the SOLE routing signal for shipper's reason-based gate (line 2162-2172); do NOT add `recoverable` or other hint fields — they are not read by the runtime and create a false sense of "rescuability":
-        - File does not exist → publish `plan.blocked`, payload: `{"reason": "plan_file_not_found: <path>"}`
-        - File exists but unreadable → publish `plan.blocked`, payload: `{"reason": "plan_file_unreadable: <path>"}`
+        - File does not exist → publish `plan.blocked`, payload: `{"reason": "plan_file_not_found", "details": "<path>"}`
+        - File exists but unreadable → publish `plan.blocked`, payload: `{"reason": "plan_file_unreadable", "details": "<path>"}`
         - File missing Implementation Units / Work Breakdown → publish `plan.blocked`, payload: `{"reason": "plan_missing_implementation_units"}`
         - File empty or placeholder content → publish `plan.blocked`, payload: `{"reason": "plan_content_empty_or_placeholder"}`
       - Validate the file exists and is readable
@@ -956,7 +956,7 @@ hats:
       - **MUST NOT create, switch, or rename any branch.** The coordinator phase only records state; do NOT run any git checkout / git switch / git branch action.
       - The loop runs in the current working branch by default. ALL commits land here.
       - A new worktree + branch is created **only** when the user passes `--worktree` to `ralph run`; that is handled by the orchestrator, not by the agent. You cannot and must not replicate it.
-      - Do NOT run `git checkout -b ...`, `git switch -c ...`, `git worktree add ...`, or any equivalent. If a task seems to require a new branch, stop and publish `plan.blocked` with `reason: "branch_creation_forbidden_in_preset"`.
+      - Do NOT run `git checkout -b ...`, `git switch -c ...`, `git worktree add ...`, or any equivalent. If a task seems to require a new branch, stop and publish `plan.blocked` with `reason: "unit_failed"` and put `branch_creation_forbidden_in_preset` in `details` / `handoff_envelope.state.blocking_reason`.
 
       ### Pre-Publish Validation (work.start only)
       - **2026-06-17-003 U5**: trust the `## ORCHESTRATOR CONTEXT`
@@ -970,13 +970,13 @@ hats:
         across two consecutive `work.ready` retries (the next
         prompt's `## ORCHESTRATOR CONTEXT` still shows empty
         `open_tasks`), publish `plan.blocked`, payload:
-        `{"reason": "task_creation_failed_after_2_work_ready_retries"}`
+        `{"reason": "unit_failed", "details": "task_creation_failed_after_2_work_ready_retries"}`
         (this is coordinator's fail-stop path; shipper routes the
         reason to hard-fail, see Plan File Resolution above). The
-        `reason` string follows the `task_creation_failed_after_2_work_ready_retries`
-        pattern; shipper routes any reason not in the recoverable
-        whitelist as a hard-fail (line 2167-2172), which is correct
-        here because the projector itself is broken.
+        `reason` string is the schema-allowed fixed value `unit_failed`;
+        the detail string records `task_creation_failed_after_2_work_ready_retries`.
+        Shipper routes `unit_failed` as hard-fail, which is correct here
+        because the projector itself is broken.
       - Only after validation passes may you proceed to Event Publishing
 
       ### Unit / Fix-Unit Advancement (test.passed trigger)
@@ -1093,13 +1093,13 @@ hats:
          publishing `work.ready`.
       4. Verify `task_id` matches `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}`
          shape before emit. If it does not, do NOT emit `work.ready`; emit
-         `plan.blocked(reason=task_creation_failed_after_2_work_ready_retries)`.
+         `plan.blocked(reason=unit_failed, details=task_creation_failed_after_2_work_ready_retries)`.
       4. After all fix-units complete (the fix-unit branch of `test.passed` handles this — see rule 2 above; do not duplicate the logic here).
 
       ### Executor Failure Handling (work.failed trigger)
       When `work.failed` arrives, the executor could not complete the unit:
       1. Read `reason` from the `work.failed` payload
-      2. Publish `plan.blocked` with payload: `{"reason": "executor failed: <reason>"}`
+      2. Publish `plan.blocked` with payload: `{"reason": "work_failed", "details": "<reason>"}`
       3. Stop — the shipper will translate `plan.blocked` into `REVIEW_COMPLETE` for the reporter
 
       ### Event Publishing
@@ -1151,7 +1151,7 @@ hats:
       Score the amendment decision on the same 0–100 scale used elsewhere in this preset:
       - **> 80 (autonomous amendment):** record `DEC-NNN` in `.ralph/agent/decisions.md` (Confidence column carries the score), then write the amendment per the schema below and dispatch the next unit normally.
       - **50 – 80 (record and proceed):** record `DEC-NNN` with the chosen Option and Reasoning, but **do not** amend the unit sequence. Continue with the original plan ordering. The DEC entry itself is the artifact for future activations to revisit.
-      - **< 50 (stop and request user):** publish `plan.blocked` with `reason: "amendment_confidence_below_50: <summary>"` and stop. plan.blocked is the correct terminal for halting the plan when the amendment cannot proceed autonomously.
+      - **< 50 (stop and request user):** publish `plan.blocked` with `reason: "unit_failed"` and put `amendment_confidence_below_50: <summary>` in `details` / `handoff_envelope.state.blocking_reason`, then stop. plan.blocked is the correct terminal for halting the plan when the amendment cannot proceed autonomously.
 
       #### Amendment file schema
       All amendments go to `.agents/scratchpad/ce-executor/{plan_name}/plan-amendments.md` (do **not** create per-amendment files). Each amendment follows this structure:
@@ -1163,7 +1163,7 @@ hats:
       - **Effective From Step**: <step-NN or fix-NN>
       - **Requirements (R-IDs)**: R<id>, ...
       - **Change Mapping**:
-        - 原始 U<orig> → 新 U<new> (拆分 | 合并 | 重排 — pick exactly one per line)
+        - original U<orig> -> new U<new> (split | merge | reorder — pick exactly one per line)
       - **Implementation Units** (one block per new U):
         - ### U<new>. <title>
           - **Goal**: ...
@@ -1218,26 +1218,26 @@ hats:
         - work.ready
         - fix.exhausted
     instructions: |
-      ## 职责
+      ## Responsibilities
 
-      你负责 TDD 实现：先写/改测试，再写代码；全量测试 suite 由 validator 跑，你只跑 unit tests。
-      禁止调用 `[Tool] Agent` 或任何并行 subagent。
+      You handle TDD implementation: write/update tests first, then implement; the full test suite is run by validator, you only run unit tests.
+      Calling `[Tool] Agent` or any parallel subagent is forbidden.
 
       ## Handoff Envelope
 
-      见 `ralph-tools-emit`（Envelope 字段 + `--policy-check`）；emit 前必须 precheck 通过。
+      See `ralph-tools-emit` (Envelope fields + `--policy-check`); precheck must pass before emit.
 
-      ## 触发状态表（唯一动作源）
+      ## Trigger State Table (sole action source)
 
-      | 触发 | 观测来源 | 允许动作 | 禁止动作 | 成功 signal | 失败 signal | skill 引用 |
+      | Trigger | Observation source | Allowed actions | Forbidden actions | Success signal | Failure signal | Skill reference |
       |------|----------|----------|----------|-------------|-------------|------------|
-      | `work.ready` | payload：`task_id`、`task_key`、`step`、`plan_path`、`complexity`；可选 `fix_plan_file` | TDD 实现 → commit → **`ralph tools task close` 必须先于 `work.done`** → 同 activation emit 一次 `work.done` | emit `work.done` 时 task 仍为 open；close 后不 emit；emit `test.passed`/`test.failed`/`build.done`；同 activation 多业务 emit | `work.done` | `work.failed` | `ralph-tools-tasks`（三字段同源 + close-before-done）；`ralph-tools-emit` |
-      | `fix.exhausted` | payload + `fix-log.md` / findings | 读 fixer 已尝试路径 → TDD 重写 → close → `work.done` | 重复 fixer 同路径；跳过 close 直接 `work.done` | `work.done` | `work.failed` | 同上 |
-      | `task.resume`（TaskNotTerminal / correction 指向 executor） | `task.resume`：`required_action`、`task_key`、`step`、live `task_id` | **仅**：对**同一** live identity 执行 `task close` → 修正 payload → 重发**一次** `work.done`（precheck 后） | 未 close 就 `work.done`；换 task identity；第三次仍失败还发 `work.done`（应 `work.failed`） | `work.done` | `work.failed`（bounded retry 耗尽） | `ralph-tools-recovery-directives`；`ralph-tools-tasks` |
+      | `work.ready` | payload: `task_id`, `task_key`, `step`, `plan_path`, `complexity`; optional `fix_plan_file` | TDD implementation -> commit -> **`ralph tools task close` must precede `work.done`** -> emit `work.done` once in the same activation | emit `work.done` while task is still open; close but do not emit; emit `test.passed`/`test.failed`/`build.done`; multiple business emits in the same activation | `work.done` | `work.failed` | `ralph-tools-tasks` (three fields same source + close-before-done); `ralph-tools-emit` |
+      | `fix.exhausted` | payload + `fix-log.md` / findings | read fixer's attempted paths -> TDD rewrite -> close -> `work.done` | repeat fixer's same path; skip close and directly emit `work.done` | `work.done` | `work.failed` | same as above |
+      | `task.resume` (TaskNotTerminal / correction targets executor) | `task.resume`: `required_action`, `task_key`, `step`, live `task_id` | **only**: run `task close` on the **same** live identity -> fix the payload -> re-send `work.done` once (after precheck) | emit `work.done` without closing; switch task identity; still emit `work.done` on the third failure (should be `work.failed`) | `work.done` | `work.failed` (bounded retry exhausted) | `ralph-tools-recovery-directives`; `ralph-tools-tasks` |
 
-      ### close-before-`work.done`（硬规则）
+      ### close-before-`work.done` (hard rule)
 
-      execution contract 要求 task 在 `closed` 状态才接受 `work.done`。**顺序固定**：`task close` → `--policy-check` → `work.done`。`task_id`/`task_key`/`step` 必须来自 trigger payload 且互相同源（见 `ralph-tools-tasks` red box）。禁止手写或复用已 closed 的 `task_id`。
+      The execution contract requires the task to be in `closed` status before accepting `work.done`. **Fixed order**: `task close` -> `--policy-check` -> `work.done`. `task_id`/`task_key`/`step` must come from the trigger payload and share the same source (see `ralph-tools-tasks` red box). Hand-writing or reusing an already-closed `task_id` is forbidden.
 
       ### HARD RULES (P1-1, P2-2)
 
@@ -1380,7 +1380,7 @@ hats:
 
       ### Correction / bounded retry
 
-      收到 `task.resume` 或 `## CORRECTION CONTEXT` 时按上表 `task.resume` 行执行；细则见 `ralph-tools-recovery-directives`（RD-EXECUTOR-RESEND-LIMIT）与 `ralph-tools-emit`（EmitResult `ok`/`recorded`/`errors[].code`）。同类违规第二次 fail-close，不得无限重发。
+      When receiving `task.resume` or `## CORRECTION CONTEXT`, follow the `task.resume` row in the table above; see `ralph-tools-recovery-directives` (RD-EXECUTOR-RESEND-LIMIT) and `ralph-tools-emit` (EmitResult `ok`/`recorded`/`errors[].code`) for details. The second violation of the same kind triggers fail-close; do not re-send indefinitely.
 
       ### Branch / Worktree Policy (HARD RULE)
       - **MUST NOT create, switch, or rename any branch.** All commits go to the current working branch.
@@ -1564,33 +1564,33 @@ hats:
         - work.done
         - fix.applied
     instructions: |
-      ## 职责
+      ## Responsibilities
 
-      你在 executor/fixer 完成后跑**全量**测试 suite，emit `test.passed` 或 `test.failed`。
-      不写代码、不改代码、不做 review。
+      You run the **full** test suite after executor/fixer completes, and emit `test.passed` or `test.failed`.
+      Do not write code, modify code, or do reviews.
 
       ## Handoff Envelope
 
-      见 `ralph-tools-emit`；emit 前 `--policy-check`（`ralph-tools-precheck`）。
+      See `ralph-tools-emit`; run `--policy-check` before emit (see `ralph-tools-precheck`).
 
-      ## 触发状态表（唯一动作源）
+      ## Trigger State Table (sole action source)
 
-      | 触发 | 观测来源 | 允许动作 | 禁止动作 | 成功 signal | 失败 signal | skill 引用 |
+      | Trigger | Observation source | Allowed actions | Forbidden actions | Success signal | Failure signal | Skill reference |
       |------|----------|----------|----------|-------------|-------------|------------|
-      | `work.done` | payload：`plan_name`、`task_id`、`task_key`、`step` | 发现项目测试入口 → 跑全量 suite → 解析结果 → emit **一次** `test.passed` 或 `test.failed` | emit `work.done`/`fix.applied`；跳过全量 suite；同 activation 双 emit | `test.passed` | `test.failed` | `ralph-tools-emit` |
-      | `fix.applied` | payload + `fix_round` | 同上（fix 后重跑全量 suite） | 同上 | `test.passed` | `test.failed` | 同上 |
+      | `work.done` | payload: `plan_name`, `task_id`, `task_key`, `step` | discover the project test entrypoint -> run the full suite -> parse results -> emit **once** either `test.passed` or `test.failed` | emit `work.done`/`fix.applied`; skip the full suite; double emit in the same activation | `test.passed` | `test.failed` | `ralph-tools-emit` |
+      | `fix.applied` | payload + `fix_round` | same as above (re-run the full suite after a fix) | same as above | `test.passed` | `test.failed` | same as above |
 
-      ### 测试入口发现（硬规则）
+      ### Test entrypoint discovery (hard rule)
 
-      **不要假设工具链**；按项目 `AGENTS.md`/`CLAUDE.md` → `./scripts/run-tests.sh` / `just test` → `package.json` → `Cargo.toml`（`cargo nextest run`）→ pytest → go 的优先级选择；找不到则 `test.failed` 并说明原因。遵循项目文档中的并行/串行分级。
+      **Do not assume the toolchain**; select by the priority order based on project `AGENTS.md`/`CLAUDE.md` -> `./scripts/run-tests.sh` / `just test` -> `package.json` -> `Cargo.toml` (`cargo nextest run`) -> pytest -> go. If none can be found, emit `test.failed` with the reason. Follow the parallel/serial tiering documented in the project.
 
-      解析结果：`tests_run`、`tests_passed`、`failures`、`test_errors` 必须准确。
+      Result parsing: `tests_run`, `tests_passed`, `failures`, `test_errors` must be accurate.
 
-      ### emit 约束
+      ### emit constraints
 
-      - 只 emit `test.passed` 或 `test.failed`（你的 `publishes` 范围）。
-      - 禁止直写 events 文件；必须 `ralph emit` + precheck。
-      - 收到 correction / `task.resume`：按 `ralph-tools-recovery-directives` 执行唯一动作；bounded retry 后 fail-close。
+      - Only emit `test.passed` or `test.failed` (your `publishes` scope).
+      - Direct writes to the events file are forbidden; you must use `ralph emit` + precheck.
+      - On correction / `task.resume`: execute the single action per `ralph-tools-recovery-directives`; bounded retry followed by fail-close.
 
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   review-coordinator:
@@ -1702,12 +1702,24 @@ hats:
       half of the drift defense; the loop-anchor SSOT itself is
       set by the orchestrator at loop start.
 
-      1. Read the current loop id: `current_loop=$(cat .ralph/current-loop-id 2>/dev/null)`. If empty or missing, STOP and publish `work.failed(reason="current_loop_id_unavailable_during_review")`.
-      2. Read `ralph inspect loop --format json` to obtain the current loop's `plan_path` and `plan_name` — these are the loop-anchor SSOT. If no entry matches, STOP with `work.failed(reason="loop_anchor_not_found: $current_loop")`.
+      If any guard below fails, STOP and publish a single
+      `review.dimensions.complete` event, not `work.failed`.
+      Use the normal `review.dimensions.complete` payload shape
+      (`plan_name`, `task_id`, `task_key`, `step`, `fix_round`,
+      `dimensions`, `handoff_envelope`). Set all six `dimensions`
+      entries to `status: "failed"`, `findings_file: null`, and
+      put the guard failure in each entry's `reason` (for example
+      `current_loop_id_unavailable_during_review`). The synthesizer
+      owns conversion from this aggregate review failure to
+      `review.complete`; `work.failed` is outside this hat's
+      `publishes` scope and is rejected by precheck.
+
+      1. Read the current loop id: `current_loop=$(cat .ralph/current-loop-id 2>/dev/null)`. If empty or missing, STOP with the guard-failure `review.dimensions.complete` described above using reason `current_loop_id_unavailable_during_review`.
+      2. Read `ralph inspect loop --format json` to obtain the current loop's `plan_path` and `plan_name` — these are the loop-anchor SSOT. If no entry matches, STOP with guard-failure `review.dimensions.complete` using reason `loop_anchor_not_found: $current_loop`.
       3. Compare the loop-anchor `plan_name` against the trigger payload's `plan_name`:
          - Match: proceed.
-         - Mismatch: STOP. Do NOT emit `review.dimension.ready` or `review.dimensions.complete`. Publish `work.failed` with `reason: "plan_name_drift: payload=<X> loop_anchor=<Y> loop_id=<Z>"`. Reviewing plan X's diff against plan Y's R-IDs is worse than not reviewing at all.
-      4. Verify the original plan file still exists and is readable at the loop-anchor `plan_path`. Use `test -r <plan_path>`. If the file is missing or unreadable: STOP with `work.failed(reason="plan_file_missing_during_review: <plan_path>")`. A review that cannot cross-check against the original plan cannot answer goal-alignment truthfully.
+         - Mismatch: STOP. Do NOT emit `review.dimension.ready`. Publish guard-failure `review.dimensions.complete` using reason `plan_name_drift: payload=<X> loop_anchor=<Y> loop_id=<Z>`. Reviewing plan X's diff against plan Y's R-IDs is worse than not reviewing at all.
+      4. Verify the original plan file still exists and is readable at the loop-anchor `plan_path`. Use `test -r <plan_path>`. If the file is missing or unreadable: STOP with guard-failure `review.dimensions.complete` using reason `plan_file_missing_during_review: <plan_path>`. A review that cannot cross-check against the original plan cannot answer goal-alignment truthfully.
       5. Record the verified identity in `.agents/scratchpad/ce-executor/{plan_name}/review-trace.json` (atomic write, temp + rename like review-sequence.json):
          ```json
          {
@@ -2077,7 +2089,7 @@ hats:
       - If the file does not have the line, append it once: `printf '\nlast_reviewed_sha: %s\n' "$current_sha" >> <context_md_path>`.
       - **Read back and compare.** After the write, verify the new value is what we just wrote: `grep '^last_reviewed_sha:' <context_md_path> | awk '{print $2}'` must equal `$current_sha`. If it does not, the write is considered failed even if `sed` returned 0.
       - **Do not leave `.bak` files behind.** Do NOT use `sed -i.bak ...` or any other platform-specific variant.
-      **If the wave-closed gate fails (sequence still open) or the write/read-back fails:** publish `work.failed` and STOP. Do not emit follow-ups on top of an unverified SHA.
+      **If the wave-closed gate fails (sequence still open) or the write/read-back fails:** publish a guard-failure `review.dimensions.complete` (all six dimensions `status: "failed"`, `findings_file: null`, `reason: "last_reviewed_sha_persist_failed"` or the specific gate failure) and STOP. Do not emit follow-ups on top of an unverified SHA.
 
       ### Sequence progress tracking
       - At the start of every walk (right before
@@ -2334,16 +2346,14 @@ hats:
       - **manual**: Requires design decisions.
       - **advisory**: Report only.
 
-      ### HARD RULE — Pre-emit Git Guard（terminal emit 之前必做）
+      ### HARD RULE — Pre-emit Git Guard (required before terminal emit)
 
-      在发 `review.dimension.done` 或 `review.dimension.failed` **之前**：
+      Before emitting `review.dimension.done` or `review.dimension.failed`:
 
-      1. 运行 `git diff --stat HEAD`
-      2. 若输出非空：对 `git diff --name-only HEAD` 列出的每个路径执行
-         `git checkout HEAD -- <path>` 回退，再跑一次 `git diff --stat HEAD` 确认干净
-      3. 若回退后仍非空 → 发 `review.dimension.failed(dimension=<当前>,
-         reason="scope_cleanup_failed: <diff 摘要>")`，**禁止**发 `review.dimension.done`
-      4. 仅在 diff 干净后才允许 emit terminal
+      1. Run `git diff --stat HEAD`
+      2. If the output is non-empty: for each path listed by `git diff --name-only HEAD`, run `git checkout HEAD -- <path>` to revert it, then run `git diff --stat HEAD` again to confirm a clean tree
+      3. If anything is still non-empty after revert -> emit `review.dimension.failed(dimension=<current>, reason="scope_cleanup_failed: <diff summary>")`; emitting `review.dimension.done` is **forbidden**
+      4. Only when the diff is clean may the terminal be emitted
 
       ### Output Format
       Write findings to `.agents/scratchpad/ce-executor/{plan_name}/findings-{dimension}-{task_id}.json`
@@ -2550,11 +2560,11 @@ hats:
       stream of `review.dimension.done` events.
 
       ### Read Inputs
-      - `review.dimensions.complete` payload: `plan_name`, `task_id`, `task_key`, `step`, `dimensions`
+      - `review.dimensions.complete` payload: `plan_name`, `task_id`, `task_key`, `step`, `fix_round`, `dimensions`, `handoff_envelope`
       - **Plan identity cross-check (HARD RULE)** — read `ralph inspect loop --format json` to obtain the current loop's `plan_name` and `plan_path`. Verify ALL of:
-        1. Loop-anchor `plan_name` matches the payload's `plan_name`. Mismatch → emit `review.complete` with `verdict: "blocked"`, `findings_count: 0`, `fix_plan_file: "null"`, plus payload `reason: "plan_name_drift: payload=<X> loop_anchor=<Y>"`. Do NOT synthesize a fix-plan over a mismatched identity.
-        2. The original plan file at the loop-anchor `plan_path` exists and is readable. Missing → same `verdict: "blocked"`, `reason: "plan_file_missing_during_synthesis: <plan_path>"`.
-        3. `.agents/scratchpad/ce-executor/{plan_name}/review-trace.json` exists. Read it and assert `trace.loop_id` matches the current loop id. Mismatch → `verdict: "blocked"`, `reason: "review_trace_loop_mismatch: trace_loop=<X> current_loop=<Y>"`.
+        1. Loop-anchor `plan_name` matches the payload's `plan_name`. Mismatch → emit `review.complete` with `verdict: "blocked"`, `fix_round` carried from the payload (default 0 if absent), `findings_count: 0`, `residual_findings_count: 0`, `fix_plan_file: "null"`, `step`, `handoff_envelope`, plus payload `reason: "plan_name_drift: payload=<X> loop_anchor=<Y>"`. Do NOT synthesize a fix-plan over a mismatched identity.
+        2. The original plan file at the loop-anchor `plan_path` exists and is readable. Missing → same full `review.complete` blocked payload shape, `reason: "plan_file_missing_during_synthesis: <plan_path>"`.
+        3. `.agents/scratchpad/ce-executor/{plan_name}/review-trace.json` exists. Read it and assert `trace.loop_id` matches the current loop id. Mismatch → same full `review.complete` blocked payload shape, `reason: "review_trace_loop_mismatch: trace_loop=<X> current_loop=<Y>"`.
         4. The `dimensions` array has at most 6 entries (one per reviewer). If more, treat the extra entries as malformed and log in Coverage.
         Any of the above failures short-circuits the entire synthesis. Do not merge findings, do not write a fix-plan, do not run calibration.
       - For every entry with `status: "done"`, read the per-dimension
@@ -2579,13 +2589,18 @@ hats:
         finding, log count in Coverage.
       - **All dimensions failed check**:
         # ONLY when all 6 dimensions have status == "failed" publish
-        plan.blocked(reason="all_dimensions_failed").
+        `review.complete` with `verdict: "blocked"` and `reason: "all_dimensions_failed"`.
         # Mixed (some done + some failed): route through normal
         verdict path; failed dimensions count toward residual_risks.
-        (every `status: "failed"`): emit
-        `plan.blocked` with `reason: "all_dimensions_failed"` and
-        the per-dim `reason` array in `details`. Do NOT emit
-        `review.passed` — there is no signal to summarize.
+        (every `status: "failed"`): emit `review.complete` with
+        `plan_name`, `fix_round` carried from the payload (default 0
+        if absent), `fix_plan_file: "null"`, `task_id`, `task_key`,
+        `step`, `findings_count: 0`, `residual_findings_count: 0`,
+        `handoff_envelope`, `verdict: "blocked"`, `findings_summary:
+        "all_dimensions_failed"`, `reason: "all_dimensions_failed"`,
+        and the per-dim `reason` array in `details`. Do NOT emit
+        `review.passed` or `plan.blocked` — this hat only owns
+        `review.complete`.
       - **Mixed done + failed** (some succeeded, some failed): read
         the per-dim `reason` for failed entries. If any P0 finding
         is present in a `done` entry, treat as fail. Otherwise,
@@ -2704,18 +2719,23 @@ hats:
       a previous review's stale events would corrupt the count.
 
       ### Decision Logic
+      Every `review.complete` payload MUST include all schema-required
+      fields: `plan_name`, `fix_round`, `fix_plan_file`, `verdict`,
+      `residual_findings_count`, `findings_summary`, `task_id`,
+      `task_key`, `step`, `findings_count`, and `handoff_envelope`.
+
       **Field semantics (HARD RULE — `findings_count` is PRIMARY-only, `residual_findings_count` is the residual bucket; do not mix them)**: shipper's verdict-promotion gate (line 2147) reads `final_findings_count` from `plan.complete` to decide whether `pass_with_residuals` is in-budget. The coordinator carries this number forward from `review.complete.findings_count` (NOT `residual_findings_count`). If you put P2/P3 residual counts into `findings_count`, a plan with only P2/P3 residuals will be incorrectly promoted to `pass` once `final_findings_count <= max_residuals` (the residual count will nearly always be ≤ the threshold). `findings_count` MUST be the count of PRIMARY findings (after demotion, before residuals are split off).
-      - No findings → publish `review.complete`, payload: `plan_name`, `fix_plan_file: "null"`, `task_id`, `task_key`, `findings_count: 0` (PRIMARY count — no findings means no primary either), `residual_findings_count: 0`, `verdict: "pass"`, `findings_summary: "no findings"`
+      - No findings → publish `review.complete`, payload: `plan_name`, `fix_round` carried from `review.dimensions.complete` (default 0 if absent), `fix_plan_file: "null"`, `task_id`, `task_key`, `step`, `findings_count: 0` (PRIMARY count — no findings means no primary either), `residual_findings_count: 0`, `verdict: "pass"`, `findings_summary: "no findings"`, `handoff_envelope`
       - Has findings → branch on the primary-severity mix (after excluding pre-existing and applying soft-demotion rules):
         - **P0 or P1 in primary findings (after demotion) → write fix-plan**: there is real work to do.
           - Extract P0 and P1 findings (excluding pre_existing)
           - Write a fix-plan markdown file to `.agents/scratchpad/ce-executor/{plan_name}/fix-plan.md` using the **Fix-Plan File Template** below
           - Compute `findings_count` = PRIMARY P0/P1 count (after demotion), `residual_findings_count` = remaining P2/P3 + soft-bucket findings count
-          - Publish `review.complete`, payload: `plan_name`, `fix_plan_file: ".agents/scratchpad/ce-executor/{plan_name}/fix-plan.md"`, `task_id`, `task_key`, `findings_count: <int>` (= PRIMARY P0/P1 count), `residual_findings_count: <int>` (= P2/P3 + soft-bucket count, may be 0), `verdict: "fail"` (P0 in primary) or `"pass_with_residuals"` (only P1 in primary), `findings_summary`
+          - Publish `review.complete`, payload: `plan_name`, `fix_round` carried from `review.dimensions.complete` (default 0 if absent), `fix_plan_file: ".agents/scratchpad/ce-executor/{plan_name}/fix-plan.md"`, `task_id`, `task_key`, `step`, `findings_count: <int>` (= PRIMARY P0/P1 count), `residual_findings_count: <int>` (= P2/P3 + soft-bucket count, may be 0), `verdict: "fail"` (P0 in primary) or `"pass_with_residuals"` (only P1 in primary), `findings_summary`, `handoff_envelope`
         - **Only P2/P3 findings in primary (no P0/P1) → no fix-plan, pass with residuals**:
           - DO NOT write a fix-plan file. An empty/placeholder fix-plan would create an empty fix loop with no actionable units.
           - Compute `findings_count` = PRIMARY P2/P3 count (since no P0/P1 survived demotion, the PRIMARY bucket is P2/P3 only), `residual_findings_count` = same count (or 0 if the same findings are reported in `findings_summary`)
-          - Publish `review.complete`, payload: `plan_name`, `fix_plan_file: "null"` (literal 4-char string — the coordinator's `review.complete` handler at line 695 checks for this exact literal), `task_id`, `task_key`, `findings_count: <int>` (PRIMARY count = P2/P3 here), `residual_findings_count: <int>`, `verdict: "pass_with_residuals"`, `findings_summary: "<count> P2/P3 advisories, no fix-plan; see findings.md"`. **NOTE**: shipper's verdict-promotion gate will promote this to `pass` when `final_findings_count <= max_residuals`. That is intentional — pure-residual plans are exactly the case the gate exists for; the gate's threshold (default 8) bounds the residual count that can be promoted.
+          - Publish `review.complete`, payload: `plan_name`, `fix_round` carried from `review.dimensions.complete` (default 0 if absent), `fix_plan_file: "null"` (literal 4-char string — the coordinator's `review.complete` handler at line 695 checks for this exact literal), `task_id`, `task_key`, `step`, `findings_count: <int>` (PRIMARY count = P2/P3 here), `residual_findings_count: <int>`, `verdict: "pass_with_residuals"`, `findings_summary: "<count> P2/P3 advisories, no fix-plan; see findings.md"`, `handoff_envelope`. **NOTE**: shipper's verdict-promotion gate will promote this to `pass` when `final_findings_count <= max_residuals`. That is intentional — pure-residual plans are exactly the case the gate exists for; the gate's threshold (default 8) bounds the residual count that can be promoted.
       - `verdict`: `pass` (0 findings) | `pass_with_residuals` (P2/P3 residuals OR P1-only primary) | `fail` (P0 in primary)
       - The coordinator reads `fix_plan_file` and creates fix-unit tasks when the literal is a real path; when it is the literal string `"null"`, the coordinator advances directly to `plan.complete` with `verdict: "pass_with_residuals"`. The executor applies fixes (TDD); the validator re-runs tests.
 
@@ -2959,24 +2979,24 @@ hats:
         - plan.complete
         - plan.blocked
     instructions: |
-      ## 职责
+      ## Responsibilities
 
-      你是交付前最后一道 gate：验证、更新 plan 状态、准备最终 commit（不 push、不建 PR）。
+      You are the last gate before delivery: validate, update plan status, prepare the final commit (no push, no PR).
 
       ## Handoff Envelope
 
-      见 `ralph-tools-emit`；`REVIEW_COMPLETE` emit 前必须 `--policy-check`（`ralph-tools-precheck`）。
+      See `ralph-tools-emit`; `--policy-check` (see `ralph-tools-precheck`) is required before emitting `REVIEW_COMPLETE`.
 
-      ## 触发状态表（唯一动作源）
+      ## Trigger State Table (sole action source)
 
-      | 触发 | 观测来源 | 允许动作 | 禁止动作 | 成功 signal | 失败 signal | skill 引用 |
+      | Trigger | Observation source | Allowed actions | Forbidden actions | Success signal | Failure signal | Skill reference |
       |------|----------|----------|----------|-------------|-------------|------------|
-      | `plan.complete` | payload + scratchpad 产物 | 跑完整 validation checklist → verdict promotion → emit **一次** `REVIEW_COMPLETE` | 在**当前 step 无 validator terminal**（`test.passed`/`test.failed`）时发 pass；用 `pass_with_residuals` 掩盖 validator 缺席；同 activation 多 emit | `REVIEW_COMPLETE`（pass） | `REVIEW_COMPLETE`（fail） | `ralph-tools-emit` |
-      | `plan.blocked` | payload `reason`（strict exact match） | 仅跑 checklist 1–2 → 按 recoverable whitelist 路由 → emit **一次** `REVIEW_COMPLETE` | validator 缺席时用 pass 收尾；对 hard-fail reason 伪装 pass；忽略 reason strict match | `REVIEW_COMPLETE` | `REVIEW_COMPLETE`（fail） | `ralph-tools-recovery-directives` |
+      | `plan.complete` | payload + scratchpad artifacts | run the full validation checklist -> verdict promotion -> emit `REVIEW_COMPLETE` **once** | emit pass when the current step has no validator terminal (`test.passed`/`test.failed`); use `pass_with_residuals` to mask a missing validator; multiple emits in the same activation | `REVIEW_COMPLETE` (pass) | `REVIEW_COMPLETE` (fail) | `ralph-tools-emit` |
+      | `plan.blocked` | payload `reason` (strict exact match) | only run checks 1-2 -> route by the recoverable whitelist -> emit `REVIEW_COMPLETE` **once** | close out as pass when the validator is missing; disguise a hard-fail reason as pass; ignore strict match on `reason` | `REVIEW_COMPLETE` | `REVIEW_COMPLETE` (fail) | `ralph-tools-recovery-directives` |
 
-      ### wait-for-validator terminal（硬规则）
+      ### wait-for-validator terminal (hard rule)
 
-      Runtime 已 gate：当前 step 必须有匹配的 `test.passed` 或 `test.failed` 才允许 success ship。**禁止**在 validator terminal 缺席时 emit `REVIEW_COMPLETE(pass_or_fail=pass, verdict=pass_with_residuals)` 作为 stall/recovery 兜底。若 correction 指示 wait 或 fail-close，**停止** emit pass，等待 validator 或 emit fail。
+      The runtime already gates this: the current step must have a matching `test.passed` or `test.failed` before a success ship is allowed. Emitting `REVIEW_COMPLETE(pass_or_fail=pass, verdict=pass_with_residuals)` as a stall/recovery fallback when the validator terminal is missing is **forbidden**. If the correction indicates wait or fail-close, **stop** emitting pass, wait for the validator, or emit fail.
 
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## SHIPPER MODE — Final Validation, Plan Completion, and Delivery
@@ -3106,24 +3126,23 @@ hats:
           # The `recovery_exhausted:stall_recovery:...` drift-engine
           # promotion path is preserved by the Rust-side `starts_with`
           # fallback in `shipper_reason.rs::is_recoverable_plan_blocked_reason`.
-          # 2026-07-03-002 plan U3: coordinator 沉默是 backpressure 而非
-          # 实现失败。runtime 注入 plan.blocked(reason=default_publishes)
-          # 后,验证 1-2(test + build/lint/typecheck)通过时路由到
-          # pass_with_residuals。075227 run 因此从 REVIEW_COMPLETE(fail)
-          # 变为可恢复路径。注意:default_publishes 是兜底 topic,扩白名单
-          # 后任何 hat 沉默都会被路由到 pass — 必须配合 shipper verification
-          # 1-2 双重检查(见 line 2676 下方规则)。
+          # 2026-07-03-002 plan U3: coordinator silence is backpressure,
+          # not an implementation failure. After the runtime injects
+          # plan.blocked(reason=default_publishes), route to
+          # pass_with_residuals when checks 1-2 (test + build/lint/typecheck)
+          # pass. The 075227 run therefore went from REVIEW_COMPLETE(fail)
+          # to a recoverable path. Note: default_publishes is the fallback
+          # topic; widening the whitelist routes any hat silence to pass —
+          # it MUST be paired with the shipper verification 1-2 double-check
+          # (see the rule below line 2676).
           - `default_publishes`
           For recoverable reasons (after trim+lowercase == whitelist entry): run checks 1-2 (test suite + build/lint/typecheck). If BOTH pass, publish `REVIEW_COMPLETE` with `pass_or_fail: "pass"`, `verdict: "pass_with_residuals"`, and `residual_findings_summary: "plan.blocked with recoverable reason '<reason>'; verification passed; stall_recovery_observed: <true|false>"`. Set `stall_recovery_observed: true` when the recovered reason is `recovery_exhausted` (drift-engine promotion path) or when the orchestrator has logged ≥1 `stall_recovery:*` envelope in `.ralph/recovery.jsonl` for this run; otherwise `false`. This marker is the dashboard signal that a `pass_with_residuals` verdict may be masking a stall pipeline — it does NOT change the verdict, only annotates the summary so the operator can correlate with `recovery.jsonl`. If either check fails, fall through to the hard-fail path.
         - **Hard-fail reasons** (the unit, review, or fix pipeline itself broke; verification cannot rescue it):
-          - `executor failed: <detail>` (coordinator emitted on `work.failed`)
           - `work_failed`
           - `fix budget exhausted` / `fix_exhausted` (fixer hit the Rust-side hard cap)
           - `dimension_failed` / `all_dimensions_failed` (review dimension could not complete)
           - `plan_file_not_found` / `plan_file_unreadable` / `plan_missing_implementation_units` / `plan_content_empty_or_placeholder` (coordinator emitted on work.start when the plan file is unusable)
-          - `task_creation_failed_after_2_work_ready_retries` (projector itself is broken — hard-fail, NOT recoverable)
-          - `branch_creation_forbidden_in_preset` (coordinator detected agent-side branch attempt — see line 642)
-          - `amendment_confidence_below_50` (coordinator halted the plan — see line 772)
+          - `unit_failed` (coordinator detected a unit-level hard stop; inspect `details` / `handoff_envelope.state.blocking_reason` for values such as `task_creation_failed_after_2_work_ready_retries`, `branch_creation_forbidden_in_preset`, or `amendment_confidence_below_50`)
           - any other reason not listed as recoverable
           For hard-fail reasons: publish `REVIEW_COMPLETE` with `pass_or_fail: "fail"` and `verdict: "fail"`. Include the reason in `residual_findings_summary`. Do NOT disguise it as pass.
 
@@ -3161,24 +3180,24 @@ hats:
                 pass_or_fail: "fail"
             forbid_topics: ["LOOP_COMPLETE"]
     instructions: |
-      ## 职责
+      ## Responsibilities
 
-      生成面向管理者的 completion report，并按 upstream verdict 决定是否 emit `LOOP_COMPLETE`。
+      Generate the manager-facing completion report, and decide whether to emit `LOOP_COMPLETE` based on the upstream verdict.
 
       ## Handoff Envelope
 
-      见 `ralph-tools-emit`；`report.done` / `LOOP_COMPLETE` emit 前 `--policy-check`（`ralph-tools-precheck`）。
+      See `ralph-tools-emit`; run `--policy-check` (see `ralph-tools-precheck`) before emitting `report.done` / `LOOP_COMPLETE`.
 
-      ## 触发状态表（唯一动作源）
+      ## Trigger State Table (sole action source)
 
-      | 触发 | 观测来源 | 允许动作 | 禁止动作 | 成功 signal | 失败 signal | skill 引用 |
+      | Trigger | Observation source | Allowed actions | Forbidden actions | Success signal | Failure signal | Skill reference |
       |------|----------|----------|----------|-------------|-------------|------------|
-      | `REVIEW_COMPLETE` + `pass_or_fail=pass`/`pass_with_residuals` | payload + scratchpad | 写 report → emit `report.done`（镜像 upstream `pass_or_fail`/`verdict`）→ 若 plan 全部 step 完成则 emit **一次** `LOOP_COMPLETE` | `pass_or_fail=fail` 时 emit `LOOP_COMPLETE`；终态后补发业务事件；同 activation 夹带多余 emit | `report.done` → `LOOP_COMPLETE` | `report.done` only | `ralph-tools-emit`（单事件预算）；`ralph-tools-recovery-directives`（post-terminal） |
-      | `REVIEW_COMPLETE` + `pass_or_fail=fail` | 同上 | 写 report（含 Awaiting decision）→ emit **一次** `report.done(awaiting_decision=true, pass_or_fail=fail)` → **停止** | emit `LOOP_COMPLETE`；silent 成功 | `report.done` | — | 同上 |
+      | `REVIEW_COMPLETE` + `pass_or_fail=pass`/`pass_with_residuals` | payload + scratchpad | write the report -> emit `report.done` (mirror upstream `pass_or_fail`/`verdict`) -> if every plan step is complete, emit `LOOP_COMPLETE` **once** | emit `LOOP_COMPLETE` when `pass_or_fail=fail`; emit business events after terminal; piggyback extra emits in the same activation | `report.done` -> `LOOP_COMPLETE` | `report.done` only | `ralph-tools-emit` (single-event budget); `ralph-tools-recovery-directives` (post-terminal) |
+      | `REVIEW_COMPLETE` + `pass_or_fail=fail` | same as above | write the report (include Awaiting decision) -> emit `report.done(awaiting_decision=true, pass_or_fail=fail)` **once** -> **stop** | emit `LOOP_COMPLETE`; silent success | `report.done` | — | same as above |
 
-      ### post-terminal（硬规则）
+      ### post-terminal (hard rule)
 
-      `LOOP_COMPLETE` honored 后禁止任何业务 emit；拒写无 bounded retry（见 `ralph-tools-recovery-directives`）。
+      After `LOOP_COMPLETE` has been honored, all business emits are forbidden; writes are rejected with no bounded retry (see `ralph-tools-recovery-directives`).
 
       ## REPORTER MODE — Manager-Facing Completion Report
 
