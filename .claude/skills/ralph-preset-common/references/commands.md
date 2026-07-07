@@ -27,17 +27,23 @@ cargo nextest run -p ralph-core -- preset_lint
 ## Schema / emit 验证
 
 ```bash
-# 某 topic 的 payload 字段 SSOT
+# 某 topic 的 payload 字段 SSOT（**只验 shape**）
 ralph emit --schema <topic> -H <path|builtin:name>
 
-# 写盘前策略预检（OPAC Precheck）
+# 写盘前策略预检（OPAC Precheck；**shape + 拓扑 ownership**，不验字段可见性 / 值源 / 语义）
 ralph emit --policy-check <topic> '<payload>' -H <path|builtin:name>
 
 # envelope 层 triggered 拓扑预检（与 payload schema 分开）
 ralph emit --policy-check --triggered <hat-id> <topic> '<payload>' -H <path|builtin:name>
+
+# emit ↔ hat 通道桥接校验（runtime 视角）
+ralph tools task verify-emit-bridge ...
 ```
 
 `--triggered` 必须是 preset `hats[]` 里声明的 hat id，否则 `triggered_not_in_topology`（apply 与 `--policy-check` 均 enforce）。缺省 `--triggered` 允许。ralph-control / orchestrator diagnostic topic 跳过 topology check。详见 `crates/ralph-core/data/ralph-tools-emit.md`「Envelope 校验」段。
+`verify-emit-bridge` 的完整参数见 `crates/ralph-core/data/ralph-tools-tasks.md` 的 OPAC Precheck 段；本 reference 只保留入口名，避免复制 runtime command table。
+
+**review 含义**：上面四条命令只能排除 shape / 拓扑 ownership 类问题。**字段可见性 / 值源 / 身份 / 语义 / 下游消费 必须由 review 从 activated-hat 视角独立审**。详见 `references/agent-native-model.md`「Payload 审计模型」段。
 
 ## Hat 检查（local / 路径 preset）
 

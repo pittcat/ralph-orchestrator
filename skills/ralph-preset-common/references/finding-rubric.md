@@ -8,6 +8,8 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 
 **软性 AAF 起点：** ≤ 50，须验证后上调。
 
+**软性 Payload Audit 起点：** ≤ 50，须验证后上调。
+
 ## AAF 缺口 → Severity（软性）
 
 | 缺口 | Severity | category | aaf_question |
@@ -26,6 +28,22 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `review.dimensions.complete` 已 publish 但 `state_projection` 无对应 action | P1 | state | Q5 |
 | 框架术语堆砌 | P1 | style | Q1 |
 | 命名 / 冗余 hat / instructions 过长 | P2 | style | Q1 |
+
+## Payload Audit → Severity（软性）
+
+`ralph emit --schema` 与 `--policy-check` 只验 shape；字段可见性 / 值源 / 身份 / 语义 / 下游消费由 review 把关。
+
+| 缺口 | Severity | category | aaf_question |
+|---|---|---|---|
+| emit 字段 hat 不可见（无 Observe / 无 projection） | P0 | payload-content | Q4 |
+| `task_id` / `task_key` / `step` 手写而非 live 取得 | P0 | payload-content | Q4 |
+| emit 引用未声明字段（schema 通过但 hat 拿不到值） | P0 | payload-content | Q4 |
+| 决策字段值与下游语义不匹配（`summary: done` 类） | P1（若阻塞下游执行则升 P0） | payload-content | Q4 / Q5 |
+| 多 trigger hat 未按 trigger 拆分 payload 差异 | P1 | payload-content | Q4 |
+| payload audit 行缺值源 / 缺可见性证据 | P1 | payload-content | Q4 |
+| 同一 hat emit 多条业务事件（违反单事件预算） | P0 | feasibility | Q4 |
+| 终态 emit 前夹带其它业务事件 | P0 | feasibility | Q4 |
+| report finding 无 repair surface（无字段 / 无 source / 无 fix） | 拒入主表 → Unverified Suspicions | — | — |
 
 ## finding_id 映射表（curated）
 

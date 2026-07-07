@@ -9,14 +9,23 @@ It ships operator skills:
 |---|---|
 | `ralph-hats` | Create, inspect, validate user `.ralph/hats/` collections |
 | `ralph-loop` | Run, monitor, resume, merge, debug Ralph loops |
-| `ralph-preset-author` | Draft presets (builtin + local) with per-hat AAF tables |
-| `ralph-preset-review` | AAF review + `preset-review-report.md` + mechanical lint |
+| `ralph-preset-author` | Draft presets (builtin + local) with per-hat AAF tables **+ payload contract notes** before review |
+| `ralph-preset-review` | Per-hat activation dry-run + **payload audit** + mechanical lint → `preset-review-report.md` |
 | `ralph-run-diagnosis` | Post-run deep diagnosis: artifacts, OPAC, mechanism vs preset attribution |
 
 `ralph-preset-common/` holds shared `references/` and fixtures (not a standalone marketplace skill).
 
 These are public agent skills. They are not part of Ralph's internal
 `ralph tools skill` registry.
+
+## Agent-flow audit standard
+
+`ralph-preset-author` and `ralph-preset-review` are a closed-loop agent-flow audit pair:
+
+- **Author** records per-hat AAF tables **plus payload contract rows** (field, value source, visibility evidence, identity check, downstream use) before handoff.
+- **Review** independently simulates each hat's activation from the visible prompt stack — trigger, context, command plan, payload construction, emit precheck, handoff — and produces a report with a per-hat section, a payload audit table, a handoff audit table, and remediation ordered by runtime unblock.
+
+Mechanical lint (`ralph preset check`) only proves shape and topology. **Invisible inputs, fabricated identity fields, vague decision fields, and broken handoffs are caught by these skills, not by lint.** Neither skill replaces `ralph preset check`; both complement it.
 
 ## Symlinks (local dev)
 

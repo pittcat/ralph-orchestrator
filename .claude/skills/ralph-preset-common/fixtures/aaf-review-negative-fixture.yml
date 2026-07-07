@@ -1,4 +1,4 @@
-# AAF negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+# AAF + payload-content negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
 event_loop:
   execution_mode: isolated
   starting_event: work.start

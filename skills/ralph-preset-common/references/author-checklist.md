@@ -23,6 +23,7 @@
 - [ ] Recovery / correction 路径：引用 `ralph-tools-recovery-directives`（通用 bounded retry）；preset 内用**触发状态表**写专用动作，不复述 data skill 全文
 - [ ] `task_id` / `task_key` / `step`：引用 `ralph-tools-tasks` red box
 - [ ] 不复述 `ralph-tools*.md` 参数表
+- [ ] **对每个 emit topic，按 payload audit 五列填行**（见下）—— schema 通过不等于字段可达
 
 ## AAF 五问表模板（每 hat 必填）
 
@@ -32,16 +33,38 @@
 - **Q1 使命:** …
 - **Q2 输入 (Observe 命令 + 期望字段):** …
 - **Q3 执行 (OPAC 命令序列):** Observe → Precheck → Apply → Confirm
-- **Q4 输出 (topic + payload 字段):** …
+- **Q4 输出 (topic + payload 合同):** 见下方 Payload Contract 表
 - **Q5 交接 (emit 字段 → 下游 Observe 路径):** …
 ```
 
 **不可交付信号：** 任一为空；含「待定」「同上」「上游会处理」。
 
-## 交 review 前门禁（R12）
+## Payload Contract 表模板（每 emit topic 必填）
 
-- [ ] 每 hat 一张 AAF 表，写入 `preset-author-notes.md`
-- [ ] 自问：「若我只收到这份 instructions + Ralph 注入，能否做完 Q1？」
+每个 hat 至少填一张；多 trigger 须按 trigger 拆分。
+
+```markdown
+### Hat: <id> — Payload Contract
+
+| topic | 字段 | 类型 | 值源（哪条命令 / 哪段 projection / 哪个 trigger payload 字段） | 可见性证据（hat prompt 栈哪一段可见） | 身份检查（是否需要 live task_id） | 下游消费（下游哪个 hat 的哪个决策用到） |
+|---|---|---|---|---|---|---|
+| `<topic>` | `task_id` | string | `ralph tools task list` → 当前 active task | `## ORCHESTRATOR CONTEXT` | 必须 live；禁手写 | reviewer 决定后续 fix / block |
+| `<topic>` | `verdict` | enum | 本 hat work 输出 | `## HAT IDENTITY` trigger payload | 不涉及 | 同上 |
+```
+
+**拒交付信号：**
+
+- 字段值源写「上游会处理」「待定」「约定俗成」
+- `task_id` / `task_key` / `step` 字段未标 `live required`
+- 多 trigger hat 合并成一行（必须按 trigger 拆分差异）
+- 决策字段（`verdict` / `reason` / `summary` / `next_action`）无下游消费说明
+- 某字段无任何一行说明它对 hat 可见
+
+## 交 review 前门禁
+
+- [ ] 每 hat 一张 AAF 表 + Payload Contract 表，写入 `preset-author-notes.md`
+- [ ] hat 表数 == YAML hat 数；每 emit topic 都填了 Payload Contract 行
+- [ ] 自问：「若我只收到这份 instructions + Ralph 注入，能否做完 Q1？Q4 每个字段我能取到值吗？」
 - [ ] 对 builtin 改动：列出 7 点同步清单（见下），不自动执行
 - [ ] 建议调用 `ralph-preset-review`（不替代 `ralph preset check`）
 
@@ -64,4 +87,4 @@
 | 文件 | 位置 |
 |---|---|
 | Preset YAML | `presets/en/<name>.yml` 或 `.ralph/hats/<name>.yml` |
-| `preset-author-notes.md` | 与 preset 同目录（默认） |
+| `preset-author-notes.md` | 与 preset 同目录（默认）；含 AAF 五问表 + Payload Contract 表 |

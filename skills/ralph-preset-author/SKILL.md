@@ -37,14 +37,17 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
    - For each hat, **pretend other hats do not exist**.
    - Write only that hat's `instructions:`.
    - Fill one AAF 五问表 per hat (template in `references/author-checklist.md`).
+   - For every emit topic, fill the **Payload Contract 表** (per-topic rows: field, value source, visibility evidence, identity check, downstream use).
 
-4. **Assemble `preset-author-notes.md`** next to the preset YAML (all AAF tables).
+4. **Assemble `preset-author-notes.md`** next to the preset YAML (all AAF tables + Payload Contract tables).
 
 5. **Pre-review gate (MUST — do not skip):**
-   - Every hat has a complete AAF table in `preset-author-notes.md`.
-   - Hat count in notes **equals** hat count in YAML.
-   - No empty cells; no「待定」「同上」「上游会处理」.
-   - Ask: "If I only received this hat's instructions + injection, can I complete Q1?"
+   - Every hat has a complete AAF table **and** a complete Payload Contract table in `preset-author-notes.md`.
+   - Hat count in notes **equals** hat count in YAML; per-emit-topic row count covers every material `publishes` entry.
+   - No empty cells; no「待定」「同上」「上游会处理」「约定俗成」.
+   - Every `task_id` / `task_key` / `step` row is marked `live required` with a concrete observation command.
+   - Multi-trigger hats split Payload Contract by trigger, not collapsed into one row.
+   - Ask: "If I only received this hat's instructions + injection, can I complete Q1? Can I construct every Q4 field from visible sources?"
    - For builtin edits, list the 7-point sync checklist (do not auto-apply).
    - **If any check fails: STOP.** Do not recommend review or deliver YAML as complete.
 
@@ -63,7 +66,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 ## Output Expectations
 
 - Updated preset YAML
-- `preset-author-notes.md` with one complete AAF table per hat
+- `preset-author-notes.md` with one complete AAF table **+ one Payload Contract table** per hat
 - Explicit handoff message: preset path + notes path → invoke `ralph-preset-review`
 
 ## Read These References When Needed
