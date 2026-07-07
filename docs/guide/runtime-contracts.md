@@ -17,16 +17,16 @@ Runtime Contracts 是 Ralph 的 preset/workflow 质量门禁体系。它把分�
 
 ```bash
 # 1. 检查 preset 结构是否健康
-ralph preset check -H builtin:ce-executor-serial --strict
+ralph preset check -H builtin:ce-executor-pipeline --strict
 
 # 2. 查看拓扑图（可选）
-ralph hats graph -H builtin:ce-executor-serial
+ralph hats graph -H builtin:ce-executor-pipeline
 
 # 3. 检查运行环境
 ralph preflight
 
 # 4. 运行 workflow
-ralph run -H builtin:ce-executor-serial -p "your prompt"
+ralph run -H builtin:ce-executor-pipeline -p "your prompt"
 ```
 
 ## Strict 模式
@@ -58,7 +58,7 @@ ralph run -H builtin:ce-executor-serial -p "your prompt"
 
 ```json
 {
-  "source_label": "builtin:ce-executor-serial",
+  "source_label": "builtin:ce-executor-pipeline",
   "payload_strict": false,
   "fail_on_warnings": false,
   "passed": true,

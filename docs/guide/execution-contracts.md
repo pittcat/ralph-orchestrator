@@ -88,9 +88,9 @@ event_loop:
 3. 指导发布到 `plan.blocked`（2026-06-28-005 之前是 `human.guidance`，已废弃）
 4. 下游 hat **不会**收到该事件
 
-## ce-executor-serial 示例
+## ce-executor-pipeline 示例
 
-`ce-executor-serial` 预设使用执行契约来保护 executor：
+`ce-executor-pipeline` 预设使用执行契约来保护 executor：
 
 ```yaml
 event_loop:

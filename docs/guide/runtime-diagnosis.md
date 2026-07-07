@@ -20,7 +20,7 @@ Runtime Diagnosis 是 2026-06 drift-auto-calibration 计划（U0–U8）引入�
 
 ```bash
 # 1) 跑一个 loop，强制开启全量诊断 session。
-RALPH_DIAGNOSTICS=1 ralph run -c ralph.yml -H builtin:ce-executor-serial -p "fix flaky test" --max-iterations 20
+RALPH_DIAGNOSTICS=1 ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "fix flaky test" --max-iterations 20
 
 # 2) 看 .ralph/diagnostics/<session>/ 下生成了哪些文件
 ls -1 .ralph/diagnostics/$(ls -1 .ralph/diagnostics/ | grep -E '^[0-9]{4}-' | tail -1)/
@@ -263,7 +263,7 @@ Failed → Degraded
 
 **触发条件（所有 4 条同时满足）：**
 
-1. `workflow_contract.incomplete_wave_gate.enabled = true`（仅 `ce-executor-serial` preset 显式开启）
+1. `workflow_contract.incomplete_wave_gate.enabled = true`（`ce-executor-pipeline` preset 显式开启）
 2. `ReviewStepTracker.open_wave_id` 非空 + `received < expected`
 3. `last_dimension_at` 已设置（至少 1 个 dimension.done 到过）
 4. `now - last_dimension_at > 0.8 * aggregate_timeout_secs`（**仅 staleness**，不含 handoff timeout；handoff 归 U3 ladder）
@@ -597,7 +597,7 @@ ralph diagnose --diagnostics-root /var/log/ralph/sessions
 
 ## 12. Serial review 链 recovery 形状（2026-06-17-004）
 
-`builtin:ce-executor-serial` 把 6 个 review 维度串行走完。当 `dimension-reviewer` 声称 emit 了事件但实际上没有写入时，orchestrator 会注入一条 `task.resume` 并把它 pin 回同一个 hat。为了让 reviewer 在第二次激活时知道该 review 哪个维度，`task.resume` payload 必须携带原始触发上下文：
+`builtin:ce-executor-pipeline` 把 6 个 review 维度串行走完。当 `dimension-reviewer` 声称 emit 了事件但实际上没有写入时，orchestrator 会注入一条 `task.resume` 并把它 pin 回同一个 hat。为了让 reviewer 在第二次激活时知道该 review 哪个维度，`task.resume` payload 必须携带原始触发上下文：
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
@@ -661,7 +661,7 @@ grep -c '"topic":"work.start"' "$CURRENT"
 
 ## 13. Step Handoff 诊断（2026-06-17-002）
 
-`ce-executor-serial` preset 在 2026-06-17-002 中新增了两类 Step Handoff 诊断事件，均写入 `recovery.jsonl`：
+`ce-executor-pipeline` preset 在 2026-06-17-002 中新增了两类 Step Handoff 诊断事件，均写入 `recovery.jsonl`：
 
 | 信号 | `source` | `reason_code` | 含义 / 排查 |
 |---|---|---|---|
@@ -712,7 +712,7 @@ emit 失败 / 拒收
 
 1. 读 PENDING EVENTS 里 `task.resume` payload（`stage` / `topic` / `violation` / `required_fields` / `allowed_topics`）。
 2. 按决策树第一分支定位层。
-3. 不要用 `--unsafe-no-policy-check`（`ce-executor-serial` preset 默认 `allow_unsafe_cli_emit: false` 时该参数被拒）；不要直写 `events.jsonl`。
+3. 不要用 `--unsafe-no-policy-check`（`ce-executor-pipeline` preset 默认 `allow_unsafe_cli_emit: false` 时该参数被拒）；不要直写 `events.jsonl`。
 4. 修复后用 `ralph emit --policy-check` 预检；同源通过再正式发。
 5. 仍不明：`ralph diagnose --session latest` 出报告；本 guide §10 解释 schema；本节决策树与 §13 互补。
 

@@ -8,7 +8,7 @@ Built-in hat collections are now intentionally small. Ralph ships a core working
 ralph init --backend claude
 ralph init --list-presets
 
-ralph run -c ralph.yml -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
+ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "docs/plans/my-plan.md"
 ```
 
 ## Supported Builtins
@@ -17,7 +17,6 @@ ralph run -c ralph.yml -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
 |---|---|---|---|
 | `autoresearch` | autonomous experiment loop | Try ideas, measure, keep what works | Optimization loop with self-scoring |
 | `ce-executor-pipeline` | linear pipeline: plan reviewer → executor → 6 serial dimension reviewers → synthesizer → fixer → alignment → reporter | Plan-driven implementation | One-shot whole-plan execution; isolated multi-hat |
-| `ce-executor-serial` | `coordinator`, `executor`, `validator`, `fixer`, `review-coordinator`, `dimension-reviewer`, `review-synthesizer`, `shipper`, `reporter`, `progress-steward` | Plan-driven implementation | Recommended default; per-unit TDD + validator + 6-dimension serial review; isolated multi-hat |
 | `ce-executor-supervisor` | supervisor + per-slot worktrees + parallel workers + parallel 6-dim review/fix + integrator + reporter | Large plan-driven implementation | Requires `--features supervisor-db`; isolated multi-hat |
 | `debug` | `investigator`, `tester`, `fixer`, `verifier` | Root-cause debugging | Strong on repro and fix verification |
 | `merge-batch` | reviewer → integrator → stabilizer (self-loop) → reporter | Git-first batch merge across worktrees | Isolated multi-hat |
@@ -58,14 +57,13 @@ ralph run -c ralph.yml -H .ralph/hats/my-flow.yml -p "..."
 
 ## Recommended Workflow
 
-- Use `ce-executor-serial` for plan-driven implementation tasks.
+- Use `ce-executor-pipeline` for plan-driven implementation tasks.
 - Use `debug` for bug investigation and root-cause analysis.
 
 | Collection | Canonical source | Hats | Start event | Completion | Best for |
 |---|---|---|---|---|---|
 | `autoresearch` | `presets/en/autoresearch.yml` | experiment loop | `experiment.start` (default) | `LOOP_COMPLETE` (default) | Autonomous idea/measure/keep/discard loop |
 | `ce-executor-pipeline` | `presets/en/ce-executor-pipeline.yml` | linear pipeline: plan reviewer → executor → 6 serial dimension reviewers → synthesizer → fixer → alignment → reporter | `work.start` | `LOOP_COMPLETE` | One-shot plan-driven execution with serial 6-dimension review, auto-fix, and manager report (isolated mode) |
-| `ce-executor-serial` | `presets/en/ce-executor-serial.yml` | `coordinator`, `executor`, `validator`, `fixer`, `review-coordinator`, `dimension-reviewer`, `review-synthesizer`, `shipper`, `reporter`, `progress-steward` | `work.start` | `LOOP_COMPLETE` | Plan-driven execution with per-unit TDD, validator, serial 6-dimension review (goal-alignment → correctness → testing → maintainability → project-standards → adversarial), auto-fix, and manager report (isolated mode) |
 | `ce-executor-supervisor` | `presets/en/ce-executor-supervisor.yml` | supervisor + per-slot worktrees + parallel workers + parallel 6-dim review/fix + integrator + reporter | `work.start` | `LOOP_COMPLETE` | Large plan-driven execution with supervisor fan-out, parallel review/fix, and merge report (requires `--features supervisor-db`; isolated mode) |
 | `debug` | `presets/en/debug.yml` | `investigator`, `tester`, `fixer`, `verifier` | `debug.start` | `DEBUG_COMPLETE` | Root-cause debugging and hypothesis testing |
 | `merge-batch` | `presets/en/merge-batch.yml` | reviewer → integrator → stabilizer (self-loop) → reporter | `merge.start` | `MERGE_COMPLETE` | Git-first batch merge across worktrees |
@@ -108,7 +106,7 @@ Historical workflow ideas such as spec-driven development, red-team review, mob 
 
 ```bash
 # Plan-driven implementation workflow
-ralph run -c ralph.yml -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
+ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "docs/plans/my-plan.md"
 
 # Debugging
 ralph run -c ralph.yml -H builtin:debug -p "Investigate why login fails on mobile"
@@ -116,20 +114,19 @@ ralph run -c ralph.yml -H builtin:debug -p "Investigate why login fails on mobil
 
 ### ce-executor Workflow
 
-`ce-executor-serial`, `ce-executor-pipeline`, and `ce-executor-supervisor` are the plan-driven execution builtins. `ce-executor-serial` uses per-unit TDD execution, a validator, and serial 6-dimension code review, auto-fix, and manager reporting.
+`ce-executor-pipeline` and `ce-executor-supervisor` are the plan-driven execution builtins. `ce-executor-pipeline` uses a one-shot whole-plan linear pipeline: plan reviewer → executor → 6 serial dimension reviewers → synthesizer → fixer → alignment → reporter.
 
-**`ce-executor-serial` key characteristics:**
+**`ce-executor-pipeline` key characteristics:**
 - Does not auto-create feature branches (runs on current checkout)
 - Records `start_sha` at startup to anchor review scope
-- Executor writes tests first, then implements; validator runs the full test suite after each unit
+- Executor writes tests first, then implements
 - Review stage walks 6 dimensions strictly serially (goal-alignment → correctness → testing → maintainability → project-standards → adversarial)
 - Blocks all push operations (local commit only)
-- Coordinator directly advances units and creates fix-unit tasks from the review synthesizer's fix plan
 
-For one-shot whole-plan execution, use `ce-executor-pipeline`. For large plans with supervisor fan-out to per-slot worktrees, use `ce-executor-supervisor` (requires `--features supervisor-db`).
+For large plans with supervisor fan-out to per-slot worktrees, use `ce-executor-supervisor` (requires `--features supervisor-db`).
 
 **When to use `--worktree`:**
-- Multiple parallel ce-executor-serial runs
+- Multiple parallel ce-executor-pipeline runs
 - When you want isolation from main workspace changes
 - When the plan might involve significant refactoring
 
@@ -140,10 +137,10 @@ For one-shot whole-plan execution, use `ce-executor-pipeline`. For large plans w
 
 ```bash
 # Single run (in-place execution)
-ralph run -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
+ralph run -H builtin:ce-executor-pipeline -p "docs/plans/my-plan.md"
 
 # Isolated run (worktree, no branch creation)
-ralph run -H builtin:ce-executor-serial --worktree -p "docs/plans/my-plan.md"
+ralph run -H builtin:ce-executor-pipeline --worktree -p "docs/plans/my-plan.md"
 ```
 
 ## Common Workflow Patterns
@@ -175,7 +172,7 @@ See [Agent Waves](../advanced/agent-waves.md) for details.
 ### 5) Extended End-to-End Orchestration
 Large multi-stage pipelines from idea through implementation.
 
-Example: `ce-executor-serial`
+Example: `ce-executor-pipeline`
 
 ### 6) Guarded Sequential Workflows
 Workflows with mandatory phase ordering where out-of-order events could corrupt state.
@@ -290,7 +287,7 @@ If any required event is not on all completion paths, adjust your hat topology s
 The same topology validator also runs automatically during `ralph preflight` and `ralph run` (as the `preset-topology` preflight check). This catches bad preset configurations before any backend API call is made:
 
 ```bash
-ralph preflight -c ralph.yml -H builtin:ce-executor-serial
+ralph preflight -c ralph.yml -H builtin:ce-executor-pipeline
 # Checks: starting event reachability, completion path, required events all-of coverage
 ```
 

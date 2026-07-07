@@ -36,13 +36,13 @@ Practical guides for using Ralph Orchestrator effectively.
 
 - Initialize core config: `ralph init --backend claude`
 - List built-in hat collections: `ralph init --list-presets`
-- Run with hats: `ralph run -c ralph.yml -H builtin:ce-executor-serial`
+- Run with hats: `ralph run -c ralph.yml -H builtin:ce-executor-pipeline`
 
 ### Running Ralph
 
 - Basic run (core only): `ralph run -c ralph.yml`
 - With hats: `ralph run -c ralph.yml -H builtin:debug`
-- With inline prompt: `ralph run -c ralph.yml -H builtin:ce-executor-serial -p "Implement feature X"`
+- With inline prompt: `ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "Implement feature X"`
 - Headless mode: `ralph run --no-tui`
 - Resume session: `ralph run --continue`
 
@@ -57,7 +57,7 @@ Practical guides for using Ralph Orchestrator effectively.
 | Your Situation | Recommended Approach |
 |----------------|---------------------|
 | Simple task | Core only (no hats) |
-| Implementation work | `-H builtin:ce-executor-serial` |
+| Implementation work | `-H builtin:ce-executor-pipeline` |
 | Bug investigation | `-H builtin:debug` |
 
 ## Common Tasks
@@ -66,7 +66,7 @@ Practical guides for using Ralph Orchestrator effectively.
 
 ```bash
 ralph init --backend claude
-ralph run -c ralph.yml -H builtin:ce-executor-serial -p "Add OAuth login"
+ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "Add OAuth login"
 ```
 
 ### Debug an Issue
@@ -78,7 +78,7 @@ ralph run -c ralph.yml -H builtin:debug -p "Investigate why user authentication 
 ### Run a Plan-Driven Workflow
 
 ```bash
-ralph run -c ralph.yml -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
+ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "docs/plans/my-plan.md"
 ```
 
 ## Next Steps

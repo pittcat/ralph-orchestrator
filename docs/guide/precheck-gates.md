@@ -76,11 +76,11 @@ event_loop:
 
 ### Schema SSOT 作者（`presets/schemas/*.yml`）
 
-若 preset 从 schema 文件生成，可在 schema 顶层写 `precheck:`，`build.rs` 会 merge 到 `event_loop.precheck`（与 `execution_contracts` 同路径）。示例占位见 `presets/schemas/ce-executor-serial.yml` 尾部注释。
+若 preset 从 schema 文件生成，可在 schema 顶层写 `precheck:`，`build.rs` 会 merge 到 `event_loop.precheck`（与 `execution_contracts` 同路径）。示例占位见 `presets/schemas/ce-executor-pipeline.yml` 尾部注释。
 
 启用 precheck 后，runtime 会自动为 `<X>.proposed` / `<X>.rejected` 注入 `event_policy.schemas` 条目（`inject_precheck_event_schemas`）。若 preset 已有 `<X>` schema，不会被覆盖。
 
-若使用 `plan.blocked(reason=precheck_failed)`，须在 schema 的 `plan.blocked.allowed_values.reason` 白名单中包含 `precheck_failed`（`ce-executor-serial` schema 已包含）。
+若使用 `plan.blocked(reason=precheck_failed)`，须在 schema 的 `plan.blocked.allowed_values.reason` 白名单中包含 `precheck_failed`（`ce-executor-pipeline` schema 已包含）。
 
 ## 验证清单
 

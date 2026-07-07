@@ -21,7 +21,7 @@ ralph run -c ralph.yml -P PROMPT.md
 如果要使用内置工作流，而不是当前项目的 `hats`，可以用 `-H` 指定 preset：
 
 ```bash
-ralph run -c ralph.yml -H builtin:ce-executor-serial -p "实现登录限流"
+ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "实现登录限流"
 ralph run -c ralph.yml -H builtin:debug -p "排查 CI 偶发超时"
 ```
 
@@ -346,7 +346,7 @@ ralph run -c ralph.qa.yml -p "验证事件循环改动"
 ralph run -c ralph.yml -P PROMPT.md
 
 # 使用基础配置 + 内置 hats
-ralph run -c ralph.yml -H builtin:ce-executor-serial -p "实现一个功能"
+ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "实现一个功能"
 
 # 临时覆盖 specs 目录
 ralph run -c ralph.yml -c core.specs_dir=.ralph/specs -p "按 spec 实现"
@@ -518,7 +518,7 @@ engine now publishes `plan.blocked(reason=...)` (the previous
 `human.guidance` topic was removed by plan 2026-06-28-005), and
 `task.resume` is injected into PENDING EVENTS whenever policy / origin /
 contract rejects a payload. See
-`docs/solutions/integration-issues/ce-executor-serial-precheck-recovery-alignment-2026-06-17.md`
+`docs/solutions/integration-issues/ce-executor-pipeline-precheck-recovery-alignment-2026-06-17.md`
 for the surviving recovery flow.
 
 > The `ralph run` loop continues to honour `.ralph/stop-requested` and
@@ -602,7 +602,7 @@ Rules of engagement:
 
 ```bash
 # 使用内置名称
-ralph run -c ralph.yml -H builtin:ce-executor-serial -p "实现 OAuth 登录"
+ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "实现 OAuth 登录"
 
 # 直接使用本地 preset 文件
 ralph run -c ralph.yml -H presets/wave-review.yml -p "审查认证模块"
@@ -627,7 +627,6 @@ ralph run -c ralph.yml -H builtin:debug -p "排查某个问题"
 |---|---|---|
 | `autoresearch` | 指标驱动实验 | 尝试想法、测量、保留有效改动、丢弃无效改动 |
 | `ce-executor-pipeline` | 单阶段计划执行 | 一次执行整个 plan，6 维串行 review + aggregate，适合中小型 plan |
-| `ce-executor-serial` | 默认实现任务 | Plan-driven 分 unit 执行、TDD executor + validator、6 维串行 review、auto-fix、manager report |
 | `ce-executor-supervisor` | 大型计划执行 | supervisor 派发 per-slot worktree，并行 review/fix，需要 `--features supervisor-db` |
 | `debug` | bug 排查 | 先复现和假设，再修复和验证 |
 | `merge-batch` | 批量 merge | Git-first 多 worktree 批量 merge：review → integrate → stabilize → report |
@@ -868,7 +867,7 @@ ralph run -c ralph.yml -P PROMPT.md
 ### 想用通用实现工作流
 
 ```bash
-ralph run -c ralph.yml -H builtin:ce-executor-serial -p "实现配置校验错误信息优化"
+ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "实现配置校验错误信息优化"
 ```
 
 ### 排查 bug
@@ -880,7 +879,7 @@ ralph run -c ralph.yml -H builtin:debug -p "排查 ralph run --continue 重复�
 ### Plan-driven 执行
 
 ```bash
-ralph run -c ralph.yml -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
+ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "docs/plans/my-plan.md"
 ```
 
 ### 并行审查

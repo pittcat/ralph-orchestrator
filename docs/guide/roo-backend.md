@@ -143,8 +143,8 @@ core:
     - "Preserve primary sources — all referenced files, research findings, code snippets, and external docs must be captured with source attribution"
     - "Confidence protocol: score decisions 0-100. >80 proceed autonomously; 50-80 proceed + document in .ralph/agent/decisions.md; <50 choose safe default + document."
 
-# Copy hats from presets/en/ce-executor-serial.yml
-# (coordinator, executor, review-coordinator, dimension-reviewer, review-synthesizer, fixer, plan-gate, shipper, reporter)
+# Copy hats from presets/en/ce-executor-pipeline.yml
+# (plan reviewer, executor, 6 serial dimension reviewers, review-synthesizer, fixer, alignment, reporter)
 ```
 
 Then run:
@@ -156,7 +156,7 @@ ralph run -c ralph.roo.yml -p "Build a CLI tool for managing tasks"
 Or use the built-in preset with roo args:
 
 ```bash
-ralph run -c presets/en/ce-executor-serial.yml \
+ralph run -c presets/en/ce-executor-pipeline.yml \
   -c cli.backend=roo \
   -- --provider bedrock --aws-profile roo-bedrock --aws-region us-east-1 \
      --model anthropic.claude-opus-4-6 --max-tokens 100000 \

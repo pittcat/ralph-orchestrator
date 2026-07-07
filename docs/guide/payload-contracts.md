@@ -192,7 +192,7 @@ was broken for builtin presets — `resolve_schema_files` has no
 on-disk anchor to resolve the relative path against, so the schemas
 silently went unloaded and the payload contract hard gate failed
 with `SchemaMissingForRequiredTopic` for every topic the preset
-declared. (Symptom: `ralph run -H builtin:ce-executor-serial -p "..."` reports
+declared. (Symptom: `ralph run -H builtin:ce-executor-pipeline -p "..."` reports
 "Subprocess exited before starting the orchestration loop" with the
 real cause buried in `.ralph/diagnostics/logs/`.)
 
@@ -207,7 +207,7 @@ by `crates/ralph-cli/build.rs`.
 
 | Schema file | Preset that owns the schemas | Status |
 |---|---|---|
-| `presets/schemas/ce-executor-serial.yml` | `ce-executor-serial` | Authoring SSOT (merged into `presets/en/ce-executor-serial.yml` at build time) |
+| `presets/schemas/ce-executor-pipeline.yml` | `ce-executor-pipeline` | Authoring SSOT (merged into `presets/en/ce-executor-pipeline.yml` at build time) |
 
 When adding a new schema to a builtin preset:
 
@@ -232,7 +232,7 @@ ralph hats validate -c ralph.yml -H .ralph/hats/my-flow.yml
 ralph hats validate --strict -c ralph.yml -H .ralph/hats/my-flow.yml
 
 # `ralph run` automatically runs the strict hard gate. There is no skip flag.
-ralph run -c ralph.yml -H builtin:ce-executor-serial -p "..."
+ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "..."
 ```
 
 ---
