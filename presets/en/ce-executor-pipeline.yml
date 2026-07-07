@@ -1,7 +1,9 @@
-# ce-executor-pipeline: linear plan-driven execution preset
+# ce-executor-pipeline: linear single-chain plan-driven execution preset
 #
-# Pattern: Plan → Review Plan → Execute (TDD + full suite green) → 6-Dimension
-# Serial Review → Synthesize Findings → Plan Fixes → Fix → Align → Report → Complete
+# Ralph primary path (plan 2026-07-07-006): the recommended CE executor for
+# plan-driven work. Single consumer per topic, flat hat-only chain, no
+# runtime unit loop, no fallback rescue. Executor owns unit/subagent work
+# internally; downstream hats only see a single `work.done` / `work.failed`.
 #
 # 13-hat topology with linear single-consumer chain:
 # - plan-reviewer: Reviews the plan file in-place; no per-unit breakdown, no

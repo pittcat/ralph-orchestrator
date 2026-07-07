@@ -250,7 +250,7 @@ mod tests {
     fn test_format_preset_list() {
         let output = format_preset_list();
         assert!(output.contains("Available hat collections:"));
-        assert!(output.contains("ce-executor-serial"));
+        assert!(output.contains("ce-executor-pipeline"));
         assert!(output.contains("debug"));
         assert!(output.contains("Usage:"));
         assert!(output.contains("-H builtin:<collection>"));

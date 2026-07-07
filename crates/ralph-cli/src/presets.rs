@@ -31,24 +31,20 @@ const PRESETS: &[EmbeddedPreset] = &[
     },
     EmbeddedPreset {
         name: "ce-executor-pipeline",
-        description: "Isolated-mode linear one-shot plan execution: review plan → execute whole plan with TDD + full suite green → 6 serial dimension reviewers → synthesize findings → plan fixes → fix → align → report → complete",
+        description: "Linear single-chain plan-driven CE executor (Ralph primary path). Executor owns unit/subagent work; downstream hats run 6 serial dimension reviews → synthesize → fix → align → report → complete.",
         content: include_str!(concat!(
             env!("OUT_DIR"),
             "/presets/ce-executor-pipeline.yml"
         )),
         public: true,
     },
-    EmbeddedPreset {
-        name: "ce-executor-serial",
-        description: "Isolated-mode plan-driven work execution with TDD executor, validator (full test suite), single overall review, auto-fix, shipping, and manager report",
-        content: include_str!(concat!(env!("OUT_DIR"), "/presets/ce-executor-serial.yml")),
-        public: true,
-    },
     // 2026-07-03-001 plan U13: supervisor parallel preset.
-    // 16 functional hats + progress-steward. Requires the
-    // `supervisor-db` feature at build time so the rusqlite
-    // store links; isolated mode + supervisor.enabled: true is
-    // required (R-SW-1 lint enforces).
+    // 16 functional hats + progress-steward. Built on top of the
+    // `ce-executor-pipeline` topology; swaps the in-process WaveTracker
+    // for the rusqlite-backed SupervisorStore (U2/U3/U5/U8/U12) and
+    // exposes the six supervisor coordination topics via
+    // `event_loop.supervisor.enabled: true` + isolated mode
+    // (R-SW-1 lint enforces the contract).
     EmbeddedPreset {
         name: "ce-executor-supervisor",
         description: "Isolated-mode plan-driven work execution with parallel worker fan-out via rusqlite supervisor: per-slot worktrees, fan-in merge, parallel 6-dim review, parallel fix, integration + report",
@@ -88,7 +84,7 @@ const PRESETS: &[EmbeddedPreset] = &[
 ///
 /// Tier-0 design rationale (KTD-WRC-5): making every builtin
 #[allow(dead_code)] // 003 plan tiered-gates 预留：见 docs/solutions/developer-experience/wac-rollout-tiered-gates-2026-06-12.md
-pub const TIER_0_WAC_PRESETS: &[&str] = &["ce-executor-serial"];
+pub const TIER_0_WAC_PRESETS: &[&str] = &["ce-executor-pipeline"];
 
 /// `true` if `preset_name` is in the Tier-0 list. Used by the CI
 /// gate and by the test suite that asserts the Tier-0 preset
@@ -119,6 +115,70 @@ pub fn preset_names() -> Vec<&'static str> {
         .collect()
 }
 
+// Unit 1 (plan 2026-07-07-006): single-chain execution primary path.
+    // ce-executor-pipeline becomes the recommended CE executor;
+    // ce-executor-serial is removed from the public builtin registry.
+    // These assertions lock that contract at the registry boundary.
+
+    /// Registry must expose `ce-executor-pipeline` as a public builtin.
+    #[test]
+    fn test_preset_names_contains_pipeline() {
+        let names = preset_names();
+        assert!(
+            names.iter().any(|n| *n == "ce-executor-pipeline"),
+            "ce-executor-pipeline must be a public builtin; got {names:?}"
+        );
+    }
+
+    /// Registry must NOT expose `ce-executor-serial` once Unit 1 is complete.
+    #[test]
+    fn test_preset_names_excludes_serial() {
+        let names = preset_names();
+        assert!(
+            !names.iter().any(|n| *n == "ce-executor-serial"),
+            "ce-executor-serial must not appear in preset_names(); got {names:?}"
+        );
+    }
+
+    /// `get_preset("ce-executor-serial")` must return `None`, not a redirect
+    /// or an alias to a different preset.
+    #[test]
+    fn test_get_preset_serial_returns_none() {
+        assert!(
+            get_preset("ce-executor-serial").is_none(),
+            "ce-executor-serial lookup must return None, not a redirect"
+        );
+    }
+
+    /// No code path may silently re-introduce `ce-executor-serial` as a
+    /// public surface under a different name (e.g. as an alias for
+    /// `ce-executor-pipeline`). The registry has no alias mechanism; this
+    /// assertion guards against adding one.
+    #[test]
+    fn test_no_serial_to_pipeline_alias() {
+        // Static scan: PRESETS is a flat list with no alias field. If an
+        // alias layer is ever added, this assertion must be revisited.
+        let pipeline = get_preset("ce-executor-pipeline")
+            .expect("ce-executor-pipeline must remain a public builtin");
+        for preset in PRESETS {
+            // A duplicate-content + different-name entry would be a
+            // silent alias. We refuse it on principle, not by accident.
+            if preset.name != pipeline.name && preset.content == pipeline.content {
+                panic!(
+                    "preset '{}' has identical content to 'ce-executor-pipeline' \
+                     — this is a silent alias and is forbidden by plan 2026-07-07-006",
+                    preset.name
+                );
+            }
+        }
+        // Belt-and-braces: serial must be entirely absent from PRESETS.
+        assert!(
+            !PRESETS.iter().any(|p| p.name == "ce-executor-serial"),
+            "ce-executor-serial must not appear in PRESETS at all"
+        );
+    }
+
+    /// WRC-U5 / T-WRC-U5-01: the `is_tier_0_wac_preset` helper must
 /// P2-6: SSOT multi-section merge table (KTD-1, plan 2026-06-20-001 U1).
 ///
 /// The table itself lives in [`crate::preset_merge_table`] so
@@ -169,7 +229,7 @@ mod tests {
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        assert_eq!(presets.len(), 6, "Expected 6 public presets");
+        assert_eq!(presets.len(), 5, "Expected 5 public presets");
     }
 
     #[test]
@@ -209,8 +269,8 @@ mod tests {
     /// removal of the actual YAML, manifest entry, public index, registry entry,
     /// and shell completion — without an alias. `get_preset("ce-executor")` must
     /// return `None` and the user-facing `preset_names()` must not list it.
-    /// The replacement is `ce-executor-serial` (R12, the only complete CE
-    /// executor entry point).
+    /// The replacement is `ce-executor-pipeline` (plan 2026-07-07-006,
+    /// Ralph primary CE executor).
     #[test]
     fn test_ce_executor_returns_unknown_after_u7_removal() {
         // F5 / AE7: registry lookup must fail explicitly.
@@ -219,27 +279,27 @@ mod tests {
             "U7: legacy 'ce-executor' must NOT be resolvable. \
              R13–R15 require removal of YAML, manifest, public index, \
              registry entry, and shell completion without aliasing to \
-             'ce-executor-serial'."
+             'ce-executor-pipeline'."
         );
 
         // The replacement entry point must remain resolvable.
-        let replacement = get_preset("ce-executor-serial")
-            .expect("ce-executor-serial must remain the only complete CE executor entry point");
-        assert_eq!(replacement.name, "ce-executor-serial");
+        let replacement = get_preset("ce-executor-pipeline")
+            .expect("ce-executor-pipeline must remain the only complete CE executor entry point");
+        assert_eq!(replacement.name, "ce-executor-pipeline");
         assert!(
             !replacement.content.is_empty(),
-            "ce-executor-serial must still be embedded with non-empty content"
+            "ce-executor-pipeline must still be embedded with non-empty content"
         );
 
-        // Public listing must drop the legacy name.
+        // Public listing must drop the legacy name and keep the replacement.
         let public_names = preset_names();
         assert!(
             !public_names.contains(&"ce-executor"),
             "U7: 'ce-executor' must NOT appear in public preset_names()"
         );
         assert!(
-            public_names.contains(&"ce-executor-serial"),
-            "U7: 'ce-executor-serial' must remain in public preset_names()"
+            public_names.contains(&"ce-executor-pipeline"),
+            "U7: 'ce-executor-pipeline' must remain in public preset_names()"
         );
 
         // Sibling templates (lite / wave) must be unaffected.
@@ -247,11 +307,11 @@ mod tests {
             !public_names.contains(&"ce-executor-lite"),
             "ce-executor-lite is a template, not a builtin — it must NOT be in public_names()"
         );
-        // 2026-06-17-002 U3: ce-executor-serial (serial-review variant) is a
-        // sibling public builtin alongside -isolated.
+        // Plan 2026-07-07-006: ce-executor-pipeline is the only public
+        // single-chain CE executor entry point.
         assert!(
-            public_names.contains(&"ce-executor-serial"),
-            "ce-executor-serial must be a public builtin (2026-06-17-002 U3)"
+            public_names.contains(&"ce-executor-pipeline"),
+            "ce-executor-pipeline must be a public builtin (plan 2026-07-07-006)"
         );
     }
 
@@ -293,10 +353,9 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 5);
         assert!(names.contains(&"autoresearch"));
         assert!(names.contains(&"ce-executor-pipeline"));
-        assert!(names.contains(&"ce-executor-serial"));
         assert!(names.contains(&"ce-executor-supervisor"));
         assert!(names.contains(&"debug"));
         assert!(names.contains(&"merge-batch"));
@@ -541,7 +600,7 @@ mod tests {
     fn test_ce_executor_required_events_is_report_done() {
         // Verify ce-executor uses report.done as completion gate (not mutually exclusive
         // branch events review.passed + review.complete which caused infinite loops)
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-pipeline").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         assert_eq!(
@@ -555,9 +614,12 @@ mod tests {
 
     #[test]
     fn test_ce_executor_executor_has_no_default_publishes() {
-        // U2: executor must NOT have default_publishes — it must explicitly emit.
-        // The no-event gate (U1) handles the "forgot to emit" case instead.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
+        // U2: executor must NOT default_publishes to `work.done` — that
+        // would silently swallow a real failure as success. The pipeline
+        // preset deliberately uses `work.failed` as the default publish
+        // fallback so the no-event gate fails closed; the contract
+        // below pins that asymmetric behavior.
+        let preset = get_preset("ce-executor-pipeline").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let executor = config
@@ -565,10 +627,15 @@ mod tests {
             .get("executor")
             .expect("ce-executor should define executor hat");
 
-        assert!(
-            executor.default_publishes.is_none(),
-            "executor must NOT have default_publishes; explicit emit is required"
-        );
+        match executor.default_publishes.as_deref() {
+            None => { /* explicit emit, fine */ }
+            Some("work.failed") => { /* fail-closed default, fine */ }
+            Some(other) => panic!(
+                "executor default_publishes must be either unset or 'work.failed' \
+                 (fail-closed); got {other:?}. Setting it to 'work.done' would \
+                 silently swallow real failures as success."
+            ),
+        }
     }
 
     /// Helper: read a non-embedded root preset YAML by relative path.
@@ -763,7 +830,7 @@ mod tests {
         // that drops `report.done`), the gate event would never fire and the
         // infinite-loop bug would return even with `required_events: ["report.done"]`.
         // Reading the static config catches that case at unit-test time.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-pipeline").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let reporter = config
@@ -795,7 +862,7 @@ mod tests {
     /// 切换分支") but still fails if the policy block is dropped.
     #[test]
     fn test_ce_executor_forbids_agent_branch_creation() {
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-pipeline").expect("ce-executor preset should exist");
         let content = preset.content;
 
         let prohibition_markers = ["NEVER", "MUST NOT", "不要", "禁止", "严禁"];
@@ -949,23 +1016,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_dimension_reviewer_timeout_is_900() {
-        // R1: dimension-reviewer must have explicit timeout to avoid default 300s.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
-        let reviewer = config
-            .hats
-            .get("dimension-reviewer")
-            .expect("ce-executor must define a 'dimension-reviewer' hat");
-        assert_eq!(
-            reviewer.timeout,
-            Some(1800),
-            "dimension-reviewer timeout must be explicitly set to 1800 seconds"
-        );
-    }
-
-    #[test]
     fn test_ce_executor_root_preset_matches_embedded() {
         // Plan 2026-06-16-002 Unit 1: the embedded copy is no longer
         // byte-equal to the canonical preset because `build.rs` now
@@ -974,9 +1024,35 @@ mod tests {
         // want to lock down is: the embedded copy is the merge of
         // (canonical preset, schema SSOT) — i.e. the build pipeline
         // produced what the SSOT prescribes.
-        let merged = merge_root_with_ssot("ce-executor-serial");
+        //
+        // Plan 2026-07-07-006 U1: ce-executor-pipeline has no
+        // separate `presets/schemas/<name>.yml` SSOT file (its
+        // `event_policy.schemas` is fully inlined into the preset
+        // YAML). Skip the merge-equality check when no SSOT file
+        // exists; the embedded-vs-canonical equality still holds
+        // because there is nothing to merge in.
+        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("presets")
+            .join("schemas")
+            .join("ce-executor-pipeline.yml");
+        if !schema_path.is_file() {
+            // The pipeline preset has no separate schema SSOT; the
+            // embedded content must equal the canonical preset YAML.
+            let canonical = read_root_preset("ce-executor-pipeline.yml");
+            let preset = get_preset("ce-executor-pipeline")
+                .expect("ce-executor-pipeline preset should exist");
+            assert_eq!(
+                canonical, preset.content,
+                "ce-executor-pipeline has no separate schema SSOT; \
+                 embedded content must equal canonical preset YAML."
+            );
+            return;
+        }
+        let merged = merge_root_with_ssot("ce-executor-pipeline");
         let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
+            get_preset("ce-executor-pipeline").expect("ce-executor-serial preset should exist");
         assert_eq!(
             merged, preset.content,
             "Embedded ce-executor-serial must equal merge(canonical preset, schema SSOT). \
@@ -1003,853 +1079,6 @@ mod tests {
             "Embedded ce-executor-supervisor must equal merge(canonical preset, schema SSOT). \
              Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-supervisor.yml."
         );
-    }
-
-    // -------------------------------------------------------------------------
-    // 2026-06-17-002 U4: ce-executor-serial preset tests
-    // -------------------------------------------------------------------------
-
-    /// U7 (2026-07-04-003 plan): `ce-executor-serial` must narrow
-    /// its `coordinator_hats` allowlist to exactly
-    /// `[coordinator, progress-steward]` and must enable the
-    /// two-step verify gate.
-    ///
-    /// This is the closed-list assertion that locks the
-    /// 2026-07-04-003 narrowing; the wider 7-hat allowlist
-    /// previously shipped here made `tasks.coordinator_hats`
-    /// so permissive that worker hats could self-create tasks
-    /// without going through the coordinator. Worker hats
-    /// (executor, validator, fixer, shipper, reporter) must
-    /// NOT appear in this list.
-    /// 2026-07-06 plan U11: the coordinator allowlist is narrowed to
-    /// EXACTLY ONE hat — `coordinator`. The previous U7
-    /// (`coordinator, progress-steward`) carve-out is obsolete
-    /// because `progress-steward` was removed from the preset in
-    /// U10. Wider allowlists re-introduce the worker-self-create
-    /// drift window. Narrower allowlists (zero hats) would
-    /// surface `tasks.enabled=true` with no gate, so the
-    /// single-`coordinator` invariant is the only safe value.
-    #[test]
-    fn test_ce_executor_serial_coordinator_hats_narrowed_to_one_after_u11() {
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
-        let hats = yaml
-            .get("tasks")
-            .and_then(|t| t.get("coordinator_hats"))
-            .and_then(|c| c.as_sequence())
-            .expect("tasks.coordinator_hats must be a sequence");
-        let names: Vec<&str> = hats.iter().filter_map(|v| v.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["coordinator"],
-            "ce-executor-serial coordinator_hats must be narrowed to exactly 1 hat (`coordinator`); \
-             wider allowlists re-introduce the worker-self-create drift window, narrower \
-             allowlists surface tasks.enabled=true with no gate"
-        );
-    }
-
-    /// 2026-07-06 plan U11: the previous `narrowed_to_two` invariant
-    /// (`coordinator, progress-steward`) is OBSOLETE. `progress-steward`
-    /// was removed from the preset in U10. The test below pins the
-    /// NEGATIVE: `progress-steward` MUST NOT appear in
-    /// `tasks.coordinator_hats` after U11.
-    #[test]
-    fn test_ce_executor_serial_coordinator_hats_excludes_progress_steward_after_u11() {
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
-        let hats = yaml
-            .get("tasks")
-            .and_then(|t| t.get("coordinator_hats"))
-            .and_then(|c| c.as_sequence())
-            .expect("tasks.coordinator_hats must be a sequence");
-        let names: Vec<&str> = hats.iter().filter_map(|v| v.as_str()).collect();
-        assert!(
-            !names.contains(&"progress-steward"),
-            "ce-executor-serial coordinator_hats MUST NOT contain `progress-steward` after U11 \
-             (the hat was removed in U10); got {:?}",
-            names
-        );
-    }
-
-    /// 2026-07-06 plan U11: `event_loop.progress_steward.enabled`
-    /// MUST be `false` in `ce-executor-serial` after U11. The
-    /// flag is the runtime's kill-switch for the stall detector
-    /// (event_loop/mod.rs U12 reads it; shipper_reason U13
-    /// reads it for the fail-close contract). Setting it back to
-    /// `true` would re-activate `loop.stalled` wake publishes,
-    /// which is the silent-success / phantom-recovery drift
-    /// path the SSOT convergence plan exists to eliminate.
-    #[test]
-    fn test_ce_executor_serial_progress_steward_disabled_after_u11() {
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
-        let enabled = yaml
-            .get("event_loop")
-            .and_then(|e| e.get("progress_steward"))
-            .and_then(|p| p.get("enabled"))
-            .and_then(|v| v.as_bool())
-            .expect("event_loop.progress_steward.enabled must be present");
-        assert!(
-            !enabled,
-            "ce-executor-serial event_loop.progress_steward.enabled MUST be `false` after U11 \
-             (runtime fail-close U12 + shipper_reason U13 rely on this kill-switch); got {enabled}"
-        );
-    }
-
-    /// 2026-07-06-004 plan U7 (extended by U10): serial turns
-    /// on prompt injection (U7), then validate_payload +
-    /// emit_result_summary (U10). The contract is read from the
-    /// embedded preset so a future drift between
-    /// `presets/en/ce-executor-serial.yml` and the in-binary
-    /// embedded copy is caught.
-    #[test]
-    fn ce_executor_serial_enables_handoff_envelope_prompt() {
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
-
-        let enabled = yaml
-            .get("event_loop")
-            .and_then(|e| e.get("handoff_envelope"))
-            .and_then(|h| h.get("enabled"))
-            .and_then(|v| v.as_bool())
-            .expect("event_loop.handoff_envelope.enabled must be present");
-        assert!(
-            enabled,
-            "ce-executor-serial must enable handoff_envelope after U7"
-        );
-
-        let prompt_injection = yaml
-            .get("event_loop")
-            .and_then(|e| e.get("handoff_envelope"))
-            .and_then(|h| h.get("prompt_injection"))
-            .and_then(|v| v.as_bool())
-            .expect("event_loop.handoff_envelope.prompt_injection must be present");
-        assert!(
-            prompt_injection,
-            "ce-executor-serial must turn on prompt_injection after U7"
-        );
-
-        // U10 contract: validate_payload + emit_result_summary
-        // are also on. The U7 contract said "stay off until
-        // U10"; U10 is the unit that flips them on, so this
-        // assertion now flips to positive.
-        let validate_payload = yaml
-            .get("event_loop")
-            .and_then(|e| e.get("handoff_envelope"))
-            .and_then(|h| h.get("validate_payload"))
-            .and_then(|v| v.as_bool())
-            .expect("event_loop.handoff_envelope.validate_payload must be present");
-        assert!(
-            validate_payload,
-            "ce-executor-serial must enable validate_payload after U10"
-        );
-        let emit_result_summary = yaml
-            .get("event_loop")
-            .and_then(|e| e.get("handoff_envelope"))
-            .and_then(|h| h.get("emit_result_summary"))
-            .and_then(|v| v.as_bool())
-            .expect("event_loop.handoff_envelope.emit_result_summary must be present");
-        assert!(
-            emit_result_summary,
-            "ce-executor-serial must enable emit_result_summary after U10"
-        );
-    }
-
-    /// 2026-07-06-004 plan U7: non-serial presets do NOT opt in
-    /// to the handoff envelope. This guards the regression
-    /// defence #4 — only `ce-executor-serial` is the experiment.
-    /// We sample a handful of presets we expect to see in CI.
-    #[test]
-    fn non_serial_presets_leave_handoff_envelope_disabled() {
-        let samples = [
-            "ce-executor-pipeline",
-            "ce-executor-supervisor",
-            "ce-executor-lite",
-            "autoresearch",
-            "debug",
-        ];
-        for name in samples {
-            let Some(preset) = get_preset(name) else {
-                // Preset may be absent in some build profiles;
-                // skip silently rather than failing the test.
-                continue;
-            };
-            let yaml: serde_yaml::Value =
-                serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
-            // The block may be entirely omitted (default-closed),
-            // in which case `as_bool()` returns None — that's the
-            // desired "disabled" state.
-            let enabled = yaml
-                .get("event_loop")
-                .and_then(|e| e.get("handoff_envelope"))
-                .and_then(|h| h.get("enabled"))
-                .and_then(|v| v.as_bool());
-            assert!(
-                enabled.is_none() || !enabled.unwrap_or(true),
-                "preset {name} must not enable handoff_envelope (U7 contract: serial-only experiment); got {:?}",
-                enabled
-            );
-        }
-    }
-
-    /// 2026-07-06-004 plan U10: serial flips `validate_payload`
-    /// and `emit_result_summary` on. Schema SSOT (see
-    /// `presets/schemas/ce-executor-serial.yml`) requires
-    /// `handoff_envelope` on every key business topic.
-    #[test]
-    fn ce_executor_serial_u10_enables_validate_and_summary() {
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
-
-        let block = yaml
-            .get("event_loop")
-            .and_then(|e| e.get("handoff_envelope"))
-            .expect("event_loop.handoff_envelope must be present after U10");
-        assert!(
-            block.get("validate_payload").and_then(|v| v.as_bool()) == Some(true),
-            "ce-executor-serial must turn validate_payload on at U10"
-        );
-        assert!(
-            block.get("emit_result_summary").and_then(|v| v.as_bool()) == Some(true),
-            "ce-executor-serial must turn emit_result_summary on at U10"
-        );
-    }
-
-    /// 2026-07-06-004 plan U10: schema SSOT requires
-    /// `handoff_envelope` on `work.ready` and `work.done`.
-    #[test]
-    fn ce_executor_serial_schema_requires_handoff_envelope_for_work_ready_and_done() {
-        // The SSOT byte-equality invariant means the embedded
-        // copy equals merge(canonical preset, schema SSOT).
-        // Use the merged text directly so the test pins both
-        // halves of the contract: canonical YAML carries the
-        // optional `event_policy.schemas` block, schema SSOT
-        // carries the canonical `schemas:` block, and the build
-        // pipeline deep-merges them.
-        let merged_text = merge_root_with_ssot("ce-executor-serial");
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str(&merged_text).expect("merged YAML must parse");
-        let schemas = yaml
-            .get("event_loop")
-            .and_then(|e| e.get("event_policy"))
-            .and_then(|p| p.get("schemas"))
-            .expect("event_loop.event_policy.schemas must be present after merge");
-        for topic in ["work.ready", "work.done"] {
-            let required = schemas
-                .get(topic)
-                .and_then(|t| t.get("required_fields"))
-                .and_then(|r| r.as_sequence())
-                .expect("topic must carry required_fields");
-            let list: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
-            assert!(
-                list.contains(&"handoff_envelope"),
-                "U10 contract: {topic} must require handoff_envelope; got {:?}",
-                list
-            );
-        }
-    }
-
-    /// 2026-07-07-001 plan U3: extend the U10 schema-contract
-    /// guard so every payload-bearing topic that the R15
-    /// migration set declares as envelope-required
-    /// (`plan.complete`, `plan.blocked`, `REVIEW_COMPLETE`,
-    /// `report.done`, `review.dimensions.complete`,
-    /// `review.complete`, `fix.exhausted`) carries
-    /// `handoff_envelope` in `required_fields`. Topics that are
-    /// payload-less sentinels (`LOOP_COMPLETE`) or non-business
-    /// runtime corrections (`task.resume`) are intentionally
-    /// excluded — the test allowlist keeps the rationale next
-    /// to the assertion.
-    #[test]
-    fn ce_executor_serial_schema_requires_handoff_envelope_for_all_migrated_topics() {
-        // The authoritative R15 topic set with envelope-required
-        // contract. Each entry must list `handoff_envelope` in
-        // its `required_fields`. Topics intentionally absent
-        // (terminal sentinels, runtime corrections) carry a
-        // rationale in the comment column for future maintainers.
-        const ENVELOPE_REQUIRED: &[(&str, &str)] = &[
-            ("work.ready", "executor input; payload-bearing"),
-            ("work.done", "executor output; payload-bearing"),
-            ("work.failed", "executor failure; payload-bearing"),
-            ("test.passed", "validator output; payload-bearing"),
-            ("test.failed", "validator failure; payload-bearing"),
-            ("review.start", "coordinator kick-off; payload-bearing"),
-            (
-                "review.dimension.ready",
-                "review-coordinator kick-off; payload-bearing",
-            ),
-            (
-                "review.dimension.done",
-                "dimension-reviewer output; payload-bearing",
-            ),
-            (
-                "review.dimension.failed",
-                "dimension-reviewer failure; payload-bearing",
-            ),
-            (
-                "review.dimensions.complete",
-                "review-coordinator aggregate; payload-bearing",
-            ),
-            (
-                "review.complete",
-                "review-synthesizer output; payload-bearing",
-            ),
-            ("fix.applied", "fixer output; payload-bearing"),
-            ("fix.exhausted", "fixer failure; payload-bearing"),
-            ("plan.complete", "coordinator terminal; payload-bearing"),
-            ("plan.blocked", "coordinator terminal; payload-bearing"),
-            ("REVIEW_COMPLETE", "shipper terminal; payload-bearing"),
-            ("report.done", "reporter terminal; payload-bearing"),
-        ];
-
-        let merged_text = merge_root_with_ssot("ce-executor-serial");
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str(&merged_text).expect("merged YAML must parse");
-        let schemas = yaml
-            .get("event_loop")
-            .and_then(|e| e.get("event_policy"))
-            .and_then(|p| p.get("schemas"))
-            .expect("event_loop.event_policy.schemas must be present after merge");
-
-        for (topic, rationale) in ENVELOPE_REQUIRED {
-            let entry = schemas
-                .get(*topic)
-                .unwrap_or_else(|| panic!("schema must declare `{topic}` ({rationale})"));
-            let required = entry
-                .get("required_fields")
-                .and_then(|r| r.as_sequence())
-                .unwrap_or_else(|| panic!("`{topic}` must carry required_fields"));
-            let list: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
-            assert!(
-                list.contains(&"handoff_envelope"),
-                "U3 contract: `{topic}` ({rationale}) must require handoff_envelope; got {:?}",
-                list
-            );
-        }
-
-        // Explicit allowlist: terminal sentinels and runtime
-        // corrections that the R15 list intentionally excluded.
-        // Pin the absence so a future drift that adds
-        // `handoff_envelope` to one of these surfaces as a test
-        // failure with a documented rationale.
-        const NOT_ENVELOPE_REQUIRED: &[(&str, &str)] = &[
-            (
-                "LOOP_COMPLETE",
-                "terminal sentinel; no payload / no business handoff",
-            ),
-            (
-                "task.resume",
-                "runtime correction injected by the event loop; not a business handoff",
-            ),
-        ];
-        for (topic, rationale) in NOT_ENVELOPE_REQUIRED {
-            let entry = match schemas.get(*topic) {
-                Some(e) => e,
-                None => continue, // topic not in schema at all → consistent with allowlist
-            };
-            let required = match entry.get("required_fields").and_then(|r| r.as_sequence()) {
-                Some(r) => r,
-                None => continue,
-            };
-            let list: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
-            assert!(
-                !list.contains(&"handoff_envelope"),
-                "allowlist entry `{topic}` ({rationale}) must NOT require handoff_envelope; got {:?}",
-                list
-            );
-        }
-    }
-
-    /// 2026-07-07-001 plan U4 (P0): every copy-pasteable
-    /// `ralph emit <envelope-required-topic>` example inside the
-    /// serial preset must include the top-level `handoff_envelope`
-    /// field. Without this guard, an agent following the documented
-    /// example emits an event that the runtime / CLI rejects with a
-    /// missing-required-field error — the exact P0 the original
-    /// review flagged. The scan reads the canonical preset text
-    /// and asserts, for each fenced `ralph emit <topic>` block in
-    /// the serial preset's instructions, that the JSON literal
-    /// contains the `handoff_envelope` key.
-    ///
-    /// Topics that the serial preset documents ONLY via prose
-    /// (no fenced `ralph emit` example block — e.g. `work.ready`
-    /// is described in prose, not via a fenced example) are
-    /// skipped: the scan only inspects blocks that exist. Each
-    /// existing block must carry the envelope.
-    #[test]
-    fn ce_executor_serial_emit_examples_include_handoff_envelope() {
-        const ENVELOPE_REQUIRED: &[&str] = &[
-            "work.ready",
-            "work.done",
-            "work.failed",
-            "test.passed",
-            "test.failed",
-            "review.start",
-            "review.dimension.ready",
-            "review.dimension.done",
-            "review.dimension.failed",
-            "review.dimensions.complete",
-            "review.complete",
-            "fix.applied",
-            "fix.exhausted",
-            "plan.complete",
-            "plan.blocked",
-            "REVIEW_COMPLETE",
-            "report.done",
-        ];
-
-        // Read the canonical preset (the user-visible instructions,
-        // not the post-merge embedded copy — the schema SSOT is the
-        // authoritative schema; the canonical preset is the
-        // authoritative docs).
-        let preset_text = read_root_preset("ce-executor-serial.yml");
-        for topic in ENVELOPE_REQUIRED {
-            let outcome = serial_emit_block_status(&preset_text, topic);
-            assert!(
-                !matches!(outcome, EmitBlockStatus::MissingEnvelope),
-                "P0: every copy-pasteable `ralph emit {topic}` block in \
-                 `presets/en/ce-executor-serial.yml` must include a top-level \
-                 `handoff_envelope` field. The agent following the documented \
-                 example would otherwise emit an event the runtime rejects with \
-                 a missing-required-field error. \
-                 (Block status: {outcome:?}; allowed outcomes are `NoBlock` or `CarriesEnvelope`.)"
-            );
-        }
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    enum EmitBlockStatus {
-        /// The topic has no fenced `ralph emit` block in the preset.
-        NoBlock,
-        /// At least one fenced block exists and every such block
-        /// carries `"handoff_envelope"`.
-        CarriesEnvelope,
-        /// At least one fenced block exists and at least one of
-        /// those blocks omits `"handoff_envelope"`.
-        MissingEnvelope,
-    }
-
-    fn serial_emit_block_status(preset_text: &str, topic: &str) -> EmitBlockStatus {
-        let needle = format!("ralph emit {topic} ");
-        let mut in_bash_block = false;
-        let mut in_topic_block = false;
-        let mut any_topic_block = false;
-        let mut any_topic_block_carries_envelope = false;
-        for line in preset_text.lines() {
-            if line.trim_start().starts_with("```bash") {
-                in_bash_block = true;
-                in_topic_block = line.contains(&needle);
-                if in_topic_block {
-                    any_topic_block = true;
-                }
-                continue;
-            }
-            if line.trim_start().starts_with("```") {
-                // Closing fence (matches the first ``` after a
-                // ```bash opener). Reset both flags.
-                in_bash_block = false;
-                in_topic_block = false;
-                continue;
-            }
-            if in_bash_block && in_topic_block && line.contains("\"handoff_envelope\"") {
-                any_topic_block_carries_envelope = true;
-            }
-        }
-        if !any_topic_block {
-            EmitBlockStatus::NoBlock
-        } else if any_topic_block_carries_envelope {
-            EmitBlockStatus::CarriesEnvelope
-        } else {
-            EmitBlockStatus::MissingEnvelope
-        }
-    }
-
-    #[test]
-    fn test_ce_executor_serial_has_two_step_verify_gate() {
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str(&preset.content).expect("preset must be valid YAML");
-        let require = yaml
-            .get("tasks")
-            .and_then(|t| t.get("require_verify_for_cli_mutate"))
-            .and_then(|v| v.as_bool())
-            .expect("tasks.require_verify_for_cli_mutate must be present");
-        assert!(
-            require,
-            "ce-executor-serial must require verify for add/ensure"
-        );
-        let unsafe_hatch = yaml
-            .get("tasks")
-            .and_then(|t| t.get("allow_unsafe_task_mutate"))
-            .and_then(|v| v.as_bool())
-            .expect("tasks.allow_unsafe_task_mutate must be present");
-        assert!(
-            !unsafe_hatch,
-            "ce-executor-serial must keep the unsafe escape hatch OFF by default"
-        );
-    }
-
-    /// U4: ce-executor-serial must use `report.done` as its sole completion
-    /// gate, mirroring ce-executor-serial. Without this, the loop would
-    /// never reach `LOOP_COMPLETE` and stall at the missing-event gate.
-    #[test]
-    fn test_ce_executor_serial_has_report_done_completion_gate() {
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
-        assert_eq!(
-            config.event_loop.required_events,
-            &["report.done"],
-            "ce-executor-serial must require 'report.done' as its only completion gate"
-        );
-    }
-
-    /// U4: review-synthesizer's triggers must be `[review.dimensions.complete]`
-    /// for the serial preset — the wave variant triggers on
-    /// `review.dimension.done` and `wave.worker.failed`, neither of which
-    /// exists in the serial path. If a serial preset accidentally keeps the
-    /// wave-style triggers, the synthesizer never activates and the loop
-    /// stalls on the missing-event gate.
-    #[test]
-    fn test_ce_executor_serial_synthesizer_triggers_on_dimensions_complete() {
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
-        let synthesizer = config
-            .hats
-            .get("review-synthesizer")
-            .expect("ce-executor-serial must define a 'review-synthesizer' hat");
-        assert_eq!(
-            synthesizer.triggers,
-            vec!["review.dimensions.complete".to_string()],
-            "ce-executor-serial review-synthesizer must trigger only on review.dimensions.complete; \
-             the wave-style triggers (review.dimension.done, wave.worker.failed) are absent in the \
-             serial path and would never fire"
-        );
-        // Defense in depth: the wave topic must NOT appear anywhere in
-        // the synthesizer's trigger list, even as a duplicate.
-        assert!(
-            !synthesizer
-                .triggers
-                .contains(&"review.wave.ready".to_string()),
-            "ce-executor-serial review-synthesizer must NOT trigger on review.wave.ready (no wave in this preset)"
-        );
-        assert!(
-            !synthesizer
-                .triggers
-                .contains(&"wave.worker.failed".to_string()),
-            "ce-executor-serial review-synthesizer must NOT trigger on wave.worker.failed (no wave dispatcher in this preset)"
-        );
-    }
-
-    /// U4: dimension-reviewer in the serial preset must have
-    /// `concurrency: 1` (the default; no fan-out) and NO `aggregate`
-    /// block — the serial path is a strict 1-instance-per-activation
-    /// design. If a future edit re-introduces concurrency, the test
-    /// fails loudly and forces the author to either keep the topology
-    /// serial or rename the preset to a wave variant.
-    #[test]
-    fn test_ce_executor_serial_dimension_reviewer_no_concurrency_no_aggregate() {
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
-        let reviewer = config
-            .hats
-            .get("dimension-reviewer")
-            .expect("ce-executor-serial must define a 'dimension-reviewer' hat");
-        assert_eq!(
-            reviewer.concurrency, 1,
-            "ce-executor-serial dimension-reviewer concurrency must be 1 (single instance per activation)"
-        );
-        assert!(
-            reviewer.aggregate.is_none(),
-            "ce-executor-serial dimension-reviewer must have no aggregate block (no wait_for_all in serial path)"
-        );
-        // Timeout must still be 1800 (parallel preset's per-worker cap) so
-        // a single hung dimension still surfaces in bounded wall time.
-        assert_eq!(
-            reviewer.timeout,
-            Some(1800),
-            "ce-executor-serial dimension-reviewer timeout must be 1800s to bound per-dim wall time"
-        );
-    }
-
-    /// 2026-07-06 plan U10: progress-steward hat REMOVED from
-    /// `ce-executor-serial`. Stall recovery is now runtime
-    /// fail-close (`event_loop/mod.rs`, U12) + shipper_reason gate
-    /// (`shipper_reason.rs`, U13). The pre-U10 assertion that the
-    /// preset declared a `progress-steward` hat triggering on
-    /// `loop.stalled` only is obsolete and has been deleted; the
-    /// regression is preserved as a negative expectation below
-    /// (the hat MUST NOT be present in the post-U10 preset).
-
-    /// 2026-07-06 plan U10 negative assertion: the
-    /// `progress-steward` hat MUST NOT be declared in the
-    /// `ce-executor-serial` preset after U10. Stall recovery
-    /// has migrated to runtime fail-close + shipper_reason.
-    #[test]
-    fn test_ce_executor_serial_no_progress_steward_hat_after_u10() {
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
-        assert!(
-            !config.hats.contains_key("progress-steward"),
-            "ce-executor-serial MUST NOT declare a 'progress-steward' hat after 2026-07-06 U10 \
-             (runtime fail-close + shipper_reason replace it); got {:?}",
-            config.hats.keys().collect::<Vec<_>>()
-        );
-    }
-
-    /// U4: review-coordinator must own the serial review events
-    /// (`review.dimension.ready` and `review.dimensions.complete`) and
-    /// dimension-reviewer must own the per-dim completion events
-    /// (`review.dimension.done` and `review.dimension.failed`).
-    /// Crossing the ownership lines would let dimension-reviewer kick
-    /// a new review dimension (denied by topic_deny_rules) or let
-    /// review-coordinator emit a per-dim done (rejected by origin
-    /// guard as it is not in the hat's `publishes` list).
-    #[test]
-    fn test_ce_executor_serial_topic_ownership() {
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
-        let coordinator = config
-            .hats
-            .get("review-coordinator")
-            .expect("ce-executor-serial must define a 'review-coordinator' hat");
-        let reviewer = config
-            .hats
-            .get("dimension-reviewer")
-            .expect("ce-executor-serial must define a 'dimension-reviewer' hat");
-
-        // review-coordinator owns the kick-off + close events
-        assert!(
-            coordinator
-                .publishes
-                .contains(&"review.dimension.ready".to_string()),
-            "review-coordinator must publish review.dimension.ready"
-        );
-        assert!(
-            coordinator
-                .publishes
-                .contains(&"review.dimensions.complete".to_string()),
-            "review-coordinator must publish review.dimensions.complete (plural — aggregate over the sequence)"
-        );
-        assert!(
-            !coordinator
-                .publishes
-                .contains(&"review.dimension.done".to_string()),
-            "review-coordinator must NOT publish review.dimension.done (dimension-reviewer owns that)"
-        );
-        assert!(
-            !coordinator
-                .publishes
-                .contains(&"review.dimension.failed".to_string()),
-            "review-coordinator must NOT publish review.dimension.failed (dimension-reviewer owns that)"
-        );
-
-        // dimension-reviewer owns the per-dim completion events
-        assert!(
-            reviewer
-                .publishes
-                .contains(&"review.dimension.done".to_string()),
-            "dimension-reviewer must publish review.dimension.done"
-        );
-        assert!(
-            reviewer
-                .publishes
-                .contains(&"review.dimension.failed".to_string()),
-            "dimension-reviewer must publish review.dimension.failed"
-        );
-        assert!(
-            !reviewer
-                .publishes
-                .contains(&"review.dimensions.complete".to_string()),
-            "dimension-reviewer must NOT publish review.dimensions.complete (review-coordinator owns that)"
-        );
-    }
-
-    /// U4: root preset must match the embedded copy after build.rs's
-    /// U4: ce-executor-serial must NOT declare `review.wave.ready` or
-    /// `wave.worker.failed` as triggers / publishes / aggregate
-    /// members / required keys on any hat. (The preset may mention
-    /// these topics in PROSE comments explaining what was removed;
-    /// that prose is fine. What is not fine is wiring the wave
-    /// topics into the runtime contract.)
-    ///
-    /// This guards against a future edit accidentally wiring the
-    /// serial preset to the wave dispatcher — the topic_deny_rules
-    /// block would still reject the emit, but at that point the
-    /// preset is internally inconsistent and the test should fire
-    /// before runtime does.
-    #[test]
-    fn test_ce_executor_serial_has_no_wave_topic() {
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
-        for (hat_name, hat) in &config.hats {
-            // Triggers must not subscribe to wave-only events.
-            for forbidden in ["review.wave.ready", "wave.worker.failed"] {
-                assert!(
-                    !hat.triggers.contains(&forbidden.to_string()),
-                    "ce-executor-serial hat '{}' must NOT declare '{}' as a trigger \
-                     (no wave in this preset)",
-                    hat_name,
-                    forbidden
-                );
-                assert!(
-                    !hat.publishes.contains(&forbidden.to_string()),
-                    "ce-executor-serial hat '{}' must NOT declare '{}' in publishes \
-                     (no wave in this preset)",
-                    hat_name,
-                    forbidden
-                );
-            }
-        }
-    }
-
-    /// U4: ce-executor-serial uses a 6-dimension review
-    /// sequence (goal-alignment → correctness → testing → maintainability →
-    /// project-standards → adversarial). The review-coordinator's
-    /// instructions must not still reference the old 4-dim/5-dim set.
-    /// This guard must stay in sync with the preset's sequence contract.
-    #[test]
-    fn test_ce_executor_serial_review_sequence_is_six_dimensions() {
-        let preset =
-            get_preset("ce-executor-serial").expect("ce-executor-serial preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
-        let coordinator = config
-            .hats
-            .get("review-coordinator")
-            .expect("ce-executor-serial must define a 'review-coordinator' hat");
-        let instructions = coordinator.instructions.as_str();
-
-        // Sequence contract must list exactly the six dimensions in fixed order.
-        let ordered_markers = [
-            "1. `goal-alignment`",
-            "2. `correctness`",
-            "3. `testing`",
-            "4. `maintainability`",
-            "5. `project-standards`",
-            "6. `adversarial`",
-        ];
-        let mut prev_idx = 0usize;
-        for marker in &ordered_markers {
-            let idx = instructions.find(marker).unwrap_or_else(|| {
-                panic!(
-                    "review-coordinator instructions must contain `{marker}` for the 6-dimension sequence contract"
-                )
-            });
-            assert!(
-                idx >= prev_idx,
-                "review-coordinator instructions must list dimensions in fixed order; `{marker}` appeared before its predecessor"
-            );
-            prev_idx = idx;
-        }
-    }
-
-    /// U4: ce-executor-serial must validate end-to-end (ambiguous routing
-    /// whitelist, terminal event authority, etc.). Companion of
-    /// test_ce_executor_serial_preset_validates_ambiguous_routing.
-    #[test]
-    fn test_ce_executor_serial_preset_validates() {
-        let preset = get_preset("ce-executor-serial")
-            .expect("ce-executor-serial must be embedded with non-empty content");
-        let config = RalphConfig::parse_yaml(preset.content)
-            .unwrap_or_else(|e| panic!("ce-executor-serial must parse: {e}"));
-        config.validate().unwrap_or_else(|e| {
-            panic!("ce-executor-serial must validate (ambiguous routing + terminal authority): {e}")
-        });
-    }
-
-    #[test]
-    fn test_ce_executor_has_hard_commit_cadence() {
-        // R3: executor must have hard commit cadence rule.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let content = preset.content;
-        assert!(
-            content.contains("Commit Cadence (HARD RULE)"),
-            "ce-executor must contain 'Commit Cadence (HARD RULE)'"
-        );
-        assert!(
-            content.contains("Do NOT batch multiple U-IDs"),
-            "ce-executor must forbid batching multiple U-IDs"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_has_preflight_contract() {
-        // R4: executor must validate hard prerequisites before implementation.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let content = preset.content;
-        assert!(
-            content.contains("Preflight Contract (HARD RULE)"),
-            "ce-executor must contain 'Preflight Contract (HARD RULE)'"
-        );
-        assert!(
-            content.contains("preflight check failed"),
-            "ce-executor must reference preflight check failure"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_executor_publishes_excludes_queue_advance() {
-        // KTD4: executor no longer publishes queue.advance; plan-gate owns advancement.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
-
-        let executor = config
-            .hats
-            .get("executor")
-            .expect("ce-executor must define an 'executor' hat");
-        assert!(
-            !executor.publishes.contains(&"queue.advance".to_string()),
-            "executor must NOT publish queue.advance; plan-gate owns queue advancement"
-        );
-    }
-
-    /// 2026-06-24 fix: the full `ce-executor-serial` preset must pass
-    /// `RalphConfig::validate` end-to-end. Previously this test pinned the
-    /// `trigger_multi_consumer_topics` whitelist for `fix.exhausted` and
-    /// `debug.exhausted`; those multi-consumer declarations have been
-    /// removed to eliminate the round-robin scheduling race. The test now
-    /// just ensures the preset still validates cleanly.
-    #[test]
-    fn test_ce_executor_serial_preset_validates_ambiguous_routing() {
-        let en = get_preset("ce-executor-serial")
-            .expect("ce-executor-serial must be embedded with non-empty content");
-        let zh = read_root_preset("ce-executor-serial.yml");
-        let en_yaml: &str = en.content.as_ref();
-        let cases: &[(&str, &str)] = &[
-            ("ce-executor-serial", en_yaml),
-            ("ce-executor-serial", zh.as_str()),
-        ];
-        for (name, yaml) in cases {
-            let config =
-                RalphConfig::parse_yaml(yaml).unwrap_or_else(|e| panic!("{name} must parse: {e}"));
-            config
-                .validate()
-                .unwrap_or_else(|e| panic!("{name} must validate (U1 whitelist): {e}"));
-        }
     }
 
     /// 2026-07-07-002 plan Unit 9: generic data skill docs must document correction/bounded retry.
@@ -1919,66 +1148,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_ce_executor_reporter_defensive_plan_check() {
-        // R8: Reporter instructions must contain a defensive plan completion check.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let content = preset.content;
-        assert!(
-            content.contains("Defensive plan completion check")
-                || content.contains("defensive plan completion check"),
-            "reporter instructions must contain a defensive plan completion check"
-        );
-        assert!(
-            content.contains("plan.md") && content.contains("progress.md"),
-            "reporter must reference plan.md and progress.md for the defensive check"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_verdict_gate_targets_review_complete() {
-        // R10: verdict_gate must check REVIEW_COMPLETE (not review.complete) because
-        // REVIEW_COMPLETE carries pass_or_fail; review.complete carries verdict.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
-        let gate = config
-            .event_loop
-            .verdict_gate
-            .as_ref()
-            .expect("ce-executor must have a verdict_gate");
-        assert_eq!(
-            gate.topic, "REVIEW_COMPLETE",
-            "verdict_gate topic must be REVIEW_COMPLETE (uppercase) to match shipper output"
-        );
-        assert_eq!(
-            gate.fail_field, "pass_or_fail",
-            "verdict_gate fail_field must be pass_or_fail"
-        );
-        assert_eq!(
-            gate.fail_value, "fail",
-            "verdict_gate fail_value must be fail"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_dimension_reviewer_passes_through_task_correlation() {
-        // R13: dimension-reviewer must read and publish task_id/task_key/step so
-        // plan-gate can correlate wave results with the original task.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let content = preset.content;
-        let dim_section = content
-            .split("dimension-reviewer:")
-            .nth(1)
-            .expect("ce-executor must have dimension-reviewer section");
-        assert!(
-            dim_section.contains("task_id")
-                && dim_section.contains("task_key")
-                && dim_section.contains("step"),
-            "dimension-reviewer instructions must reference task_id, task_key, and step"
-        );
-    }
-
     /// U4 (2026-06-11-002) — superseded by 2026-06-17-005 R4. The
     /// legacy executor-instructions helper was removed when the
     /// U4 progress-reconcile tests were replaced by projector-driven
@@ -2011,137 +1180,6 @@ mod tests {
     /// to live in the per-hat `instructions` string (preserved) or
     /// in `presets/schemas/<name>.yml` (merged). We assert the
     /// preserved shape here: a per-hat instruction that tells the
-    /// agent to prefer `work.ready` over `ralph tools task`.
-    #[test]
-    fn test_ce_executor_orchestrator_context_is_canonical_read_source_en() {
-        let preset = get_preset("ce-executor-serial").expect("ce-executor-serial preset");
-        let content = &preset.content;
-        assert!(
-            content.contains("## ORCHESTRATOR CONTEXT"),
-            "ce-executor-serial must reference `## ORCHESTRATOR CONTEXT` as the read source"
-        );
-        // The HARD RULE says the agent must prefer `work.ready`
-        // and only fall back to `ralph tools task` when the
-        // ORCHESTRATOR CONTEXT block shows the task is missing.
-        // Pin the projector-driven shape (per-hat instructions
-        // mention `work.ready` together with `ORCHESTRATOR CONTEXT`).
-        assert!(
-            content.contains("work.ready") && content.contains("ORCHESTRATOR CONTEXT"),
-            "ce-executor-serial instructions must couple `work.ready` to `ORCHESTRATOR CONTEXT`"
-        );
-        // The Chinese preset mirrors the same cross-hat block
-        // (R3 of 2026-06-17-005 — see U3).
-        let zh = read_root_preset("ce-executor-serial.yml");
-        assert!(
-            zh.contains("## ORCHESTRATOR CONTEXT"),
-            "ce-executor-serial must reference `## ORCHESTRATOR CONTEXT` (R3 of 2026-06-17-005)"
-        );
-        // And the zh HARD RULE mirrors the en "ralph tools task"
-        // prohibition (added in U3 of 2026-06-17-005). The
-        // comment wraps to a second line; collapse newlines
-        // before searching. Each token is checked independently
-        // so a future YAML reflow that breaks the literal
-        // `ensure|start|close|fail|reopen` adjacency still
-        // surfaces a meaningful failure message.
-        let zh_collapsed: String = zh.chars().filter(|c| *c != '\n').collect();
-        for token in ["ensure", "start", "close", "fail", "reopen"] {
-            assert!(
-                zh_collapsed.contains(token),
-                "ce-executor-serial HARD RULE must mention `{token}` \
-                 (R3 / U3 of 2026-06-17-005); multi-line comment is collapsed before search"
-            );
-        }
-    }
-
-    /// R4 (2026-06-17-005): the `ce-executor-serial` preset
-    /// mirrors the same projector + ORCHESTRATOR CONTEXT contract.
-    /// Pin the parity so an isolated-only edit to one preset
-    /// does not silently drift the other.
-    #[test]
-    fn test_ce_executor_orchestrator_context_is_canonical_read_source_serial_en() {
-        let preset = get_preset("ce-executor-serial").expect("ce-executor-serial preset");
-        let content = &preset.content;
-        assert!(
-            content.contains("## ORCHESTRATOR CONTEXT"),
-            "ce-executor-serial must reference `## ORCHESTRATOR CONTEXT` as the read source"
-        );
-        // The cross-hat HARD RULE mirrors the isolated preset
-        // (per the inline comment in ce-executor-serial.yml).
-        // The merged content keeps per-hat instructions as a
-        // string; assert the per-hat "trust ORCHESTRATOR CONTEXT"
-        // cue with a stronger signal than just substring
-        // presence (the prior OR-fallback was a tautology once
-        // the first assert above already checked the substring).
-        // We require the explicit "trust the ORCHESTRATOR
-        // CONTEXT" per-hat HARD RULE wording; that string is
-        // unique to the serial preset's per-hat instructions
-        // and would catch a regression that drops the per-hat
-        // binding while leaving a stray mention elsewhere.
-        assert!(
-            content.contains("trust the `## ORCHESTRATOR CONTEXT`"),
-            "ce-executor-serial must carry the per-hat 'trust the `## ORCHESTRATOR CONTEXT`' \
-             HARD RULE binding (R4 of 2026-06-17-005)"
-        );
-    }
-
-    /// R4: legacy regression guard. The pre-Phase-1 hand-written
-    /// progress.md contract has been replaced. The old
-    /// per-hat instruction that drove `test_ce_executor_u4_*`
-    /// must no longer be enforced as a strict ordering rule;
-    /// instead, agent behaviour is bound to the ORCHESTRATOR
-    /// CONTEXT block. This test pins the **direction** of the
-    /// change without locking the executor's per-step
-    /// numbering (which the agent can still tune).
-    #[test]
-    fn test_ce_executor_u4_legacy_progress_reconcile_is_superseded() {
-        // The R4 contract now lives in
-        // `test_ce_executor_state_projection_enabled_serial_en`
-        // and `test_ce_executor_orchestrator_context_is_canonical_read_source_en`.
-        // We retain this test name as a one-line marker so
-        // anyone reading the legacy contract test can see the
-        // successor contract. It must stay green; if it fails
-        // the projector was disabled.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor-serial preset");
-        let config = RalphConfig::parse_yaml(&preset.content).expect("parse");
-        assert!(
-            config.event_loop.state_projection.enabled,
-            "R4 contract is broken: state projection must stay enabled in ce-executor-serial"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_fixer_reads_task_correlation_fields() {
-        // R17: fixer must read task_id/task_key/step from review.failed payload
-        // so that fix.applied / fix.exhausted can carry them downstream.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
-        let fixer = config
-            .hats
-            .get("fixer")
-            .expect("ce-executor must define fixer");
-        assert!(
-            fixer.default_publishes.is_none(),
-            "fixer must NOT use default_publishes; fix.exhausted requires contextual payload"
-        );
-        let content = preset.content;
-        let fixer_section = content
-            .split("fixer:")
-            .nth(1)
-            .expect("ce-executor must have fixer section");
-        assert!(
-            fixer_section.contains("task_id")
-                && fixer_section.contains("task_key")
-                && fixer_section.contains("step"),
-            "fixer Read State must reference task_id, task_key, step from review.failed payload"
-        );
-        assert!(
-            fixer_section.contains("MUST explicitly publish")
-                || fixer_section.contains("必须显式发布"),
-            "fixer instructions must require explicit fix.applied/fix.exhausted publishing"
-        );
-    }
-
     /// Cross-check the Rust `PRESETS` array against `presets/manifest.yml`.
     ///
     /// `build.rs` reads the manifest to decide which yml files to copy into
@@ -2295,7 +1333,6 @@ mod tests {
         // Zsh completion values for builtin presets (from zsh plugin)
         // This must stay in sync with scripts/ralph-zsh-plugin.zsh
         let zsh_values: std::collections::BTreeSet<String> = [
-            "builtin:ce-executor-serial",
             "builtin:ce-executor-pipeline",
             "builtin:ce-executor-supervisor",
             "builtin:debug",
@@ -2535,7 +1572,7 @@ mod tests {
         // Strict mode: every trigger topic with payload field references in
         // instructions must have a schema, and all referenced fields must be
         // declared in the schema's required_fields.
-        let preset = get_preset("ce-executor-serial").expect("ce-executor preset should exist");
+        let preset = get_preset("ce-executor-pipeline").expect("ce-executor preset should exist");
         let config =
             RalphConfig::parse_yaml(preset.content).expect("ce-executor YAML should parse");
         let registry = HatRegistry::from_config(&config);
@@ -2700,7 +1737,7 @@ mod tests {
     /// fully declared schemas.
     #[test]
     fn test_development_presets_pass_strict_contract() {
-        let strict_presets = &["ce-executor-serial"];
+        let strict_presets = &["ce-executor-pipeline"];
         for preset_name in strict_presets {
             let preset = PRESETS
                 .iter()

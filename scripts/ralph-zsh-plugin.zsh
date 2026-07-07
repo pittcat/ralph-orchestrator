@@ -57,7 +57,6 @@ unset _ralph_fn
 # `ralph preset list` does not show, breaking the discoverability
 # invariant.
 _RALPH_BUILTIN_HAT_VALUES=(
-  "builtin:ce-executor-serial"
   "builtin:ce-executor-pipeline"
   # 2026-07-03-001 plan U13: supervisor-driven parallel preset.
   # Requires `--features supervisor-db` at build time and
@@ -72,8 +71,7 @@ _RALPH_BUILTIN_HAT_VALUES=(
 )
 
 _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
-  "Isolated-mode plan-driven work execution with serial code review (no wave), auto-fix, shipping, and manager report"
-  "Isolated-mode linear one-shot plan execution: review plan → execute (TDD) → 6 serial dimension reviewers → fix → align → report → complete"
+  "Ralph primary CE executor: linear single-chain plan-driven execution; TDD executor (subagents internal), 6 serial dimension reviewers, synthesize, fix, align, report"
   "Isolated-mode plan-driven work with parallel worker fan-out via rusqlite supervisor: per-slot worktrees, fan-in merge, parallel 6-dim review, parallel fix, integration + report"
   # Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping  # deleted 2026-06-23
   "Bug investigation, root-cause analysis, and adversarial fix verification"
