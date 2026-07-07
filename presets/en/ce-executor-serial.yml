@@ -148,13 +148,13 @@ mechanism:
     phases:
       - id: unit_loop
         allowed_emits:
-          coordinator: [work.ready, queue.advance]
+          coordinator: [work.ready, queue.advance, plan.blocked]
           executor: [work.done, work.failed]
           validator: [test.passed, test.failed]
       - id: review
         allowed_emits:
           coordinator: [review.start]
-          review-coordinator: [review.dimension.ready, review.dimensions.complete]
+          review-coordinator: [review.dimension.ready, review.dimensions.complete, plan.blocked]
           review-goalalign: [review.goalalign.done, review.goalalign.failed]
           review-correctness: [review.correctness.done, review.correctness.failed]
           review-testing: [review.testing.done, review.testing.failed]
