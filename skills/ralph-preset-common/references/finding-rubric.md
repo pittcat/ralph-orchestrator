@@ -19,6 +19,8 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | Q5 handoff 字段未 emit 或未投影 | P0 | handoff | Q5 |
 | isolated 下假设其它 hat 行为 | P0 | visibility | Q2 |
 | Q3 缺 Confirm 或 OPAC skill 引用 | P1 | opac | Q3 |
+| Q3 recovery 散文无状态表 / 缺 bounded retry 引用 | P1 | opac | Q3 |
+| data skill doc 含 preset 专用 hat 名或拓扑 | P1 | style | Q3 |
 | Q1 不可判定 | P1 | feasibility | Q1 |
 | Q5 弱对齐（能跑易漂移） | P1 | handoff | Q5 |
 | `review.dimensions.complete` 已 publish 但 `state_projection` 无对应 action | P1 | state | Q5 |

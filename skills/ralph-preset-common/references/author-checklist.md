@@ -20,7 +20,7 @@
 - [ ] 逐 hat 填 AAF 五问表（模板见下）
 - [ ] 禁止拓扑句式抄进 instructions
 - [ ] Emitter hat：引用 `ralph-tools-opac`、`ralph-tools-emit` §5；强制 `--policy-check`
-- [ ] 若 instructions 写明 `--triggered <hat>`，核对 `<hat>` 在 preset `hats[]`；预检示例见 `references/commands.md`
+- [ ] Recovery / correction 路径：引用 `ralph-tools-recovery-directives`（通用 bounded retry）；preset 内用**触发状态表**写专用动作，不复述 data skill 全文
 - [ ] `task_id` / `task_key` / `step`：引用 `ralph-tools-tasks` red box
 - [ ] 不复述 `ralph-tools*.md` 参数表
 

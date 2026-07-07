@@ -54,3 +54,5 @@ plan-gate / work.start
 | 「上一步 executor 已提交代码」 | Q2：Observe `work.done` 投影字段 |
 | 「读 events.jsonl 末尾」 | `ralph events --events-source hat-channel` |
 | 「整个 pipeline 有 12 个 hat」 | 删除；该 hat 不知拓扑 |
+| 在 instructions 写长篇 recovery 散文 | 改为**触发状态表** + 引用 `ralph-tools-recovery-directives` |
+| 把 preset 专用 trigger 表抄进 `ralph-tools*.md` | 专用表只放 preset YAML；data docs 保持通用 |

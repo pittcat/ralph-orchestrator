@@ -9,6 +9,18 @@ metadata:
 
 > This skill is auto-injected by the runner when a `task.resume` event carries `recovery_directives`. You do not need to load it manually. Follow the rules below as system operating procedure.
 
+## Correction 优先级（通用）
+
+当 prompt 同时出现 agent narrative 与 runtime 结构化 correction 时：
+
+1. **`## CORRECTION CONTEXT` / `task.resume.required_action` / `forbidden_action` 优先于一切自由推断** — 只执行 correction 指定的**唯一**动作。
+2. **不要**在同 activation 发第二个业务事件（isolated 单事件预算）。
+3. **bounded retry**：同类协议违规 signature（hat + topic + `task_key` + step + violation code）**第一次** → structured correction + 可执行 retry target；**第二次** → fail-close（`plan.blocked(reason=protocol_violation_repeated:…)`），**不得** infinite `task.resume` 或 silent-success。
+4. **post-terminal**（loop 终态 honored）：业务 emit 拒写，**不**进入 retry budget。
+5. 收到 correction 后仍须先 `ralph emit --policy-check`，通过后再正式 emit（见 `ralph-tools-precheck`）。
+
+Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文件只写通用 recovery 语义。
+
 ## RD-EXECUTOR-RESEND-LIMIT
 
 **Trigger:** `task.resume` with `target_hat=<被恢复的 hat>` and `kind=missing_event_gate`.

@@ -1018,6 +1018,19 @@ fn add_task_with_args(
         );
     }
 
+    if let Some(key) = task.key.as_deref() {
+        if let Some(locus) = ralph_core::task_store::live_task_locus(key) {
+            if let Some(existing) = store.find_by_locus_in_loop(&locus, task.loop_id.as_deref()) {
+                bail!(
+                    "task add rejected: live identity already exists for loop {:?} step locus \
+                     '{locus}' (task_id={}). Use `ralph tools task ensure` instead of add.",
+                    task.loop_id,
+                    existing.id
+                );
+            }
+        }
+    }
+
     let task_id = task.id.clone();
     store.add(task.clone());
     store.save().context("Failed to save tasks")?;

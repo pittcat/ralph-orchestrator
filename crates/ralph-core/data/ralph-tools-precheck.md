@@ -85,6 +85,8 @@ RALPH_PRECHECK_MODE=off ralph run ...
 - ❌ 把 git diff / test pass / task 关闭等塞进 `precheck.rules.<X>.prompt` — 用 execution_contracts / event_policy
 - ❌ 看到 `<X>.rejected` 后自己再 emit bare `<X>` — 等 `task.resume` 打回 producer 重做
 - ❌ 与 `ralph emit --policy-check` 混淆 — policy 失败在正式 emit 前（`--policy-check` 本身不写盘）；precheck 失败在 gate hat 轮次
+- ❌ 收到 protocol correction 后跳过 `--policy-check` 直接真实 emit — precheck 失败则本 activation 不得继续写盘 emit
+- ❌ 同类 protocol violation 无限自由 retry — 第二次同类违规必须 fail-close（见 `ralph-tools-recovery-directives` Correction 优先级）
 
 ---
 

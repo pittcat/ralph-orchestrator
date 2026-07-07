@@ -817,6 +817,26 @@ fn validate_task(
         }
     };
 
+    // 2026-07-07-002 U7: payload task_key must match the live record key.
+    if let Some(payload_key) = task_key_from_payload {
+        if task.key.as_deref() != Some(payload_key) {
+            return Some(ExecutionContractFinding {
+                kind: ExecutionContractViolationKind::TaskNotFound {
+                    task_id: task_id.clone(),
+                },
+                message: format!(
+                    "Task '{}' live identity mismatch: payload task_key '{}' does not match \
+                     ledger key {:?}. Use `ralph tools task list` for the live task_id/task_key.",
+                    task_id,
+                    payload_key,
+                    task.key
+                ),
+                topic: event.topic.to_string(),
+                ..Default::default()
+            });
+        }
+    }
+
     // Check loop scoping
     if rule.require_task.loop_scoped {
         if let Some(task_loop_id) = &task.loop_id {

@@ -87,9 +87,162 @@ fn is_stall_recovery_reason(reason: &str) -> bool {
     STALL_TOKENS.iter().any(|t| lower.contains(t))
 }
 
+/// Validator terminal kind for the current step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidatorTerminalKind {
+    Passed,
+    Failed,
+}
+
+/// 2026-07-07-002 plan Unit 5: shipper must wait for validator terminal.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShipperValidatorGateContext {
+    /// Current plan step id (e.g. `step-02`).
+    pub current_step: Option<String>,
+    /// Step recorded by the latest validator terminal (`test.passed` / `test.failed`).
+    pub validator_terminal_step: Option<String>,
+    pub validator_terminal_kind: Option<ValidatorTerminalKind>,
+    /// Incoming `plan.blocked` / stall recovery reason when shipper would pass.
+    pub plan_blocked_reason: Option<String>,
+    /// True when shipper would emit `pass_or_fail=pass` or `pass_with_residuals`.
+    pub attempting_success_ship: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum ShipperValidatorGateDecision {
+    Allow,
+    DenyWaitForValidator { current_step: String },
+    HardFail { reason: String },
+}
+
+/// Pure decision: may shipper emit success `REVIEW_COMPLETE` for the current step?
+#[must_use]
+pub fn evaluate_shipper_validator_gate(
+    ctx: &ShipperValidatorGateContext,
+) -> ShipperValidatorGateDecision {
+    let current = match ctx.current_step.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return ShipperValidatorGateDecision::HardFail {
+                reason: "shipper_validator_gate:missing_current_step".to_string(),
+            };
+        }
+    };
+
+    if !ctx.attempting_success_ship {
+        return ShipperValidatorGateDecision::Allow;
+    }
+
+    if let Some(reason) = ctx.plan_blocked_reason.as_deref() {
+        if is_stall_recovery_reason(reason) && ctx.validator_terminal_step.is_none() {
+            return ShipperValidatorGateDecision::HardFail {
+                reason: "shipper_validator_gate:stall_recovery_without_validator_terminal"
+                    .to_string(),
+            };
+        }
+    }
+
+    let terminal_step = match ctx.validator_terminal_step.as_deref() {
+        Some(s) => s,
+        None => {
+            return ShipperValidatorGateDecision::DenyWaitForValidator {
+                current_step: current.to_string(),
+            };
+        }
+    };
+
+    if terminal_step != current {
+        return ShipperValidatorGateDecision::DenyWaitForValidator {
+            current_step: current.to_string(),
+        };
+    }
+
+    ShipperValidatorGateDecision::Allow
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validator_gate_stall_without_terminal_hard_fails() {
+        let ctx = ShipperValidatorGateContext {
+            current_step: Some("step-02".to_string()),
+            validator_terminal_step: None,
+            validator_terminal_kind: None,
+            plan_blocked_reason: Some(
+                "recovery_exhausted:stall_recovery:validator:work_done:handoff_dispatch_timeout"
+                    .to_string(),
+            ),
+            attempting_success_ship: true,
+        };
+        assert!(matches!(
+            evaluate_shipper_validator_gate(&ctx),
+            ShipperValidatorGateDecision::HardFail { .. }
+        ));
+    }
+
+    #[test]
+    fn validator_gate_current_step_passed_allows() {
+        let ctx = ShipperValidatorGateContext {
+            current_step: Some("step-02".to_string()),
+            validator_terminal_step: Some("step-02".to_string()),
+            validator_terminal_kind: Some(ValidatorTerminalKind::Passed),
+            plan_blocked_reason: None,
+            attempting_success_ship: true,
+        };
+        assert_eq!(
+            evaluate_shipper_validator_gate(&ctx),
+            ShipperValidatorGateDecision::Allow
+        );
+    }
+
+    #[test]
+    fn validator_gate_current_step_failed_allows_fail_semantics() {
+        let ctx = ShipperValidatorGateContext {
+            current_step: Some("step-02".to_string()),
+            validator_terminal_step: Some("step-02".to_string()),
+            validator_terminal_kind: Some(ValidatorTerminalKind::Failed),
+            plan_blocked_reason: None,
+            attempting_success_ship: false,
+        };
+        assert_eq!(
+            evaluate_shipper_validator_gate(&ctx),
+            ShipperValidatorGateDecision::Allow
+        );
+    }
+
+    #[test]
+    fn validator_gate_old_step_denies() {
+        let ctx = ShipperValidatorGateContext {
+            current_step: Some("step-02".to_string()),
+            validator_terminal_step: Some("step-01".to_string()),
+            validator_terminal_kind: Some(ValidatorTerminalKind::Passed),
+            plan_blocked_reason: None,
+            attempting_success_ship: true,
+        };
+        assert!(matches!(
+            evaluate_shipper_validator_gate(&ctx),
+            ShipperValidatorGateDecision::DenyWaitForValidator { .. }
+        ));
+    }
+
+    #[test]
+    fn validator_gate_missing_terminal_denies_success_ship() {
+        let ctx = ShipperValidatorGateContext {
+            current_step: Some("step-02".to_string()),
+            validator_terminal_step: None,
+            validator_terminal_kind: None,
+            plan_blocked_reason: None,
+            attempting_success_ship: true,
+        };
+        assert!(matches!(
+            evaluate_shipper_validator_gate(&ctx),
+            ShipperValidatorGateDecision::DenyWaitForValidator { .. }
+        ));
+    }
 
     #[test]
     fn disabled_engine_accepts_any_reason() {

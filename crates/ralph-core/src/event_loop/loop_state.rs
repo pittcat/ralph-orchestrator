@@ -745,6 +745,14 @@ pub struct LoopState {
     /// Avoids re-parsing the step prefix on every prompt
     /// build.
     pub last_test_passed_was_fix_unit: bool,
+
+    /// 2026-07-07-002 U6: latest validator terminal snapshot for shipper gate.
+    pub last_validator_terminal_step: Option<String>,
+    /// `"passed"` or `"failed"` — mirrors latest `test.passed` / `test.failed`.
+    pub last_validator_terminal_kind: Option<String>,
+    /// 2026-07-07-002 U6: step from the most recent accepted `plan.complete`.
+    pub last_plan_complete_step: Option<String>,
+
     /// Deterministic correction queue.  The loop runner writes a
     /// [`CorrectionContext`] here whenever a recoverable
     /// rejection fires; the next `build_prompt` reads the
@@ -928,6 +936,9 @@ impl Default for LoopState {
             // 2026-07-01-001 plan U6: no test.passed observed yet.
             last_test_passed_step: None,
             last_test_passed_was_fix_unit: false,
+            last_validator_terminal_step: None,
+            last_validator_terminal_kind: None,
+            last_plan_complete_step: None,
             // U7a: deterministic correction queue.
             prompt_context: crate::correction::PromptContext::default(),
             // 2026-06-23-005 F4: typed TerminationTrigger queue
@@ -1089,8 +1100,15 @@ impl LoopState {
     /// passes overwrite earlier ones within a single
     /// activation).
     pub fn record_test_passed(&mut self, step: String, was_fix_unit: bool) {
-        self.last_test_passed_step = Some(step);
+        self.last_test_passed_step = Some(step.clone());
         self.last_test_passed_was_fix_unit = was_fix_unit;
+        self.record_validator_terminal(step, "passed");
+    }
+
+    /// Record validator terminal snapshot from accepted `test.passed` / `test.failed`.
+    pub fn record_validator_terminal(&mut self, step: String, kind: &str) {
+        self.last_validator_terminal_step = Some(step);
+        self.last_validator_terminal_kind = Some(kind.to_string());
     }
 
     /// U8 (2026-06-27-002 plan completion): clear the
@@ -1269,6 +1287,20 @@ impl LoopState {
         reason_class: &str,
     ) -> (u32, bool) {
         let key = format!("policy:{hat}:{topic}:{reason_class}");
+        let count = self.record_rejection_key(&key);
+        (count, self.rejection_key_is_exhausted(&key))
+    }
+
+    /// 2026-07-07-002 U8: bounded retry for protocol violations.
+    pub fn record_protocol_violation_signature(
+        &mut self,
+        hat: &str,
+        topic: &str,
+        task_key: &str,
+        step: &str,
+        violation_code: &str,
+    ) -> (u32, bool) {
+        let key = format!("protocol:{hat}:{topic}:{task_key}:{step}:{violation_code}");
         let count = self.record_rejection_key(&key);
         (count, self.rejection_key_is_exhausted(&key))
     }

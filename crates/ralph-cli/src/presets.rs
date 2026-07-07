@@ -1958,6 +1958,157 @@ mod tests {
         );
     }
 
+    /// 2026-07-07-002 plan Unit 9: coordinator/executor/validator/shipper/reporter
+    /// instructions must use trigger state tables with bounded-retry forbidden actions.
+    #[test]
+    fn test_ce_executor_serial_protocol_state_tables_unit9() {
+        let preset =
+            get_preset("ce-executor-serial").expect("ce-executor-serial preset must be embedded");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("ce-executor-serial YAML should parse");
+
+        let coordinator = config
+            .hats
+            .get("coordinator")
+            .expect("coordinator hat must exist");
+        let coordinator_instr = coordinator.instructions.as_str();
+        assert!(
+            coordinator_instr.contains("触发状态表"),
+            "coordinator instructions must contain a trigger state table"
+        );
+        for trigger in [
+            "`work.start`",
+            "`task.resume`",
+            "TaskNotTerminal",
+            "duplicate_work_done",
+            "`test.passed`",
+            "`review.complete`",
+            "`work.failed`",
+        ] {
+            assert!(
+                coordinator_instr.contains(trigger),
+                "coordinator state table must cover trigger {trigger}"
+            );
+        }
+        assert!(
+            !coordinator_instr.contains("Re-emit `work.ready`"),
+            "coordinator must NOT instruct blanket re-emit work.ready on task.resume"
+        );
+        assert!(
+            coordinator_instr.contains("bounded retry") || coordinator_instr.contains("fail-close"),
+            "coordinator must document bounded retry / fail-close"
+        );
+
+        let executor = config
+            .hats
+            .get("executor")
+            .expect("executor hat must exist");
+        let executor_instr = executor.instructions.as_str();
+        assert!(
+            executor_instr.contains("触发状态表"),
+            "executor instructions must contain a trigger state table"
+        );
+        assert!(
+            executor_instr.contains("close-before-`work.done`")
+                || executor_instr.contains("close-before-work.done")
+                || executor_instr.contains("close-before-"),
+            "executor must document close-before-work.done"
+        );
+        assert!(
+            executor_instr.contains("ralph-tools-tasks"),
+            "executor must reference ralph-tools-tasks for task identity"
+        );
+
+        let validator = config
+            .hats
+            .get("validator")
+            .expect("validator hat must exist");
+        assert!(
+            validator.instructions.contains("触发状态表"),
+            "validator instructions must contain a trigger state table"
+        );
+
+        let shipper = config.hats.get("shipper").expect("shipper hat must exist");
+        let shipper_instr = shipper.instructions.as_str();
+        assert!(
+            shipper_instr.contains("wait-for-validator") || shipper_instr.contains("validator terminal"),
+            "shipper must document wait-for-validator terminal gate"
+        );
+        assert!(
+            shipper_instr.contains("pass_with_residuals"),
+            "shipper must reference pass_with_residuals in forbidden/wait context"
+        );
+
+        let reporter = config.hats.get("reporter").expect("reporter hat must exist");
+        assert!(
+            reporter.instructions.contains("触发状态表"),
+            "reporter instructions must contain a trigger state table"
+        );
+        assert!(
+            reporter.instructions.contains("post-terminal")
+                || reporter.instructions.contains("LOOP_COMPLETE"),
+            "reporter must document post-terminal constraints"
+        );
+    }
+
+    /// 2026-07-07-002 plan Unit 9: generic data skill docs must document correction/bounded retry.
+    #[test]
+    fn test_data_skill_docs_correction_guidance_unit9() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let emit = std::fs::read_to_string(manifest_dir.join("crates/ralph-core/data/ralph-tools-emit.md"))
+            .expect("read ralph-tools-emit.md");
+        assert!(
+            emit.contains("协议违规后的 EmitResult"),
+            "ralph-tools-emit must document protocol violation EmitResult/correction response"
+        );
+        assert!(
+            emit.contains("protocol_violation_repeated"),
+            "ralph-tools-emit must mention bounded fail-close reason"
+        );
+
+        let recovery = std::fs::read_to_string(
+            manifest_dir.join("crates/ralph-core/data/ralph-tools-recovery-directives.md"),
+        )
+        .expect("read ralph-tools-recovery-directives.md");
+        assert!(
+            recovery.contains("Correction 优先级"),
+            "ralph-tools-recovery-directives must document correction priority"
+        );
+        assert!(
+            recovery.contains("forbidden_action"),
+            "ralph-tools-recovery-directives must document forbidden_action semantics"
+        );
+
+        let main = std::fs::read_to_string(manifest_dir.join("crates/ralph-core/data/ralph-tools.md"))
+            .expect("read ralph-tools.md");
+        assert!(
+            main.contains("ralph-tools-recovery-directives"),
+            "ralph-tools.md must point agents to recovery-directives on task.resume"
+        );
+
+        let precheck = std::fs::read_to_string(
+            manifest_dir.join("crates/ralph-core/data/ralph-tools-precheck.md"),
+        )
+        .expect("read ralph-tools-precheck.md");
+        assert!(
+            precheck.contains("protocol correction"),
+            "ralph-tools-precheck must mention correction-then-policy-check discipline"
+        );
+
+        let tasks = std::fs::read_to_string(
+            manifest_dir.join("crates/ralph-core/data/ralph-tools-tasks.md"),
+        )
+        .expect("read ralph-tools-tasks.md");
+        assert!(
+            tasks.contains("live identity") || tasks.contains("live record"),
+            "ralph-tools-tasks must document live task identity"
+        );
+        assert!(
+            tasks.contains("close-before"),
+            "ralph-tools-tasks must document close-before-done"
+        );
+    }
+
     #[test]
     fn test_ce_executor_reporter_defensive_plan_check() {
         // R8: Reporter instructions must contain a defensive plan completion check.

@@ -358,6 +358,28 @@ policy-check 拒收:
 }
 ```
 
+### 协议违规后的 EmitResult / correction 响应
+
+当 emit 被 policy / execution contract / terminal guard 拒收时，用 `--output json` 读完整 `EmitResult`，**不要** `tail events.jsonl` 猜测是否落盘。
+
+| 字段 | 拒收时如何读 | agent 动作 |
+|------|-------------|-----------|
+| `ok` | `false` | 事件未通过 gate；不要假设下游已激活 |
+| `recorded` | 恒 `false` | 主 events **未**写入；rejected business event 不会成为事实 |
+| `errors[].code` | 稳定错误码（如 `missing_required_field`、`task_not_terminal`） | 按 code 路由修复策略 |
+| `errors[].field` | 触发的 payload 字段 | 补齐或修正该字段 |
+| `errors[].suggested_command` | 建议命令模板（若有） | 优先采用，仍须 `--policy-check` |
+| `handoff_envelope` | 拒收场景通常省略 | 不要凭 handoff 摘要推断已成功 |
+
+**Correction 注入**：拒收后 runner 可能在下一 activation 注入 `## CORRECTION CONTEXT` 或 `task.resume`（含 `required_action` / `forbidden_action` / `target_hat` / live `task_id`+`task_key`+`step`）。规则：
+
+1. **Correction 高于 narrative** — 只执行 correction 指定的唯一动作（见 `ralph-tools-recovery-directives`）。
+2. **bounded retry** — 同类 violation signature 第一次 → correction + 一次可执行 retry；第二次 → fail-close（`protocol_violation_repeated:*`），不得 infinite retry。
+3. **post-terminal** — `LOOP_COMPLETE` honored 后业务 emit 拒写，无 retry budget。
+4. **修复后仍走两步 precheck** — `ralph emit <topic> --policy-check` 通过 → 去掉 `--policy-check` 正式 emit（`ralph-tools-precheck`）。
+
+**EmitResult 与 `task.resume` 分工**：CLI 层 `EmitResult` 告诉你**本次 emit 是否落盘**；`task.resume` / correction context 告诉你**下一 activation 唯一允许动作**。两者同时出现时以 correction 的 `required_action`/`forbidden_action` 为准。
+
 ### 反模式
 
 - 🔴 **不要** `tail events.jsonl | jq` 验证 emit 结果；用 `--output json` 直接拿到 `recorded` 字段。

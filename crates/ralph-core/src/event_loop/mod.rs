@@ -2,9 +2,11 @@
 //!
 //! The event loop coordinates the execution of hats via pub/sub messaging.
 
+pub mod accepted_event;
 pub mod loop_state;
 pub mod plan_blocked_reason;
 pub mod rejection;
+pub mod terminal_closed_guard;
 pub mod rejection_kind;
 pub mod review_step_state;
 // 2026-06-27 mechanism foundation U1: hard required-fields check at
@@ -1518,6 +1520,169 @@ impl EventLoop {
             .as_ref()
             .map(|ctx| ctx.tasks_path())
             .unwrap_or_else(|| PathBuf::from(".ralph/agent/tasks.jsonl"))
+    }
+
+    /// 2026-07-07-002 plan U2: side effects that must run only after execution
+    /// contract (and other commit gates) accept an event for the main ledger.
+    fn apply_contract_committed_side_effects(&mut self, events: &[JsonlEvent]) {
+        self.update_bootstrap_flags_from_accepted(events);
+        for accepted in events {
+            if let Some(consumer) = self.handoff_index.consumer_of(&accepted.topic) {
+                let consumer_triggers_ok = self
+                    .registry
+                    .get_config(&HatId::from(consumer))
+                    .map(|cfg| {
+                        crate::workflow_contract::handoff_index::check_hat_triggers(
+                            &cfg.triggers,
+                            accepted.topic.as_str(),
+                        )
+                        .is_ok()
+                    })
+                    .unwrap_or(false);
+                if !consumer_triggers_ok {
+                    warn!(
+                        topic = %accepted.topic,
+                        consumer = %consumer,
+                        "U16 handoff: consumer hat's `triggers` does not declare \
+                         this topic — emitting task.resume.misrouted diagnostic, \
+                         skipping 600s pending registration"
+                    );
+                    let diagnostic = Event::new(
+                        "task.resume.misrouted",
+                        format!(
+                            "U16: consumer hat `{}` does not declare `{}` in its \
+                             `triggers` list; handoff skipped to avoid 600s stall \
+                             escalation. Fix: add `{}` to the hat's `triggers:` or \
+                             remove the producer from this hat's emission scope.",
+                            consumer, accepted.topic, accepted.topic
+                        ),
+                    )
+                    .with_source(HatId::from("ralph"));
+                    self.state.record_event(&diagnostic);
+                    self.bus.publish(diagnostic);
+                    continue;
+                }
+                let event_id = format!("{}:{}", accepted.ts, accepted.topic);
+                self.state.handoff_tracker.on_handoff_accepted(
+                    accepted.topic.clone(),
+                    consumer.to_string(),
+                    event_id.clone(),
+                    std::time::Instant::now(),
+                );
+            }
+
+            match accepted.topic.as_str() {
+                "work.done" => {
+                    if let Some(p) = accepted.payload.as_deref()
+                        && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+                        && let (Some(pn), Some(st), Some(ti)) = (
+                            obj.get("plan_name").and_then(|v| v.as_str()),
+                            obj.get("step").and_then(|v| v.as_str()),
+                            obj.get("task_id").and_then(|v| v.as_str()),
+                        )
+                    {
+                        let key = LoopState::work_done_dedup_key(pn, st, ti);
+                        self.state.work_done_seen_tasks.insert(key);
+                    }
+                    let ctx = self.runtime_recovery_context(std::slice::from_ref(accepted));
+                    self.apply_runtime_recovery_actions(&ctx);
+                }
+                "fix.applied" => {
+                    if let Some(p) = accepted.payload.as_deref()
+                        && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+                    {
+                        let plan_name = obj
+                            .get("plan_name")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let step = obj
+                            .get("completed_step")
+                            .or_else(|| obj.get("step"))
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        if let (Some(pn), Some(st)) = (&plan_name, &step) {
+                            self.state.prune_work_done_bucket(pn, st);
+                            let task_id = obj
+                                .get("task_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+                            if let Some(ti) = task_id.as_deref() {
+                                let new_count = self.state.increment_fix_round(pn, st, ti);
+                                if new_count >= LoopState::FIX_ROUND_HARD_CAP {
+                                    warn!(
+                                        plan = %pn,
+                                        step = %st,
+                                        task = %ti,
+                                        count = new_count,
+                                        "fix-round hard cap reached; emitting fix.exhausted"
+                                    );
+                                    let exhausted_payload = serde_json::json!({
+                                        "plan_name": pn,
+                                        "fix_round": new_count,
+                                        "task_id": ti,
+                                        "task_key": obj.get("task_key").and_then(|v| v.as_str()).unwrap_or(""),
+                                        "step": st,
+                                        "reason": format!(
+                                            "fix budget exhausted (max {} rounds)",
+                                            LoopState::FIX_ROUND_HARD_CAP
+                                        ),
+                                    });
+                                    self.bus.publish(Event::new(
+                                        "fix.exhausted",
+                                        exhausted_payload.to_string(),
+                                    ));
+                                }
+                                if let Some(ref mut policy_state) = self.state.policy_runtime_state {
+                                    policy_state
+                                        .prune_review_dimension_ready_bucket(pn, st, ti);
+                                    policy_state
+                                        .prune_review_dimensions_complete_bucket(pn, st, ti);
+                                    policy_state.prune_work_done_bucket(pn, st);
+                                    policy_state.prune_work_ready_bucket(pn, st);
+                                    policy_state.prune_test_result_buckets(pn, st, ti);
+                                    policy_state.prune_review_start_bucket(pn, ti);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// 2026-07-07-002 U4: terminal-closed guard using Unit 3 pure decision.
+    fn evaluate_terminal_closed_for_event(
+        &mut self,
+        topic: &str,
+        payload: &str,
+        completion_topic: &str,
+    ) -> crate::event_loop::terminal_closed_guard::TerminalClosedDecision {
+        use crate::event_loop::terminal_closed_guard::{
+            classify_topic, evaluate_terminal_closed, TerminalClosedDecision, TerminalClosedInput,
+        };
+        if !self.state.completion_honored {
+            return TerminalClosedDecision::Allow;
+        }
+        let proto = Event::new(topic, payload);
+        let is_byte_duplicate = self.state.is_review_complete_duplicate(&proto);
+        let input = TerminalClosedInput {
+            completion_honored: true,
+            topic,
+            topic_class: classify_topic(topic),
+            is_completion_promise: topic == completion_topic,
+            is_byte_duplicate,
+        };
+        evaluate_terminal_closed(&input)
+    }
+
+    fn publish_post_terminal_rejection(&mut self, topic: &str, reason: &str) {
+        self.bus.publish(Event::new(
+            "event.post_terminal.rejected",
+            format!(
+                "{{\"rejected_topic\":\"{topic}\",\"reason\":\"{reason}\",\"completion_honored\":true}}"
+            ),
+        ));
     }
 
     /// Returns the scratchpad path based on loop context and active scratchpad config.
@@ -10070,176 +10235,6 @@ impl EventLoop {
                     }
                 }
 
-                // WRC-U4: handoff tracking for accepted events whose topic has a
-                // unique consumer in the HandoffIndex.
-                self.update_bootstrap_flags_from_accepted(&events);
-                for accepted in &events {
-                    if let Some(consumer) = self.handoff_index.consumer_of(&accepted.topic) {
-                        // 2026-07-06 silent-success P0-4 fix (long-term U16):
-                        // `HandoffIndex::consumer_of` returns the unique
-                        // consumer hat for `topic`, but the consumer's
-                        // `triggers` list is the SSOT for what it actually
-                        // subscribes to. If the hat does NOT declare
-                        // `topic` in `triggers`, the handoff would silently
-                        // 600s-stall (no activation, escalate to
-                        // `task.resume.misrouted` -> stall_recovery ->
-                        // `recovery_exhausted:stall_recovery:...` ->
-                        // shipper pass translation, the exact silent-success
-                        // path observed in primary-20260705-224028).
-                        //
-                        // Detect this BEFORE registering the pending handoff
-                        // and emit a diagnostic event so the operator sees
-                        // the misroute immediately instead of waiting for
-                        // the 600s window to expire.
-                        let consumer_triggers_ok = self
-                            .registry
-                            .get_config(&HatId::from(consumer))
-                            .map(|cfg| {
-                                crate::workflow_contract::handoff_index::check_hat_triggers(
-                                    &cfg.triggers,
-                                    accepted.topic.as_str(),
-                                )
-                                .is_ok()
-                            })
-                            .unwrap_or(false);
-                        if !consumer_triggers_ok {
-                            warn!(
-                                topic = %accepted.topic,
-                                consumer = %consumer,
-                                "U16 handoff: consumer hat's `triggers` does not declare \
-                                 this topic — emitting task.resume.misrouted diagnostic, \
-                                 skipping 600s pending registration"
-                            );
-                            let diagnostic = Event::new(
-                                "task.resume.misrouted",
-                                format!(
-                                    "U16: consumer hat `{}` does not declare `{}` in its \
-                                     `triggers` list; handoff skipped to avoid 600s stall \
-                                     escalation. Fix: add `{}` to the hat's `triggers:` or \
-                                     remove the producer from this hat's emission scope.",
-                                    consumer, accepted.topic, accepted.topic
-                                ),
-                            )
-                            .with_source(HatId::from("ralph"));
-                            self.state.record_event(&diagnostic);
-                            self.bus.publish(diagnostic);
-                            // Skip the on_handoff_accepted registration —
-                            // this consumer will never activate on this
-                            // topic, so tracking it would just delay the
-                            // escalation through the 600s window.
-                            continue;
-                        }
-                        let event_id = format!("{}:{}", accepted.ts, accepted.topic);
-                        self.state.handoff_tracker.on_handoff_accepted(
-                            accepted.topic.clone(),
-                            consumer.to_string(),
-                            event_id.clone(),
-                            std::time::Instant::now(),
-                        );
-                    }
-
-                    match accepted.topic.as_str() {
-                        "work.done" => {
-                            if let Some(p) = accepted.payload.as_deref()
-                                && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
-                                && let (Some(pn), Some(st), Some(ti)) = (
-                                    obj.get("plan_name").and_then(|v| v.as_str()),
-                                    obj.get("step").and_then(|v| v.as_str()),
-                                    obj.get("task_id").and_then(|v| v.as_str()),
-                                )
-                            {
-                                let key = LoopState::work_done_dedup_key(pn, st, ti);
-                                self.state.work_done_seen_tasks.insert(key);
-                            }
-                            // 2026-06-28-003: run the resend-storm detector on
-                            // every accepted work.done. If the executor keeps
-                            // emitting the same commit_count, the next prompt
-                            // gets a hard stop directive.
-                            let ctx = self.runtime_recovery_context(std::slice::from_ref(accepted));
-                            self.apply_runtime_recovery_actions(&ctx);
-                        }
-                        "fix.applied" => {
-                            if let Some(p) = accepted.payload.as_deref()
-                                && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
-                            {
-                                let plan_name = obj
-                                    .get("plan_name")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from);
-                                let step = obj
-                                    .get("completed_step")
-                                    .or_else(|| obj.get("step"))
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from);
-                                if let (Some(pn), Some(st)) = (&plan_name, &step) {
-                                    self.state.prune_work_done_bucket(pn, st);
-                                    let task_id = obj
-                                        .get("task_id")
-                                        .and_then(|v| v.as_str())
-                                        .map(String::from);
-                                    if let Some(ti) = task_id.as_deref() {
-                                        // 2026-06-24 P1-2: increment the
-                                        // fix-round counter. When the hard
-                                        // cap is reached, emit fix.exhausted
-                                        // so the executor gets a rewrite
-                                        // chance and the shipper can route
-                                        // to terminal.
-                                        let new_count = self.state.increment_fix_round(pn, st, ti);
-                                        if new_count >= LoopState::FIX_ROUND_HARD_CAP {
-                                            warn!(
-                                                plan = %pn,
-                                                step = %st,
-                                                task = %ti,
-                                                count = new_count,
-                                                "fix-round hard cap reached; emitting fix.exhausted"
-                                            );
-                                            let exhausted_payload = serde_json::json!({
-                                                "plan_name": pn,
-                                                "fix_round": new_count,
-                                                "task_id": ti,
-                                                "task_key": obj.get("task_key").and_then(|v| v.as_str()).unwrap_or(""),
-                                                "step": st,
-                                                "reason": format!(
-                                                    "fix budget exhausted (max {} rounds)",
-                                                    LoopState::FIX_ROUND_HARD_CAP
-                                                ),
-                                            });
-                                            self.bus.publish(Event::new(
-                                                "fix.exhausted",
-                                                exhausted_payload.to_string(),
-                                            ));
-                                        }
-                                        if let Some(ref mut policy_state) =
-                                            self.state.policy_runtime_state
-                                        {
-                                            policy_state
-                                                .prune_review_dimension_ready_bucket(pn, st, ti);
-                                            policy_state.prune_review_dimensions_complete_bucket(
-                                                pn, st, ti,
-                                            );
-                                            policy_state.prune_work_done_bucket(pn, st);
-                                            // 2026-06-24 P1-3: prune the new
-                                            // `work.ready` / `test.passed` /
-                                            // `test.failed` buckets so the
-                                            // next round's emits land without
-                                            // colliding with the prior round's
-                                            // entries.
-                                            policy_state.prune_work_ready_bucket(pn, st);
-                                            policy_state.prune_test_result_buckets(pn, st, ti);
-                                            // 2026-07-01-001 U1: prune
-                                            // `review.start` so a coordinator
-                                            // can start a fresh review round
-                                            // after fixes land.
-                                            policy_state.prune_review_start_bucket(pn, ti);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
                 // Write hold artifact if policy hold was triggered.
                 if let Some(ref reason) = hold_reason {
                     if let Err(e) = self.write_hold_artifact(Some(reason)) {
@@ -10476,6 +10471,19 @@ impl EventLoop {
                         ExecutionContractDecision::Reject(findings) => {
                             // Publish rejection diagnostic and guidance, do NOT accept the event
                             let finding = &findings[0];
+                            let disposition = crate::event_loop::accepted_event::from_execution_contract_rejection(
+                                crate::event_loop::accepted_event::CandidateEvent {
+                                    topic: event.topic.clone(),
+                                    payload: event.payload.clone().unwrap_or_default(),
+                                },
+                                crate::event_loop::rejection::RejectionStage::ExecutionContract,
+                                format!("{:?}", finding.kind),
+                                finding.message.clone(),
+                            );
+                            debug_assert!(
+                                !disposition.is_committable(),
+                                "execution contract rejection must never be committable"
+                            );
                             warn!(
                                 topic = %event.topic,
                                 violation = ?finding.kind,
@@ -10566,6 +10574,52 @@ impl EventLoop {
                             }
 
                             if let Some(hat_id) = &retry_target {
+                                let payload_obj = event
+                                    .payload
+                                    .as_deref()
+                                    .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok());
+                                let task_key = payload_obj
+                                    .as_ref()
+                                    .and_then(|v| v.get("task_key"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let step = payload_obj
+                                    .as_ref()
+                                    .and_then(|v| v.get("step"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let violation_code = match &finding.kind {
+                                    ExecutionContractViolationKind::TaskNotTerminal { .. } => {
+                                        "task_not_terminal"
+                                    }
+                                    _ => "execution_contract",
+                                };
+                                let source_hat = source_hat_str.unwrap_or("unknown");
+                                let (_, protocol_exhausted) = self
+                                    .state
+                                    .record_protocol_violation_signature(
+                                        source_hat,
+                                        event.topic.as_str(),
+                                        task_key,
+                                        step,
+                                        violation_code,
+                                    );
+                                if protocol_exhausted {
+                                    let fail_reason = format!(
+                                        "protocol_violation_repeated:{violation_code}"
+                                    );
+                                    warn!(
+                                        topic = %event.topic.as_str(),
+                                        reason = %fail_reason,
+                                        "U8: protocol violation retry budget exhausted; fail-closing"
+                                    );
+                                    let blocked = Event::new(
+                                        "plan.blocked",
+                                        serde_json::json!({ "reason": fail_reason }).to_string(),
+                                    );
+                                    self.bus.publish(blocked.clone());
+                                    self.state.record_event(&blocked);
+                                } else {
                                 let original_trigger =
                                     self.state.last_activation_events.iter().rev().find(
                                         |trigger| {
@@ -10619,6 +10673,7 @@ impl EventLoop {
                                     "Publishing targeted contract recovery event to source hat"
                                 );
                                 self.bus.publish(retry_event);
+                                }
                             } else if let Some(reason) = &no_retry_reason {
                                 warn!(
                                     topic = %event.topic.as_str(),
@@ -10688,6 +10743,10 @@ impl EventLoop {
             events
         };
         // --- End execution contract validation ---
+
+        // 2026-07-07-002 U2: handoff / work.done dedup side effects only for
+        // contract-committed events (never for rejected candidates).
+        self.apply_contract_committed_side_effects(&events);
 
         // Calculate had_raw_events and had_rejected_events for missing-event gate logic
         // had_raw_events: events that passed through contract validation (accepted OR rejected)
@@ -10837,6 +10896,32 @@ impl EventLoop {
 
         for (index, event) in events.into_iter().enumerate() {
             let payload = event.payload.clone().unwrap_or_default();
+
+            // 2026-07-07-002 U4: terminal-closed guard before main-events commit.
+            match self.evaluate_terminal_closed_for_event(
+                event.topic.as_str(),
+                &payload,
+                completion_topic.as_str(),
+            ) {
+                crate::event_loop::terminal_closed_guard::TerminalClosedDecision::Allow => {}
+                crate::event_loop::terminal_closed_guard::TerminalClosedDecision::RejectPostTerminal => {
+                    self.publish_post_terminal_rejection(
+                        event.topic.as_str(),
+                        "post_terminal_business_event_frozen",
+                    );
+                    continue;
+                }
+                crate::event_loop::terminal_closed_guard::TerminalClosedDecision::IgnoreDuplicateTerminal => {
+                    self.bus.publish(Event::new(
+                        "event.completion.ignored",
+                        format!(
+                            "Terminal-closed guard ignored duplicate '{}'",
+                            event.topic
+                        ),
+                    ));
+                    continue;
+                }
+            }
 
             // 2026-07-06 U9 (DEV-009): topology guard — work.ready for
             // step-NN where NN > 01 must be preceded by work.done for
@@ -11810,6 +11895,16 @@ impl EventLoop {
                 if let Some(step) = extract_step_id(&event.payload) {
                     let was_fix = step.starts_with("fix-");
                     self.state.record_test_passed(step, was_fix);
+                }
+            }
+            if event.topic.as_str() == "test.failed" {
+                if let Some(step) = extract_step_id(&event.payload) {
+                    self.state.record_validator_terminal(step, "failed");
+                }
+            }
+            if event.topic.as_str() == "plan.complete" {
+                if let Some(step) = extract_step_id(&event.payload) {
+                    self.state.last_plan_complete_step = Some(step);
                 }
             }
         }
@@ -13086,6 +13181,9 @@ impl EventLoop {
 
     /// 2026-07-02-006 plan U20: shipper routing when phase engine is on.
     fn phase_authority_rejects_shipper_emit(&self, event: &ralph_proto::Event) -> bool {
+        if self.shipper_validator_gate_rejects(event) {
+            return true;
+        }
         if !self.phase_authority.is_enabled() {
             return false;
         }
@@ -13116,7 +13214,76 @@ impl EventLoop {
         )
     }
 
+    /// 2026-07-07-002 U6: shipper success requires current-step validator terminal.
+    fn shipper_validator_gate_rejects(&self, event: &ralph_proto::Event) -> bool {
+        if event.topic.as_str() != "REVIEW_COMPLETE" {
+            return false;
+        }
+        use crate::event_loop::phase_authority::shipper_helper::{
+            ShipperValidatorGateContext, ShipperValidatorGateDecision, ValidatorTerminalKind,
+            evaluate_shipper_validator_gate,
+        };
+        let pass_or_fail = serde_json::from_str::<serde_json::Value>(event.payload.as_str())
+            .ok()
+            .and_then(|v| {
+                v.get("pass_or_fail")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_ascii_lowercase())
+            })
+            .unwrap_or_default();
+        let attempting_success = pass_or_fail == "pass"
+            || event.payload.contains("pass_with_residuals")
+            || event.payload.contains("\"verdict\":\"pass");
+        let plan_blocked_reason = self
+            .state
+            .policy_runtime_state
+            .as_ref()
+            .and_then(|s| s.last_plan_blocked_reason.clone());
+        let validator_terminal_kind = self.state.last_validator_terminal_kind.as_deref().and_then(
+            |k| match k {
+                "passed" => Some(ValidatorTerminalKind::Passed),
+                "failed" => Some(ValidatorTerminalKind::Failed),
+                _ => None,
+            },
+        );
+        let current_step = self
+            .state
+            .last_test_passed_step
+            .clone()
+            .or_else(|| self.state.last_validator_terminal_step.clone())
+            .or_else(|| self.state.last_plan_complete_step.clone());
+        let ctx = ShipperValidatorGateContext {
+            current_step,
+            validator_terminal_step: self.state.last_validator_terminal_step.clone(),
+            validator_terminal_kind,
+            plan_blocked_reason,
+            attempting_success_ship: attempting_success,
+        };
+        !matches!(
+            evaluate_shipper_validator_gate(&ctx),
+            ShipperValidatorGateDecision::Allow
+        )
+    }
+
     fn record_repair_event(&mut self, event: &ralph_proto::Event) {
+        let completion_topic = self.config.event_loop.completion_promise.clone();
+        match self.evaluate_terminal_closed_for_event(
+            event.topic.as_str(),
+            event.payload.as_str(),
+            completion_topic.as_str(),
+        ) {
+            crate::event_loop::terminal_closed_guard::TerminalClosedDecision::Allow => {}
+            crate::event_loop::terminal_closed_guard::TerminalClosedDecision::RejectPostTerminal => {
+                self.publish_post_terminal_rejection(
+                    event.topic.as_str(),
+                    "post_terminal_repair_stream_frozen",
+                );
+                return;
+            }
+            crate::event_loop::terminal_closed_guard::TerminalClosedDecision::IgnoreDuplicateTerminal => {
+                return;
+            }
+        }
         self.diagnose_plan_complete_channel(
             event,
             crate::event_loop::phase_authority::diagnosis::Channel::Repair,

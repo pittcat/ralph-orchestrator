@@ -462,6 +462,19 @@ impl TaskStore {
             .find(|t| t.key.as_deref() == Some(key) && t.loop_id.as_deref() == loop_id)
     }
 
+    /// 2026-07-07-002 U7: find live task by `(loop_id, step locus)` for keyed tasks.
+    pub fn find_by_locus_in_loop(&self, locus: &str, loop_id: Option<&str>) -> Option<&Task> {
+        self.tasks.iter().find(|t| {
+            t.loop_id.as_deref() == loop_id
+                && t
+                    .key
+                    .as_deref()
+                    .and_then(task_locus)
+                    .as_deref()
+                    == Some(locus)
+        })
+    }
+
     /// Gets a task by ID (mutable reference).
     pub fn get_mut(&mut self, id: &str) -> Option<&mut Task> {
         self.tasks.iter_mut().find(|t| t.id == id)
@@ -665,6 +678,31 @@ impl TaskStore {
                 }
                 return &self.tasks[existing_idx];
             }
+
+            // 2026-07-07-002 U7: keyed tasks with the same step locus in
+            // one loop must reuse the live record (idempotent ensure).
+            if let Some(locus) = task_locus(key) {
+                if let Some(existing_idx) = self.tasks.iter().position(|existing| {
+                    existing.loop_id.as_deref() == new_loop
+                        && existing
+                            .key
+                            .as_deref()
+                            .and_then(task_locus)
+                            .as_deref()
+                            == Some(locus.as_str())
+                }) {
+                    let existing = &mut self.tasks[existing_idx];
+                    existing.title = task.title;
+                    existing.priority = task.priority;
+                    if task.description.is_some() {
+                        existing.description = task.description;
+                    }
+                    if !task.blocked_by.is_empty() {
+                        existing.blocked_by = task.blocked_by;
+                    }
+                    return &self.tasks[existing_idx];
+                }
+            }
         }
 
         // R4 (2026-06-14-003 plan): single-U contract.  When the
@@ -828,6 +866,10 @@ fn unit_from_key(key: &str) -> Option<String> {
 /// is the `{plan_name}:step-XX` middle portion of the canonical key
 /// shape.  Keys that do not match the canonical 4-segment shape
 /// return `None` (the contract falls through to the legacy behaviour).
+pub fn live_task_locus(key: &str) -> Option<String> {
+    task_locus(key)
+}
+
 fn task_locus(key: &str) -> Option<String> {
     let mut parts = key.split(':');
     // Drop the prefix segment (`ce-executor`).

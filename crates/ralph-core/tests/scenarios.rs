@@ -3528,6 +3528,45 @@ fn test_ce_executor_serial_shipper_hard_fail_promotion() {
     run_workflow_guard_scenario(yaml);
 }
 
+// 2026-07-07-002 plan Unit 10: true runtime regression scenarios for
+// ce-executor-serial protocol stability (Units 1-8 integration).
+#[test]
+fn test_ce_executor_serial_runtime_protocol_happy_path() {
+    let yaml =
+        load_scenario("tests/scenarios/ce_executor_serial_runtime_protocol_happy_path.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_ce_executor_serial_rejects_post_terminal_business_event() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_serial_rejects_post_terminal_business_event.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_ce_executor_serial_shipper_waits_for_validator() {
+    let yaml =
+        load_scenario("tests/scenarios/ce_executor_serial_shipper_waits_for_validator.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_ce_executor_serial_task_identity_idempotent() {
+    let yaml =
+        load_scenario("tests/scenarios/ce_executor_serial_task_identity_idempotent.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_ce_executor_serial_protocol_violation_retry_then_fail_close() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_serial_protocol_violation_retry_then_fail_close.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
 // 2026-07-04-001 plan U10: BDD scenarios for OPAC agent discipline.
 // ACL-1: non-coordinator worker attempting out-of-scope emit is
 // rejected and routed through task.resume recovery.

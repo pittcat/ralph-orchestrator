@@ -25,6 +25,7 @@ mod ephemeral_isolation_integration;
 mod event_filter;
 mod event_policy;
 mod execution_contract;
+mod execution_contract_commit_boundary;
 mod handoff_dispatch;
 mod hat_backend;
 mod hat_exhaustion;
@@ -40,6 +41,7 @@ mod objective;
 mod origin_guard;
 mod payload_types;
 mod persistent_mode;
+mod post_terminal_rejection;
 // 2026-07-04-001 plan U16 (KTD-13): task.resume consumer triggers
 // routing validation tests.
 mod u16_resume_routing;

@@ -56,6 +56,17 @@ Preset YAML 是作者视角的单文件；**运行时从不把整份 preset 喂�
 - 手写 `task_id`（须 `ralph tools task list` 取得）
 - 同一 activation 多条业务 emit（isolated 单事件预算）
 - 终态 emit 前夹带其它业务事件
+- 在 `crates/ralph-core/data/*.md` 写 preset 专用 hat 名 / 拓扑 / 一次性诊断术语（专用知识只放 preset instructions）
+
+## 文档分层（data skill vs preset instructions）
+
+| 层 | 位置 | 内容 |
+|---|---|---|
+| 通用 agent guide | `crates/ralph-core/data/ralph-tools*.md` | emit/task/recovery/precheck 通用语义、EmitResult、bounded retry、live task identity |
+| Preset 专用 | `presets/en/<name>.yml` hat `instructions:` | 触发状态表、hat 角色、topic 编排、禁止动作 |
+| Loop 外评审 | `skills/ralph-preset-common/references/` | 作者/评审如何检查分层与 AAF |
+
+Author 起草 recovery 路径时：**data docs 引用 + preset 状态表行**，不得在 data docs 复制 preset 状态表。
 
 ## Coordinator 分支（≤3 hat）
 

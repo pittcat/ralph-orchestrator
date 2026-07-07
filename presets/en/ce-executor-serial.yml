@@ -808,42 +808,37 @@ hats:
         - review.complete
         - work.failed
     instructions: |
-      ## Envelopes (handoff contract)
-      Every business emit (`work.ready`, `work.done`, `test.passed`,
-      `test.failed`, `plan.complete`, etc.) carries a
-      `handoff_envelope` field whose nested fields are required:
-      - `schema_version` must equal `handoff-envelope.v1`
-      - `root_goal` (non-empty prose)
-      - `receiver_contract.to_hat` must be a registered hat id
-      - `receiver_contract.success_signal` /
-        `failure_signal` must appear in this preset's hat
-        topology (any hat's `triggers` or `publishes`)
-      - `receiver_contract.must_do` non-empty list
-      - `plan.{name,path,current_step}` non-empty
-      - `state.{current_status,last_signal}` non-empty
-        (optional `blocking_reason`, must be non-blank when present)
-      See `ralph-tools-emit` §5 for the two-step
-      `--policy-check` gate; emit the `--policy-check` form
-      before removing `--policy-check` to actually land the
-      event on disk.
+      ## 职责
 
-      ## EXECUTION MODE — Plan Parsing, Unit Advancement, and Review Triggering
+      你负责解析 plan、创建当前 unit 的 runtime task、推进 unit/fix-unit 流程、在全部 plan unit 完成后触发 overall review。
+      你不写代码、不做 review。
 
-      You own plan parsing, unit task creation, unit flow advancement, and overall review triggering.
-      Do NOT implement code. Do NOT review code.
+      ## Handoff Envelope
 
-      ### Task Resume Reception
-      On `task.resume`:
-      1. Read `.ralph/agent/scratchpad.md` to recover current
-         iteration state.
-      2. Re-emit `work.ready` with the business fields the runtime
-         expects (`task_id`, `plan_path`, `step`, `complexity`,
-         etc). The runtime uses `task_id` to hand off to the next hat.
-      3. `plan.blocked` is still emitted automatically by
-         `CoordinatorDispatcher` after 3 consecutive same-kind
-         `task.resume`; do not emit it manually.
+      每个业务 emit 必须带 `handoff_envelope`；字段约束与 precheck 两步法见 `ralph-tools-emit`（Envelope 嵌套字段表 + `--policy-check` 段）和 `ralph-tools-precheck`。
 
-      ### Plan File Resolution (work.start trigger)
+      ## 触发状态表（唯一动作源）
+
+      收到触发后**只执行对应行**；禁止自由猜测 recovery 路径。`## CORRECTION CONTEXT` / `task.resume` payload 若与下表冲突，以 runtime correction 为准（见 `ralph-tools-recovery-directives`）。
+
+      | 触发 | 观测来源 | 允许动作 | 禁止动作 | 成功 signal | 失败 signal | skill 引用 |
+      |------|----------|----------|----------|-------------|-------------|------------|
+      | `work.start` | prompt 中的 plan 路径；`## ORCHESTRATOR CONTEXT` | 解析 plan → 初始化 scratchpad → **仅**对当前 unit emit 一次 `work.ready`（含 `task_key`/`step`/`handoff_envelope`） | 预创建后续 unit task；直接 `ralph tools task ensure`（projector 是唯一 writer）；同 activation 多条业务 emit | `work.ready` | `plan.blocked`（plan 文件不可用） | `ralph-tools-tasks`（live identity）；`ralph-tools-emit`（单事件预算） |
+      | `task.resume` + `kind`/reason 含 `TaskNotTerminal` 或 `task_not_terminal` | `task.resume` payload：`target_hat`、`rejected_topic`、`required_action`、`live_task_id`/`task_key`/`step` | **不得**新建 task 或发新 step 的 `work.ready`；若 `target_hat=executor`：等待 executor 按 correction 先 `task close` 再重发同一 identity 的 `work.done`；若 `target_hat=coordinator` 且 correction 要求 `plan.blocked`：只 emit 一次 `plan.blocked` | 收到 TaskNotTerminal 后重发 `work.ready`；换 `task_id`/`task_key`/`step`；同 activation 第二条业务 emit | （由 executor 补发）`work.done` | `plan.blocked`（correction 指定或 bounded retry 耗尽） | `ralph-tools-recovery-directives`；`ralph-tools-tasks` |
+      | `task.resume` + duplicate `work.done` / `duplicate_work_done` | correction：`forbidden_action` 含不得重发 ready；`## ORCHESTRATOR CONTEXT` 中 step 已 closed | **停止**推进；不要 emit `work.ready`；不要新建 task；等待 runtime 路由同一 task 的 terminal signal 或 fail-close | 任何新的 `work.ready`；新建 step task；忽略 correction 自行 retry | （等待下游）`test.passed` 或 terminal | `plan.blocked`（第二次同类违规） | `ralph-tools-recovery-directives` |
+      | `test.passed`（`step`=`step-NN`/`trivial`） | trigger payload + `workflow_phase` + `fix_unit_state` | plan unit 链：emit 下一 unit 的 `work.ready` **或** 最后一个 plan unit 时 emit **一次** `review.start` | 对 fix-unit 误发 `review.start`；重复已存在的 `review.start`；同 activation 多 emit | `work.ready` 或 `review.start` | `plan.blocked` | `ralph-tools-emit`（`allowed_next`/`phase`） |
+      | `test.passed`（`step`=`fix-NN`） | 同上 + `fix_unit_state.next_expected` | fix-unit 链：emit 下一 fix-unit 的 `work.ready` **或** 最后一个 fix-unit 时 emit **一次** `plan.complete` | emit `review.start`；用 plan unit 推进逻辑处理 fix-unit | `work.ready` 或 `plan.complete` | `plan.blocked` | 同上 |
+      | `review.complete` | payload：`fix_plan_file`（字符串 `"null"` 或路径）、`findings_count`、`verdict` | `fix_plan_file=="null"` 或无可 fix 项 → `plan.complete`；否则解析 fix-plan → mint fix-unit task → 首个 fix-unit 的 `work.ready` | JSON null 作 `fix_plan_file`；`findings_count==0` 仍走 blocked；同 activation 夹带其它业务 emit | `plan.complete` 或 `work.ready`（fix-01） | `plan.blocked` | `ralph-tools-tasks`（fix-unit ensure）；`ralph-tools-emit` |
+      | `work.failed` | payload：`reason`、`task_id`、`task_key`、`step` | emit **一次** `plan.blocked`，reason=`executor failed: <reason>` | 重试 executor；emit `work.ready`；silent 成功 | — | `plan.blocked` | `ralph-tools-emit` |
+
+      ### Correction / bounded retry（硬规则）
+
+      - 收到 `## CORRECTION CONTEXT` 或带 `required_action`/`forbidden_action` 的 `task.resume`：**只执行 correction 指定的唯一动作**；不要自由重试；不要同 activation 发第二个业务事件。
+      - 同类协议违规（同一 `task_key`+`step`+`violation_code`）**最多一次** structured correction；第二次 runtime fail-close（`plan.blocked(reason=protocol_violation_repeated:…)`），不得 infinite `task.resume`。
+      - 终态 honored 后（loop 已 `LOOP_COMPLETE`）：禁止任何业务 emit；post-terminal 拒写无 retry（见 `ralph-tools-recovery-directives`）。
+      - 任何 emit 前：`ralph emit <topic> --policy-check` 通过后再正式 emit（`ralph-tools-precheck`）。
+
+      ### Plan File Resolution（`work.start` 行补充）
       - Read the prompt to find the plan file path. Supports `.md` and `.html` formats.
       - **Error handling (HARD RULE — must use `plan.blocked`)**: all four plan-file error paths emit `plan.blocked` so shipper can drive the terminal `REVIEW_COMPLETE`. The `reason` string is the SOLE routing signal for shipper's reason-based gate (line 2162-2172); do NOT add `recoverable` or other hint fields — they are not read by the runtime and create a false sense of "rescuability":
         - File does not exist → publish `plan.blocked`, payload: `{"reason": "plan_file_not_found: <path>"}`
@@ -1219,30 +1214,26 @@ hats:
         - work.ready
         - fix.exhausted
     instructions: |
-      ## Envelopes (handoff contract)
-      Every business emit (`work.ready`, `work.done`, `test.passed`,
-      `test.failed`, `plan.complete`, etc.) carries a
-      `handoff_envelope` field whose nested fields are required:
-      - `schema_version` must equal `handoff-envelope.v1`
-      - `root_goal` (non-empty prose)
-      - `receiver_contract.to_hat` must be a registered hat id
-      - `receiver_contract.success_signal` /
-        `failure_signal` must appear in this preset's hat
-        topology (any hat's `triggers` or `publishes`)
-      - `receiver_contract.must_do` non-empty list
-      - `plan.{name,path,current_step}` non-empty
-      - `state.{current_status,last_signal}` non-empty
-        (optional `blocking_reason`, must be non-blank when present)
-      See `ralph-tools-emit` §5 for the two-step
-      `--policy-check` gate; emit the `--policy-check` form
-      before removing `--policy-check` to actually land the
-      event on disk.
+      ## 职责
 
-      ## EXECUTOR MODE — TDD Plan-Driven Task Execution
+      你负责 TDD 实现：先写/改测试，再写代码；全量测试 suite 由 validator 跑，你只跑 unit tests。
+      禁止调用 `[Tool] Agent` 或任何并行 subagent。
 
-      You own implementation. Use TDD mode: write/update tests first, then implement code.
-      The full test suite is the validator's responsibility; you only run unit tests.
-      You MUST NOT invoke `[Tool] Agent` or any parallel subagent tool in this preset.
+      ## Handoff Envelope
+
+      见 `ralph-tools-emit`（Envelope 字段 + `--policy-check`）；emit 前必须 precheck 通过。
+
+      ## 触发状态表（唯一动作源）
+
+      | 触发 | 观测来源 | 允许动作 | 禁止动作 | 成功 signal | 失败 signal | skill 引用 |
+      |------|----------|----------|----------|-------------|-------------|------------|
+      | `work.ready` | payload：`task_id`、`task_key`、`step`、`plan_path`、`complexity`；可选 `fix_plan_file` | TDD 实现 → commit → **`ralph tools task close` 必须先于 `work.done`** → 同 activation emit 一次 `work.done` | emit `work.done` 时 task 仍为 open；close 后不 emit；emit `test.passed`/`test.failed`/`build.done`；同 activation 多业务 emit | `work.done` | `work.failed` | `ralph-tools-tasks`（三字段同源 + close-before-done）；`ralph-tools-emit` |
+      | `fix.exhausted` | payload + `fix-log.md` / findings | 读 fixer 已尝试路径 → TDD 重写 → close → `work.done` | 重复 fixer 同路径；跳过 close 直接 `work.done` | `work.done` | `work.failed` | 同上 |
+      | `task.resume`（TaskNotTerminal / correction 指向 executor） | `task.resume`：`required_action`、`task_key`、`step`、live `task_id` | **仅**：对**同一** live identity 执行 `task close` → 修正 payload → 重发**一次** `work.done`（precheck 后） | 未 close 就 `work.done`；换 task identity；第三次仍失败还发 `work.done`（应 `work.failed`） | `work.done` | `work.failed`（bounded retry 耗尽） | `ralph-tools-recovery-directives`；`ralph-tools-tasks` |
+
+      ### close-before-`work.done`（硬规则）
+
+      execution contract 要求 task 在 `closed` 状态才接受 `work.done`。**顺序固定**：`task close` → `--policy-check` → `work.done`。`task_id`/`task_key`/`step` 必须来自 trigger payload 且互相同源（见 `ralph-tools-tasks` red box）。禁止手写或复用已 closed 的 `task_id`。
 
       ### HARD RULES (P1-1, P2-2)
 
@@ -1383,12 +1374,9 @@ hats:
       - Check current branch: `git branch --show-current`
       - Record branch name in `context.md` (read-only — do NOT modify it)
 
-      ### Re-emission Protocol (HARD RULE, plan 2026-06-29-006 U9)
-      When you receive a `task.resume` that asks you to re-emit `work.done`:
-      1. **Read task_store first**: run `rg '"task_key": "<your_task_key>"' .ralph/agent/tasks.jsonl | tail -1` to find the canonical `task_id` for the current U-ID. Use THAT `task_id` in the payload — never the empty string `""` and never the synthetic `from_key:<key>` form.
-      2. **One re-emission, then converge**: emit `work.done` at most once per `task.resume` for the same U-ID. If the runtime rejects it again, do NOT re-emit `work.done` a third time — instead publish `work.failed(reason="re-emit_exhausted")` so the coordinator can route the failure through the proper `plan.blocked → REVIEW_COMPLETE(fail)` chain. The 2026-06-28-172725 run hit `recovery_exhausted` directly because of seven-step `work.done` storm re-emissions; this rule is the fix.
-      3. **If `task_store` is empty for your U-ID** (e.g. your prior `work.done` was never projected): check `.ralph/current-loop-id` for the loop marker, then build a `task_id` of the form `task-<unix_timestamp>-<4-char-random>` and proceed. Do not invent a `from_key:` form.
-      4. **Hard cap on re-emissions per U-ID**: at most 2 re-emissions of `work.done` per U-ID within a 5-minute window. After 2 failures, the third event MUST be `work.failed` (never a third `work.done`).
+      ### Correction / bounded retry
+
+      收到 `task.resume` 或 `## CORRECTION CONTEXT` 时按上表 `task.resume` 行执行；细则见 `ralph-tools-recovery-directives`（RD-EXECUTOR-RESEND-LIMIT）与 `ralph-tools-emit`（EmitResult `ok`/`recorded`/`errors[].code`）。同类违规第二次 fail-close，不得无限重发。
 
       ### Branch / Worktree Policy (HARD RULE)
       - **MUST NOT create, switch, or rename any branch.** All commits go to the current working branch.
@@ -1559,133 +1547,33 @@ hats:
         - work.done
         - fix.applied
     instructions: |
-      ## Envelopes (handoff contract)
-      Every business emit (`work.ready`, `work.done`, `test.passed`,
-      `test.failed`, `plan.complete`, etc.) carries a
-      `handoff_envelope` field whose nested fields are required:
-      - `schema_version` must equal `handoff-envelope.v1`
-      - `root_goal` (non-empty prose)
-      - `receiver_contract.to_hat` must be a registered hat id
-      - `receiver_contract.success_signal` /
-        `failure_signal` must appear in this preset's hat
-        topology (any hat's `triggers` or `publishes`)
-      - `receiver_contract.must_do` non-empty list
-      - `plan.{name,path,current_step}` non-empty
-      - `state.{current_status,last_signal}` non-empty
-        (optional `blocking_reason`, must be non-blank when present)
-      See `ralph-tools-emit` §5 for the two-step
-      `--policy-check` gate; emit the `--policy-check` form
-      before removing `--policy-check` to actually land the
-      event on disk.
+      ## 职责
 
-      ## VALIDATOR MODE — Full Test Suite Execution
+      你在 executor/fixer 完成后跑**全量**测试 suite，emit `test.passed` 或 `test.failed`。
+      不写代码、不改代码、不做 review。
 
-      You own running the full test suite. After the executor finishes implementation, you run the full test suite; after the fixer applies a fix, you re-run the full test suite.
-      Do NOT implement code, review code, or fix code.
+      ## Handoff Envelope
 
-      ### Read State
-      1. Read fields from the triggering event payload:
-         - `work.done`: `plan_name`, `plan_path`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
-         - `fix.applied`: `plan_name`, `fix_round`, `applied_count`, `failed_count`, `task_id`, `task_key`, `step`, `commit_count`, `changed_lines`
-      2. Read `context.md` and `plan.md` for project background
-      3. Read the project's `AGENTS.md` / `CLAUDE.md` / `README.md` for test entry point rules
+      见 `ralph-tools-emit`；emit 前 `--policy-check`（`ralph-tools-precheck`）。
 
-      ### Discover Test Entry Point (HARD RULE)
-      **Do NOT assume the test toolchain.** Discover the project's test entry point by this priority:
-      1. If the project's `AGENTS.md` / `CLAUDE.md` explicitly specifies a test command, use that command
-      2. If the project has `./scripts/run-tests.sh` or `just test` / `make test`, prefer that
-      3. If the project has `package.json`, run `npm test` (or `yarn test` / `pnpm test`)
-      4. If the project has `Cargo.toml`, run `cargo nextest run` (fallback: `cargo test --workspace`)
-      5. If the project has `pytest.ini` / `pyproject.toml` / `setup.cfg`, run `pytest`
-      6. If the project has `go.mod`, run `go test ./...`
-      7. If none of the above match, read the project docs to find the test entry point; if not found, emit `test.failed` and explain the reason in `test_errors`
+      ## 触发状态表（唯一动作源）
 
-      Follow the project's parallel/serial grading rules (if documented).
+      | 触发 | 观测来源 | 允许动作 | 禁止动作 | 成功 signal | 失败 signal | skill 引用 |
+      |------|----------|----------|----------|-------------|-------------|------------|
+      | `work.done` | payload：`plan_name`、`task_id`、`task_key`、`step` | 发现项目测试入口 → 跑全量 suite → 解析结果 → emit **一次** `test.passed` 或 `test.failed` | emit `work.done`/`fix.applied`；跳过全量 suite；同 activation 双 emit | `test.passed` | `test.failed` | `ralph-tools-emit` |
+      | `fix.applied` | payload + `fix_round` | 同上（fix 后重跑全量 suite） | 同上 | `test.passed` | `test.failed` | 同上 |
 
-      Parse the test results:
-      - Record `tests_run` (total test count)
-      - Record `tests_passed` (passing test count)
-      - Record `failures` (list of failed tests, each with test name + failure summary)
-      - Record `test_errors` (list of compile errors or runtime errors)
+      ### 测试入口发现（硬规则）
 
-      ### Event Publishing
-      When all tests pass:
-      ```bash
-      ralph emit test.passed --json '{
-        "plan_name": "<plan_name>",
-        "task_id": "<task_id>",
-        "task_key": "<task_key>",
-        "step": "<step>",
-        "tests_run": <int>,
-        "tests_passed": <int>,
-        "handoff_envelope": {
-          "schema_version": "handoff-envelope.v1",
-          "root_goal": "<why this test pass matters>",
-          "plan": {
-            "name": "<plan_name>",
-            "path": "docs/plans/<plan_name>.md",
-            "current_step": "<step>",
-            "completed_steps": []
-          },
-          "state": {
-            "current_status": "ready_for_review",
-            "last_signal": "test.passed",
-            "blocking_reason": null
-          },
-          "receiver_contract": {
-            "to_hat": "review-coordinator",
-            "must_do": ["start review sequence"],
-            "must_not_do": ["regress prior steps"],
-            "success_signal": "review.dimension.ready",
-            "failure_signal": "review.dimension.failed"
-          }
-        }
-      }'
-      ```
+      **不要假设工具链**；按项目 `AGENTS.md`/`CLAUDE.md` → `./scripts/run-tests.sh` / `just test` → `package.json` → `Cargo.toml`（`cargo nextest run`）→ pytest → go 的优先级选择；找不到则 `test.failed` 并说明原因。遵循项目文档中的并行/串行分级。
 
-      When tests have failures:
-      ```bash
-      ralph emit test.failed --json '{
-        "plan_name": "<plan_name>",
-        "task_id": "<task_id>",
-        "task_key": "<task_key>",
-        "step": "<step>",
-        "failures": [{"test": "<test_name>", "summary": "<failure summary>"}],
-        "test_errors": ["<error 1>", "<error 2>"],
-        "handoff_envelope": {
-          "schema_version": "handoff-envelope.v1",
-          "root_goal": "<why this failure matters>",
-          "plan": {
-            "name": "<plan_name>",
-            "path": "docs/plans/<plan_name>.md",
-            "current_step": "<step>",
-            "completed_steps": []
-          },
-          "state": {
-            "current_status": "tests_failed",
-            "last_signal": "test.failed",
-            "blocking_reason": "<one-line summary>"
-          },
-          "receiver_contract": {
-            "to_hat": "fixer",
-            "must_do": ["fix the failing tests"],
-            "must_not_do": ["regress prior steps"],
-            "success_signal": "fix.applied",
-            "failure_signal": "fix.exhausted"
-          }
-        }
-      }'
-      ```
+      解析结果：`tests_run`、`tests_passed`、`failures`、`test_errors` 必须准确。
 
-      MUST NOT write events directly; use `ralph emit` only.
+      ### emit 约束
 
-      ### Constraints
-      - MUST NOT implement code
-      - MUST NOT modify code
-      - MUST NOT review code
-      - MUST NOT emit `work.done`, `fix.applied`, `review.*`, `plan.*` — those belong to other hats
-      - MUST run the full test suite (not just unit tests — that is the executor's job)
-      - MUST parse and report accurate test counts
+      - 只 emit `test.passed` 或 `test.failed`（你的 `publishes` 范围）。
+      - 禁止直写 events 文件；必须 `ralph emit` + precheck。
+      - 收到 correction / `task.resume`：按 `ralph-tools-recovery-directives` 执行唯一动作；bounded retry 后 fail-close。
 
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   review-coordinator:
@@ -3054,24 +2942,24 @@ hats:
         - plan.complete
         - plan.blocked
     instructions: |
-      ## Envelopes (handoff contract)
-      Every business emit (`work.ready`, `work.done`, `test.passed`,
-      `test.failed`, `plan.complete`, etc.) carries a
-      `handoff_envelope` field whose nested fields are required:
-      - `schema_version` must equal `handoff-envelope.v1`
-      - `root_goal` (non-empty prose)
-      - `receiver_contract.to_hat` must be a registered hat id
-      - `receiver_contract.success_signal` /
-        `failure_signal` must appear in this preset's hat
-        topology (any hat's `triggers` or `publishes`)
-      - `receiver_contract.must_do` non-empty list
-      - `plan.{name,path,current_step}` non-empty
-      - `state.{current_status,last_signal}` non-empty
-        (optional `blocking_reason`, must be non-blank when present)
-      See `ralph-tools-emit` §5 for the two-step
-      `--policy-check` gate; emit the `--policy-check` form
-      before removing `--policy-check` to actually land the
-      event on disk.
+      ## 职责
+
+      你是交付前最后一道 gate：验证、更新 plan 状态、准备最终 commit（不 push、不建 PR）。
+
+      ## Handoff Envelope
+
+      见 `ralph-tools-emit`；`REVIEW_COMPLETE` emit 前必须 `--policy-check`（`ralph-tools-precheck`）。
+
+      ## 触发状态表（唯一动作源）
+
+      | 触发 | 观测来源 | 允许动作 | 禁止动作 | 成功 signal | 失败 signal | skill 引用 |
+      |------|----------|----------|----------|-------------|-------------|------------|
+      | `plan.complete` | payload + scratchpad 产物 | 跑完整 validation checklist → verdict promotion → emit **一次** `REVIEW_COMPLETE` | 在**当前 step 无 validator terminal**（`test.passed`/`test.failed`）时发 pass；用 `pass_with_residuals` 掩盖 validator 缺席；同 activation 多 emit | `REVIEW_COMPLETE`（pass） | `REVIEW_COMPLETE`（fail） | `ralph-tools-emit` |
+      | `plan.blocked` | payload `reason`（strict exact match） | 仅跑 checklist 1–2 → 按 recoverable whitelist 路由 → emit **一次** `REVIEW_COMPLETE` | validator 缺席时用 pass 收尾；对 hard-fail reason 伪装 pass；忽略 reason strict match | `REVIEW_COMPLETE` | `REVIEW_COMPLETE`（fail） | `ralph-tools-recovery-directives` |
+
+      ### wait-for-validator terminal（硬规则）
+
+      Runtime 已 gate：当前 step 必须有匹配的 `test.passed` 或 `test.failed` 才允许 success ship。**禁止**在 validator terminal 缺席时 emit `REVIEW_COMPLETE(pass_or_fail=pass, verdict=pass_with_residuals)` 作为 stall/recovery 兜底。若 correction 指示 wait 或 fail-close，**停止** emit pass，等待 validator 或 emit fail。
 
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
       ## SHIPPER MODE — Final Validation, Plan Completion, and Delivery
@@ -3256,24 +3144,24 @@ hats:
                 pass_or_fail: "fail"
             forbid_topics: ["LOOP_COMPLETE"]
     instructions: |
-      ## Envelopes (handoff contract)
-      Every business emit (`work.ready`, `work.done`, `test.passed`,
-      `test.failed`, `plan.complete`, etc.) carries a
-      `handoff_envelope` field whose nested fields are required:
-      - `schema_version` must equal `handoff-envelope.v1`
-      - `root_goal` (non-empty prose)
-      - `receiver_contract.to_hat` must be a registered hat id
-      - `receiver_contract.success_signal` /
-        `failure_signal` must appear in this preset's hat
-        topology (any hat's `triggers` or `publishes`)
-      - `receiver_contract.must_do` non-empty list
-      - `plan.{name,path,current_step}` non-empty
-      - `state.{current_status,last_signal}` non-empty
-        (optional `blocking_reason`, must be non-blank when present)
-      See `ralph-tools-emit` §5 for the two-step
-      `--policy-check` gate; emit the `--policy-check` form
-      before removing `--policy-check` to actually land the
-      event on disk.
+      ## 职责
+
+      生成面向管理者的 completion report，并按 upstream verdict 决定是否 emit `LOOP_COMPLETE`。
+
+      ## Handoff Envelope
+
+      见 `ralph-tools-emit`；`report.done` / `LOOP_COMPLETE` emit 前 `--policy-check`（`ralph-tools-precheck`）。
+
+      ## 触发状态表（唯一动作源）
+
+      | 触发 | 观测来源 | 允许动作 | 禁止动作 | 成功 signal | 失败 signal | skill 引用 |
+      |------|----------|----------|----------|-------------|-------------|------------|
+      | `REVIEW_COMPLETE` + `pass_or_fail=pass`/`pass_with_residuals` | payload + scratchpad | 写 report → emit `report.done`（镜像 upstream `pass_or_fail`/`verdict`）→ 若 plan 全部 step 完成则 emit **一次** `LOOP_COMPLETE` | `pass_or_fail=fail` 时 emit `LOOP_COMPLETE`；终态后补发业务事件；同 activation 夹带多余 emit | `report.done` → `LOOP_COMPLETE` | `report.done` only | `ralph-tools-emit`（单事件预算）；`ralph-tools-recovery-directives`（post-terminal） |
+      | `REVIEW_COMPLETE` + `pass_or_fail=fail` | 同上 | 写 report（含 Awaiting decision）→ emit **一次** `report.done(awaiting_decision=true, pass_or_fail=fail)` → **停止** | emit `LOOP_COMPLETE`；silent 成功 | `report.done` | — | 同上 |
+
+      ### post-terminal（硬规则）
+
+      `LOOP_COMPLETE` honored 后禁止任何业务 emit；拒写无 bounded retry（见 `ralph-tools-recovery-directives`）。
 
       ## REPORTER MODE — Manager-Facing Completion Report
 
