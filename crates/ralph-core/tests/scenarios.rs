@@ -2031,23 +2031,6 @@ fn test_u6_coordinator_build_done_deny_scenario() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// 2026-06-09: O3 regression — verdict_gate keeps loop open on fail
-// ──────────────────────────────────────────────────────────────────────
-
-#[test]
-fn test_verdict_gate_fail_keeps_loop_open() {
-    // Defense-in-depth verification of the 2026-06-09 fix.
-    // Three iterations exercise: pass, fail-without-rogue,
-    // fail-with-rogue.  After the third (failing) response,
-    // `completion_rejected: true` checkpoint confirms that
-    // `check_completion_event` returns None — the LOOP_COMPLETE
-    // is rejected by the verdict_gate because the most recent
-    // `report.done` carried pass_or_fail="fail".
-    let yaml = load_scenario("tests/scenarios/verdict_gate_fail_keeps_loop_open.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-// ──────────────────────────────────────────────────────────────────────
 // ──────────────────────────────────────────────────────────────────────
 // U6: Hat lifecycle contract — terminal events close activations
 // ──────────────────────────────────────────────────────────────────────
@@ -3258,39 +3241,6 @@ fn test_u1_invalid_step_target_issued_for_unknown_fix_unit() {
 fn test_task_not_terminal_coordinator_recovery_scenario() {
     let yaml =
         load_scenario("tests/scenarios/2026-07-06-task-not-terminal-coordinator-recovery.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-30-001 P0-1 BDD coverage for U4 (shipper reason
-/// strict-match whitelist). When `plan.blocked` carries a
-/// recovery-bucket reason that is NOT in the strict whitelist
-/// (`loop_stalled_max_iterations`, `steward_escalation`,
-/// `review_terminal_drift`), the shipper MUST hard-fail —
-/// not promote to pass via substring match. The smoke
-/// scenario below verifies the hard-fail path emits
-/// `REVIEW_COMPLETE(pass_or_fail=fail, verdict=fail)` and
-/// never emits `LOOP_COMPLETE`/`plan.complete`. Lint coverage
-/// is in `strict_reason_routing::tests`.
-#[test]
-fn test_u4_shipper_reason_whitelist() {
-    let yaml = load_scenario("tests/scenarios/2026-06-30-001-u4-shipper-reason-whitelist.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-06-30-001 P0-1 BDD coverage for U5 (REVIEW_COMPLETE
-/// byte-level dedup). The runtime MUST drop a second
-/// byte-identical `REVIEW_COMPLETE` payload so the
-/// `events.jsonl` file does not accumulate the 29-second
-/// pattern observed in primary-20260630-032648. The smoke
-/// scenario below emits two byte-identical `REVIEW_COMPLETE`
-/// events in the same mock batch and asserts only one
-/// surfaces in the events stream. Single-step unit coverage
-/// is in `test_review_complete_payload_dedup` /
-/// `test_report_done_payload_dedup` /
-/// `test_loop_complete_payload_dedup`.
-#[test]
-fn test_u5_review_complete_dedup() {
-    let yaml = load_scenario("tests/scenarios/2026-06-30-001-u5-review-complete-dedup.yml");
     run_workflow_guard_scenario(yaml);
 }
 

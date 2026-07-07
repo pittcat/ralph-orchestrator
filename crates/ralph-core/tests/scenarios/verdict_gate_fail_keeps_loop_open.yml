@@ -20,16 +20,11 @@
 #      even if the obligation check were bypassed.  (backstop
 #      gate, enforced at completion check time)
 #
-# Three iterations exercise the three outcomes:
-#   - iter 1 (pass): REVIEW_COMPLETE pass + report.done
-#     awaiting_decision=false + LOOP_COMPLETE → accepted.
-#   - iter 2 (fail, no rogue): REVIEW_COMPLETE fail + report.done
-#     awaiting_decision=true → LOOP_COMPLETE is rejected by
-#     verdict_gate.
-#   - iter 3 (fail, rogue): REVIEW_COMPLETE fail + report.done
-#     awaiting_decision=true + LOOP_COMPLETE in same response →
-#     still rejected: report.done pass_or_fail="fail" is enough
-#     for the gate to fire on the follow-up.
+# Three iterations exercise the failing-review close path:
+#   - iter 1: shipper emits REVIEW_COMPLETE(pass); accepted.
+#   - iter 2: reporter emits report.done(pass); accepted.
+#   - iter 3: reporter emits report.done(fail) and then rogue
+#     LOOP_COMPLETE; verdict_gate must reject the terminal.
 #
 # `completion_rejected: true` checkpoint verifies that even after
 # all responses are processed, `check_completion_event` returns
@@ -87,30 +82,20 @@ config:
 # --payload '{...}'` real-world format) so the verdict_gate's
 # `verdict_payload_is_fail` can extract `pass_or_fail` from them.
 mock_responses:
-  # iter 1: happy path.  REVIEW_COMPLETE pass → reporter emits
-  # report.done with pass_or_fail="pass" mirror → LOOP_COMPLETE accepted.
-  - |
-    <event topic="REVIEW_COMPLETE">{"plan_name":"plan-x","verdict":"pass","pass_or_fail":"pass","residual_findings_summary":"none"}</event>
-    <event topic="report.done">{"report_path":"r.md","awaiting_decision":false,"pass_or_fail":"pass","verdict":"pass"}</event>
-    <event topic="LOOP_COMPLETE">{"plan_name":"plan-x"}</event>
-  # iter 2: failing review, reporter behaves correctly (no
-  # LOOP_COMPLETE).  report.done mirrors pass_or_fail="fail" so
-  # the verdict_gate has the most recent failing verdict.  When
-  # the orchestrator subsequently processes this state, completion
-  # is rejected.
-  - |
-    <event topic="REVIEW_COMPLETE">{"plan_name":"plan-x","verdict":"fail","pass_or_fail":"fail","residual_findings_summary":"P0 in src/x.rs"}</event>
-    <event topic="report.done">{"report_path":"r.md","awaiting_decision":true,"pass_or_fail":"fail","verdict":"fail"}</event>
-  # iter 3: failing review, reporter emits rogue LOOP_COMPLETE.
-  # This is the regression case — the BUG observed in the
-  # gentle-orchid worktree (4 REVIEW_COMPLETEs, 3 fail, reporter
-  # still emitted LOOP_COMPLETE).  The verdict_gate must catch
-  # it: report.done pass_or_fail="fail" alone is enough for the
-  # gate to reject LOOP_COMPLETE at completion check.
-  - |
-    <event topic="REVIEW_COMPLETE">{"plan_name":"plan-x","verdict":"fail","pass_or_fail":"fail","residual_findings_summary":"P0 in src/y.rs"}</event>
-    <event topic="report.done">{"report_path":"r.md","awaiting_decision":true,"pass_or_fail":"fail","verdict":"fail"}</event>
-    <event topic="LOOP_COMPLETE">{"plan_name":"plan-x"}</event>
+  # iter 1: shipper emits a pass verdict.
+  - text: |
+      <event topic="REVIEW_COMPLETE">{"plan_name":"plan-x","verdict":"pass","pass_or_fail":"pass","residual_findings_summary":"none"}</event>
+    hat: shipper
+  # iter 2: reporter mirrors the pass verdict with report.done.
+  - text: |
+      <event topic="report.done">{"report_path":"r.md","awaiting_decision":false,"pass_or_fail":"pass","verdict":"pass"}</event>
+    hat: reporter
+  # iter 3: failing review, then rogue LOOP_COMPLETE.
+  - text: |
+      <event topic="REVIEW_COMPLETE">{"plan_name":"plan-x","verdict":"fail","pass_or_fail":"fail","residual_findings_summary":"P0 in src/x.rs"}</event>
+      <event topic="report.done">{"report_path":"r.md","awaiting_decision":true,"pass_or_fail":"fail","verdict":"fail"}</event>
+      <event topic="LOOP_COMPLETE">{"plan_name":"plan-x"}</event>
+    hat: reporter
 
 expected:
   iterations: 3

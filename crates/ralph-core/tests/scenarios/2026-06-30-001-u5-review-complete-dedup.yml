@@ -34,27 +34,26 @@ config:
 
 mock_responses:
   # 第一次 REVIEW_COMPLETE
-  - |
-    <event topic="REVIEW_COMPLETE">
-    verdict: pass
-    pass_or_fail: pass
-    final_findings_count: 0
-    </event>
+  - text: |
+      <event topic="REVIEW_COMPLETE">
+      {"verdict":"pass","pass_or_fail":"pass","final_findings_count":0}
+      </event>
+    hat: reviewer
   # 字节级相同的第二次 REVIEW_COMPLETE
   # (在同 batch 内被 dedup,不应在 events 流中出现)
-  - |
-    <event topic="REVIEW_COMPLETE">
-    verdict: pass
-    pass_or_fail: pass
-    final_findings_count: 0
-    </event>
-  - |
-    <event topic="report.done">
-    verdict: pass
-    summary: u5-dedup-demo done
-    </event>
-  - |
-    waiting.
+  - text: |
+      <event topic="REVIEW_COMPLETE">
+      {"verdict":"pass","pass_or_fail":"pass","final_findings_count":0}
+      </event>
+    hat: reviewer
+  - text: |
+      <event topic="report.done">
+      {"verdict":"pass","summary":"u5-dedup-demo done"}
+      </event>
+    hat: reporter
+  - text: |
+      waiting.
+    hat: reporter
 
 expected:
   iterations: 4

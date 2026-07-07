@@ -37,6 +37,7 @@ config:
         - "REVIEW_COMPLETE"
         - "report.done"
         - "work.done"
+        - "test.passed"
         - "review.complete"
       completion_after_terminal:
         duplicate_terminal: reject
@@ -46,6 +47,15 @@ config:
         work.done:
           payload: json_object
           required_fields: [plan_name, task_id, task_key, step]
+        test.passed:
+          payload: json_object
+          required_fields:
+            - plan_name
+            - task_id
+            - task_key
+            - step
+            - tests_run
+            - tests_passed
         review.complete:
           payload: json_object
           required_fields:
@@ -83,6 +93,9 @@ config:
     review-synthesizer:
       subscribes_to: [work.done]
       publishes: [review.complete, review.passed]
+    validator:
+      subscribes_to: [work.done]
+      publishes: [test.passed, test.failed]
     shipper:
       subscribes_to: [plan.complete, plan.blocked]
       publishes: [REVIEW_COMPLETE]
@@ -126,6 +139,11 @@ mock_responses:
       </event>
     hat: review-synthesizer
   - text: |
+      <event topic="test.passed">
+      {"plan_name":"pwr-demo","task_id":"pwr-task-02","task_key":"ce-executor:pwr-demo:step-02:u2-impl","step":"step-02","tests_run":6,"tests_passed":6}
+      </event>
+    hat: validator
+  - text: |
       <event topic="plan.complete">
       {"plan_name":"pwr-demo","completed_steps":["step-01","step-02"],"task_id":"pwr-task-02","task_key":"ce-executor:pwr-demo:step-02:u2-impl","step":"step-02","verdict":"pass_with_residuals","final_findings_count":3,"fix_round":0}
       </event>
@@ -157,19 +175,20 @@ mock_responses:
     hat: reporter
 
 checkpoints:
-  - after_response: 9
-    honor_completion: true
   - after_response: 10
-    completion_rejected: true
+    honor_completion: true
   - after_response: 11
+    completion_rejected: true
+  - after_response: 12
     completion_rejected: true
 
 expected:
-  iterations: 11
+  iterations: 12
   events:
     - topic: plan.ready
     - topic: work.done
     - topic: review.complete
+    - topic: test.passed
     - topic: plan.complete
     - topic: REVIEW_COMPLETE
     - topic: report.done
