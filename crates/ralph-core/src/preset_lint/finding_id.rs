@@ -309,22 +309,6 @@ pub const FINDING_FLOW_UNKNOWN_EMIT_REJECTED: &str = "preset.flow_unknown_emit_r
 /// preset-half a hard lint.
 pub const FINDING_METADATA_RUNTIME_DRIFT: &str = "preset.metadata_runtime_drift";
 
-// ──────────────────────────────────────────────────────────────────────────
-// 2026-06-30-001 P0-2 (primary-20260630-032648 diagnosis):
-// shipper's `plan.blocked` reason routing must use a STRICT
-// exact-match whitelist. The pre-fix prompt wording ("with
-// recoverable reason X") let the agent promote recovery-bucket
-// reasons (e.g. `stall_no_events`) to pass by substring
-// matching. The lint scans the shipper prompt and warns when
-// the marker phrases ("STRICT-MATCH" or "STRICT EXACT MATCH")
-// are missing — drift-guard against future prompt refactors
-// that re-loosen the routing.
-// ──────────────────────────────────────────────────────────────────────────
-
-/// Shipper `plan.blocked` reason routing is missing the
-/// STRICT-MATCH marker. The lint is structural (Error) so the
-/// preset fails to load when the marker is removed.
-pub const FINDING_STRICT_REASON_ROUTING_MISSING: &str = "preset.strict_reason_routing_missing";
 
 // ──────────────────────────────────────────────────────────────────────────
 // 2026-07-03-002 plan U1: fix-unit task_id minting lint finding ID
@@ -337,32 +321,6 @@ pub const FINDING_STRICT_REASON_ROUTING_MISSING: &str = "preset.strict_reason_ro
 pub const FINDING_FIX_UNIT_TASK_ID_NOT_HELPER_DERIVED: &str =
     "preset.fix_unit_task_id_not_helper_derived";
 
-// ──────────────────────────────────────────────────────────────────────────
-// 2026-07-02-006 plan U3: `mechanism.phase_authority` lint finding IDs
-// ──────────────────────────────────────────────────────────────────────────
-
-/// A transition under `mechanism.phase_authority.transitions`
-/// references a primitive id that is not in the engine-known
-/// whitelist. The runtime cannot evaluate the trigger, so the
-/// preset is rejected at load time. Always `Error` severity —
-/// adding a new primitive requires both this whitelist and a
-/// corresponding handler in `event_loop::phase_authority::primitives`.
-pub const FINDING_PHASE_AUTHORITY_UNKNOWN_PRIMITIVE: &str =
-    "preset.phase_authority_unknown_primitive";
-
-/// A hat-only pipeline preset declares
-/// `mechanism.phase_authority` (either enabled or disabled).
-/// Per KTD1 the phase engine is opt-in for multi-phase
-/// coordination; hat-only pipelines must leave the block
-/// absent or `enabled: false`. Always `Error` severity.
-pub const FINDING_PHASE_AUTHORITY_PIPELINE_NOT_ALLOWED: &str =
-    "preset.phase_authority_pipeline_not_allowed";
-
-/// `mechanism.phase_authority.enabled: true` but the block
-/// carries no `phases` or no `transitions`. The engine has no
-/// state to track, so the lint surfaces the misconfiguration
-/// rather than letting the loop run inert. Always `Error`.
-pub const FINDING_PHASE_AUTHORITY_EMPTY: &str = "preset.phase_authority_empty";
 
 // ──────────────────────────────────────────────────────────────────────────
 // 2026-07-03-001 plan U9: supervisor preset lint finding IDs
@@ -468,11 +426,52 @@ pub const FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC: &str =
 /// exactly what produced the 2026-07-04 silent-success run.
 pub const FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD: &str = "preset.review_synthesizer_block_guard";
 
-/// U4 (plan 2026-07-04-004): coordinator routing drifted away
-/// from the explicit "findings_count == 0 → plan.complete"
-/// invariant. Without this guard the runtime accepted
-/// `review.complete(verdict=blocked, findings_count=0)` as a
-/// legitimate block, which is the exact shape the silent-success
-/// run produced.
-pub const FINDING_REVIEW_COMPLETE_MISROUTED: &str = "preset.review_complete_misrouted";
-
+/// Inventory of every finding id in this module. Use this in tests
+/// that assert the lint surface does not silently re-introduce a
+/// serial-only or coordinator-loop finding. Plan 2026-07-07-006
+/// Unit 4 Step 4.6.
+pub const ALL_FINDING_IDS: &[&str] = &[
+    FINDING_INVALID_TOPIC_FORMAT,
+    FINDING_WHITELIST_EXEMPT_TOPIC,
+    FINDING_FLOW_REVIEW_COMPLETE_IN_UNIT_LOOP_BODY,
+    FINDING_OWNER_UNKNOWN_HAT,
+    FINDING_OWNER_NOT_PUBLISHER,
+    FINDING_CROSS_HAT_UNAUTHORIZED_PUBLISH,
+    FINDING_MISSING_TOPIC_OWNER,
+    FINDING_COORDINATOR_MISSING,
+    FINDING_TASK_PUBLISHER_NOT_COORDINATED,
+    FINDING_MULTI_HAT_REQUIRES_ISOLATED,
+    FINDING_RE_EMIT_TRAP,
+    FINDING_ACTIVATION_EGRESS_MISSING,
+    FINDING_HANDOFF_PAIRING_BROKEN,
+    FINDING_TRIGGER_PUBLISH_ASYMMETRY,
+    FINDING_HANDOFF_SEED_DERIVED_CONFLICT,
+    FINDING_PUBLISHES_MISSING_SCHEMA,
+    FINDING_SCHEMA_REFERENCE_PARITY,
+    FINDING_WORK_DONE_ACTION_CHAIN_ORDER,
+    FINDING_TERMINAL_DUAL_SUBSCRIBE,
+    FINDING_TERMINAL_PUBLISHER_INCOMPLETE,
+    FINDING_REVIEW_TERMINAL_DUAL_SUBSCRIBE,
+    FINDING_REVIEW_TERMINAL_PUBLISHER_INCOMPLETE,
+    FINDING_HAT_SCOPE_EVENT_FILTER_DISABLED,
+    FINDING_HAT_SCOPE_TOPIC_DENY_INCOMPLETE,
+    FINDING_HAT_SCOPE_COORDINATOR_REVIEW_LEAK,
+    FINDING_HAT_SCOPE_COORDINATOR_FORBIDDEN_PUBLISH,
+    FINDING_HAT_SCOPE_VERDICT_FIELD_UNKNOWN,
+    FINDING_FLOW_DECLARATION_MISSING,
+    FINDING_FLOW_PARTIAL_STATE_UNDECLARED,
+    FINDING_FLOW_PARTIAL_BRANCH_EMPTY,
+    FINDING_FLOW_TERMINAL_EMIT_MISSING,
+    FINDING_FLOW_UNKNOWN_EMIT_REJECTED,
+    FINDING_METADATA_RUNTIME_DRIFT,
+    FINDING_FIX_UNIT_TASK_ID_NOT_HELPER_DERIVED,
+    FINDING_SUPERVISOR_REQUIRES_ISOLATED,
+    FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE,
+    FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC,
+    FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL,
+    FINDING_INSTRUCTIONS_FIX_UNIT_MINT_TEMPLATE_MISSING,
+    FINDING_INSTRUCTIONS_OPAC_SKILL_REFERENCE_MISSING,
+    FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER,
+    FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC,
+    FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD,
+];

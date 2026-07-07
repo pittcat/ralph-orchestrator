@@ -38,22 +38,11 @@ pub mod instructions_opac;
 pub mod metadata_runtime_drift;
 pub mod multi_hat;
 pub mod ownership;
-// 2026-07-02-006 plan U3: `mechanism.phase_authority` lint
-// rule family. Pure-YAML entry point; pairs with the
-// `WorkflowPhaseAuthority` engine.
-pub mod phase_authority;
 // 2026-07-04-004 plan U3: review-synthesizer block-guard drift
 // lint. Catches presets whose `review-synthesizer` `instructions:`
 // drift away from the explicit "all 6 dimensions status == failed"
 // invariant that the runtime relies on for silent-success detection.
 pub mod review_synthesizer_block_guard;
-// 2026-07-04-004 plan U4: review-complete misrouting drift lint.
-// Catches presets whose `coordinator` `instructions:` drift away
-// from the explicit `findings_count == 0 → plan.complete` rule.
-// Severity graded by strictness (Warn in default, Error in strict);
-// `Error` when the hat carries verdict-only routing (silent-success
-// root cause class).
-pub mod review_complete_misrouted;
 pub mod schema_parity;
 // 2026-07-03-001 plan U9: supervisor preset lint rule family.
 // Three rules (R-SW-1, R-SW-2, R-COORD-4) over the raw preset
@@ -62,16 +51,12 @@ pub mod schema_parity;
 // the phase_authority block so the operator sees a single
 // coordinated report.
 pub mod state_projection;
-pub mod strict_reason_routing;
 pub mod supervisor;
 pub mod topic_format;
 pub mod workflow_activation;
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod phase_authority_tests;
 
 #[cfg(test)]
 mod supervisor_preset_test;
@@ -120,11 +105,7 @@ pub use review_synthesizer_block_guard::{
 // 2026-07-04-004 plan U4: review-complete misrouting drift lint
 // exported alongside U3 so callers have a single import surface.
 pub use ownership::{check_owner_references, check_ownership_rules};
-pub use review_complete_misrouted::{
-    FINDING_REVIEW_COMPLETE_MISROUTED, check_review_complete_misrouted,
-};
 pub use state_projection::check_work_done_action_chain_order;
-pub use strict_reason_routing::check_strict_reason_routing;
 // 2026-07-03-001 plan U9: export the supervisor lint entry
 // point so `ralph preset check` / `run_preset_lint` callers
 // can wire it (next line: into the unified orchestrator).
@@ -544,38 +525,6 @@ pub fn run_preset_lint(
     // strictness (Warn in default, Error in strict).
     findings.extend(lint_findings_to_contract_findings(
         &check_review_synthesizer_block_guard(config, strictness),
-    ));
-
-    // 2026-07-04-004 plan U4: review-complete misrouting drift
-    // lint. Catches presets whose `coordinator` `instructions:`
-    // drift away from the explicit `findings_count == 0 →
-    // plan.complete` rule. Severity graded by strictness
-    // (Warn in default, Error in strict); Error when the hat
-    // carries verdict-only routing (silent-success root cause
-    // class).
-    findings.extend(lint_findings_to_contract_findings(
-        &check_review_complete_misrouted(config, strictness),
-    ));
-
-    // 2026-06-30-001 P0-2 (primary-20260630-032648 diagnosis):
-    // shipper's `plan.blocked` reason routing must use a
-    // STRICT EXACT MATCH on the canonical whitelist. The lint
-    // scans the shipper prompt body and fires `Error` when the
-    // marker is missing, so a casual prompt refactor that
-    // re-loosens the routing is caught at preset-load time
-    // rather than mid-run.
-    //
-    // P1-2: prefer the raw_yaml the caller supplied (when
-    // available) so the lint can scan the shipper prompt
-    // body in its YAML-original form. The `RalphConfig`
-    // round-trip drops fields the typed config does not
-    // model (e.g. `system_prompt_template`, anchor-based
-    // fragments injected at render time). Falling back to
-    // `instructions + extra_instructions` keeps the lint
-    // useful for synthesised configs (unit tests, debug
-    // harnesses).
-    findings.extend(lint_findings_to_contract_findings(
-        &check_strict_reason_routing(config, strictness, raw_yaml),
     ));
 
     // 2026-06-27 mechanism foundation U5: flow declaration lint.

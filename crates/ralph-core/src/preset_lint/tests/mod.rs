@@ -10,9 +10,11 @@
 //! - [`ownership`] — 16 tests (R2/R3/R4 ownership rules, R5
 //!   coordinator rules, severity mapping, deterministic sorting).
 //! - [`run_preset_lint`] — 4 tests (U3 end-to-end integration).
+//! - [`finding_id_lock`] — 1 test (Unit 4 finding-id surface lock).
 
 use super::*;
 
+mod finding_id_lock;
 mod ownership;
 mod run_preset_lint;
 mod topic_format;

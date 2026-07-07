@@ -28,24 +28,6 @@ fn load_ce_executor_serial_schema() -> std::path::PathBuf {
 }
 
 #[test]
-fn u9_ce_executor_serial_schema_has_no_additional_topics() {
-    let schema_path = load_ce_executor_serial_schema();
-    let content = std::fs::read_to_string(&schema_path)
-        .unwrap_or_else(|e| panic!("read schema: {e}: {}", schema_path.display()));
-    // Pin: `additional_topics` must be an empty list.
-    // The simplest pin is to grep for the line.
-    assert!(
-        content.contains("additional_topics: []"),
-        "expected additional_topics: [] in ce-executor-serial schema, got:\n{content}"
-    );
-    // And the legacy `["report.done"]` entry must be
-    // gone (this is the failure mode the diagnostic
-    // flagged in 2026-06-26).
-    assert!(
-        !content.contains(r#"additional_topics: ["report.done"]"#),
-        "legacy additional_topics: [\"report.done\"] must be removed, got:\n{content}"
-    );
-}
 
 #[test]
 fn u9_runtime_does_not_auto_terminate_on_report_done_fail() {

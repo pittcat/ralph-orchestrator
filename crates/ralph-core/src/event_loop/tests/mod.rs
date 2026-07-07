@@ -8,6 +8,7 @@ mod audit_severity_ssot;
 mod backpressure;
 mod build_prompt;
 mod ce_executor;
+mod fallback_recovery_fail_close;
 mod chain_validation;
 mod common;
 mod completion_honored;
