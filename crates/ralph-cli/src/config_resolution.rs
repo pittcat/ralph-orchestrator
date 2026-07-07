@@ -69,7 +69,7 @@ pub(crate) fn default_core_value() -> Result<Value> {
             "enforce_current_unit",
             // 2026-06-24 plan U2: max_residuals is u32-typed
             // (default 8). Strip the operator-default placeholder so
-            // the preset opt-in (8 for ce-executor-serial) survives
+            // the preset opt-in (8 for ce-executor-pipeline) survives
             // `merge_hats_overlay`.
             "max_residuals",
             // 2026-07-03-001 plan U1: supervisor is opt-in.

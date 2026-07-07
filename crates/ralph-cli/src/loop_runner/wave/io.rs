@@ -306,7 +306,7 @@ pub fn read_worker_events_with_retry(path: &Path, timeout: Duration) -> Vec<ralp
 /// review-coordinator — a self-inflicted stall on an already-partial
 /// wave. `review-synthesizer` is the wave-result aggregator and
 /// declares `wave.worker.failed` in its `publishes` list (see
-/// `presets/en/ce-executor-serial.yml`), so the synthetic record
+/// `presets/en/ce-executor-pipeline.yml`), so the synthetic record
 /// now passes the origin guard and reaches the synthesizer as the
 /// intended aggregated-failure signal.
 ///

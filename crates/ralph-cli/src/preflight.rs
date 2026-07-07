@@ -675,10 +675,10 @@ const ALLOWED_HATS_TOP_LEVEL: &[&str] = &[
     // it is safe to allow it through the operator/hat-collection
     // security boundary.
     "topic_format_whitelist",
-    // 2026-06-24 KTD-Drift: builtin presets (e.g. `ce-executor-serial`)
-    // declare `telemetry.runtime_diagnosis.drift.coord_join_mode: serial`
-    // for the 4-dim serial review chain (parallel default's 60% threshold
-    // would false-positive on the structurally-low 1/4 rate). The
+    // 2026-06-24 KTD-Drift: builtin presets may declare
+    // `telemetry.runtime_diagnosis.drift.coord_join_mode` when a
+    // workflow needs a non-default join mode. The parallel default's
+    // threshold would false-positive on structurally low fan-in rates.
     // security boundary treats `telemetry.*` as operator-controlled at
     // the top level, so the preset can ONLY opt in to specific leaf
     // keys (currently just `coord_join_mode`); the operator's
@@ -701,8 +701,9 @@ const ALLOWED_HATS_TOP_LEVEL: &[&str] = &[
 // minimum. `execution_mode` and the 3 contract keys below (`event_policy`,
 // `verdict_gate`, `execution_contracts`) are hat-driven by design: a hat
 // collection declares the topology and contracts required for its safety
-// properties, so they must survive overlay merge for builtin presets like
-// `ce-executor-serial` to work end-to-end.
+// properties, so they must survive overlay merge for builtin presets
+// like `ce-executor-pipeline` and `ce-executor-supervisor` to work
+// end-to-end.
 //
 // Note: resource budgets (`max_iterations`, `max_runtime_seconds`,
 // `checkpoint_interval`) and `enforce_hat_scope` are intentionally
@@ -711,10 +712,8 @@ const ALLOWED_HATS_TOP_LEVEL: &[&str] = &[
 // disable scope enforcement behind the user's back.
 //
 // `state_projection` (2026-06-18) joins the hat-driven opt-in list.
-// A preset that opts in to state projection (e.g.
-// `presets/en/ce-executor-serial.yml` declares
-// `event_loop.state_projection.enabled: true` and the four canonical
-// actions) must have those settings survive `merge_hats_overlay` even
+// A preset that opts in to state projection must have those settings
+// survive `merge_hats_overlay` even
 // when the operator ralph.yml does not declare its own
 // `state_projection` subtree. Without this entry, the operator's
 // `event_loop` block (which carries budget/promise keys) would shadow
@@ -747,7 +746,7 @@ const PRESET_OPT_IN_WHEN_OPERATOR_OMITS: &[&str] = &[
     "ephemeral_isolation",
     "enforce_current_unit",
     // 2026-06-24 plan U2: max_residuals is opt-in so the preset
-    // value (8 for ce-executor-serial) is silently applied
+    // value survives when the operator omits the key
     // when the operator's ralph.yml omits the key. Without this
     // entry, the shipper hat prompt gets the framework default
     // (8) but operator overrides would silently overwrite it
@@ -860,7 +859,7 @@ fn extract_hat_overlay_from_preset(preset_value: Value) -> Result<Value> {
     // branch in `merge_hats_overlay` (the test goes through the
     // full overlay path and deserialises into `RalphConfig`,
     // asserting `config.mechanism` is `Some(_)` for the
-    // `ce-executor-serial` fixture).
+    // `ce-executor-pipeline` fixture).
     let default_keys: Vec<&str> = ALLOWED_HATS_TOP_LEVEL
         .iter()
         .copied()
@@ -1144,9 +1143,8 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
     // boundary in spirit — `telemetry.*` remains operator-controlled at
     // the top level (see `ALLOWED_HATS_TOP_LEVEL`); we are simply
     // allowing the KTD-Drift opt-in to ride through `merge_hats_overlay`
-    // for preset opt-in scenarios (e.g. `presets/en/ce-executor-serial.yml`
-    // shipping with `coord_join_mode: serial` for the 4-dim serial
-    // review chain). KTD-Drift e2e guard
+    // for preset opt-in scenarios that need a non-default join mode.
+    // KTD-Drift e2e guard
     // `merge_hats_overlay_preserves_coord_join_mode_via_default_core_value`
     // pins this contract.
     if let Some(preset_telemetry_value) = mapping_get(hats_mapping, "telemetry") {
@@ -1399,8 +1397,8 @@ hats:
     // count being `0`.
     #[test]
     fn overlay_round_trip_preserves_mechanism_block_from_preset() {
-        // Mimic the structure of `presets/en/ce-executor-serial.yml`
-        // — operator's ralph.yml is empty, preset supplies everything.
+        // Mimic the structure of the pipeline preset — operator's
+        // ralph.yml is empty, preset supplies everything.
         let core: Value = serde_yaml::from_str(
             r"
 cli:
@@ -1950,7 +1948,7 @@ event_loop:
     // exercised by the test below.
     #[test]
     fn merge_hats_overlay_preserves_preset_opt_in_event_loop_keys_when_operator_omits_them() {
-        // bold-heron (2026-06-19): ce-executor-serial declares these keys
+        // bold-heron (2026-06-19): the pipeline preset declares these keys
         // but operator ralph.yml typically omits them; they must not fall
         // back to framework defaults.
         let core: Value = serde_yaml::from_str(
@@ -2160,7 +2158,7 @@ hats:
 
     // ──────────────────────────────────────────────────────────────────────
     // 2026-06-18 perky-maple regression: `state_projection` is opt-in at
-    // the preset level (presets/en/ce-executor-serial.yml declares
+    // the preset level (the pipeline preset declares
     // `event_loop.state_projection.enabled: true`). The previous
     // verification path only deserialized the preset YAML in isolation
     // (`presets.rs::test_ce_executor_state_projection_enabled_*`); it
@@ -2200,8 +2198,8 @@ hats:
         )
         .unwrap();
 
-        // Preset declares state_projection (mirrors
-        // presets/en/ce-executor-serial.yml:98-121). The minimal
+        // Preset declares state_projection (mirrors the pipeline
+        // preset). The minimal
         // per-action shape must include `kind` + the field names the
         // projector looks up; the exact set of action fields is
         // verified by `presets::test_ce_executor_state_projection_enabled_serial_en`
@@ -2355,12 +2353,11 @@ hats:
     /// The drift-detector's `CoordJoinMode` enum has no production-path
     /// test today; the only coverage lives in the `telemetry` config
     /// parser's own unit tests (which never touch `merge_hats_overlay`).
-    /// `ce-executor-serial` ships with
-    /// `telemetry.runtime_diagnosis.drift.coord_join_mode: serial` and
-    /// relies on the merge step keeping it alive when the operator's
-    /// `ralph.yml` omits the field. A regression that drops the preset
-    /// opt-in would silently revert serial-mode presets to the
-    /// parallel default (60% threshold), causing the drift detector to
+    /// The pipeline preset ships with
+    /// `telemetry.runtime_diagnosis.drift.coord_join_mode` when the
+    /// operator omits the field. A regression that drops the preset
+    /// opt-in would silently revert the workflow to the parallel
+    /// default (60% threshold), causing the drift detector to
     /// raise `coord_join_rate 1/4 < 60%` false positives on the
     /// structurally-low serial workflow. This test pins the
     /// production-path contract.

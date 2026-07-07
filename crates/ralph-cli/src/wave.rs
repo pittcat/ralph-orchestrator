@@ -2389,7 +2389,7 @@ event_loop:
     /// (`allow_unsafe_cli_emit: false`), the `--unsafe-no-policy-check`
     /// flag MUST be ignored — the precheck still runs. This
     /// closes the bypass that would otherwise let agents skip
-    /// schema validation on a `ce-executor-serial` preset.
+    /// schema validation on a builtin pipeline preset.
     #[test]
     fn test_wave_emit_unsafe_bypass_blocked_when_config_denies() {
         let tmp = TempDir::new().unwrap();
@@ -2419,7 +2419,7 @@ event_loop:
     /// `allow_unsafe_cli_emit: true`, the `--unsafe-no-policy-check`
     /// flag MUST work — the precheck is skipped and the wave
     /// emit writes through. This is the documented escape hatch
-    /// for non-`ce-executor-serial` presets.
+    /// for presets that explicitly allow it.
     #[test]
     fn test_wave_emit_unsafe_bypass_allowed_when_config_permits() {
         let tmp = TempDir::new().unwrap();

@@ -44,7 +44,7 @@ pub(crate) struct ExecutionOutcome {
 /// Injects Ralph hat execution context environment variables into a backend.
 /// Overwrites any existing Ralph reserved variables.
 ///
-/// `hats_source_label` carries the preset label (e.g. `builtin:ce-executor-serial`)
+/// `hats_source_label` carries the preset label (e.g. `builtin:ce-executor-pipeline`)
 /// that the loop was started with. We propagate it as `RALPH_HATS_SOURCE` so that
 /// any in-process CLI invocation (notably `ralph emit` and `ralph wave emit`)
 /// inherits the same `event_policy.schemas` the loop runner sees, even when the

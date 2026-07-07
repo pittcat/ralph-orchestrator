@@ -130,7 +130,7 @@ chmod +x ralph
 
    ```bash
    ralph init --backend claude
-   ralph run -c ralph.yml -H builtin:ce-executor-serial
+   ralph run -c ralph.yml -H builtin:ce-executor-pipeline
    ```
 
 #### Custom Backend Command
@@ -911,15 +911,15 @@ Look for `completion_rejection_signature` in the output to see what was blocking
 
 ```bash
 # Check topology
-ralph hats validate -H builtin:ce-executor-serial
-ralph hats validate -H builtin:ce-executor-serial
+ralph hats validate -H builtin:ce-executor-pipeline
+ralph hats validate -H builtin:ce-executor-pipeline
 
 # Check open tasks
 ralph tools task list
 
 # Check preflight
-ralph preflight -c ralph.yml -H builtin:ce-executor-serial
-ralph preflight -c ralph.yml -H builtin:ce-executor-serial
+ralph preflight -c ralph.yml -H builtin:ce-executor-pipeline
+ralph preflight -c ralph.yml -H builtin:ce-executor-pipeline
 ```
 
 See [Loop Detection](../advanced/loop-detection.md) for the technical details of backlog detection and [Presets](../guide/presets.md) for completion gate configuration.

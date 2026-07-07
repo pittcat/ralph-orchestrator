@@ -187,7 +187,7 @@ pub fn load_workspace_config(
 /// the environment, merge the matching preset's `event_policy` on top
 /// of the workspace config. This is the C1 path that closes the
 /// loop-subprocess precheck hole described in plan 001 §4.3: an agent
-/// running inside `ralph run -H builtin:ce-executor-serial` can call
+/// running inside `ralph run -H builtin:ce-executor-pipeline` can call
 /// `ralph emit` / `ralph wave emit` without re-passing `-H`, and the
 /// CLI still gets the same `event_policy.schemas` the loop sees.
 ///
@@ -2085,7 +2085,7 @@ pub fn build_emit_result_parts(
 
 /// Whether the typed `emit_result_summary` config flag is on.
 /// U2 (2026-07-06-004 fix-plan) gates the summary extraction on
-/// this so non-serial presets and ad-hoc emits see no
+/// this so pipeline presets and ad-hoc emits see no
 /// behavioural change.
 fn envelope_summary_enabled(config: Option<&RalphConfig>) -> bool {
     config
@@ -2451,9 +2451,9 @@ event_loop:
     }
 
     // ------------------------------------------------------------------
-    // 2026-07-06-004 plan U10: end-to-end serial policy-check
+    // 2026-07-06-004 plan U10: end-to-end pipeline policy-check
     // exercises the handoff envelope validator through the CLI
-    // entry point. The serial preset enables
+    // entry point. The pipeline preset enables
     // `validate_payload: true`, so a missing `handoff_envelope`
     // must surface as a missing_required_field-style rejection.
     // ------------------------------------------------------------------

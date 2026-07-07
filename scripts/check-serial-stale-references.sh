@@ -7,10 +7,11 @@
 # recommend `ce-executor-serial`, the dropped shipper handoff, or the
 # removed `progress-steward` hat.
 #
-# The script scans an "include" set (active agent docs, CLI surfaces,
-# SOPs, cursor rules) and an "exclude" set (history kept on disk for
-# auditability: `docs/report/`, `docs/brainstorms/`, old `docs/plans/`,
-# `skills/` which is Unit 6's surface).
+# The script scans an "include" set (active agent docs, handbook and
+# reference docs, CLI surfaces, SOPs, cursor rules, and the source files
+# that still carry user-facing guidance) and an "exclude" set (history
+# kept on disk for auditability: `docs/report/`, `docs/brainstorms/`,
+# old `docs/plans/`, `skills/` which is Unit 6's surface).
 #
 # Usage:
 #   bash scripts/check-serial-stale-references.sh
@@ -25,17 +26,25 @@ cd "$REPO_ROOT"
 
 # forbidden substrings — kept short so historical code markers like
 # `mechanism.phase_authority` are also caught via secondary regex.
-FORBIDDEN_REGEX='ce-executor-serial|progress-steward|shipper reason|handoff_envelope|phase_authority|strict_reason_routing|review_complete_misrouted'
+FORBIDDEN_REGEX='ce-executor-serial|progress-steward|shipper reason|phase_authority|strict_reason_routing|review_complete_misrouted'
 
 # active surfaces: anything a user or agent reads at runtime
 INCLUDE_PATHS=(
   AGENTS.md
   CLAUDE.md
   .cursor/rules
+  docs/handbook
+  docs/reference
   crates/ralph-core/data
   crates/ralph-cli/sops
   crates/ralph-cli/src/commands/init.rs
   crates/ralph-cli/src/commands/tutorial.rs
+  crates/ralph-cli/src/config_resolution.rs
+  crates/ralph-cli/src/preflight.rs
+  crates/ralph-cli/src/policy_check.rs
+  crates/ralph-cli/src/loop_runner/execution.rs
+  crates/ralph-cli/src/loop_runner/wave/io.rs
+  crates/ralph-cli/src/wave.rs
 )
 
 # historical surfaces — kept verbatim for audit and explicitly
