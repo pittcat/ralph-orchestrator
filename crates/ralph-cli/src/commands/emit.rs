@@ -3600,7 +3600,7 @@ hats:
     // ------------------------------------------------------------------
 
     /// Minimal preset fixture mirroring the section layout that
-    /// `build.rs` produces for `ce-executor-serial`. We only need
+    /// `build.rs` produces for builtin CE presets. We only need
     /// `event_policy.schemas.work.done` to exercise the
     /// required-fields surface.
     const SCHEMA_FIXTURE_YAML: &str = r#"

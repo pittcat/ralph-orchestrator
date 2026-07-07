@@ -446,7 +446,7 @@ pub struct LoopAnchorView {
     /// at a `.md` / `.html` file under `docs/plans/`).
     pub plan_path: std::path::PathBuf,
     /// Derived from `plan_path.file_stem()` — e.g.
-    /// `2026-07-04-004-fix-ce-executor-serial-silent-success-p0-p1-plan`.
+    /// `2026-07-04-004-feat-single-chain-refactor-plan`.
     pub plan_name: String,
     /// SHA captured at plan start (file
     /// `.ralph/agent/plan-baseline.sha`). `None` when no baseline
@@ -2023,7 +2023,7 @@ mod tests {
         let plan_dir = tmp.path().join("docs").join("plans");
         std::fs::create_dir_all(&plan_dir).expect("plan dir");
         let plan_path =
-            plan_dir.join("2026-07-04-004-fix-ce-executor-serial-silent-success-p0-p1-plan.md");
+            plan_dir.join("2026-07-04-004-feat-single-chain-refactor-plan.md");
         std::fs::write(&plan_path, "# plan").expect("write plan");
 
         let mut cfg = RalphConfig::default();
@@ -2034,7 +2034,7 @@ mod tests {
         assert_eq!(anchor.plan_path, plan_path);
         assert_eq!(
             anchor.plan_name,
-            "2026-07-04-004-fix-ce-executor-serial-silent-success-p0-p1-plan"
+            "2026-07-04-004-feat-single-chain-refactor-plan"
         );
         assert!(anchor.plan_baseline_sha.is_none());
         assert!(anchor.loop_start_sha.is_none());
@@ -2044,7 +2044,7 @@ mod tests {
         let json = serde_json::to_value(&anchor).expect("serialise");
         assert_eq!(
             json["plan_name"],
-            serde_json::json!("2026-07-04-004-fix-ce-executor-serial-silent-success-p0-p1-plan")
+            serde_json::json!("2026-07-04-004-feat-single-chain-refactor-plan")
         );
         assert_eq!(json["plan_path"], serde_json::json!(plan_path));
         assert_eq!(json["plan_baseline_sha"], serde_json::Value::Null);

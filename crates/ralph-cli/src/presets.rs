@@ -1185,18 +1185,18 @@ mod tests {
         }
         let merged = merge_root_with_ssot("ce-executor-pipeline");
         let preset =
-            get_preset("ce-executor-pipeline").expect("ce-executor-serial preset should exist");
+            get_preset("ce-executor-pipeline").expect("ce-executor-pipeline preset should exist");
         assert_eq!(
             merged, preset.content,
-            "Embedded ce-executor-serial must equal merge(canonical preset, schema SSOT). \
-             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-serial.yml."
+            "Embedded ce-executor-pipeline must equal merge(canonical preset, schema SSOT). \
+             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-pipeline.yml."
         );
     }
 
     /// U12 (fix-plan U12 / F-020 / R-20): the
     /// `ce-executor-supervisor` preset must satisfy the
     /// same SSOT byte-equality contract as
-    /// `ce-executor-serial` — the embedded copy must equal
+    /// `ce-executor-pipeline` — the embedded copy must equal
     /// the merge of the canonical preset YAML with the
     /// supervisor schema SSOT. Drift between canonical +
     /// schema breaks the lint surface (M-12) because the
@@ -1745,14 +1745,6 @@ mod tests {
             // every completion path — this is by design for the debug loop's
             // hypothesis/fix/verify flow.
             "debug",
-            // ce-executor-serial: 2026-06-28 plan U10 (R10) intentionally
-            // allows coordinator to emit `LOOP_COMPLETE(success=false)` as a
-            // self-stop signal when automated recovery is exhausted. This
-            // creates an early-termination path from `work.start` that does
-            // not pass through `report.done`, which the static topology
-            // validator correctly flags. The runtime still rejects missing
-            // required events on the success path.
-            "ce-executor-serial",
             // ce-executor-pipeline: 2026-07-02-003 plan U1 (R3). The 13-hat
             // flat single-consumer chain (`plan-reviewer → executor → 6 dim
             // hats → review-synthesizer → fix-planner → fixer → alignment → reporter`) is
@@ -1887,11 +1879,10 @@ mod tests {
                 strictness,
                 Some(preset.content),
             );
-            // U10: ce-executor-serial has a known topology exception
-            // (coordinator may emit `LOOP_COMPLETE(success=false)` directly
-            // from `work.start`, bypassing `report.done`). This test is
-            // focused on strict payload contract, so topology-only findings
-            // are recorded rather than failing.
+            // U10: dev presets may have known topology exceptions (e.g. a hat can
+            // emit a terminal topic directly from `work.start`). This test
+            // is focused on strict payload contract, so topology-only
+            // findings are recorded rather than failing.
             let errors: Vec<_> = report
                 .findings
                 .iter()
@@ -1932,12 +1923,6 @@ mod tests {
         // section "U5: built-in preset migration" (autoresearch, debug explicitly
         // deferred due to multi-branch completion topologies).
         //
-        // ce-executor-serial: 2026-06-28 plan U10 (R10) intentionally allows
-        // coordinator to emit `LOOP_COMPLETE(success=false)` as a self-stop
-        // signal when automated recovery is exhausted. This creates an
-        // early-termination path from `work.start` that does not pass through
-        // `report.done`, which the static topology validator correctly flags.
-        //
         // ce-executor-pipeline: 2026-07-02-003 plan U1 (R3). The 13-hat flat
         // single-consumer chain is intentionally long; the first dimension
         // hat `dim:goal-alignment` is 10 hops from the terminal `report.done`
@@ -1959,7 +1944,6 @@ mod tests {
         let topology_exempt: &[&str] = &[
             "autoresearch",
             "debug",
-            "ce-executor-serial",
             "ce-executor-pipeline",
             "ce-executor-supervisor",
         ];
