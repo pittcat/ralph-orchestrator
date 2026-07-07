@@ -215,6 +215,58 @@ mod tests {
         );
     }
 
+    /// Normalize preset content for byte-for-byte comparison so a
+    /// silent-alias detection assertion cannot be bypassed by
+    /// invisible whitespace (UTF-8 BOM), line endings (CRLF), or
+    /// case differences. Used by `test_no_serial_to_pipeline_alias`
+    /// to keep the lock honest across encoding drift.
+    ///
+    /// Strip UTF-8 BOM (`\xEF\xBB\xBF`), trim outer whitespace,
+    /// normalize CRLF/CR → LF, then lowercase. The output is a
+    /// `String` so the comparison is total-order deterministic.
+    fn normalize_for_compare(s: &str) -> String {
+        let bom = '\u{FEFF}';
+        let stripped = s.strip_prefix(bom).unwrap_or(s);
+        stripped
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .trim()
+            .to_lowercase()
+    }
+
+    /// Companion lock test: the helper used by
+    /// `test_no_serial_to_pipeline_alias` must collapse BOM, CRLF,
+    /// trailing whitespace, and case differences so a future
+    /// embedded preset YAML cannot hide a silent alias behind an
+    /// encoding artifact. This test fails first if the helper
+    /// regresses (e.g. someone drops the BOM strip or the
+    /// CRLF normalization).
+    #[test]
+    fn test_normalize_for_compare_handles_bom_crlf_case() {
+        // BOM + uppercase + trailing whitespace + CRLF on the canonical
+        // name should normalize to the bare lowercase.
+        let messy = "\u{FEFF}CE-EXECUTOR-PIPELINE\r\n";
+        assert_eq!(
+            normalize_for_compare(messy),
+            "ce-executor-pipeline",
+            "normalize_for_compare must strip BOM, collapse CRLF, and lowercase"
+        );
+        // Bare canonical and fully-clean variant must compare equal
+        // (the lock test asserts equality on the normalized form, not
+        // the raw form).
+        assert_eq!(
+            normalize_for_compare("ce-executor-pipeline"),
+            normalize_for_compare("\u{FEFF}ce-executor-pipeline\r\n")
+        );
+        // Distinct preset names must remain distinct — the helper
+        // must not collapse a real difference.
+        assert_ne!(
+            normalize_for_compare("ce-executor-pipeline"),
+            normalize_for_compare("ce-executor-lite"),
+            "normalize_for_compare must not collapse distinct preset names"
+        );
+    }
+
     /// No code path may silently re-introduce `ce-executor-serial` as a
     /// public surface under a different name (e.g. as an alias for
     /// `ce-executor-pipeline`). The registry has no alias mechanism; this
@@ -225,10 +277,15 @@ mod tests {
         // alias layer is ever added, this assertion must be revisited.
         let pipeline = get_preset("ce-executor-pipeline")
             .expect("ce-executor-pipeline must remain a public builtin");
+        let pipeline_norm = normalize_for_compare(&pipeline.content);
         for preset in PRESETS {
             // A duplicate-content + different-name entry would be a
             // silent alias. We refuse it on principle, not by accident.
-            if preset.name != pipeline.name && preset.content == pipeline.content {
+            // Use the normalized comparison so encoding drift (BOM,
+            // CRLF, case) cannot hide the duplicate.
+            if preset.name != pipeline.name
+                && normalize_for_compare(&preset.content) == pipeline_norm
+            {
                 panic!(
                     "preset '{}' has identical content to 'ce-executor-pipeline' \
                      — this is a silent alias and is forbidden by plan 2026-07-07-006",
