@@ -3106,6 +3106,10 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         "tests/scenarios/u6_coordinator_",
         "tests/scenarios/2026-07-02-",
         "tests/scenarios/isolated_with_event_projection",
+        // correction/diagnose 模块的通用行为(fixture-neutral,U8 已恢复
+        // 三个 pipeline-named 测试条目,见 d294be76 的 commit message)
+        "tests/scenarios/correction_",
+        "tests/scenarios/diagnose_from_ledger",
     ];
     const SUPERVISOR_PATH_PREFIXES: &[&str] = &[
         "tests/scenarios/opac/",

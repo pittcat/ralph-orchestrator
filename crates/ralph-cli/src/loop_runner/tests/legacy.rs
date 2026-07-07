@@ -4894,10 +4894,11 @@ fn u4_recovery_count_falls_back_to_workspace_when_session_empty() {
 // ──────────────────────────────────────────────────────────────────────────
 // 2026-06-17-004 plan U2 (R2): dimension-reviewer read-only enforcement.
 //
-// The plan layers the read-only contract at four enforcement points; this
-// module already pinned the configuration layer in
-// `integration_emit_policy::test_ce_executor_serial_dimension_reviewer_disallowed_tools_pinned`.
-// This test pins the **runtime hard-audit** layer: the per-iteration
+// The plan layers the read-only contract at four enforcement points.
+// The configuration-layer pin lived in the
+// `integration_emit_policy::test_ce_executor_serial_dimension_reviewer_disallowed_tools_pinned`
+// test, which was removed with the serial preset in plan 2026-07-07-006.
+// This module pins the **runtime hard-audit** layer: the per-iteration
 // `audit_file_modifications(hat_id)` callback that runs `git diff --stat
 // HEAD` after each iteration. If the hat has `Edit` or `Write` in
 // `disallowed_tools` and a file changed, the runtime publishes
