@@ -1206,6 +1206,13 @@ hats:
     let _ = event_loop.process_events_from_jsonl().unwrap();
 
     // The post-completion guard must refuse plan.blocked.
+    // 2026-07-07-003 fix: with no `event_policy` enabled, the runtime
+    // fallback path intercepts in the terminal-closed guard before
+    // `check_completion_guard` runs, so the diagnostic is
+    // `event.post_terminal.rejected`. When an `event_policy` IS enabled
+    // (see `test_post_terminal_reject_action_publishes_blocked_diagnostic`
+    // in post_terminal_rejection.rs), the warning/reject diagnostics
+    // from `check_completion_guard` are what we see instead.
     let topics: Vec<String> = captured
         .lock()
         .unwrap()
@@ -1213,8 +1220,10 @@ hats:
         .map(|e| e.topic.to_string())
         .collect();
     assert!(
-        topics.iter().any(|t| t == "event.completion.blocked"),
-        "U2 cross-batch: expected event.completion.blocked diagnostic; got topics: {topics:?}"
+        topics
+            .iter()
+            .any(|t| t == "event.post_terminal.rejected" || t == "event.completion.blocked"),
+        "U2 cross-batch: expected a post-terminal rejection diagnostic; got topics: {topics:?}"
     );
 
     // plan.blocked must NOT have landed in seen_topics

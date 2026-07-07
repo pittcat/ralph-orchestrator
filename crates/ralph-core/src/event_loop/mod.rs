@@ -1651,13 +1651,20 @@ impl EventLoop {
         }
     }
 
-    /// 2026-07-07-002 U4: terminal-closed guard using Unit 3 pure decision.
+    /// 2026-07-07-002 U4 + 2026-07-07-003 fix: terminal-closed guard using
+    /// Unit 3 pure decision. The post-completion *business* freeze is now
+    /// policy-aware: only `Reject` freezes at the guard. `Warn` / `Ignore`
+    /// fall through to the downstream `check_completion_guard` so the
+    /// existing policy path publishes the configured warning or
+    /// ignore-with-diagnostic. Without an enabled `event_policy`, the
+    /// guard keeps the conservative 2026-07-01 freeze (default `Reject`).
     fn evaluate_terminal_closed_for_event(
         &mut self,
         topic: &str,
         payload: &str,
         completion_topic: &str,
     ) -> crate::event_loop::terminal_closed_guard::TerminalClosedDecision {
+        use crate::config::CompletionAfterTerminalAction;
         use crate::event_loop::terminal_closed_guard::{
             classify_topic, evaluate_terminal_closed, TerminalClosedDecision, TerminalClosedInput,
         };
@@ -1666,12 +1673,21 @@ impl EventLoop {
         }
         let proto = Event::new(topic, payload);
         let is_byte_duplicate = self.state.is_review_complete_duplicate(&proto);
+        let business_action = self
+            .config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .filter(|p| p.enabled)
+            .map(|p| p.completion_after_terminal.business_after_completion.clone())
+            .unwrap_or(CompletionAfterTerminalAction::Reject);
         let input = TerminalClosedInput {
             completion_honored: true,
             topic,
             topic_class: classify_topic(topic),
             is_completion_promise: topic == completion_topic,
             is_byte_duplicate,
+            business_after_completion: business_action,
         };
         evaluate_terminal_closed(&input)
     }
