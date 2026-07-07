@@ -6,7 +6,7 @@
   },
   {
     "name": "ce-executor-pipeline",
-    "description": "Isolated-mode linear one-shot plan execution: review plan → execute whole plan with TDD + full suite green → 6 serial dimension reviewers → synthesize fix plan → fix → align → report → complete",
+    "description": "Isolated-mode linear one-shot plan execution: review plan → execute whole plan with TDD + full suite green → 6 serial dimension reviewers → synthesize findings → plan fixes → fix → align → report → complete",
     "category": "development"
   },
   {

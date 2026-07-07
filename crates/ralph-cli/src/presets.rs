@@ -31,7 +31,7 @@ const PRESETS: &[EmbeddedPreset] = &[
     },
     EmbeddedPreset {
         name: "ce-executor-pipeline",
-        description: "Isolated-mode linear one-shot plan execution: review plan → execute whole plan with TDD + full suite green → 6 serial dimension reviewers → synthesize fix plan → fix → align → report → complete",
+        description: "Isolated-mode linear one-shot plan execution: review plan → execute whole plan with TDD + full suite green → 6 serial dimension reviewers → synthesize findings → plan fixes → fix → align → report → complete",
         content: include_str!(concat!(
             env!("OUT_DIR"),
             "/presets/ce-executor-pipeline.yml"
@@ -2585,12 +2585,13 @@ mod tests {
             "ce-executor-serial",
             // ce-executor-pipeline: 2026-07-02-003 plan U1 (R3). The 13-hat
             // flat single-consumer chain (`plan-reviewer → executor → 6 dim
-            // hats → review-synthesizer → fixer → alignment → reporter`) is
+            // hats → review-synthesizer → fix-planner → fixer → alignment → reporter`) is
             // intentionally long. The first dimension hat
-            // `dim:goal-alignment` is 9 hops from the terminal
-            // `report.done` and exceeds the WAC EGRESS_MAX_HOPS=8 limit
-            // (`crates/ralph-core/src/preset_lint/workflow_activation.rs:364`),
-            // tripping `activation_egress_missing` by 1 hop. This is a known
+            // `dim:goal-alignment` is 10 hops from the terminal
+            // `report.done` and reaches the WAC EGRESS_MAX_HOPS=10 limit
+            // (`crates/ralph-core/src/preset_lint/workflow_activation.rs`).
+            // Older versions tripped `activation_egress_missing` by 1 hop.
+            // This is a known
             // false positive of the static-lint BFS bound — the chain
             // terminates deterministically via `report.done` (required_events)
             // and `LOOP_COMPLETE` (completion_promise), and the chain length
@@ -2615,10 +2616,10 @@ mod tests {
         // lint counterpart) but is its own const so the two tests can
         // diverge if needed.
         //
-        // ce-executor-pipeline: the 13-hat flat chain trips three
+        // ce-executor-pipeline: the 13-hat flat chain used to trip three
         // WAC findings on the chain head `dim:goal-alignment` whose
-        // root cause is the static-lint BFS bound (`EGRESS_MAX_HOPS=8`)
-        // in `crates/ralph-core/src/preset_lint/workflow_activation.rs:364`.
+        // root cause was the static-lint BFS bound. Keep these exemptions
+        // while older embedded/topology checks are being phased out.
         // Topology is structurally valid; the chain terminates at
         // `report.done` + `LOOP_COMPLETE`.
         const AUTHORING_EXEMPT_FINDINGS: &[(&str, &str)] = &[
@@ -2769,9 +2770,9 @@ mod tests {
         //
         // ce-executor-pipeline: 2026-07-02-003 plan U1 (R3). The 13-hat flat
         // single-consumer chain is intentionally long; the first dimension
-        // hat `dim:goal-alignment` is 9 hops from the terminal `report.done`
-        // and exceeds the WAC EGRESS_MAX_HOPS=8 limit, tripping
-        // `activation_egress_missing` by 1 hop. Known false positive of the
+        // hat `dim:goal-alignment` is 10 hops from the terminal `report.done`
+        // after the `fix-planner` split and reaches the WAC
+        // EGRESS_MAX_HOPS=10 limit. Known false positive of the
         // static-lint BFS bound — chain terminates deterministically via
         // `report.done` (required_events) and `LOOP_COMPLETE`
         // (completion_promise). Topology is structurally valid; the EGRESS
@@ -2813,14 +2814,13 @@ mod tests {
         //
         // ce-executor-pipeline: 2026-07-02-003 plan U1 (R3). The 13-hat flat
         // single-consumer chain (`plan-reviewer → executor → 6 dim hats →
-        // review-synthesizer → fixer → alignment → reporter`) is intentionally
-        // long. The first dimension hat `dim:goal-alignment` is 9 hops from
-        // the terminal `report.done` and exceeds the WAC EGRESS_MAX_HOPS=8
-        // limit, tripping three related WAC findings on that one hat:
-        // `lint.preset.activation_egress_missing` (the BFS bound rejection),
-        // `lint.preset.handoff_pairing_broken` (downstream of the egress
-        // miss), and `lint.preset.re_emit_trap` (also derived from the
-        // 8-hop BFS bound). The chain terminates deterministically via
+        // review-synthesizer → fix-planner → fixer → alignment → reporter`)
+        // is intentionally long. The first dimension hat `dim:goal-alignment`
+        // is 10 hops from the terminal `report.done` and reaches the WAC
+        // EGRESS_MAX_HOPS=10 limit. Older versions tripped three related WAC
+        // findings on that one hat: `lint.preset.activation_egress_missing`,
+        // `lint.preset.handoff_pairing_broken`, and `lint.preset.re_emit_trap`.
+        // The chain terminates deterministically via
         // `report.done` (required_events) and `LOOP_COMPLETE`
         // (completion_promise); the chain length is a deliberate design
         // choice (one hat per dimension; no consolidation). Topology is

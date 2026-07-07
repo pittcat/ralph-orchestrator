@@ -397,13 +397,14 @@ pub fn check_re_emit_trap(
 /// backtracking to find the `review.dimensions.complete` branch, so
 /// the bound must account for that overhead. The 2026-07-02-003 plan
 /// U1 (R3) `ce-executor-pipeline` preset adds a 13-hat flat single-
-/// consumer chain where the head `dim:goal-alignment` is 9 hops from
-/// `report.done` — bumping the bound from 8 to 9 lets the chain
-/// terminate through the lint check. 9 hops is still tight enough to
+/// consumer chain where the head `dim:goal-alignment` is 10 hops from
+/// `report.done` after the `fix-planner` split — bumping the bound from
+/// 9 to 10 lets the chain terminate through the lint check. 10 hops is
+/// still tight enough to
 /// catch genuine dead ends (a hat publishing to a topic with no
 /// consumer at all fails at hop 1). The T-U1-03 test fixture uses a
 /// 1-hop chain and continues to fire under the wider bound.
-const EGRESS_MAX_HOPS: usize = 9;
+const EGRESS_MAX_HOPS: usize = 10;
 
 pub fn check_activation_egress(
     config: &RalphConfig,

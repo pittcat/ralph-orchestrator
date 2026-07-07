@@ -1,22 +1,27 @@
 # ce-executor-pipeline: linear plan-driven execution preset
 #
 # Pattern: Plan → Review Plan → Execute (TDD + full suite green) → 6-Dimension
-# Serial Review → Synthesize Fix Plan → Fix → Align → Report → Complete
+# Serial Review → Synthesize Findings → Plan Fixes → Fix → Align → Report → Complete
 #
-# 12-hat topology with linear single-consumer chain:
+# 13-hat topology with linear single-consumer chain:
 # - plan-reviewer: Reviews the plan file in-place; no per-unit breakdown, no
 #   code edits. Output: plan.ready (with review_summary + plan_revised flag)
 #   or plan.blocked (plan unusable).
 # - executor: Whole-plan execution with TDD. Hard DoD = full test suite green.
-#   No per-unit task breakdown (tasks.enabled: false).
+#   The main executor delegates each Implementation Unit to exactly one
+#   subagent, then reviews, commits, checkpoints, and emits the final event
+#   itself. No runtime task breakdown (`tasks.enabled: false`).
 # - dim:goal-alignment / dim:correctness / dim:testing / dim:maintainability /
 #   dim:project-standards / dim:adversarial: Six read-only dimension hats in
 #   a flat serial chain — each reviews ONE dimension, writes a findings
 #   product file, emits EXACTLY ONE done event triggering the next dimension
 #   (last dimension triggers review-synthesizer).
 # - review-synthesizer: Reads all 6 dimension products, dedupes / merges /
-#   ranks P0-P3, writes fix_plan_file, emits EXACTLY ONE review.complete.
-# - fixer: Applies the **review-synthesizer fix plan only** (NOT the original
+#   ranks P0-P3, writes synthesized_review_file, emits EXACTLY ONE
+#   review.synthesized.
+# - fix-planner: Reads synthesized_review_file, writes fix_plan_file, emits
+#   EXACTLY ONE review.complete.
+# - fixer: Applies the **fix-planner fix plan only** (NOT the original
 #   plan); empty fix plan → no-op + fix.done{fixes_applied:0}.
 # - alignment: Cross-checks original plan execution vs fix-plan execution
 #   (separate git ranges). Records residuals; does NOT loop or block.
@@ -27,12 +32,13 @@
 # Why this architecture:
 #   - No multi-consumer topics: every event has exactly one subscriber
 #   - No coordinator loop: the chain is flat and deterministic
-#   - No subagents: dimensions are first-class hats, not parallel calls
+#   - Dimensions are first-class hats, not parallel calls; executor may use
+#     one subagent per Implementation Unit inside its own activation.
 #   - No re-review loop: alignment records residuals, never re-enters review
 #   - Verdict is single field (pass / pass_with_residuals / blocked) —
 #     downstream subscribes to ONE terminal pair, never two siblings.
 #
-# Topology exemption rationale (`EGRESS_MAX_HOPS=9` in
+# Topology exemption rationale (`EGRESS_MAX_HOPS=10` in
 # `crates/ralph-core/src/preset_lint/workflow_activation.rs:368`):
 # `handoff_pairing_broken` / `re_emit_trap` on the chain head are known
 # static-lint artifacts for this flat serial topology. The chain terminates
@@ -78,6 +84,7 @@ event_loop:
       - "review.maintainability.done"
       - "review.standards.done"
       - "review.adversarial.done"
+      - "review.synthesized"
       - "review.complete"
       - "fix.done"
       - "align.done"
@@ -105,6 +112,7 @@ event_loop:
       - {hat_id: dim:project-standards, topic: plan.ready}
       - {hat_id: dim:adversarial, topic: plan.ready}
       - {hat_id: review-synthesizer, topic: plan.ready}
+      - {hat_id: fix-planner, topic: plan.ready}
       - {hat_id: fixer, topic: plan.ready}
       - {hat_id: alignment, topic: plan.ready}
       - {hat_id: reporter, topic: plan.ready}
@@ -116,6 +124,7 @@ event_loop:
       - {hat_id: dim:project-standards, topic: plan.blocked}
       - {hat_id: dim:adversarial, topic: plan.blocked}
       - {hat_id: review-synthesizer, topic: plan.blocked}
+      - {hat_id: fix-planner, topic: plan.blocked}
       - {hat_id: fixer, topic: plan.blocked}
       - {hat_id: alignment, topic: plan.blocked}
       # executor owns work.done / work.failed
@@ -128,6 +137,7 @@ event_loop:
       - {hat_id: dim:project-standards, topic: work.done}
       - {hat_id: dim:adversarial, topic: work.done}
       - {hat_id: review-synthesizer, topic: work.done}
+      - {hat_id: fix-planner, topic: work.done}
       - {hat_id: fixer, topic: work.done}
       - {hat_id: alignment, topic: work.done}
       - {hat_id: reporter, topic: work.done}
@@ -139,6 +149,7 @@ event_loop:
       - {hat_id: dim:project-standards, topic: work.failed}
       - {hat_id: dim:adversarial, topic: work.failed}
       - {hat_id: review-synthesizer, topic: work.failed}
+      - {hat_id: fix-planner, topic: work.failed}
       - {hat_id: fixer, topic: work.failed}
       - {hat_id: alignment, topic: work.failed}
       # dim:goal-alignment owns review.goalalign.done
@@ -150,6 +161,7 @@ event_loop:
       - {hat_id: dim:project-standards, topic: review.goalalign.done}
       - {hat_id: dim:adversarial, topic: review.goalalign.done}
       - {hat_id: review-synthesizer, topic: review.goalalign.done}
+      - {hat_id: fix-planner, topic: review.goalalign.done}
       - {hat_id: fixer, topic: review.goalalign.done}
       - {hat_id: alignment, topic: review.goalalign.done}
       - {hat_id: reporter, topic: review.goalalign.done}
@@ -162,6 +174,7 @@ event_loop:
       - {hat_id: dim:project-standards, topic: review.correctness.done}
       - {hat_id: dim:adversarial, topic: review.correctness.done}
       - {hat_id: review-synthesizer, topic: review.correctness.done}
+      - {hat_id: fix-planner, topic: review.correctness.done}
       - {hat_id: fixer, topic: review.correctness.done}
       - {hat_id: alignment, topic: review.correctness.done}
       - {hat_id: reporter, topic: review.correctness.done}
@@ -174,6 +187,7 @@ event_loop:
       - {hat_id: dim:project-standards, topic: review.testing.done}
       - {hat_id: dim:adversarial, topic: review.testing.done}
       - {hat_id: review-synthesizer, topic: review.testing.done}
+      - {hat_id: fix-planner, topic: review.testing.done}
       - {hat_id: fixer, topic: review.testing.done}
       - {hat_id: alignment, topic: review.testing.done}
       - {hat_id: reporter, topic: review.testing.done}
@@ -186,6 +200,7 @@ event_loop:
       - {hat_id: dim:project-standards, topic: review.maintainability.done}
       - {hat_id: dim:adversarial, topic: review.maintainability.done}
       - {hat_id: review-synthesizer, topic: review.maintainability.done}
+      - {hat_id: fix-planner, topic: review.maintainability.done}
       - {hat_id: fixer, topic: review.maintainability.done}
       - {hat_id: alignment, topic: review.maintainability.done}
       - {hat_id: reporter, topic: review.maintainability.done}
@@ -198,6 +213,7 @@ event_loop:
       - {hat_id: dim:maintainability, topic: review.standards.done}
       - {hat_id: dim:adversarial, topic: review.standards.done}
       - {hat_id: review-synthesizer, topic: review.standards.done}
+      - {hat_id: fix-planner, topic: review.standards.done}
       - {hat_id: fixer, topic: review.standards.done}
       - {hat_id: alignment, topic: review.standards.done}
       - {hat_id: reporter, topic: review.standards.done}
@@ -210,10 +226,24 @@ event_loop:
       - {hat_id: dim:maintainability, topic: review.adversarial.done}
       - {hat_id: dim:project-standards, topic: review.adversarial.done}
       - {hat_id: review-synthesizer, topic: review.adversarial.done}
+      - {hat_id: fix-planner, topic: review.adversarial.done}
       - {hat_id: fixer, topic: review.adversarial.done}
       - {hat_id: alignment, topic: review.adversarial.done}
       - {hat_id: reporter, topic: review.adversarial.done}
-      # review-synthesizer owns review.complete
+      # review-synthesizer owns review.synthesized
+      - {hat_id: plan-reviewer, topic: review.synthesized}
+      - {hat_id: executor, topic: review.synthesized}
+      - {hat_id: dim:goal-alignment, topic: review.synthesized}
+      - {hat_id: dim:correctness, topic: review.synthesized}
+      - {hat_id: dim:testing, topic: review.synthesized}
+      - {hat_id: dim:maintainability, topic: review.synthesized}
+      - {hat_id: dim:project-standards, topic: review.synthesized}
+      - {hat_id: dim:adversarial, topic: review.synthesized}
+      - {hat_id: fix-planner, topic: review.synthesized}
+      - {hat_id: fixer, topic: review.synthesized}
+      - {hat_id: alignment, topic: review.synthesized}
+      - {hat_id: reporter, topic: review.synthesized}
+      # fix-planner owns review.complete
       - {hat_id: plan-reviewer, topic: review.complete}
       - {hat_id: executor, topic: review.complete}
       - {hat_id: dim:goal-alignment, topic: review.complete}
@@ -222,6 +252,7 @@ event_loop:
       - {hat_id: dim:maintainability, topic: review.complete}
       - {hat_id: dim:project-standards, topic: review.complete}
       - {hat_id: dim:adversarial, topic: review.complete}
+      - {hat_id: review-synthesizer, topic: review.complete}
       - {hat_id: fixer, topic: review.complete}
       - {hat_id: alignment, topic: review.complete}
       - {hat_id: reporter, topic: review.complete}
@@ -235,6 +266,7 @@ event_loop:
       - {hat_id: dim:project-standards, topic: fix.done}
       - {hat_id: dim:adversarial, topic: fix.done}
       - {hat_id: review-synthesizer, topic: fix.done}
+      - {hat_id: fix-planner, topic: fix.done}
       - {hat_id: reporter, topic: fix.done}
       # alignment owns align.done
       - {hat_id: plan-reviewer, topic: align.done}
@@ -246,6 +278,7 @@ event_loop:
       - {hat_id: dim:project-standards, topic: align.done}
       - {hat_id: dim:adversarial, topic: align.done}
       - {hat_id: review-synthesizer, topic: align.done}
+      - {hat_id: fix-planner, topic: align.done}
       - {hat_id: fixer, topic: align.done}
       - {hat_id: reporter, topic: align.done}
       # reporter owns report.done / LOOP_COMPLETE
@@ -258,6 +291,7 @@ event_loop:
       - {hat_id: dim:project-standards, topic: report.done}
       - {hat_id: dim:adversarial, topic: report.done}
       - {hat_id: review-synthesizer, topic: report.done}
+      - {hat_id: fix-planner, topic: report.done}
       - {hat_id: fixer, topic: report.done}
       - {hat_id: alignment, topic: report.done}
       - {hat_id: plan-reviewer, topic: LOOP_COMPLETE}
@@ -269,6 +303,7 @@ event_loop:
       - {hat_id: dim:project-standards, topic: LOOP_COMPLETE}
       - {hat_id: dim:adversarial, topic: LOOP_COMPLETE}
       - {hat_id: review-synthesizer, topic: LOOP_COMPLETE}
+      - {hat_id: fix-planner, topic: LOOP_COMPLETE}
       - {hat_id: fixer, topic: LOOP_COMPLETE}
       - {hat_id: alignment, topic: LOOP_COMPLETE}
     # Inline payload schemas (no `presets/schemas/` SSOT file for this
@@ -352,6 +387,18 @@ event_loop:
           - "dimension"
           - "findings_file"
           - "findings_count"
+      review.synthesized:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "executor_head_sha"
+          - "resolved_baseline_sha"  # pass-through from review.adversarial.done
+          - "synthesized_review_file"
+          - "findings_count"
+          - "p0_count"
+          - "p1_count"
+          - "findings_summary"
+          - "verdict"
       review.complete:
         required_fields:
           - "plan_name"
@@ -653,7 +700,7 @@ hats:
 
   executor:
     name: "Executor (whole-plan TDD)"
-    description: "Whole-plan execution with TDD (write/update tests first, then implement). Hard DoD = full test suite green. No per-unit task breakdown."
+    description: "Whole-plan execution with TDD (write/update tests first, then implement). Hard DoD = full test suite green. Use one subagent per Implementation Unit; the main executor reviews, commits, checkpoints, and emits."
     triggers: ["plan.ready"]
     publishes: ["work.done", "work.failed"]
     exempt_topics: ["work.done", "work.failed"]
@@ -668,10 +715,14 @@ hats:
     instructions: |
       ## EXECUTOR MODE — Whole-plan TDD execution with full-suite green hard gate
 
-      You own **whole-plan execution** with TDD. There is NO per-unit
-      breakdown for this preset (`tasks.enabled: false`); the
-      plan-reviewer has already done plan-level review, and you
-      execute the full plan in one continuous run.
+      You own **whole-plan execution** with TDD. Runtime tasks are
+      disabled for this preset (`tasks.enabled: false`), so there is no
+      Ralph task breakdown. Inside this activation, however, use
+      **exactly one subagent per Implementation Unit (U-ID)**. The main
+      executor stays responsible for reading the plan, launching each
+      Unit subagent with a narrow brief, reviewing its output, committing
+      the Unit, checkpointing progress, running the full suite, and
+      emitting the final `work.done` / `work.failed` event.
 
       ### HARD RULES
 
@@ -681,6 +732,11 @@ hats:
         `report.done` / `LOOP_COMPLETE` — those are owned by other hats
         and the `topic_deny_rules` will reject them.
       - **TDD mode**: write/update tests FIRST, then implement. RED → GREEN → REFACTOR.
+      - **Subagent cadence (HARD RULE)**: one Implementation Unit (U-ID)
+        = one subagent. Do not ask one subagent to execute multiple U-IDs,
+        and do not let a subagent emit Ralph events. Subagents write code
+        and tests only; the main executor performs review, commits, metrics,
+        policy precheck, emit, and confirm.
       - **Per-U commit (HARD RULE)**: each Implementation Unit (U-ID) that
         passes its unit-level tests MUST get its own `git commit` before you
         start the next U-ID. Do NOT batch multiple U-IDs into one commit.
@@ -716,8 +772,10 @@ hats:
          treat absence as `"first_run"`.
       2. Read the plan file end-to-end. The plan-reviewer already
          vetted and possibly revised it; trust its quality.
-      3. Search memories for relevant patterns (`ralph tools memory search ...`).
-      4. Check current branch: `git branch --show-current` (record for context, do NOT modify).
+      3. Extract the ordered Implementation Unit list (`U1`, `U2`, ...).
+         Keep this list visible in your working notes until the final emit.
+      4. Search memories for relevant patterns (`ralph tools memory search ...`).
+      5. Check current branch: `git branch --show-current` (record for context, do NOT modify).
 
       ### Step 1.5 — Flow-Audit Cross-Check (HARD RULE — gates Execution Loop)
       Do **not** start the Execution Loop until this step passes. This
@@ -767,19 +825,36 @@ hats:
 
       ### Execution Loop
 
-      Walk the Implementation Units (U-IDs) in order. For each U:
+      Walk the Implementation Units (U-IDs) in order. For each U, launch
+      exactly one subagent with only that Unit's Goal / Files / Approach /
+      Test scenarios / Verification plus the relevant repository rules.
+      The subagent must return changed files, tests run, and residual risks;
+      it must not emit Ralph events or create commits.
+
+      Main executor duties for each U:
 
       1. **RED**: Write or update the tests listed under that U's
          `**Test scenarios:**` (or equivalent). Confirm they fail.
       2. **GREEN**: Implement the minimal code per the U's
          `**Approach:**` to make the tests pass.
       3. **REFACTOR**: Refactor the code while keeping tests passing.
-      4. **Commit this U-ID immediately** (HARD RULE — before moving on):
+      4. **Review subagent output** before staging:
+         - diff touches only files allowed by this U,
+         - tests prove this U's behavior,
+         - no unrelated cleanup or preset/config drift,
+         - no Ralph events were emitted by the subagent.
+      5. **Commit this U-ID immediately** (HARD RULE — before moving on):
          ```bash
          git add <files touched for this U only>
          git commit -m "feat(scope): <U-ID> <short description>"
          ```
          One U-ID = one commit. Never defer commits to the end of the plan.
+      6. **Checkpoint before the next U-ID**:
+         - append one line to `.ralph/agent/decisions.md`:
+           `executor checkpoint: <U-ID> committed=<sha> unit_tests=<command> remaining=<U-IDs|none>`;
+         - recompute `git rev-list --count <DIFF_BASE>..HEAD`;
+         - re-read the remaining U-ID list and confirm the next Unit token;
+         - if this was the final U-ID, go directly to the Full-Suite Green Gate.
 
       ### Commit Cadence (HARD RULE)
       - Each U-ID that passes its unit tests MUST be committed independently.
@@ -791,6 +866,25 @@ hats:
       are NOT in your `publishes`. Verification evidence (test counts,
       changed lines, commit count) goes into the final `work.done`
       payload.
+
+      ### Emit-Readiness Reminder
+
+      Before you leave this activation, you MUST either emit `work.done`
+      or emit `work.failed`. Code changes, commits, tests, and notes alone
+      do not complete the hat. Run this checklist after every Unit
+      checkpoint and again after the full suite:
+
+      - all planned U-IDs have either a matching commit or a documented
+        blocker in `.ralph/agent/decisions.md`;
+      - `executor_head_sha` is `git rev-parse HEAD` after the last executor
+        commit;
+      - `resolved_baseline_sha` is copied from `plan.ready`;
+      - `tests_run`, `tests_passed`, `changed_lines`, and `commit_count`
+        are populated from actual command/git output;
+      - `ralph emit --policy-check --triggered executor ...` passes before
+        the real `ralph emit`;
+      - after the real emit, confirm it with `ralph events --events-source
+        hat-channel`.
 
       ### Full-Suite Green Gate (HARD DoD)
 
@@ -1516,11 +1610,11 @@ hats:
 
   review-synthesizer:
     name: "Review Synthesizer"
-    description: "Reads all 6 dimension products, dedupes/merges/cross-checks consistency, ranks P0-P3, writes fix_plan_file. Emits EXACTLY ONE review.complete."
+    description: "Reads all 6 dimension products, dedupes/merges/cross-checks consistency, ranks P0-P3, writes synthesized_review_file. Emits EXACTLY ONE review.synthesized."
     triggers: ["review.adversarial.done"]
-    publishes: ["review.complete"]
-    exempt_topics: ["review.complete"]
-    terminal_events: ["review.complete"]
+    publishes: ["review.synthesized"]
+    exempt_topics: ["review.synthesized"]
+    terminal_events: ["review.synthesized"]
     event_filter:
       enabled: true
       events:
@@ -1528,22 +1622,23 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
-      ## REVIEW SYNTHESIZER MODE — Merge, rank, write fix plan
+      ## REVIEW SYNTHESIZER MODE — Merge and rank dimension findings
 
       You are the final aggregator of the 6-dim serial chain. You
       receive `review.adversarial.done` (the last dimension) and
-      must produce ONE `review.complete` event. Your output drives
-      fixer (for real fixes) or straight to alignment (for empty
-      plans).
+      must produce ONE `review.synthesized` event. Your output is a
+      compact synthesized review file for `fix-planner`; you do NOT
+      write the fix plan.
 
       ### HARD RULES
-      - Emit EXACTLY ONE `review.complete` per activation. Do NOT
+      - Emit EXACTLY ONE `review.synthesized` per activation. Do NOT
         re-emit; the runner rejects extra emits in isolated mode.
-      - Do NOT emit any review.* event besides `review.complete`.
+      - Do NOT emit any review.* event besides `review.synthesized`.
       - Do NOT emit `work.done` / `work.failed` / `plan.*` /
-        `fix.*` / `align.done` / `report.done` / `LOOP_COMPLETE`.
-      - Do NOT modify code. The synthesizer is read + write of the
-        fix-plan file (under `ephemeral_isolation`).
+        `review.complete` / `fix.*` / `align.done` / `report.done` /
+        `LOOP_COMPLETE`.
+      - Do NOT modify code. Write only the synthesized review product
+        under `.ralph/review/{plan_name}/`.
 
       ### Step 1 — Read all 6 dimension products
       The 6 dimension hats wrote their findings to:
@@ -1605,11 +1700,89 @@ hats:
       - Has P1 (no P0) OR mix of P1+P2/P3 → `verdict: "pass_with_residuals"`
       - Has P0 → `verdict: "blocked"`
 
-      ### Step 7 — Write fix-plan file
+      ### Step 7 — Write synthesized review file
 
-      **Path:** `.ralph/review/{plan_name}/fix-plan.md` (under
-      `ephemeral_isolation`; gitignored). `{plan_name}` = basename of
-      `plan_path` without `.md`.
+      **Path:** `.ralph/review/{plan_name}/synthesized-review.md`.
+      `{plan_name}` = basename of `plan_path` without `.md`.
+
+      Write this exact structure:
+
+      ```markdown
+      # synthesized review: <plan_name>
+
+      ## Summary
+      <1-2 sentence summary>
+
+      ## Counts
+      - findings_count: <N>
+      - p0_count: <P0>
+      - p1_count: <P1>
+      - verdict: <pass|pass_with_residuals|blocked>
+
+      ## Findings
+      | ID | Severity | Owner | Description | Evidence | Requires verification |
+      |----|----------|-------|-------------|----------|-----------------------|
+      | <dimension>:<id> | P0/P1/P2/P3 | <owner> | <description> | <file:line or product path> | true/false |
+
+      ## Fix Planning Notes
+      - P0/P1 findings must become actionable fix-plan Units.
+      - P2/P3 findings may be deferred as DOC residuals.
+      - Preserve source finding IDs in every downstream Unit.
+      ```
+
+      ### Step 8 — Emit event
+      Pass through `plan_path`, `executor_head_sha`, and
+      `resolved_baseline_sha` from the trigger (`review.adversarial.done`).
+      ```bash
+      ralph emit review.synthesized --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.adversarial.done>","synthesized_review_file":".ralph/review/<plan>/synthesized-review.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
+      ```
+      Then stop. `fix-planner` will be triggered next.
+
+      ### OPAC reference
+      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
+      and `ralph-tools-emit` §5 for precheck rules before every emit.
+
+  fix-planner:
+    name: "Fix Planner"
+    description: "Reads synthesized_review_file, writes fix_plan_file, and emits EXACTLY ONE review.complete for fixer."
+    triggers: ["review.synthesized"]
+    publishes: ["review.complete"]
+    exempt_topics: ["review.complete"]
+    terminal_events: ["review.complete"]
+    event_filter:
+      enabled: true
+      events:
+        - review.synthesized
+    timeout: 1800
+    missing_event_grace_secs: 540
+    instructions: |
+      ## FIX PLANNER MODE — Turn synthesized review into fix plan
+
+      You receive `review.synthesized` from `review-synthesizer`.
+      Your only job is to read `synthesized_review_file`, write
+      `.ralph/review/{plan_name}/fix-plan.md`, and emit ONE
+      `review.complete` event. You do NOT re-review code and you do
+      NOT apply fixes.
+
+      ### HARD RULES
+      - Emit EXACTLY ONE `review.complete` per activation.
+      - Do NOT emit `review.synthesized` or any other review.* topic.
+      - Do NOT emit `work.done` / `work.failed` / `plan.*` /
+        `fix.*` / `align.done` / `report.done` / `LOOP_COMPLETE`.
+      - Do NOT modify code. Write only the fix-plan file under
+        `.ralph/review/{plan_name}/`.
+      - Source of truth is `synthesized_review_file`; use dimension files
+        only when evidence in the synthesized file is ambiguous.
+
+      ### Step 1 — Read context
+      From `review.synthesized` payload read: `plan_name`, `plan_path`,
+      `executor_head_sha`, `resolved_baseline_sha`,
+      `synthesized_review_file`, `findings_count`, `p0_count`,
+      `p1_count`, `findings_summary`, and `verdict`.
+
+      Read the synthesized review file. Parse its `## Findings` table.
+
+      ### Step 2 — Decide fix-plan shape
 
       #### 7a — When to write which shape
 
@@ -1618,7 +1791,7 @@ hats:
       | `p0_count > 0` OR `p1_count > 0` | **Full fix-plan** (template §7c) |
       | `verdict == "pass"` (no P0/P1) | **Placeholder** (template §7b) |
 
-      Mapping findings → Units (after Step 2 dedup):
+      Mapping findings → Units (from the synthesized review):
       - **One P0 finding → one `### U<N>.`** (do not merge unrelated P0s).
       - **One P1 finding → one `### U<N>.`** (same rule).
       - **P2/P3 only (bundled):** optional single
@@ -1635,7 +1808,7 @@ hats:
 
       **Verdict → file shape → frontmatter `verdict` (full fix-plan only):**
 
-      | Step 6 `verdict` | File | Frontmatter `verdict` |
+      | Synthesized `verdict` | File | Frontmatter `verdict` |
       |------------------|------|------------------------|
       | `pass` (no P0/P1) | §7b placeholder | (no frontmatter) |
       | `pass_with_residuals` (`p1_count > 0`, `p0_count == 0`) | §7c full | `pass_with_residuals` |
@@ -1692,8 +1865,8 @@ hats:
       type: fix
       status: active
       date: YYYY-MM-DD
-      origin_plan: <plan_path from review.complete trigger>
-      executor_head_sha: <sha from trigger>
+      origin_plan: <plan_path from review.synthesized trigger>
+      executor_head_sha: <sha from review.synthesized trigger>
       findings_source: .ralph/review/<plan_name>/
       p0_count: <int>
       p1_count: <int>
@@ -1786,7 +1959,7 @@ hats:
         `## Final Verification`).
       - Toolchain-specific commands unless project docs require them.
 
-      #### 7f — Minimal worked example (structure only)
+      #### 2f — Minimal worked example (structure only)
 
       ```markdown
       ---
@@ -1856,9 +2029,9 @@ hats:
       the original plan at `plan_path`) after all actionable Units are green.
       ```
 
-      ### Step 8 — Emit event (one terminal per activation)
-      Pass through `plan_path` and `executor_head_sha` from the trigger
-      (`review.adversarial.done`).
+      ### Step 3 — Emit event (one terminal per activation)
+      Pass through `plan_path`, `executor_head_sha`, and
+      `resolved_baseline_sha` from the trigger (`review.synthesized`).
       ```bash
       ralph emit review.complete --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","fix_plan_file":".ralph/review/<plan>/fix-plan.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
       ```
@@ -1870,7 +2043,7 @@ hats:
 
   fixer:
     name: "Fixer"
-    description: "Reads fix_plan_file from review-synthesizer and applies ONLY that fix plan (never re-executes the original plan). Empty fix plan → no-op + fix.done{fixes_applied:0}."
+    description: "Reads fix_plan_file from fix-planner and applies ONLY that fix plan (never re-executes the original plan). Empty fix plan → no-op + fix.done{fixes_applied:0}."
     triggers: ["review.complete"]
     publishes: ["fix.done"]
     exempt_topics: ["fix.done"]
@@ -1883,9 +2056,9 @@ hats:
     missing_event_grace_secs: 540
     instructions: |
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
-      ## FIXER MODE — Apply the synthesizer fix plan only (NOT the original plan)
+      ## FIXER MODE — Apply the fix-planner plan only (NOT the original plan)
 
-      You apply the **fix-plan file** produced by `review-synthesizer`.
+      You apply the **fix-plan file** produced by `fix-planner`.
       The original operator plan (`plan_path` on `review.complete`) is
       **context only** — do NOT walk its Implementation Units or re-run
       executor work. Your sole execution source is `fix_plan_file`.
@@ -2027,7 +2200,7 @@ hats:
       You audit **two separate plans** against git evidence:
       1. **Original plan** (`plan_path`) — executor-phase U-IDs, commits in
          `<DIFF_BASE>..<executor_head_sha>`.
-      2. **Fix plan** (`fix_plan_file`) — synthesizer actionable Units only
+      2. **Fix plan** (`fix_plan_file`) — fix-planner actionable Units only
          (`### U<N>.` with P0/P1 findings; excludes DOC residuals), commits
          in `<executor_head_sha>..HEAD` (fixer phase; NOT the original plan).
 
@@ -2165,7 +2338,7 @@ hats:
          ## 4. 6-Dimension Review
          For each dimension: findings_count, top P0/P1 (if any)
 
-         ## 5. Fix Plan Application (synthesizer fix plan — NOT original plan)
+         ## 5. Fix Plan Application (fix-planner plan — NOT original plan)
          - fix_plan_file (from review.complete)
          - review_verdict, fixes_applied / fixes_skipped (from fix.done)
 
