@@ -696,10 +696,19 @@ fn enforce_command_policy(
     ctx: &OperationContext,
     coordinator_hats: &[String],
     coordinator_err: Option<&CoordinatorHatsError>,
+    config: Option<&ralph_core::config::RalphConfig>,
     verb: &str,
+    is_for_fix_unit: bool,
 ) -> Result<()> {
     use crate::hat_command_policy::PolicyDecision;
-    match HatCommandPolicy::check_task(ctx, coordinator_hats, coordinator_err, verb) {
+    match HatCommandPolicy::check_task_with_config(
+        ctx,
+        coordinator_hats,
+        coordinator_err,
+        config,
+        verb,
+        is_for_fix_unit,
+    ) {
         PolicyDecision::Allow { .. } => Ok(()),
         PolicyDecision::Deny { reason, hint } => bail!(
             "hat_command_policy denied '{verb}' for hat '{hat}': [{reason}] {hint}",
@@ -966,15 +975,22 @@ fn execute_add(
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
     let ctx = operation_context_for(root);
     let workspace = resolve_workspace_root(root);
-
-    enforce_command_policy(&ctx, coordinator_hats, coordinator_err, "add")?;
+    let config = load_config_or_default(root);
     // U7 (2026-07-04-003 plan): two-step gate. If the agent
     // invoked `task verify add` first, a matching ticket is on
     // disk; require_ticket consumes it and lets the mutation
     // proceed. Without verify (or with a stale ticket), the gate
     // denies.
     let canonical = canonical_add_payload(&args);
-    let config = load_config_or_default(root);
+
+    enforce_command_policy(
+        &ctx,
+        coordinator_hats,
+        coordinator_err,
+        Some(&config),
+        "add",
+        false,
+    )?;
     verify_gate_check(&workspace, &config, &ctx, "add", &canonical)?;
     add_task_with_args(&mut store, &args, &ctx, coordinator_hats, use_colors)?;
     Ok(())
@@ -1032,7 +1048,10 @@ fn add_task_with_args(
     }
 
     let task_id = task.id.clone();
-    store.add(task.clone());
+    let added = store
+        .add_checked(task.clone())
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let _ = added;
     store.save().context("Failed to save tasks")?;
 
     print_added_task(&task, &task_id, args.format, use_colors);
@@ -1050,7 +1069,17 @@ fn execute_ensure(
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
     let ctx = operation_context_for(root);
     let workspace = resolve_workspace_root(root);
-    enforce_command_policy(&ctx, coordinator_hats, coordinator_err, "ensure")?;
+    let config = load_config_or_default(root);
+    let is_for_fix_unit = args.for_fix_unit.is_some();
+
+    enforce_command_policy(
+        &ctx,
+        coordinator_hats,
+        coordinator_err,
+        Some(&config),
+        "ensure",
+        is_for_fix_unit,
+    )?;
 
     // R4 (2026-06-14-003 plan): opt into the single-U contract.
     // Two signals are accepted (env var takes precedence; the
@@ -1500,7 +1529,14 @@ fn execute_close(
     } else {
         None
     };
-    enforce_command_policy(&ctx, coordinator_hats, coordinator_err.as_ref(), "close")?;
+    enforce_command_policy(
+        &ctx,
+        coordinator_hats,
+        coordinator_err.as_ref(),
+        None,
+        "close",
+        false,
+    )?;
     close_task_with_context_and_config(
         &mut store,
         &args.id,
@@ -2060,7 +2096,15 @@ fn verify_add(
     coordinator_err: Option<&CoordinatorHatsError>,
     args: &VerifyAddArgs,
 ) -> Result<VerifyOutcome> {
-    if let Err(outcome) = gate_outcome(ctx, coordinator_hats, coordinator_err, "add")? {
+    let config = load_config_or_default(Some(&ctx.workspace_root));
+    if let Err(outcome) = gate_outcome(
+        ctx,
+        coordinator_hats,
+        coordinator_err,
+        Some(&config),
+        "add",
+        false,
+    )? {
         return Ok(outcome);
     }
     let Some(title) = args.title.clone() else {
@@ -2134,7 +2178,16 @@ fn verify_ensure(
     coordinator_err: Option<&CoordinatorHatsError>,
     args: &VerifyEnsureArgs,
 ) -> Result<VerifyOutcome> {
-    if let Err(outcome) = gate_outcome(ctx, coordinator_hats, coordinator_err, "ensure")? {
+    let config = load_config_or_default(Some(&ctx.workspace_root));
+    let is_for_fix_unit = args.for_fix_unit.is_some();
+    if let Err(outcome) = gate_outcome(
+        ctx,
+        coordinator_hats,
+        coordinator_err,
+        Some(&config),
+        "ensure",
+        is_for_fix_unit,
+    )? {
         return Ok(outcome);
     }
     if args.key.is_none() && args.for_fix_unit.is_none() {
@@ -2235,7 +2288,7 @@ fn verify_lifecycle(
     verb: &str,
     task_id: &str,
 ) -> Result<VerifyOutcome> {
-    if let Err(outcome) = gate_outcome(ctx, coordinator_hats, coordinator_err, verb)? {
+    if let Err(outcome) = gate_outcome(ctx, coordinator_hats, coordinator_err, None, verb, false)? {
         return Ok(outcome);
     }
     if let Err(message) = validate_task_id(task_id) {
@@ -2269,10 +2322,19 @@ fn gate_outcome(
     ctx: &OperationContext,
     coordinator_hats: &[String],
     coordinator_err: Option<&CoordinatorHatsError>,
+    config: Option<&ralph_core::config::RalphConfig>,
     verb: &str,
+    is_for_fix_unit: bool,
 ) -> Result<std::result::Result<(), VerifyOutcome>> {
     use crate::hat_command_policy::PolicyDecision;
-    match HatCommandPolicy::check_task(ctx, coordinator_hats, coordinator_err, verb) {
+    match HatCommandPolicy::check_task_with_config(
+        ctx,
+        coordinator_hats,
+        coordinator_err,
+        config,
+        verb,
+        is_for_fix_unit,
+    ) {
         PolicyDecision::Allow { .. } => Ok(Ok(())),
         PolicyDecision::Deny { reason, hint } => Ok(Err(VerifyOutcome::Deny {
             reason: reason.to_string(),
@@ -2856,7 +2918,7 @@ hats:
         let cfg = isolated_config_with_coordinator();
         let ctx = ctx_for(Path::new("/tmp"), Some("loop-a"), Some("coordinator"));
         let hats = hats_for(&cfg);
-        assert!(enforce_command_policy(&ctx, &hats, None, "add").is_ok());
+        assert!(enforce_command_policy(&ctx, &hats, None, None, "add", false).is_ok());
     }
 
     #[test]
@@ -2864,7 +2926,7 @@ hats:
         let cfg = isolated_config_with_coordinator();
         let ctx = ctx_for(Path::new("/tmp"), Some("loop-a"), Some("worker"));
         let hats = hats_for(&cfg);
-        let err = enforce_command_policy(&ctx, &hats, None, "add")
+        let err = enforce_command_policy(&ctx, &hats, None, None, "add", false)
             .expect_err("worker must be denied at add entry");
         let msg = err.to_string();
         assert!(msg.contains("hat_command_policy denied 'add'"));
@@ -2877,7 +2939,7 @@ hats:
         let cfg = isolated_config_with_coordinator();
         let ctx = ctx_for(Path::new("/tmp"), Some("loop-a"), Some("worker"));
         let hats = hats_for(&cfg);
-        let err = enforce_command_policy(&ctx, &hats, None, "ensure")
+        let err = enforce_command_policy(&ctx, &hats, None, None, "ensure", false)
             .expect_err("worker must be denied at ensure entry");
         assert!(err.to_string().contains("non_coordinator_owner"));
     }
@@ -2888,7 +2950,7 @@ hats:
         let ctx = ctx_for(Path::new("/tmp"), Some("loop-a"), Some("worker"));
         let hats = hats_for(&cfg);
         assert!(
-            enforce_command_policy(&ctx, &hats, None, "close").is_ok(),
+            enforce_command_policy(&ctx, &hats, None, None, "close", false).is_ok(),
             "close passes the role gate; ownership is enforced by authorize_lifecycle"
         );
     }
@@ -2898,8 +2960,8 @@ hats:
         let cfg = isolated_config_with_coordinator();
         let ctx = ctx_for(Path::new("/tmp"), None, None);
         let hats = hats_for(&cfg);
-        assert!(enforce_command_policy(&ctx, &hats, None, "add").is_ok());
-        assert!(enforce_command_policy(&ctx, &hats, None, "ensure").is_ok());
+        assert!(enforce_command_policy(&ctx, &hats, None, None, "add", false).is_ok());
+        assert!(enforce_command_policy(&ctx, &hats, None, None, "ensure", false).is_ok());
     }
 
     #[test]
@@ -2914,7 +2976,7 @@ tasks:
         let cfg: ralph_core::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let ctx = ctx_for(Path::new("/tmp"), Some("loop-a"), Some("coordinator"));
         let hats = hats_for(&cfg);
-        let err = enforce_command_policy(&ctx, &hats, None, "add")
+        let err = enforce_command_policy(&ctx, &hats, None, None, "add", false)
             .expect_err("empty coordinator_hats must fail closed for agents");
         let msg = err.to_string();
         assert!(msg.contains("non_coordinator_owner"));

@@ -899,17 +899,18 @@ hats:
         instead of incrementing the hard-gate counter — but emitting a valid
         `task_id` from the start is still strictly cheaper than retrying.
         - Recommended workflow:
-          1. Emit `work.ready` with only `task_key` set.
+          1. Emit `work.ready` with `task_key`, `step`, and plan fields set.
+             On the **first** unit, omit `task_id` (or leave it unset until
+             the projector materializes the row).
           2. Wait for the next activation's `## ORCHESTRATOR CONTEXT` block,
              which carries the projector-derived `task_id`.
-          3. Embed that `task_id` in all subsequent `work.done` payloads.
+          3. Embed that `task_id` in subsequent `work.ready` payloads for
+             the same unit (refresh only — never hand-compose ids).
         - DO NOT emit `task_id=""` — projector rejects the event.
-        - DO NOT emit `from_key:*` synthetic IDs — preset line 1179
-          (below) forbids these and the runner will reject them too.
-        - If `.ralph/agent/tasks.jsonl` is empty for your U-ID, call
-          `ralph tools task add` first to seed the ledger, then
-          read back the canonical `task_id` before publishing
-          `work.ready`.
+        - DO NOT emit `from_key:*` synthetic IDs — preset forbids these.
+        - DO NOT call `ralph tools task add` or plain `ralph tools task ensure`
+          for plan units while state projection is enabled — runtime denies
+          agent-context create and the projector is the sole writer.
       - **2026-07-01-001 plan U4 — fix-unit `task_id` MUST be helper-derived**:
         Hand-written `task-{unix_ts}-{4hex}` ids with stale (e.g. 2025)
         timestamps are now rejected at the projection boundary
@@ -1156,8 +1157,10 @@ hats:
       ### Event Publishing
       - Publish `work.ready` with payload:
         - `plan_path`, `plan_name`, `complexity`
-        - `task_id`: the first uncompleted runtime task ID (from Pre-Publish Validation)
-        - `task_key`: the corresponding task key
+        - `task_id`: on the first `work.ready` for a unit, omit until
+          `## ORCHESTRATOR CONTEXT` shows the projector-derived id; on
+          refresh emits for the same unit, carry forward that id only
+        - `task_key`: the corresponding task key (computed per Runtime Task Creation)
         - `step`: step identifier (e.g., "step-01" or "trivial"). If the payload also
           contains a `task_key`, the step segment inside `task_key` MUST match `step`
           exactly. Do not emit a payload where these two fields disagree.
@@ -1170,7 +1173,10 @@ hats:
       - MUST NOT implement code
       - MUST NOT create future-step tasks (trivial mode excepted)
       - MUST NOT modify the plan file (original plan is **read-only**; see Same-Plan Learning & Plan Amendment Protocol below for the only sanctioned mechanism — amendments go to `plan-amendments.md`, not the plan)
-      - MUST complete all file creation and task creation before publishing `work.ready`
+      - MUST complete scratchpad initialization before publishing `work.ready`
+      - MUST NOT call `ralph tools task add` or plain `ralph tools task ensure`
+        for plan units (projector SSOT); fix-units only via
+        `ralph tools task ensure --for-fix-unit` (see review.complete path)
       - **MUST NOT publish events for any hat other than coordinator** (allowed topics are declared in `publishes:` above; this constraint restates the runtime scope check, not a separate allowlist)
       - **MUST NOT create, switch, or rename branches** — see Branch / Worktree Policy above
       - **MUST NOT call `ce-plan` skill or any other plan-regenerating skill** — Coordinator composes amendments locally from scratchpad artifacts; invoking a plan-regeneration skill would risk altering the original plan file (a HARD RULE violation) and would also exceed this preset's role boundary.
@@ -1285,6 +1291,7 @@ hats:
       | `work.ready` | payload: `task_id`, `task_key`, `step`, `plan_path`, `complexity`; optional `fix_plan_file` | TDD implementation -> commit -> **`ralph tools task close` must precede `work.done`** -> emit `work.done` once in the same activation | emit `work.done` while task is still open; close but do not emit; emit `test.passed`/`test.failed`/`build.done`; multiple business emits in the same activation | `work.done` | `work.failed` | `ralph-tools-tasks` (three fields same source + close-before-done); `ralph-tools-emit` |
       | `fix.exhausted` | payload + `fix-log.md` / findings | read fixer's attempted paths -> TDD rewrite -> close -> `work.done` | repeat fixer's same path; skip close and directly emit `work.done` | `work.done` | `work.failed` | same as above |
       | `task.resume` (TaskNotTerminal / correction targets executor) | `task.resume`: `required_action`, `task_key`, `step`, live `task_id` | **only**: run `task close` on the **same** live identity -> fix the payload -> re-send `work.done` once (after precheck) | emit `work.done` without closing; switch task identity; still emit `work.done` on the third failure (should be `work.failed`) | `work.done` | `work.failed` (bounded retry exhausted) | `ralph-tools-recovery-directives`; `ralph-tools-tasks` |
+      | `task close` denied (owner / ACL) | CLI stderr: `owned by hat` or `not in coordinator_hats` | **stop** — do not emit `work.failed` for infrastructure blockers; record memory; wait for `task.resume` routing coordinator to fix ownership/ledger | emit `work.failed` claiming work failed; retry `task add`; switch task identity | (await `task.resume`) `work.done` | `work.failed` only if implementation itself failed | `ralph-tools-tasks` Cross-Hat Authorization |
 
       ### close-before-`work.done` (hard rule)
 
@@ -2935,7 +2942,7 @@ hats:
 
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
 
-      For fix-unit task minting, use the canonical template `ralph tools task ensure --for-fix-unit --key <key>` (see `ralph-tools-tasks`).
+      Fix-unit task minting is owned by the coordinator (see `review.complete` path); when you need the live fix-unit `task_id`, run `ralph tools task list` and match by `task_key`. The canonical mint template is `ralph tools task ensure --for-fix-unit --key <key>` (see `ralph-tools-tasks`).
   fixer:
     name: "🔧 Fixer"
     description: "Diagnoses and fixes test failures. Merges debug-resolver capability: locate max 10 + fix max 10."
@@ -3084,7 +3091,7 @@ hats:
 
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
 
-      For fix-unit task minting, use the canonical template `ralph tools task ensure --for-fix-unit --key <key>` (see `ralph-tools-tasks`).
+      Fix-unit task minting is owned by the coordinator (see `review.complete` path); when you need the live fix-unit `task_id`, run `ralph tools task list` and match by `task_key`. The canonical mint template is `ralph tools task ensure --for-fix-unit --key <key>` (see `ralph-tools-tasks`).
   shipper:
     name: "📦 Shipper"
     description: "Final validation, plan status update, final commit."

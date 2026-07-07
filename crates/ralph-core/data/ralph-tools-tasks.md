@@ -61,7 +61,7 @@ ralph tools task show <task-id> [--format table|json|quiet]
   - `task_id` 必须来自当前 loop 的 live record（`ralph tools task list` / `show` / `ensure` 返回），不要复用已 closed 的 id。
   - `task_key` 是稳定匹配键（`loop_id` + `task_key` + `step` 构成 live identity）；同一 identity 重复 ensure 返回同一 `task_id`，不得手写第二套 id。
   - `task_key` 中的 step 段（例如 `:fix-02:`）必须与 `step` 字段完全一致。
-  - 不要手写 `task_id`；优先用 `ralph tools task add/ensure` 生成，或从 trigger payload / `## ORCHESTRATOR CONTEXT` 读取 projector 派生值。
+  - 不要手写 `task_id`；从 trigger payload、`ralph tools task list` / `show`，或 prompt 里的 `## ORCHESTRATOR CONTEXT` 取得 live id。
   - **`work.done` 等 execution contract topic**：必须先 `ralph tools task close <task_id>`，再 emit（close-before-done 顺序固定）。
 
 ### Cross-Loop and Cross-Hat Authorization
@@ -106,6 +106,18 @@ tasks:
 ralph tools task ready    # What's open? Pick one. Don't create duplicates.
 ```
 
+### When `task add` / `task ensure` is denied
+
+Loop 里若 `ralph tools task add` 或 `task ensure` 返回 `hat_command_policy denied`，看 stderr 的 `[reason]` 和 hint：
+
+| 现象 | 你该做什么 |
+|------|-----------|
+| hint 提到 **emit `work.ready`**（或你的 hat Trigger State Table 写「任务由事件创建」） | **停止** CLI 建 task。按 hat instructions：发 handoff 事件（常见字段 `task_key` + `step`），下一轮从 **trigger payload** 或 prompt 里的 **`## ORCHESTRATOR CONTEXT`** 读取 `task_id`。 |
+| `[non_coordinator_owner]` | 只有 `tasks.coordinator_hats` 里的 hat 能 `add`/`ensure`；worker hat 用 `task list` 只读，等 coordinator 派 task。 |
+| `task close` 报 **owned by hat** / **cannot close** | 不要 emit 业务失败事件来「兜底」。写 memory，等 `task.resume` 纠正；implementation 已完成 ≠ workflow 失败。 |
+
+**不要**在 `task add` 被拒后换参数重试建第二套 id，也不要对同一 `task_id` 既 CLI 建 task 又往 handoff 事件里塞同一个 id（会产生重复行，`work.done` 可能对不上 live row）。
+
 ### Failure Capture — Task Half
 
 If any command fails (non-zero exit), or you hit a missing dependency/skill, or you are blocked:
@@ -134,7 +146,8 @@ ralph tools task ready  # Only shows unblocked tasks
 
 - **收到 `task.resume(kind=recovery_exhausted)` 后**：**禁止**再重试；立即 emit `plan.blocked(reason="recovery_exhausted:<retry_key>")` 并把阻塞原因写入当前 task note。
 - **收到 `task.resume(kind=execution_contract:TaskWrongLoop)` 后**：重新 emit 前**必须**确认 `task_id` 属于当前 loop；跨 loop task 只能读、不能改。
-- **任何 emit 的 `task_id` 必须真实且非空**：在 emit 任何带 `task_id` 字段的事件前，必须先从 `.ralph/agent/tasks.jsonl`（`ralph tools task list` / `ralph tools task show`）取得当前 loop 的真实 id 填入 payload。`task_id=""`、`null` 或 `from_key:...` 形态都会被拒绝，并破坏 step handoff / state projection。
+- **收到 `task.resume` 且其 `required_action` 指向「修复 task 记录」而非「重做实现」时**（典型措辞：删除/修正冲突行、对齐 key、让 projector 重新派生）：这是 ledger 修复指令，**不要**重写代码。应：① `ralph tools task list` / `show` 找到与目标 `task_key` 不一致的行；② 删除或修正该行；③ 重新触发 handoff 事件或 `task ensure` 让记录恢复一致。实现代码本轮已完成，无需再改。
+- **任何 emit 的 `task_id` 必须真实且非空**：emit 前用 `ralph tools task list` / `show` 确认当前 loop 的 live id。`task_id=""`、`null` 或 `from_key:...` 会被拒收并破坏 step handoff。
 - **task 反复失败时**：不要无限 reopen 同一 task；评估是否需要拆分为更小任务或提升到 `plan.blocked`。
 - 更多细节见自动注入的 `## RECOVERY DIRECTIVES` 块（ID：`RD-PLAN-BLOCKED-ON-RECOVERY-EXHAUSTED`、`RD-TASK-ID-MUST-BE-LOOP-SCOPED`）。
 

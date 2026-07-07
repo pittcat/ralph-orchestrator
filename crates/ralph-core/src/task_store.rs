@@ -440,6 +440,40 @@ impl TaskStore {
         self.tasks.last().unwrap()
     }
 
+    /// 2026-07-07-002 P0-4: create-side guard against duplicate `task_id`
+    /// rows bound to a different `key`. The projector SSOT (P0-2) already
+    /// rejects the same shape at `work.ready`, but a coordinator that
+    /// bypasses the policy (or a future caller that ignores the deny)
+    /// would still land a second row via raw `task add`. This check makes
+    /// the storage layer the last line of defense: same id + same key is
+    /// idempotent (treat as no-op, return existing); same id + different
+    /// key (or key/None mismatch) is a hard error. The caller must bail
+    /// and surface the structured message so the agent stops instead of
+    /// producing a shadow row that later breaks `work.done` matching.
+    pub fn add_checked(&mut self, task: Task) -> Result<&Task, String> {
+        if let Some(existing) = self.get(&task.id) {
+            let existing_key = existing.key.as_deref();
+            let new_key = task.key.as_deref();
+            let keys_match = existing_key == new_key;
+            if !keys_match {
+                return Err(format!(
+                    "duplicate_task_id: id '{}' is already bound to key {:?}; \
+                     new add carries key {:?}. Do not call `ralph tools task add` for \
+                     an id that the projector (or a prior add) already minted — \
+                     use `ralph tools task ensure` with the same key, or pick a fresh id.",
+                    task.id, existing_key, new_key
+                ));
+            }
+            // Idempotent re-add under the same key: return existing row
+            // without pushing a duplicate. Matches `ensure()` semantics
+            // for callers that haven't migrated yet.
+            let idx = self.tasks.iter().position(|t| t.id == task.id).unwrap();
+            return Ok(&self.tasks[idx]);
+        }
+        self.tasks.push(task);
+        Ok(self.tasks.last().unwrap())
+    }
+
     /// Gets a task by ID (immutable reference).
     pub fn get(&self, id: &str) -> Option<&Task> {
         self.tasks.iter().find(|t| t.id == id)
@@ -1841,5 +1875,114 @@ mod tests {
             "corrupt JSONL is silently skipped; resolve returns Ok(None) \
              so the gate can emit task_not_found (got Some)",
         );
+    }
+
+    #[test]
+    fn p0_4_add_checked_rejects_duplicate_id_with_different_key() {
+        // 2026-07-07-002 P0-4: storage-layer guard. The projector SSOT
+        // (P0-2) already rejects at work.ready, but a coordinator that
+        // bypasses policy must still hit a wall at the store.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tasks.jsonl");
+        let mut store = TaskStore::load(&path).unwrap();
+        let mut first = Task::new("first".to_string(), 1);
+        first.id = "task-dup-001".to_string();
+        first.key = Some("ce-executor:l1:step-01:u1".to_string());
+        store.add(first);
+
+        let mut second = Task::new("second".to_string(), 1);
+        second.id = "task-dup-001".to_string();
+        // Different key — the projector-derived row.
+        second.key = Some("ce-executor:l1:step-01:u1-skeleton".to_string());
+        let err = store
+            .add_checked(second)
+            .expect_err("duplicate id with different key must be rejected");
+        assert!(
+            err.contains("duplicate_task_id"),
+            "error must carry structured reason, got: {err}"
+        );
+        assert!(
+            err.contains("task-dup-001"),
+            "error must name the conflicting id, got: {err}"
+        );
+        // Storage must not have grown a second row.
+        assert_eq!(
+            store.tasks.len(),
+            1,
+            "rejected add must not append a shadow row"
+        );
+    }
+
+    #[test]
+    fn p0_4_add_checked_rejects_duplicate_id_when_existing_has_no_key() {
+        // Mirrors the 2026-07-07 e2e stall: L1 is a coordinator
+        // `task add` placeholder (id set, key=None); L2 is the
+        // projector row carrying the real key. The store must
+        // refuse the second add regardless of which side lands
+        // first.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tasks.jsonl");
+        let mut store = TaskStore::load(&path).unwrap();
+        let mut placeholder = Task::new("placeholder".to_string(), 1);
+        placeholder.id = "task-1783411414-39d0".to_string();
+        placeholder.key = None;
+        store.add(placeholder);
+
+        let mut real = Task::new("real".to_string(), 1);
+        real.id = "task-1783411414-39d0".to_string();
+        real.key = Some("ce-executor:l1:step-01:u1-skeleton-quick-sort".to_string());
+        let err = store
+            .add_checked(real)
+            .expect_err("duplicate id with key/None mismatch must be rejected");
+        assert!(
+            err.contains("duplicate_task_id"),
+            "key/None mismatch is still a duplicate, got: {err}"
+        );
+        assert_eq!(store.tasks.len(), 1);
+    }
+
+    #[test]
+    fn p0_4_add_checked_idempotent_when_keys_match() {
+        // Re-adding the same (id, key) is a no-op, not an error.
+        // This protects callers that retry add after a network
+        // blip without re-minting an id.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tasks.jsonl");
+        let mut store = TaskStore::load(&path).unwrap();
+        let mut first = Task::new("first".to_string(), 1);
+        first.id = "task-idem-001".to_string();
+        first.key = Some("ce-executor:l1:step-01:u1".to_string());
+        store.add(first);
+
+        let mut retry = Task::new("retry".to_string(), 1);
+        retry.id = "task-idem-001".to_string();
+        retry.key = Some("ce-executor:l1:step-01:u1".to_string());
+        let result = store
+            .add_checked(retry)
+            .expect("idempotent re-add under same key must succeed");
+        assert_eq!(result.id, "task-idem-001");
+        assert_eq!(
+            store.tasks.len(),
+            1,
+            "idempotent re-add must not append a row"
+        );
+    }
+
+    #[test]
+    fn p0_4_add_checked_allows_distinct_ids() {
+        // Sanity: the guard must not break the normal case of
+        // adding two unrelated tasks.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tasks.jsonl");
+        let mut store = TaskStore::load(&path).unwrap();
+        let mut a = Task::new("a".to_string(), 1);
+        a.id = "task-a".to_string();
+        a.key = Some("k-a".to_string());
+        let mut b = Task::new("b".to_string(), 1);
+        b.id = "task-b".to_string();
+        b.key = Some("k-b".to_string());
+        store.add_checked(a).expect("first add must succeed");
+        store.add_checked(b).expect("second add with distinct id must succeed");
+        assert_eq!(store.tasks.len(), 2);
     }
 }

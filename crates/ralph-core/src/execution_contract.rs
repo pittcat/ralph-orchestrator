@@ -79,6 +79,70 @@ pub fn task_not_terminal_resume_plan(
     (target, hint)
 }
 
+/// P1-5 (2026-07-07-002): choose the `task.resume` target and hint when
+/// `work.done` is rejected as `TaskNotFound`. The 2026-07-07 e2e stall
+/// showed that a duplicate `task_id` row (coordinator `task add`
+/// shadowing the projector row) makes the contract layer report
+/// `TaskNotFound` even though the executor's implementation is fine.
+/// Routing that recovery back to the executor is a dead end — the
+/// executor cannot edit `tasks.jsonl`. We route to a coordinator hat
+/// instead, with a hint that names the structured action (delete or
+/// fix the orphan row), and only fall back to `source_hat` when no
+/// coordinator hat is configured (legacy / human-CLI loops).
+///
+/// `task` is the row found by literal `task_id` (if any). When its
+/// `owner_hat_id` is a configured coordinator hat, that hat is the
+/// target; otherwise the first coordinator hat is chosen. When
+/// `coordinator_hats` is empty, the source hat is returned so the
+/// caller can still emit a recovery event without panicking.
+pub fn task_not_found_resume_plan(
+    task_id: &str,
+    task_key: &str,
+    task: Option<&crate::task::Task>,
+    source_hat: &str,
+    coordinator_hats: &[String],
+) -> (String, String) {
+    // No coordinator hats configured — legacy loop. Keep the old
+    // behaviour so we do not break human-CLI / hatless presets.
+    if coordinator_hats.is_empty() {
+        return (
+            source_hat.to_string(),
+            format!(
+                "Task '{task_id}' not found in task store. work.done rejected to prevent \
+                 false completion. Verify the task_id with `ralph tools task list` and \
+                 re-emit, or emit 'work.failed' if the task was never created."
+            ),
+        );
+    }
+
+    // Prefer the task's owner if it is a configured coordinator hat —
+    // that hat minted the row and is the natural one to fix it.
+    let target = task
+        .and_then(|t| t.owner_hat_id.as_deref())
+        .filter(|owner| coordinator_hats.iter().any(|h| h == owner))
+        .map(|owner| owner.to_string())
+        .or_else(|| coordinator_hats.first().cloned())
+        .unwrap_or_else(|| source_hat.to_string());
+
+    let hint = if !task_key.is_empty() {
+        format!(
+            "Task '{task_id}' live identity mismatch: payload task_key='{task_key}' does not \
+             match the row bound to that id. Hat '{source_hat}' cannot fix the task ledger; \
+             hat '{target}' must remove the orphan row (or align its key to '{task_key}') \
+             via `ralph tools task` commands, then hat '{source_hat}' re-emits work.done \
+             with the live task_id from `ralph tools task list`. Do not emit work.failed — \
+             the implementation is not the failure."
+        )
+    } else {
+        format!(
+            "Task '{task_id}' not found in task store. Hat '{source_hat}' cannot create \
+             runtime tasks here; hat '{target}' must mint or repair the task row, then \
+             hat '{source_hat}' re-emits work.done with the live task_id."
+        )
+    };
+    (target, hint)
+}
+
 /// Git evidence provider abstraction for testability.
 pub trait GitEvidenceProvider: Send + Sync {
     /// Returns true if the workspace is a git repository.
@@ -813,12 +877,58 @@ fn validate_task(
     };
 
     // Find the task — fail-closed: not found = reject.
-    // 2026-06-28 plan U5 (R8): when `task_id` is empty and
-    // `task_key` is present, look up the task under the
-    // projector-derived `from_key:<key>` id first. If that
-    // fails, retry the original `task_id` so an existing
-    // task under the literal id is still found.
-    let task = if !task_id.is_empty() {
+    // 2026-07-07-002 follow-up: when the payload carries `task_key`,
+    // resolve the live row by `(loop_id, task_key)` first. A duplicate
+    // `task_id` placeholder row (coordinator `task add` racing the
+    // projector) must not shadow the keyed projector row.
+    let task = if let Some(payload_key) = task_key_from_payload.filter(|k| !k.is_empty()) {
+        if let Some(t) = store.get_by_key_in_loop(payload_key, Some(current_loop_id)) {
+            if !task_id.is_empty() && t.id != task_id {
+                return Some(ExecutionContractFinding {
+                    kind: ExecutionContractViolationKind::TaskNotFound {
+                        task_id: task_id.clone(),
+                    },
+                    message: format!(
+                        "Task '{}' live identity mismatch: payload task_id '{}' does not match \
+                         keyed row id '{}'. Use `ralph tools task list` for the live task_id/task_key.",
+                        payload_key, task_id, t.id
+                    ),
+                    topic: event.topic.to_string(),
+                    ..Default::default()
+                });
+            }
+            t
+        } else if !task_id.is_empty() {
+            match store.get(&task_id) {
+                Some(t) => t,
+                None => {
+                    return Some(ExecutionContractFinding {
+                        kind: ExecutionContractViolationKind::TaskNotFound {
+                            task_id: task_id.clone(),
+                        },
+                        message: format!(
+                            "Task '{}' not found in task store. work.done rejected to prevent false completion.",
+                            task_id
+                        ),
+                        topic: event.topic.to_string(),
+                        ..Default::default()
+                    });
+                }
+            }
+        } else {
+            return Some(ExecutionContractFinding {
+                kind: ExecutionContractViolationKind::TaskNotFound {
+                    task_id: resolved_task_id.clone(),
+                },
+                message: format!(
+                    "Task with task_key '{}' not found in loop '{}'. work.done rejected.",
+                    payload_key, current_loop_id
+                ),
+                topic: event.topic.to_string(),
+                ..Default::default()
+            });
+        }
+    } else if !task_id.is_empty() {
         match store.get(&task_id) {
             Some(t) => t,
             None => {
@@ -1734,6 +1844,56 @@ mod tests {
         assert_eq!(target, "coordinator");
         assert!(hint.contains("hat 'coordinator' must run"));
         assert!(hint.contains("hat 'executor'"));
+    }
+
+    #[test]
+    fn p1_5_task_not_found_resume_plan_routes_coordinator_on_identity_mismatch() {
+        // 2026-07-07-002 scenario: executor emits work.done with a
+        // task_id that resolves to a coordinator-owned placeholder
+        // row (key=None) while the payload carries a real task_key.
+        // Recovery must go to a coordinator hat, not back to executor.
+        let task = Task::new("orphan".to_string(), 1)
+            .with_owner_hat(Some("coordinator".to_string()));
+        let (target, hint) = super::task_not_found_resume_plan(
+            "task-1783411414-39d0",
+            "ce-executor:l1:step-01:u1-skeleton",
+            Some(&task),
+            "executor",
+            &["coordinator".to_string()],
+        );
+        assert_eq!(target, "coordinator");
+        assert!(hint.contains("identity mismatch"), "hint must name the failure mode, got: {hint}");
+        assert!(hint.contains("Do not emit work.failed"), "hint must steer away from work.failed");
+    }
+
+    #[test]
+    fn p1_5_task_not_found_resume_plan_falls_back_to_source_when_no_coordinator_hats() {
+        // Legacy / human-CLI loops have no coordinator_hats; keep the
+        // old source-hat retry target so we do not break them.
+        let (target, _hint) = super::task_not_found_resume_plan(
+            "task-x",
+            "some-key",
+            None,
+            "executor",
+            &[],
+        );
+        assert_eq!(target, "executor");
+    }
+
+    #[test]
+    fn p1_5_task_not_found_resume_plan_uses_first_coordinator_when_owner_unknown() {
+        // Task row exists but owner is not a configured coordinator
+        // hat — fall back to the first coordinator hat.
+        let task = Task::new("row".to_string(), 1)
+            .with_owner_hat(Some("ghost".to_string()));
+        let (target, _hint) = super::task_not_found_resume_plan(
+            "task-y",
+            "k-y",
+            Some(&task),
+            "executor",
+            &["coordinator-a".to_string(), "coordinator-b".to_string()],
+        );
+        assert_eq!(target, "coordinator-a");
     }
 
     // === F2 Git evidence tests ===

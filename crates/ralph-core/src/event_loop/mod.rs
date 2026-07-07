@@ -10516,6 +10516,10 @@ impl EventLoop {
                             // DEV-005 (2026-07-06): for `TaskNotTerminal`, route
                             // recovery to the hat that can actually close the task
                             // (typically coordinator) instead of the emitter.
+                            // P1-5 (2026-07-07-002): for `TaskNotFound` carrying a
+                            // `task_key`, route to a coordinator hat that can repair
+                            // the ledger (orphan row / identity mismatch) — the
+                            // emitter (executor) cannot fix `tasks.jsonl`.
                             let source_hat_str = finding.source_hat.as_deref();
                             let mut retry_target: Option<HatId> = None;
                             let mut no_retry_reason: Option<String> = None;
@@ -10541,6 +10545,43 @@ impl EventLoop {
                                                 );
                                             task_not_terminal_hint = Some(hint);
                                             delegate
+                                        } else if let ExecutionContractViolationKind::TaskNotFound {
+                                            task_id,
+                                        } = &finding.kind
+                                        {
+                                            // P1-5: TaskNotFound with a payload task_key is
+                                            // an identity mismatch / orphan-row scenario.
+                                            // The executor cannot repair the ledger; route
+                                            // to a coordinator hat. Without a task_key this
+                                            // is a plain missing-task error and the source
+                                            // hat is still the right retry target.
+                                            let payload_obj = event
+                                                .payload
+                                                .as_deref()
+                                                .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok());
+                                            let payload_key = payload_obj
+                                                .as_ref()
+                                                .and_then(|v| v.get("task_key"))
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            if payload_key.is_empty() {
+                                                hat_id_str.to_string()
+                                            } else {
+                                                use crate::task_store::TaskStore;
+                                                let task_snapshot = TaskStore::load(tasks_path)
+                                                    .ok()
+                                                    .and_then(|store| store.get(task_id).cloned());
+                                                let (delegate, hint) =
+                                                    crate::execution_contract::task_not_found_resume_plan(
+                                                        task_id,
+                                                        payload_key,
+                                                        task_snapshot.as_ref(),
+                                                        hat_id_str,
+                                                        &self.config.tasks.coordinator_hats,
+                                                    );
+                                                task_not_terminal_hint = Some(hint);
+                                                delegate
+                                            }
                                         } else {
                                             hat_id_str.to_string()
                                         };
@@ -10553,12 +10594,13 @@ impl EventLoop {
                                             ));
                                         }
                                         Some(_) => {
-                                            let is_task_not_terminal_delegate = matches!(
+                                            let is_delegated_recovery = matches!(
                                                 &finding.kind,
                                                 ExecutionContractViolationKind::TaskNotTerminal { .. }
+                                                    | ExecutionContractViolationKind::TaskNotFound { .. }
                                             )
                                                 && resolved_hat_id_str != hat_id_str;
-                                            if is_task_not_terminal_delegate {
+                                            if is_delegated_recovery {
                                                 retry_target = Some(hat_id);
                                             } else {
                                                 let can_retry = self
@@ -10607,6 +10649,17 @@ impl EventLoop {
                                 let violation_code = match &finding.kind {
                                     ExecutionContractViolationKind::TaskNotTerminal { .. } => {
                                         "task_not_terminal"
+                                    }
+                                    ExecutionContractViolationKind::TaskNotFound { .. } => {
+                                        // P1-5: distinguish identity-mismatch routing
+                                        // (coordinator-bound) from plain missing-task
+                                        // (source-hat retry) so the protocol-violation
+                                        // budget is tracked under the right signature.
+                                        if task_key.is_empty() {
+                                            "task_not_found"
+                                        } else {
+                                            "task_not_found_identity_mismatch"
+                                        }
                                     }
                                     _ => "execution_contract",
                                 };

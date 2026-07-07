@@ -108,6 +108,7 @@ ralph inspect loop --format json | jq 'has("supervisor")'
 ## Apply 阶段红线
 
 - 跨 loop/跨 hat 调用 `task add` / `task ensure` → **Deny**（agent context；人类 bypass + warning）
+- agent 调 `task add` / 普通 `task ensure --key` 若被拒且 hint 指向 handoff 事件 → 改走 hat Trigger State Table，不要重复 CLI 建 task
 - 用 `task create` / `task make` 字面量 → **命令不存在**；用 `add` 或 `ensure`
 - 同一 activation 内发第 2 条业务事件 → runtime 静默丢弃（终态事件前面的夹带事件会被一起丢）
 - 对不存在的 `task_id` emit → payload_contract 拒收；先 `ralph tools task list` 拿 live id

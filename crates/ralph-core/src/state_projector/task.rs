@@ -264,6 +264,29 @@ pub(crate) fn project_ensure_task(
     if let Some(plan_name) = json_pointer(payload, "plan_name") {
         task = task.with_description(Some(format!("plan: {plan_name}")));
     }
+    // 2026-07-07-002: plan-unit rows created by the projector are owned
+    // by `executor` so close-before-done ACL succeeds. Fix-units keep
+    // coordinator ownership (minted via `task ensure --for-fix-unit`).
+    if !task_key_is_fix_unit(&key) {
+        task = task.with_owner_hat(Some("executor".to_string()));
+    }
+    // Reject duplicate task_id bound to a different key (coordinator
+    // `task add` racing `work.ready` → projector).
+    if let Some(provided_id) = json_pointer(payload, "task_id") {
+        if !provided_id.is_empty() {
+            if let Some(existing) = store.get(provided_id) {
+                if existing.key.as_deref() != Some(key.as_str()) {
+                    return Err(format!(
+                        "duplicate_task_id: id '{provided_id}' is already bound to key \
+                         {:?}; work.ready carries key '{key}'. Do not call \
+                         `ralph tools task add` before work.ready — the projector is the \
+                         sole writer for plan units.",
+                        existing.key
+                    ));
+                }
+            }
+        }
+    }
     // P0-2 (plan 2026-06-29-006): prefer the payload's `loop_id`
     // when present, otherwise fall back to the loop marker
     // threaded in via `ProjectionContext::current_loop_id`. Without
@@ -745,16 +768,21 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_task_id_reuse_across_keys_is_allowed() {
+    fn ordinary_task_id_reuse_across_keys_is_rejected() {
+        // 2026-07-07-002 P0-2: the projector is the sole writer for
+        // plan-unit task rows. Reusing a `task_id` across different
+        // ordinary (non-fix-unit) keys was a legacy pattern that
+        // produced duplicate rows shadowing the keyed live row — the
+        // exact shape that stalled the 2026-07-07 e2e. The projector
+        // now rejects this regardless of fix-unit status. This test
+        // pins the new contract: same id + different key = hard error,
+        // and only the first row is written.
         use crate::state_projector::ProjectionContext;
         use crate::state_projector::StateProjectionConfig;
 
         let dir = tempdir().unwrap();
         let mut ctx = ProjectionContext::new(dir.path(), StateProjectionConfig::default(), false)
             .with_current_loop_id("loop-A");
-        // Non-fix-unit keys should not be held to the strict fix-unit
-        // task_id rules. Reusing a task id across different ordinary
-        // keys is a legacy pattern that must continue to work.
         let first = serde_json::json!({
             "task_id": "task-shared",
             "task_key": "legacy:step-01:impl",
@@ -766,10 +794,17 @@ mod tests {
             "plan_name": "p",
         });
         project_ensure_task(&mut ctx, &first, "task_key", None).unwrap();
-        project_ensure_task(&mut ctx, &second, "task_key", None).unwrap();
+        let err = project_ensure_task(&mut ctx, &second, "task_key", None)
+            .expect_err("reuse of task_id across different keys must be rejected");
+        assert!(
+            err.contains("duplicate_task_id"),
+            "error must carry structured reason, got: {err}"
+        );
 
+        // Only the original row is written; no second ledger entry.
         let tasks = ctx.task_snapshot().0;
-        assert_eq!(tasks.len(), 2, "legacy key reuse must produce two rows");
+        assert_eq!(tasks.len(), 1, "rejected projection must not write a second row");
+        assert_eq!(tasks[0].key.as_deref(), Some("legacy:step-01:impl"));
     }
 
     // 2026-06-30 P0-B (primary-20260630-083222): the coordinator's

@@ -274,6 +274,82 @@ impl HatCommandPolicy {
         }
     }
 
+    /// When `event_loop.state_projection.enabled` is true, the projector
+    /// (driven by `work.ready`) is the sole writer for plan-unit tasks.
+    /// Agent-context `task add` / plain `task ensure` race the projector
+    /// and produce duplicate `task_id` rows (2026-07-07 e2e stall).
+    ///
+    /// Fix-unit minting remains allowed via `task ensure --for-fix-unit`.
+    pub fn check_projector_task_create(
+        ctx: &OperationContext,
+        config: &RalphConfig,
+        verb: &str,
+        is_for_fix_unit: bool,
+    ) -> PolicyDecision {
+        if !config.event_loop.state_projection.enabled || !ctx.is_agent_context {
+            return PolicyDecision::Allow {
+                human_warning: None,
+            };
+        }
+
+        let Some(cmd) = TaskCommand::parse(verb) else {
+            return PolicyDecision::Allow {
+                human_warning: None,
+            };
+        };
+
+        if !TaskCommand::COORDINATOR_ONLY.contains(&cmd) {
+            return PolicyDecision::Allow {
+                human_warning: None,
+            };
+        }
+
+        if cmd == TaskCommand::Ensure && is_for_fix_unit {
+            return PolicyDecision::Allow {
+                human_warning: None,
+            };
+        }
+
+        let hint = if cmd == TaskCommand::Add {
+            "This loop creates runtime tasks via a handoff event (see your hat Trigger State Table), \
+             not via `ralph tools task add`. Emit the event with `task_key` + `step`, then read \
+             `task_id` from the trigger payload or `## ORCHESTRATOR CONTEXT` on the next activation."
+                .to_string()
+        } else {
+            "Plain `task ensure --key` is not allowed in this loop. If your hat instructions \
+             describe a fix-unit mint path, use only that documented command shape; otherwise \
+             create tasks via the handoff event in your Trigger State Table."
+                .to_string()
+        };
+
+        PolicyDecision::Deny {
+            reason: "projector_ssot_task_create_forbidden",
+            hint,
+        }
+    }
+
+    /// Combined L2 check: role gate + projector SSOT gate.
+    pub fn check_task_with_config(
+        ctx: &OperationContext,
+        coordinator_hats: &[String],
+        coordinator_err: Option<&crate::task_cli::CoordinatorHatsError>,
+        config: Option<&RalphConfig>,
+        verb: &str,
+        is_for_fix_unit: bool,
+    ) -> PolicyDecision {
+        match Self::check_task(ctx, coordinator_hats, coordinator_err, verb) {
+            deny @ PolicyDecision::Deny { .. } => deny,
+            PolicyDecision::Allow { .. } => {
+                let Some(cfg) = config else {
+                    return PolicyDecision::Allow {
+                        human_warning: None,
+                    };
+                };
+                Self::check_projector_task_create(ctx, cfg, verb, is_for_fix_unit)
+            }
+        }
+    }
+
     /// Check whether the caller may invoke `ralph wave emit` /
     /// `ralph wave verify`.
     ///
@@ -660,6 +736,56 @@ hats:
         assert!(
             decision.is_allow(),
             "human CLI must always be allowed: {decision:?}"
+        );
+    }
+
+    fn config_with_projection_enabled() -> RalphConfig {
+        let mut cfg = isolated_config_with_coordinator();
+        cfg.event_loop.state_projection.enabled = true;
+        cfg
+    }
+
+    #[test]
+    fn projector_ssot_denies_coordinator_add_in_agent_context() {
+        let cfg = config_with_projection_enabled();
+        let decision = HatCommandPolicy::check_projector_task_create(
+            &agent_ctx("coordinator"),
+            &cfg,
+            "add",
+            false,
+        );
+        let deny = match decision {
+            PolicyDecision::Deny { reason, hint } => (reason, hint),
+            other => panic!("expected Deny, got {other:?}"),
+        };
+        assert_eq!(deny.0, "projector_ssot_task_create_forbidden");
+        assert!(deny.1.contains("handoff event") || deny.1.contains("Trigger State Table"));
+    }
+
+    #[test]
+    fn projector_ssot_allows_for_fix_unit_ensure() {
+        let cfg = config_with_projection_enabled();
+        let decision = HatCommandPolicy::check_projector_task_create(
+            &agent_ctx("coordinator"),
+            &cfg,
+            "ensure",
+            true,
+        );
+        assert!(decision.is_allow(), "for-fix-unit ensure must pass: {decision:?}");
+    }
+
+    #[test]
+    fn projector_ssot_denies_plain_ensure_in_agent_context() {
+        let cfg = config_with_projection_enabled();
+        let decision = HatCommandPolicy::check_projector_task_create(
+            &agent_ctx("coordinator"),
+            &cfg,
+            "ensure",
+            false,
+        );
+        assert!(
+            matches!(decision, PolicyDecision::Deny { .. }),
+            "plain ensure must be denied: {decision:?}"
         );
     }
 }
