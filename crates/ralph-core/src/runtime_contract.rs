@@ -2501,13 +2501,13 @@ hats:
         let config = crate::config::RalphConfig::default();
         let registry = HatRegistry::from_runtime_config(&config);
         let report = RuntimeContractAggregator::aggregate(
-            "builtin:ce-executor-serial",
+            "builtin:ce-executor-pipeline",
             &config,
             &registry,
             RuntimeContractStrictness::default(),
             None,
         );
-        assert_eq!(report.source_label, "builtin:ce-executor-serial");
+        assert_eq!(report.source_label, "builtin:ce-executor-pipeline");
     }
 
     #[test]
