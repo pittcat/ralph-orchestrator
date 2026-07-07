@@ -31,6 +31,19 @@ impl ColorMode {
             return false;
         }
 
+        // Loop agent context: when the CLI is invoked by a hat activation inside
+        // a ralph loop, output is captured via PTY and serialized to JSON. The
+        // ESC character (`\x1b`) is stripped during JSON transit, which leaves
+        // bare CSI sequences (e.g. `[32m`) in the TUI display. Force-disable
+        // colors so no ANSI codes are emitted in the first place.
+        // Detection mirrors the env vars injected by the loop runner
+        // (crates/ralph-cli/src/loop_runner/execution.rs).
+        if std::env::var("RALPH_CURRENT_LOOP_ID").is_ok()
+            || std::env::var("RALPH_CURRENT_HAT").is_ok()
+        {
+            return false;
+        }
+
         match self {
             ColorMode::Always => true,
             ColorMode::Never => false,
@@ -228,7 +241,13 @@ mod tests {
     #[test]
     fn test_color_mode_should_use_colors() {
         // `NO_COLOR` disables ANSI globally, including `--color always`.
-        let expected_always = std::env::var("NO_COLOR").is_err();
+        // Loop-agent context (RALPH_CURRENT_LOOP_ID / RALPH_CURRENT_HAT)
+        // also forces colors off to avoid bare-CSI garbage in TUI display.
+        let no_color_blocks = std::env::var("NO_COLOR").is_ok();
+        let in_loop_context = std::env::var("RALPH_CURRENT_LOOP_ID").is_ok()
+            || std::env::var("RALPH_CURRENT_HAT").is_ok();
+        let blocked = no_color_blocks || in_loop_context;
+        let expected_always = !blocked;
         assert_eq!(ColorMode::Always.should_use_colors(), expected_always);
         assert!(!ColorMode::Never.should_use_colors());
     }
