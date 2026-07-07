@@ -19,7 +19,7 @@ Templates generate **ordinary YAML** with `x_preset` metadata. They do not becom
 | Collection | Source | Best for |
 |---|---|---|
 | `autoresearch` | `presets/en/autoresearch.yml` | Autonomous experiment loop for any measurable improvement |
-| `ce-executor-serial` | `presets/en/ce-executor-serial.yml` | Plan-driven work execution with serial 4-dimension code review (correctness → testing → maintainability → requirements), auto-fix, and manager report (isolated multi-hat execution) |
+| `ce-executor-pipeline` | `presets/en/ce-executor-pipeline.yml` | One-shot whole-plan execution: plan reviewer → executor → 6 serial dimension reviewers → review-synthesizer → fix-planner → fixer → alignment → reporter (isolated multi-hat execution) |
 | `debug` | `presets/en/debug.yml` | Investigation and fix verification |
 
 ## Internal Presets
@@ -30,7 +30,7 @@ These remain loadable for Ralph internals or testing, but are intentionally hidd
 
 ## Product Positioning
 
-- `ce-executor-serial` is the recommended default for plan-driven implementation work.
+- `ce-executor-pipeline` is the recommended default for plan-driven implementation work.
 - `debug` is the dedicated preset for bug investigation and adversarial fix verification.
 - `autoresearch` is a specialized loop for metric-driven experimentation.
 - Other historical presets (e.g. `code-assist`, `research`, `review`, `pdd-to-code-assist`) are now treated as documentation examples instead of supported builtins.
@@ -42,7 +42,7 @@ ralph init --backend claude
 ralph init --list-presets
 
 ralph run -c ralph.yml -H builtin:autoresearch -p "Improve test coverage in src/core/"
-ralph run -c ralph.yml -H builtin:ce-executor-serial -p "docs/plans/my-plan.md"
+ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "docs/plans/my-plan.md"
 ralph run -c ralph.yml -H builtin:debug -p "Investigate intermittent timeout"
 ```
 
@@ -66,13 +66,13 @@ Editing or creating a preset? Run the contract check before pushing:
 
 ```bash
 # Strict authoring check (recommended for CI and PR gates)
-ralph preset check -H builtin:ce-executor-serial --strict
+ralph preset check -H builtin:ce-executor-pipeline --strict
 
 # Non-strict smoke (faster, ignores warnings)
-ralph preset check -H builtin:ce-executor-serial
+ralph preset check -H builtin:ce-executor-pipeline
 
 # JSON output for diagnostics / CI
-ralph preset check -H builtin:ce-executor-serial --strict --format json
+ralph preset check -H builtin:ce-executor-pipeline --strict --format json
 ```
 
 `ralph preset check` covers four authoring concerns in one pass:

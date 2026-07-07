@@ -1011,13 +1011,13 @@ still works, but the inline form is preferred for consistency.
 
 | Schema file | Referenced by | Status |
 |---|---|---|
-| `schemas/ce-executor-serial.yml` | `ce-executor-serial` | SSOT for `event_policy.schemas` block (deep-merged into `presets/en/ce-executor-serial.yml` at build time by `build.rs`) |
+| `schemas/ce-executor-pipeline.yml` | `ce-executor-pipeline` | SSOT for `event_policy.schemas` block (deep-merged into `presets/en/ce-executor-pipeline.yml` at build time by `build.rs`) |
 
-### Task Split Heuristics (ce-executor-serial)
+### Task Split Heuristics (ce-executor-pipeline)
 
-**Task Split Heuristics**: `ce-executor-serial` coordinator 默认每 U 拆 1 张 task；
+**Task Split Heuristics**: `ce-executor-pipeline` executor 默认每 U 拆 1 张 task；
 只有在 plan 显式列子单元、需要 worktree 隔离时才拆多张。
-详见 `presets/en/ce-executor-serial.yml` 的 coordinator "Task Split Heuristics" 段。
+详见 `presets/en/ce-executor-pipeline.yml` 的 executor "Task Split Heuristics" 段。
 
 ### Checklist for Preset Authors (Payload Contracts)
 
@@ -1057,4 +1057,4 @@ regression matrix source.
 - [ ] Does `./scripts/validate-builtin-presets.sh --strict` pass after the change?
 - [ ] If a new finding id appears, is it documented in `docs/guide/runtime-contracts.md`?
 - [ ] For new public builtin presets, is the name added to `presets/index.json`?
-- [ ] For development presets (`ce-executor-serial`), does `ralph preset check --strict --format json` show zero findings?
+- [ ] For development presets (`ce-executor-pipeline`), does `ralph preset check --strict --format json` show zero findings?
