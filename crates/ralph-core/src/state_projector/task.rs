@@ -694,27 +694,36 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ctx = ProjectionContext::new(dir.path(), StateProjectionConfig::default(), false)
             .with_current_loop_id("loop-A");
+        // Pin a single ts so every `fix_unit_task_id` call below
+        // yields the same id string. `None` would re-read
+        // `SystemTime::now()` at each call site and a 1-second
+        // drift between the ensure() and the trailing assert_eq!
+        // produces `task-...-{ts:x}` and `task-...-{ts+1:x}`,
+        // which fail the id equality assertion (regression from
+        // 02101d32 switching the test body to helper-derive ids).
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         // First emit: fresh id + fix-01 key.
         // 2026-07-01-001 plan U4: helper-derive the id so the
         // validator's 6-month back-window accepts it. The
         // historical `task-ce_executor_serial-fix01u01-1` had
         // a 1970-era hex suffix and now falls outside.
+        let fix_unit_id = Task::fix_unit_task_id("ce-executor-serial", 1, 1, Some(ts));
         let fix01 = serde_json::json!({
-            "task_id": Task::fix_unit_task_id("ce-executor-serial", 1, 1, None),
+            "task_id": fix_unit_id.clone(),
             "task_key": "ce-executor:p:fix-01:u1",
             "plan_name": "p",
         });
         project_ensure_task(&mut ctx, &fix01, "task_key", None).unwrap();
         let tasks = ctx.task_snapshot().0;
         assert_eq!(tasks.len(), 1);
-        assert_eq!(
-            tasks[0].id,
-            Task::fix_unit_task_id("ce-executor-serial", 1, 1, None)
-        );
+        assert_eq!(tasks[0].id, fix_unit_id);
 
         // Second emit: same id, but fix-02 key — must fail-closed.
         let fix02 = serde_json::json!({
-            "task_id": Task::fix_unit_task_id("ce-executor-serial", 1, 1, None),
+            "task_id": fix_unit_id.clone(),
             "task_key": "ce-executor:p:fix-02:u2",
             "plan_name": "p",
         });
