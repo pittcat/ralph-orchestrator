@@ -124,7 +124,7 @@ TOPOLOGY_EXEMPT_PRESETS=(
 # two stay in lockstep by convention. When you promote a preset
 # in either place, update both.
 TIER_0_WAC_PRESETS=(
-    "ce-executor-serial"
+    "ce-executor-pipeline"
 )
 
 # Returns 0 (true) if every error-severity finding in $1 (a JSON report) has
