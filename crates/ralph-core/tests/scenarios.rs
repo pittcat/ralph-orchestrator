@@ -3281,6 +3281,22 @@ fn test_u5b_coordinator_reason() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-07-004 plan U1: integration smoke for the
+/// `task_creation_forbidden_in_preset` fail-stop reason.
+/// Coordinator self-detects the projector-SSOT violation
+/// (duplicate row with owner_hat_id=coordinator) and emits
+/// `plan.blocked(reason=task_creation_forbidden_in_preset)`
+/// instead of `work.ready`. The scenario proves the new
+/// reason string passes the schema `allowed_values` gate
+/// end-to-end.
+#[test]
+fn test_u1_coordinator_task_creation_forbidden_fail_stop() {
+    let yaml = load_scenario(
+        "tests/scenarios/2026-07-07-004-u1-coordinator-task-create-forbidden.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-06-29-007 plan U5a: smoke test for the
 /// `dimension_reviewer_write_paths` lint. The core
 /// "reject docs/plans/ write access for

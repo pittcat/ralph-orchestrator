@@ -1,0 +1,81 @@
+# 2026-07-07-004 U1 BDD scenario: coordinator fail-stop on SSOT violation.
+#
+# BDD coverage: when the coordinator hat self-detects the projector-SSOT
+# violation (a duplicate task row in .ralph/agent/tasks.jsonl with
+# owner_hat_id=coordinator), it must publish plan.blocked with the new
+# schema-allowed reason `task_creation_forbidden_in_preset` instead of
+# `work.ready`. The fail-stop path lives in
+# `presets/en/ce-executor-serial.yml` coordinator.instructions
+# ("Task Creation Violation Detection").
+#
+# This scenario proves the runtime schema gate accepts the new reason
+# end-to-end (the schema `allowed_values` whitelist is the SSOT for
+# `plan.blocked.reason`; without the entry the event is rejected and
+# the loop stalls).
+#
+# Expected: plan.blocked is accepted by the runtime, no plan.complete
+# follows, no second work.ready attempt.
+
+name: u1_coordinator_task_creation_forbidden_fail_stop
+description: U1 - coordinator fail-stops plan with task_creation_forbidden_in_preset on SSOT violation
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  # BDD scenarios run with isolated event_policy by default; the
+  # inline `schemas` block below mirrors what
+  # `presets/schemas/ce-executor-serial.yml` requires so the
+  # scenario exercises the real schema gate, not a relaxed
+  # default. Adding `task_creation_forbidden_in_preset` to the
+  # `allowed_values` here would shadow the SSOT and defeat the
+  # test; we deliberately consume the SSOT entry through
+  # `apply_yaml_hats` (see `run_workflow_guard_scenario`).
+  event_loop:
+    execution_mode: isolated
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        plan.blocked:
+          payload: json_object
+          required_fields: [reason]
+          allowed_values:
+            reason:
+              - task_creation_forbidden_in_preset
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - plan.blocked
+    shipper:
+      subscribes_to:
+        - plan.blocked
+      publishes:
+        - REVIEW_COMPLETE
+
+mock_responses:
+  - text: |
+      <event topic="plan.blocked">
+      {"reason":"task_creation_forbidden_in_preset","plan_name":"u1-demo","task_id":"task-1783406403-2e22","task_key":"ce-executor:u1-demo:step-01:u1","details":"duplicate row id=task-1783406403-2e22 owner_hat_id=coordinator; coordinator violated projector SSOT by calling ralph tools task add directly"}
+      </event>
+    hat: coordinator
+  - text: |
+      waiting.
+    hat: shipper
+  - text: |
+      waiting.
+    hat: shipper
+  - text: |
+      waiting.
+    hat: shipper
+
+expected:
+  iterations: 4
+  events:
+    - topic: plan.blocked
+  absent_events:
+    - topic: plan.complete
+    - topic: work.ready
+  completion: false

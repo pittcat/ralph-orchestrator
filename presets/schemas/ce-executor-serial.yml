@@ -422,6 +422,17 @@ schemas:
         # 本项扩 schema 入口白名单;shipper 侧在 preset yml 同步扩
         # recoverable_whitelist。
         - default_publishes
+        # 2026-07-07-004 plan U1: coordinator self-detects the SSOT
+        # violation (calling `ralph tools task add|ensure` directly,
+        # leaving a duplicate row with owner_hat_id=coordinator) and
+        # fails the plan with this reason. The reason is intentionally
+        # NOT in shipper's recoverable_whitelist so the loop ends in
+        # REVIEW_COMPLETE(pass_or_fail=fail) and never re-attempts
+        # work.ready. The corresponding fail-stop rule lives in
+        # coordinator.instructions (Runtime Task Creation ->
+        # Task Creation Violation Detection).
+        - task_creation_forbidden_in_preset
+        - review_guard_failure
 
   loop.cancel:
     required_fields:
