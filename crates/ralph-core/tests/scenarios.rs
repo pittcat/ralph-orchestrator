@@ -3620,3 +3620,99 @@ fn test_opac_sb2_supervisor_review_batch_origin_guard() {
     let yaml = load_scenario("tests/scenarios/supervisor/ce_executor_supervisor_review_batch.yml");
     run_workflow_guard_scenario(yaml);
 }
+
+// Unit 2 (plan 2026-07-07-006): pipeline scenario's mock `work.done`
+// payload must carry every unit-evidence field the executor mode
+// promises. Read-only fixture check; the fixture cannot drift away
+// from the schema without this assertion failing first.
+
+const PIPELINE_UNIT_EVIDENCE_FIELDS: &[&str] = &[
+    "executor_head_sha",
+    "tests_run",
+    "tests_passed",
+    "commit_count",
+    "changed_lines",
+];
+
+/// Extract every mock-response `work.done` payload object from the
+/// pipeline fixture YAML by simple text scan (the fixture uses raw
+/// `{"..."}` blocks). Returns the set of top-level keys present.
+fn pipeline_work_done_payload_keys() -> std::collections::BTreeSet<String> {
+    let text = fs::read_to_string("tests/scenarios/ce_executor_pipeline.yml")
+        .expect("read ce_executor_pipeline.yml fixture");
+    // Find each `<event topic="work.done">` block.
+    let mut keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for segment in text.split("<event topic=\"work.done\">").skip(1) {
+        let body = segment.split("</event>").next().unwrap_or("");
+        // Cheap JSON-key extraction: substring between { and the first "}".
+        let json = body
+            .split('{')
+            .nth(1)
+            .and_then(|s| s.split('}').next())
+            .unwrap_or("");
+        for kv in json.split(',') {
+            let key = kv.split(':').next().unwrap_or("").trim().trim_matches('"');
+            if !key.is_empty() {
+                keys.insert(key.to_string());
+            }
+        }
+    }
+    keys
+}
+
+/// SC1 scenario half: the pipeline happy-path fixture's mock
+/// `work.done` payload must already include every unit-evidence
+/// field the executor mode promises. Drift here is a regression
+/// because the fixture is the contract surface downstream hats
+/// consume.
+#[test]
+fn test_pipeline_work_done_payload_carries_unit_evidence() {
+    let keys = pipeline_work_done_payload_keys();
+    let needed: std::collections::BTreeSet<String> = PIPELINE_UNIT_EVIDENCE_FIELDS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let missing: Vec<&String> = needed.difference(&keys).collect();
+    assert!(
+        missing.is_empty(),
+        "ce_executor_pipeline.yml work.done mock payload is missing unit evidence fields: {missing:?}. \
+         Per plan 2026-07-07-006 Unit 2, the executor mode requires these in work.done."
+    );
+}
+
+/// SC1 blocked-scenario half: the `work.failed` payload must carry
+/// at least `{plan_name, reason}` so downstream can attribute the
+/// failure to the originating plan.
+#[test]
+fn test_pipeline_work_failed_payload_minimal() {
+    let text = fs::read_to_string("tests/scenarios/ce_executor_pipeline_blocked.yml")
+        .expect("read ce_executor_pipeline_blocked.yml fixture");
+    let segment = text
+        .split("<event topic=\"work.failed\">")
+        .nth(1)
+        .expect("ce_executor_pipeline_blocked.yml must contain a work.failed mock event");
+    let body = segment.split("</event>").next().unwrap_or("");
+    let json = body
+        .split('{')
+        .nth(1)
+        .and_then(|s| s.split('}').next())
+        .unwrap_or("");
+    let keys: std::collections::BTreeSet<String> = json
+        .split(',')
+        .filter_map(|kv| {
+            let key = kv.split(':').next()?.trim().trim_matches('"');
+            if key.is_empty() {
+                None
+            } else {
+                Some(key.to_string())
+            }
+        })
+        .collect();
+    for required in ["plan_name", "reason"] {
+        assert!(
+            keys.contains(required),
+            "ce_executor_pipeline_blocked.yml work.failed mock payload is missing \
+             `{required}`; got keys = {keys:?}"
+        );
+    }
+}

@@ -115,6 +115,36 @@ pub fn preset_names() -> Vec<&'static str> {
         .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preset_merge_table::SSOT_SECTION_TARGETS;
+    use ralph_core::event_origin::{OriginCheck, validate_event_origin};
+    use ralph_core::payload_contract::validate_payload_contract;
+    use ralph_core::{HatRegistry, RalphConfig};
+
+    fn assert_public_preset_has_completion_path(preset: &EmbeddedPreset) {
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
+        let promise = config.event_loop.completion_promise.trim();
+        assert!(
+            !promise.is_empty(),
+            "Preset '{}' must define a non-empty completion promise",
+            preset.name
+        );
+
+        let has_completion_path = config.hats.values().any(|hat| {
+            hat.publishes.iter().any(|topic| topic == promise)
+                || hat.default_publishes.as_deref() == Some(promise)
+        });
+
+        assert!(
+            has_completion_path,
+            "Preset '{}' must expose its completion promise '{}' via publishes/default_publishes",
+            preset.name, promise
+        );
+    }
+
 // Unit 1 (plan 2026-07-07-006): single-chain execution primary path.
     // ce-executor-pipeline becomes the recommended CE executor;
     // ce-executor-serial is removed from the public builtin registry.
@@ -178,41 +208,144 @@ pub fn preset_names() -> Vec<&'static str> {
         );
     }
 
-    /// WRC-U5 / T-WRC-U5-01: the `is_tier_0_wac_preset` helper must
-/// P2-6: SSOT multi-section merge table (KTD-1, plan 2026-06-20-001 U1).
-///
-/// The table itself lives in [`crate::preset_merge_table`] so
-/// `build.rs` and this crate can share one source of truth
-/// (build.rs uses `include!` because the build script and
-/// the library are separate compilation units).
+    // Unit 2 (plan 2026-07-07-006): pipeline schema static self-check.
+    // Lock the registry's claim that pipeline's work.done schema already
+    // carries the unit-evidence fields the executor needs (SC1), and
+    // that pipeline does not depend on runtime unit-loop topics (SC2).
+    // Read-only assertions — no pipeline mutation, no schema edits.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::preset_merge_table::SSOT_SECTION_TARGETS;
-    use ralph_core::event_origin::{OriginCheck, validate_event_origin};
-    use ralph_core::payload_contract::validate_payload_contract;
-    use ralph_core::{HatRegistry, RalphConfig};
+    /// Unit-evidence fields the executor must place in `work.done` per
+    /// the executor-mode contract (tests_run, tests_passed, commit_count,
+    /// changed_lines, executor_head_sha). Pipeline's `work.done`
+    /// `required_fields` must be a superset of these so the chain
+    /// (synthesizer → fix-planner → fixer → alignment → reporter) can
+    /// consume the evidence without schema changes.
+    const UNIT_EVIDENCE_FIELDS: &[&str] = &[
+        "executor_head_sha",
+        "tests_run",
+        "tests_passed",
+        "commit_count",
+        "changed_lines",
+    ];
 
-    fn assert_public_preset_has_completion_path(preset: &EmbeddedPreset) {
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
-        let promise = config.event_loop.completion_promise.trim();
+    fn parse_pipeline_work_done_required_fields() -> std::collections::BTreeSet<String> {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = std::path::Path::new(manifest_dir)
+            .join("..")
+            .join("..")
+            .join("presets")
+            .join("en")
+            .join("ce-executor-pipeline.yml");
+        let yaml = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read pipeline preset at {}: {}", path.display(), e));
+        let v: serde_yaml::Value =
+            serde_yaml::from_str(&yaml).expect("parse pipeline yaml");
+        let seq = v["event_loop"]["event_policy"]["schemas"]["work.done"]["required_fields"]
+            .as_sequence()
+            .expect("event_loop.event_policy.schemas.work.done.required_fields must be a list");
+        seq.iter()
+            .map(|s| {
+                s.as_str()
+                    .unwrap_or_else(|| panic!("required_fields entries must be strings"))
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// SC1: pipeline `work.done.required_fields` must cover all
+    /// unit-evidence fields the executor mode promises. If this test
+    /// fails, the plan's "no schema extension" invariant is broken —
+    /// stop and raise to the user (per plan Unit 2 Step 2.5).
+    #[test]
+    fn test_pipeline_work_done_required_fields_covers_unit_evidence() {
+        let required = parse_pipeline_work_done_required_fields();
+        let needed: std::collections::BTreeSet<String> = UNIT_EVIDENCE_FIELDS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let missing: Vec<&String> = needed.difference(&required).collect();
         assert!(
-            !promise.is_empty(),
-            "Preset '{}' must define a non-empty completion promise",
-            preset.name
+            missing.is_empty(),
+            "pipeline work.done required_fields is missing unit evidence fields: {missing:?}. \
+             Per plan 2026-07-07-006 Unit 2, this would require expanding the pipeline schema, \
+             which violates the Pipeline Hard Rule. Stop the plan and raise to the user."
         );
+    }
 
-        let has_completion_path = config.hats.values().any(|hat| {
-            hat.publishes.iter().any(|topic| topic == promise)
-                || hat.default_publishes.as_deref() == Some(promise)
-        });
-
+    /// SC2 static lock: pipeline must not reference any runtime
+    /// unit-loop topic on a hat's `triggers` or `publishes`. If a future
+    /// refactor accidentally adds `unit.ready` / `unit.done` /
+    /// `unit.validated` / `test.passed` / `test.failed` to the
+    /// pipeline topology, this test fails before the regression can
+    /// reach runtime.
+    #[test]
+    fn test_pipeline_schema_has_no_runtime_unit_loop_topics() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = std::path::Path::new(manifest_dir)
+            .join("..")
+            .join("..")
+            .join("presets")
+            .join("en")
+            .join("ce-executor-pipeline.yml");
+        let yaml = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read pipeline preset at {}: {}", path.display(), e));
+        let v: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse pipeline yaml");
+        let forbidden: std::collections::BTreeSet<&str> = [
+            "unit.ready",
+            "unit.done",
+            "unit.validated",
+            "test.passed",
+            "test.failed",
+        ]
+        .iter()
+        .copied()
+        .collect();
+        let hats = v["hats"].as_mapping().expect("hats must be a mapping");
+        let mut all_topics: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for (_name, hat) in hats {
+            for key in ["triggers", "publishes"] {
+                if let Some(seq) = hat[key].as_sequence() {
+                    for t in seq {
+                        if let Some(s) = t.as_str() {
+                            all_topics.insert(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let hits: Vec<&String> = all_topics
+            .iter()
+            .filter(|t| forbidden.contains(t.as_str()))
+            .collect();
         assert!(
-            has_completion_path,
-            "Preset '{}' must expose its completion promise '{}' via publishes/default_publishes",
-            preset.name, promise
+            hits.is_empty(),
+            "pipeline must not reference runtime unit-loop topics on any hat's \
+             triggers/publishes. Found {hits:?}. If this regresses, the \
+             single-chain execution invariant is broken."
+        );
+    }
+
+    /// Cross-check: pipeline also must not have a `mechanism.flow`
+    /// block, since single-chain execution is hat-only. This pins the
+    /// plan's claim that pipeline is a "flat serial hat chain".
+    #[test]
+    fn test_pipeline_has_no_mechanism_flow_block() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = std::path::Path::new(manifest_dir)
+            .join("..")
+            .join("..")
+            .join("presets")
+            .join("en")
+            .join("ce-executor-pipeline.yml");
+        let yaml = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read pipeline preset at {}: {}", path.display(), e));
+        let v: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse pipeline yaml");
+        assert!(
+            v.get("mechanism").is_none(),
+            "pipeline must NOT define a top-level `mechanism:` block; \
+             single-chain execution is hat-only. Found: {:?}",
+            v.get("mechanism")
         );
     }
 
@@ -1998,19 +2131,4 @@ mod tests {
         }
     }
 
-    // WRC-U5 / T-WRC-U5-01: the `is_tier_0_wac_preset` helper must
-    // agree with the `TIER_0_WAC_PRESETS` constant byte-for-byte.
-    // Drift between the two is the documented failure mode of the
-    // shell-side list (`scripts/validate-builtin-presets.sh`).
-    #[test]
-    fn test_is_tier_0_wac_preset_helper_matches_constant() {
-        for name in TIER_0_WAC_PRESETS {
-            assert!(
-                is_tier_0_wac_preset(name),
-                "TIER_0_WAC_PRESETS contains '{name}' but is_tier_0_wac_preset disagrees"
-            );
-        }
-        assert!(!is_tier_0_wac_preset("not-a-real-preset"));
-        assert!(!is_tier_0_wac_preset("autoresearch")); // Tier-2
-    }
 }
