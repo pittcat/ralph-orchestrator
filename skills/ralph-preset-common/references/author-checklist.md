@@ -68,6 +68,18 @@
 - [ ] 对 builtin 改动：列出 7 点同步清单（见下），不自动执行
 - [ ] 建议调用 `ralph-preset-review`（不替代 `ralph preset check`）
 
+## Hard questions — single-chain-first (2026-07-07-006 Unit 6)
+
+任何 preset 起草阶段在「默认走单链」之前必须先回答以下 5 问：
+
+1. **本 preset 的 unit 拆分能否由 executor 内部 subagent 完成？** ✓ / ✗ + ≤50 字理由
+2. **任何业务 topic 是否超过一个消费者？** ✓ / ✗ + ≤50 字理由
+3. **fallback 是否可能路由到 success？** ✓ / ✗ + ≤50 字理由
+4. **是否有 hat 把 tasks / progress / recovery 当业务事实？** ✓ / ✗ + ≤50 字理由
+5. **是否有 rescue hat 能改变业务链路？** ✓ / ✗ + ≤50 字理由
+
+任一问 ✗ → 必须改写或显式说明为何单链无法表达（默认应迁移到 executor 内部 subagent）。见 `references/finding-rubric.md` 的「Single-chain-first audit」段。
+
 ## Builtin 7 点同步清单（摘要）
 
 改 `presets/en/<name>.yml` 或 `presets/schemas/<name>.yml` 事件拓扑后，逐层检查：

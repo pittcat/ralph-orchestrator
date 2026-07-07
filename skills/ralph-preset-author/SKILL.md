@@ -28,6 +28,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 1. **Classify target:** local (`.ralph/hats/*.yml`) vs builtin (`presets/en/` + `presets/schemas/`). Note `execution_mode` and hat count (4+ → `isolated` mandatory).
 
 2. **Topology phase (author brain):**
+   - **Default execution model = single-chain** (`ce-executor-pipeline` 同型:linear hat chain + executor-owned subagent work)。仅当显式证明单链无法表达时,才允许引入多角色 runtime orchestration（如 `ce-executor-supervisor` 风格）。
    - Read schema SSOT for builtin presets.
    - Sketch event flow (topics, not prompts).
    - Align each handoff: upstream Q4 fields ↔ downstream Q2 Observe path.
@@ -48,6 +49,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
    - Every `task_id` / `task_key` / `step` row is marked `live required` with a concrete observation command.
    - Multi-trigger hats split Payload Contract by trigger, not collapsed into one row.
    - Ask: "If I only received this hat's instructions + injection, can I complete Q1? Can I construct every Q4 field from visible sources?"
+   - **Single-chain-first 5 问全 ✓**: 填 `references/author-checklist.md` 的「Hard questions — single-chain-first」段；任一 ✗ 必须改写或显式 justify。
    - For builtin edits, list the 7-point sync checklist (do not auto-apply).
    - **If any check fails: STOP.** Do not recommend review or deliver YAML as complete.
 

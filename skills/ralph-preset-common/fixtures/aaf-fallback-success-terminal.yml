@@ -1,0 +1,35 @@
+# Anti-pattern fixture: fallback path can produce success terminal.
+# NOT a builtin preset. Used by ralph-preset-review to assert
+# `fallback_reaches_success_terminal` finding (2026-07-07-006 Unit 6).
+#
+# Reviewer expectation: ralph preset check reports `fallback_reaches_success_terminal`
+# at P0, confidence ≥ 60; recommended remediation is `delete or downgrade to diagnostic`.
+event_loop:
+  execution_mode: isolated
+  starting_event: work.start
+  completion_promise: work.done
+  max_iterations: 10
+hats:
+  executor:
+    name: Executor
+    description: Does work, can fail.
+    triggers:
+      - work.start
+    publishes:
+      - work.failed
+    instructions: |
+      ## EXECUTOR MODE
+      Do the work and emit `work.failed` on terminal failure.
+  rescue:
+    name: Rescue
+    description: Fallback rescue hat that can promote failure to success.
+    triggers:
+      - work.failed
+    publishes:
+      - work.done
+    instructions: |
+      ## RESCUE MODE
+      On `work.failed`, decide whether to retry internally; if recoverable,
+      emit `work.done` to short-circuit the loop to success.
+    terminal_events:
+      - work.done

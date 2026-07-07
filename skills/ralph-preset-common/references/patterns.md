@@ -24,27 +24,32 @@ debug.start
 
 参考：`presets/en/debug.yml`。
 
-## ce-executor-serial（9 hat，isolated；2026-07-06 plan U10 删除 progress-steward）
+## ce-executor-pipeline（13 hat，isolated；Ralph primary path；2026-07-07-006 Unit 1）
 
-Plan-driven 执行 + 串行多维 review。Builtin：`builtin:ce-executor-serial`。
+**唯一推荐 CE executor 拓扑。** 单链 plan-driven 执行 + 串行多维 review，
+executor 内部按 U-ID 分配 subagent，但 Ralph runtime 主链只看到 `work.done` /
+`work.failed`。Builtin：`builtin:ce-executor-pipeline`。
 
 高层事件流（简化）：
 
 ```
 plan-gate / work.start
-  → coordinator（拆 task、发 work.start）
-  → executor（TDD 实现，work.done）
-  → validator
-  → review-coordinator（review.start，批量 wave）
-  → 6× review dimension hats（review.dimension.done）
-  → review-coordinator 发 `review.dimensions.complete`（须在 `state_projection` 投影，供下游 Observe）
-  → review-synthesizer → fixer → alignment → reporter → plan.complete
+  → plan-reviewer（plan.reviewed）
+  → executor（每个 U-ID 一个 subagent；主 executor 验收/提交/最终 emit）
+  → 6× dimension hats（review.dimension.done）
+  → review-synthesizer（review.complete）
+  → fix-planner → fixer（fix.applied）
+  → alignment（alignment.done）
+  → reporter（LOOP_COMPLETE）
 ```
 
-- Schema SSOT：`presets/schemas/ce-executor-serial.yml`
+- Schema SSOT：`presets/en/ce-executor-pipeline.yml` 内联 `event_policy.schemas`
 - 改 topic / `required_fields` / `state_projection` 须同步 schema 与 7 点清单
+- executor 的 unit-level 证据走现有 `work.done` payload 字段（`tests_run` /
+  `tests_passed` / `commit_count` / `executor_head_sha` / `changed_lines`），
+  **不**新增 runtime unit-loop topic
 
-参考：`presets/en/ce-executor-serial.yml`、`docs/handbook/serial-preset-development.md`。
+参考：`presets/en/ce-executor-pipeline.yml`。
 
 ## 起草反模式（禁止抄进 instructions）
 
@@ -56,3 +61,16 @@ plan-gate / work.start
 | 「整个 pipeline 有 12 个 hat」 | 删除；该 hat 不知拓扑 |
 | 在 instructions 写长篇 recovery 散文 | 改为**触发状态表** + 引用 `ralph-tools-recovery-directives` |
 | 把 preset 专用 trigger 表抄进 `ralph-tools*.md` | 专用表只放 preset YAML；data docs 保持通用 |
+
+## Historical anti-pattern: serial CE preset
+
+> **2026-07-08 起 `ce-executor-serial` 已从 builtin 公共面删除。**
+> 历史实验品，被 `ce-executor-pipeline`（见上文）取代。复发问题：
+> 多状态源（tasks / progress / recovery 都被当作业务事实）、fallback
+> 救场（shipper 路径能走到 success 终态）、prompt wall（orchestrator
+> 与 review-synthesizer 互相 know）、terminal 后业务事件（post-`LOOP_COMPLETE`
+> 仍有 `work.ready` 流过）。任何新 preset 都不应复刻这一拓扑；
+> unit-by-unit 是 executor 内部策略，不是 runtime 拓扑。如果一个用户场景
+> 你认为「必须」用 multi-consumer / fallback-success / rescue hat，请先
+> 与 `ralph-preset-review` 沟通，确认单链语义确实表达不了，再立项。
+> `references/finding-rubric.md` 的「Single-chain-first audit」段列出对应 finding。

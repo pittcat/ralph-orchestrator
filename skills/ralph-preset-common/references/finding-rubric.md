@@ -75,9 +75,20 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.flow_unknown_emit_rejected` | P0 | 95 | Q4 | topology |
 | `preset.supervisor_requires_isolated` | P0 | 95 | Q3 | lint |
 | `preset.supervisor_hat_publishes_coord_topic` | P0 | 95 | Q4 | lint |
-| `preset.review_complete_misrouted` | P0 | 95 | Q5 | topology |
-| `preset.strict_reason_routing_missing` | P1 | 85 | Q4 | topology |
 | `preset.metadata_runtime_drift` | P1 | 85 | — | lint |
+
+### Single-chain-first audit (2026-07-07-006 Unit 6)
+
+新增 / 软性 finding（机械 lint 不直接产出，靠 AAF review 与 fixture 自检触发）：
+
+| 缺口 | Severity | 建议 | category | aaf_question |
+|---|---|---|---|---|
+| `fallback_reaches_success_terminal` | P0 | delete or downgrade to diagnostic | topology | Q4 |
+| `runtime_unit_loop_multiple_fact_sources` | P0 | migrate-into-executor | topology | Q5 |
+| `blocked_failed_promoted_to_pass` | P0 | delete promotion path | topology | Q4 |
+| `topic_multi_consumer` | P1（blast radius 大则 P0） | split consumer or remove | topology | Q5 |
+| `hidden_phase_decision` | P1（改变业务事实则 P0） | lift to explicit hat transition | topology | Q4 |
+| `prompt_wall_serial_style` | P1 | reference skill doc, do not inline | style | Q3 |
 
 数据源：`crates/ralph-core/src/preset_lint/finding_id.rs`。
 

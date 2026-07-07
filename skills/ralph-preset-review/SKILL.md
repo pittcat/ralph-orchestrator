@@ -33,6 +33,11 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
 
 3. **Topology sketch** — event flow diagram (not prompt flow).
 
+3a. **Single-chain-first audit (2026-07-07-006 Unit 6)** — mandatory:
+   - Read `references/finding-rubric.md` 「Single-chain-first audit」段；按 `fallback_reaches_success_terminal` / `runtime_unit_loop_multiple_fact_sources` / `blocked_failed_promoted_to_pass` / `topic_multi_consumer` / `hidden_phase_decision` / `prompt_wall_serial_style` 六项逐项判定。
+   - 任一命中 → 报告 P0（`fallback_reaches_success_terminal` / `runtime_unit_loop_multiple_fact_sources` / `blocked_failed_promoted_to_pass`）或 P1（其余）；confidence 起点 60。
+   - 此审计**独立**于 mechanical lint 与 AAF 五问；可在 Per-Hat AAF Reviews 之前作为「Topology sketch 续」插入。
+
 4. **Per-hat AAF review** (mandatory — one hat at a time, strict sequence per hat):
    - Declare: simulating hat `<id>` activation.
    - For the current hat, load **only** that hat's `instructions` (or `ralph hats show -H <path> <id>`). Do not use another hat's private instructions as evidence for this hat's visible context.

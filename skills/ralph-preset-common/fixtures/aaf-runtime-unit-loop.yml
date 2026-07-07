@@ -1,0 +1,49 @@
+# Anti-pattern fixture: runtime unit loop split across coordinator/executor/validator
+# with tasks/progress as business truth source.
+# NOT a builtin preset. Used by ralph-preset-review to assert
+# `runtime_unit_loop_multiple_fact_sources` finding (2026-07-07-006 Unit 6).
+#
+# Reviewer expectation: ralph preset check reports
+# `runtime_unit_loop_multiple_fact_sources` at P0, confidence ≥ 60;
+# recommended remediation is `migrate-into-executor` (i.e. unit loop is an
+# executor-internal subagent concern, not a runtime topology concern).
+event_loop:
+  execution_mode: isolated
+  starting_event: work.start
+  completion_promise: work.done
+  max_iterations: 20
+hats:
+  coordinator:
+    name: Coordinator
+    description: Splits unit loop and tracks progress as business truth.
+    triggers:
+      - work.start
+    publishes:
+      - unit.ready
+    instructions: |
+      ## COORDINATOR MODE
+      Maintain unit progression as runtime events. Write plan progress to
+      `.ralph/agent/progress.md` and rely on `ralph tools task list` to track
+      unit completion as the business fact source.
+  executor:
+    name: Executor
+    description: Implements one unit at a time.
+    triggers:
+      - unit.ready
+    publishes:
+      - unit.done
+    instructions: |
+      ## EXECUTOR MODE
+      Implement the unit and emit `unit.done` when finished.
+  validator:
+    name: Validator
+    description: Validates a single unit's output.
+    triggers:
+      - unit.done
+    publishes:
+      - unit.validated
+    instructions: |
+      ## VALIDATOR MODE
+      Validate the unit; emit `unit.validated` with verdict.
+    terminal_events:
+      - work.done
