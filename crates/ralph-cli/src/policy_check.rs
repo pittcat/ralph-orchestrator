@@ -1924,19 +1924,17 @@ pub fn enrich_validation_error(
                         payload.unwrap_or(&Value::Null),
                     );
                     if shape.is_object() {
-                        let shape_str = shape.to_string();
-                        error.suggested_command = Some(format!(
-                            "ralph emit {topic} --policy-check -j '{shape}'",
-                            topic = error.field, // safe placeholder; replaced below
-                            shape = shape_str
-                        ));
-                        // The "topic" placeholder above is replaced
-                        // by the actual topic at the call site;
-                        // here we just keep the payload shape for
-                        // the JSON consumer. The caller
-                        // (`enrich_validation_error_with_topic`)
-                        // wraps this with the real topic.
-                        error.suggested_command = None;
+                        // 2026-07-09-001 plan (U6): the previously
+                        // here-and-now-overwritten
+                        // `error.suggested_command = Some(format!(...))`
+                        // + comment block + `= None` reassignment
+                        // were a dead-code trap — the
+                        // `enrich_validation_error_with_topic`
+                        // wrapper regenerates suggested_command
+                        // from the real topic downstream, so
+                        // any inline placeholder was
+                        // misleading. Keep only the
+                        // `suggested_payload_shape` write.
                         error.suggested_payload_shape = Some(shape);
                     }
                 }
@@ -4251,6 +4249,121 @@ hats:
             failure.validation_errors[0].field_description.as_deref(),
             Some("live id"),
             "schema lookup must still succeed even when payload_index is OOR"
+        );
+    }
+
+    // 2026-07-09-001 plan (U6 / C1+M1+T2):
+    // pin the dead-code removal in
+    // `enrich_validation_error`'s `missing_required_field`
+    // branch. The pre-fix code accidentally assigned
+    // suggested_command to an inline placeholder that
+    // contained `error.field` as the topic name and
+    // immediately re-assigned None. The behaviour was
+    // correct (None at the end) but the trap was easy to
+    // misread. These two tests pin:
+    //
+    // - the plain `enrich_validation_error` keeps
+    //   `suggested_command == None` after the field is
+    //   populated.
+    // - the wrapper
+    //   `enrich_validation_error_with_topic` regenerates
+    //   `suggested_command` from the real topic, so any
+    //   future regression that re-adds the inline
+    //   placeholder shows up as wrong-topic noise in the
+    //   command string.
+
+    fn schema_with_task_id_field() -> EventSchema {
+        use ralph_core::config::EventFieldDoc;
+        let mut schema = EventSchema::default();
+        schema.required_fields.push("task_id".to_string());
+        schema.field_docs.insert(
+            "task_id".to_string(),
+            EventFieldDoc {
+                meaning: "live task id from `ralph tools task list`".to_string(),
+                source: "preset".to_string(),
+                fill_rule: "do NOT hand-write".to_string(),
+            },
+        );
+        schema
+    }
+
+    #[test]
+    fn enrich_validation_error_keeps_suggested_command_none_missing_branch() {
+        // U6 happy: enrich_validation_error (no topic
+        // wrapper) must NOT touch `suggested_command` in
+        // the `missing_required_field` branch — the
+        // downstream `enrich_validation_error_with_topic`
+        // wrapper owns that field. The pre-fix code path
+        // (assignment-then-immediate-reassignment) also
+        // produced None at the end; this test pins the
+        // final invariant so a future refactor that
+        // removes the immediate reassignment without
+        // deleting the assignment fails CI rather than
+        // shipping a misleading inline placeholder.
+        let schema = schema_with_task_id_field();
+        let err = ValidationError {
+            payload_index: 0,
+            field: "task_id".to_string(),
+            reason_code: "missing_required_field".to_string(),
+            message: "missing required field: task_id".to_string(),
+            ..Default::default()
+        };
+        let enriched = enrich_validation_error(err, None, Some(&schema));
+        assert!(
+            enriched.suggested_command.is_none(),
+            "enrich_validation_error (no topic wrapper) must keep suggested_command == None \
+             for the missing_required_field branch; got {:?}",
+            enriched.suggested_command
+        );
+        assert!(
+            enriched.suggested_payload_shape.is_some(),
+            "missing_required_field enrichment still surfaces the schema-aware payload shape"
+        );
+        assert_eq!(
+            enriched.field_description.as_deref(),
+            Some("live task id from `ralph tools task list`")
+        );
+    }
+
+    #[test]
+    fn enrich_validation_error_with_topic_regenerates_suggested_command() {
+        // U6 negative: the wrapper
+        // `enrich_validation_error_with_topic` must
+        // produce a `suggested_command` that uses the
+        // real topic (e.g. `review.complete`), NOT the
+        // inline field-name placeholder the pre-fix code
+        // path would have produced. Guards against future
+        // edits that resurrect the dead-code inline
+        // placeholder.
+        let schema = schema_with_task_id_field();
+        let err = ValidationError {
+            payload_index: 0,
+            field: "task_id".to_string(),
+            reason_code: "missing_required_field".to_string(),
+            message: "missing required field: task_id".to_string(),
+            ..Default::default()
+        };
+        let enriched = enrich_validation_error_with_topic(
+            err,
+            "review.complete",
+            Some(&serde_json::json!({})),
+            Some(&schema),
+        );
+        let suggested = enriched
+            .suggested_command
+            .as_deref()
+            .expect("topic wrapper must populate suggested_command");
+        assert!(
+            suggested.contains("ralph emit review.complete"),
+            "topic wrapper must use the real topic, not the field name. got: {suggested}"
+        );
+        assert!(
+            !suggested.contains("ralph emit task_id "),
+            "legacy inline-placeholder regression. got: {suggested}"
+        );
+        assert!(
+            suggested.contains("--policy-check"),
+            "suggested_command must advertise --policy-check so the agent re-prechecks"
         );
     }
 }
