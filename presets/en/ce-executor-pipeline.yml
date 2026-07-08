@@ -1110,10 +1110,43 @@ hats:
       - `evidence` — file:line, commit SHA, or plan section
       - `requires_verification` — `true` if you could not
         confirm the fix here
+      - `confidence.overall` — reviewer confidence from 0.0 to 1.0.
+        Use high confidence when the finding is directly supported by
+        code, tests, logs, or the plan; use low confidence when it is
+        an inference that needs another agent to verify.
+      - `evidence_score` — evidence strength from 0.0 to 1.0.
+        Score near 1.0 when the finding cites an exact file:line,
+        failing command, or explicit plan mismatch; score lower when
+        the evidence is broad or circumstantial.
+      - `impact_score` — user/project impact from 0.0 to 1.0.
+        Score near 1.0 for data loss, broken primary workflows,
+        security issues, or violations that block the loop; score
+        lower for local maintainability or cosmetic issues.
+      - `regression_probability` — estimated chance from 0.0 to 1.0
+        that this issue will recur or be hit in normal use if not
+        fixed. This is context for humans and future ranking; it does
+        not change the initial risk formula.
+      - `risk_score` — numeric priority from 0.0 to 1.0, computed as
+        `severity_weight * confidence.overall * evidence_score`.
+        Severity weights: P0=1.00, P1=0.80, P2=0.45, P3=0.15.
+      - `merge_decision` — downstream action:
+        `block` means the finding must be fixed before completion;
+        `warn` means preserve it as a residual or defer unless it is
+        P1; `ignore` means keep it in the review record but do not
+        create fix work.
+
+      `merge_decision` MUST follow these thresholds:
+      - `block`: P0, or P1 with `risk_score >= 0.60`
+      - `warn`: P1 with `risk_score < 0.60`, or P2 with
+        `risk_score >= 0.25`
+      - `ignore`: P3, or `evidence_score < 0.40`, or
+        `confidence.overall < 0.50`
 
       If no discrepancies, write a single finding `{id: "G0",
       severity: "P3", owner: "n/a", description: "no goal-alignment
-      issues"}`.
+      issues", confidence: {overall: 1.0}, evidence_score: 1.0,
+      impact_score: 0.0, regression_probability: 0.0,
+      risk_score: 0.15, merge_decision: "ignore"}`.
 
       ### Step 4 — Write product file
       Write the findings to
@@ -1136,6 +1169,13 @@ hats:
       ## Findings
       - id: G1
         severity: P1
+        confidence:
+          overall: 0.85
+        evidence_score: 0.95
+        impact_score: 1.0
+        regression_probability: 0.7
+        risk_score: 0.65
+        merge_decision: block
         owner: executor
         description: ...
         evidence: src/foo.rs:42
@@ -1653,12 +1693,26 @@ hats:
 
       Read each file. Parse the `## Findings` section into a list
       of finding records `{id, severity, owner, description,
-      evidence, requires_verification}`.
+      evidence, requires_verification, confidence.overall,
+      evidence_score, impact_score, regression_probability,
+      risk_score, merge_decision}`.
 
       If a dimension file is missing or unreadable, treat that
       dimension as having a single finding `{id: "<DIM>0",
       severity: P3, owner: manual, description: "dimension file
-      missing", evidence: "<file path>", requires_verification: true}`.
+      missing", evidence: "<file path>", requires_verification: true,
+      confidence: {overall: 1.0}, evidence_score: 1.0,
+      impact_score: 0.2, regression_probability: 0.2,
+      risk_score: 0.15, merge_decision: "ignore"}`.
+
+      Backward-compatible fallback: if an older dimension product is
+      missing risk fields, infer them before ranking:
+      - `confidence.overall: 0.70`
+      - `evidence_score: 0.70`
+      - `impact_score: 0.50`
+      - `regression_probability: 0.50`
+      - `risk_score = severity_weight * confidence.overall * evidence_score`
+      - `merge_decision`: P0 -> block, P1 -> warn, P2/P3 -> ignore
 
       ### Step 2 — Dedup + merge
       - Same `evidence` (file:line) + same root cause → merge,
@@ -1668,6 +1722,9 @@ hats:
         independent findings.
       - Conflict on severity for the same finding → keep the
         more severe (P0 wins over P3).
+      - Conflict on risk fields for the same finding → keep the
+        highest `risk_score`, the highest `confidence.overall`, and
+        the strictest `merge_decision` (`block` > `warn` > `ignore`).
 
       ### Step 3 — Cross-dimension consistency
       - If `correctness` flags a bug AND `testing` has no test
@@ -1690,6 +1747,20 @@ hats:
       - "missing test for critical path" → P1
       - "function > 50 lines" → P2
       - "comment typo" → P3
+
+      Risk field definitions for final output:
+      - `confidence.overall`: how certain the reviewer is that the
+        finding is real.
+      - `evidence_score`: how concrete and checkable the cited
+        evidence is.
+      - `impact_score`: how severe the user/project damage would be
+        if the issue ships.
+      - `regression_probability`: how likely the issue is to recur or
+        be hit in normal use if not fixed.
+      - `risk_score`: `severity_weight * confidence.overall *
+        evidence_score`, using P0=1.00, P1=0.80, P2=0.45, P3=0.15.
+      - `merge_decision`: `block`, `warn`, or `ignore`, using the
+        dimension-reviewer thresholds.
 
       ### Step 5 — Compute counts
       - `findings_count` — total findings after dedup/merge
@@ -1722,13 +1793,16 @@ hats:
       - verdict: <pass|pass_with_residuals|blocked>
 
       ## Findings
-      | ID | Severity | Owner | Description | Evidence | Requires verification |
-      |----|----------|-------|-------------|----------|-----------------------|
-      | <dimension>:<id> | P0/P1/P2/P3 | <owner> | <description> | <file:line or product path> | true/false |
+      | ID | Severity | Risk | Decision | Confidence | Evidence score | Impact | Regression probability | Owner | Description | Evidence | Requires verification |
+      |----|----------|------|----------|------------|----------------|--------|------------------------|-------|-------------|----------|-----------------------|
+      | <dimension>:<id> | P0/P1/P2/P3 | <risk_score> | block/warn/ignore | <confidence.overall> | <evidence_score> | <impact_score> | <regression_probability> | <owner> | <description> | <file:line or product path> | true/false |
 
       ## Fix Planning Notes
-      - P0/P1 findings must become actionable fix-plan Units.
-      - P2/P3 findings may be deferred as DOC residuals.
+      - `block` findings must become actionable fix-plan Units.
+      - P1 `warn` findings must become actionable fix-plan Units.
+      - P2/P3 `warn` findings may be deferred as DOC residuals.
+      - `ignore` findings stay in the review record and do not create
+        fix work.
       - Preserve source finding IDs in every downstream Unit.
       ```
 
@@ -1794,14 +1868,19 @@ hats:
       | `verdict == "pass"` (no P0/P1) | **Placeholder** (template §7b) |
 
       Mapping findings → Units (from the synthesized review):
-      - **One P0 finding → one `### U<N>.`** (do not merge unrelated P0s).
-      - **One P1 finding → one `### U<N>.`** (same rule).
-      - **P2/P3 only (bundled):** optional single
+      - **One `merge_decision: block` finding → one `### U<N>.`**
+        (do not merge unrelated blockers).
+      - **One P1 `merge_decision: warn` finding → one `### U<N>.`**
+        because P1 residuals are still must-fix for this pipeline.
+      - **P2/P3 `merge_decision: warn` findings (bundled):** optional single
         `### U<N>. Residuals (deferred)` with
         `**Kind:** DOC` and `**Verification:** none — documentation-only`;
         fixer does **not** implement code for this Unit (see fixer Step 1).
+      - **`merge_decision: ignore` findings:** do not create Units;
+        preserve them only in the review record.
       - Order Units **U1 → U2 → …** by severity (all P0 first, then P1,
-        then residuals). **Never** renumber after assign; gaps OK.
+        then residuals). Within the same severity, sort by descending
+        `risk_score`. **Never** renumber after assign; gaps OK.
       - Heading token is always uppercase `U` + integer (`U1`, `U2`, …) —
         same token in git commit subjects for alignment matching.
 
