@@ -684,7 +684,17 @@ async fn run_loop_impl_inner(
     // WRC-U3: pass `source_is_builtin_embedded` so the WAC
     // severity upgrade (KTD-7) applies to builtin presets even
     // outside `--strict` mode.
-    if let Err(lint_error) = enforce_preset_lint_gate(&config, source_is_builtin_embedded) {
+    //
+    // 2026-07-09-001 plan (U1 / A7): forward `hats_source_label`
+    // so the U7 emit-feedback lint gate can scope its check to
+    // the preset whitelist. Without this, `preset_name` resolves
+    // to `""` inside the gate and the lint silently bypasses
+    // the new rule on `ralph run -H builtin:ce-executor-pipeline-loop`.
+    if let Err(lint_error) = enforce_preset_lint_gate_with_preset_name(
+        &config,
+        source_is_builtin_embedded,
+        hats_source_label.as_deref(),
+    ) {
         let diagnostics_dir = std::path::Path::new(".").join(".ralph").join("diagnostics");
         let _artifact_path = write_preset_lint_artifact(&diagnostics_dir, &lint_error);
         eprintln!(
@@ -4853,6 +4863,149 @@ mod sync_timeout_tests {
         assert!(
             elapsed < std::time::Duration::from_secs(2),
             "fast sync should not wait 30s: {elapsed:?}"
+        );
+    }
+}
+
+/// 2026-07-09-001 plan (U1 / A7): the lint gate call site in
+/// `run_loop_impl_inner` (line ~687) MUST route through
+/// `enforce_preset_lint_gate_with_preset_name` so the U7
+/// emit-feedback skill-reference rule actually fires on
+/// `ralph run -H builtin:ce-executor-pipeline-loop`. Without
+/// the preset name the whitelist gate inside
+/// `check_instructions_opac_with_preset` resolves to
+/// `preset_name = ""` and the rule silently bypasses.
+#[cfg(test)]
+mod u1_preset_name_aware_lint_gate_wiring {
+    use super::*;
+    use crate::loop_runner::preset_lint_gate::{
+        enforce_preset_lint_gate, enforce_preset_lint_gate_with_preset_name,
+    };
+    use ralph_core::RalphConfig;
+
+    /// A minimal preset that mimics `ce-executor-pipeline-loop`'s
+    /// `fix-planner` hat with the U7 emit-feedback citation
+    /// deliberately removed. The topology stays lint-clean
+    /// (handoff / completion_promise covered) so the only
+    /// failing rule on the whitelisted preset is the U7 skill
+    /// reference missing — the exact U1/A7 production
+    /// asymmetry the runner has to defend against.
+    const LOOP_YAML_WITHOUT_CITE: &str = r#"
+hats:
+  worker:
+    name: "Worker"
+    description: "Build the U-IDs"
+    triggers: ["work.start"]
+    publishes: ["work.ready"]
+  review-synthesizer:
+    name: "Review Synthesizer"
+    description: "Aggregate review findings"
+    triggers: ["work.ready"]
+    publishes: ["work.complete"]
+  fix-planner:
+    name: "Fix Planner"
+    description: "Draft the fix plan"
+    triggers: ["work.complete"]
+    publishes: ["loop.complete"]
+    instructions: |
+      Draft a fix plan for the review findings referencing
+      the payload shape conventions. Use
+      `ralph tools task ensure` to register the per-fix
+      tasks.
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "loop.complete"
+tasks:
+  enabled: false
+"#;
+
+    #[test]
+    fn invokes_preset_name_aware_lint_gate() {
+        // The same config produces different gate verdicts
+        // depending on whether the preset name is forwarded.
+        // The fresh call site (with `hats_source_label`) MUST
+        // land on the `_with_preset_name` path; the legacy
+        // no-arg `enforce_preset_lint_gate` API bails out of
+        // the U7 whitelist silently.
+        let config: RalphConfig =
+            serde_yaml::from_str(LOOP_YAML_WITHOUT_CITE).expect("yaml must parse");
+
+        // The runner passes raw_yaml through to the lint
+        // aggregator; the U7 instruction-level check only
+        // fires when raw_yaml is supplied, matching the
+        // production `ralph run` path (which threads raw YAML
+        // through from `RalphConfig::parse_yaml`).
+        let lint_source_yaml = LOOP_YAML_WITHOUT_CITE;
+
+        let legacy_result = enforce_preset_lint_gate(&config, false);
+        assert!(
+            legacy_result.is_ok(),
+            "legacy no-preset-name gate must NOT fire U7 (pre-fix behaviour, expected)"
+        );
+
+        // The lint aggregator signature requires
+        // `raw_yaml: Option<&str>` to reach the
+        // instructions_opac layer. The legacy no-arg
+        // `enforce_preset_lint_gate` does NOT thread
+        // raw_yaml by design (it is the
+        // unit-test/no-yaml path), so we drive
+        // `run_preset_lint_with_preset_name` directly to
+        // prove the same call site the new
+        // `enforce_preset_lint_gate_with_preset_name`
+        // uses produces the U7 finding the runner
+        // depends on.
+        let whitelisted_result = ralph_core::preset_lint::run_preset_lint_with_preset_name(
+            &config,
+            ralph_core::preset_lint::LintStrictness::Strict,
+            false,
+            Some(lint_source_yaml),
+            "ce-executor-pipeline-loop",
+        );
+        assert!(
+            whitelisted_result.iter().any(|f| {
+                f.id == "lint.preset.instructions_emit_feedback_skill_reference_missing"
+                    && f.severity == ralph_core::runtime_contract::FindingSeverity::Error
+            }),
+            "preset-name-aware lint must fire U7 finding for whitelisted preset, got: {:?}",
+            whitelisted_result
+        );
+    }
+
+    #[test]
+    fn invokes_lint_gate_without_preset_name_when_source_unknown() {
+        // A preset NOT in the U7 whitelist + the same
+        // U7-violating instructions must NOT trigger the U7
+        // finding — the whitelist gate inside the lint is
+        // the only thing keeping non-pipeline-loop presets
+        // (e.g. user hats) from a cliff.
+        let config: RalphConfig =
+            serde_yaml::from_str(LOOP_YAML_WITHOUT_CITE).expect("yaml must parse");
+        let findings_none = ralph_core::preset_lint::run_preset_lint_with_preset_name(
+            &config,
+            ralph_core::preset_lint::LintStrictness::Strict,
+            false,
+            Some(LOOP_YAML_WITHOUT_CITE),
+            "",
+        );
+        assert!(
+            !findings_none.iter().any(|f| {
+                f.id == "lint.preset.instructions_emit_feedback_skill_reference_missing"
+            }),
+            "preset-name-aware gate with empty preset name must behave like the legacy no-arg variant (no U7 finding)"
+        );
+        let findings_other_preset =
+            ralph_core::preset_lint::run_preset_lint_with_preset_name(
+                &config,
+                ralph_core::preset_lint::LintStrictness::Strict,
+                false,
+                Some(LOOP_YAML_WITHOUT_CITE),
+                "ce-executor-lite",
+            );
+        assert!(
+            !findings_other_preset.iter().any(|f| {
+                f.id == "lint.preset.instructions_emit_feedback_skill_reference_missing"
+            }),
+            "non-whitelisted preset name must not trigger U7 (scoped rule)"
         );
     }
 }
