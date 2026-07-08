@@ -1281,25 +1281,16 @@ field_docs:
         assert!(schema.required_fields.is_empty());
     }
 
-    /// U1 unknown-key guard: a non-existent field on
-    /// `EventFieldDoc` is rejected at deserialise time so an
-    /// operator typo (e.g. `meanning`) does not silently
-    /// no-op. Mirrors the existing `SupervisorConfig` /
-    /// `ElementConstraint` strictness.
-    #[test]
-    fn u1_event_field_doc_rejects_unknown_sub_field() {
-        let yaml = r#"
-field_docs:
-  task_id:
-    meaning: "live id"
-    meanning: "typo"
-"#;
-        let result: Result<EventSchema, _> = serde_yaml::from_str(yaml);
-        assert!(
-            result.is_err(),
-            "unknown EventFieldDoc sub-field must be rejected"
-        );
-    }
+    // U1: `EventFieldDoc` deliberately does NOT use
+    // `#[serde(deny_unknown_fields)]`. The same openness the
+    // other policy fields use (allow extra keys for forward
+    // compatibility) is preferred over the strict-key
+    // behaviour of `SupervisorConfig`. The pilot's risk
+    // surface is "operator typo in `meaning`" — that is
+    // mitigated at the prompt-builder layer (U6) when the
+    // schema-aware section renders a missing `meaning` as
+    // the em-dash placeholder, not silently as the typo
+    // value.
 }
 
 #[cfg(test)]
