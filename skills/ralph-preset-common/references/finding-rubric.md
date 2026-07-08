@@ -53,6 +53,7 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.multi_hat_requires_isolated` | P0 | 95 | Q3 | lint |
 | `preset.instructions_read_internal_ledger` | P0 | 95 | Q3 | lint |
 | `preset.instructions_opac_skill_reference_missing` | P1 | 85 | Q3 | lint |
+| `preset.instructions_emit_feedback_skill_reference_missing` | P1 | 80 | Q3 | lint |
 | `preset.instructions_task_create_literal` | P1 | 85 | Q3 | lint |
 | `preset.instructions_supervisor_coordination_topic` | P0 | 95 | Q4 | lint |
 | `preset.handoff_pairing_broken` | P0 | 95 | Q5 | lint |

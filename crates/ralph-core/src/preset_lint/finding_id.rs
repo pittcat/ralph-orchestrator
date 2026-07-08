@@ -405,6 +405,29 @@ pub const FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER: &str =
 pub const FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC: &str =
     "preset.instructions_supervisor_coordination_topic";
 
+/// 2026-07-09-001 plan (U7): hat `instructions:` direct the
+/// agent to build / shape / fix a `ralph emit` payload but
+/// do **not** cite the new `ralph-tools-emit` policy-check
+/// feedback section. The agent ends up re-deriving field
+/// shapes from stale inline text instead of the U3
+/// enrichment layer (`field_description`,
+/// `suggested_payload_shape`, `suggested_command`).
+///
+/// The rule only fires when:
+/// - the hat publishes a non-empty topics list, AND
+/// - the hat's `instructions` mention `payload` /
+///   `ralph emit` / `ralph wave emit` /
+///   `field shape` / `required fields`, AND
+/// - the hat's `instructions` do not cite the U3
+///   `ralph-tools-emit` feedback section (e.g.
+///   "enrichment fields" or "policy-check feedback").
+///
+/// Always `Error` for builtin / high-risk presets
+/// (Phase 1); the lint scope is tightened in
+/// `check_emit_feedback_skill_reference`.
+pub const FINDING_INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING: &str =
+    "preset.instructions_emit_feedback_skill_reference_missing";
+
 // ──────────────────────────────────────────────────────────────────────────
 // U3 + U4 of plan 2026-07-04-004: review-synthesizer + coordinator
 // routing drift guards. The two rules below are *drift* guards
@@ -471,5 +494,6 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_INSTRUCTIONS_OPAC_SKILL_REFERENCE_MISSING,
     FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER,
     FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC,
+    FINDING_INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING,
     FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD,
 ];

@@ -24,6 +24,7 @@ use serde_yaml::Value;
 
 use super::LintFinding;
 use super::finding_id::{
+    FINDING_INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING,
     FINDING_INSTRUCTIONS_FIX_UNIT_MINT_TEMPLATE_MISSING,
     FINDING_INSTRUCTIONS_OPAC_SKILL_REFERENCE_MISSING, FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER,
     FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC, FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL,
@@ -98,6 +99,17 @@ pub fn check_instructions_opac(raw_yaml: &str) -> Vec<LintFinding> {
         // silently failed to fire for those emitters.
         if !publishes.is_empty() {
             check_opac_skill_reference(hat_id_str, &instructions, &mut findings);
+            // 2026-07-09-001 plan (U7): gate the new
+            // emit-feedback-skill-reference rule on the same
+            // "talks about payload shape" heuristic the rule
+            // checks. Hats that just emit a single
+            // `work.done`-style "publish at the end" without
+            // shaping the payload (e.g. some builtin observers)
+            // are exempt — the lint targets emitter hats that
+            // *describe* the payload to the agent.
+            if mentions_payload_construction(&instructions) {
+                check_emit_feedback_skill_reference(hat_id_str, &instructions, &mut findings);
+            }
             let talks_fix_unit = mentions_fix_unit(&instructions);
             if talks_fix_unit {
                 check_fix_unit_mint_template(hat_id_str, &instructions, &mut findings);
@@ -243,6 +255,70 @@ fn check_fix_unit_mint_template(hat_id: &str, instructions: &str, findings: &mut
 fn mentions_fix_unit(instructions: &str) -> bool {
     let lower = instructions.to_ascii_lowercase();
     lower.contains("fix-unit") || lower.contains("fix unit") || lower.contains("fresh mint")
+}
+
+/// 2026-07-09-001 plan (U7): returns true when the hat
+/// `instructions` describe payload construction (so the
+/// emit-feedback lint should run). The heuristic looks for
+/// common payload-shaping verbs / nouns. We deliberately
+/// match the same words the agent sees in the schema-aware
+/// prompt section, so the rule's gate is *visible* to
+/// preset authors.
+fn mentions_payload_construction(instructions: &str) -> bool {
+    let lower = instructions.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "payload",
+        "ralph emit",
+        "ralph wave emit",
+        "field shape",
+        "required fields",
+        "field_docs",
+        "field description",
+        "schema-aware",
+        "policy-check",
+    ];
+    NEEDLES.iter().any(|n| lower.contains(n))
+}
+
+fn check_emit_feedback_skill_reference(
+    hat_id: &str,
+    instructions: &str,
+    findings: &mut Vec<LintFinding>,
+) {
+    // 2026-07-09-001 plan (U7): the rule accepts any of the
+    // following references as proof the agent is pointed at
+    // the new policy-check feedback section:
+    //   - `ralph-tools-emit` + `policy-check feedback`
+    //   - `ralph-tools-emit` + `enrichment fields`
+    //   - `ralph-tools-emit` + `suggested_payload_shape`
+    //   - `ralph-tools-emit` + `field_description`
+    //   - `ralph-tools-emit` + `suggested_command`
+    //
+    // The mention does NOT need a §N anchor — the U7 plan
+    // scopes the rule to builtin / high-risk presets, and
+    // builtin preset authors are expected to read the
+    // ralph-tools-emit skill end-to-end.
+    let cites_emit_feedback = instructions.contains("ralph-tools-emit")
+        && [
+            "policy-check feedback",
+            "enrichment fields",
+            "suggested_payload_shape",
+            "field_description",
+            "suggested_command",
+        ]
+        .iter()
+        .any(|n| instructions.contains(n));
+    if !cites_emit_feedback {
+        findings.push(
+            LintFinding::new(
+                FINDING_INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING,
+                format!(
+                    "hat `{hat_id}` instructions describe payload construction but do not cite the U3 `ralph-tools-emit` policy-check feedback section (field_description / suggested_payload_shape / suggested_command); the agent will re-derive field shapes from stale inline text instead of the schema-aware layer"
+                ),
+            )
+            .with_hat(hat_id),
+        );
+    }
 }
 
 /// Tiny helper: does `haystack` contain `needle` with word/space boundaries
@@ -457,6 +533,86 @@ hats:
         assert!(
             findings.is_empty(),
             "hat with no instructions: skip silently"
+        );
+    }
+
+    // 2026-07-09-001 plan (U7): emit-feedback-skill-reference lint.
+
+    /// U7 error path: hat publishes a business event, the
+    /// `instructions` text talks about `payload` / `ralph
+    /// emit` / `field shape`, but the new
+    /// `ralph-tools-emit` policy-check feedback section is
+    /// not cited. The lint fires with
+    /// `INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING`.
+    #[test]
+    fn u7_emit_feedback_skill_reference_missing_is_caught() {
+        let yaml = r#"
+hats:
+  emitter:
+    subscribes_to: [work.start]
+    publishes:
+      - work.done
+    instructions: |
+      Build the JSON payload for work.done and call `ralph emit work.done --json '<payload>'`.
+"#;
+        let findings = check_instructions_opac(yaml);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING),
+            "expected emit-feedback-skill-reference finding, got: {findings:?}"
+        );
+    }
+
+    /// U7 happy path: instructions cite `ralph-tools-emit`
+    /// AND mention one of the U3 enrichment fields
+    /// (e.g. `field_description`, `suggested_payload_shape`,
+    /// `suggested_command`). The lint passes.
+    #[test]
+    fn u7_emit_feedback_skill_reference_present_passes() {
+        let yaml = r#"
+hats:
+  emitter:
+    subscribes_to: [work.start]
+    publishes:
+      - work.done
+    instructions: |
+      Build the JSON payload for work.done. Cite ralph-tools-emit and read the policy-check feedback section for `field_description` / `suggested_payload_shape` / `suggested_command` after a rejection.
+"#;
+        let findings = check_instructions_opac(yaml);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING),
+            "ralph-tools-emit + enrichment-field mention must satisfy the lint"
+        );
+    }
+
+    /// U7 non-goal: hat publishes business event but
+    /// `instructions` does NOT mention payload construction
+    /// — the lint stays silent. This is the gate the
+    /// `mentions_payload_construction` heuristic enforces:
+    /// hats that just say "publish at the end" without
+    /// describing the payload are exempt (they already rely
+    /// on the schema-aware prompt section, not the inline
+    /// text).
+    #[test]
+    fn u7_emit_feedback_skill_reference_no_payload_mention_is_skipped() {
+        let yaml = r#"
+hats:
+  observer:
+    subscribes_to: [work.start]
+    publishes:
+      - work.done
+    instructions: |
+      Do the work and publish work.done at the end.
+"#;
+        let findings = check_instructions_opac(yaml);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING),
+            "hat without payload-shaping text must be exempt, got: {findings:?}"
         );
     }
 }

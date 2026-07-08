@@ -67,6 +67,34 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 >
 > **对 agent 来说**：不需要检测当前模式。只要记住两条规则：1) 若 prompt 明确要求你触发某个 hat， emit 时带上 `--triggered <hat>`；2) 没要求时直接 emit，runner / CLI 会自动处理。
 
+### Policy-Check 反馈（plan 2026-07-09-001 U3-U6）
+
+`ralph emit --policy-check` / `ralph wave emit --policy-check` 拒收时，错误响应里**每条** `validation_errors[]` 现在带一组可机读、可修复的字段（agent 优先读这些字段再决定怎么改 payload，不要凭"error message"猜）：
+
+| 字段 | 含义 |
+|------|------|
+| `field` | 触发的 payload 字段名（如 `task_id`）；空字符串表示错误在 payload / topic 层级 |
+| `reason_code` | 稳定错误码（`missing_required_field` / `invalid_field_value` / `payload_type_mismatch` / `terminal_monotonicity_violation` 等） |
+| `message` | 人类可读描述 |
+| `expected` | 字段应满足的形态（allowed_values 列表 / 字段名 / payload 类型） |
+| `actual` | 实际触发的值（缺字段时为 None） |
+| `field_description` | `field_docs.<f>.meaning`（schema 声明时才有） |
+| `suggested_payload_shape` | 已存在字段保留原值，缺失字段用 `<field>` 占位符的 JSON 骨架 —— **绝不**填业务事实（如 `0` / `pass`） |
+| `suggested_command` | 修完 payload 后直接可重跑的 `ralph emit <topic> --policy-check -j '<shape>'` 命令 |
+
+**Agent 流程**：
+
+1. 读 prompt 中的 schema-aware publish section（plan U6 输出），按 `field_docs` 填 payload。
+2. 跑 `ralph emit <topic> --policy-check -j '<payload>'` 预检。
+3. 拒收时读 `errors[0].field` / `expected` / `actual` / `field_description` / `suggested_payload_shape` / `suggested_command`。
+4. 修 payload（**只**改 `field` 提示的字段；**不要**复制旧 payload 重新猜字段名）。
+5. 再跑 `--policy-check`；通过后去掉 `--policy-check` 正式 emit。
+6. 同一 `(hat, topic, task_key, step, violation)` 第二次同型错误会触发 runtime fail-close（`plan.blocked(reason=protocol_violation_repeated:...)`）—— 不要 infinite 重试。
+
+**Wave batch 特殊处理**：`ralph wave emit --policy-check` 的 `validation_errors[]` 每条带 `payload_index`，对应原始 batch 的索引；整个 batch 仍 atomic reject（任何一个失败 = events.jsonl 一行都不写）。修整批后一次性重发。
+
+**preset instructions 必须引用本段**（plan U7 lint：`INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING`）：builtin / high-risk preset 的 emitter hat 在 instructions 提到 `payload` / `ralph emit` / `ralph wave emit` / `field shape` / `required fields` 时，必须同时引用 `ralph-tools-emit` policy-check feedback 段（任意一处提到 `policy-check feedback` / `enrichment fields` / `suggested_payload_shape` / `field_description` / `suggested_command` 即可）。Hat instructions 不要复述字段表 —— prompt section 已经按 U6 渲染好；instructions 只负责指向本 skill。
+
 ### Envelope 校验（`triggered` 拓扑）
 
 `ralph emit --triggered <hat_id>` 在 apply 路径与 `--policy-check` 路径都会被 envelope 层校验：`triggered` 字段的值必须是当前 preset 声明的 hat 之一（即出现在 `hats[]` map 里），否则返回 `triggered_not_in_topology`。
