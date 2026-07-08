@@ -3994,8 +3994,15 @@ hats:
     /// U4 happy path: when `validation_errors` is populated,
     /// `report_to_emit_result` uses them (not the legacy
     /// `reason_codes` flattening) so the agent sees the
-    /// `field` / `expected` / `suggested_command` JSON
-    /// fields.
+    /// full U3 enrichment JSON (`field` / `expected` /
+    /// `actual` / `field_description` /
+    /// `suggested_payload_shape` / `suggested_command`).
+    ///
+    /// 2026-07-09-001 plan (U4): after U3 extends
+    /// `EmitError`, this fixture populates every U3 field
+    /// so the additive invariant is no longer silent — a
+    /// future U3 regression would skip one of these
+    /// assertions, not just `code` / `suggested_command`.
     #[test]
     fn u4_report_to_emit_result_uses_validation_errors_when_present() {
         let report = PolicyCheckReport {
@@ -4016,6 +4023,12 @@ hats:
                     "ralph emit work.done --policy-check -j '{\"task_id\":\"<task_id>\"}'"
                         .to_string(),
                 ),
+                expected: Some("task_id".to_string()),
+                actual: None,
+                field_description: Some(
+                    "the live task id from `ralph tools task list`".to_string(),
+                ),
+                suggested_payload_shape: Some(serde_json::json!({"task_id": "<id>"})),
                 ..Default::default()
             }],
         };
@@ -4029,6 +4042,61 @@ hats:
             .as_str()
             .unwrap()
             .contains("--policy-check"));
+        // U4 (2026-07-09-001): U3 enrichment fields survive
+        // the validation_errors_to_emit_errors round trip.
+        assert_eq!(
+            errors[0]["expected"],
+            serde_json::json!("task_id"),
+            "expected must propagate as a JSON string (ValidationError.String → Value::String)"
+        );
+        assert!(
+            errors[0].get("actual").is_none(),
+            "None actual must skip serialise (no `\"actual\": null`)"
+        );
+        assert_eq!(
+            errors[0]["field_description"],
+            "the live task id from `ralph tools task list`"
+        );
+        assert_eq!(
+            errors[0]["suggested_payload_shape"],
+            serde_json::json!({"task_id": "<id>"})
+        );
+    }
+
+    /// U4 (2026-07-09-001): regression guard — when a
+    /// `ValidationError`'s U3 fields are `None`, the JSON
+    /// envelope must omit the JSON keys entirely (not
+    /// `"expected": null`). This pins the
+    /// skip-serializing-if-None invariant; a future caller
+    /// that reassigns `expected` to `Some(serde_json::Value::Null)`
+    /// would silently break agents reading JSON.
+    #[test]
+    fn u4_report_to_emit_result_omits_none_enrichment_fields() {
+        let report = PolicyCheckReport {
+            topic: "work.done".to_string(),
+            hat: None,
+            workspace: std::path::PathBuf::from("/tmp"),
+            accepted: false,
+            reason_codes: vec!["should_be_ignored".to_string()],
+            suggestions: vec!["should_be_ignored".to_string()],
+            post_commit_rejected: false,
+            validation_errors: vec![ValidationError {
+                payload_index: 0,
+                field: "task_id".to_string(),
+                reason_code: "missing_required_field".to_string(),
+                message: "missing required field: task_id".to_string(),
+                suggested_command: None,
+                // All U3 enrichment fields default to None.
+                ..Default::default()
+            }],
+        };
+        let result = report_to_emit_result(&report, None);
+        let v = serde_json::to_value(&result).expect("serialize EmitResult");
+        let err_obj = &v["errors"][0];
+        assert!(err_obj.get("expected").is_none());
+        assert!(err_obj.get("actual").is_none());
+        assert!(err_obj.get("field_description").is_none());
+        assert!(err_obj.get("suggested_payload_shape").is_none());
     }
 
     // 2026-07-09-001 plan (U5): batch/wave enrichment tests.
