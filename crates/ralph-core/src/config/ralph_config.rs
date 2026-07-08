@@ -479,6 +479,23 @@ impl RalphConfig {
                         message: "Schema topic cannot be empty".to_string(),
                     });
                 }
+                // 2026-07-09-001 plan (U1): reject empty
+                // `field_docs` keys. Non-required-field entries
+                // are still allowed (documentation ≠ validation),
+                // but a key like `""` would silently match no
+                // real field and confuse the agent prompt
+                // builder / policy-check error paths.
+                for key in schema.field_docs.keys() {
+                    if key.trim().is_empty() {
+                        return Err(ConfigError::EventPolicyValidation {
+                            field: format!(
+                                "event_loop.event_policy.schemas.{}.field_docs",
+                                topic
+                            ),
+                            message: "Field doc key cannot be empty".to_string(),
+                        });
+                    }
+                }
                 for path in schema.allowed_values.keys() {
                     if path.trim().is_empty() {
                         return Err(ConfigError::EventPolicyValidation {
@@ -919,6 +936,102 @@ fn build_gate_instructions(topic: &str, rule: &PrecheckRule) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 2026-07-09-001 plan (U1): `EventSchema::field_docs` config
+    // validation — empty keys are rejected with a stable
+    // `EventPolicyValidation` error so the runtime and the
+    // operator see the same failure surface.
+
+    /// U1 error path: a `field_docs` entry with an empty key
+    /// must be rejected at validation time and the error
+    /// message must point at the topic's `field_docs` field
+    /// path. Required: keeps the agent / preset author
+    /// debugging flow consistent with the existing
+    /// `allowed_values` validation pattern.
+    #[test]
+    fn u1_event_policy_field_docs_rejects_empty_key() {
+        let yaml = r#"
+event_loop:
+  event_policy:
+    mode: "enforce"
+    enabled: true
+    schemas:
+      work.done:
+        required_fields: ["task_id"]
+        field_docs:
+          "":
+            meaning: "accidental empty key"
+"#;
+        let cfg: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = cfg
+            .validate()
+            .expect_err("empty field_docs key must fail validate()");
+        match err {
+            ConfigError::EventPolicyValidation { field, message } => {
+                assert!(
+                    field.contains("work.done.field_docs"),
+                    "error field path must mention work.done.field_docs, got: {field}"
+                );
+                assert!(
+                    message.to_lowercase().contains("empty"),
+                    "error message must explain the empty-key problem, got: {message}"
+                );
+            }
+            other => panic!("expected EventPolicyValidation, got: {other:?}"),
+        }
+    }
+
+    /// U1 happy path: a non-empty `field_docs` block parses
+    /// and passes validation unchanged. Required: documents
+    /// the success path so the negative test above cannot
+    /// silently pass because the whole event_policy block
+    /// becomes ignored.
+    #[test]
+    fn u1_event_policy_field_docs_accepts_real_keys() {
+        let yaml = r#"
+event_loop:
+  event_policy:
+    mode: "enforce"
+    enabled: true
+    schemas:
+      work.done:
+        required_fields: ["task_id"]
+        field_docs:
+          task_id:
+            meaning: "live task id"
+            source: "ralph tools task list"
+            fill_rule: "do NOT hand-write"
+"#;
+        let cfg: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = cfg.validate().expect("non-empty field_docs must validate");
+        let _ = warnings;
+    }
+
+    /// U1 non-goal guard: a `field_docs` key that does not
+    /// appear in `required_fields` is allowed. This keeps
+    /// `field_docs` as documentation (advisory), not
+    /// validation, and matches the `EventSchema`-level
+    /// non-goal guard.
+    #[test]
+    fn u1_event_policy_field_docs_allows_non_required_field() {
+        let yaml = r#"
+event_loop:
+  event_policy:
+    mode: "enforce"
+    enabled: true
+    schemas:
+      work.done:
+        required_fields: ["task_id"]
+        field_docs:
+          optional_note:
+            meaning: "operator annotation, free text"
+"#;
+        let cfg: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = cfg
+            .validate()
+            .expect("non-required field_docs entries must validate");
+        let _ = warnings;
+    }
 
     #[test]
     fn test_default_config() {

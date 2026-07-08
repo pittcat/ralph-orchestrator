@@ -23,6 +23,29 @@ pub struct HatAllowedValues {
     pub values: Vec<serde_json::Value>,
 }
 
+/// 2026-07-09-001 plan (U1): agent-facing metadata for a single
+/// payload field. Machine validation does NOT consult this struct —
+/// it only informs `ralph emit --policy-check` failures, the
+/// schema-aware hat prompt section, and the
+/// `crates/ralph-core/data/ralph-tools-emit.md` flow. Each
+/// sub-field is `#[serde(default)]` so old schemas keep parsing
+/// unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct EventFieldDoc {
+    /// What the field means in the context of the topic (e.g.
+    /// "the live task id returned by `ralph tools task list`").
+    #[serde(default)]
+    pub meaning: String,
+    /// Where the field's value typically originates
+    /// (e.g. "`ralph tools task list` for the live id").
+    #[serde(default)]
+    pub source: String,
+    /// How to fill the field when the value is missing
+    /// (e.g. "do NOT hand-write; copy from `ralph tools task list`").
+    #[serde(default)]
+    pub fill_rule: String,
+}
+
 /// Schema for validating events of a specific topic.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EventSchema {
@@ -56,6 +79,25 @@ pub struct EventSchema {
     /// a non-null `findings_file` (no silent-drop of fake "done" elements).
     #[serde(default)]
     pub element_constraints: HashMap<String, ElementConstraint>,
+    /// 2026-07-09-001 plan (U1): per-field agent-facing metadata.
+    /// Keyed by the same field path used in `required_fields` /
+    /// `allowed_values` (top-level field name for now; not
+    /// dot-notation). The map is **advisory only** — runtime
+    /// acceptance still reads `required_fields` /
+    /// `allowed_values` / `element_constraints`. A field appearing
+    /// in `field_docs` but not in `required_fields` is allowed
+    /// (documentation is not validation). Empty keys are rejected
+    /// at config validation time (see
+    /// `RalphConfig::validate_event_policy_schemas`).
+    #[serde(default)]
+    pub field_docs: HashMap<String, EventFieldDoc>,
+    /// 2026-07-09-001 plan (U1): topic-level example payloads for
+    /// the schema-aware prompt section. These are illustrative
+    /// only; the policy-check suggestion path uses placeholder
+    /// shapes (never concrete business values) so a copied
+    /// example cannot accidentally satisfy the validator.
+    #[serde(default)]
+    pub examples: Vec<serde_json::Value>,
 }
 
 /// 2026-07-03-005 plan (P0 fix C7): per-array-field element shape
@@ -1108,6 +1150,156 @@ fn default_enforce_schema() -> String {
 
 fn default_state_idempotency() -> String {
     "required".to_string()
+}
+
+// 2026-07-09-001 plan (U1): schema metadata model tests.
+#[cfg(test)]
+mod u1_schema_metadata_tests {
+    use super::*;
+
+    /// U1 happy path: a complete `field_docs` + `examples` block
+    /// round-trips through serde_yaml with every sub-field
+    /// (`meaning` / `source` / `fill_rule`) preserved as YAML
+    /// declared. Required: this is the configuration SSOT that
+    /// `emit_schema_hint` (U2) and the policy-check enricher
+    /// (U3) consume — losing any sub-field would silently strip
+    /// the agent's repair context.
+    #[test]
+    fn u1_event_schema_field_docs_and_examples_round_trip() {
+        let yaml = r#"
+field_docs:
+  task_id:
+    meaning: "live task id from `ralph tools task list`"
+    source: "ralph tools task list"
+    fill_rule: "do NOT hand-write; copy from task list"
+  verdict:
+    meaning: "final decision for the task"
+    source: "executor / reviewer"
+    fill_rule: "one of pass, blocked, failed"
+examples:
+  - task_id: "task-1234-abcd"
+    verdict: "pass"
+"#;
+        let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
+        let task_id_doc = schema
+            .field_docs
+            .get("task_id")
+            .expect("field_docs.task_id must be present");
+        assert_eq!(task_id_doc.meaning, "live task id from `ralph tools task list`");
+        assert_eq!(task_id_doc.source, "ralph tools task list");
+        assert_eq!(task_id_doc.fill_rule, "do NOT hand-write; copy from task list");
+        assert_eq!(schema.examples.len(), 1);
+        assert_eq!(
+            schema.examples[0].get("task_id").and_then(|v| v.as_str()),
+            Some("task-1234-abcd")
+        );
+    }
+
+    /// U1 backward compatibility: a schema YAML that predates
+    /// `field_docs` / `examples` deserialises with both new fields
+    /// at their `Default` values and never errors. Required: the
+    /// 2026-07-09-001 plan R18 / R20 contract — "old schema
+    /// parses unchanged" — must be a pure-runtime guarantee, not
+    /// a docs promise.
+    #[test]
+    fn u1_event_schema_backward_compat_omits_field_docs() {
+        let yaml = r#"
+required_fields:
+  - task_id
+allowed_values:
+  verdict:
+    - pass
+    - blocked
+"#;
+        let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            schema.field_docs.is_empty(),
+            "old schema must yield an empty field_docs map"
+        );
+        assert!(
+            schema.examples.is_empty(),
+            "old schema must yield an empty examples vec"
+        );
+        assert_eq!(schema.required_fields, vec!["task_id".to_string()]);
+    }
+
+    /// U1 backward compatibility: `EventSchema::default()` is
+    /// unchanged — both new fields default to empty so any
+    /// existing `EventSchema { .. }` literal in test code
+    /// continues to compile and the runtime validation pipeline
+    /// sees no surprises.
+    #[test]
+    fn u1_event_schema_default_keeps_field_docs_empty() {
+        let schema = EventSchema::default();
+        assert!(schema.field_docs.is_empty());
+        assert!(schema.examples.is_empty());
+    }
+
+    /// U1 non-goal guard: a `field_docs` entry that points at a
+    /// non-required field is allowed. `field_docs` is
+    /// documentation, not validation; U1 must not introduce a
+    /// hidden "every documented field must be required" rule.
+    /// Required: prevents `field_docs` from accidentally
+    /// acquiring machine-authority semantics and breaking
+    /// existing presets that document optional fields.
+    #[test]
+    fn u1_event_schema_field_docs_allows_non_required_field() {
+        let yaml = r#"
+required_fields:
+  - task_id
+field_docs:
+  task_id:
+    meaning: "live id"
+  optional_note:
+    meaning: "operator annotation, free text"
+"#;
+        let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
+        assert!(schema.field_docs.contains_key("optional_note"));
+        assert!(schema.field_docs.contains_key("task_id"));
+    }
+
+    /// U1 isolation: `field_docs` is not consulted by the
+    /// machine-validator helpers. We assert the field on the
+    /// struct is the same data as the YAML, but the runtime
+    /// required-field check (the only validation in
+    /// `EventSchema`'s contract) must ignore `field_docs`. This
+    /// is the negative control that keeps U1 from drifting
+    /// into U3.
+    #[test]
+    fn u1_event_schema_field_docs_is_advisory_only() {
+        let yaml = r#"
+required_fields: []
+field_docs:
+  task_id:
+    meaning: "live id"
+"#;
+        let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
+        // required_fields stays empty: the schema declares
+        // no required fields even though field_docs references
+        // one. This is the whole point — documentation does
+        // not validate.
+        assert!(schema.required_fields.is_empty());
+    }
+
+    /// U1 unknown-key guard: a non-existent field on
+    /// `EventFieldDoc` is rejected at deserialise time so an
+    /// operator typo (e.g. `meanning`) does not silently
+    /// no-op. Mirrors the existing `SupervisorConfig` /
+    /// `ElementConstraint` strictness.
+    #[test]
+    fn u1_event_field_doc_rejects_unknown_sub_field() {
+        let yaml = r#"
+field_docs:
+  task_id:
+    meaning: "live id"
+    meanning: "typo"
+"#;
+        let result: Result<EventSchema, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "unknown EventFieldDoc sub-field must be rejected"
+        );
+    }
 }
 
 #[cfg(test)]
