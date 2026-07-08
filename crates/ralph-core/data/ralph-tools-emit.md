@@ -95,6 +95,8 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 **preset instructions 必须引用本段**（plan U7 lint：`INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING`）：builtin / high-risk preset 的 emitter hat 在 instructions 提到 `payload` / `ralph emit` / `ralph wave emit` / `field shape` / `required fields` 时，必须同时引用 `ralph-tools-emit` policy-check feedback 段（任意一处提到 `policy-check feedback` / `enrichment fields` / `suggested_payload_shape` / `field_description` / `suggested_command` 即可）。Hat instructions 不要复述字段表 —— prompt section 已经按 U6 渲染好；instructions 只负责指向本 skill。
 
+**新增 emitter hat 时的一致性约束**（plan 2026-07-09-001 S2）：任何 preset hat 的 `publishes` 列表包含 emitter role（即通过 `ralph emit` 或 `ralph wave emit` 产出事件），其 `instructions` 段必须 cite 上述 policy-check feedback 段。lint `preset.instructions_emit_feedback_skill_reference_missing` 在 preset-add 时强制此契约；此 doc note 防止 lint 准入与新 emitter-hat 起草之间的隐性 drift：当 lint 白名单扩展或新加入 builtin preset 时，作者必须主动 cite。
+
 ### Envelope 校验（`triggered` 拓扑）
 
 `ralph emit --triggered <hat_id>` 在 apply 路径与 `--policy-check` 路径都会被 envelope 层校验：`triggered` 字段的值必须是当前 preset 声明的 hat 之一（即出现在 `hats[]` map 里），否则返回 `triggered_not_in_topology`。

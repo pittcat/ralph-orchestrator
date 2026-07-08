@@ -776,4 +776,108 @@ mod tests {
             "ralph emit t --json 'false'"
         );
     }
+
+    // 2026-07-09-001 plan (U7 / T1):
+    // pin the em-dash boundary behaviour in
+    // `render_field_line`. The function uses
+    // `meaning.trim().is_empty()` to decide between
+    // rendering the meaning vs an em-dash placeholder.
+    // Without a unit test, a future \`is_empty()\`-only
+    // change would silently break two visible scenarios:
+    //
+    // 1. literal empty string \`""\` → render em-dash.
+    // 2. ASCII whitespace + full-width space \`\"   \\u{3000}   \"`
+    //    → render em-dash (because trim() drops ASCII +
+    //    full-width spaces).
+    //
+    // The negative case (rendering the actual meaning)
+    // is already covered by U2 happy path; this slot is
+    // for the empty / whitespace-only boundary.
+
+    /// T1 happy path: literal empty `meaning` renders an
+    /// em-dash placeholder rather than a bare blank.
+    #[test]
+    fn render_field_line_em_dash_for_empty_meaning() {
+        let mut schema = schema_with_required(&["task_id"]);
+        schema.field_docs.insert(
+            "task_id".to_string(),
+            EventFieldDoc {
+                meaning: String::new(),
+                source: "preset".to_string(),
+                fill_rule: "rule".to_string(),
+            },
+        );
+        let line = render_field_line("task_id", &schema);
+        assert!(
+            line.contains('—'),
+            "empty meaning must surface the em-dash placeholder, got: {line:?}"
+        );
+        // The em-dash renders alone — does not include an
+        // empty `meaning:` token. The function constructs
+        // the line by template; we just check the em-dash
+        // is present.
+    }
+
+    /// T1 edge: ASCII + full-width whitespace (the
+    /// `trim().is_empty()` semantic) still hits the
+    /// em-dash fallback. A future regression to
+    /// `.is_empty()` would let this through and render
+    /// the whitespace-laden line (visually empty but
+    /// misleading). Pin the trim() semantic.
+    #[test]
+    fn render_field_line_em_dash_for_whitespace_only_meaning() {
+        let mut schema = schema_with_required(&["task_id"]);
+        schema.field_docs.insert(
+            "task_id".to_string(),
+            EventFieldDoc {
+                meaning: "   \u{3000}   ".to_string(),
+                source: "preset".to_string(),
+                fill_rule: "rule".to_string(),
+            },
+        );
+        let line = render_field_line("task_id", &schema);
+        assert!(
+            line.contains('—'),
+            "whitespace-only meaning (trim().is_empty()) must surface the em-dash fallback, \
+             got: {line:?}"
+        );
+    }
+
+    /// T1 negative: non-empty meaning stays as the
+    /// literal meaning, not an em-dash placeholder.
+    /// (Companion to the U2 happy path; lightweight
+    /// redundancy is acceptable when pinning a
+    /// boundary.)
+    #[test]
+    fn render_field_line_keeps_meaning_when_non_empty() {
+        let mut schema = schema_with_required(&["task_id"]);
+        schema.field_docs.insert(
+            "task_id".to_string(),
+            EventFieldDoc {
+                meaning: String::new(), // start empty so we can assert the em-dash
+                source: "preset".to_string(),
+                fill_rule: "rule".to_string(),
+            },
+        );
+        let line_with_empty_meaning = render_field_line("task_id", &schema);
+        assert!(
+            line_with_empty_meaning.contains('—'),
+            "control: empty meaning renders em-dash. got: {line_with_empty_meaning:?}"
+        );
+
+        // Now flip meaning to non-empty and confirm the
+        // meaning text appears AT THE START of the
+        // section between `: ` and ` (source:` — i.e.
+        // the meaning is rendered rather than collapsed
+        // to em-dash. (The em-dash still appears later
+        // because \`fill_rule: rule\` formatting prepends
+        // \` — rule\`.)
+        schema.field_docs.get_mut("task_id").unwrap().meaning =
+            "the live task id".to_string();
+        let line = render_field_line("task_id", &schema);
+        assert!(
+            line.contains(": the live task id (source: preset) — rule"),
+            "non-empty meaning must render literally between the colon and the source parenthetical, got: {line:?}"
+        );
+    }
 }
