@@ -17,17 +17,22 @@
 #   round; emits review.round.ready.
 # - dim:goal-alignment / dim:correctness / dim:testing / dim:maintainability /
 #   dim:project-standards / dim:adversarial: Six read-only dimension hats in
-#   a flat serial chain — each reviews ONE dimension, writes a findings
-#   product file, emits EXACTLY ONE done event triggering the next dimension
-#   (last dimension triggers review-synthesizer).
-# - review-synthesizer: Reads all 6 dimension products, dedupes / merges /
-#   ranks P0-P3, writes synthesized_review_file, emits EXACTLY ONE
+#   a flat serial chain — each reviews ONE dimension for the current
+#   review_round, writes a findings product file under
+#   `.ralph/review/<plan>/round-XX/`, reads the canonical
+#   `review.diff.patch` from that same round directory, emits EXACTLY ONE
+#   done event triggering the next dimension (last dimension triggers
+#   review-synthesizer). Previous rounds are preserved; never overwrite
+#   round-N files from an earlier round.
+# - review-synthesizer: Reads all 6 dimension products from the current
+#   round directory, dedupes / merges / ranks P0-P3, writes
+#   synthesized_review_file in that same round directory, emits EXACTLY ONE
 #   review.synthesized.
 # - review-gate: Three-way gate after synthesis. Emits review.accepted,
 #   fix.requested, or review.loop.blocked. Rounds 1-3 block on P0/P1;
 #   round 4+ blocks only on P0; max 6 rounds.
-# - fix-planner: Reads synthesized_review_file, writes fix_plan_file, emits
-#   EXACTLY ONE review.complete.
+# - fix-planner: Reads synthesized_review_file, writes fix_plan_file in the
+#   current round directory, emits EXACTLY ONE review.complete.
 # - fixer: Applies the **fix-planner fix plan only** (NOT the original
 #   plan), using one subagent per actionable fix Unit; empty fix plan →
 #   no-op + fix.done{fixes_applied:0}.
@@ -353,6 +358,7 @@ event_loop:
           - "executor_head_sha"
           - "resolved_baseline_sha"
           - "round_base_sha"
+          - "diff_patch_file"
           - "review_plan"
       review.goalalign.done:
         required_fields:
@@ -362,6 +368,7 @@ event_loop:
           - "resolved_baseline_sha"  # pass-through from plan.ready
           - "review_round"
           - "round_base_sha"
+          - "diff_patch_file"
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -373,6 +380,7 @@ event_loop:
           - "resolved_baseline_sha"  # pass-through
           - "review_round"
           - "round_base_sha"
+          - "diff_patch_file"
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -384,6 +392,7 @@ event_loop:
           - "resolved_baseline_sha"  # pass-through
           - "review_round"
           - "round_base_sha"
+          - "diff_patch_file"
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -395,6 +404,7 @@ event_loop:
           - "resolved_baseline_sha"  # pass-through
           - "review_round"
           - "round_base_sha"
+          - "diff_patch_file"
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -406,6 +416,7 @@ event_loop:
           - "resolved_baseline_sha"  # pass-through
           - "review_round"
           - "round_base_sha"
+          - "diff_patch_file"
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -417,6 +428,7 @@ event_loop:
           - "resolved_baseline_sha"  # pass-through (last dim; review-synthesizer reads it)
           - "review_round"
           - "round_base_sha"
+          - "diff_patch_file"
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -428,6 +440,7 @@ event_loop:
           - "resolved_baseline_sha"  # pass-through from review.adversarial.done
           - "review_round"
           - "round_base_sha"
+          - "diff_patch_file"
           - "synthesized_review_file"
           - "findings_count"
           - "p0_count"
@@ -452,6 +465,7 @@ event_loop:
           - "executor_head_sha"
           - "resolved_baseline_sha"
           - "round_base_sha"
+          - "diff_patch_file"
           - "synthesized_review_file"
           - "p0_count"
           - "p1_count"
@@ -1116,6 +1130,26 @@ hats:
         the whole diff from `resolved_baseline_sha` to `executor_head_sha`.
       - For `fix.done`, set `round_base_sha` to `head_sha` and set
         `review_plan` to the trigger payload's `next_review_plan`.
+      - Create this round's artifact directory:
+        `.ralph/review/{plan_name}/round-<NN>/`, where `<NN>` is
+        zero-padded `review_round` (`01`, `02`, ... `06`).
+      - Write the review diff patch to
+        `.ralph/review/{plan_name}/round-<NN>/review.diff.patch` and set
+        `diff_patch_file` to that path. This is the canonical diff artifact
+        for the round; downstream review hats should read it instead of
+        regenerating their own patch.
+      - Also write `.ralph/review/{plan_name}/round-<NN>/review.diffstat.txt`
+        for quick scanning. The diffstat file is not part of the event
+        contract; `diff_patch_file` is.
+      - Diff range:
+        - `work.done`: `resolved_baseline_sha..executor_head_sha`
+        - `fix.done`: `fixed_from_sha..head_sha` from the trigger payload
+      - Generate artifacts before emitting:
+        ```bash
+        mkdir -p ".ralph/review/<plan>/round-<NN>"
+        git diff "<from>..<to>" > ".ralph/review/<plan>/round-<NN>/review.diff.patch"
+        git diff --stat "<from>..<to>" > ".ralph/review/<plan>/round-<NN>/review.diffstat.txt"
+        ```
       - Use `ralph emit --policy-check` first; only after it passes, emit
         the real event. See `ralph-tools-emit` §5.
 
@@ -1129,6 +1163,7 @@ hats:
         "executor_head_sha": "<sha>",
         "resolved_baseline_sha": "<sha>",
         "round_base_sha": "<sha>",
+        "diff_patch_file": ".ralph/review/<plan>/round-01/review.diff.patch",
         "review_plan": {
           "focus_areas": ["full implementation diff"],
           "fixed_findings": [],
@@ -1194,15 +1229,24 @@ hats:
         executor's / reviewer's job, not yours.
 
       ### Step 1 — Read context
-      - From the trigger event (`work.done`): `plan_name`, `plan_path`,
-        `executor_head_sha`.
+      - From the trigger event (`review.round.ready`): `plan_name`,
+        `plan_path`, `executor_head_sha`, `review_round`,
+        `round_base_sha`, `diff_patch_file`, and `review_plan`.
       - Resolve `<DIFF_BASE>` (see **Diff base** below).
       - Read the **original** plan file at `plan_path` (read-only).
-      - Read executor-phase changes only:
-        `git diff <DIFF_BASE>..<executor_head_sha> --stat` and
+      - Set `<ROUND_DIR>` to
+        `.ralph/review/{plan_name}/round-<NN>/`, where `<NN>` is
+        zero-padded `review_round` from the trigger event (`01`, `02`,
+        ... `06`). Create this directory if needed.
+      - Read the round's canonical patch at `diff_patch_file` and the
+        quick stat at `<ROUND_DIR>/review.diffstat.txt` if present. If the
+        patch file is missing or unreadable, stop and emit no review event;
+        the round artifact contract is broken.
+      - Read commit summary with
         `git log <DIFF_BASE>..<executor_head_sha> --oneline`.
-      - Read `.ralph/review/{plan_name}/` if it exists (prior dimension
-        products — your review stands alone).
+      - Read prior round directories under `.ralph/review/{plan_name}/`
+        only as historical context. Do not edit, delete, rename, or
+        overwrite files in any earlier `round-<NN>` directory.
 
       ### Diff base (HARD RULE — shared by all 6 dim hats)
       Resolution order (first valid SHA wins, validate every choice
@@ -1287,11 +1331,13 @@ hats:
 
       ### Step 4 — Write product file
       Write the findings to
-      `.ralph/review/{plan_name}/goal-alignment.md` using the `Write`
-      tool. The file path is under `ephemeral_isolation` — gitignored,
-      not counted as a "modification" by `git diff --stat`. NEVER
-      write findings to in-repo source paths (that triggers
-      `<hat>.scope_violation`).
+      `<ROUND_DIR>/goal-alignment.md` using the `Write` tool. The
+      file path is under `ephemeral_isolation` — gitignored, not counted
+      as a "modification" by `git diff --stat`. NEVER write findings to
+      in-repo source paths (that triggers `<hat>.scope_violation`).
+      This preset preserves every review round: never write current-round
+      output to `.ralph/review/{plan_name}/goal-alignment.md` without the
+      `round-<NN>` path segment.
 
       Schema:
       ```
@@ -1321,9 +1367,10 @@ hats:
       ```
 
       ### Step 5 — Emit event
-      Pass through `plan_path` and `executor_head_sha` from the trigger.
+      Pass through `plan_path`, `executor_head_sha`, `review_round`,
+      `round_base_sha`, and `diff_patch_file` from the trigger.
       ```bash
-      ralph emit review.goalalign.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","dimension":"goal-alignment","findings_file":".ralph/review/<plan>/goal-alignment.md","findings_count":<N>}'
+      ralph emit review.goalalign.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","dimension":"goal-alignment","findings_file":".ralph/review/<plan>/round-<NN>/goal-alignment.md","findings_count":<N>}'
       ```
       Then stop. The next dim (`dim:correctness`) will be
       triggered by this event.
@@ -1382,7 +1429,13 @@ hats:
         `findings_file` (prior dim, informational), AND
         `resolved_baseline_sha` (pass-through from `plan.ready` via the
         prior `review.<dim>.done` payload — every dim in the chain
-        schema carries it; you inherit it).
+        schema carries it; you inherit it), plus `review_round`,
+        `round_base_sha`, and `diff_patch_file`.
+      - Set `<ROUND_DIR>` to
+        `.ralph/review/{plan_name}/round-<NN>/`, where `<NN>` is
+        zero-padded `review_round` from the trigger event (`01`, `02`,
+        ... `06`). Create this directory if needed. Earlier round
+        directories are history; do not edit or overwrite them.
       - **Diff base priority** (matches the chain in dim:goal-alignment
         `## Diff base`, but TRUSTED before ORCHESTRATOR here because the
         field is in your trigger payload, not just on disk):
@@ -1394,8 +1447,9 @@ hats:
            every hat prompt — see `event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see **Diff base** in dim:goal-alignment).
       - Read the **original** plan at `plan_path`.
-      - Read `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
-      - Read `.ralph/review/{plan_name}/goal-alignment.md` if present.
+      - Read the round's canonical patch at `diff_patch_file` and
+        `<ROUND_DIR>/review.diffstat.txt` if present.
+      - Read `<ROUND_DIR>/goal-alignment.md` if present.
 
       ### Step 2 — Correctness audit
       For each changed file in the diff, walk the modified functions
@@ -1416,12 +1470,15 @@ hats:
       schema as the goal-alignment dim.
 
       ### Step 4 — Write product file
-      Write findings to `.ralph/review/{plan_name}/correctness.md`.
+      Write findings to `<ROUND_DIR>/correctness.md`. Preserve previous
+      round directories; never overwrite a file outside the current
+      `round-<NN>` directory.
 
       ### Step 5 — Emit event
-      Pass through `plan_path` and `executor_head_sha` from the trigger.
+      Pass through `plan_path`, `executor_head_sha`, `review_round`,
+      `round_base_sha`, and `diff_patch_file` from the trigger.
       ```bash
-      ralph emit review.correctness.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.goalalign.done>","dimension":"correctness","findings_file":".ralph/review/<plan>/correctness.md","findings_count":<N>}'
+      ralph emit review.correctness.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.goalalign.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","dimension":"correctness","findings_file":".ralph/review/<plan>/round-<NN>/correctness.md","findings_count":<N>}'
       ```
       Then stop. The next dim (`dim:testing`) will be triggered.
 
@@ -1479,7 +1536,13 @@ hats:
         `findings_file` (prior dim, informational), AND
         `resolved_baseline_sha` (pass-through from `plan.ready` via the
         prior `review.<dim>.done` payload — every dim in the chain
-        schema carries it; you inherit it).
+        schema carries it; you inherit it), plus `review_round`,
+        `round_base_sha`, and `diff_patch_file`.
+      - Set `<ROUND_DIR>` to
+        `.ralph/review/{plan_name}/round-<NN>/`, where `<NN>` is
+        zero-padded `review_round` from the trigger event (`01`, `02`,
+        ... `06`). Create this directory if needed. Earlier round
+        directories are history; do not edit or overwrite them.
       - **Diff base priority** (matches the chain in dim:goal-alignment
         `## Diff base`, but TRUSTED before ORCHESTRATOR here because the
         field is in your trigger payload, not just on disk):
@@ -1491,8 +1554,9 @@ hats:
            every hat prompt — see `event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read the **original** plan (look for `**Test scenarios:**` per U).
-      - Read `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
-      - Read `.ralph/review/{plan_name}/correctness.md` if present.
+      - Read the round's canonical patch at `diff_patch_file` and
+        `<ROUND_DIR>/review.diffstat.txt` if present.
+      - Read `<ROUND_DIR>/correctness.md` if present.
 
       ### Step 2 — Testing audit
       For each Implementation Unit, verify:
@@ -1511,12 +1575,15 @@ hats:
       schema.
 
       ### Step 4 — Write product file
-      Write findings to `.ralph/review/{plan_name}/testing.md`.
+      Write findings to `<ROUND_DIR>/testing.md`. Preserve previous
+      round directories; never overwrite a file outside the current
+      `round-<NN>` directory.
 
       ### Step 5 — Emit event
-      Pass through `plan_path` and `executor_head_sha` from the trigger.
+      Pass through `plan_path`, `executor_head_sha`, `review_round`,
+      `round_base_sha`, and `diff_patch_file` from the trigger.
       ```bash
-      ralph emit review.testing.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.correctness.done>","dimension":"testing","findings_file":".ralph/review/<plan>/testing.md","findings_count":<N>}'
+      ralph emit review.testing.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.correctness.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","dimension":"testing","findings_file":".ralph/review/<plan>/round-<NN>/testing.md","findings_count":<N>}'
       ```
       Then stop. Next dim (`dim:maintainability`) triggered.
 
@@ -1573,7 +1640,13 @@ hats:
         `findings_file` (prior dim, informational), AND
         `resolved_baseline_sha` (pass-through from `plan.ready` via the
         prior `review.<dim>.done` payload — every dim in the chain
-        schema carries it; you inherit it).
+        schema carries it; you inherit it), plus `review_round`,
+        `round_base_sha`, and `diff_patch_file`.
+      - Set `<ROUND_DIR>` to
+        `.ralph/review/{plan_name}/round-<NN>/`, where `<NN>` is
+        zero-padded `review_round` from the trigger event (`01`, `02`,
+        ... `06`). Create this directory if needed. Earlier round
+        directories are history; do not edit or overwrite them.
       - **Diff base priority** (matches the chain in dim:goal-alignment
         `## Diff base`, but TRUSTED before ORCHESTRATOR here because the
         field is in your trigger payload, not just on disk):
@@ -1585,8 +1658,9 @@ hats:
            every hat prompt — see `event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read the **original** plan and
-        `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
-      - Read `.ralph/review/{plan_name}/testing.md` if present.
+        the round's canonical patch at `diff_patch_file` and
+        `<ROUND_DIR>/review.diffstat.txt` if present.
+      - Read `<ROUND_DIR>/testing.md` if present.
 
       ### Step 2 — Maintainability audit
       1. Walk new / modified files. Flag:
@@ -1604,12 +1678,15 @@ hats:
       ### Step 3 — Build findings list (id prefix `M<N>`)
 
       ### Step 4 — Write product file
-      Write findings to `.ralph/review/{plan_name}/maintainability.md`.
+      Write findings to `<ROUND_DIR>/maintainability.md`. Preserve previous
+      round directories; never overwrite a file outside the current
+      `round-<NN>` directory.
 
       ### Step 5 — Emit event
-      Pass through `plan_path` and `executor_head_sha` from the trigger.
+      Pass through `plan_path`, `executor_head_sha`, `review_round`,
+      `round_base_sha`, and `diff_patch_file` from the trigger.
       ```bash
-      ralph emit review.maintainability.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.testing.done>","dimension":"maintainability","findings_file":".ralph/review/<plan>/maintainability.md","findings_count":<N>}'
+      ralph emit review.maintainability.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.testing.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","dimension":"maintainability","findings_file":".ralph/review/<plan>/round-<NN>/maintainability.md","findings_count":<N>}'
       ```
       Then stop. Next dim (`dim:project-standards`) triggered.
 
@@ -1661,7 +1738,13 @@ hats:
         `findings_file` (prior dim, informational), AND
         `resolved_baseline_sha` (pass-through from `plan.ready` via the
         prior `review.<dim>.done` payload — every dim in the chain
-        schema carries it; you inherit it).
+        schema carries it; you inherit it), plus `review_round`,
+        `round_base_sha`, and `diff_patch_file`.
+      - Set `<ROUND_DIR>` to
+        `.ralph/review/{plan_name}/round-<NN>/`, where `<NN>` is
+        zero-padded `review_round` from the trigger event (`01`, `02`,
+        ... `06`). Create this directory if needed. Earlier round
+        directories are history; do not edit or overwrite them.
       - **Diff base priority** (matches the chain in dim:goal-alignment
         `## Diff base`, but TRUSTED before ORCHESTRATOR here because the
         field is in your trigger payload, not just on disk):
@@ -1674,8 +1757,9 @@ hats:
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read `AGENTS.md` and `CLAUDE.md` (project root).
       - Read the **original** plan and
-        `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
-      - Read `.ralph/review/{plan_name}/maintainability.md` if present.
+        the round's canonical patch at `diff_patch_file` and
+        `<ROUND_DIR>/review.diffstat.txt` if present.
+      - Read `<ROUND_DIR>/maintainability.md` if present.
 
       ### Step 2 — Standards audit
       1. Hard rules check: walk the diff and confirm none of the
@@ -1698,12 +1782,15 @@ hats:
       ### Step 3 — Build findings list (id prefix `S<N>`)
 
       ### Step 4 — Write product file
-      Write findings to `.ralph/review/{plan_name}/standards.md`.
+      Write findings to `<ROUND_DIR>/standards.md`. Preserve previous
+      round directories; never overwrite a file outside the current
+      `round-<NN>` directory.
 
       ### Step 5 — Emit event
-      Pass through `plan_path` and `executor_head_sha` from the trigger.
+      Pass through `plan_path`, `executor_head_sha`, `review_round`,
+      `round_base_sha`, and `diff_patch_file` from the trigger.
       ```bash
-      ralph emit review.standards.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.maintainability.done>","dimension":"project-standards","findings_file":".ralph/review/<plan>/standards.md","findings_count":<N>}'
+      ralph emit review.standards.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.maintainability.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","dimension":"project-standards","findings_file":".ralph/review/<plan>/round-<NN>/standards.md","findings_count":<N>}'
       ```
       Then stop. Last dim (`dim:adversarial`) triggered next.
 
@@ -1758,7 +1845,13 @@ hats:
         `findings_file` (prior dim, informational), AND
         `resolved_baseline_sha` (pass-through from `plan.ready` via the
         prior `review.<dim>.done` payload — every dim in the chain
-        schema carries it; you inherit it).
+        schema carries it; you inherit it), plus `review_round`,
+        `round_base_sha`, and `diff_patch_file`.
+      - Set `<ROUND_DIR>` to
+        `.ralph/review/{plan_name}/round-<NN>/`, where `<NN>` is
+        zero-padded `review_round` from the trigger event (`01`, `02`,
+        ... `06`). Create this directory if needed. Earlier round
+        directories are history; do not edit or overwrite them.
       - **Diff base priority** (matches the chain in dim:goal-alignment
         `## Diff base`, but TRUSTED before ORCHESTRATOR here because the
         field is in your trigger payload, not just on disk):
@@ -1770,8 +1863,9 @@ hats:
            every hat prompt — see `event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read the **original** plan and
-        `git diff <DIFF_BASE>..<executor_head_sha> --stat`.
-      - Read `.ralph/review/{plan_name}/standards.md` if present.
+        the round's canonical patch at `diff_patch_file` and
+        `<ROUND_DIR>/review.diffstat.txt` if present.
+      - Read `<ROUND_DIR>/standards.md` if present.
 
       ### Step 2 — Adversarial probe
       For each new public API / entry point / untrusted input
@@ -1792,12 +1886,15 @@ hats:
       typically P0/P1.
 
       ### Step 4 — Write product file
-      Write findings to `.ralph/review/{plan_name}/adversarial.md`.
+      Write findings to `<ROUND_DIR>/adversarial.md`. Preserve previous
+      round directories; never overwrite a file outside the current
+      `round-<NN>` directory.
 
       ### Step 5 — Emit event
-      Pass through `plan_path` and `executor_head_sha` from the trigger.
+      Pass through `plan_path`, `executor_head_sha`, `review_round`,
+      `round_base_sha`, and `diff_patch_file` from the trigger.
       ```bash
-      ralph emit review.adversarial.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.standards.done>","dimension":"adversarial","findings_file":".ralph/review/<plan>/adversarial.md","findings_count":<N>}'
+      ralph emit review.adversarial.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.standards.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","dimension":"adversarial","findings_file":".ralph/review/<plan>/round-<NN>/adversarial.md","findings_count":<N>}'
       ```
       Then stop. Last dim done; `review-synthesizer` will be
       triggered next.
@@ -1832,16 +1929,30 @@ hats:
         `review.complete` / `fix.*` / `align.done` / `report.done` /
         `LOOP_COMPLETE`.
       - Do NOT modify code. Write only the synthesized review product
-        under `.ralph/review/{plan_name}/`.
+        under the current round directory:
+        `.ralph/review/{plan_name}/round-<NN>/`.
+      - Preserve review history. Never overwrite files from previous
+        `round-<NN>` directories.
 
       ### Step 1 — Read all 6 dimension products
-      The 6 dimension hats wrote their findings to:
-      - `.ralph/review/{plan_name}/goal-alignment.md`
-      - `.ralph/review/{plan_name}/correctness.md`
-      - `.ralph/review/{plan_name}/testing.md`
-      - `.ralph/review/{plan_name}/maintainability.md`
-      - `.ralph/review/{plan_name}/standards.md`
-      - `.ralph/review/{plan_name}/adversarial.md`
+      Read `review_round`, `round_base_sha`, and `diff_patch_file` from
+      the trigger payload.
+      Set `<ROUND_DIR>` to `.ralph/review/{plan_name}/round-<NN>/`, where
+      `<NN>` is zero-padded `review_round` from the trigger event (`01`,
+      `02`, ... `06`).
+
+      The 6 dimension hats wrote the current round findings to:
+      - `<ROUND_DIR>/goal-alignment.md`
+      - `<ROUND_DIR>/correctness.md`
+      - `<ROUND_DIR>/testing.md`
+      - `<ROUND_DIR>/maintainability.md`
+      - `<ROUND_DIR>/standards.md`
+      - `<ROUND_DIR>/adversarial.md`
+
+      Read `diff_patch_file` for code context when deduping evidence. Treat
+      a missing patch file as a P1 process finding in the synthesized review:
+      the review can continue from dimension products, but the round artifact
+      contract was not fully satisfied.
 
       Read each file. Parse the `## Findings` section into a list
       of finding records `{id, severity, owner, description,
@@ -1927,7 +2038,7 @@ hats:
 
       ### Step 7 — Write synthesized review file
 
-      **Path:** `.ralph/review/{plan_name}/synthesized-review.md`.
+      **Path:** `<ROUND_DIR>/synthesized-review.md`.
       `{plan_name}` = basename of `plan_path` without `.md`.
 
       Write this exact structure:
@@ -1959,10 +2070,11 @@ hats:
       ```
 
       ### Step 8 — Emit event
-      Pass through `plan_path`, `executor_head_sha`, and
+      Pass through `plan_path`, `executor_head_sha`, `review_round`,
+      `round_base_sha`, `diff_patch_file`, and
       `resolved_baseline_sha` from the trigger (`review.adversarial.done`).
       ```bash
-      ralph emit review.synthesized --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.adversarial.done>","synthesized_review_file":".ralph/review/<plan>/synthesized-review.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
+      ralph emit review.synthesized --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.adversarial.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","synthesized_review_file":".ralph/review/<plan>/round-<NN>/synthesized-review.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
       ```
       Then stop. `fix-planner` will be triggered next.
 
@@ -2008,7 +2120,7 @@ hats:
       Pass through `plan_name`, `plan_path`, `review_round`,
       `executor_head_sha`, `resolved_baseline_sha`, `p0_count`, `p1_count`,
       `findings_summary`, and `verdict` from the trigger payload. Preserve
-      `round_base_sha` when emitting `fix.requested`.
+      `round_base_sha` and `diff_patch_file` when emitting `fix.requested`.
 
       Use `ralph emit --policy-check` first; only after it passes, emit the
       real event. See `ralph-tools-emit` §5.
@@ -2031,11 +2143,10 @@ hats:
     instructions: |
       ## FIX PLANNER MODE — Turn synthesized review into fix plan
 
-      You receive `review.synthesized` from `review-synthesizer`.
+      You receive `fix.requested` from `review-gate`.
       Your only job is to read `synthesized_review_file`, write
-      `.ralph/review/{plan_name}/fix-plan.md`, and emit ONE
-      `review.complete` event. You do NOT re-review code and you do
-      NOT apply fixes.
+      `<ROUND_DIR>/fix-plan.md`, and emit ONE `review.complete` event.
+      You do NOT re-review code and you do NOT apply fixes.
 
       ### HARD RULES
       - Emit EXACTLY ONE `review.complete` per activation.
@@ -2043,15 +2154,22 @@ hats:
       - Do NOT emit `work.done` / `work.failed` / `plan.*` /
         `fix.*` / `align.done` / `report.done` / `LOOP_COMPLETE`.
       - Do NOT modify code. Write only the fix-plan file under
-        `.ralph/review/{plan_name}/`.
+        the current round directory:
+        `.ralph/review/{plan_name}/round-<NN>/`.
+      - Preserve review history. Never overwrite files from previous
+        `round-<NN>` directories.
       - Source of truth is `synthesized_review_file`; use dimension files
         only when evidence in the synthesized file is ambiguous.
 
       ### Step 1 — Read context
-      From `review.synthesized` payload read: `plan_name`, `plan_path`,
-      `executor_head_sha`, `resolved_baseline_sha`,
+      From `fix.requested` payload read: `plan_name`, `plan_path`,
+      `executor_head_sha`, `resolved_baseline_sha`, `review_round`,
+      `round_base_sha`, `diff_patch_file`,
       `synthesized_review_file`, `findings_count`, `p0_count`,
       `p1_count`, `findings_summary`, and `verdict`.
+      Set `<ROUND_DIR>` to `.ralph/review/{plan_name}/round-<NN>/`, where
+      `<NN>` is zero-padded `review_round` from the trigger event (`01`,
+      `02`, ... `06`).
 
       Read the synthesized review file. Parse its `## Findings` table.
 
@@ -2145,7 +2263,8 @@ hats:
       date: YYYY-MM-DD
       origin_plan: <plan_path from review.synthesized trigger>
       executor_head_sha: <sha from review.synthesized trigger>
-      findings_source: .ralph/review/<plan_name>/
+      findings_source: .ralph/review/<plan_name>/round-<NN>/
+      diff_patch_file: .ralph/review/<plan_name>/round-<NN>/review.diff.patch
       p0_count: <int>
       p1_count: <int>
       verdict: <pass_with_residuals|blocked>
@@ -2256,7 +2375,8 @@ hats:
       date: 2026-07-02
       origin_plan: <plan_path from trigger>
       executor_head_sha: abc1234
-      findings_source: .ralph/review/<plan_name>/
+      findings_source: .ralph/review/<plan_name>/round-<NN>/
+      diff_patch_file: .ralph/review/<plan_name>/round-<NN>/review.diff.patch
       p0_count: 1
       p1_count: 1
       verdict: blocked
@@ -2317,10 +2437,13 @@ hats:
       ```
 
       ### Step 3 — Emit event (one terminal per activation)
-      Pass through `plan_path`, `executor_head_sha`, and
-      `resolved_baseline_sha` from the trigger (`review.synthesized`).
+      Pass through `plan_path`, `executor_head_sha`, `review_round`,
+      `round_base_sha`, and
+      `resolved_baseline_sha` from the trigger (`fix.requested`).
+      Set `fix_base_sha` to `round_base_sha`: the fixer must apply this
+      round's fix plan on top of the exact commit that was reviewed.
       ```bash
-      ralph emit review.complete --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","fix_plan_file":".ralph/review/<plan>/fix-plan.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
+      ralph emit review.complete --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","review_round":<N>,"round_base_sha":"<sha>","fix_base_sha":"<round_base_sha>","fix_plan_file":".ralph/review/<plan>/round-<NN>/fix-plan.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
       ```
       Then stop. Fixer will be triggered next.
 
@@ -2656,9 +2779,17 @@ hats:
          `residuals_count`, `residuals_summary`.
       2. From events file (above): `plan.ready`, `work.done`,
          `review.complete`, `fix.done` payloads.
-      3. Read all 6 dimension products under `.ralph/review/{plan_name}/`.
-      4. Read `fix-plan.md` and the **original** plan at `plan_path`.
-      5. Write the report to `.ralph/review/{plan_name}/report.md`:
+      3. Read all review round directories under
+         `.ralph/review/{plan_name}/round-<NN>/`. For each round, read
+         that round's `review.diff.patch`, `review.diffstat.txt`, six
+         dimension products, `synthesized-review.md`, and `fix-plan.md` when
+         present. Do not assume the latest files exist at
+         `.ralph/review/{plan_name}/` without the `round-<NN>` segment.
+      4. Read the final `fix_plan_file` from the upstream payload when it is
+         non-empty, and read the **original** plan at `plan_path`.
+      5. Write the run-level report to `.ralph/review/{plan_name}/report.md`.
+         This top-level report is the only file outside a round directory;
+         round-specific review artifacts remain under `round-<NN>/`:
 
          ## 1. Verdict
          {derived verdict — see step 6}
@@ -2672,8 +2803,10 @@ hats:
            executor_head_sha (from work.done)
          - changes: `git diff --stat <DIFF_BASE>..<executor_head_sha>`
 
-         ## 4. 6-Dimension Review
-         For each dimension: findings_count, top P0/P1 (if any)
+         ## 4. Review Rounds
+         For each `round-<NN>`: six dimension findings_count, synthesized
+         verdict, `review.diff.patch` path, diffstat summary, top P0/P1
+         findings, and whether that round requested fixes or was accepted.
 
          ## 5. Fix Plan Application (fix-planner plan — NOT original plan)
          - fix_plan_file (from review.complete)
@@ -2708,6 +2841,7 @@ hats:
       1. Read the trigger payload for `plan_name` and `reason`.
       2. If available, read `plan.ready` from events file for plan_path.
       3. Write a blocked report to `.ralph/review/{plan_name}/report.md`
+         (run-level report, not a round artifact)
          with verdict `blocked` and upstream `reason` in §1.
       4. Emit `report.done` with `verdict: "blocked"`.
       5. Emit `LOOP_COMPLETE` with `reason: "blocked: <upstream reason>"`.
