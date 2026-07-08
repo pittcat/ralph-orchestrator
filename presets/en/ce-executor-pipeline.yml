@@ -659,6 +659,9 @@ hats:
       You may IN-PLACE edit the plan file (preserving U-IDs, R-IDs, and frontmatter
       structure) to fix any deficiency you find. Set `plan_revised: true` if you
       edited anything; `false` otherwise.
+      If you edit the plan file, commit that plan-file change before emitting
+      `plan.ready`. Do not leave the revised plan as an uncommitted working-tree
+      change for downstream hats.
 
       **Quality gates (each is a one-line criterion; missing or weak → in-place fix):**
 
@@ -675,6 +678,9 @@ hats:
       - Add / tighten missing sections. Do NOT delete U-IDs.
       - Resolve trivial ambiguities (e.g. "fix bug" → specific file/symptom). For non-trivial ones, emit `plan.blocked` with `reason: plan_unusable: <reason>` instead of guessing.
       - Set `plan_revised: true` if you changed any line; `false` otherwise.
+      - If `plan_revised: true`, stage only `plan_path` and commit it before
+        `plan.ready`, for example:
+        `git add -- "$plan_path" && git commit -m "docs(plan): revise <plan_name> for execution"`.
 
       ### Step 4 — Emit `plan.ready` (handoff to executor)
       When the plan passes all quality gates AND Step 2.5 has decided
@@ -761,6 +767,14 @@ hats:
         `executor_head_sha` MUST be `git rev-parse HEAD` after your last
         executor commit. If you emit `work.done` before `git commit`, the
         contract rejects the event.
+      - **Never edit the original plan**: `plan_path` is read-only context
+        for executor. The plan-reviewer already owns plan edits. If the plan
+        is wrong or impossible to execute, document the blocker and emit
+        `work.failed`; do NOT patch the plan file yourself.
+      - **No uncommitted implementation changes before `work.done`**: before
+        emitting `work.done`, `git status --short` MUST show no uncommitted
+        changes outside `.ralph/`. Any source, test, docs, config, or plan
+        change outside `.ralph/` must be included in an executor commit.
       - **Diff base for metrics**: read `plan_baseline_sha`, then
         `loop_start_sha`, from `## ORCHESTRATOR CONTEXT`. Validate each with
         `git cat-file -t <sha> 2>/dev/null` == `commit`. Fall back:
@@ -871,6 +885,8 @@ hats:
       - Do NOT batch U2+U3 into one commit, even if they touch related files.
       - Do NOT emit `work.done` with `commit_count` less than the number of
         U-IDs you completed — alignment will flag missing U-IDs as residuals.
+      - Do NOT leave any non-`.ralph/` working-tree modification uncommitted.
+        If executor changed it, executor must commit it before `work.done`.
 
       Do NOT publish `test.passed` / `test.failed` mid-loop; those
       are NOT in your `publishes`. Verification evidence (test counts,
@@ -891,6 +907,7 @@ hats:
       - `resolved_baseline_sha` is copied from `plan.ready`;
       - `tests_run`, `tests_passed`, `changed_lines`, and `commit_count`
         are populated from actual command/git output;
+      - `git status --short` has no entries outside `.ralph/`;
       - `ralph emit --policy-check --triggered executor ...` passes before
         the real `ralph emit`;
       - after the real emit, confirm it with `ralph events --events-source

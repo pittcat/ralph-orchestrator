@@ -11,7 +11,7 @@
   },
   {
     "name": "ce-executor-pipeline-loop",
-    "description": "Review-loop CE executor: pipeline execution with serial six-dimension review, gated fix/re-review rounds, P1 cutoff after round 3, and max 6 review rounds",
+    "description": "Review-loop CE executor: pipeline execution with serial six-dimension review, convergence-gated fix/re-review rounds, and max 6 review rounds",
     "category": "development"
   },
   {

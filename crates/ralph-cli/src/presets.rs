@@ -40,7 +40,7 @@ const PRESETS: &[EmbeddedPreset] = &[
     },
     EmbeddedPreset {
         name: "ce-executor-pipeline-loop",
-        description: "Review-loop CE executor: pipeline execution with serial six-dimension review, gated fix/re-review rounds, P1 cutoff after round 3, max 6 review rounds.",
+        description: "Review-loop CE executor: pipeline execution with serial six-dimension review, convergence-gated fix/re-review rounds, max 6 review rounds.",
         content: include_str!(concat!(
             env!("OUT_DIR"),
             "/presets/ce-executor-pipeline-loop.yml"
@@ -251,11 +251,11 @@ mod tests {
         let instructions = &gate.instructions;
         for required in [
             "exclusive three-way gate",
-            "N <= 3",
-            "P0 == 0",
-            "P1 == 0",
-            "N >= 4",
-            "P1 no longer blocks after the first three review rounds",
+            "M = must_fix_now_count",
+            "M == 0",
+            "M > 0",
+            "residual P0/P1",
+            "synthesized_review_file",
             "N < 6",
             "N >= 6",
             "max_review_rounds: 6",

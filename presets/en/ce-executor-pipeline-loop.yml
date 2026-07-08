@@ -29,8 +29,10 @@
 #   synthesized_review_file in that same round directory, emits EXACTLY ONE
 #   review.synthesized.
 # - review-gate: Three-way gate after synthesis. Emits review.accepted,
-#   fix.requested, or review.loop.blocked. Rounds 1-3 block on P0/P1;
-#   round 4+ blocks only on P0; max 6 rounds.
+#   fix.requested, or review.loop.blocked. The gate uses convergence
+#   semantics: only findings classified as must_fix_now keep the loop open;
+#   baseline / out-of-scope / newly discovered residuals are reported but do
+#   not keep creating fix rounds. Max 6 review rounds.
 # - fix-planner: Reads synthesized_review_file, writes fix_plan_file in the
 #   current round directory, emits EXACTLY ONE review.complete.
 # - fixer: Applies the **fix-planner fix plan only** (NOT the original
@@ -445,6 +447,8 @@ event_loop:
           - "findings_count"
           - "p0_count"
           - "p1_count"
+          - "must_fix_now_count"
+          - "residual_findings_count"
           - "findings_summary"
           - "verdict"
       review.accepted:
@@ -456,6 +460,8 @@ event_loop:
           - "resolved_baseline_sha"
           - "p0_count"
           - "p1_count"
+          - "must_fix_now_count"
+          - "residual_findings_count"
           - "verdict"
       fix.requested:
         required_fields:
@@ -469,6 +475,8 @@ event_loop:
           - "synthesized_review_file"
           - "p0_count"
           - "p1_count"
+          - "must_fix_now_count"
+          - "residual_findings_count"
           - "findings_summary"
           - "verdict"
       review.complete:
@@ -483,6 +491,8 @@ event_loop:
           - "findings_count"
           - "p0_count"
           - "p1_count"
+          - "must_fix_now_count"
+          - "residual_findings_count"
           - "findings_summary"
           - "verdict"
       fix.done:
@@ -510,6 +520,8 @@ event_loop:
           - "resolved_baseline_sha"
           - "p0_count"
           - "p1_count"
+          - "must_fix_now_count"
+          - "residual_findings_count"
           - "reason"
       align.done:
         required_fields:
@@ -742,6 +754,9 @@ hats:
       You may IN-PLACE edit the plan file (preserving U-IDs, R-IDs, and frontmatter
       structure) to fix any deficiency you find. Set `plan_revised: true` if you
       edited anything; `false` otherwise.
+      If you edit the plan file, commit that plan-file change before emitting
+      `plan.ready`. Do not leave the revised plan as an uncommitted working-tree
+      change for downstream hats.
 
       **Quality gates (each is a one-line criterion; missing or weak → in-place fix):**
 
@@ -758,6 +773,9 @@ hats:
       - Add / tighten missing sections. Do NOT delete U-IDs.
       - Resolve trivial ambiguities (e.g. "fix bug" → specific file/symptom). For non-trivial ones, emit `plan.blocked` with `reason: plan_unusable: <reason>` instead of guessing.
       - Set `plan_revised: true` if you changed any line; `false` otherwise.
+      - If `plan_revised: true`, stage only `plan_path` and commit it before
+        `plan.ready`, for example:
+        `git add -- "$plan_path" && git commit -m "docs(plan): revise <plan_name> for execution"`.
 
       ### Step 4 — Emit `plan.ready` (handoff to executor)
       When the plan passes all quality gates AND Step 2.5 has decided
@@ -844,6 +862,14 @@ hats:
         `executor_head_sha` MUST be `git rev-parse HEAD` after your last
         executor commit. If you emit `work.done` before `git commit`, the
         contract rejects the event.
+      - **Never edit the original plan**: `plan_path` is read-only context
+        for executor. The plan-reviewer already owns plan edits. If the plan
+        is wrong or impossible to execute, document the blocker and emit
+        `work.failed`; do NOT patch the plan file yourself.
+      - **No uncommitted implementation changes before `work.done`**: before
+        emitting `work.done`, `git status --short` MUST show no uncommitted
+        changes outside `.ralph/`. Any source, test, docs, config, or plan
+        change outside `.ralph/` must be included in an executor commit.
       - **Diff base for metrics**: read `plan_baseline_sha`, then
         `loop_start_sha`, from `## ORCHESTRATOR CONTEXT`. Validate each with
         `git cat-file -t <sha> 2>/dev/null` == `commit`. Fall back:
@@ -954,6 +980,8 @@ hats:
       - Do NOT batch U2+U3 into one commit, even if they touch related files.
       - Do NOT emit `work.done` with `commit_count` less than the number of
         U-IDs you completed — alignment will flag missing U-IDs as residuals.
+      - Do NOT leave any non-`.ralph/` working-tree modification uncommitted.
+        If executor changed it, executor must commit it before `work.done`.
 
       Do NOT publish `test.passed` / `test.failed` mid-loop; those
       are NOT in your `publishes`. Verification evidence (test counts,
@@ -974,6 +1002,7 @@ hats:
       - `resolved_baseline_sha` is copied from `plan.ready`;
       - `tests_run`, `tests_passed`, `changed_lines`, and `commit_count`
         are populated from actual command/git output;
+      - `git status --short` has no entries outside `.ralph/`;
       - `ralph emit --policy-check --triggered executor ...` passes before
         the real `ralph emit`;
       - after the real emit, confirm it with `ralph events --events-source
@@ -1935,6 +1964,10 @@ hats:
         `.ralph/review/{plan_name}/round-<NN>/`.
       - Preserve review history. Never overwrite files from previous
         `round-<NN>` directories.
+      - Do NOT invent fix-unit `task_id` values. If a downstream workflow
+        needs fix-unit task minting, the canonical template is
+        `ralph tools task ensure --for-fix-unit`; this hat records finding
+        IDs only and does not mint task ids.
 
       ### Step 1 — Read all 6 dimension products
       Read `review_round`, `round_base_sha`, and `diff_patch_file` from
@@ -2032,11 +2065,63 @@ hats:
         (across all severities, including P3 nits).
       - `p0_count` — count of P0 findings.
       - `p1_count` — count of P1 findings.
+      - `must_fix_now_count` — count of findings whose `Loop Action` is
+        `must_fix_now`.
+      - `residual_findings_count` — count of findings whose `Loop Action`
+        is `residual_report_only`.
+
+      ### Step 5b — Classify loop action
+      Classify every P0/P1 finding before computing the gate signal. The
+      review loop does not try to fix "everything ever discovered"; it only
+      fixes the current loop obligation.
+
+      Add these two fields to every finding:
+      - `Origin`:
+        - `initial_review` — round 1 finding from the executor diff.
+        - `unfixed_previous` — a finding requested in the previous fix-plan
+          that is still not fixed.
+        - `new_regression` — the current fix diff introduced this issue.
+        - `baseline_existing` — existed before this run or belongs to the
+          baseline outside the current diff.
+        - `out_of_scope` — real issue, but outside the operator plan / fix
+          plan scope.
+        - `newly_discovered` — first noticed now, but not caused by the
+          current fix diff.
+      - `Loop Action`:
+        - `must_fix_now` for round-1 P0/P1 findings, `unfixed_previous`
+          P0/P1 findings, and `new_regression` P0 findings.
+        - `residual_report_only` for `baseline_existing`, `out_of_scope`,
+          and `newly_discovered` findings, plus any new P1/P2/P3 that was
+          not requested by the previous fix-plan and was not introduced as a
+          P0 regression by the current fix diff.
+
+      For round `N > 1`, do not assume `review_plan` is present in your
+      trigger payload. Your trigger is `review.adversarial.done`; it carries
+      the current round fields, not the full reentry plan. Query sanctioned
+      events to recover the classification context:
+
+      ```bash
+      ralph events --events-source main --output json | jq -c 'select(.topic=="review.round.ready" and (.payload.review_round == <N>))' | tail -1
+      ralph events --events-source main --output json | jq -c 'select(.topic=="fix.done")' | tail -1
+      ```
+
+      Read `review_plan.fixed_findings`, `review_plan.focus_areas`, and
+      `review_plan.diff_ranges` from that round's `review.round.ready`
+      payload. Read `next_review_plan.fixed_findings` and
+      `next_review_plan.residual_risks` from latest `fix.done` when present.
+      Use those fields plus this round's `diff_patch_file` to decide whether
+      a finding is an unfixed prior obligation or a new regression. If
+      evidence is ambiguous, choose `must_fix_now` only when the finding is
+      clearly tied to the current fix diff; otherwise classify it as
+      `residual_report_only` and explain the uncertainty in the finding
+      evidence.
 
       ### Step 6 — Verdict
-      - 0 findings OR only P3 findings → `verdict: "pass"`
-      - Has P1 (no P0) OR mix of P1+P2/P3 → `verdict: "pass_with_residuals"`
-      - Has P0 → `verdict: "blocked"`
+      - `must_fix_now_count > 0` → `verdict: "blocked"`.
+      - `must_fix_now_count == 0` and `residual_findings_count > 0` →
+        `verdict: "pass_with_residuals"`.
+      - `must_fix_now_count == 0` and `residual_findings_count == 0` →
+        `verdict: "pass"`.
 
       ### Step 7 — Write synthesized review file
 
@@ -2055,17 +2140,20 @@ hats:
       - findings_count: <N>
       - p0_count: <P0>
       - p1_count: <P1>
+      - must_fix_now_count: <M>
+      - residual_findings_count: <R>
       - verdict: <pass|pass_with_residuals|blocked>
 
       ## Findings
-      | ID | Severity | Risk | Decision | Confidence | Evidence score | Impact | Regression probability | Owner | Description | Evidence | Requires verification |
-      |----|----------|------|----------|------------|----------------|--------|------------------------|-------|-------------|----------|-----------------------|
-      | <dimension>:<id> | P0/P1/P2/P3 | <risk_score> | block/warn/ignore | <confidence.overall> | <evidence_score> | <impact_score> | <regression_probability> | <owner> | <description> | <file:line or product path> | true/false |
+      | ID | Severity | Origin | Loop Action | Risk | Decision | Confidence | Evidence score | Impact | Regression probability | Owner | Description | Evidence | Requires verification |
+      |----|----------|--------|-------------|------|----------|------------|----------------|--------|------------------------|-------|-------------|----------|-----------------------|
+      | <dimension>:<id> | P0/P1/P2/P3 | <origin> | must_fix_now/residual_report_only | <risk_score> | block/warn/ignore | <confidence.overall> | <evidence_score> | <impact_score> | <regression_probability> | <owner> | <description> | <file:line or product path> | true/false |
 
       ## Fix Planning Notes
-      - `block` findings must become actionable fix-plan Units.
-      - P1 `warn` findings must become actionable fix-plan Units.
-      - P2/P3 `warn` findings may be deferred as DOC residuals.
+      - Only `Loop Action = must_fix_now` findings become actionable
+        fix-plan Units.
+      - `Loop Action = residual_report_only` findings stay in the report
+        and must not create code-fix Units in this loop.
       - `ignore` findings stay in the review record and do not create
         fix work.
       - Preserve source finding IDs in every downstream Unit.
@@ -2076,9 +2164,10 @@ hats:
       `round_base_sha`, `diff_patch_file`, and
       `resolved_baseline_sha` from the trigger (`review.adversarial.done`).
       ```bash
-      ralph emit review.synthesized --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.adversarial.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","synthesized_review_file":".ralph/review/<plan>/round-<NN>/synthesized-review.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
+      ralph emit review.synthesized --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.adversarial.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","synthesized_review_file":".ralph/review/<plan>/round-<NN>/synthesized-review.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"must_fix_now_count":<M>,"residual_findings_count":<R>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
       ```
-      Then stop. `fix-planner` will be triggered next.
+      Then stop. `review-gate` will receive `review.synthesized` and decide
+      whether to accept, request fixes, or block.
 
       ### OPAC reference
       Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
@@ -2105,24 +2194,36 @@ hats:
       same activation.
 
       ### Decision Rules
-      Let `N = review_round`, `P0 = p0_count`, `P1 = p1_count`, and
+      Let `N = review_round`, `M = must_fix_now_count`, and
       `max_review_rounds = 6`.
 
-      - If `N <= 3` and `P0 == 0` and `P1 == 0`, emit only
-        `review.accepted`.
-      - If `N >= 4` and `P0 == 0`, emit only `review.accepted`, even when
-        `P1 > 0`. P1 no longer blocks after the first three review rounds.
-      - If blocking issues remain and `N < 6`, emit only
-        `fix.requested`. Blocking means P0 or P1 for rounds 1-3, and
-        P0 only from round 4 onward.
-      - If blocking issues remain and `N >= 6`, emit only
-        `review.loop.blocked` with `max_review_rounds: 6`.
+      - If `M == 0`, emit only `review.accepted`. Any residual P0/P1
+        findings have already been classified as report-only residuals by
+        `review-synthesizer`; do not open another fix round for them.
+      - If `M > 0` and `N < 6`, emit only `fix.requested`.
+      - If `M > 0` and `N >= 6`, emit only `review.loop.blocked` with
+        `max_review_rounds: 6`.
 
       ### Payload Rules
       Pass through `plan_name`, `plan_path`, `review_round`,
       `executor_head_sha`, `resolved_baseline_sha`, `p0_count`, `p1_count`,
-      `findings_summary`, and `verdict` from the trigger payload. Preserve
-      `round_base_sha` and `diff_patch_file` when emitting `fix.requested`.
+      `must_fix_now_count`, `residual_findings_count`, `findings_summary`,
+      `verdict`, and `synthesized_review_file` from the trigger payload.
+      Preserve `round_base_sha` and `diff_patch_file` when emitting
+      `fix.requested`.
+
+      Required payload shapes:
+
+      ```bash
+      # Accept when M == 0
+      ralph emit review.accepted --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","review_round":<N>,"executor_head_sha":"<sha>","resolved_baseline_sha":"<sha>","p0_count":<P0>,"p1_count":<P1>,"must_fix_now_count":0,"residual_findings_count":<R>,"verdict":"<pass|pass_with_residuals>"}'
+
+      # Request fixes when M > 0 and N < 6
+      ralph emit fix.requested --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","review_round":<N>,"executor_head_sha":"<sha>","resolved_baseline_sha":"<sha>","round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","synthesized_review_file":".ralph/review/<plan>/round-<NN>/synthesized-review.md","p0_count":<P0>,"p1_count":<P1>,"must_fix_now_count":<M>,"residual_findings_count":<R>,"findings_summary":"<1-2 sentence summary>","verdict":"blocked"}'
+
+      # Block when M > 0 and N >= 6
+      ralph emit review.loop.blocked --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","review_round":<N>,"max_review_rounds":6,"executor_head_sha":"<sha>","resolved_baseline_sha":"<sha>","p0_count":<P0>,"p1_count":<P1>,"must_fix_now_count":<M>,"residual_findings_count":<R>,"reason":"max_review_rounds_reached_with_must_fix_findings"}'
+      ```
 
       Use `ralph emit --policy-check` first; only after it passes, emit the
       real event. See `ralph-tools-emit` §5.
@@ -2162,13 +2263,18 @@ hats:
         `round-<NN>` directories.
       - Source of truth is `synthesized_review_file`; use dimension files
         only when evidence in the synthesized file is ambiguous.
+      - Do NOT invent fix-unit `task_id` values. If a downstream workflow
+        needs fix-unit task minting, the canonical template is
+        `ralph tools task ensure --for-fix-unit`; this hat writes source
+        finding IDs and fix-plan Unit headings only.
 
       ### Step 1 — Read context
       From `fix.requested` payload read: `plan_name`, `plan_path`,
       `executor_head_sha`, `resolved_baseline_sha`, `review_round`,
       `round_base_sha`, `diff_patch_file`,
       `synthesized_review_file`, `findings_count`, `p0_count`,
-      `p1_count`, `findings_summary`, and `verdict`.
+      `p1_count`, `must_fix_now_count`, `residual_findings_count`,
+      `findings_summary`, and `verdict`.
       Set `<ROUND_DIR>` to `.ralph/review/{plan_name}/round-<NN>/`, where
       `<NN>` is zero-padded `review_round` from the trigger event (`01`,
       `02`, ... `06`).
@@ -2181,22 +2287,22 @@ hats:
 
       | Condition | File shape |
       |-----------|------------|
-      | `p0_count > 0` OR `p1_count > 0` | **Full fix-plan** (template §7c) |
-      | `verdict == "pass"` (no P0/P1) | **Placeholder** (template §7b) |
+      | `must_fix_now_count > 0` | **Full fix-plan** (template §7c) |
+      | `must_fix_now_count == 0` | **Defensive placeholder** (template §7b). Normal `review-gate` does not send this to `fix-planner`; it accepts instead. Use only if replay/manual recovery delivers such an event. |
 
       Mapping findings → Units (from the synthesized review):
-      - **One `merge_decision: block` finding → one `### U<N>.`**
-        (do not merge unrelated blockers).
-      - **One P1 `merge_decision: warn` finding → one `### U<N>.`**
-        because P1 residuals are still must-fix for this pipeline.
-      - **P2/P3 `merge_decision: warn` findings (bundled):** optional single
-        `### U<N>. Residuals (deferred)` with
-        `**Kind:** DOC` and `**Verification:** none — documentation-only`;
-        fixer does **not** implement code for this Unit (see fixer Step 1).
+      - **Only `Loop Action = must_fix_now` findings become actionable
+        `### U<N>.` Units.** Do not create code-fix Units for report-only
+        residuals, even when their severity is P0/P1.
+      - **One must-fix finding → one `### U<N>.`** (do not merge unrelated
+        blockers).
+      - **`Loop Action = residual_report_only` findings:** summarize them in
+        `## Scope Boundaries` / `### Deferred` and keep their IDs in the
+        report trail. They must not create actionable Units.
       - **`merge_decision: ignore` findings:** do not create Units;
         preserve them only in the review record.
-      - Order Units **U1 → U2 → …** by severity (all P0 first, then P1,
-        then residuals). Within the same severity, sort by descending
+      - Order Units **U1 → U2 → …** by severity (P0 first, then P1).
+        Within the same severity, sort by descending
         `risk_score`. **Never** renumber after assign; gaps OK.
       - Heading token is always uppercase `U` + integer (`U1`, `U2`, …) —
         same token in git commit subjects for alignment matching.
@@ -2208,26 +2314,30 @@ hats:
 
       | Synthesized `verdict` | File | Frontmatter `verdict` |
       |------------------|------|------------------------|
-      | `pass` (no P0/P1) | §7b placeholder | (no frontmatter) |
-      | `pass_with_residuals` (`p1_count > 0`, `p0_count == 0`) | §7c full | `pass_with_residuals` |
-      | `blocked` (`p0_count > 0`) | §7c full | `blocked` |
+      | `pass` (`must_fix_now_count == 0`, no residuals) | §7b placeholder | (no frontmatter) |
+      | `pass_with_residuals` (`must_fix_now_count == 0`, residuals only) | §7b placeholder | (no frontmatter) |
+      | `blocked` (`must_fix_now_count > 0`) | §7c full | `blocked` |
 
-      Do NOT set frontmatter `verdict: blocked` when only P1 findings exist.
+      Do NOT set frontmatter `verdict: blocked` unless
+      `must_fix_now_count > 0`.
 
-      #### 7b — Placeholder template (`verdict == "pass"`)
+      #### 7b — Placeholder template (`must_fix_now_count == 0`)
 
       Write exactly this shape (no frontmatter, no Implementation Units):
 
       ```markdown
       # fix-plan: no fixes required
 
-      All 6 dimensions reviewed with no P0/P1 findings. No fix plan
-      required.
+      All 6 dimensions reviewed with no findings that must be fixed in this
+      loop. Report-only residuals, if any, remain in synthesized-review.md
+      and the final report.
 
       - findings_count: <N>
-      - p0_count: 0
-      - p1_count: 0
-      - verdict: pass
+      - p0_count: <P0>
+      - p1_count: <P1>
+      - must_fix_now_count: 0
+      - residual_findings_count: <R>
+      - verdict: <pass|pass_with_residuals>
       ```
 
       #### 7c — Full fix-plan template (canonical layout)
@@ -2269,12 +2379,14 @@ hats:
       diff_patch_file: .ralph/review/<plan_name>/round-<NN>/review.diff.patch
       p0_count: <int>
       p1_count: <int>
-      verdict: <pass_with_residuals|blocked>
+      must_fix_now_count: <int>
+      residual_findings_count: <int>
+      verdict: blocked
       ---
       ```
 
-      `verdict` MUST match the table in §7a (P1-only → `pass_with_residuals`;
-      any P0 → `blocked`).
+      `verdict` MUST match the table in §7a. Full fix-plans are only for
+      `must_fix_now_count > 0`.
 
       #### 7d — Execution Protocol (embed verbatim in every full fix-plan)
 
@@ -2381,6 +2493,8 @@ hats:
       diff_patch_file: .ralph/review/<plan_name>/round-<NN>/review.diff.patch
       p0_count: 1
       p1_count: 1
+      must_fix_now_count: 2
+      residual_findings_count: 0
       verdict: blocked
       ---
 
@@ -2445,7 +2559,7 @@ hats:
       Set `fix_base_sha` to `round_base_sha`: the fixer must apply this
       round's fix plan on top of the exact commit that was reviewed.
       ```bash
-      ralph emit review.complete --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","review_round":<N>,"round_base_sha":"<sha>","fix_base_sha":"<round_base_sha>","fix_plan_file":".ralph/review/<plan>/round-<NN>/fix-plan.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
+      ralph emit review.complete --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","review_round":<N>,"round_base_sha":"<sha>","fix_base_sha":"<round_base_sha>","fix_plan_file":".ralph/review/<plan>/round-<NN>/fix-plan.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"must_fix_now_count":<M>,"residual_findings_count":<R>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
       ```
       Then stop. Fixer will be triggered next.
 
@@ -2524,8 +2638,9 @@ hats:
         as priority-1 in the §Diff base chain; if this hat's trigger
         lacks it, fall back to ORCHESTRATOR CONTEXT plan_baseline_sha
         freshly read by B-layer runtime), `fix_plan_file`,
-        `findings_count`, `p0_count`, `p1_count`, `findings_summary`,
-        `verdict` (emit as `review_verdict` on `fix.done`).
+        `findings_count`, `p0_count`, `p1_count`, `must_fix_now_count`,
+        `residual_findings_count`, `findings_summary`, `verdict` (emit as
+        `review_verdict` on `fix.done`).
       - Read **only** the fix-plan file at `fix_plan_file`.
       - **Fast path** (jump to Step 4 — no per-Unit code):
         - File starts with `# fix-plan: no fixes required` (§7b), OR
