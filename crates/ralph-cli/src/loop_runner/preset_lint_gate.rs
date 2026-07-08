@@ -15,7 +15,7 @@
 //! 2b applies to the gate path: builtin WAC defects are blocking.
 
 use super::*;
-use ralph_core::preset_lint::{LintStrictness, run_preset_lint};
+use ralph_core::preset_lint::{LintStrictness, run_preset_lint_with_preset_name};
 use ralph_core::runtime_contract::FindingSeverity;
 
 /// Exit code for preset lint gate failure (R7).
@@ -80,8 +80,24 @@ pub fn enforce_preset_lint_gate(
     config: &ralph_core::RalphConfig,
     source_is_builtin_embedded: bool,
 ) -> Result<(), PresetLintGateError> {
+    enforce_preset_lint_gate_with_preset_name(config, source_is_builtin_embedded, None)
+}
+
+/// 2026-07-09-001 plan (U7): preset-aware wrapper that
+/// forwards `preset_name` to the OPAC whitelist gate.
+pub fn enforce_preset_lint_gate_with_preset_name(
+    config: &ralph_core::RalphConfig,
+    source_is_builtin_embedded: bool,
+    preset_name: Option<&str>,
+) -> Result<(), PresetLintGateError> {
     let lint_strictness = LintStrictness::Strict;
-    let findings = run_preset_lint(config, lint_strictness, source_is_builtin_embedded, None);
+    let findings = run_preset_lint_with_preset_name(
+        config,
+        lint_strictness,
+        source_is_builtin_embedded,
+        None,
+        preset_name.unwrap_or(""),
+    );
 
     let error_count = findings
         .iter()

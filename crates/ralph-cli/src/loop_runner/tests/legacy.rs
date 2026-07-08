@@ -3278,7 +3278,15 @@ fn u6_all_builtin_presets_pass_lint_gate() {
     for preset in list_presets().iter() {
         let config =
             RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
-        let result = enforce_preset_lint_gate(&config, false);
+        // 2026-07-09-001 plan (U7): pass `preset.name` so the
+        // instructions-OPAC emit-feedback rule can gate on
+        // the U7 whitelist. Without this, every builtin
+        // preset would fail the new check at once.
+        let result = crate::loop_runner::preset_lint_gate::enforce_preset_lint_gate_with_preset_name(
+            &config,
+            false,
+            Some(preset.name),
+        );
         let Err(err) = result else { continue };
         let blocking_errors = err
             .findings

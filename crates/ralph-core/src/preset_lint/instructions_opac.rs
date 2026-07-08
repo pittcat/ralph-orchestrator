@@ -50,6 +50,18 @@ const SUPERVISOR_COORD_TOPICS: &[&str] = &[
 /// Public entry point. Walks every hat in the preset and emits findings
 /// for the OPAC anti-patterns described in this module's header.
 pub fn check_instructions_opac(raw_yaml: &str) -> Vec<LintFinding> {
+    check_instructions_opac_with_preset(raw_yaml, "")
+}
+
+/// Preset-aware variant: pass the resolved preset name (e.g.
+/// `ce-executor-pipeline-loop`) so the U7 emit-feedback rule
+/// can gate on `U7_EMIT_FEEDBACK_LINT_PRESET_WHITELIST`.
+/// When the name is empty, the rule stays silent (matches
+/// the pre-U7 behaviour).
+pub fn check_instructions_opac_with_preset(
+    raw_yaml: &str,
+    preset_name: &str,
+) -> Vec<LintFinding> {
     let mut findings = Vec::new();
     let parsed: Value = match serde_yaml::from_str(raw_yaml) {
         Ok(v) => v,
@@ -59,6 +71,12 @@ pub fn check_instructions_opac(raw_yaml: &str) -> Vec<LintFinding> {
     let Some(hats) = parsed.get("hats").and_then(Value::as_mapping) else {
         return findings;
     };
+
+    // U7 lint whitelist gate: only the presets on the
+    // whitelist reach `check_emit_feedback_skill_reference`.
+    let lint_active = U7_EMIT_FEEDBACK_LINT_PRESET_WHITELIST
+        .iter()
+        .any(|n| *n == preset_name);
 
     for (hat_id, hat_value) in hats {
         let Some(hat_id_str) = hat_id.as_str() else {
@@ -106,9 +124,17 @@ pub fn check_instructions_opac(raw_yaml: &str) -> Vec<LintFinding> {
             // `work.done`-style "publish at the end" without
             // shaping the payload (e.g. some builtin observers)
             // are exempt — the lint targets emitter hats that
-            // *describe* the payload to the agent.
-            if mentions_payload_construction(&instructions) {
-                check_emit_feedback_skill_reference(hat_id_str, &instructions, &mut findings);
+            // *describe* the payload to the agent. The
+            // additional preset-name gate scopes the lint to
+            // the U7 whitelist so we do not bootstrap a
+            // failing-everywhere cliff.
+            if lint_active && mentions_payload_construction(&instructions) {
+                check_emit_feedback_skill_reference(
+                    hat_id_str,
+                    &instructions,
+                    &mut findings,
+                    preset_name,
+                );
             }
             let talks_fix_unit = mentions_fix_unit(&instructions);
             if talks_fix_unit {
@@ -280,10 +306,23 @@ fn mentions_payload_construction(instructions: &str) -> bool {
     NEEDLES.iter().any(|n| lower.contains(n))
 }
 
+/// 2026-07-09-001 plan (U7): the rule is intentionally
+/// scoped to a short whitelist of "high-risk" preset names.
+/// The lint's first iteration only enforces on presets that
+/// the U8 pilot covers (`ce-executor-pipeline-loop`). Adding
+/// a new preset to the whitelist is the documented way to
+/// widen the rule; adding a new finding to a preset that is
+/// not on the list is a no-op. This matches the plan's
+/// "Lint 第一版只针对 builtin/high-risk" intent and avoids a
+/// bootstrap cliff where every existing preset would fail
+/// the new check at once.
+const U7_EMIT_FEEDBACK_LINT_PRESET_WHITELIST: &[&str] = &["ce-executor-pipeline-loop"];
+
 fn check_emit_feedback_skill_reference(
     hat_id: &str,
     instructions: &str,
     findings: &mut Vec<LintFinding>,
+    preset_name: &str,
 ) {
     // 2026-07-09-001 plan (U7): the rule accepts any of the
     // following references as proof the agent is pointed at
@@ -471,7 +510,7 @@ hats:
     instructions: |
       Do the work and emit work.done at the end.
 "#;
-        let findings = check_instructions_opac(yaml);
+        let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             findings
                 .iter()
@@ -491,7 +530,7 @@ hats:
       When a fix-unit lands, run the verification suite.
       Cite ralph-tools-opac and ralph-tools-emit §5.
 "#;
-        let findings = check_instructions_opac(yaml);
+        let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             findings
                 .iter()
@@ -511,7 +550,7 @@ hats:
       When a fix-unit lands, call `ralph tools task ensure --for-fix-unit --key ...`.
       Cite ralph-tools-opac and ralph-tools-emit §5.
 "#;
-        let findings = check_instructions_opac(yaml);
+        let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             !findings
                 .iter()
@@ -529,7 +568,7 @@ hats:
     publishes:
       - work.done
 "#;
-        let findings = check_instructions_opac(yaml);
+        let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             findings.is_empty(),
             "hat with no instructions: skip silently"
@@ -555,7 +594,7 @@ hats:
     instructions: |
       Build the JSON payload for work.done and call `ralph emit work.done --json '<payload>'`.
 "#;
-        let findings = check_instructions_opac(yaml);
+        let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             findings
                 .iter()
@@ -579,7 +618,7 @@ hats:
     instructions: |
       Build the JSON payload for work.done. Cite ralph-tools-emit and read the policy-check feedback section for `field_description` / `suggested_payload_shape` / `suggested_command` after a rejection.
 "#;
-        let findings = check_instructions_opac(yaml);
+        let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             !findings
                 .iter()
@@ -607,12 +646,59 @@ hats:
     instructions: |
       Do the work and publish work.done at the end.
 "#;
-        let findings = check_instructions_opac(yaml);
+        let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             !findings
                 .iter()
                 .any(|f| f.id == FINDING_INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING),
             "hat without payload-shaping text must be exempt, got: {findings:?}"
+        );
+    }
+
+    /// U7 whitelist gate: the lint stays silent when the
+    /// preset is not on the
+    /// `U7_EMIT_FEEDBACK_LINT_PRESET_WHITELIST`. A future
+    /// preset author can opt in by adding the preset to the
+    /// list — this test pins the gate so a wholesale widening
+    /// of the rule is a deliberate code change.
+    #[test]
+    fn u7_emit_feedback_skill_reference_preset_whitelist_gate() {
+        let yaml = r#"
+hats:
+  emitter:
+    subscribes_to: [work.start]
+    publishes:
+      - work.done
+    instructions: |
+      Build the JSON payload for work.done and call `ralph emit work.done --json '<payload>'`.
+"#;
+        // Whitelisted preset → finding expected.
+        let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING),
+            "whitelisted preset must fire the rule, got: {findings:?}"
+        );
+        // Non-whitelisted preset → finding must NOT fire,
+        // even though the same yaml would have triggered it.
+        let findings = check_instructions_opac_with_preset(yaml, "merge-loop");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING),
+            "non-whitelisted preset must stay silent, got: {findings:?}"
+        );
+        // Empty preset name → same as the non-whitelisted
+        // branch (preserves the pre-U7 behaviour for
+        // `check_instructions_opac` callers that don't have
+        // a preset name handy).
+        let findings = check_instructions_opac_with_preset(yaml, "");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.id == FINDING_INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING),
+            "empty preset name must stay silent, got: {findings:?}"
         );
     }
 }

@@ -93,7 +93,7 @@ pub use fix_unit_task_id::{
     FINDING_FIX_UNIT_TASK_ID_NOT_HELPER_DERIVED, check_fix_unit_task_id_helper_derived,
 };
 pub use hat_scope_invariant::check_hat_scope_invariant;
-pub use instructions_opac::check_instructions_opac;
+pub use instructions_opac::{check_instructions_opac, check_instructions_opac_with_preset};
 pub use metadata_runtime_drift::check_metadata_runtime_drift;
 pub use multi_hat::check_multi_hat_isolation;
 // 2026-07-04-004 plan U3: review-synthesizer block-guard drift
@@ -351,6 +351,22 @@ pub fn run_preset_lint(
     source_is_builtin_embedded: bool,
     raw_yaml: Option<&str>,
 ) -> Vec<RuntimeContractFinding> {
+    run_preset_lint_with_preset_name(config, strictness, source_is_builtin_embedded, raw_yaml, "")
+}
+
+/// 2026-07-09-001 plan (U7): preset-aware variant of
+/// `run_preset_lint`. The `preset_name` is forwarded to the
+/// instructions-OPAC rule so its whitelist gate can fire on
+/// the high-risk presets only. Pass an empty string when the
+/// caller does not have a preset name handy (matches the
+/// pre-U7 behaviour).
+pub fn run_preset_lint_with_preset_name(
+    config: &RalphConfig,
+    strictness: LintStrictness,
+    source_is_builtin_embedded: bool,
+    raw_yaml: Option<&str>,
+    preset_name: &str,
+) -> Vec<RuntimeContractFinding> {
     let mut findings: Vec<RuntimeContractFinding> = Vec::new();
 
     // Topic format validation (U1)
@@ -488,7 +504,7 @@ pub fn run_preset_lint(
     // reads, supervisor coord-topic emits. Always Error; raw_yaml
     // is required so the lint can scan the YAML-original text.
     if let Some(text) = raw_yaml {
-        let opac_findings = check_instructions_opac(text);
+        let opac_findings = check_instructions_opac_with_preset(text, preset_name);
         findings.extend(lint_findings_to_contract_findings(&opac_findings));
     }
 
