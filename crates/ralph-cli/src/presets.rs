@@ -1446,6 +1446,63 @@ mod tests {
         );
     }
 
+    /// 2026-07-09-001 plan (U8): the embedded copy of
+    /// `ce-executor-pipeline-loop` must equal the merge of
+    /// the canonical preset YAML and the schema SSOT file
+    /// `presets/schemas/ce-executor-pipeline-loop.yml`. The
+    /// SSOT carries the U8 pilot `field_docs` /
+    /// `examples`; the inline block in the preset YAML
+    /// carries the same metadata (per U8's
+    /// `schema_reference_parity` contract) so the merge is
+    /// a no-op drift check.
+    #[test]
+    fn test_ce_executor_pipeline_loop_embedded_includes_u8_field_docs() {
+        let merged = merge_root_with_ssot("ce-executor-pipeline-loop");
+        let preset = get_preset("ce-executor-pipeline-loop")
+            .expect("ce-executor-pipeline-loop preset should exist");
+        assert_eq!(
+            merged, preset.content,
+            "Embedded ce-executor-pipeline-loop must equal merge(canonical preset, schema SSOT). \
+             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-pipeline-loop.yml."
+        );
+        // The merged copy must carry the U8 pilot
+        // `field_docs` for `must_fix_now_count` /
+        // `residual_findings_count` on the review/fix
+        // convergence topics. These are the agent-facing
+        // metadata the U3 enrichment layer (policy-check
+        // errors) and the U6 schema-aware prompt section
+        // both consume.
+        let value: serde_yaml::Value =
+            serde_yaml::from_str(&merged).expect("merged preset must be valid YAML");
+        let schemas = value
+            .get("event_loop")
+            .and_then(|v| v.get("event_policy"))
+            .and_then(|v| v.get("schemas"))
+            .expect("merged preset must carry event_policy.schemas");
+        for topic in [
+            "review.synthesized",
+            "review.accepted",
+            "fix.requested",
+            "review.complete",
+            "review.loop.blocked",
+        ] {
+            let schema = schemas.get(topic).unwrap_or_else(|| {
+                panic!("U8 pilot topic `{topic}` must appear in merged schemas")
+            });
+            let field_docs = schema
+                .get("field_docs")
+                .unwrap_or_else(|| panic!("U8 pilot topic `{topic}` must declare field_docs"));
+            assert!(
+                field_docs.is_mapping(),
+                "U8 pilot topic `{topic}` field_docs must be a mapping"
+            );
+            assert!(
+                !field_docs.as_mapping().unwrap().is_empty(),
+                "U8 pilot topic `{topic}` field_docs must not be empty"
+            );
+        }
+    }
+
     /// U12 (fix-plan U12 / F-020 / R-20): the
     /// `ce-executor-supervisor` preset must satisfy the
     /// same SSOT byte-equality contract as

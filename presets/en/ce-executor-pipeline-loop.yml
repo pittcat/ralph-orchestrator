@@ -451,6 +451,32 @@ event_loop:
           - "residual_findings_count"
           - "findings_summary"
           - "verdict"
+        # 2026-07-09-001 plan U8: agent-facing field metadata
+        # for the U3 enrichment layer (policy-check errors) and
+        # the U6 schema-aware prompt section. Mirror this block
+        # to `presets/schemas/ce-executor-pipeline-loop.yml`
+        # (the SSOT) so `schema_reference_parity` lint passes.
+        field_docs:
+          review_round:
+            meaning: "current convergence round (1..max_review_rounds); review-synthesizer increments"
+            source: "review-synthesizer reads it from .ralph/review/<plan>/round-<n>/"
+            fill_rule: "do NOT hand-write; copy the round directory name"
+          synthesized_review_file:
+            meaning: "path to the synthesized review file written by review-synthesizer"
+            source: "review-synthesizer"
+            fill_rule: "absolute path; do NOT make up a filename"
+          must_fix_now_count:
+            meaning: "findings classified as must_fix_now in this round (drives review-gate convergence)"
+            source: "review-synthesizer computes from p0/p1"
+            fill_rule: "integer; 0 means the gate can close the loop"
+          residual_findings_count:
+            meaning: "findings kept in the report but not blocking the loop"
+            source: "review-synthesizer"
+            fill_rule: "integer; 0 means nothing left to report"
+          verdict:
+            meaning: "final decision for the topic"
+            source: "review-synthesizer"
+            fill_rule: "one of pass, blocked, failed"
       review.accepted:
         required_fields:
           - "plan_name"
@@ -463,6 +489,15 @@ event_loop:
           - "must_fix_now_count"
           - "residual_findings_count"
           - "verdict"
+        field_docs:
+          must_fix_now_count:
+            meaning: "must equal 0 for review.accepted; if > 0 the gate would have emitted fix.requested instead"
+            source: "review-gate"
+            fill_rule: "must be 0; this is the close-loop signal"
+          verdict:
+            meaning: "must equal 'pass' on this topic; the review-gate never accepts with anything else"
+            source: "review-gate"
+            fill_rule: "literal string 'pass'"
       fix.requested:
         required_fields:
           - "plan_name"
@@ -479,6 +514,23 @@ event_loop:
           - "residual_findings_count"
           - "findings_summary"
           - "verdict"
+        field_docs:
+          round_base_sha:
+            meaning: "git SHA at the start of the current review round (fixer rebases onto this)"
+            source: "review-gate"
+            fill_rule: "40-char git SHA; do NOT hand-write"
+          diff_patch_file:
+            meaning: "path to the round-N diff patch (review.* and fix.* are diff-locked to this)"
+            source: "review-gate / loop runner"
+            fill_rule: "absolute path under .ralph/review/<plan>/round-<n>/"
+          must_fix_now_count:
+            meaning: "must be > 0 on this topic; review-gate only emits fix.requested when there is real work to do"
+            source: "review-gate"
+            fill_rule: "integer >= 1"
+          verdict:
+            meaning: "must equal 'blocked' on this topic; review-gate never requests fixes for a passing review"
+            source: "review-gate"
+            fill_rule: "literal string 'blocked'"
       review.complete:
         required_fields:
           - "plan_name"
@@ -495,6 +547,15 @@ event_loop:
           - "residual_findings_count"
           - "findings_summary"
           - "verdict"
+        field_docs:
+          fix_plan_file:
+            meaning: "path to the fix plan written by fix-planner; fixer reads ONLY this file"
+            source: "fix-planner"
+            fill_rule: "absolute path under .ralph/review/<plan>/round-<n>/"
+          fix_base_sha:
+            meaning: "git SHA the fixer should rebase onto before applying the fix plan"
+            source: "fix-planner"
+            fill_rule: "40-char git SHA; do NOT hand-write"
       fix.done:
         required_fields:
           - "plan_name"
@@ -523,6 +584,19 @@ event_loop:
           - "must_fix_now_count"
           - "residual_findings_count"
           - "reason"
+        field_docs:
+          max_review_rounds:
+            meaning: "hard cap on the review loop (6 in ce-executor-pipeline-loop); loop.blocked fires when reached with must_fix_now > 0"
+            source: "review-gate / preset"
+            fill_rule: "integer; do NOT hand-write (preset constant)"
+          must_fix_now_count:
+            meaning: "must be > 0 on this topic; loop.blocked is the failure path, never the close path"
+            source: "review-gate"
+            fill_rule: "integer >= 1"
+          reason:
+            meaning: "human-readable reason the loop gave up (exceeded max_review_rounds, etc.)"
+            source: "review-gate"
+            fill_rule: "free text; do NOT include the synthetic 'pass' verdict"
       align.done:
         required_fields:
           - "plan_name"
@@ -2165,6 +2239,11 @@ hats:
       `resolved_baseline_sha` from the trigger (`review.adversarial.done`).
       ```bash
       ralph emit review.synthesized --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.adversarial.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","synthesized_review_file":".ralph/review/<plan>/round-<NN>/synthesized-review.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"must_fix_now_count":<M>,"residual_findings_count":<R>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
+      # 2026-07-09-001 plan U7: cite ralph-tools-emit's
+      # policy-check feedback section. After a rejection, read
+      # `field_description` / `suggested_payload_shape` /
+      # `suggested_command` from the error item; do not re-derive
+      # field shapes from this inline template.
       ```
       Then stop. `review-gate` will receive `review.synthesized` and decide
       whether to accept, request fixes, or block.
@@ -2223,6 +2302,12 @@ hats:
 
       # Block when M > 0 and N >= 6
       ralph emit review.loop.blocked --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","review_round":<N>,"max_review_rounds":6,"executor_head_sha":"<sha>","resolved_baseline_sha":"<sha>","p0_count":<P0>,"p1_count":<P1>,"must_fix_now_count":<M>,"residual_findings_count":<R>,"reason":"max_review_rounds_reached_with_must_fix_findings"}'
+
+      # 2026-07-09-001 plan U7: cite ralph-tools-emit's
+      # policy-check feedback section. After a rejection, read
+      # `field_description` / `suggested_payload_shape` /
+      # `suggested_command` from the error item; do not re-derive
+      # field shapes from this inline template.
       ```
 
       Use `ralph emit --policy-check` first; only after it passes, emit the
@@ -2560,6 +2645,30 @@ hats:
       round's fix plan on top of the exact commit that was reviewed.
       ```bash
       ralph emit review.complete --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","review_round":<N>,"round_base_sha":"<sha>","fix_base_sha":"<round_base_sha>","fix_plan_file":".ralph/review/<plan>/round-<NN>/fix-plan.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"must_fix_now_count":<M>,"residual_findings_count":<R>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
+
+      # 2026-07-09-001 plan U7: cite ralph-tools-emit's
+      # policy-check feedback section. After a rejection, read
+      # `field_description` / `suggested_payload_shape` /
+      # `suggested_command` from the error item; do not re-derive
+      # field shapes from this inline template.
+
+      # 2026-07-09-001 plan U7: cite ralph-tools-emit's
+      # policy-check feedback section. After a rejection, read
+      # `field_description` / `suggested_payload_shape` /
+      # `suggested_command` from the error item; do not re-derive
+      # field shapes from this inline template.
+
+      # 2026-07-09-001 plan U7: cite ralph-tools-emit's
+      # policy-check feedback section. After a rejection, read
+      # `field_description` / `suggested_payload_shape` /
+      # `suggested_command` from the error item; do not re-derive
+      # field shapes from this inline template.
+
+      # 2026-07-09-001 plan U7: cite ralph-tools-emit's
+      # policy-check feedback section. After a rejection, read
+      # `field_description` / `suggested_payload_shape` /
+      # `suggested_command` from the error item; do not re-derive
+      # field shapes from this inline template.
       ```
       Then stop. Fixer will be triggered next.
 

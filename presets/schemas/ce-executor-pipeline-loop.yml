@@ -1,0 +1,184 @@
+# Authoring SSOT for `ce-executor-pipeline-loop` `event_policy.schemas`.
+#
+# 2026-07-09-001 plan U8: this file is the schema SSOT for the
+# high-risk review/fix convergence topics. build.rs deep-merges
+# this file's `schemas:` mapping into the inline
+# `event_policy.schemas:` block of
+# `presets/en/ce-executor-pipeline-loop.yml`. Authors who want
+# to change the field set MUST edit this file; the inline
+# `schemas:` block in the preset YAML is the runtime-side
+# view that ends up in the embedded copy. If the inline block
+# already declares the same topic, the merge is additive —
+# required_fields / allowed_values / element_constraints from
+# SSOT are base, inline is override.
+#
+# U8 pilot scope: 5 review/fix convergence topics get
+# `field_docs` + `examples` so the U3 enrichment layer
+# (policy-check error items) and the U6 schema-aware prompt
+# section both work for these topics. Other topics
+# (work.done, plan.ready, dimension events) keep the
+# required_fields-only shape so this pilot is small enough
+# to validate end-to-end without a `field_docs` rewrite
+# across the whole preset.
+#
+# Field docs vocabulary is intentionally narrow — we only
+# document the high-traffic fields that the agent must
+# understand (review_round, must_fix_now_count,
+# residual_findings_count, fix_plan_file, etc.). Anything
+# else stays on the required-field-only path.
+
+schemas:
+  review.synthesized:
+    required_fields:
+      - "plan_name"
+      - "plan_path"
+      - "executor_head_sha"
+      - "resolved_baseline_sha"
+      - "review_round"
+      - "round_base_sha"
+      - "diff_patch_file"
+      - "synthesized_review_file"
+      - "findings_count"
+      - "p0_count"
+      - "p1_count"
+      - "must_fix_now_count"
+      - "residual_findings_count"
+      - "findings_summary"
+      - "verdict"
+    field_docs:
+      review_round:
+        meaning: "current convergence round (1..max_review_rounds); review-synthesizer increments"
+        source: "review-synthesizer reads it from .ralph/review/<plan>/round-<n>/"
+        fill_rule: "do NOT hand-write; copy the round directory name"
+      synthesized_review_file:
+        meaning: "path to the synthesized review file written by review-synthesizer"
+        source: "review-synthesizer"
+        fill_rule: "absolute path; do NOT make up a filename"
+      must_fix_now_count:
+        meaning: "findings classified as must_fix_now in this round (drives review-gate convergence)"
+        source: "review-synthesizer computes from p0/p1"
+        fill_rule: "integer; 0 means the gate can close the loop"
+      residual_findings_count:
+        meaning: "findings kept in the report but not blocking the loop (baseline / out-of-scope / newly discovered)"
+        source: "review-synthesizer"
+        fill_rule: "integer; 0 means nothing left to report"
+      verdict:
+        meaning: "final decision for the topic"
+        source: "review-synthesizer"
+        fill_rule: "one of pass, blocked, failed"
+    examples:
+      - plan_name: "2026-07-09-001-feat-policy-check-agent-feedback-plan"
+        plan_path: "docs/plans/2026-07-09-001-feat-policy-check-agent-feedback-plan.md"
+        review_round: 1
+        must_fix_now_count: 2
+        residual_findings_count: 0
+        verdict: "blocked"
+
+  review.accepted:
+    required_fields:
+      - "plan_name"
+      - "plan_path"
+      - "review_round"
+      - "executor_head_sha"
+      - "resolved_baseline_sha"
+      - "p0_count"
+      - "p1_count"
+      - "must_fix_now_count"
+      - "residual_findings_count"
+      - "verdict"
+    field_docs:
+      must_fix_now_count:
+        meaning: "must equal 0 for review.accepted; if > 0 the gate would have emitted fix.requested instead"
+        source: "review-gate"
+        fill_rule: "must be 0; this is the close-loop signal"
+      verdict:
+        meaning: "must equal 'pass' on this topic; the review-gate never accepts with anything else"
+        source: "review-gate"
+        fill_rule: "literal string 'pass'"
+
+  fix.requested:
+    required_fields:
+      - "plan_name"
+      - "plan_path"
+      - "review_round"
+      - "executor_head_sha"
+      - "resolved_baseline_sha"
+      - "round_base_sha"
+      - "diff_patch_file"
+      - "synthesized_review_file"
+      - "p0_count"
+      - "p1_count"
+      - "must_fix_now_count"
+      - "residual_findings_count"
+      - "findings_summary"
+      - "verdict"
+    field_docs:
+      round_base_sha:
+        meaning: "git SHA at the start of the current review round (fixer rebases onto this)"
+        source: "review-gate"
+        fill_rule: "40-char git SHA; do NOT hand-write"
+      diff_patch_file:
+        meaning: "path to the round-N diff patch (review.* and fix.* are diff-locked to this)"
+        source: "review-gate / loop runner"
+        fill_rule: "absolute path under .ralph/review/<plan>/round-<n>/"
+      must_fix_now_count:
+        meaning: "must be > 0 on this topic; review-gate only emits fix.requested when there is real work to do"
+        source: "review-gate"
+        fill_rule: "integer >= 1"
+      verdict:
+        meaning: "must equal 'blocked' on this topic; review-gate never requests fixes for a passing review"
+        source: "review-gate"
+        fill_rule: "literal string 'blocked'"
+
+  review.complete:
+    required_fields:
+      - "plan_name"
+      - "plan_path"
+      - "review_round"
+      - "executor_head_sha"
+      - "resolved_baseline_sha"
+      - "fix_base_sha"
+      - "fix_plan_file"
+      - "findings_count"
+      - "p0_count"
+      - "p1_count"
+      - "must_fix_now_count"
+      - "residual_findings_count"
+      - "findings_summary"
+      - "verdict"
+    field_docs:
+      fix_plan_file:
+        meaning: "path to the fix plan written by fix-planner; fixer reads ONLY this file (not the original plan)"
+        source: "fix-planner"
+        fill_rule: "absolute path under .ralph/review/<plan>/round-<n>/"
+      fix_base_sha:
+        meaning: "git SHA the fixer should rebase onto before applying the fix plan"
+        source: "fix-planner"
+        fill_rule: "40-char git SHA; do NOT hand-write"
+
+  review.loop.blocked:
+    required_fields:
+      - "plan_name"
+      - "plan_path"
+      - "review_round"
+      - "max_review_rounds"
+      - "executor_head_sha"
+      - "resolved_baseline_sha"
+      - "p0_count"
+      - "p1_count"
+      - "must_fix_now_count"
+      - "residual_findings_count"
+      - "reason"
+    field_docs:
+      max_review_rounds:
+        meaning: "hard cap on the review loop (6 in ce-executor-pipeline-loop); loop.blocked fires when reached with must_fix_now > 0"
+        source: "review-gate / preset"
+        fill_rule: "integer; do NOT hand-write (preset constant)"
+      must_fix_now_count:
+        meaning: "must be > 0 on this topic; loop.blocked is the failure path, never the close path"
+        source: "review-gate"
+        fill_rule: "integer >= 1"
+      reason:
+        meaning: "human-readable reason the loop gave up (exceeded max_review_rounds, etc.)"
+        source: "review-gate"
+        fill_rule: "free text; do NOT include the synthetic 'pass' verdict"
