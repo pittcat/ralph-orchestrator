@@ -13,6 +13,145 @@ use crate::config::{EventSchema, PayloadType};
 use ralph_proto::Hat;
 use std::collections::HashMap;
 
+/// 2026-07-09-001 plan (U2): render a single field hint line
+/// (`field: meaning (source) — fill_rule`) for the
+/// schema-aware prompt section. The line is markdown-friendly
+/// and never invents a meaning: an empty `meaning` becomes an
+/// em-dash placeholder. `field_docs` is consulted first; if
+/// absent, the line falls back to `<field> (required)` so old
+/// schemas still produce a useful line.
+pub fn render_field_line(field: &str, schema: &EventSchema) -> String {
+    let allowed = schema.allowed_values.get(field);
+    if let Some(doc) = schema.field_docs.get(field) {
+        let meaning = if doc.meaning.trim().is_empty() {
+            "—".to_string()
+        } else {
+            doc.meaning.clone()
+        };
+        let source = if doc.source.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" (source: {})", doc.source)
+        };
+        let fill_rule = if doc.fill_rule.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", doc.fill_rule)
+        };
+        let allowed_segment = match allowed {
+            Some(values) if !values.is_empty() => format!(
+                " [allowed: {}]",
+                values
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            _ => String::new(),
+        };
+        format!(
+            "- `{field}`: {meaning}{source}{fill_rule}{allowed_segment}",
+            field = field
+        )
+    } else {
+        match allowed {
+            Some(values) if !values.is_empty() => format!(
+                "- `{field}` (required) [allowed: {}]",
+                values
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            _ => format!("- `{field}` (required)"),
+        }
+    }
+}
+
+/// 2026-07-09-001 plan (U2): build the agent-facing field table
+/// for a schema, one line per entry in `required_fields` (in
+/// declared order). Fields not in `required_fields` are
+/// intentionally NOT included here — this is the prompt-side
+/// list of "what you must fill"; optional fields belong in
+/// `field_docs` documentation only.
+pub fn render_required_field_table(schema: &EventSchema) -> String {
+    schema
+        .required_fields
+        .iter()
+        .map(|f| render_field_line(f, schema))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 2026-07-09-001 plan (U2): build a `suggested_payload_shape`
+/// that keeps the user's existing fields verbatim and fills
+/// missing required fields with `<field>` placeholders. The
+/// function never invents business values: a missing
+/// `must_fix_now_count` is `0`-shaped only when the schema's
+/// `allowed_values` explicitly says so, otherwise it is the
+/// `<must_fix_now_count>` placeholder string. Returns
+/// `serde_json::Value::Null` for non-object payload types
+/// (String / Number / Bool / Array) — those schemas do not
+/// have a field-level shape to suggest.
+pub fn suggested_payload_shape(
+    schema: &EventSchema,
+    payload: &serde_json::Value,
+) -> serde_json::Value {
+    use serde_json::{Map, Value};
+    if !matches!(schema.payload.as_ref(), Some(PayloadType::JsonObject) | None) {
+        return Value::Null;
+    }
+    let mut map = Map::new();
+    // 1) Preserve user-supplied fields verbatim — never
+    // overwrite what the agent already filled.
+    if let Some(obj) = payload.as_object() {
+        for (k, v) in obj {
+            map.insert(k.clone(), v.clone());
+        }
+    }
+    // 2) For each missing required field, insert a
+    // placeholder. The placeholder is the literal `<field>`
+    // string for free-text fields. For fields with a
+    // single-value `allowed_values` list, the placeholder
+    // echoes the first allowed value as a hint (e.g. for
+    // boolean-like enums) — but ONLY if the user's payload
+    // also has no value for that field, so we never overwrite
+    // an existing field. The hint is still a JSON-safe value
+    // (string) so the agent cannot confuse it with a real
+    // business fact.
+    for field in &schema.required_fields {
+        if map.contains_key(field) {
+            continue;
+        }
+        let hint = schema
+            .allowed_values
+            .get(field)
+            .and_then(|v| v.first())
+            .map(|v| v.to_string());
+        let placeholder = match hint {
+            Some(h) => format!("<{field} e.g. {h}>"),
+            None => format!("<{field}>"),
+        };
+        map.insert(field.clone(), Value::String(placeholder));
+    }
+    Value::Object(map)
+}
+
+/// 2026-07-09-001 plan (U2): pick the best prompt-side example
+/// for a schema. If the schema declares `examples`, return the
+/// first one as a JSON string (the schema author chose it).
+/// Otherwise, fall back to the heuristic `example_json_object`
+/// (the legacy `<field>` placeholder generator). Callers that
+/// need a safe shape (e.g. policy-check suggestion) must call
+/// `suggested_payload_shape` instead — this function may
+/// surface a real business example.
+pub fn prompt_example_payload(schema: &EventSchema) -> String {
+    if let Some(first) = schema.examples.first() {
+        return first.to_string();
+    }
+    example_json_object(schema)
+}
+
 /// Generate a single copy-pasteable `ralph emit ... --json '...'` line.
 ///
 /// The placeholder values are heuristic placeholders chosen to be obvious
@@ -157,6 +296,144 @@ mod tests {
         Hat::new(id, name)
             .with_description("")
             .with_publishes(topics.iter().map(|t| Topic::new(*t)).collect())
+    }
+
+    use crate::config::EventFieldDoc;
+
+    /// U2 happy path: a schema with `field_docs.task_id`
+    /// produces a field line that includes the meaning,
+    /// source, and fill_rule. Required: this is the entire
+    /// agent-readable repair context.
+    #[test]
+    fn u2_render_field_line_includes_field_doc_subfields() {
+        let mut schema = schema_with_required(&["task_id"]);
+        schema.field_docs.insert(
+            "task_id".to_string(),
+            EventFieldDoc {
+                meaning: "live id".to_string(),
+                source: "ralph tools task list".to_string(),
+                fill_rule: "do NOT hand-write".to_string(),
+            },
+        );
+        let line = render_field_line("task_id", &schema);
+        assert!(line.contains("`task_id`"));
+        assert!(line.contains("live id"));
+        assert!(line.contains("source: ralph tools task list"));
+        assert!(line.contains("do NOT hand-write"));
+    }
+
+    /// U2 happy path: a schema with `allowed_values.verdict`
+    /// shows the allowed list in the field hint. This
+    /// surfaces the policy at the agent prompt level, not
+    /// only at the policy-check error level.
+    #[test]
+    fn u2_render_field_line_includes_allowed_values() {
+        let mut schema = schema_with_required(&["verdict"]);
+        schema.allowed_values.insert(
+            "verdict".to_string(),
+            vec![serde_json::json!("pass"), serde_json::json!("blocked")],
+        );
+        let line = render_field_line("verdict", &schema);
+        assert!(line.contains("[allowed:"));
+        assert!(line.contains("\"pass\""));
+        assert!(line.contains("\"blocked\""));
+    }
+
+    /// U2 happy path: `suggested_payload_shape` keeps
+    /// `verdict` from the original payload and inserts a
+    /// `<reason>` placeholder for the missing required
+    /// field. The placeholder is a JSON string and never a
+    /// fabricated business value.
+    #[test]
+    fn u2_suggested_payload_shape_preserves_existing_and_placeholders_missing() {
+        let schema = schema_with_required(&["verdict", "reason"]);
+        let payload = serde_json::json!({"verdict": "blocked"});
+        let shape = suggested_payload_shape(&schema, &payload);
+        let obj = shape.as_object().expect("shape must be a JSON object");
+        assert_eq!(obj.get("verdict"), Some(&serde_json::json!("blocked")));
+        let reason = obj
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .expect("reason must be a string placeholder");
+        assert!(reason.contains("reason"), "placeholder must name the field, got: {reason}");
+    }
+
+    /// U2 safety: missing numeric / count-style field is a
+    /// placeholder, NOT a fabricated `0`. Required: this
+    /// is the KTD-4 / R9 "do not auto-fill business facts"
+    /// guarantee. The hard-coded `0` is a footgun that the
+    /// `ce-executor-pipeline-loop` review gate would happily
+    /// accept (`must_fix_now_count: 0` => "no fix needed" =>
+    /// close the loop), so the test pins the safer shape.
+    #[test]
+    fn u2_suggested_payload_shape_does_not_invent_zero_for_count_field() {
+        let schema = schema_with_required(&["must_fix_now_count"]);
+        let payload = serde_json::json!({});
+        let shape = suggested_payload_shape(&schema, &payload);
+        let v = shape
+            .get("must_fix_now_count")
+            .expect("placeholder must be present");
+        let s = v.as_str().expect("placeholder must be a string, not a number");
+        assert!(
+            s.contains("must_fix_now_count"),
+            "placeholder must reference the field name, got: {s}"
+        );
+        // Defensive: the placeholder string itself must not
+        // be a parseable number, otherwise copy-paste would
+        // accidentally pass the validator.
+        assert!(
+            s.parse::<u64>().is_err(),
+            "placeholder must not be numeric, got: {s}"
+        );
+    }
+
+    /// U2 backward compatibility: a schema with no
+    /// `field_docs` and no `allowed_values` still produces a
+    /// field line — the legacy `(required)` form. This is
+    /// the R18 / R20 invariant for every old preset.
+    #[test]
+    fn u2_render_field_line_falls_back_to_required_marker() {
+        let schema = schema_with_required(&["task_id"]);
+        let line = render_field_line("task_id", &schema);
+        assert!(line.contains("(required)"));
+        // And the table joins multiple required fields.
+        let table = render_required_field_table(&schema);
+        assert!(table.contains("`task_id` (required)"));
+    }
+
+    /// U2 scope guard: `fix_hint_for_hat_topic` still
+    /// returns `None` when the hat is not authorised to
+    /// publish the topic. Required: U1 / U2 must not leak
+    /// another hat's payload shape (and now its
+    /// `field_docs`) into the error path.
+    #[test]
+    fn u2_fix_hint_for_hat_topic_still_none_for_unauthorised() {
+        let schema = schema_with_required(&["task_id"]);
+        let hat = hat_with_publishes("reviewer", "Reviewer", &["review.accepted"]);
+        assert!(fix_hint_for_hat_topic(&hat, "work.done", &schema).is_none());
+    }
+
+    /// U2 happy path: `prompt_example_payload` returns the
+    /// first author-declared example when present. This is
+    /// the path the schema-aware prompt section uses.
+    #[test]
+    fn u2_prompt_example_payload_prefers_author_example() {
+        let mut schema = schema_with_required(&["task_id"]);
+        schema.examples.push(serde_json::json!({"task_id": "task-1234-abcd"}));
+        let example = prompt_example_payload(&schema);
+        assert!(example.contains("task-1234-abcd"));
+    }
+
+    /// U2 backward compatibility: when the schema has no
+    /// `examples`, `prompt_example_payload` falls back to
+    /// the legacy heuristic placeholders. This keeps old
+    /// presets producing a usable prompt section.
+    #[test]
+    fn u2_prompt_example_payload_falls_back_to_heuristic() {
+        let schema = schema_with_required(&["task_id"]);
+        let example = prompt_example_payload(&schema);
+        assert!(example.contains("task_id"));
+        assert!(example.contains("<task_id>"));
     }
 
     #[test]
