@@ -12,6 +12,8 @@
 - [ ] `state_projection.actions` 与 emit payload 字段对齐
 - [ ] 若 hat `publishes` 含 `review.dimensions.complete`，`state_projection.actions_chain` 须有对应投影 action（否则下游 Q2 看不到 review 汇总）
 - [ ] emitter 若 instructions 要求 `--triggered <hat>`，该 `<hat>` 必须在 preset `hats[]` 里声明（否则 runtime 拒收 `triggered_not_in_topology`）
+- [ ] loop preset 中 `fix.done.next_review_plan` 必须是非空 object 合同；schema、example、fixer instructions 都不能允许 `null`
+- [ ] `dim:*` / `dimension-reviewer` 只读 reviewer 若禁用 Edit/Write，不得声明 `docs/plans/` 写路径；review 产物写到 `.ralph/review/**`
 - [ ] 可参考 `references/patterns.md`（仅拓扑阶段）
 
 ### 阶段 2：起草（单 hat agent 视角）

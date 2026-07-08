@@ -1181,6 +1181,9 @@ hats:
         write the findings product file (see Step 4) and use
         read-only shell commands (cat / grep / find / rg / ls /
         echo). You MAY NOT modify source code, configs, or docs.
+        Do NOT edit the original plan file at `plan_path` or any file
+        under `docs/plans/`; write review findings only to
+        `.ralph/review/**`.
       - Do NOT emit `work.done` / `work.failed` / `plan.*` /
         `review.complete` / `fix.*` / `align.done` / `report.done`
         / `LOOP_COMPLETE` — those belong to other hats.
@@ -1367,6 +1370,9 @@ hats:
         write the findings product file (see Step 4) and use
         read-only shell commands (cat / grep / find / rg / ls /
         echo / test runners for cross-verification).
+        Do NOT edit the original plan file at `plan_path` or any file
+        under `docs/plans/`; write review findings only to
+        `.ralph/review/**`.
       - Do NOT emit `work.*` / `plan.*` / `review.complete` /
         `fix.*` / `align.done` / `report.done` / `LOOP_COMPLETE`.
       - Do NOT re-emit another dimension's done event.
@@ -1463,6 +1469,9 @@ hats:
       - Read-only role: `disallowed_tools: ["Edit"]`. You MAY
         write the findings product file and use read-only commands
         (including test runners for cross-verification).
+        Do NOT edit the original plan file at `plan_path` or any file
+        under `docs/plans/`; write review findings only to
+        `.ralph/review/**`.
       - Do NOT emit any other business topic.
 
       ### Step 1 — Read context
@@ -1554,6 +1563,9 @@ hats:
       - Read-only role: `disallowed_tools: ["Edit"]`. You MAY
         write the findings product file and use read-only
         commands.
+        Do NOT edit the original plan file at `plan_path` or any file
+        under `docs/plans/`; write review findings only to
+        `.ralph/review/**`.
       - Do NOT emit any other business topic.
 
       ### Step 1 — Read context
@@ -1639,6 +1651,9 @@ hats:
       ### HARD RULES (shared by all 6 dim hats)
       - Emit EXACTLY ONE event per activation: `review.standards.done`.
       - Read-only role: `disallowed_tools: ["Edit"]`.
+        Do NOT edit the original plan file at `plan_path` or any file
+        under `docs/plans/`; write review findings only to
+        `.ralph/review/**`.
       - Do NOT emit any other business topic.
 
       ### Step 1 — Read context
@@ -1733,6 +1748,9 @@ hats:
       ### HARD RULES (shared by all 6 dim hats)
       - Emit EXACTLY ONE event per activation: `review.adversarial.done`.
       - Read-only role: `disallowed_tools: ["Edit"]`.
+        Do NOT edit the original plan file at `plan_path` or any file
+        under `docs/plans/`; write review findings only to
+        `.ralph/review/**`.
       - Do NOT emit any other business topic.
 
       ### Step 1 — Read context
@@ -2341,10 +2359,11 @@ hats:
       unit-scoped tests only; they must not emit Ralph events or create
       commits.
 
-      This preset has **no fix round / re-review cycle** — apply
-      everything you can in one pass, verify full suite green, emit
-      `fix.done`, and stop. Alignment (next) cross-checks fix-plan
-      execution separately from the original plan.
+      This preset has a bounded fix/re-review loop. Apply everything you can
+      in one pass, verify full suite green when required by the fix plan, emit
+      `fix.done` with a structured `next_review_plan`, and stop. The
+      `review-reentry` hat uses `next_review_plan` to start the next review
+      round.
 
       ### HARD RULES
       - Emit EXACTLY ONE `fix.done` per activation.
@@ -2358,7 +2377,12 @@ hats:
       - Do NOT emit `work.done` / `work.failed` /
         `plan.*` / `review.*` / `align.done` / `report.done` /
         `LOOP_COMPLETE`.
-      - Do NOT route back to review; alignment handles residuals.
+      - Do NOT emit `review.round.ready` yourself; `review-reentry` handles
+        the next review round from your `fix.done` payload.
+      - `next_review_plan` is REQUIRED and MUST be a JSON object, never
+        `null`. Include these array fields even when empty:
+        `focus_areas`, `fixed_findings`, `verification_performed`,
+        `residual_risks`, and `diff_ranges`.
       - Do NOT create / switch / rename branches / worktrees.
       - **Full-suite green gate (HARD DoD)**: before `fix.done`, run the
         project's **authoritative full-suite command** (discovery order:
@@ -2449,11 +2473,18 @@ hats:
 
       ### Step 6 — Emit event
       Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`, and
-      `verdict` as `review_verdict`.
+      `verdict` as `review_verdict`. Set `fixed_from_sha` to the trigger
+      `fix_base_sha` and `head_sha` to the current HEAD after fixes. Build
+      `next_review_plan` as the exact input for the next review round:
+      `focus_areas` describes what reviewers should verify,
+      `fixed_findings` lists fixed P0/P1 IDs or summaries,
+      `verification_performed` lists commands actually run,
+      `residual_risks` lists remaining risks or `[]`,
+      and `diff_ranges` includes at least `"<fixed_from_sha>..<head_sha>"`.
       ```bash
-      ralph emit fix.done --json '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from review.complete>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>}'
+      ralph emit fix.done --json '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","review_round":<N from review.complete>,"executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.complete>","fixed_from_sha":"<fix_base_sha from review.complete>","head_sha":"<current HEAD sha>","fix_plan_file":"<fix-plan path>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>,"fix_summary":"<brief summary>","next_review_plan":{"focus_areas":["verify applied fixes"],"fixed_findings":["<finding id or summary>"],"verification_performed":["<command>"],"residual_risks":[],"diff_ranges":["<fixed_from_sha>..<head_sha>"]}}'
       ```
-      Then stop. Alignment will be triggered next.
+      Then stop. `review-reentry` will be triggered next.
 
       ### Failure Handling
       The response to failure depends on `review_verdict` from
@@ -2494,12 +2525,11 @@ hats:
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## ALIGNMENT MODE — Cross-check original plan vs fix-plan execution
 
-      You audit **two separate plans** against git evidence:
-      1. **Original plan** (`plan_path`) — executor-phase U-IDs, commits in
-         `<DIFF_BASE>..<executor_head_sha>`.
-      2. **Fix plan** (`fix_plan_file`) — fix-planner actionable Units only
-         (`### U<N>.` with P0/P1 findings; excludes DOC residuals), commits
-         in `<executor_head_sha>..HEAD` (fixer phase; NOT the original plan).
+      You receive `review.accepted` after the final accepted review round and
+      audit execution evidence against git history. If a fix round happened,
+      use the latest `fix.done` event available through the sanctioned event
+      query command to identify the fix-plan range; otherwise treat the fix
+      plan as not applicable.
 
       Record residuals; do NOT loop back, retry, or block.
 
@@ -2511,13 +2541,21 @@ hats:
       - Do NOT loop back to executor / fixer / review.
 
       ### Step 1 — Read context
-      - From `fix.done` payload: `plan_name`, `plan_path` (original plan),
-        `executor_head_sha`, `resolved_baseline_sha` (pass-through),
-        `fix_plan_file`, `review_verdict`, `fixes_applied`,
-        `fixes_skipped`.
+      - From the `review.accepted` trigger payload: `plan_name`,
+        `plan_path`, `review_round`, `executor_head_sha`,
+        `resolved_baseline_sha`, `p0_count`, `p1_count`, and `verdict`.
+      - If `review_round > 1`, load the latest `fix.done` event with the
+        sanctioned event query command:
+        `ralph events --events-source main --output json | jq -c 'select(.topic=="fix.done")' | tail -1`.
+        Read `fix_plan_file`, `fixed_from_sha`, `head_sha`,
+        `review_verdict`, `fixes_applied`, and `fixes_skipped` from that
+        event. Do not read internal `.ralph/*` ledger files directly.
+      - If `review_round == 1`, set `fix_plan_file` to an empty string,
+        `fixes_applied: 0`, `fixes_skipped: 0`, and `review_verdict` to the
+        trigger `verdict`.
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read the **original** plan at `plan_path`.
-      - Read the **fix plan** at `fix_plan_file` (may be placeholder).
+      - Read the **fix plan** at `fix_plan_file` only when it is non-empty.
 
       ### Step 2 — Cross-check original plan (executor phase ONLY)
       1. List every Implementation Unit (U-ID) in the **original** plan.
@@ -2529,17 +2567,18 @@ hats:
          `false` and include missing U-IDs in residuals.
 
       ### Step 3 — Cross-check fix plan (fixer phase ONLY)
-      1. If fix-plan matches Step 1 fast path (§7b placeholder, or only DOC
+      1. If no fix round happened, set `fix_plan_executed: true`.
+      2. If fix-plan matches Step 1 fast path (§7b placeholder, or only DOC
          residuals Units): set `fix_plan_executed: true` (nothing to apply).
-      2. Else list every **actionable** `### U<N>.` heading in
+      3. Else list every **actionable** `### U<N>.` heading in
          **fix-plan.md** — exclude `Residuals (deferred)` / `Kind: DOC`
          units; ignore Units from the original plan at `plan_path`.
-      3. For each actionable Unit token (`U1`, `U2`, …), search
-         `git log --oneline <executor_head_sha>..HEAD` for a commit whose
+      4. For each actionable Unit token (`U1`, `U2`, …), search
+         `git log --oneline <fixed_from_sha>..<head_sha>` for a commit whose
          subject contains that token (preferred: `fix(U1):` / `fix(U2):`).
-      4. Collect `missing_fix_uids` = actionable Unit tokens with no commit.
-      5. Add any `fixes_skipped` from `fix.done` to residuals.
-      6. `fix_plan_executed: true` iff `missing_fix_uids` is empty AND
+      5. Collect `missing_fix_uids` = actionable Unit tokens with no commit.
+      6. Add any `fixes_skipped` from `fix.done` to residuals.
+      7. `fix_plan_executed: true` iff `missing_fix_uids` is empty AND
          `fixes_skipped == 0`; else `false`.
 
       ### Step 4 — Build residuals list
@@ -2553,7 +2592,7 @@ hats:
       Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`,
       `review_verdict`.
       ```bash
-      ralph emit align.done --json '{"plan_name":"<plan>","plan_path":"<original plan path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from fix.done>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
+      ralph emit align.done --json '{"plan_name":"<plan>","plan_path":"<original plan path>","review_round":<N from review.accepted>,"executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path or empty string>","resolved_baseline_sha":"<sha from review.accepted>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
       ```
       Then stop. Reporter will receive `align.done`.
 

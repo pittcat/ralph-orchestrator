@@ -1447,6 +1447,16 @@ fn test_ce_executor_pipeline_loop() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-08 loop preset regression: first review round has P1
+/// residuals, so the gate requests fixes; `fix.done` must wake
+/// `review-reentry`, which starts round 2 before any terminal
+/// completion is honored.
+#[test]
+fn test_ce_executor_pipeline_loop_fix_reentry() {
+    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_loop_fix_reentry.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-07-02-003 plan U2: failure variant. When the executor
 /// emits `work.failed` (e.g. cannot reach test green), the 6-dim
 /// review chain and downstream synthesizers/fixer/alignment MUST

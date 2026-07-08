@@ -81,6 +81,12 @@ work.done / fix.done
   只走 `review.loop.blocked`。
 - `fix.done.next_review_plan` 是下一轮 review 的输入；`review-reentry`
   不应重新推断修复意图，也不应读取内部 ledger。
+- `fix.done.next_review_plan` 必须是非空 JSON object，不能是 `null`；
+  至少包含 `focus_areas`、`fixed_findings`、`verification_performed`、
+  `residual_risks`、`diff_ranges` 五个数组字段，即使数组为空也要发出。
+- 分裂维度 reviewer（`dim:*`）如果声明 `disallowed_tools: ["Edit"]`
+  或 `["Write"]`，就按只读 reviewer 处理：不能把 `docs/plans/` 放进
+  `allowed_write_paths`，也不能在 instructions 中要求直接改原计划文件。
 
 参考：`presets/en/ce-executor-pipeline-loop.yml`。
 

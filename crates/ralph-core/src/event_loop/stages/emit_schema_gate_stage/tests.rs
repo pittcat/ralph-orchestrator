@@ -46,6 +46,23 @@ fn emit_schema_gate_stage_rejects_plan_blocked_with_null_reason() {
 }
 
 #[test]
+fn emit_schema_gate_stage_rejects_fix_done_with_null_next_review_plan() {
+    let mut required = HashMap::new();
+    required.insert(
+        "fix.done".to_string(),
+        vec!["plan_name".to_string(), "next_review_plan".to_string()],
+    );
+    let stage = EmitSchemaGateStage::new(required);
+    let e = ev(
+        "fix.done",
+        r#"{"plan_name":"plan-loop","next_review_plan":null}"#,
+    );
+    let err = stage.check(&mut ctx(), &e).unwrap_err();
+    assert_eq!(err.reason_code, "missing_required_fields");
+    assert_eq!(err.missing_fields, vec!["next_review_plan".to_string()]);
+}
+
+#[test]
 fn emit_schema_gate_stage_rejects_task_resume_with_missing_kind() {
     let stage = EmitSchemaGateStage::with_defaults();
     let e = ev(

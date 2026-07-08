@@ -8070,23 +8070,16 @@ impl EventLoop {
                 );
                 self.bus.publish(violation);
 
-                // U5 (plan 2026-07-04-004): scope_violation for the
-                // `dimension-reviewer` hat (and only this hat) is
-                // promoted from the legacy `add_failures: 1` counting
-                // path to a typed `AuditSeverity::BlockLoop` hard
-                // reject. Without the carve-out the 6× silent-success
-                // frontmatter rewrites shipped as counting failures
-                // that the budget reset on every fix.applied; the
-                // loop kept running and the reviewer kept rewriting.
+                // Scope violations from read-only dimension reviewers are
+                // promoted from the legacy `add_failures: 1` counting path to
+                // a typed hard reject. This covers both the historical
+                // `dimension-reviewer` hat and split dimension hats (`dim:*`)
+                // that explicitly disallow Edit/Write.
                 //
-                // The other hats still route through `Fail { add_failures: 1 }`
-                // because their scope_violation can be a legitimate
-                // fix (coordinator writing plan files, executor
-                // committing code). The hard-reject is the explicit
-                // shape `dimension-reviewer` is the only hat that
-                // cannot legitimately touch plan files (see
-                // `dimension_reviewer_write_paths` lint + the
-                // preset instructions).
+                // Other hats still route through `Fail { add_failures: 1 }`
+                // because their scope_violation can be a legitimate fix
+                // attempt (coordinator writing plan files, executor
+                // committing code).
                 //
                 // The BlockLoop arm does NOT increment
                 // `consecutive_failures` (orthogonal termination
@@ -8095,18 +8088,23 @@ impl EventLoop {
                 // `check_termination` converts to
                 // `TerminationReason::ScopeViolationHardRejected`
                 // on the next call.
-                let is_dimension_reviewer = hat_id.as_str() == "dimension-reviewer";
-                let severity = if is_dimension_reviewer {
+                let is_read_only_dimension_reviewer = hat_id.as_str() == "dimension-reviewer"
+                    || (hat_id.as_str().starts_with("dim:")
+                        && config
+                            .disallowed_tools
+                            .iter()
+                            .any(|tool| matches!(tool.as_str(), "Edit" | "Write")));
+                let severity = if is_read_only_dimension_reviewer {
                     crate::event_loop::audit::AuditSeverity::BlockLoop {
                         reason: "scope_violation".to_string(),
                     }
                 } else {
                     crate::event_loop::audit::AuditSeverity::Fail { add_failures: 1 }
                 };
-                let kind = if is_dimension_reviewer {
+                let kind = if is_read_only_dimension_reviewer {
                     crate::preset::engine::gates::RejectionKind::ScopeViolation
                 } else {
-                    // Pre-U5 placeholder retained for non-dimension-reviewer
+                    // Pre-U5 placeholder retained for non-read-only-reviewer
                     // hats so the audit chain stays backwards-compatible.
                     crate::preset::engine::gates::RejectionKind::MissingField
                 };
@@ -8123,11 +8121,11 @@ impl EventLoop {
                 // Push the typed termination trigger so
                 // `check_termination` produces the matching
                 // `TerminationReason::ScopeViolationHardRejected`.
-                // Only for `dimension-reviewer` (the BlockLoop arm).
+                // Only for read-only dimension reviewers (the BlockLoop arm).
                 // The trigger carries the hat + diff stat so
                 // `trigger_to_reason` produces a fully-populated
                 // `TerminationReason` without further enrichment.
-                if is_dimension_reviewer {
+                if is_read_only_dimension_reviewer {
                     if let Err(e) = self.state.push_termination_trigger(
                         crate::event_loop::termination::TerminationTrigger::ScopeViolation {
                             hat: hat_id.as_str().to_string(),

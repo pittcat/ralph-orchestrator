@@ -268,6 +268,67 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_ce_executor_pipeline_loop_fix_reentry_contract() {
+        let preset = get_preset("ce-executor-pipeline-loop")
+            .expect("ce-executor-pipeline-loop must be embedded");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("loop preset YAML should parse");
+
+        let schemas = &config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("loop preset must declare event policy")
+            .schemas;
+        let fix_done = schemas
+            .get("fix.done")
+            .expect("loop preset must schema fix.done");
+        assert!(
+            fix_done
+                .required_fields
+                .iter()
+                .any(|field| field == "next_review_plan"),
+            "fix.done must require next_review_plan so null/missing payloads are rejected"
+        );
+
+        let fixer = config
+            .hats
+            .get("fixer")
+            .expect("loop preset must declare fixer");
+        for required in [
+            "structured `next_review_plan`",
+            "`next_review_plan` is REQUIRED",
+            "MUST be a JSON object, never",
+            "`review-reentry` will be triggered next",
+        ] {
+            assert!(
+                fixer.instructions.contains(required),
+                "fixer instructions missing required reentry contract phrase `{required}`"
+            );
+        }
+
+        let alignment = config
+            .hats
+            .get("alignment")
+            .expect("loop preset must declare alignment");
+        for required in [
+            "You receive `review.accepted`",
+            "From the `review.accepted` trigger payload",
+            "If `review_round > 1`, load the latest `fix.done` event",
+            "Do not read internal `.ralph/*` ledger files directly",
+        ] {
+            assert!(
+                alignment.instructions.contains(required),
+                "alignment instructions missing required trigger contract phrase `{required}`"
+            );
+        }
+        assert!(
+            !alignment.instructions.contains("From `fix.done` payload:"),
+            "alignment must not claim fix.done is its direct trigger"
+        );
+    }
+
     /// Registry must NOT expose `ce-executor-serial` once Unit 1 is complete.
     #[test]
     fn test_preset_names_excludes_serial() {
@@ -2105,11 +2166,7 @@ mod tests {
         // This is by design — `work.done` is the success-path handoff, while
         // the failure path is handled by the fix wave. The runtime still
         // requires `work.done` on every successful completion.
-        let topology_exempt: &[&str] = &[
-            "autoresearch",
-            "debug",
-            "ce-executor-supervisor",
-        ];
+        let topology_exempt: &[&str] = &["autoresearch", "debug", "ce-executor-supervisor"];
 
         // Per-preset finding-id exemptions (P2 #16 + #22).
         //

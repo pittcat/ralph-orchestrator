@@ -40,6 +40,7 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | emit 引用未声明字段（schema 通过但 hat 拿不到值） | P0 | payload-content | Q4 |
 | 决策字段值与下游语义不匹配（`summary: done` 类） | P1（若阻塞下游执行则升 P0） | payload-content | Q4 / Q5 |
 | 多 trigger hat 未按 trigger 拆分 payload 差异 | P1 | payload-content | Q4 |
+| loop preset 的 `fix.done.next_review_plan` 允许 `null` 或缺少下一轮 review 所需数组字段 | P0 | payload-content | Q4 / Q5 |
 | payload audit 行缺值源 / 缺可见性证据 | P1 | payload-content | Q4 |
 | 同一 hat emit 多条业务事件（违反单事件预算） | P0 | feasibility | Q4 |
 | 终态 emit 前夹带其它业务事件 | P0 | feasibility | Q4 |
@@ -76,6 +77,7 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.supervisor_requires_isolated` | P0 | 95 | Q3 | lint |
 | `preset.supervisor_hat_publishes_coord_topic` | P0 | 95 | Q4 | lint |
 | `preset.metadata_runtime_drift` | P1 | 85 | — | lint |
+| `preset.dimension_reviewer_write_plan` | P0 | 95 | Q3 | lint |
 
 ### Single-chain-first audit (2026-07-07-006 Unit 6)
 
