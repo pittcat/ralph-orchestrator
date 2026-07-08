@@ -129,6 +129,7 @@ mod tests {
                 message: "task_id is required".to_string(),
                 field: Some("task_id".to_string()),
                 suggested_command: None,
+                ..EmitError::default()
             }],
             handoff: Some(EmitHandoff {
                 from_hat: "executor".to_string(),
@@ -357,6 +358,7 @@ mod tests {
                 message: "task_id is required".to_string(),
                 field: Some("task_id".to_string()),
                 suggested_command: None,
+                ..EmitError::default()
             }],
             handoff: None,
             target_path: None,

@@ -37,6 +37,7 @@ pub fn map_policy_report_to_errors(
                 message: code.clone(),
                 field: None,
                 suggested_command,
+                ..EmitError::default()
             }
         })
         .collect()

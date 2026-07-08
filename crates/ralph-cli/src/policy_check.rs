@@ -2483,14 +2483,22 @@ pub fn report_to_emit_result(
     ralph_core::emit_result::EmitResult::assemble(parts)
 }
 
-/// 2026-07-09-001 plan (U4): convert a `Vec<ValidationError>`
+/// 2026-07-09-001 plan (U4 + U3): convert a `Vec<ValidationError>`
 /// into the `EmitError` shape `EmitResult` expects,
 /// threading the U3 enrichment fields (`field`,
 /// `field_description`, `suggested_payload_shape`,
-/// `suggested_command`) into the JSON consumer. The
-/// function is pure: it does not consult the schema; the
-/// caller (or `enrich_report_with_schema`) is responsible
-/// for populating those fields before calling this.
+/// `suggested_command` plus the new `expected` / `actual`)
+/// into the JSON consumer. The function is pure: it does
+/// not consult the schema; the caller (or
+/// `enrich_report_with_schema`) is responsible for
+/// populating those fields before calling this.
+///
+/// `expected` / `actual` are sourced as `Option<String>` on
+/// `ValidationError` but `EmitError` carries them as
+/// `Option<serde_json::Value>` (per the U3 plan). String
+/// sources are wrapped in `Value::String` so the JSON shape
+/// stays additive: the field becomes a JSON string scalar
+/// rather than being absent.
 fn validation_errors_to_emit_errors(
     errors: &[ValidationError],
 ) -> Vec<ralph_core::emit_result::EmitError> {
@@ -2506,6 +2514,10 @@ fn validation_errors_to_emit_errors(
                 Some(e.field.clone())
             },
             suggested_command: e.suggested_command.clone(),
+            expected: e.expected.as_ref().map(|s| serde_json::Value::String(s.clone())),
+            actual: e.actual.as_ref().map(|s| serde_json::Value::String(s.clone())),
+            field_description: e.field_description.clone(),
+            suggested_payload_shape: e.suggested_payload_shape.clone(),
         })
         .collect()
 }
@@ -3666,6 +3678,7 @@ hats:
                 message: "y".to_string(),
                 field: None,
                 suggested_command: None,
+                ..ralph_core::emit_result::EmitError::default()
             }],
             Some(&cfg),
             tmp.path(),

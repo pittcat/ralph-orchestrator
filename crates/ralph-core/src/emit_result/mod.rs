@@ -87,7 +87,17 @@ pub struct EmitResult {
 ///
 /// agent 应直接读取 `code` 与 `message`，`field` / `suggested_command`
 /// 是 **可选** 的可执行修复提示（`None` 时整个键被省略）。
-#[derive(Debug, Clone, Serialize)]
+///
+/// 2026-07-09-001 plan (U3 / A1): the legacy four-field
+/// shape is extended with `expected` / `actual` /
+/// `field_description` / `suggested_payload_shape`. These
+/// mirror the same-named fields on `ValidationError` so the
+/// JSON consumer can self-repair from `--output json`
+/// without re-reading source code. All four are
+/// `skip_serializing_if = "Option::is_none"` and therefore
+/// additive — old consumers see exactly the same JSON keys
+/// as before.
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct EmitError {
     /// 稳定错误码（CLI agent 据此路由修复策略）。
     pub code: String,
@@ -101,6 +111,37 @@ pub struct EmitError {
     /// 仅当错误具备可执行修复路径时填充。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub suggested_command: Option<String>,
+    /// 2026-07-09-001 plan (U3): the field-level
+    /// expectation the schema expresses — for
+    /// `missing_required_field` the literal required field
+    /// name; for `invalid_field_value` the allowed-values
+    /// list (serialised to a JSON array or string when the
+    /// schema only carries scalars). `None` for violations
+    /// where the field-level expectation cannot be
+    /// expressed (e.g. unknown semantic gate).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub expected: Option<serde_json::Value>,
+    /// 2026-07-09-001 plan (U3): the actual value the
+    /// agent supplied that violated the rule. Serialised
+    /// to JSON so number / bool / object / string are
+    /// preserved rather than flattened to a display
+    /// string. `None` for `missing_required_field` (no
+    /// actual value exists) or when the legacy message
+    /// parse failed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub actual: Option<serde_json::Value>,
+    /// 2026-07-09-001 plan (U3): the schema's
+    /// `field_docs.<f>` meaning for the offending field.
+    /// `None` when the field is unknown or has no doc.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub field_description: Option<String>,
+    /// 2026-07-09-001 plan (U3): a JSON-serialisable
+    /// skeleton payload the agent can edit. Uses
+    /// `emit_schema_hint::suggested_payload_shape` so it
+    /// never invents business values (e.g. `0` for
+    /// `must_fix_now_count`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub suggested_payload_shape: Option<serde_json::Value>,
 }
 
 /// Agent 上下文交接包（output side）。

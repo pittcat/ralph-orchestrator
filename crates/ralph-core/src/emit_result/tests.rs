@@ -71,6 +71,7 @@ fn test_emit_result_types_error_optional_fields_omitted_in_json() {
         message: "task_id is required".to_string(),
         field: None,
         suggested_command: None,
+        ..EmitError::default()
     };
     let json: Value = serde_json::to_value(&err).expect("EmitError must serialize to JSON value");
     let obj = json.as_object().expect("EmitError JSON must be an object");
@@ -165,6 +166,7 @@ fn test_emit_result_types_with_allowed_next_and_errors_keeps_vecs() {
             message: "task_id is required".to_string(),
             field: Some("task_id".to_string()),
             suggested_command: Some("ralph tools task list".to_string()),
+            ..EmitError::default()
         }],
         handoff: None,
         target_path: None,
@@ -232,9 +234,100 @@ fn test_emit_result_types_roundup() {
         message: "y".to_string(),
         field: None,
         suggested_command: None,
+        ..EmitError::default()
     };
     let err_json: Value = serde_json::to_value(&err).expect("EmitError must serialize");
     let err_obj = err_json.as_object().expect("EmitError JSON must be object");
     assert!(err_obj.get("field").is_none());
     assert!(err_obj.get("suggested_command").is_none());
+}
+
+// 2026-07-09-001 plan (U3 / A1): the four enrichment
+// fields are serialised alongside `code` / `message`
+// when populated, and the skip-serializing-if-None rule
+// keeps them out of the JSON when the upstream
+// `ValidationError` did not produce them. Old consumers
+// see exactly the same keys; new consumers can opt in by
+// reading `expected` / `actual` / `field_description` /
+// `suggested_payload_shape`.
+
+/// Happy path: every U3 field populated shows up in the
+/// JSON envelope under the documented key.
+#[test]
+fn u3_json_emit_error_includes_all_4_enrichment_fields() {
+    let err = EmitError {
+        code: "missing_required_field".to_string(),
+        message: "task_id is required".to_string(),
+        field: Some("task_id".to_string()),
+        suggested_command: Some("ralph emit work.done --policy-check -j '{\"task_id\":\"<id>\"}'".to_string()),
+        expected: Some(serde_json::Value::String("task_id".to_string())),
+        actual: None,
+        field_description: Some("the live task id from `ralph tools task list`".to_string()),
+        suggested_payload_shape: Some(serde_json::json!({"task_id": "<id>"})),
+    };
+    let json: Value = serde_json::to_value(&err).expect("emit error serializes");
+    let obj = json.as_object().expect("error must be object");
+    assert_eq!(obj["code"], "missing_required_field");
+    assert_eq!(obj["field"], "task_id");
+    assert!(obj["suggested_command"]
+        .as_str()
+        .unwrap()
+        .contains("--policy-check"));
+    assert_eq!(obj["expected"], serde_json::json!("task_id"));
+    assert!(obj.get("actual").is_none(), "None must skip serialise");
+    assert_eq!(
+        obj["field_description"],
+        "the live task id from `ralph tools task list`"
+    );
+    assert_eq!(
+        obj["suggested_payload_shape"],
+        serde_json::json!({"task_id": "<id>"})
+    );
+}
+
+/// Edge: `expected` is `None` (e.g. semantic gate with no
+/// field-level expectation) — the JSON omits the key
+/// entirely instead of emitting `"expected": null`.
+#[test]
+fn u3_json_emit_error_omits_expected_when_none() {
+    let err = EmitError {
+        code: "semantic_gate".to_string(),
+        message: "monotonicity violation".to_string(),
+        field: None,
+        suggested_command: None,
+        expected: None,
+        actual: Some(serde_json::Value::String("downgraded".to_string())),
+        field_description: None,
+        suggested_payload_shape: None,
+    };
+    let json: Value = serde_json::to_value(&err).expect("emit error serializes");
+    let obj = json.as_object().expect("error must be object");
+    assert!(obj.get("expected").is_none());
+    assert_eq!(obj["actual"], serde_json::json!("downgraded"));
+    assert!(obj.get("field_description").is_none());
+    assert!(obj.get("suggested_payload_shape").is_none());
+}
+
+/// `expected` / `actual` accept any `serde_json::Value`,
+/// not just strings — number / bool / object / array
+/// shape survives the round-trip.
+#[test]
+fn u3_json_emit_error_preserves_value_kinds() {
+    let err = EmitError {
+        code: "invalid_field_value".to_string(),
+        message: "must be one of allowed values".to_string(),
+        field: Some("verdict".to_string()),
+        suggested_command: None,
+        expected: Some(serde_json::json!(["pass", "pass_with_residuals", "blocked"])),
+        actual: Some(serde_json::Value::String("invalid".to_string())),
+        field_description: Some("verdict enum".to_string()),
+        suggested_payload_shape: Some(serde_json::json!({"verdict": "pass"})),
+    };
+    let json: Value = serde_json::to_value(&err).expect("emit error serializes");
+    let obj = json.as_object().expect("error must be object");
+    assert_eq!(
+        obj["expected"],
+        serde_json::json!(["pass", "pass_with_residuals", "blocked"])
+    );
+    assert_eq!(obj["actual"], serde_json::json!("invalid"));
 }
