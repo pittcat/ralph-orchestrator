@@ -682,6 +682,15 @@ pub struct PolicyCheckReport {
     /// The CLI uses this to decide whether to surface a
     /// "post-state violation" warning distinct from the per-rule hints.
     pub post_commit_rejected: bool,
+    /// 2026-07-09-001 plan (U4): structured validation errors
+    /// for the unified path. The CLI uses this to render
+    /// `field` + `expected` + `actual` + `field_description`
+    /// + `suggested_payload_shape` + `suggested_command` per
+    /// item, instead of the legacy `reason_codes` /
+    /// `suggestions` parallel-vector format. Empty when
+    /// `accepted == true`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_errors: Vec<ValidationError>,
 }
 
 impl PolicyCheckReport {
@@ -729,6 +738,7 @@ fn report_from_validation(
 ) -> PolicyCheckReport {
     let mut reason_codes = Vec::new();
     let mut suggestions = Vec::new();
+    let mut validation_errors: Vec<ValidationError> = Vec::new();
     for r in report.pre_commit.iter().chain(report.post_commit.iter()) {
         if r.accepted {
             continue;
@@ -738,8 +748,33 @@ fn report_from_validation(
             .clone()
             .unwrap_or_else(|| format!("{}:rejected", r.stage));
         let hint = r.correction_hint.clone().unwrap_or_default();
-        reason_codes.push(code);
-        suggestions.push(hint);
+        reason_codes.push(code.clone());
+        suggestions.push(hint.clone());
+        // 2026-07-09-001 plan (U4): the legacy
+        // `code:hint` shape is what `ralph emit --policy-check`
+        // already serialises via `report_to_emit_result`. We
+        // also surface a `ValidationError` per rejection so
+        // the agent's repair-loop can read the new
+        // `field_description` / `suggested_payload_shape`
+        // fields. The `field` is empty for the unified path
+        // — the validation pipeline does not yet emit
+        // field-level markers — so we leave it that way
+        // rather than fabricating one.
+        let normalised_code = code
+            .strip_prefix("engine_rejected:legacy_policy:")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                code.strip_prefix("engine_rejected:")
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| code.clone())
+            });
+        validation_errors.push(ValidationError {
+            payload_index: 0,
+            field: String::new(),
+            reason_code: normalised_code,
+            message: hint,
+            ..Default::default()
+        });
     }
     PolicyCheckReport {
         topic: topic.to_string(),
@@ -749,6 +784,7 @@ fn report_from_validation(
         reason_codes,
         suggestions,
         post_commit_rejected: report.post_commit_rejected,
+        validation_errors,
     }
 }
 
@@ -2344,16 +2380,60 @@ fn envelope_summary_enabled(config: Option<&RalphConfig>) -> bool {
         .unwrap_or(false)
 }
 
+/// 2026-07-09-001 plan (U4): take a freshly built
+/// `PolicyCheckReport` and, for each `validation_error`,
+/// consult the loaded `EventSchema` + the original payload
+/// to populate the U3 enrichment fields
+/// (`expected` / `actual` / `field_description` /
+/// `suggested_payload_shape` / `suggested_command`). The
+/// schema is the same one the unified pipeline ran against,
+/// so any `field_docs` / `allowed_values` the preset author
+/// declared flows through to the agent. Schemas without
+/// field metadata still produce the legacy four-field
+/// shape (U3 backward-compat).
+///
+/// `payload` is `Option<&serde_json::Value>`: the unified
+/// pipeline doesn't thread the payload back to the
+/// `PolicyCheckReport` builder, so the caller passes
+/// whatever it has. The function is pure: no I/O, no
+/// clock, no env.
+pub fn enrich_report_with_schema(
+    mut report: PolicyCheckReport,
+    topic: &str,
+    payload: Option<&serde_json::Value>,
+    schema: Option<&EventSchema>,
+) -> PolicyCheckReport {
+    for error in report.validation_errors.iter_mut() {
+        let enriched =
+            enrich_validation_error_with_topic(error.clone(), topic, payload, schema);
+        *error = enriched;
+    }
+    report
+}
+
 /// U7 (2026-07-06-001 plan): bridge `PolicyCheckReport` → `EmitResult`
 /// for the `--output json` policy-check rejection path.
+///
+/// 2026-07-09-001 plan (U4): when the report carries enriched
+/// `validation_errors` (the U3 path), use them to build the
+/// `EmitError` list so the agent can read `field` /
+/// `expected` / `actual` / `field_description` /
+/// `suggested_payload_shape` / `suggested_command` per item.
+/// Falls back to the legacy `reason_codes` + `suggestions`
+/// flattening when `validation_errors` is empty (e.g. the
+/// pre-U3 path or a topic that has no schema metadata).
 pub fn report_to_emit_result(
     report: &PolicyCheckReport,
     config: Option<&RalphConfig>,
 ) -> ralph_core::emit_result::EmitResult {
-    let errors = ralph_core::emit_result::map_policy_report_to_errors(
-        &report.reason_codes,
-        &report.suggestions,
-    );
+    let errors = if !report.validation_errors.is_empty() {
+        validation_errors_to_emit_errors(&report.validation_errors)
+    } else {
+        ralph_core::emit_result::map_policy_report_to_errors(
+            &report.reason_codes,
+            &report.suggestions,
+        )
+    };
 
     let parts = build_emit_result_parts(
         report.topic.clone(),
@@ -2370,6 +2450,33 @@ pub fn report_to_emit_result(
         None,
     );
     ralph_core::emit_result::EmitResult::assemble(parts)
+}
+
+/// 2026-07-09-001 plan (U4): convert a `Vec<ValidationError>`
+/// into the `EmitError` shape `EmitResult` expects,
+/// threading the U3 enrichment fields (`field`,
+/// `field_description`, `suggested_payload_shape`,
+/// `suggested_command`) into the JSON consumer. The
+/// function is pure: it does not consult the schema; the
+/// caller (or `enrich_report_with_schema`) is responsible
+/// for populating those fields before calling this.
+fn validation_errors_to_emit_errors(
+    errors: &[ValidationError],
+) -> Vec<ralph_core::emit_result::EmitError> {
+    use ralph_core::emit_result::EmitError;
+    errors
+        .iter()
+        .map(|e| EmitError {
+            code: e.reason_code.clone(),
+            message: e.message.clone(),
+            field: if e.field.is_empty() {
+                None
+            } else {
+                Some(e.field.clone())
+            },
+            suggested_command: e.suggested_command.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -3756,5 +3863,127 @@ hats:
         assert!(v.get("field_description").is_none());
         assert!(v.get("suggested_payload_shape").is_none());
         assert!(v.get("suggested_command").is_none());
+    }
+
+    // 2026-07-09-001 plan (U4): wiring tests.
+
+    /// U4 happy path: a `PolicyCheckReport` with one
+    /// `validation_errors` item gets enriched when the
+    /// caller passes a schema with `field_docs.task_id` and
+    /// the original payload. The first validation_error
+    /// becomes a `missing_required_field`-style error with
+    /// the meaning / suggested shape / suggested command
+    /// fields populated by `enrich_report_with_schema`.
+    #[test]
+    fn u4_enrich_report_with_schema_populates_missing_required_field() {
+        use ralph_core::config::EventFieldDoc;
+        let mut schema = EventSchema::default();
+        schema.required_fields.push("task_id".to_string());
+        schema.field_docs.insert(
+            "task_id".to_string(),
+            EventFieldDoc {
+                meaning: "live task id".to_string(),
+                source: "ralph tools task list".to_string(),
+                fill_rule: String::new(),
+            },
+        );
+        // The unified pipeline stamps a `missing_required_field`-like
+        // error with `field` empty when running with the
+        // engine result that the existing code path returns.
+        // U4 wiring tests this by simulating the same shape.
+        let mut report = PolicyCheckReport {
+            topic: "work.done".to_string(),
+            hat: None,
+            workspace: std::path::PathBuf::from("/tmp"),
+            accepted: false,
+            reason_codes: vec!["missing_required_field".to_string()],
+            suggestions: vec![String::new()],
+            post_commit_rejected: false,
+            validation_errors: vec![ValidationError {
+                payload_index: 0,
+                field: "task_id".to_string(),
+                reason_code: "missing_required_field".to_string(),
+                message: "missing required field: task_id".to_string(),
+                ..Default::default()
+            }],
+        };
+        report = enrich_report_with_schema(
+            report,
+            "work.done",
+            Some(&serde_json::json!({})),
+            Some(&schema),
+        );
+        let err = &report.validation_errors[0];
+        assert_eq!(err.field, "task_id");
+        assert_eq!(err.expected.as_deref(), Some("task_id"));
+        assert_eq!(err.field_description.as_deref(), Some("live task id"));
+        assert!(err.suggested_payload_shape.is_some());
+        let cmd = err.suggested_command.as_deref().expect("cmd present");
+        assert!(cmd.contains("ralph emit work.done"));
+    }
+
+    /// U4 backward compatibility: a `PolicyCheckReport`
+    /// produced before U4 (no `validation_errors`) flows
+    /// through `report_to_emit_result` using the legacy
+    /// `map_policy_report_to_errors` path. The legacy JSON
+    /// shape does not include the U3 enrichment fields.
+    #[test]
+    fn u4_report_to_emit_result_falls_back_to_legacy_path() {
+        let report = PolicyCheckReport {
+            topic: "work.done".to_string(),
+            hat: None,
+            workspace: std::path::PathBuf::from("/tmp"),
+            accepted: false,
+            reason_codes: vec!["missing_required_field".to_string()],
+            suggestions: vec!["".to_string()],
+            post_commit_rejected: false,
+            validation_errors: vec![],
+        };
+        let result = report_to_emit_result(&report, None);
+        assert!(!result.ok, "rejection must produce ok=false");
+        let v = serde_json::to_value(&result).expect("serialize EmitResult");
+        let errors = v["errors"].as_array().expect("errors must be array");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["code"], "missing_required_field");
+    }
+
+    /// U4 happy path: when `validation_errors` is populated,
+    /// `report_to_emit_result` uses them (not the legacy
+    /// `reason_codes` flattening) so the agent sees the
+    /// `field` / `expected` / `suggested_command` JSON
+    /// fields.
+    #[test]
+    fn u4_report_to_emit_result_uses_validation_errors_when_present() {
+        let report = PolicyCheckReport {
+            topic: "work.done".to_string(),
+            hat: None,
+            workspace: std::path::PathBuf::from("/tmp"),
+            accepted: false,
+            // Legacy code + suggestion must be ignored.
+            reason_codes: vec!["should_be_ignored".to_string()],
+            suggestions: vec!["should_be_ignored".to_string()],
+            post_commit_rejected: false,
+            validation_errors: vec![ValidationError {
+                payload_index: 0,
+                field: "task_id".to_string(),
+                reason_code: "missing_required_field".to_string(),
+                message: "missing required field: task_id".to_string(),
+                suggested_command: Some(
+                    "ralph emit work.done --policy-check -j '{\"task_id\":\"<task_id>\"}'"
+                        .to_string(),
+                ),
+                ..Default::default()
+            }],
+        };
+        let result = report_to_emit_result(&report, None);
+        let v = serde_json::to_value(&result).expect("serialize EmitResult");
+        let errors = v["errors"].as_array().expect("errors must be array");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["code"], "missing_required_field");
+        assert_eq!(errors[0]["field"], "task_id");
+        assert!(errors[0]["suggested_command"]
+            .as_str()
+            .unwrap()
+            .contains("--policy-check"));
     }
 }

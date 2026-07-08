@@ -830,13 +830,35 @@ fn emit_command_with_root_and_hats(
             .and_then(|c| c.event_loop.event_policy.as_ref())
             .is_some_and(|p| p.enabled);
     if unified_active {
-        let report = crate::policy_check::run_policy_check_unified(
+        let mut report = crate::policy_check::run_policy_check_unified(
             &topic,
             Some(&args.payload),
             hat.as_deref(),
             triggered.as_deref(),
             &workspace_root,
         )?;
+        // 2026-07-09-001 plan (U4): enrich the unified
+        // report's per-item `validation_errors` with
+        // `field_docs` / `allowed_values` from the loaded
+        // schema. The schema is whatever the unified pipeline
+        // resolved for the topic; if the topic has no schema,
+        // enrichment is a no-op.
+        {
+            let schema_lookup: Option<&ralph_core::config::EventSchema> = config
+                .as_ref()
+                .and_then(|c| c.event_loop.event_policy.as_ref())
+                .and_then(|p| {
+                    let key: &str = topic.as_ref();
+                    p.schemas.get(key)
+                });
+            let payload_value = serde_json::from_str::<serde_json::Value>(&args.payload).ok();
+            report = crate::policy_check::enrich_report_with_schema(
+                report,
+                &topic,
+                payload_value.as_ref(),
+                schema_lookup,
+            );
+        }
         if !report.accepted {
             // Structured reason_code list — the U6 plan mandates
             // "统一后错误输出结构化 `reason_code`" so the agent can
