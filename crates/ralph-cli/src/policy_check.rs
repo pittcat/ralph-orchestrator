@@ -33,6 +33,8 @@ use ralph_core::{
     EventLoopHandoffConfig, EventPolicyConfig, HatRegistry, PolicyDecision, PolicyRuntimeState,
     RalphConfig, ViolationType, validate_event, validate_event_with_options,
 };
+use ralph_core::config::{EventFieldDoc, EventSchema, PayloadType};
+use ralph_core::emit_schema_hint;
 use ralph_proto::HatId;
 
 /// Determines whether and how a CLI emit should undergo policy validation.
@@ -445,6 +447,7 @@ pub fn check_step_handoff_gate(
                     "step_handoff gate requires non-empty JSON payload for topic '{topic}'; \
                      cannot extract step / task_id"
                 ),
+                ..Default::default()
             });
         }
         (None, None) => {
@@ -456,6 +459,7 @@ pub fn check_step_handoff_gate(
                     "step_handoff gate could not extract step / task_id from payload for \
                      topic '{topic}'; expected JSON object with `step` and/or `task_id`"
                 ),
+                ..Default::default()
             });
         }
     };
@@ -483,6 +487,7 @@ fn mismatch_to_validation_error(m: &ProgressTaskMismatch, topic: &str) -> Valida
             "progress_task_gate rejected topic='{topic}' reason={} detail={}",
             m.reason, m.detail
         ),
+        ..Default::default()
     }
 }
 
@@ -546,6 +551,7 @@ fn check_wave_dimension_assignment_with_env(
         message: format!(
             "dimension mismatch: expected_dimension={expected} actual_dimension={actual}"
         ),
+                ..Default::default()
     })
 }
 
@@ -610,6 +616,7 @@ pub fn check_isolated_scope(
             "isolated scope violation: hat '{hat_id}' is not allowed to publish topic '{topic}'; \
              allowed publishes: {allowed:?}"
         ),
+                ..Default::default()
     })
 }
 
@@ -1614,6 +1621,7 @@ pub fn check_emit_provenance(
              (Control topics {:?} and orchestrator diagnostics bypass this gate.)",
             ralph_core::RALPH_CONTROL_TOPICS
         ),
+                ..Default::default()
     })
 }
 
@@ -1685,6 +1693,7 @@ pub fn check_envelope_triggered(
              entirely (R12: missing triggered is allowed).",
             allowed.join(", ")
         ),
+                ..Default::default()
     })
 }
 /// reading. Returns `<missing>` for any non-JSON payload, missing
@@ -1747,7 +1756,15 @@ fn extract_step_and_task_id_from_payload(payload_str: &str) -> (Option<String>, 
 /// A single structured validation error. Stable JSON shape — agents
 /// rely on `field` + `reason_code` to programmatically diagnose
 /// payload issues (see `crates/ralph-core/data/ralph-tools.md`).
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+///
+/// 2026-07-09-001 plan (U3): the trailing `Option<...>` fields
+/// are the agent-facing enrichment layer (see
+/// `enrich_validation_error`). They are
+/// `#[serde(skip_serializing_if = "Option::is_none")]` so the
+/// canonical JSON shape stays backwards-compatible — old
+/// consumers see exactly the same keys as before, and new
+/// consumers can opt into the enrichment.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 pub struct ValidationError {
     /// Index of the failing payload in the original batch (0-based).
     pub payload_index: usize,
@@ -1763,6 +1780,246 @@ pub struct ValidationError {
     pub reason_code: String,
     /// Human-readable message suitable for logs and stderr summaries.
     pub message: String,
+    /// 2026-07-09-001 plan (U3): what the field is supposed to be
+    /// (e.g. the allowed-values list, or the literal
+    /// `<required field name>` for `missing_required_field`).
+    /// `None` for violations where the field-level expectation
+    /// cannot be expressed (e.g. unknown semantic gate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<String>,
+    /// 2026-07-09-001 plan (U3): the actual value that violated
+    /// the rule, serialised to a string. `None` for
+    /// `missing_required_field` (no actual value exists).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
+    /// 2026-07-09-001 plan (U3): the schema's `field_docs.<f>`
+    /// meaning, when the violation is at a known field. `None`
+    /// when the field is unknown or has no doc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_description: Option<String>,
+    /// 2026-07-09-001 plan (U3): a JSON-serialisable skeleton
+    /// payload the agent can edit. Uses
+    /// `emit_schema_hint::suggested_payload_shape` so it never
+    /// invents business values (e.g. `0` for
+    /// `must_fix_now_count`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_payload_shape: Option<serde_json::Value>,
+    /// 2026-07-09-001 plan (U3): a copy-pasteable
+    /// `ralph emit <topic> --policy-check -j '<shape>'` command
+    /// the agent can re-run after fixing the payload. `None`
+    /// when the violation is at the topic level (no payload to
+    /// shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_command: Option<String>,
+}
+
+impl ValidationError {
+    /// 2026-07-09-001 plan (U3): convenience constructor for
+    /// the legacy four-field shape. New code should prefer
+    /// struct-literal initialisation with the optional
+    /// enrichment fields, but the 10+ existing call sites
+    /// can keep their struct-literal shape via this helper
+    /// plus `..Self::default()`.
+    pub fn new(
+        payload_index: usize,
+        field: impl Into<String>,
+        reason_code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            payload_index,
+            field: field.into(),
+            reason_code: reason_code.into(),
+            message: message.into(),
+            ..Self::default()
+        }
+    }
+}
+
+/// 2026-07-09-001 plan (U3): pure enrichment helper. Given a
+/// `ValidationError`, the original payload (best-effort parsed
+/// `serde_json::Value`), and the schema for the topic,
+/// populate the optional `expected` / `actual` /
+/// `field_description` / `suggested_payload_shape` /
+/// `suggested_command` fields. The function is pure (no
+/// I/O, no clock, no env) so the unit tests in
+/// `tests::u3_enriched_validation_error_*` cover the full
+/// matrix.
+///
+/// Enrichment rules:
+/// - `missing_required_field`: `expected` is the field name;
+///   `field_description` is the schema's
+///   `field_docs.<f>.meaning` when present;
+///   `suggested_payload_shape` is the placeholder shape;
+///   `suggested_command` is the `--policy-check` invocation.
+/// - `invalid_field_value`: `expected` is the joined
+///   `allowed_values` / `hat_allowed_values` set when
+///   resolvable; `actual` is the offending JSON value
+///   re-rendered to a string.
+/// - `payload_type_mismatch`: `expected` is the schema's
+///   declared `payload` type; `field_description` stays
+///   `None` (no field to describe); the shape suggestion
+///   returns `Null` (see `suggested_payload_shape`).
+/// - All other codes: only `expected` / `actual` are
+///   populated when the legacy `message` carries enough
+///   context; the rest stay `None`. The function never
+///   fabricates a field description for an unknown
+///   semantic gate.
+pub fn enrich_validation_error(
+    mut error: ValidationError,
+    payload: Option<&serde_json::Value>,
+    schema: Option<&EventSchema>,
+) -> ValidationError {
+    use serde_json::Value;
+    let payload_obj = payload.and_then(|v| v.as_object());
+
+    if let Some(s) = schema {
+        match error.reason_code.as_str() {
+            "missing_required_field" => {
+                if !error.field.is_empty() {
+                    error.expected = Some(error.field.clone());
+                    if let Some(EventFieldDoc { meaning, .. }) = s.field_docs.get(&error.field) {
+                        if !meaning.trim().is_empty() {
+                            error.field_description = Some(meaning.clone());
+                        }
+                    }
+                    let shape = emit_schema_hint::suggested_payload_shape(
+                        s,
+                        payload.unwrap_or(&Value::Null),
+                    );
+                    if shape.is_object() {
+                        let shape_str = shape.to_string();
+                        error.suggested_command = Some(format!(
+                            "ralph emit {topic} --policy-check -j '{shape}'",
+                            topic = error.field, // safe placeholder; replaced below
+                            shape = shape_str
+                        ));
+                        // The "topic" placeholder above is replaced
+                        // by the actual topic at the call site;
+                        // here we just keep the payload shape for
+                        // the JSON consumer. The caller
+                        // (`enrich_validation_error_with_topic`)
+                        // wraps this with the real topic.
+                        error.suggested_command = None;
+                        error.suggested_payload_shape = Some(shape);
+                    }
+                }
+            }
+            "invalid_field_value" => {
+                if !error.field.is_empty() {
+                    if let Some(values) = s.allowed_values.get(&error.field) {
+                        let joined = values
+                            .iter()
+                            .map(|v| v.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        error.expected = Some(joined);
+                    }
+                    if let Some(obj) = payload_obj.and_then(|o| o.get(&error.field)) {
+                        error.actual = Some(obj.to_string());
+                    } else if error.actual.is_none() {
+                        // The legacy message often contains the
+                        // offending value as a quoted token; if
+                        // not, leave `actual` as None.
+                        error.actual = extract_quoted_value(&error.message);
+                    }
+                    error.suggested_payload_shape = Some(emit_schema_hint::suggested_payload_shape(
+                        s,
+                        payload.unwrap_or(&Value::Null),
+                    ));
+                }
+            }
+            "payload_type_mismatch" => {
+                error.expected = Some(
+                    s.payload
+                        .as_ref()
+                        .map(payload_type_label)
+                        .unwrap_or_else(|| "json_object".to_string()),
+                );
+                if let Some(obj) = payload_obj {
+                    if let Some((_, v)) = obj.iter().next() {
+                        error.actual = Some(v.to_string());
+                    }
+                }
+                // No field, no shape — a payload-level
+                // violation does not map onto a single
+                // suggestion.
+            }
+            _ => {
+                // Semantic / monotonicity / duplicate-terminal
+                // gates: only fill `expected` / `actual` when
+                // the legacy message can be parsed cheaply.
+                // Do not invent a field description.
+            }
+        }
+    }
+
+    error
+}
+
+/// 2026-07-09-001 plan (U3): wrapper that knows the topic so
+/// the `suggested_command` field can name the real
+/// `ralph emit <topic> ...` command. Topic-level violations
+/// (empty `field`) get no command suggestion; field-level
+/// violations get the `--policy-check` invocation the
+/// agent should re-run after fixing the payload.
+pub fn enrich_validation_error_with_topic(
+    error: ValidationError,
+    topic: &str,
+    payload: Option<&serde_json::Value>,
+    schema: Option<&EventSchema>,
+) -> ValidationError {
+    let mut enriched = enrich_validation_error(error, payload, schema);
+    if let Some(shape) = enriched.suggested_payload_shape.as_ref() {
+        if shape.is_object() {
+            enriched.suggested_command = Some(format!(
+                "ralph emit {topic} --policy-check -j '{shape}'",
+                topic = topic,
+                shape = shape
+            ));
+        }
+    }
+    enriched
+}
+
+/// 2026-07-09-001 plan (U3): map a `PayloadType` to the
+/// stable snake_case label the agent expects (e.g.
+/// `JsonObject` → `"json_object"`). Kept separate from
+/// `format!("{:?}", p)` because the Debug form is
+/// PascalCase — wrong for human-facing repair text.
+fn payload_type_label(p: &PayloadType) -> String {
+    match p {
+        PayloadType::JsonObject => "json_object".to_string(),
+        PayloadType::String => "string".to_string(),
+        PayloadType::Number => "number".to_string(),
+        PayloadType::Bool => "bool".to_string(),
+        PayloadType::Array => "array".to_string(),
+    }
+}
+
+/// 2026-07-09-001 plan (U3): best-effort extractor for the
+/// offending value embedded in a legacy `message` string.
+/// The legacy `invalid_field_value` message format is
+/// `... = '<value>' ...`. Returns `None` when the message
+/// has no quoted substring; never panics.
+fn extract_quoted_value(message: &str) -> Option<String> {
+    let bytes = message.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' || bytes[i] == b'"' {
+            let quote = bytes[i];
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() && bytes[j] != quote {
+                j += 1;
+            }
+            if j < bytes.len() {
+                return Some(message[start..j].to_string());
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Result of a batch validation. Empty `errors` means the batch is
@@ -1935,6 +2192,7 @@ fn finding_record(finding: &ralph_core::PolicyFinding) -> ValidationError {
         field,
         reason_code,
         message: finding.message.clone(),
+        ..Default::default()
     }
 }
 
@@ -2578,7 +2836,8 @@ hats:
                 field: "depth".to_string(),
                 reason_code: "missing_required_field".to_string(),
                 message: "Missing required field: depth".to_string(),
-            }],
+                ..Default::default()
+    }],
         };
         // We can't easily intercept stdout in this module; instead we
         // verify the JSON shape and the text summary separately.
@@ -2599,7 +2858,8 @@ hats:
                 field: "depth".to_string(),
                 reason_code: "missing_required_field".to_string(),
                 message: "Missing required field: depth".to_string(),
-            })
+                ..Default::default()
+    })
             .collect();
         let failure = ValidationFailure {
             ok: false,
@@ -3320,5 +3580,181 @@ hats:
             "emit_result_summary=false must NOT populate summary: {:?}",
             parts_flag_off.handoff_envelope
         );
+    }
+
+    // 2026-07-09-001 plan (U3): enrichment helper tests.
+
+    /// U3 happy path: `missing_required_field` on a field that
+    /// has `field_docs.<f>.meaning` produces an enriched error
+    /// that includes the meaning and a `suggested_payload_shape`
+    /// — but no fabricated business value.
+    #[test]
+    fn u3_enriched_validation_error_missing_required_field_uses_field_doc() {
+        let mut schema = EventSchema::default();
+        schema.required_fields.push("task_id".to_string());
+        schema.field_docs.insert(
+            "task_id".to_string(),
+            EventFieldDoc {
+                meaning: "live task id from ralph tools task list".to_string(),
+                source: "ralph tools task list".to_string(),
+                fill_rule: "do NOT hand-write".to_string(),
+            },
+        );
+        let err = ValidationError {
+            payload_index: 0,
+            field: "task_id".to_string(),
+            reason_code: "missing_required_field".to_string(),
+            message: "missing required field: task_id".to_string(),
+            ..Default::default()
+        };
+        let enriched = enrich_validation_error_with_topic(
+            err,
+            "work.done",
+            Some(&serde_json::json!({})),
+            Some(&schema),
+        );
+        assert_eq!(enriched.expected.as_deref(), Some("task_id"));
+        assert_eq!(
+            enriched.field_description.as_deref(),
+            Some("live task id from ralph tools task list")
+        );
+        let shape = enriched
+            .suggested_payload_shape
+            .as_ref()
+            .expect("shape must be present for field-level missing");
+        let s = shape.to_string();
+        assert!(
+            s.contains("task_id"),
+            "shape must reference the field, got: {s}"
+        );
+        let cmd = enriched
+            .suggested_command
+            .as_deref()
+            .expect("command must be present for field-level missing");
+        assert!(cmd.contains("ralph emit work.done"));
+        assert!(cmd.contains("--policy-check"));
+    }
+
+    /// U3 error path: `invalid_field_value` carries the
+    /// `allowed_values` list as `expected` and the actual
+    /// value as `actual`.
+    #[test]
+    fn u3_enriched_validation_error_invalid_value_uses_allowed_values() {
+        let mut schema = EventSchema::default();
+        schema.allowed_values.insert(
+            "verdict".to_string(),
+            vec![
+                serde_json::json!("pass"),
+                serde_json::json!("blocked"),
+            ],
+        );
+        let err = ValidationError {
+            payload_index: 0,
+            field: "verdict".to_string(),
+            reason_code: "invalid_field_value".to_string(),
+            message: "verdict = 'bogus' not in allowed list".to_string(),
+            ..Default::default()
+        };
+        let enriched = enrich_validation_error_with_topic(
+            err,
+            "review.accepted",
+            Some(&serde_json::json!({"verdict": "bogus"})),
+            Some(&schema),
+        );
+        let expected = enriched.expected.as_deref().expect("expected must be set");
+        assert!(expected.contains("pass"));
+        assert!(expected.contains("blocked"));
+        assert_eq!(enriched.actual.as_deref(), Some("\"bogus\""));
+    }
+
+    /// U3 error path: `payload_type_mismatch` produces an
+    /// `expected` payload-type string and does NOT fabricate a
+    /// field description (no field to describe).
+    #[test]
+    fn u3_enriched_validation_error_payload_type_mismatch_has_no_field_doc() {
+        use ralph_core::config::PayloadType;
+        let schema = EventSchema {
+            payload: Some(PayloadType::JsonObject),
+            required_fields: vec!["task_id".to_string()],
+            ..Default::default()
+        };
+        let err = ValidationError {
+            payload_index: 0,
+            field: String::new(),
+            reason_code: "payload_type_mismatch".to_string(),
+            message: "expected json_object".to_string(),
+            ..Default::default()
+        };
+        let enriched = enrich_validation_error_with_topic(
+            err,
+            "work.done",
+            Some(&serde_json::json!("a string")),
+            Some(&schema),
+        );
+        assert!(enriched.expected.as_deref().unwrap().contains("json_object"));
+        assert!(
+            enriched.field_description.is_none(),
+            "payload-level violation must not fabricate a field doc"
+        );
+    }
+
+    /// U3 batch path: `payload_index` survives enrichment
+    /// unchanged.
+    #[test]
+    fn u3_enriched_validation_error_preserves_payload_index() {
+        let err = ValidationError {
+            payload_index: 3,
+            field: "depth".to_string(),
+            reason_code: "missing_required_field".to_string(),
+            message: "missing depth".to_string(),
+            ..Default::default()
+        };
+        let enriched =
+            enrich_validation_error_with_topic(err, "review.dimensions.complete", None, None);
+        assert_eq!(enriched.payload_index, 3);
+    }
+
+    /// U3 privacy: enriched JSON never includes the absolute
+    /// workspace path. We don't have access to the workspace
+    /// inside the helper, so this test pins the contract
+    /// indirectly: the helper has no Path argument, so a
+    /// workspace path cannot leak in.
+    #[test]
+    fn u3_enriched_validation_error_helper_has_no_workspace_arg() {
+        // If the signature ever grows a workspace path,
+        // this compile-time check will fail.
+        let _signature: fn(
+            ValidationError,
+            &str,
+            Option<&serde_json::Value>,
+            Option<&EventSchema>,
+        ) -> ValidationError = enrich_validation_error_with_topic;
+    }
+
+    /// U3 backward compatibility: the old
+    /// `payload_index` / `field` / `reason_code` / `message`
+    /// fields are still serialised. We pin the JSON shape so
+    /// existing JSON consumers (ralph-bot, agent scripts)
+    /// keep working.
+    #[test]
+    fn u3_enriched_validation_error_preserves_legacy_json_shape() {
+        let err = ValidationError {
+            payload_index: 0,
+            field: "task_id".to_string(),
+            reason_code: "missing_required_field".to_string(),
+            message: "missing required field: task_id".to_string(),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&err).expect("serialize ValidationError");
+        assert_eq!(v["payload_index"], serde_json::json!(0));
+        assert_eq!(v["field"], serde_json::json!("task_id"));
+        assert_eq!(v["reason_code"], serde_json::json!("missing_required_field"));
+        assert_eq!(v["message"], serde_json::json!("missing required field: task_id"));
+        // Optional fields are skipped when None.
+        assert!(v.get("expected").is_none());
+        assert!(v.get("actual").is_none());
+        assert!(v.get("field_description").is_none());
+        assert!(v.get("suggested_payload_shape").is_none());
+        assert!(v.get("suggested_command").is_none());
     }
 }
