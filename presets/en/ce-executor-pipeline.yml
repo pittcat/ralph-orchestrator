@@ -24,7 +24,8 @@
 # - fix-planner: Reads synthesized_review_file, writes fix_plan_file, emits
 #   EXACTLY ONE review.complete.
 # - fixer: Applies the **fix-planner fix plan only** (NOT the original
-#   plan); empty fix plan → no-op + fix.done{fixes_applied:0}.
+#   plan), using one subagent per actionable fix Unit; empty fix plan →
+#   no-op + fix.done{fixes_applied:0}.
 # - alignment: Cross-checks original plan execution vs fix-plan execution
 #   (separate git ranges). Records residuals; does NOT loop or block.
 # - reporter: Aggregates plan change / execution / 6-dim review / fixes /
@@ -1969,19 +1970,24 @@ hats:
       1. **Strictly sequential:** Execute U1 → U2 → … → UN in order.
          Unit N+1 starts only after Unit N code and unit-scoped tests
          are green.
-      2. **Absolute isolation:** Touch only paths listed under that
+      2. **Subagent-ready Unit boundary:** Each actionable Unit will be
+         handed to exactly one subagent. The Unit must contain all context
+         that subagent needs for that one fix: finding IDs, goal, allowed
+         files, approach, test scenarios, and a narrow verification command.
+         Do not require the subagent to read other Units for missing context.
+      3. **Absolute isolation:** Touch only paths listed under that
          Unit's **Files** field. Do not edit files owned by another
          Unit.
-      3. **Zero forward dependency:** Unit N must not import or call
+      4. **Zero forward dependency:** Unit N must not import or call
          symbols introduced in Unit N+1. No tests that wait for a
          later Unit to land.
-      4. **Atomic TDD:** Per Unit — failing test (this Unit's I/O only)
+      5. **Atomic TDD:** Per Unit — failing test (this Unit's I/O only)
          → implement → refactor. No cross-Unit integration tests inside
          a single Unit.
-      5. **Test placement:** Match the target project's conventions
+      6. **Test placement:** Match the target project's conventions
          (inline tests, `tests/` tree, framework test files, etc.) and
          list paths in **Files**.
-      6. **Full-suite last:** Run the project full-suite only after all
+      7. **Full-suite last:** Run the project full-suite only after all
          Units are green. Put the command **only** in `## Final Verification`
          — never in per-Unit **Verification** or **Test scenarios**.
       ```
@@ -2012,7 +2018,8 @@ hats:
       **Files:**
       - <project-relative paths to create/modify/test for THIS unit only>
 
-      **Approach:** <minimal; no code blocks; one unit = one concern>
+      **Approach:** <minimal; no code blocks; one unit = one concern; enough
+      context for one subagent to execute this Unit without reading other Units>
 
       **Execution note:** TDD — write failing test for this unit's public
       behavior first (RED → GREEN → REFACTOR).
@@ -2031,6 +2038,9 @@ hats:
 
       **Anti-patterns (reject your own draft if present):**
       - Units that mix unrelated concerns (split them).
+      - Units that are not subagent-ready: missing finding IDs, missing
+        allowed files, vague approach, or verification that depends on
+        context only described in another Unit.
       - One Unit that changes both production/runtime code **and**
         orchestration config (preset YAML, workflow schema) — split into
         separate Units (runtime vs config).
@@ -2124,7 +2134,7 @@ hats:
 
   fixer:
     name: "Fixer"
-    description: "Reads fix_plan_file from fix-planner and applies ONLY that fix plan (never re-executes the original plan). Empty fix plan → no-op + fix.done{fixes_applied:0}."
+    description: "Reads fix_plan_file from fix-planner and applies ONLY that fix plan (never re-executes the original plan). Use one subagent per actionable fix Unit; main fixer reviews, commits, verifies, and emits. Empty fix plan → no-op + fix.done{fixes_applied:0}."
     triggers: ["review.complete"]
     publishes: ["fix.done"]
     exempt_topics: ["fix.done"]
@@ -2144,6 +2154,15 @@ hats:
       **context only** — do NOT walk its Implementation Units or re-run
       executor work. Your sole execution source is `fix_plan_file`.
 
+      Inside this activation, use **exactly one subagent per actionable
+      fix-plan Unit (`### U<N>.`)**. The main fixer stays responsible for
+      reading the trigger and fix plan, launching each Unit subagent with
+      a narrow brief, reviewing the subagent's diff, committing the Unit,
+      counting `fixes_applied` / `fixes_skipped`, running the full suite,
+      and emitting the final `fix.done` event. Subagents write code and
+      unit-scoped tests only; they must not emit Ralph events or create
+      commits.
+
       This preset has **no fix round / re-review cycle** — apply
       everything you can in one pass, verify full suite green, emit
       `fix.done`, and stop. Alignment (next) cross-checks fix-plan
@@ -2153,6 +2172,11 @@ hats:
       - Emit EXACTLY ONE `fix.done` per activation.
       - **Source of truth = `fix_plan_file` only.** Never implement Units
         from the original plan file at `plan_path`.
+      - **Subagent cadence (HARD RULE)**: one actionable fix-plan Unit
+        (`### U<N>.`) = one subagent. Do not ask one subagent to execute
+        multiple Units, and do not let a subagent emit Ralph events or
+        create commits. The main fixer performs review, commits, metrics,
+        policy precheck, emit, and confirm.
       - Do NOT emit `work.done` / `work.failed` /
         `plan.*` / `review.*` / `align.done` / `report.done` /
         `LOOP_COMPLETE`.
@@ -2193,11 +2217,25 @@ hats:
 
       For each actionable `### U<N>.` heading in **fix-plan.md** (skip
       `Residuals (deferred)` / `Kind: DOC` units; never read Units from
-      the original plan at `plan_path`):
-      1. **RED**: write or update the test for this fix finding.
-      2. **GREEN**: minimal code change to make the test pass.
-      3. **REFACTOR**: clean up while keeping tests green.
-      4. **Per-Unit commit** (after executor phase — commits land on top of
+      the original plan at `plan_path`), launch exactly one subagent with
+      only that Unit's Kind / Goal / Requirements / Dependencies / Files /
+      Approach / Test scenarios / Verification plus the relevant
+      repository rules. The subagent must return changed files, tests run,
+      and residual risks; it must not emit Ralph events or create commits.
+
+      Main fixer duties for each actionable Unit:
+
+      1. **RED**: ensure the Unit subagent writes or updates the test for
+         this fix finding first.
+      2. **GREEN**: ensure the subagent applies the minimal code change to
+         make the test pass.
+      3. **REFACTOR**: ensure cleanup keeps tests green.
+      4. **Review subagent output** before staging:
+         - diff touches only files allowed by this fix Unit,
+         - tests prove this Unit's behavior,
+         - no unrelated cleanup or orchestration config drift,
+         - no Ralph events were emitted by the subagent.
+      5. **Per-Unit commit** (after executor phase — commits land on top of
          `executor_head_sha`):
          ```bash
          git add <relevant files> && git commit -m "fix(U<N>): <one-liner from Unit Goal>"
