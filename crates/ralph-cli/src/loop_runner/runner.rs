@@ -4878,9 +4878,7 @@ mod sync_timeout_tests {
 #[cfg(test)]
 mod u1_preset_name_aware_lint_gate_wiring {
     use super::*;
-    use crate::loop_runner::preset_lint_gate::{
-        enforce_preset_lint_gate, enforce_preset_lint_gate_with_preset_name,
-    };
+    use crate::loop_runner::preset_lint_gate::enforce_preset_lint_gate;
     use ralph_core::RalphConfig;
 
     /// A minimal preset that mimics `ce-executor-pipeline-loop`'s
