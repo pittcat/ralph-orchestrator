@@ -681,14 +681,16 @@ hats:
       the `flow_audit` verdict, emit EXACTLY ONE `plan.ready` event:
       ```
       <event topic="plan.ready">
-      {"plan_name": "<basename without extension>", "plan_path": "<repo-relative path>", "plan_revised": <true|false>, "review_summary": "<1-2 sentence summary>", "flow_audit": "<post_merge_complete | post_merge_no_canary | first_run>", "matched_uids": ["U1","U3",...], "missing_uids": ["U2",...]}
+      {"plan_name": "<basename without extension>", "plan_path": "<repo-relative path>", "plan_revised": <true|false>, "review_summary": "<1-2 sentence summary>", "flow_audit": "<post_merge_complete | post_merge_no_canary | first_run>", "resolved_baseline_sha": "<sha from Step 2.5b>", "matched_uids": ["U1","U3",...], "missing_uids": ["U2",...]}
       </event>
       ```
-      `plan_name`, `plan_path`, `plan_revised`, `review_summary`, and
-      `flow_audit` are required by the payload schema (`plan_revised`
-      must be a boolean; `flow_audit` must be one of the three valid
-      strings from Step 2.5). `matched_uids` / `missing_uids` are
-      informational lists for the executor's read-only cross-check.
+      `plan_name`, `plan_path`, `plan_revised`, `review_summary`,
+      `flow_audit`, and `resolved_baseline_sha` are required by the
+      payload schema (`plan_revised` must be a boolean; `flow_audit`
+      must be one of the three valid strings from Step 2.5;
+      `resolved_baseline_sha` is the Step 2.5b baseline reconciliation
+      result). `matched_uids` / `missing_uids` are informational lists
+      for the executor's read-only cross-check.
       Then stop. Do NOT do any of the executor's work.
 
       ### Step 5 — Emit `plan.blocked` (unusable plan)
