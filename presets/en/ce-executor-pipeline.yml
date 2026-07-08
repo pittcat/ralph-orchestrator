@@ -41,13 +41,10 @@
 #   - Verdict is single field (pass / pass_with_residuals / blocked) —
 #     downstream subscribes to ONE terminal pair, never two siblings.
 #
-# Topology exemption rationale (`EGRESS_MAX_HOPS=10` in
-# `crates/ralph-core/src/preset_lint/workflow_activation.rs:368`):
-# `handoff_pairing_broken` / `re_emit_trap` on the chain head are known
-# static-lint artifacts for this flat serial topology. The chain terminates
-# deterministically via `report.done` (required_events) and
-# `LOOP_COMPLETE` (completion_promise). topology_exempt documents this;
-# do NOT merge hats to appease lint.
+# The chain passes WAC strict lint cleanly: `EGRESS_MAX_HOPS=12` in
+# `crates/ralph-core/src/preset_lint/workflow_activation.rs` covers the
+# 10-hop path from `dim:goal-alignment` to `report.done`. No topology
+# exemption needed.
 #
 # No `mechanism.flow` block: this preset is a flat hat-only linear chain.
 # Routing + scope enforcement come from hat triggers/publishes, isolated mode,

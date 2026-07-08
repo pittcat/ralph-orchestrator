@@ -5,7 +5,7 @@
 # runtime unit loop, no fallback rescue. Executor owns unit/subagent work
 # internally; downstream hats only see a single `work.done` / `work.failed`.
 #
-# 13-hat topology with linear single-consumer chain:
+# 15-hat topology with linear single-consumer chain + review/fix loop:
 # - plan-reviewer: Reviews the plan file in-place; no per-unit breakdown, no
 #   code edits. Output: plan.ready (with review_summary + plan_revised flag)
 #   or plan.blocked (plan unusable).
@@ -13,6 +13,8 @@
 #   The main executor delegates each Implementation Unit to exactly one
 #   subagent, then reviews, commits, checkpoints, and emits the final event
 #   itself. No runtime task breakdown (`tasks.enabled: false`).
+# - review-reentry: Normalizes work.done / fix.done into the next review
+#   round; emits review.round.ready.
 # - dim:goal-alignment / dim:correctness / dim:testing / dim:maintainability /
 #   dim:project-standards / dim:adversarial: Six read-only dimension hats in
 #   a flat serial chain — each reviews ONE dimension, writes a findings
@@ -21,6 +23,9 @@
 # - review-synthesizer: Reads all 6 dimension products, dedupes / merges /
 #   ranks P0-P3, writes synthesized_review_file, emits EXACTLY ONE
 #   review.synthesized.
+# - review-gate: Three-way gate after synthesis. Emits review.accepted,
+#   fix.requested, or review.loop.blocked. Rounds 1-3 block on P0/P1;
+#   round 4+ blocks only on P0; max 6 rounds.
 # - fix-planner: Reads synthesized_review_file, writes fix_plan_file, emits
 #   EXACTLY ONE review.complete.
 # - fixer: Applies the **fix-planner fix plan only** (NOT the original
@@ -30,24 +35,23 @@
 #   (separate git ranges). Records residuals; does NOT loop or block.
 # - reporter: Aggregates plan change / execution / 6-dim review / fixes /
 #   alignment residuals. Writes report, emits report.done + LOOP_COMPLETE.
-#   Sole consumer of plan.blocked / work.failed.
+#   Sole consumer of plan.blocked / work.failed / review.loop.blocked.
 #
 # Why this architecture:
 #   - No multi-consumer topics: every event has exactly one subscriber
 #   - No coordinator loop: the chain is flat and deterministic
 #   - Dimensions are first-class hats, not parallel calls; executor may use
 #     one subagent per Implementation Unit inside its own activation.
-#   - No re-review loop: alignment records residuals, never re-enters review
+#   - Review-gate drives the loop: fix.done → review-reentry → next round,
+#     or review.accepted → alignment → terminal.
 #   - Verdict is single field (pass / pass_with_residuals / blocked) —
 #     downstream subscribes to ONE terminal pair, never two siblings.
 #
-# Topology exemption rationale (`EGRESS_MAX_HOPS=10` in
-# `crates/ralph-core/src/preset_lint/workflow_activation.rs:368`):
-# `handoff_pairing_broken` / `re_emit_trap` on the chain head are known
-# static-lint artifacts for this flat serial topology. The chain terminates
-# deterministically via `report.done` (required_events) and
-# `LOOP_COMPLETE` (completion_promise). topology_exempt documents this;
-# do NOT merge hats to appease lint.
+# The chain passes WAC strict lint cleanly: `EGRESS_MAX_HOPS=12` in
+# `crates/ralph-core/src/preset_lint/workflow_activation.rs` covers the
+# 11-hop path from `fix-planner` to `report.done` (fix-planner → fixer →
+# review-reentry → 6 dim hats → review-synthesizer → review-gate →
+# alignment → reporter → report.done). No topology exemption needed.
 #
 # No `mechanism.flow` block: this preset is a flat hat-only linear chain.
 # Routing + scope enforcement come from hat triggers/publishes, isolated mode,

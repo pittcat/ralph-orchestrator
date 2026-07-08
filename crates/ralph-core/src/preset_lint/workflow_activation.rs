@@ -381,30 +381,35 @@ pub fn check_re_emit_trap(
 // ──────────────────────────────────────────────────────────────────────────
 
 /// R3: For each (hat H, trigger topic T) pair, at least one of H's
-/// declared `publishes` topics must reach a "progressed" endpoint
-/// within ≤4 hops. Endpoints are:
+/// declared `publishes` topics must reach a "progressed" endpoint.
+/// Endpoints are:
 ///
 /// - another hat's `triggers` (a downstream workflow hat will pick up the work), or
 /// - a known terminal/completion topic set.
 ///
-/// The 8-hop bound (raised from 4 by the 2026-06-24 10-hat refactor)
-/// accommodates the canonical `ce-executor-serial` workflow's review
-/// chain: `review.dimension.done → review-coordinator →
-/// review.dimensions.complete → review-synthesizer → review.complete
-/// → coordinator → plan.complete → shipper → REVIEW_COMPLETE →
-/// reporter → LOOP_COMPLETE` is a 7-hop path. The DFS also wastes
-/// hops on the review-coordinator ↔ dimension-reviewer cycle before
-/// backtracking to find the `review.dimensions.complete` branch, so
-/// the bound must account for that overhead. The 2026-07-02-003 plan
-/// U1 (R3) `ce-executor-pipeline` preset adds a 13-hat flat single-
-/// consumer chain where the head `dim:goal-alignment` is 10 hops from
-/// `report.done` after the `fix-planner` split — bumping the bound from
-/// 9 to 10 lets the chain terminate through the lint check. 10 hops is
-/// still tight enough to
-/// catch genuine dead ends (a hat publishing to a topic with no
-/// consumer at all fails at hop 1). The T-U1-03 test fixture uses a
-/// 1-hop chain and continues to fire under the wider bound.
-const EGRESS_MAX_HOPS: usize = 10;
+/// Bound history: 4 → 8 (2026-06-24 10-hat refactor) → 9 → 10
+/// (2026-07-02-003 `ce-executor-pipeline` 13-hat flat chain) → 12
+/// (2026-07-08 `ce-executor-pipeline-loop` 15-hat chain).
+///
+/// The 12-hop bound accommodates the `ce-executor-pipeline-loop`
+/// preset, which adds `review-reentry` and `review-gate` hats on top
+/// of the `ce-executor-pipeline` flat serial chain. The `fix-planner`
+/// hat in the loop preset is 11 hops from `report.done`:
+/// `fix-planner → fixer → review-reentry → dim:goal-alignment →
+/// dim:correctness → dim:testing → dim:maintainability →
+/// dim:project-standards → dim:adversarial → review-synthesizer →
+/// review-gate → (review.accepted) → alignment → reporter →
+/// report.done`. The BFS budget must cover 11 hops so the loop
+/// preset's chain terminates through the lint check.
+///
+/// 12 hops is still tight enough to catch genuine dead ends: a hat
+/// publishing to a topic with no consumer at all fails at hop 1, and
+/// a handoff chain that dead-ends mid-way fails well before 12. The
+/// bound only limits how deep the BFS searches for a *valid* path to
+/// a terminal; it does not affect detection of truly broken
+/// topologies. The T-U1-03 test fixture uses a 1-hop chain and
+/// continues to fire under the wider bound.
+const EGRESS_MAX_HOPS: usize = 12;
 
 pub fn check_activation_egress(
     config: &RalphConfig,

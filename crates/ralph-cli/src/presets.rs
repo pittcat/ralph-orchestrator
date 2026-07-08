@@ -1941,29 +1941,6 @@ mod tests {
             // every completion path — this is by design for the debug loop's
             // hypothesis/fix/verify flow.
             "debug",
-            // ce-executor-pipeline: 2026-07-02-003 plan U1 (R3). The 13-hat
-            // flat single-consumer chain (`plan-reviewer → executor → 6 dim
-            // hats → review-synthesizer → fix-planner → fixer → alignment → reporter`) is
-            // intentionally long. The first dimension hat
-            // `dim:goal-alignment` is 10 hops from the terminal
-            // `report.done` and reaches the WAC EGRESS_MAX_HOPS=10 limit
-            // (`crates/ralph-core/src/preset_lint/workflow_activation.rs`).
-            // Older versions tripped `activation_egress_missing` by 1 hop.
-            // This is a known
-            // false positive of the static-lint BFS bound — the chain
-            // terminates deterministically via `report.done` (required_events)
-            // and `LOOP_COMPLETE` (completion_promise), and the chain length
-            // is a deliberate design choice (one hat per dimension; no
-            // consolidation). Topology is structurally valid; the EGRESS
-            // finding is a known bound artifact.
-            "ce-executor-pipeline",
-            // ce-executor-pipeline-loop: 2026-07-08 loop preset. This keeps
-            // the same flat serial review chain as ce-executor-pipeline and
-            // adds a review-gate/reentry loop. The WAC static BFS can treat
-            // the gated fix handoff as a dead end even though the explicit
-            // single-consumer chain is locked by
-            // test_ce_executor_pipeline_loop_routes_are_single_consumer.
-            "ce-executor-pipeline-loop",
             // ce-executor-supervisor: 2026-07-03-001 plan U13. The supervisor
             // preset has intentional branching completion paths: a failed exec
             // wave (`exec.wave.failed`) routes through `exec-failure-handler` →
@@ -1981,29 +1958,14 @@ mod tests {
         // lint counterpart) but is its own const so the two tests can
         // diverge if needed.
         //
-        // ce-executor-pipeline: the 13-hat flat chain used to trip three
-        // WAC findings on the chain head `dim:goal-alignment` whose
-        // root cause was the static-lint BFS bound. Keep these exemptions
-        // while older embedded/topology checks are being phased out.
-        // Topology is structurally valid; the chain terminates at
-        // `report.done` + `LOOP_COMPLETE`.
-        const AUTHORING_EXEMPT_FINDINGS: &[(&str, &str)] = &[
-            (
-                "ce-executor-pipeline",
-                "lint.preset.activation_egress_missing",
-            ),
-            ("ce-executor-pipeline", "lint.preset.handoff_pairing_broken"),
-            ("ce-executor-pipeline", "lint.preset.re_emit_trap"),
-            (
-                "ce-executor-pipeline-loop",
-                "lint.preset.activation_egress_missing",
-            ),
-            (
-                "ce-executor-pipeline-loop",
-                "lint.preset.handoff_pairing_broken",
-            ),
-            ("ce-executor-pipeline-loop", "lint.preset.re_emit_trap"),
-        ];
+        // Currently empty: `ce-executor-pipeline` and
+        // `ce-executor-pipeline-loop` used to trip three WAC findings
+        // each on the chain head whose root cause was the static-lint
+        // BFS bound (EGRESS_MAX_HOPS). The 2026-07-08 bump of
+        // EGRESS_MAX_HOPS from 10 to 12 let both presets pass strict
+        // with zero findings, so these exemptions are no longer
+        // needed.
+        const AUTHORING_EXEMPT_FINDINGS: &[(&str, &str)] = &[];
 
         for preset in PRESETS.iter().filter(|p| p.public) {
             let config =
@@ -2135,16 +2097,6 @@ mod tests {
         // section "U5: built-in preset migration" (autoresearch, debug explicitly
         // deferred due to multi-branch completion topologies).
         //
-        // ce-executor-pipeline: 2026-07-02-003 plan U1 (R3). The 13-hat flat
-        // single-consumer chain is intentionally long; the first dimension
-        // hat `dim:goal-alignment` is 10 hops from the terminal `report.done`
-        // after the `fix-planner` split and reaches the WAC
-        // EGRESS_MAX_HOPS=10 limit. Known false positive of the
-        // static-lint BFS bound — chain terminates deterministically via
-        // `report.done` (required_events) and `LOOP_COMPLETE`
-        // (completion_promise). Topology is structurally valid; the EGRESS
-        // finding is a known bound artifact.
-        //
         // ce-executor-supervisor: 2026-07-03-001 plan U13. The supervisor
         // preset has intentional branching completion paths: a failed exec
         // wave routes through `exec-failure-handler` → `work.failed` →
@@ -2156,8 +2108,6 @@ mod tests {
         let topology_exempt: &[&str] = &[
             "autoresearch",
             "debug",
-            "ce-executor-pipeline",
-            "ce-executor-pipeline-loop",
             "ce-executor-supervisor",
         ];
 
@@ -2179,51 +2129,14 @@ mod tests {
         // merge.handled as terminal, and the redundant cleanup.done /
         // merge.complete publishes have been removed).
         //
-        // ce-executor-pipeline: 2026-07-02-003 plan U1 (R3). The 13-hat flat
-        // single-consumer chain (`plan-reviewer → executor → 6 dim hats →
-        // review-synthesizer → fix-planner → fixer → alignment → reporter`)
-        // is intentionally long. The first dimension hat `dim:goal-alignment`
-        // is 10 hops from the terminal `report.done` and reaches the WAC
-        // EGRESS_MAX_HOPS=10 limit. Older versions tripped three related WAC
-        // findings on that one hat: `lint.preset.activation_egress_missing`,
-        // `lint.preset.handoff_pairing_broken`, and `lint.preset.re_emit_trap`.
-        // The chain terminates deterministically via
-        // `report.done` (required_events) and `LOOP_COMPLETE`
-        // (completion_promise); the chain length is a deliberate design
-        // choice (one hat per dimension; no consolidation). Topology is
-        // structurally valid; the WAC findings are known bound artifacts.
-        const EXEMPT_FINDINGS: &[(&str, &str, &str)] = &[
-            (
-                "ce-executor-pipeline",
-                "lint.preset.activation_egress_missing",
-                "docs/plans/2026-07-02-003-feat-ce-executor-pipeline-preset-plan.md#u1",
-            ),
-            (
-                "ce-executor-pipeline",
-                "lint.preset.handoff_pairing_broken",
-                "docs/plans/2026-07-02-003-feat-ce-executor-pipeline-preset-plan.md#u1",
-            ),
-            (
-                "ce-executor-pipeline",
-                "lint.preset.re_emit_trap",
-                "docs/plans/2026-07-02-003-feat-ce-executor-pipeline-preset-plan.md#u1",
-            ),
-            (
-                "ce-executor-pipeline-loop",
-                "lint.preset.activation_egress_missing",
-                "docs/plans/2026-07-08-002-feat-ce-executor-pipeline-loop-plan.md#u2",
-            ),
-            (
-                "ce-executor-pipeline-loop",
-                "lint.preset.handoff_pairing_broken",
-                "docs/plans/2026-07-08-002-feat-ce-executor-pipeline-loop-plan.md#u2",
-            ),
-            (
-                "ce-executor-pipeline-loop",
-                "lint.preset.re_emit_trap",
-                "docs/plans/2026-07-08-002-feat-ce-executor-pipeline-loop-plan.md#u2",
-            ),
-        ];
+        // `ce-executor-pipeline` and `ce-executor-pipeline-loop` used to
+        // be exempt for three WAC findings each
+        // (`activation_egress_missing`, `handoff_pairing_broken`,
+        // `re_emit_trap`) caused by the static-lint BFS bound
+        // (EGRESS_MAX_HOPS). The 2026-07-08 bump of EGRESS_MAX_HOPS
+        // from 10 to 12 let both presets pass strict with zero findings,
+        // so these exemptions are no longer needed.
+        const EXEMPT_FINDINGS: &[(&str, &str, &str)] = &[];
 
         let mut failures = Vec::new();
         for preset in PRESETS.iter() {
