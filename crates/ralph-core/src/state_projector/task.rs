@@ -803,7 +803,11 @@ mod tests {
 
         // Only the original row is written; no second ledger entry.
         let tasks = ctx.task_snapshot().0;
-        assert_eq!(tasks.len(), 1, "rejected projection must not write a second row");
+        assert_eq!(
+            tasks.len(),
+            1,
+            "rejected projection must not write a second row"
+        );
         assert_eq!(tasks[0].key.as_deref(), Some("legacy:step-01:impl"));
     }
 

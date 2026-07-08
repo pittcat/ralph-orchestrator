@@ -29,6 +29,7 @@
 embedded:
   - autoresearch
   - ce-executor-pipeline
+  - ce-executor-pipeline-loop
   # 2026-07-03-001 plan U13: supervisor-driven parallel preset.
   # Built on top of `ce-executor-pipeline` topology; swaps the
   # in-process WaveTracker for the rusqlite-backed

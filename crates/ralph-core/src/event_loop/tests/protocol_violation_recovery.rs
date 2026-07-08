@@ -58,21 +58,47 @@ fn test_protocol_violation_budget_accumulates_across_retries() {
 #[test]
 fn test_protocol_violation_signature_isolates_by_step() {
     let mut state = LoopState::default();
-    let (_c1, ex1) =
-        state.record_protocol_violation_signature("executor", "work.done", "k", "step-01", "task_not_terminal");
-    let (_c2, ex2) =
-        state.record_protocol_violation_signature("executor", "work.done", "k", "step-02", "task_not_terminal");
+    let (_c1, ex1) = state.record_protocol_violation_signature(
+        "executor",
+        "work.done",
+        "k",
+        "step-01",
+        "task_not_terminal",
+    );
+    let (_c2, ex2) = state.record_protocol_violation_signature(
+        "executor",
+        "work.done",
+        "k",
+        "step-02",
+        "task_not_terminal",
+    );
     assert!(!ex1 && !ex2);
     // Exhaust step-01 by adding LIMIT more signatures after the
     // initial one above (4 total on step-01), then verify the
     // (LIMIT+2)-th signature trips the fail-close flag.
     for _ in 0..U2_REJECTION_RETRY_LIMIT {
-        state.record_protocol_violation_signature("executor", "work.done", "k", "step-01", "task_not_terminal");
+        state.record_protocol_violation_signature(
+            "executor",
+            "work.done",
+            "k",
+            "step-01",
+            "task_not_terminal",
+        );
     }
-    let (c_step1, ex_step1) =
-        state.record_protocol_violation_signature("executor", "work.done", "k", "step-01", "task_not_terminal");
-    let (_, ex_step2) =
-        state.record_protocol_violation_signature("executor", "work.done", "k", "step-02", "task_not_terminal");
+    let (c_step1, ex_step1) = state.record_protocol_violation_signature(
+        "executor",
+        "work.done",
+        "k",
+        "step-01",
+        "task_not_terminal",
+    );
+    let (_, ex_step2) = state.record_protocol_violation_signature(
+        "executor",
+        "work.done",
+        "k",
+        "step-02",
+        "task_not_terminal",
+    );
     assert_eq!(c_step1, U2_REJECTION_RETRY_LIMIT + 2);
     assert!(ex_step1);
     // step-02 budget is independent and still well below the limit

@@ -10,6 +10,11 @@
     "category": "development"
   },
   {
+    "name": "ce-executor-pipeline-loop",
+    "description": "Review-loop CE executor: pipeline execution with serial six-dimension review, gated fix/re-review rounds, P1 cutoff after round 3, and max 6 review rounds",
+    "category": "development"
+  },
+  {
     "name": "ce-executor-supervisor",
     "description": "Isolated-mode plan-driven work execution with parallel worker fan-out via rusqlite supervisor: per-slot worktrees, fan-in merge, parallel 6-dim review, parallel fix, integration + report",
     "category": "development"

@@ -771,7 +771,10 @@ hats:
             "ensure",
             true,
         );
-        assert!(decision.is_allow(), "for-fix-unit ensure must pass: {decision:?}");
+        assert!(
+            decision.is_allow(),
+            "for-fix-unit ensure must pass: {decision:?}"
+        );
     }
 
     #[test]

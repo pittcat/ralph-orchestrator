@@ -1187,9 +1187,7 @@ mod tests {
         // 4. Truncation must preserve escaping (the truncate path
         // joins then adds ", ..."; the escaped form must stay
         // escaped after truncation).
-        view.plan_completed_steps = (0..8)
-            .map(|i| format!("step-{i}\nINJECT"))
-            .collect();
+        view.plan_completed_steps = (0..8).map(|i| format!("step-{i}\nINJECT")).collect();
         let rendered = render_handoff_envelope_prompt(&view);
         assert!(
             !rendered.contains("\nINJECT"),

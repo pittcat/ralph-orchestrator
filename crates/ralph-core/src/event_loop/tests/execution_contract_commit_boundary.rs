@@ -134,10 +134,10 @@ fn test_open_task_work_done_not_in_accepted_events() {
         "expected TaskNotTerminal rejection"
     );
     assert!(
-        result
-            .contract_rejections
-            .iter()
-            .any(|f| matches!(f.kind, ExecutionContractViolationKind::TaskNotTerminal { .. })),
+        result.contract_rejections.iter().any(|f| matches!(
+            f.kind,
+            ExecutionContractViolationKind::TaskNotTerminal { .. }
+        )),
         "expected TaskNotTerminal, got {:?}",
         result.contract_rejections
     );
@@ -182,11 +182,7 @@ fn test_closed_task_work_done_accepted_and_updates_work_done_seen_tasks() {
     init_git_repo(workspace);
     let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
     write_closed_task(&tasks_path, "live-task-1");
-    std::fs::write(
-        workspace.join("README.md"),
-        "# Test\nagent diff\n",
-    )
-    .unwrap();
+    std::fs::write(workspace.join("README.md"), "# Test\nagent diff\n").unwrap();
 
     let config = build_test_config(workspace);
     let ctx = crate::loop_context::LoopContext::primary(workspace.to_path_buf());

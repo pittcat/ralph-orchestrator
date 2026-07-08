@@ -152,4 +152,3 @@ fn test_emit_rejection_hint_excludes_unauthorised_topics() {
         stderr
     );
 }
-

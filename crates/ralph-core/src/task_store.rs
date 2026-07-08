@@ -500,12 +500,7 @@ impl TaskStore {
     pub fn find_by_locus_in_loop(&self, locus: &str, loop_id: Option<&str>) -> Option<&Task> {
         self.tasks.iter().find(|t| {
             t.loop_id.as_deref() == loop_id
-                && t
-                    .key
-                    .as_deref()
-                    .and_then(task_locus)
-                    .as_deref()
-                    == Some(locus)
+                && t.key.as_deref().and_then(task_locus).as_deref() == Some(locus)
         })
     }
 
@@ -727,8 +722,7 @@ impl TaskStore {
             // literally the same key — distinct unit slugs in the key
             // tail therefore stay separate.
             if let Some(existing_idx) = self.tasks.iter().position(|existing| {
-                existing.loop_id.as_deref() == new_loop
-                    && existing.key.as_deref() == Some(key)
+                existing.loop_id.as_deref() == new_loop && existing.key.as_deref() == Some(key)
             }) {
                 let existing = &mut self.tasks[existing_idx];
                 existing.title = task.title;
@@ -1982,7 +1976,9 @@ mod tests {
         b.id = "task-b".to_string();
         b.key = Some("k-b".to_string());
         store.add_checked(a).expect("first add must succeed");
-        store.add_checked(b).expect("second add with distinct id must succeed");
+        store
+            .add_checked(b)
+            .expect("second add with distinct id must succeed");
         assert_eq!(store.tasks.len(), 2);
     }
 }

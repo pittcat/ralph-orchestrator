@@ -977,9 +977,7 @@ fn validate_task(
                 message: format!(
                     "Task '{}' live identity mismatch: payload task_key '{}' does not match \
                      ledger key {:?}. Use `ralph tools task list` for the live task_id/task_key.",
-                    task_id,
-                    payload_key,
-                    task.key
+                    task_id, payload_key, task.key
                 ),
                 topic: event.topic.to_string(),
                 ..Default::default()
@@ -1145,7 +1143,9 @@ fn validate_git_change(
     if rule.require_git_change.mode == "commit_only_clean" {
         if !has_new_commits {
             return Some(commit_only_clean_no_evidence_finding(
-                event, payload_str, loop_start_sha,
+                event,
+                payload_str,
+                loop_start_sha,
             ));
         }
         if has_uncommitted {
@@ -1852,8 +1852,8 @@ mod tests {
         // task_id that resolves to a coordinator-owned placeholder
         // row (key=None) while the payload carries a real task_key.
         // Recovery must go to a coordinator hat, not back to executor.
-        let task = Task::new("orphan".to_string(), 1)
-            .with_owner_hat(Some("coordinator".to_string()));
+        let task =
+            Task::new("orphan".to_string(), 1).with_owner_hat(Some("coordinator".to_string()));
         let (target, hint) = super::task_not_found_resume_plan(
             "task-1783411414-39d0",
             "ce-executor:l1:step-01:u1-skeleton",
@@ -1862,21 +1862,22 @@ mod tests {
             &["coordinator".to_string()],
         );
         assert_eq!(target, "coordinator");
-        assert!(hint.contains("identity mismatch"), "hint must name the failure mode, got: {hint}");
-        assert!(hint.contains("Do not emit work.failed"), "hint must steer away from work.failed");
+        assert!(
+            hint.contains("identity mismatch"),
+            "hint must name the failure mode, got: {hint}"
+        );
+        assert!(
+            hint.contains("Do not emit work.failed"),
+            "hint must steer away from work.failed"
+        );
     }
 
     #[test]
     fn p1_5_task_not_found_resume_plan_falls_back_to_source_when_no_coordinator_hats() {
         // Legacy / human-CLI loops have no coordinator_hats; keep the
         // old source-hat retry target so we do not break them.
-        let (target, _hint) = super::task_not_found_resume_plan(
-            "task-x",
-            "some-key",
-            None,
-            "executor",
-            &[],
-        );
+        let (target, _hint) =
+            super::task_not_found_resume_plan("task-x", "some-key", None, "executor", &[]);
         assert_eq!(target, "executor");
     }
 
@@ -1884,8 +1885,7 @@ mod tests {
     fn p1_5_task_not_found_resume_plan_uses_first_coordinator_when_owner_unknown() {
         // Task row exists but owner is not a configured coordinator
         // hat — fall back to the first coordinator hat.
-        let task = Task::new("row".to_string(), 1)
-            .with_owner_hat(Some("ghost".to_string()));
+        let task = Task::new("row".to_string(), 1).with_owner_hat(Some("ghost".to_string()));
         let (target, _hint) = super::task_not_found_resume_plan(
             "task-y",
             "k-y",
@@ -2054,12 +2054,7 @@ mod tests {
         )
         .unwrap();
         let tasks_path = ralph_dir.join("agent/tasks.jsonl");
-        write_task_with_loop_id_and_key(
-            &tasks_path,
-            "task-1",
-            Some("primary-OTHER-LOOP"),
-            "k",
-        );
+        write_task_with_loop_id_and_key(&tasks_path, "task-1", Some("primary-OTHER-LOOP"), "k");
 
         let rule = make_work_done_rule();
         let event = Event::new(
@@ -2222,12 +2217,7 @@ mod tests {
         )
         .unwrap();
         let tasks_path = ralph_dir.join("agent/tasks.jsonl");
-        write_task_with_loop_id_and_key(
-            &tasks_path,
-            "task-1",
-            Some("primary-OTHER"),
-            "k",
-        );
+        write_task_with_loop_id_and_key(&tasks_path, "task-1", Some("primary-OTHER"), "k");
 
         let rule = make_work_done_rule();
         let event = Event::new(

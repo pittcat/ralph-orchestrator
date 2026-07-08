@@ -51,6 +51,39 @@ plan-gate / work.start
 
 参考：`presets/en/ce-executor-pipeline.yml`。
 
+## ce-executor-pipeline-loop（15 hat，isolated；单链环形 review/fix；2026-07-08）
+
+`builtin:ce-executor-pipeline-loop` 是 `ce-executor-pipeline` 的环形版本。
+它不是旁路广播：每个业务 topic 仍然只有一个显式消费者。
+
+关键拓扑：
+
+```
+work.done / fix.done
+  → review-reentry（review.round.ready）
+  → 6× 串行 dimension hats
+  → review-synthesizer（review.synthesized）
+  → review-gate（三选一）
+      ├─ review.accepted → alignment → reporter → LOOP_COMPLETE
+      ├─ fix.requested → fix-planner → review.complete → fixer → fix.done → review-reentry
+      └─ review.loop.blocked → reporter → LOOP_COMPLETE
+```
+
+起草/评审检查点：
+
+- `review-gate` 必须是互斥三出口：`review.accepted`、`fix.requested`、
+  `review.loop.blocked` 同一 activation 只能发一个。
+- `fix.requested` 只给 `fix-planner`，`review.complete` 只给 `fixer`；
+  不要让两个 downstream hat 消费同一个 fix topic。
+- `work.done` 和 `fix.done` 都只给 `review-reentry`，由它统一生成
+  `review.round.ready`。
+- 第 1-3 轮 P0/P1 阻塞；第 4 轮起只有 P0 阻塞；第 6 轮仍有阻塞问题时
+  只走 `review.loop.blocked`。
+- `fix.done.next_review_plan` 是下一轮 review 的输入；`review-reentry`
+  不应重新推断修复意图，也不应读取内部 ledger。
+
+参考：`presets/en/ce-executor-pipeline-loop.yml`。
+
 ## 起草反模式（禁止抄进 instructions）
 
 | 反模式 | 应改为 |

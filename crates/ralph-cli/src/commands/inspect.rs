@@ -2022,8 +2022,7 @@ mod tests {
         let tmp = TempDir::new().expect("temp dir");
         let plan_dir = tmp.path().join("docs").join("plans");
         std::fs::create_dir_all(&plan_dir).expect("plan dir");
-        let plan_path =
-            plan_dir.join("2026-07-04-004-feat-single-chain-refactor-plan.md");
+        let plan_path = plan_dir.join("2026-07-04-004-feat-single-chain-refactor-plan.md");
         std::fs::write(&plan_path, "# plan").expect("write plan");
 
         let mut cfg = RalphConfig::default();

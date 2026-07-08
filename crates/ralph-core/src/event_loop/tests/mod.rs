@@ -8,10 +8,10 @@ mod audit_severity_ssot;
 mod backpressure;
 mod build_prompt;
 mod ce_executor;
-mod fallback_recovery_fail_close;
 mod chain_validation;
 mod common;
 mod completion_honored;
+mod fallback_recovery_fail_close;
 // 2026-06-23-005 U2: typed dispatch coverage for the three new
 // `RejectionKind` variants (MissingEventGate / StallNoEvents /
 // ContractViolation). See `coordinator_dispatch_coverage.rs`.
@@ -69,11 +69,11 @@ mod replay_light_integration;
 mod review_step_gate;
 // 2026-06-23 T2: `## RUNTIME CONFIG` block injection for `max_residuals`.
 // See `runtime_config_block.rs`.
+mod event_policy_lint_resume;
 mod runtime_config_block;
 mod runtime_state_injection;
 mod scope_enforcement;
 mod scratchpad;
-mod event_policy_lint_resume;
 mod stale_breaker;
 mod state_machine;
 mod structured_evidence;

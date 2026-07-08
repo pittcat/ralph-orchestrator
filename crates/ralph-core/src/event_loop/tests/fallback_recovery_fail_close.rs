@@ -13,10 +13,7 @@ use ralph_proto::Topic;
 ///
 /// Pinning this list here turns a future regression into a
 /// compile/test failure rather than a silent success terminal.
-const PASS_ONLY_TOPICS: &[&str] = &[
-    "work.done",
-    "report.done",
-];
+const PASS_ONLY_TOPICS: &[&str] = &["work.done", "report.done"];
 
 #[test]
 fn test_fallback_recovery_cannot_produce_success() {

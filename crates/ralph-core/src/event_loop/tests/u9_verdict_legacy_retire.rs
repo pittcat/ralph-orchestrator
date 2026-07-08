@@ -41,7 +41,6 @@ fn load_ce_executor_serial_schema() -> std::path::PathBuf {
 }
 
 #[test]
-
 #[test]
 fn u9_runtime_does_not_auto_terminate_on_report_done_fail() {
     // Drive the `decide_termination_reason`-style

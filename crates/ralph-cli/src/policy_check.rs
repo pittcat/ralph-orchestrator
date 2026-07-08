@@ -297,10 +297,8 @@ fn load_policy_config_from_hats_only(
     }
     let content = std::fs::read_to_string(&hats_yaml_path)
         .with_context(|| format!("Failed to load hats from {:?}", hats_yaml_path))?;
-    let value: serde_yaml::Value = config_resolution::parse_yaml_value(
-        &content,
-        &hats_yaml_path.display().to_string(),
-    )?;
+    let value: serde_yaml::Value =
+        config_resolution::parse_yaml_value(&content, &hats_yaml_path.display().to_string())?;
     let hats_map = match value.get("hats") {
         Some(serde_yaml::Value::Mapping(m)) => m.clone(),
         Some(other) => {
@@ -344,10 +342,8 @@ fn merge_workspace_hats_into(
 ) -> Result<()> {
     let content = std::fs::read_to_string(hats_yaml_path)
         .with_context(|| format!("Failed to load hats from {:?}", hats_yaml_path))?;
-    let value: serde_yaml::Value = config_resolution::parse_yaml_value(
-        &content,
-        &hats_yaml_path.display().to_string(),
-    )?;
+    let value: serde_yaml::Value =
+        config_resolution::parse_yaml_value(&content, &hats_yaml_path.display().to_string())?;
     let hats_map = match value.get("hats") {
         Some(serde_yaml::Value::Mapping(m)) => m.clone(),
         Some(other) => {
@@ -1400,10 +1396,7 @@ event_loop:
         // envelope validator's `unknown_to_hat` code must reach
         // either `reason_codes` or `suggestions` so downstream
         // tooling can route on it.
-        let reason_blob = format!(
-            "{:?}\n{:?}",
-            report.reason_codes, report.suggestions
-        );
+        let reason_blob = format!("{:?}\n{:?}", report.reason_codes, report.suggestions);
         assert!(
             reason_blob.contains("handoff_envelope_unknown_to_hat"),
             "report must surface the stable unknown-to_hat code; got: {reason_blob}"
@@ -2564,9 +2557,8 @@ hats:
         )
         .unwrap();
 
-        let err =
-            load_policy_config_for_cli_emit(Some(&root_path), OnConfigError::Fail)
-                .expect_err("invalid hat config must reject");
+        let err = load_policy_config_for_cli_emit(Some(&root_path), OnConfigError::Fail)
+            .expect_err("invalid hat config must reject");
         let msg = err.to_string();
         assert!(
             msg.contains("Failed to parse hat config for `executor`")

@@ -172,6 +172,9 @@ struct ExpectedYaml {
     /// event counts per topic (from `ProcessedEvents::accepted_events`).
     #[serde(default)]
     event_topic_counts: Vec<EventTopicCountYaml>,
+    /// Assert selected payload fields on the Nth accepted event for a topic.
+    #[serde(default)]
+    payload_matches: Vec<PayloadMatchYaml>,
 }
 
 /// One entry in `ExpectedYaml.assert_state` (2026-06-20-002 plan U1).
@@ -436,6 +439,15 @@ struct EventYaml {
 struct EventTopicCountYaml {
     topic: String,
     count: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct PayloadMatchYaml {
+    topic: String,
+    #[serde(default)]
+    occurrence: Option<usize>,
+    fields: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -856,6 +868,8 @@ fn run_scenario_with_snapshots(
     let mut last_prompt_for_iter: Option<(String, String)> = None;
     let mut accepted_topic_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
+    let mut accepted_payloads: std::collections::HashMap<String, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
 
     for (idx, response) in yaml.mock_responses.iter().enumerate() {
         // Simulate hat execution so isolated mode scope enforcement is active.
@@ -901,6 +915,13 @@ fn run_scenario_with_snapshots(
             *accepted_topic_counts
                 .entry(e.topic.to_string())
                 .or_insert(0) += 1;
+            accepted_payloads
+                .entry(e.topic.to_string())
+                .or_default()
+                .push(
+                    serde_json::from_str(&e.payload)
+                        .unwrap_or_else(|_| serde_json::Value::String(e.payload.clone())),
+                );
         }
 
         // 2026-07-03-001 Phase 6 BDD realization: when the
@@ -1186,6 +1207,48 @@ fn run_scenario_with_snapshots(
         );
     }
 
+    for payload_match in &yaml.expected.payload_matches {
+        let occurrence = payload_match.occurrence.unwrap_or(1);
+        assert!(
+            occurrence > 0,
+            "{}: payload_matches occurrence for '{}' must be 1-based",
+            yaml.name,
+            payload_match.topic
+        );
+        let payloads = accepted_payloads
+            .get(&payload_match.topic)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}: Expected accepted payload for topic '{}', got topics {:?}",
+                    yaml.name,
+                    payload_match.topic,
+                    accepted_payloads.keys().collect::<Vec<_>>()
+                )
+            });
+        let payload = payloads.get(occurrence - 1).unwrap_or_else(|| {
+            panic!(
+                "{}: Expected occurrence {} for topic '{}', got {} occurrence(s)",
+                yaml.name,
+                occurrence,
+                payload_match.topic,
+                payloads.len()
+            )
+        });
+        for (field, expected_value) in &payload_match.fields {
+            let actual = payload.get(field).unwrap_or_else(|| {
+                panic!(
+                    "{}: Payload for topic '{}' occurrence {} missing field '{}': {}",
+                    yaml.name, payload_match.topic, occurrence, field, payload
+                )
+            });
+            assert_eq!(
+                actual, expected_value,
+                "{}: Payload field '{}.{}' occurrence {} mismatch",
+                yaml.name, payload_match.topic, field, occurrence
+            );
+        }
+    }
+
     // Verify iteration count matches the number of mock responses
     assert_eq!(
         yaml.mock_responses.len(),
@@ -1373,6 +1436,14 @@ fn test_wave_dimension_mismatch_retry() {
 #[test]
 fn test_ce_executor_pipeline() {
     let yaml = load_scenario("tests/scenarios/ce_executor_pipeline.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-08 loop preset: first review round has no P0/P1, so
+/// review-gate emits `review.accepted` and the fix path stays absent.
+#[test]
+fn test_ce_executor_pipeline_loop() {
+    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_loop.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -1709,7 +1780,6 @@ fn test_ce_executor_bootstrap_recovery_scenario() {
     let yaml = load_scenario("tests/scenarios/ce_executor_bootstrap_recovery.yml");
     run_scenario(yaml);
 }
-
 
 // ──────────────────────────────────────────────────────────────────────
 // 2026-06-16-002 plan U6: coordinator build.deny deny rule
@@ -3030,8 +3100,7 @@ fn registered_scenario_paths() -> Vec<String> {
     // registration surface and stays robust to future macro refactors.
     // Skip comment lines and lines that only mention `tests/scenarios/`
     // inside doc strings or error messages.
-    let text = fs::read_to_string("tests/scenarios.rs")
-        .expect("read scenarios.rs");
+    let text = fs::read_to_string("tests/scenarios.rs").expect("read scenarios.rs");
     let mut paths: Vec<String> = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim_start();
@@ -3111,13 +3180,9 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         "tests/scenarios/correction_",
         "tests/scenarios/diagnose_from_ledger",
     ];
-    const SUPERVISOR_PATH_PREFIXES: &[&str] = &[
-        "tests/scenarios/opac/",
-        "tests/scenarios/supervisor/",
-    ];
-    const PIPELINE_PATH_PREFIXES: &[&str] = &[
-        "tests/scenarios/ce_executor_pipeline",
-    ];
+    const SUPERVISOR_PATH_PREFIXES: &[&str] =
+        &["tests/scenarios/opac/", "tests/scenarios/supervisor/"];
+    const PIPELINE_PATH_PREFIXES: &[&str] = &["tests/scenarios/ce_executor_pipeline"];
     let registered = registered_scenario_paths();
     let offenders: Vec<&String> = registered
         .iter()

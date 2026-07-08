@@ -189,9 +189,7 @@ mod tests {
         match disposition {
             CommitDisposition::NonCommittable { reason, .. } => match reason {
                 NonCommittableReason::Rejected {
-                    stage,
-                    reason_code,
-                    ..
+                    stage, reason_code, ..
                 } => {
                     assert_eq!(stage, RejectionStage::ExecutionContract);
                     assert_eq!(reason_code, "task_not_terminal");

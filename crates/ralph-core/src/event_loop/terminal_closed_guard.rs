@@ -56,10 +56,7 @@ pub fn classify_topic(topic: &str) -> TopicClass {
     ) {
         return TopicClass::Control;
     }
-    if matches!(
-        topic,
-        "REVIEW_COMPLETE" | "report.done" | "LOOP_COMPLETE"
-    ) {
+    if matches!(topic, "REVIEW_COMPLETE" | "report.done" | "LOOP_COMPLETE") {
         return TopicClass::TerminalAdjacent;
     }
     TopicClass::Business
@@ -87,8 +84,7 @@ pub fn evaluate_terminal_closed(input: &TerminalClosedInput<'_>) -> TerminalClos
     }
 
     if input.is_byte_duplicate
-        && (input.is_completion_promise
-            || input.topic_class == TopicClass::TerminalAdjacent)
+        && (input.is_completion_promise || input.topic_class == TopicClass::TerminalAdjacent)
     {
         return TerminalClosedDecision::IgnoreDuplicateTerminal;
     }
@@ -102,9 +98,7 @@ pub fn evaluate_terminal_closed(input: &TerminalClosedInput<'_>) -> TerminalClos
         || POST_TERMINAL_FROZEN_TOPICS.contains(&input.topic)
     {
         return match input.business_after_completion {
-            CompletionAfterTerminalAction::Reject => {
-                TerminalClosedDecision::RejectPostTerminal
-            }
+            CompletionAfterTerminalAction::Reject => TerminalClosedDecision::RejectPostTerminal,
             CompletionAfterTerminalAction::Warn | CompletionAfterTerminalAction::Ignore => {
                 TerminalClosedDecision::Allow
             }
@@ -209,8 +203,14 @@ mod tests {
     #[test]
     fn test_classify_topic_matches_frozen_set() {
         assert_eq!(classify_topic("work.done"), TopicClass::Business);
-        assert_eq!(classify_topic("REVIEW_COMPLETE"), TopicClass::TerminalAdjacent);
-        assert_eq!(classify_topic("event.policy_warning"), TopicClass::Diagnostic);
+        assert_eq!(
+            classify_topic("REVIEW_COMPLETE"),
+            TopicClass::TerminalAdjacent
+        );
+        assert_eq!(
+            classify_topic("event.policy_warning"),
+            TopicClass::Diagnostic
+        );
     }
 
     // 2026-07-07-003 fix: business + frozen-subset topics fall through

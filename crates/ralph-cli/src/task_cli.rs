@@ -3773,7 +3773,11 @@ tasks:
         // a second row and must return the same task id.
         ensure_task_with_args(
             &mut store,
-            &ensure_args("Step 01 (re-issued)", "ce-executor:idem-test:step-01:u1-impl", None),
+            &ensure_args(
+                "Step 01 (re-issued)",
+                "ce-executor:idem-test:step-01:u1-impl",
+                None,
+            ),
             &ctx,
             &coordinator_hats,
             false,
@@ -3835,10 +3839,8 @@ tasks:
 
         let saved = store.all();
         assert_eq!(saved.len(), 2, "two loops => two live records");
-        let loops: std::collections::HashSet<_> = saved
-            .iter()
-            .filter_map(|t| t.loop_id.clone())
-            .collect();
+        let loops: std::collections::HashSet<_> =
+            saved.iter().filter_map(|t| t.loop_id.clone()).collect();
         assert!(loops.contains("loop-a"));
         assert!(loops.contains("loop-b"));
     }

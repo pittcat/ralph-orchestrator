@@ -6,9 +6,9 @@ pub mod accepted_event;
 pub mod loop_state;
 pub mod plan_blocked_reason;
 pub mod rejection;
-pub mod terminal_closed_guard;
 pub mod rejection_kind;
 pub mod review_step_state;
+pub mod terminal_closed_guard;
 // 2026-06-27 mechanism foundation U1: hard required-fields check at
 // emit time. Pure-logic core; `EmitSchemaGateStage` (U6) wraps it.
 pub mod emit_schema_gate;
@@ -1632,9 +1632,9 @@ impl EventLoop {
                                         exhausted_payload.to_string(),
                                     ));
                                 }
-                                if let Some(ref mut policy_state) = self.state.policy_runtime_state {
-                                    policy_state
-                                        .prune_review_dimension_ready_bucket(pn, st, ti);
+                                if let Some(ref mut policy_state) = self.state.policy_runtime_state
+                                {
+                                    policy_state.prune_review_dimension_ready_bucket(pn, st, ti);
                                     policy_state
                                         .prune_review_dimensions_complete_bucket(pn, st, ti);
                                     policy_state.prune_work_done_bucket(pn, st);
@@ -1666,7 +1666,7 @@ impl EventLoop {
     ) -> crate::event_loop::terminal_closed_guard::TerminalClosedDecision {
         use crate::config::CompletionAfterTerminalAction;
         use crate::event_loop::terminal_closed_guard::{
-            classify_topic, evaluate_terminal_closed, TerminalClosedDecision, TerminalClosedInput,
+            TerminalClosedDecision, TerminalClosedInput, classify_topic, evaluate_terminal_closed,
         };
         if !self.state.completion_honored {
             return TerminalClosedDecision::Allow;
@@ -1679,7 +1679,11 @@ impl EventLoop {
             .event_policy
             .as_ref()
             .filter(|p| p.enabled)
-            .map(|p| p.completion_after_terminal.business_after_completion.clone())
+            .map(|p| {
+                p.completion_after_terminal
+                    .business_after_completion
+                    .clone()
+            })
             .unwrap_or(CompletionAfterTerminalAction::Reject);
         let input = TerminalClosedInput {
             completion_honored: true,
@@ -10632,10 +10636,9 @@ impl EventLoop {
                             }
 
                             if let Some(hat_id) = &retry_target {
-                                let payload_obj = event
-                                    .payload
-                                    .as_deref()
-                                    .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok());
+                                let payload_obj = event.payload.as_deref().and_then(|p| {
+                                    serde_json::from_str::<serde_json::Value>(p).ok()
+                                });
                                 let task_key = payload_obj
                                     .as_ref()
                                     .and_then(|v| v.get("task_key"))
@@ -10664,9 +10667,8 @@ impl EventLoop {
                                     _ => "execution_contract",
                                 };
                                 let source_hat = source_hat_str.unwrap_or("unknown");
-                                let (protocol_count, protocol_exhausted) = self
-                                    .state
-                                    .record_protocol_violation_signature(
+                                let (protocol_count, protocol_exhausted) =
+                                    self.state.record_protocol_violation_signature(
                                         source_hat,
                                         event.topic.as_str(),
                                         task_key,
@@ -10674,9 +10676,8 @@ impl EventLoop {
                                         violation_code,
                                     );
                                 if protocol_exhausted {
-                                    let fail_reason = format!(
-                                        "protocol_violation_repeated:{violation_code}"
-                                    );
+                                    let fail_reason =
+                                        format!("protocol_violation_repeated:{violation_code}");
                                     warn!(
                                         topic = %event.topic.as_str(),
                                         reason = %fail_reason,
@@ -10689,59 +10690,61 @@ impl EventLoop {
                                     self.bus.publish(blocked.clone());
                                     self.state.record_event(&blocked);
                                 } else {
-                                let original_trigger =
-                                    self.state.last_activation_events.iter().rev().find(
-                                        |trigger| {
+                                    let original_trigger = self
+                                        .state
+                                        .last_activation_events
+                                        .iter()
+                                        .rev()
+                                        .find(|trigger| {
                                             self.registry.get_config(hat_id).is_some_and(|config| {
                                                 config.trigger_topics().iter().any(|topic| {
                                                     topic.matches_str(trigger.topic.as_str())
                                                 })
                                             })
-                                        },
-                                    );
-                                let recovery_reason = task_not_terminal_hint
-                                    .as_deref()
-                                    .unwrap_or(finding.message.as_str());
-                                let retry_payload = serde_json::json!({
-                                    "rejected_topic": event.topic.as_str(),
-                                    // U2 (2026-06-17-003 plan): add the
-                                    // schema-required `target_hat` field
-                                    // alongside `reason` so the drift
-                                    // detector counts the contract recovery
-                                    // as schema-compliant.
-                                    "target_hat": hat_id.as_str(),
-                                    "reason": recovery_reason,
-                                    "finding_kind": format!("{:?}", finding.kind),
-                                    "required_action": format!(
-                                        "Fix the issue and emit '{}' again with correct payload, or emit 'work.failed' if unrecoverable.",
-                                        event.topic.as_str()
-                                    ),
-                                    "original_payload": event.payload.as_deref().unwrap_or(""),
-                                    "original_trigger_topic": original_trigger
-                                        .map(|trigger| trigger.topic.as_str()),
-                                    "original_trigger_payload": original_trigger
-                                        .map(|trigger| {
-                                            serde_json::from_str::<serde_json::Value>(
-                                                trigger.payload.as_str(),
-                                            )
-                                            .unwrap_or_else(|_| {
-                                                serde_json::Value::String(
-                                                    trigger.payload.clone(),
+                                        });
+                                    let recovery_reason = task_not_terminal_hint
+                                        .as_deref()
+                                        .unwrap_or(finding.message.as_str());
+                                    let retry_payload = serde_json::json!({
+                                        "rejected_topic": event.topic.as_str(),
+                                        // U2 (2026-06-17-003 plan): add the
+                                        // schema-required `target_hat` field
+                                        // alongside `reason` so the drift
+                                        // detector counts the contract recovery
+                                        // as schema-compliant.
+                                        "target_hat": hat_id.as_str(),
+                                        "reason": recovery_reason,
+                                        "finding_kind": format!("{:?}", finding.kind),
+                                        "required_action": format!(
+                                            "Fix the issue and emit '{}' again with correct payload, or emit 'work.failed' if unrecoverable.",
+                                            event.topic.as_str()
+                                        ),
+                                        "original_payload": event.payload.as_deref().unwrap_or(""),
+                                        "original_trigger_topic": original_trigger
+                                            .map(|trigger| trigger.topic.as_str()),
+                                        "original_trigger_payload": original_trigger
+                                            .map(|trigger| {
+                                                serde_json::from_str::<serde_json::Value>(
+                                                    trigger.payload.as_str(),
                                                 )
-                                            })
-                                        }),
-                                    "retry_publish_topics": [event.topic.as_str(), "work.failed"],
-                                    "contract_finding": finding,
-                                });
-                                let retry_event =
-                                    Event::new("task.resume", retry_payload.to_string())
-                                        .with_target(hat_id.clone());
-                                debug!(
-                                    target = %hat_id.as_str(),
-                                    topic = %event.topic.as_str(),
-                                    "Publishing targeted contract recovery event to source hat"
-                                );
-                                self.bus.publish(retry_event);
+                                                .unwrap_or_else(|_| {
+                                                    serde_json::Value::String(
+                                                        trigger.payload.clone(),
+                                                    )
+                                                })
+                                            }),
+                                        "retry_publish_topics": [event.topic.as_str(), "work.failed"],
+                                        "contract_finding": finding,
+                                    });
+                                    let retry_event =
+                                        Event::new("task.resume", retry_payload.to_string())
+                                            .with_target(hat_id.clone());
+                                    debug!(
+                                        target = %hat_id.as_str(),
+                                        topic = %event.topic.as_str(),
+                                        "Publishing targeted contract recovery event to source hat"
+                                    );
+                                    self.bus.publish(retry_event);
                                 }
                             } else if let Some(reason) = &no_retry_reason {
                                 warn!(
@@ -13308,13 +13311,15 @@ impl EventLoop {
             .policy_runtime_state
             .as_ref()
             .and_then(|s| s.last_plan_blocked_reason.clone());
-        let validator_terminal_kind = self.state.last_validator_terminal_kind.as_deref().and_then(
-            |k| match k {
-                "passed" => Some(ValidatorTerminalKind::Passed),
-                "failed" => Some(ValidatorTerminalKind::Failed),
-                _ => None,
-            },
-        );
+        let validator_terminal_kind =
+            self.state
+                .last_validator_terminal_kind
+                .as_deref()
+                .and_then(|k| match k {
+                    "passed" => Some(ValidatorTerminalKind::Passed),
+                    "failed" => Some(ValidatorTerminalKind::Failed),
+                    _ => None,
+                });
         let current_step = self
             .state
             .last_test_passed_step

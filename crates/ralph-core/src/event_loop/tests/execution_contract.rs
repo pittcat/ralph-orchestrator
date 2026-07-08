@@ -633,14 +633,12 @@ fn u6_fix_applied_missing_payload_field_rejected_with_dynamic_topic() {
 
 #[test]
 fn test_execution_contract_commit_only_clean_rejects_dirty_workspace() {
-    use crate::config::execution_contracts::GitChangeRequirement;
     use crate::config::ExecutionContractRule;
+    use crate::config::execution_contracts::GitChangeRequirement;
     use crate::config::execution_contracts::{
         ContractRejectConfig, TaskCompletionRequirement, TestEvidenceRequirement,
     };
-    use crate::execution_contract::{
-        validate_execution_contract, DefaultGitEvidenceProvider,
-    };
+    use crate::execution_contract::{DefaultGitEvidenceProvider, validate_execution_contract};
 
     // The executor's working tree is the repo root. Force-dirty it
     // by creating a fresh tracked file and leaving it uncommitted.
@@ -723,8 +721,8 @@ fn test_execution_contract_commit_only_clean_branch_logic() {
     // whatever we want for `has_uncommitted_changes` /
     // `has_new_commits_since`. This is the most reliable way to pin
     // the three observable branches without depending on disk state.
-    use crate::config::execution_contracts::GitChangeRequirement;
     use crate::config::ExecutionContractRule;
+    use crate::config::execution_contracts::GitChangeRequirement;
     use crate::config::execution_contracts::{
         ContractRejectConfig, TaskCompletionRequirement, TestEvidenceRequirement,
     };
@@ -749,12 +747,7 @@ fn test_execution_contract_commit_only_clean_branch_logic() {
         fn has_new_commits_since(&self, _: &Path, _: Option<&str>) -> bool {
             self.has_new_commits
         }
-        fn recent_commit_messages(
-            &self,
-            _: &Path,
-            _: Option<&str>,
-            _: usize,
-        ) -> Vec<String> {
+        fn recent_commit_messages(&self, _: &Path, _: Option<&str>, _: usize) -> Vec<String> {
             Vec::new()
         }
         fn working_tree_porcelain(&self, _: &Path) -> String {
@@ -811,15 +804,15 @@ fn test_execution_contract_commit_only_clean_branch_logic() {
         ExecutionContractDecision::Reject(findings) => {
             assert_eq!(findings.len(), 1);
             match &findings[0].kind {
-                ExecutionContractViolationKind::WorkingTreeDirtyWithCommits { porcelain, .. } => {
+                ExecutionContractViolationKind::WorkingTreeDirtyWithCommits {
+                    porcelain, ..
+                } => {
                     assert!(
                         porcelain.contains("docs/plans/foo.md"),
                         "porcelain should surface dirty path, got: {porcelain}"
                     );
                 }
-                other => panic!(
-                    "expected WorkingTreeDirtyWithCommits, got {other:?}"
-                ),
+                other => panic!("expected WorkingTreeDirtyWithCommits, got {other:?}"),
             }
         }
         other => panic!("case 1 expected Reject, got {other:?}"),
@@ -886,14 +879,12 @@ fn test_execution_contract_commit_only_mode_still_accepts_dirty() {
     // change the `commit_only` mode semantics (used by `fix.applied`
     // in the same preset). The legacy `commit_only` mode still
     // admits dirty+commits.
-    use crate::config::execution_contracts::GitChangeRequirement;
     use crate::config::ExecutionContractRule;
+    use crate::config::execution_contracts::GitChangeRequirement;
     use crate::config::execution_contracts::{
         ContractRejectConfig, TaskCompletionRequirement, TestEvidenceRequirement,
     };
-    use crate::execution_contract::{
-        ExecutionContractDecision, GitEvidenceProvider,
-    };
+    use crate::execution_contract::{ExecutionContractDecision, GitEvidenceProvider};
     use std::path::Path;
 
     struct DirtyCommittedMock;
@@ -907,12 +898,7 @@ fn test_execution_contract_commit_only_mode_still_accepts_dirty() {
         fn has_new_commits_since(&self, _: &Path, _: Option<&str>) -> bool {
             true
         }
-        fn recent_commit_messages(
-            &self,
-            _: &Path,
-            _: Option<&str>,
-            _: usize,
-        ) -> Vec<String> {
+        fn recent_commit_messages(&self, _: &Path, _: Option<&str>, _: usize) -> Vec<String> {
             Vec::new()
         }
         fn working_tree_porcelain(&self, _: &Path) -> String {

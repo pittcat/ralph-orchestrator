@@ -1,4 +1,4 @@
-# ce-executor-pipeline: linear single-chain plan-driven execution preset
+# ce-executor-pipeline-loop: review/fix loop single-chain plan-driven execution preset
 #
 # Ralph primary path (plan 2026-07-07-006): the recommended CE executor for
 # plan-driven work. Single consumer per topic, flat hat-only chain, no
@@ -66,7 +66,7 @@ event_loop:
   completion_promise: "LOOP_COMPLETE"
   required_events: ["report.done"]
   starting_event: "work.start"
-  max_iterations: 40
+  max_iterations: 80
   max_runtime_seconds: 28800  # 8 hours
   enforce_hat_scope: true
   ephemeral_isolation: true
@@ -81,6 +81,7 @@ event_loop:
       - "plan.blocked"
       - "work.done"
       - "work.failed"
+      - "review.round.ready"
       - "review.goalalign.done"
       - "review.correctness.done"
       - "review.testing.done"
@@ -88,8 +89,11 @@ event_loop:
       - "review.standards.done"
       - "review.adversarial.done"
       - "review.synthesized"
+      - "review.accepted"
+      - "fix.requested"
       - "review.complete"
       - "fix.done"
+      - "review.loop.blocked"
       - "align.done"
       - "report.done"
     completion_after_terminal:
@@ -336,12 +340,24 @@ event_loop:
           - "commit_count"
       work.failed:
         required_fields: ["plan_name", "reason"]
+      review.round.ready:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "review_round"
+          - "source_topic"
+          - "executor_head_sha"
+          - "resolved_baseline_sha"
+          - "round_base_sha"
+          - "review_plan"
       review.goalalign.done:
         required_fields:
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through from plan.ready
+          - "review_round"
+          - "round_base_sha"
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -351,6 +367,8 @@ event_loop:
           - "plan_path"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through
+          - "review_round"
+          - "round_base_sha"
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -360,6 +378,8 @@ event_loop:
           - "plan_path"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through
+          - "review_round"
+          - "round_base_sha"
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -369,6 +389,8 @@ event_loop:
           - "plan_path"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through
+          - "review_round"
+          - "round_base_sha"
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -378,6 +400,8 @@ event_loop:
           - "plan_path"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through
+          - "review_round"
+          - "round_base_sha"
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -387,6 +411,8 @@ event_loop:
           - "plan_path"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through (last dim; review-synthesizer reads it)
+          - "review_round"
+          - "round_base_sha"
           - "dimension"
           - "findings_file"
           - "findings_count"
@@ -396,8 +422,33 @@ event_loop:
           - "plan_path"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through from review.adversarial.done
+          - "review_round"
+          - "round_base_sha"
           - "synthesized_review_file"
           - "findings_count"
+          - "p0_count"
+          - "p1_count"
+          - "findings_summary"
+          - "verdict"
+      review.accepted:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "review_round"
+          - "executor_head_sha"
+          - "resolved_baseline_sha"
+          - "p0_count"
+          - "p1_count"
+          - "verdict"
+      fix.requested:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "review_round"
+          - "executor_head_sha"
+          - "resolved_baseline_sha"
+          - "round_base_sha"
+          - "synthesized_review_file"
           - "p0_count"
           - "p1_count"
           - "findings_summary"
@@ -406,8 +457,10 @@ event_loop:
         required_fields:
           - "plan_name"
           - "plan_path"
+          - "review_round"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through from plan.ready
+          - "fix_base_sha"
           - "fix_plan_file"
           - "findings_count"
           - "p0_count"
@@ -418,16 +471,33 @@ event_loop:
         required_fields:
           - "plan_name"
           - "plan_path"
+          - "review_round"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through from review.complete
+          - "fixed_from_sha"
+          - "head_sha"
           - "fix_plan_file"
           - "review_verdict"
           - "fixes_applied"
           - "fixes_skipped"
+          - "fix_summary"
+          - "next_review_plan"
+      review.loop.blocked:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "review_round"
+          - "max_review_rounds"
+          - "executor_head_sha"
+          - "resolved_baseline_sha"
+          - "p0_count"
+          - "p1_count"
+          - "reason"
       align.done:
         required_fields:
           - "plan_name"
           - "plan_path"
+          - "review_round"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through from fix.done
           - "fix_plan_file"
@@ -1008,17 +1078,76 @@ hats:
       Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
       and `ralph-tools-emit` §5 for precheck rules before every emit.
 
+  review-reentry:
+    name: "Review Reentry"
+    description: "Normalizes work.done and fix.done into the next serial review round. Emits exactly one review.round.ready event."
+    triggers: ["work.done", "fix.done"]
+    publishes: ["review.round.ready"]
+    exempt_topics: ["review.round.ready"]
+    terminal_events: ["review.round.ready"]
+    event_filter:
+      enabled: true
+      events:
+        - work.done
+        - fix.done
+    timeout: 900
+    missing_event_grace_secs: 300
+    instructions: |
+      ## REVIEW REENTRY MODE — Start or continue the review loop
+
+      You receive either `work.done` or `fix.done` and emit exactly one
+      `review.round.ready` event. You are a routing/normalization hat only:
+      do not review code, do not plan fixes, and do not read internal
+      `.ralph/*` ledgers.
+
+      ### HARD RULES
+      - Emit EXACTLY ONE `review.round.ready` event per activation.
+      - For `work.done`, set `review_round: 1`.
+      - For `fix.done`, set `review_round` to the trigger payload's
+        `review_round + 1`.
+      - Preserve `plan_name`, `plan_path`, `executor_head_sha`, and
+        `resolved_baseline_sha` from the trigger payload.
+      - For `work.done`, set `round_base_sha` to `executor_head_sha` and
+        create a short `review_plan` that asks the six review hats to audit
+        the whole diff from `resolved_baseline_sha` to `executor_head_sha`.
+      - For `fix.done`, set `round_base_sha` to `head_sha` and set
+        `review_plan` to the trigger payload's `next_review_plan`.
+      - Use `ralph emit --policy-check` first; only after it passes, emit
+        the real event. See `ralph-tools-emit` §5.
+
+      Example payload shape:
+      ```json
+      {
+        "plan_name": "<plan>",
+        "plan_path": "<repo-relative plan path>",
+        "review_round": 1,
+        "source_topic": "work.done",
+        "executor_head_sha": "<sha>",
+        "resolved_baseline_sha": "<sha>",
+        "round_base_sha": "<sha>",
+        "review_plan": {
+          "focus_areas": ["full implementation diff"],
+          "fixed_findings": [],
+          "verification_performed": [],
+          "residual_risks": [],
+          "diff_ranges": ["<resolved_baseline_sha>..<executor_head_sha>"]
+        }
+      }
+      ```
+
+      Then stop. `dim:goal-alignment` will receive the event.
+
   dim:goal-alignment:
     name: "🔍 Dimension Reviewer — Goal Alignment"
     description: "Read-only single-dimension reviewer. Checks whether the executor's changes actually achieve the plan's stated goals. Writes product file, emits review.goalalign.done."
-    triggers: ["work.done"]
+    triggers: ["review.round.ready"]
     publishes: ["review.goalalign.done"]
     exempt_topics: ["review.goalalign.done"]
     terminal_events: ["review.goalalign.done"]
     event_filter:
       enabled: true
       events:
-        - work.done
+        - review.round.ready
     disallowed_tools: ["Edit"]
     timeout: 1800
     missing_event_grace_secs: 540
@@ -1819,17 +1948,62 @@ hats:
       Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
       and `ralph-tools-emit` §5 for precheck rules before every emit.
 
+  review-gate:
+    name: "Review Gate"
+    description: "Chooses exactly one review-loop exit: accept, request fix planning, or block after max rounds."
+    triggers: ["review.synthesized"]
+    publishes: ["review.accepted", "fix.requested", "review.loop.blocked"]
+    exempt_topics: ["review.accepted", "fix.requested", "review.loop.blocked"]
+    terminal_events: ["review.accepted", "fix.requested", "review.loop.blocked"]
+    event_filter:
+      enabled: true
+      events:
+        - review.synthesized
+    timeout: 900
+    missing_event_grace_secs: 300
+    instructions: |
+      ## REVIEW GATE MODE — Decide the next review-loop step
+
+      You receive `review.synthesized` and emit exactly one business event.
+      This is an exclusive three-way gate; do not emit a second event in the
+      same activation.
+
+      ### Decision Rules
+      Let `N = review_round`, `P0 = p0_count`, `P1 = p1_count`, and
+      `max_review_rounds = 6`.
+
+      - If `N <= 3` and `P0 == 0` and `P1 == 0`, emit only
+        `review.accepted`.
+      - If `N >= 4` and `P0 == 0`, emit only `review.accepted`, even when
+        `P1 > 0`. P1 no longer blocks after the first three review rounds.
+      - If blocking issues remain and `N < 6`, emit only
+        `fix.requested`. Blocking means P0 or P1 for rounds 1-3, and
+        P0 only from round 4 onward.
+      - If blocking issues remain and `N >= 6`, emit only
+        `review.loop.blocked` with `max_review_rounds: 6`.
+
+      ### Payload Rules
+      Pass through `plan_name`, `plan_path`, `review_round`,
+      `executor_head_sha`, `resolved_baseline_sha`, `p0_count`, `p1_count`,
+      `findings_summary`, and `verdict` from the trigger payload. Preserve
+      `round_base_sha` when emitting `fix.requested`.
+
+      Use `ralph emit --policy-check` first; only after it passes, emit the
+      real event. See `ralph-tools-emit` §5.
+
+      Then stop. Do not review code, plan fixes, apply fixes, align, or report.
+
   fix-planner:
     name: "Fix Planner"
-    description: "Reads synthesized_review_file, writes fix_plan_file, and emits EXACTLY ONE review.complete for fixer."
-    triggers: ["review.synthesized"]
+    description: "Reads synthesized_review_file after review-gate requests fixes, writes fix_plan_file, and emits EXACTLY ONE review.complete for fixer."
+    triggers: ["fix.requested"]
     publishes: ["review.complete"]
     exempt_topics: ["review.complete"]
     terminal_events: ["review.complete"]
     event_filter:
       enabled: true
       events:
-        - review.synthesized
+        - fix.requested
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
@@ -2301,14 +2475,14 @@ hats:
   alignment:
     name: "Alignment"
     description: "Cross-checks original plan execution (executor phase) vs fix-plan execution (fixer phase) using separate git ranges. Records residuals; does NOT loop, retry, or block."
-    triggers: ["fix.done"]
+    triggers: ["review.accepted"]
     publishes: ["align.done"]
     exempt_topics: ["align.done"]
     terminal_events: ["align.done"]
     event_filter:
       enabled: true
       events:
-        - fix.done
+        - review.accepted
     disallowed_tools: ["Edit"]
     timeout: 1800
     missing_event_grace_secs: 540
@@ -2386,7 +2560,7 @@ hats:
   reporter:
     name: "Reporter"
     description: "Aggregates plan change / execution / 6-dim review / fixes / alignment residuals into a final report. Sole consumer of plan.blocked / work.failed. Emits report.done then LOOP_COMPLETE."
-    triggers: ["align.done", "plan.blocked", "work.failed"]
+    triggers: ["align.done", "plan.blocked", "work.failed", "review.loop.blocked"]
     publishes: ["report.done", "LOOP_COMPLETE"]
     exempt_topics: ["report.done", "LOOP_COMPLETE"]
     terminal_events: ["report.done", "LOOP_COMPLETE"]
@@ -2396,6 +2570,7 @@ hats:
         - align.done
         - plan.blocked
         - work.failed
+        - review.loop.blocked
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |

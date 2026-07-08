@@ -330,11 +330,8 @@ event_loop:
         "build_unified_validation_pipeline must wire the runtime HatRegistry; got None"
     );
 
-    let view = ProtocolView::from_event_loop_with_feature_hats(
-        &config.event_loop,
-        &config.hats,
-        true,
-    );
+    let view =
+        ProtocolView::from_event_loop_with_feature_hats(&config.event_loop, &config.hats, true);
     let mut snap = minimal_snapshot();
     let mut projected = snap.clone();
     let mut ctx = ValidationContext::new(&mut snap);
@@ -345,8 +342,7 @@ event_loop:
         &envelope_payload_with_to_hat("ghost-hat"),
         Some("executor"),
     );
-    let report =
-        pipeline.validate_with_preview(&view, &mut ctx, &mut projected_ctx, &event);
+    let report = pipeline.validate_with_preview(&view, &mut ctx, &mut projected_ctx, &event);
     assert!(
         !report.accepted,
         "unknown to_hat must surface as a pipeline rejection; report: {report:?}"
@@ -413,11 +409,8 @@ event_loop:
 "#;
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let pipeline = build_unified_validation_pipeline(&config);
-    let view = ProtocolView::from_event_loop_with_feature_hats(
-        &config.event_loop,
-        &config.hats,
-        true,
-    );
+    let view =
+        ProtocolView::from_event_loop_with_feature_hats(&config.event_loop, &config.hats, true);
     let mut snap = minimal_snapshot();
     let mut projected = snap.clone();
     let mut ctx = ValidationContext::new(&mut snap);
@@ -427,8 +420,7 @@ event_loop:
         &envelope_payload_with_to_hat("reviewer"),
         Some("executor"),
     );
-    let report =
-        pipeline.validate_with_preview(&view, &mut ctx, &mut projected_ctx, &event);
+    let report = pipeline.validate_with_preview(&view, &mut ctx, &mut projected_ctx, &event);
     assert!(
         report.accepted,
         "known to_hat must pass; first_rejection={:?}",

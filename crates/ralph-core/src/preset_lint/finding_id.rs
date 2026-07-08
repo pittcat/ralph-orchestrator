@@ -309,7 +309,6 @@ pub const FINDING_FLOW_UNKNOWN_EMIT_REJECTED: &str = "preset.flow_unknown_emit_r
 /// preset-half a hard lint.
 pub const FINDING_METADATA_RUNTIME_DRIFT: &str = "preset.metadata_runtime_drift";
 
-
 // ──────────────────────────────────────────────────────────────────────────
 // 2026-07-03-002 plan U1: fix-unit task_id minting lint finding ID
 // ──────────────────────────────────────────────────────────────────────────
@@ -320,7 +319,6 @@ pub const FINDING_METADATA_RUNTIME_DRIFT: &str = "preset.metadata_runtime_drift"
 /// agent 推不出参数导致手写 id 被 state_projector 拒。Always `Error`.
 pub const FINDING_FIX_UNIT_TASK_ID_NOT_HELPER_DERIVED: &str =
     "preset.fix_unit_task_id_not_helper_derived";
-
 
 // ──────────────────────────────────────────────────────────────────────────
 // 2026-07-03-001 plan U9: supervisor preset lint finding IDs

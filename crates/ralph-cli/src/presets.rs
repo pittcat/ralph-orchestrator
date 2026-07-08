@@ -38,6 +38,15 @@ const PRESETS: &[EmbeddedPreset] = &[
         )),
         public: true,
     },
+    EmbeddedPreset {
+        name: "ce-executor-pipeline-loop",
+        description: "Review-loop CE executor: pipeline execution with serial six-dimension review, gated fix/re-review rounds, P1 cutoff after round 3, max 6 review rounds.",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/presets/ce-executor-pipeline-loop.yml"
+        )),
+        public: true,
+    },
     // 2026-07-03-001 plan U13: supervisor parallel preset.
     // 16 functional hats + progress-steward. Built on top of the
     // `ce-executor-pipeline` topology; swaps the in-process WaveTracker
@@ -145,7 +154,7 @@ mod tests {
         );
     }
 
-// Unit 1 (plan 2026-07-07-006): single-chain execution primary path.
+    // Unit 1 (plan 2026-07-07-006): single-chain execution primary path.
     // ce-executor-pipeline becomes the recommended CE executor;
     // ce-executor-serial is removed from the public builtin registry.
     // These assertions lock that contract at the registry boundary.
@@ -158,6 +167,105 @@ mod tests {
             names.iter().any(|n| *n == "ce-executor-pipeline"),
             "ce-executor-pipeline must be a public builtin; got {names:?}"
         );
+        assert!(
+            names.iter().any(|n| *n == "ce-executor-pipeline-loop"),
+            "ce-executor-pipeline-loop must be a public builtin; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_pipeline_loop_routes_are_single_consumer() {
+        let preset = get_preset("ce-executor-pipeline-loop")
+            .expect("ce-executor-pipeline-loop must be embedded");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("loop preset YAML should parse");
+
+        let mut consumers: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (hat_id, hat) in &config.hats {
+            for topic in &hat.triggers {
+                consumers
+                    .entry(topic.clone())
+                    .or_default()
+                    .push(hat_id.clone());
+            }
+        }
+
+        for topic in [
+            "work.done",
+            "fix.done",
+            "review.round.ready",
+            "review.synthesized",
+            "review.accepted",
+            "fix.requested",
+            "review.complete",
+            "review.loop.blocked",
+            "align.done",
+        ] {
+            let actual = consumers.get(topic).cloned().unwrap_or_default();
+            assert_eq!(
+                actual.len(),
+                1,
+                "topic {topic} must have exactly one explicit consumer, got {actual:?}"
+            );
+        }
+
+        assert_eq!(
+            consumers.get("work.done").cloned().unwrap_or_default(),
+            vec!["review-reentry".to_string()]
+        );
+        assert_eq!(
+            consumers.get("fix.done").cloned().unwrap_or_default(),
+            vec!["review-reentry".to_string()]
+        );
+        assert_eq!(
+            consumers.get("fix.requested").cloned().unwrap_or_default(),
+            vec!["fix-planner".to_string()]
+        );
+        assert_eq!(
+            consumers
+                .get("review.complete")
+                .cloned()
+                .unwrap_or_default(),
+            vec!["fixer".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_ce_executor_pipeline_loop_gate_contract() {
+        let preset = get_preset("ce-executor-pipeline-loop")
+            .expect("ce-executor-pipeline-loop must be embedded");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("loop preset YAML should parse");
+        let gate = config
+            .hats
+            .get("review-gate")
+            .expect("loop preset must declare review-gate");
+
+        assert_eq!(gate.triggers, vec!["review.synthesized"]);
+        assert_eq!(
+            gate.publishes,
+            vec!["review.accepted", "fix.requested", "review.loop.blocked"]
+        );
+
+        let instructions = &gate.instructions;
+        for required in [
+            "exclusive three-way gate",
+            "N <= 3",
+            "P0 == 0",
+            "P1 == 0",
+            "N >= 4",
+            "P1 no longer blocks after the first three review rounds",
+            "N < 6",
+            "N >= 6",
+            "max_review_rounds: 6",
+            "ralph emit --policy-check",
+        ] {
+            assert!(
+                instructions.contains(required),
+                "review-gate instructions missing required contract phrase `{required}`"
+            );
+        }
     }
 
     /// Registry must NOT expose `ce-executor-serial` once Unit 1 is complete.
@@ -170,7 +278,7 @@ mod tests {
         );
     }
 
-/// Reverse lock test (plan 2026-07-07-006 fix-plan U1): the
+    /// Reverse lock test (plan 2026-07-07-006 fix-plan U1): the
     /// `ce-executor-lite` template's `source` field must point to
     /// the Ralph primary path `ce-executor-pipeline`, never to
     /// the removed `ce-executor-serial`. If a future edit re-points
@@ -325,8 +433,7 @@ mod tests {
             .join("ce-executor-pipeline.yml");
         let yaml = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read pipeline preset at {}: {}", path.display(), e));
-        let v: serde_yaml::Value =
-            serde_yaml::from_str(&yaml).expect("parse pipeline yaml");
+        let v: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse pipeline yaml");
         let seq = v["event_loop"]["event_policy"]["schemas"]["work.done"]["required_fields"]
             .as_sequence()
             .expect("event_loop.event_policy.schemas.work.done.required_fields must be a list");
@@ -346,10 +453,8 @@ mod tests {
     #[test]
     fn test_pipeline_work_done_required_fields_covers_unit_evidence() {
         let required = parse_pipeline_work_done_required_fields();
-        let needed: std::collections::BTreeSet<String> = UNIT_EVIDENCE_FIELDS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let needed: std::collections::BTreeSet<String> =
+            UNIT_EVIDENCE_FIELDS.iter().map(|s| s.to_string()).collect();
         let missing: Vec<&String> = needed.difference(&required).collect();
         assert!(
             missing.is_empty(),
@@ -388,8 +493,7 @@ mod tests {
         .copied()
         .collect();
         let hats = v["hats"].as_mapping().expect("hats must be a mapping");
-        let mut all_topics: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
+        let mut all_topics: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for (_name, hat) in hats {
             for key in ["triggers", "publishes"] {
                 if let Some(seq) = hat[key].as_sequence() {
@@ -449,7 +553,7 @@ mod tests {
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        assert_eq!(presets.len(), 5, "Expected 5 public presets");
+        assert_eq!(presets.len(), 6, "Expected 6 public presets");
     }
 
     #[test]
@@ -573,9 +677,10 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
         assert!(names.contains(&"autoresearch"));
         assert!(names.contains(&"ce-executor-pipeline"));
+        assert!(names.contains(&"ce-executor-pipeline-loop"));
         assert!(names.contains(&"ce-executor-supervisor"));
         assert!(names.contains(&"debug"));
         assert!(names.contains(&"merge-batch"));
@@ -1314,8 +1419,10 @@ mod tests {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..");
-        let emit = std::fs::read_to_string(manifest_dir.join("crates/ralph-core/data/ralph-tools-emit.md"))
-            .expect("read ralph-tools-emit.md");
+        let emit = std::fs::read_to_string(
+            manifest_dir.join("crates/ralph-core/data/ralph-tools-emit.md"),
+        )
+        .expect("read ralph-tools-emit.md");
         assert!(
             emit.contains("协议违规后的 EmitResult"),
             "ralph-tools-emit must document protocol violation EmitResult/correction response"
@@ -1338,8 +1445,9 @@ mod tests {
             "ralph-tools-recovery-directives must document forbidden_action semantics"
         );
 
-        let main = std::fs::read_to_string(manifest_dir.join("crates/ralph-core/data/ralph-tools.md"))
-            .expect("read ralph-tools.md");
+        let main =
+            std::fs::read_to_string(manifest_dir.join("crates/ralph-core/data/ralph-tools.md"))
+                .expect("read ralph-tools.md");
         assert!(
             main.contains("ralph-tools-recovery-directives"),
             "ralph-tools.md must point agents to recovery-directives on task.resume"
@@ -1554,6 +1662,7 @@ mod tests {
         // This must stay in sync with scripts/ralph-zsh-plugin.zsh
         let zsh_values: std::collections::BTreeSet<String> = [
             "builtin:ce-executor-pipeline",
+            "builtin:ce-executor-pipeline-loop",
             "builtin:ce-executor-supervisor",
             "builtin:debug",
             "builtin:autoresearch",
@@ -1848,6 +1957,13 @@ mod tests {
             // consolidation). Topology is structurally valid; the EGRESS
             // finding is a known bound artifact.
             "ce-executor-pipeline",
+            // ce-executor-pipeline-loop: 2026-07-08 loop preset. This keeps
+            // the same flat serial review chain as ce-executor-pipeline and
+            // adds a review-gate/reentry loop. The WAC static BFS can treat
+            // the gated fix handoff as a dead end even though the explicit
+            // single-consumer chain is locked by
+            // test_ce_executor_pipeline_loop_routes_are_single_consumer.
+            "ce-executor-pipeline-loop",
             // ce-executor-supervisor: 2026-07-03-001 plan U13. The supervisor
             // preset has intentional branching completion paths: a failed exec
             // wave (`exec.wave.failed`) routes through `exec-failure-handler` →
@@ -1878,6 +1994,15 @@ mod tests {
             ),
             ("ce-executor-pipeline", "lint.preset.handoff_pairing_broken"),
             ("ce-executor-pipeline", "lint.preset.re_emit_trap"),
+            (
+                "ce-executor-pipeline-loop",
+                "lint.preset.activation_egress_missing",
+            ),
+            (
+                "ce-executor-pipeline-loop",
+                "lint.preset.handoff_pairing_broken",
+            ),
+            ("ce-executor-pipeline-loop", "lint.preset.re_emit_trap"),
         ];
 
         for preset in PRESETS.iter().filter(|p| p.public) {
@@ -2032,6 +2157,7 @@ mod tests {
             "autoresearch",
             "debug",
             "ce-executor-pipeline",
+            "ce-executor-pipeline-loop",
             "ce-executor-supervisor",
         ];
 
@@ -2081,6 +2207,21 @@ mod tests {
                 "ce-executor-pipeline",
                 "lint.preset.re_emit_trap",
                 "docs/plans/2026-07-02-003-feat-ce-executor-pipeline-preset-plan.md#u1",
+            ),
+            (
+                "ce-executor-pipeline-loop",
+                "lint.preset.activation_egress_missing",
+                "docs/plans/2026-07-08-002-feat-ce-executor-pipeline-loop-plan.md#u2",
+            ),
+            (
+                "ce-executor-pipeline-loop",
+                "lint.preset.handoff_pairing_broken",
+                "docs/plans/2026-07-08-002-feat-ce-executor-pipeline-loop-plan.md#u2",
+            ),
+            (
+                "ce-executor-pipeline-loop",
+                "lint.preset.re_emit_trap",
+                "docs/plans/2026-07-08-002-feat-ce-executor-pipeline-loop-plan.md#u2",
             ),
         ];
 
@@ -2201,5 +2342,4 @@ mod tests {
             );
         }
     }
-
 }
