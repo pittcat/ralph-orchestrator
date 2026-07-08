@@ -2265,6 +2265,37 @@ impl ValidationFailure {
             validation_errors: batch.errors,
         }
     }
+
+    /// 2026-07-09-001 plan (U5): enrich every item in
+    /// `validation_errors` with the U3 fields
+    /// (`expected` / `actual` / `field_description` /
+    /// `suggested_payload_shape` / `suggested_command`) by
+    /// looking at the matching payload in the original
+    /// batch (`payloads[index]`) and the topic's
+    /// `EventSchema`. `payloads` is passed as a slice of
+    /// `serde_json::Value` so the function is testable
+    /// without I/O; the wave CLI parses each line into a
+    /// `Value` before calling this.
+    ///
+    /// `validation_errors[].payload_index` is preserved so
+    /// the agent can map back to the original batch entry.
+    /// Required: U5 / R14a / SC2a contract — every error
+    /// must carry `payload_index` so the agent fixes the
+    /// whole batch in one round.
+    pub fn enrich_with_schema(
+        mut self,
+        topic: &str,
+        payloads: &[serde_json::Value],
+        schema: Option<&EventSchema>,
+    ) -> Self {
+        for error in self.validation_errors.iter_mut() {
+            let payload = payloads.get(error.payload_index);
+            let enriched =
+                enrich_validation_error_with_topic(error.clone(), topic, payload, schema);
+            *error = enriched;
+        }
+        self
+    }
 }
 
 /// Emit the validation failure in the requested output mode. Returns
@@ -3985,5 +4016,160 @@ hats:
             .as_str()
             .unwrap()
             .contains("--policy-check"));
+    }
+
+    // 2026-07-09-001 plan (U5): batch/wave enrichment tests.
+
+    /// U5 batch happy path: a `ValidationFailure::from_batch`
+    /// whose `validation_errors` carry a `payload_index` gets
+    /// matched to the index-matched payload when enriched.
+    /// The original 4-field shape (`field` / `reason_code` /
+    /// `message` / `payload_index`) survives; the new U3
+    /// fields (`expected` / `field_description` /
+    /// `suggested_payload_shape` / `suggested_command`) are
+    /// filled when the schema has field_docs.
+    #[test]
+    fn u5_enrich_with_schema_populates_per_payload_field_doc() {
+        use ralph_core::config::EventFieldDoc;
+        let mut schema = EventSchema::default();
+        schema.required_fields.push("depth".to_string());
+        schema.field_docs.insert(
+            "depth".to_string(),
+            EventFieldDoc {
+                meaning: "review dimension depth".to_string(),
+                source: "preset config".to_string(),
+                fill_rule: String::new(),
+            },
+        );
+        let failure = ValidationFailure {
+            ok: false,
+            error: "policy_validation_failed",
+            topic: "review.dimensions.complete".to_string(),
+            validation_errors: vec![
+                ValidationError {
+                    payload_index: 0,
+                    field: "depth".to_string(),
+                    reason_code: "missing_required_field".to_string(),
+                    message: "missing depth".to_string(),
+                    ..Default::default()
+                },
+                ValidationError {
+                    payload_index: 3,
+                    field: "depth".to_string(),
+                    reason_code: "missing_required_field".to_string(),
+                    message: "missing depth at index 3".to_string(),
+                    ..Default::default()
+                },
+            ],
+        };
+        let payloads = vec![
+            serde_json::json!({}),
+            serde_json::json!({"x": 1}),
+            serde_json::json!({"y": 2}),
+            serde_json::json!({}),
+        ];
+        let failure = failure.enrich_with_schema("review.dimensions.complete", &payloads, Some(&schema));
+        // payload_index is preserved (the U5 / SC2a contract).
+        assert_eq!(failure.validation_errors[0].payload_index, 0);
+        assert_eq!(failure.validation_errors[1].payload_index, 3);
+        // Both items got enriched because both reference a field
+        // with field_docs.
+        assert_eq!(
+            failure.validation_errors[0].field_description.as_deref(),
+            Some("review dimension depth")
+        );
+        assert_eq!(
+            failure.validation_errors[1].field_description.as_deref(),
+            Some("review dimension depth")
+        );
+    }
+
+    /// U5 privacy: enriched JSON never includes the absolute
+    /// workspace path. We don't have access to the workspace
+    /// inside the helper, so this test pins the contract
+    /// indirectly: the helper has no Path argument.
+    #[test]
+    fn u5_enrich_with_schema_has_no_workspace_arg() {
+        let _signature: fn(
+            ValidationFailure,
+            &str,
+            &[serde_json::Value],
+            Option<&EventSchema>,
+        ) -> ValidationFailure = |f, t, p, s| f.enrich_with_schema(t, p, s);
+    }
+
+    /// U5 backward compatibility: enriching a
+    /// `ValidationFailure` whose schema has no `field_docs`
+    /// still produces a stable JSON shape (no panic, no
+    /// fabricated field description).
+    #[test]
+    fn u5_enrich_with_schema_no_field_docs_is_safe() {
+        let schema = EventSchema::default();
+        let failure = ValidationFailure {
+            ok: false,
+            error: "policy_validation_failed",
+            topic: "work.done".to_string(),
+            validation_errors: vec![ValidationError {
+                payload_index: 0,
+                field: "task_id".to_string(),
+                reason_code: "missing_required_field".to_string(),
+                message: "missing required field: task_id".to_string(),
+                ..Default::default()
+            }],
+        };
+        let payloads = vec![serde_json::json!({})];
+        let failure = failure.enrich_with_schema("work.done", &payloads, Some(&schema));
+        assert!(
+            failure.validation_errors[0]
+                .field_description
+                .is_none(),
+            "no field_docs must produce no field_description"
+        );
+        // `expected` is still filled: that's the bare field
+        // name, which is safe.
+        assert_eq!(
+            failure.validation_errors[0].expected.as_deref(),
+            Some("task_id")
+        );
+    }
+
+    /// U5 batch safety: when an error has an out-of-range
+    /// `payload_index` (e.g. a clock-skewed batch where the
+    /// operator passes `payloads.len() < expected`), the
+    /// helper must NOT panic. It silently uses `Value::Null`
+    /// for the payload lookup so the rest of the enrichment
+    /// still works.
+    #[test]
+    fn u5_enrich_with_schema_out_of_range_payload_index_is_safe() {
+        use ralph_core::config::EventFieldDoc;
+        let mut schema = EventSchema::default();
+        schema.field_docs.insert(
+            "task_id".to_string(),
+            EventFieldDoc {
+                meaning: "live id".to_string(),
+                source: String::new(),
+                fill_rule: String::new(),
+            },
+        );
+        let failure = ValidationFailure {
+            ok: false,
+            error: "policy_validation_failed",
+            topic: "work.done".to_string(),
+            validation_errors: vec![ValidationError {
+                payload_index: 99,
+                field: "task_id".to_string(),
+                reason_code: "missing_required_field".to_string(),
+                message: "missing required field: task_id".to_string(),
+                ..Default::default()
+            }],
+        };
+        let payloads = vec![serde_json::json!({})];
+        let failure = failure.enrich_with_schema("work.done", &payloads, Some(&schema));
+        assert_eq!(failure.validation_errors[0].payload_index, 99);
+        assert_eq!(
+            failure.validation_errors[0].field_description.as_deref(),
+            Some("live id"),
+            "schema lookup must still succeed even when payload_index is OOR"
+        );
     }
 }

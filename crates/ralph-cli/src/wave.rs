@@ -517,6 +517,24 @@ fn run_wave_precheck(
     }
 
     let batch = validate_batch_against_config(topic, payloads, policy, events_file)?;
+    // 2026-07-09-001 plan (U5): pre-parse every payload into
+    // a JSON Value so we can hand each error its index-matched
+    // payload to the enrichment helper. A parse failure here
+    // means the original batch will surface a
+    // `payload_type_mismatch` error already; we just keep the
+    // `Null` marker on the unmatched indices so the helper
+    // does not panic.
+    let parsed_payloads: Vec<serde_json::Value> = payloads
+        .iter()
+        .map(|p| serde_json::from_str(p).unwrap_or(serde_json::Value::Null))
+        .collect();
+    let schema = config
+        .as_ref()
+        .and_then(|c| c.event_loop.event_policy.as_ref())
+        .and_then(|p| {
+            let key: &str = topic;
+            p.schemas.get(key)
+        });
     if batch.is_ok() {
         // U1 (2026-06-17-005 plan): step handoff progress-task gate
         // precheck, batch path. For each payload on a gated topic
@@ -539,7 +557,8 @@ fn run_wave_precheck(
                     let failure = ValidationFailure::from_batch(
                         topic,
                         crate::policy_check::BatchValidation { errors },
-                    );
+                    )
+                    .enrich_with_schema(topic, &parsed_payloads, schema);
                     let out_mode = match output {
                         WaveOutputFormat::Text => OutputMode::Text,
                         WaveOutputFormat::Json => OutputMode::Json,
@@ -554,7 +573,8 @@ fn run_wave_precheck(
     // Build the structured failure payload and emit it in the
     // requested output mode. This always exits non-zero (the helper
     // returns Err) so the agent sees a clear failure.
-    let failure = ValidationFailure::from_batch(topic, batch);
+    let failure = ValidationFailure::from_batch(topic, batch)
+        .enrich_with_schema(topic, &parsed_payloads, schema);
     let out_mode = match output {
         WaveOutputFormat::Text => OutputMode::Text,
         WaveOutputFormat::Json => OutputMode::Json,
