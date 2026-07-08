@@ -73,7 +73,7 @@ mod runtime_config_block;
 mod runtime_state_injection;
 mod scope_enforcement;
 mod scratchpad;
-mod serial_lint;
+mod event_policy_lint_resume;
 mod stale_breaker;
 mod state_machine;
 mod structured_evidence;

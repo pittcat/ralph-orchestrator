@@ -1,8 +1,12 @@
 //! 2026-06-13-004 U6: incident fixture regression test.
 //!
-//! Reproduces the 2026-06-13 ce-executor-serial incident end-to-end
-//! from the anonymized JSONL fixture in
-//! `tests/fixtures/wave-isolated-dimension-done/`. The 8 events all
+//! Historical reference: this test reproduces the 2026-06-13
+//! historical `ce-executor-serial` incident end-to-end from the
+//! anonymized JSONL fixture in
+//! `tests/fixtures/wave-isolated-dimension-done/`. The fixture
+//! predates the 2026-07-07-006 refactor that retired the serial
+//! preset; the scope / origin guard fix the test verifies is now
+//! a generic boundary mechanism. The 8 events all
 //! carry `hat=dimension-reviewer` (correct worker provenance) and
 //! `topic=review.dimension.done`. Before U1+U2 they were dropped by
 //! the isolated scope check (which used `current_isolated_hat`

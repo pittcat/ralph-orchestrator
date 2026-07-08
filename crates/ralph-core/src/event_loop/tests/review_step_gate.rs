@@ -175,7 +175,11 @@ event_loop:
 // ─────────────────────────────────────────────────────────────────
 // 2026-06-28-002 plan U1: plan_gate 豁免 fix-unit
 //
-// 背景：ce-executor-serial 在 fix-unit 阶段发 `review.complete(fix_plan_file)`
+// Historical note: the original fix-unit exemption was added
+// while the `ce-executor-serial` preset was the canonical
+// reference. The mechanism is now generic (any preset whose
+// `flow.steps` contains a `fix-{NN}` step hits the same path):
+// 背景：historical serial preset 在 fix-unit 阶段发 `review.complete(fix_plan_file)`
 // 之后，后续 `plan.complete` 因没有 review terminal 而被拒。修复：
 // (1) `plan.complete` 当 step 以 `fix-` 开头时直接 accept；
 // (2) `observe_accepted` 在 `review.complete` payload 含非空 `fix_plan_file`

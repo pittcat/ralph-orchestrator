@@ -15,7 +15,12 @@
 //! These tests cover BOTH paths by driving the runtime via
 //! `process_events_from_jsonl` and observing the bus.
 //!
-//! Plan: docs/plans/2026-07-06-001-feat-ce-executor-serial-protocol-ssot-convergence-plan.md
+//! Historical reference: the plan that motivated U12
+//! (`docs/plans/2026-07-06-001-feat-ce-executor-serial-protocol-ssot-convergence-plan.md`)
+//! was authored while `ce-executor-serial` was still the
+//! canonical built-in. After plan 2026-07-07-006 retired that
+//! preset, the U12 contract still holds for any preset that
+//! does NOT opt in to `progress_steward.enabled == true`.
 //! Unit: U12.
 
 use ralph_proto::Event as ProtoEvent;
@@ -58,9 +63,9 @@ fn write_event(path: &std::path::Path, topic: &str, hat: &str) {
 
 /// Build a minimal isolated-mode event loop with
 /// `progress_steward.enabled: false` and `executor` as the
-/// publishing hat. The `progress-steward` hat is NOT declared
-/// (mimicking the post-U10 ce-executor-serial preset where the
-/// hat was removed entirely).
+/// publishing hat. The opt-in `progress-steward` hat is NOT
+/// declared (mimicking the post-007 state where the steward
+/// is opt-in and removed by default).
 fn make_isolated_loop_with_steward_disabled(events_path: &std::path::Path) -> EventLoop {
     let yaml = r#"
 event_loop:
@@ -142,11 +147,11 @@ fn test_progress_steward_disabled_skips_loop_stalled_wake() {
 }
 
 /// U12.NO_HAT: when `progress_steward.enabled == false` AND
-/// the `progress-steward` hat is not declared in the topology,
-/// the runtime's `consumer_stall_repeat` branch in
-/// `process_output` MUST NOT publish `loop.stalled` either. The
-/// post-U10 ce-executor-serial preset exhibits exactly this
-/// state (enabled==false AND no `progress-steward` hat), so a
+/// the opt-in `progress-steward` hat is not declared in the
+/// topology, the runtime's `consumer_stall_repeat` branch in
+/// `process_output` MUST NOT publish `loop.stalled` either.
+/// The default state (`enabled == false`, no steward hat
+/// declared) is the post-007 pipeline contract; a
 /// `loop.stalled` wake would target a non-existent hat and
 /// surface as a phantom-recovery drift.
 #[test]

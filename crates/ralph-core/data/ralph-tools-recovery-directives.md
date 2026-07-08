@@ -70,7 +70,7 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 **Trigger:** Orchestrator emits `task.resume.misrouted` diagnostic event. The diagnostic payload contains the offending `consumer` hat ID and the `topic` that consumer's `triggers` did not declare.
 
 **What this means:**
-- The orchestrator detected that a handoff's target consumer does NOT subscribe to the handoff's topic (via the shared `check_hat_triggers` helper).
+- The orchestrator detected that a handoff's target consumer does NOT subscribe to the handoff's topic (the orchestrator's `triggers:` check rejects misrouted handoffs before the pending-registration timer).
 - Without this detection the handoff would silently stall for 600s, then escalate to `task.resume → recovery_exhausted:stall_recovery:...:handoff_dispatch_timeout` and route through the handoff's prefix-allowlist as `REVIEW_COMPLETE(pass)` — the silent-success loop family (see the historical `docs/report/2026-07-06-ce-executor-primary-*` diagnosis reports for the original root cause; pipeline does not enable the prefix-allowlist promotion path).
 - The orchestrator now skips the 600s pending registration and emits this diagnostic immediately. The producer's topic emissions are also bypassed.
 
@@ -82,9 +82,3 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 **禁止：** 在没有 topology 修复的情况下继续走 consumer hat 路径（会再次触发同一种 misroute）。
 
 ---
-
-**对应 runtime 判定函数（reviewer only, not injected）：**
-`recovery_runtime::dedupe_stall_recovery_with_missing_event_gate`,
-`recovery_runtime::finalize_recovery_outcome_on_flapping`,
-`recovery_runtime::publish_loop_stalled_business_event`,
-`recovery_runtime::block_executor_resend_storm`.

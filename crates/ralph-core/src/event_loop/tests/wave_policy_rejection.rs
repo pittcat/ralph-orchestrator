@@ -46,7 +46,9 @@ fn write_wave_event_to_jsonl_with_payload(
 
 /// Build a minimal isolated-mode event loop with a coordinator + reviewer
 /// topology that supports `review.wave.ready` wave dispatch. The `review.wave.ready`
-/// schema requires `depth` (matches `presets/en/ce-executor-serial.yml`).
+/// schema requires `depth` (matches the historical reference
+/// preset schema — see the retired `presets/schemas/ce-executor-serial.yml`
+/// — that first declared the field).
 fn make_wave_policy_loop(events_path: &std::path::Path) -> EventLoop {
     let yaml = r#"
 event_loop:

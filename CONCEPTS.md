@@ -10,7 +10,7 @@ An isolated agent role in a preset loop. Each activation gets fresh context, own
 
 ### dimension-reviewer
 
-A read-only review hat in `ce-executor-serial`. Reviews one quality dimension per activation, emits `review.dimension.done` or `review.dimension.failed`, and may write findings only under the plan scratchpad. Must not modify tracked plan or source files; doing so triggers scope violation audit.
+A read-only review hat in `ce-executor-pipeline` (and historically `ce-executor-serial`). Reviews one quality dimension per activation, emits `review.dimension.done` or `review.dimension.failed`, and may write findings only under the plan scratchpad. Must not modify tracked plan or source files; doing so triggers scope violation audit.
 
 ### disallowed_tools
 

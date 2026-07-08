@@ -160,7 +160,7 @@ pub fn publish_correction_via_context(
 
     // R11 (3-strike escalation): if the correction block already
     // crossed the escalation threshold, publish a `plan.blocked`
-    // event so the shipper / reporter chain runs the preset's
+    // event so the terminal reporting chain runs the preset's
     // failure path. The legacy `task.resume` event is not
     // published alongside (the `return` in the caller short-
     // circuits the legacy path).

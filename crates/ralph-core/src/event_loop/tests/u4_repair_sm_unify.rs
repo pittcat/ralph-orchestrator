@@ -58,8 +58,8 @@ hats:
 fn u4_repair_state_machine_default_budget_is_three() {
     use crate::event_loop::repair_flow::{RepairBudget, RepairStateMachine};
     // The default budget used by `RepairStateMachine::default`
-    // is 3 (mirroring the `mechanism.repair_budget: 3`
-    // SSOT in `ce-executor-serial`).
+    // is 3 (the historical preset used `mechanism.repair_budget: 3`
+    // — see `presets/schemas/`).
     let sm = RepairStateMachine::default();
     assert_eq!(sm.budget(), RepairBudget { max: 3 });
 }
@@ -105,8 +105,8 @@ fn u4_build_stage_context_shares_repair_state_machine() {
     // Both start empty; the `RepairDispatchStage`
     // inserts on first use. The per-task default
     // budget is 3 (mirroring
-    // `mechanism.repair_budget: 3` in
-    // `ce-executor-serial`).
+    // `mechanism.repair_budget: 3` in the historical
+    // preset family — see `presets/schemas/`).
     assert!(ctx.repair_states.is_empty());
     assert!(event_loop.repair_state_machines.is_empty());
     let _ = RepairBudget { max: 3 };

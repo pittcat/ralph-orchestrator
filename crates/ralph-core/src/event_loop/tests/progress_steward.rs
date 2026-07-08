@@ -1,11 +1,19 @@
 //! Characterization tests for plan `2026-06-16-001` U5: the loop-
-//! level `progress-steward` fallback hat.
+//! level `progress-steward` opt-in stall-diagnostic hat.
+//!
+//! Historical reference: the `progress-steward` hat was first
+//! introduced while the `ce-executor-serial` preset was the
+//! canonical built-in. After the 2026-07-07-006 refactor the
+//! serial preset was retired; the hat is now used only by
+//! `ce-executor-supervisor` (non-pipeline) as an opt-in
+//! diagnostic.
 //!
 //! The runtime auto-emits a `loop.stalled` diagnostic when no
 //! business event has advanced for
 //! `progress_steward.max_steward_iterations` consecutive turns.
-//! The `progress-steward` hat (added to the preset by U5) is the
-//! recovery handler. The runtime also auto-escalates to
+//! The opt-in `progress-steward` hat is the recovery handler;
+//! `enabled` defaults to `false`, so a pipeline loop never
+//! auto-wakes the steward. The runtime also auto-escalates to
 //! `plan.blocked(reason=loop_stalled_max_iterations)` when the
 //! steward itself has been woken `max_steward_iterations` times
 //! in a row without producing a forwarded business event.
@@ -16,8 +24,8 @@
 //! stall and wake the hat. The bus observer captures the
 //! diagnostic events; the per-hat `peek_pending` would require
 //! a `progress-steward` hat registered in the test topology
-//! (which the test yaml does not declare — the production
-//! preset does), so we use the observer pattern instead.
+//! (which the test yaml does declare — see line 85), so we use
+//! the observer pattern instead.
 
 use super::*;
 use ralph_proto::Event as ProtoEvent;
@@ -57,7 +65,7 @@ fn write_event(path: &std::path::Path, topic: &str, hat: &str) {
 }
 
 /// Build a minimal isolated-mode event loop with `executor` as the
-/// publishing hat. The `progress-steward` hat IS declared here
+/// publishing hat. The opt-in `progress-steward` hat IS declared here
 /// because the runtime's stall detector cross-validates the
 /// configured `steward_hat_id` against the runtime registry
 /// (F-REL-002) — a missing hat causes the wake to be skipped.
@@ -82,6 +90,8 @@ hats:
     name: "Executor"
     triggers: ["work.start"]
     publishes: ["work.ready", "work.done"]
+  # Opt-in stall-diagnostic hat declared so the runtime's
+  # stall detector can route to it (test-only fixture).
   progress-steward:
     name: "🛟 Progress Steward"
     triggers: ["loop.stalled", "task.resume"]
@@ -99,14 +109,18 @@ hats:
 /// keeps `consecutive_no_progress_turns = 0`. A subsequent
 /// no-progress turn increments the counter; after 3 such turns
 /// the runtime auto-emits `loop.stalled` with `target =
-/// progress-steward`.
-///
-/// We test the runtime's stall detector by writing a no-event
-/// JSONL (the loop sees an empty events file) and asserting on
-/// the diagnostic + bus state after the runtime's stall detector
-/// runs. The exact diagnostic shape is checked via the bus
-/// observer (the per-hat `peek_pending` would require a
-/// `progress-steward` hat registered in the test topology).
+/// Historical reference: the original comment said "via the
+/// opt-in `progress-steward` hat". After plan 2026-07-07-006
+/// retired `ce-executor-serial` as a public builtin, the
+/// opt-in stall-diagnostic hat is now used only by
+/// `ce-executor-supervisor` (non-pipeline). Pipeline presets
+/// must NOT declare the hat; if they do, it is a regression. We test the runtime's stall detector by
+/// writing a no-event JSONL (the loop sees an empty events
+/// file) and asserting on the diagnostic + bus state after the
+/// runtime's stall detector runs. The exact diagnostic shape
+/// is checked via the bus observer (the per-hat `peek_pending`
+/// would require the opt-in `progress-steward` hat registered
+/// in the test topology).
 #[test]
 fn test_u5_stall_detector_emits_loop_stalled_after_threshold() {
     let temp_dir = tempfile::tempdir().unwrap();

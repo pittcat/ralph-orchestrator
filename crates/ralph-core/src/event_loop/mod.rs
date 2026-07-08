@@ -135,7 +135,7 @@ pub use policy::{
 pub use types::{EventLoop, ProcessedEvents, ProcessedEventsWithWaves, TerminationReason};
 // 2026-06-26 plan U1: typed verdict SSOT — used by `verdict_payload_is_fail`
 // and `check_completion_event` to share the same Pass / PassWithResiduals /
-// Fail semantics as the shipper and reporter prompts.
+// Fail semantics as the terminal reporting chain.
 pub use verdict::{Verdict, VerdictParseError};
 // 2026-06-26 plan U1: completion-correction exhaust + structural-rejection
 // sources, surfaced through `TerminationReason::CompletionStuck`.
@@ -394,9 +394,9 @@ pub struct RecoverableExhaustion {
 /// override it in `ralph.yml`, and lets the hat prompt read the
 /// actual value rather than the literal variable name.
 ///
-/// 2026-06-24 plan U2: also appends `max_residuals` so the shipper
-/// hat can read the verdict-promotion threshold without depending
-/// on hat-side hardcoding.
+/// 2026-06-24 plan U2: also appends `max_residuals` so the terminal
+/// reporting chain can read the verdict-promotion threshold
+/// without depending on hat-side hardcoding.
 ///
 /// Appended AFTER `### GUARDRAILS` so the hat's own instructions
 /// remain authoritative for workflow order. Block is always emitted

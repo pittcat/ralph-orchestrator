@@ -208,6 +208,6 @@ jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
 | `review.wave.complete` | supervisor 确认 review-coordinator aggregate 收齐 6/7 维度 | `review-synthesizer` |
 | `review.wave.failed` | review coordinator 报 aggregate_timeout 时 | `review-synthesizer` |
 
-**为什么不能从 worker 内直接发**：origin guard 拒绝 agent emit 这些 topics（参见 `crates/ralph-core/src/event_origin.rs::SUPERVISOR_COORDINATION_TOPICS`）。`ce-executor-supervisor` 中 review-synthesizer 的 `publishes: [review.wave.complete]` 实际上由 lint whitelist 允许（review-synthesizer 属于 `*-integrator / *-coordinator` 例外族），但 runtime 仍走 supervisor 路径。
+**为什么不能从 worker 内直接发**：origin guard 拒绝 agent emit 这些 topics（supervisor 协调 topic 是 runtime-owned，只有 supervisor 路径可以发）。`ce-executor-supervisor` 中 review-synthesizer 的 `publishes: [review.wave.complete]` 实际上由 lint whitelist 允许（review-synthesizer 属于 `*-integrator / *-coordinator` 例外族），但 runtime 仍走 supervisor 路径。
 
 **如何观察**：用 `ralph diagnose --supervisor json` 看 `active_waves` / `queue_depth` / `dedup_hits`（fix-plan U11 / R-11）。

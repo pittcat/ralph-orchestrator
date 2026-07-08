@@ -554,17 +554,24 @@ pub struct LoopState {
     /// P0-3 fix (plan 2026-06-29-006 U7): when the drift engine
     /// promotes a `Final` hint to `RecoveryExhausted`, it must
     /// first publish a `plan.blocked` business event so the
-    /// `shipper` / `reporter` chain can run the preset's
-    /// failure path. The flag records "we already emitted
-    /// `plan.blocked` and are waiting for shipper to process
-    /// it" so the engine can defer the actual
-    /// `RecoveryExhausted` return for one iteration.
+    /// terminal reporting chain can run the preset's failure
+    /// path. The flag records "we already emitted
+    /// `plan.blocked` and are waiting for the terminal
+    /// reporting chain to process it" so the engine can defer
+    /// the actual `RecoveryExhausted` return for one iteration.
+    ///
+    /// Historical note: the original wording said
+    /// `shipper / reporter`. After plan 2026-07-07-006 retired
+    /// `ce-executor-serial` as a public builtin, the chain is
+    /// preset-owned (the unit-level `reporter` hat in pipeline,
+    /// or any preset-defined terminal hat). The flag's
+    /// semantics are unchanged.
     ///
     /// Lifetime: set by `DriftEngine::check_termination_hint`
     /// when the responder escalates to `Final`; consumed (and
     /// cleared) by the same function on the next iteration
     /// after the emit. Capped at 1 iteration to avoid hanging
-    /// the loop when no shipper is registered.
+    /// the loop when no terminal hat is registered.
     pub pending_plan_blocked_for_failure: bool,
 
     /// Unit 3 (2026-06-16-002 plan): `true` once the coordinator has
@@ -746,7 +753,8 @@ pub struct LoopState {
     /// build.
     pub last_test_passed_was_fix_unit: bool,
 
-    /// 2026-07-07-002 U6: latest validator terminal snapshot for shipper gate.
+    /// 2026-07-07-002 U6: latest validator terminal snapshot for the
+    /// fail-close terminal gate.
     pub last_validator_terminal_step: Option<String>,
     /// `"passed"` or `"failed"` — mirrors latest `test.passed` / `test.failed`.
     pub last_validator_terminal_kind: Option<String>,

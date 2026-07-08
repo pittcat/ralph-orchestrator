@@ -139,7 +139,7 @@ Ralph implements the [Ralph Wiggum technique](https://ghuntley.com/ralph/) — a
 - **Hat System** — Specialized personas coordinating through events
 - **Backpressure** — Gates that reject incomplete work (tests, lint, typecheck)
 - **Memories & Tasks** — Persistent learning and runtime work tracking
-- **4 Supported Builtins** — `autoresearch`, `ce-executor-serial`, `debug`, and `merge-loop`, with more patterns documented as examples
+- **6 Supported Builtins** — `autoresearch`, `ce-executor-pipeline`, `ce-executor-supervisor`, `debug`, `merge-loop`, and `merge-batch`, with more patterns documented as examples
 
 ## Human Guidance & Recovery
 
@@ -198,7 +198,7 @@ ralph run -p "Implement the feature in specs/user-authentication/"
 Claude Code, Kiro, Gemini CLI, Codex, Amp, Copilot CLI, and OpenCode.
 
 **What is the "hat system"?**
-Ralph uses specialized personas (hats) that coordinate through events. Each hat has a specific role — for example, the `ce-executor-serial` preset uses coordinator, executor, reviewer, fixer, shipper, and reporter hats — enabling structured multi-step task execution.
+Ralph uses specialized personas (hats) that coordinate through events. Each hat has a specific role — for example, the `ce-executor-pipeline` preset uses plan-reviewer, executor, multiple dimension reviewers, fix-planner, fixer, alignment, and reporter hats — enabling structured multi-step task execution.
 
 ### Human Guidance & Recovery
 

@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Historical Note (state projection phase 1)
+
+> The entries below describe the original `state projection phase 1`
+> rollout (plan `2026-06-17-003`). The named presets (`ce-executor-isolated`,
+> `ce-executor-serial`) were the active builtins at that time; both have
+> since been retired — `ce-executor-isolated` was removed in 2026-06-23,
+> `ce-executor-serial` was retired as a public builtin by plan
+> `2026-07-07-006`. Kept verbatim so the rollout history stays auditable;
+> current builtins are listed in `presets/manifest.yml`.
+
 ### Added
 
 - State projection: the orchestrator is the canonical writer for

@@ -1,15 +1,16 @@
 // 2026-06-26 plan U1: typed `Verdict` SSOT for terminal state semantics.
 //
 // Three-state model — the OLD code did binary `verdict == "fail"` matching
-// which caused `pass_with_residuals` to be mis-classified by shipper,
-// reporter and verdict_gate independently (see
-// docs/solutions/integration-issues/ce-executor-serial-mechanism-close-loop-2026-06-23.md).
+// which caused `pass_with_residuals` to be mis-classified by the
+// terminal reporting chain and `verdict_gate` independently (see
+// docs/solutions/integration-issues/ce-executor-serial-mechanism-close-loop-2026-06-23.md
+// for the historical incident report).
 //
 // This module is the single source of truth: the same `Verdict::resolve()`
 // function is called from Rust code paths (`verdict_payload_is_fail`,
-// `check_completion_event`) and is described in the shipper/reporter
-// prompts (`presets/en/ce-executor-serial.yml`) so the three layers share
-// one definition of `Pass` / `PassWithResiduals` / `Fail`.
+// `check_completion_event`) and is documented in the terminal reporting
+// prompts so the three layers share one definition of
+// `Pass` / `PassWithResiduals` / `Fail`.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -36,8 +37,8 @@ pub enum Verdict {
         count: u32,
     },
     /// Verdict: fail. `reason` is a free-form human-readable
-    /// explanation that the shipper / reporter forwards to the
-    /// terminal `report.done` payload.
+    /// explanation that the terminal reporting chain forwards to
+    /// the `report.done` payload.
     Fail {
         /// Free-form reason string.
         reason: String,

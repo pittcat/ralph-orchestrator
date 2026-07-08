@@ -3,8 +3,17 @@
 //! is retired from both schema and runtime. Only
 //! `LOOP_COMPLETE` now terminates the dispatcher (U10).
 //!
+//! Historical reference: the test fixture loads
+//! `presets/schemas/ce-executor-serial.yml` to assert that
+//! its `verdict_gate.additional_topics` is `[]`. That
+//! preset has since been retired (plan 2026-07-07-006).
+//! The fixture path is kept for SSOT-equivalence coverage
+//! of the contract — the assert reads the schema as
+//! historical evidence that the field is empty.
+//!
 //! Pinned contracts:
-//! 1. `presets/schemas/ce-executor-serial.yml` declares
+//! 1. The historical preset schema
+//!    `presets/schemas/ce-executor-serial.yml` declares
 //!    `verdict_gate.additional_topics: []`.
 //! 2. A `report.done(pass_or_fail=fail)` event does NOT
 //!    produce `TerminationReason::ReviewFailed` from
@@ -16,10 +25,14 @@
 
 use super::*;
 
+#[allow(dead_code)]
 fn load_ce_executor_serial_schema() -> std::path::PathBuf {
     // The schema lives under `presets/schemas/` in the
     // workspace root. We use `CARGO_MANIFEST_DIR` to
-    // find it from `ralph-core`'s tests.
+    // find it from `ralph-core`'s tests. The path is
+    // retained as historical evidence that the
+    // `verdict_gate.additional_topics` mirror was empty
+    // before U9 retired it from the runtime.
     let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     crate_dir
         .join("../../presets/schemas/ce-executor-serial.yml")

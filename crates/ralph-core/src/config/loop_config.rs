@@ -295,9 +295,10 @@ pub struct EventLoopConfig {
     /// runtime scans the workspace for `scratchpad.md` /
     /// `tmp*.md` / `*.bak` artefacts that landed in source trees
     /// (`crates/`, `src/`, `backend/`, etc.) and relocates them to
-    /// `.ralph/agent/scratchpad-{loop_id}.md`.  Defaults to `false`
-    /// so non-isolated presets are unaffected; the
-    /// `ce-executor-serial` preset opts in.
+    /// `.ralph/agent/scratchpad-{loop_id}.md`.  Defaults to
+    /// disabled; presets that opt into the isolated boundary
+    /// flip this to `true` (generic boundary mechanism — does
+    /// not depend on any specific preset).
     #[serde(default)]
     pub ephemeral_isolation: bool,
 
@@ -308,7 +309,8 @@ pub struct EventLoopConfig {
     /// step)`.  The contract is enforced only for keys whose last
     /// slug matches the `uN-` / `uNa-` shape; legacy or
     /// non-conforming keys fall through to the legacy behaviour.
-    /// Defaults to `false`; `ce-executor-serial` opts in.
+    /// Defaults to disabled; presets that opt into the per-step
+    /// contract flip this on.
     #[serde(default)]
     pub enforce_current_unit: bool,
 
@@ -332,17 +334,18 @@ pub struct EventLoopConfig {
     #[serde(default)]
     pub mechanism: Option<MechanismConfig>,
 
-    /// 2026-06-16-001 U5: progress-steward fallback configuration.
-    /// When the loop detects that no accepted business event has
-    /// advanced for `max_steward_iterations` consecutive turns, it
-    /// wakes the `steward_hat_id` hat to summarise the state and
-    /// emit a single recovery event. The steward is itself exempt
-    /// from re-routing (a steward emit that fails the origin guard
-    /// will not recursively re-trigger the steward).
+    /// 2026-06-16-001 U5: optional opt-in stall-diagnostic hat.
+    /// When `progress_steward.enabled == true` and the loop
+    /// detects that no accepted business event has advanced for
+    /// `max_steward_iterations` consecutive turns, the loop wakes
+    /// the `steward_hat_id` hat so it can summarise the state and
+    /// emit a single recovery event. The steward is itself
+    /// exempt from re-routing (a steward emit that fails the
+    /// origin guard will not recursively re-trigger the steward).
     ///
-    /// Defaults are conservative: enabled with `progress-steward`
-    /// as the target and 3 iterations as the stall threshold. Set
-    /// `enabled: false` to disable the steward entirely.
+    /// Defaults: `enabled == false`. Set `enabled: true` to opt
+    /// in. The mechanism is a generic stall diagnostic and does
+    /// not depend on any specific preset.
     #[serde(default)]
     pub progress_steward: ProgressStewardConfig,
 
@@ -352,10 +355,7 @@ pub struct EventLoopConfig {
     /// that has since been closed or whose context has drifted past
     /// the recovery window. The default is 300s; operators can
     /// override per-preset or in `ralph.yml`. A value of `0`
-    /// disables the freshness filter (always admit). U5 also reads
-    /// this TTL when routing rejections to the `progress-steward`
-    /// hat (the steward itself is exempt from re-routing into
-    /// itself).
+    /// disables the freshness filter (always admit).
     #[serde(default)]
     pub task_resume_ttl_seconds: Option<u64>,
 
@@ -363,15 +363,14 @@ pub struct EventLoopConfig {
     /// `enabled` is `true`, the event loop projects the canonical
     /// `.ralph/agent/tasks.jsonl` and `.ralph/agent/progress.md`
     /// ledgers from the inbound event batch **before** the
-    /// `progress_task_gate` runs (SP-R8). Defaults to `disabled` so
-    /// legacy presets are unaffected; `ce-executor-serial` and
-    /// `ce-executor-serial` opt in via
-    /// `event_loop.state_projection.enabled: true` (SP-R18).
+    /// `progress_task_gate` runs (SP-R8). Defaults to `disabled`
+    /// so legacy presets are unaffected; presets that opt in
+    /// flip `event_loop.state_projection.enabled: true` (SP-R18).
     #[serde(default)]
     pub state_projection: StateProjectionConfig,
 
     /// 2026-06-24 plan U2: residual-finding threshold for verdict
-    /// promotion. When the shipper hat translates
+    /// promotion. When the verdict gate translates
     /// `plan.complete.verdict == "pass_with_residuals"` to
     /// `REVIEW_COMPLETE`, it reads `final_findings_count` (or
     /// `residual_findings_count`) and promotes the verdict to
@@ -405,8 +404,8 @@ pub struct EventLoopConfig {
     /// policy-check validator (U8), and `EmitResult` summary
     /// (U9) start honouring the typed `handoff_envelope` field
     /// in business event payloads. Defaults to disabled so
-    /// non-serial presets and ad-hoc emits are unaffected
-    /// (regression防线 #1).
+    /// generic emits and ad-hoc flows are unaffected (regression
+    /// defence #1).
     #[serde(default)]
     pub handoff_envelope: HandoffEnvelopeConfig,
 }
@@ -415,20 +414,20 @@ pub struct EventLoopConfig {
 /// `event_loop.handoff_envelope:` block in `presets/en/<name>.yml`.
 ///
 /// All four fields default to `false`. The master `enabled` flag
-/// exists so non-serial presets, plain `ralph emit` calls, and
-/// the policy-check dry-run path keep their pre-004 behaviour
-/// with zero changes (regression防线 #1 / #8). The four flags are
-/// orthogonal: U7 only opens `prompt_injection`, U10 is the first
-/// unit that opens `validate_payload` / `emit_result_summary`.
+/// exists so generic presets, plain `ralph emit` calls, and the
+/// policy-check dry-run path keep their pre-004 behaviour with
+/// zero changes (regression defence #1 / #8). The four flags
+/// are orthogonal: U7 only opens `prompt_injection`, U10 is the
+/// first unit that opens `validate_payload` / `emit_result_summary`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HandoffEnvelopeConfig {
     /// Master switch. When `false` the handoff envelope is dormant
     /// at every layer: payload validator is skipped, prompt
     /// renderer is skipped, `EmitResult` summary is omitted.
-    /// `presets/en/ce-executor-serial.yml` is the only preset that
-    /// flips this on (U7), and even there `validate_payload` /
-    /// `emit_result_summary` stay off until U10.
+    /// Presets that opt in flip this on (U7), and even there
+    /// `validate_payload` / `emit_result_summary` stay off until
+    /// U10.
     #[serde(default)]
     pub enabled: bool,
 
@@ -441,8 +440,8 @@ pub struct HandoffEnvelopeConfig {
 
     /// When true and `enabled` is also true, the policy-check
     /// validation gate rejects payloads that lack a valid
-    /// `handoff_envelope` (U8). Off by default so non-serial
-    /// presets and ad-hoc emits are not affected.
+    /// `handoff_envelope` (U8). Off by default so generic emits
+    /// are not affected.
     #[serde(default)]
     pub validate_payload: bool,
 
@@ -472,12 +471,15 @@ pub struct MacroEdgeNextHintConfig {
     pub enabled: bool,
 }
 
-/// 2026-06-16-001 U5: per-preset configuration for the loop-level
-/// `progress-steward` fallback hat.
+/// 2026-06-16-001 U5: optional opt-in stall-diagnostic hat.
+/// Master `enabled` defaults to `false`; presets that opt in
+/// flip it on. The mechanism is a generic stall diagnostic and
+/// does not depend on any specific preset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgressStewardConfig {
-    /// Master switch. When false, the loop never auto-wakes the
-    /// steward; the human must intervene manually.
+    /// Master switch. When false (default), the loop never
+    /// auto-wakes the steward; the human must intervene
+    /// manually. Set true to opt in.
     #[serde(default = "default_progress_steward_enabled")]
     pub enabled: bool,
 
@@ -492,7 +494,7 @@ pub struct ProgressStewardConfig {
     /// steward. After this many consecutive steward activations
     /// without a forwarded business event, the loop emits
     /// `plan.blocked(reason=loop_stalled_max_iterations)` and
-    /// terminates cleanly through shipper → reporter.
+    /// terminates.
     #[serde(default = "default_progress_steward_max_iterations")]
     pub max_steward_iterations: u32,
 }
@@ -501,6 +503,10 @@ fn default_progress_steward_enabled() -> bool {
     false
 }
 
+// Default opt-in stall-diagnostic hat ID. Used only when
+// `progress_steward.enabled == true` (master switch off by
+// default). Pipeline presets do not declare this hat; only
+// non-pipeline presets such as `ce-executor-supervisor` opt in.
 fn default_progress_steward_hat_id() -> String {
     "progress-steward".to_string()
 }
@@ -559,16 +565,18 @@ impl Default for EventLoopConfig {
             // task that has since been closed. Operators can
             // override per-preset or in `ralph.yml`.
             task_resume_ttl_seconds: Some(300),
-            // 2026-06-16-001 U5: default progress-steward
-            // configuration. Enabled, target = `progress-steward`,
-            // 3 iterations before auto-emit of `plan.blocked`.
+            // 2026-06-16-001 U5: default opt-in stall-diagnostic
+            // configuration. `enabled == false` (master switch
+            // off); target hat defaults to `progress-steward`
+            // when opted in; 3 iterations before auto-emit of
+            // `plan.blocked`.
             progress_steward: ProgressStewardConfig::default(),
             // 2026-06-17-003 U1: state projection opt-in. Disabled
             // by default; presets opt in via YAML.
             state_projection: StateProjectionConfig::default(),
             // 2026-06-24 plan U2: max_residuals default 8.
-            // Presets (e.g. ce-executor-serial → 8) and operators
-            // may override via YAML.
+            // Presets that opt in and operators may override via
+            // YAML.
             max_residuals: default_max_residuals(),
             // P0-3 (2026-06-27 adversarial review): the
             // mechanism foundation opt-in. None by
@@ -723,6 +731,12 @@ impl Default for WarmupConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Tests for the generic opt-in stall-diagnostic
+    // `progress_steward` config block. Master switch defaults to
+    // `false`; presets opt in only when they need the
+    // stall-recovery diagnostic (e.g. `ce-executor-supervisor`).
+    // Pipeline presets must NOT enable it.
 
     #[test]
     fn u7_progress_steward_config_serializes_with_exempt_field() {
@@ -1011,11 +1025,11 @@ pub struct MechanismConfig {
     /// `presets/en/<name>.yml`. When `None` or
     /// `enabled == false`, the runtime's phase
     /// authority is a no-op and behaviour matches the
-    /// pre-006 baseline (serial runs through the
-    /// existing `FlowStepScopeStage` flow guard). The
-    /// typed view lives in
+    /// pre-006 baseline (the existing `FlowStepScopeStage`
+    /// flow guard runs unchanged). The typed view lives in
     /// `event_loop::phase_authority::config::PhaseAuthorityConfig`
-    /// and is re-exported from there.
+    /// and is re-exported from there. The block is opt-in and
+    /// does not depend on any specific preset.
     #[serde(default)]
     pub phase_authority: Option<crate::event_loop::phase_authority::config::PhaseAuthorityConfig>,
 }
@@ -1034,14 +1048,15 @@ pub struct FlowDeclarationConfig {
     // 2026-07-02-001 plan U4 (Fix D): the `type` rename mirrors
     // `event_loop::flow_declaration::FlowDeclaration::flow_type` so a
     // non-default value declared in a preset's `mechanism.flow` block
-    // (e.g. `type: declared` written by `ce-executor-serial.yml`)
-    // is no longer silently dropped to the framework default at the
-    // config-typed view. Pre-fix: `flow_type` carried no rename, so
-    // serde_yaml saw the YAML key `type` and fell through to
-    // `default_flow_type()`. The runtime's downstream
-    // `FlowDeclaration::from_yaml` reads the same `type` key correctly
-    // (it has its own `#[serde(rename = "type")]`), so the discrepancy
-    // was invisible until a future guard started inspecting
+    // (e.g. `type: declared` written by a preset that opts into
+    // the typed flow declaration) is no longer silently dropped
+    // to the framework default at the config-typed view. Pre-fix:
+    // `flow_type` carried no rename, so serde_yaml saw the YAML
+    // key `type` and fell through to `default_flow_type()`. The
+    // runtime's downstream `FlowDeclaration::from_yaml` reads the
+    // same `type` key correctly (it has its own
+    // `#[serde(rename = "type")]`), so the discrepancy was
+    // invisible until a future guard started inspecting
     // `config.mechanism.flow.flow_type` directly.
     #[serde(rename = "type", default = "default_flow_type")]
     pub flow_type: String,

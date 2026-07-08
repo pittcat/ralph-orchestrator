@@ -1,11 +1,14 @@
-//! Unit tests for the in-loop lint feedback path (U4b / R13).
+//! Unit tests for the in-loop event-policy lint resume path
+//! (U4b / R13).
 //!
-//! 2026-06-20-001 review v2 F1-F3: the BDD scenarios in
-//! `tests/scenarios/serial_lint/` were dropped because the
-//! scenario runner's per-iteration `next_hat()` returns the
-//! fallback `ralph` hat on iteration 2 (after the executor's
-//! rejected event was dropped), making `## LINT MIRROR`
-//! injection unreachable from the SourceHat routing check.
+//! Historical note: the BDD scenarios under
+//! `tests/scenarios/serial_lint/` were dropped during the 2026-06-20
+//! review (F1-F3) because the scenario runner's per-iteration
+//! `next_hat()` returned the fallback `ralph` hat on iteration 2
+//! (after the executor's rejected event was dropped), making
+//! `## LINT MIRROR` injection unreachable from the SourceHat routing
+//! check. These unit tests cover the same behaviour as a generic
+//! in-loop lint feedback path.
 //!
 //! These unit tests exercise the in-loop feedback path
 //! directly: `process_events_from_jsonl` populates
@@ -21,7 +24,7 @@ use super::*;
 use crate::event_loop::tests::common::write_object_event_to_jsonl;
 use crate::preset::engine::LintResumeHint;
 
-fn serial_lint_config() -> RalphConfig {
+fn event_policy_lint_config() -> RalphConfig {
     let yaml = r#"
 prompt_file: PROMPT.md
 hats:
@@ -58,7 +61,7 @@ fn u2_engine_gate_rejection_seeds_pending_lint_resume() {
     // the agent's next prompt sees `## LINT RESUME REQUIRED`.
     let temp = tempfile::tempdir().unwrap();
     let events_path = temp.path().join("events.jsonl");
-    let mut config = serial_lint_config();
+    let mut config = event_policy_lint_config();
     config.core.workspace_root = temp.path().to_path_buf();
     let mut event_loop = EventLoop::with_context(
         config,
@@ -100,7 +103,7 @@ fn u2_engine_gate_acceptance_does_not_seed_hint() {
     // next prompt would falsely claim a lint failure.
     let temp = tempfile::tempdir().unwrap();
     let events_path = temp.path().join("events.jsonl");
-    let mut config = serial_lint_config();
+    let mut config = event_policy_lint_config();
     config.core.workspace_root = temp.path().to_path_buf();
     let mut event_loop = EventLoop::with_context(
         config,
@@ -133,7 +136,7 @@ fn u2_inject_consumes_pending_lint_resume() {
     // REQUIRED` at the head of the prompt, then clears the
     // slot (consume-on-use).
     let temp = tempfile::tempdir().unwrap();
-    let mut config = serial_lint_config();
+    let mut config = event_policy_lint_config();
     config.core.workspace_root = temp.path().to_path_buf();
     let mut event_loop = EventLoop::with_context(
         config,
@@ -179,7 +182,7 @@ fn u2_inject_no_op_when_hint_slot_empty() {
     // `build_prompt` must NOT inject anything. Otherwise we
     // would accumulate stale resume blocks.
     let temp = tempfile::tempdir().unwrap();
-    let mut config = serial_lint_config();
+    let mut config = event_policy_lint_config();
     config.core.workspace_root = temp.path().to_path_buf();
     let mut event_loop = EventLoop::with_context(
         config,
@@ -210,7 +213,7 @@ fn u2_inject_misrouted_hat_restores_hint() {
     // the hint is restored (not consumed) so the right hat's
     // next prompt can use it.
     let temp = tempfile::tempdir().unwrap();
-    let mut config = serial_lint_config();
+    let mut config = event_policy_lint_config();
     config.core.workspace_root = temp.path().to_path_buf();
     let mut event_loop = EventLoop::with_context(
         config,
@@ -219,7 +222,7 @@ fn u2_inject_misrouted_hat_restores_hint() {
     event_loop.initialize("Test");
 
     // The executor hat publishes `work.done` (per
-    // serial_lint_config). Seed a hint on a topic the
+    // event_policy_lint_config). Seed a hint on a topic the
     // executor does NOT publish (`debug.exhausted`) so
     // routing rejects and the hint is restored.
     event_loop.state.pending_lint_resume = Some(LintResumeHint::from_reason(
@@ -251,7 +254,7 @@ fn u2_circuit_breaker_trips_after_consecutive_rejections() {
     // check, which is a different backstop).
     let temp = tempfile::tempdir().unwrap();
     let events_path = temp.path().join("events.jsonl");
-    let mut config = serial_lint_config();
+    let mut config = event_policy_lint_config();
     config.core.workspace_root = temp.path().to_path_buf();
     let mut event_loop = EventLoop::with_context(
         config,
@@ -332,7 +335,7 @@ fn u2_circuit_breaker_resets_on_acceptance() {
     // with accepts.
     let temp = tempfile::tempdir().unwrap();
     let events_path = temp.path().join("events.jsonl");
-    let mut config = serial_lint_config();
+    let mut config = event_policy_lint_config();
     config.core.workspace_root = temp.path().to_path_buf();
     let mut event_loop = EventLoop::with_context(
         config,
@@ -389,7 +392,7 @@ fn plan_blocked_skips_task_resume_emit() {
     // emitted; `task.resume` is NOT in seen_topics.
     let temp = tempfile::tempdir().unwrap();
     let events_path = temp.path().join("events.jsonl");
-    let mut config = serial_lint_config();
+    let mut config = event_policy_lint_config();
     config.core.workspace_root = temp.path().to_path_buf();
     let mut event_loop = EventLoop::with_context(
         config,

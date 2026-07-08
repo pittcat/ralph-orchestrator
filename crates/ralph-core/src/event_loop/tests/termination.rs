@@ -550,8 +550,12 @@ fn test_review_failed_does_not_trigger_on_pass_verdict() {
 // ============================================================================
 // U6 step-handoff plan: verdict gate 闭包验证与加固 (2026-06-17)
 //
-// These tests close the report.done + LOOP_COMPLETE / 假 pass edges that
-// the ce-executor-serial preset depends on:
+// Historical note: these tests were first added while the
+// `ce-executor-serial` preset was the canonical built-in that
+// mirrored its verdict onto both topics. The mechanism is now
+// generic (any preset can declare an `additional_topics` list).
+// The tests close the report.done + LOOP_COMPLETE / 假 pass edges that
+// the historical serial preset relied on:
 //
 //   - `check_completion_event` MUST reject LOOP_COMPLETE when any
 //     recorded verdict payload (REVIEW_COMPLETE *or* report.done via
