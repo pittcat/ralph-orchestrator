@@ -2652,23 +2652,15 @@ hats:
       # `suggested_command` from the error item; do not re-derive
       # field shapes from this inline template.
 
-      # 2026-07-09-001 plan U7: cite ralph-tools-emit's
-      # policy-check feedback section. After a rejection, read
-      # `field_description` / `suggested_payload_shape` /
-      # `suggested_command` from the error item; do not re-derive
-      # field shapes from this inline template.
-
-      # 2026-07-09-001 plan U7: cite ralph-tools-emit's
-      # policy-check feedback section. After a rejection, read
-      # `field_description` / `suggested_payload_shape` /
-      # `suggested_command` from the error item; do not re-derive
-      # field shapes from this inline template.
-
-      # 2026-07-09-001 plan U7: cite ralph-tools-emit's
-      # policy-check feedback section. After a rejection, read
-      # `field_description` / `suggested_payload_shape` /
-      # `suggested_command` from the error item; do not re-derive
-      # field shapes from this inline template.
+      # 2026-07-09-001 plan U7 dedup (U5): the three
+      # verbatim duplicates above were removed — keep one
+      # canonical citation so future edits stay in sync. The
+      # lint \`preset.instructions_emit_feedback_skill_reference_missing\`
+      # only requires the substring \`ralph-tools-emit\` plus one
+      # of \`policy-check feedback\` / \`enrichment fields\` /
+      # \`suggested_payload_shape\` / \`field_description\` /
+      # \`suggested_command\`; one citation block satisfies
+      # the gate for the fix-planner hat.
       ```
       Then stop. Fixer will be triggered next.
 
