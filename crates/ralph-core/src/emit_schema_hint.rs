@@ -172,6 +172,15 @@ pub fn format_emit_json_example(topic: &str, schema: &EventSchema) -> String {
 /// If the hat publishes nothing, or no schema is registered for any of
 /// the hat's publish topics, an empty string is returned so the caller
 /// can fall back to the legacy `<summary>` template.
+///
+/// 2026-07-09-001 plan (U6): for schemas that declare
+/// `field_docs` or `examples`, append a per-topic field table
+/// (rendered via `render_required_field_table`) and a
+/// policy-check-first instruction line, so the hat knows
+/// exactly which fields are mandatory and what to do when
+/// `--policy-check` rejects a payload. Legacy schemas
+/// (no `field_docs`) still get the §3 EXAMPLES line so the
+/// 2026-06-15-001 backwards-compat invariant holds.
 pub fn build_publish_emit_section(hat: &Hat, schemas: &HashMap<String, EventSchema>) -> String {
     let mut sections: Vec<String> = Vec::new();
 
@@ -181,10 +190,33 @@ pub fn build_publish_emit_section(hat: &Hat, schemas: &HashMap<String, EventSche
             Some(s) => s,
             None => continue,
         };
-        sections.push(format!(
-            "- {example}",
+        let mut block = String::new();
+        block.push_str(&format!(
+            "- `{topic_str}`:\n  {example}",
             example = format_emit_json_example(topic_str, schema)
         ));
+        // Only show the field table when the schema has at
+        // least one `field_docs` entry — schemas without
+        // metadata stay on the legacy summary path.
+        if !schema.field_docs.is_empty() {
+            let table = render_required_field_table(schema);
+            if !table.is_empty() {
+                block.push_str("\n\n  Required fields (with meaning):\n  ");
+                block.push_str(&table.replace('\n', "\n  "));
+            }
+            if !schema.examples.is_empty() {
+                let examples_block: String = schema
+                    .examples
+                    .iter()
+                    .take(2) // bound to two so the prompt does not bloat
+                    .map(|v| format!("  ```json\n  {}\n  ```", v))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                block.push_str("\n\n  Examples:\n");
+                block.push_str(&examples_block);
+            }
+        }
+        sections.push(block);
     }
 
     if sections.is_empty() {
@@ -194,12 +226,13 @@ pub fn build_publish_emit_section(hat: &Hat, schemas: &HashMap<String, EventSche
     let topics: Vec<&str> = hat.publishes.iter().map(|t| t.as_str()).collect();
     format!(
         "Publish exactly ONE of: `{topics}`.\n\
-         Each example below matches that topic's schema. Use the exact `--json` form.\n\n\
+         Each example below matches that topic's schema. Use the exact `--json` form. Prefer running `ralph emit <topic> --policy-check -j '<payload>'` first; only emit (without `--policy-check`) after precheck passes.\n\n\
          {lines}\n\n\
+         On rejection: the policy-check error reports `field` / `expected` / `actual` / `field_description` / `suggested_payload_shape` / `suggested_command`. Fix the payload, re-run `--policy-check`, then emit for real.\n\n\
          MUST NOT append or write to events.jsonl directly; use `ralph emit` / \
          `ralph wave emit` only.",
         topics = topics.join("`, `"),
-        lines = sections.join("\n")
+        lines = sections.join("\n\n")
     )
 }
 
@@ -434,6 +467,115 @@ mod tests {
         let example = prompt_example_payload(&schema);
         assert!(example.contains("task_id"));
         assert!(example.contains("<task_id>"));
+    }
+
+    // 2026-07-09-001 plan (U6): prompt-builder tests.
+
+    /// U6 happy path: a hat publishing `review.synthesized`
+    /// with a schema that has `field_docs` produces a
+    /// section that includes field meaning, allowed values
+    /// (when present), and a policy-check instruction line.
+    #[test]
+    fn u6_publish_section_includes_field_table_for_field_docs() {
+        use crate::config::EventFieldDoc;
+        let mut schema = schema_with_required(&["synthesized_review_file"]);
+        schema.field_docs.insert(
+            "synthesized_review_file".to_string(),
+            EventFieldDoc {
+                meaning: "path to the synthesized review file".to_string(),
+                source: "loop runner".to_string(),
+                fill_rule: "do NOT hand-write".to_string(),
+            },
+        );
+        let mut schemas = HashMap::new();
+        schemas.insert("review.synthesized".to_string(), schema);
+        let hat = hat_with_publishes("review-synthesizer", "Reviewer", &["review.synthesized"]);
+        let section = build_publish_emit_section(&hat, &schemas);
+        assert!(section.contains("synthesized_review_file"));
+        assert!(section.contains("path to the synthesized review file"));
+        assert!(section.contains("review.synthesized"));
+        assert!(section.contains("--policy-check"));
+        assert!(section.contains("`field_description`"));
+    }
+
+    /// U6 scope guard: a hat publishing `work.done` does NOT
+    /// see `review.accepted` in its prompt section, even
+    /// when both topics have schemas. The existing scope
+    /// guard on `hat.publishes` is the primary defence; this
+    /// test pins it under U6.
+    #[test]
+    fn u6_publish_section_does_not_leak_other_hat_topics() {
+        let mut schemas = HashMap::new();
+        schemas.insert("work.done".to_string(), schema_with_required(&["task_id"]));
+        schemas.insert(
+            "review.accepted".to_string(),
+            schema_with_required(&["verdict"]),
+        );
+        let hat = hat_with_publishes("executor", "Executor", &["work.done"]);
+        let section = build_publish_emit_section(&hat, &schemas);
+        assert!(section.contains("work.done"));
+        assert!(!section.contains("review.accepted"));
+    }
+
+    /// U6 backward compatibility: a schema without
+    /// `field_docs` still produces a usable §3 section
+    /// (the legacy summary path). The U6 changes only kick
+    /// in when field_docs is present.
+    #[test]
+    fn u6_publish_section_falls_back_to_legacy_for_no_field_docs() {
+        let mut schemas = HashMap::new();
+        schemas.insert("work.done".to_string(), schema_with_required(&["task_id"]));
+        let hat = hat_with_publishes("executor", "Executor", &["work.done"]);
+        let section = build_publish_emit_section(&hat, &schemas);
+        assert!(section.contains("work.done"));
+        // No field table when no field_docs.
+        assert!(!section.contains("Required fields (with meaning)"));
+        // But the policy-check line is still present so the
+        // hat knows the precheck-first flow.
+        assert!(section.contains("--policy-check"));
+    }
+
+    /// U6 fallback: hat publishes topic but schema map is
+    /// empty — the function returns an empty string so the
+    /// caller falls back to the legacy `<summary>` template.
+    /// This is the same contract as pre-U6.
+    #[test]
+    fn u6_publish_section_empty_when_no_schema() {
+        let schemas: HashMap<String, EventSchema> = HashMap::new();
+        let hat = hat_with_publishes("executor", "Executor", &["work.done"]);
+        let section = build_publish_emit_section(&hat, &schemas);
+        assert!(section.is_empty());
+    }
+
+    /// U6 examples: a schema with both `field_docs` and
+    /// `examples` produces a fenced JSON example in the
+    /// prompt section. Bounded to 2 examples to keep prompts
+    /// compact. The `field_docs` requirement is intentional:
+    /// without field docs, the prompt stays on the legacy
+    /// summary path (U6 backward-compat invariant).
+    #[test]
+    fn u6_publish_section_includes_examples_block() {
+        use crate::config::EventFieldDoc;
+        let mut schema = schema_with_required(&["task_id"]);
+        schema.field_docs.insert(
+            "task_id".to_string(),
+            EventFieldDoc {
+                meaning: "live id".to_string(),
+                source: String::new(),
+                fill_rule: String::new(),
+            },
+        );
+        schema.examples.push(serde_json::json!({"task_id": "task-1"}));
+        schema.examples.push(serde_json::json!({"task_id": "task-2"}));
+        schema.examples.push(serde_json::json!({"task_id": "task-3"}));
+        let mut schemas = HashMap::new();
+        schemas.insert("work.done".to_string(), schema);
+        let hat = hat_with_publishes("executor", "Executor", &["work.done"]);
+        let section = build_publish_emit_section(&hat, &schemas);
+        assert!(section.contains("task-1"));
+        assert!(section.contains("task-2"));
+        // The third example is bounded out of the prompt.
+        assert!(!section.contains("task-3"));
     }
 
     #[test]
