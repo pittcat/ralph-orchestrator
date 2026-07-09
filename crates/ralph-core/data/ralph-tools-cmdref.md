@@ -115,8 +115,8 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 - 🔴 `--worktree` 创建的隔离目录不会自动合并回主分支（可用 `--no-auto-merge` 控制）。
 - 🔴 **Worktree 复用必须显式**: `--reuse-worktree` 现在要求同时提供 `--plan <plan.md>` 或 `--worktree-name <name>`，不再从 prompt 文本中自动猜测 plan 路径（该行为已废弃）。推荐做法：
   ```bash
-  ralph -H builtin:ce-executor-pipeline run --worktree --reuse-worktree \
-    --plan docs/plans/2026-06-25-002-feat-profiles-for-preset-role-tuning-plan.md
+  ralph -H builtin:<preset> run --worktree --reuse-worktree \
+    --plan docs/plans/<your-plan>.md
   ```
 - 🔴 `--plan` 与 `--worktree-name` 互斥； `--worktree-name` 会精确匹配 `.worktrees/<NAME>/`，而 `--plan` 使用 plan 文件的 basename 作为前缀并按前缀匹配。
 
@@ -144,7 +144,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `ralph inspect` | 只读诊断命名空间（含 `inspect profiles`；`inspect loop` 输出 loop + hat 身份 + events 路径 + **`loop_anchor` plan 锚点**（优先 `.ralph/agent/.ralph-anchor.json`，否则 `prompt_file`），OPAC Observe 一手数据源） |
 | `ralph diagnose` | 离线诊断报告（`--format json` 含 `dup_storm_topics`：`work.ready` 同 dedup key 重复 ≥3 次；ranked findings 的 `hint` 区分 `duplicate_work_done_same_step` / `duplicate_work_done_stall_bypass`） |
 
-> U8 (2026-06-25): `ralph bot` 已随 `ralph-telegram` crate 一起删除;运行时不再提供人工通道。`human.guidance` 已废弃(plan 2026-06-28-005);`task.resume` 恢复通道保留(由 runtime diagnosis engine 产出)。
+> `ralph bot` 已随 `ralph-telegram` crate 一起删除;运行时不再提供人工通道。`human.guidance` 已废弃;`task.resume` 恢复通道保留(由 runtime diagnosis engine 产出)。
 
 > 低频命令的独有参数可通过 `ralph <cmd> --help` 查看。全量参考见 `docs/guide/`。
 

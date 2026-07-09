@@ -71,7 +71,7 @@ metadata:
    - `violation`：人类可读原因（含字段名 / 类型不匹配）
    - `required_fields`：当前 topic 缺失或类型错的字段清单
    - `allowed_topics`：当前 hat 可发布的所有 topic（**只在这列里挑**）
-   - `reason` / `kind`：结构化 reason code（U2）
+   - `reason` / `kind`：结构化 reason code
    - `target_hat`：应当修复并重发的目标 hat
 2. **若 prompt 含 `## CORRECTION CONTEXT`**：runtime correction **高于** agent narrative；只执行 correction 的 `required_action`，遵守 `forbidden_action`；细则见 `ralph tools skill load ralph-tools-recovery-directives`。
 3. **对照 `required_fields` 补齐 payload**；用 `ralph emit <topic> --policy-check -j '...'` 预检（与 loop gate 同源 schema，**不写盘**）；通过后再正式 `ralph emit` 落盘。
@@ -90,7 +90,7 @@ metadata:
 | `ralph tools memory` | 记忆管理 | 已注入（`ralph-tools-memories` skill，仅当 `memories.enabled`） |
 | `ralph tools skill` | 加载 skill | `ralph tools skill load ralph-tools-cmdref` |
 
-> U8 (2026-06-25): `ralph tools interact` 与 `ralph bot` 已随 `ralph-telegram` crate 一起删除;运行时不再提供人工通道(`human.guidance` 已废弃,见 plan 2026-06-28-005;`task.resume` 恢复通道保留)。
+> `ralph tools interact` 与 `ralph bot` 已随 `ralph-telegram` crate 一起删除;运行时不再提供人工通道(`human.guidance` 已废弃;`task.resume` 恢复通道保留)。
 
 ### 顶层命令（按需加载对应 skill）
 
@@ -108,7 +108,7 @@ metadata:
 | `ralph inspect profiles` | 预览 profile overlay 解析结果（只读，不启动 loop） | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph hats validate [--strict]` | 拓扑/payload/orphan/lint 校验 | `crates/ralph-cli/src/hats.rs:170`（strict 时启用 lint 所有权检查） |
 
-> **OPAC 纪律（agent context）**: 所有 state-changing 操作遵循 Observe → Precheck → Apply → Confirm 四阶段；详见 always-injected `ralph-tools-opac` skill。本表所有 `ralph emit` / `ralph tools task` / `ralph wave emit` 行均按 OPAC 纪律执行——agent 上下文默认 enforce `--policy-check`（见 U15）。
+> **OPAC 纪律（agent context）**: 所有 state-changing 操作遵循 Observe → Precheck → Apply → Confirm 四阶段；详见 always-injected `ralph-tools-opac` skill。本表所有 `ralph emit` / `ralph tools task` / `ralph wave emit` 行均按 OPAC 纪律执行——agent 上下文默认 enforce `--policy-check`。
 
 > **按需加载需要 hat 上下文**：`ralph tools skill load` 在 agent 上下文中要求 `RALPH_CURRENT_HAT` 已设置，否则会以非零退出。如加载失败，先检查 `echo $RALPH_CURRENT_HAT` 是否非空。
 

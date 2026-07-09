@@ -17,27 +17,27 @@ metadata:
 
 > `wave` 命令没有 `root` 和 `format` 选项（root，format）。
 
-### Wave OPAC 四阶段 (U26/U21)
+### Wave OPAC 四阶段
 
 Wave OPAC 与单 emit OPAC 并列——同样四阶段，差别只在 Confirm 路径：
 
 | 阶段 | 命令 | 关键约束 |
 |------|------|----------|
 | **Observe** | `ralph inspect loop` + `ralph tools task list` | 不要读 `.ralph/events.jsonl` / `supervisor.db`（HARD RULE 4） |
-| **Precheck** | `ralph wave verify --payloads-stdin`（U21） | 零写盘；与 emit 同源 `policy_check` / origin guard |
-| **Apply** | `ralph wave emit --payloads-stdin` | agent context 默认 enforce `--policy-check`（U15）；不通过 verify 不能直发 |
+| **Precheck** | `ralph wave verify --payloads-stdin` | 零写盘；与 emit 同源 `policy_check` / origin guard |
+| **Apply** | `ralph wave emit --payloads-stdin` | agent context 默认 enforce `--policy-check`；不通过 verify 不能直发 |
 | **Confirm** | `ralph events --events-source main --output json \| jq 'select(.wave_id == ...)'` | wave 写主 ledger，不走 hat-channel |
 
 **Confirm 路径与单 emit 不同**：`ralph wave emit` 写入 `current-events`（参见 `crates/ralph-cli/src/wave.rs:resolve_events_file`），不走 hat-channel。所以 Confirm 不能用 `ralph events --events-source hat-channel`——必须从 main ledger 验。
 
 **反模式**：
 
-- ❌ 跳过 `wave verify` 直接 `wave emit`（U15 agent default enforce 会拒写盘；预设 opt-out 用 `event_policy.allow_unsafe_cli_emit: true`）
-- ❌ 在 worker hat 内调用 `ralph wave emit`（U23 wave ACL：仅 dispatcher hat——`publishes` 含 `*.unit.ready` 或 `review.wave.ready`——可调用）
+- ❌ 跳过 `wave verify` 直接 `wave emit`（agent default enforce 会拒写盘；预设 opt-out 只能由 config 显式允许）
+- ❌ 在 worker hat 内调用 `ralph wave emit`（仅 dispatcher hat 可调用）
 - ❌ Confirm 阶段读 `current-hat-events`（那是单 emit 通道，看不到 wave 写入）
 - ❌ 试图让 agent emit `*.wave.complete` / `*.unit.ready` 等 supervisor 协调 topic（origin guard 拒收，参见下方表格）
 
-### `ralph wave verify` (U21)
+### `ralph wave verify`
 
 零写盘批预检；与 `wave emit` 共用同源 `ValidationPipeline` / schema / origin guard。
 
@@ -69,10 +69,10 @@ ralph wave emit [OPTIONS] <TOPIC>
 | `<TOPIC>` | string | 是 | — | 所有 wave 事件的主题（如 `review.file`） |
 | `--payloads <PAYLOADS>...` | string… | 二选一 | — | 每个 wave worker 一个 payload（`num_args = 1..`，至少 1 个） |
 | `--payloads-stdin` | flag | 二选一 | false | 从 stdin 逐行读取 payload，适合 JSON payload 列表 |
-| `--output <FMT>` | enum | 否 | `text` | 输出格式：`text`（stdout 仅 wave_id）或 `json`（stdout `{wave_id, topic, count, events_file, deduplicated}`，用于 U5 机器验真；失败时 stdout 改为结构化 `validation_errors`，见下方「Schema 预检（U4）」） |
-| `--idempotency-key <KEY>` | string | 否 | — | 幂等键（U2）。同一 `(loop_id, hat, topic, key)` 重复调用只返回首个 `wave_id` 并标 `deduplicated=true`，不写新事件。键最长 256 字节、ASCII、非空非空白。未传则行为与原版一致。 |
-| `--policy-check` | flag | 否 | false | U4：显式强制 schema 预检（即便 config 未开启 event policy，也走 `event_policy.schemas.<topic>.required_fields` 校验） |
-| `--unsafe-no-policy-check` | flag | 否 | false | U4：尝试绕过 schema 预检。当 config `event_policy.allow_unsafe_cli_emit: false` 时**不生效**（与 `ralph emit --unsafe-no-policy-check` 对齐）。与 `--policy-check` 互斥。 |
+| `--output <FMT>` | enum | 否 | `text` | 输出格式：`text`（stdout 仅 wave_id）或 `json`（stdout `{wave_id, topic, count, events_file, deduplicated}`，用于机器验真；失败时 stdout 改为结构化 `validation_errors`，见下方「Schema 预检」） |
+| `--idempotency-key <KEY>` | string | 否 | — | 幂等键。同一 `(loop_id, hat, topic, key)` 重复调用只返回首个 `wave_id` 并标 `deduplicated=true`，不写新事件。键最长 256 字节、ASCII、非空非空白。未传则行为与原版一致。 |
+| `--policy-check` | flag | 否 | false | 显式强制 schema 预检（即便 config 未开启 event policy，也走 `event_policy.schemas.<topic>.required_fields` 校验） |
+| `--unsafe-no-policy-check` | flag | 否 | false | 尝试绕过 schema 预检。当 config `event_policy.allow_unsafe_cli_emit: false` 时**不生效**（与 `ralph emit --unsafe-no-policy-check` 对齐）。与 `--policy-check` 互斥。 |
 
 `--payloads` 与 `--payloads-stdin` 互斥，必须提供其中一个。不要把多行 JSON 列表塞进一个 shell 变量后传给 `--payloads "$PAYLOADS"`；该用法会被拒绝。多 JSON payload 使用：
 
@@ -94,7 +94,7 @@ printf '%s\n' \
 - 不能在 wave worker 内部使用（`RALPH_WAVE_WORKER=1` 时会阻止）。
 - Wave worker 的结果应通过 `ralph emit` 返回，而非 `ralph wave emit`。
 
-**幂等键（U2）：**
+**幂等键：**
 
 - `--idempotency-key` 实现基于同目录下 `.<events_basename>.idempotency.jsonl` 的持久化记录（例如 `events.jsonl` → `.events.jsonl.idempotency.jsonl`）。文件锁保证并发安全。
 - 推荐 review-coordinator 使用 `ce-review:{plan_name}:{task_id}:{step}:round-{fix_round}` 命名空间。
@@ -118,16 +118,16 @@ printf '%s\n' \
 **反模式 / 注意事项：**
 - 🔴 不要在 wave worker 内部调用 `ralph wave emit`。
 - 🔴 不要使用 `ralph wave emit <topic> --payloads "$PAYLOADS"` 传递多行 JSON；使用 `--payloads-stdin`。
-- 🔴 不要使用 `printf '%s\n' $(cat payloads.jsonl)` 后再 pipe——IFS word splitting 会把单个 JSON object 切成多个 token，触发 U1 的 JSON object 校验失败。直接 `cat payloads.jsonl` 即可。
+- 🔴 不要使用 `printf '%s\n' $(cat payloads.jsonl)` 后再 pipe——IFS word splitting 会把单个 JSON object 切成多个 token，触发 JSON object 校验失败。直接 `cat payloads.jsonl` 即可。
 
-**Schema 预检（U4，2026-06-13）：**
+**Schema 预检：**
 
 `ralph wave emit` 在 shape 校验之后、写盘之前会先对**整批** payload 做 event policy schema 预检（`crates/ralph-cli/src/policy_check.rs`），与 `ralph run` 循环内统一校验管线 `validation::rules_event_policy::EventPolicyRule` 行为一致：
 
 - 默认行为：当 `ralph.yml`（或合并后的 preset）开启 `event_policy.enabled: true` 时强制启用预检。`require_policy_check_for_cli_emit: true` 不改变 wave 行为——wave 始终预检。
 - 任一 payload 缺必需字段（如 `review.wave.ready` 的 `depth`）→ 整批**原子拒绝**，**不写盘**任何 line。
 - `--policy-check`：显式强制预检（即便 config 未开启 `event_policy`）。
-- `--unsafe-no-policy-check`：尝试绕过预检；当 config `event_policy.allow_unsafe_cli_emit: false` 时**不生效**。`ce-executor-pipeline` 预设的 `allow_unsafe_cli_emit: false` 强制 agent 看到 schema 错误而非写入后被静默清空。
+- `--unsafe-no-policy-check`：尝试绕过预检；当 config `event_policy.allow_unsafe_cli_emit: false` 时**不生效**。
 
 **JSON 失败响应**（`--output json`，stdout，exit ≠ 0）：
 
@@ -146,7 +146,7 @@ printf '%s\n' \
 
 **Text 失败响应**（stderr，exit ≠ 0）：`policy validation failed: 7 payloads, missing required field 'depth' in 7`。
 
-> 设计意图：一次响应列出所有违规 payload，避免「修一个再发、又错下一个」的来回。loop 端 U1（`ProcessedEventsWithWaves.wave_policy_rejections`）和 CLI 端 U4（precheck）是同源 schema 校验的两侧——CLI 失败 = 100% loop 端也会被拒；CLI 成功 → loop 端也会接受。
+> 设计意图：一次响应列出所有违规 payload，避免「修一个再发、又错下一个」的来回。loop 端和 CLI 端是同源 schema 校验的两侧——CLI 失败 = 100% loop 端也会被拒；CLI 成功 → loop 端也会接受。
 
 ---
 
@@ -166,8 +166,8 @@ printf '%s\n' \
 | `--idempotency-key must be ASCII` | key 含非 ASCII 字节 | 改用 ASCII；如 `plan_name` 是中文，先 hash 或 percent-encode |
 | `idempotency-key conflict: ...` | 同 scope 不同 payload | 改用不同 key（`round-2` 递增或换 task） |
 | `incomplete prior wave emission: ...` | 上次 events 写了 N 行但 record 丢失，扫 events 也只找到少于 N 行 | 手工删除残留 events 行；或换新 key |
-| `policy validation failed for topic 'X'`（exit ≠ 0） | 任一 payload 违反 `event_policy.schemas.<topic>.required_fields`，整批拒绝、零写盘 | 用 `--output json` 读 stdout 的 `validation_errors[].field` 一次性拿到全部缺失字段，修正后重发。`--unsafe-no-policy-check` 仅在 config `allow_unsafe_cli_emit: true` 时生效 |
-| `agent policy-check required` (U15/U21) | agent context + wave emit 无 precheck 成功记录 | 先 `ralph wave verify --payloads-stdin` 通过，再正式 `ralph wave emit`。dispatcher hat 由 `HatCommandPolicy` 派生（`publishes` 含 `*.unit.ready`）；worker hat 调 wave 子命令会被 deny |
+| `policy validation failed for topic 'X'`（exit ≠ 0） | 任一 payload 违反 `event_policy.schemas.<topic>.required_fields`，整批拒绝、零写盘 | 用 `--output json` 读 stdout 的 `validation_errors[].field` 一次性拿到全部缺失字段，修正后重发。`--unsafe-no-policy-check` 仅在 config 显式允许时生效 |
+| `agent policy-check required` | agent context + wave emit 无 precheck 成功记录 | 先 `ralph wave verify --payloads-stdin` 通过，再正式 `ralph wave emit`。worker hat 调 wave 子命令会被 deny |
 | 任何命令失败 | 通用恢复 | 1. `ralph wave emit --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
 
 > **wave worker 注意事项**：
@@ -184,7 +184,7 @@ printf '%s\n' \
 ### 校验
 
 ```bash
-# U5: 推荐用 --output json 拿 wave_id + events_file，避开 tail/grep 拼装
+# 推荐用 --output json 拿 wave_id + events_file，避开 tail/grep 拼装
 wave_id=$(cat payloads.jsonl | ralph wave emit review.wave.ready --payloads-stdin --output json | jq -r .wave_id)
 events_file=$(cat .ralph/current-events)
 
@@ -195,19 +195,6 @@ jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
 ' "$events_file"
 ```
 
-### 监督态协调话题 (Supervisor coordination topics)
+### 监督态协调话题
 
-`ce-executor-supervisor` preset（`presets/en/ce-executor-supervisor.yml`）下，仅 supervisor（rust side）能发布以下协调话题。Hat 不能在自己的 `publishes:` 里声明它们 —— production lint `hat_publishes_coord_topic` 会拒绝：
-
-| 话题 | 触发条件 | 订阅者 |
-|------|---------|---------|
-| `exec.wave.complete` | supervisor 确认所有 exec worker slot `Completed` | `exec-integrator` |
-| `exec.wave.failed` | supervisor 收到 `record_slot_failure` 不可恢复时 | `exec-integrator`（决策 `loop.cancel`） |
-| `fix.wave.complete` | supervisor 确认所有 fix worker slot `Completed` | `fix-integrator` |
-| `fix.wave.failed` | supervisor 收到 fix slot 不可恢复失败 | `fix-integrator` |
-| `review.wave.complete` | supervisor 确认 review-coordinator aggregate 收齐 6/7 维度 | `review-synthesizer` |
-| `review.wave.failed` | review coordinator 报 aggregate_timeout 时 | `review-synthesizer` |
-
-**为什么不能从 worker 内直接发**：origin guard 拒绝 agent emit 这些 topics（supervisor 协调 topic 是 runtime-owned，只有 supervisor 路径可以发）。`ce-executor-supervisor` 中 review-synthesizer 的 `publishes: [review.wave.complete]` 实际上由 lint whitelist 允许（review-synthesizer 属于 `*-integrator / *-coordinator` 例外族），但 runtime 仍走 supervisor 路径。
-
-**如何观察**：用 `ralph diagnose --supervisor json` 看 `active_waves` / `queue_depth` / `dedup_hits`（fix-plan U11 / R-11）。
+某些协调话题只能由 supervisor 路径发射，worker hat 不应直接 emit。是否属于这类 topic，以当前 preset 的运行时约束和 lint 结果为准；如果不确定，先看 preset 文档和 `ralph hats validate --strict` 的结果，再决定是否允许由 worker 发射。

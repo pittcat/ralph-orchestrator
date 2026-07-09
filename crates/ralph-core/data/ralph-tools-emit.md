@@ -37,7 +37,7 @@ ralph emit [OPTIONS] <TOPIC> [PAYLOAD]
 | `--hat <HAT>` | string | 否 | `$RALPH_CURRENT_HAT` | 发布此事件的 hat |
 | `--triggered <TRIGGERED>` | string | 否 | `$RALPH_TRIGGERED_HAT` | 被此事件触发的目标 hat |
 | `--source <SOURCE>` | string | 否 | `$RALPH_EVENT_SOURCE` | 事件来源标识 |
-| `--schema <TOPIC>` | string | 否 | — | 打印 `<TOPIC>` 的 embedded 协议 JSON 视图 + `protocol_hash`(U5 / R6,plan 2026-06-20-001);**只读,不写 events.jsonl,不消耗 iteration,不触发 lint**;与 `payload` / `--json` / `--policy-check` 互斥。常见用途:检测 authoring YAML 与 embedded 协议 drift、查 `required_fields` / `is_macro_edge`。详见 [`docs/handbook/serial-preset-development.md`](../../../docs/handbook/serial-preset-development.md) §"`ralph emit --schema <TOPIC>`"。 |
+| `--schema <TOPIC>` | string | 否 | — | 打印 `<TOPIC>` 的 embedded 协议 JSON 视图 + `protocol_hash`;**只读,不写 events.jsonl,不消耗 iteration,不触发 lint**;与 `payload` / `--json` / `--policy-check` 互斥。常见用途:检测 authoring YAML 与 embedded 协议 drift、查 `required_fields` / `is_macro_edge`。详见 [`docs/handbook/serial-preset-development.md`](../../../docs/handbook/serial-preset-development.md) §"`ralph emit --schema <TOPIC>`"。 |
 | `--output <MODE>` | string | 否 | `text` | policy-check / apply 响应格式。`json` → stdout 输出 [`EmitResult`](#ralph-emit-响应emitresult) JSON；`text` → 保留旧版人类可读输出（默认） |
 
 **Schema 模式示例：**
@@ -47,7 +47,7 @@ ralph emit --schema work.done
 
 # 检测 drift:build 前后 protocol_hash 必变
 ralph emit --schema work.done | jq -r .protocol_hash   # 改前
-# 改 presets/schemas/ce-executor-pipeline.yml 后
+# 修改对应 preset schema 后
 cargo build
 ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 ```
@@ -67,7 +67,7 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 >
 > **对 agent 来说**：不需要检测当前模式。只要记住两条规则：1) 若 prompt 明确要求你触发某个 hat， emit 时带上 `--triggered <hat>`；2) 没要求时直接 emit，runner / CLI 会自动处理。
 
-### Policy-Check 反馈（plan 2026-07-09-001 U3-U6）
+### Policy-Check 反馈
 
 `ralph emit --policy-check` / `ralph wave emit --policy-check` 拒收时，错误响应里**每条** `validation_errors[]` 现在带一组可机读、可修复的字段（agent 优先读这些字段再决定怎么改 payload，不要凭"error message"猜）：
 
@@ -84,18 +84,18 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 **Agent 流程**：
 
-1. 读 prompt 中的 schema-aware publish section（plan U6 输出），按 `field_docs` 填 payload。
+1. 读 prompt 中的 schema-aware publish section，按 `field_docs` 填 payload。
 2. 跑 `ralph emit <topic> --policy-check -j '<payload>'` 预检。
 3. 拒收时读 `errors[0].field` / `expected` / `actual` / `field_description` / `suggested_payload_shape` / `suggested_command`。
 4. 修 payload（**只**改 `field` 提示的字段；**不要**复制旧 payload 重新猜字段名）。
 5. 再跑 `--policy-check`；通过后去掉 `--policy-check` 正式 emit。
-6. 同一 `(hat, topic, task_key, step, violation)` 第二次同型错误会触发 runtime fail-close（`plan.blocked(reason=protocol_violation_repeated:...)`）—— 不要 infinite 重试。
+6. 如果同一 hat / topic 反复触发同一类协议违规，runtime 可能转入 fail-close；不要无限重试。
 
 **Wave batch 特殊处理**：`ralph wave emit --policy-check` 的 `validation_errors[]` 每条带 `payload_index`，对应原始 batch 的索引；整个 batch 仍 atomic reject（任何一个失败 = events.jsonl 一行都不写）。修整批后一次性重发。
 
-**preset instructions 必须引用本段**（plan U7 lint：`INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING`）：builtin / high-risk preset 的 emitter hat 在 instructions 提到 `payload` / `ralph emit` / `ralph wave emit` / `field shape` / `required fields` 时，必须同时引用 `ralph-tools-emit` policy-check feedback 段（任意一处提到 `policy-check feedback` / `enrichment fields` / `suggested_payload_shape` / `field_description` / `suggested_command` 即可）。Hat instructions 不要复述字段表 —— prompt section 已经按 U6 渲染好；instructions 只负责指向本 skill。
+**preset instructions 应引用本段**：如果 preset 的 emitter hat 会构造 payload、调用 `ralph emit` 或 `ralph wave emit`，其 `instructions` 应引用这里的字段说明；不要把字段表复制进 `instructions`。prompt 里的 schema-aware publish section 已经提供了足够的字段提示。
 
-**新增 emitter hat 时的一致性约束**（plan 2026-07-09-001 S2）：任何 preset hat 的 `publishes` 列表包含 emitter role（即通过 `ralph emit` 或 `ralph wave emit` 产出事件），其 `instructions` 段必须 cite 上述 policy-check feedback 段。lint `preset.instructions_emit_feedback_skill_reference_missing` 在 preset-add 时强制此契约；此 doc note 防止 lint 准入与新 emitter-hat 起草之间的隐性 drift：当 lint 白名单扩展或新加入 builtin preset 时，作者必须主动 cite。
+**新增 emitter hat 时的一致性约束**：任何会通过 `ralph emit` 或 `ralph wave emit` 发事件的 hat，`instructions` 需要引用本段；相关 lint 会检查这一点。
 
 ### Envelope 校验（`triggered` 拓扑）
 
@@ -106,7 +106,7 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 - **ralph-control topics**（`task.resume`、`loop.cancel`、`loop.complete`、`human.*` 等）以及 **orchestrator diagnostic topics**（`event.*`）— 跳过 topology check；runtime 注入事件时 `triggered` 经常是 `ralph` 这类 pseudo-hat，不需要在 `hats[]` 中声明。
 - **business topics**（`work.done`、`queue.advance`、`review.dimension.*` 等）— 严格 topology check；`triggered` 必须是当前 preset 的 hat 之一。
 
-`ralph emit` 默认 enforce 这条规则；如需绕开，只能用 `ralph emit --unsafe-no-policy-check`，但该参数在大多数 preset（包括 `ce-executor-pipeline`）下被直接拒绝。
+`ralph emit` 默认 enforce 这条规则；如需绕开，只能用 `ralph emit --unsafe-no-policy-check`，但该参数在大多数 preset 下会被直接拒绝。
 
 **事件文件解析优先级：**
 1. 显式 `RALPH_EVENTS_FILE` 或非默认 `--file`（必须命中本 loop 的 events allowlist，否则 `ralph emit` 拒绝写入并报错；不静默回退到 marker）
@@ -114,9 +114,9 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 3. `.ralph/current-events` marker 文件
 4. `.ralph/events.jsonl` 默认路径
 
-**`RALPH_WORKSPACE_ROOT` 锚定（plan 2026-07-06-002）：**
+**`RALPH_WORKSPACE_ROOT` 锚定：**
 
-emit 全路径用 `resolve_workspace_root` 单一锚点 (priority：`RALPH_WORKSPACE_ROOT` env > `discover_workspace_root(cwd)` > cwd)。runner 通过 `cli_executor::inject_ralph_runtime_env` 已注入 `RALPH_WORKSPACE_ROOT` 和 `PWD` —— hat 进程**不要 unset**。当你 `unset RALPH_EVENTS_FILE; cd sorts/; ralph emit ...` 时，事件可能落到 `sorts/.ralph/events.jsonl` 孤儿路径(参见 `docs/report/2026-07-06-ce-executor-ralph-emit-pwd-sorts-diagnosis.md`)。
+emit 全路径用 `resolve_workspace_root` 单一锚点 (priority：`RALPH_WORKSPACE_ROOT` env > `discover_workspace_root(cwd)` > cwd)。runner 通过 `cli_executor::inject_ralph_runtime_env` 已注入 `RALPH_WORKSPACE_ROOT` 和 `PWD` —— hat 进程**不要 unset**。当你 `unset RALPH_EVENTS_FILE; cd sorts/; ralph emit ...` 时，事件可能落到 `sorts/.ralph/events.jsonl` 孤儿路径（参见相关诊断报告）。
 
 **fail-closed 守卫（硬拒绝 + stdout 摘要）：**
 
@@ -125,7 +125,7 @@ emit 全路径用 `resolve_workspace_root` 单一锚点 (priority：`RALPH_WORKS
 - 显式非默认 `--file` 命中 allowlist 的高级场景不受 `cwd_workspace_drift` 限制。
 
 **反模式 / 注意事项：**
-- 🔴 **禁止直写 `.ralph/events.jsonl`**：必须通过 `ralph emit` / `ralph wave emit` 写入事件。直接 `echo ... >> .ralph/events.jsonl` 或 heredoc 写入会绕过 CLI pre-publish check；loop 读盘时仍会触发 `event_policy` 校验，并以 `payload_contract_violation` 拒绝整行（最坏情况：`not_retriable` 终止 loop）。文档：`docs/plans/2026-06-15-001-feat-schema-aware-hat-emit-instructions-plan.md` §4.6。
+- 🔴 **禁止直写 `.ralph/events.jsonl`**：必须通过 `ralph emit` / `ralph wave emit` 写入事件。直接 `echo ... >> .ralph/events.jsonl` 或 heredoc 写入会绕过 CLI pre-publish check；loop 读盘时仍会触发 `event_policy` 校验，并以 `payload_contract_violation` 拒绝整行（最坏情况：`not_retriable` 终止 loop）。详见相关设计文档。
 - 🔴 **`task_id` 字段禁止空字符串**：任何包含 `task_id` 的 payload（`work.ready`、`work.done`、`test.passed`、`queue.advance` 等）必须传非空字符串，如 `task-{timestamp}-{hex}`。`"task_id":""` 会被 `ralph emit` 直接拒绝，且会破坏 step handoff / state projection。
 - 🔴 **不要**在 wave worker 内部使用 `ralph emit` 发射 wave 事件；worker 应直接通过标准输出或 `ralph emit` 返回结果，而不是触发新 wave。
 - 🔴 **禁止 `unset RALPH_EVENTS_FILE` 后从子目录 `cd sorts/; ralph emit ...`**：isolated hat 进程会被 `cwd_workspace_drift` 硬拒绝，事件落不到目标。若 runner 注入的 env 被破坏，恢复 `unset` 前的 env 或 `cd $RALPH_WORKSPACE_ROOT` 后再 emit。
@@ -134,7 +134,7 @@ emit 全路径用 `resolve_workspace_root` 单一锚点 (priority：`RALPH_WORKS
 - 🔴 `ralph emit` **没有** `format` 选项。
 - 🔴 试图通过 `RALPH_EVENTS_FILE` 或 `--file` 写入其他 worktree 的 events 文件会被 `ralph emit` 拒绝；错误信息会列出当前 allowlist。
 
-**`EmitResult.target_path`（plan 2026-07-06-002 R5）：**
+**`EmitResult.target_path`：**
 
 - `--output json` 路径下 `EmitResult.target_path` 字段在 `recorded: true` 时为绝对落盘路径;`recorded: false` 或拒收场景下整键被 `skip_serializing_if` 省略。
 - text 模式成功行追加 `→ <absolute_path>`:例如 `Event emitted: test.passed → /home/.../.ralph/agent/events-hat-validator-001-1.jsonl`。stderr 截断场景下仍能肉眼核对落盘位置。
@@ -174,9 +174,9 @@ emit 任何 step handoff 事件前，确认 payload 内部一致：
 
 JSON 写法：`ralph emit work.done --policy-check -j '{"plan_path": "...", "task_id": "..."}'`（dry-run 预检，不写盘；通过后去掉 `--policy-check` 再正式 emit）。
 
-**`--policy-check` 边界**：显式 `--policy-check` 是 **dry-run 预检**——校验通过与 loop gate 同源，但**不会**把事件写入 `events.jsonl`；通过后再跑一次不带 `--policy-check` 的正式 `ralph emit` 才会落盘。配置强制 `require_policy_check_for_cli_emit: true` 时，校验通过后仍会写盘（Enforce 模式，不是 dry-run）。CLI 校验覆盖：unified validation pipeline（`event_policy.schemas.<topic>.required_fields`）、isolated hat 作用域、以及 `progress_task_gate`（`plan.complete` / `queue.advance` 的 `progress.md` ↔ `tasks.jsonl` 一致性，`emit.rs` step handoff gate）。
+**`--policy-check` 边界**：显式 `--policy-check` 是 **dry-run 预检**——校验通过与 loop gate 同源，但**不会**把事件写入 `events.jsonl`；通过后再跑一次不带 `--policy-check` 的正式 `ralph emit` 才会落盘。配置强制 `require_policy_check_for_cli_emit: true` 时，校验通过后仍会写盘（Enforce 模式，不是 dry-run）。CLI 校验覆盖：统一的事件策略校验、isolated hat 作用域，以及 `progress_task_gate`（`plan.complete` / `queue.advance` 的 `progress.md` ↔ `tasks.jsonl` 一致性）。
 
-> **OPAC Precheck/Apply（agent context 默认 enforce）**: agent 上下文下，`ralph emit` 在无 `--policy-check` 且无 `--unsafe-no-policy-check` 写盘会被拒（U15）。`allow_unsafe_cli_emit: true` 可作为 preset opt-out（打印 deprecation warning）。详见 always-injected `ralph-tools-opac` skill Apply 段。
+> **OPAC Precheck/Apply（agent context 默认 enforce）**: agent 上下文下，`ralph emit` 在无 `--policy-check` 且无 `--unsafe-no-policy-check` 写盘会被拒。`allow_unsafe_cli_emit: true` 可作为 preset opt-out（打印 deprecation warning）。详见 always-injected `ralph-tools-opac` skill Apply 段。
 
 **校验：**
 ```bash
@@ -204,9 +204,9 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 |------|------|------|
 | `events file not in allowlist` | `RALPH_EVENTS_FILE` / `--file` 命中非 allowlist 路径 | 查看错误信息中列出的 allowlist 条目；优先移除显式参数让 ralph emit 走 marker 解析 |
 | `topic is required` | 缺少位置参数 | 补上 topic |
-| `policy check failed` | payload 不符合策略 | 读 stderr / 用 `--output json` 取 `validation_errors[].field` 一次拿全部缺失字段；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再发。**不要**首选 `--unsafe-no-policy-check`（`ce-executor-pipeline` preset 默认 `allow_unsafe_cli_emit: false` 时该参数被拒） |
+| `policy check failed` | payload 不符合策略 | 读 stderr / 用 `--output json` 取 `validation_errors[].field` 一次拿全部缺失字段；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再发。**不要**首选 `--unsafe-no-policy-check`（当配置未显式允许时该参数会被拒） |
 | `triggered_not_in_topology` | `--triggered <hat>` 不在当前 preset `hats[]` 里 | 用 `ralph hats list` 或 preset YAML 查合法 hat id；改 `--triggered` 为拓扑内 hat，或省略 `--triggered`（缺省允许）。ralph-control / orchestrator diagnostic topic 跳过此检查 |
-| `agent policy-check required` (U15) | agent context + 业务 topic + 无 `--policy-check` | 先 `ralph emit <TOPIC> --policy-check -j '...'` 通过，再去掉 `--policy-check` 正式 emit。preset `allow_unsafe_cli_emit: true` 可 opt-out（deprecated warning） |
+| `agent policy-check required` | agent context + 业务 topic + 无 `--policy-check` | 先 `ralph emit <TOPIC> --policy-check -j '...'` 通过，再去掉 `--policy-check` 正式 emit。preset `allow_unsafe_cli_emit: true` 可 opt-out（deprecated warning） |
 | `cannot write to events file` | 文件不存在或权限不足 | 确认 `.ralph/` 目录存在，检查权限 |
 | `Invalid JSON payload` | 用 `-j` 但 payload 不是合法 JSON | 用 `jq` 验证 payload：`echo '{"a":1}' \| jq .` |
 | `task_id cannot be empty` | payload 中 `task_id` 为空字符串 | 从 `.ralph/agent/tasks.jsonl` 取得真实 task id 后再 emit；任何带 `task_id` 的事件都适用 |
@@ -235,7 +235,7 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 以下规范在 loop 遇到 `task.resume` 时由 runner 自动注入（对应 `ralph-tools-recovery-directives` skill）。emit 相关操作**必须**遵守：
 
 - **收到 `task.resume(kind=missing_event_gate)` 后**：重新 emit 同一 topic 前**必须**先用 `ralph emit --schema <TOPIC>` 确认全部 `required_fields`；**最多**重试 2 次；第 3 次仍失败则 emit `work.failed(reason="re-emit_exhausted")`。
-- **收到 `task.resume(kind=stall_recovery)` 后**：stall 超过 30 秒未收到预期事件时，主动 yield 并 emit `loop.stalled`(`human.guidance` 已被 plan 2026-06-28-005 物理删除)，不要无限重发。
+- **收到 `task.resume(kind=stall_recovery)` 后**：stall 超过 30 秒未收到预期事件时，主动 yield 并 emit `loop.stalled`（`human.guidance` 已不再是有效 emit 目标），不要无限重发。
 - **禁止**绕过 policy 直写 `.ralph/events.jsonl`；也**禁止**用 `--unsafe-no-policy-check` 作为默认修复手段。
 - 更多细节见自动注入的 `## RECOVERY DIRECTIVES` 块（ID：`RD-EXECUTOR-RESEND-LIMIT`、`RD-STALL-DETECT-AND-YIELD`）。
 
@@ -243,7 +243,7 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 
 ## `ralph emit` 响应：`EmitResult`
 
-> **2026-07-06 plan U1/U5/U7-U9**: `ralph emit` 通过 `--output json` 返回 **统一** `EmitResult` JSON（SSOT 在 `crates/ralph-core/src/emit_result/`）。
+> `ralph emit` 通过 `--output json` 返回 **统一** `EmitResult` JSON（SSOT 在 `crates/ralph-core/src/emit_result/`）。
 > 这是 agent 与脚本解析 emit 结果的单一事实源；不要自己 `tail events.jsonl | jq` 来判断 emit 是否落盘。
 
 **启用方式**：所有 `ralph emit` 子命令 + 子路径（policy-check / apply）通过 `--output json` 输出 `EmitResult` 到 stdout，stderr 仅保留警告。
@@ -366,20 +366,19 @@ policy-check 拒收:
 
 ---
 
-## Unified Pipeline(U11)
+## Unified Pipeline
 
 `ralph emit --policy-check` 走 **unified validation pipeline**,与 loop 的 `process_parse_result` 使用同一 `ValidationPipeline::validate_pre_commit_with_view`。
 
 > 之前的 `UNIFIED_*` env var 开关已全部移除;unified path 现在为唯一路径,不再提供 legacy compat path。
 
-### Ledger 状态查询(U11-T1)
+### Ledger 状态查询
 
 进程崩溃后,`StateLedger::new(workspace)` 自动调用 `replay_from_disk` 重建 `LedgerSnapshot`,恢复:
 - `iteration` 计数
 - `rejection_digest`(R11 retry counts)
-- `handoff_accepted_log` / `handoff_tracker_log` / `flow_lifecycle_log`(U5 audit trail)
+- `handoff_accepted_log` / `handoff_tracker_log` / `flow_lifecycle_log`（审计轨迹）
 - `workflow_phases`
 - counter 集合
 
 若 ledger 损坏,降级到 `LedgerSnapshot::cold_start()` 并 `warn!` 日志。修复方式:`ralph loops clean --ledger` 截断损坏文件。
-

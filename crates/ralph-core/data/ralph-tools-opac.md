@@ -52,7 +52,7 @@ metadata:
 
 **marker 文件**：`.ralph/agent/.ralph-anchor.json`（runtime 状态，勿手改；由 `ralph resume --plan` 原子写入）。
 
-## supervisor 摘要（U8 of 2026-07-04-002）
+## supervisor 摘要
 
 当 `event_loop.supervisor.enabled: true` 时,`ralph inspect loop --format json` 的 `supervisor` 字段会带四段信息:
 
@@ -90,9 +90,9 @@ ralph inspect loop --format json | jq 'has("supervisor")'
 - **wave emit**：`ralph wave verify --payloads-stdin`（零写盘 batch precheck）。**worker hat 不可 wave emit**（已在 `HatCommandPolicy` / dispatcher hat 限定）
 - **shell 残留 `RALPH_CURRENT_HAT`**：operator 在 agent shell 残留变量是常见误用源；如发现 context 错乱，先 `unset RALPH_CURRENT_HAT`
 
-## Apply 阶段两步式 task verify gate（U7 of 2026-07-04-003）
+## Apply 阶段两步式 task verify gate
 
-> **强制**：当 preset 启用了 `tasks.require_verify_for_cli_mutate: true`（ce-executor-pipeline 默认开），agent 调用 `task add` / `task ensure` 必须先走两步：
+> **强制**：当 preset 启用了 `tasks.require_verify_for_cli_mutate: true` 时，agent 调用 `task add` / `task ensure` 必须先走两步：
 
 1. **P — Precheck record**：`ralph tools task verify <verb> [args…]` 通过后（Allow），runtime 在 `<workspace>/.ralph/agent/.ralph-task-verify-ticket` 写一个 one-shot ticket（SHA-256 fingerprint of `verb + canonical_payload + loop_id + hat_id`）
 2. **A — Apply consume**：紧接着用**完全相同**的参数调 `ralph tools task <verb>` → gate 读 ticket、匹配 fingerprint、consume ticket、放行写盘

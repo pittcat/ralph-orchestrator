@@ -49,7 +49,7 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 
 **行为规范：**
 - If no expected event (`test.passed`, `review.*.done`, etc.) arrives within approximately 30 seconds, yield instead of repeating the same emit.
-- Emit `loop.stalled` with a concise reason and the last attempted action. `human.guidance` is no longer a valid emit target (plan 2026-06-28-005).
+- Emit `loop.stalled` with a concise reason and the last attempted action. `human.guidance` is no longer a valid emit target.
 - Then wait for the orchestrator or operator to route the next step.
 
 **禁止：** 在 stall 状态下无限循环重发同一事件。
@@ -71,7 +71,7 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 
 **What this means:**
 - The orchestrator detected that a handoff's target consumer does NOT subscribe to the handoff's topic (the orchestrator's `triggers:` check rejects misrouted handoffs before the pending-registration timer).
-- Without this detection the handoff would silently stall for 600s, then escalate to `task.resume → recovery_exhausted:stall_recovery:...:handoff_dispatch_timeout` and route through the handoff's prefix-allowlist as `REVIEW_COMPLETE(pass)` — the silent-success loop family (see the historical `docs/report/2026-07-06-ce-executor-primary-*` diagnosis reports for the original root cause; pipeline does not enable the prefix-allowlist promotion path).
+- Without this detection the handoff would silently stall for 600s, then escalate to `task.resume → recovery_exhausted:stall_recovery:...:handoff_dispatch_timeout` and route through the handoff's prefix-allowlist as `REVIEW_COMPLETE(pass)` — the silent-success loop family (see the historical diagnosis reports for the original root cause; pipeline does not enable the prefix-allowlist promotion path).
 - The orchestrator now skips the 600s pending registration and emits this diagnostic immediately. The producer's topic emissions are also bypassed.
 
 **行为规范：**
