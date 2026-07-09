@@ -2477,43 +2477,39 @@ hats:
       injected ## TRIGGER CONTEXT block as the authoritative summary.
 
       ### Decision Rules
-      The injected matched hints encode the three branches; do not duplicate
-      them here. Apply the hint guidance verbatim and emit the topic it
-      names (`review.accepted` / `fix.requested` / `review.loop.blocked`).
+      The injected `## TRIGGER CONTEXT` block is the authoritative source for
+      this round. Read the matched routing hints, apply the guidance they name
+      verbatim, and emit exactly one of the topics they specify
+      (`review.accepted` / `fix.requested` / `review.loop.blocked`).
+      Do not duplicate the branch conditions here; the hints already encode them.
 
       ### Payload Rules
-      Pass through `plan_name`, `plan_path`, `review_round`,
-      `executor_head_sha`, `resolved_baseline_sha`, `p0_count`, `p1_count`,
-      `must_fix_now_count`, `main_conflict_count`,
-      `unfixed_previous_count`, `new_regression_p0_count`,
-      `newly_discovered_residual_count`, `blocking_main_conflict_count`,
-      `residual_findings_count`, `findings_summary`,
-      `loop_decision_basis`, `verdict`, and `synthesized_review_file` from
-      the trigger payload.
-      Preserve `round_base_sha` and `diff_patch_file` when emitting
-      `fix.requested`.
+      Pass through the listed fields from the trigger payload so downstream
+      consumers (fix-planner, fixer, alignment, reporter) keep the same shape:
 
-      Required payload shapes:
+      - `plan_name`, `plan_path`, `executor_head_sha`, `resolved_baseline_sha`
+      - counts: `p0_count`, `p1_count`, `must_fix_now_count`,
+        `main_conflict_count`, `unfixed_previous_count`,
+        `new_regression_p0_count`, `newly_discovered_residual_count`,
+        `blocking_main_conflict_count`, `residual_findings_count`,
+        `review_round`
+      - `findings_summary`, `loop_decision_basis`, `verdict`
+      - `synthesized_review_file` (always), and `round_base_sha` /
+        `diff_patch_file` only on `fix.requested`
 
-      ```bash
-      # Accept when B == 0
-      ralph emit review.accepted --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","review_round":<N>,"executor_head_sha":"<sha>","resolved_baseline_sha":"<sha>","p0_count":<P0>,"p1_count":<P1>,"must_fix_now_count":0,"main_conflict_count":0,"blocking_main_conflict_count":0,"residual_findings_count":<R>,"loop_decision_basis":"<why residuals do not keep the loop open>","verdict":"<pass|pass_with_residuals>"}'
+      `blocking_main_conflict_count` is the v1 gate-driving field; the
+      matched hints in `## TRIGGER CONTEXT` decide which topic to emit.
+      `must_fix_now_count` is kept for reporting compatibility and is not
+      a gate signal on its own.
 
-      # Request fixes when B > 0 and N < 6
-      ralph emit fix.requested --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","review_round":<N>,"executor_head_sha":"<sha>","resolved_baseline_sha":"<sha>","round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","synthesized_review_file":".ralph/review/<plan>/round-<NN>/synthesized-review.md","p0_count":<P0>,"p1_count":<P1>,"must_fix_now_count":<M>,"main_conflict_count":<C>,"unfixed_previous_count":<U>,"new_regression_p0_count":<G>,"newly_discovered_residual_count":<D>,"blocking_main_conflict_count":<B>,"residual_findings_count":<R>,"findings_summary":"<1-2 sentence summary>","loop_decision_basis":"<why the loop is still blocked>","verdict":"blocked"}'
-
-      # Block when B > 0 and N >= 6
-      ralph emit review.loop.blocked --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","review_round":<N>,"max_review_rounds":6,"executor_head_sha":"<sha>","resolved_baseline_sha":"<sha>","p0_count":<P0>,"p1_count":<P1>,"must_fix_now_count":<M>,"main_conflict_count":<C>,"blocking_main_conflict_count":<B>,"residual_findings_count":<R>,"loop_decision_basis":"<remaining main conflict>","reason":"max_review_rounds_reached_with_main_conflict_findings"}'
-
-      # 2026-07-09-001 plan U7: cite ralph-tools-emit's
-      # policy-check feedback section. After a rejection, read
-      # `field_description` / `suggested_payload_shape` /
-      # `suggested_command` from the error item; do not re-derive
-      # field shapes from this inline template.
-      ```
-
-      Use `ralph emit --policy-check` first; only after it passes, emit the
-      real event. See `ralph-tools-emit` §5.
+      ### Emit guidance
+      Construct the emit command from the field list above and the topic
+      the matched hint names. Use `ralph emit --policy-check` first; only
+      after it passes, emit the real event. See `ralph-tools-emit` §5 and
+      the ralph-tools-emit policy-check feedback section. After a rejection,
+      read `field_description` / `suggested_payload_shape` /
+      `suggested_command` from the error item rather than re-deriving field
+      shapes from this prompt.
 
       Then stop. Do not review code, plan fixes, apply fixes, align, or report.
 
