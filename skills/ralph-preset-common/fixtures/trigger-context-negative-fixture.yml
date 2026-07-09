@@ -1,0 +1,131 @@
+# Trigger Context negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+#
+# Goal: cover the 2026-07-09-003 (schema-backed trigger context) negative axes
+# so review-skill trainees can read a single YAML and locate every anti-pattern
+# the lint family and soft AAF path are supposed to catch. Each axis is
+# tagged in an inline comment so the acceptance grep is mechanical.
+#
+# ⚠️ Acceptance caveat (2026-07-09): as of this writing, `ralph preset check`
+# does NOT surface `preset.trigger_context_*` findings on a local YAML path
+# (the underlying `run_preset_lint(Strict)` call does run, but the
+# `RuntimeContractAggregator` Step-2 path silently drops them in this CLI
+# surface). The fixture therefore serves as a human-readable anti-pattern
+# index for review-skill acceptance; the lint side is verified via the
+# `cargo nextest run -p ralph-core -- preset_lint::trigger_context` suite
+# (see ../README.md).
+#
+# Negative axes covered:
+#   (a) summary_fields references a field not in required_fields /
+#       known_fields / field_docs / allowed_values → preset.trigger_context_unknown_field
+#   (b) hint condition uses an unsupported predicate op (regex) →
+#       preset.trigger_context_unsupported_predicate
+#   (c) numeric comparison op carries a non-number value → preset.trigger_context_value_shape
+#   (d) two routing hints share the same label → preset.trigger_context_duplicate_label
+#   (e) trigger_context is declared on review.synthesized but no hat
+#       subscribes to that topic → preset.trigger_context_no_consumer
+#   (f) gate hat instructions duplicate hint condition values into prose
+#       (soft AAF: duplicated hint conditions → review-only P1)
+event_loop:
+  execution_mode: isolated
+  starting_event: work.start
+  completion_promise: work.done
+  max_iterations: 10
+  event_policy:
+    enabled: true
+    mode: enforce
+    topic_deny_rules:
+      - {hat_id: ralph, topic: review.synthesized}
+      - {hat_id: ralph, topic: fix.requested}
+    schemas:
+      review.synthesized:
+        required_fields:
+          - review_round
+          - blocking_main_conflict_count
+        known_fields:
+          - residual_findings_count
+        field_docs:
+          verdict:
+            meaning: reviewer gate verdict
+            source: review-synthesizer hat
+            fill_rule: one of pass / needs_fix / blocked
+        allowed_values:
+          verdict:
+            - pass
+            - needs_fix
+            - blocked
+        trigger_context:
+          # (a) ghost_count is intentionally NOT in known set
+          summary_fields:
+            - ghost_count
+            - review_round
+            - residual_findings_count
+            - verdict
+          routing_hints:
+            # legitimate accept branch
+            - label: accept_when_clean
+              conditions:
+                - field: blocking_main_conflict_count
+                  op: eq
+                  value: 0
+              guidance: |
+                accept the round; residuals are report-only.
+            # (d) duplicate label — same string as above
+            - label: accept_when_clean
+              conditions:
+                - field: residual_findings_count
+                  # (b) unsupported predicate op (regex)
+                  op: regex
+                  value: ".*"
+              guidance: |
+                duplicate label + bad op probe.
+            # (c) numeric op with non-number value
+            - label: compare_with_bad_value
+              conditions:
+                - field: review_round
+                  op: gt
+                  value: "not-a-number"
+              guidance: |
+                value-shape probe.
+      fix.requested:
+        required_fields:
+          - fix_units
+hats:
+  executor:
+    name: Executor
+    description: Produces work output.
+    triggers:
+      - work.start
+    publishes:
+      - work.done
+    instructions: |
+      ## EXECUTOR MODE
+
+      Emit `work.done` after writing work output. Do not consult the
+      downstream review hints here — your activation sees no `review.synthesized`.
+    terminal_events:
+      - work.done
+  gate:
+    name: Gate
+    description: |
+      Decides accept / fix / blocked. Deliberately violates the
+      `## TRIGGER CONTEXT` boundary by re-stating hint conditions in prose.
+    triggers:
+      - work.done
+    publishes:
+      - work.done
+      - fix.requested
+    instructions: |
+      ## GATE MODE
+
+      # (f) SOFT AAF — instructions duplicate hint condition values
+      # from event_policy.schemas.review.synthesized.trigger_context.
+      # The `accept_when_clean` hint listed there should be evaluated
+      # as: `blocking_main_conflict_count eq 0`. If
+      # `blocking_main_conflict_count == 0` and `residual_findings_count == 0`,
+      # accept. If `blocking_main_conflict_count > 0`, emit `fix.requested`
+      # for must-fix findings only.
+
+      If you read `## TRIGGER CONTEXT`, ignore it — use the inline
+      if/else above instead.
+    terminal_events:
+      - work.done
