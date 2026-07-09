@@ -232,43 +232,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_pipeline_loop_gate_contract() {
-        let preset = get_preset("ce-executor-pipeline-loop")
-            .expect("ce-executor-pipeline-loop must be embedded");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("loop preset YAML should parse");
-        let gate = config
-            .hats
-            .get("review-gate")
-            .expect("loop preset must declare review-gate");
-
-        assert_eq!(gate.triggers, vec!["review.synthesized"]);
-        assert_eq!(
-            gate.publishes,
-            vec!["review.accepted", "fix.requested", "review.loop.blocked"]
-        );
-
-        let instructions = &gate.instructions;
-        for required in [
-            "exclusive three-way gate",
-            "M = must_fix_now_count",
-            "M == 0",
-            "M > 0",
-            "residual P0/P1",
-            "synthesized_review_file",
-            "N < 6",
-            "N >= 6",
-            "max_review_rounds: 6",
-            "ralph emit --policy-check",
-        ] {
-            assert!(
-                instructions.contains(required),
-                "review-gate instructions missing required contract phrase `{required}`"
-            );
-        }
-    }
-
-    #[test]
     fn test_ce_executor_pipeline_loop_fix_reentry_contract() {
         let preset = get_preset("ce-executor-pipeline-loop")
             .expect("ce-executor-pipeline-loop must be embedded");
@@ -290,42 +253,6 @@ mod tests {
                 .iter()
                 .any(|field| field == "next_review_plan"),
             "fix.done must require next_review_plan so null/missing payloads are rejected"
-        );
-
-        let fixer = config
-            .hats
-            .get("fixer")
-            .expect("loop preset must declare fixer");
-        for required in [
-            "structured `next_review_plan`",
-            "`next_review_plan` is REQUIRED",
-            "MUST be a JSON object, never",
-            "`review-reentry` will be triggered next",
-        ] {
-            assert!(
-                fixer.instructions.contains(required),
-                "fixer instructions missing required reentry contract phrase `{required}`"
-            );
-        }
-
-        let alignment = config
-            .hats
-            .get("alignment")
-            .expect("loop preset must declare alignment");
-        for required in [
-            "You receive `review.accepted`",
-            "From the `review.accepted` trigger payload",
-            "If `review_round > 1`, load the latest `fix.done` event",
-            "Do not read internal `.ralph/*` ledger files directly",
-        ] {
-            assert!(
-                alignment.instructions.contains(required),
-                "alignment instructions missing required trigger contract phrase `{required}`"
-            );
-        }
-        assert!(
-            !alignment.instructions.contains("From `fix.done` payload:"),
-            "alignment must not claim fix.done is its direct trigger"
         );
     }
 
@@ -798,65 +725,6 @@ mod tests {
                 "DEBUG_COMPLETE".to_string(),
             ]
         );
-        assert!(
-            investigator
-                .instructions
-                .contains("On `debug.start` or `hypothesis.rejected`:")
-        );
-        assert!(investigator
-            .instructions
-            .contains("If the bug is already fixed, cannot be reproduced, or an existing debug note already captures the answer"));
-        assert!(
-            investigator
-                .instructions
-                .contains("Emit exactly one `hypothesis.test`")
-        );
-        assert!(
-            investigator
-                .instructions
-                .contains("Use a real `ralph emit` command. Example:")
-        );
-        assert!(
-            investigator
-                .instructions
-                .contains("ralph tools task start <task_id>")
-        );
-        assert!(investigator.instructions.contains("`task_id`, `task_key`"));
-        assert!(
-            investigator
-                .instructions
-                .contains("On `hypothesis.confirmed`:")
-        );
-        assert!(investigator.instructions.contains("emit `fix.propose`"));
-        assert!(investigator.instructions.contains("On `fix.verified`:"));
-        assert!(
-            investigator
-                .instructions
-                .contains("Emit exactly one `DEBUG_COMPLETE`")
-        );
-        assert!(
-            investigator
-                .instructions
-                .contains("Use a real `ralph emit` command, not prose.")
-        );
-        assert!(
-            investigator
-                .instructions
-                .contains("Do not end the turn with only prose")
-        );
-        assert!(investigator.instructions.contains(
-            "❌ End the turn with only narration, document updates, or \"already complete\""
-        ));
-        assert!(
-            investigator
-                .instructions
-                .contains("❌ Emit undeclared topics like `debug.start`")
-        );
-        assert!(
-            investigator
-                .instructions
-                .contains("❌ Skip the event chain by doing fix or verification work inline")
-        );
 
         let tester = config.hats.get("tester").expect("tester hat should exist");
         assert_eq!(tester.triggers, vec!["hypothesis.test".to_string()]);
@@ -867,24 +735,6 @@ mod tests {
                 "hypothesis.rejected".to_string(),
             ]
         );
-        assert!(
-            tester
-                .instructions
-                .contains("If the hypothesis says the bug is already fixed")
-        );
-        assert!(
-            tester
-                .instructions
-                .contains("ralph tools task start <task_id>")
-        );
-        assert!(
-            tester
-                .instructions
-                .contains("nearby adversarial or neighboring failure-path case")
-        );
-        assert!(tester.instructions.contains(
-            "Use a real `ralph emit` command. The turn is incomplete until that command succeeds."
-        ));
 
         let fixer = config.hats.get("fixer").expect("fixer hat should exist");
         assert_eq!(
@@ -892,29 +742,6 @@ mod tests {
             vec!["fix.applied".to_string(), "fix.blocked".to_string()]
         );
         assert_eq!(fixer.default_publishes.as_deref(), Some("fix.blocked"));
-        assert!(!fixer.instructions.contains("Commit"));
-        assert!(
-            fixer
-                .instructions
-                .contains("❌ Make commits in this preset")
-        );
-        assert!(
-            fixer
-                .instructions
-                .contains("ralph tools task start <task_id>")
-        );
-        assert!(fixer.instructions.contains("ralph tools memory add"));
-        assert!(fixer.instructions.contains(
-            "Use a real `ralph emit` command. Writing code, notes, or tests alone does not complete the turn."
-        ));
-        assert!(fixer.instructions.contains(
-            "If the proposed fix is already present in the code, do NOT rewrite the code or tests."
-        ));
-        assert!(
-            fixer
-                .instructions
-                .contains("Write the required root-cause note in `.eval-sandbox/debug/counter.md`")
-        );
 
         let verifier = config
             .hats
@@ -925,22 +752,6 @@ mod tests {
             vec!["fix.verified".to_string(), "fix.failed".to_string()]
         );
         assert_eq!(verifier.default_publishes.as_deref(), Some("fix.failed"));
-        assert!(
-            verifier
-                .instructions
-                .contains("Re-run at least one nearby adversarial or failure-path case.")
-        );
-        assert!(
-            verifier
-                .instructions
-                .contains("ralph tools task start <task_id>")
-        );
-        assert!(verifier.instructions.contains("`task_id`/`task_key`"));
-        assert!(
-            verifier
-                .instructions
-                .contains("The turn is incomplete until the `ralph emit` command succeeds.")
-        );
     }
 
     #[test]

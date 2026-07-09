@@ -2473,9 +2473,8 @@ hats:
       (gate signal comes from `blocking_main_conflict_count`; `must_fix_now_count`
       is kept for reporting compatibility).
 
-      Do NOT re-derive the same conditions from the full payload; do NOT
-      read `.ralph/events.jsonl`, `.ralph/supervisor.db`, or any runtime
-      ledger to infer what the injected block already tells you.
+      Do NOT re-derive the same conditions from the full payload; trust the
+      injected ## TRIGGER CONTEXT block as the authoritative summary.
 
       ### Decision Rules
       The injected matched hints encode the three branches; do not duplicate
@@ -2548,8 +2547,7 @@ hats:
       actionable Units and which remain report-only.
 
       Do NOT re-derive the must-fix vs residual split from the full payload;
-      do NOT read `.ralph/events.jsonl`, `.ralph/supervisor.db`, or any
-      runtime ledger to infer what the injected block already tells you.
+      trust the injected ## TRIGGER CONTEXT block as the authoritative summary.
 
       ### HARD RULES
       - Emit EXACTLY ONE `review.complete` per activation.
@@ -3106,8 +3104,7 @@ hats:
       another fix round.
 
       Do NOT re-derive "why this round was accepted" from the full payload;
-      do NOT read `.ralph/events.jsonl`, `.ralph/supervisor.db`, or any
-      runtime ledger to infer what the injected block already tells you.
+      trust the injected ## TRIGGER CONTEXT block as the authoritative summary.
 
       Record residuals; do NOT loop back, retry, or block.
 
