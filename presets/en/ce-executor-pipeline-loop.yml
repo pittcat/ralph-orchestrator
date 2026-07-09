@@ -435,6 +435,46 @@ event_loop:
           - "findings_file"
           - "findings_count"
       review.synthesized:
+        # 2026-07-09-003 plan (U6): review-gate consumes this topic.
+        # Mirror `trigger_context` and `known_fields` to the SSOT file
+        # `presets/schemas/ce-executor-pipeline-loop.yml`. The fields
+        # listed under `known_fields` are referenced by hint conditions
+        # but are pass-through rather than gate decisions.
+        known_fields:
+          - "round_base_sha"
+          - "diff_patch_file"
+          - "synthesized_review_file"
+        trigger_context:
+          summary_fields:
+            - "review_round"
+            - "must_fix_now_count"
+            - "blocking_main_conflict_count"
+            - "residual_findings_count"
+            - "loop_decision_basis"
+            - "verdict"
+            - "synthesized_review_file"
+          routing_hints:
+            - label: "accept_or_residual_report_only"
+              conditions:
+                - field: "blocking_main_conflict_count"
+                  op: "eq"
+                  value: 0
+              guidance: "If blocking_main_conflict_count == 0: emit only review.accepted. Any residual P0/P1 findings are report-only; do not open another fix round for them."
+            - label: "must_fix_only"
+              conditions:
+                - field: "blocking_main_conflict_count"
+                  op: "gt"
+                  value: 0
+              guidance: "If blocking_main_conflict_count > 0 and review_round < 6: emit only fix.requested and treat only must_fix_now findings as actionable; ignore residual_findings_count for fix planning."
+            - label: "max_round_blocked"
+              conditions:
+                - field: "review_round"
+                  op: "gte"
+                  value: 6
+                - field: "blocking_main_conflict_count"
+                  op: "gt"
+                  value: 0
+              guidance: "If review_round >= 6 and blocking_main_conflict_count > 0: emit only review.loop.blocked with max_review_rounds: 6. Do not request another fix round."
         required_fields:
           - "plan_name"
           - "plan_path"
@@ -521,6 +561,23 @@ event_loop:
             loop_decision_basis: "round 1 P0/P1 findings are initial main-conflict obligations"
             verdict: "blocked"
       review.accepted:
+        # 2026-07-09-003 plan (U6): alignment consumes this topic;
+        # mirror `trigger_context` to the SSOT file.
+        trigger_context:
+          summary_fields:
+            - "review_round"
+            - "must_fix_now_count"
+            - "blocking_main_conflict_count"
+            - "residual_findings_count"
+            - "loop_decision_basis"
+            - "verdict"
+          routing_hints:
+            - label: "alignment_after_acceptance"
+              conditions:
+                - field: "blocking_main_conflict_count"
+                  op: "eq"
+                  value: 0
+              guidance: "If blocking_main_conflict_count == 0: the review round has been accepted. residual_findings_count is report-only context; do not open another fix round from alignment. Record residuals and emit align.done."
         required_fields:
           - "plan_name"
           - "plan_path"
@@ -557,6 +614,28 @@ event_loop:
             source: "review-gate"
             fill_rule: "literal string 'pass'"
       fix.requested:
+        # 2026-07-09-003 plan (U6): fix-planner consumes this topic;
+        # mirror `trigger_context` and `known_fields` to the SSOT file.
+        known_fields:
+          - "round_base_sha"
+          - "diff_patch_file"
+          - "synthesized_review_file"
+        trigger_context:
+          summary_fields:
+            - "review_round"
+            - "must_fix_now_count"
+            - "blocking_main_conflict_count"
+            - "residual_findings_count"
+            - "loop_decision_basis"
+            - "synthesized_review_file"
+            - "diff_patch_file"
+          routing_hints:
+            - label: "fix_planner_must_fix_only"
+              conditions:
+                - field: "blocking_main_conflict_count"
+                  op: "gt"
+                  value: 0
+              guidance: "If blocking_main_conflict_count > 0: write a full fix plan with one Unit per must_fix_now finding. residual_findings_count is report-only; do not create fix Units for residual findings."
         required_fields:
           - "plan_name"
           - "plan_path"
@@ -2386,21 +2465,22 @@ hats:
       This is an exclusive three-way gate; do not emit a second event in the
       same activation.
 
-      ### Decision Rules
-      Let `N = review_round`, `M = must_fix_now_count`,
-      `B = blocking_main_conflict_count`, and `max_review_rounds = 6`.
-      `M` is kept for reporting compatibility; `B` is the gate signal.
-      The old `M == 0` close-loop intuition is now expressed as `B == 0`:
-      severe residuals can remain in the report without opening another
-      fix round.
+      ### Read TRIGGER CONTEXT first
+      Before applying the decision rules below, read the `## TRIGGER CONTEXT`
+      block injected near the top of this prompt. It carries the current
+      trigger payload summary fields and any matched routing hints. Treat
+      the matched hints as the authoritative task guidance for this round
+      (gate signal comes from `blocking_main_conflict_count`; `must_fix_now_count`
+      is kept for reporting compatibility).
 
-      - If `B == 0`, emit only `review.accepted` and set
-        `must_fix_now_count: 0`. Any residual P0/P1
-        findings have already been classified as report-only residuals by
-        `review-synthesizer`; do not open another fix round for them.
-      - If `M > 0` and `B > 0` and `N < 6`, emit only `fix.requested`.
-      - If `M > 0` and `B > 0` and `N >= 6`, emit only `review.loop.blocked` with
-        `max_review_rounds: 6`.
+      Do NOT re-derive the same conditions from the full payload; do NOT
+      read `.ralph/events.jsonl`, `.ralph/supervisor.db`, or any runtime
+      ledger to infer what the injected block already tells you.
+
+      ### Decision Rules
+      The injected matched hints encode the three branches; do not duplicate
+      them here. Apply the hint guidance verbatim and emit the topic it
+      names (`review.accepted` / `fix.requested` / `review.loop.blocked`).
 
       ### Payload Rules
       Pass through `plan_name`, `plan_path`, `review_round`,
@@ -2458,6 +2538,18 @@ hats:
       Your only job is to read `synthesized_review_file`, write
       `<ROUND_DIR>/fix-plan.md`, and emit ONE `review.complete` event.
       You do NOT re-review code and you do NOT apply fixes.
+
+      ### Read TRIGGER CONTEXT first
+      Before deciding the fix-plan shape, read the `## TRIGGER CONTEXT`
+      block injected near the top of this prompt. It carries the current
+      round's gate-driving counts and the matched routing hint that tells
+      you whether this round is a `fix_planner_must_fix_only` activation.
+      Treat the matched hint as authoritative for which findings become
+      actionable Units and which remain report-only.
+
+      Do NOT re-derive the must-fix vs residual split from the full payload;
+      do NOT read `.ralph/events.jsonl`, `.ralph/supervisor.db`, or any
+      runtime ledger to infer what the injected block already tells you.
 
       ### HARD RULES
       - Emit EXACTLY ONE `review.complete` per activation.
@@ -3005,6 +3097,17 @@ hats:
       use the latest `fix.done` event available through the sanctioned event
       query command to identify the fix-plan range; otherwise treat the fix
       plan as not applicable.
+
+      ### Read TRIGGER CONTEXT first
+      Before cross-checking, read the `## TRIGGER CONTEXT` block injected
+      near the top of this prompt. The matched hint (`alignment_after_acceptance`)
+      confirms the review round has been accepted and tells you that
+      `residual_findings_count` is report-only context, not a signal to open
+      another fix round.
+
+      Do NOT re-derive "why this round was accepted" from the full payload;
+      do NOT read `.ralph/events.jsonl`, `.ralph/supervisor.db`, or any
+      runtime ledger to infer what the injected block already tells you.
 
       Record residuals; do NOT loop back, retry, or block.
 

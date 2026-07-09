@@ -29,6 +29,51 @@
 
 schemas:
   review.synthesized:
+    # 2026-07-09-003 plan (U6): declare `trigger_context` for the
+    # review-gate hat so the downstream isolated prompt block surfaces
+    # the gate-driving counts and routing hints instead of asking the
+    # agent to re-derive them from the full payload. `known_fields`
+    # widens the reference surface for hint conditions that read
+    # `synthesized_review_file` / `round_base_sha` / `diff_patch_file`,
+    # which are required for the fix round but are pass-through fields
+    # rather than gate decisions. Summary field order matches the
+    # agent's scan order: round, fix-now count, blocking count,
+    # residual count, decision basis, verdict, then supporting paths.
+    known_fields:
+      - "round_base_sha"
+      - "diff_patch_file"
+      - "synthesized_review_file"
+    trigger_context:
+      summary_fields:
+        - "review_round"
+        - "must_fix_now_count"
+        - "blocking_main_conflict_count"
+        - "residual_findings_count"
+        - "loop_decision_basis"
+        - "verdict"
+        - "synthesized_review_file"
+      routing_hints:
+        - label: "accept_or_residual_report_only"
+          conditions:
+            - field: "blocking_main_conflict_count"
+              op: "eq"
+              value: 0
+          guidance: "If blocking_main_conflict_count == 0: emit only review.accepted. Any residual P0/P1 findings are report-only; do not open another fix round for them."
+        - label: "must_fix_only"
+          conditions:
+            - field: "blocking_main_conflict_count"
+              op: "gt"
+              value: 0
+          guidance: "If blocking_main_conflict_count > 0 and review_round < 6: emit only fix.requested and treat only must_fix_now findings as actionable; ignore residual_findings_count for fix planning."
+        - label: "max_round_blocked"
+          conditions:
+            - field: "review_round"
+              op: "gte"
+              value: 6
+            - field: "blocking_main_conflict_count"
+              op: "gt"
+              value: 0
+          guidance: "If review_round >= 6 and blocking_main_conflict_count > 0: emit only review.loop.blocked with max_review_rounds: 6. Do not request another fix round."
     required_fields:
       - "plan_name"
       - "plan_path"
@@ -111,6 +156,25 @@ schemas:
         verdict: "blocked"
 
   review.accepted:
+    # 2026-07-09-003 plan (U6): alignment consumes this topic. Surface
+    # the verdict, gate-driving count, residual count, and decision
+    # basis so the alignment agent does not have to re-derive
+    # "why this round was accepted" from the full payload.
+    trigger_context:
+      summary_fields:
+        - "review_round"
+        - "must_fix_now_count"
+        - "blocking_main_conflict_count"
+        - "residual_findings_count"
+        - "loop_decision_basis"
+        - "verdict"
+      routing_hints:
+        - label: "alignment_after_acceptance"
+          conditions:
+            - field: "blocking_main_conflict_count"
+              op: "eq"
+              value: 0
+          guidance: "If blocking_main_conflict_count == 0: the review round has been accepted. residual_findings_count is report-only context; do not open another fix round from alignment. Record residuals and emit align.done."
     required_fields:
       - "plan_name"
       - "plan_path"
@@ -148,6 +212,30 @@ schemas:
         fill_rule: "literal string 'pass'"
 
   fix.requested:
+    # 2026-07-09-003 plan (U6): fix-planner consumes this topic.
+    # Surface the gate-driving count, must-fix count, residual count,
+    # and supporting round paths so fix-planner only acts on must-fix
+    # findings and never creates Units for residual report-only items.
+    known_fields:
+      - "round_base_sha"
+      - "diff_patch_file"
+      - "synthesized_review_file"
+    trigger_context:
+      summary_fields:
+        - "review_round"
+        - "must_fix_now_count"
+        - "blocking_main_conflict_count"
+        - "residual_findings_count"
+        - "loop_decision_basis"
+        - "synthesized_review_file"
+        - "diff_patch_file"
+      routing_hints:
+        - label: "fix_planner_must_fix_only"
+          conditions:
+            - field: "blocking_main_conflict_count"
+              op: "gt"
+              value: 0
+          guidance: "If blocking_main_conflict_count > 0: write a full fix plan with one Unit per must_fix_now finding. residual_findings_count is report-only; do not create fix Units for residual findings."
     required_fields:
       - "plan_name"
       - "plan_path"
