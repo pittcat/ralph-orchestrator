@@ -40,7 +40,69 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use ralph_proto::Topic;
+
 use crate::config::{EventSchema, HintCondition, HintOp, TriggerContextConfig};
+
+/// Topics that the runner treats as internal bookkeeping. They
+/// are never "the trigger" for an isolated hat activation and
+/// must not be considered when selecting the most recent
+/// trigger event for `## TRIGGER CONTEXT`. Mirrors
+/// `EventLoop::is_system_event`; kept as a string list so the
+/// `trigger_context` module stays I/O-free.
+const SYSTEM_TOPICS: &[&str] = &[
+    "task.resume",
+    "human.guidance",
+    "loop.cancel",
+    "loop.suspend",
+    "plan.complete",
+    "plan.blocked",
+    "LOOP_COMPLETE",
+    "REVIEW_COMPLETE",
+    "ralph.control",
+];
+
+/// Resolved trigger: the most recent accepted event that
+/// `hat_triggers` declared interest in. `payload` is the parsed
+/// JSON value (or `Value::Null` when the payload was not valid
+/// JSON; the renderer treats that case as "no fields present").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchedTrigger<'a> {
+    pub topic: &'a str,
+    pub payload: Value,
+}
+
+/// Walk `events` in reverse, return the most recent non-system
+/// event whose topic is matched by at least one of
+/// `hat_triggers` (glob-aware, see [`Topic::matches_str`]). The
+/// search starts from the **end** so the latest matching event
+/// wins — older events are stale by definition.
+///
+/// The hat-triggers filter is the same check the runner uses to
+/// pick the active hat in the first place, so the trigger
+/// context never leaks across hat subscriptions (R21 / R22).
+/// When the hat declares no triggers, the helper returns
+/// `None` (caller should treat this as a no-op).
+pub fn find_matching_trigger_event<'a, 'b>(
+    events: &'a [ralph_proto::Event],
+    hat_triggers: &[String],
+) -> Option<MatchedTrigger<'a>> {
+    for ev in events.iter().rev() {
+        let topic = ev.topic.as_str();
+        if SYSTEM_TOPICS.contains(&topic) {
+            continue;
+        }
+        let matched = hat_triggers
+            .iter()
+            .any(|t| Topic::from(t.as_str()).matches_str(topic));
+        if !matched {
+            continue;
+        }
+        let payload: Value = serde_json::from_str(&ev.payload).unwrap_or(Value::Null);
+        return Some(MatchedTrigger { topic, payload });
+    }
+    None
+}
 
 /// Stable source-of-truth for one trigger context. Built by
 /// [`build`] and consumed by [`render`]. Keeping the typed
@@ -816,5 +878,124 @@ mod u4_trigger_context_builder_tests {
         assert!(rendered.contains("  - scalar_str: \"ok\"\n"));
         assert!(rendered.contains("  - scalar_null: null\n"));
         assert!(rendered.contains("  - scalar_bool: true\n"));
+    }
+}
+
+#[cfg(test)]
+mod u5_trigger_event_matcher_tests {
+    //! U3 / U5 acceptance tests for `find_matching_trigger_event`.
+    //!
+    //! The matcher is the runtime-side analogue of the U5
+    //! topology-leakage lint: a `## TRIGGER CONTEXT` block must
+    //! never be injected for a hat that did not subscribe to
+    //! the source topic. We pin the helper's behaviour with
+    //! focused tests so the EventLoop wiring in
+    //! `prepend_trigger_context` can stay a thin pass-through.
+    use super::*;
+    use ralph_proto::Event;
+    use serde_json::json;
+
+    fn evt(topic: &str, payload: &str) -> Event {
+        Event::new(topic, payload)
+    }
+
+    /// 1. No events at all → no trigger (caller should no-op).
+    #[test]
+    fn u3_no_events_returns_none() {
+        let events: Vec<Event> = vec![];
+        let triggers = vec!["review.synthesized".to_string()];
+        assert!(find_matching_trigger_event(&events, &triggers).is_none());
+    }
+
+    /// 2. Event matches the hat's declared trigger: helper
+    /// returns the most recent matching event and parses its
+    /// payload into JSON.
+    #[test]
+    fn u3_returns_most_recent_matching_event() {
+        let events = vec![
+            evt("work.done", r#"{"x":1}"#),
+            evt("review.synthesized", r#"{"must_fix_now_count":0}"#),
+        ];
+        let triggers = vec!["review.synthesized".to_string()];
+        let matched = find_matching_trigger_event(&events, &triggers).expect("must match");
+        assert_eq!(matched.topic, "review.synthesized");
+        assert_eq!(matched.payload, json!({"must_fix_now_count": 0}));
+    }
+
+    /// 3. Glob trigger matches: `review.*` matches
+    /// `review.synthesized`. We must not silently ignore glob
+    /// semantics — that would diverge from the runtime's own
+    /// subscription matcher.
+    #[test]
+    fn u3_glob_trigger_matches_suffix() {
+        let events = vec![evt("review.synthesized", r#"{"x":1}"#)];
+        let triggers = vec!["review.*".to_string()];
+        let matched = find_matching_trigger_event(&events, &triggers).expect("must match");
+        assert_eq!(matched.topic, "review.synthesized");
+    }
+
+    /// 4. System events are never the trigger. Even if a
+    /// malformed preset declared `task.resume` as a hat
+    /// trigger, the helper ignores system topics so the block
+    /// never injects.
+    #[test]
+    fn u3_system_events_never_match() {
+        let events = vec![
+            evt("task.resume", r#"{"x":1}"#),
+            evt("human.guidance", r#"{"x":2}"#),
+        ];
+        let triggers = vec!["task.resume".to_string(), "human.guidance".to_string()];
+        assert!(find_matching_trigger_event(&events, &triggers).is_none());
+    }
+
+    /// 5. Event present but not in the hat's trigger list:
+    /// the helper must return `None`. This is the runtime
+    /// half of the R22 leakage guard — a hat that does not
+    /// subscribe to `plan.complete` must not see the trigger
+    /// context for `plan.complete`, even if the event reached
+    /// its event bus.
+    #[test]
+    fn u3_non_subscriber_event_returns_none() {
+        let events = vec![evt("plan.complete", r#"{"x":1}"#)];
+        let triggers = vec!["work.done".to_string()];
+        assert!(find_matching_trigger_event(&events, &triggers).is_none());
+    }
+
+    /// 6. Empty hat trigger list is a hard no-op (defensive:
+    /// a hat with no triggers should never receive a context
+    /// block).
+    #[test]
+    fn u3_empty_trigger_list_returns_none() {
+        let events = vec![evt("any.topic", r#"{"x":1}"#)];
+        let triggers: Vec<String> = vec![];
+        assert!(find_matching_trigger_event(&events, &triggers).is_none());
+    }
+
+    /// 7. Non-JSON payload is surfaced as `Value::Null` rather
+    /// than panicking. The builder treats the null payload as
+    /// "all fields missing", which renders as `<missing>`.
+    #[test]
+    fn u3_non_json_payload_becomes_null() {
+        let events = vec![evt("review.synthesized", "not-json")];
+        let triggers = vec!["review.synthesized".to_string()];
+        let matched = find_matching_trigger_event(&events, &triggers).expect("must match");
+        assert_eq!(matched.payload, Value::Null);
+    }
+
+    /// 8. Most-recent wins: when several matching events are
+    /// present, the helper returns the **last** one, mirroring
+    /// the "scan backwards" rule used by the runner's own
+    /// trigger search.
+    #[test]
+    fn u3_returns_last_matching_event() {
+        let events = vec![
+            evt("review.synthesized", r#"{"round":1}"#),
+            evt("other.topic", r#"{"ignored":true}"#),
+            evt("review.synthesized", r#"{"round":2}"#),
+        ];
+        let triggers = vec!["review.synthesized".to_string()];
+        let matched = find_matching_trigger_event(&events, &triggers).expect("must match");
+        assert_eq!(matched.topic, "review.synthesized");
+        assert_eq!(matched.payload, json!({"round": 2}));
     }
 }

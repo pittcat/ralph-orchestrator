@@ -142,3 +142,9 @@ mod u8_legacy_relocate_and_close;
 /// from schema + runtime. Only `LOOP_COMPLETE`
 /// terminates the dispatcher.
 mod u9_verdict_legacy_retire;
+/// 2026-07-09-003 plan U3: `prepend_trigger_context` is
+/// wired into the isolated build_prompt path. The helper is
+/// a no-op when the schema has no `trigger_context`
+/// declaration or the current hat does not subscribe to the
+/// source topic (SC6 / R3 / R21 / R22 / R29).
+mod u3_trigger_context_prompt;

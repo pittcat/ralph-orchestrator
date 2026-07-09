@@ -5031,6 +5031,15 @@ impl EventLoop {
             // 2026-06-28-003: prepend recovery directives derived
             // from pending `task.resume` events.
             let base_prompt = self.prepend_recovery_directives(base_prompt, &regular_events);
+            // 2026-07-09-003 plan (U3): prepend the schema-backed
+            // `## TRIGGER CONTEXT` block. The helper is a no-op
+            // when the schema has no `trigger_context`
+            // declaration or the hat does not subscribe to the
+            // source topic, so the SC6 / R3 / R29 byte-identical
+            // pre-feature contract holds for undeclared
+            // presets.
+            let base_prompt =
+                self.prepend_trigger_context(base_prompt, hat_id, &regular_events);
             let with_skills = self.prepend_auto_inject_skills(base_prompt, hat_id);
             let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
             let with_state_files = self.prepend_state_files(with_scratchpad);
@@ -6215,6 +6224,95 @@ impl EventLoop {
             return prompt;
         }
         format!("{section}\n{prompt}")
+    }
+
+    /// 2026-07-09-003 plan (U3): prepend the
+    /// `## TRIGGER CONTEXT` block derived from the schema-
+    /// declared `trigger_context` (U1) of the most recent
+    /// accepted event that the current hat subscribed to.
+    ///
+    /// The block is rendered by [`crate::trigger_context`]:
+    /// the helper here is the runtime wiring that finds the
+    /// matching trigger, looks up the schema, and decides
+    /// whether to inject at all. Three gates short-circuit to
+    /// a no-op prompt (SC6 / R3 / R29):
+    ///
+    /// 1. `event_policy` is absent (no schemas declared).
+    /// 2. No event in `regular_events` matches the hat's
+    ///    declared `triggers` (no trigger ⇒ no context).
+    /// 3. The schema for the matched topic has no
+    ///    `trigger_context` declaration (default-empty
+    ///    `TriggerContextConfig`).
+    ///
+    /// Topology safety (R21 / R22): the helper filters by the
+    /// hat's own `triggers` list, so a `## TRIGGER CONTEXT`
+    /// block can never be injected into a hat that did not
+    /// subscribe to the source topic. U5 wires a sibling lint
+    /// that catches the same mistake statically.
+    ///
+    /// The block is intentionally prepended **above** every
+    /// other prepend helper so the agent sees the trigger
+    /// summary first (R13 / R17 / KTD-5).
+    fn prepend_trigger_context(
+        &self,
+        prompt: String,
+        hat_id: &HatId,
+        regular_events: &[Event],
+    ) -> String {
+        // Gate 1: no event policy ⇒ no schemas ⇒ no block.
+        let Some(policy) = self.config.event_loop.event_policy.as_ref() else {
+            return prompt;
+        };
+
+        // The current hat's declared triggers drive the
+        // topology guard. We never fall back to a wildcard
+        // search — a hat that subscribes to no topics must
+        // not see a trigger context.
+        let Some(hat_config) = self.registry.get_config(hat_id) else {
+            return prompt;
+        };
+        let hat_triggers: Vec<String> = hat_config.triggers.clone();
+        if hat_triggers.is_empty() {
+            return prompt;
+        }
+
+        // Find the most recent non-system event the hat
+        // subscribes to.
+        let Some(trigger) =
+            crate::trigger_context::find_matching_trigger_event(regular_events, &hat_triggers)
+        else {
+            return prompt;
+        };
+
+        // Gate 2: schema for the source topic must exist and
+        // declare a non-empty `trigger_context` block.
+        let Some(schema) = policy.schemas.get(trigger.topic) else {
+            return prompt;
+        };
+        if schema.trigger_context.summary_fields.is_empty()
+            && schema.trigger_context.routing_hints.is_empty()
+        {
+            return prompt;
+        }
+
+        // Build + render. `source_hat` is unknown at this
+        // layer (events do not carry it), so the renderer
+        // surfaces `(unknown source hat)`. That is a U4 / U5
+        // observable gap that strict lint can flag if a
+        // schema/preset relies on it.
+        let view = crate::trigger_context::build(&crate::trigger_context::TriggerContextInput {
+            current_hat: hat_id.as_str(),
+            source_topic: trigger.topic,
+            source_hat: None,
+            schema,
+            payload: &trigger.payload,
+        });
+
+        let Some(block) = crate::trigger_context::render(&view) else {
+            return prompt;
+        };
+
+        format!("{block}\n{prompt}")
     }
 
     /// Prepends scratchpad content to the prompt if the file exists and is non-empty.
