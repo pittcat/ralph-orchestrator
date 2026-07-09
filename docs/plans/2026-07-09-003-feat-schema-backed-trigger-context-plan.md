@@ -503,3 +503,20 @@ U9 是所有 Unit 完成后的发布级验证门，不新增功能逻辑；它�
 - `presets/schemas/ce-executor-pipeline-loop.yml` 与 `presets/en/ce-executor-pipeline-loop.yml`：试点 schema SSOT 与 runtime embedded preset view。
 - `crates/ralph-core/tests/scenarios/opac/macro_edge_next_hint.yml` 与 `crates/ralph-core/tests/scenarios.rs`：真实 EventLoop 场景和 `prompt_contains` 断言模式。
 - `skills/ralph-preset-author/SKILL.md`、`skills/ralph-preset-review/SKILL.md`、`skills/ralph-preset-common/references/*.md`：loop 外 preset 起草/评审规程与 AAF / Payload Audit / finding rubric 来源。
+
+---
+
+## Implementation Correction Note (2026-07-09)
+
+追加于原 plan 实施后，限制为业务决策显式化，不重写 Product Contract。
+
+**Gate-driving field 决策**：v1 试点实现将"何时 accept / fix / block"的 gate signal 锁定为 `blocking_main_conflict_count`，而不是原 SC2/SC3 草案里的 `must_fix_now_count`。原因：
+
+- `blocking_main_conflict_count` 是 review-synthesizer 算出的"主冲突闭环数"，**已排除** baseline / out-of-scope / newly discovered residuals，正好对应"是否还有阻塞主冲突"的判断。
+- `must_fix_now_count` 只代表"被分类为 must_fix_now 的 findings 数量"，可能和 gate 状态脱钩（如果上游把它们算入 residuals 就会不再 gate 阻塞）。
+
+**兼容性**：schema 仍要求 `must_fix_now_count` 透传，填法遵循 `fill_rule: "integer; use blocking_main_conflict_count for the gate decision"`。Pilot hint 在 `presets/schemas/ce-executor-pipeline-loop.yml` 的 `review.synthesized` 块已显式写为 `field: blocking_main_conflict_count` 的三个分支 hint（`== 0` / `> 0 && review_round < 6` / `> 0 && review_round >= 6`），与试点 hat instructions 的"先读 ## TRIGGER CONTEXT"配套。
+
+**对原 SC2/SC3 的影响**：原 plan 草案 SC2/SC3 把 `must_fix_now_count == 0` 和 `> 0` 当作"必然 accept / 必然 fix"的判定。**实施后将判定改写为 `blocking_main_conflict_count == 0` / `> 0`**。原 AE1/AE2 仍可被新 acceptance 替代（覆盖同一行为：accept / request fixes），但 prompt 中实际读到的 hint 来自 `blocking_main_conflict_count`，不是 `must_fix_now_count`。后续 reviewer 不应按旧 SC2/SC3 字符串字面"必须按 `must_fix_now_count` 判定"来判 fail。
+
+**对配套 fix plan 编号 2026-07-09-004**：本修正已在该 plan 的 U1/U2 中落实——`review-gate` instructions 不再复述 `B == 0` / `B > 0 && N < 6` / `B > 0 && N >= 6` 的分支条件，改为只复述字段清单 + `ralph emit --policy-check` 约束。
