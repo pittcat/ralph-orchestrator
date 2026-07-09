@@ -42,8 +42,14 @@ schemas:
       - "p0_count"
       - "p1_count"
       - "must_fix_now_count"
+      - "main_conflict_count"
+      - "unfixed_previous_count"
+      - "new_regression_p0_count"
+      - "newly_discovered_residual_count"
+      - "blocking_main_conflict_count"
       - "residual_findings_count"
       - "findings_summary"
+      - "loop_decision_basis"
       - "verdict"
     field_docs:
       review_round:
@@ -55,13 +61,37 @@ schemas:
         source: "review-synthesizer"
         fill_rule: "absolute path; do NOT make up a filename"
       must_fix_now_count:
-        meaning: "findings classified as must_fix_now in this round (drives review-gate convergence)"
+        meaning: "findings classified as must_fix_now in this round; not every current-round P0/P1 is automatically a blocking loop obligation"
         source: "review-synthesizer computes from p0/p1"
-        fill_rule: "integer; 0 means the gate can close the loop"
+        fill_rule: "integer; use blocking_main_conflict_count for the gate decision"
+      main_conflict_count:
+        meaning: "current findings that are the loop's main conflict: initial review P0/P1, unfixed previous obligations, or current-fix P0 regressions"
+        source: "review-synthesizer classifies findings from the synthesized table and current round context"
+        fill_rule: "integer; count only findings that should drive this loop, not all severe residuals"
+      unfixed_previous_count:
+        meaning: "prior fix-plan obligations that are still not closed in this review round"
+        source: "review-synthesizer compares current findings with previous fix-plan / fix.done fixed_findings"
+        fill_rule: "integer; 0 when all prior obligations are closed"
+      new_regression_p0_count:
+        meaning: "P0 findings clearly introduced by the current fix diff"
+        source: "review-synthesizer checks evidence against the current fix diff range"
+        fill_rule: "integer; evidence must point to the current fix diff, otherwise classify as residual"
+      newly_discovered_residual_count:
+        meaning: "new severe findings discovered after round 1 that are not current-fix regressions and therefore report-only"
+        source: "review-synthesizer"
+        fill_rule: "integer; these do not keep the loop open"
+      blocking_main_conflict_count:
+        meaning: "gate-driving count; if > 0 review-gate requests fixes or blocks at max rounds, if 0 review-gate accepts"
+        source: "review-synthesizer"
+        fill_rule: "integer; usually main_conflict_count, and must exclude report-only residuals"
       residual_findings_count:
         meaning: "findings kept in the report but not blocking the loop (baseline / out-of-scope / newly discovered)"
         source: "review-synthesizer"
         fill_rule: "integer; 0 means nothing left to report"
+      loop_decision_basis:
+        meaning: "short explanation of why the loop should continue or close"
+        source: "review-synthesizer"
+        fill_rule: "one short sentence; mention main conflict closure, unfixed prior obligations, or current-fix regression evidence"
       verdict:
         meaning: "final decision for the topic"
         source: "review-synthesizer"
@@ -71,7 +101,13 @@ schemas:
         plan_path: "docs/plans/2026-07-09-001-feat-policy-check-agent-feedback-plan.md"
         review_round: 1
         must_fix_now_count: 2
+        main_conflict_count: 2
+        unfixed_previous_count: 0
+        new_regression_p0_count: 0
+        newly_discovered_residual_count: 0
+        blocking_main_conflict_count: 2
         residual_findings_count: 0
+        loop_decision_basis: "round 1 P0/P1 findings are initial main-conflict obligations"
         verdict: "blocked"
 
   review.accepted:
@@ -84,13 +120,28 @@ schemas:
       - "p0_count"
       - "p1_count"
       - "must_fix_now_count"
+      - "main_conflict_count"
+      - "blocking_main_conflict_count"
       - "residual_findings_count"
+      - "loop_decision_basis"
       - "verdict"
     field_docs:
       must_fix_now_count:
-        meaning: "must equal 0 for review.accepted; if > 0 the gate would have emitted fix.requested instead"
+        meaning: "accepted review has no remaining blocking loop obligations"
         source: "review-gate"
-        fill_rule: "must be 0; this is the close-loop signal"
+        fill_rule: "must be 0 when closing the loop"
+      main_conflict_count:
+        meaning: "main-conflict findings that remain after review-gate decision"
+        source: "review-gate"
+        fill_rule: "must be 0 on review.accepted"
+      blocking_main_conflict_count:
+        meaning: "gate-driving count; accepted only when this is 0 even if residual P0/P1 findings remain"
+        source: "review-gate"
+        fill_rule: "must be 0"
+      loop_decision_basis:
+        meaning: "short explanation of why residuals do not keep the loop open"
+        source: "review-gate"
+        fill_rule: "one short sentence"
       verdict:
         meaning: "must equal 'pass' on this topic; the review-gate never accepts with anything else"
         source: "review-gate"
@@ -109,8 +160,14 @@ schemas:
       - "p0_count"
       - "p1_count"
       - "must_fix_now_count"
+      - "main_conflict_count"
+      - "unfixed_previous_count"
+      - "new_regression_p0_count"
+      - "newly_discovered_residual_count"
+      - "blocking_main_conflict_count"
       - "residual_findings_count"
       - "findings_summary"
+      - "loop_decision_basis"
       - "verdict"
     field_docs:
       round_base_sha:
@@ -122,9 +179,17 @@ schemas:
         source: "review-gate / loop runner"
         fill_rule: "absolute path under .ralph/review/<plan>/round-<n>/"
       must_fix_now_count:
-        meaning: "must be > 0 on this topic; review-gate only emits fix.requested when there is real work to do"
+        meaning: "findings that the synthesizer marked must_fix_now for this round"
         source: "review-gate"
-        fill_rule: "integer >= 1"
+        fill_rule: "integer >= 1 when blocking_main_conflict_count > 0"
+      blocking_main_conflict_count:
+        meaning: "gate-driving count for the requested fix round"
+        source: "review-gate"
+        fill_rule: "integer >= 1; do not request fixes for report-only residuals"
+      loop_decision_basis:
+        meaning: "short explanation of why the loop is still blocked"
+        source: "review-gate"
+        fill_rule: "one short sentence"
       verdict:
         meaning: "must equal 'blocked' on this topic; review-gate never requests fixes for a passing review"
         source: "review-gate"
@@ -143,8 +208,14 @@ schemas:
       - "p0_count"
       - "p1_count"
       - "must_fix_now_count"
+      - "main_conflict_count"
+      - "unfixed_previous_count"
+      - "new_regression_p0_count"
+      - "newly_discovered_residual_count"
+      - "blocking_main_conflict_count"
       - "residual_findings_count"
       - "findings_summary"
+      - "loop_decision_basis"
       - "verdict"
     field_docs:
       fix_plan_file:
@@ -155,6 +226,10 @@ schemas:
         meaning: "git SHA the fixer should rebase onto before applying the fix plan"
         source: "fix-planner"
         fill_rule: "40-char git SHA; do NOT hand-write"
+      blocking_main_conflict_count:
+        meaning: "number of actionable main-conflict findings represented by the fix plan"
+        source: "fix-planner"
+        fill_rule: "integer >= 1 for full fix plans; 0 only for defensive placeholder plans"
 
   review.loop.blocked:
     required_fields:
@@ -167,7 +242,10 @@ schemas:
       - "p0_count"
       - "p1_count"
       - "must_fix_now_count"
+      - "main_conflict_count"
+      - "blocking_main_conflict_count"
       - "residual_findings_count"
+      - "loop_decision_basis"
       - "reason"
     field_docs:
       max_review_rounds:
@@ -175,9 +253,17 @@ schemas:
         source: "review-gate / preset"
         fill_rule: "integer; do NOT hand-write (preset constant)"
       must_fix_now_count:
-        meaning: "must be > 0 on this topic; loop.blocked is the failure path, never the close path"
+        meaning: "must-fix findings still present when the loop gives up"
         source: "review-gate"
         fill_rule: "integer >= 1"
+      blocking_main_conflict_count:
+        meaning: "gate-driving count still open at max rounds"
+        source: "review-gate"
+        fill_rule: "integer >= 1"
+      loop_decision_basis:
+        meaning: "short explanation of the remaining main conflict"
+        source: "review-gate"
+        fill_rule: "one short sentence"
       reason:
         meaning: "human-readable reason the loop gave up (exceeded max_review_rounds, etc.)"
         source: "review-gate"

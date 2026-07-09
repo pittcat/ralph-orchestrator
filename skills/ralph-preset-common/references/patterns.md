@@ -77,8 +77,12 @@ work.done / fix.done
   不要让两个 downstream hat 消费同一个 fix topic。
 - `work.done` 和 `fix.done` 都只给 `review-reentry`，由它统一生成
   `review.round.ready`。
-- 第 1-3 轮 P0/P1 阻塞；第 4 轮起只有 P0 阻塞；第 6 轮仍有阻塞问题时
-  只走 `review.loop.blocked`。
+- P0/P1 先判断是否为当前 loop 的主要矛盾；严重程度本身不自动等于
+  阻塞项。主要矛盾包括 round-1 P0/P1、上一轮 fix-plan 要求修但仍未
+  关闭的问题、以及当前 fix diff 明确引入的新 P0 回归。
+- 后续轮次新发现但不是当前修复导致的 P0/P1 进入 report-only residual，
+  不应继续扩大 fix-plan；第 6 轮仍有主要矛盾时只走
+  `review.loop.blocked`。
 - `fix.done.next_review_plan` 是下一轮 review 的输入；`review-reentry`
   不应重新推断修复意图，也不应读取内部 ledger。
 - `fix.done.next_review_plan` 必须是非空 JSON object，不能是 `null`；
