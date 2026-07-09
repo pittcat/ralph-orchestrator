@@ -447,6 +447,40 @@ pub const FINDING_INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING: &str =
 /// exactly what produced the 2026-07-04 silent-success run.
 pub const FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD: &str = "preset.review_synthesizer_block_guard";
 
+// ──────────────────────────────────────────────────────────────────────────
+// 2026-07-09-003 plan (U4): schema-backed trigger context lint
+// finding IDs. R2 / R8 / R9 / R11 / R19 / R20 / SC5.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// U4 (plan 2026-07-09-003): `trigger_context.summary_fields` (or
+/// a hint condition's `field`) references a field that is not in
+/// `required_fields ∪ known_fields ∪ field_docs.keys() ∪
+/// allowed_values.keys()`. R2 / R19. Always `Error`.
+pub const FINDING_TRIGGER_CONTEXT_UNKNOWN_FIELD: &str = "preset.trigger_context_unknown_field";
+
+/// U4 (plan 2026-07-09-003): hint condition uses an
+/// `op` that is not in the v1 allowlist
+/// (`eq` / `ne` / `gt` / `gte` / `lt` / `lte` / `exists` /
+/// `missing`). The `HintOp::Unknown` variant preserves the
+/// original string at parse time so this finding can pin the
+/// exact unsupported predicate. R8 / R20. Always `Error`.
+pub const FINDING_TRIGGER_CONTEXT_UNSUPPORTED_PREDICATE: &str =
+    "preset.trigger_context_unsupported_predicate";
+
+/// U4 (plan 2026-07-09-003): hint condition has a `value` field
+/// shape that does not match the `op` — comparison ops
+/// (`gt` / `gte` / `lt` / `lte`) require a JSON number, and
+/// `exists` / `missing` must not carry a `value`. R8 / R9.
+/// Always `Error`.
+pub const FINDING_TRIGGER_CONTEXT_VALUE_SHAPE: &str = "preset.trigger_context_value_shape";
+
+/// U4 (plan 2026-07-09-003): two routing hints inside the same
+/// `trigger_context` declare the same `label`. The label is the
+/// stable identifier agent skill docs and BDD scenarios refer
+/// to; duplicates silently scramble the matched-hint sequence
+/// agents see. R11 / SC5. Always `Error`.
+pub const FINDING_TRIGGER_CONTEXT_DUPLICATE_LABEL: &str = "preset.trigger_context_duplicate_label";
+
 /// Inventory of every finding id in this module. Use this in tests
 /// that assert the lint surface does not silently re-introduce a
 /// serial-only or coordinator-loop finding. Plan 2026-07-07-006
@@ -496,4 +530,8 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC,
     FINDING_INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING,
     FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD,
+    FINDING_TRIGGER_CONTEXT_UNKNOWN_FIELD,
+    FINDING_TRIGGER_CONTEXT_UNSUPPORTED_PREDICATE,
+    FINDING_TRIGGER_CONTEXT_VALUE_SHAPE,
+    FINDING_TRIGGER_CONTEXT_DUPLICATE_LABEL,
 ];

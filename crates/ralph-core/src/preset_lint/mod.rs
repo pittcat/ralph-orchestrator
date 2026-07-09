@@ -53,6 +53,13 @@ pub mod schema_parity;
 pub mod state_projection;
 pub mod supervisor;
 pub mod topic_format;
+/// 2026-07-09-003 plan (U4): schema-backed trigger context
+/// static lint. Catches unknown `summary_fields` / condition
+/// field references, unsupported predicate ops, value-shape
+/// mismatches, and duplicate hint labels. Strict-only by
+/// design (R3 / R29) — default mode skips the check entirely
+/// so undeclared presets see no behaviour change.
+pub mod trigger_context;
 pub mod workflow_activation;
 
 #[cfg(test)]
@@ -117,6 +124,7 @@ pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,
     validate_all_topics, validate_topic_format,
 };
+pub use trigger_context::check_trigger_context;
 pub use workflow_activation::{HandoffGraph, run_workflow_activation_contract};
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -542,6 +550,22 @@ pub fn run_preset_lint_with_preset_name(
     findings.extend(lint_findings_to_contract_findings(
         &check_review_synthesizer_block_guard(config, strictness),
     ));
+
+    // 2026-07-09-003 plan (U4): schema-backed trigger context
+    // static lint. Catches unknown `summary_fields` /
+    // condition field references, unsupported predicate ops,
+    // value-shape mismatches, and duplicate hint labels. The
+    // lint is strict-only by design (R3 / R29): default mode
+    // skips the check entirely so undeclared presets see no
+    // behaviour change. The helper reads
+    // `event_policy.schemas` directly so it can also run for
+    // presets whose `event_policy` is otherwise inactive.
+    if matches!(strictness, LintStrictness::Strict) {
+        if let Some(policy) = config.event_loop.event_policy.as_ref() {
+            let trigger_ctx_findings = check_trigger_context(&policy.schemas, strictness);
+            findings.extend(lint_findings_to_contract_findings(&trigger_ctx_findings));
+        }
+    }
 
     // 2026-06-27 mechanism foundation U5: flow declaration lint.
     // Only presets that declare a `mechanism:` block are checked.
