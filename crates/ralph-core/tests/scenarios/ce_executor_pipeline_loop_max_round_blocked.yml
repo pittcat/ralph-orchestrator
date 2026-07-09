@@ -1,0 +1,196 @@
+# ce_executor_pipeline_loop_max_round_blocked: review_round 6 + blocking_main_conflict > 0 → review-gate emits review.loop.blocked with max_round_blocked hint
+
+name: ce_executor_pipeline_loop_max_round_blocked
+description: ce-executor-pipeline-loop max-round blocked path — at review_round 6 with a remaining main conflict, the gate emits review.loop.blocked and downstream review-gate prompt contains the [max_round_blocked] hint guidance.
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 40
+  hats:
+    plan-reviewer:
+      subscribes_to: [work.start]
+      publishes: [plan.ready, plan.blocked]
+    executor:
+      subscribes_to: [plan.ready]
+      publishes: [work.done, work.failed]
+    review-reentry:
+      subscribes_to: [work.done, fix.done]
+      publishes: [review.round.ready]
+    "dim:goal-alignment":
+      subscribes_to: [review.round.ready]
+      publishes: [review.goalalign.done]
+    "dim:correctness":
+      subscribes_to: [review.goalalign.done]
+      publishes: [review.correctness.done]
+    "dim:testing":
+      subscribes_to: [review.correctness.done]
+      publishes: [review.testing.done]
+    "dim:maintainability":
+      subscribes_to: [review.testing.done]
+      publishes: [review.maintainability.done]
+    "dim:project-standards":
+      subscribes_to: [review.maintainability.done]
+      publishes: [review.standards.done]
+    "dim:adversarial":
+      subscribes_to: [review.standards.done]
+      publishes: [review.adversarial.done]
+    review-synthesizer:
+      subscribes_to: [review.adversarial.done]
+      publishes: [review.synthesized]
+    review-gate:
+      subscribes_to: [review.synthesized]
+      publishes: [review.accepted, fix.requested, review.loop.blocked]
+    fix-planner:
+      subscribes_to: [fix.requested]
+      publishes: [review.complete]
+    fixer:
+      subscribes_to: [review.complete]
+      publishes: [fix.done]
+    alignment:
+      subscribes_to: [review.accepted]
+      publishes: [align.done]
+    reporter:
+      subscribes_to: [align.done, plan.blocked, work.failed, review.loop.blocked]
+      publishes: [report.done, LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: work.start
+    completion_promise: LOOP_COMPLETE
+    required_events: [report.done]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      terminal_topics: [LOOP_COMPLETE]
+      # 2026-07-09-004 plan U3: inline schema for review.synthesized
+      # so the build_prompt path actually injects the trigger-context
+      # block (with the [max_round_blocked] hint guidance) into the
+      # review-gate prompt. The trigger-context routing_hints mirror
+      # the schema-declared `blocking_main_conflict_count` gates.
+      schemas:
+        review.synthesized:
+          required_fields:
+            - plan_name
+            - plan_path
+            - review_round
+            - executor_head_sha
+            - resolved_baseline_sha
+            - blocking_main_conflict_count
+          trigger_context:
+            summary_fields:
+              - review_round
+              - blocking_main_conflict_count
+              - must_fix_now_count
+              - residual_findings_count
+            routing_hints:
+              - label: max_round_blocked
+                conditions:
+                  - field: review_round
+                    op: gte
+                    value: 6
+                  - field: blocking_main_conflict_count
+                    op: gt
+                    value: 0
+                guidance: "If review_round >= 6 and blocking_main_conflict_count > 0: emit only review.loop.blocked with max_review_rounds: 6. Do not request another fix round."
+      business_topics:
+        - plan.ready
+        - plan.blocked
+        - work.done
+        - work.failed
+        - review.round.ready
+        - review.goalalign.done
+        - review.correctness.done
+        - review.testing.done
+        - review.maintainability.done
+        - review.standards.done
+        - review.adversarial.done
+        - review.synthesized
+        - review.accepted
+        - fix.requested
+        - review.complete
+        - fix.done
+        - review.loop.blocked
+        - align.done
+        - report.done
+
+mock_responses:
+  - hat: plan-reviewer
+    text: |
+      <event topic="plan.ready">{"plan_name":"plan-loop-max","plan_path":"docs/plans/loop-max.md","plan_revised":false,"review_summary":"ok","flow_audit":"first_run","resolved_baseline_sha":"0000000000000000000000000000000000000001"}</event>
+  - hat: executor
+    text: |
+      <event topic="work.done">{"plan_name":"plan-loop-max","plan_path":"docs/plans/loop-max.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","tests_run":1,"tests_passed":1,"changed_lines":4,"commit_count":1}</event>
+  - hat: review-reentry
+    text: |
+      <event topic="review.round.ready">{"plan_name":"plan-loop-max","plan_path":"docs/plans/loop-max.md","review_round":6,"source_topic":"fix.done","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","round_base_sha":"0000000000000000000000000000000000000007","review_plan":{"focus_areas":["verify remaining main conflict"],"fixed_findings":[],"verification_performed":["cargo nextest"],"residual_risks":["unresolved P0 main conflict"],"diff_ranges":["0000000000000000000000000000000000000001..0000000000000000000000000000000000000007"]}}</event>
+  - hat: "dim:goal-alignment"
+    text: |
+      <event topic="review.goalalign.done">{"plan_name":"plan-loop-max","plan_path":"docs/plans/loop-max.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":6,"round_base_sha":"0000000000000000000000000000000000000007","dimension":"goal-alignment","findings_file":".ralph/review/plan-loop-max/r6-goal-alignment.md","findings_count":0}</event>
+  - hat: "dim:correctness"
+    text: |
+      <event topic="review.correctness.done">{"plan_name":"plan-loop-max","plan_path":"docs/plans/loop-max.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":6,"round_base_sha":"0000000000000000000000000000000000000007","dimension":"correctness","findings_file":".ralph/review/plan-loop-max/r6-correctness.md","findings_count":1}</event>
+  - hat: "dim:testing"
+    text: |
+      <event topic="review.testing.done">{"plan_name":"plan-loop-max","plan_path":"docs/plans/loop-max.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":6,"round_base_sha":"0000000000000000000000000000000000000007","dimension":"testing","findings_file":".ralph/review/plan-loop-max/r6-testing.md","findings_count":0}</event>
+  - hat: "dim:maintainability"
+    text: |
+      <event topic="review.maintainability.done">{"plan_name":"plan-loop-max","plan_path":"docs/plans/loop-max.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":6,"round_base_sha":"0000000000000000000000000000000000000007","dimension":"maintainability","findings_file":".ralph/review/plan-loop-max/r6-maintainability.md","findings_count":0}</event>
+  - hat: "dim:project-standards"
+    text: |
+      <event topic="review.standards.done">{"plan_name":"plan-loop-max","plan_path":"docs/plans/loop-max.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":6,"round_base_sha":"0000000000000000000000000000000000000007","dimension":"project-standards","findings_file":".ralph/review/plan-loop-max/r6-standards.md","findings_count":0}</event>
+  - hat: "dim:adversarial"
+    text: |
+      <event topic="review.adversarial.done">{"plan_name":"plan-loop-max","plan_path":"docs/plans/loop-max.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":6,"round_base_sha":"0000000000000000000000000000000000000007","dimension":"adversarial","findings_file":".ralph/review/plan-loop-max/r6-adversarial.md","findings_count":0}</event>
+  - hat: review-synthesizer
+    text: |
+      <event topic="review.synthesized">{"plan_name":"plan-loop-max","plan_path":"docs/plans/loop-max.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":6,"round_base_sha":"0000000000000000000000000000000000000007","diff_patch_file":".ralph/review/plan-loop-max/round-06/review.diff.patch","synthesized_review_file":".ralph/review/plan-loop-max/r6-synthesized-review.md","findings_count":1,"p0_count":1,"p1_count":0,"must_fix_now_count":1,"main_conflict_count":1,"unfixed_previous_count":1,"new_regression_p0_count":0,"newly_discovered_residual_count":0,"blocking_main_conflict_count":1,"residual_findings_count":0,"findings_summary":"unresolved main-conflict P0 persists at round 6","loop_decision_basis":"max_review_rounds reached with blocking main conflict remaining","verdict":"blocked"}</event>
+  - hat: review-gate
+    text: |
+      <event topic="review.loop.blocked">{"plan_name":"plan-loop-max","plan_path":"docs/plans/loop-max.md","review_round":6,"max_review_rounds":6,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","p0_count":1,"p1_count":0,"must_fix_now_count":1,"main_conflict_count":1,"blocking_main_conflict_count":1,"residual_findings_count":0,"loop_decision_basis":"max_review_rounds reached with blocking main conflict remaining","reason":"max_review_rounds_reached_with_main_conflict_findings"}</event>
+  - hat: reporter
+    text: |
+      <event topic="report.done">{"plan_name":"plan-loop-max","report_path":".ralph/review/plan-loop-max/report.md","verdict":"blocked"}</event>
+  - hat: reporter
+    text: |
+      <event topic="LOOP_COMPLETE">{"reason":"max_review_rounds reached"}</event>
+
+expected:
+  iterations: 13
+  events:
+    - topic: review.synthesized
+    - topic: review.loop.blocked
+    - topic: report.done
+  absent_events:
+    - topic: review.accepted
+    - topic: fix.requested
+    - topic: review.complete
+    - topic: fix.done
+    - topic: align.done
+  event_topic_counts:
+    - topic: review.synthesized
+      count: 1
+    - topic: review.loop.blocked
+      count: 1
+  payload_matches:
+    - topic: review.synthesized
+      fields:
+        review_round: 6
+        blocking_main_conflict_count: 1
+        must_fix_now_count: 1
+    - topic: review.loop.blocked
+      fields:
+        review_round: 6
+        blocking_main_conflict_count: 1
+        reason: "max_review_rounds_reached_with_main_conflict_findings"
+  # 2026-07-09-004 plan U3: assert review-gate's prompt includes
+  # the trigger-context header, the [max_round_blocked] hint label,
+  # the topic to emit, and the explicit "do not request another fix
+  # round" guidance.
+  prompt_contains:
+    - hat: review-gate
+      substrings:
+        - "## TRIGGER CONTEXT"
+        - "[max_round_blocked]"
+        - "review.loop.blocked"
+        - "Do not request another fix round"
+  completion: true

@@ -1457,6 +1457,16 @@ fn test_ce_executor_pipeline_loop_fix_reentry() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-09-004 plan U3: at review_round 6 with
+/// `blocking_main_conflict_count > 0`, the gate must emit
+/// `review.loop.blocked` and its prompt must carry the
+/// `[max_round_blocked]` hint guidance from the trigger context.
+#[test]
+fn test_ce_executor_pipeline_loop_max_round_blocked() {
+    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_loop_max_round_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-07-02-003 plan U2: failure variant. When the executor
 /// emits `work.failed` (e.g. cannot reach test green), the 6-dim
 /// review chain and downstream synthesizers/fixer/alignment MUST
