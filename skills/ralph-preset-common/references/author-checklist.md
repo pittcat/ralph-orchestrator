@@ -55,7 +55,20 @@
 |---|---|---|---|---|---|---|---|
 | `<topic>` | `task_id` | string | `ralph tools task list` → 当前 active task | `## ORCHESTRATOR CONTEXT` | 必须 live；禁手写 | reviewer 决定后续 fix / block | `field_docs.task_id.source` 指向 live task list；`fill_rule` 禁手写 |
 | `<topic>` | `verdict` | enum | 本 hat work 输出 | `## HAT IDENTITY` trigger payload | 不涉及 | 同上 | `field_docs.verdict.meaning` 解释判定语义；`allowed_values` 列枚举 |
+| `<topic>` | summary field（如 `must_fix_now_count`） | 整数 | 当前 trigger payload 字段 | `## TRIGGER CONTEXT`（preset/schema `trigger_context.summary_fields` 声明） | 不涉及 | 本 hat 决定路由分支 | schema `trigger_context.summary_fields` 列声明字段；missing 渲染为 `<missing>` |
+| `<topic>` | matched hint guidance | 字符串 | `trigger_context.routing_hints` 命中条目 | `## TRIGGER CONTEXT`「Matched routing hints」段 | 不涉及 | 本 hat 行动指导 | `routing_hints[*].label` 唯一；同 `exclusive_group` 内不可同时命中 |
 ```
+
+**Trigger Context 审核项（适用于 trigger-consuming hats）**
+
+- [ ] **声明位置**：`trigger_context` 写在 `event_policy.schemas.<topic>` 下，不要放在 `hats[*].instructions` 或独立 sibling。
+- [ ] **`summary_fields` 值源**：每条声明字段必须来自 trigger payload，且在 schema `required_fields` ∪ `known_fields` ∪ `field_docs.keys()` ∪ `allowed_values.keys()` 内。
+- [ ] **`known_fields` 缺口**：若 hint 条件或 summary 字段引用非 required 字段，须把它加入 schema `known_fields`，不要靠放宽 lint。
+- [ ] **`routing_hints` 形状**：每条 hint 用 `conditions: [{field, op, value}]` 形式，`op` 仅允许 `eq` / `ne` / `gt` / `gte` / `lt` / `lte` / `exists` / `missing`；数值比较 op 的 `value` 必须是 number；`exists` / `missing` 不带 `value`。
+- [ ] **`label` 唯一性**：同 topic 内 hint `label` 不重复；同 `exclusive_group` 内 hint 条件须可静态判定为互斥。
+- [ ] **拓扑消费方**：只为 `hats[*].triggers` / `subscribes_to` 包含该 source topic 的 hat 注入；无消费者触发 `trigger_context_no_consumer`。
+- [ ] **guidance 是 agent 行动**：hint `guidance` 用「你应该如何处理」表达，不要写 runtime 控制命令、不要修改 routing / 权限。
+- [ ] **instructions 不复制**：hat `instructions` 只引用 `## TRIGGER CONTEXT` 区块，不要把 hint 条件值复制进 instructions。
 
 **拒交付信号：**
 

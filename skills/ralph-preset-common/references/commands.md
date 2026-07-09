@@ -47,6 +47,8 @@ ralph tools task verify-emit-bridge ...
 
 **review 含义**：上面四条命令只能排除 shape / 拓扑 ownership 类问题，并观察 policy-check 的 agent-facing 修复面。**字段可见性 / 值源 / 身份 / 语义 / 下游消费 必须由 review 从 activated-hat 视角独立审**。详见 `references/agent-native-model.md`「Payload 审计模型」段。
 
+**Trigger Context（preset `event_policy.schemas.<topic>.trigger_context`）命令边界**：`ralph preset check --strict` 与 `ralph emit --schema <topic>` 只能验证 `trigger_context.summary_fields` 字段引用、`routing_hints[*].conditions[*].{op, value}` 形状、`label` 唯一性、以及 `trigger_context` 与下游 hat `triggers` / `subscribes_to` 的拓扑消费方关系（lint ID 见 `references/finding-rubric.md`）。**它们不能证明 hint `guidance` 与下游 hat 实际决策分支语义一致，也不能验证 hat `instructions` 是否仍在复制 hint 条件值**——这两项是 review 必须独立审的软性 AAF / payload-content 缺口。
+
 ## Hat 检查（local / 路径 preset）
 
 ```bash

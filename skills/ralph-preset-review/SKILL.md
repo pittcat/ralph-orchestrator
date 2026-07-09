@@ -16,6 +16,7 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
 - Reviewing builtin or local presets before merge
 - Finding P0/P1 issues: invisible inputs, broken handoffs, illegal commands, ledger reads, **invisible / fabricated / semantically unusable payload fields**
 - Finding policy-check feedback adoption gaps: missing `field_docs`, unsafe `examples`, or emitter instructions that do not cite `ralph-tools-emit` Policy-Check feedback
+- **Auditing `trigger_context` declarations** in `event_policy.schemas.<topic>`: hint conditions, label uniqueness, topology consumers, and the `instructions` ↔ `## TRIGGER CONTEXT` boundary (no duplicated hint conditions in prose)
 - Running `ralph preset check --strict` and preset_lint nextest subsets
 - Producing actionable remediation from AAF gaps + payload audit gaps
 
@@ -70,6 +71,8 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
 
 7. **Mechanical lint** — run commands in `references/commands.md`. Map JSON `id` values (`lint.preset.*`) via `references/finding-rubric.md`. **Continue AAF and payload audit even if lint fails**; note failure in Executive Summary.
    - If `preset.instructions_emit_feedback_skill_reference_missing` appears, treat it as a real adoption gap unless the hat does not construct payloads. The repair surface is the relevant hat `instructions:` plus, if needed, `event_policy.schemas.<topic>.field_docs`.
+   - **Trigger Context lint IDs** (`preset.trigger_context_unknown_field` / `preset.trigger_context_unsupported_predicate` / `preset.trigger_context_value_shape` / `preset.trigger_context_duplicate_label` / `preset.trigger_context_no_consumer`) 是机械 lint 抓得到的 shape / 拓扑错误。命中即按 `references/finding-rubric.md` 默认 severity 与 confidence 入表，**不要重写为软性 AAF**。
+   - **lint 不抓的 review-only 项**：hint `guidance` 是否与下游 hat 实际决策分支语义一致、`instructions` 是否仍在复制 hint 条件值（与 `## TRIGGER CONTEXT` 双写漂移）、`summary_fields` 引用字段是否在 trigger payload 中真实可见——这些由本 skill 第 4 / 5 步的 AAF 与 Payload Audit 独立审。
 
 8. **Confidence calibration** (`references/finding-rubric.md`):
    - Lint Error → 95; Warn → 85

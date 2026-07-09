@@ -15,6 +15,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 - Creating local presets from templates (`ralph preset new`)
 - Designing event topology, `state_projection`, and handoff fields
 - Designing event schema metadata (`field_docs` / `examples`) that lets agents repair policy-check failures
+- **Declaring schema-backed `trigger_context`** (`summary_fields` + `routing_hints` + `known_fields`) for trigger-consuming hats — collapses duplicated payload if/else in `instructions` into a single injected `## TRIGGER CONTEXT` block
 - Writing per-hat `instructions:` in isolated mode (one agent per activation)
 - Producing `preset-author-notes.md` (AAF 五问表 per hat) before review
 
@@ -47,6 +48,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
      - `field_docs.<field>.fill_rule`: how to fill or repair the value after policy-check rejects it.
      - `examples[]`: topic-level example payloads only when they do not invent business facts.
    - In `instructions:`, cite `ralph-tools-emit` Policy-Check feedback instead of copying field tables. The prompt builder supplies the per-topic schema-aware publish section.
+   - **Trigger Context 收敛**：trigger-consuming hats 的分支判定（accept / fix-now / blocked、residual 处理边界）若用 payload if/else 表达，必须先收敛到 `event_policy.schemas.<topic>.trigger_context.routing_hints`，再用 `summary_fields` 暴露关键计数；`instructions` 只引用 `## TRIGGER CONTEXT` 区块，不复制 hint 条件值。详情见 `references/author-checklist.md`「Trigger Context 审核项」。
 
 4. **Assemble `preset-author-notes.md`** next to the preset YAML (all AAF tables + Payload Contract tables).
 

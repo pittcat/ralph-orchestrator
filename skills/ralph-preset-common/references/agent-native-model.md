@@ -55,14 +55,15 @@ AAF 评审的核心是：**从 activated-hat 视角独立模拟每一步**，再
 
 1. `## HAT IDENTITY` — hat id、触发事件上下文
 2. 可选 `## WAVE CONTEXT` — wave worker 场景
-3. `## ORCHESTRATOR CONTEXT` — 投影后的 task/progress 视图
-4. **本 hat `instructions:`**
-5. Auto-inject skills — `ralph-tools.md`（tasks/memories 启用时）、`ralph-tools-tasks.md`、`ralph-tools-memories.md` 等
-6. Scratchpad / state files / open tasks 块
+3. 可选 `## TRIGGER CONTEXT` — preset/schema 在 `event_policy.schemas.<topic>.trigger_context` 声明的当前 trigger payload 摘要（source topic、source hat、declared summary fields、命中 routing hints）。本块只来自当前 activation 的 trigger payload，不来自 runtime ledger 或事件历史；缺失字段显示 `<missing>`，不推断为默认值。
+4. `## ORCHESTRATOR CONTEXT` — 投影后的 task/progress 视图
+5. **本 hat `instructions:`**
+6. Auto-inject skills — `ralph-tools.md`（tasks/memories 启用时）、`ralph-tools-tasks.md`、`ralph-tools-memories.md` 等
+7. Scratchpad / state files / open tasks 块
 
 证据：`crates/ralph-core/src/event_loop/tests/payload_types.rs` — `test_isolated_prompt_contains_only_target_hat_instructions`。
 
-Review 模拟每 hat 时，按上面六段核对每条 Q2 Observe / Q4 字段的可见性。
+Review 模拟每 hat 时，按上面七段核对每条 Q2 Observe / Q4 字段的可见性。`## TRIGGER CONTEXT` 是消费方 prompt context，不是 `ralph emit --policy-check` 的替代品；emit shape 验证仍走 schema gate。
 
 ## 状态传递（禁止空想）
 

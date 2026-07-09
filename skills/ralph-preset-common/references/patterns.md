@@ -94,6 +94,41 @@ work.done / fix.done
 
 参考：`presets/en/ce-executor-pipeline-loop.yml`。
 
+## review/fix convergence pattern（通用：单链环形 review/fix）
+
+适用范围：reviewer → gate 三选一 → 接受 / 修复 / 阻塞；同一业务 topic
+仅一个显式消费者；后续轮次新发现但非当前修复导致的严重 findings
+按 report-only residual 处理，不应继续扩大 fix-plan。
+
+拓扑通则（适用于所有 preset，不要套某个 builtin preset 字段清单）：
+
+- gate hat 必须是互斥三出口（accept / fix / blocked）中的一支；
+  同一 activation 只发一个终端业务事件。
+- 「fix request」只给 fix planner 一个 consumer；plan 完成事件只给
+  fixer 一个 consumer；不要让两个 downstream hat 消费同一个 fix topic。
+- 「reentry / next-round trigger」是上游 work / fix done 的唯一汇聚点；
+  同一上游 topic 复用到多个下游 hat 时要确认所有消费者有合理理由。
+- 主要矛盾（main conflict）按「轮次 P0/P1 ∪ 上一轮未关闭 ∪ 当前 fix
+  diff 引入的回归」三类组合判定；严重程度本身不等于阻塞项。
+- residual report-only 在第 N 轮（preset 设定的 `max_review_rounds`）
+  仍有主要矛盾时只能走 blocked；不要把 residual report 重新升级为
+  fix request。
+
+**Trigger Context 适配（适用任何 preset）**：
+
+- 把「主要矛盾 / 接受 / 必须修复 / 第 N 轮阻塞」分支判定收敛到
+  `event_policy.schemas.<synthesized-topic>.trigger_context.routing_hints`，
+  gate / fix planner / alignment 的 `instructions` 只引用 `## TRIGGER CONTEXT`
+  区块并说「先读 Trigger Context，再按本 hat 职责执行」。
+- `summary_fields` 至少包含 `review_round`、主要矛盾计数、residual
+  计数、`loop_decision_basis`、`verdict`、与下游必需的 supporting path
+  字段。
+- hint `guidance` 用「本轮你应该如何处理」的语言表达；不要写 runtime
+  控制命令、不要改 topic / hat / 工具权限、不要叫下游 hat 重新推断
+  payload。
+- 残留处理边界必须在 hint guidance 中显式说明（report-only vs fix-now），
+  避免下游 hat 误把 residual findings 升级成 fix units。
+
 ## 起草反模式（禁止抄进 instructions）
 
 | 反模式 | 应改为 |

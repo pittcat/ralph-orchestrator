@@ -92,6 +92,20 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.supervisor_hat_publishes_coord_topic` | P0 | 95 | Q4 | lint |
 | `preset.metadata_runtime_drift` | P1 | 85 | — | lint |
 | `preset.dimension_reviewer_write_plan` | P0 | 95 | Q3 | lint |
+| `preset.trigger_context_unknown_field` | P0 | 90 | Q4 | lint |
+| `preset.trigger_context_unsupported_predicate` | P0 | 90 | Q4 | lint |
+| `preset.trigger_context_value_shape` | P0 | 90 | Q4 | lint |
+| `preset.trigger_context_duplicate_label` | P0 | 90 | Q4 | lint |
+| `preset.trigger_context_no_consumer` | P0 | 90 | Q4 | topology |
+
+### Trigger Context 软性 AAF 缺口（review-only，不直接触发 lint）
+
+| 缺口 | Severity | category | aaf_question | 备注 |
+|---|---|---|---|---|
+| instructions 复制了 hint 条件值（与 `## TRIGGER CONTEXT` 双写漂移） | P1 | style | Q3 | instructions 应只引用 `## TRIGGER CONTEXT` 区块 |
+| `routing_hints[*].guidance` 是 runtime 控制命令 / 修改 routing / 改权限 | P1 | feasibility | Q4 | guidance 必须是 agent 行动 |
+| `summary_fields` 引用字段在 trigger payload 中可见但不在 schema SSOT 内 | P0 | payload-content | Q4 | 需先补 `required_fields` ∪ `known_fields` ∪ `field_docs` |
+| matched hint 的 guidance 与下游 hat 实际语义不一致 | P1（阻塞下游则 P0） | payload-content | Q5 | 验证 guidance 映射到下游决策分支 |
 
 ### Single-chain-first audit (2026-07-07-006 Unit 6)
 
