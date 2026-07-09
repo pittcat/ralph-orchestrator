@@ -77,8 +77,13 @@ fn u3_prepend_trigger_context_no_event_policy_is_noop() {
     let prompt = event_loop
         .build_prompt(&HatId::new("reviewer"))
         .expect("isolated build_prompt returns Some");
+    // Anchor on the renderer's first body line (`- source topic:`)
+    // instead of the `## TRIGGER CONTEXT` heading text. The heading
+    // name also appears in agent-facing skill docs that mention the
+    // block, so substring-checking the heading produces false
+    // positives when such skills are injected into the prompt.
     assert!(
-        !prompt.contains("## TRIGGER CONTEXT"),
+        !prompt.contains("- source topic:"),
         "without an event policy the prompt must not include the block, got: {prompt}"
     );
 }
@@ -110,7 +115,7 @@ fn u3_prepend_trigger_context_empty_declaration_is_noop() {
         .build_prompt(&HatId::new("reviewer"))
         .expect("isolated build_prompt returns Some");
     assert!(
-        !prompt.contains("## TRIGGER CONTEXT"),
+        !prompt.contains("- source topic:"),
         "empty trigger_context declaration must yield no block, got: {prompt}"
     );
 }
@@ -153,7 +158,7 @@ fn u3_prepend_trigger_context_non_subscriber_hat_is_noop() {
         .build_prompt(&HatId::new("reviewer"))
         .expect("isolated build_prompt returns Some");
     assert!(
-        !prompt.contains("## TRIGGER CONTEXT"),
+        !prompt.contains("- source topic:"),
         "non-subscriber hat must not see the synthesize trigger context, got: {prompt}"
     );
 }
@@ -196,13 +201,14 @@ fn u3_prepend_trigger_context_subscriber_injects_block() {
     let prompt = event_loop
         .build_prompt(&HatId::new("reviewer"))
         .expect("isolated build_prompt returns Some");
-    assert!(
-        prompt.contains("## TRIGGER CONTEXT"),
-        "subscriber hat must see the trigger context block, got: {prompt}"
-    );
+    // Anchor on the renderer's body line (`- source topic: <name>`)
+    // instead of the heading text. The heading name also appears
+    // in agent-facing skill docs that mention the block, so
+    // substring-checking the heading produces false positives when
+    // such skills are injected into the prompt.
     assert!(
         prompt.contains("- source topic: review.request"),
-        "block must surface source topic, got: {prompt}"
+        "subscriber hat must see the trigger context block, got: {prompt}"
     );
     assert!(
         prompt.contains("verdict: \"pass\""),
@@ -334,7 +340,7 @@ fn u3_prepend_trigger_context_no_matching_event_is_noop() {
         .build_prompt(&HatId::new("reviewer"))
         .expect("isolated build_prompt returns Some");
     assert!(
-        !prompt.contains("## TRIGGER CONTEXT"),
+        !prompt.contains("- source topic:"),
         "with no matching event the prompt must not include the block, got: {prompt}"
     );
 }
