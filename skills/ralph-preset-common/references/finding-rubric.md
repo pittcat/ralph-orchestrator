@@ -46,6 +46,19 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | 终态 emit 前夹带其它业务事件 | P0 | feasibility | Q4 |
 | report finding 无 repair surface（无字段 / 无 source / 无 fix） | 拒入主表 → Unverified Suspicions | — | — |
 
+## Policy-Check Feedback → Severity
+
+这些缺口不一定改变 runtime 接受 / 拒绝语义，但会让 agent 无法从 `--policy-check` 拒收中自修复。
+
+| 缺口 | Severity | category | aaf_question |
+|---|---|---|---|
+| required handoff / identity / decision 字段缺 `field_docs`，且 injected skill 没有覆盖字段含义 | P1（导致 agent 反复拒收则升 P0） | policy-feedback | Q3 / Q4 |
+| `field_docs.<field>.source` 与 Payload Audit 的可见值源冲突 | P1（会诱导伪造 live identity 则 P0） | policy-feedback | Q4 |
+| `field_docs.<field>.fill_rule` 要求 agent 猜测、默认填业务事实或手写 live id | P0 | policy-feedback | Q4 |
+| `examples[]` 固化业务结论（如固定 `pass` / `0`）且 agent 可能复制为事实 | P1（影响终态 / gate 判定则 P0） | policy-feedback | Q4 / Q5 |
+| emitter instructions 提到 payload / emit / required fields 但未引用 `ralph-tools-emit` Policy-Check feedback | P1 | lint | Q3 |
+| policy-check JSON 缺 `payload_index` 导致 wave batch 无法定位失败 item | P1（batch 阻塞主路径则 P0） | policy-feedback | Q3 |
+
 ## finding_id 映射表（curated）
 
 | finding_id（裸 ID / JSON 为 `lint.` + 此列） | default_severity | default_confidence | aaf_question | category |

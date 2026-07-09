@@ -10,6 +10,7 @@
 - [ ] 画事件流（topic 箭头，非 prompt 流）
 - [ ] 每条 handoff 边：上游 Q4 emit 字段 ↔ 下游 Q2 Observe 命令/字段
 - [ ] `state_projection.actions` 与 emit payload 字段对齐
+- [ ] 每个 agent-authored emit topic 的 `event_policy.schemas.<topic>` 已检查：required handoff / identity / verdict / count / path / reason 字段有 `field_docs`，高风险 topic 有不会伪造业务事实的 `examples`
 - [ ] 若 hat `publishes` 含 `review.dimensions.complete`，`state_projection.actions_chain` 须有对应投影 action（否则下游 Q2 看不到 review 汇总）
 - [ ] emitter 若 instructions 要求 `--triggered <hat>`，该 `<hat>` 必须在 preset `hats[]` 里声明（否则 runtime 拒收 `triggered_not_in_topology`）
 - [ ] loop preset 中 `fix.done.next_review_plan` 必须是非空 object 合同；schema、example、fixer instructions 都不能允许 `null`
@@ -22,10 +23,12 @@
 - [ ] 逐 hat 填 AAF 五问表（模板见下）
 - [ ] 禁止拓扑句式抄进 instructions
 - [ ] Emitter hat：引用 `ralph-tools-opac`、`ralph-tools-emit` §5；强制 `--policy-check`
+- [ ] Emitter hat：若 instructions 提到 payload / required fields / field shape / `ralph emit` / `ralph wave emit`，必须引用 `ralph-tools-emit`「Policy-Check 反馈」；不要复制 `field_docs` 表
 - [ ] Recovery / correction 路径：引用 `ralph-tools-recovery-directives`（通用 bounded retry）；preset 内用**触发状态表**写专用动作，不复述 data skill 全文
 - [ ] `task_id` / `task_key` / `step`：引用 `ralph-tools-tasks` red box
 - [ ] 不复述 `ralph-tools*.md` 参数表
 - [ ] **对每个 emit topic，按 payload audit 五列填行**（见下）—— schema 通过不等于字段可达
+- [ ] **对每个 payload 字段，反查 schema metadata**：`field_docs.meaning/source/fill_rule` 与 Payload Contract 的值源、可见性、下游消费一致
 
 ## AAF 五问表模板（每 hat 必填）
 
@@ -48,10 +51,10 @@
 ```markdown
 ### Hat: <id> — Payload Contract
 
-| topic | 字段 | 类型 | 值源（哪条命令 / 哪段 projection / 哪个 trigger payload 字段） | 可见性证据（hat prompt 栈哪一段可见） | 身份检查（是否需要 live task_id） | 下游消费（下游哪个 hat 的哪个决策用到） |
-|---|---|---|---|---|---|---|
-| `<topic>` | `task_id` | string | `ralph tools task list` → 当前 active task | `## ORCHESTRATOR CONTEXT` | 必须 live；禁手写 | reviewer 决定后续 fix / block |
-| `<topic>` | `verdict` | enum | 本 hat work 输出 | `## HAT IDENTITY` trigger payload | 不涉及 | 同上 |
+| topic | 字段 | 类型 | 值源（哪条命令 / 哪段 projection / 哪个 trigger payload 字段） | 可见性证据（hat prompt 栈哪一段可见） | 身份检查（是否需要 live task_id） | 下游消费（下游哪个 hat 的哪个决策用到） | schema metadata |
+|---|---|---|---|---|---|---|---|
+| `<topic>` | `task_id` | string | `ralph tools task list` → 当前 active task | `## ORCHESTRATOR CONTEXT` | 必须 live；禁手写 | reviewer 决定后续 fix / block | `field_docs.task_id.source` 指向 live task list；`fill_rule` 禁手写 |
+| `<topic>` | `verdict` | enum | 本 hat work 输出 | `## HAT IDENTITY` trigger payload | 不涉及 | 同上 | `field_docs.verdict.meaning` 解释判定语义；`allowed_values` 列枚举 |
 ```
 
 **拒交付信号：**
@@ -61,11 +64,15 @@
 - 多 trigger hat 合并成一行（必须按 trigger 拆分差异）
 - 决策字段（`verdict` / `reason` / `summary` / `next_action`）无下游消费说明
 - 某字段无任何一行说明它对 hat 可见
+- required handoff / identity / decision 字段没有 `field_docs`，也没有说明为什么现有 injected skill 已覆盖
+- `examples` 填了业务结论占位（例如固定 `0` / `pass`），而不是安全示例
 
 ## 交 review 前门禁
 
 - [ ] 每 hat 一张 AAF 表 + Payload Contract 表，写入 `preset-author-notes.md`
 - [ ] hat 表数 == YAML hat 数；每 emit topic 都填了 Payload Contract 行
+- [ ] Payload Contract 的 `schema metadata` 列已同步到 `presets/schemas/<name>.yml` 或 preset inline `event_policy.schemas`
+- [ ] Emitter instructions 引用 `ralph-tools-emit`「Policy-Check 反馈」，不复制字段说明
 - [ ] 自问：「若我只收到这份 instructions + Ralph 注入，能否做完 Q1？Q4 每个字段我能取到值吗？」
 - [ ] 对 builtin 改动：列出 7 点同步清单（见下），不自动执行
 - [ ] 建议调用 `ralph-preset-review`（不替代 `ralph preset check`）
