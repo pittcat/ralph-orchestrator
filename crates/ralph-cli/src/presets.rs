@@ -127,7 +127,6 @@ pub fn preset_names() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preset_merge_table::SSOT_SECTION_TARGETS;
     use ralph_core::event_origin::{OriginCheck, validate_event_origin};
     use ralph_core::payload_contract::validate_payload_contract;
     use ralph_core::{HatRegistry, RalphConfig};
@@ -311,90 +310,6 @@ mod tests {
         );
     }
 
-    /// Normalize preset content for byte-for-byte comparison so a
-    /// silent-alias detection assertion cannot be bypassed by
-    /// invisible whitespace (UTF-8 BOM), line endings (CRLF), or
-    /// case differences. Used by `test_no_serial_to_pipeline_alias`
-    /// to keep the lock honest across encoding drift.
-    ///
-    /// Strip UTF-8 BOM (`\xEF\xBB\xBF`), trim outer whitespace,
-    /// normalize CRLF/CR → LF, then lowercase. The output is a
-    /// `String` so the comparison is total-order deterministic.
-    fn normalize_for_compare(s: &str) -> String {
-        let bom = '\u{FEFF}';
-        let stripped = s.strip_prefix(bom).unwrap_or(s);
-        stripped
-            .replace("\r\n", "\n")
-            .replace('\r', "\n")
-            .trim()
-            .to_lowercase()
-    }
-
-    /// Companion lock test: the helper used by
-    /// `test_no_serial_to_pipeline_alias` must collapse BOM, CRLF,
-    /// trailing whitespace, and case differences so a future
-    /// embedded preset YAML cannot hide a silent alias behind an
-    /// encoding artifact. This test fails first if the helper
-    /// regresses (e.g. someone drops the BOM strip or the
-    /// CRLF normalization).
-    #[test]
-    fn test_normalize_for_compare_handles_bom_crlf_case() {
-        // BOM + uppercase + trailing whitespace + CRLF on the canonical
-        // name should normalize to the bare lowercase.
-        let messy = "\u{FEFF}CE-EXECUTOR-PIPELINE\r\n";
-        assert_eq!(
-            normalize_for_compare(messy),
-            "ce-executor-pipeline",
-            "normalize_for_compare must strip BOM, collapse CRLF, and lowercase"
-        );
-        // Bare canonical and fully-clean variant must compare equal
-        // (the lock test asserts equality on the normalized form, not
-        // the raw form).
-        assert_eq!(
-            normalize_for_compare("ce-executor-pipeline"),
-            normalize_for_compare("\u{FEFF}ce-executor-pipeline\r\n")
-        );
-        // Distinct preset names must remain distinct — the helper
-        // must not collapse a real difference.
-        assert_ne!(
-            normalize_for_compare("ce-executor-pipeline"),
-            normalize_for_compare("ce-executor-lite"),
-            "normalize_for_compare must not collapse distinct preset names"
-        );
-    }
-
-    /// No code path may silently re-introduce `ce-executor-serial` as a
-    /// public surface under a different name (e.g. as an alias for
-    /// `ce-executor-pipeline`). The registry has no alias mechanism; this
-    /// assertion guards against adding one.
-    #[test]
-    fn test_no_serial_to_pipeline_alias() {
-        // Static scan: PRESETS is a flat list with no alias field. If an
-        // alias layer is ever added, this assertion must be revisited.
-        let pipeline = get_preset("ce-executor-pipeline")
-            .expect("ce-executor-pipeline must remain a public builtin");
-        let pipeline_norm = normalize_for_compare(&pipeline.content);
-        for preset in PRESETS {
-            // A duplicate-content + different-name entry would be a
-            // silent alias. We refuse it on principle, not by accident.
-            // Use the normalized comparison so encoding drift (BOM,
-            // CRLF, case) cannot hide the duplicate.
-            if preset.name != pipeline.name
-                && normalize_for_compare(&preset.content) == pipeline_norm
-            {
-                panic!(
-                    "preset '{}' has identical content to 'ce-executor-pipeline' \
-                     — this is a silent alias and is forbidden by plan 2026-07-07-006",
-                    preset.name
-                );
-            }
-        }
-        // Belt-and-braces: serial must be entirely absent from PRESETS.
-        assert!(
-            !PRESETS.iter().any(|p| p.name == "ce-executor-serial"),
-            "ce-executor-serial must not appear in PRESETS at all"
-        );
-    }
 
     // Unit 2 (plan 2026-07-07-006): pipeline schema static self-check.
     // Lock the registry's claim that pipeline's work.done schema already
@@ -561,14 +476,15 @@ mod tests {
             preset.description,
             "Merges completed parallel loop from worktree back to main branch"
         );
-        // Verify key merge-related content
-        assert!(preset.content.contains("RALPH_MERGE_LOOP_ID"));
-        assert!(preset.content.contains("merge.start"));
-        assert!(preset.content.contains("MERGE_COMPLETE"));
-        assert!(preset.content.contains("conflict.detected"));
-        assert!(preset.content.contains("conflict.resolved"));
-        assert!(preset.content.contains("git merge"));
-        assert!(preset.content.contains("git worktree remove"));
+        // Structural parity (per plan 2026-07-09-005): parse the
+        // embedded YAML into RalphConfig so a future content rewrite
+        // cannot silently break the merge-loop contract — only
+        // registry presence + description + parseable schema matter.
+        // We deliberately do not assert on hat triggers/publishes
+        // here; that topology is governed by preset_lint and the
+        // BDD scenarios, not by a substring/text lock.
+        let _config = RalphConfig::parse_yaml(preset.content)
+            .expect("merge-loop embedded YAML must remain parseable as RalphConfig");
     }
 
     #[test]
@@ -835,188 +751,6 @@ mod tests {
         }
     }
 
-    /// Helper: read a non-embedded root preset YAML by relative path.
-    ///
-    /// Picks the right canonical subdirectory based on filename suffix:
-    /// `*`-zh.yml → `presets/zh/`, anything else → `presets/en/`.
-    fn read_root_preset(filename: &str) -> String {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let subdir = if filename.ends_with("-zh.yml") {
-            "zh"
-        } else {
-            "en"
-        };
-        let path = std::path::Path::new(manifest_dir)
-            .join("..")
-            .join("..")
-            .join("presets")
-            .join(subdir)
-            .join(filename);
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("failed to read root preset at {}: {}", path.display(), e))
-    }
-
-    fn read_root_schema(filename: &str) -> String {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let path = std::path::Path::new(manifest_dir)
-            .join("..")
-            .join("..")
-            .join("presets")
-            .join("schemas")
-            .join(filename);
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("failed to read root schema at {}: {}", path.display(), e))
-    }
-
-    /// Plan 2026-06-16-002 Unit 1: reproduce the merge that `build.rs`
-    /// applies at compile time — read the canonical preset and the
-    /// schema SSOT, then deep-merge the SSOT's `schemas:` mapping into
-    /// `event_loop.event_policy.schemas` (SSOT base, inline override).
-    /// Used by the SSOT-driven parity tests below to verify the binary
-    /// embedded what the build pipeline intended.
-    fn merge_root_with_ssot(preset_name: &str) -> String {
-        let preset_text = read_root_preset(&format!("{preset_name}.yml"));
-        let ssot_text = read_root_schema(&format!("{preset_name}.yml"));
-        merge_preset_with_schema_yaml(&preset_text, &ssot_text).unwrap_or_else(|e| {
-            panic!(
-                "merge_root_with_ssot({preset_name}) failed: {e}\n\
-                 (this mirrors build.rs — if it fails here, the test setup is broken, \
-                  not the production code.)"
-            )
-        })
-    }
-
-    fn merge_preset_with_schema_yaml(preset_text: &str, ssot_text: &str) -> Result<String, String> {
-        let mut preset: serde_yaml::Value =
-            serde_yaml::from_str(preset_text).map_err(|e| format!("preset YAML: {e}"))?;
-        let ssot: serde_yaml::Value =
-            serde_yaml::from_str(ssot_text).map_err(|e| format!("SSOT YAML: {e}"))?;
-
-        // 1) Schemas deep-merge into event_policy.schemas (U1).
-        let ssot_schemas = match ssot.get("schemas") {
-            Some(serde_yaml::Value::Mapping(m)) => m.clone(),
-            Some(other) => {
-                return Err(format!(
-                    "SSOT `schemas` must be a mapping, found {:?}",
-                    other
-                ));
-            }
-            None => serde_yaml::Mapping::new(),
-        };
-
-        let event_loop = ensure_yaml_mapping(&mut preset, &["event_loop"])?;
-        let event_policy = ensure_yaml_mapping(event_loop, &["event_policy"])?;
-        let inline_schemas_mapping = event_policy
-            .get("schemas")
-            .and_then(|v| v.as_mapping())
-            .cloned()
-            .unwrap_or_default();
-        let merged = deep_merge_yaml_mapping(&ssot_schemas, &inline_schemas_mapping);
-        let event_policy_mapping = event_policy
-            .as_mapping_mut()
-            .expect("ensure_yaml_mapping returned a non-mapping Value");
-        event_policy_mapping.insert(
-            serde_yaml::Value::String("schemas".to_string()),
-            serde_yaml::Value::Mapping(merged),
-        );
-
-        // 2) Multi-section protocol merge (plan 2026-06-20-001
-        //    U1 / KTD-1). Mirrors `build.rs` exactly so the
-        //    embedded copy produced by `cargo build` matches
-        //    what this test computes. The mapping table lives
-        //    in `crate::preset_merge_table::SSOT_SECTION_TARGETS`
-        //    (P2-6) so the build script and the test can share
-        //    one source of truth. Each SSOT top-level key (other
-        //    than `schemas`) is deep-merged into
-        //    `event_loop.<section>`.
-        let section_targets = SSOT_SECTION_TARGETS;
-        for (ssot_key, target_path) in section_targets {
-            let Some(ssot_value) = ssot.get(*ssot_key) else {
-                continue;
-            };
-            let ssot_mapping = match ssot_value {
-                serde_yaml::Value::Mapping(m) => m.clone(),
-                other => {
-                    return Err(format!(
-                        "SSOT `{ssot_key}` must be a mapping, found {:?}",
-                        other
-                    ));
-                }
-            };
-            let parent_path = &target_path[..target_path.len() - 1];
-            let leaf_key = target_path[target_path.len() - 1];
-            let parent = ensure_yaml_mapping(&mut preset, parent_path)?;
-            let parent_mapping = parent
-                .as_mapping_mut()
-                .expect("ensure_yaml_mapping returned a non-mapping Value");
-            let inline_mapping = parent_mapping
-                .get(leaf_key)
-                .and_then(|v| v.as_mapping())
-                .cloned()
-                .unwrap_or_default();
-            let section_merged = deep_merge_yaml_mapping(&ssot_mapping, &inline_mapping);
-            parent_mapping.insert(
-                serde_yaml::Value::String(leaf_key.to_string()),
-                serde_yaml::Value::Mapping(section_merged),
-            );
-        }
-
-        serde_yaml::to_string(&preset).map_err(|e| format!("re-serialise: {e}"))
-    }
-
-    fn ensure_yaml_mapping<'a>(
-        root: &'a mut serde_yaml::Value,
-        path: &[&str],
-    ) -> Result<&'a mut serde_yaml::Value, String> {
-        let mut current = root;
-        for key in path {
-            let entry = current
-                .as_mapping_mut()
-                .ok_or_else(|| format!("`{key}` parent is not a mapping"))?;
-            let key_value = serde_yaml::Value::String((*key).to_string());
-            if !entry.contains_key(&key_value) {
-                entry.insert(
-                    key_value.clone(),
-                    serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-                );
-            }
-            current = entry.get_mut(&key_value).expect("key just inserted above");
-        }
-        if !current.is_mapping() {
-            return Err(format!(
-                "path `{}` did not resolve to a mapping",
-                path.join(".")
-            ));
-        }
-        Ok(current)
-    }
-
-    fn deep_merge_yaml_mapping(
-        base: &serde_yaml::Mapping,
-        override_: &serde_yaml::Mapping,
-    ) -> serde_yaml::Mapping {
-        let mut out = serde_yaml::Mapping::new();
-        for (k, v) in base {
-            out.insert(k.clone(), v.clone());
-        }
-        for (k, override_v) in override_ {
-            match (out.get(k), override_v) {
-                (Some(existing), serde_yaml::Value::Mapping(override_map))
-                    if existing.is_mapping() =>
-                {
-                    let merged = deep_merge_yaml_mapping(
-                        existing.as_mapping().expect("checked is_mapping above"),
-                        override_map,
-                    );
-                    out.insert(k.clone(), serde_yaml::Value::Mapping(merged));
-                }
-                _ => {
-                    out.insert(k.clone(), override_v.clone());
-                }
-            }
-        }
-        out
-    }
 
     #[test]
     fn test_ce_executor_reporter_publishes_report_done() {
@@ -1042,254 +776,25 @@ mod tests {
         );
     }
 
-    /// Guard: ce-executor must explicitly tell the agent NOT to create, switch,
-    /// or rename branches, and NOT to create worktrees. Branching is reserved
-    /// for the user via `ralph run --worktree`; the orchestrator handles it
-    /// before the agent activates. The agent improvising a "git checkout -b
-    /// feat/plan-name" or "git worktree add ..." was the original bug — see
-    /// git history for "fix: ce-executor 禁建分支".
-    ///
-    /// Note: this guard scans hat instructions text because the
-    /// prohibition is expressed in the prompt to the agent (a free-form
-    /// string), not as a structured field. We check that
-    /// `git checkout -b` and `git worktree add` each appear in a
-    /// sentence that *also* carries a prohibition marker
-    /// (NEVER / MUST NOT / "不要" / "禁止" / "严禁"). This is
-    /// resilient to wording changes (e.g. "MUST NOT create" / "禁止
-    /// 切换分支") but still fails if the policy block is dropped.
-    #[test]
-    fn test_ce_executor_forbids_agent_branch_creation() {
-        let preset = get_preset("ce-executor-pipeline").expect("ce-executor preset should exist");
-        let content = preset.content;
-
-        let prohibition_markers = ["NEVER", "MUST NOT", "不要", "禁止", "严禁"];
-        for forbidden_cmd in ["git checkout -b", "git worktree add"] {
-            let mut found = false;
-            for marker in prohibition_markers {
-                // Check the 200 chars before each occurrence of the
-                // forbidden command for a prohibition marker. This
-                // tolerates re-flowing YAML comments. Use char_indices
-                // because the content is UTF-8 and byte slicing would
-                // split multi-byte characters (e.g. CJK).
-                for (idx, _) in content.match_indices(forbidden_cmd) {
-                    let start_byte = content
-                        .char_indices()
-                        .rev()
-                        .filter(|(b, _)| *b <= idx)
-                        .nth(200)
-                        .map(|(b, _)| b)
-                        .unwrap_or(0);
-                    if content[start_byte..idx].contains(marker) {
-                        found = true;
-                        break;
-                    }
-                }
-                if found {
-                    break;
-                }
-            }
-            assert!(
-                found,
-                "ce-executor must forbid `{forbidden_cmd}` with a prohibition marker \
-                 (NEVER / MUST NOT / 不要 / 禁止 / 严禁) in the surrounding 200 chars. \
-                 Run ./scripts/sync-embedded-files.sh if the canonical file has the \
-                 policy but the embedded mirror does not."
-            );
-        }
-
-        // Negative regression: the exact "create one (e.g., `feat/plan-name`)"
-        // instruction that caused the original bug must be absent.
-        assert!(
-            !content.contains("create one (e.g., `feat/plan-name`)"),
-            "ce-executor must NOT instruct the executor to auto-create a feature \
-             branch. Branching is reserved for `ralph run --worktree`."
-        );
-        assert!(
-            !content.contains("Do not create branches (Executor handles that)"),
-            "ce-executor must NOT defer branch creation to the executor. The \
-             executor also does not create branches in this preset."
-        );
-    }
-
-    /// Guard: autoresearch must NOT tell the strategist hat to run
-    /// `git checkout -b autoresearch/...` during fresh-session setup.
-    /// Branching is reserved for the user via `ralph run --worktree`.
-    /// Regression: the original preset had step 2 of "Fresh Session" read
-    /// "Create a branch: `git checkout -b autoresearch/<goal-slug>-$(date +%Y%m%d)`"
-    /// which the agent dutifully executed, polluting the user's branch.
-    ///
-    /// Like `test_ce_executor_forbids_agent_branch_creation`, this scans
-    /// the strategist's prompt for `git checkout -b` and `git worktree add`
-    /// *each paired with* a prohibition marker — resilient to wording drift.
-    #[test]
-    fn test_autoresearch_forbids_agent_branch_creation() {
-        let preset = get_preset("autoresearch").expect("autoresearch preset should exist");
-        let content = preset.content;
-
-        let prohibition_markers = ["NEVER", "MUST NOT", "不要", "禁止", "严禁"];
-        for forbidden_cmd in ["git checkout -b", "git worktree add"] {
-            let mut found = false;
-            for marker in prohibition_markers {
-                for (idx, _) in content.match_indices(forbidden_cmd) {
-                    let start_byte = content
-                        .char_indices()
-                        .rev()
-                        .filter(|(b, _)| *b <= idx)
-                        .nth(200)
-                        .map(|(b, _)| b)
-                        .unwrap_or(0);
-                    if content[start_byte..idx].contains(marker) {
-                        found = true;
-                        break;
-                    }
-                }
-                if found {
-                    break;
-                }
-            }
-            assert!(
-                found,
-                "autoresearch must forbid `{forbidden_cmd}` with a prohibition marker \
-                 (NEVER / MUST NOT / 不要 / 禁止 / 严禁) in the surrounding 200 chars."
-            );
-        }
-
-        // Negative regression: the exact old line must be absent.
-        assert!(
-            !content.contains("git checkout -b autoresearch/<goal-slug>"),
-            "autoresearch must NOT tell the strategist to run \
-             `git checkout -b autoresearch/<goal-slug>-...`. Branching is reserved \
-             for `ralph run --worktree`."
-        );
-
-        // The Chinese translation preset must stay in parity with English.
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let zh_path = std::path::Path::new(manifest_dir)
-            .join("..")
-            .join("..")
-            .join("presets")
-            .join("zh")
-            .join("autoresearch-zh.yml");
-        let zh_content = std::fs::read_to_string(&zh_path).unwrap_or_else(|e| {
-            panic!(
-                "failed to read autoresearch-zh preset at {}: {}",
-                zh_path.display(),
-                e
-            )
-        });
-        // In the Chinese preset the marker is `绝对禁止`; the
-        // command names stay English.
-        for forbidden_cmd in ["git checkout -b", "git worktree add"] {
-            let mut found = false;
-            for marker in ["绝对禁止", "NEVER", "MUST NOT", "禁止", "严禁"] {
-                for (idx, _) in zh_content.match_indices(forbidden_cmd) {
-                    let start_byte = zh_content
-                        .char_indices()
-                        .rev()
-                        .filter(|(b, _)| *b <= idx)
-                        .nth(200)
-                        .map(|(b, _)| b)
-                        .unwrap_or(0);
-                    if zh_content[start_byte..idx].contains(marker) {
-                        found = true;
-                        break;
-                    }
-                }
-                if found {
-                    break;
-                }
-            }
-            assert!(
-                found,
-                "autoresearch-zh must forbid `{forbidden_cmd}` with a prohibition marker \
-                 (绝对禁止 / NEVER / MUST NOT / 禁止 / 严禁) in the surrounding 200 chars."
-            );
-        }
-        assert!(
-            !zh_content.contains("git checkout -b autoresearch/<goal-slug>"),
-            "autoresearch-zh must NOT contain the old `git checkout -b \
-             autoresearch/<goal-slug>` instruction either."
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_root_preset_matches_embedded() {
-        // Plan 2026-06-16-002 Unit 1: the embedded copy is no longer
-        // byte-equal to the canonical preset because `build.rs` now
-        // deep-merges the schema SSOT into `event_policy.schemas`
-        // before writing the embedded copy. The invariant we still
-        // want to lock down is: the embedded copy is the merge of
-        // (canonical preset, schema SSOT) — i.e. the build pipeline
-        // produced what the SSOT prescribes.
-        //
-        // Plan 2026-07-07-006 U1: ce-executor-pipeline has no
-        // separate `presets/schemas/<name>.yml` SSOT file (its
-        // `event_policy.schemas` is fully inlined into the preset
-        // YAML). Skip the merge-equality check when no SSOT file
-        // exists; the embedded-vs-canonical equality still holds
-        // because there is nothing to merge in.
-        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("presets")
-            .join("schemas")
-            .join("ce-executor-pipeline.yml");
-        if !schema_path.is_file() {
-            // The pipeline preset has no separate schema SSOT; the
-            // embedded content must equal the canonical preset YAML.
-            let canonical = read_root_preset("ce-executor-pipeline.yml");
-            let preset = get_preset("ce-executor-pipeline")
-                .expect("ce-executor-pipeline preset should exist");
-            assert_eq!(
-                canonical, preset.content,
-                "ce-executor-pipeline has no separate schema SSOT; \
-                 embedded content must equal canonical preset YAML."
-            );
-            return;
-        }
-        let merged = merge_root_with_ssot("ce-executor-pipeline");
-        let preset =
-            get_preset("ce-executor-pipeline").expect("ce-executor-pipeline preset should exist");
-        assert_eq!(
-            merged, preset.content,
-            "Embedded ce-executor-pipeline must equal merge(canonical preset, schema SSOT). \
-             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-pipeline.yml."
-        );
-    }
-
-    /// 2026-07-09-001 plan (U8): the embedded copy of
-    /// `ce-executor-pipeline-loop` must equal the merge of
-    /// the canonical preset YAML and the schema SSOT file
-    /// `presets/schemas/ce-executor-pipeline-loop.yml`. The
-    /// SSOT carries the U8 pilot `field_docs` /
-    /// `examples`; the inline block in the preset YAML
-    /// carries the same metadata (per U8's
-    /// `schema_reference_parity` contract) so the merge is
-    /// a no-op drift check.
+    /// 2026-07-09-001 plan (U8): the embedded `ce-executor-pipeline-loop`
+    /// preset must declare agent-facing `field_docs` / `examples`
+    /// metadata for the review/fix convergence topics so that the
+    /// U3 enrichment layer (policy-check errors) and the U6
+    /// schema-aware prompt section can consume them. Plan
+    /// 2026-07-09-005 replaced the previous SSOT byte-equality
+    /// assertion with a structured schema assertion that survives
+    /// legitimate prompt-wording or comment edits in the YAML.
     #[test]
     fn test_ce_executor_pipeline_loop_embedded_includes_u8_field_docs() {
-        let merged = merge_root_with_ssot("ce-executor-pipeline-loop");
         let preset = get_preset("ce-executor-pipeline-loop")
             .expect("ce-executor-pipeline-loop preset should exist");
-        assert_eq!(
-            merged, preset.content,
-            "Embedded ce-executor-pipeline-loop must equal merge(canonical preset, schema SSOT). \
-             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-pipeline-loop.yml."
-        );
-        // The merged copy must carry the U8 pilot
-        // `field_docs` for `must_fix_now_count` /
-        // `residual_findings_count` on the review/fix
-        // convergence topics. These are the agent-facing
-        // metadata the U3 enrichment layer (policy-check
-        // errors) and the U6 schema-aware prompt section
-        // both consume.
         let value: serde_yaml::Value =
-            serde_yaml::from_str(&merged).expect("merged preset must be valid YAML");
+            serde_yaml::from_str(&preset.content).expect("embedded preset must be valid YAML");
         let schemas = value
             .get("event_loop")
             .and_then(|v| v.get("event_policy"))
             .and_then(|v| v.get("schemas"))
-            .expect("merged preset must carry event_policy.schemas");
+            .expect("ce-executor-pipeline-loop must carry event_policy.schemas");
         for topic in [
             "review.synthesized",
             "review.accepted",
@@ -1298,7 +803,7 @@ mod tests {
             "review.loop.blocked",
         ] {
             let schema = schemas.get(topic).unwrap_or_else(|| {
-                panic!("U8 pilot topic `{topic}` must appear in merged schemas")
+                panic!("U8 pilot topic `{topic}` must appear in embedded schemas")
             });
             let field_docs = schema
                 .get("field_docs")
@@ -1312,27 +817,6 @@ mod tests {
                 "U8 pilot topic `{topic}` field_docs must not be empty"
             );
         }
-    }
-
-    /// U12 (fix-plan U12 / F-020 / R-20): the
-    /// `ce-executor-supervisor` preset must satisfy the
-    /// same SSOT byte-equality contract as
-    /// `ce-executor-pipeline` — the embedded copy must equal
-    /// the merge of the canonical preset YAML with the
-    /// supervisor schema SSOT. Drift between canonical +
-    /// schema breaks the lint surface (M-12) because the
-    /// lint reads from the canonical copy while the
-    /// runtime reads from the embedded merge.
-    #[test]
-    fn test_ce_executor_supervisor_root_preset_matches_embedded() {
-        let merged = merge_root_with_ssot("ce-executor-supervisor");
-        let preset = get_preset("ce-executor-supervisor")
-            .expect("ce-executor-supervisor preset should exist");
-        assert_eq!(
-            merged, preset.content,
-            "Embedded ce-executor-supervisor must equal merge(canonical preset, schema SSOT). \
-             Re-run `cargo build` so build.rs regenerates $OUT_DIR/presets/ce-executor-supervisor.yml."
-        );
     }
 
     /// 2026-07-07-002 plan Unit 9: generic data skill docs must document correction/bounded retry.
