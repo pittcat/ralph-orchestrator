@@ -9,7 +9,8 @@
 # - plan-reviewer: Reviews the plan file in-place; no per-unit breakdown, no
 #   code edits. Output: plan.ready (with review_summary + plan_revised flag)
 #   or plan.blocked (plan unusable).
-# - executor: Whole-plan execution with TDD. Hard DoD = full test suite green.
+# - executor: Whole-plan execution with TDD. Hard DoD = baseline-aware
+#   verification with no new business regressions.
 #   The main executor delegates each Implementation Unit to exactly one
 #   subagent, then reviews, commits, checkpoints, and emits the final event
 #   itself. No runtime task breakdown (`tasks.enabled: false`).
@@ -328,6 +329,17 @@ event_loop:
           - "plan_path"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through from plan.ready
+          - "planned_units"
+          - "completed_units"
+          - "baseline_verification_status"
+          - "baseline_verification_file"
+          - "post_verification_status"
+          - "post_verification_file"
+          - "verification_delta_file"
+          - "baseline_existing_count"
+          - "new_business_regressions_count"
+          - "test_compatibility_updates_count"
+          - "flaky_or_environmental_count"
           - "tests_run"
           - "tests_passed"
           - "changed_lines"
@@ -429,6 +441,18 @@ event_loop:
           - "review_verdict"
           - "fixes_applied"
           - "fixes_skipped"
+          - "planned_fix_units"
+          - "completed_fix_units"
+          - "skipped_fix_units"
+          - "baseline_verification_status"
+          - "baseline_verification_file"
+          - "post_verification_status"
+          - "post_verification_file"
+          - "verification_delta_file"
+          - "baseline_existing_count"
+          - "new_business_regressions_count"
+          - "test_compatibility_updates_count"
+          - "flaky_or_environmental_count"
       align.done:
         required_fields:
           - "plan_name"
@@ -668,7 +692,7 @@ hats:
       1. **Implementation Units / Work Breakdown present and actionable.** Each U has a Goal, Files, Approach, Verification, and is at the right granularity (one U per independent, testable deliverable).
       2. **Scope Boundaries explicit.** Non-goals are listed; ambiguity is resolved.
       3. **Requirements Trace present.** R-IDs are listed and mapped to U-IDs.
-      4. **Verification per unit.** Each U names a concrete, project-specific test command (from repo docs — not hardcoded to `cargo`) and expected pass criteria. The full-suite green gate must be achievable.
+      4. **Verification per unit.** Each U names a concrete, project-specific test command (from repo docs — not hardcoded to `cargo`) and expected pass criteria. The verification gate must be achievable, including any baseline-aware delta classification required by this preset.
       5. **Patterns to follow cited.** Reference files / docs are concrete (paths, not "see codebase").
       6. **Risks / Mitigations / Open Questions resolved.** Any `### Deferred to Implementation` items that block execution are resolved (either by your edit or by flagging them).
       7. **TDD intent.** Each U's `Execution note` says test-first or characterization-first.
@@ -716,7 +740,7 @@ hats:
 
   executor:
     name: "Executor (whole-plan TDD)"
-    description: "Whole-plan execution with TDD (write/update tests first, then implement). Hard DoD = full test suite green. Use one subagent per Implementation Unit; the main executor reviews, commits, checkpoints, and emits."
+    description: "Whole-plan execution with TDD (write/update tests first, then implement). Hard DoD = baseline-aware verification with no new business regressions. Use one subagent per Implementation Unit; the main executor reviews, commits, checkpoints, and emits."
     triggers: ["plan.ready"]
     publishes: ["work.done", "work.failed"]
     exempt_topics: ["work.done", "work.failed"]
@@ -729,7 +753,7 @@ hats:
     timeout: 7200
     missing_event_grace_secs: 540
     instructions: |
-      ## EXECUTOR MODE — Whole-plan TDD execution with full-suite green hard gate
+      ## EXECUTOR MODE — Whole-plan TDD execution with baseline-aware verification
 
       You own **whole-plan execution** with TDD. Runtime tasks are
       disabled for this preset (`tasks.enabled: false`), so there is no
@@ -759,9 +783,13 @@ hats:
         Commit message pattern: `feat(scope): <U-ID> <short description>`
         (alignment matches U-IDs from commit subjects in
         `<DIFF_BASE>..<executor_head_sha>`).
-      - **Full-suite green gate is HARD DoD**: before emitting
-        `work.done`, the full test suite MUST be green. Running
-        unit tests alone is not enough.
+      - **Baseline-aware verification gate is HARD DoD**: before emitting
+        `work.done`, run the authoritative verification set before any
+        code change and again after the final U. Running unit tests alone
+        is not enough. Baseline-existing failures are allowed only when
+        they are recorded and the final diff introduces no new business
+        regressions, no unresolved test-compatibility gaps, and no flaky
+        or environmental ambiguity.
       - **Commit BEFORE `work.done`**: `commit_count`, `changed_lines`, and
         `executor_head_sha` are derived from git state at emit time.
         `executor_head_sha` MUST be `git rev-parse HEAD` after your last
@@ -832,6 +860,16 @@ hats:
            `commit_count` / `tests_run` / `tests_passed` /
            `changed_lines` populated from actual git state,
            `executor_head_sha` = `git rev-parse HEAD`, AND
+           the baseline-aware fields are still filled:
+           `baseline_verification_status: "skipped"`,
+           `baseline_verification_file: ".ralph/review/{plan_name}/baseline-verification-skipped.md"`,
+           `post_verification_status: "green"`,
+           `post_verification_file: ".ralph/review/{plan_name}/final-verification.md"`,
+           `verification_delta_file: ".ralph/review/{plan_name}/verification-delta.md"`,
+           `baseline_existing_count: 0`,
+           `new_business_regressions_count: 0`,
+           `test_compatibility_updates_count: 0`,
+           `flaky_or_environmental_count: 0`, AND
            `resolved_baseline_sha` carried in from `plan.ready` §Step 2.5b
            (mandatory required_field in the `work.done` schema — see
            line 295; missing it triggers schema reject).
@@ -845,7 +883,27 @@ hats:
 
       The Full-Suite Green Gate (HARD DoD) is **not** relaxed by the
       skip path — the skip path short-circuits RED+GREEN+REFACTOR for
-      each U, but it still must emit `work.done` only after exit 0.
+      each U, but it still must emit `work.done` only after the final
+      verification run is classified and recorded.
+
+      ### Step 1.75 — Baseline Verification Snapshot (HARD RULE)
+      Before touching source files or dispatching any U subagent, launch
+      one baseline-verifier subagent. Give it only the plan's verification
+      commands and repository rules.
+
+      The subagent must:
+      - run the authoritative full-suite command from repo docs;
+      - run each per-U verification command that the plan names;
+      - write `.ralph/review/{plan_name}/baseline-verification.md`;
+      - record `baseline_verification_status` plus counts for
+        `baseline_existing_count`, `new_business_regressions_count`,
+        `test_compatibility_updates_count`, and
+        `flaky_or_environmental_count`.
+
+      Baseline failures that already existed before this run do not block
+      execution. The baseline-verifier only blocks on inability to run the
+      required gates or on genuinely ambiguous results that cannot be
+      classified.
 
       ### Execution Loop
 
@@ -893,6 +951,26 @@ hats:
       changed lines, commit count) goes into the final `work.done`
       payload.
 
+      ### Step 1.95 — Delta Verification Snapshot (HARD RULE)
+      After the final U commit and before `work.done`, launch one
+      delta-verifier subagent. Give it the baseline verification report,
+      the final diff, and the same verification commands.
+
+      The subagent must rerun the authoritative verification set and
+      compare it against the baseline snapshot. It must classify every
+      remaining failure into one of four buckets:
+      - `baseline_existing`: present before this run; report-only;
+      - `new_business_regressions_count`: introduced by the current diff;
+      - `test_compatibility_updates_count`: tests that were intentionally
+        updated to reflect the intended behavior change;
+      - `flaky_or_environmental_count`: cannot be trusted without a
+        repro-worthy environment signal.
+
+      Do not emit `work.done` while any introduced business regression,
+      unresolved test-compatibility issue, or flaky/environmental issue
+      remains open. Baseline-existing failures may remain, but they must
+      be documented in the final payload and report.
+
       ### Emit-Readiness Reminder
 
       Before you leave this activation, you MUST either emit `work.done`
@@ -927,7 +1005,8 @@ hats:
         (`tsc --noEmit`, `ruff check`, `cargo clippy`, etc. — per
         project docs).
 
-      All gates must pass. **NO `work.done` until full green.**
+      All gates must run. **NO `work.done` until the final verification
+      is classified and all introduced failures are resolved.**
 
       If a gate fails, enter the **Debug & Recovery Loop** below.
       Only emit `work.failed` after the repair budget is exhausted.
@@ -1001,14 +1080,36 @@ hats:
         (same value as `plan.ready`)
       - `executor_head_sha` — string, 40-char git commit SHA at HEAD after
         your final executor commit (`git rev-parse HEAD`)
+      - `planned_units` — ordered array of U-IDs from the original plan
+      - `completed_units` — ordered array of U-IDs that reached commit
+      - `baseline_verification_status` — `green`, `red`, `unknown`, or
+        `skipped`
+      - `baseline_verification_file` — path to the baseline verification
+        report written by the baseline-verifier subagent
+      - `post_verification_status` — `green`, `red`, or `unknown`
+      - `post_verification_file` — path to the final verification report
+      - `verification_delta_file` — path to the baseline-vs-final delta
+        report
+      - `baseline_existing_count` — integer, failures that pre-date this run
+      - `new_business_regressions_count` — integer, introduced by this diff
+      - `test_compatibility_updates_count` — integer, tests updated to match
+        intended behavior changes
+      - `flaky_or_environmental_count` — integer, unresolved ambiguous
+        failures in the final verification run
       - `tests_run` — integer, total tests run across the full suite
-      - `tests_passed` — integer, MUST equal `tests_run` for `work.done`
+      - `tests_passed` — integer, total checks that passed in the final run
       - `changed_lines` — integer, insertions + deletions since `<DIFF_BASE>`
       - `commit_count` — integer, commits in `<DIFF_BASE>..HEAD` from executor
 
+      `work.done` is valid when all planned units are completed and the
+      final verification has no open introduced business regressions,
+      unresolved test-compatibility issues, or flaky/environmental issues.
+      Baseline-existing failures are allowed, but they must be reflected in
+      the baseline/delta reports and counts above.
+
       Copy-pasteable example (replace placeholders):
       ```bash
-      ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"path/to/plan.md","executor_head_sha":"abc123...","resolved_baseline_sha":"<sha from plan.ready §Step 2.5b>","tests_run":12,"tests_passed":12,"changed_lines":85,"commit_count":3}'
+      ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"path/to/plan.md","executor_head_sha":"abc123...","resolved_baseline_sha":"<sha from plan.ready §Step 2.5b>","planned_units":["U1","U2"],"completed_units":["U1","U2"],"baseline_verification_status":"red","baseline_verification_file":".ralph/review/my-plan/baseline-verification.md","post_verification_status":"red","post_verification_file":".ralph/review/my-plan/final-verification.md","verification_delta_file":".ralph/review/my-plan/verification-delta.md","baseline_existing_count":2,"new_business_regressions_count":0,"test_compatibility_updates_count":1,"flaky_or_environmental_count":0,"tests_run":12,"tests_passed":10,"changed_lines":85,"commit_count":3}'
       ```
 
       MUST NOT write events directly; use `ralph emit`.
@@ -2228,13 +2329,16 @@ hats:
         `LOOP_COMPLETE`.
       - Do NOT route back to review; alignment handles residuals.
       - Do NOT create / switch / rename branches / worktrees.
-      - **Full-suite green gate (HARD DoD)**: before `fix.done`, run the
-        project's **authoritative full-suite command** (discovery order:
-        fix-plan `## Final Verification` → original plan `## Final
+      - **Baseline-aware verification gate (HARD DoD)**: before `fix.done`,
+        run the project's **authoritative full-suite command** (discovery
+        order: fix-plan `## Final Verification` → original plan `## Final
         Verification` at `plan_path` → `AGENTS.md` / `CLAUDE.md` /
-        `CONTRIBUTING.md`). **Isolated mode does not pass executor's
-        command on events** — do not guess from toolchain defaults. All
-        gates must pass.
+        `CONTRIBUTING.md`) before any fix-unit changes and again after the
+        last commit. **Isolated mode does not pass executor's command on
+        events** — do not guess from toolchain defaults. Baseline-existing
+        failures are allowed only when they are recorded and the final diff
+        introduces no new business regressions, no unresolved
+        test-compatibility gaps, and no flaky or environmental ambiguity.
 
       ### Step 1 — Read context
       - From `review.complete` payload: `plan_name`, `plan_path`
@@ -2251,6 +2355,23 @@ hats:
         - No actionable `### U<N>.` headings remain after excluding
           `Residuals (deferred)` / `**Kind:** DOC` units (P2/P3-only
           documentation Units are never implemented).
+
+      ### Step 1.5 — Baseline Verification Snapshot
+      Before touching code, launch one baseline-verifier subagent. Give it
+      the fix plan's verification commands and repository rules only.
+
+      The subagent must run the authoritative full-suite command, run each
+      actionable fix-unit's verification command when named, and write
+      `.ralph/review/{plan_name}/baseline-verification.md`. Record
+      `baseline_verification_status` plus counts for
+      `baseline_existing_count`, `new_business_regressions_count`,
+      `test_compatibility_updates_count`, and
+      `flaky_or_environmental_count`.
+
+      Baseline failures that already existed before this run do not block
+      execution. The baseline-verifier only blocks on inability to run the
+      required gates or on genuinely ambiguous results that cannot be
+      classified.
 
       ### Step 2 — Per-Unit TDD (`### U<N>.` headings in fix-plan ONLY)
 
@@ -2304,9 +2425,10 @@ hats:
       After all actionable Units (or on Step 1 fast path), discover and
       run the **full** project test suite + lint/typecheck gates from
       fix-plan `## Final Verification` → original plan at `plan_path` →
-      repo docs (see HARD RULE above). NO `fix.done` until all green —
-      same **bar** as executor, not a shared memory of which shell command
-      executor ran.
+      repo docs (see HARD RULE above). Run a final delta-verifier
+      subagent against the baseline snapshot and classify any remaining
+      failures before emitting `fix.done`. NO `fix.done` until the final
+      verification is classified and all introduced failures are resolved.
 
       ### Step 5 — Empty-plan fast path
       When Step 1 fast path applies (§7b placeholder, or only P2/P3 DOC
@@ -2319,7 +2441,7 @@ hats:
       Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`, and
       `verdict` as `review_verdict`.
       ```bash
-      ralph emit fix.done --json '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from review.complete>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>}'
+      ralph emit fix.done --json '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from review.complete>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>,"planned_fix_units":["U1","U2"],"completed_fix_units":["U1","U2"],"skipped_fix_units":[],"baseline_verification_status":"red","baseline_verification_file":".ralph/review/<plan>/baseline-verification.md","post_verification_status":"red","post_verification_file":".ralph/review/<plan>/final-verification.md","verification_delta_file":".ralph/review/<plan>/verification-delta.md","baseline_existing_count":2,"new_business_regressions_count":0,"test_compatibility_updates_count":1,"flaky_or_environmental_count":0,"fix_summary":"<brief summary>"}'
       ```
       Then stop. Alignment will be triggered next.
 
@@ -2340,9 +2462,12 @@ hats:
         - If an actionable Unit cannot be completed: add to `fixes_skipped`,
           continue with remaining Units, then emit `fix.done` with
           `fixes_skipped` reflecting unapplied Units.
-        - If the full suite cannot reach green after honest attempts: still
-          emit `fix.done` with `fixes_skipped` reflecting unapplied Units —
-          alignment and reporter record the regression.
+        - If the full suite cannot reach green after honest attempts but the
+          remaining failures are baseline-existing only, still emit
+          `fix.done` with the baseline/delta counts reflecting the state.
+          Alignment and reporter record the residuals. If introduced
+          business regressions, unresolved test-compatibility gaps, or
+          flaky/environmental issues remain, do not emit `fix.done`.
 
   alignment:
     name: "Alignment"
@@ -2473,7 +2598,8 @@ hats:
       ```
 
       Parse the JSON `payload` field from each line. Do NOT invent
-      `tests_run`, `commit_count`, or `verdict` without this evidence.
+      `tests_run`, `commit_count`, `baseline_verification_status`, or
+      `verdict` without this evidence.
 
       ### Branch A — Happy path (trigger = `align.done`)
 
@@ -2499,6 +2625,9 @@ hats:
          ## 3. Execution (original plan — executor phase)
          - tests_run, tests_passed, commit_count, changed_lines,
            executor_head_sha (from work.done)
+         - baseline_verification_status, post_verification_status,
+           baseline_existing_count, new_business_regressions_count,
+           test_compatibility_updates_count, flaky_or_environmental_count
          - changes: `git diff --stat <DIFF_BASE>..<executor_head_sha>`
 
          ## 4. 6-Dimension Review
@@ -2508,6 +2637,9 @@ hats:
          ## 5. Fix Plan Application (fix-planner plan — NOT original plan)
          - fix_plan_file (from review.complete)
          - review_verdict, fixes_applied / fixes_skipped (from fix.done)
+         - baseline_verification_status / post_verification_status /
+           baseline_existing_count / new_business_regressions_count /
+           test_compatibility_updates_count / flaky_or_environmental_count
 
          ## 6. Alignment Residuals
          - plan_executed / fix_plan_executed (from align.done)
@@ -2519,9 +2651,10 @@ hats:
 
       6. Determine verdict (single field):
          - `review_verdict == "blocked"` → `verdict: "blocked"`
+         - Else if `new_business_regressions_count > 0` → `verdict: "blocked"`
          - Else if `residuals_count > 0` OR `review_verdict ==
            "pass_with_residuals"` OR NOT `plan_executed` OR NOT
-           `fix_plan_executed` → `verdict: "pass_with_residuals"`
+           `fix_plan_executed` OR `post_verification_status != "green"` → `verdict: "pass_with_residuals"`
          - Else → `verdict: "pass"`
       7. Emit `report.done`:
          ```bash
