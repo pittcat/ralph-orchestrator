@@ -312,6 +312,44 @@ fn u3_prepend_trigger_context_matched_hint_appears_in_block() {
 }
 
 #[test]
+fn u3_prepend_trigger_context_source_hat_unknown_marker() {
+    // 2026-07-09-004 plan U4: `source hat` is **optional** in v1.
+    // Runtime does not know which hat actually published the
+    // trigger event, so the renderer surfaces
+    // `(unknown source hat)`. Agents must not depend on
+    // `source hat` for branch decisions; the marker is the
+    // observable contract.
+    let cfg = two_hat_config_with_policy(
+        r#"
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    schemas:
+      review.request:
+        required_fields:
+          - verdict
+        trigger_context:
+          summary_fields:
+            - verdict
+"#,
+    );
+    let mut event_loop = EventLoop::new(cfg);
+    event_loop.initialize("unit test");
+    event_loop
+        .bus
+        .publish(Event::new("review.request", r#"{"verdict":"pass"}"#));
+
+    let prompt = event_loop
+        .build_prompt(&HatId::new("reviewer"))
+        .expect("isolated build_prompt returns Some");
+    assert!(
+        prompt.contains("- source hat: (unknown source hat)"),
+        "v1 must render source hat as the unknown marker, got: {prompt}"
+    );
+}
+
+#[test]
 fn u3_prepend_trigger_context_no_matching_event_is_noop() {
     // Default no-op for an empty queue. The hat triggers on
     // `review.request`, the schema declares a context block,

@@ -55,7 +55,7 @@ AAF 评审的核心是：**从 activated-hat 视角独立模拟每一步**，再
 
 1. `## HAT IDENTITY` — hat id、触发事件上下文
 2. 可选 `## WAVE CONTEXT` — wave worker 场景
-3. 可选 `## TRIGGER CONTEXT` — preset/schema 在 `event_policy.schemas.<topic>.trigger_context` 声明的当前 trigger payload 摘要（source topic、source hat、declared summary fields、命中 routing hints）。本块只来自当前 activation 的 trigger payload，不来自 runtime ledger 或事件历史；缺失字段显示 `<missing>`，不推断为默认值。
+3. 可选 `## TRIGGER CONTEXT` — preset/schema 在 `event_policy.schemas.<topic>.trigger_context` 声明的当前 trigger payload 摘要（`source topic`、可选 `source hat`、declared summary fields、命中 routing hints）。本块只来自当前 activation 的 trigger payload，不来自 runtime ledger 或事件历史；缺失字段显示 `<missing>`，不推断为默认值。**v1 `source hat` 是 optional**：runtime 不知道实际发布 hat 时显示 `(unknown source hat)`，不要把它当成必然存在字段。
 4. `## ORCHESTRATOR CONTEXT` — 投影后的 task/progress 视图
 5. **本 hat `instructions:`**
 6. Auto-inject skills — `ralph-tools.md`（tasks/memories 启用时）、`ralph-tools-tasks.md`、`ralph-tools-memories.md` 等
