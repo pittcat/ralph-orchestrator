@@ -481,6 +481,19 @@ pub const FINDING_TRIGGER_CONTEXT_VALUE_SHAPE: &str = "preset.trigger_context_va
 /// agents see. R11 / SC5. Always `Error`.
 pub const FINDING_TRIGGER_CONTEXT_DUPLICATE_LABEL: &str = "preset.trigger_context_duplicate_label";
 
+/// U5 (plan 2026-07-09-003): `trigger_context` is declared for
+/// a topic but no hat subscribes to that topic. The block
+/// would never reach a downstream hat's prompt, so the
+/// declaration is dead. R21 / R22. Always `Error`.
+pub const FINDING_TRIGGER_CONTEXT_NO_CONSUMER: &str = "preset.trigger_context_no_consumer";
+
+/// U5 (plan 2026-07-09-003): the `trigger_context` block
+/// references a source topic, but a hat that does subscribe to
+/// that topic is misconfigured in a way that would still let
+/// the block leak. Reserved for future use; current U5 work
+/// is no-op here.
+pub const FINDING_TRIGGER_CONTEXT_TOPOLOGY_LEAK: &str = "preset.trigger_context_topology_leak";
+
 /// Inventory of every finding id in this module. Use this in tests
 /// that assert the lint surface does not silently re-introduce a
 /// serial-only or coordinator-loop finding. Plan 2026-07-07-006
@@ -534,4 +547,6 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_TRIGGER_CONTEXT_UNSUPPORTED_PREDICATE,
     FINDING_TRIGGER_CONTEXT_VALUE_SHAPE,
     FINDING_TRIGGER_CONTEXT_DUPLICATE_LABEL,
+    FINDING_TRIGGER_CONTEXT_NO_CONSUMER,
+    FINDING_TRIGGER_CONTEXT_TOPOLOGY_LEAK,
 ];

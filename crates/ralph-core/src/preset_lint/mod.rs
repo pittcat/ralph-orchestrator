@@ -124,7 +124,7 @@ pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,
     validate_all_topics, validate_topic_format,
 };
-pub use trigger_context::check_trigger_context;
+pub use trigger_context::{check_trigger_context, check_trigger_context_topology};
 pub use workflow_activation::{HandoffGraph, run_workflow_activation_contract};
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -565,6 +565,17 @@ pub fn run_preset_lint_with_preset_name(
             let trigger_ctx_findings = check_trigger_context(&policy.schemas, strictness);
             findings.extend(lint_findings_to_contract_findings(&trigger_ctx_findings));
         }
+    }
+
+    // 2026-07-09-003 plan (U5): trigger context topology
+    // lint. Catches `trigger_context` blocks declared on a
+    // topic that no hat subscribes to. The block would never
+    // reach a downstream hat's prompt, so the declaration is
+    // dead. R21 / R22 / SC5. Strict-only by design; the
+    // default mode skip is the R3 / R29 invariant.
+    if matches!(strictness, LintStrictness::Strict) {
+        let topology_findings = check_trigger_context_topology(config, strictness);
+        findings.extend(lint_findings_to_contract_findings(&topology_findings));
     }
 
     // 2026-06-27 mechanism foundation U5: flow declaration lint.

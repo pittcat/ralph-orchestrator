@@ -43,12 +43,15 @@
 
 use std::collections::HashSet;
 
+use ralph_proto::Topic;
+
 use crate::config::{
-    EventSchema, HintCondition, HintOp, RoutingHintConfig, TriggerContextConfig,
+    EventSchema, HintCondition, HintOp, RalphConfig, RoutingHintConfig, TriggerContextConfig,
 };
 use crate::preset_lint::finding_id::{
-    FINDING_TRIGGER_CONTEXT_DUPLICATE_LABEL, FINDING_TRIGGER_CONTEXT_UNKNOWN_FIELD,
-    FINDING_TRIGGER_CONTEXT_UNSUPPORTED_PREDICATE, FINDING_TRIGGER_CONTEXT_VALUE_SHAPE,
+    FINDING_TRIGGER_CONTEXT_DUPLICATE_LABEL, FINDING_TRIGGER_CONTEXT_NO_CONSUMER,
+    FINDING_TRIGGER_CONTEXT_UNKNOWN_FIELD, FINDING_TRIGGER_CONTEXT_UNSUPPORTED_PREDICATE,
+    FINDING_TRIGGER_CONTEXT_VALUE_SHAPE,
 };
 use crate::preset_lint::{LintFinding, LintStrictness};
 
@@ -81,6 +84,79 @@ pub fn check_trigger_context(
         check_routing_hints(topic, cfg, &known, &mut findings);
     }
     findings
+}
+
+/// Plan 2026-07-09-003 (U5): topology-aware check that the
+/// `trigger_context` declared on a topic schema can actually
+/// reach a downstream hat. The lint walks every hat's
+/// `triggers` list (glob-aware, mirroring
+/// `Topic::matches_str`); when a schema declares a
+/// `trigger_context` block but no hat subscribes to that
+/// topic, the block is dead and we emit
+/// `FINDING_TRIGGER_CONTEXT_NO_CONSUMER`.
+///
+/// The check is **strict-only** by design (same default-mode
+/// invariant as `check_trigger_context`). R21 / R22 / SC5.
+///
+/// Topology safety is **also** enforced at runtime by
+/// `EventLoop::prepend_trigger_context`, which filters by
+/// the current hat's trigger list. The lint + the runtime
+/// filter form a defence-in-depth pair: the lint catches
+/// dead declarations before the loop starts, and the
+/// runtime filter protects against a hat that subscribes
+/// to a different topic receiving the block by accident.
+pub fn check_trigger_context_topology(
+    config: &RalphConfig,
+    strictness: LintStrictness,
+) -> Vec<LintFinding> {
+    if !matches!(strictness, LintStrictness::Strict) {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+    let Some(policy) = config.event_loop.event_policy.as_ref() else {
+        return findings;
+    };
+    // Pre-compute every hat's resolved trigger topics once.
+    let hat_triggers: Vec<(&str, Vec<Topic>)> = config
+        .hats
+        .iter()
+        .map(|(id, hat)| (id.as_str(), hat.trigger_topics()))
+        .collect();
+    for (topic, schema) in &policy.schemas {
+        let cfg = &schema.trigger_context;
+        if cfg.summary_fields.is_empty() && cfg.routing_hints.is_empty() {
+            continue;
+        }
+        if !any_hat_subscribes(&hat_triggers, topic) {
+            findings.push(no_consumer_finding(topic));
+        }
+    }
+    findings
+}
+
+fn any_hat_subscribes(hat_triggers: &[(&str, Vec<Topic>)], topic: &str) -> bool {
+    hat_triggers
+        .iter()
+        .any(|(_, triggers)| triggers.iter().any(|t| t.matches_str(topic)))
+}
+
+fn no_consumer_finding(topic: &str) -> LintFinding {
+    LintFinding {
+        id: FINDING_TRIGGER_CONTEXT_NO_CONSUMER,
+        severity: crate::preset_lint::LintSeverity::Error,
+        message: format!(
+            "schema topic \"{topic}\" declares a trigger_context block but no hat \
+             subscribes to \"{topic}\" in its `triggers` list; the block is dead. Add \
+             the topic to a hat's `triggers:` or remove the trigger_context declaration"
+        ),
+        topic: Some(topic.to_string()),
+        hat: None,
+        owner: None,
+        action_hint: Some(format!(
+            "add `{topic}` to a hat's `triggers:` list, or remove the trigger_context \
+             block from event_policy.schemas.{topic}"
+        )),
+    }
 }
 
 /// Walk every `required_fields` / `known_fields` /
@@ -697,5 +773,158 @@ mod u6_trigger_context_lint_tests {
         );
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, FINDING_TRIGGER_CONTEXT_VALUE_SHAPE);
+    }
+}
+
+#[cfg(test)]
+mod u7_trigger_context_topology_lint_tests {
+    //! U5 acceptance tests. These tests pin the
+    //! topology-aware half of the trigger context lint.
+    //! The default-mode no-op (R3 / R29) is exercised in
+    //! the U6 test module above and is not duplicated
+    //! here.
+    use super::*;
+    use crate::config::hat::HatConfig;
+    use std::collections::HashMap;
+
+    fn schema_with_trigger_context(cfg: TriggerContextConfig) -> EventSchema {
+        EventSchema {
+            trigger_context: cfg,
+            required_fields: vec!["known_field".to_string()],
+            ..Default::default()
+        }
+    }
+
+    fn config_with_hats_and_policy(
+        hats: Vec<(&str, Vec<&str>)>,
+        schemas: Vec<(&str, EventSchema)>,
+    ) -> RalphConfig {
+        let mut config = RalphConfig::default();
+        for (id, triggers) in hats {
+            let mut hat = HatConfig::default();
+            hat.name = id.to_string();
+            hat.triggers = triggers.into_iter().map(|s| s.to_string()).collect();
+            config.hats.insert(id.to_string(), hat);
+        }
+        let mut policy: crate::config::EventPolicyConfig = Default::default();
+        for (topic, schema) in schemas {
+            policy.schemas.insert(topic.to_string(), schema);
+        }
+        config.event_loop.event_policy = Some(policy);
+        config
+    }
+
+    /// 1. Default strictness is a no-op (R3 / R29).
+    #[test]
+    fn u5_default_strictness_is_noop() {
+        let schema = schema_with_trigger_context(TriggerContextConfig {
+            summary_fields: vec!["known_field".into()],
+            ..Default::default()
+        });
+        let config = config_with_hats_and_policy(
+            vec![("a", vec!["any.topic"])],
+            vec![("any.topic", schema)],
+        );
+        let findings = check_trigger_context_topology(&config, LintStrictness::Default);
+        assert!(
+            findings.is_empty(),
+            "default mode must skip topology lint, got: {findings:?}"
+        );
+    }
+
+    /// 2. No `event_policy` ⇒ no findings (the U4 / U5
+    /// topology check has nothing to evaluate).
+    #[test]
+    fn u5_no_event_policy_is_noop() {
+        let config = RalphConfig::default();
+        let findings = check_trigger_context_topology(&config, LintStrictness::Strict);
+        assert!(findings.is_empty());
+    }
+
+    /// 3. Schema declares trigger_context AND a hat
+    /// subscribes → no finding.
+    #[test]
+    fn u5_subscriber_keeps_block_alive() {
+        let schema = schema_with_trigger_context(TriggerContextConfig {
+            summary_fields: vec!["known_field".into()],
+            ..Default::default()
+        });
+        let config = config_with_hats_and_policy(
+            vec![("reviewer", vec!["review.synthesized"])],
+            vec![("review.synthesized", schema)],
+        );
+        let findings = check_trigger_context_topology(&config, LintStrictness::Strict);
+        assert!(findings.is_empty(), "got unexpected findings: {findings:?}");
+    }
+
+    /// 4. No hat subscribes → `FINDING_TRIGGER_CONTEXT_NO_CONSUMER`.
+    #[test]
+    fn u5_no_consumer_reports_error() {
+        let schema = schema_with_trigger_context(TriggerContextConfig {
+            summary_fields: vec!["known_field".into()],
+            ..Default::default()
+        });
+        let config = config_with_hats_and_policy(
+            // Subscriber is for a *different* topic.
+            vec![("reviewer", vec!["other.topic"])],
+            vec![("review.synthesized", schema)],
+        );
+        let findings = check_trigger_context_topology(&config, LintStrictness::Strict);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].id, FINDING_TRIGGER_CONTEXT_NO_CONSUMER);
+        assert!(findings[0].message.contains("review.synthesized"));
+    }
+
+    /// 5. Glob trigger `review.*` matches `review.synthesized`.
+    #[test]
+    fn u5_glob_trigger_satisfies_consumer_check() {
+        let schema = schema_with_trigger_context(TriggerContextConfig {
+            summary_fields: vec!["known_field".into()],
+            ..Default::default()
+        });
+        let config = config_with_hats_and_policy(
+            vec![("reviewer", vec!["review.*"])],
+            vec![("review.synthesized", schema)],
+        );
+        let findings = check_trigger_context_topology(&config, LintStrictness::Strict);
+        assert!(findings.is_empty(), "got unexpected findings: {findings:?}");
+    }
+
+    /// 6. Empty trigger_context declaration on a topic with
+    /// no subscriber is NOT a no-consumer finding (the
+    /// block is empty, so there is nothing to leak).
+    #[test]
+    fn u5_empty_trigger_context_is_not_a_no_consumer_finding() {
+        let schema = EventSchema::default();
+        let config = config_with_hats_and_policy(
+            vec![],
+            vec![("review.synthesized", schema)],
+        );
+        let findings = check_trigger_context_topology(&config, LintStrictness::Strict);
+        assert!(
+            findings.is_empty(),
+            "empty trigger_context must not trip no-consumer, got: {findings:?}"
+        );
+    }
+
+    /// 7. Multiple hats, only one subscribes → block is
+    /// alive (R21 / R22 contract is "any subscriber keeps
+    /// it alive", not "all hats must subscribe").
+    #[test]
+    fn u5_single_subscriber_among_many_keeps_block_alive() {
+        let schema = schema_with_trigger_context(TriggerContextConfig {
+            summary_fields: vec!["known_field".into()],
+            ..Default::default()
+        });
+        let config = config_with_hats_and_policy(
+            vec![
+                ("reviewer", vec!["other.topic"]),
+                ("gate", vec!["review.synthesized"]),
+                ("alignment", vec!["third.topic"]),
+            ],
+            vec![("review.synthesized", schema)],
+        );
+        let findings = check_trigger_context_topology(&config, LintStrictness::Strict);
+        assert!(findings.is_empty(), "got unexpected findings: {findings:?}");
     }
 }
