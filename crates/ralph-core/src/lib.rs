@@ -45,6 +45,15 @@ mod hatless_ralph;
 pub mod hooks;
 pub mod recovery_runtime;
 pub mod shipper_reason;
+/// 2026-07-09-003 plan (U2): pure builder that turns a
+/// schema-declared trigger context into structured
+/// `summary` / `matched_hints` data, plus a markdown
+/// renderer used by the isolated prompt prepend chain in
+/// U3. The builder is I/O-free; it never reads
+/// `.ralph/events.jsonl`, the event bus, or the lint
+/// state. The renderer is also I/O-free; it only formats
+/// whatever the builder returns.
+pub mod trigger_context;
 /// 2026-07-03-001 plan U2: rusqlite-backed wave orchestration
 /// domain types + persistence trait. U3-U5 introduce the in-memory
 /// and SQLite implementations; U8 wires the coordinator; U11/U12
