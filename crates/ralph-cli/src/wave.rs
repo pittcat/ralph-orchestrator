@@ -200,6 +200,9 @@ fn execute_verify(args: WaveVerifyArgs) -> Result<()> {
     validate_payload_shape(&payloads)?;
 
     let events_file = resolve_events_file();
+    let hat = std::env::var("RALPH_CURRENT_HAT")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     // Reuse the same precheck as `wave emit` so verify/apply share a
     // single authorization core. The `false` / `false` flags mean
@@ -210,6 +213,7 @@ fn execute_verify(args: WaveVerifyArgs) -> Result<()> {
         false,
         false,
         args.output,
+        hat.as_deref(),
         &payloads,
         &events_file,
         &args.config,
@@ -296,6 +300,9 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
     // checks). `resolve_events_file` follows the same env / marker /
     // default priority as the write path.
     let events_file = resolve_events_file();
+    let hat = std::env::var("RALPH_CURRENT_HAT")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     // U4: Schema precheck — load workspace ralph.yml (or preset) and
     // validate every payload against the active event policy BEFORE
@@ -307,6 +314,7 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
         args.policy_check,
         args.no_policy_check,
         args.output,
+        hat.as_deref(),
         &payloads,
         &events_file,
         &args.config,
@@ -407,6 +415,7 @@ fn run_wave_precheck(
     policy_check_flag: bool,
     no_policy_check_flag: bool,
     output: WaveOutputFormat,
+    hat: Option<&str>,
     payloads: &[String],
     events_file: &Path,
     config_overrides: &[String],
@@ -558,7 +567,7 @@ fn run_wave_precheck(
                         topic,
                         crate::policy_check::BatchValidation { errors },
                     )
-                    .enrich_with_schema(topic, &parsed_payloads, schema);
+                    .enrich_with_schema(topic, hat, &parsed_payloads, schema);
                     let out_mode = match output {
                         WaveOutputFormat::Text => OutputMode::Text,
                         WaveOutputFormat::Json => OutputMode::Json,
@@ -573,8 +582,12 @@ fn run_wave_precheck(
     // Build the structured failure payload and emit it in the
     // requested output mode. This always exits non-zero (the helper
     // returns Err) so the agent sees a clear failure.
-    let failure = ValidationFailure::from_batch(topic, batch)
-        .enrich_with_schema(topic, &parsed_payloads, schema);
+    let failure = ValidationFailure::from_batch(topic, batch).enrich_with_schema(
+        topic,
+        hat,
+        &parsed_payloads,
+        schema,
+    );
     let out_mode = match output {
         WaveOutputFormat::Text => OutputMode::Text,
         WaveOutputFormat::Json => OutputMode::Json,
@@ -2306,6 +2319,7 @@ event_loop:
             true, // explicit --policy-check
             false,
             WaveOutputFormat::Json,
+            None,
             &payloads,
             &events,
             &[],
@@ -2348,6 +2362,7 @@ event_loop:
             true,
             false,
             WaveOutputFormat::Json,
+            None,
             &payloads,
             &events,
             &[],
@@ -2395,6 +2410,7 @@ event_loop:
             false, // no explicit --policy-check
             false,
             WaveOutputFormat::Json,
+            None,
             &payloads,
             &events,
             &[],
@@ -2425,6 +2441,7 @@ event_loop:
             false, // no explicit --policy-check
             true,  // but --unsafe-no-policy-check
             WaveOutputFormat::Json,
+            None,
             &payloads,
             &events,
             &[],
@@ -2470,6 +2487,7 @@ event_loop:
             false,
             true, // --unsafe-no-policy-check
             WaveOutputFormat::Json,
+            None,
             &payloads,
             &events,
             &[],

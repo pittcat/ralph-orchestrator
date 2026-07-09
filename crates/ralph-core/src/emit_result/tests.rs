@@ -259,7 +259,9 @@ fn u3_json_emit_error_includes_all_4_enrichment_fields() {
         code: "missing_required_field".to_string(),
         message: "task_id is required".to_string(),
         field: Some("task_id".to_string()),
-        suggested_command: Some("ralph emit work.done --policy-check -j '{\"task_id\":\"<id>\"}'".to_string()),
+        suggested_command: Some(
+            "ralph emit work.done --policy-check -j '{\"task_id\":\"<id>\"}'".to_string(),
+        ),
         expected: Some(serde_json::Value::String("task_id".to_string())),
         actual: None,
         field_description: Some("the live task id from `ralph tools task list`".to_string()),
@@ -269,10 +271,12 @@ fn u3_json_emit_error_includes_all_4_enrichment_fields() {
     let obj = json.as_object().expect("error must be object");
     assert_eq!(obj["code"], "missing_required_field");
     assert_eq!(obj["field"], "task_id");
-    assert!(obj["suggested_command"]
-        .as_str()
-        .unwrap()
-        .contains("--policy-check"));
+    assert!(
+        obj["suggested_command"]
+            .as_str()
+            .unwrap()
+            .contains("--policy-check")
+    );
     assert_eq!(obj["expected"], serde_json::json!("task_id"));
     assert!(obj.get("actual").is_none(), "None must skip serialise");
     assert_eq!(
@@ -318,7 +322,11 @@ fn u3_json_emit_error_preserves_value_kinds() {
         message: "must be one of allowed values".to_string(),
         field: Some("verdict".to_string()),
         suggested_command: None,
-        expected: Some(serde_json::json!(["pass", "pass_with_residuals", "blocked"])),
+        expected: Some(serde_json::json!([
+            "pass",
+            "pass_with_residuals",
+            "blocked"
+        ])),
         actual: Some(serde_json::Value::String("invalid".to_string())),
         field_description: Some("verdict enum".to_string()),
         suggested_payload_shape: Some(serde_json::json!({"verdict": "pass"})),

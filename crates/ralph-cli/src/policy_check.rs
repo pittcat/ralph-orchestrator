@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use crate::cli::{ConfigSource, load_config_with_overrides, resolve_workspace_root};
 use crate::config_resolution;
 use ralph_core::config::HatExecutionMode;
+use ralph_core::config::{EventFieldDoc, EventSchema, PayloadType};
+use ralph_core::emit_schema_hint;
 #[allow(deprecated)]
 use ralph_core::step_handoff::progress_task_gate::{
     GateDecision, ProgressTaskMismatch, check_progress_task_alignment, is_gated_topic,
@@ -33,8 +35,6 @@ use ralph_core::{
     EventLoopHandoffConfig, EventPolicyConfig, HatRegistry, PolicyDecision, PolicyRuntimeState,
     RalphConfig, ViolationType, validate_event, validate_event_with_options,
 };
-use ralph_core::config::{EventFieldDoc, EventSchema, PayloadType};
-use ralph_core::emit_schema_hint;
 use ralph_proto::HatId;
 
 /// Determines whether and how a CLI emit should undergo policy validation.
@@ -551,7 +551,7 @@ fn check_wave_dimension_assignment_with_env(
         message: format!(
             "dimension mismatch: expected_dimension={expected} actual_dimension={actual}"
         ),
-                ..Default::default()
+        ..Default::default()
     })
 }
 
@@ -616,7 +616,7 @@ pub fn check_isolated_scope(
             "isolated scope violation: hat '{hat_id}' is not allowed to publish topic '{topic}'; \
              allowed publishes: {allowed:?}"
         ),
-                ..Default::default()
+        ..Default::default()
     })
 }
 
@@ -1657,7 +1657,7 @@ pub fn check_emit_provenance(
              (Control topics {:?} and orchestrator diagnostics bypass this gate.)",
             ralph_core::RALPH_CONTROL_TOPICS
         ),
-                ..Default::default()
+        ..Default::default()
     })
 }
 
@@ -1729,7 +1729,7 @@ pub fn check_envelope_triggered(
              entirely (R12: missing triggered is allowed).",
             allowed.join(", ")
         ),
-                ..Default::default()
+        ..Default::default()
     })
 }
 /// reading. Returns `<missing>` for any non-JSON payload, missing
@@ -1903,6 +1903,7 @@ impl ValidationError {
 ///   semantic gate.
 pub fn enrich_validation_error(
     mut error: ValidationError,
+    hat: Option<&str>,
     payload: Option<&serde_json::Value>,
     schema: Option<&EventSchema>,
 ) -> ValidationError {
@@ -1941,7 +1942,7 @@ pub fn enrich_validation_error(
             }
             "invalid_field_value" => {
                 if !error.field.is_empty() {
-                    if let Some(values) = s.allowed_values.get(&error.field) {
+                    if let Some(values) = resolved_allowed_values(s, hat, &error.field) {
                         let joined = values
                             .iter()
                             .map(|v| v.to_string())
@@ -1957,10 +1958,11 @@ pub fn enrich_validation_error(
                         // not, leave `actual` as None.
                         error.actual = extract_quoted_value(&error.message);
                     }
-                    error.suggested_payload_shape = Some(emit_schema_hint::suggested_payload_shape(
-                        s,
-                        payload.unwrap_or(&Value::Null),
-                    ));
+                    error.suggested_payload_shape =
+                        Some(emit_schema_hint::suggested_payload_shape(
+                            s,
+                            payload.unwrap_or(&Value::Null),
+                        ));
                 }
             }
             "payload_type_mismatch" => {
@@ -2000,10 +2002,11 @@ pub fn enrich_validation_error(
 pub fn enrich_validation_error_with_topic(
     error: ValidationError,
     topic: &str,
+    hat: Option<&str>,
     payload: Option<&serde_json::Value>,
     schema: Option<&EventSchema>,
 ) -> ValidationError {
-    let mut enriched = enrich_validation_error(error, payload, schema);
+    let mut enriched = enrich_validation_error(error, hat, payload, schema);
     if let Some(shape) = enriched.suggested_payload_shape.as_ref() {
         if shape.is_object() {
             enriched.suggested_command = Some(format!(
@@ -2014,6 +2017,30 @@ pub fn enrich_validation_error_with_topic(
         }
     }
     enriched
+}
+
+/// Resolve allowed values for a field, preferring the rule that
+/// matches the current hat when one exists.
+fn resolved_allowed_values(
+    schema: &EventSchema,
+    hat: Option<&str>,
+    field: &str,
+) -> Option<Vec<serde_json::Value>> {
+    if let Some(hat_id) = hat {
+        if let Some(rules) = schema.hat_allowed_values.get(field) {
+            if let Some(rule) = rules.iter().find(|rule| rule.hat_id == hat_id) {
+                if !rule.values.is_empty() {
+                    return Some(rule.values.clone());
+                }
+            }
+        }
+    }
+
+    schema
+        .allowed_values
+        .get(field)
+        .filter(|values| !values.is_empty())
+        .cloned()
 }
 
 /// 2026-07-09-001 plan (U3): map a `PayloadType` to the
@@ -2283,13 +2310,14 @@ impl ValidationFailure {
     pub fn enrich_with_schema(
         mut self,
         topic: &str,
+        hat: Option<&str>,
         payloads: &[serde_json::Value],
         schema: Option<&EventSchema>,
     ) -> Self {
         for error in self.validation_errors.iter_mut() {
             let payload = payloads.get(error.payload_index);
             let enriched =
-                enrich_validation_error_with_topic(error.clone(), topic, payload, schema);
+                enrich_validation_error_with_topic(error.clone(), topic, hat, payload, schema);
             *error = enriched;
         }
         self
@@ -2330,6 +2358,11 @@ pub fn emit_policy_validation_failure(
                 "policy validation failed: {total} payload{}, {field_hint}",
                 if total == 1 { "" } else { "s" }
             );
+            if let Some(repair_block) =
+                render_validation_error_repair_block(&failure.topic, &failure.validation_errors)
+            {
+                eprintln!("{repair_block}");
+            }
         }
         OutputMode::Json => {
             // R19: structured JSON on stdout (machine-parseable).
@@ -2429,12 +2462,13 @@ fn envelope_summary_enabled(config: Option<&RalphConfig>) -> bool {
 pub fn enrich_report_with_schema(
     mut report: PolicyCheckReport,
     topic: &str,
+    hat: Option<&str>,
     payload: Option<&serde_json::Value>,
     schema: Option<&EventSchema>,
 ) -> PolicyCheckReport {
     for error in report.validation_errors.iter_mut() {
         let enriched =
-            enrich_validation_error_with_topic(error.clone(), topic, payload, schema);
+            enrich_validation_error_with_topic(error.clone(), topic, hat, payload, schema);
         *error = enriched;
     }
     report
@@ -2512,12 +2546,64 @@ fn validation_errors_to_emit_errors(
                 Some(e.field.clone())
             },
             suggested_command: e.suggested_command.clone(),
-            expected: e.expected.as_ref().map(|s| serde_json::Value::String(s.clone())),
-            actual: e.actual.as_ref().map(|s| serde_json::Value::String(s.clone())),
+            expected: e
+                .expected
+                .as_ref()
+                .map(|s| serde_json::Value::String(s.clone())),
+            actual: e
+                .actual
+                .as_ref()
+                .map(|s| serde_json::Value::String(s.clone())),
             field_description: e.field_description.clone(),
             suggested_payload_shape: e.suggested_payload_shape.clone(),
         })
         .collect()
+}
+
+/// Render a concise repair block from enriched validation errors.
+///
+/// This is shared by the CLI text rejection path and the wave
+/// precheck text path so agents see the same fix guidance in both
+/// command families.
+pub fn render_validation_error_repair_block(
+    topic: &str,
+    errors: &[ValidationError],
+) -> Option<String> {
+    if errors.is_empty() {
+        return None;
+    }
+
+    let mut lines = vec![format!("Repair hints for topic `{topic}`:")];
+    for error in errors {
+        let mut header = String::from("- ");
+        if !error.field.is_empty() {
+            header.push_str(&format!("field `{}`", error.field));
+        } else {
+            header.push_str("payload-level violation");
+        }
+        if errors.len() > 1 || error.payload_index != 0 {
+            header.push_str(&format!(" (payload[{}])", error.payload_index));
+        }
+        lines.push(header);
+
+        if let Some(desc) = error.field_description.as_deref() {
+            lines.push(format!("  meaning: {desc}"));
+        }
+        if let Some(expected) = error.expected.as_deref() {
+            lines.push(format!("  expected: {expected}"));
+        }
+        if let Some(actual) = error.actual.as_deref() {
+            lines.push(format!("  actual: {actual}"));
+        }
+        if let Some(shape) = error.suggested_payload_shape.as_ref() {
+            lines.push(format!("  suggested payload shape: {shape}"));
+        }
+        if let Some(cmd) = error.suggested_command.as_deref() {
+            lines.push(format!("  rerun: {cmd}"));
+        }
+    }
+
+    Some(lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -2985,7 +3071,7 @@ hats:
                 reason_code: "missing_required_field".to_string(),
                 message: "Missing required field: depth".to_string(),
                 ..Default::default()
-    }],
+            }],
         };
         // We can't easily intercept stdout in this module; instead we
         // verify the JSON shape and the text summary separately.
@@ -3007,7 +3093,7 @@ hats:
                 reason_code: "missing_required_field".to_string(),
                 message: "Missing required field: depth".to_string(),
                 ..Default::default()
-    })
+            })
             .collect();
         let failure = ValidationFailure {
             ok: false,
@@ -3021,6 +3107,30 @@ hats:
         assert_eq!(failure.validation_errors.len(), 7);
         let all_depth = failure.validation_errors.iter().all(|e| e.field == "depth");
         assert!(all_depth);
+    }
+
+    #[test]
+    fn test_render_validation_error_repair_block_includes_field_and_command() {
+        let error = ValidationError {
+            payload_index: 3,
+            field: "task_id".to_string(),
+            reason_code: "missing_required_field".to_string(),
+            message: "missing required field: task_id".to_string(),
+            expected: Some("task_id".to_string()),
+            field_description: Some("live task id".to_string()),
+            suggested_payload_shape: Some(serde_json::json!({"task_id": "<task_id>"})),
+            suggested_command: Some(
+                "ralph emit work.done --policy-check -j '{\"task_id\":\"<task_id>\"}'".to_string(),
+            ),
+            ..Default::default()
+        };
+        let block = render_validation_error_repair_block("work.done", &[error])
+            .expect("repair block must be present");
+        assert!(block.contains("Repair hints for topic `work.done`"));
+        assert!(block.contains("field `task_id`"));
+        assert!(block.contains("meaning:"));
+        assert!(block.contains("suggested payload shape"));
+        assert!(block.contains("--policy-check"));
     }
 
     #[test]
@@ -3759,6 +3869,7 @@ hats:
         let enriched = enrich_validation_error_with_topic(
             err,
             "work.done",
+            None,
             Some(&serde_json::json!({})),
             Some(&schema),
         );
@@ -3792,10 +3903,7 @@ hats:
         let mut schema = EventSchema::default();
         schema.allowed_values.insert(
             "verdict".to_string(),
-            vec![
-                serde_json::json!("pass"),
-                serde_json::json!("blocked"),
-            ],
+            vec![serde_json::json!("pass"), serde_json::json!("blocked")],
         );
         let err = ValidationError {
             payload_index: 0,
@@ -3807,6 +3915,7 @@ hats:
         let enriched = enrich_validation_error_with_topic(
             err,
             "review.accepted",
+            None,
             Some(&serde_json::json!({"verdict": "bogus"})),
             Some(&schema),
         );
@@ -3814,6 +3923,42 @@ hats:
         assert!(expected.contains("pass"));
         assert!(expected.contains("blocked"));
         assert_eq!(enriched.actual.as_deref(), Some("\"bogus\""));
+    }
+
+    /// U3 error path: when a matching `hat_allowed_values`
+    /// rule exists, enrichment prefers the hat-specific
+    /// allowed-value list over the generic `allowed_values`.
+    #[test]
+    fn u3_enriched_validation_error_uses_hat_allowed_values_when_present() {
+        let mut schema = EventSchema::default();
+        schema
+            .allowed_values
+            .insert("verdict".to_string(), vec![serde_json::json!("generic")]);
+        schema.hat_allowed_values.insert(
+            "verdict".to_string(),
+            vec![ralph_core::config::HatAllowedValues {
+                hat_id: "reviewer".to_string(),
+                values: vec![serde_json::json!("pass"), serde_json::json!("blocked")],
+            }],
+        );
+        let err = ValidationError {
+            payload_index: 0,
+            field: "verdict".to_string(),
+            reason_code: "invalid_field_value".to_string(),
+            message: "verdict = 'bogus' not in allowed list".to_string(),
+            ..Default::default()
+        };
+        let enriched = enrich_validation_error_with_topic(
+            err,
+            "review.accepted",
+            Some("reviewer"),
+            Some(&serde_json::json!({"verdict": "bogus"})),
+            Some(&schema),
+        );
+        let expected = enriched.expected.as_deref().expect("expected must be set");
+        assert!(expected.contains("pass"));
+        assert!(expected.contains("blocked"));
+        assert!(!expected.contains("generic"));
     }
 
     /// U3 error path: `payload_type_mismatch` produces an
@@ -3837,10 +3982,17 @@ hats:
         let enriched = enrich_validation_error_with_topic(
             err,
             "work.done",
+            None,
             Some(&serde_json::json!("a string")),
             Some(&schema),
         );
-        assert!(enriched.expected.as_deref().unwrap().contains("json_object"));
+        assert!(
+            enriched
+                .expected
+                .as_deref()
+                .unwrap()
+                .contains("json_object")
+        );
         assert!(
             enriched.field_description.is_none(),
             "payload-level violation must not fabricate a field doc"
@@ -3859,7 +4011,7 @@ hats:
             ..Default::default()
         };
         let enriched =
-            enrich_validation_error_with_topic(err, "review.dimensions.complete", None, None);
+            enrich_validation_error_with_topic(err, "review.dimensions.complete", None, None, None);
         assert_eq!(enriched.payload_index, 3);
     }
 
@@ -3875,6 +4027,7 @@ hats:
         let _signature: fn(
             ValidationError,
             &str,
+            Option<&str>,
             Option<&serde_json::Value>,
             Option<&EventSchema>,
         ) -> ValidationError = enrich_validation_error_with_topic;
@@ -3897,8 +4050,14 @@ hats:
         let v = serde_json::to_value(&err).expect("serialize ValidationError");
         assert_eq!(v["payload_index"], serde_json::json!(0));
         assert_eq!(v["field"], serde_json::json!("task_id"));
-        assert_eq!(v["reason_code"], serde_json::json!("missing_required_field"));
-        assert_eq!(v["message"], serde_json::json!("missing required field: task_id"));
+        assert_eq!(
+            v["reason_code"],
+            serde_json::json!("missing_required_field")
+        );
+        assert_eq!(
+            v["message"],
+            serde_json::json!("missing required field: task_id")
+        );
         // Optional fields are skipped when None.
         assert!(v.get("expected").is_none());
         assert!(v.get("actual").is_none());
@@ -3952,6 +4111,7 @@ hats:
         report = enrich_report_with_schema(
             report,
             "work.done",
+            None,
             Some(&serde_json::json!({})),
             Some(&schema),
         );
@@ -4036,10 +4196,12 @@ hats:
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0]["code"], "missing_required_field");
         assert_eq!(errors[0]["field"], "task_id");
-        assert!(errors[0]["suggested_command"]
-            .as_str()
-            .unwrap()
-            .contains("--policy-check"));
+        assert!(
+            errors[0]["suggested_command"]
+                .as_str()
+                .unwrap()
+                .contains("--policy-check")
+        );
         // U4 (2026-07-09-001): U3 enrichment fields survive
         // the validation_errors_to_emit_errors round trip.
         assert_eq!(
@@ -4147,7 +4309,12 @@ hats:
             serde_json::json!({"y": 2}),
             serde_json::json!({}),
         ];
-        let failure = failure.enrich_with_schema("review.dimensions.complete", &payloads, Some(&schema));
+        let failure = failure.enrich_with_schema(
+            "review.dimensions.complete",
+            None,
+            &payloads,
+            Some(&schema),
+        );
         // payload_index is preserved (the U5 / SC2a contract).
         assert_eq!(failure.validation_errors[0].payload_index, 0);
         assert_eq!(failure.validation_errors[1].payload_index, 3);
@@ -4172,9 +4339,10 @@ hats:
         let _signature: fn(
             ValidationFailure,
             &str,
+            Option<&str>,
             &[serde_json::Value],
             Option<&EventSchema>,
-        ) -> ValidationFailure = |f, t, p, s| f.enrich_with_schema(t, p, s);
+        ) -> ValidationFailure = |f, t, hat, p, s| f.enrich_with_schema(t, hat, p, s);
     }
 
     /// U5 backward compatibility: enriching a
@@ -4197,11 +4365,9 @@ hats:
             }],
         };
         let payloads = vec![serde_json::json!({})];
-        let failure = failure.enrich_with_schema("work.done", &payloads, Some(&schema));
+        let failure = failure.enrich_with_schema("work.done", None, &payloads, Some(&schema));
         assert!(
-            failure.validation_errors[0]
-                .field_description
-                .is_none(),
+            failure.validation_errors[0].field_description.is_none(),
             "no field_docs must produce no field_description"
         );
         // `expected` is still filled: that's the bare field
@@ -4243,7 +4409,7 @@ hats:
             }],
         };
         let payloads = vec![serde_json::json!({})];
-        let failure = failure.enrich_with_schema("work.done", &payloads, Some(&schema));
+        let failure = failure.enrich_with_schema("work.done", None, &payloads, Some(&schema));
         assert_eq!(failure.validation_errors[0].payload_index, 99);
         assert_eq!(
             failure.validation_errors[0].field_description.as_deref(),
@@ -4308,7 +4474,7 @@ hats:
             message: "missing required field: task_id".to_string(),
             ..Default::default()
         };
-        let enriched = enrich_validation_error(err, None, Some(&schema));
+        let enriched = enrich_validation_error(err, None, None, Some(&schema));
         assert!(
             enriched.suggested_command.is_none(),
             "enrich_validation_error (no topic wrapper) must keep suggested_command == None \
@@ -4346,6 +4512,7 @@ hats:
         let enriched = enrich_validation_error_with_topic(
             err,
             "review.complete",
+            None,
             Some(&serde_json::json!({})),
             Some(&schema),
         );

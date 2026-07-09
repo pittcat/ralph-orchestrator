@@ -58,10 +58,7 @@ pub fn check_instructions_opac(raw_yaml: &str) -> Vec<LintFinding> {
 /// can gate on `U7_EMIT_FEEDBACK_LINT_PRESET_WHITELIST`.
 /// When the name is empty, the rule stays silent (matches
 /// the pre-U7 behaviour).
-pub fn check_instructions_opac_with_preset(
-    raw_yaml: &str,
-    preset_name: &str,
-) -> Vec<LintFinding> {
+pub fn check_instructions_opac_with_preset(raw_yaml: &str, preset_name: &str) -> Vec<LintFinding> {
     let mut findings = Vec::new();
     let parsed: Value = match serde_yaml::from_str(raw_yaml) {
         Ok(v) => v,

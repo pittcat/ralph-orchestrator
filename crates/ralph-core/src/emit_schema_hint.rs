@@ -98,7 +98,10 @@ pub fn suggested_payload_shape(
     payload: &serde_json::Value,
 ) -> serde_json::Value {
     use serde_json::{Map, Value};
-    if !matches!(schema.payload.as_ref(), Some(PayloadType::JsonObject) | None) {
+    if !matches!(
+        schema.payload.as_ref(),
+        Some(PayloadType::JsonObject) | None
+    ) {
         return Value::Null;
     }
     let mut map = Map::new();
@@ -388,7 +391,10 @@ mod tests {
             .get("reason")
             .and_then(|v| v.as_str())
             .expect("reason must be a string placeholder");
-        assert!(reason.contains("reason"), "placeholder must name the field, got: {reason}");
+        assert!(
+            reason.contains("reason"),
+            "placeholder must name the field, got: {reason}"
+        );
     }
 
     /// U2 safety: missing numeric / count-style field is a
@@ -406,7 +412,9 @@ mod tests {
         let v = shape
             .get("must_fix_now_count")
             .expect("placeholder must be present");
-        let s = v.as_str().expect("placeholder must be a string, not a number");
+        let s = v
+            .as_str()
+            .expect("placeholder must be a string, not a number");
         assert!(
             s.contains("must_fix_now_count"),
             "placeholder must reference the field name, got: {s}"
@@ -452,7 +460,9 @@ mod tests {
     #[test]
     fn u2_prompt_example_payload_prefers_author_example() {
         let mut schema = schema_with_required(&["task_id"]);
-        schema.examples.push(serde_json::json!({"task_id": "task-1234-abcd"}));
+        schema
+            .examples
+            .push(serde_json::json!({"task_id": "task-1234-abcd"}));
         let example = prompt_example_payload(&schema);
         assert!(example.contains("task-1234-abcd"));
     }
@@ -565,9 +575,15 @@ mod tests {
                 fill_rule: String::new(),
             },
         );
-        schema.examples.push(serde_json::json!({"task_id": "task-1"}));
-        schema.examples.push(serde_json::json!({"task_id": "task-2"}));
-        schema.examples.push(serde_json::json!({"task_id": "task-3"}));
+        schema
+            .examples
+            .push(serde_json::json!({"task_id": "task-1"}));
+        schema
+            .examples
+            .push(serde_json::json!({"task_id": "task-2"}));
+        schema
+            .examples
+            .push(serde_json::json!({"task_id": "task-3"}));
         let mut schemas = HashMap::new();
         schemas.insert("work.done".to_string(), schema);
         let hat = hat_with_publishes("executor", "Executor", &["work.done"]);
@@ -872,8 +888,7 @@ mod tests {
         // to em-dash. (The em-dash still appears later
         // because \`fill_rule: rule\` formatting prepends
         // \` — rule\`.)
-        schema.field_docs.get_mut("task_id").unwrap().meaning =
-            "the live task id".to_string();
+        schema.field_docs.get_mut("task_id").unwrap().meaning = "the live task id".to_string();
         let line = render_field_line("task_id", &schema);
         assert!(
             line.contains(": the live task id (source: preset) — rule"),

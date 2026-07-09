@@ -852,9 +852,11 @@ fn emit_command_with_root_and_hats(
                     p.schemas.get(key)
                 });
             let payload_value = serde_json::from_str::<serde_json::Value>(&args.payload).ok();
+            let report_hat = report.hat.clone();
             report = crate::policy_check::enrich_report_with_schema(
                 report,
                 &topic,
+                report_hat.as_deref(),
                 payload_value.as_ref(),
                 schema_lookup,
             );
@@ -885,6 +887,12 @@ fn emit_command_with_root_and_hats(
             } else {
                 format!("\n\nSuggestions:\n{}", suggestions.join("\n"))
             };
+            let repair_block = crate::policy_check::render_validation_error_repair_block(
+                &report.topic,
+                &report.validation_errors,
+            )
+            .map(|block| format!("\n\n{block}"))
+            .unwrap_or_default();
             // Always append the schema-discovery hint so agents know to
             // query `--schema` for the authoritative field list instead
             // of guessing from error messages.
@@ -895,7 +903,7 @@ fn emit_command_with_root_and_hats(
                  has no preset-bearing ralph.yml.",
                 report.topic, report.topic
             );
-            let suggestions_block = format!("{suggestions_block}{schema_hint}");
+            let suggestions_block = format!("{suggestions_block}{repair_block}{schema_hint}");
             let envelope = serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string());
 
             // phase / allowed_next resolved from phase authority + ledger

@@ -488,10 +488,7 @@ impl RalphConfig {
                 for key in schema.field_docs.keys() {
                     if key.trim().is_empty() {
                         return Err(ConfigError::EventPolicyValidation {
-                            field: format!(
-                                "event_loop.event_policy.schemas.{}.field_docs",
-                                topic
-                            ),
+                            field: format!("event_loop.event_policy.schemas.{}.field_docs", topic),
                             message: "Field doc key cannot be empty".to_string(),
                         });
                     }

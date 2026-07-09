@@ -4991,14 +4991,13 @@ tasks:
             }),
             "preset-name-aware gate with empty preset name must behave like the legacy no-arg variant (no U7 finding)"
         );
-        let findings_other_preset =
-            ralph_core::preset_lint::run_preset_lint_with_preset_name(
-                &config,
-                ralph_core::preset_lint::LintStrictness::Strict,
-                false,
-                Some(LOOP_YAML_WITHOUT_CITE),
-                "ce-executor-lite",
-            );
+        let findings_other_preset = ralph_core::preset_lint::run_preset_lint_with_preset_name(
+            &config,
+            ralph_core::preset_lint::LintStrictness::Strict,
+            false,
+            Some(LOOP_YAML_WITHOUT_CITE),
+            "ce-executor-lite",
+        );
         assert!(
             !findings_other_preset.iter().any(|f| {
                 f.id == "lint.preset.instructions_emit_feedback_skill_reference_missing"

@@ -3282,11 +3282,12 @@ fn u6_all_builtin_presets_pass_lint_gate() {
         // instructions-OPAC emit-feedback rule can gate on
         // the U7 whitelist. Without this, every builtin
         // preset would fail the new check at once.
-        let result = crate::loop_runner::preset_lint_gate::enforce_preset_lint_gate_with_preset_name(
-            &config,
-            false,
-            Some(preset.name),
-        );
+        let result =
+            crate::loop_runner::preset_lint_gate::enforce_preset_lint_gate_with_preset_name(
+                &config,
+                false,
+                Some(preset.name),
+            );
         let Err(err) = result else { continue };
         let blocking_errors = err
             .findings

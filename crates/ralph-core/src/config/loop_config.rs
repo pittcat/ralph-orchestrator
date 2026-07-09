@@ -1185,9 +1185,15 @@ examples:
             .field_docs
             .get("task_id")
             .expect("field_docs.task_id must be present");
-        assert_eq!(task_id_doc.meaning, "live task id from `ralph tools task list`");
+        assert_eq!(
+            task_id_doc.meaning,
+            "live task id from `ralph tools task list`"
+        );
         assert_eq!(task_id_doc.source, "ralph tools task list");
-        assert_eq!(task_id_doc.fill_rule, "do NOT hand-write; copy from task list");
+        assert_eq!(
+            task_id_doc.fill_rule,
+            "do NOT hand-write; copy from task list"
+        );
         assert_eq!(schema.examples.len(), 1);
         assert_eq!(
             schema.examples[0].get("task_id").and_then(|v| v.as_str()),
