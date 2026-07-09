@@ -402,4 +402,6 @@ AAF 模型 + Payload Audit 模型详见 [`skills/ralph-preset-common/references/
 - [Precheck Gates](./precheck-gates.md) — 可选的事件发射 LLM 关卡（`event_loop.precheck`）
 - [CLI Reference](./cli-reference.md) — 完整命令行参考
 - [Runtime Contracts](./runtime-contracts.md) — preset 检查的详细行为矩阵
+- [Payload Contracts](./payload-contracts.md) — Schema metadata（`field_docs` / `examples` / `known_fields` / `trigger_context`）与 `--policy-check` 拒收后 5 个 agent-facing 字段如何读，以及 `## TRIGGER CONTEXT` 区块如何解读
+- [单链 preset 开发手册](../handbook/serial-preset-development.md) — `ce-executor-pipeline*` 内嵌协议 SSOT 维护指南
 - [Plan: preset-static-lint](../plans/2026-06-08-003-feat-preset-static-lint-plan.md) — R1–R12 需求与 U1–U6 实现拆分

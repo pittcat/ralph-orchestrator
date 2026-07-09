@@ -36,6 +36,16 @@
    - `event_loop.workflow_contract.step_handoff.progress_task_gate`: step handoff 约束
    - `event_loop.state_projection.actions.<topic>`: 投影动作
 
+3. **topic-level schema metadata**（2026-07-09 起，U1-U9 plan 001 / plan 003 落地）
+   - `field_docs.<field>: { meaning, source, fill_rule }` —— author 对字段含义、值源、填法的可读注解；不参与 runtime accept/reject，只在 agent prompt 与 `--policy-check` 拒收时回显。
+   - `examples` —— topic 级示例 payload，供给 prompt builder 用作 schema-aware publish section。
+   - `known_fields` —— schema 已知存在但非必填的 pass-through 字段，供 `trigger_context` 引用。
+   - `trigger_context: { summary_fields, routing_hints }` —— 在下游 hat prompt 顶部注入 `## TRIGGER CONTEXT` 区块（source topic/source hat/summary fields/matched hints）；不为 runtime 控制命令、不改 routing/权限、不替 `--policy-check`。
+   详细字段形状、写入流程、与 `--policy-check` 的边界见
+   [Payload Contracts → Schema Metadata / Policy-Check 反馈 / Trigger Context](../guide/payload-contracts.md)。
+
+> **去双写硬规则**:hat `instructions` 不复述 schema 提示的字段含义，也不复述 `trigger_context.routing_hints` 的判定条件；要写就只引用 `## TRIGGER CONTEXT` 区块 / `--policy-check` 的 `field_docs`/`examples`。Lint 会检查 emitter hat 的 instructions 是否引用了 `ralph-tools-emit` 与新章节（详见 `skills/ralph-preset-common/references/finding-rubric.md`）。
+
 ---
 
 ## 修改步骤
@@ -64,6 +74,22 @@ cargo nextest run -p ralph-core -- preset_lint
 1. 改 `event_loop.state_projection.actions.<topic>` 的动作顺序。
 2. 用 `cargo nextest run -p ralph-core --test scenarios -- ce_executor_pipeline` 验证投影路径。
 3. 如影响 CLI emit / task gate，同步更新相关注释和测试说明。
+
+### 增改 schema metadata（`field_docs` / `examples` / `known_fields` / `trigger_context`）
+
+> 来自 plan 2026-07-09-001（policy-check 反馈）与 plan 2026-07-09-003（trigger context）。改动 schema metadata **不改变 runtime accept/reject 语义**，但 strict preset lint 会卡住字段引用、谓词集合与 topology 可见性。
+
+1. 在 `presets/schemas/ce-executor-pipeline.yml` 的 topic 键下补 `field_docs` / `examples` / `known_fields` / `trigger_context`。详见 [Payload Contracts → Schema Metadata / Policy-Check 反馈 / Trigger Context](../guide/payload-contracts.md)。
+2. **保持 inline / sibling 一致**：如 `presets/en/ce-executor-pipeline*.yml` 仍有 inline `event_policy.schemas.<topic>` 块，必须在同一份 inline 复制同一份 metadata；schema parity lint 会拒收 drift。
+3. 增 trigger context 时确认 source topic 的下游 hats 在 `triggers` / `subscribes_to` 覆盖该 topic；否则 lint 会以 `trigger_context_no_consumer` Error 拒收。
+4. hat `instructions` 不复述 metadata。Emitted-event hat 的 `instructions` 必须引用 `ralph-tools-emit` 的「Policy-Check 反馈」与「## TRIGGER CONTEXT」章节；不要复制字段表或 hint 判定条件。
+5. 修改后跑：
+    ```bash
+    ralph preset check -H builtin:ce-executor-pipeline[-loop] --strict
+    cargo nextest run -p ralph-core -- preset_lint
+    cargo nextest run -p ralph-cli --bin ralph -- test_ce_executor_root_preset_matches_embedded
+    ```
+    全绿后才算 schema metadata 闭环。
 
 ---
 

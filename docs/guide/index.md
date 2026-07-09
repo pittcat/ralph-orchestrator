@@ -18,7 +18,7 @@ Practical guides for using Ralph Orchestrator effectively.
 | [Writing Prompts](prompts.md) | Prompt engineering tips |
 | [Cost Management](cost-management.md) | Controlling API costs |
 | [Harness Extensions](harness-extensions.md) | Event filter / projection / state injection / preflight hooks |
-| [Payload Contracts](payload-contracts.md) | Schema-based field enforcement between hats |
+| [Payload Contracts](payload-contracts.md) | Schema-based field enforcement between hats, schema metadata (`field_docs` / `examples` / `known_fields` / `trigger_context`), `--policy-check` 拒收后 5 个 agent-facing 字段如何读，`## TRIGGER CONTEXT` 区块如何解读 |
 | [Execution Contracts](execution-contracts.md) | `work.done` completion gate (task closed, git evidence, tests) |
 | [Precheck Gates](precheck-gates.md) | Opt-in LLM-as-judge gate before key topics (`event_loop.precheck`) |
 | [Runtime Contracts](runtime-contracts.md) | Unified preset/workflow quality gates |
