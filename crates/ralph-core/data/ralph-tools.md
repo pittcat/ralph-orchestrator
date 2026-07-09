@@ -39,6 +39,7 @@ metadata:
 | 要校验 hat 拓扑 | `ralph hats validate [--strict]` | `crates/ralph-cli/src/hats.rs:170` |
 | Loop 崩溃/ledger 损坏需恢复 | `ralph loops clean --ledger` + `ralph diagnose --session latest` | `docs/guide/runtime-diagnosis.md`（JSON 含 `dup_storm_topics` + findings `hint`） |
 | `ralph emit` 报 `triggered_not_in_topology` | `--triggered` 不在 preset `hats[]`；改 hat id 或省略 | `ralph tools skill load ralph-tools-emit` |
+| prompt 顶部出现 `## TRIGGER CONTEXT` 区块 | 先读完它，再按 hat instructions 执行；不要从完整 payload / ledger 重新推断 | 本 skill「核心规则」第 8 条 |
 
 **新增 flag 一句话说明**：
 - `ralph run --no-default-profiles`：跳过 `ralph.yml` 中的 `profiles.default`，仅保留 CLI `--profile`。
@@ -60,6 +61,11 @@ metadata:
    ralph -H builtin:<preset> run --worktree --reuse-worktree \
      --plan docs/plans/<your-plan>.md
    ```
+8. **先读 `## TRIGGER CONTEXT` 区块，再执行 hat instructions** —— 当 prompt 顶部出现 `## TRIGGER CONTEXT` 时:
+   - **触发条件**：preset/schema 为当前 trigger topic 声明了 `trigger_context`（`summary_fields` + 可选 `routing_hints`）。
+   - **agent 动作**：先读该区块，再按 hat instructions 执行；区块已把当前 trigger payload 的关键字段（`source topic`、`source hat`、summary fields、命中 routing hints）整理好，直接作为本轮任务指导。
+   - **关键字段从哪里取得**：注入的 `## TRIGGER CONTEXT` 区块，不是 runtime 内部 ledger 或事件历史。Summary 字段是 schema 声明字段的当前 trigger payload 切片；missing 字段显示 `<missing>`，不要推断成 `0` / `false` / 空字符串。
+   - **失败停止条件**：若 Trigger Context 与 hat instructions 冲突，按 hat instructions 与既有恢复机制（`task.resume` / `plan.blocked`）处理，不要自行猜测；若 Trigger Context 显示某字段为 `<missing>` 而你又必须用它，先 `ralph inspect loop --format json` / `ralph tools task list` 复核当前任务状态，再决定继续、阻塞或报告。
 
 ## 收到 `task.resume` 时（policy / origin / contract 拒收后自动注入）
 

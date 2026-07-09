@@ -228,6 +228,8 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 > Loop 内出现 `<X>.proposed` / `<X>.rejected` / `precheck-<X>` 时：`ralph tools skill load ralph-tools-precheck`  
 > Preset 作者启用 walkthrough：`docs/guide/precheck-gates.md`
 
+> **Trigger Context 不替代 `--policy-check`。** Trigger Context 是消费方 prompt context（帮助下游 hat 读懂本轮 trigger payload），与 `ralph emit --policy-check`（写盘前 schema 预检）独立。发事件仍必须先 `--policy-check` 通过，再去掉 `--policy-check` 真正写盘；Trigger Context 只告诉你怎么理解上一轮事件，不替你验证下一条 emit 的形状。
+
 ---
 
 ## 运行时行为规范
