@@ -98,6 +98,128 @@ pub struct EventSchema {
     /// example cannot accidentally satisfy the validator.
     #[serde(default)]
     pub examples: Vec<serde_json::Value>,
+
+    /// 2026-07-09-003 plan (U1): schema-backed trigger context. Optional;
+    /// when absent, behavior is identical to the pre-feature state. The
+    /// block declares which payload fields to surface in the
+    /// `## TRIGGER CONTEXT` prompt section and which short task-guidance
+    /// hints to inject for downstream isolated hats.
+    #[serde(default)]
+    pub trigger_context: TriggerContextConfig,
+
+    /// 2026-07-09-003 plan (U1): non-required, schema-declared fields that
+    /// `summary_fields` and hint conditions may reference. This widens
+    /// the reference surface beyond `required_fields` so authors can
+    /// document and hint on optional fields without weakening policy.
+    #[serde(default)]
+    pub known_fields: Vec<String>,
+}
+
+/// 2026-07-09-003 plan (U1): schema-backed declaration of the trigger
+/// context block rendered into the downstream hat prompt. All fields
+/// are optional and default to empty; an absent or empty block is a
+/// no-op at runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TriggerContextConfig {
+    /// Field paths to extract from the trigger payload and render as a
+    /// short `field: <value>` list in the prompt block. Missing fields
+    /// render as `<missing>`. Paths follow the same dot-notation used by
+    /// `allowed_values` (top-level or nested object access). Array
+    /// indexing and JSONPath are not supported in v1.
+    #[serde(default)]
+    pub summary_fields: Vec<String>,
+
+    /// Short task-guidance hints. Each hint declares a list of payload
+    /// conditions; when all conditions match, the hint's `guidance` is
+    /// rendered into the prompt in declaration order. Hints are
+    /// agent-facing only; they never alter routing, hat selection, or
+    /// policy acceptance.
+    #[serde(default)]
+    pub routing_hints: Vec<RoutingHintConfig>,
+}
+
+/// 2026-07-09-003 plan (U1): one schema-declared routing hint. Conditions
+/// are evaluated as a conjunction (all must match). The `label` is the
+/// stable identifier agents and lint findings refer to; duplicates are
+/// rejected by strict lint.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RoutingHintConfig {
+    /// Stable label referenced by agent skill docs and lint findings.
+    /// Must be unique within a single `trigger_context` block.
+    #[serde(default)]
+    pub label: String,
+
+    /// Optional grouping for lint cross-checks (e.g. mutually exclusive
+    /// hint groups). Empty string means "no group". Used only by lint;
+    /// runtime ignores the value.
+    #[serde(default)]
+    pub exclusive_group: String,
+
+    /// Conjunctive list of payload conditions. Order is preserved
+    /// (declaration order) and evaluated left-to-right at runtime; the
+    /// first failing condition short-circuits the rest.
+    #[serde(default)]
+    pub conditions: Vec<HintCondition>,
+
+    /// Agent-facing task guidance rendered into the prompt block when
+    /// all conditions match. Written from the hat's perspective, never
+    /// as a runtime control command.
+    #[serde(default)]
+    pub guidance: String,
+}
+
+/// 2026-07-09-003 plan (U1): one condition on a trigger payload field.
+/// `exists` / `missing` do not require `value`; comparison ops do.
+/// Numeric comparisons only accept JSON numbers; type mismatches make
+/// the condition return false (no panic, no implicit coercion).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HintCondition {
+    /// Field path inside the trigger payload (top-level or dot-notation).
+    /// Referenced field must exist in `required_fields ∪ known_fields
+    /// ∪ field_docs.keys() ∪ allowed_values.keys()` per lint R2 / R19.
+    #[serde(default)]
+    pub field: String,
+
+    /// Comparison operator. Unknown operators are preserved at parse
+    /// time as `HintOp::Unknown` so U4 strict lint can emit a stable
+    /// `trigger_context_unsupported_predicate` finding rather than
+    /// silently dropping the declaration.
+    pub op: HintOp,
+
+    /// Comparison value. Required for `eq` / `ne` / `gt` / `gte` /
+    /// `lt` / `lte`; forbidden for `exists` / `missing`; ignored by
+    /// runtime (lint validates presence/absence).
+    #[serde(default)]
+    pub value: serde_json::Value,
+}
+
+/// 2026-07-09-003 plan (U1): hint predicate operator. Tagged enum
+/// keeps the condition language finite and statically checkable.
+/// `Unknown` preserves unrecognized serde values so the strict
+/// lint family in U4 can surface a stable finding instead of a
+/// parse error.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HintOp {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    Exists,
+    Missing,
+    /// Preserves the original YAML string for any unrecognized op so
+    /// U4 lint can produce a stable `trigger_context_unsupported_predicate`
+    /// finding. Runtime evaluation always returns false.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+impl Default for HintOp {
+    fn default() -> Self {
+        HintOp::Eq
+    }
 }
 
 /// 2026-07-03-005 plan (P0 fix C7): per-array-field element shape
@@ -1297,6 +1419,188 @@ field_docs:
     // schema-aware section renders a missing `meaning` as
     // the em-dash placeholder, not silently as the typo
     // value.
+}
+
+// 2026-07-09-003 plan (U1): trigger-context config model tests.
+// Scope: YAML → typed config in / out. No prompt rendering, no
+// runtime wiring, no preset changes.
+#[cfg(test)]
+mod u3_trigger_context_config_tests {
+    use super::*;
+
+    /// U1 backward compatibility: an old schema YAML that does
+    /// not mention `trigger_context` or `known_fields` must
+    /// deserialise with both new fields at their `Default`
+    /// (empty TriggerContextConfig + empty known_fields vec)
+    /// and never error. Required: SC6 / R3 / R29 — "未声明
+    /// Trigger Context 的 preset 行为不变" must be a pure
+    /// runtime guarantee, not a docs promise.
+    #[test]
+    fn u1_trigger_context_backward_compat_omits_block() {
+        let yaml = r#"
+required_fields:
+  - task_id
+allowed_values:
+  verdict:
+    - pass
+"#;
+        let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            schema.trigger_context.summary_fields.is_empty(),
+            "old schema must yield an empty trigger_context.summary_fields vec"
+        );
+        assert!(
+            schema.trigger_context.routing_hints.is_empty(),
+            "old schema must yield an empty trigger_context.routing_hints vec"
+        );
+        assert!(
+            schema.known_fields.is_empty(),
+            "old schema must yield an empty known_fields vec"
+        );
+    }
+
+    /// U1 happy path: a `trigger_context` block with two
+    /// `routing_hints` preserves declaration order and all
+    /// sub-fields. Order matters because the prompt renderer
+    /// walks hints in declaration order (R11) and any map
+    /// re-ordering would silently scramble the guidance
+    /// sequence in the agent's prompt.
+    #[test]
+    fn u1_trigger_context_preserves_declaration_order() {
+        let yaml = r#"
+required_fields:
+  - must_fix_now_count
+known_fields:
+  - residual_findings_count
+trigger_context:
+  summary_fields:
+    - review_round
+    - must_fix_now_count
+    - residual_findings_count
+  routing_hints:
+    - label: accept_residual
+      exclusive_group: round
+      guidance: "Residual findings are report-only; do not generate fix units."
+      conditions:
+        - field: must_fix_now_count
+          op: eq
+          value: 0
+    - label: must_fix_only
+      exclusive_group: round
+      guidance: "Process must_fix findings only; ignore residual_findings_count."
+      conditions:
+        - field: must_fix_now_count
+          op: gt
+          value: 0
+"#;
+        let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            schema.trigger_context.summary_fields,
+            vec![
+                "review_round".to_string(),
+                "must_fix_now_count".to_string(),
+                "residual_findings_count".to_string(),
+            ]
+        );
+        assert_eq!(schema.known_fields, vec!["residual_findings_count".to_string()]);
+        let hints = &schema.trigger_context.routing_hints;
+        assert_eq!(hints.len(), 2, "two hints must round-trip");
+        assert_eq!(hints[0].label, "accept_residual");
+        assert_eq!(hints[0].exclusive_group, "round");
+        assert_eq!(hints[1].label, "must_fix_only");
+        assert_eq!(hints[0].conditions.len(), 1);
+        assert_eq!(hints[0].conditions[0].field, "must_fix_now_count");
+        assert_eq!(hints[0].conditions[0].op, HintOp::Eq);
+        assert_eq!(hints[0].conditions[0].value, serde_json::json!(0));
+    }
+
+    /// U1 unknown-op preservation: an unsupported predicate
+    /// such as `contains` must be retained as `HintOp::Unknown`
+    /// rather than dropped at parse time. Required: U4 strict
+    /// lint needs to see the original op string to emit a
+    /// stable `trigger_context_unsupported_predicate` finding.
+    /// Silently dropping the hint at parse time would let
+    /// broken configs pass lint with no signal.
+    #[test]
+    fn u1_trigger_context_preserves_unknown_op() {
+        let yaml = r#"
+required_fields:
+  - tags
+trigger_context:
+  summary_fields:
+    - tags
+  routing_hints:
+    - label: bad_predicate
+      guidance: "should never match at runtime"
+      conditions:
+        - field: tags
+          op: contains
+          value: hot
+"#;
+        let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
+        let hint = &schema.trigger_context.routing_hints[0];
+        match &hint.conditions[0].op {
+            HintOp::Unknown(s) => assert_eq!(s, "contains"),
+            other => panic!("unknown op must round-trip as HintOp::Unknown, got {other:?}"),
+        }
+    }
+
+    /// U1 condition shape: `exists` / `missing` parse without
+    /// a `value`; `gt` missing `value` parses with `Value::Null`
+    /// (the contract is that runtime treats it as "never
+    /// matches", and U4 lint raises a stable shape error).
+    /// This test pins the serde shape, not the lint behaviour
+    /// (U4).
+    #[test]
+    fn u1_hint_condition_shape_parses_with_or_without_value() {
+        let yaml = r#"
+required_fields:
+  - must_fix_now_count
+trigger_context:
+  summary_fields: []
+  routing_hints:
+    - label: when_present
+      guidance: "trigger fired"
+      conditions:
+        - field: must_fix_now_count
+          op: exists
+    - label: when_absent
+      guidance: "trigger did not fire"
+      conditions:
+        - field: must_fix_now_count
+          op: missing
+    - label: bad_numeric
+      guidance: "intentionally malformed; U4 lint must catch"
+      conditions:
+        - field: must_fix_now_count
+          op: gt
+"#;
+        let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
+        let hints = &schema.trigger_context.routing_hints;
+        assert_eq!(hints[0].conditions[0].op, HintOp::Exists);
+        assert_eq!(hints[0].conditions[0].value, serde_json::Value::Null);
+        assert_eq!(hints[1].conditions[0].op, HintOp::Missing);
+        assert_eq!(hints[2].conditions[0].op, HintOp::Gt);
+        assert_eq!(hints[2].conditions[0].value, serde_json::Value::Null);
+    }
+
+    /// U1 default shape: an empty `trigger_context: {}` block
+    /// is a no-op (`summary_fields` empty, `routing_hints`
+    /// empty). Required: schema authors should be able to
+    /// declare the block as a forward-compatibility marker
+    /// without injecting any field.
+    #[test]
+    fn u1_trigger_context_default_is_empty_noop() {
+        let yaml = r#"
+required_fields:
+  - task_id
+trigger_context: {}
+"#;
+        let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
+        assert!(schema.trigger_context.summary_fields.is_empty());
+        assert!(schema.trigger_context.routing_hints.is_empty());
+        assert!(schema.known_fields.is_empty());
+    }
 }
 
 #[cfg(test)]
