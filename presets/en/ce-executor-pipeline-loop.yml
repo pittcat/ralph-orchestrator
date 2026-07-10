@@ -1222,7 +1222,8 @@ hats:
            `matched_uids` as authoritative.
          - Full-suite green: discover the authoritative command from
            repo `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md` (do NOT
-           assume Rust defaults on a foreign repo), run it, exit 0.
+           assume any language/toolchain defaults on a foreign repo),
+           run it, exit 0.
          - Skip-path payload: `executor_action: "flow_audit_verified_skip"`,
            `commit_count` / `tests_run` / `tests_passed` /
            `changed_lines` populated from actual git state,
@@ -1364,13 +1365,13 @@ hats:
       - Discover the authoritative command from the plan's per-U
         **Verification** / **Patterns to follow**, or from repo
         `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md`. Common shapes:
-        Python `pytest`, TS `npm test`, Go `go test ./...`, Rust
-        `cargo nextest run ...` **only when those docs say so** —
-        this preset is cross-language; do not assume Ralph's Rust
-        defaults on a foreign repo.
+        Python `pytest`, TS `npm test`, Go `go test ./...`, or the
+        repo's documented test runner **only when those docs say so** —
+        this preset is cross-language; do not assume Ralph's defaults
+        on a foreign repo.
       - Include any lint / typecheck gates the project requires
-        (`tsc --noEmit`, `ruff check`, `cargo clippy`, etc. — per
-        project docs).
+        (`tsc --noEmit`, `ruff check`, or the project's documented
+        linters/typecheckers — per project docs).
 
       All gates must run. **NO `work.done` until the final verification
       is classified and all introduced failures are resolved.**
@@ -1636,9 +1637,8 @@ hats:
         / `LOOP_COMPLETE` — those belong to other hats.
       - Do NOT re-emit `review.<dim>.done` for a previous dim; you
         only handle the current `dimension` from the trigger.
-      - Do NOT run `cargo test` / `cargo nextest` /
-        `cargo build` / `cargo clippy` / `cargo fmt` — those are
-        executor's / reviewer's job, not yours.
+      - Do NOT run the project's build/test/format commands — those
+        are executor's / reviewer's job, not yours.
 
       ### Step 1 — Read context
       - From the trigger event (`review.round.ready`): `plan_name`,
@@ -1818,7 +1818,7 @@ hats:
         or the type is non-nullable by design.
 
       You MAY re-run the project's test suite to cross-verify
-      (`cargo nextest run -p <crate> -- <subset>` or `pytest <path>`).
+      (the repo's documented test runner, or `pytest <path>`).
       Do NOT modify source — only observe.
 
       Output dimension name in event: `dimension: "correctness"`.
@@ -1927,9 +1927,8 @@ hats:
         network, real filesystem outside temp dirs.
 
       You MAY re-run the project's test suite to verify it
-      actually passes on the current commit
-      (`cargo nextest run -p <crate>` or `pytest <path>`). Do NOT
-      modify source.
+      actually passes on the current commit (the repo's documented
+      test runner, or `pytest <path>`). Do NOT modify source.
 
       Output dimension name in event: `dimension: "testing"`.
 
@@ -2124,16 +2123,16 @@ hats:
       Project standards. Audit compliance with the project's
       `AGENTS.md` / `CLAUDE.md` hard rules and conventions:
       - Hard rules in `CLAUDE.md` / `AGENTS.md` are respected
-        (e.g. "no remote push", "use cargo nextest", "no Edit in
-        reviewers", "no kill of ralph processes", "no branch /
-        worktree creation by agent").
+        (e.g. "no remote push", "use the repo's documented test
+        runner", "no Edit in reviewers", "no kill of ralph
+        processes", "no branch / worktree creation by agent").
       - Frontmatter / doc comments follow the project's
         conventions.
       - New config / CLI flags / events are added with
         corresponding skill-guide updates
         (`crates/ralph-core/data/*.md`).
-      - Lint and typecheck clean (check via `cargo clippy` /
-        `cargo fmt --check` / `tsc --noEmit` / etc., read-only).
+      - Lint and typecheck clean (check via the project's documented
+        lint/typecheck commands, `tsc --noEmit` / etc., read-only).
 
       Output dimension name in event: `dimension: "project-standards"`.
 
@@ -2178,7 +2177,8 @@ hats:
          project's HARD RULE clauses are violated. For Ralph's
          own repo, pay special attention to:
          - No push to remote (no `git push` anywhere in diff)
-         - Tests use `cargo nextest` not bare `cargo test`
+         - Tests use the repo's documented test runner, not a bare
+           fallback command
          - No agent-created branches / worktrees
          - No agent-killed ralph processes
          - No edits to `presets/en/`, `presets/schemas/`,
