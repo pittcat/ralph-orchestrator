@@ -319,6 +319,108 @@ schemas:
         source: "fix-planner"
         fill_rule: "integer >= 1 for full fix plans; 0 only for defensive placeholder plans"
 
+  fix.done:
+    required_fields:
+      - "plan_name"
+      - "plan_path"
+      - "review_round"
+      - "executor_head_sha"
+      - "resolved_baseline_sha"
+      - "fixed_from_sha"
+      - "head_sha"
+      - "fix_plan_file"
+      - "review_verdict"
+      - "fixes_applied"
+      - "fixes_skipped"
+      - "planned_fix_units"
+      - "completed_fix_units"
+      - "skipped_fix_units"
+      - "failed_fix_units"
+      - "fix_attempt_commit_sha"
+      - "worktree_status"
+      - "fix_status"
+      - "failure_reason"
+      - "baseline_verification_status"
+      - "baseline_verification_file"
+      - "post_verification_status"
+      - "post_verification_file"
+      - "verification_delta_file"
+      - "baseline_existing_count"
+      - "new_business_regressions_count"
+      - "test_compatibility_updates_count"
+      - "flaky_or_environmental_count"
+      - "fix_summary"
+      - "next_review_plan"
+    field_docs:
+      fix_status:
+        meaning: "outcome of this fixer attempt; fix.done means the fixer is handing off a complete attempt report, not necessarily claiming all fixes succeeded"
+        source: "fixer"
+        fill_rule: "one of applied, partial, blocked"
+      failure_reason:
+        meaning: "short reason when fix_status is partial or blocked; empty string only when fix_status is applied"
+        source: "fixer verification / subagent result / blocker notes"
+        fill_rule: "one short sentence explaining the unfinished Unit, failed verification, or blocker"
+      failed_fix_units:
+        meaning: "actionable fix Units attempted but not completed successfully"
+        source: "fixer per-Unit execution log"
+        fill_rule: "array of U tokens; [] only when no Unit failed"
+      fix_attempt_commit_sha:
+        meaning: "git commit SHA that captures this fixer attempt, including partial or blocked attempt evidence when changes were made"
+        source: "git rev-parse HEAD after the final fixer commit"
+        fill_rule: "40-char git SHA; if no files changed, use the unchanged HEAD and explain in failure_reason"
+      worktree_status:
+        meaning: "final git worktree state after fixer commits or reverts the attempt"
+        source: "git status --short"
+        fill_rule: "must be clean before emitting fix.done"
+      baseline_verification_file:
+        meaning: "baseline verification snapshot for this fixer round"
+        source: "baseline-verifier subagent"
+        fill_rule: "absolute path under .ralph/review/<plan>/round-<n>/"
+      post_verification_file:
+        meaning: "final verification snapshot for this fixer round"
+        source: "delta-verifier subagent"
+        fill_rule: "absolute path under .ralph/review/<plan>/round-<n>/"
+      verification_delta_file:
+        meaning: "delta between the baseline snapshot and final verification for this fixer round"
+        source: "delta-verifier subagent"
+        fill_rule: "absolute path under .ralph/review/<plan>/round-<n>/"
+    examples:
+      - plan_name: "2026-06-20-001-feat-python-sort-algorithms-plan"
+        plan_path: "docs/plans/2026-06-20-001-feat-python-sort-algorithms-plan.md"
+        review_round: 1
+        executor_head_sha: "3005e79f9b3a6b9963aa63f89401078534fce6ac"
+        resolved_baseline_sha: "6f87a2cf7801b1623ce4e6bb484646fc6915fa17"
+        fixed_from_sha: "3005e79f9b3a6b9963aa63f89401078534fce6ac"
+        head_sha: "3005e79f9b3a6b9963aa63f89401078534fce6ac"
+        fix_plan_file: ".ralph/review/<plan>/round-01/fix-plan.md"
+        review_verdict: "blocked"
+        fixes_applied: 1
+        fixes_skipped: 1
+        planned_fix_units: ["U1", "U2"]
+        completed_fix_units: ["U1"]
+        skipped_fix_units: ["U2"]
+        failed_fix_units: ["U2"]
+        fix_attempt_commit_sha: "b17c0ffee0b17c0ffee0b17c0ffee0b17c0ffee0"
+        worktree_status: "clean"
+        fix_status: "partial"
+        failure_reason: "U2 was not completed and final verification is not green"
+        baseline_verification_status: "green"
+        baseline_verification_file: ".ralph/review/<plan>/round-01/baseline-verification.md"
+        post_verification_status: "red"
+        post_verification_file: ".ralph/review/<plan>/round-01/final-verification.md"
+        verification_delta_file: ".ralph/review/<plan>/round-01/verification-delta.md"
+        baseline_existing_count: 0
+        new_business_regressions_count: 1
+        test_compatibility_updates_count: 0
+        flaky_or_environmental_count: 0
+        fix_summary: "U1 was applied; U2 remains unfinished"
+        next_review_plan:
+          focus_areas: ["inspect partial fixer attempt"]
+          fixed_findings: ["adversarial:A1"]
+          verification_performed: ["pytest sorts/tests/test_quick_sort.py -v"]
+          residual_risks: ["adversarial:A2 remains unfinished"]
+          diff_ranges: ["3005e79f9b3a6b9963aa63f89401078534fce6ac..3005e79f9b3a6b9963aa63f89401078534fce6ac"]
+
   review.loop.blocked:
     required_fields:
       - "plan_name"

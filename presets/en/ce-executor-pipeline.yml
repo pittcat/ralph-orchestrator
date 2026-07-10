@@ -2468,6 +2468,16 @@ hats:
           Alignment and reporter record the residuals. If introduced
           business regressions, unresolved test-compatibility gaps, or
           flaky/environmental issues remain, do not emit `fix.done`.
+        - If the fixer discovers a sensitive value in git history, do not
+          treat history rewrite as the default action. Prefer a local
+          remediation that removes the secret from the working tree,
+          commits the concrete fix evidence, and records the remaining
+          rotation / repo hygiene follow-up in `fix_summary` (and in
+          `.ralph/agent/decisions.md`).
+        - Only use history-rewriting commands when the operator explicitly
+          asked for them outside the normal fix run. The fix run must leave
+          a clean working tree and a commit SHA, not mutate old history as
+          a hidden side effect.
 
   alignment:
     name: "Alignment"
