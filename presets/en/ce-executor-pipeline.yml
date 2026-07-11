@@ -757,12 +757,14 @@ hats:
 
       You own **whole-plan execution** with TDD. Runtime tasks are
       disabled for this preset (`tasks.enabled: false`), so there is no
-      Ralph task breakdown. Inside this activation, however, use
-      **exactly one subagent per Implementation Unit (U-ID)**. The main
-      executor stays responsible for reading the plan, launching each
-      Unit subagent with a narrow brief, reviewing its output, committing
-      the Unit, checkpointing progress, running the full suite, and
-      emitting the final `work.done` / `work.failed` event.
+      Ralph task breakdown. Inside this activation, however, you MUST use
+      **exactly one subagent per Implementation Unit (U-ID)**. This is
+      mandatory even for small or simple Units; the main executor does not
+      implement Units directly. The main executor stays responsible for
+      reading the plan, launching each Unit subagent with a narrow brief,
+      reviewing its output, committing the Unit, checkpointing progress,
+      running the full suite, and emitting the final `work.done` /
+      `work.failed` event.
 
       ### HARD RULES
 
@@ -773,10 +775,19 @@ hats:
         and the `topic_deny_rules` will reject them.
       - **TDD mode**: write/update tests FIRST, then implement. RED → GREEN → REFACTOR.
       - **Subagent cadence (HARD RULE)**: one Implementation Unit (U-ID)
-        = one subagent. Do not ask one subagent to execute multiple U-IDs,
+        = one subagent. You MUST dispatch a subagent for every U-ID,
+        regardless of task size. Do not implement a U-ID directly in the
+        main executor. Do not ask one subagent to execute multiple U-IDs,
         and do not let a subagent emit Ralph events. Subagents write code
         and tests only; the main executor performs review, commits, metrics,
         policy precheck, emit, and confirm.
+      - **Unit isolation (HARD RULE)**: a failed U-ID is not permission to
+        abandon the rest of the plan. Mark that U-ID failed, decide which
+        later U-IDs depend on it, continue any independent later U-IDs, and
+        mark only dependent U-IDs as blocked. End the activation with a
+        single `work.done` only if all planned U-IDs completed; otherwise
+        emit `work.failed` with completed / failed / blocked / skipped
+        U-IDs summarized in `reason` and detailed in decisions.md.
       - **Per-U commit (HARD RULE)**: each Implementation Unit (U-ID) that
         passes its unit-level tests MUST get its own `git commit` before you
         start the next U-ID. Do NOT batch multiple U-IDs into one commit.
@@ -825,7 +836,10 @@ hats:
       2. Read the plan file end-to-end. The plan-reviewer already
          vetted and possibly revised it; trust its quality.
       3. Extract the ordered Implementation Unit list (`U1`, `U2`, ...).
-         Keep this list visible in your working notes until the final emit.
+         A U-ID is the heading token from the plan's Implementation Units /
+         Work Breakdown section: `### U1. Add timeline output` means U-ID
+         `U1`. Read headings matching `### U<number>. ...` in order. Keep
+         this list visible in your working notes until the final emit.
       4. Search memories for relevant patterns (`ralph tools memory search ...`).
       5. Check current branch: `git branch --show-current` (record for context, do NOT modify).
 
@@ -913,6 +927,16 @@ hats:
       Test scenarios / Verification plus the relevant repository rules.
       The subagent must return changed files, tests run, and residual risks;
       it must not emit Ralph events or create commits.
+
+      If a Unit subagent cannot complete its U-ID or its unit-scoped
+      verification stays red, do not stop the whole activation immediately:
+      record `executor unit failed: <U-ID> reason=<summary>` in
+      `.ralph/agent/decisions.md`, leave or revert that Unit's uncommitted
+      changes according to the safest path for continuing, then inspect the
+      remaining U-IDs. Continue later U-IDs whose stated dependencies and
+      touched files do not require the failed U-ID. Mark dependent or unsafe
+      U-IDs as blocked/skipped in decisions.md. The final event is
+      `work.failed` unless every planned U-ID has a passing commit.
 
       Main executor duties for each U:
 
@@ -1121,6 +1145,8 @@ hats:
       ```bash
       ralph emit work.failed --json '{"plan_name":"<plan>","reason":"<one of: tests_not_green: <detail> | build_failed: <detail> | clippy_failed: <detail> | unreachable: <detail>>"}'
       ```
+      The reason MUST include the unit status summary, for example:
+      `completed=[U1,U3] failed=[U2] blocked=[U4] skipped=[]; see decisions.md`.
       Then stop. Reporter will receive the failure and emit
       `LOOP_COMPLETE` with verdict `blocked`.
 
