@@ -129,6 +129,24 @@ work.done / fix.done
 - 残留处理边界必须在 hint guidance 中显式说明（report-only vs fix-now），
   避免下游 hat 误把 residual findings 升级成 fix units。
 
+## Terminal report pattern（通用：经理正文 + 技术附录）
+
+适用范围：终态 reporter / shipper / summarizer 类 hat 需要把一次执行结果写成
+人类可读报告，并随后发出 terminal event。
+
+- 正文面向决策者：先给一句话结论，再解释目标、实际完成、未完成或刻意不做、
+  决策理由、质量风险、需要人决定的下一步。
+- 技术附录面向核验证据者：集中放 plan / artifact 路径、SHA、验证命令、计数、
+  review/fix 证据指针；正文不应变成 payload 字段流水账。
+- 结论文案与 emit verdict 必须一一对应：报告可以用本地语言表达，payload enum
+  保持 schema 允许值；不要为了报告新增 sibling terminal fields。
+- 失败或阻塞路径使用同一骨架，明确哪些阶段未运行、证据只到哪里、下一步需要
+  人介入什么；禁止 silent-success 话术。
+- 若 preset 有多轮 review/fix，报告必须按轮次汇总过程，不要只用最新事件替代
+  全部历史。
+- 报告 prose 不应用 byte-equality 测试锁死；用 schema、lint、事件场景和人工
+  checklist 验证结构化合同。
+
 ## 起草反模式（禁止抄进 instructions）
 
 | 反模式 | 应改为 |

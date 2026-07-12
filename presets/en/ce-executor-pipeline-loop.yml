@@ -3785,7 +3785,7 @@ hats:
 
   reporter:
     name: "Reporter"
-    description: "Aggregates plan change / execution / 6-dim review / fixes / alignment residuals into a final report. Sole consumer of plan.blocked / work.failed. Emits report.done then LOOP_COMPLETE."
+    description: "Aggregates plan change / execution / review rounds / fixes / alignment residuals into a final report. Sole consumer of plan.blocked / work.failed / review.loop.blocked. Emits report.done then LOOP_COMPLETE."
     triggers: ["align.done", "plan.blocked", "work.failed", "review.loop.blocked"]
     publishes: ["report.done", "LOOP_COMPLETE"]
     exempt_topics: ["report.done", "LOOP_COMPLETE"]
@@ -3804,89 +3804,149 @@ hats:
 
       You are the terminal aggregator. You emit `report.done`
       followed by `LOOP_COMPLETE`. You are the SOLE consumer of
-      `plan.blocked` and `work.failed`, which short-circuit to a
-      blocked report without the full chain having run.
+      `plan.blocked`, `work.failed`, and `review.loop.blocked`, which
+      short-circuit to a blocked report without an accepted alignment handoff.
 
       ### HARD RULES
       - Emit EXACTLY ONE `report.done` followed by EXACTLY ONE
         `LOOP_COMPLETE` (or `LOOP_COMPLETE` only on the next
         activation after `report.done` is acknowledged).
+      - If this is a second activation whose only remaining work is
+        `LOOP_COMPLETE`, do NOT rewrite `.ralph/review/{plan_name}/report.md`;
+        emit only `LOOP_COMPLETE` and stop.
       - Do NOT emit `work.done` / `work.failed` / `plan.*` /
         `review.*` / `fix.*` / `align.done`.
       - Do NOT modify code (read-only audit role).
       - Do NOT loop back. After `LOOP_COMPLETE`, stop.
+      - The report artifact must contain no Mermaid or AACIM diagram.
+      - The manager-facing body is Chinese. Technical terms, commands,
+        paths, and SHAs may remain in English.
+      - Do not dump payload field names as prose. Map evidence into
+        human-readable Chinese; raw field names are allowed only in the
+        short technical appendix.
+      - Do not use silent-success language. If evidence is missing or the
+        loop blocked, say so plainly and set the matching verdict.
+      - Before each real `ralph emit`, follow `ralph-tools-emit` §5: run the
+        same command with `--policy-check`; only emit for real after the
+        policy check passes.
 
       ### Read upstream events (HARD RULE — isolated mode shows only trigger)
       Your `event_filter` exposes the trigger event only. For happy-path
-      fields from earlier hats, query the runtime event ledger:
+      fields from earlier hats, query the runtime event ledger.
+
+      **Single-shot topics** (at most one meaningful final value — `tail -1`
+      is OK):
 
       ```bash
       ralph events --events-source main --output json | jq -c 'select(.topic=="plan.ready")' | tail -1
       ralph events --events-source main --output json | jq -c 'select(.topic=="work.done")' | tail -1
-      ralph events --events-source main --output json | jq -c 'select(.topic=="review.complete")' | tail -1
-      ralph events --events-source main --output json | jq -c 'select(.topic=="fix.done")' | tail -1
+      ralph events --events-source main --output json | jq -c 'select(.topic=="align.done")' | tail -1
+      ralph events --events-source main --output json | jq -c 'select(.topic=="review.loop.blocked")' | tail -1
       ```
 
-      Parse the JSON `payload` field from each line. Do NOT invent
-      `tests_run`, `commit_count`, `baseline_verification_status`, or
-      `verdict` without this evidence.
+      **Multi-round topics** (may appear once per review/fix round — list
+      ALL rows ordered by `review_round`; do NOT use `tail -1` to narrate
+      the whole loop):
 
-      ### Branch A — Happy path (trigger = `align.done`)
+      ```bash
+      ralph events --events-source main --output json \
+        | jq -c 'select(.topic=="review.complete")' \
+        | jq -s 'sort_by(.payload.review_round // 0)[]'
+      ralph events --events-source main --output json \
+        | jq -c 'select(.topic=="fix.done")' \
+        | jq -s 'sort_by(.payload.review_round // 0)[]'
+      ralph events --events-source main --output json \
+        | jq -c 'select(.topic=="review.round.ready" or .topic=="review.accepted" or .topic=="fix.requested")' \
+        | jq -s 'sort_by(.payload.review_round // 0)[]'
+      ```
+
+      Always also scan every `.ralph/review/{plan_name}/round-<NN>/`
+      directory. Round dirs are the primary multi-round evidence; event
+      lists above fill gaps when a round dir is incomplete. Parse the JSON
+      `payload` field from each line. Do NOT invent `tests_run`,
+      `commit_count`, `baseline_verification_status`, or `verdict` without
+      this evidence.
+
+      ### Report contract (manager body + short technical appendix)
+
+      Always write `.ralph/review/{plan_name}/report.md` after creating the
+      directory if needed. Use exactly this run-level structure:
+
+      ```markdown
+      ## 一句话结论
+      <one Chinese sentence using exactly one of these manager conclusions:
+      "通过，可以继续" / "有遗留可跟进，可以有条件继续" / "未完成需介入，暂不建议继续">
+
+      ## 我们想解决什么
+      <Chinese manager summary of the original plan goal and why it mattered.>
+
+      ## 实际做了什么
+      <Chinese narrative of completed plan review, implementation, review
+      rounds, fix attempts, and alignment work that actually ran.>
+
+      ## 尝试过但未做成 / 刻意没做的
+      <Chinese explanation of blocked, skipped, residual, or intentionally
+      out-of-scope items. Say "无" only when evidence supports it.>
+
+      ## 为什么这样决策
+      <Chinese rationale connecting review verdict, loop decision, regression
+      evidence, residual risks, and alignment evidence to the conclusion.>
+
+      ## 质量与风险
+      <Chinese summary of verification status, review findings, regressions,
+      residuals, and what risk remains. Include the subsection below.>
+
+      ### 多轮修复经过
+      <One Chinese line per review round: round number, whether fixes were
+      requested or accepted, key evidence, and final round detail. If no fix
+      round happened, state "本轮未进入修复".>
+
+      ## 请你决定的事
+      <Chinese action request matching the conclusion: continue / continue
+      with follow-up / intervene before continuing.>
+
+      ## 技术附录
+      - 计划与产物路径: ...
+      - 关键 SHA / commit 摘要: ...
+      - 验证与计数: ...
+      - 评审 / 修复证据指针: ...
+      ```
+
+      Verdict mapping is fixed:
+      - `pass` → `通过，可以继续`
+      - `pass_with_residuals` → `有遗留可跟进，可以有条件继续`
+      - `blocked` → `未完成需介入，暂不建议继续`
+
+      The body must be understandable by a manager without reading the
+      appendix. Keep counts and evidence pointers in the appendix unless a
+      number changes the decision. Before writing the file, confirm the body
+      and appendix contain no Mermaid/AACIM block and no line beginning with
+      `graph`, `flowchart`, `sequenceDiagram`, `classDiagram`, `stateDiagram`,
+      or `gantt`.
+
+      ### Branch A — Accepted path (trigger = `align.done`)
 
       1. Read the `align.done` payload: `plan_name`, `plan_path`,
-         `executor_head_sha`, `resolved_baseline_sha` (pass-through;
-         authoritative SOT for this run), `fix_plan_file`,
+         `review_round`, `executor_head_sha`, `resolved_baseline_sha`
+         (pass-through; authoritative SOT for this run), `fix_plan_file`,
          `review_verdict`, `plan_executed`, `fix_plan_executed`,
          `residuals_count`, `residuals_summary`.
-      2. From events file (above): `plan.ready`, `work.done`,
-         `review.complete`, `fix.done` payloads.
+      2. From events file (above): `plan.ready` / `work.done` via
+         single-shot queries; **all** `review.complete` / `fix.done` /
+         round-routing events via the multi-round listing (never only
+         `tail -1`).
       3. Read all review round directories under
          `.ralph/review/{plan_name}/round-<NN>/`. For each round, read
          that round's `review.diff.patch`, `review.diffstat.txt`, six
          dimension products, `synthesized-review.md`, and `fix-plan.md` when
          present. Do not assume the latest files exist at
          `.ralph/review/{plan_name}/` without the `round-<NN>` segment.
-      4. Read the final `fix_plan_file` from the upstream payload when it is
+      4. Build the `多轮修复经过` subsection from ALL `round-<NN>/`
+         directories plus the full multi-round event lists above. Do not
+         describe the whole loop from only the latest event or `tail -1`.
+         If no fix round happened, write `本轮未进入修复`.
+      5. Read the final `fix_plan_file` from the upstream payload when it is
          non-empty, and read the **original** plan at `plan_path`.
-      5. Write the run-level report to `.ralph/review/{plan_name}/report.md`.
-         This top-level report is the only file outside a round directory;
-         round-specific review artifacts remain under `round-<NN>/`:
-
-         ## 1. Verdict
-         {derived verdict — see step 6}
-
-         ## 2. Plan Review
-         - plan_name, plan_path, plan_revised (from plan.ready)
-         - review_summary (from plan.ready)
-
-         ## 3. Execution (original plan — executor phase)
-         - tests_run, tests_passed, commit_count, changed_lines,
-           executor_head_sha (from work.done)
-         - baseline_verification_status, post_verification_status,
-           baseline_existing_count, new_business_regressions_count,
-           test_compatibility_updates_count, flaky_or_environmental_count
-         - changes: `git diff --stat <DIFF_BASE>..<executor_head_sha>`
-
-         ## 4. Review Rounds
-         For each `round-<NN>`: six dimension findings_count, synthesized
-         verdict, `review.diff.patch` path, diffstat summary, top P0/P1
-         findings, and whether that round requested fixes or was accepted.
-
-         ## 5. Fix Plan Application (fix-planner plan — NOT original plan)
-         - fix_plan_file (from review.complete)
-         - review_verdict, fixes_applied / fixes_skipped (from fix.done)
-         - baseline_verification_status / post_verification_status /
-           baseline_existing_count / new_business_regressions_count /
-           test_compatibility_updates_count / flaky_or_environmental_count
-
-         ## 6. Alignment Residuals
-         - plan_executed / fix_plan_executed (from align.done)
-         - residuals_count + residuals_summary
-
-         ## 7. Conclusion
-         One-paragraph summary.
-         ```
-
       6. Determine verdict (single field):
          - `review_verdict == "blocked"` → `verdict: "blocked"`
          - Else if `new_business_regressions_count > 0` → `verdict: "blocked"`
@@ -3894,33 +3954,80 @@ hats:
            "pass_with_residuals"` OR NOT `plan_executed` OR NOT
            `fix_plan_executed` OR `post_verification_status != "green"` → `verdict: "pass_with_residuals"`
          - Else → `verdict: "pass"`
-      7. Emit `report.done`:
+      7. Write the report using the Report contract above. Explain in Chinese
+         what completed, how review/fix rounds evolved, what did not, why the
+         verdict follows from evidence, and what decision is requested. Use
+         the appendix for paths, SHAs, counts, round directories,
+         `fix-plan.md`, residuals, and diffstat.
+      8. Emit `report.done` with policy-check first (see `ralph-tools-emit` §5):
          ```bash
+         ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'
          ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'
          ```
-      8. Emit `LOOP_COMPLETE` (next activation is OK, or same
-         activation if the runtime allows; usually separate):
+      9. Emit `LOOP_COMPLETE` with policy-check first (next activation is OK, or
+         same activation if the runtime allows; usually separate):
          ```bash
-         ralph emit LOOP_COMPLETE --json '{"reason":"<1-2 sentence>"}'
+         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>"}'
+         ralph emit LOOP_COMPLETE --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>"}'
          ```
 
-      ### Branch B — Failure path (trigger = `work.failed` or `plan.blocked`)
+      ### Branch B — Early failure path (trigger = `work.failed` or `plan.blocked`)
 
       1. Read the trigger payload for `plan_name` and `reason`.
       2. If available, read `plan.ready` from events file for plan_path.
       3. Write a blocked report to `.ralph/review/{plan_name}/report.md`
-         (run-level report, not a round artifact)
-         with verdict `blocked` and upstream `reason` in §1.
-      4. Emit `report.done` with `verdict: "blocked"`.
-      5. Emit `LOOP_COMPLETE` with `reason: "blocked: <upstream reason>"`.
+         using the same Report contract. Use `未完成需介入，暂不建议继续` in
+         `一句话结论`, explain the upstream reason in
+         `尝试过但未做成 / 刻意没做的` and `质量与风险`, and mark plan review,
+         implementation, fix, alignment, 6-dimension review, or multi-round
+         repair as "未运行" or "仅取得部分证据" where appropriate.
+      4. Emit `report.done` with policy-check first:
+         ```bash
+         ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
+         ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
+         ```
+      5. Emit `LOOP_COMPLETE` with policy-check first:
+         ```bash
+         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"blocked: <upstream reason>"}'
+         ralph emit LOOP_COMPLETE --json '{"reason":"blocked: <upstream reason>"}'
+         ```
 
-      Fix/alignment/6-dim sections: mark "not run".
+      ### Branch C — Loop exhausted path (trigger = `review.loop.blocked`)
+
+      1. Read the trigger payload: `plan_name`, `plan_path`, `review_round`,
+         `max_review_rounds`, `executor_head_sha`, `resolved_baseline_sha`,
+         `p0_count`, `p1_count`, `must_fix_now_count`,
+         `main_conflict_count`, `blocking_main_conflict_count`,
+         `residual_findings_count`, `loop_decision_basis`, and `reason`.
+      2. Read `plan.ready` / `work.done` via single-shot queries. List
+         **all** `review.complete` / `fix.done` / round-routing events via
+         the multi-round recipes above. Then scan every
+         `.ralph/review/{plan_name}/round-<NN>/` directory to reconstruct all
+         review/fix rounds. Do not rely on only the latest event.
+      3. Write the same manager report structure with conclusion
+         `未完成需介入，暂不建议继续`. In `质量与风险` / `多轮修复经过`, explain
+         which round exhausted the loop, what main conflict remained, which
+         fixes were attempted, and which residuals are report-only versus
+         still blocking.
+      4. Emit `report.done` with policy-check first:
+         ```bash
+         ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
+         ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
+         ```
+      5. Emit `LOOP_COMPLETE` with policy-check first:
+         ```bash
+         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"blocked: <loop_decision_basis> (<reason>)"}'
+         ralph emit LOOP_COMPLETE --json '{"reason":"blocked: <loop_decision_basis> (<reason>)"}'
+         ```
 
       ### Notes
       - The verdict field on `report.done` is the SINGLE routing
         signal for downstream consumers (currently none in this
         preset). Do NOT emit sibling terminal fields like
         `pass_with_residuals_v2`.
+      - `review.loop.blocked` always maps to `verdict: "blocked"`, even when
+        some findings were fixed earlier. Do not downgrade it to
+        `pass_with_residuals`.
       - `LOOP_COMPLETE` is the `completion_promise`. The runner
         shuts the loop on this event.
 

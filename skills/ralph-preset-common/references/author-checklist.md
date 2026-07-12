@@ -27,6 +27,7 @@
 - [ ] Emitter hat：引用 `ralph-tools-opac`、`ralph-tools-emit` §5；强制 `--policy-check`
 - [ ] Emitter hat：若 instructions 提到 payload / required fields / field shape / `ralph emit` / `ralph wave emit`，必须引用 `ralph-tools-emit`「Policy-Check 反馈」；不要复制 `field_docs` 表
 - [ ] Recovery / correction 路径：引用 `ralph-tools-recovery-directives`（通用 bounded retry）；preset 内用**触发状态表**写专用动作，不复述 data skill 全文
+- [ ] 终态报告类 hat：正文面向决策者、技术附录面向核验证据者；正文不得是 payload 字段流水账，失败路径不得写成 silent-success
 - [ ] `task_id` / `task_key` / `step`：引用 `ralph-tools-tasks` red box
 - [ ] 不复述 `ralph-tools*.md` 参数表
 - [ ] **对每个 emit topic，按 payload audit 五列填行**（见下）—— schema 通过不等于字段可达

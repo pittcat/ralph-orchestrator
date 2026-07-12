@@ -2999,10 +2999,24 @@ hats:
       - Emit EXACTLY ONE `report.done` followed by EXACTLY ONE
         `LOOP_COMPLETE` (or `LOOP_COMPLETE` only on the next
         activation after `report.done` is acknowledged).
+      - If this is a second activation whose only remaining work is
+        `LOOP_COMPLETE`, do NOT rewrite `.ralph/review/{plan_name}/report.md`;
+        emit only `LOOP_COMPLETE` and stop.
       - Do NOT emit `work.done` / `work.failed` / `plan.*` /
         `review.*` / `fix.*` / `align.done`.
       - Do NOT modify code (read-only audit role).
       - Do NOT loop back. After `LOOP_COMPLETE`, stop.
+      - The report artifact must contain no Mermaid or AACIM diagram.
+      - The manager-facing body is Chinese. Technical terms, commands,
+        paths, and SHAs may remain in English.
+      - Do not dump payload field names as prose. Map evidence into
+        human-readable Chinese; raw field names are allowed only in the
+        short technical appendix.
+      - Do not use silent-success language. If evidence is missing or the
+        run blocked, say so plainly and set the matching verdict.
+      - Before each real `ralph emit`, follow `ralph-tools-emit` §5: run the
+        same command with `--policy-check`; only emit for real after the
+        policy check passes.
 
       ### Read upstream events (HARD RULE — isolated mode shows only trigger)
       Your `event_filter` exposes the trigger event only. For happy-path
@@ -3019,6 +3033,58 @@ hats:
       `tests_run`, `commit_count`, `baseline_verification_status`, or
       `verdict` without this evidence.
 
+      ### Report contract (manager body + short technical appendix)
+
+      Always write `.ralph/review/{plan_name}/report.md` after creating the
+      directory if needed. Use exactly this run-level structure:
+
+      ```markdown
+      ## 一句话结论
+      <one Chinese sentence using exactly one of these manager conclusions:
+      "通过，可以继续" / "有遗留可跟进，可以有条件继续" / "未完成需介入，暂不建议继续">
+
+      ## 我们想解决什么
+      <Chinese manager summary of the original plan goal and why it mattered.>
+
+      ## 实际做了什么
+      <Chinese narrative of completed plan review, implementation, review,
+      fix, and alignment work that actually ran.>
+
+      ## 尝试过但未做成 / 刻意没做的
+      <Chinese explanation of blocked, skipped, residual, or intentionally
+      out-of-scope items. Say "无" only when evidence supports it.>
+
+      ## 为什么这样决策
+      <Chinese rationale connecting review verdict, regression evidence,
+      residual risks, and alignment evidence to the conclusion.>
+
+      ## 质量与风险
+      <Chinese summary of verification status, review findings, regressions,
+      residuals, and what risk remains.>
+
+      ## 请你决定的事
+      <Chinese action request matching the conclusion: continue / continue
+      with follow-up / intervene before continuing.>
+
+      ## 技术附录
+      - 计划与产物路径: ...
+      - 关键 SHA / commit 摘要: ...
+      - 验证与计数: ...
+      - 评审 / 修复证据指针: ...
+      ```
+
+      Verdict mapping is fixed:
+      - `pass` → `通过，可以继续`
+      - `pass_with_residuals` → `有遗留可跟进，可以有条件继续`
+      - `blocked` → `未完成需介入，暂不建议继续`
+
+      The body must be understandable by a manager without reading the
+      appendix. Keep counts and evidence pointers in the appendix unless a
+      number changes the decision. Before writing the file, confirm the body
+      and appendix contain no Mermaid/AACIM block and no line beginning with
+      `graph`, `flowchart`, `sequenceDiagram`, `classDiagram`, `stateDiagram`,
+      or `gantt`.
+
       ### Branch A — Happy path (trigger = `align.done`)
 
       1. Read the `align.done` payload: `plan_name`, `plan_path`,
@@ -3031,57 +3097,27 @@ hats:
       3. Read `review.diff.patch`, `review.diffstat.txt`, and all 6
          dimension products under `.ralph/review/{plan_name}/`.
       4. Read `fix-plan.md` and the **original** plan at `plan_path`.
-      5. Write the report to `.ralph/review/{plan_name}/report.md`:
-
-         ## 1. Verdict
-         {derived verdict — see step 6}
-
-         ## 2. Plan Review
-         - plan_name, plan_path, plan_revised (from plan.ready)
-         - review_summary (from plan.ready)
-
-         ## 3. Execution (original plan — executor phase)
-         - tests_run, tests_passed, commit_count, changed_lines,
-           executor_head_sha (from work.done)
-         - baseline_verification_status, post_verification_status,
-           baseline_existing_count, new_business_regressions_count,
-           test_compatibility_updates_count, flaky_or_environmental_count
-         - changes: `git diff --stat <DIFF_BASE>..<executor_head_sha>`
-
-         ## 4. 6-Dimension Review
-         Include `review.diff.patch` path, diffstat summary, and for each
-         dimension: findings_count, top P0/P1 (if any)
-
-         ## 5. Fix Plan Application (fix-planner plan — NOT original plan)
-         - fix_plan_file (from review.complete)
-         - review_verdict, fixes_applied / fixes_skipped (from fix.done)
-         - baseline_verification_status / post_verification_status /
-           baseline_existing_count / new_business_regressions_count /
-           test_compatibility_updates_count / flaky_or_environmental_count
-
-         ## 6. Alignment Residuals
-         - plan_executed / fix_plan_executed (from align.done)
-         - residuals_count + residuals_summary
-
-         ## 7. Conclusion
-         One-paragraph summary.
-         ```
-
-      6. Determine verdict (single field):
+      5. Determine verdict (single field):
          - `review_verdict == "blocked"` → `verdict: "blocked"`
          - Else if `new_business_regressions_count > 0` → `verdict: "blocked"`
          - Else if `residuals_count > 0` OR `review_verdict ==
            "pass_with_residuals"` OR NOT `plan_executed` OR NOT
            `fix_plan_executed` OR `post_verification_status != "green"` → `verdict: "pass_with_residuals"`
          - Else → `verdict: "pass"`
-      7. Emit `report.done`:
+      6. Write the report using the Report contract above. Explain in Chinese
+         what completed, what did not, why the verdict follows from evidence,
+         and what decision is requested. Use the appendix for paths, SHAs,
+         counts, dimension products, `fix-plan.md`, residuals, and diffstat.
+      7. Emit `report.done` with policy-check first (see `ralph-tools-emit` §5):
          ```bash
+         ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'
          ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'
          ```
-      8. Emit `LOOP_COMPLETE` (next activation is OK, or same
-         activation if the runtime allows; usually separate):
+      8. Emit `LOOP_COMPLETE` with policy-check first (next activation is OK, or
+         same activation if the runtime allows; usually separate):
          ```bash
-         ralph emit LOOP_COMPLETE --json '{"reason":"<1-2 sentence>"}'
+         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>"}'
+         ralph emit LOOP_COMPLETE --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>"}'
          ```
 
       ### Branch B — Failure path (trigger = `work.failed` or `plan.blocked`)
@@ -3089,11 +3125,21 @@ hats:
       1. Read the trigger payload for `plan_name` and `reason`.
       2. If available, read `plan.ready` from events file for plan_path.
       3. Write a blocked report to `.ralph/review/{plan_name}/report.md`
-         with verdict `blocked` and upstream `reason` in §1.
-      4. Emit `report.done` with `verdict: "blocked"`.
-      5. Emit `LOOP_COMPLETE` with `reason: "blocked: <upstream reason>"`.
-
-      Fix/alignment/6-dim sections: mark "not run".
+         using the same Report contract. Use `未完成需介入，暂不建议继续` in
+         `一句话结论`, explain the upstream reason in
+         `尝试过但未做成 / 刻意没做的` and `质量与风险`, and mark plan review,
+         implementation, fix, alignment, or 6-dimension review as "未运行" or
+         "仅取得部分证据" where appropriate.
+      4. Emit `report.done` with policy-check first:
+         ```bash
+         ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
+         ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
+         ```
+      5. Emit `LOOP_COMPLETE` with policy-check first:
+         ```bash
+         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"blocked: <upstream reason>"}'
+         ralph emit LOOP_COMPLETE --json '{"reason":"blocked: <upstream reason>"}'
+         ```
 
       ### Notes
       - The verdict field on `report.done` is the SINGLE routing
