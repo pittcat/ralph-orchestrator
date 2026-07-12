@@ -200,6 +200,9 @@ config:
             - plan_name
             - plan_path
             - executor_head_sha
+            - head_sha
+            - fix_attempt_commit_sha
+            - worktree_status
             - fix_plan_file
             - review_verdict
             - fixes_applied
@@ -210,6 +213,8 @@ config:
             - plan_name
             - plan_path
             - executor_head_sha
+            - head_sha
+            - worktree_status
             - fix_plan_file
             - review_verdict
             - plan_executed
@@ -286,13 +291,13 @@ mock_responses:
   # 9. fixer applies the synthesizer fix plan (not the original plan)
   - text: |
       <event topic="fix.done">
-      {"plan_name":"plan-p","plan_path":"docs/plans/p.md","executor_head_sha":"aabbccddaabbccddaabbccddaabbccddaabbccdd","fix_plan_file":".ralph/review/plan-p/fix-plan.md","review_verdict":"pass_with_residuals","fixes_applied":1,"fixes_skipped":2}
+      {"plan_name":"plan-p","plan_path":"docs/plans/p.md","executor_head_sha":"aabbccddaabbccddaabbccddaabbccddaabbccdd","head_sha":"aabbccddaabbccddaabbccddaabbccddaabbccde","fix_attempt_commit_sha":"aabbccddaabbccddaabbccddaabbccddaabbccde","worktree_status":"clean","fix_plan_file":".ralph/review/plan-p/fix-plan.md","review_verdict":"pass_with_residuals","fixes_applied":1,"fixes_skipped":2}
       </event>
     hat: fixer
   # 10. alignment cross-checks original plan vs fix-plan execution
   - text: |
       <event topic="align.done">
-      {"plan_name":"plan-p","plan_path":"docs/plans/p.md","executor_head_sha":"aabbccddaabbccddaabbccddaabbccddaabbccdd","fix_plan_file":".ralph/review/plan-p/fix-plan.md","review_verdict":"pass_with_residuals","plan_executed":true,"fix_plan_executed":true,"residuals_count":2,"residuals_summary":"2 P3 maintainability findings not applied (deferred)"}
+      {"plan_name":"plan-p","plan_path":"docs/plans/p.md","executor_head_sha":"aabbccddaabbccddaabbccddaabbccddaabbccdd","head_sha":"aabbccddaabbccddaabbccddaabbccddaabbccde","worktree_status":"clean","fix_plan_file":".ralph/review/plan-p/fix-plan.md","review_verdict":"pass_with_residuals","plan_executed":true,"fix_plan_executed":true,"residuals_count":2,"residuals_summary":"2 P3 maintainability findings not applied (deferred)"}
       </event>
     hat: alignment
   # 11. reporter emits report.done

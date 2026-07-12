@@ -370,8 +370,8 @@ schemas:
         fill_rule: "40-char git SHA; if no files changed, use the unchanged HEAD and explain in failure_reason"
       worktree_status:
         meaning: "final git worktree state after fixer commits or reverts the attempt"
-        source: "git status --short"
-        fill_rule: "must be clean before emitting fix.done"
+        source: "git status --porcelain --untracked-files=all (excluding .ralph/)"
+        fill_rule: "clean on successful handoff; dirty only when fix_status is blocked on unowned residual dirt — never fabricate clean"
       baseline_verification_file:
         meaning: "baseline verification snapshot for this fixer round"
         source: "baseline-verifier subagent"

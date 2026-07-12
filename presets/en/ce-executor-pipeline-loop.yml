@@ -780,8 +780,8 @@ event_loop:
             fill_rule: "40-char git SHA; if no files changed, use the unchanged HEAD and explain in failure_reason"
           worktree_status:
             meaning: "final git worktree state after fixer commits or reverts the attempt"
-            source: "git status --short"
-            fill_rule: "must be clean before emitting fix.done"
+            source: "git status --porcelain --untracked-files=all (excluding .ralph/)"
+            fill_rule: "clean on successful handoff; dirty only when fix_status is blocked on unowned residual dirt — never fabricate clean"
       review.loop.blocked:
         required_fields:
           - "plan_name"
@@ -1177,10 +1177,14 @@ hats:
         for executor. The plan-reviewer already owns plan edits. If the plan
         is wrong or impossible to execute, document the blocker and emit
         `work.failed`; do NOT patch the plan file yourself.
-      - **No uncommitted implementation changes before `work.done`**: before
-        emitting `work.done`, `git status --short` MUST show no uncommitted
-        changes outside `.ralph/`. Any source, test, docs, config, or plan
-        change outside `.ralph/` must be included in an executor commit.
+      - **Final Git handoff is a HARD contract**: before emitting
+        `work.done` (including the Step 1.5 flow-audit skip path), every
+        Implementation Unit you intend to preserve MUST already be in a
+        commit on the current branch, the working tree MUST be free of any
+        non-`.ralph/` modification, and `executor_head_sha` MUST equal
+        `git rev-parse HEAD` after that final commit. See the unified
+        `Final Git Handoff Precheck` block at the end of HARD RULES —
+        apply it on every emit path, including skip-path / no-Unit paths.
       - **Diff base for metrics**: read `plan_baseline_sha`, then
         `loop_start_sha`, from `## ORCHESTRATOR CONTEXT`. Validate each with
         `git cat-file -t <sha> 2>/dev/null` == `commit`. Fall back:
@@ -1193,6 +1197,75 @@ hats:
       - **MUST NOT modify any file under `presets/en/`, `presets/schemas/`,
         `presets/index.json`, or `presets/manifest.yml`** — those are
         orchestration SSOT, not implementation files.
+
+      ### Final Git Handoff Precheck (applies to EVERY `work.done` emit)
+
+      Every `work.done` emit — including the Step 1.5 skip path and any
+      no-Unit / no-new-commit scenario — MUST pass this same two-stage
+      gate. Reviewers and alignment downstream rely on these SHAs and
+      the clean worktree to know what they are looking at.
+
+      The same protocol is required by every reviewer and alignment
+      hat on their `Entry Precheck` / `Exit Precheck` (see `dim:*` and
+      `alignment` instructions for the read-only side).
+
+      **Stage A — Pre-policy-check (right before `ralph emit --policy-check`)**
+
+      1. Inspect the working tree for non-`.ralph/` changes. Use a
+         porcelain view that captures staged, unstaged, and untracked
+         entries, then drop anything under `.ralph/` (the runtime
+         artifact directory is gitignored and MUST NOT count toward
+         project dirty state):
+         ```bash
+         # porcelain for staged + unstaged + untracked, excluding .ralph/
+         git status --porcelain --untracked-files=all \
+           | awk '!/^\?\? \.ralph\// && !/^\?\? \.ralph$/ { print }'
+         ```
+         If anything is still listed, you have leftover changes:
+         - If the file is part of an Implementation Unit you executed
+           and the unit tests are green → stage and commit it under
+           that U-ID's `feat(scope): <U-ID> ...` subject, then
+           recompute `executor_head_sha` and `commit_count`.
+         - If the file is not attributable to any U-ID or you cannot
+           form a safe commit (failing tests, partial work, ambiguous
+           ownership), stop the emit, document the dirty path in
+           `.ralph/agent/decisions.md`, and emit `work.failed` instead
+           of `work.done`. Do NOT fold unowned changes into a
+           fabricated executor commit.
+      2. Compute the handoff SHAs and metrics from the final state:
+         ```bash
+         FINAL_HEAD="$(git rev-parse HEAD)"
+         # DIFF_BASE per the Diff base chain above (validate with
+         # `git cat-file -t <sha>` == commit).
+         COMMIT_COUNT="$(git rev-list --count <DIFF_BASE>..HEAD)"
+         CHANGED_LINES="$(git diff --shortstat <DIFF_BASE>..HEAD \
+           | awk '{ ins += $4 ; del += $6 } END { print ins + del }')"
+         ```
+         Use `FINAL_HEAD` (not any earlier reading) when filling
+         `executor_head_sha` in the payload.
+      3. Confirm the canonical review artifact path is in place:
+         `.ralph/review/{plan_name}/review.diff.patch` (regenerate if a
+         later U landed after Step 1's diff capture).
+
+      **Stage B — Post-policy-check (right before the real `ralph emit`)**
+
+      Policy-check and the real emit are not atomic. Re-run the gate
+      immediately before the actual emit so a stray subagent or hook
+      did not reintroduce dirty state or move HEAD:
+
+      1. Re-check the porcelain filter above — must be empty outside
+         `.ralph/`.
+      2. `git rev-parse HEAD` MUST still equal `FINAL_HEAD` from Stage A.
+      3. If either check fails, abandon this emit attempt, return to
+         Stage A (commit the new change under a real U-ID, or revert
+         the unowned modification, or emit `work.failed` if you
+         cannot reconcile), and rebuild the payload from scratch. Do
+         NOT emit a `work.done` payload built from a stale SHA.
+
+      **Skip-path note**: even when Step 1.5 emits `work.done` directly,
+      the same Stage A / Stage B checks apply — `executor_head_sha` and
+      `commit_count` must still be derived from the actual HEAD / commit
+      list. Do not skip the precheck because "no new Unit landed".
 
       ### Read State (on every activation)
 
@@ -1569,6 +1642,48 @@ hats:
         those fields visible in `review_plan.focus_areas` /
         `review_plan.residual_risks` so the next review round checks the
         unfinished attempt instead of treating the handoff as clean success.
+
+      ### Entry Precheck (HARD RULE — read-only routing gate)
+      Before generating artifacts, prove the upstream handoff is
+      clean. `review-reentry` is itself a routing/normalization hat
+      with no commit / restore authority:
+
+      1. `expected_head_sha` is `executor_head_sha` for `work.done`,
+         or `head_sha` from the trigger for `fix.done`.
+      2. `actual_start_head_sha` = `git rev-parse HEAD`. If it does
+         not equal `expected_head_sha`, record the SHA mismatch in
+         `.ralph/agent/decisions.md`, do NOT attempt to reset /
+         restore / clean upstream state, and follow **Handoff failure
+         emit** below.
+      3. Porcelain filter (excluding `.ralph/`) MUST be empty. Any
+         non-`.ralph/` dirty path is an upstream carryover — record
+         it, do NOT modify it, and follow **Handoff failure emit**
+         below.
+      4. Save start evidence to
+         `.ralph/review/{plan_name}/round-<NN>/git-state-review-reentry-start.txt`
+         (where `<NN>` is the upcoming `review_round`, zero-padded).
+         This file lives under `.ralph/` and MUST NOT be committed.
+
+      **Handoff failure emit (Entry Precheck failure — HARD)**
+      Do NOT silent-stop with zero events. Still emit exactly one
+      `review.round.ready` (this hat's only allowed topic) with the
+      normal `round_base_sha` / passthrough fields, and put
+      `handoff_precheck_failed: <sha-mismatch|dirty: paths>` into
+      `review_plan.residual_risks` so downstream dims surface the
+      failure. Do not reset / restore / clean upstream state.
+
+      ### Exit Precheck (HARD RULE — pre-emit clean proof)
+      Before the real `ralph emit`:
+
+      1. **Stage A** — `git rev-parse HEAD` still equals
+         `actual_start_head_sha` and the porcelain filter (excluding
+         `.ralph/`) is empty.
+      2. `ralph emit --policy-check --triggered review-reentry ...`
+         must pass (see `ralph-tools-emit` §5).
+      3. **Stage B** — re-check HEAD + clean; if either changed,
+         rebuild payload and redo Stage A.
+      4. Save end evidence to
+         `.ralph/review/{plan_name}/round-<NN>/git-state-review-reentry-end.txt`.
       - Create this round's artifact directory:
         `.ralph/review/{plan_name}/round-<NN>/`, where `<NN>` is
         zero-padded `review_round` (`01`, `02`, ... `06`).
@@ -1685,6 +1800,47 @@ hats:
       - Read prior round directories under `.ralph/review/{plan_name}/`
         only as historical context. Do not edit, delete, rename, or
         overwrite files in any earlier `round-<NN>` directory.
+
+      ### Entry Precheck (HARD RULE — read-only proof of clean handoff)
+      Each round starts at the round's actual baseline. The reviewer
+      MUST prove the upstream handoff matches the round's expected
+      HEAD before any dimension audit.
+
+      1. `expected_head_sha` is `round_base_sha` from the trigger
+         payload. This is the per-round SHA: round 1 = first
+         `executor_head_sha`; rounds 2..6 = the most recent
+         `fix.done.head_sha` after each fix attempt. Round-N
+         reviewers MUST NOT fall back to the original `executor_head_sha`
+         when the round base has moved forward.
+      2. `actual_start_head_sha` = `git rev-parse HEAD`. If it does
+         not equal `expected_head_sha`, record the SHA mismatch in
+         `.ralph/agent/decisions.md`, do NOT attempt to reset /
+         restore / clean upstream state, and use **Handoff failure
+         emit** below. Do not re-emit the previous dimension's done
+         event as a recovery.
+      3. Porcelain filter (excluding `.ralph/`) MUST be empty. Any
+         non-`.ralph/` dirty path is an upstream carryover — record
+         the dirty paths in `.ralph/agent/decisions.md`, do NOT commit /
+         restore / stash / clean them, and use **Handoff failure emit**
+         below.
+      4. Save the start evidence to
+         `<ROUND_DIR>/git-state-goal-alignment-start.txt` with
+         `expected_head_sha`, `actual_start_head_sha`, the porcelain
+         output, the current `review_round`, the dimension name, and
+         the trigger topic. The file lives under `.ralph/` and MUST
+         NOT be committed.
+
+      **Handoff failure emit (Entry or Exit Precheck failure — HARD)**
+      Do NOT silent-stop with zero events (that stalls the loop). Skip
+      the normal dimension audit, write a single P0 finding
+      `handoff_precheck_failed` into the round's goal-alignment.md,
+      then emit exactly one `review.goalalign.done` with
+      `findings_count: 1` and trigger passthrough fields including
+      `round_base_sha`. This is a failed handoff signal, not a
+      successful audit.
+
+      Only after the four checks above all pass may you proceed to
+      Step 2.
 
       ### Diff base (HARD RULE — shared by all 6 dim hats)
       Resolution order (first valid SHA wins, validate every choice
@@ -1804,9 +1960,21 @@ hats:
       ...
       ```
 
-      ### Step 5 — Emit event
+      ### Step 5 — Exit Precheck and emit event
       Pass through `plan_path`, `executor_head_sha`, `review_round`,
-      `round_base_sha`, and `diff_patch_file` from the trigger.
+      `round_base_sha`, and `diff_patch_file` from the trigger. Follow
+      the same two-stage Exit Precheck as `dim:goal-alignment` Step 5
+      in the ordinary `ce-executor-pipeline` preset, scoped to this
+      round's `<ROUND_DIR>`:
+
+      1. **Stage A** — `git rev-parse HEAD` equals
+         `actual_start_head_sha` and the porcelain filter
+         (excluding `.ralph/`) is empty.
+      2. Run `ralph emit --policy-check --triggered dim:goal-alignment ...`.
+      3. **Stage B** — re-check HEAD + clean; if either changed,
+         rebuild payload and redo Stage A.
+      4. Save end evidence to
+         `<ROUND_DIR>/git-state-goal-alignment-end.txt`.
       ```bash
       ralph emit review.goalalign.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","dimension":"goal-alignment","findings_file":".ralph/review/<plan>/round-<NN>/goal-alignment.md","findings_count":<N>}'
       ```
@@ -1889,6 +2057,19 @@ hats:
         `<ROUND_DIR>/review.diffstat.txt` if present.
       - Read `<ROUND_DIR>/goal-alignment.md` if present.
 
+      ### Entry Precheck (HARD RULE — read-only proof of clean handoff)
+      Same protocol as the round's `dim:goal-alignment` Step 1: confirm
+      `actual_start_head_sha` matches `round_base_sha` from the
+      trigger (NOT the original `executor_head_sha` — rounds 2+ have
+      moved forward); porcelain filter (excluding `.ralph/`) is
+      empty; save start evidence to
+      `<ROUND_DIR>/git-state-correctness-start.txt`. On any mismatch
+      or non-`.ralph/` dirty state, record the violation in
+      `.ralph/agent/decisions.md`, do NOT modify upstream state, and
+      use **Handoff failure emit** (one P0 `handoff_precheck_failed`
+      finding + emit this hat's done topic with `findings_count: 1`
+      and passthrough `round_base_sha`; skip normal audit).
+
       ### Step 2 — Correctness audit
       For each changed file in the diff, walk the modified functions
       and check:
@@ -1912,9 +2093,14 @@ hats:
       round directories; never overwrite a file outside the current
       `round-<NN>` directory.
 
-      ### Step 5 — Emit event
+      ### Step 5 — Exit Precheck and emit event
       Pass through `plan_path`, `executor_head_sha`, `review_round`,
-      `round_base_sha`, and `diff_patch_file` from the trigger.
+      `round_base_sha`, and `diff_patch_file` from the trigger. Follow
+      the same two-stage Exit Precheck as the round's
+      `dim:goal-alignment` Step 5: Stage A (HEAD == start HEAD and
+      clean filter empty), `ralph emit --policy-check`, Stage B
+      (re-check HEAD + clean), save end evidence to
+      `<ROUND_DIR>/git-state-correctness-end.txt`.
       ```bash
       ralph emit review.correctness.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.goalalign.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","dimension":"correctness","findings_file":".ralph/review/<plan>/round-<NN>/correctness.md","findings_count":<N>}'
       ```
@@ -1995,6 +2181,17 @@ hats:
         `<ROUND_DIR>/review.diffstat.txt` if present.
       - Read `<ROUND_DIR>/correctness.md` if present.
 
+      ### Entry Precheck (HARD RULE — read-only proof of clean handoff)
+      Same protocol as the round's `dim:goal-alignment` Step 1: confirm
+      `actual_start_head_sha` matches `round_base_sha` from the
+      trigger; porcelain filter (excluding `.ralph/`) is empty; save
+      start evidence to `<ROUND_DIR>/git-state-testing-start.txt`. On
+      any mismatch or non-`.ralph/` dirty state, record the violation
+      in `.ralph/agent/decisions.md`, do NOT modify upstream state,
+      and use **Handoff failure emit** (one P0 `handoff_precheck_failed`
+      finding + emit this hat's done topic with `findings_count: 1` and
+      passthrough `round_base_sha`; skip normal audit).
+
       ### Step 2 — Testing audit
       For each Implementation Unit, verify:
       1. The U's `**Test scenarios:**` are reflected in the test
@@ -2016,9 +2213,14 @@ hats:
       round directories; never overwrite a file outside the current
       `round-<NN>` directory.
 
-      ### Step 5 — Emit event
+      ### Step 5 — Exit Precheck and emit event
       Pass through `plan_path`, `executor_head_sha`, `review_round`,
-      `round_base_sha`, and `diff_patch_file` from the trigger.
+      `round_base_sha`, and `diff_patch_file` from the trigger. Follow
+      the same two-stage Exit Precheck as the round's
+      `dim:goal-alignment` Step 5: Stage A (HEAD == start HEAD and
+      clean filter empty), `ralph emit --policy-check`, Stage B
+      (re-check HEAD + clean), save end evidence to
+      `<ROUND_DIR>/git-state-testing-end.txt`.
       ```bash
       ralph emit review.testing.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.correctness.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","dimension":"testing","findings_file":".ralph/review/<plan>/round-<NN>/testing.md","findings_count":<N>}'
       ```
@@ -2099,6 +2301,18 @@ hats:
         `<ROUND_DIR>/review.diffstat.txt` if present.
       - Read `<ROUND_DIR>/testing.md` if present.
 
+      ### Entry Precheck (HARD RULE — read-only proof of clean handoff)
+      Same protocol as the round's `dim:goal-alignment` Step 1: confirm
+      `actual_start_head_sha` matches `round_base_sha` from the
+      trigger; porcelain filter (excluding `.ralph/`) is empty; save
+      start evidence to `<ROUND_DIR>/git-state-maintainability-start.txt`.
+      On any mismatch or non-`.ralph/` dirty state, record the
+      violation in `.ralph/agent/decisions.md`, do NOT modify upstream
+      state, and use **Handoff failure emit** (one P0
+      `handoff_precheck_failed` finding + emit this hat's done topic
+      with `findings_count: 1` and passthrough `round_base_sha`; skip
+      normal audit).
+
       ### Step 2 — Maintainability audit
       1. Walk new / modified files. Flag:
          - Functions > 50 lines
@@ -2119,9 +2333,14 @@ hats:
       round directories; never overwrite a file outside the current
       `round-<NN>` directory.
 
-      ### Step 5 — Emit event
+      ### Step 5 — Exit Precheck and emit event
       Pass through `plan_path`, `executor_head_sha`, `review_round`,
-      `round_base_sha`, and `diff_patch_file` from the trigger.
+      `round_base_sha`, and `diff_patch_file` from the trigger. Follow
+      the same two-stage Exit Precheck as the round's
+      `dim:goal-alignment` Step 5: Stage A (HEAD == start HEAD and
+      clean filter empty), `ralph emit --policy-check`, Stage B
+      (re-check HEAD + clean), save end evidence to
+      `<ROUND_DIR>/git-state-maintainability-end.txt`.
       ```bash
       ralph emit review.maintainability.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.testing.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","dimension":"maintainability","findings_file":".ralph/review/<plan>/round-<NN>/maintainability.md","findings_count":<N>}'
       ```
@@ -2198,6 +2417,17 @@ hats:
         `<ROUND_DIR>/review.diffstat.txt` if present.
       - Read `<ROUND_DIR>/maintainability.md` if present.
 
+      ### Entry Precheck (HARD RULE — read-only proof of clean handoff)
+      Same protocol as the round's `dim:goal-alignment` Step 1: confirm
+      `actual_start_head_sha` matches `round_base_sha` from the
+      trigger; porcelain filter (excluding `.ralph/`) is empty; save
+      start evidence to `<ROUND_DIR>/git-state-standards-start.txt`. On
+      any mismatch or non-`.ralph/` dirty state, record the violation
+      in `.ralph/agent/decisions.md`, do NOT modify upstream state,
+      and use **Handoff failure emit** (one P0 `handoff_precheck_failed`
+      finding + emit this hat's done topic with `findings_count: 1` and
+      passthrough `round_base_sha`; skip normal audit).
+
       ### Step 2 — Standards audit
       1. Hard rules check: walk the diff and confirm none of the
          project's HARD RULE clauses are violated. For Ralph's
@@ -2224,9 +2454,14 @@ hats:
       round directories; never overwrite a file outside the current
       `round-<NN>` directory.
 
-      ### Step 5 — Emit event
+      ### Step 5 — Exit Precheck and emit event
       Pass through `plan_path`, `executor_head_sha`, `review_round`,
-      `round_base_sha`, and `diff_patch_file` from the trigger.
+      `round_base_sha`, and `diff_patch_file` from the trigger. Follow
+      the same two-stage Exit Precheck as the round's
+      `dim:goal-alignment` Step 5: Stage A (HEAD == start HEAD and
+      clean filter empty), `ralph emit --policy-check`, Stage B
+      (re-check HEAD + clean), save end evidence to
+      `<ROUND_DIR>/git-state-standards-end.txt`.
       ```bash
       ralph emit review.standards.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.maintainability.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","dimension":"project-standards","findings_file":".ralph/review/<plan>/round-<NN>/standards.md","findings_count":<N>}'
       ```
@@ -2305,6 +2540,18 @@ hats:
         `<ROUND_DIR>/review.diffstat.txt` if present.
       - Read `<ROUND_DIR>/standards.md` if present.
 
+      ### Entry Precheck (HARD RULE — read-only proof of clean handoff)
+      Same protocol as the round's `dim:goal-alignment` Step 1: confirm
+      `actual_start_head_sha` matches `round_base_sha` from the
+      trigger; porcelain filter (excluding `.ralph/`) is empty; save
+      start evidence to `<ROUND_DIR>/git-state-adversarial-start.txt`.
+      On any mismatch or non-`.ralph/` dirty state, record the
+      violation in `.ralph/agent/decisions.md`, do NOT modify upstream
+      state, and use **Handoff failure emit** (one P0
+      `handoff_precheck_failed` finding + emit this hat's done topic
+      with `findings_count: 1` and passthrough `round_base_sha`; skip
+      normal audit).
+
       ### Step 2 — Adversarial probe
       For each new public API / entry point / untrusted input
       handler, probe:
@@ -2328,9 +2575,14 @@ hats:
       round directories; never overwrite a file outside the current
       `round-<NN>` directory.
 
-      ### Step 5 — Emit event
+      ### Step 5 — Exit Precheck and emit event
       Pass through `plan_path`, `executor_head_sha`, `review_round`,
-      `round_base_sha`, and `diff_patch_file` from the trigger.
+      `round_base_sha`, and `diff_patch_file` from the trigger. Follow
+      the same two-stage Exit Precheck as the round's
+      `dim:goal-alignment` Step 5: Stage A (HEAD == start HEAD and
+      clean filter empty), `ralph emit --policy-check`, Stage B
+      (re-check HEAD + clean), save end evidence to
+      `<ROUND_DIR>/git-state-adversarial-end.txt`.
       ```bash
       ralph emit review.adversarial.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.standards.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","dimension":"adversarial","findings_file":".ralph/review/<plan>/round-<NN>/adversarial.md","findings_count":<N>}'
       ```
@@ -3122,6 +3374,74 @@ hats:
         commit the attempt before `fix.done` even when `fix_status` is
         `partial` or `blocked`. Use a subject like
         `fix-attempt(U<N>): <status and reason>` for incomplete Units.
+
+      ### Final Git Handoff Precheck (applies to EVERY `fix.done` emit)
+
+      Every `fix.done` emit — applied, partial, blocked, or empty-plan
+      fast path — MUST pass this two-stage gate. The downstream
+      `alignment` hat (loop's `alignment` triggers off
+      `review.accepted`; this precheck governs the `fix.done` payload
+      that `review-reentry` consumes) and `review-reentry` itself
+      rely on `head_sha` + `worktree_status` to know what the fixer
+      actually produced.
+
+      Handoff outcomes are exclusive:
+      - **clean success path**: porcelain empty outside `.ralph/`,
+        `worktree_status: "clean"`.
+      - **dirty blocked path**: unowned / unsafe-to-touch dirt remains,
+        `worktree_status: "dirty"`, `fix_status: blocked`, and
+        `failure_reason` names the dirty paths. Never fabricate
+        `worktree_status: "clean"` while dirt remains.
+
+      **Stage A — Pre-policy-check (right before `ralph emit --policy-check`)**
+
+      1. Inspect the working tree for non-`.ralph/` changes using the
+         porcelain filter from the executor's precheck (staged +
+         unstaged + untracked, excluding `.ralph/`). If anything is
+         still listed:
+         - Useful partial Unit evidence → commit it under the
+           `fix-attempt(U<N>): <status and reason>` subject so the
+           attempt is traceable, then re-check until clean or blocked.
+         - Unusable changes **this fixer activation created** → revert
+           only those changes (do not touch unrelated upstream dirt)
+           so the tree can return to clean when possible.
+         - Non-attributable dirty files you did not create and must not
+           rewrite → do NOT commit them as fixer work and do NOT run
+           blanket `git restore` / `git stash` / `git reset` on them.
+           Choose the **dirty blocked path**: keep the real dirt,
+           set `worktree_status: "dirty"`, set `fix_status: blocked`,
+           and name every dirty path in `failure_reason`. Fabricating
+           `worktree_status: "clean"` is a contract violation.
+      2. Compute the final handoff SHAs:
+         ```bash
+         FINAL_HEAD="$(git rev-parse HEAD)"
+         ```
+         On the empty-plan fast path (no actionable Units and no
+         commit), you MUST be on the clean success path:
+         `head_sha` equals the unchanged HEAD and
+         `worktree_status` equals `"clean"`. Verify both before
+         policy-check.
+      3. On the clean success path, cross-check `head_sha` against
+         `git log --oneline <executor_head_sha>..HEAD` when commits
+         were expected. On the dirty blocked path, still set
+         `head_sha` / `fix_attempt_commit_sha` to `FINAL_HEAD`
+         (unchanged HEAD is fine) and skip claiming new fix commits.
+
+      **Stage B — Post-policy-check (right before the real `ralph emit`)**
+
+      Re-run the gate immediately before the actual emit so a stray
+      subagent or hook did not change state after policy-check:
+
+      1. `git rev-parse HEAD` MUST still equal `FINAL_HEAD` from Stage A.
+      2. Clean success path: porcelain filter MUST still be empty outside
+         `.ralph/`, and payload `worktree_status` MUST be `"clean"`.
+      3. Dirty blocked path: porcelain filter MUST still show the same
+         non-`.ralph/` dirty paths named in `failure_reason`, and
+         payload `worktree_status` MUST be `"dirty"` (not `"clean"`).
+      4. If HEAD moved, or the chosen path no longer matches the
+         porcelain reality, abandon this emit attempt, return to
+         Stage A, and rebuild the payload. Do not ship a stale
+         `head_sha` or a fabricated clean status.
         If the attempt produced no useful file changes, revert the attempt
         changes, keep `worktree_status: "clean"`, set
         `fix_attempt_commit_sha` to the unchanged HEAD, and explain the
@@ -3369,6 +3689,53 @@ hats:
       - Read the **original** plan at `plan_path`.
       - Read the **fix plan** at `fix_plan_file` only when it is non-empty.
 
+      ### Entry Precheck (HARD RULE — read-only proof of clean handoff)
+      Read-only proof of the **current** handoff tip after the accepted
+      review round (and after any fixer commits):
+
+      - If `review_round == 1` (no fix round): `expected_head_sha` =
+        `executor_head_sha` from the trigger.
+      - If `review_round > 1` (fix round happened): `expected_head_sha` =
+        latest `fix.done.head_sha` loaded in Step 1. Do NOT use the
+        historical `executor_head_sha` as Entry Precheck expected HEAD
+        after fixer has advanced the branch.
+      - `executor_head_sha` remains the **git-log boundary** for
+        Steps 2–3 only.
+
+      1. Set `expected_head_sha` per the rules above.
+      2. `actual_start_head_sha` = `git rev-parse HEAD`. If mismatch,
+         record in `.ralph/agent/decisions.md`, do NOT reset /
+         restore / stash / clean upstream state, follow **Handoff
+         failure emit** below.
+      3. Porcelain filter (excluding `.ralph/`) MUST be empty for a
+         normal audit. Any non-`.ralph/` dirty path is upstream
+         carryover — record it, do NOT modify it, follow **Handoff
+         failure emit** below.
+      4. Save start evidence to
+         `<ROUND_DIR>/git-state-alignment-start.txt` (alignment is the
+         post-acceptance audit; the round is the LAST accepted round's
+         `<NN>`). The file lives under `.ralph/` and MUST NOT be
+         committed.
+
+      If `fix_plan_file` is non-empty, also cross-check that the
+      fixer's last commit is reachable from `actual_start_head_sha`
+      via `git merge-base --is-ancestor` (informational only; do not
+      act on a divergence — record and continue when Entry Precheck
+      otherwise passes).
+
+      **Handoff failure emit (Entry or Exit Precheck failure — HARD)**
+      Do NOT silent-stop with zero events. Skip Steps 2–4 normal
+      cross-checks, then emit exactly one `align.done` with:
+      `plan_executed: false`, `fix_plan_executed: false`,
+      `residuals_count: 1`, `residuals_summary` beginning with
+      `handoff_precheck_failed:`, passthrough `executor_head_sha` /
+      `fix_plan_file` / `review_verdict` / `review_round` from
+      context. This reaches reporter without pretending the audit
+      succeeded.
+
+      Only after the four checks above all pass may you proceed to
+      Step 2.
+
       ### Step 2 — Cross-check original plan (executor phase ONLY)
       1. List every Implementation Unit (U-ID) in the **original** plan.
       2. For each U-ID, search
@@ -3400,9 +3767,13 @@ hats:
       Set `residuals_count` to the list length.
       Format `residuals_summary` as comma-separated `U<N>:reason` or `none`.
 
-      ### Step 5 — Emit event
+      ### Step 5 — Exit Precheck and emit event
       Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`,
-      `review_verdict`.
+      `review_verdict`. Follow the same two-stage Exit Precheck as
+      the round's `dim:goal-alignment` Step 5: Stage A (HEAD == start
+      HEAD and clean filter empty), `ralph emit --policy-check`,
+      Stage B (re-check HEAD + clean), save end evidence to
+      `<ROUND_DIR>/git-state-alignment-end.txt`.
       ```bash
       ralph emit align.done --json '{"plan_name":"<plan>","plan_path":"<original plan path>","review_round":<N from review.accepted>,"executor_head_sha":"<sha>","fix_plan_file":"<fix-plan path or empty string>","resolved_baseline_sha":"<sha from review.accepted>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
       ```

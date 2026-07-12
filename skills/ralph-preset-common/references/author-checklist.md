@@ -9,6 +9,8 @@
 - [ ] 读 schema SSOT：`presets/schemas/<name>.yml`（builtin）或 preset 内 `event_policy.schemas`
 - [ ] 画事件流（topic 箭头，非 prompt 流）
 - [ ] 每条 handoff 边：上游 Q4 emit 字段 ↔ 下游 Q2 Observe 命令/字段
+- [ ] **Git handoff 纪律（写入型 hat）**：每条写入型 hat（executor / fixer / 等）在 emit 终态 topic（work.done / fix.done 等）前必须有"两阶段 Git handoff precheck"：Stage A 计算 final HEAD + commit 状态 + clean worktree（在 policy-check 之前），Stage B 在真实 emit 前重检 HEAD / clean（防止 policy-check 与 emit 之间的窗口被 hook / subagent 篡改）；fabricate `worktree_status: clean` 是 contract violation。
+- [ ] **Git handoff 纪律（只读 hat）**：每条只读 review / alignment hat 在 trigger 时必须先做"Entry Precheck"：expected_head_sha（dim：executor/round tip；alignment：fixer `head_sha`，无 fix 时才是 executor tip）必须等于 actual_start_head_sha（git rev-parse HEAD），porcelain filter（排除 `.ralph/`）必须为空；violation 时走 **Handoff failure emit**（发本 hat 唯一允许事件 + `handoff_precheck_failed`，禁止 silent-stop；不可替上游 commit / restore / stash / reset）；emit 前再做 Exit Precheck 两阶段重检；start / end evidence 必须写 `.ralph/review/<plan>/{round-<NN>/}git-state-<hat>-{start,end}.txt`，不污染 Git 状态。
 - [ ] `state_projection.actions` 与 emit payload 字段对齐
 - [ ] 每个 agent-authored emit topic 的 `event_policy.schemas.<topic>` 已检查：required handoff / identity / verdict / count / path / reason 字段有 `field_docs`，高风险 topic 有不会伪造业务事实的 `examples`
 - [ ] 若 hat `publishes` 含 `review.dimensions.complete`，`state_projection.actions_chain` 须有对应投影 action（否则下游 Q2 看不到 review 汇总）

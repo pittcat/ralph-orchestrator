@@ -139,6 +139,71 @@ work.done / fix.done
 | 「整个 pipeline 有 12 个 hat」 | 删除；该 hat 不知拓扑 |
 | 在 instructions 写长篇 recovery 散文 | 改为**触发状态表** + 引用 `ralph-tools-recovery-directives` |
 | 把 preset 专用 trigger 表抄进 `ralph-tools*.md` | 专用表只放 preset YAML；data docs 保持通用 |
+| reviewer "帮上游 commit 一下" 或 "git restore 一下" | 只读 hat 不替上游清理；记录 evidence + **Handoff failure emit**（发本 hat 唯一允许的 done/align 事件，带 `handoff_precheck_failed`，不伪装成功） |
+| `worktree_status: clean` 当作可填字段 | 必须真实从 porcelain 推算；fabricate 是 contract violation |
+| alignment Entry 用 `executor_head_sha` 验当前 HEAD | Entry 验当前交接 tip（`fix.done.head_sha` / 无 fix 时才是 executor tip）；`executor_head_sha` 只做 git-log 边界 |
+
+## Git handoff protocol（写入型 vs 只读型，2026-07-12-001）
+
+单链 preset 的下游 hat 只能从 Git 状态 + trigger payload 推断上游交接是否完整。
+全局 `audit_file_modifications` 不知 activation 边界；因此 preset 必须强制下列纪律：
+
+**写入型 hat（executor / fixer）— Final Git Handoff Precheck（两阶段，紧邻 emit）**
+
+1. **Stage A（policy-check 前）**
+   - 用 porcelain filter 抓 staged + unstaged + untracked，排除 `.ralph/`
+     （runtime 产物不入项目 dirty 状态）：
+     ```bash
+     git status --porcelain --untracked-files=all \
+       | awk '!/^\?\? \.ralph\// && !/^\?\? \.ralph$/ { print }'
+     ```
+   - 有本 hat 的可保留修改 → 复核 / 测试 / commit 后再算 final HEAD
+   - 不可安全归属的修改 → **dirty blocked path**：`worktree_status: dirty`
+     + blocked 语义（不得 fabricate `clean`）；或仅 revert 本 activation
+     自产改动后走 clean success path
+   - 计算 `final_head = git rev-parse HEAD`、`commit_count`、`changed_lines`
+2. **Stage B（真实 emit 前）**
+   - clean success path：porcelain 必须为空、HEAD == final_head、
+     `worktree_status: clean`
+   - dirty blocked path：porcelain 仍显示 payload 点名的脏路径、
+     HEAD == final_head、`worktree_status: dirty`
+   - 任一失败 → 放弃本次 emit，回到 Stage A 重建 payload
+3. **fixer** 必须额外产出 `head_sha` / `worktree_status` / `fix_attempt_commit_sha`
+   字段；empty-plan fast path 必须走 clean success path
+
+**只读型 hat（6 dim / alignment / review-reentry）— Entry Precheck + Exit Precheck**
+
+1. **Entry（trigger 后立刻）**
+   - `expected_head_sha` 来自 trigger payload：普通 pipeline dim 用
+     `executor_head_sha`；普通 pipeline alignment 用 `fix.done.head_sha`；
+     loop dim 用 `round_base_sha`；loop alignment 在有 fix 轮时用
+     最新 `fix.done.head_sha`，首轮无 fix 时用 `executor_head_sha`
+   - `actual_start_head_sha = git rev-parse HEAD`，必须等于 expected
+   - Porcelain filter（排除 `.ralph/`）必须为空
+   - Save start evidence 到
+     `.ralph/review/<plan>/{round-<NN>/}git-state-<hat>-start.txt`（不
+     commit，仅 `.ralph/` 内）
+   - 任何 violation → **Handoff failure emit**：发本 hat 唯一允许事件，
+     带 `handoff_precheck_failed`（dim findings / align residuals /
+     reentry residual_risks），禁止 silent-stop 挂起 loop
+2. **Exit（policy-check + 真实 emit 两阶段）**
+   - Stage A：HEAD == start HEAD + clean filter 空
+   - `ralph emit --policy-check`
+   - Stage B：再重检 HEAD + clean；变化则重建 payload
+   - Save end evidence 到 `<...>/git-state-<hat>-end.txt`
+   - Exit 失败同样走 **Handoff failure emit**，不得零事件退出
+
+**Shared 纪律**
+
+- reviewer / alignment **绝不**运行 `git add` / `git commit` /
+  `git restore` / `git stash` / `git reset`
+- `.ralph/` 不 commit；是 runtime 产物
+- `worktree_status: clean` 必须真实；fabricate 是 contract violation
+- 不需要为这套纪律写"大段 preset 文案 byte-equality"测试；以结构化
+  schema（required fields `head_sha` / `worktree_status` /
+  `fix_attempt_commit_sha`）和真实 EventLoop 场景验证
+
+详见 `docs/plans/2026-07-12-001-fix-pipeline-preset-git-handoff-precheck-plan.md`。
 
 ## Historical anti-pattern: serial CE preset
 
