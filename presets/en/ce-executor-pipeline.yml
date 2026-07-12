@@ -321,8 +321,42 @@ event_loop:
           - "review_summary"
           - "flow_audit"
           - "resolved_baseline_sha"  # written by plan-reviewer §Step 2.5b
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; stable identifier for the rest of the loop"
+            source: "plan-reviewer derives from plan_path"
+            fill_rule: "do NOT make up a name; copy from plan_path basename"
+          plan_path:
+            meaning: "repo-relative path to the plan file passed into the loop (for hat prompts to re-read)"
+            source: "plan-reviewer derives from the prompt's plan file path"
+            fill_rule: "absolute repo-relative path; never absolute filesystem path"
+          plan_revised:
+            meaning: "boolean flag — true when plan-reviewer edited the plan file in-place, false when the plan was already executable"
+            source: "plan-reviewer"
+            fill_rule: "literal boolean true or false"
+          review_summary:
+            meaning: "one or two sentence summary of the plan-reviewer's verdict and any in-place edits"
+            source: "plan-reviewer"
+            fill_rule: "short prose; mention revision outcome and any unresolved concerns the executor must know"
+          flow_audit:
+            meaning: "execution-loop skip verdict decided by plan-reviewer §Step 2.5; tells executor whether to skip the per-Unit TDD round"
+            source: "plan-reviewer §Step 2.5"
+            fill_rule: "literal one of first_run, post_merge_complete, post_merge_no_canary"
+          resolved_baseline_sha:
+            meaning: "canonical baseline SHA the downstream chain uses for <DIFF_BASE> (reconciles against orphaned anchors)"
+            source: "plan-reviewer §Step 2.5b"
+            fill_rule: "40-char git SHA; do NOT hand-write (plan-reviewer resolves)"
       plan.blocked:
         required_fields: ["plan_name", "reason"]
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; identifies which plan failed"
+            source: "plan-reviewer derives from plan_path"
+            fill_rule: "do NOT make up a name; copy from plan_path basename"
+          reason:
+            meaning: "sole routing signal so reporter drives terminal LOOP_COMPLETE with verdict blocked"
+            source: "plan-reviewer"
+            fill_rule: "one of the canonical reason strings (plan_file_not_found, plan_file_unreadable, plan_missing_implementation_units, plan_content_empty_or_placeholder, plan_unusable, baseline_reconciliation_io_failure) — never add recoverable/other hint fields the runtime does not read"
       work.done:
         required_fields:
           - "plan_name"
@@ -344,8 +378,114 @@ event_loop:
           - "tests_passed"
           - "changed_lines"
           - "commit_count"
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; copied from plan.ready for downstream hat routing"
+            source: "executor carries forward from plan.ready"
+            fill_rule: "literal copy of the same field from the prior plan.ready payload"
+          plan_path:
+            meaning: "repo-relative path to the original plan file; executor uses it to re-read the plan if needed"
+            source: "executor carries forward from plan.ready"
+            fill_rule: "literal copy of the same field from the prior plan.ready payload"
+          executor_head_sha:
+            meaning: "git SHA at HEAD after the last executor commit; the SHA reviewers/reporter anchor their work onto"
+            source: "executor runs `git rev-parse HEAD` after the final executor commit"
+            fill_rule: "40-char git SHA; recompute on every emit attempt; do not reuse a stale SHA"
+          resolved_baseline_sha:
+            meaning: "canonical baseline SHA carried through from plan.ready §Step 2.5b — reconciliation anchor"
+            source: "executor carries forward from plan.ready"
+            fill_rule: "literal copy; do NOT hand-write"
+          planned_units:
+            meaning: "ordered array of U-IDs from the original plan's Implementation Units"
+            source: "executor extracts from plan_path Implementation Units section"
+            fill_rule: "array of U-ID strings; preserve order"
+          completed_units:
+            meaning: "ordered array of U-IDs that reached a commit this run"
+            source: "executor derives from git log over the executor range"
+            fill_rule: "subset of planned_units; alignment will flag any U missing here as residual"
+          baseline_verification_status:
+            meaning: "result of the Step 1.75 baseline-snapshot verifier (green / red / unknown / skipped)"
+            source: "executor runs the baseline-verifier subagent"
+            fill_rule: "literal one of green, red, unknown, skipped"
+          baseline_verification_file:
+            meaning: "absolute path to the baseline verifier report written under .ralph/review/<plan>/"
+            source: "executor writes via the Write tool; path follows the basename-verifier convention"
+            fill_rule: "absolute path; do NOT make up a path — write the file first"
+          post_verification_status:
+            meaning: "result of the Step 1.95 delta-verifier final snapshot"
+            source: "executor runs the delta-verifier subagent after the final Unit commit"
+            fill_rule: "literal one of green, red, unknown"
+          post_verification_file:
+            meaning: "absolute path to the final-verification report under .ralph/review/<plan>/"
+            source: "executor writes via the Write tool"
+            fill_rule: "absolute path; do NOT make up a path"
+          verification_delta_file:
+            meaning: "absolute path to the baseline-vs-final delta report under .ralph/review/<plan>/"
+            source: "executor writes via the Write tool"
+            fill_rule: "absolute path; do NOT make up a path"
+          baseline_existing_count:
+            meaning: "failures that already existed before this run; report-only — do not block"
+            source: "executor / delta-verifier classifies"
+            fill_rule: "integer >= 0"
+          new_business_regressions_count:
+            meaning: "failures clearly introduced by this diff; must be 0 before work.done"
+            source: "executor / delta-verifier classifies"
+            fill_rule: "integer = 0 when emitting work.done; if > 0, emit work.failed instead"
+          test_compatibility_updates_count:
+            meaning: "tests intentionally updated to reflect intended behavior change; counted separately from regressions"
+            source: "executor / delta-verifier classifies"
+            fill_rule: "integer >= 0; document each test in the delta file"
+          flaky_or_environmental_count:
+            meaning: "failures that cannot be trusted without a repro-worthy environment signal"
+            source: "executor / delta-verifier classifies"
+            fill_rule: "integer = 0 before work.done; if > 0, emit work.failed"
+          tests_run:
+            meaning: "total tests run across the final verification suite"
+            source: "executor captures from the final-suite command output"
+            fill_rule: "integer >= 0"
+          tests_passed:
+            meaning: "total checks that passed in the final verification run"
+            source: "executor captures from the final-suite command output"
+            fill_rule: "integer; should equal tests_run minus open new_regressions/flaky counts"
+          changed_lines:
+            meaning: "insertions + deletions since DIFF_BASE; shortstat snapshot of the executor range"
+            source: "executor runs `git diff --shortstat <DIFF_BASE>..HEAD`"
+            fill_rule: "integer >= 0; recompute on every emit attempt"
+          commit_count:
+            meaning: "commits in DIFF_BASE..HEAD attributable to executor; one per passed Unit"
+            source: "executor runs `git rev-list --count <DIFF_BASE>..HEAD`"
+            fill_rule: "integer; must be >= the number of completed_units"
+        examples:
+          - plan_name: "2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan"
+            plan_path: "docs/plans/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan.md"
+            executor_head_sha: "0123456789abcdef0123456789abcdef01234567"
+            resolved_baseline_sha: "fedcba9876543210fedcba9876543210fedcba98"
+            planned_units: ["U1", "U2", "U3", "U4", "U5", "U6", "U7", "U8", "U9", "U10", "U11", "U12"]
+            completed_units: ["U1", "U2", "U3", "U4", "U5", "U6", "U7", "U8", "U9", "U10", "U11", "U12"]
+            baseline_verification_status: "green"
+            baseline_verification_file: ".ralph/review/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan/baseline-verification.md"
+            post_verification_status: "green"
+            post_verification_file: ".ralph/review/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan/final-verification.md"
+            verification_delta_file: ".ralph/review/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan/verification-delta.md"
+            baseline_existing_count: 0
+            new_business_regressions_count: 0
+            test_compatibility_updates_count: 0
+            flaky_or_environmental_count: 0
+            tests_run: 480
+            tests_passed: 480
+            changed_lines: 320
+            commit_count: 12
       work.failed:
         required_fields: ["plan_name", "reason"]
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; identifies which plan failed"
+            source: "executor derives from plan_path"
+            fill_rule: "literal copy of plan_name from the plan.ready payload"
+          reason:
+            meaning: "sole routing signal so reporter drives terminal LOOP_COMPLETE with verdict blocked; must include the Unit status summary"
+            source: "executor"
+            fill_rule: "starts with one of tests_not_green / build_failed / clippy_failed / unreachable; append completed / failed / blocked / skipped Unit lists and a decisions.md pointer"
       review.goalalign.done:
         required_fields:
           - "plan_name"
@@ -356,6 +496,39 @@ event_loop:
           - "dimension"
           - "findings_file"
           - "findings_count"
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; copied from work.done for dimension routing"
+            source: "dim:<dim> carries forward from work.done trigger payload"
+            fill_rule: "literal copy; do NOT make up a name"
+          plan_path:
+            meaning: "repo-relative path to the original plan file"
+            source: "dim:<dim> carries forward from work.done trigger payload"
+            fill_rule: "literal copy; absolute repo-relative path"
+          executor_head_sha:
+            meaning: "git SHA at HEAD after the last executor commit — the canonical review anchor"
+            source: "executor ran `git rev-parse HEAD`; copied from work.done"
+            fill_rule: "40-char git SHA; do NOT recompute or hand-write"
+          resolved_baseline_sha:
+            meaning: "canonical baseline SHA carried through the chain from plan.ready"
+            source: "pass-through from plan.ready (via work.done); runner re-reads on every hat prompt"
+            fill_rule: "literal copy; do NOT hand-write"
+          diff_patch_file:
+            meaning: "absolute path to the canonical review patch written by dim:goal-alignment Step 1"
+            source: "dim:goal-alignment Step 1 first writes this; downstream dims read it"
+            fill_rule: "absolute path under .ralph/review/<plan>/; do NOT make up a path"
+          dimension:
+            meaning: "name of the dimension being audited; copy of the dim hat's name"
+            source: "dim:<dim> itself"
+            fill_rule: "literal one of goal-alignment, correctness, testing, maintainability, project-standards, adversarial"
+          findings_file:
+            meaning: "absolute path to this dimension's findings product file"
+            source: "dim:<dim> writes it via the Write tool at Step 4"
+            fill_rule: "absolute path under .ralph/review/<plan>/<dim>.md; do NOT make up a path — write the file first"
+          findings_count:
+            meaning: "integer count of findings in this dimension's product file (including G0 placeholder when clean)"
+            source: "dim:<dim> counts entries in findings_file"
+            fill_rule: "integer >= 1 (G0 placeholder still counts)"
       review.correctness.done:
         required_fields:
           - "plan_name"
@@ -366,6 +539,39 @@ event_loop:
           - "dimension"
           - "findings_file"
           - "findings_count"
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; copied from work.done for dimension routing"
+            source: "dim:<dim> carries forward from work.done trigger payload"
+            fill_rule: "literal copy; do NOT make up a name"
+          plan_path:
+            meaning: "repo-relative path to the original plan file"
+            source: "dim:<dim> carries forward from work.done trigger payload"
+            fill_rule: "literal copy; absolute repo-relative path"
+          executor_head_sha:
+            meaning: "git SHA at HEAD after the last executor commit — the canonical review anchor"
+            source: "executor ran `git rev-parse HEAD`; copied from work.done"
+            fill_rule: "40-char git SHA; do NOT recompute or hand-write"
+          resolved_baseline_sha:
+            meaning: "canonical baseline SHA carried through the chain from plan.ready"
+            source: "pass-through from plan.ready (via work.done); runner re-reads on every hat prompt"
+            fill_rule: "literal copy; do NOT hand-write"
+          diff_patch_file:
+            meaning: "absolute path to the canonical review patch written by dim:goal-alignment Step 1"
+            source: "dim:goal-alignment Step 1 first writes this; downstream dims read it"
+            fill_rule: "absolute path under .ralph/review/<plan>/; do NOT make up a path"
+          dimension:
+            meaning: "name of the dimension being audited; copy of the dim hat's name"
+            source: "dim:<dim> itself"
+            fill_rule: "literal one of goal-alignment, correctness, testing, maintainability, project-standards, adversarial"
+          findings_file:
+            meaning: "absolute path to this dimension's findings product file"
+            source: "dim:<dim> writes it via the Write tool at Step 4"
+            fill_rule: "absolute path under .ralph/review/<plan>/<dim>.md; do NOT make up a path — write the file first"
+          findings_count:
+            meaning: "integer count of findings in this dimension's product file (including G0 placeholder when clean)"
+            source: "dim:<dim> counts entries in findings_file"
+            fill_rule: "integer >= 1 (G0 placeholder still counts)"
       review.testing.done:
         required_fields:
           - "plan_name"
@@ -376,6 +582,39 @@ event_loop:
           - "dimension"
           - "findings_file"
           - "findings_count"
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; copied from work.done for dimension routing"
+            source: "dim:<dim> carries forward from work.done trigger payload"
+            fill_rule: "literal copy; do NOT make up a name"
+          plan_path:
+            meaning: "repo-relative path to the original plan file"
+            source: "dim:<dim> carries forward from work.done trigger payload"
+            fill_rule: "literal copy; absolute repo-relative path"
+          executor_head_sha:
+            meaning: "git SHA at HEAD after the last executor commit — the canonical review anchor"
+            source: "executor ran `git rev-parse HEAD`; copied from work.done"
+            fill_rule: "40-char git SHA; do NOT recompute or hand-write"
+          resolved_baseline_sha:
+            meaning: "canonical baseline SHA carried through the chain from plan.ready"
+            source: "pass-through from plan.ready (via work.done); runner re-reads on every hat prompt"
+            fill_rule: "literal copy; do NOT hand-write"
+          diff_patch_file:
+            meaning: "absolute path to the canonical review patch written by dim:goal-alignment Step 1"
+            source: "dim:goal-alignment Step 1 first writes this; downstream dims read it"
+            fill_rule: "absolute path under .ralph/review/<plan>/; do NOT make up a path"
+          dimension:
+            meaning: "name of the dimension being audited; copy of the dim hat's name"
+            source: "dim:<dim> itself"
+            fill_rule: "literal one of goal-alignment, correctness, testing, maintainability, project-standards, adversarial"
+          findings_file:
+            meaning: "absolute path to this dimension's findings product file"
+            source: "dim:<dim> writes it via the Write tool at Step 4"
+            fill_rule: "absolute path under .ralph/review/<plan>/<dim>.md; do NOT make up a path — write the file first"
+          findings_count:
+            meaning: "integer count of findings in this dimension's product file (including G0 placeholder when clean)"
+            source: "dim:<dim> counts entries in findings_file"
+            fill_rule: "integer >= 1 (G0 placeholder still counts)"
       review.maintainability.done:
         required_fields:
           - "plan_name"
@@ -386,6 +625,39 @@ event_loop:
           - "dimension"
           - "findings_file"
           - "findings_count"
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; copied from work.done for dimension routing"
+            source: "dim:<dim> carries forward from work.done trigger payload"
+            fill_rule: "literal copy; do NOT make up a name"
+          plan_path:
+            meaning: "repo-relative path to the original plan file"
+            source: "dim:<dim> carries forward from work.done trigger payload"
+            fill_rule: "literal copy; absolute repo-relative path"
+          executor_head_sha:
+            meaning: "git SHA at HEAD after the last executor commit — the canonical review anchor"
+            source: "executor ran `git rev-parse HEAD`; copied from work.done"
+            fill_rule: "40-char git SHA; do NOT recompute or hand-write"
+          resolved_baseline_sha:
+            meaning: "canonical baseline SHA carried through the chain from plan.ready"
+            source: "pass-through from plan.ready (via work.done); runner re-reads on every hat prompt"
+            fill_rule: "literal copy; do NOT hand-write"
+          diff_patch_file:
+            meaning: "absolute path to the canonical review patch written by dim:goal-alignment Step 1"
+            source: "dim:goal-alignment Step 1 first writes this; downstream dims read it"
+            fill_rule: "absolute path under .ralph/review/<plan>/; do NOT make up a path"
+          dimension:
+            meaning: "name of the dimension being audited; copy of the dim hat's name"
+            source: "dim:<dim> itself"
+            fill_rule: "literal one of goal-alignment, correctness, testing, maintainability, project-standards, adversarial"
+          findings_file:
+            meaning: "absolute path to this dimension's findings product file"
+            source: "dim:<dim> writes it via the Write tool at Step 4"
+            fill_rule: "absolute path under .ralph/review/<plan>/<dim>.md; do NOT make up a path — write the file first"
+          findings_count:
+            meaning: "integer count of findings in this dimension's product file (including G0 placeholder when clean)"
+            source: "dim:<dim> counts entries in findings_file"
+            fill_rule: "integer >= 1 (G0 placeholder still counts)"
       review.standards.done:
         required_fields:
           - "plan_name"
@@ -396,6 +668,39 @@ event_loop:
           - "dimension"
           - "findings_file"
           - "findings_count"
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; copied from work.done for dimension routing"
+            source: "dim:<dim> carries forward from work.done trigger payload"
+            fill_rule: "literal copy; do NOT make up a name"
+          plan_path:
+            meaning: "repo-relative path to the original plan file"
+            source: "dim:<dim> carries forward from work.done trigger payload"
+            fill_rule: "literal copy; absolute repo-relative path"
+          executor_head_sha:
+            meaning: "git SHA at HEAD after the last executor commit — the canonical review anchor"
+            source: "executor ran `git rev-parse HEAD`; copied from work.done"
+            fill_rule: "40-char git SHA; do NOT recompute or hand-write"
+          resolved_baseline_sha:
+            meaning: "canonical baseline SHA carried through the chain from plan.ready"
+            source: "pass-through from plan.ready (via work.done); runner re-reads on every hat prompt"
+            fill_rule: "literal copy; do NOT hand-write"
+          diff_patch_file:
+            meaning: "absolute path to the canonical review patch written by dim:goal-alignment Step 1"
+            source: "dim:goal-alignment Step 1 first writes this; downstream dims read it"
+            fill_rule: "absolute path under .ralph/review/<plan>/; do NOT make up a path"
+          dimension:
+            meaning: "name of the dimension being audited; copy of the dim hat's name"
+            source: "dim:<dim> itself"
+            fill_rule: "literal one of goal-alignment, correctness, testing, maintainability, project-standards, adversarial"
+          findings_file:
+            meaning: "absolute path to this dimension's findings product file"
+            source: "dim:<dim> writes it via the Write tool at Step 4"
+            fill_rule: "absolute path under .ralph/review/<plan>/<dim>.md; do NOT make up a path — write the file first"
+          findings_count:
+            meaning: "integer count of findings in this dimension's product file (including G0 placeholder when clean)"
+            source: "dim:<dim> counts entries in findings_file"
+            fill_rule: "integer >= 1 (G0 placeholder still counts)"
       review.adversarial.done:
         required_fields:
           - "plan_name"
@@ -406,6 +711,39 @@ event_loop:
           - "dimension"
           - "findings_file"
           - "findings_count"
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; copied from work.done for dimension routing"
+            source: "dim:<dim> carries forward from work.done trigger payload"
+            fill_rule: "literal copy; do NOT make up a name"
+          plan_path:
+            meaning: "repo-relative path to the original plan file"
+            source: "dim:<dim> carries forward from work.done trigger payload"
+            fill_rule: "literal copy; absolute repo-relative path"
+          executor_head_sha:
+            meaning: "git SHA at HEAD after the last executor commit — the canonical review anchor"
+            source: "executor ran `git rev-parse HEAD`; copied from work.done"
+            fill_rule: "40-char git SHA; do NOT recompute or hand-write"
+          resolved_baseline_sha:
+            meaning: "canonical baseline SHA carried through the chain from plan.ready"
+            source: "pass-through from plan.ready (via work.done); runner re-reads on every hat prompt"
+            fill_rule: "literal copy; do NOT hand-write"
+          diff_patch_file:
+            meaning: "absolute path to the canonical review patch written by dim:goal-alignment Step 1"
+            source: "dim:goal-alignment Step 1 first writes this; downstream dims read it"
+            fill_rule: "absolute path under .ralph/review/<plan>/; do NOT make up a path"
+          dimension:
+            meaning: "name of the dimension being audited; copy of the dim hat's name"
+            source: "dim:<dim> itself"
+            fill_rule: "literal one of goal-alignment, correctness, testing, maintainability, project-standards, adversarial"
+          findings_file:
+            meaning: "absolute path to this dimension's findings product file"
+            source: "dim:<dim> writes it via the Write tool at Step 4"
+            fill_rule: "absolute path under .ralph/review/<plan>/<dim>.md; do NOT make up a path — write the file first"
+          findings_count:
+            meaning: "integer count of findings in this dimension's product file (including G0 placeholder when clean)"
+            source: "dim:<dim> counts entries in findings_file"
+            fill_rule: "integer >= 1 (G0 placeholder still counts)"
       review.synthesized:
         required_fields:
           - "plan_name"
@@ -419,6 +757,65 @@ event_loop:
           - "p1_count"
           - "findings_summary"
           - "verdict"
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; copied from the final dim's payload"
+            source: "review-synthesizer carries forward from the last review.<dim>.done payload"
+            fill_rule: "literal copy; do NOT make up a name"
+          plan_path:
+            meaning: "repo-relative path to the original plan file"
+            source: "review-synthesizer carries forward from the last dim's payload"
+            fill_rule: "literal copy"
+          executor_head_sha:
+            meaning: "git SHA at HEAD after the last executor commit — anchors synthesized counts"
+            source: "review-synthesizer carries forward from the last dim's payload"
+            fill_rule: "literal copy; do NOT recompute"
+          resolved_baseline_sha:
+            meaning: "canonical baseline SHA carried through the chain from plan.ready"
+            source: "review-synthesizer carries forward"
+            fill_rule: "literal copy"
+          diff_patch_file:
+            meaning: "absolute path to the canonical review patch written by dim:goal-alignment"
+            source: "review-synthesizer reads from the last dim's payload"
+            fill_rule: "literal copy of the path; do NOT make up a path"
+          synthesized_review_file:
+            meaning: "absolute path to the synthesized review product file written by review-synthesizer"
+            source: "review-synthesizer writes it via the Write tool"
+            fill_rule: "absolute path under .ralph/review/<plan>/synthesized.md; write the file first"
+          findings_count:
+            meaning: "total findings deduped across all six dimensions"
+            source: "review-synthesizer aggregates from the six dimension product files"
+            fill_rule: "integer >= 0"
+          p0_count:
+            meaning: "count of blocker (P0) findings in the synthesized table"
+            source: "review-synthesizer classifies"
+            fill_rule: "integer >= 0"
+          p1_count:
+            meaning: "count of must-fix (P1) findings in the synthesized table"
+            source: "review-synthesizer classifies"
+            fill_rule: "integer >= 0"
+          findings_summary:
+            meaning: "short prose summarizing the synthesized findings; one or two sentences"
+            source: "review-synthesizer"
+            fill_rule: "short prose; mention P0/P1 totals and the most impactful category"
+          verdict:
+            meaning: "single-field decision driving fix-planner routing"
+            source: "review-synthesizer"
+            fill_rule: "literal one of pass, pass_with_residuals, blocked"
+        examples:
+          # Shape-illustration only; runtime never treats these as
+          # must-equal constraints. Mirror loop preset's examples block.
+          - plan_name: "2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan"
+            plan_path: "docs/plans/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan.md"
+            executor_head_sha: "0123456789abcdef0123456789abcdef01234567"
+            resolved_baseline_sha: "fedcba9876543210fedcba9876543210fedcba98"
+            diff_patch_file: ".ralph/review/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan/review.diff.patch"
+            synthesized_review_file: ".ralph/review/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan/synthesized.md"
+            findings_count: 6
+            p0_count: 2
+            p1_count: 2
+            findings_summary: "2 P0 + 2 P1 findings, mostly around executor verdict routing and downstream hat prompt assumptions"
+            verdict: "blocked"
       review.complete:
         required_fields:
           - "plan_name"
@@ -431,6 +828,47 @@ event_loop:
           - "p1_count"
           - "findings_summary"
           - "verdict"
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; copied from review.synthesized for fixer routing"
+            source: "fix-planner carries forward from review.synthesized"
+            fill_rule: "literal copy"
+          plan_path:
+            meaning: "repo-relative path to the original plan file"
+            source: "fix-planner carries forward from review.synthesized"
+            fill_rule: "literal copy"
+          executor_head_sha:
+            meaning: "git SHA at HEAD after the last executor commit — anchor for the fix diff"
+            source: "fix-planner carries forward from review.synthesized"
+            fill_rule: "literal copy; do NOT recompute"
+          resolved_baseline_sha:
+            meaning: "canonical baseline SHA carried through the chain from plan.ready"
+            source: "fix-planner carries forward"
+            fill_rule: "literal copy"
+          fix_plan_file:
+            meaning: "absolute path to the fix plan product written by fix-planner; fixer reads ONLY this file"
+            source: "fix-planner writes it via the Write tool"
+            fill_rule: "absolute path under .ralph/review/<plan>/fix-plan.md; write the file first"
+          findings_count:
+            meaning: "total findings the fix plan addresses (subset of synthesized)"
+            source: "fix-planner counts actionable Units in fix_plan_file"
+            fill_rule: "integer >= 0"
+          p0_count:
+            meaning: "P0 findings covered by the fix plan"
+            source: "fix-planner classifies"
+            fill_rule: "integer >= 0"
+          p1_count:
+            meaning: "P1 findings covered by the fix plan"
+            source: "fix-planner classifies"
+            fill_rule: "integer >= 0"
+          findings_summary:
+            meaning: "short prose summarizing what the fix plan covers and what is report-only"
+            source: "fix-planner"
+            fill_rule: "short prose; mention which Units are actionable and which are residuals (deferred)"
+          verdict:
+            meaning: "fix-planner's routing verdict — pass when no fixes needed, blocked when a plan exists"
+            source: "fix-planner"
+            fill_rule: "literal one of pass, blocked"
       fix.done:
         required_fields:
           - "plan_name"
@@ -456,6 +894,124 @@ event_loop:
           - "new_business_regressions_count"
           - "test_compatibility_updates_count"
           - "flaky_or_environmental_count"
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; copied from review.complete for alignment routing"
+            source: "fixer carries forward from review.complete"
+            fill_rule: "literal copy"
+          plan_path:
+            meaning: "repo-relative path to the original plan file"
+            source: "fixer carries forward"
+            fill_rule: "literal copy"
+          executor_head_sha:
+            meaning: "git SHA at HEAD after the last executor commit — diff base for alignment"
+            source: "fixer carries forward from review.complete"
+            fill_rule: "literal copy; do NOT recompute"
+          resolved_baseline_sha:
+            meaning: "canonical baseline SHA carried through the chain from plan.ready"
+            source: "fixer carries forward"
+            fill_rule: "literal copy"
+          head_sha:
+            meaning: "40-char git SHA at HEAD after fixer's final commit / revert (alignment reads this to anchor its diff)"
+            source: "fixer runs `git rev-parse HEAD` after the final fix step"
+            fill_rule: "40-char git SHA; recompute on every emit attempt; on empty-plan fast path equals unchanged HEAD"
+          fix_attempt_commit_sha:
+            meaning: "git commit SHA capturing this fixer attempt; even partial/blocked attempts should leave a trace"
+            source: "fixer runs `git rev-parse HEAD` after the final commit/revert"
+            fill_rule: "40-char git SHA; if no files changed, use unchanged HEAD and document in failure_reason"
+          worktree_status:
+            meaning: "final git worktree state after fixer commits/reverts the attempt"
+            source: "git status --porcelain --untracked-files=all (excluding .ralph/)"
+            fill_rule: "literal one of clean, dirty — clean only when porcelain is empty outside .ralph/; never fabricate clean"
+          fix_plan_file:
+            meaning: "absolute path to the fix plan product written by fix-planner"
+            source: "fixer copies from review.complete payload"
+            fill_rule: "literal copy; do NOT make up a path"
+          review_verdict:
+            meaning: "verdict carried forward from review.complete — fixer labels this attempt against it"
+            source: "fixer copies from review.complete"
+            fill_rule: "literal copy"
+          fixes_applied:
+            meaning: "count of fix Units that landed successfully"
+            source: "fixer per-Unit execution log"
+            fill_rule: "integer >= 0"
+          fixes_skipped:
+            meaning: "count of fix Units intentionally skipped (Kind: DOC or residuals)"
+            source: "fixer per-Unit execution log"
+            fill_rule: "integer >= 0"
+          planned_fix_units:
+            meaning: "ordered array of fix Unit U-IDs the fix plan committed to address"
+            source: "fixer copies from fix_plan_file after dropping residuals/DOC kinds"
+            fill_rule: "array of fix Unit U-ID strings"
+          completed_fix_units:
+            meaning: "ordered array of fix Units whose commits landed"
+            source: "fixer derives from git log over the fix range"
+            fill_rule: "subset of planned_fix_units; [] only when there were no planned Units (empty-plan fast path)"
+          skipped_fix_units:
+            meaning: "ordered array of fix Units intentionally skipped with rationale"
+            source: "fixer per-Unit execution log"
+            fill_rule: "array of U-ID strings; document the reason in fix_planner's fix_plan_file"
+          baseline_verification_status:
+            meaning: "result of the Step 1.5 baseline-snapshot verifier"
+            source: "fixer runs the baseline-verifier subagent before any fix code lands"
+            fill_rule: "literal one of green, red, unknown, skipped"
+          baseline_verification_file:
+            meaning: "absolute path to the fixer's baseline-verification report under .ralph/review/<plan>/"
+            source: "fixer writes via the Write tool"
+            fill_rule: "absolute path; do NOT make up a path"
+          post_verification_status:
+            meaning: "result of the final post-fix verification (after the last fix commit)"
+            source: "fixer / delta-verifier"
+            fill_rule: "literal one of green, red, unknown"
+          post_verification_file:
+            meaning: "absolute path to the fixer's final-verification report under .ralph/review/<plan>/"
+            source: "fixer writes via the Write tool"
+            fill_rule: "absolute path; do NOT make up a path"
+          verification_delta_file:
+            meaning: "absolute path to the fixer's baseline-vs-final delta report under .ralph/review/<plan>/"
+            source: "fixer writes via the Write tool"
+            fill_rule: "absolute path; do NOT make up a path"
+          baseline_existing_count:
+            meaning: "failures that already existed before this fix run; report-only — do not block"
+            source: "fixer / delta-verifier classifies"
+            fill_rule: "integer >= 0"
+          new_business_regressions_count:
+            meaning: "failures clearly introduced by the fix diff; must be 0 before reporting success"
+            source: "fixer / delta-verifier classifies"
+            fill_rule: "integer = 0 when claiming fixes_applied > 0; if > 0, set review_verdict to blocked"
+          test_compatibility_updates_count:
+            meaning: "tests intentionally updated to reflect intended behavior changes"
+            source: "fixer / delta-verifier classifies"
+            fill_rule: "integer >= 0"
+          flaky_or_environmental_count:
+            meaning: "failures that cannot be trusted without a repro-worthy environment signal"
+            source: "fixer / delta-verifier classifies"
+            fill_rule: "integer = 0 before claiming success"
+        examples:
+          # Shape-illustration only. Mirror loop preset's examples style.
+          - plan_name: "2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan"
+            plan_path: "docs/plans/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan.md"
+            executor_head_sha: "0123456789abcdef0123456789abcdef01234567"
+            resolved_baseline_sha: "fedcba9876543210fedcba9876543210fedcba98"
+            head_sha: "89abcdef0123456789abcdef0123456789abcdef01"
+            fix_attempt_commit_sha: "89abcdef0123456789abcdef0123456789abcdef01"
+            worktree_status: "clean"
+            fix_plan_file: ".ralph/review/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan/fix-plan.md"
+            review_verdict: "blocked"
+            fixes_applied: 4
+            fixes_skipped: 0
+            planned_fix_units: ["U1", "U2", "U3", "U4"]
+            completed_fix_units: ["U1", "U2", "U3", "U4"]
+            skipped_fix_units: []
+            baseline_verification_status: "green"
+            baseline_verification_file: ".ralph/review/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan/baseline-verification.md"
+            post_verification_status: "green"
+            post_verification_file: ".ralph/review/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan/final-verification.md"
+            verification_delta_file: ".ralph/review/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan/verification-delta.md"
+            baseline_existing_count: 0
+            new_business_regressions_count: 0
+            test_compatibility_updates_count: 0
+            flaky_or_environmental_count: 0
       align.done:
         required_fields:
           - "plan_name"
@@ -470,10 +1026,77 @@ event_loop:
           - "fix_plan_executed"
           - "residuals_count"
           - "residuals_summary"
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; copied from fix.done for reporter routing"
+            source: "alignment carries forward from fix.done"
+            fill_rule: "literal copy"
+          plan_path:
+            meaning: "repo-relative path to the original plan file"
+            source: "alignment carries forward"
+            fill_rule: "literal copy"
+          executor_head_sha:
+            meaning: "git SHA at HEAD after the last executor commit — the original-plan execution anchor"
+            source: "alignment carries forward from fix.done"
+            fill_rule: "literal copy; do NOT recompute"
+          head_sha:
+            meaning: "git SHA at HEAD after fixer's final commit — alignment's plan-vs-fix comparison anchor"
+            source: "alignment carries forward from fix.done"
+            fill_rule: "literal copy"
+          resolved_baseline_sha:
+            meaning: "canonical baseline SHA carried through the chain from plan.ready"
+            source: "alignment carries forward"
+            fill_rule: "literal copy"
+          fix_plan_file:
+            meaning: "absolute path to the fix plan product — alignment reads both the plan and the fix plan to compute residuals"
+            source: "alignment copies from fix.done payload"
+            fill_rule: "literal copy"
+          worktree_status:
+            meaning: "git worktree state at handoff time (inherited from fix.done)"
+            source: "alignment copies from fix.done payload"
+            fill_rule: "literal copy of clean / dirty — do NOT modify after handoff"
+          review_verdict:
+            meaning: "review verdict carried forward — alignment reports residuals, never re-routes"
+            source: "alignment copies from fix.done"
+            fill_rule: "literal copy"
+          plan_executed:
+            meaning: "boolean flag — true when the original plan reached a commit for every planned Unit"
+            source: "alignment derives from executor's planned_units vs completed_units"
+            fill_rule: "literal boolean true or false"
+          fix_plan_executed:
+            meaning: "boolean flag — true when the fix plan reached a commit for every actionable fix Unit"
+            source: "alignment derives from fixer's planned_fix_units vs completed_fix_units"
+            fill_rule: "literal boolean true or false"
+          residuals_count:
+            meaning: "integer count of report-only residuals (baseline / out-of-scope / post-merge deviations)"
+            source: "alignment classifies"
+            fill_rule: "integer >= 0"
+          residuals_summary:
+            meaning: "short prose summarizing the residuals alignment logged for the reporter"
+            source: "alignment"
+            fill_rule: "short prose; group residuals by category and note any deviation from the original plan"
       report.done:
         required_fields: ["plan_name", "report_path", "verdict"]
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; identifies which plan this report belongs to"
+            source: "reporter copies from the last event in the chain"
+            fill_rule: "literal copy"
+          report_path:
+            meaning: "absolute path to the final aggregated report file the reporter wrote"
+            source: "reporter writes it via the Write tool"
+            fill_rule: "absolute path; do NOT make up a path — write the file first"
+          verdict:
+            meaning: "single-field terminal verdict driving LOOP_COMPLETE"
+            source: "reporter aggregates from the chain"
+            fill_rule: "literal one of pass, pass_with_residuals, blocked"
       LOOP_COMPLETE:
         required_fields: ["reason"]
+        field_docs:
+          reason:
+            meaning: "human-readable short reason for why the loop ended; recorded by the runtime"
+            source: "reporter derives from report.done (or plan.blocked / work.failed fallback)"
+            fill_rule: "one short sentence; mention final verdict and any blockers"
 
 cli:
   backend: "claude"
