@@ -125,6 +125,11 @@ pub fn find_skills_script(name: &str) -> Result<PathBuf> {
         PathBuf::from("skills"),
         PathBuf::from("../skills"),
         PathBuf::from("../../skills"),
+        // External config generators (e.g., universal-autoresearch) install
+        // phase transition scripts into <project>/.uar/scripts/. Without
+        // this base, PhaseWatcher silently fails to locate them and warmup
+        // never transitions.
+        PathBuf::from(".uar/scripts"),
     ];
 
     for base in search_paths {
@@ -143,4 +148,150 @@ pub fn find_skills_script(name: &str) -> Result<PathBuf> {
     }
 
     anyhow::bail!("Script not found: {}", name)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for `find_skills_script` — the search-base order is a
+    //! silent compatibility surface; without these, future refactors can
+    //! quietly break external generators (e.g., universal-autoresearch)
+    //! that install scripts into `.uar/scripts/`.
+
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// Run `body` with cwd set to `dir`, restoring the original cwd on
+    /// drop. Tests must not run concurrently in the same process when
+    /// relying on cwd; `cargo test` defaults to a thread pool, so we
+    /// mark each `find_skills_script` test with `--test-threads=1` via
+    /// a shared `#[serial]` mutex below.
+    struct CwdGuard {
+        original: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn enter(dir: &std::path::Path) -> Self {
+            let original = std::env::current_dir().expect("cwd");
+            std::env::set_current_dir(dir).expect("set_current_dir");
+            Self { original }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    /// Serial mutex so cwd-manipulating tests don't stomp each other.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn write_script(dir: &std::path::Path, relative: &str) {
+        let full = dir.join(relative);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&full, "#!/usr/bin/env python3\n").unwrap();
+    }
+
+    /// `.uar/scripts/` is the install location used by
+    /// universal-autoresearch (see generate_autoresearch.py:_copy_support_scripts).
+    /// PhaseWatcher must locate `check_exit_conditions.py` placed there.
+    #[test]
+    fn find_skills_script_discovers_uar_scripts() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        write_script(dir.path(), ".uar/scripts/check_exit_conditions.py");
+
+        let _cwd = CwdGuard::enter(dir.path());
+        let found = find_skills_script("check_exit_conditions.py").unwrap();
+        assert!(
+            found.ends_with(".uar/scripts/check_exit_conditions.py"),
+            "expected .uar/scripts path, got {found:?}"
+        );
+    }
+
+    /// Same discovery guarantee for the second phase script.
+    #[test]
+    fn find_skills_script_discovers_uar_transition_script() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        write_script(dir.path(), ".uar/scripts/transition_warmup_to_production.py");
+
+        let _cwd = CwdGuard::enter(dir.path());
+        let found = find_skills_script("transition_warmup_to_production.py").unwrap();
+        assert!(found.ends_with(".uar/scripts/transition_warmup_to_production.py"));
+    }
+
+    /// Legacy `skills/` location must keep winning when both exist, so
+    /// projects that still install scripts the old way don't regress.
+    /// Search order is `.`, `..`, `../..`, `skills`, `../skills`,
+    /// `../../skills`, `.uar/scripts`.
+    #[test]
+    fn find_skills_script_legacy_skills_path_takes_priority_over_uar() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        write_script(dir.path(), "skills/check_exit_conditions.py");
+        write_script(dir.path(), ".uar/scripts/check_exit_conditions.py");
+
+        let _cwd = CwdGuard::enter(dir.path());
+        let found = find_skills_script("check_exit_conditions.py").unwrap();
+        assert!(
+            found.ends_with("skills/check_exit_conditions.py"),
+            "legacy skills/ path must take priority, got {found:?}"
+        );
+    }
+
+    /// Old fallback chain must still resolve: top-level `.` and the
+    /// `universal-autoresearch/scripts` alt-suffix were the historical
+    /// installation layouts and must not regress after we added
+    /// `.uar/scripts/`.
+    #[test]
+    fn find_skills_script_legacy_fallbacks_still_work() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        // Only the universal-autoresearch/scripts alt-suffix exists.
+        write_script(dir.path(), "universal-autoresearch/scripts/check_exit_conditions.py");
+
+        let _cwd = CwdGuard::enter(dir.path());
+        let found = find_skills_script("check_exit_conditions.py").unwrap();
+        assert!(
+            found.ends_with("universal-autoresearch/scripts/check_exit_conditions.py"),
+            "universal-autoresearch/scripts fallback regressed: {found:?}"
+        );
+    }
+
+    /// Bare top-level install (no subdirectory) must still resolve via
+    /// the `.` search base.
+    #[test]
+    fn find_skills_script_top_level_dot_still_works() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        write_script(dir.path(), "check_exit_conditions.py");
+
+        let _cwd = CwdGuard::enter(dir.path());
+        let found = find_skills_script("check_exit_conditions.py").unwrap();
+        assert!(found.ends_with("check_exit_conditions.py"));
+    }
+
+    /// When nothing matches, the error message must include the script
+    /// name so upstream log triage can identify which script Ralph was
+    /// trying to locate.
+    #[test]
+    fn find_skills_script_missing_returns_helpful_error() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        // Empty tempdir; nothing on disk.
+
+        let _cwd = CwdGuard::enter(dir.path());
+        let err = find_skills_script("check_exit_conditions.py")
+            .expect_err("expected bail when no script is found");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("check_exit_conditions.py"),
+            "error message must contain script name, got: {msg}"
+        );
+    }
 }
