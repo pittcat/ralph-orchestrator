@@ -198,7 +198,7 @@ pub fn run_sop(config: SopRunConfig) -> Result<(), SopRunError> {
 /// Precedence (highest to lowest):
 /// 1. CLI flag (`--backend`)
 /// 2. Config file (`cli.backend` in ralph.yml)
-/// 3. Auto-detect (first available from claude → kiro → gemini → codex → amp)
+/// 3. Auto-detect (first available from claude → kiro → gemini → codex)
 fn resolve_backend(
     flag_override: Option<&str>,
     config: Option<&RalphConfig>,
@@ -359,7 +359,6 @@ mod tests {
         assert!(validate_backend_name("kiro").is_ok());
         assert!(validate_backend_name("gemini").is_ok());
         assert!(validate_backend_name("codex").is_ok());
-        assert!(validate_backend_name("amp").is_ok());
         assert!(validate_backend_name("opencode").is_ok());
         assert!(validate_backend_name("custom").is_ok());
     }

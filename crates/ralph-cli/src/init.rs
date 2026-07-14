@@ -91,7 +91,7 @@ fn check_file_exists(force: bool) -> Result<(), InitError> {
 /// Initializes ralph.yml from a minimal backend template.
 ///
 /// # Arguments
-/// * `backend` - The backend name (claude, kiro, gemini, codex, amp, opencode, custom)
+/// * `backend` - The backend name (claude, kiro, gemini, codex, opencode, custom)
 /// * `force` - If true, overwrite existing ralph.yml
 ///
 /// # Errors
@@ -340,7 +340,7 @@ event_loop:
 cli:
   backend: "claude"  # inline comment
 "#;
-        let result = super::override_backend_in_yaml(content, "amp").unwrap();
+        let result = super::override_backend_in_yaml(content, "opencode").unwrap();
         assert!(result.contains("# This is a preset"));
         assert!(result.contains("# With helpful comments"));
     }

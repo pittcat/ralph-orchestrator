@@ -294,7 +294,6 @@ impl RalphConfig {
         if self.adapters.claude.tool_permissions.is_some()
             || self.adapters.gemini.tool_permissions.is_some()
             || self.adapters.codex.tool_permissions.is_some()
-            || self.adapters.amp.tool_permissions.is_some()
         {
             warnings.push(ConfigWarning::DroppedField {
                 field: "adapters.*.tool_permissions".to_string(),
@@ -736,7 +735,7 @@ impl RalphConfig {
     /// If empty, returns the default priority order.
     pub fn get_agent_priority(&self) -> Vec<&str> {
         if self.agent_priority.is_empty() {
-            vec!["claude", "kiro", "gemini", "codex", "amp"]
+            vec!["claude", "kiro", "gemini", "codex"]
         } else {
             self.agent_priority.iter().map(String::as_str).collect()
         }
@@ -750,7 +749,6 @@ impl RalphConfig {
             "gemini" => &self.adapters.gemini,
             "kiro" => &self.adapters.kiro,
             "codex" => &self.adapters.codex,
-            "amp" => &self.adapters.amp,
             _ => &self.adapters.claude, // Default fallback
         }
     }
@@ -1128,7 +1126,7 @@ agent_priority: [gemini, claude, codex]
     fn test_default_agent_priority() {
         let config = RalphConfig::default();
         let priority = config.get_agent_priority();
-        assert_eq!(priority, vec!["claude", "kiro", "gemini", "codex", "amp"]);
+        assert_eq!(priority, vec!["claude", "kiro", "gemini", "codex"]);
     }
 
     #[test]

@@ -74,7 +74,6 @@ impl CliBackend {
             "kiro-acp" => Self::kiro_acp(),
             "gemini" => Self::gemini(),
             "codex" => Self::codex(),
-            "amp" => Self::amp(),
             "opencode" => Self::opencode(),
             "pi" => Self::pi(),
             "roo" => Self::roo(),
@@ -248,7 +247,6 @@ impl CliBackend {
             "kiro-acp" => Ok(Self::kiro_acp()),
             "gemini" => Ok(Self::gemini()),
             "codex" => Ok(Self::codex()),
-            "amp" => Ok(Self::amp()),
             "opencode" => Ok(Self::opencode()),
             "pi" => Ok(Self::pi()),
             "roo" => Ok(Self::roo()),
@@ -313,18 +311,6 @@ impl CliBackend {
         }
     }
 
-    /// Creates the Amp backend.
-    pub fn amp() -> Self {
-        Self {
-            command: "amp".to_string(),
-            args: vec!["--dangerously-allow-all".to_string()],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: Some("-x".to_string()),
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        }
-    }
-
     /// Creates the Claude interactive backend with Agent Teams support.
     ///
     /// Like `claude_interactive()` but with reduced `--disallowedTools` (only `TodoWrite`)
@@ -360,7 +346,6 @@ impl CliBackend {
     /// | Kiro    | removes `--no-interactive` |
     /// | Gemini  | uses `-i` instead of `-p` |
     /// | Codex   | no `exec` subcommand |
-    /// | Amp     | removes `--dangerously-allow-all` |
     /// | OpenCode| `run` subcommand with positional prompt |
     ///
     /// # Errors
@@ -374,7 +359,6 @@ impl CliBackend {
             "kiro" | "kiro-acp" => Ok(Self::kiro_interactive()),
             "gemini" => Ok(Self::gemini_interactive()),
             "codex" => Ok(Self::codex_interactive()),
-            "amp" => Ok(Self::amp_interactive()),
             "opencode" => Ok(Self::opencode_interactive()),
             "pi" => Ok(Self::pi_interactive()),
             "roo" => Ok(Self::roo_interactive()),
@@ -423,21 +407,6 @@ impl CliBackend {
             args: vec![], // No exec, no --full-auto
             prompt_mode: PromptMode::Arg,
             prompt_flag: None, // Positional argument
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        }
-    }
-
-    /// Amp in interactive mode (removes --dangerously-allow-all).
-    ///
-    /// Unlike headless `amp()`, this runs without the auto-approve flag,
-    /// requiring user confirmation for tool usage.
-    pub fn amp_interactive() -> Self {
-        Self {
-            command: "amp".to_string(),
-            args: vec![],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: Some("-x".to_string()),
             output_format: OutputFormat::Text,
             env_vars: vec![],
         }
@@ -766,10 +735,6 @@ impl CliBackend {
                 .filter(|a| a != "--no-interactive")
                 .collect(),
             "codex" => args.into_iter().filter(|a| a != "--full-auto").collect(),
-            "amp" => args
-                .into_iter()
-                .filter(|a| a != "--dangerously-allow-all")
-                .collect(),
             "claude" => args.into_iter().filter(|a| a != "--print").collect(),
             "roo" => args
                 .into_iter()
@@ -982,16 +947,6 @@ mod tests {
     }
 
     #[test]
-    fn test_amp_backend() {
-        let backend = CliBackend::amp();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "amp");
-        assert_eq!(args, vec!["--dangerously-allow-all", "-x", "test prompt"]);
-        assert!(stdin.is_none());
-    }
-
-    #[test]
     fn test_from_config() {
         let config = CliConfig {
             backend: "claude".to_string(),
@@ -1044,17 +999,6 @@ mod tests {
         assert_eq!(args, vec!["exec", "--yolo", "test prompt"]);
         assert!(stdin.is_none());
         assert!(!args.contains(&"--full-auto".to_string()));
-    }
-
-    #[test]
-    fn test_amp_interactive_mode_no_flags() {
-        let backend = CliBackend::amp();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", true);
-
-        assert_eq!(cmd, "amp");
-        assert_eq!(args, vec!["-x", "test prompt"]);
-        assert!(stdin.is_none());
-        assert!(!args.contains(&"--dangerously-allow-all".to_string()));
     }
 
     #[test]
@@ -1234,12 +1178,6 @@ mod tests {
     fn test_from_name_codex() {
         let backend = CliBackend::from_name("codex").unwrap();
         assert_eq!(backend.command, "codex");
-    }
-
-    #[test]
-    fn test_from_name_amp() {
-        let backend = CliBackend::from_name("amp").unwrap();
-        assert_eq!(backend.command, "amp");
     }
 
     #[test]
@@ -1425,18 +1363,6 @@ mod tests {
         assert_eq!(args, vec!["test prompt"]);
         assert!(!args.contains(&"exec".to_string()));
         assert!(!args.contains(&"--full-auto".to_string()));
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_for_interactive_prompt_amp() {
-        let backend = CliBackend::for_interactive_prompt("amp").unwrap();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "amp");
-        // Should NOT have --dangerously-allow-all
-        assert_eq!(args, vec!["-x", "test prompt"]);
-        assert!(!args.contains(&"--dangerously-allow-all".to_string()));
         assert!(stdin.is_none());
     }
 
@@ -1737,7 +1663,6 @@ mod tests {
         assert!(CliBackend::kiro().env_vars.is_empty());
         assert!(CliBackend::gemini().env_vars.is_empty());
         assert!(CliBackend::codex().env_vars.is_empty());
-        assert!(CliBackend::amp().env_vars.is_empty());
         assert!(CliBackend::opencode().env_vars.is_empty());
         assert!(CliBackend::pi().env_vars.is_empty());
         assert!(CliBackend::roo().env_vars.is_empty());

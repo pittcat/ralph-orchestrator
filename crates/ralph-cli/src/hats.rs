@@ -41,7 +41,7 @@ pub enum HatsCommands {
         /// Output format (unicode, ascii, compact, mermaid)
         #[arg(long, default_value = "unicode")]
         format: GraphFormat,
-        /// Backend for AI-generated diagrams (claude, kiro, gemini, codex, amp, opencode, pi, custom)
+        /// Backend for AI-generated diagrams (claude, kiro, gemini, codex, opencode, pi, custom)
         #[arg(short = 'b', long = "backend")]
         backend: Option<String>,
     },
@@ -532,7 +532,7 @@ fn render_hat_dag_via_ai(
 /// Precedence (highest to lowest):
 /// 1. CLI flag (`--backend`)
 /// 2. Config file (`cli.backend` in ralph.yml)
-/// 3. Auto-detect (first available from claude → kiro → gemini → codex → amp)
+/// 3. Auto-detect (first available from claude → kiro → gemini → codex)
 fn resolve_backend(flag_override: Option<&str>, config: &RalphConfig) -> Result<String> {
     // 1. CLI flag takes precedence
     if let Some(backend) = flag_override {
@@ -1497,7 +1497,6 @@ event_loop:
         assert!(validate_backend_name("kiro").is_ok());
         assert!(validate_backend_name("gemini").is_ok());
         assert!(validate_backend_name("codex").is_ok());
-        assert!(validate_backend_name("amp").is_ok());
         assert!(validate_backend_name("custom").is_ok());
     }
 

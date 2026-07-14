@@ -92,12 +92,6 @@ fn test_wave_worker_execution_mode_matches_supported_named_backend_roster() {
             "execution-mode:named:codex",
         ),
         (
-            "amp",
-            BackendOutputFormat::Text,
-            WaveWorkerExecutionMode::Pty,
-            "execution-mode:named:amp",
-        ),
-        (
             "opencode",
             BackendOutputFormat::Text,
             WaveWorkerExecutionMode::Pty,
@@ -1233,13 +1227,6 @@ named_text_wave_backend_test!(
 
 #[cfg(unix)]
 named_text_wave_backend_test!(
-    test_execute_wave_supports_named_amp_backend,
-    "amp",
-    "amp backend ok"
-);
-
-#[cfg(unix)]
-named_text_wave_backend_test!(
     test_execute_wave_supports_named_opencode_backend,
     "opencode",
     "opencode backend ok"
@@ -1344,13 +1331,6 @@ async fn test_execute_wave_named_backend_invocation_contracts() {
             marker_id: "invocation-contract:named:codex",
         },
         NamedBackendInvocationCase {
-            name: "amp",
-            success_payload: "amp invocation contract ok",
-            expected_prefix: &["--dangerously-allow-all"],
-            prompt_delivery: PromptDeliveryExpectation::Flag("-x"),
-            marker_id: "invocation-contract:named:amp",
-        },
-        NamedBackendInvocationCase {
             name: "opencode",
             success_payload: "opencode invocation contract ok",
             expected_prefix: &["run"],
@@ -1435,13 +1415,6 @@ async fn test_execute_wave_named_backend_large_prompt_contracts() {
             expected_prefix: &["exec", "--yolo"],
             prompt_delivery: PromptDeliveryExpectation::TempFilePositional,
             marker_id: "large-prompt-contract:named:codex",
-        },
-        NamedBackendLargePromptCase {
-            name: "amp",
-            success_payload: "amp large prompt contract ok",
-            expected_prefix: &["--dangerously-allow-all"],
-            prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-x"),
-            marker_id: "large-prompt-contract:named:amp",
         },
         NamedBackendLargePromptCase {
             name: "opencode",
@@ -1599,20 +1572,6 @@ async fn test_execute_wave_hat_backend_invocation_contracts() {
                 prompt_delivery: PromptDeliveryExpectation::Positional,
                 success_payload: "hat codex named-with-args invocation contract ok",
                 marker_id: "invocation-contract:hat:named-with-args:codex",
-            },
-            HatNamedWithArgsInvocationCase {
-                backend_type: "amp",
-                executable_name: "amp",
-                extra_args: &["--model", "gpt-5"],
-                expected_prefix: &[
-                    "--dangerously-allow-all",
-                    "--model",
-                    "gpt-5",
-                    "--hat-runtime-arg",
-                ],
-                prompt_delivery: PromptDeliveryExpectation::Flag("-x"),
-                success_payload: "hat amp named-with-args invocation contract ok",
-                marker_id: "invocation-contract:hat:named-with-args:amp",
             },
             HatNamedWithArgsInvocationCase {
                 backend_type: "roo",
@@ -1790,14 +1749,6 @@ async fn test_execute_wave_hat_backend_large_prompt_contracts() {
             marker_id: "large-prompt-contract:hat:named:codex",
         },
         HatNamedLargePromptCase {
-            backend_type: "amp",
-            executable_name: "amp",
-            expected_prefix: &["--dangerously-allow-all", "--hat-runtime-arg"],
-            prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-x"),
-            success_payload: "hat amp named large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named:amp",
-        },
-        HatNamedLargePromptCase {
             backend_type: "opencode",
             executable_name: "opencode",
             expected_prefix: &["run", "--hat-runtime-arg"],
@@ -1931,20 +1882,6 @@ async fn test_execute_wave_hat_backend_large_prompt_contracts() {
             prompt_delivery: PromptDeliveryExpectation::TempFilePositional,
             success_payload: "hat codex named-with-args large prompt contract ok",
             marker_id: "large-prompt-contract:hat:named-with-args:codex",
-        },
-        HatNamedWithArgsLargePromptCase {
-            backend_type: "amp",
-            executable_name: "amp",
-            extra_args: &["--model", "gpt-5"],
-            expected_prefix: &[
-                "--dangerously-allow-all",
-                "--model",
-                "gpt-5",
-                "--hat-runtime-arg",
-            ],
-            prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-x"),
-            success_payload: "hat amp named-with-args large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named-with-args:amp",
         },
         HatNamedWithArgsLargePromptCase {
             backend_type: "roo",

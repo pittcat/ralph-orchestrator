@@ -22,10 +22,6 @@ pub struct AdaptersConfig {
     /// Codex adapter settings.
     #[serde(default)]
     pub codex: AdapterSettings,
-
-    /// Amp adapter settings.
-    #[serde(default)]
-    pub amp: AdapterSettings,
 }
 
 /// Per-adapter settings.
