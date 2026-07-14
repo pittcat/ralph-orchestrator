@@ -9,7 +9,7 @@
 //! Tasks are stored in `.ralph/agent/tasks.jsonl` and provide structured
 //! work item tracking when memories are enabled.
 //!
-//! All scenarios are backend-agnostic and support Claude, Kiro, and OpenCode.
+//! All scenarios are backend-agnostic and support Claude, OpenCode.
 
 use super::{AssertionBuilder, Assertions, ScenarioError, TestScenario};
 use crate::Backend;

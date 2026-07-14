@@ -9,7 +9,7 @@
 //! The memory system stores learnings in `.ralph/agent/memories.md` and can
 //! automatically inject relevant memories into agent prompts.
 //!
-//! All scenarios in this module are backend-agnostic and support Claude, Kiro,
+//! All scenarios in this module are backend-agnostic and support Claude, OpenCode,
 //! and OpenCode backends. The backend is configured at setup time.
 
 use super::{AssertionBuilder, Assertions, ScenarioError, TestScenario};
@@ -88,7 +88,7 @@ impl TestScenario for MemoryAddScenario {
     }
 
     fn supported_backends(&self) -> Vec<Backend> {
-        vec![Backend::Claude, Backend::Kiro, Backend::OpenCode]
+        vec![Backend::Claude, Backend::OpenCode, Backend::OpenCode]
     }
 
     fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
@@ -309,7 +309,7 @@ impl TestScenario for MemorySearchScenario {
     }
 
     fn supported_backends(&self) -> Vec<Backend> {
-        vec![Backend::Claude, Backend::Kiro, Backend::OpenCode]
+        vec![Backend::Claude, Backend::OpenCode, Backend::OpenCode]
     }
 
     fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
@@ -529,7 +529,7 @@ impl TestScenario for MemoryInjectionScenario {
     }
 
     fn supported_backends(&self) -> Vec<Backend> {
-        vec![Backend::Claude, Backend::Kiro, Backend::OpenCode]
+        vec![Backend::Claude, Backend::OpenCode, Backend::OpenCode]
     }
 
     fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
@@ -753,7 +753,7 @@ impl TestScenario for MemoryPersistenceScenario {
     }
 
     fn supported_backends(&self) -> Vec<Backend> {
-        vec![Backend::Claude, Backend::Kiro, Backend::OpenCode]
+        vec![Backend::Claude, Backend::OpenCode, Backend::OpenCode]
     }
 
     fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
@@ -977,7 +977,7 @@ impl TestScenario for MemoryCorruptedFileScenario {
     }
 
     fn supported_backends(&self) -> Vec<Backend> {
-        vec![Backend::Claude, Backend::Kiro, Backend::OpenCode]
+        vec![Backend::Claude, Backend::OpenCode, Backend::OpenCode]
     }
 
     fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
@@ -1197,7 +1197,7 @@ impl TestScenario for MemoryMissingFileScenario {
     }
 
     fn supported_backends(&self) -> Vec<Backend> {
-        vec![Backend::Claude, Backend::Kiro, Backend::OpenCode]
+        vec![Backend::Claude, Backend::OpenCode, Backend::OpenCode]
     }
 
     fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
@@ -1395,7 +1395,7 @@ impl TestScenario for MemoryRapidWriteScenario {
     }
 
     fn supported_backends(&self) -> Vec<Backend> {
-        vec![Backend::Claude, Backend::Kiro, Backend::OpenCode]
+        vec![Backend::Claude, Backend::OpenCode, Backend::OpenCode]
     }
 
     fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
@@ -1584,7 +1584,7 @@ impl TestScenario for MemoryLargeContentScenario {
     }
 
     fn supported_backends(&self) -> Vec<Backend> {
-        vec![Backend::Claude, Backend::Kiro, Backend::OpenCode]
+        vec![Backend::Claude, Backend::OpenCode, Backend::OpenCode]
     }
 
     fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
@@ -1776,7 +1776,7 @@ mod tests {
         let scenario = MemoryAddScenario::new();
         let supported = scenario.supported_backends();
         assert!(supported.contains(&Backend::Claude));
-        assert!(supported.contains(&Backend::Kiro));
+        assert!(supported.contains(&Backend::OpenCode));
         assert!(supported.contains(&Backend::OpenCode));
     }
 
@@ -1905,7 +1905,7 @@ mod tests {
         let scenario = MemorySearchScenario::new();
         let supported = scenario.supported_backends();
         assert!(supported.contains(&Backend::Claude));
-        assert!(supported.contains(&Backend::Kiro));
+        assert!(supported.contains(&Backend::OpenCode));
         assert!(supported.contains(&Backend::OpenCode));
     }
 
@@ -1976,7 +1976,7 @@ mod tests {
         let scenario = MemoryInjectionScenario::new();
         let supported = scenario.supported_backends();
         assert!(supported.contains(&Backend::Claude));
-        assert!(supported.contains(&Backend::Kiro));
+        assert!(supported.contains(&Backend::OpenCode));
         assert!(supported.contains(&Backend::OpenCode));
     }
 
@@ -2072,7 +2072,7 @@ mod tests {
         let scenario = MemoryPersistenceScenario::new();
         let supported = scenario.supported_backends();
         assert!(supported.contains(&Backend::Claude));
-        assert!(supported.contains(&Backend::Kiro));
+        assert!(supported.contains(&Backend::OpenCode));
         assert!(supported.contains(&Backend::OpenCode));
     }
 

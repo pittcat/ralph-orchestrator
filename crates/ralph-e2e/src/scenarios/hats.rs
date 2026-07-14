@@ -8,7 +8,7 @@
 //! - Per-hat backend overrides
 //!
 //! All scenarios are backend-agnostic and configure themselves at setup time
-//! based on the target backend. They support Claude, Kiro, and OpenCode.
+//! based on the target backend. They support Claude, OpenCode.
 //!
 //! These scenarios are more complex than orchestration tests and validate
 //! Ralph's hat system for coordinating specialized agent personas.

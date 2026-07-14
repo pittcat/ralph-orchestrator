@@ -17,7 +17,7 @@ use std::path::Path;
 
 /// Test scenario that verifies basic connectivity to any backend.
 ///
-/// This scenario is backend-agnostic and will work with Claude, Kiro, or OpenCode.
+/// This scenario is backend-agnostic and will work with Claude, OpenCode.
 /// It configures itself at setup time based on the target backend.
 ///
 /// The scenario:
@@ -259,7 +259,7 @@ mod tests {
         let scenario = ConnectivityScenario::new();
         let supported = scenario.supported_backends();
         assert!(supported.contains(&Backend::Claude));
-        assert!(supported.contains(&Backend::Kiro));
+        assert!(supported.contains(&Backend::OpenCode));
         assert!(supported.contains(&Backend::OpenCode));
     }
 
@@ -278,23 +278,6 @@ mod tests {
         assert!(content.contains("backend: claude"));
 
         assert_eq!(config.timeout, Backend::Claude.default_timeout());
-
-        cleanup_workspace(&workspace);
-    }
-
-    #[test]
-    fn test_connectivity_setup_kiro() {
-        let workspace = test_workspace("setup-kiro");
-        fs::create_dir_all(&workspace).unwrap();
-
-        let scenario = ConnectivityScenario::new();
-        let config = scenario.setup(&workspace, Backend::Kiro).unwrap();
-
-        let config_path = workspace.join("ralph.yml");
-        let content = fs::read_to_string(&config_path).unwrap();
-        assert!(content.contains("backend: kiro"));
-
-        assert_eq!(config.timeout, Backend::Kiro.default_timeout());
 
         cleanup_workspace(&workspace);
     }

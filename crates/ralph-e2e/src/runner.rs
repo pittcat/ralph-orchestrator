@@ -550,7 +550,7 @@ mod tests {
                 id: id.to_string(),
                 description: format!("Mock scenario {}", id),
                 tier: "Tier 0: Mock".to_string(),
-                supported_backends: vec![Backend::Claude, Backend::Kiro, Backend::OpenCode],
+                supported_backends: vec![Backend::Claude, Backend::OpenCode, Backend::OpenCode],
                 should_pass: pass,
             }
         }
@@ -840,7 +840,7 @@ mod tests {
         let workspace_mgr = WorkspaceManager::new(workspace.clone());
         let scenarios: Vec<Box<dyn TestScenario>> = vec![
             Box::new(MockScenario::new("claude-connect", true)),
-            Box::new(MockScenario::new("kiro-connect", true)),
+            Box::new(MockScenario::new("opencode-connect", true)),
             Box::new(MockScenario::new("claude-loop", true)),
         ];
 
@@ -856,8 +856,8 @@ mod tests {
         let matching = runner.matching_scenarios(&config);
         assert_eq!(matching.len(), 2);
 
-        // Filter by "kiro" should match 1
-        let config = RunConfig::new().with_filter("kiro");
+        // Filter by "opencode" should match 1
+        let config = RunConfig::new().with_filter("opencode");
         let matching = runner.matching_scenarios(&config);
         assert_eq!(matching.len(), 1);
 
@@ -870,7 +870,7 @@ mod tests {
         let workspace_mgr = WorkspaceManager::new(workspace.clone());
         let scenarios: Vec<Box<dyn TestScenario>> = vec![
             Box::new(MockScenario::new("claude-test", true).with_backend(Backend::Claude)),
-            Box::new(MockScenario::new("kiro-test", true).with_backend(Backend::Kiro)),
+            Box::new(MockScenario::new("opencode-test", true).with_backend(Backend::OpenCode)),
         ];
 
         let runner = TestRunner::new(workspace_mgr, scenarios);

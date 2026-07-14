@@ -285,7 +285,7 @@ mod tests {
         create_test_cassette(&cassette_dir, "connect.jsonl");
 
         let resolver = CassetteResolver::new(&cassette_dir);
-        let path = resolver.resolve("connect", Backend::Kiro).unwrap();
+        let path = resolver.resolve("connect", Backend::OpenCode).unwrap();
 
         assert!(path.ends_with("connect.jsonl"));
     }

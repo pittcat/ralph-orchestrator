@@ -483,7 +483,7 @@ mod tests {
         let scenario = ToolUseScenario::new();
         let supported = scenario.supported_backends();
         assert!(supported.contains(&Backend::Claude));
-        assert!(supported.contains(&Backend::Kiro));
+        assert!(supported.contains(&Backend::OpenCode));
         assert!(supported.contains(&Backend::OpenCode));
     }
 
@@ -567,7 +567,7 @@ mod tests {
         let scenario = StreamingScenario::new();
         let supported = scenario.supported_backends();
         assert!(supported.contains(&Backend::Claude));
-        assert!(supported.contains(&Backend::Kiro));
+        assert!(supported.contains(&Backend::OpenCode));
         assert!(supported.contains(&Backend::OpenCode));
     }
 

@@ -173,7 +173,6 @@ impl AuthChecker {
     ///
     /// Different backends have different ways to check authentication:
     /// - Claude: `claude --version` with API key set returns successfully
-    /// - Kiro: `kiro-cli --version` similarly
     /// - OpenCode: `opencode --version`
     ///
     /// For now, we use a simple heuristic: if the CLI is available and
@@ -190,7 +189,6 @@ impl AuthChecker {
         // This can be enhanced later with backend-specific checks.
         match backend {
             Backend::Claude => Self::check_claude_auth().await,
-            Backend::Kiro => Self::check_kiro_auth().await,
             Backend::OpenCode => Self::check_opencode_auth().await,
         }
     }
@@ -201,19 +199,6 @@ impl AuthChecker {
         // We can try running `claude doctor` or check if config exists
         // For now, check if version command succeeds (indicates basic setup)
         let output = Command::new(Backend::Claude.command())
-            .arg("--version")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await;
-
-        matches!(output, Ok(o) if o.status.success())
-    }
-
-    /// Kiro-specific authentication check.
-    async fn check_kiro_auth() -> bool {
-        // Similar to Claude
-        let output = Command::new(Backend::Kiro.command())
             .arg("--version")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -253,7 +238,7 @@ mod tests {
     #[test]
     fn test_backend_info_available_not_authenticated() {
         let info =
-            BackendInfo::available_not_authenticated(Backend::Kiro, Some("1.0.0".to_string()));
+            BackendInfo::available_not_authenticated(Backend::OpenCode, Some("1.0.0".to_string()));
         assert!(info.is_available);
         assert!(!info.is_authenticated);
         assert_eq!(info.version, Some("1.0.0".to_string()));
@@ -275,9 +260,11 @@ mod tests {
 
     #[test]
     fn test_backend_info_status_string_not_authenticated() {
-        let info =
-            BackendInfo::available_not_authenticated(Backend::Kiro, Some("kiro 0.3.2".to_string()));
-        assert_eq!(info.status_string(), "kiro 0.3.2 - Not authenticated");
+        let info = BackendInfo::available_not_authenticated(
+            Backend::OpenCode,
+            Some("opencode 0.3.2".to_string()),
+        );
+        assert_eq!(info.status_string(), "opencode 0.3.2 - Not authenticated");
     }
 
     #[test]
@@ -310,12 +297,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_check_all_returns_three_backends() {
+    async fn test_check_all_returns_two_backends() {
         let checker = AuthChecker::new();
         let results = checker.check_all().await;
-        assert_eq!(results.len(), 3);
+        assert_eq!(results.len(), 2);
         assert!(results.iter().any(|r| r.backend == Backend::Claude));
-        assert!(results.iter().any(|r| r.backend == Backend::Kiro));
         assert!(results.iter().any(|r| r.backend == Backend::OpenCode));
     }
 
