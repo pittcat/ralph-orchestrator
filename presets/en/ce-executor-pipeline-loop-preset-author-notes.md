@@ -4,6 +4,8 @@
 
 目标：不新增 topic、不新增消费者。`fixer` 仍然只发布 `fix.done`，`review-reentry` 仍然是唯一消费者。`fix.done` 表示 fixer 完成本轮尝试报告，不再等同于“全部修复成功”。成功、部分完成、阻塞分别由 `fix_status` 表达，并由后续 review round 与既有 `review.loop.blocked` / `reporter` 链路收口。每一轮 fixer 只写自己的 `round-<NN>/baseline-verification.md`、`round-<NN>/final-verification.md`、`round-<NN>/verification-delta.md`，顶层只保留 executor 阶段总验证。
 
+验证采用分层策略：每 Unit 跑 focused + affected integration，全部 Unit 后跑权威 full-suite；全量新增失败最多委派 3 次按失败簇隔离的 repair subagent，主 executor/fixer 不直接编辑修复代码。
+
 ## Single-Chain-First
 
 1. **本 preset 的 unit 拆分能否由 executor/fixer 内部 subagent 完成？** ✓。fix Unit 仍由 fixer 内部 subagent 执行。

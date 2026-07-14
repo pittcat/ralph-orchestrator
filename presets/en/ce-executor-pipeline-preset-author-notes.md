@@ -4,6 +4,8 @@
 
 目标：不改变 topic 拓扑，只收紧 `executor` 与 `fixer` 的单链执行契约。计划规模、Unit 数量、文件数量、预计上下文压力和预计耗时均不能代替真实执行证据。主 hat 只 dispatch、验收、提交和结账；每个 Unit 的 RED/GREEN/REFACTOR 由唯一 subagent 完成。
 
+验证采用分层策略：每个 Unit 完成后运行 focused tests 与受影响的跨边界/集成测试；全部 Unit 结束后运行一次权威 full-suite。全量新增失败按因果相关失败簇最多委派 3 次 fresh repair subagent，主 hat 不直接编辑修复代码。
+
 ## Single-Chain-First
 
 1. **本 preset 的 unit 拆分能否由 executor/fixer 内部 subagent 完成？** ✓。原始 Unit 与 fix Unit 都在各自主 hat 内逐个 dispatch。
@@ -16,7 +18,7 @@
 
 - **Q1 使命:** 逐个 dispatch 原始计划的所有独立 U-ID，验收、独立提交并发出完整执行账单。
 - **Q2 输入:** 从 `plan.ready` 读取 `plan_path` 与 baseline SHA；从计划提取 U-ID/Dependencies；从 subagent 返回、git log 与验证报告取得尝试证据。
-- **Q3 执行:** Observe → baseline verifier → 每 U-ID dispatch/验收/commit/checkpoint → settlement → `ralph emit --policy-check` → emit/confirm。
+- **Q3 执行:** Observe → baseline verifier → 每 U-ID dispatch/验收/affected tests/commit → final full-suite → delegated repair（如需）→ settlement → policy-check → emit/confirm。
 - **Q4 输出:** `work.done` 或结构化 `work.failed`。
 - **Q5 交接:** reporter 从 `work.failed` 的 Unit 分类与 `reason` 生成 blocked 报告。
 
@@ -34,7 +36,7 @@
 
 - **Q1 使命:** 逐个 dispatch 所有 actionable fix Unit；无论 applied、partial 或 blocked，都发出一次诚实的 `fix.done` 尝试报告。
 - **Q2 输入:** `review.complete` trigger、`fix_plan_file`、Unit Dependencies、subagent 返回、git 与 baseline/final/delta 报告。
-- **Q3 执行:** Observe → baseline verifier → 每 fix Unit dispatch/验收/commit → settlement → policy-check → emit/confirm。
+- **Q3 执行:** Observe → baseline verifier → 每 fix Unit dispatch/验收/affected tests/commit → final full-suite → delegated repair（如需）→ settlement → policy-check → emit/confirm。
 - **Q4 输出:** `fix.done`，以 `fix_status` 表达成功、部分完成或阻塞。
 - **Q5 交接:** alignment 用 Unit 分类、SHA、worktree 与验证字段核对原计划和 fix plan。
 

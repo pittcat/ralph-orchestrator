@@ -1458,6 +1458,10 @@ hats:
          - tests prove this U's behavior,
          - no unrelated cleanup or preset/config drift,
          - no Ralph events were emitted by the subagent.
+         - run the Unit's focused tests plus affected cross-boundary /
+           integration tests discoverable from its changed files. Do not run
+           the authoritative full suite here unless repository docs identify
+           it as cheap and mandatory per change.
       5. **Commit this U-ID immediately** (HARD RULE — before moving on):
          ```bash
          git add <files touched for this U only>
@@ -1551,20 +1555,19 @@ hats:
       If a gate fails, enter the **Debug & Recovery Loop** below.
       Only emit `work.failed` after the repair budget is exhausted.
 
-      ### Debug & Recovery Loop (inside executor)
+      ### Delegated Full-Suite Repair Loop (inside executor)
 
       When the full suite is not green after the first run, repeat up to
-      **3 honest attempts** total. Each attempt is one diagnose + fix +
-      re-run cycle. If the suite is still not green after 3 attempts,
+      **3 honest attempts** total. Each attempt uses a fresh dedicated repair
+      subagent for one causally related failure cluster. The main executor
+      MUST NOT diagnose by editing files or apply repair code itself. If the
+      suite is still not green after 3 attempts,
       emit `work.failed`.
 
       #### Attempt Structure
 
-      1. **Save point** (before any change):
-         ```bash
-         git stash push -m "executor-debug-attempt-$(date +%s)" --include-untracked
-         ```
-         If `git stash` fails, use `git add -A && git commit -m "WIP: executor debug save point"` instead.
+      1. **Save point**: record `git rev-parse HEAD` and require a clean
+         non-`.ralph/` worktree. Do not stash, reset, or create a WIP commit.
 
       2. **Diagnose (causal chain gate)**:
          - Reproduce the failing test / gate with the exact command and capture full output.
@@ -1576,15 +1579,19 @@ hats:
            - the causal chain: trigger → intermediate steps → symptom
          - **Do NOT apply a fix until you can explain the complete causal chain.**
 
-      3. **Apply fix**:
-         - Make the minimal code change per the top hypothesis.
-         - Keep changes scoped to the failing gate; do not mix unrelated cleanups.
+      3. **Dispatch repair subagent**:
+         - Give one fresh subagent the failing command/output, baseline-vs-final
+           classification, relevant diff, ranked hypotheses, and implicated
+           U-ID(s). Ask it to make the minimal repair and run focused tests.
+         - The subagent edits code/tests only; it must not commit or emit.
+         - The main executor reviews scope, causal evidence, and focused test
+           output. Reject unrelated changes before committing.
 
       4. **Commit before verification (HARD RULE)**:
          - Stage only files relevant to this fix:
            ```bash
            git add <relevant files>
-           git commit -m "fix: <root-cause one-liner>
+           git commit -m "fix(scope): <U-ID|U-ID+U-ID> repair full-suite regression
 
            - diagnosis: <1-line causal chain>
            - failing gate: <command>"
@@ -1595,7 +1602,9 @@ hats:
          - Re-run the **full** test suite / gate that failed.
          - Also run any related unit tests and cross-boundary build/lint/typecheck gates.
          - If all green: proceed to the next failing gate or emit `work.done`.
-         - If still failing: revert ALL changes (`git reset --hard HEAD~1` or `git revert <commit-sha>`), record the failed hypothesis in `.ralph/agent/decisions.md`, and start the next attempt with a new diagnosis.
+         - If still failing: use `git revert <repair-commit-sha>` (never
+           `git reset --hard`), record the rejected hypothesis, and dispatch
+           a fresh repair subagent for the next attempt.
 
       6. **Record**:
          - After each attempt, append to `.ralph/agent/decisions.md`:
@@ -3605,6 +3614,10 @@ hats:
          - tests prove this Unit's behavior,
          - no unrelated cleanup or orchestration config drift,
          - no Ralph events were emitted by the subagent.
+         - run focused tests plus affected cross-boundary / integration tests
+           discoverable from this fix Unit's changed files; reserve the
+           authoritative full suite for the settlement gate unless repo docs
+           require it per change.
       5. **Per-Unit commit** (after executor phase — commits land on top of
          `executor_head_sha`):
          ```bash
@@ -3647,6 +3660,22 @@ hats:
       `failure_reason`, `failed_fix_units`, `fix_attempt_commit_sha`,
       `worktree_status: "clean"`, and verification counts. Do not
       silently stop.
+
+      If final verification finds failures introduced by this fixer diff,
+      run up to **3 delegated repair attempts** before settling partial or
+      blocked. For each attempt, choose one causally related failure cluster
+      and launch one fresh repair subagent with the failing command/output,
+      baseline-vs-final classification, relevant diff, ranked hypotheses,
+      and implicated fix Unit(s). The subagent edits code/tests and runs
+      focused tests only; it must not commit or emit. The main fixer reviews
+      and commits accepted work as
+      `fix(full-suite): <U-ID|U-ID+U-ID> <root cause>`, reruns the authoritative
+      full suite, and records the outcome. If an accepted repair still fails,
+      revert it with `git revert <repair-commit-sha>` and use a fresh subagent
+      for the next attempt. The main fixer MUST NOT edit repair code itself.
+      Only after all 3 attempts fail may introduced failures settle as
+      `fix_status: partial` or `blocked`; the loop's next review round is not
+      a substitute for making these attempts now.
 
       ### Step 5 — Empty-plan fast path
       When Step 1 fast path applies (§7b placeholder, or only P2/P3 DOC
