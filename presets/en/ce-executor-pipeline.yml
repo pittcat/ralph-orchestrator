@@ -476,16 +476,63 @@ event_loop:
             changed_lines: 320
             commit_count: 12
       work.failed:
-        required_fields: ["plan_name", "reason"]
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "planned_units"
+          - "attempted_units"
+          - "completed_units"
+          - "failed_units"
+          - "blocked_units"
+          - "skipped_units"
+          - "baseline_verification_file"
+          - "decisions_file"
+          - "reason"
         field_docs:
           plan_name:
             meaning: "plan file basename without extension; identifies which plan failed"
             source: "executor derives from plan_path"
             fill_rule: "literal copy of plan_name from the plan.ready payload"
+          plan_path:
+            meaning: "repo-relative path to the original plan"
+            source: "executor copies from plan.ready"
+            fill_rule: "literal copy; do not invent a path"
+          planned_units:
+            meaning: "complete ordered U-ID list extracted from the original plan"
+            source: "executor reads the Implementation Units section"
+            fill_rule: "include every planned U-ID, including failed or blocked Units"
           reason:
-            meaning: "sole routing signal so reporter drives terminal LOOP_COMPLETE with verdict blocked; must include the Unit status summary"
+            meaning: "evidence-backed execution failure; plan size, Unit count, file count, predicted context pressure, or predicted duration are not failures"
             source: "executor"
-            fill_rule: "starts with one of tests_not_green / build_failed / clippy_failed / unreachable; append completed / failed / blocked / skipped Unit lists and a decisions.md pointer"
+            fill_rule: "starts with tests_not_green / build_failed / clippy_failed / unreachable and names an observed failed attempt or external blocker; never use a forecast that the remaining plan may not fit"
+          attempted_units:
+            meaning: "ordered U-IDs for which a Unit subagent was actually dispatched and returned an outcome"
+            source: "executor's per-Unit dispatch log in decisions_file"
+            fill_rule: "array of U-ID strings; a Unit may not enter failed_units unless it appears here"
+          completed_units:
+            meaning: "ordered attempted U-IDs accepted by the main executor and committed independently"
+            source: "executor cross-checks the dispatch log with git log"
+            fill_rule: "subset of attempted_units and planned_units"
+          failed_units:
+            meaning: "ordered attempted U-IDs whose implementation or verification actually failed"
+            source: "Unit subagent result plus executor acceptance evidence"
+            fill_rule: "subset of attempted_units; never include a Unit that was only predicted to be difficult"
+          blocked_units:
+            meaning: "ordered unattempted U-IDs made unsafe by an explicit dependency on an actually failed Unit"
+            source: "Dependencies fields in the original plan plus failed_units"
+            fill_rule: "array of U-ID strings; record the failed dependency edge in decisions_file"
+          skipped_units:
+            meaning: "ordered U-IDs legitimately closed by the existing-commit skip path"
+            source: "flow-audit and git-log evidence"
+            fill_rule: "array of U-ID strings; remaining work, context pressure, or elapsed time are not skip reasons"
+          baseline_verification_file:
+            meaning: "baseline verifier report produced before any Unit implementation begins"
+            source: "baseline-verifier subagent"
+            fill_rule: "existing path under .ralph/review/<plan>/; do not invent a path"
+          decisions_file:
+            meaning: "execution ledger containing dispatch, acceptance, commit, failure, and dependency evidence"
+            source: "executor writes .ralph/agent/decisions.md"
+            fill_rule: "literal .ralph/agent/decisions.md after recording every planned Unit's disposition"
       review.goalalign.done:
         required_fields:
           - "plan_name"
@@ -883,8 +930,14 @@ event_loop:
           - "fixes_applied"
           - "fixes_skipped"
           - "planned_fix_units"
+          - "attempted_fix_units"
           - "completed_fix_units"
+          - "failed_fix_units"
+          - "blocked_fix_units"
           - "skipped_fix_units"
+          - "fix_status"
+          - "failure_reason"
+          - "decisions_file"
           - "baseline_verification_status"
           - "baseline_verification_file"
           - "post_verification_status"
@@ -943,14 +996,38 @@ event_loop:
             meaning: "ordered array of fix Unit U-IDs the fix plan committed to address"
             source: "fixer copies from fix_plan_file after dropping residuals/DOC kinds"
             fill_rule: "array of fix Unit U-ID strings"
+          attempted_fix_units:
+            meaning: "ordered actionable fix Units for which a Unit subagent was actually dispatched and returned"
+            source: "main fixer's per-Unit dispatch log in decisions_file"
+            fill_rule: "array of U-ID strings; failed_fix_units must be a subset"
           completed_fix_units:
             meaning: "ordered array of fix Units whose commits landed"
             source: "fixer derives from git log over the fix range"
             fill_rule: "subset of planned_fix_units; [] only when there were no planned Units (empty-plan fast path)"
           skipped_fix_units:
-            meaning: "ordered array of fix Units intentionally skipped with rationale"
+            meaning: "ordered non-actionable fix Units skipped only because they are DOC, residual, or covered by the empty-plan path"
             source: "fixer per-Unit execution log"
-            fill_rule: "array of U-ID strings; document the reason in fix_planner's fix_plan_file"
+            fill_rule: "array of U-ID strings; predicted context pressure, Unit count, or elapsed time are not skip reasons"
+          failed_fix_units:
+            meaning: "ordered attempted fix Units whose implementation or verification actually failed"
+            source: "Unit subagent outcome plus main fixer acceptance evidence"
+            fill_rule: "subset of attempted_fix_units"
+          blocked_fix_units:
+            meaning: "ordered unattempted actionable fix Units blocked by an explicit dependency on a failed fix Unit"
+            source: "Dependencies fields in fix_plan_file plus failed_fix_units"
+            fill_rule: "record each dependency edge in decisions_file"
+          fix_status:
+            meaning: "complete attempt outcome; fix.done reports applied, partial, or blocked and never implies automatic success"
+            source: "fixer settlement audit"
+            fill_rule: "one of applied, partial, blocked"
+          failure_reason:
+            meaning: "observed failure or blocker when fix_status is partial or blocked"
+            source: "subagent result, verification result, or external blocker"
+            fill_rule: "empty only for applied; plan size or predicted context pressure is forbidden"
+          decisions_file:
+            meaning: "fix execution ledger containing dispatch, acceptance, commit, failure, and dependency evidence"
+            source: "fixer writes .ralph/agent/decisions.md"
+            fill_rule: "literal .ralph/agent/decisions.md"
           baseline_verification_status:
             meaning: "result of the Step 1.5 baseline-snapshot verifier"
             source: "fixer runs the baseline-verifier subagent before any fix code lands"
@@ -1001,8 +1078,14 @@ event_loop:
             fixes_applied: 4
             fixes_skipped: 0
             planned_fix_units: ["U1", "U2", "U3", "U4"]
+            attempted_fix_units: ["U1", "U2", "U3", "U4"]
             completed_fix_units: ["U1", "U2", "U3", "U4"]
+            failed_fix_units: []
+            blocked_fix_units: []
             skipped_fix_units: []
+            fix_status: "applied"
+            failure_reason: ""
+            decisions_file: ".ralph/agent/decisions.md"
             baseline_verification_status: "green"
             baseline_verification_file: ".ralph/review/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan/baseline-verification.md"
             post_verification_status: "green"
@@ -1409,6 +1492,14 @@ hats:
         and do not let a subagent emit Ralph events. Subagents write code
         and tests only; the main executor performs review, commits, metrics,
         policy precheck, emit, and confirm.
+      - **Anti-abdication gate (HARD RULE)**: plan length, Unit count, file count,
+        predicted context pressure, and predicted duration are estimates,
+        not observed failures, and NEVER justify `work.failed` or an
+        unattempted Unit disposition. Finish baseline verification and
+        actually dispatch every independent U-ID. A U-ID may be failed only
+        after its subagent returns an observed failure; it may be blocked
+        without dispatch only when its explicit Dependencies field names an
+        actually failed U-ID.
       - **Unit isolation (HARD RULE)**: a failed U-ID is not permission to
         abandon the rest of the plan. Mark that U-ID failed, decide which
         later U-IDs depend on it, continue any independent later U-IDs, and
@@ -1639,13 +1730,14 @@ hats:
       U-IDs as blocked/skipped in decisions.md. The final event is
       `work.failed` unless every planned U-ID has a passing commit.
 
-      Main executor duties for each U:
+      Main executor acceptance duties for each U (the Unit subagent performs
+      RED / GREEN / REFACTOR; the main executor MUST NOT edit Unit code):
 
-      1. **RED**: Write or update the tests listed under that U's
-         `**Test scenarios:**` (or equivalent). Confirm they fail.
-      2. **GREEN**: Implement the minimal code per the U's
-         `**Approach:**` to make the tests pass.
-      3. **REFACTOR**: Refactor the code while keeping tests passing.
+      1. **RED acceptance**: confirm the subagent wrote or updated the tests
+         under `**Test scenarios:**` and captured a failing run.
+      2. **GREEN acceptance**: confirm the subagent implemented the minimal
+         `**Approach:**` change and the focused tests pass.
+      3. **REFACTOR acceptance**: confirm cleanup kept those tests green.
       4. **Review subagent output** before staging:
          - diff touches only files allowed by this U,
          - tests prove this U's behavior,
@@ -1698,6 +1790,13 @@ hats:
       be documented in the final payload and report.
 
       ### Emit-Readiness Reminder
+
+      Before any `work.failed` policy-check, verify that `planned_units`
+      equals the disjoint union of `completed_units`, `failed_units`,
+      `blocked_units`, and `skipped_units`, and that `failed_units` is a
+      subset of `attempted_units`. If an actionable U-ID is neither attempted
+      nor blocked by an explicit failed dependency, settlement is forbidden:
+      dispatch that Unit subagent and continue.
 
       Before you leave this activation, you MUST either emit `work.done`
       or emit `work.failed`. Code changes, commits, tests, and notes alone
@@ -1844,7 +1943,7 @@ hats:
 
       If the full suite cannot reach green:
       ```bash
-      ralph emit work.failed --json '{"plan_name":"<plan>","reason":"<one of: tests_not_green: <detail> | build_failed: <detail> | clippy_failed: <detail> | unreachable: <detail>>"}'
+      ralph emit work.failed --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","planned_units":["U1","U2"],"attempted_units":["U1"],"completed_units":[],"failed_units":["U1"],"blocked_units":["U2"],"skipped_units":[],"baseline_verification_file":".ralph/review/<plan>/baseline-verification.md","decisions_file":".ralph/agent/decisions.md","reason":"tests_not_green: U1 failed after an actual subagent attempt; U2 explicitly depends on U1"}'
       ```
       The reason MUST include the unit status summary, for example:
       `completed=[U1,U3] failed=[U2] blocked=[U4] skipped=[]; see decisions.md`.
@@ -3225,6 +3324,13 @@ hats:
         multiple Units, and do not let a subagent emit Ralph events or
         create commits. The main fixer performs review, commits, metrics,
         policy precheck, emit, and confirm.
+      - **Anti-abdication gate (HARD RULE)**: fix-plan length, Unit count,
+        file count, predicted context pressure, and predicted duration are
+        estimates, not observed failures. Finish baseline verification and
+        actually dispatch every independent actionable fix Unit. A Unit may
+        enter `failed_fix_units` only after its subagent returns an observed
+        failure; it may enter `blocked_fix_units` without dispatch only when
+        its explicit Dependencies field names an actually failed Unit.
       - Do NOT emit `work.done` / `work.failed` /
         `plan.*` / `review.*` / `align.done` / `report.done` /
         `LOOP_COMPLETE`.
@@ -3369,7 +3475,9 @@ hats:
       repository rules. The subagent must return changed files, tests run,
       and residual risks; it must not emit Ralph events or create commits.
 
-      Main fixer duties for each actionable Unit:
+      Main fixer acceptance duties for each actionable Unit (the Unit
+      subagent performs RED / GREEN / REFACTOR; the main fixer MUST NOT edit
+      Unit code):
 
       1. **RED**: ensure the Unit subagent writes or updates the test for
          this fix finding first.
@@ -3399,6 +3507,9 @@ hats:
       - DO NOT silently skip.
       - Increment `fixes_skipped` and document in `.ralph/agent/decisions.md`.
       - Continue with remaining actionable Units.
+      - Never classify an unattempted independent actionable Unit as skipped;
+        dispatch it. Use `blocked_fix_units` only for an explicit failed
+        dependency recorded in the decisions file.
 
       ### Step 4 — Full-suite verification (HARD DoD)
       After all actionable Units (or on Step 1 fast path), discover and
@@ -3406,8 +3517,9 @@ hats:
       fix-plan `## Final Verification` → original plan at `plan_path` →
       repo docs (see HARD RULE above). Run a final delta-verifier
       subagent against the baseline snapshot and classify any remaining
-      failures before emitting `fix.done`. NO `fix.done` until the final
-      verification is classified and all introduced failures are resolved.
+      failures before emitting `fix.done`. Final verification must be
+      classified before `fix.done`; unresolved introduced failures require
+      `fix_status: partial` or `blocked`, never a fabricated success.
 
       ### Step 5 — Empty-plan fast path
       When Step 1 fast path applies (§7b placeholder, or only P2/P3 DOC
@@ -3417,10 +3529,16 @@ hats:
       - Still run full-suite verification to confirm no regression.
 
       ### Step 6 — Emit event
+      Before policy-check, verify that `planned_fix_units` equals the
+      disjoint union of `completed_fix_units`, `failed_fix_units`,
+      `blocked_fix_units`, and `skipped_fix_units`; completed and failed
+      Units must be subsets of `attempted_fix_units`. If an actionable Unit
+      is neither attempted nor blocked by an explicit failed dependency,
+      settlement is forbidden: dispatch it and continue.
       Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`, and
       `verdict` as `review_verdict`.
       ```bash
-      ralph emit fix.done --json '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","executor_head_sha":"<sha>","head_sha":"<git rev-parse HEAD after final fixer commit / revert>","fix_attempt_commit_sha":"<same as head_sha or unchanged HEAD when no files changed>","worktree_status":"clean","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from review.complete>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>,"planned_fix_units":["U1","U2"],"completed_fix_units":["U1","U2"],"skipped_fix_units":[],"baseline_verification_status":"red","baseline_verification_file":".ralph/review/<plan>/baseline-verification.md","post_verification_status":"red","post_verification_file":".ralph/review/<plan>/final-verification.md","verification_delta_file":".ralph/review/<plan>/verification-delta.md","baseline_existing_count":2,"new_business_regressions_count":0,"test_compatibility_updates_count":1,"flaky_or_environmental_count":0,"fix_summary":"<brief summary>"}'
+      ralph emit fix.done --json '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","executor_head_sha":"<sha>","head_sha":"<git rev-parse HEAD after final fixer commit / revert>","fix_attempt_commit_sha":"<same as head_sha or unchanged HEAD when no files changed>","worktree_status":"clean","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from review.complete>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>,"planned_fix_units":["U1","U2"],"attempted_fix_units":["U1","U2"],"completed_fix_units":["U1"],"failed_fix_units":["U2"],"blocked_fix_units":[],"skipped_fix_units":[],"fix_status":"partial","failure_reason":"U2 verification remained red after an actual attempt","decisions_file":".ralph/agent/decisions.md","baseline_verification_status":"red","baseline_verification_file":".ralph/review/<plan>/baseline-verification.md","post_verification_status":"red","post_verification_file":".ralph/review/<plan>/final-verification.md","verification_delta_file":".ralph/review/<plan>/verification-delta.md","baseline_existing_count":2,"new_business_regressions_count":0,"test_compatibility_updates_count":1,"flaky_or_environmental_count":0,"fix_summary":"<brief summary>"}'
       ```
       Then stop. Alignment will be triggered next.
 
@@ -3431,11 +3549,11 @@ hats:
       - **Blocked verdict (`review_verdict == "blocked"`)**
         Every actionable P0/P1 Unit in the fix-plan MUST be applied.
         - If any actionable P0/P1 Unit cannot be completed, or if the full
-          suite cannot reach green after honest attempts, do NOT emit
-          `fix.done`. Stop, document the blocker in
-          `.ralph/agent/decisions.md`, and wait for operator resume/abort.
-        - Emitting `fix.done` with `review_verdict == "blocked"` and
-          `fixes_skipped > 0` is a contract violation.
+          suite cannot reach green after honest attempts, continue all
+          independent Units, then emit exactly one `fix.done` with
+          `fix_status: partial` or `blocked`, a non-empty `failure_reason`,
+          and complete Unit settlement arrays. Never silent-stop an isolated
+          activation waiting for an operator.
 
       - **Non-blocked verdict (`pass` / `pass_with_residuals`)**
         - If an actionable Unit cannot be completed: add to `fixes_skipped`,
@@ -3446,7 +3564,9 @@ hats:
           `fix.done` with the baseline/delta counts reflecting the state.
           Alignment and reporter record the residuals. If introduced
           business regressions, unresolved test-compatibility gaps, or
-          flaky/environmental issues remain, do not emit `fix.done`.
+          flaky/environmental issues remain, emit `fix.done` with
+          `fix_status: partial` or `blocked` and an honest failure reason;
+          do not claim success and do not silent-stop.
         - If the fixer discovers a sensitive value in git history, do not
           treat history rewrite as the default action. Prefer a local
           remediation that removes the secret from the working tree,
