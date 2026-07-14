@@ -2,12 +2,12 @@
 
 /// Supported LLM backend identifiers in ralph-cli.
 pub const VALID_BACKENDS: &[&str] = &[
-    "claude", "kiro", "kiro-acp", "gemini", "codex", "opencode", "pi", "traecli", "custom",
+    "claude", "gemini", "codex", "opencode", "pi", "traecli", "custom",
 ];
 
 /// Human-readable list for CLI messages and docs.
 pub const VALID_BACKENDS_LABEL: &str =
-    "claude, kiro, kiro-acp, gemini, codex, opencode, pi, traecli, custom";
+    "claude, gemini, codex, opencode, pi, traecli, custom";
 
 #[cfg(test)]
 mod tests {
@@ -46,6 +46,22 @@ mod tests {
         assert!(
             !VALID_BACKENDS_LABEL.contains("roo"),
             "VALID_BACKENDS_LABEL must not contain deleted backend 'roo'"
+        );
+    }
+
+    #[test]
+    fn test_valid_backends_does_not_contain_kiro_and_kiro_acp() {
+        assert!(
+            !VALID_BACKENDS.contains(&"kiro"),
+            "VALID_BACKENDS must not contain deleted backend 'kiro'"
+        );
+        assert!(
+            !VALID_BACKENDS.contains(&"kiro-acp"),
+            "VALID_BACKENDS must not contain deleted backend 'kiro-acp'"
+        );
+        assert!(
+            !VALID_BACKENDS_LABEL.contains("kiro"),
+            "VALID_BACKENDS_LABEL must not contain deleted backend 'kiro'"
         );
     }
 }

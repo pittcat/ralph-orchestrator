@@ -41,7 +41,7 @@ pub enum HatsCommands {
         /// Output format (unicode, ascii, compact, mermaid)
         #[arg(long, default_value = "unicode")]
         format: GraphFormat,
-        /// Backend for AI-generated diagrams (claude, kiro, gemini, codex, opencode, pi, custom)
+        /// Backend for AI-generated diagrams (claude, gemini, codex, opencode, pi, custom)
         #[arg(short = 'b', long = "backend")]
         backend: Option<String>,
     },
@@ -532,7 +532,7 @@ fn render_hat_dag_via_ai(
 /// Precedence (highest to lowest):
 /// 1. CLI flag (`--backend`)
 /// 2. Config file (`cli.backend` in ralph.yml)
-/// 3. Auto-detect (first available from claude → kiro → gemini → codex)
+/// 3. Auto-detect (first available from claude → gemini → codex)
 fn resolve_backend(flag_override: Option<&str>, config: &RalphConfig) -> Result<String> {
     // 1. CLI flag takes precedence
     if let Some(backend) = flag_override {
@@ -1494,7 +1494,6 @@ event_loop:
     #[test]
     fn test_validate_backend_name_valid() {
         assert!(validate_backend_name("claude").is_ok());
-        assert!(validate_backend_name("kiro").is_ok());
         assert!(validate_backend_name("gemini").is_ok());
         assert!(validate_backend_name("codex").is_ok());
         assert!(validate_backend_name("custom").is_ok());
@@ -1512,9 +1511,9 @@ event_loop:
     #[test]
     fn test_resolve_backend_flag_override() {
         let config = RalphConfig::default();
-        let result = resolve_backend(Some("kiro"), &config);
+        let result = resolve_backend(Some("codex"), &config);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "kiro");
+        assert_eq!(result.unwrap(), "codex");
     }
 
     #[test]

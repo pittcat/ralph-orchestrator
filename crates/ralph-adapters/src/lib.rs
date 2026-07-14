@@ -24,7 +24,6 @@
 //! allowing Ralph to orchestrate iterations. Supports interactive mode (user
 //! input forwarded) and observe mode (output-only).
 
-mod acp_executor;
 mod auto_detect;
 mod claude_stream;
 mod cli_backend;
@@ -38,7 +37,6 @@ pub mod tool_policy;
 pub mod tool_preview;
 mod trae_stream;
 
-pub use acp_executor::AcpExecutor;
 pub use auto_detect::{
     DEFAULT_PRIORITY, NoBackendError, detect_backend, detect_backend_default, is_backend_available,
 };
@@ -93,6 +91,28 @@ mod tests {
         assert!(
             !has_pub_use,
             "lib.rs must not re-export deleted `copilot_stream` types"
+        );
+    }
+
+    #[test]
+    fn test_acp_executor_module_removed() {
+        // U4: acp_executor module + AcpExecutor re-export are deleted.
+        let src = include_str!("lib.rs");
+        let has_module_decl = src
+            .lines()
+            .map(str::trim_start)
+            .any(|line| line.starts_with("mod acp_executor;"));
+        let has_pub_use = src
+            .lines()
+            .map(str::trim_start)
+            .any(|line| line.starts_with("pub use acp_executor::"));
+        assert!(
+            !has_module_decl,
+            "lib.rs must not declare deleted module `acp_executor`"
+        );
+        assert!(
+            !has_pub_use,
+            "lib.rs must not re-export deleted `AcpExecutor` type"
         );
     }
 }

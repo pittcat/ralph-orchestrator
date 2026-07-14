@@ -3,11 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ralph_adapters::{AcpExecutor, CliBackend, StreamHandler};
+use ralph_adapters::{CliBackend, StreamHandler};
 use ralph_proto::RpcEvent;
 use tracing::{info, warn};
 
-use super::acp_mock::AcpWaveExecutionResult;
 use super::io::{
     extract_readable_delta, push_to_wave_worker_buffer, read_worker_events,
     read_worker_events_with_retry, truncate_wave_worker_preview,
@@ -19,16 +18,13 @@ pub type WaveWorkerOutcome =
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WaveWorkerExecutionMode {
     Pty,
-    Acp,
 }
 
 pub fn wave_worker_execution_mode(
     output_format: ralph_adapters::OutputFormat,
 ) -> WaveWorkerExecutionMode {
-    match output_format {
-        ralph_adapters::OutputFormat::Acp => WaveWorkerExecutionMode::Acp,
-        _ => WaveWorkerExecutionMode::Pty,
-    }
+    let _ = output_format;
+    WaveWorkerExecutionMode::Pty
 }
 
 pub struct WaveWorkerStreamHandler {
@@ -124,131 +120,6 @@ pub async fn run_wave_worker(
                 worker_cwd,
             )
             .await
-        }
-        WaveWorkerExecutionMode::Acp => {
-            run_wave_worker_acp(
-                index,
-                worker_backend,
-                prompt,
-                worker_events_path,
-                wave_timeout,
-                tx,
-                worker_rpc_tx,
-                worker_tui_state,
-                worker_cwd,
-            )
-            .await
-        }
-    }
-}
-
-pub async fn execute_wave_worker_acp_prompt(
-    index: u32,
-    worker_backend: &CliBackend,
-    prompt: &str,
-    _worker_events_path: &Path,
-    wave_timeout: Duration,
-    worker_rpc_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
-    worker_tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
-    // 2026-07-03-001 supervisor real-wiring: per-worker cwd.
-    worker_cwd: Option<&Path>,
-) -> AcpWaveExecutionResult {
-    #[cfg(test)]
-    {
-        if let Some(mock) = {
-            let mut queued = super::acp_mock::MOCK_ACP_EXECUTIONS
-                .lock()
-                .expect("mock ACP execution lock");
-            queued.pop_front()
-        } {
-            mock.write_capture(worker_backend, prompt, _worker_events_path);
-            mock.write_events(_worker_events_path);
-            return match mock {
-                super::acp_mock::MockAcpExecution::Success { success, .. } => {
-                    AcpWaveExecutionResult::Completed(Ok(success))
-                }
-                super::acp_mock::MockAcpExecution::Error { error, .. } => {
-                    AcpWaveExecutionResult::Completed(Err(error))
-                }
-                super::acp_mock::MockAcpExecution::Timeout { .. } => {
-                    AcpWaveExecutionResult::TimedOut
-                }
-            };
-        }
-    }
-
-    // 2026-07-03-001 supervisor real-wiring: prefer the
-    // per-worker cwd (from `SlotBinding.worktree_path`) when
-    // supplied; fall back to the process CWD for the legacy
-    // dispatcher path.
-    let workspace_root = worker_cwd
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let executor = AcpExecutor::new(worker_backend.clone(), workspace_root);
-    let mut handler = WaveWorkerStreamHandler::new(index, worker_rpc_tx, worker_tui_state);
-
-    match tokio::time::timeout(wave_timeout, executor.execute(prompt, &mut handler)).await {
-        Ok(Ok(result)) => AcpWaveExecutionResult::Completed(Ok(result.success)),
-        Ok(Err(e)) => AcpWaveExecutionResult::Completed(Err(e.to_string())),
-        Err(_) => AcpWaveExecutionResult::TimedOut,
-    }
-}
-
-pub async fn run_wave_worker_acp(
-    index: u32,
-    worker_backend: &CliBackend,
-    prompt: &str,
-    worker_events_path: &Path,
-    wave_timeout: Duration,
-    tx: tokio::sync::mpsc::UnboundedSender<(u32, bool, Duration)>,
-    worker_rpc_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
-    worker_tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
-    worker_cwd: Option<&Path>,
-) -> (u32, WaveWorkerOutcome) {
-    let start = std::time::Instant::now();
-    let result = execute_wave_worker_acp_prompt(
-        index,
-        worker_backend,
-        prompt,
-        worker_events_path,
-        wave_timeout,
-        worker_rpc_tx,
-        worker_tui_state,
-        worker_cwd,
-    )
-    .await;
-    let duration = start.elapsed();
-    let events = read_worker_events(worker_events_path);
-    let _ = fs::remove_file(worker_events_path);
-
-    match result {
-        AcpWaveExecutionResult::Completed(Ok(success)) => {
-            let _ = tx.send((index, success, duration));
-            (index, Ok((events, duration, success)))
-        }
-        AcpWaveExecutionResult::Completed(Err(error)) => {
-            let _ = tx.send((index, false, duration));
-            (
-                index,
-                Err((format!("ACP worker failed: {error}"), duration)),
-            )
-        }
-        AcpWaveExecutionResult::TimedOut if events.is_empty() => {
-            let _ = tx.send((index, false, duration));
-            (
-                index,
-                Err((
-                    format!(
-                        "Worker timed out after {}s without emitting events",
-                        wave_timeout.as_secs()
-                    ),
-                    duration,
-                )),
-            )
-        }
-        AcpWaveExecutionResult::TimedOut => {
-            let _ = tx.send((index, false, duration));
-            (index, Ok((events, duration, false)))
         }
     }
 }

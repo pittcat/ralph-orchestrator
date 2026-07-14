@@ -88,7 +88,7 @@ use ralph_core::payload_contract::validate_payload_contract;
 /// There is no skip flag for this gate. Plan non-regression: payload contract
 /// gate is required and cannot be bypassed.
 use ralph_adapters::{
-    AcpExecutor, ClaudeStreamEvent, ClaudeStreamParser, CliBackend, CliExecutor,
+    ClaudeStreamEvent, ClaudeStreamParser, CliBackend, CliExecutor,
     ConsoleStreamHandler, ContentBlock, JsonRpcStreamHandler,
     OutputFormat as BackendOutputFormat, PiAssistantEvent, PiStreamEvent, PiStreamParser,
     PrettyStreamHandler, PtyConfig, PtyExecutor, QuietStreamHandler, TuiStreamHandler,

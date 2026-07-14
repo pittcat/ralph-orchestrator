@@ -113,7 +113,7 @@ pub fn truncate_wave_worker_preview(text: &str) -> String {
 /// Extract a human-readable text delta from a single stdout line.
 pub fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) -> Option<String> {
     match output_format {
-        BackendOutputFormat::Text | BackendOutputFormat::Acp => Some(format!("{line}\n")),
+        BackendOutputFormat::Text => Some(format!("{line}\n")),
         BackendOutputFormat::StreamJson => {
             use ralph_adapters::{ClaudeStreamEvent, ClaudeStreamParser, ContentBlock};
             match ClaudeStreamParser::parse_line(line) {

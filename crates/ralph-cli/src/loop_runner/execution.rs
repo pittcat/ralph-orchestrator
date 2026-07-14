@@ -133,67 +133,6 @@ pub fn prepare_tui_iteration(
     state.latest_iteration_lines_handle()
 }
 
-/// Execute a prompt via ACP (Agent Client Protocol) for kiro-acp backend.
-pub async fn execute_acp(
-    backend: &CliBackend,
-    config: &RalphConfig,
-    prompt: &str,
-    verbosity: Verbosity,
-    tui_lines: Option<Arc<std::sync::Mutex<Vec<ratatui::text::Line<'static>>>>>,
-    rpc_stdout: Option<Arc<std::sync::Mutex<std::io::Stdout>>>,
-    iteration: u32,
-    hat: &str,
-    backend_name: &str,
-) -> Result<ExecutionOutcome> {
-    let executor = AcpExecutor::new(backend.clone(), config.core.workspace_root.clone());
-
-    let pty_result = if let Some(lines) = tui_lines {
-        let mut handler = TuiStreamHandler::with_lines(verbosity == Verbosity::Verbose, lines);
-        executor.execute(prompt, &mut handler).await?
-    } else if let Some(stdout_writer) = rpc_stdout {
-        let mut handler = JsonRpcStreamHandler::new(
-            stdout_writer,
-            iteration,
-            Some(hat.to_string()),
-            Some(backend_name.to_string()),
-        );
-        executor.execute(prompt, &mut handler).await?
-    } else {
-        match verbosity {
-            Verbosity::Quiet => {
-                let mut handler = QuietStreamHandler;
-                executor.execute(prompt, &mut handler).await?
-            }
-            Verbosity::Normal => {
-                let mut handler = ConsoleStreamHandler::new(false);
-                executor.execute(prompt, &mut handler).await?
-            }
-            Verbosity::Verbose => {
-                let mut handler = ConsoleStreamHandler::new(true);
-                executor.execute(prompt, &mut handler).await?
-            }
-        }
-    };
-
-    let output = if pty_result.extracted_text.is_empty() {
-        pty_result.stripped_output
-    } else {
-        pty_result.extracted_text
-    };
-
-    Ok(ExecutionOutcome {
-        output,
-        success: pty_result.success,
-        termination: None,
-        watchdog_timeout: false,
-        total_cost_usd: pty_result.total_cost_usd,
-        input_tokens: pty_result.input_tokens,
-        output_tokens: pty_result.output_tokens,
-        cache_read_tokens: pty_result.cache_read_tokens,
-        cache_write_tokens: pty_result.cache_write_tokens,
-    })
-}
-
 pub async fn execute_pty(
     executor: Option<&mut PtyExecutor>,
     backend: &CliBackend,

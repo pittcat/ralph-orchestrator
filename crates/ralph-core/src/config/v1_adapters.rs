@@ -15,10 +15,6 @@ pub struct AdaptersConfig {
     #[serde(default)]
     pub gemini: AdapterSettings,
 
-    /// Kiro adapter settings.
-    #[serde(default)]
-    pub kiro: AdapterSettings,
-
     /// Codex adapter settings.
     #[serde(default)]
     pub codex: AdapterSettings,
