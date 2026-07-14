@@ -8,7 +8,7 @@
 | Repo 内 YAML | `presets/en/debug.yml` |
 | Local | `.ralph/hats/my-workflow.yml` |
 
-可加 `-c ralph.yml` 指定 core config（local preset 常用）。
+可加 `-c ralph.yml` 指定 core config（local preset 常用）。Custom 项目配置文件名同样支持：`-c myapp.yml` 或 `RALPH_CONFIG=myapp.yml` 都会走 discovery SSOT（`ConfigSource::File` → `$RALPH_CONFIG` → `ralph.yml` / `ralph.yaml`），agent-facing tool (`ralph tools task`、`ralph emit` 等) 都会读到同一份。Runner 启动 hat 子进程时会自动注入 `RALPH_CONFIG`，AAF 评审不再要求把 custom 文件 symlink 成 `ralph.yml`。
 
 ## 机械门禁（review 默认）
 

@@ -3110,6 +3110,10 @@ async fn run_loop_impl_inner(
         } else {
             event_loop.triggered_hat().map(|h| h.as_str().to_string())
         };
+        let injected_config_path = config
+            .config_path
+            .as_deref()
+            .and_then(|path| (!path.as_os_str().is_empty()).then_some(path));
         inject_hat_execution_env(
             &mut effective_backend,
             display_hat.as_str(),
@@ -3117,6 +3121,7 @@ async fn run_loop_impl_inner(
             &events_path,
             triggered_hat.as_deref(),
             hats_source_label.as_deref(),
+            injected_config_path,
         );
         // R1 (2026-06-14-003 plan): expose the wave context as the
         // `RALPH_WAVE_CONTEXT` env var so the agent's bash tool can
@@ -4277,6 +4282,10 @@ async fn run_loop_impl_inner(
                     // `event_policy.schemas` even when the parent
                     // process env does not carry RALPH_HATS_SOURCE.
                     hats_source_label.as_deref(),
+                    // 2026-07-13-001 plan U2: forward the loop's
+                    // resolved project config path so wave workers
+                    // inherit RALPH_CONFIG.
+                    config.config_path.as_deref().filter(|p| !p.as_os_str().is_empty()),
                     // 2026-07-03-001 supervisor real-wiring: pass
                     // the loop-wide bridge through so the dispatcher
                     // takes the supervisor path when `enabled &&

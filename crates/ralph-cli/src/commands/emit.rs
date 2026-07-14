@@ -560,13 +560,32 @@ fn emit_command_with_root_and_hats(
 
         // Prefer explicitly-passed `--config` sources (so operators can
         // inspect a preset's protocol view without a ralph.yml pointing
-        // at it). Fall back to workspace discovery when none provided.
+        // at it). Fall back to the project-config discovery SSOT
+        // (`-c` File → `RALPH_CONFIG` → `ralph.yml` → `ralph.yaml`)
+        // so `ralph emit --schema` works for operators who keep
+        // their custom project config without a `ralph.yml`
+        // symlink. The resolver is only consulted when no
+        // explicit sources are present; explicit sources keep
+        // the historical warn-on-multiple behaviour.
         let owned_config_sources: Vec<ConfigSource>;
         let effective_config_sources: &[ConfigSource] = if !config_sources.is_empty() {
             config_sources
         } else {
-            let config_path = config_resolution::find_workspace_config_path(&workspace_root)
-                .unwrap_or_else(|| workspace_root.join("ralph.yml"));
+            let resolved = config_resolution::resolve_project_config_path(
+                &workspace_root,
+                config_sources,
+            );
+            let config_path = match resolved {
+                Some(path) => path,
+                None => {
+                    anyhow::bail!(
+                        "Cannot render protocol view for `{schema_topic}`: no project config found. \
+                         The schema view is built from the loaded preset, so the workspace must have \
+                         a discoverable ralph.yml / ralph.yaml, set $RALPH_CONFIG, or pass \
+                         --config <preset-or-ralph.yml>."
+                    );
+                }
+            };
             if !config_path.exists() {
                 anyhow::bail!(
                     "Cannot render protocol view for `{schema_topic}`: no ralph.yml \
@@ -639,17 +658,28 @@ fn emit_command_with_root_and_hats(
     let config = if should_load_config {
         // Prefer explicitly-passed `--config` sources (so operators can
         // target a preset without a workspace ralph.yml). Fall back to
-        // workspace discovery when none provided.
+        // the project-config discovery SSOT (`-c` File → `RALPH_CONFIG`
+        // → `ralph.yml` → `ralph.yaml`) so emit / policy-check honour
+        // every supported input without requiring a `ralph.yml`
+        // symlink.
         let owned_config_sources: Vec<ConfigSource>;
         let effective_config_sources: &[ConfigSource] = if !config_sources.is_empty() {
             config_sources
         } else {
-            let config_path = config_resolution::find_workspace_config_path(&workspace_root)
-                .unwrap_or_else(|| workspace_root.join("ralph.yml"));
+            let resolved = config_resolution::resolve_project_config_path(
+                &workspace_root,
+                config_sources,
+            );
+            let config_path = resolved.unwrap_or_else(|| workspace_root.join("ralph.yml"));
             owned_config_sources = vec![ConfigSource::File(config_path.clone())];
             &owned_config_sources
         };
-        let discovered_config_path = config_resolution::find_workspace_config_path(&workspace_root)
+        let discovered_config_path = effective_config_sources
+            .iter()
+            .find_map(|source| match source {
+                ConfigSource::File(path) => Some(path.clone()),
+                _ => None,
+            })
             .unwrap_or_else(|| workspace_root.join("ralph.yml"));
         match crate::preflight::load_config_for_preflight_sync(
             effective_config_sources,

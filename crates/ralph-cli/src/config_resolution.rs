@@ -180,6 +180,93 @@ pub(crate) fn find_workspace_config_path(root: &Path) -> Option<PathBuf> {
         .find(|path| path.exists())
 }
 
+/// Resolves the project configuration file used by workspace-facing commands.
+///
+/// Discovery order (2026-07-13-001 plan R1 + review #C2):
+/// 1. The first `ConfigSource::File` listed by the caller. If it is
+///    `Some(File(path))` it always wins, even when the file does
+///    not exist on disk. This mirrors the existing
+///    `load_config_with_overrides` warn-on-first behaviour and
+///    prevents the resolver from "skipping" a missing leading
+///    `-c` source to pick up a later one (which would diverge
+///    from the loop / preflight / clean paths).
+/// 2. `$RALPH_CONFIG` (trim non-empty).
+/// 3. `<workspace>/ralph.yml` / `<workspace>/ralph.yaml` via
+///    [`find_workspace_config_path`].
+///
+/// Non-file sources (Remote / Builtin / Override) are intentionally
+/// skipped because this synchronous discovery path cannot load them.
+pub(crate) fn resolve_project_config_path(
+    workspace_root: &Path,
+    config_sources: &[ConfigSource],
+) -> Option<PathBuf> {
+    // Honour the caller's explicit first primary source. When the
+    // caller has not provided a File source at all (the empty
+    // slice / Remote-only case), fall through to env and workspace
+    // discovery — that is the only path allowed to find a config
+    // without an explicit user-provided File.
+    let primary = config_sources
+        .iter()
+        .find_map(|source| match source {
+            ConfigSource::File(path) => Some(path.clone()),
+            _ => None,
+        });
+    let resolved = match primary {
+        Some(path) => {
+            // Caller supplied a File source. If it exists on disk we
+            // trust it; if it does not, fall through to env/default
+            // so the agent surfaces a single, typed
+            // "no project config found" hint instead of silently
+            // adopting a later `-c` File (which the main runner
+            // explicitly ignores with "Multiple config sources
+            // specified, using first one. Others ignored.").
+            if path.exists() {
+                Some(path)
+            } else {
+                env_then_workspace(workspace_root)
+            }
+        }
+        None => env_then_workspace(workspace_root),
+    };
+    resolved
+}
+
+fn env_then_workspace(workspace_root: &Path) -> Option<PathBuf> {
+    let env_config = std::env::var("RALPH_CONFIG")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from);
+    env_config.or_else(|| find_workspace_config_path(workspace_root))
+}
+
+/// Test helper that mirrors [`resolve_project_config_path`] but
+/// threads an explicit `env_config` override instead of reading
+/// `std::env::var("RALPH_CONFIG")`. Kept in sync with the public
+/// behaviour: honours the caller's first primary `ConfigSource::File`
+/// and falls through to `env_config` / workspace discovery only when
+/// the caller passed no File source.
+fn resolve_project_config_path_with_env(
+    workspace_root: &Path,
+    config_sources: &[ConfigSource],
+    env_config: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let primary = config_sources.iter().find_map(|source| match source {
+        ConfigSource::File(path) => Some(path.clone()),
+        _ => None,
+    });
+    let fallback = move || {
+        env_config
+            .clone()
+            .or_else(|| find_workspace_config_path(workspace_root))
+    };
+    match primary {
+        Some(path) if path.exists() => Some(path),
+        Some(_) | None => fallback(),
+    }
+}
+
+
+
 fn user_config_path_from_home(home: Option<&Path>) -> Option<PathBuf> {
     Some(home?.join(".ralph").join("config.yml"))
 }
@@ -208,6 +295,166 @@ mod tests {
         let path = user_config_path_from_home(Some(Path::new("/tmp/test-home")))
             .expect("path should exist");
         assert_eq!(path, PathBuf::from("/tmp/test-home/.ralph/config.yml"));
+    }
+
+    #[test]
+    fn resolve_project_config_path_explicit_file_wins() {
+        let temp = tempfile::tempdir().unwrap();
+        let explicit = temp.path().join("custom.yml");
+        let default = temp.path().join("ralph.yml");
+        std::fs::write(&explicit, "cli: {}\n").unwrap();
+        std::fs::write(&default, "cli: {}\n").unwrap();
+
+        let resolved = resolve_project_config_path_with_env(
+            temp.path(),
+            &[ConfigSource::File(explicit.clone())],
+            Some(temp.path().join("env.yml")),
+        );
+
+        assert_eq!(resolved, Some(explicit));
+    }
+
+    #[test]
+    fn resolve_project_config_path_uses_env_without_explicit_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let env_path = temp.path().join("custom.yml");
+        std::fs::write(&env_path, "cli: {}\n").unwrap();
+
+        let resolved =
+            resolve_project_config_path_with_env(temp.path(), &[], Some(env_path.clone()));
+
+        assert_eq!(resolved, Some(env_path));
+    }
+
+    #[test]
+    fn resolve_project_config_path_supports_default_extensions() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let yaml = temp.path().join("ralph.yaml");
+        std::fs::write(&yaml, "cli: {}\n").unwrap();
+        assert_eq!(
+            resolve_project_config_path_with_env(temp.path(), &[], None),
+            Some(yaml.clone())
+        );
+
+        let yml = temp.path().join("ralph.yml");
+        std::fs::write(&yml, "cli: {}\n").unwrap();
+        assert_eq!(
+            resolve_project_config_path_with_env(temp.path(), &[], None),
+            Some(yml)
+        );
+    }
+
+    #[test]
+    fn resolve_project_config_path_missing_file_falls_back_to_env() {
+        let temp = tempfile::tempdir().unwrap();
+        let env_path = temp.path().join("env.yml");
+        std::fs::write(&env_path, "cli: {}\n").unwrap();
+
+        let resolved = resolve_project_config_path_with_env(
+            temp.path(),
+            &[ConfigSource::File(temp.path().join("missing.yml"))],
+            Some(env_path.clone()),
+        );
+
+        assert_eq!(resolved, Some(env_path));
+    }
+
+    #[test]
+    fn resolve_project_config_path_without_env_uses_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let default = temp.path().join("ralph.yml");
+        std::fs::write(&default, "cli: {}\n").unwrap();
+
+        let resolved = resolve_project_config_path_with_env(temp.path(), &[], None);
+
+        assert_eq!(resolved, Some(default));
+    }
+
+    // 2026-07-13-001 plan + review #C2: when the caller provides
+    // a primary `ConfigSource::File` that does not exist on disk,
+    // the resolver must NOT silently fall through to env and pick
+    // up a different file. The fix below mirrors the
+    // `load_config_with_overrides` warn-on-first behaviour.
+    #[test]
+    fn resolve_project_config_path_does_not_skip_missing_first_explicit_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing.yml");
+        let second = temp.path().join("second.yml");
+        std::fs::write(&second, "cli: {}\n").unwrap();
+        // No ralph.yml in the workspace either, so the env/workspace
+        // fallback chain must return `None`.
+        let resolved = resolve_project_config_path_with_env(
+            temp.path(),
+            &[
+                ConfigSource::File(missing),
+                ConfigSource::File(second.clone()),
+            ],
+            None,
+        );
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn resolve_project_config_path_existing_first_file_wins_even_when_env_present() {
+        let temp = tempfile::tempdir().unwrap();
+        let explicit = temp.path().join("custom.yml");
+        let env_path = temp.path().join("from-env.yml");
+        std::fs::write(&explicit, "cli: {}\n").unwrap();
+        std::fs::write(&env_path, "cli: {}\n").unwrap();
+
+        // env was trimmed and valid; explicit File exists. Explicit
+        // file should win (R1 priority).
+        let resolved = resolve_project_config_path_with_env(
+            temp.path(),
+            &[ConfigSource::File(explicit.clone())],
+            Some(env_path),
+        );
+        assert_eq!(resolved, Some(explicit));
+    }
+
+    // 2026-07-13-001 plan U6: end-to-end precedence regression
+    // covering every supported discovery input. The test pins
+    // the order: `-c` File > $RALPH_CONFIG > ralph.yml >
+    // ralph.yaml, and confirms the legacy "ralph.yml only"
+    // workspace keeps working unchanged.
+    #[test]
+    fn resolve_project_config_path_precedence_is_stable() {
+        let temp = tempfile::tempdir().unwrap();
+        let explicit = temp.path().join("custom.yml");
+        let env_file = temp.path().join("from-env.yml");
+        let yml_default = temp.path().join("ralph.yml");
+        let yaml_default = temp.path().join("ralph.yaml");
+        for p in [&explicit, &env_file, &yml_default, &yaml_default] {
+            std::fs::write(p, "cli: {}\n").unwrap();
+        }
+
+        // 1) -c wins over everything.
+        assert_eq!(
+            resolve_project_config_path_with_env(
+                temp.path(),
+                &[ConfigSource::File(explicit.clone())],
+                Some(env_file.clone())
+            ),
+            Some(explicit.clone())
+        );
+        // 2) $RALPH_CONFIG wins when no -c.
+        assert_eq!(
+            resolve_project_config_path_with_env(temp.path(), &[], Some(env_file.clone())),
+            Some(env_file.clone())
+        );
+        // 3) ralph.yml beats ralph.yaml.
+        assert_eq!(
+            resolve_project_config_path_with_env(temp.path(), &[], None),
+            Some(yml_default.clone())
+        );
+
+        // Drop the `ralph.yml` and re-assert ralph.yaml takes over.
+        std::fs::remove_file(&yml_default).unwrap();
+        assert_eq!(
+            resolve_project_config_path_with_env(temp.path(), &[], None),
+            Some(yaml_default.clone())
+        );
     }
 
     #[test]

@@ -32,6 +32,12 @@ pub struct WaveOutputs<'a> {
     /// inherits the loop's `event_policy.schemas` via `RALPH_HATS_SOURCE`.
     /// When `None`, the dispatcher falls back to the parent process env.
     pub hats_source_label: Option<&'a str>,
+    /// 2026-07-13-001 plan U2: project config file path forwarded
+    /// to each wave worker so its in-process `ralph tools task` /
+    /// `ralph emit` discover the same project config the loop was
+    /// started with via `RALPH_CONFIG`. `None` means do not inject
+    /// (the worker keeps falling back to the parent process env).
+    pub config_path: Option<&'a std::path::Path>,
 }
 
 /// Optional limits a runner can impose on a wave dispatch.
@@ -296,6 +302,12 @@ pub async fn handle_wave_events(
     // wave worker so its in-process `ralph emit` / `ralph wave emit`
     // inherits the loop's `event_policy.schemas` via `RALPH_HATS_SOURCE`.
     hats_source_label: Option<&str>,
+    // 2026-07-13-001 plan U2: project config file path forwarded
+    // to each wave worker so its in-process `ralph tools task` /
+    // `ralph emit` discover the same project config the loop was
+    // started with via `RALPH_CONFIG`. `None` means do not inject
+    // (the worker keeps falling back to the parent process env).
+    config_path: Option<&std::path::Path>,
     // 2026-07-03-001 supervisor real-wiring: when `Some`, the
     // dispatcher takes the supervisor path (`register_wave_if_absent`
     // → `bind_slot` per slot → `dispatch_wave_inner` with per-worker
@@ -326,12 +338,25 @@ pub async fn handle_wave_events(
         max_wave_total,
     );
 
+    // 2026-07-13-001 plan U2: read the loop's resolved project
+    // config path once and forward it to every wave worker. Clone
+    // the `PathBuf` so the immutable borrow on `event_loop` is
+    // released before later mutable calls.
+    let config_path: Option<std::path::PathBuf> = event_loop
+        .config()
+        .config_path
+        .as_deref()
+        .and_then(|path| (!path.as_os_str().is_empty()).then_some(path))
+        .map(|p| p.to_path_buf());
+    let config_path_ref = config_path.as_deref();
+
     let out = WaveOutputs {
         use_colors,
         show_cli: tui_state.is_none() && !enable_rpc,
         rpc_tx: rpc_event_tx,
         tui: tui_state,
         hats_source_label,
+        config_path: config_path_ref,
     };
 
     // U2: emit a single structured `plan.blocked` per rejected wave and
@@ -450,6 +475,7 @@ pub async fn handle_wave_events(
             // each wave worker's `ralph emit` / `ralph wave emit`
             // inherits the loop's `event_policy.schemas`.
             out.hats_source_label.as_deref(),
+            out.config_path,
             // 2026-07-03-001 supervisor real-wiring: forward the
             // optional supervisor bridge so the dispatcher can take
             // the per-slot worktree path when `supervisor.enabled: true`.
@@ -840,6 +866,10 @@ pub async fn execute_wave(
         // Legacy wrapper has no runner-supplied hat-source label;
         // the dispatcher falls back to the parent process env var.
         None,
+        // 2026-07-13-001 plan U2: legacy wrapper has no
+        // runner-supplied config path; the dispatcher keeps
+        // falling back to the parent process env.
+        None,
         // 2026-07-03-001 supervisor real-wiring: legacy wrapper
         // has no supervisor bridge; the dispatcher takes the
         // `WaveTracker` path.
@@ -900,6 +930,12 @@ pub async fn execute_wave_structured(
     // the parent process env var — this preserves the legacy wrapper
     // path for callers that have not yet threaded the label.
     hats_source_label: Option<&str>,
+    // 2026-07-13-001 plan U2: project config file path forwarded
+    // to each wave worker so its in-process `ralph tools task` /
+    // `ralph emit` discover the same project config the loop was
+    // started with via `RALPH_CONFIG`. `None` means do not inject
+    // the env var (worker keeps falling back to its own discovery).
+    config_path: Option<&std::path::Path>,
     // 2026-07-03-001 supervisor real-wiring: when `Some`, the
     // dispatcher delegates to `execute_wave_via_supervisor`
     // (per-slot worktree + `register_wave_if_absent` + `bind_slot`).
@@ -924,6 +960,7 @@ pub async fn execute_wave_structured(
             loop_id,
             limits,
             hats_source_label,
+            config_path,
             bridge,
         )
         .await;
@@ -1049,6 +1086,7 @@ pub async fn execute_wave_structured(
             &worker_events_file,
             None,
             hats_source_label,
+            config_path,
         );
 
         // Apply hat backend args
@@ -1160,6 +1198,7 @@ async fn execute_wave_via_supervisor(
     loop_id: &str,
     limits: WaveDispatchLimits,
     hats_source_label: Option<&str>,
+    config_path: Option<&std::path::Path>,
     bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
 ) -> WaveDispatchOutcome {
     use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
@@ -1218,6 +1257,7 @@ async fn execute_wave_via_supervisor(
                 loop_id,
                 limits,
                 hats_source_label,
+                config_path,
                 None,
             ))
             .await;
@@ -1295,6 +1335,7 @@ async fn execute_wave_via_supervisor(
             &worker_events_file,
             None,
             hats_source_label,
+            config_path,
         );
 
         if let Some(ref args) = hat_config.backend_args {
@@ -2569,6 +2610,10 @@ hats: {}
             // propagation path; leave the label None to fall back to
             // the parent process env.
             hats_source_label: None,
+            // 2026-07-13-001 plan U2: tests do not exercise
+            // RALPH_CONFIG injection; leave None to keep the
+            // pre-U2 behaviour.
+            config_path: None,
         }
     }
 
@@ -4024,6 +4069,9 @@ hats: {}
             Some(tokio::time::Instant::now()),
             // Plan 001 §4.3 C1: hats_source_label is irrelevant for
             // empty input but is now part of the signature.
+            None,
+            // 2026-07-13-001 plan U2: config_path is irrelevant for
+            // empty input; `None` keeps the pre-U2 behaviour.
             None,
             // 2026-07-03-001 supervisor real-wiring: legacy test
             // path; `None` keeps the WaveTracker shape.

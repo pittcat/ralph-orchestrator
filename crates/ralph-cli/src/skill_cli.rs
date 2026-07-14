@@ -60,13 +60,20 @@ pub struct ListArgs {
 }
 
 /// Execute a skill command.
-pub fn execute(args: SkillArgs) -> Result<()> {
+pub fn execute(
+    args: SkillArgs,
+    config_sources: &[crate::cli::shared::ConfigSource],
+) -> Result<()> {
     let root = resolve_root(args.root)?;
     let ctx = OperationContext::detect(root.clone());
 
     match args.command {
-        SkillCommands::Load(load_args) => execute_load(&root, &ctx, &load_args.name),
-        SkillCommands::List(list_args) => execute_list(&root, &ctx, list_args),
+        SkillCommands::Load(load_args) => {
+            execute_load(&root, &ctx, &load_args.name, config_sources)
+        }
+        SkillCommands::List(list_args) => {
+            execute_list(&root, &ctx, list_args, config_sources)
+        }
     }
 }
 
@@ -86,8 +93,13 @@ fn resolve_skill_hat_filter(ctx: &OperationContext) -> Result<Option<String>> {
     Ok(Some(hat.to_string()))
 }
 
-fn execute_load(root: &Path, ctx: &OperationContext, name: &str) -> Result<()> {
-    let registry = build_registry(root)?;
+fn execute_load(
+    root: &Path,
+    ctx: &OperationContext,
+    name: &str,
+    config_sources: &[crate::cli::shared::ConfigSource],
+) -> Result<()> {
+    let registry = build_registry(root, config_sources)?;
     let hat_filter = resolve_skill_hat_filter(ctx)?;
 
     // Agent load: only allow skills visible to the current hat, and
@@ -127,8 +139,13 @@ fn execute_load(root: &Path, ctx: &OperationContext, name: &str) -> Result<()> {
     std::process::exit(1);
 }
 
-fn execute_list(root: &Path, ctx: &OperationContext, args: ListArgs) -> Result<()> {
-    let registry = build_registry(root)?;
+fn execute_list(
+    root: &Path,
+    ctx: &OperationContext,
+    args: ListArgs,
+    config_sources: &[crate::cli::shared::ConfigSource],
+) -> Result<()> {
+    let registry = build_registry(root, config_sources)?;
     let hat_filter = resolve_skill_hat_filter(ctx)?;
     let mut skills = registry.skills_for_hat(hat_filter.as_deref());
     skills.sort_by_key(|skill| skill.name.clone());
@@ -181,8 +198,11 @@ fn execute_list(root: &Path, ctx: &OperationContext, args: ListArgs) -> Result<(
     Ok(())
 }
 
-fn build_registry(root: &Path) -> Result<SkillRegistry> {
-    let config = load_config(root);
+fn build_registry(
+    root: &Path,
+    config_sources: &[crate::cli::shared::ConfigSource],
+) -> Result<SkillRegistry> {
+    let config = load_config(root, config_sources);
     let active_backend = Some(config.cli.backend.as_str());
     SkillRegistry::from_config(&config.skills, root, active_backend)
         .context("Failed to build skill registry")
@@ -313,7 +333,18 @@ fn resolve_configured_skills_dir(root: &Path, dir: &Path) -> PathBuf {
 }
 
 /// Load config from workspace root, falling back to defaults.
-fn load_config(root: &Path) -> RalphConfig {
+/// Load config from workspace root, falling back to defaults.
+///
+/// 2026-07-13-001 plan U4 + review #C3: when the caller passes
+/// `config_sources` (e.g. `-c custom.yml` from the top-level CLI),
+/// the skill registry must honour the same project-config discovery
+/// SSOT. With `config_sources` empty we still consult
+/// `RALPH_CONFIG` (via the SSOT helper) so agents inheriting the
+/// runner-injected env continue to work.
+fn load_config(
+    root: &Path,
+    config_sources: &[crate::cli::shared::ConfigSource],
+) -> RalphConfig {
     let mut merged = match config_resolution::default_core_value() {
         Ok(value) => value,
         Err(_) => return RalphConfig::default(),
@@ -327,7 +358,7 @@ fn load_config(root: &Path) -> RalphConfig {
         }
     }
 
-    if let Some(path) = config_resolution::find_workspace_config_path(root)
+    if let Some(path) = config_resolution::resolve_project_config_path(root, config_sources)
         && let Ok(content) = std::fs::read_to_string(&path)
         && let Ok(value) =
             config_resolution::parse_yaml_value(&content, &path.display().to_string())

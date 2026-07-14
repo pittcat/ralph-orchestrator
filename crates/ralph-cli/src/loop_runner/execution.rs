@@ -54,6 +54,15 @@ pub(crate) struct ExecutionOutcome {
 /// process env so call sites that don't yet thread the explicit label still
 /// forward whatever the launcher set. Call sites with the explicit value
 /// always win.
+///
+/// `config_path` carries the resolved project config file path. The retain
+/// list strips any stale `RALPH_CONFIG` the parent process may have leaked.
+/// 2026-07-13-001 plan U2 + review #C5: align `RALPH_CONFIG` with the
+/// `RALPH_HATS_SOURCE` fallback semantics. When the caller has no
+/// explicit config path (legacy `execute_wave` wrapper, defaults-only
+/// runs, ...), keep the parent env value so the hat subprocess
+/// inherits whatever the launcher set. When the caller does pass a
+/// path, it always wins.
 pub fn inject_hat_execution_env(
     backend: &mut CliBackend,
     current_hat: &str,
@@ -61,11 +70,19 @@ pub fn inject_hat_execution_env(
     events_file: &std::path::Path,
     triggered_hat: Option<&str>,
     hats_source_label: Option<&str>,
+    config_path: Option<&std::path::Path>,
 ) {
     let resolved_label = hats_source_label
         .map(|s| s.to_string())
         .or_else(|| std::env::var("RALPH_HATS_SOURCE").ok())
         .filter(|s| !s.is_empty());
+    let resolved_config = config_path
+        .map(|p| p.display().to_string())
+        .or_else(|| {
+            std::env::var("RALPH_CONFIG")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        });
     backend.env_vars.retain(|(k, _)| {
         !matches!(
             k.as_str(),
@@ -74,6 +91,7 @@ pub fn inject_hat_execution_env(
                 | "RALPH_EVENTS_FILE"
                 | "RALPH_TRIGGERED_HAT"
                 | "RALPH_HATS_SOURCE"
+                | "RALPH_CONFIG"
         )
     });
     backend
@@ -93,6 +111,9 @@ pub fn inject_hat_execution_env(
     }
     if let Some(label) = resolved_label {
         backend.env_vars.push(("RALPH_HATS_SOURCE".into(), label));
+    }
+    if let Some(path) = resolved_config {
+        backend.env_vars.push(("RALPH_CONFIG".into(), path));
     }
 }
 

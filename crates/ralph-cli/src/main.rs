@@ -460,7 +460,9 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Some(Commands::Tools(args)) => tools::execute(args, cli.color.should_use_colors()).await,
+        Some(Commands::Tools(args)) => {
+            tools::execute(args, cli.color.should_use_colors(), &config_sources).await
+        }
         Some(Commands::Wave(args)) => wave::execute(args, cli.color.should_use_colors()),
         Some(Commands::Loops(args)) => loops::execute(args, cli.color.should_use_colors()),
         Some(Commands::Hats(args)) => {

@@ -8,7 +8,7 @@ These options are accepted by all commands.
 
 | Option | Description |
 |--------|-------------|
-| `-c, --config <CONFIG>` | Core configuration source: file path, URL, or `core.field=value` override. Can be specified multiple times. If not set, defaults to `ralph.yml` or `$RALPH_CONFIG`. |
+| `-c, --config <CONFIG>` | Core configuration source: file path, URL, or `core.field=value` override. Can be specified multiple times. If not set, defaults to `ralph.yml` or `$RALPH_CONFIG`. Subcommands that load project config on the agent side (`ralph tools task`, `ralph emit`, `ralph wave emit`, `ralph tools skill`) honour the same precedence and additionally fall back to `RALPH_CONFIG` injected by `ralph run`. |
 | `-H, --hats <HATS>` | Hat collection source: file path, `builtin:<name>`, or URL. |
 | `-v, --verbose` | Verbose output. |
 | `--color <MODE>` | Color output mode: `auto`, `always`, `never` (default: `auto`). |
@@ -20,7 +20,7 @@ These options are accepted by all commands.
 The `-c` flag specifies where to load **core** configuration from. If not provided, `ralph` falls back to:
 
 1. `$RALPH_CONFIG` when present.
-2. `ralph.yml`.
+2. `ralph.yml` / `ralph.yaml` (workspace discovery).
 
 **Core source types:**
 

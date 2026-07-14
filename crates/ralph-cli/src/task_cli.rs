@@ -19,8 +19,9 @@
 //! emit is correctly wired before applying.
 
 use crate::{
-    display::colors, hat_command_policy::HatCommandPolicy, operation_guard::OperationContext,
-    resolve_path_from_workspace, resolve_workspace_root,
+    config_resolution, display::colors, hat_command_policy::HatCommandPolicy,
+    operation_guard::OperationContext, resolve_path_from_workspace, resolve_workspace_root,
+    ConfigSource,
 };
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -55,7 +56,15 @@ pub enum CoordinatorHatsError {
 impl std::fmt::Display for CoordinatorHatsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingRalphYml => f.write_str("no ralph.yml in workspace"),
+            // 2026-07-13-001 plan U3 / U5: reframe the "no config
+            // found" hint so it advertises every supported path
+            // (`-c`, `RALPH_CONFIG`, `ralph.yml`, `ralph.yaml`)
+            // rather than telling the operator to symlink their
+            // custom file to `ralph.yml`.
+            Self::MissingRalphYml => f.write_str(
+                "no project config found (looked for -c file, $RALPH_CONFIG, ralph.yml, ralph.yaml); \
+                 pass `ralph -c <file> …`, export RALPH_CONFIG, or add ralph.yml with tasks.coordinator_hats",
+            ),
             Self::InvalidYaml { path, source } => write!(
                 f,
                 "ralph.yml at {} is not valid YAML: {}",
@@ -80,7 +89,16 @@ impl std::error::Error for CoordinatorHatsError {}
 ///
 /// Search order:
 /// 1. `<root>/ralph.yml`
-/// 2. `<root>/ralph.yaml`
+/// 2026-07-13-001 plan U3: load `tasks.coordinator_hats` from
+/// the project config and surface the *shape* of the failure as a
+/// typed `CoordinatorHatsError` instead of silently returning an
+/// empty `Vec<String>`.
+///
+/// Discovery order:
+/// 1. `ConfigSource::File` paths passed via `-c`
+/// 2. `$RALPH_CONFIG`
+/// 3. `<root>/ralph.yml`
+/// 4. `<root>/ralph.yaml`
 ///
 /// Returns `Ok(Vec<String>)` on success. On any failure (missing
 /// file, invalid YAML, missing/empty key) the typed error is
@@ -91,47 +109,56 @@ impl std::error::Error for CoordinatorHatsError {}
 /// disambiguate "no file" vs "no tasks section" vs "no key" vs
 /// "empty value" — all four collapse to `coordinator_hats == []`
 /// when read through `RalphConfig::default()`.
-pub fn load_coordinator_hats(root: &Path) -> Result<Vec<String>, CoordinatorHatsError> {
-    let mut last_yaml_err: Option<(PathBuf, String)> = None;
-    for name in ["ralph.yml", "ralph.yaml"] {
-        let path = root.join(name);
-        if !path.exists() {
-            continue;
-        }
-        let raw =
-            std::fs::read_to_string(&path).map_err(|e| CoordinatorHatsError::InvalidYaml {
-                path: path.clone(),
-                source: e.to_string(),
-            })?;
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(&raw).map_err(|e| CoordinatorHatsError::InvalidYaml {
-                path: path.clone(),
-                source: e.to_string(),
-            })?;
-
-        let tasks = match value.get("tasks") {
-            Some(t) => t,
-            None => return Err(CoordinatorHatsError::MissingTasksSection),
-        };
-        let coordinator_hats = match tasks.get("coordinator_hats") {
-            Some(c) => c,
-            None => return Err(CoordinatorHatsError::MissingCoordinatorHatsKey),
-        };
-        let hats: Vec<String> = serde_yaml::from_value(coordinator_hats.clone()).map_err(|e| {
-            CoordinatorHatsError::InvalidYaml {
-                path: path.clone(),
-                source: e.to_string(),
-            }
-        })?;
-        if hats.is_empty() {
-            return Err(CoordinatorHatsError::CoordinatorHatsEmpty);
-        }
-        return Ok(hats);
-    }
-    if let Some((path, source)) = last_yaml_err {
-        return Err(CoordinatorHatsError::InvalidYaml { path, source });
+pub fn load_coordinator_hats(
+    root: &Path,
+    config_sources: &[ConfigSource],
+) -> Result<Vec<String>, CoordinatorHatsError> {
+    if let Some(resolved) =
+        config_resolution::resolve_project_config_path(root, config_sources)
+    {
+        return load_coordinator_hats_from_path(&resolved);
     }
     Err(CoordinatorHatsError::MissingRalphYml)
+}
+
+/// 2026-07-13-001 plan U3: load `coordinator_hats` from an
+/// already-resolved project config path. The helper is shared
+/// between the explicit `-c`/`RALPH_CONFIG` discovery path and any
+/// future caller that already has a `Path` in hand.
+pub fn load_coordinator_hats_from_path(
+    path: &Path,
+) -> Result<Vec<String>, CoordinatorHatsError> {
+    if !path.exists() {
+        return Err(CoordinatorHatsError::MissingRalphYml);
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| CoordinatorHatsError::InvalidYaml {
+        path: path.to_path_buf(),
+        source: e.to_string(),
+    })?;
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&raw).map_err(|e| CoordinatorHatsError::InvalidYaml {
+            path: path.to_path_buf(),
+            source: e.to_string(),
+        })?;
+
+    let tasks = match value.get("tasks") {
+        Some(t) => t,
+        None => return Err(CoordinatorHatsError::MissingTasksSection),
+    };
+    let coordinator_hats = match tasks.get("coordinator_hats") {
+        Some(c) => c,
+        None => return Err(CoordinatorHatsError::MissingCoordinatorHatsKey),
+    };
+    let hats: Vec<String> = serde_yaml::from_value(coordinator_hats.clone()).map_err(|e| {
+        CoordinatorHatsError::InvalidYaml {
+            path: path.to_path_buf(),
+            source: e.to_string(),
+        }
+    })?;
+    if hats.is_empty() {
+        return Err(CoordinatorHatsError::CoordinatorHatsEmpty);
+    }
+    Ok(hats)
 }
 
 /// Output format for task commands.
@@ -883,7 +910,11 @@ fn filter_tasks_for_ready(
 }
 
 /// Executes task CLI commands.
-pub fn execute(args: TaskArgs, use_colors: bool) -> Result<()> {
+pub fn execute(
+    args: TaskArgs,
+    use_colors: bool,
+    config_sources: &[ConfigSource],
+) -> Result<()> {
     let root = args.root.clone();
     let workspace = resolve_workspace_root(root.as_ref());
     // U7 (2026-07-04-003 plan): load `coordinator_hats` through the
@@ -893,11 +924,16 @@ pub fn execute(args: TaskArgs, use_colors: bool) -> Result<()> {
     // Human CLI gets `unwrap_or_default()` so a missing/empty config
     // does not lock the operator out of `task add`; agents always
     // see the typed Err converted into a hint.
-    let (coordinator_hats, coordinator_err) = match load_coordinator_hats(&workspace) {
-        Ok(hats) => (hats, None),
-        Err(err) => (Vec::new(), Some(err)),
-    };
-    let config = load_config_or_default(root.as_ref());
+    //
+    // 2026-07-13-001 plan U3: `config_sources` carries the explicit
+    // `-c` path so a custom project config file is honored without
+    // the workspace needing a `ralph.yml` symlink.
+    let (coordinator_hats, coordinator_err) =
+        match load_coordinator_hats(&workspace, config_sources) {
+            Ok(hats) => (hats, None),
+            Err(err) => (Vec::new(), Some(err)),
+        };
+    let config = load_config_or_default(root.as_ref(), config_sources);
 
     match args.command {
         TaskCommands::Add(add_args) => execute_add(
@@ -906,6 +942,7 @@ pub fn execute(args: TaskArgs, use_colors: bool) -> Result<()> {
             &coordinator_hats,
             coordinator_err.as_ref(),
             use_colors,
+            config_sources,
         ),
         TaskCommands::Ensure(ensure_args) => execute_ensure(
             ensure_args,
@@ -913,27 +950,43 @@ pub fn execute(args: TaskArgs, use_colors: bool) -> Result<()> {
             &coordinator_hats,
             coordinator_err.as_ref(),
             use_colors,
+            config_sources,
         ),
         TaskCommands::List(list_args) => execute_list(list_args, root.as_ref(), use_colors),
         TaskCommands::Ready(ready_args) => execute_ready(ready_args, root.as_ref(), use_colors),
-        TaskCommands::Start(start_args) => {
-            execute_start(start_args, root.as_ref(), &coordinator_hats, use_colors)
-        }
+        TaskCommands::Start(start_args) => execute_start(
+            start_args,
+            root.as_ref(),
+            &coordinator_hats,
+            use_colors,
+            config_sources,
+        ),
         TaskCommands::Close(close_args) => execute_close(
             close_args,
             root.as_ref(),
             &coordinator_hats,
             &config,
             use_colors,
+            config_sources,
         ),
-        TaskCommands::Fail(fail_args) => {
-            execute_fail(fail_args, root.as_ref(), &coordinator_hats, use_colors)
-        }
-        TaskCommands::Reopen(reopen_args) => {
-            execute_reopen(reopen_args, root.as_ref(), &coordinator_hats, use_colors)
-        }
+        TaskCommands::Fail(fail_args) => execute_fail(
+            fail_args,
+            root.as_ref(),
+            &coordinator_hats,
+            use_colors,
+            config_sources,
+        ),
+        TaskCommands::Reopen(reopen_args) => execute_reopen(
+            reopen_args,
+            root.as_ref(),
+            &coordinator_hats,
+            use_colors,
+            config_sources,
+        ),
         TaskCommands::Show(show_args) => execute_show(show_args, root.as_ref(), use_colors),
-        TaskCommands::Verify(verify_args) => execute_verify(verify_args, use_colors),
+        TaskCommands::Verify(verify_args) => {
+            execute_verify(verify_args, use_colors, config_sources)
+        }
         TaskCommands::VerifyEmitBridge(bridge_args) => {
             execute_verify_emit_bridge(bridge_args, root.as_ref())
         }
@@ -943,18 +996,26 @@ pub fn execute(args: TaskArgs, use_colors: bool) -> Result<()> {
 /// Loads the full `RalphConfig` from the workspace, falling back to
 /// an empty default when the file is missing or unreadable.
 ///
+/// Loads the full `RalphConfig` from the workspace, falling back to
+/// an empty default when the file is missing or unreadable.
+///
 /// The fallback is intentionally silent because the L2 CLI ACL is
 /// best-effort: a human operator without a `ralph.yml` must not be
 /// locked out of task tooling. The downstream `HatCommandPolicy`
 /// reads the same allowlist (`tasks.coordinator_hats`), so missing
 /// config yields an empty allowlist → fail-closed for agent add/ensure.
-fn load_config_or_default(root: Option<&PathBuf>) -> ralph_core::config::RalphConfig {
-    let workspace = resolve_workspace_root(root);
-    for name in ["ralph.yml", "ralph.yaml"] {
-        let path = workspace.join(name);
-        if !path.exists() {
-            continue;
-        }
+///
+/// 2026-07-13-001 plan U3 + review #C1: pass `config_sources` so a
+/// `-c custom.yml` style project config is honored before falling
+/// back to the workspace `ralph.yml` / `ralph.yaml` filenames.
+fn load_config_or_default(
+    root: Option<&PathBuf>,
+    config_sources: &[ConfigSource],
+) -> ralph_core::config::RalphConfig {
+    if let Some(path) = config_resolution::resolve_project_config_path(
+        &resolve_workspace_root(root),
+        config_sources,
+    ) {
         if let Ok(raw) = std::fs::read_to_string(&path) {
             if let Ok(cfg) = serde_yaml::from_str::<ralph_core::config::RalphConfig>(&raw) {
                 return cfg;
@@ -970,12 +1031,13 @@ fn execute_add(
     coordinator_hats: &[String],
     coordinator_err: Option<&CoordinatorHatsError>,
     use_colors: bool,
+    config_sources: &[ConfigSource],
 ) -> Result<()> {
     let path = get_tasks_path(root);
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
     let ctx = operation_context_for(root);
     let workspace = resolve_workspace_root(root);
-    let config = load_config_or_default(root);
+    let config = load_config_or_default(root, config_sources);
     // U7 (2026-07-04-003 plan): two-step gate. If the agent
     // invoked `task verify add` first, a matching ticket is on
     // disk; require_ticket consumes it and lets the mutation
@@ -1064,12 +1126,13 @@ fn execute_ensure(
     coordinator_hats: &[String],
     coordinator_err: Option<&CoordinatorHatsError>,
     use_colors: bool,
+    config_sources: &[ConfigSource],
 ) -> Result<()> {
     let path = get_tasks_path(root);
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
     let ctx = operation_context_for(root);
     let workspace = resolve_workspace_root(root);
-    let config = load_config_or_default(root);
+    let config = load_config_or_default(root, config_sources);
     let is_for_fix_unit = args.for_fix_unit.is_some();
 
     enforce_command_policy(
@@ -1125,7 +1188,7 @@ fn execute_ensure(
     let (loop_id, hat_id) = gate_identifiers(&ctx);
     let fingerprint =
         crate::task_verify_gate::mutation_fingerprint("ensure", &canonical, loop_id, hat_id);
-    let config = load_config_or_default(root);
+    let config = load_config_or_default(root, config_sources);
     crate::task_verify_gate::require_ticket(
         &crate::task_verify_gate::ticket_path(&workspace),
         &config.tasks,
@@ -1134,7 +1197,14 @@ fn execute_ensure(
         &fingerprint,
     )?;
 
-    ensure_task_with_args(&mut store, &args, &ctx, coordinator_hats, use_colors)?;
+    ensure_task_with_args(
+        &mut store,
+        &args,
+        &ctx,
+        coordinator_hats,
+        use_colors,
+        config_sources,
+    )?;
     Ok(())
 }
 
@@ -1145,6 +1215,7 @@ fn ensure_task_with_args(
     ctx: &OperationContext,
     coordinator_hats: &[String],
     use_colors: bool,
+    config_sources: &[ConfigSource],
 ) -> Result<()> {
     // 2026-06-28-002 U8: `--for-fix-unit plan:fix_step:slug` builds
     // the canonical fix-unit task and pins the owner to
@@ -1467,6 +1538,7 @@ fn execute_start(
     root: Option<&PathBuf>,
     coordinator_hats: &[String],
     use_colors: bool,
+    config_sources: &[ConfigSource],
 ) -> Result<()> {
     let path = get_tasks_path(root);
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
@@ -1514,6 +1586,7 @@ fn execute_close(
     coordinator_hats: &[String],
     config: &ralph_core::config::RalphConfig,
     use_colors: bool,
+    _config_sources: &[ConfigSource],
 ) -> Result<()> {
     let path = get_tasks_path(root);
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
@@ -1758,6 +1831,7 @@ fn execute_fail(
     root: Option<&PathBuf>,
     coordinator_hats: &[String],
     use_colors: bool,
+    config_sources: &[ConfigSource],
 ) -> Result<()> {
     let path = get_tasks_path(root);
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
@@ -1914,6 +1988,7 @@ fn execute_reopen(
     root: Option<&PathBuf>,
     coordinator_hats: &[String],
     use_colors: bool,
+    config_sources: &[ConfigSource],
 ) -> Result<()> {
     let path = get_tasks_path(root);
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
@@ -1961,12 +2036,17 @@ fn reopen_task_with_context(
 /// mutations. The function never writes to `tasks.jsonl`; it only
 /// exercises the same authorization gates as the real mutation so the
 /// agent can deterministically observe the outcome without committing.
-fn execute_verify(args: VerifyArgs, use_colors: bool) -> Result<()> {
+fn execute_verify(
+    args: VerifyArgs,
+    use_colors: bool,
+    config_sources: &[ConfigSource],
+) -> Result<()> {
     let root = args.root.clone();
-    let config = load_config_or_default(root.as_ref());
+    let config = load_config_or_default(root.as_ref(), config_sources);
     let workspace = resolve_workspace_root(root.as_ref());
-    let (coordinator_hats, coordinator_err) = match load_coordinator_hats(&workspace) {
-        Ok(hats) => (hats, None),
+    let (coordinator_hats, coordinator_err) =
+        match load_coordinator_hats(&workspace, config_sources) {
+            Ok(hats) => (hats, None),
         Err(err) => (Vec::new(), Some(err)),
     };
     let cmd = args.command;
@@ -1982,6 +2062,7 @@ fn execute_verify(args: VerifyArgs, use_colors: bool) -> Result<()> {
             &coordinator_hats,
             coordinator_err.as_ref(),
             a,
+            config_sources,
         )?,
         VerifyCommands::Ensure(e) => verify_ensure(
             &mut store,
@@ -1989,6 +2070,7 @@ fn execute_verify(args: VerifyArgs, use_colors: bool) -> Result<()> {
             &coordinator_hats,
             coordinator_err.as_ref(),
             e,
+            config_sources,
         )?,
         VerifyCommands::Start(s) => verify_lifecycle(
             &store,
@@ -2095,8 +2177,9 @@ fn verify_add(
     coordinator_hats: &[String],
     coordinator_err: Option<&CoordinatorHatsError>,
     args: &VerifyAddArgs,
+    config_sources: &[ConfigSource],
 ) -> Result<VerifyOutcome> {
-    let config = load_config_or_default(Some(&ctx.workspace_root));
+    let config = load_config_or_default(Some(&ctx.workspace_root), config_sources);
     if let Err(outcome) = gate_outcome(
         ctx,
         coordinator_hats,
@@ -2177,8 +2260,9 @@ fn verify_ensure(
     coordinator_hats: &[String],
     coordinator_err: Option<&CoordinatorHatsError>,
     args: &VerifyEnsureArgs,
+    config_sources: &[ConfigSource],
 ) -> Result<VerifyOutcome> {
-    let config = load_config_or_default(Some(&ctx.workspace_root));
+    let config = load_config_or_default(Some(&ctx.workspace_root), config_sources);
     let is_for_fix_unit = args.for_fix_unit.is_some();
     if let Err(outcome) = gate_outcome(
         ctx,
@@ -2793,6 +2877,7 @@ mod tests {
             &ctx,
             &["executor".to_string()],
             false,
+            &[],
         )
         .expect_err("ensure must also reject off-allowlist owner");
         assert!(err.to_string().contains("not in tasks.coordinator_hats"));
@@ -3074,6 +3159,7 @@ tasks:
             &ctx_a,
             &["executor".to_string()],
             false,
+            &[],
         )
         .unwrap();
         ensure_task_with_args(
@@ -3082,6 +3168,7 @@ tasks:
             &ctx_a,
             &["executor".to_string()],
             false,
+            &[],
         )
         .unwrap();
         assert_eq!(store.all().len(), 1);
@@ -3100,6 +3187,7 @@ tasks:
             &ctx_a,
             &["executor".to_string()],
             false,
+            &[],
         )
         .unwrap();
         let first_id = store
@@ -3113,6 +3201,7 @@ tasks:
             &ctx_a,
             &["executor".to_string()],
             false,
+            &[],
         )
         .unwrap();
         let reused_id = store
@@ -3137,6 +3226,7 @@ tasks:
             &ctx_a,
             &["executor".to_string()],
             false,
+            &[],
         )
         .unwrap();
         // Switch marker to loop-b so the next ensure is stamped loop-b.
@@ -3148,6 +3238,7 @@ tasks:
             &ctx_b,
             &["executor".to_string()],
             false,
+            &[],
         )
         .unwrap();
         assert_eq!(store.all().len(), 2);
@@ -3266,7 +3357,7 @@ tasks:
         .expect("write ralph.yml");
 
         // 不再调用旧 loader,改为通过 config 读取
-        let config = load_config_or_default(Some(&root));
+        let config = load_config_or_default(Some(&root), &[]);
         assert_eq!(
             config.tasks.coordinator_hats,
             vec!["coordinator".to_string(), "executor".to_string()]
@@ -3277,7 +3368,7 @@ tasks:
     fn load_config_or_default_handles_missing_ralph_yml() {
         let temp_dir = TempDir::new().expect("temp dir");
         let root = temp_dir.path().to_path_buf();
-        let config = load_config_or_default(Some(&root));
+        let config = load_config_or_default(Some(&root), &[]);
         // 缺 ralph.yml → Default::default() (event_loop.execution_mode = isolated)
         assert!(config.tasks.coordinator_hats.is_empty());
     }
@@ -3291,7 +3382,7 @@ tasks:
             "event_loop:\n  execution_mode: isolated\n",
         )
         .expect("write ralph.yml");
-        let config = load_config_or_default(Some(&root));
+        let config = load_config_or_default(Some(&root), &[]);
         assert!(config.tasks.coordinator_hats.is_empty());
     }
 
@@ -3393,10 +3484,12 @@ tasks:
 
         let outcome = verify_add(
             &mut store,
+
             &ctx,
             &["coordinator".into()],
             None,
             &verify_add_args("hi"),
+            &[],
         )
         .expect("verify_add should not error");
         assert!(matches!(outcome, VerifyOutcome::Allow));
@@ -3416,10 +3509,12 @@ tasks:
 
         let outcome = verify_add(
             &mut store,
+
             &ctx,
             &["coordinator".into()],
             None,
             &verify_add_args("hi"),
+            &[],
         )
         .expect("verify_add should not error");
         match outcome {
@@ -3440,7 +3535,8 @@ tasks:
         args.title = None;
 
         let outcome =
-            verify_add(&mut store, &ctx, &["coordinator".into()], None, &args).expect("ok");
+            verify_add(&mut store, &ctx, &["coordinator".into()], None, &args, &[])
+                .expect("ok");
         assert!(matches!(
             outcome,
             VerifyOutcome::Deny { ref reason, .. } if reason == "missing_title"
@@ -3458,8 +3554,15 @@ tasks:
         let mut args = verify_ensure_args("placeholder", "k");
         args.key = None;
         args.for_fix_unit = None;
-        let outcome =
-            verify_ensure(&mut store, &ctx, &["coordinator".into()], None, &args).expect("ok");
+        let outcome = verify_ensure(
+            &mut store,
+            &ctx,
+            &["coordinator".into()],
+            None,
+            &args,
+            &[],
+        )
+        .expect("ok");
         assert!(matches!(
             outcome,
             VerifyOutcome::Deny { ref reason, .. } if reason == "missing_key"
@@ -3468,8 +3571,15 @@ tasks:
         // And missing-title branch.
         let mut args2 = verify_ensure_args("placeholder", "k");
         args2.title = None;
-        let outcome =
-            verify_ensure(&mut store, &ctx, &["coordinator".into()], None, &args2).expect("ok");
+        let outcome = verify_ensure(
+            &mut store,
+            &ctx,
+            &["coordinator".into()],
+            None,
+            &args2,
+            &[],
+        )
+        .expect("ok");
         assert!(matches!(
             outcome,
             VerifyOutcome::Deny { ref reason, .. } if reason == "missing_title"
@@ -3762,6 +3872,7 @@ tasks:
             &ctx,
             &coordinator_hats,
             false,
+        &[],
         )
         .expect("first ensure must succeed");
 
@@ -3781,6 +3892,7 @@ tasks:
             &ctx,
             &coordinator_hats,
             false,
+        &[],
         )
         .expect("second ensure must succeed (idempotent)");
 
@@ -3811,6 +3923,7 @@ tasks:
             &ctx_a,
             &coordinator_hats,
             false,
+        &[],
         )
         .expect("first ensure (loop-a) must succeed");
 
@@ -3820,6 +3933,7 @@ tasks:
             &ctx_a,
             &coordinator_hats,
             false,
+        &[],
         )
         .expect("second ensure same loop must be idempotent");
 
@@ -3834,6 +3948,7 @@ tasks:
             &ctx_b,
             &coordinator_hats,
             false,
+        &[],
         )
         .expect("ensure on a different loop must succeed");
 
@@ -3864,7 +3979,7 @@ mod load_coordinator_hats_tests {
     #[test]
     fn test_missing_ralph_yml_returns_missing_ralph_yml() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let err = load_coordinator_hats(temp_dir.path())
+        let err = load_coordinator_hats(temp_dir.path(), &[])
             .expect_err("empty workspace must surface MissingRalphYml");
         assert_eq!(err, CoordinatorHatsError::MissingRalphYml);
     }
@@ -3874,7 +3989,7 @@ mod load_coordinator_hats_tests {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let root = temp_dir.path();
         std::fs::write(root.join("ralph.yml"), "tasks: [").expect("write broken yaml");
-        let err = load_coordinator_hats(root).expect_err("broken yaml must surface InvalidYaml");
+        let err = load_coordinator_hats(root, &[]).expect_err("broken yaml must surface InvalidYaml");
         match err {
             CoordinatorHatsError::InvalidYaml { path, source } => {
                 assert_eq!(path, root.join("ralph.yml"));
@@ -3896,7 +4011,7 @@ mod load_coordinator_hats_tests {
             "event_loop:\n  execution_mode: isolated\n",
         )
         .expect("write ralph.yml");
-        let err = load_coordinator_hats(root)
+        let err = load_coordinator_hats(root, &[])
             .expect_err("ralph.yml without tasks: must surface MissingTasksSection");
         assert_eq!(err, CoordinatorHatsError::MissingTasksSection);
     }
@@ -3906,7 +4021,7 @@ mod load_coordinator_hats_tests {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let root = temp_dir.path();
         std::fs::write(root.join("ralph.yml"), "tasks:\n  enabled: true\n").expect("write yaml");
-        let err = load_coordinator_hats(root)
+        let err = load_coordinator_hats(root, &[])
             .expect_err("tasks without coordinator_hats must surface MissingCoordinatorHatsKey");
         assert_eq!(err, CoordinatorHatsError::MissingCoordinatorHatsKey);
     }
@@ -3920,7 +4035,7 @@ mod load_coordinator_hats_tests {
             "tasks:\n  enabled: true\n  coordinator_hats: []\n",
         )
         .expect("write yaml");
-        let err = load_coordinator_hats(root)
+        let err = load_coordinator_hats(root, &[])
             .expect_err("coordinator_hats: [] must surface CoordinatorHatsEmpty");
         assert_eq!(err, CoordinatorHatsError::CoordinatorHatsEmpty);
     }
@@ -3934,7 +4049,7 @@ mod load_coordinator_hats_tests {
             "tasks:\n  enabled: true\n  coordinator_hats:\n    - coordinator\n    - executor\n",
         )
         .expect("write yaml");
-        let hats = load_coordinator_hats(root).expect("valid yaml must parse");
+        let hats = load_coordinator_hats(root, &[]).expect("valid yaml must parse");
         assert_eq!(
             hats,
             vec!["coordinator".to_string(), "executor".to_string()]
@@ -3951,7 +4066,7 @@ mod load_coordinator_hats_tests {
             "tasks:\n  coordinator_hats: [only]\n",
         )
         .expect("write yaml");
-        let hats = load_coordinator_hats(root).expect("ralph.yaml fallback must work");
+        let hats = load_coordinator_hats(root, &[]).expect("ralph.yaml fallback must work");
         assert_eq!(hats, vec!["only".to_string()]);
     }
 
@@ -3960,7 +4075,7 @@ mod load_coordinator_hats_tests {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let root = temp_dir.path();
         std::fs::write(root.join("ralph.yml"), ":\n - broken").expect("write yaml");
-        let err = load_coordinator_hats(root).expect_err("must error");
+        let err = load_coordinator_hats(root, &[]).expect_err("must error");
         match err {
             CoordinatorHatsError::InvalidYaml { path, .. } => {
                 assert_eq!(path, PathBuf::from(root.join("ralph.yml")));

@@ -153,13 +153,23 @@ pub enum OnConfigError {
 pub fn load_workspace_config(
     root: Option<&PathBuf>,
     on_error: OnConfigError,
+    config_sources: &[ConfigSource],
 ) -> Result<Option<RalphConfig>> {
     let workspace_root = resolve_workspace_root(root);
-    let config_path = config_resolution::find_workspace_config_path(&workspace_root)
-        .unwrap_or_else(|| workspace_root.join("ralph.yml"));
-    if !config_path.exists() {
-        return Ok(None);
-    }
+    let resolved = if config_sources.is_empty() {
+        config_resolution::resolve_project_config_path(&workspace_root, config_sources)
+    } else {
+        config_sources.iter().find_map(|source| match source {
+            ConfigSource::File(path) if path.exists() => Some(path.clone()),
+            _ => None,
+        })
+    };
+    let config_path = match resolved {
+        Some(path) => path,
+        None => {
+            return Ok(None);
+        }
+    };
     let sources = vec![ConfigSource::File(config_path.clone())];
     match load_config_with_overrides(&sources) {
         Ok(cfg) => Ok(Some(cfg)),
@@ -201,6 +211,7 @@ pub fn load_workspace_config(
 pub fn load_policy_config_for_cli_emit(
     root: Option<&PathBuf>,
     on_error: OnConfigError,
+    config_sources: &[ConfigSource],
 ) -> Result<Option<RalphConfig>> {
     use crate::cli::{ConfigSource, HatsSource};
     use crate::preflight::load_config_for_preflight_sync;
@@ -209,7 +220,7 @@ pub fn load_policy_config_for_cli_emit(
         .filter(|s| !s.is_empty());
     let workspace_root = resolve_workspace_root(root);
 
-    let mut base = match load_workspace_config(root, on_error)? {
+    let mut base = match load_workspace_config(root, on_error, config_sources)? {
         Some(cfg) => cfg,
         None => {
             // No `ralph.yml`. If `RALPH_HATS_SOURCE` is set, we
@@ -249,8 +260,16 @@ pub fn load_policy_config_for_cli_emit(
     };
 
     let parsed = Some(HatsSource::parse(&label));
-    let config_path = config_resolution::find_workspace_config_path(&workspace_root)
-        .unwrap_or_else(|| workspace_root.join("ralph.yml"));
+    // 2026-07-13-001 plan U4 + review #C4: reuse the SSOT-resolved
+    // path that `load_workspace_config` already produced for `base`
+    // (through the same `config_sources` slice), instead of
+    // hardcoding `workspace_root.join("ralph.yml")`. This keeps
+    // the `RALPH_HATS_SOURCE` preset-merge path consistent with
+    // the base-config path so an agent that sets both
+    // `RALPH_CONFIG=custom.yml` and `RALPH_HATS_SOURCE=builtin:...`
+    // merges the preset on top of the operator's custom project
+    // config, not a synthesised default.
+    let config_path = base.config_path.clone().unwrap_or_else(|| workspace_root.join("ralph.yml"));
     let sources: Vec<ConfigSource> = if config_path.exists() {
         vec![ConfigSource::File(config_path)]
     } else {
@@ -826,7 +845,11 @@ pub fn run_policy_check_unified(
     // fall back to a default view (the unified pipeline will
     // accept everything, mirroring the legacy no-policy default).
     let workspace_root = resolve_workspace_root(Some(&workspace.to_path_buf()));
-    let config = load_policy_config_for_cli_emit(Some(&workspace_root), OnConfigError::Tolerate)?;
+    let config = load_policy_config_for_cli_emit(
+        Some(&workspace_root),
+        OnConfigError::Tolerate,
+        &[],
+    )?;
     let event_loop_config = config
         .as_ref()
         .map(|c| c.event_loop.clone())
@@ -3049,7 +3072,7 @@ hats:
         )
         .unwrap();
 
-        let err = load_policy_config_for_cli_emit(Some(&root_path), OnConfigError::Fail)
+        let err = load_policy_config_for_cli_emit(Some(&root_path), OnConfigError::Fail, &[])
             .expect_err("invalid hat config must reject");
         let msg = err.to_string();
         assert!(
@@ -3153,7 +3176,7 @@ hats:
     fn test_load_workspace_config_returns_none_when_missing() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
-        let cfg = load_workspace_config(Some(&root), OnConfigError::Tolerate).unwrap();
+        let cfg = load_workspace_config(Some(&root), OnConfigError::Tolerate, &[]).unwrap();
         assert!(cfg.is_none());
     }
 

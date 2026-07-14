@@ -15,6 +15,7 @@ use clap::{Parser, Subcommand};
 use crate::memory;
 use crate::skill_cli;
 use crate::task_cli;
+use crate::ConfigSource;
 
 /// Ralph's runtime tools (agent-facing).
 #[derive(Parser, Debug)]
@@ -36,10 +37,14 @@ pub enum ToolsCommands {
 }
 
 /// Execute a tools command.
-pub async fn execute(args: ToolsArgs, use_colors: bool) -> Result<()> {
+pub async fn execute(
+    args: ToolsArgs,
+    use_colors: bool,
+    config_sources: &[ConfigSource],
+) -> Result<()> {
     match args.command {
         ToolsCommands::Memory(memory_args) => memory::execute(memory_args, use_colors),
-        ToolsCommands::Task(task_args) => task_cli::execute(task_args, use_colors),
-        ToolsCommands::Skill(skill_args) => skill_cli::execute(skill_args),
+        ToolsCommands::Task(task_args) => task_cli::execute(task_args, use_colors, config_sources),
+        ToolsCommands::Skill(skill_args) => skill_cli::execute(skill_args, config_sources),
     }
 }

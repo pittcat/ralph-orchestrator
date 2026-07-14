@@ -170,7 +170,7 @@ fn enforce_wave_acl(_verb: &str) -> Result<()> {
 
     let workspace_root = std::env::current_dir().unwrap_or_default();
     let ctx = OperationContext::detect(workspace_root.clone());
-    let config = load_policy_config_for_cli_emit(None, OnConfigError::Warn)?;
+    let config = load_policy_config_for_cli_emit(None, OnConfigError::Warn, &[])?;
     let config = match config {
         Some(c) => c,
         None => return Ok(()), // no config → no policy → bypass
@@ -443,6 +443,23 @@ fn run_wave_precheck(
     // dispatcher pick up the loop's preset policy without re-passing `-H`.
     // The explicit `--config` branch falls through to the default
     // loader when the file is missing so the env var still applies.
+    // 2026-07-13-001 plan U4: pass the explicit `--config` (or
+    // the inherited `RALPH_CONFIG`) source through to the policy
+    // loader so wave workers spawned from `ralph run -c custom.yml`
+    // honour the same project config without requiring a
+    // `ralph.yml` symlink in the workspace.
+    let explicit_sources: Vec<crate::cli::ConfigSource> = config_overrides
+        .first()
+        .map(|path_str| {
+            let path = PathBuf::from(path_str);
+            if path.is_file() {
+                vec![crate::cli::ConfigSource::File(path)]
+            } else {
+                Vec::new()
+            }
+        })
+        .unwrap_or_default();
+    let explicit_source_slice: &[crate::cli::ConfigSource] = &explicit_sources;
     let config = match config_overrides.first() {
         Some(path_str) => {
             let path = PathBuf::from(path_str);
@@ -451,7 +468,7 @@ fn run_wave_precheck(
                     "Warning: explicit --config '{}' is not a file; falling back to CWD-discovered ralph.yml.",
                     path_str
                 );
-                load_policy_config_for_cli_emit(None, OnConfigError::Warn)?
+                load_policy_config_for_cli_emit(None, OnConfigError::Warn, explicit_source_slice)?
             } else {
                 use crate::preflight::load_config_for_preflight_sync;
                 let workspace_root = std::env::current_dir().unwrap_or_default();
@@ -460,7 +477,7 @@ fn run_wave_precheck(
                     .filter(|s| !s.is_empty())
                     .map(|s| crate::cli::HatsSource::parse(&s));
                 match load_config_for_preflight_sync(
-                    &[crate::cli::ConfigSource::File(path.clone())],
+                    explicit_source_slice,
                     hats_source.as_ref(),
                     &workspace_root,
                 ) {
@@ -476,7 +493,7 @@ fn run_wave_precheck(
                 }
             }
         }
-        None => load_policy_config_for_cli_emit(None, OnConfigError::Warn)?,
+        None => load_policy_config_for_cli_emit(None, OnConfigError::Warn, &[])?,
     };
 
     let flags = PolicyCheckFlags {

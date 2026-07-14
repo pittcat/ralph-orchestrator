@@ -21,6 +21,23 @@ RALPH_CONFIG=/path/to/config.yml ralph run ...
 ralph run -c custom-config.yml
 ```
 
+### Agent-facing config discovery
+
+Inside a running loop, every agent-facing tool (`ralph tools task`,
+`ralph emit`, `ralph wave emit`, `ralph tools skill`) honours the
+same project-config precedence as the runner:
+
+1. `ConfigSource::File` paths passed via `-c` (first existing wins)
+2. `$RALPH_CONFIG` (when set and non-empty)
+3. `<workspace>/ralph.yml`
+4. `<workspace>/ralph.yaml`
+
+`ralph run` forwards the resolved absolute or workspace-relative
+path as `RALPH_CONFIG` to every hat and wave worker, so agents
+running inside the loop inherit the same project config without
+re-passing `-c`. Custom project filenames no longer need a
+`ralph.yml` symlink — the runner-supplied env var closes the gap.
+
 ### User-level config (`~/.ralph/config.yml`)
 
 Use `~/.ralph/config.yml` for defaults you want everywhere, such as shared backend settings, global lifecycle hooks, or organization-wide guardrails.

@@ -1,3 +1,13 @@
+// `test_support` deliberately manipulates `std::env` so the
+// integration tests can simulate the agent / runner running under
+// `RALPH_CURRENT_HAT` etc. without leaking the override into
+// sibling tests. Each mutator is gated by a global mutex so the
+// unsafe env-var calls are serialised; we silence the
+// `unsafe_op_in_unsafe_fn` lint because every helper is invoked
+// from inside an `unsafe { EnvVarGuard::set(...) }` block.
+#![allow(unsafe_op_in_unsafe_fn)]
+
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -38,3 +48,5 @@ impl Drop for CwdGuard {
         let _ = std::env::set_current_dir(&self.original);
     }
 }
+
+

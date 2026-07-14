@@ -158,7 +158,11 @@ impl ConfigFault {
     /// and apply the right fix without re-reading `ralph.yml`.
     pub fn hint(&self) -> String {
         match self {
-            Self::MissingRalphYml => "no ralph.yml in workspace; create one with `tasks: { coordinator_hats: [coordinator] }` or run from a hat that owns the task".into(),
+            // 2026-07-13-001 plan U5 + review #C1: advertise every
+            // supported discovery path (`-c` / `$RALPH_CONFIG` /
+            // `ralph.yml` / `ralph.yaml`) instead of telling the
+            // operator to symlink their custom file to `ralph.yml`.
+            Self::MissingRalphYml => "no project config found (looked for -c file, $RALPH_CONFIG, ralph.yml, ralph.yaml); pass `ralph -c <file> …`, export RALPH_CONFIG, or add ralph.yml with tasks.coordinator_hats".into(),
             Self::MissingTasksSection => "ralph.yml has no `tasks:` section; add one with `coordinator_hats: [coordinator]`".into(),
             Self::MissingCoordinatorHatsKey => "ralph.yml `tasks:` block exists but does not declare `coordinator_hats`; add `coordinator_hats: [coordinator]`".into(),
             Self::CoordinatorHatsEmpty => "tasks.coordinator_hats is empty in ralph.yml; add the hat id (e.g. `coordinator`) to tasks.coordinator_hats before dispatching work".into(),
@@ -629,16 +633,18 @@ hats:
 
     #[test]
     fn deny_hint_distinguishes_missing_ralph_yml() {
-        // 缺 ralph.yml → ConfigFault::MissingRalphYml → hint 含 "ralph.yml" / "missing"
+        // 缺 ralph.yml → ConfigFault::MissingRalphYml → hint 同时
+        // 提示 `-c` / `$RALPH_CONFIG` / `ralph.yml` / `ralph.yaml`
+        // 四条恢复路径（plan 2026-07-13-001 plan U5 + R6）。
         let fault = ConfigFault::MissingRalphYml;
         let hint = fault.hint();
         assert!(
-            hint.contains("ralph.yml"),
-            "MissingRalphYml hint should mention ralph.yml: {hint}"
+            hint.contains("ralph.yml") && hint.contains("$RALPH_CONFIG") && hint.contains("-c"),
+            "MissingRalphYml hint should advertise every recovery path: {hint}"
         );
         assert!(
-            hint.to_lowercase().contains("missing") || hint.contains("create"),
-            "MissingRalphYml hint should signal 'missing' or 'create': {hint}"
+            hint.contains("no project config found"),
+            "MissingRalphYml hint should signal the missing-config state: {hint}"
         );
     }
 
@@ -722,9 +728,15 @@ hats:
         assert_eq!(deny.0, "non_coordinator_owner");
         // The typed error should be surfaced verbatim instead of
         // the generic "empty in ralph.yml" line.
+        // 2026-07-13-001 plan U3 / U5: the hint now advertises
+        // every supported discovery path (`-c` / `$RALPH_CONFIG`
+        // / `ralph.yml` / `ralph.yaml`) so operators no longer
+        // think the only fix is symlinking their custom file.
         assert!(
-            deny.1.contains("no ralph.yml in workspace"),
-            "hint should surface the typed CoordinatorHatsError, got: {hint}",
+            deny.1.contains("no project config found")
+                && deny.1.contains("$RALPH_CONFIG")
+                && deny.1.contains("-c"),
+            "hint should surface the typed CoordinatorHatsError and reference every recovery path, got: {hint}",
             hint = deny.1
         );
     }

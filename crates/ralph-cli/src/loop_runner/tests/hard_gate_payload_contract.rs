@@ -484,6 +484,7 @@ fn test_inject_hat_execution_env_sets_reserved_and_preserves_user_vars() {
         env_vars: vec![
             ("USER_VAR".into(), "keep".into()),
             ("RALPH_CURRENT_HAT".into(), "old-hat".into()),
+            ("RALPH_CONFIG".into(), "/tmp/old.yml".into()),
         ],
     };
     inject_hat_execution_env(
@@ -493,6 +494,7 @@ fn test_inject_hat_execution_env_sets_reserved_and_preserves_user_vars() {
         std::path::Path::new("/tmp/events.jsonl"),
         Some("synthesizer"),
         None,
+        Some(std::path::Path::new("/tmp/custom.yml")),
     );
     let map: std::collections::HashMap<_, _> = backend.env_vars.into_iter().collect();
     assert_eq!(map.get("USER_VAR").unwrap(), "keep");
@@ -500,6 +502,7 @@ fn test_inject_hat_execution_env_sets_reserved_and_preserves_user_vars() {
     assert_eq!(map.get("RALPH_CURRENT_LOOP_ID").unwrap(), "loop-42");
     assert_eq!(map.get("RALPH_EVENTS_FILE").unwrap(), "/tmp/events.jsonl");
     assert_eq!(map.get("RALPH_TRIGGERED_HAT").unwrap(), "synthesizer");
+    assert_eq!(map.get("RALPH_CONFIG").unwrap(), "/tmp/custom.yml");
 }
 
 #[test]
@@ -510,7 +513,7 @@ fn test_inject_hat_execution_env_omits_triggered_when_none() {
         prompt_mode: ralph_adapters::PromptMode::Arg,
         prompt_flag: None,
         output_format: BackendOutputFormat::Text,
-        env_vars: vec![],
+        env_vars: vec![("RALPH_CONFIG".into(), "/tmp/stale.yml".into())],
     };
     inject_hat_execution_env(
         &mut backend,
@@ -519,12 +522,14 @@ fn test_inject_hat_execution_env_omits_triggered_when_none() {
         std::path::Path::new(".ralph/events.jsonl"),
         None,
         None,
+        None,
     );
     let keys: Vec<_> = backend.env_vars.iter().map(|(k, _)| k.as_str()).collect();
     assert!(keys.contains(&"RALPH_CURRENT_HAT"));
     assert!(keys.contains(&"RALPH_CURRENT_LOOP_ID"));
     assert!(keys.contains(&"RALPH_EVENTS_FILE"));
     assert!(!keys.contains(&"RALPH_TRIGGERED_HAT"));
+    assert!(!keys.contains(&"RALPH_CONFIG"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
