@@ -9,8 +9,7 @@ use tracing::debug;
 
 /// Default priority order for backend detection.
 pub const DEFAULT_PRIORITY: &[&str] = &[
-    "claude", "kiro", "kiro-acp", "gemini", "codex", "amp", "copilot", "opencode", "pi", "roo",
-    "traecli",
+    "claude", "kiro", "kiro-acp", "gemini", "codex", "amp", "opencode", "pi", "roo", "traecli",
 ];
 
 /// Maps backend config names to their actual CLI command names.
@@ -56,7 +55,6 @@ impl std::fmt::Display for NoBackendError {
         writeln!(f, "  • Gemini CLI:   https://cloud.google.com/gemini")?;
         writeln!(f, "  • Codex CLI:    https://openai.com/codex")?;
         writeln!(f, "  • Amp CLI:      https://amp.dev")?;
-        writeln!(f, "  • Copilot CLI:  https://docs.github.com/copilot")?;
         writeln!(f, "  • OpenCode CLI: https://opencode.ai")?;
         writeln!(
             f,
@@ -159,6 +157,14 @@ pub fn detect_backend_default() -> Result<String, NoBackendError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_default_priority_does_not_contain_copilot() {
+        assert!(
+            !DEFAULT_PRIORITY.contains(&"copilot"),
+            "DEFAULT_PRIORITY must not contain deleted backend 'copilot'"
+        );
+    }
 
     #[test]
     fn test_is_backend_available_echo() {

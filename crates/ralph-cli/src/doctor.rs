@@ -480,7 +480,6 @@ fn canonical_backend_name(backend: &str, command: Option<&str>) -> String {
         "gemini" => "gemini".to_string(),
         "codex" => "codex".to_string(),
         "amp" => "amp".to_string(),
-        "copilot" => "copilot".to_string(),
         "opencode" => "opencode".to_string(),
         "pi" => "pi".to_string(),
         "roo" => "roo".to_string(),

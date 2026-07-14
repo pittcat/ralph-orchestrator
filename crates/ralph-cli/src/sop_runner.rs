@@ -360,7 +360,6 @@ mod tests {
         assert!(validate_backend_name("gemini").is_ok());
         assert!(validate_backend_name("codex").is_ok());
         assert!(validate_backend_name("amp").is_ok());
-        assert!(validate_backend_name("copilot").is_ok());
         assert!(validate_backend_name("opencode").is_ok());
         assert!(validate_backend_name("custom").is_ok());
     }

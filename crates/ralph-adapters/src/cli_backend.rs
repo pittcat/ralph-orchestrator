@@ -16,8 +16,6 @@ pub enum OutputFormat {
     Text,
     /// Newline-delimited JSON stream (Claude with --output-format stream-json)
     StreamJson,
-    /// JSONL stream from Copilot prompt mode (`--output-format json`)
-    CopilotStreamJson,
     /// Newline-delimited JSON stream (Pi with --mode json)
     PiStreamJson,
     /// Newline-delimited JSON stream (Trae CLI with --output-format stream-json)
@@ -77,7 +75,6 @@ impl CliBackend {
             "gemini" => Self::gemini(),
             "codex" => Self::codex(),
             "amp" => Self::amp(),
-            "copilot" => Self::copilot(),
             "opencode" => Self::opencode(),
             "pi" => Self::pi(),
             "roo" => Self::roo(),
@@ -252,7 +249,6 @@ impl CliBackend {
             "gemini" => Ok(Self::gemini()),
             "codex" => Ok(Self::codex()),
             "amp" => Ok(Self::amp()),
-            "copilot" => Ok(Self::copilot()),
             "opencode" => Ok(Self::opencode()),
             "pi" => Ok(Self::pi()),
             "roo" => Ok(Self::roo()),
@@ -329,41 +325,6 @@ impl CliBackend {
         }
     }
 
-    /// Creates the Copilot backend for autonomous mode.
-    ///
-    /// Uses GitHub Copilot CLI with `--allow-all-tools` for automated tool approval.
-    /// Prompt mode emits JSONL via `--output-format json` for programmatic parsing.
-    pub fn copilot() -> Self {
-        Self {
-            command: "copilot".to_string(),
-            args: vec![
-                "--allow-all-tools".to_string(),
-                "--output-format".to_string(),
-                "json".to_string(),
-            ],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: Some("-p".to_string()),
-            output_format: OutputFormat::CopilotStreamJson,
-            env_vars: vec![],
-        }
-    }
-
-    /// Creates the Copilot TUI backend for interactive mode.
-    ///
-    /// Runs Copilot in full interactive mode (no -p flag), allowing
-    /// Copilot's native TUI to render. The prompt is passed as a
-    /// positional argument.
-    pub fn copilot_tui() -> Self {
-        Self {
-            command: "copilot".to_string(),
-            args: vec![], // No --allow-all-tools in TUI mode
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: None, // Positional argument
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        }
-    }
-
     /// Creates the Claude interactive backend with Agent Teams support.
     ///
     /// Like `claude_interactive()` but with reduced `--disallowedTools` (only `TodoWrite`)
@@ -400,7 +361,6 @@ impl CliBackend {
     /// | Gemini  | uses `-i` instead of `-p` |
     /// | Codex   | no `exec` subcommand |
     /// | Amp     | removes `--dangerously-allow-all` |
-    /// | Copilot | removes `--allow-all-tools` |
     /// | OpenCode| `run` subcommand with positional prompt |
     ///
     /// # Errors
@@ -415,7 +375,6 @@ impl CliBackend {
             "gemini" => Ok(Self::gemini_interactive()),
             "codex" => Ok(Self::codex_interactive()),
             "amp" => Ok(Self::amp_interactive()),
-            "copilot" => Ok(Self::copilot_interactive()),
             "opencode" => Ok(Self::opencode_interactive()),
             "pi" => Ok(Self::pi_interactive()),
             "roo" => Ok(Self::roo_interactive()),
@@ -479,21 +438,6 @@ impl CliBackend {
             args: vec![],
             prompt_mode: PromptMode::Arg,
             prompt_flag: Some("-x".to_string()),
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        }
-    }
-
-    /// Copilot in interactive mode (removes --allow-all-tools).
-    ///
-    /// Unlike headless `copilot()`, this runs without the auto-approve flag,
-    /// requiring user confirmation for tool usage.
-    pub fn copilot_interactive() -> Self {
-        Self {
-            command: "copilot".to_string(),
-            args: vec![],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: Some("-p".to_string()),
             output_format: OutputFormat::Text,
             env_vars: vec![],
         }
@@ -653,7 +597,7 @@ impl CliBackend {
     /// Runs trae-cli TUI without `--yolo` or `--print`, passing the prompt
     /// as a positional argument. Output is plain `Text` because interactive
     /// TUI mode does not emit the stream-json protocol — see
-    /// `copilot_tui()` / `claude_interactive()` for the same pattern.
+    /// `claude_interactive()` for the same pattern.
     /// Used by `ralph plan` for interactive sessions.
     pub fn traecli_interactive() -> Self {
         Self {
@@ -825,10 +769,6 @@ impl CliBackend {
             "amp" => args
                 .into_iter()
                 .filter(|a| a != "--dangerously-allow-all")
-                .collect(),
-            "copilot" => args
-                .into_iter()
-                .filter(|a| a != "--allow-all-tools")
                 .collect(),
             "claude" => args.into_iter().filter(|a| a != "--print").collect(),
             "roo" => args
@@ -1052,39 +992,6 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_backend() {
-        let backend = CliBackend::copilot();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "copilot");
-        assert_eq!(
-            args,
-            vec![
-                "--allow-all-tools",
-                "--output-format",
-                "json",
-                "-p",
-                "test prompt"
-            ]
-        );
-        assert!(stdin.is_none());
-        assert_eq!(backend.output_format, OutputFormat::CopilotStreamJson);
-    }
-
-    #[test]
-    fn test_copilot_tui_backend() {
-        let backend = CliBackend::copilot_tui();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "copilot");
-        // Should have prompt as positional arg, no -p flag, no --allow-all-tools
-        assert_eq!(args, vec!["test prompt"]);
-        assert!(stdin.is_none());
-        assert_eq!(backend.output_format, OutputFormat::Text);
-        assert_eq!(backend.prompt_flag, None);
-    }
-
-    #[test]
     fn test_from_config() {
         let config = CliConfig {
             backend: "claude".to_string(),
@@ -1148,17 +1055,6 @@ mod tests {
         assert_eq!(args, vec!["-x", "test prompt"]);
         assert!(stdin.is_none());
         assert!(!args.contains(&"--dangerously-allow-all".to_string()));
-    }
-
-    #[test]
-    fn test_copilot_interactive_mode_omits_allow_all_tools() {
-        let backend = CliBackend::copilot();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", true);
-
-        assert_eq!(cmd, "copilot");
-        assert_eq!(args, vec!["--output-format", "json", "-p", "test prompt"]);
-        assert!(stdin.is_none());
-        assert!(!args.contains(&"--allow-all-tools".to_string()));
     }
 
     #[test]
@@ -1344,13 +1240,6 @@ mod tests {
     fn test_from_name_amp() {
         let backend = CliBackend::from_name("amp").unwrap();
         assert_eq!(backend.command, "amp");
-    }
-
-    #[test]
-    fn test_from_name_copilot() {
-        let backend = CliBackend::from_name("copilot").unwrap();
-        assert_eq!(backend.command, "copilot");
-        assert_eq!(backend.prompt_flag, Some("-p".to_string()));
     }
 
     #[test]
@@ -1548,18 +1437,6 @@ mod tests {
         // Should NOT have --dangerously-allow-all
         assert_eq!(args, vec!["-x", "test prompt"]);
         assert!(!args.contains(&"--dangerously-allow-all".to_string()));
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_for_interactive_prompt_copilot() {
-        let backend = CliBackend::for_interactive_prompt("copilot").unwrap();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "copilot");
-        // Should NOT have --allow-all-tools
-        assert_eq!(args, vec!["-p", "test prompt"]);
-        assert!(!args.contains(&"--allow-all-tools".to_string()));
         assert!(stdin.is_none());
     }
 
@@ -1861,7 +1738,6 @@ mod tests {
         assert!(CliBackend::gemini().env_vars.is_empty());
         assert!(CliBackend::codex().env_vars.is_empty());
         assert!(CliBackend::amp().env_vars.is_empty());
-        assert!(CliBackend::copilot().env_vars.is_empty());
         assert!(CliBackend::opencode().env_vars.is_empty());
         assert!(CliBackend::pi().env_vars.is_empty());
         assert!(CliBackend::roo().env_vars.is_empty());

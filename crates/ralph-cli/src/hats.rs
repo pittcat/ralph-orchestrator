@@ -41,7 +41,7 @@ pub enum HatsCommands {
         /// Output format (unicode, ascii, compact, mermaid)
         #[arg(long, default_value = "unicode")]
         format: GraphFormat,
-        /// Backend for AI-generated diagrams (claude, kiro, gemini, codex, amp, copilot, opencode, pi, custom)
+        /// Backend for AI-generated diagrams (claude, kiro, gemini, codex, amp, opencode, pi, custom)
         #[arg(short = 'b', long = "backend")]
         backend: Option<String>,
     },

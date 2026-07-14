@@ -6,7 +6,6 @@
 #[cfg(test)]
 use crate::cli_backend::PromptMode;
 use crate::cli_backend::{CliBackend, OutputFormat};
-use crate::copilot_stream::CopilotStreamParser;
 use crate::trae_stream::TraeStreamParser;
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
@@ -228,14 +227,7 @@ impl CliExecutor {
                             tokio::time::Instant::now() + POST_EVENT_GRACE_TIMEOUT
                         });
                     }
-                    if self.backend.output_format == OutputFormat::CopilotStreamJson {
-                        if let Some(text) = CopilotStreamParser::extract_text(&line) {
-                            write!(output_writer, "{text}")?;
-                            if !text.ends_with('\n') {
-                                writeln!(output_writer)?;
-                            }
-                        }
-                    } else if self.backend.output_format == OutputFormat::TraeStreamJson {
+                    if self.backend.output_format == OutputFormat::TraeStreamJson {
                         // TraeStreamJson: parse NDJSON lines and extract assistant text
                         if let Some(text) = TraeStreamParser::extract_text(&line) {
                             write!(output_writer, "{text}")?;
@@ -731,35 +723,6 @@ mod tests {
             result.success,
             "Post-event timeout should be treated as success"
         );
-    }
-
-    #[tokio::test]
-    async fn test_execute_copilot_stream_writes_extracted_text() {
-        let backend = CliBackend {
-            command: "printf".to_string(),
-            args: vec![
-                "%s\n%s\n".to_string(),
-                r#"{"type":"assistant.turn_start","data":{"turnId":"0"}}"#.to_string(),
-                r#"{"type":"assistant.message","data":{"content":"hello from copilot"}}"#
-                    .to_string(),
-            ],
-            prompt_mode: PromptMode::Stdin,
-            prompt_flag: None,
-            output_format: OutputFormat::CopilotStreamJson,
-            env_vars: vec![],
-        };
-
-        let executor = CliExecutor::new(backend);
-        let mut output = Vec::new();
-
-        let result = executor
-            .execute("ignored", &mut output, None, false)
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        assert!(result.output.contains("\"assistant.message\""));
-        assert_eq!(String::from_utf8(output).unwrap(), "hello from copilot\n");
     }
 
     #[tokio::test]

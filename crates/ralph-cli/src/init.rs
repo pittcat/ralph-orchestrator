@@ -91,7 +91,7 @@ fn check_file_exists(force: bool) -> Result<(), InitError> {
 /// Initializes ralph.yml from a minimal backend template.
 ///
 /// # Arguments
-/// * `backend` - The backend name (claude, kiro, gemini, codex, amp, copilot, opencode, custom)
+/// * `backend` - The backend name (claude, kiro, gemini, codex, amp, opencode, custom)
 /// * `force` - If true, overwrite existing ralph.yml
 ///
 /// # Errors

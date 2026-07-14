@@ -46,10 +46,6 @@ fn test_wave_worker_execution_mode_supports_all_backend_formats() {
         WaveWorkerExecutionMode::Pty
     );
     assert_eq!(
-        wave_worker_execution_mode(BackendOutputFormat::CopilotStreamJson),
-        WaveWorkerExecutionMode::Pty
-    );
-    assert_eq!(
         wave_worker_execution_mode(BackendOutputFormat::Acp),
         WaveWorkerExecutionMode::Acp
     );
@@ -100,12 +96,6 @@ fn test_wave_worker_execution_mode_matches_supported_named_backend_roster() {
             BackendOutputFormat::Text,
             WaveWorkerExecutionMode::Pty,
             "execution-mode:named:amp",
-        ),
-        (
-            "copilot",
-            BackendOutputFormat::CopilotStreamJson,
-            WaveWorkerExecutionMode::Pty,
-            "execution-mode:named:copilot",
         ),
         (
             "opencode",
@@ -1250,13 +1240,6 @@ named_text_wave_backend_test!(
 
 #[cfg(unix)]
 named_text_wave_backend_test!(
-    test_execute_wave_supports_named_copilot_backend,
-    "copilot",
-    "copilot backend ok"
-);
-
-#[cfg(unix)]
-named_text_wave_backend_test!(
     test_execute_wave_supports_named_opencode_backend,
     "opencode",
     "opencode backend ok"
@@ -1368,13 +1351,6 @@ async fn test_execute_wave_named_backend_invocation_contracts() {
             marker_id: "invocation-contract:named:amp",
         },
         NamedBackendInvocationCase {
-            name: "copilot",
-            success_payload: "copilot invocation contract ok",
-            expected_prefix: &["--allow-all-tools", "--output-format", "json"],
-            prompt_delivery: PromptDeliveryExpectation::Flag("-p"),
-            marker_id: "invocation-contract:named:copilot",
-        },
-        NamedBackendInvocationCase {
             name: "opencode",
             success_payload: "opencode invocation contract ok",
             expected_prefix: &["run"],
@@ -1466,13 +1442,6 @@ async fn test_execute_wave_named_backend_large_prompt_contracts() {
             expected_prefix: &["--dangerously-allow-all"],
             prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-x"),
             marker_id: "large-prompt-contract:named:amp",
-        },
-        NamedBackendLargePromptCase {
-            name: "copilot",
-            success_payload: "copilot large prompt contract ok",
-            expected_prefix: &["--allow-all-tools", "--output-format", "json"],
-            prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-p"),
-            marker_id: "large-prompt-contract:named:copilot",
         },
         NamedBackendLargePromptCase {
             name: "opencode",
@@ -1644,22 +1613,6 @@ async fn test_execute_wave_hat_backend_invocation_contracts() {
                 prompt_delivery: PromptDeliveryExpectation::Flag("-x"),
                 success_payload: "hat amp named-with-args invocation contract ok",
                 marker_id: "invocation-contract:hat:named-with-args:amp",
-            },
-            HatNamedWithArgsInvocationCase {
-                backend_type: "copilot",
-                executable_name: "copilot",
-                extra_args: &["--model", "gpt-5"],
-                expected_prefix: &[
-                    "--allow-all-tools",
-                    "--output-format",
-                    "json",
-                    "--model",
-                    "gpt-5",
-                    "--hat-runtime-arg",
-                ],
-                prompt_delivery: PromptDeliveryExpectation::Flag("-p"),
-                success_payload: "hat copilot named-with-args invocation contract ok",
-                marker_id: "invocation-contract:hat:named-with-args:copilot",
             },
             HatNamedWithArgsInvocationCase {
                 backend_type: "roo",
@@ -1845,19 +1798,6 @@ async fn test_execute_wave_hat_backend_large_prompt_contracts() {
             marker_id: "large-prompt-contract:hat:named:amp",
         },
         HatNamedLargePromptCase {
-            backend_type: "copilot",
-            executable_name: "copilot",
-            expected_prefix: &[
-                "--allow-all-tools",
-                "--output-format",
-                "json",
-                "--hat-runtime-arg",
-            ],
-            prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-p"),
-            success_payload: "hat copilot named large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named:copilot",
-        },
-        HatNamedLargePromptCase {
             backend_type: "opencode",
             executable_name: "opencode",
             expected_prefix: &["run", "--hat-runtime-arg"],
@@ -2005,22 +1945,6 @@ async fn test_execute_wave_hat_backend_large_prompt_contracts() {
             prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-x"),
             success_payload: "hat amp named-with-args large prompt contract ok",
             marker_id: "large-prompt-contract:hat:named-with-args:amp",
-        },
-        HatNamedWithArgsLargePromptCase {
-            backend_type: "copilot",
-            executable_name: "copilot",
-            extra_args: &["--model", "gpt-5"],
-            expected_prefix: &[
-                "--allow-all-tools",
-                "--output-format",
-                "json",
-                "--model",
-                "gpt-5",
-                "--hat-runtime-arg",
-            ],
-            prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-p"),
-            success_payload: "hat copilot named-with-args large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named-with-args:copilot",
         },
         HatNamedWithArgsLargePromptCase {
             backend_type: "roo",

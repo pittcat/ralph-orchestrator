@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use ralph_adapters::{
-    CopilotStreamParser, OutputFormat as BackendOutputFormat, PiAssistantEvent, PiContentBlock,
+    OutputFormat as BackendOutputFormat, PiAssistantEvent, PiContentBlock,
     PiStreamEvent, PiStreamParser, TraeStreamEvent, TraeStreamParser, extract_assistant_text,
     extract_assistant_tool_calls, extract_user_tool_result_text, user_is_tool_result,
 };
@@ -152,15 +152,6 @@ pub fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) ->
                 _ => None,
             }
         }
-        BackendOutputFormat::CopilotStreamJson => {
-            CopilotStreamParser::extract_text(line).map(|text| {
-                if text.ends_with('\n') {
-                    text
-                } else {
-                    format!("{text}\n")
-                }
-            })
-        }
         BackendOutputFormat::PiStreamJson => match PiStreamParser::parse_line(line) {
             Some(PiStreamEvent::MessageUpdate {
                 assistant_message_event: PiAssistantEvent::TextDelta { delta },
@@ -194,7 +185,7 @@ pub fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) ->
             _ => None,
         },
         // Parse trae NDJSON: extract assistant text, tool calls, and tool results
-        // for the wave worker preview pane (mirrors pi/copilot patterns above).
+        // for the wave worker preview pane (mirrors the pi pattern above).
         BackendOutputFormat::TraeStreamJson => match TraeStreamParser::parse_line(line) {
             Some(TraeStreamEvent::Assistant { message }) => {
                 if let Some(text) = extract_assistant_text(&message) {

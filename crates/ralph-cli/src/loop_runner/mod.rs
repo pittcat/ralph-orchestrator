@@ -89,7 +89,7 @@ use ralph_core::payload_contract::validate_payload_contract;
 /// gate is required and cannot be bypassed.
 use ralph_adapters::{
     AcpExecutor, ClaudeStreamEvent, ClaudeStreamParser, CliBackend, CliExecutor,
-    ConsoleStreamHandler, ContentBlock, CopilotStreamParser, JsonRpcStreamHandler,
+    ConsoleStreamHandler, ContentBlock, JsonRpcStreamHandler,
     OutputFormat as BackendOutputFormat, PiAssistantEvent, PiStreamEvent, PiStreamParser,
     PrettyStreamHandler, PtyConfig, PtyExecutor, QuietStreamHandler, TuiStreamHandler,
 };
