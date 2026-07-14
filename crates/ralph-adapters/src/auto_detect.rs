@@ -9,7 +9,7 @@ use tracing::debug;
 
 /// Default priority order for backend detection.
 pub const DEFAULT_PRIORITY: &[&str] = &[
-    "claude", "kiro", "kiro-acp", "gemini", "codex", "opencode", "pi", "roo", "traecli",
+    "claude", "kiro", "kiro-acp", "gemini", "codex", "opencode", "pi", "traecli",
 ];
 
 /// Maps backend config names to their actual CLI command names.
@@ -59,7 +59,6 @@ impl std::fmt::Display for NoBackendError {
             f,
             "  • Pi CLI:       https://github.com/anthropics/pi-coding-agent"
         )?;
-        writeln!(f, "  • Roo CLI:      https://github.com/RooVetGit/Roo-Code")?;
         writeln!(f, "  • Trae CLI:     https://docs.trae.cn/cli")?;
         Ok(())
     }
@@ -174,6 +173,14 @@ mod tests {
     }
 
     #[test]
+    fn test_default_priority_does_not_contain_roo() {
+        assert!(
+            !DEFAULT_PRIORITY.contains(&"roo"),
+            "DEFAULT_PRIORITY must not contain deleted backend 'roo'"
+        );
+    }
+
+    #[test]
     fn test_is_backend_available_echo() {
         // 'echo' command should always be available
         let result = Command::new("echo").arg("--version").output();
@@ -249,35 +256,12 @@ mod tests {
     }
 
     #[test]
-    fn test_default_priority_includes_roo() {
-        assert!(
-            DEFAULT_PRIORITY.contains(&"roo"),
-            "DEFAULT_PRIORITY should include 'roo'"
-        );
-    }
-
-    #[test]
-    fn test_default_priority_roo_is_second_to_last() {
-        let len = DEFAULT_PRIORITY.len();
-        assert_eq!(
-            DEFAULT_PRIORITY[len - 2],
-            "roo",
-            "Roo should be second-to-last in DEFAULT_PRIORITY"
-        );
-    }
-
-    #[test]
     fn test_default_priority_traecli_is_last() {
         assert_eq!(
             DEFAULT_PRIORITY.last(),
             Some(&"traecli"),
             "Trae CLI should be the last entry in DEFAULT_PRIORITY"
         );
-    }
-
-    #[test]
-    fn test_detection_command_roo() {
-        assert_eq!(detection_command("roo"), "roo");
     }
 
     #[test]

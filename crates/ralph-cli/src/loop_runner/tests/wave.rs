@@ -98,10 +98,10 @@ fn test_wave_worker_execution_mode_matches_supported_named_backend_roster() {
             "execution-mode:named:opencode",
         ),
         (
-            "roo",
-            BackendOutputFormat::Text,
+            "traecli",
+            BackendOutputFormat::TraeStreamJson,
             WaveWorkerExecutionMode::Pty,
-            "execution-mode:named:roo",
+            "execution-mode:named:traecli",
         ),
     ] {
         let backend = CliBackend::from_name(name).expect("supported named backend");
@@ -935,11 +935,11 @@ fn assert_named_backend_invocation_contract(
             assert_eq!(
                 args[expected_prefix.len()],
                 "--prompt-file",
-                "missing roo prompt file flag"
+                "missing --prompt-file flag"
             );
             assert!(
                 !args[expected_prefix.len() + 1].is_empty(),
-                "missing roo prompt file path"
+                "missing prompt file path"
             );
             assert!(
                 args[expected_prefix.len() + 1].contains("tmp")
@@ -1233,13 +1233,6 @@ named_text_wave_backend_test!(
 );
 
 #[cfg(unix)]
-named_text_wave_backend_test!(
-    test_execute_wave_supports_named_roo_backend,
-    "roo",
-    "roo backend ok"
-);
-
-#[cfg(unix)]
 #[tokio::test]
 async fn test_execute_wave_supports_named_claude_backend() {
     let completed =
@@ -1336,13 +1329,6 @@ async fn test_execute_wave_named_backend_invocation_contracts() {
             expected_prefix: &["run"],
             prompt_delivery: PromptDeliveryExpectation::Positional,
             marker_id: "invocation-contract:named:opencode",
-        },
-        NamedBackendInvocationCase {
-            name: "roo",
-            success_payload: "roo invocation contract ok",
-            expected_prefix: &["--print", "--ephemeral"],
-            prompt_delivery: PromptDeliveryExpectation::PromptFile,
-            marker_id: "invocation-contract:named:roo",
         },
     ] {
         let (completed, captured) =
@@ -1573,21 +1559,6 @@ async fn test_execute_wave_hat_backend_invocation_contracts() {
                 success_payload: "hat codex named-with-args invocation contract ok",
                 marker_id: "invocation-contract:hat:named-with-args:codex",
             },
-            HatNamedWithArgsInvocationCase {
-                backend_type: "roo",
-                executable_name: "roo",
-                extra_args: &["--model", "claude-sonnet-4"],
-                expected_prefix: &[
-                    "--print",
-                    "--ephemeral",
-                    "--model",
-                    "claude-sonnet-4",
-                    "--hat-runtime-arg",
-                ],
-                prompt_delivery: PromptDeliveryExpectation::PromptFile,
-                success_payload: "hat roo named-with-args invocation contract ok",
-                marker_id: "invocation-contract:hat:named-with-args:roo",
-            },
         ] {
             let body = invocation_capture_backend_body(case.success_payload);
             let _fake = install_fake_path_backends(&[(case.executable_name, body.as_str())]);
@@ -1756,14 +1727,6 @@ async fn test_execute_wave_hat_backend_large_prompt_contracts() {
             success_payload: "hat opencode named large prompt contract ok",
             marker_id: "large-prompt-contract:hat:named:opencode",
         },
-        HatNamedLargePromptCase {
-            backend_type: "roo",
-            executable_name: "roo",
-            expected_prefix: &["--print", "--ephemeral", "--hat-runtime-arg"],
-            prompt_delivery: PromptDeliveryExpectation::PromptFile,
-            success_payload: "hat roo named large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named:roo",
-        },
     ] {
         let body = invocation_capture_backend_body(case.success_payload);
         let _fake = install_fake_path_backends(&[(case.executable_name, body.as_str())]);
@@ -1882,21 +1845,6 @@ async fn test_execute_wave_hat_backend_large_prompt_contracts() {
             prompt_delivery: PromptDeliveryExpectation::TempFilePositional,
             success_payload: "hat codex named-with-args large prompt contract ok",
             marker_id: "large-prompt-contract:hat:named-with-args:codex",
-        },
-        HatNamedWithArgsLargePromptCase {
-            backend_type: "roo",
-            executable_name: "roo",
-            extra_args: &["--model", "claude-sonnet-4"],
-            expected_prefix: &[
-                "--print",
-                "--ephemeral",
-                "--model",
-                "claude-sonnet-4",
-                "--hat-runtime-arg",
-            ],
-            prompt_delivery: PromptDeliveryExpectation::PromptFile,
-            success_payload: "hat roo named-with-args large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named-with-args:roo",
         },
     ] {
         let body = invocation_capture_backend_body(case.success_payload);

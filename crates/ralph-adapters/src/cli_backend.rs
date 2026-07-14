@@ -76,7 +76,6 @@ impl CliBackend {
             "codex" => Self::codex(),
             "opencode" => Self::opencode(),
             "pi" => Self::pi(),
-            "roo" => Self::roo(),
             "traecli" => Self::traecli(),
             "custom" => return Self::custom(config),
             _ => Self::claude(), // Default to claude
@@ -249,7 +248,6 @@ impl CliBackend {
             "codex" => Ok(Self::codex()),
             "opencode" => Ok(Self::opencode()),
             "pi" => Ok(Self::pi()),
-            "roo" => Ok(Self::roo()),
             "traecli" => Ok(Self::traecli()),
             _ => Err(CustomBackendError),
         }
@@ -361,7 +359,6 @@ impl CliBackend {
             "codex" => Ok(Self::codex_interactive()),
             "opencode" => Ok(Self::opencode_interactive()),
             "pi" => Ok(Self::pi_interactive()),
-            "roo" => Ok(Self::roo_interactive()),
             "traecli" => Ok(Self::traecli_interactive()),
             _ => Err(CustomBackendError),
         }
@@ -505,38 +502,6 @@ impl CliBackend {
         }
     }
 
-    /// Creates the Roo backend for headless execution.
-    ///
-    /// Uses `--print` for non-interactive output and `--ephemeral` for clean
-    /// disk state. Prompts are always passed via `--prompt-file` (handled in
-    /// `build_command()`). Roo auto-approves tools by default, so no
-    /// `--trust-all-tools` equivalent is needed.
-    pub fn roo() -> Self {
-        Self {
-            command: "roo".to_string(),
-            args: vec!["--print".to_string(), "--ephemeral".to_string()],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: None,
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        }
-    }
-
-    /// Creates the Roo backend for interactive mode with initial prompt.
-    ///
-    /// Runs roo TUI without `--print` or `--ephemeral`, passing the prompt
-    /// as a positional argument. Used by `ralph plan` for interactive sessions.
-    pub fn roo_interactive() -> Self {
-        Self {
-            command: "roo".to_string(),
-            args: vec![],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: None,
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        }
-    }
-
     /// Creates the Trae CLI backend for headless execution.
     ///
     /// Uses `--yolo` to auto-approve tools, `--print` for non-interactive
@@ -601,33 +566,6 @@ impl CliBackend {
         })
     }
 
-    /// Builds roo prompt-file args: writes prompt to a temp file and
-    /// appends `--prompt-file <path>` to args. Falls back to positional
-    /// arg if temp file creation fails.
-    fn build_roo_prompt_file(
-        args: &mut Vec<String>,
-        prompt: &str,
-    ) -> (Option<String>, Option<NamedTempFile>) {
-        match NamedTempFile::new() {
-            Ok(mut file) => {
-                if let Err(e) = file.write_all(prompt.as_bytes()) {
-                    tracing::warn!("Failed to write roo prompt to temp file: {}", e);
-                    args.push(prompt.to_string());
-                    (None, None)
-                } else {
-                    args.push("--prompt-file".to_string());
-                    args.push(file.path().display().to_string());
-                    (None, Some(file))
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to create temp file for roo: {}", e);
-                args.push(prompt.to_string());
-                (None, None)
-            }
-        }
-    }
-
     /// Builds the command for PTY (non-interactive) execution.
     ///
     /// Forces arg mode to avoid PTY line-discipline deadlocks on large prompts.
@@ -669,44 +607,38 @@ impl CliBackend {
             args = self.filter_args_for_interactive(args);
         }
 
-        // Handle prompt passing: Roo uses --prompt-file, all others use temp file for large prompts
+        // Handle prompt passing: all backends use temp file for large prompts
         let (stdin_input, temp_file) = match self.prompt_mode {
             PromptMode::Arg => {
-                // Roo headless: always use --prompt-file for all prompts
-                // Only headless roo() has --print in args; roo_interactive() does not
-                if self.command == "roo" && args.contains(&"--print".to_string()) {
-                    Self::build_roo_prompt_file(&mut args, prompt)
-                } else {
-                    // Use temp file for large prompts (>7000 chars) to avoid shell ARG_MAX limits
-                    let (prompt_text, temp_file) = if prompt.len() > 7000 {
-                        match NamedTempFile::new() {
-                            Ok(mut file) => {
-                                if let Err(e) = file.write_all(prompt.as_bytes()) {
-                                    tracing::warn!("Failed to write prompt to temp file: {}", e);
-                                    (prompt.to_string(), None)
-                                } else {
-                                    let path = file.path().display().to_string();
-                                    (
-                                        format!("Please read and execute the task in {}", path),
-                                        Some(file),
-                                    )
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to create temp file: {}", e);
+                // Use temp file for large prompts (>7000 chars) to avoid shell ARG_MAX limits
+                let (prompt_text, temp_file) = if prompt.len() > 7000 {
+                    match NamedTempFile::new() {
+                        Ok(mut file) => {
+                            if let Err(e) = file.write_all(prompt.as_bytes()) {
+                                tracing::warn!("Failed to write prompt to temp file: {}", e);
                                 (prompt.to_string(), None)
+                            } else {
+                                let path = file.path().display().to_string();
+                                (
+                                    format!("Please read and execute the task in {}", path),
+                                    Some(file),
+                                )
                             }
                         }
-                    } else {
-                        (prompt.to_string(), None)
-                    };
-
-                    if let Some(ref flag) = self.prompt_flag {
-                        args.push(flag.clone());
+                        Err(e) => {
+                            tracing::warn!("Failed to create temp file: {}", e);
+                            (prompt.to_string(), None)
+                        }
                     }
-                    args.push(prompt_text);
-                    (None, temp_file)
+                } else {
+                    (prompt.to_string(), None)
+                };
+
+                if let Some(ref flag) = self.prompt_flag {
+                    args.push(flag.clone());
                 }
+                args.push(prompt_text);
+                (None, temp_file)
             }
             PromptMode::Stdin => (Some(prompt.to_string()), None),
         };
@@ -736,10 +668,6 @@ impl CliBackend {
                 .collect(),
             "codex" => args.into_iter().filter(|a| a != "--full-auto").collect(),
             "claude" => args.into_iter().filter(|a| a != "--print").collect(),
-            "roo" => args
-                .into_iter()
-                .filter(|a| a != "--print" && a != "--ephemeral")
-                .collect(),
             "trae-cli" => args
                 .into_iter()
                 .filter(|a| a != "--yolo" && a != "--print")
@@ -790,6 +718,31 @@ impl CliBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_roo_prompt_file_helper_removed() {
+        // U3: roo backend and its helper `build_roo_prompt_file` are deleted.
+        // We verify the helpers are gone by source-grepping cli_backend.rs.
+        let src = include_str!("cli_backend.rs");
+        let has_helper = src
+            .lines()
+            .map(str::trim_start)
+            .any(|l| l.starts_with("fn build_roo_prompt_file"));
+        let has_factory = src
+            .lines()
+            .map(str::trim_start)
+            .any(|l| l.starts_with("pub fn roo()"));
+        let has_interactive = src
+            .lines()
+            .map(str::trim_start)
+            .any(|l| l.starts_with("pub fn roo_interactive()"));
+        assert!(!has_helper, "build_roo_prompt_file helper must be deleted");
+        assert!(!has_factory, "CliBackend::roo() factory must be deleted");
+        assert!(
+            !has_interactive,
+            "CliBackend::roo_interactive() factory must be deleted"
+        );
+    }
 
     #[test]
     fn test_claude_backend() {
@@ -1665,7 +1618,6 @@ mod tests {
         assert!(CliBackend::codex().env_vars.is_empty());
         assert!(CliBackend::opencode().env_vars.is_empty());
         assert!(CliBackend::pi().env_vars.is_empty());
-        assert!(CliBackend::roo().env_vars.is_empty());
     }
 
     #[test]
@@ -1690,176 +1642,6 @@ mod tests {
             assert_eq!(setting_sources.next(), Some("project,local"));
             assert_eq!(setting_sources.next(), None);
         }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Tests for Roo backend
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_roo_backend() {
-        let backend = CliBackend::roo();
-        let (cmd, args, stdin, temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "roo");
-        // Should use --prompt-file with temp file, not positional arg
-        assert!(
-            temp.is_some(),
-            "roo should always use temp file for prompts"
-        );
-        assert!(
-            args.contains(&"--print".to_string()),
-            "roo headless should have --print"
-        );
-        assert!(
-            args.contains(&"--ephemeral".to_string()),
-            "roo headless should have --ephemeral"
-        );
-        assert!(
-            args.contains(&"--prompt-file".to_string()),
-            "roo should use --prompt-file"
-        );
-        assert!(stdin.is_none());
-        assert_eq!(backend.output_format, OutputFormat::Text);
-    }
-
-    #[test]
-    fn test_roo_interactive() {
-        let backend = CliBackend::roo_interactive();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "roo");
-        // Interactive mode: no --print, no --ephemeral, positional prompt
-        assert_eq!(args, vec!["test prompt"]);
-        assert!(stdin.is_none());
-        assert_eq!(backend.output_format, OutputFormat::Text);
-        assert_eq!(backend.prompt_flag, None);
-    }
-
-    #[test]
-    fn test_from_name_roo() {
-        let backend = CliBackend::from_name("roo").unwrap();
-        assert_eq!(backend.command, "roo");
-        assert_eq!(backend.prompt_flag, None);
-        assert_eq!(backend.output_format, OutputFormat::Text);
-    }
-
-    #[test]
-    fn test_from_config_roo() {
-        let config = CliConfig {
-            backend: "roo".to_string(),
-            command: None,
-            prompt_mode: "arg".to_string(),
-            ..Default::default()
-        };
-        let backend = CliBackend::from_config(&config).unwrap();
-
-        assert_eq!(backend.command, "roo");
-        assert_eq!(backend.output_format, OutputFormat::Text);
-        assert!(backend.args.contains(&"--print".to_string()));
-        assert!(backend.args.contains(&"--ephemeral".to_string()));
-    }
-
-    #[test]
-    fn test_from_config_roo_with_args() {
-        let config = CliConfig {
-            backend: "roo".to_string(),
-            command: None,
-            prompt_mode: "arg".to_string(),
-            args: vec![
-                "--provider".to_string(),
-                "bedrock".to_string(),
-                "--model".to_string(),
-                "anthropic.claude-sonnet-4-6".to_string(),
-            ],
-            ..Default::default()
-        };
-        let backend = CliBackend::from_config(&config).unwrap();
-        let (_cmd, args, _stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(backend.command, "roo");
-        // Should have default args + extra args + --prompt-file
-        assert!(args.contains(&"--print".to_string()));
-        assert!(args.contains(&"--ephemeral".to_string()));
-        assert!(args.contains(&"--provider".to_string()));
-        assert!(args.contains(&"bedrock".to_string()));
-        assert!(args.contains(&"--model".to_string()));
-        assert!(args.contains(&"anthropic.claude-sonnet-4-6".to_string()));
-        assert!(args.contains(&"--prompt-file".to_string()));
-    }
-
-    #[test]
-    fn test_for_interactive_prompt_roo() {
-        let backend = CliBackend::for_interactive_prompt("roo").unwrap();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "roo");
-        // Interactive: no --print, no --ephemeral, positional prompt
-        assert_eq!(args, vec!["test prompt"]);
-        assert!(stdin.is_none());
-        assert_eq!(backend.output_format, OutputFormat::Text);
-    }
-
-    #[test]
-    fn test_roo_interactive_mode_removes_print() {
-        let backend = CliBackend::roo();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", true);
-
-        assert_eq!(cmd, "roo");
-        // In interactive mode, --print and --ephemeral should be removed
-        assert!(
-            !args.contains(&"--print".to_string()),
-            "interactive mode should remove --print"
-        );
-        assert!(
-            !args.contains(&"--ephemeral".to_string()),
-            "interactive mode should remove --ephemeral"
-        );
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_roo_uses_prompt_file() {
-        let backend = CliBackend::roo();
-        // Test with small prompt
-        let (_, args_small, _, temp_small) = backend.build_command("small prompt", false);
-        assert!(
-            temp_small.is_some(),
-            "even small prompts should use temp file"
-        );
-        assert!(
-            args_small.contains(&"--prompt-file".to_string()),
-            "should use --prompt-file"
-        );
-
-        // Test with large prompt
-        let large_prompt = "x".repeat(10000);
-        let (_, args_large, _, temp_large) = backend.build_command(&large_prompt, false);
-        assert!(temp_large.is_some(), "large prompts should use temp file");
-        assert!(
-            args_large.contains(&"--prompt-file".to_string()),
-            "should use --prompt-file for large prompts"
-        );
-    }
-
-    #[test]
-    fn test_roo_prompt_file_content() {
-        use std::io::{Read, Seek};
-        let backend = CliBackend::roo();
-        let prompt = "This is a test prompt for roo";
-        let (_, _, _, temp) = backend.build_command(prompt, false);
-
-        let mut temp_file = temp.expect("should have temp file");
-        let mut content = String::new();
-        temp_file
-            .as_file_mut()
-            .seek(std::io::SeekFrom::Start(0))
-            .unwrap();
-        temp_file
-            .as_file_mut()
-            .read_to_string(&mut content)
-            .unwrap();
-        assert_eq!(content, prompt);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
