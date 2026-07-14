@@ -131,6 +131,67 @@ mod tests {
     use ralph_core::payload_contract::validate_payload_contract;
     use ralph_core::{HatRegistry, RalphConfig};
 
+    #[test]
+    fn test_minimal_preset_files_exclude_deleted_backends() {
+        // U7: presets/minimal/ must no longer contain a per-backend yml
+        // for any of the 5 deleted backends (amp, kiro, roo, copilot, kiro-acp).
+        let preset_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("presets/minimal");
+        let deleted = ["amp", "kiro", "roo", "copilot", "kiro-acp"];
+        for name in deleted {
+            let path = preset_dir.join(format!("{name}.yml"));
+            assert!(
+                !path.exists(),
+                "{name}.yml must be removed from presets/minimal (backend deleted)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_zsh_plugin_backend_array_excludes_deleted_backends() {
+        // U7: scripts/ralph-zsh-plugin.zsh `_RALPH_BACKENDS=( ... )` array
+        // must no longer carry entries for the deleted backends.
+        let plugin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("scripts/ralph-zsh-plugin.zsh");
+        let src = std::fs::read_to_string(&plugin).expect("read zsh plugin");
+        let deleted = ["kiro", "amp", "copilot", "roo"];
+        for backend in deleted {
+            // Each removed backend must no longer appear as a quoted entry
+            // like `"<backend>:...` inside `_RALPH_BACKENDS=(...)`.
+            let marker = format!("\"{backend}:");
+            let occurrences: Vec<_> = src.matches(&marker).collect();
+            assert!(
+                occurrences.is_empty(),
+                "_RALPH_BACKENDS array still references deleted backend `{backend}` ({occurrences:?} matches in {})",
+                plugin.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_tools_evaluate_scripts_exclude_kiro() {
+        // U7: tools/PRESET_EVALUATOR_PROMPT.md and tools/evaluate-*.sh must
+        // no longer tell evaluators to use the deleted kiro-cli backend.
+        let tools_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tools");
+        for entry in ["PRESET_EVALUATOR_PROMPT.md", "evaluate-all-presets.sh", "evaluate-preset.sh"] {
+            let path = tools_dir.join(entry);
+            if path.exists() {
+                let src = std::fs::read_to_string(&path).expect("read tool script");
+                assert!(
+                    !src.contains("kiro-cli") && !src.contains("\"kiro\""),
+                    "tools/{entry} still references deleted `kiro` backend"
+                );
+            }
+        }
+    }
+
     fn assert_public_preset_has_completion_path(preset: &EmbeddedPreset) {
         let config =
             RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");

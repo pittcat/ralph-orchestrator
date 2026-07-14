@@ -87,14 +87,10 @@ _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
 _RALPH_BACKENDS=(
   "auto:Auto-detect backend"
   "claude:Claude CLI backend"
-  "kiro:Kiro backend"
   "gemini:Gemini backend"
   "codex:Codex backend"
-  "amp:Amp backend"
-  "copilot:Co-pilot backend"
   "opencode:Opencode backend"
   "pi:Pi backend"
-  "roo:Roo Code backend"
   "traecli:Trae CLI backend"
   "custom:Custom backend"
 )

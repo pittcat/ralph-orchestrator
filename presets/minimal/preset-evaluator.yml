@@ -1,5 +1,5 @@
 # Meta-Ralph: Hat Collection Preset Evaluator
-# Purpose: Systematically test each hat collection preset with Kiro CLI
+# Purpose: Systematically test each hat collection preset with Claude CLI
 # Output: Consolidated findings in tools/preset-evaluation-findings.md
 
 # Event loop settings - generous limits for thorough evaluation
@@ -11,9 +11,9 @@ event_loop:
   max_consecutive_failures: 3
   starting_event: "evaluation.start"  # Ralph publishes this after coordination
 
-# Use Kiro CLI as the backend
+# Use Claude CLI as the backend
 cli:
-  backend: "kiro"
+  backend: "claude"
   prompt_mode: "arg"
   pty_mode: false
   pty_interactive: false           # Non-interactive for batch evaluation

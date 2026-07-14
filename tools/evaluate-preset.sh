@@ -340,9 +340,9 @@ cli:
   idle_timeout_secs: 120
 
 adapters:
-  kiro:
-    timeout: 900
   claude:
+    timeout: 900
+  gemini:
     timeout: 900
 
 verbose: false
@@ -361,9 +361,9 @@ cli:
   idle_timeout_secs: 120
 
 adapters:
-  kiro:
-    timeout: 900
   claude:
+    timeout: 900
+  gemini:
     timeout: 900
 
 verbose: false
