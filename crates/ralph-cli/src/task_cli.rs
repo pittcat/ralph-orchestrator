@@ -19,9 +19,8 @@
 //! emit is correctly wired before applying.
 
 use crate::{
-    config_resolution, display::colors, hat_command_policy::HatCommandPolicy,
+    ConfigSource, config_resolution, display::colors, hat_command_policy::HatCommandPolicy,
     operation_guard::OperationContext, resolve_path_from_workspace, resolve_workspace_root,
-    ConfigSource,
 };
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -113,9 +112,7 @@ pub fn load_coordinator_hats(
     root: &Path,
     config_sources: &[ConfigSource],
 ) -> Result<Vec<String>, CoordinatorHatsError> {
-    if let Some(resolved) =
-        config_resolution::resolve_project_config_path(root, config_sources)
-    {
+    if let Some(resolved) = config_resolution::resolve_project_config_path(root, config_sources) {
         return load_coordinator_hats_from_path(&resolved);
     }
     Err(CoordinatorHatsError::MissingRalphYml)
@@ -125,9 +122,7 @@ pub fn load_coordinator_hats(
 /// already-resolved project config path. The helper is shared
 /// between the explicit `-c`/`RALPH_CONFIG` discovery path and any
 /// future caller that already has a `Path` in hand.
-pub fn load_coordinator_hats_from_path(
-    path: &Path,
-) -> Result<Vec<String>, CoordinatorHatsError> {
+pub fn load_coordinator_hats_from_path(path: &Path) -> Result<Vec<String>, CoordinatorHatsError> {
     if !path.exists() {
         return Err(CoordinatorHatsError::MissingRalphYml);
     }
@@ -910,11 +905,7 @@ fn filter_tasks_for_ready(
 }
 
 /// Executes task CLI commands.
-pub fn execute(
-    args: TaskArgs,
-    use_colors: bool,
-    config_sources: &[ConfigSource],
-) -> Result<()> {
+pub fn execute(args: TaskArgs, use_colors: bool, config_sources: &[ConfigSource]) -> Result<()> {
     let root = args.root.clone();
     let workspace = resolve_workspace_root(root.as_ref());
     // U7 (2026-07-04-003 plan): load `coordinator_hats` through the
@@ -2047,8 +2038,8 @@ fn execute_verify(
     let (coordinator_hats, coordinator_err) =
         match load_coordinator_hats(&workspace, config_sources) {
             Ok(hats) => (hats, None),
-        Err(err) => (Vec::new(), Some(err)),
-    };
+            Err(err) => (Vec::new(), Some(err)),
+        };
     let cmd = args.command;
 
     let path = get_tasks_path(root.as_ref());
@@ -3484,7 +3475,6 @@ tasks:
 
         let outcome = verify_add(
             &mut store,
-
             &ctx,
             &["coordinator".into()],
             None,
@@ -3509,7 +3499,6 @@ tasks:
 
         let outcome = verify_add(
             &mut store,
-
             &ctx,
             &["coordinator".into()],
             None,
@@ -3535,8 +3524,7 @@ tasks:
         args.title = None;
 
         let outcome =
-            verify_add(&mut store, &ctx, &["coordinator".into()], None, &args, &[])
-                .expect("ok");
+            verify_add(&mut store, &ctx, &["coordinator".into()], None, &args, &[]).expect("ok");
         assert!(matches!(
             outcome,
             VerifyOutcome::Deny { ref reason, .. } if reason == "missing_title"
@@ -3554,15 +3542,8 @@ tasks:
         let mut args = verify_ensure_args("placeholder", "k");
         args.key = None;
         args.for_fix_unit = None;
-        let outcome = verify_ensure(
-            &mut store,
-            &ctx,
-            &["coordinator".into()],
-            None,
-            &args,
-            &[],
-        )
-        .expect("ok");
+        let outcome =
+            verify_ensure(&mut store, &ctx, &["coordinator".into()], None, &args, &[]).expect("ok");
         assert!(matches!(
             outcome,
             VerifyOutcome::Deny { ref reason, .. } if reason == "missing_key"
@@ -3571,15 +3552,8 @@ tasks:
         // And missing-title branch.
         let mut args2 = verify_ensure_args("placeholder", "k");
         args2.title = None;
-        let outcome = verify_ensure(
-            &mut store,
-            &ctx,
-            &["coordinator".into()],
-            None,
-            &args2,
-            &[],
-        )
-        .expect("ok");
+        let outcome = verify_ensure(&mut store, &ctx, &["coordinator".into()], None, &args2, &[])
+            .expect("ok");
         assert!(matches!(
             outcome,
             VerifyOutcome::Deny { ref reason, .. } if reason == "missing_title"
@@ -3872,7 +3846,7 @@ tasks:
             &ctx,
             &coordinator_hats,
             false,
-        &[],
+            &[],
         )
         .expect("first ensure must succeed");
 
@@ -3892,7 +3866,7 @@ tasks:
             &ctx,
             &coordinator_hats,
             false,
-        &[],
+            &[],
         )
         .expect("second ensure must succeed (idempotent)");
 
@@ -3923,7 +3897,7 @@ tasks:
             &ctx_a,
             &coordinator_hats,
             false,
-        &[],
+            &[],
         )
         .expect("first ensure (loop-a) must succeed");
 
@@ -3933,7 +3907,7 @@ tasks:
             &ctx_a,
             &coordinator_hats,
             false,
-        &[],
+            &[],
         )
         .expect("second ensure same loop must be idempotent");
 
@@ -3948,7 +3922,7 @@ tasks:
             &ctx_b,
             &coordinator_hats,
             false,
-        &[],
+            &[],
         )
         .expect("ensure on a different loop must succeed");
 
@@ -3989,7 +3963,8 @@ mod load_coordinator_hats_tests {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let root = temp_dir.path();
         std::fs::write(root.join("ralph.yml"), "tasks: [").expect("write broken yaml");
-        let err = load_coordinator_hats(root, &[]).expect_err("broken yaml must surface InvalidYaml");
+        let err =
+            load_coordinator_hats(root, &[]).expect_err("broken yaml must surface InvalidYaml");
         match err {
             CoordinatorHatsError::InvalidYaml { path, source } => {
                 assert_eq!(path, root.join("ralph.yml"));

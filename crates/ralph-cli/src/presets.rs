@@ -180,7 +180,11 @@ mod tests {
             .join("..")
             .join("..")
             .join("tools");
-        for entry in ["PRESET_EVALUATOR_PROMPT.md", "evaluate-all-presets.sh", "evaluate-preset.sh"] {
+        for entry in [
+            "PRESET_EVALUATOR_PROMPT.md",
+            "evaluate-all-presets.sh",
+            "evaluate-preset.sh",
+        ] {
             let path = tools_dir.join(entry);
             if path.exists() {
                 let src = std::fs::read_to_string(&path).expect("read tool script");
@@ -245,7 +249,15 @@ mod tests {
         let ws_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..");
-        let deleted = ["kiro", "amp", "roo", "copilot", "kiro-acp", "kiro-cli", "copilot_stream"];
+        let deleted = [
+            "kiro",
+            "amp",
+            "roo",
+            "copilot",
+            "kiro-acp",
+            "kiro-cli",
+            "copilot_stream",
+        ];
         let rules = [
             ws_root.join(".cursor/rules/architecture-modules.mdc"),
             ws_root.join(".cursor/rules/feature-flags.mdc"),
@@ -468,7 +480,6 @@ mod tests {
             "ce-executor-serial lookup must return None, not a redirect"
         );
     }
-
 
     // Unit 2 (plan 2026-07-07-006): pipeline schema static self-check.
     // Lock the registry's claim that pipeline's work.done schema already
@@ -909,7 +920,6 @@ mod tests {
             ),
         }
     }
-
 
     #[test]
     fn test_ce_executor_reporter_publishes_report_done() {

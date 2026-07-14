@@ -58,9 +58,9 @@ pub use hooks::{
 };
 pub use loop_config::{
     ElementConstraint, EventFieldDoc, EventLoopConfig, EventSchema, FlowDeclarationConfig,
-    FlowStepConfig, HandoffEnvelopeConfig, HatAllowedValues, HintCondition, HintOp, MechanismConfig,
-    PayloadType, Phase, PhaseConfig, ProgressStewardConfig, RoutingHintConfig, SupervisorConfig,
-    TriggerContextConfig, VerdictGateConfig, WarmupConfig,
+    FlowStepConfig, HandoffEnvelopeConfig, HatAllowedValues, HintCondition, HintOp,
+    MechanismConfig, PayloadType, Phase, PhaseConfig, ProgressStewardConfig, RoutingHintConfig,
+    SupervisorConfig, TriggerContextConfig, VerdictGateConfig, WarmupConfig,
 };
 pub use memories::{InjectMode, MemoriesConfig, MemoriesFilter};
 pub use multi_hat_policy::{

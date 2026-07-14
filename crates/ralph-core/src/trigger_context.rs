@@ -282,7 +282,10 @@ fn extract_summary_fields(declared: &[String], payload: &Value) -> Vec<FieldSumm
 /// emitted only when **every** condition in `conditions` matches
 /// the payload. Type mismatches silently fail (no panic, no
 /// coercion) per R8 / R9.
-fn evaluate_hints(declared: &[crate::config::RoutingHintConfig], payload: &Value) -> Vec<MatchedHint> {
+fn evaluate_hints(
+    declared: &[crate::config::RoutingHintConfig],
+    payload: &Value,
+) -> Vec<MatchedHint> {
     declared
         .iter()
         .filter(|hint| hint.conditions.iter().all(|c| eval_condition(c, payload)))
@@ -485,7 +488,12 @@ mod u4_trigger_context_builder_tests {
         s
     }
 
-    fn input<'a>(current: &'a str, topic: &'a str, schema: &'a EventSchema, payload: &'a Value) -> TriggerContextInput<'a> {
+    fn input<'a>(
+        current: &'a str,
+        topic: &'a str,
+        schema: &'a EventSchema,
+        payload: &'a Value,
+    ) -> TriggerContextInput<'a> {
         TriggerContextInput {
             current_hat: current,
             source_topic: topic,
@@ -511,7 +519,12 @@ mod u4_trigger_context_builder_tests {
             "verdict": "fix_required",
             "synthesized_review_file": "/tmp/review.md",
         });
-        let view = build(&input("review-gate", "review.synthesized", &schema, &payload));
+        let view = build(&input(
+            "review-gate",
+            "review.synthesized",
+            &schema,
+            &payload,
+        ));
         let fields: Vec<&str> = view.summary.iter().map(|f| f.field.as_str()).collect();
         assert_eq!(
             fields,
@@ -524,7 +537,10 @@ mod u4_trigger_context_builder_tests {
         );
         assert_eq!(view.summary[0].value, FieldValue::Present(json!(3)));
         assert_eq!(view.summary[1].value, FieldValue::Present(json!(2)));
-        assert_eq!(view.summary[2].value, FieldValue::Present(json!("fix_required")));
+        assert_eq!(
+            view.summary[2].value,
+            FieldValue::Present(json!("fix_required"))
+        );
         assert_eq!(
             view.summary[3].value,
             FieldValue::Present(json!("/tmp/review.md"))
@@ -536,12 +552,14 @@ mod u4_trigger_context_builder_tests {
     /// value.
     #[test]
     fn u2_missing_field_renders_as_missing_never_default() {
-        let schema = schema_with_summary_fields(&[
-            "must_fix_now_count",
-            "residual_findings_count",
-        ]);
+        let schema = schema_with_summary_fields(&["must_fix_now_count", "residual_findings_count"]);
         let payload = json!({"must_fix_now_count": 0});
-        let view = build(&input("review-gate", "review.synthesized", &schema, &payload));
+        let view = build(&input(
+            "review-gate",
+            "review.synthesized",
+            &schema,
+            &payload,
+        ));
         assert_eq!(view.summary[0].value, FieldValue::Present(json!(0)));
         assert_eq!(
             view.summary[1].value,
@@ -581,18 +599,26 @@ mod u4_trigger_context_builder_tests {
     #[test]
     fn u2_non_object_payload_yields_missing_and_no_match() {
         let mut schema = schema_with_summary_fields(&["must_fix_now_count"]);
-        schema.trigger_context.routing_hints.push(RoutingHintConfig {
-            label: "anything".into(),
-            guidance: "should never match".into(),
-            conditions: vec![HintCondition {
-                field: "must_fix_now_count".into(),
-                op: HintOp::Exists,
-                value: Value::Null,
-            }],
-            exclusive_group: String::new(),
-        });
+        schema
+            .trigger_context
+            .routing_hints
+            .push(RoutingHintConfig {
+                label: "anything".into(),
+                guidance: "should never match".into(),
+                conditions: vec![HintCondition {
+                    field: "must_fix_now_count".into(),
+                    op: HintOp::Exists,
+                    value: Value::Null,
+                }],
+                exclusive_group: String::new(),
+            });
         let payload = json!("just a string");
-        let view = build(&input("review-gate", "review.synthesized", &schema, &payload));
+        let view = build(&input(
+            "review-gate",
+            "review.synthesized",
+            &schema,
+            &payload,
+        ));
         assert_eq!(view.summary.len(), 1);
         assert_eq!(view.summary[0].value, FieldValue::Missing);
         assert!(view.matched_hints.is_empty());
@@ -628,12 +654,22 @@ mod u4_trigger_context_builder_tests {
             ],
         );
         let payload = json!({"must_fix_now_count": 0});
-        let view = build(&input("review-gate", "review.synthesized", &schema, &payload));
+        let view = build(&input(
+            "review-gate",
+            "review.synthesized",
+            &schema,
+            &payload,
+        ));
         assert_eq!(view.matched_hints.len(), 1);
         assert_eq!(view.matched_hints[0].label, "accept");
 
         let payload2 = json!({"must_fix_now_count": 2});
-        let view2 = build(&input("review-gate", "review.synthesized", &schema, &payload2));
+        let view2 = build(&input(
+            "review-gate",
+            "review.synthesized",
+            &schema,
+            &payload2,
+        ));
         assert_eq!(view2.matched_hints.len(), 1);
         assert_eq!(view2.matched_hints[0].label, "must_fix");
     }
@@ -780,7 +816,11 @@ mod u4_trigger_context_builder_tests {
     #[test]
     fn u2_render_golden_string() {
         let schema = schema_with_summary_and_hints(
-            &["review_round", "must_fix_now_count", "residual_findings_count"],
+            &[
+                "review_round",
+                "must_fix_now_count",
+                "residual_findings_count",
+            ],
             vec![RoutingHintConfig {
                 label: "accept_residual".into(),
                 guidance: "Residual findings are report-only; do not generate fix units.".into(),
@@ -796,7 +836,12 @@ mod u4_trigger_context_builder_tests {
             "review_round": 3,
             "must_fix_now_count": 0
         });
-        let view = build(&input("review-gate", "review.synthesized", &schema, &payload));
+        let view = build(&input(
+            "review-gate",
+            "review.synthesized",
+            &schema,
+            &payload,
+        ));
         let rendered = render(&view).expect("non-noop view must render");
         let expected = "## TRIGGER CONTEXT\n\
                         - source topic: review.synthesized\n\

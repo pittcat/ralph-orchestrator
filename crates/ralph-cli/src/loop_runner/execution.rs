@@ -76,13 +76,11 @@ pub fn inject_hat_execution_env(
         .map(|s| s.to_string())
         .or_else(|| std::env::var("RALPH_HATS_SOURCE").ok())
         .filter(|s| !s.is_empty());
-    let resolved_config = config_path
-        .map(|p| p.display().to_string())
-        .or_else(|| {
-            std::env::var("RALPH_CONFIG")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        });
+    let resolved_config = config_path.map(|p| p.display().to_string()).or_else(|| {
+        std::env::var("RALPH_CONFIG")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+    });
     backend.env_vars.retain(|(k, _)| {
         !matches!(
             k.as_str(),

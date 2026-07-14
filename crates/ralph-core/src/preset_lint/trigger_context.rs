@@ -213,7 +213,11 @@ fn check_condition(
 ) {
     // R2: field must resolve to a known schema field.
     if !cond.field.is_empty() && !known.contains(&cond.field) {
-        out.push(unknown_field_finding_in_hint(topic, &hint.label, &cond.field));
+        out.push(unknown_field_finding_in_hint(
+            topic,
+            &hint.label,
+            &cond.field,
+        ));
     }
     match &cond.op {
         HintOp::Unknown(raw) => {
@@ -429,7 +433,8 @@ mod u6_trigger_context_lint_tests {
             summary_fields: vec!["unknown_field".to_string()],
             ..Default::default()
         });
-        let findings = check_trigger_context(&map_with("any.topic", schema), LintStrictness::Default);
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Default);
         assert!(
             findings.is_empty(),
             "default mode must skip trigger_context lint to preserve the R3 contract, got: {findings:?}"
@@ -441,10 +446,8 @@ mod u6_trigger_context_lint_tests {
     #[test]
     fn u4_empty_trigger_context_is_noop() {
         let schema = EventSchema::default();
-        let findings = check_trigger_context(
-            &map_with("any.topic", schema),
-            LintStrictness::Strict,
-        );
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Strict);
         assert!(findings.is_empty());
     }
 
@@ -455,10 +458,8 @@ mod u6_trigger_context_lint_tests {
             summary_fields: vec!["known_field".to_string()],
             ..Default::default()
         });
-        let findings = check_trigger_context(
-            &map_with("any.topic", schema),
-            LintStrictness::Strict,
-        );
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Strict);
         assert!(findings.is_empty(), "got unexpected findings: {findings:?}");
     }
 
@@ -470,17 +471,17 @@ mod u6_trigger_context_lint_tests {
             summary_fields: vec!["unknown_count".to_string()],
             ..Default::default()
         });
-        let findings = check_trigger_context(
-            &map_with("any.topic", schema),
-            LintStrictness::Strict,
-        );
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Strict);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, FINDING_TRIGGER_CONTEXT_UNKNOWN_FIELD);
         assert!(findings[0].message.contains("unknown_count"));
         assert!(findings[0].message.contains("any.topic"));
-        assert!(findings[0]
-            .message
-            .contains("trigger_context.summary_fields"));
+        assert!(
+            findings[0]
+                .message
+                .contains("trigger_context.summary_fields")
+        );
     }
 
     /// 5. Unknown hint condition field reports the same
@@ -500,10 +501,8 @@ mod u6_trigger_context_lint_tests {
             }],
             ..Default::default()
         });
-        let findings = check_trigger_context(
-            &map_with("any.topic", schema),
-            LintStrictness::Strict,
-        );
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Strict);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, FINDING_TRIGGER_CONTEXT_UNKNOWN_FIELD);
         assert!(findings[0].message.contains("ghost_field"));
@@ -528,10 +527,8 @@ mod u6_trigger_context_lint_tests {
             }],
             ..Default::default()
         });
-        let findings = check_trigger_context(
-            &map_with("any.topic", schema),
-            LintStrictness::Strict,
-        );
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Strict);
         assert_eq!(findings.len(), 1);
         assert_eq!(
             findings[0].id,
@@ -557,10 +554,8 @@ mod u6_trigger_context_lint_tests {
             }],
             ..Default::default()
         });
-        let findings = check_trigger_context(
-            &map_with("any.topic", schema),
-            LintStrictness::Strict,
-        );
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Strict);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, FINDING_TRIGGER_CONTEXT_VALUE_SHAPE);
         assert!(findings[0].message.contains("JSON number"));
@@ -582,10 +577,8 @@ mod u6_trigger_context_lint_tests {
             }],
             ..Default::default()
         });
-        let findings = check_trigger_context(
-            &map_with("any.topic", schema),
-            LintStrictness::Strict,
-        );
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Strict);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, FINDING_TRIGGER_CONTEXT_VALUE_SHAPE);
     }
@@ -618,10 +611,8 @@ mod u6_trigger_context_lint_tests {
             ],
             ..Default::default()
         });
-        let findings = check_trigger_context(
-            &map_with("any.topic", schema),
-            LintStrictness::Strict,
-        );
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Strict);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, FINDING_TRIGGER_CONTEXT_DUPLICATE_LABEL);
         assert!(findings[0].message.contains("shared"));
@@ -657,10 +648,8 @@ mod u6_trigger_context_lint_tests {
             ],
             ..Default::default()
         });
-        let findings = check_trigger_context(
-            &map_with("any.topic", schema),
-            LintStrictness::Strict,
-        );
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Strict);
         assert!(findings.is_empty(), "got unexpected findings: {findings:?}");
     }
 
@@ -685,10 +674,8 @@ mod u6_trigger_context_lint_tests {
             }],
             ..Default::default()
         });
-        let findings = check_trigger_context(
-            &map_with("any.topic", schema),
-            LintStrictness::Strict,
-        );
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Strict);
         assert_eq!(findings.len(), 1);
         assert_eq!(
             findings[0].id,
@@ -719,10 +706,8 @@ mod u6_trigger_context_lint_tests {
             }],
             ..Default::default()
         });
-        let findings = check_trigger_context(
-            &map_with("any.topic", schema),
-            LintStrictness::Strict,
-        );
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Strict);
         assert!(findings.is_empty(), "got unexpected findings: {findings:?}");
     }
 
@@ -743,10 +728,8 @@ mod u6_trigger_context_lint_tests {
             }],
             ..Default::default()
         });
-        let findings = check_trigger_context(
-            &map_with("any.topic", schema),
-            LintStrictness::Strict,
-        );
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Strict);
         assert!(findings.is_empty(), "got unexpected findings: {findings:?}");
     }
 
@@ -767,10 +750,8 @@ mod u6_trigger_context_lint_tests {
             }],
             ..Default::default()
         });
-        let findings = check_trigger_context(
-            &map_with("any.topic", schema),
-            LintStrictness::Strict,
-        );
+        let findings =
+            check_trigger_context(&map_with("any.topic", schema), LintStrictness::Strict);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, FINDING_TRIGGER_CONTEXT_VALUE_SHAPE);
     }
@@ -896,10 +877,7 @@ mod u7_trigger_context_topology_lint_tests {
     #[test]
     fn u5_empty_trigger_context_is_not_a_no_consumer_finding() {
         let schema = EventSchema::default();
-        let config = config_with_hats_and_policy(
-            vec![],
-            vec![("review.synthesized", schema)],
-        );
+        let config = config_with_hats_and_policy(vec![], vec![("review.synthesized", schema)]);
         let findings = check_trigger_context_topology(&config, LintStrictness::Strict);
         assert!(
             findings.is_empty(),

@@ -6,8 +6,7 @@ pub const VALID_BACKENDS: &[&str] = &[
 ];
 
 /// Human-readable list for CLI messages and docs.
-pub const VALID_BACKENDS_LABEL: &str =
-    "claude, gemini, codex, opencode, pi, traecli, custom";
+pub const VALID_BACKENDS_LABEL: &str = "claude, gemini, codex, opencode, pi, traecli, custom";
 
 #[cfg(test)]
 mod tests {

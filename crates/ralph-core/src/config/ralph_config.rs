@@ -2066,10 +2066,7 @@ hats:
         let builder = config.hats.get("builder").unwrap();
         assert!(builder.backend.is_some());
         match builder.backend.as_ref().unwrap() {
-            HatBackend::NamedWithArgs {
-                backend_type,
-                args,
-            } => {
+            HatBackend::NamedWithArgs { backend_type, args } => {
                 assert_eq!(backend_type, "claude");
                 assert_eq!(args, &vec!["--model".to_string(), "haiku".to_string()]);
             }

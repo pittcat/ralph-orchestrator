@@ -60,10 +60,7 @@ pub struct ListArgs {
 }
 
 /// Execute a skill command.
-pub fn execute(
-    args: SkillArgs,
-    config_sources: &[crate::cli::shared::ConfigSource],
-) -> Result<()> {
+pub fn execute(args: SkillArgs, config_sources: &[crate::cli::shared::ConfigSource]) -> Result<()> {
     let root = resolve_root(args.root)?;
     let ctx = OperationContext::detect(root.clone());
 
@@ -71,9 +68,7 @@ pub fn execute(
         SkillCommands::Load(load_args) => {
             execute_load(&root, &ctx, &load_args.name, config_sources)
         }
-        SkillCommands::List(list_args) => {
-            execute_list(&root, &ctx, list_args, config_sources)
-        }
+        SkillCommands::List(list_args) => execute_list(&root, &ctx, list_args, config_sources),
     }
 }
 
@@ -341,10 +336,7 @@ fn resolve_configured_skills_dir(root: &Path, dir: &Path) -> PathBuf {
 /// SSOT. With `config_sources` empty we still consult
 /// `RALPH_CONFIG` (via the SSOT helper) so agents inheriting the
 /// runner-injected env continue to work.
-fn load_config(
-    root: &Path,
-    config_sources: &[crate::cli::shared::ConfigSource],
-) -> RalphConfig {
+fn load_config(root: &Path, config_sources: &[crate::cli::shared::ConfigSource]) -> RalphConfig {
     let mut merged = match config_resolution::default_core_value() {
         Ok(value) => value,
         Err(_) => return RalphConfig::default(),

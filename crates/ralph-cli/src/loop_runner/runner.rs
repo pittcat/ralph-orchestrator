@@ -4269,7 +4269,10 @@ async fn run_loop_impl_inner(
                     // 2026-07-13-001 plan U2: forward the loop's
                     // resolved project config path so wave workers
                     // inherit RALPH_CONFIG.
-                    config.config_path.as_deref().filter(|p| !p.as_os_str().is_empty()),
+                    config
+                        .config_path
+                        .as_deref()
+                        .filter(|p| !p.as_os_str().is_empty()),
                     // 2026-07-03-001 supervisor real-wiring: pass
                     // the loop-wide bridge through so the dispatcher
                     // takes the supervisor path when `enabled &&

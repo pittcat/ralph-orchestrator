@@ -8,9 +8,7 @@ use std::sync::OnceLock;
 use tracing::debug;
 
 /// Default priority order for backend detection.
-pub const DEFAULT_PRIORITY: &[&str] = &[
-    "claude", "gemini", "codex", "opencode", "pi", "traecli",
-];
+pub const DEFAULT_PRIORITY: &[&str] = &["claude", "gemini", "codex", "opencode", "pi", "traecli"];
 
 /// Maps backend config names to their actual CLI command names.
 ///

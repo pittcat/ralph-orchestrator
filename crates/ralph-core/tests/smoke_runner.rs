@@ -48,8 +48,8 @@ fn test_mixed_backends_scenario_excludes_deleted_backends() {
     // U6: mixed_backends.yml used "kiro" as the reviewer backend. With
     // kiro deleted, the scenario must either be removed entirely or no
     // longer name any of the deleted backends.
-    let scenario_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/scenarios/mixed_backends.yml");
+    let scenario_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios/mixed_backends.yml");
     assert!(
         !scenario_path.exists(),
         "mixed_backends.yml should be removed (references deleted kiro backend)"

@@ -1502,7 +1502,10 @@ trigger_context:
                 "residual_findings_count".to_string(),
             ]
         );
-        assert_eq!(schema.known_fields, vec!["residual_findings_count".to_string()]);
+        assert_eq!(
+            schema.known_fields,
+            vec!["residual_findings_count".to_string()]
+        );
         let hints = &schema.trigger_context.routing_hints;
         assert_eq!(hints.len(), 2, "two hints must round-trip");
         assert_eq!(hints[0].label, "accept_residual");

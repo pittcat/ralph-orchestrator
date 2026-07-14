@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use ralph_adapters::{
-    OutputFormat as BackendOutputFormat, PiAssistantEvent, PiContentBlock,
-    PiStreamEvent, PiStreamParser, TraeStreamEvent, TraeStreamParser, extract_assistant_text,
+    OutputFormat as BackendOutputFormat, PiAssistantEvent, PiContentBlock, PiStreamEvent,
+    PiStreamParser, TraeStreamEvent, TraeStreamParser, extract_assistant_text,
     extract_assistant_tool_calls, extract_user_tool_result_text, user_is_tool_result,
 };
 use ratatui::text::Line;

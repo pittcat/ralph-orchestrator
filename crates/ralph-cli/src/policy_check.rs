@@ -269,7 +269,10 @@ pub fn load_policy_config_for_cli_emit(
     // `RALPH_CONFIG=custom.yml` and `RALPH_HATS_SOURCE=builtin:...`
     // merges the preset on top of the operator's custom project
     // config, not a synthesised default.
-    let config_path = base.config_path.clone().unwrap_or_else(|| workspace_root.join("ralph.yml"));
+    let config_path = base
+        .config_path
+        .clone()
+        .unwrap_or_else(|| workspace_root.join("ralph.yml"));
     let sources: Vec<ConfigSource> = if config_path.exists() {
         vec![ConfigSource::File(config_path)]
     } else {
@@ -845,11 +848,8 @@ pub fn run_policy_check_unified(
     // fall back to a default view (the unified pipeline will
     // accept everything, mirroring the legacy no-policy default).
     let workspace_root = resolve_workspace_root(Some(&workspace.to_path_buf()));
-    let config = load_policy_config_for_cli_emit(
-        Some(&workspace_root),
-        OnConfigError::Tolerate,
-        &[],
-    )?;
+    let config =
+        load_policy_config_for_cli_emit(Some(&workspace_root), OnConfigError::Tolerate, &[])?;
     let event_loop_config = config
         .as_ref()
         .map(|c| c.event_loop.clone())

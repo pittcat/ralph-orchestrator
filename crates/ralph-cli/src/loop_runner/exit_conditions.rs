@@ -218,7 +218,10 @@ mod tests {
     fn find_skills_script_discovers_uar_transition_script() {
         let _lock = CWD_LOCK.lock().unwrap();
         let dir = TempDir::new().unwrap();
-        write_script(dir.path(), ".uar/scripts/transition_warmup_to_production.py");
+        write_script(
+            dir.path(),
+            ".uar/scripts/transition_warmup_to_production.py",
+        );
 
         let _cwd = CwdGuard::enter(dir.path());
         let found = find_skills_script("transition_warmup_to_production.py").unwrap();
@@ -253,7 +256,10 @@ mod tests {
         let _lock = CWD_LOCK.lock().unwrap();
         let dir = TempDir::new().unwrap();
         // Only the universal-autoresearch/scripts alt-suffix exists.
-        write_script(dir.path(), "universal-autoresearch/scripts/check_exit_conditions.py");
+        write_script(
+            dir.path(),
+            "universal-autoresearch/scripts/check_exit_conditions.py",
+        );
 
         let _cwd = CwdGuard::enter(dir.path());
         let found = find_skills_script("check_exit_conditions.py").unwrap();

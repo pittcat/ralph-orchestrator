@@ -571,10 +571,8 @@ fn emit_command_with_root_and_hats(
         let effective_config_sources: &[ConfigSource] = if !config_sources.is_empty() {
             config_sources
         } else {
-            let resolved = config_resolution::resolve_project_config_path(
-                &workspace_root,
-                config_sources,
-            );
+            let resolved =
+                config_resolution::resolve_project_config_path(&workspace_root, config_sources);
             let config_path = match resolved {
                 Some(path) => path,
                 None => {
@@ -666,10 +664,8 @@ fn emit_command_with_root_and_hats(
         let effective_config_sources: &[ConfigSource] = if !config_sources.is_empty() {
             config_sources
         } else {
-            let resolved = config_resolution::resolve_project_config_path(
-                &workspace_root,
-                config_sources,
-            );
+            let resolved =
+                config_resolution::resolve_project_config_path(&workspace_root, config_sources);
             let config_path = resolved.unwrap_or_else(|| workspace_root.join("ralph.yml"));
             owned_config_sources = vec![ConfigSource::File(config_path.clone())];
             &owned_config_sources
