@@ -21,6 +21,59 @@ fn test_fixtures_directory_exists() {
 }
 
 #[test]
+fn test_kiro_fixtures_dir_removed() {
+    // U6: kiro backend deleted in U4; its fixture dir must be gone too.
+    let dir = fixtures_dir().join("kiro");
+    assert!(
+        !dir.exists(),
+        "kiro fixtures dir should be removed (backend deleted), found at {:?}",
+        dir
+    );
+}
+
+#[test]
+fn test_kiro_acp_fixtures_dir_removed() {
+    // U6: kiro-acp backend deleted in U4; its fixture dir must be gone too.
+    let dir = fixtures_dir().join("kiro-acp");
+    assert!(
+        !dir.exists(),
+        "kiro-acp fixtures dir should be removed (backend deleted), found at {:?}",
+        dir
+    );
+}
+
+#[test]
+fn test_mixed_backends_scenario_excludes_deleted_backends() {
+    use std::path::PathBuf;
+    // U6: mixed_backends.yml used "kiro" as the reviewer backend. With
+    // kiro deleted, the scenario must either be removed entirely or no
+    // longer name any of the deleted backends.
+    let scenario_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/scenarios/mixed_backends.yml");
+    assert!(
+        !scenario_path.exists(),
+        "mixed_backends.yml should be removed (references deleted kiro backend)"
+    );
+    // Sanity: no surviving scenario file should mention any of the
+    // deleted backends via the canonical `backend: \"...\"` line shape.
+    let scenarios_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios");
+    for entry in std::fs::read_dir(&scenarios_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("yml") {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            for deleted in ["kiro", "kiro-acp", "amp", "copilot", "roo"] {
+                assert!(
+                    !text.contains(&format!("backend: \"{deleted}\"")),
+                    "scenario {} still references deleted backend `{deleted}` (canonical form)",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn test_basic_session_fixture_exists() {
     let fixture = fixtures_dir().join("basic_session.jsonl");
     assert!(
@@ -795,297 +848,6 @@ Still working..."#;
             b"ReplayMe",
             "REGRESSION: Reset should allow replaying from start"
         );
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// KIRO ADAPTER SMOKE TESTS
-// Tests for Kiro CLI adapter fixtures and behaviors per specs/adapters/kiro.spec.md
-// ═══════════════════════════════════════════════════════════════════════════════
-
-mod kiro_smoke_tests {
-    use super::*;
-
-    /// Returns the path to the Kiro test fixtures directory.
-    fn kiro_fixtures_dir() -> PathBuf {
-        fixtures_dir().join("kiro")
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Acceptance Criteria #2: Kiro Fixtures Exist
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_kiro_fixtures_directory_exists() {
-        let dir = kiro_fixtures_dir();
-        assert!(
-            dir.exists(),
-            "Kiro fixtures directory should exist at {:?}",
-            dir
-        );
-    }
-
-    #[test]
-    fn test_kiro_has_at_least_two_fixtures() {
-        let fixtures = list_fixtures(kiro_fixtures_dir()).expect("Should list Kiro fixtures");
-        assert!(
-            fixtures.len() >= 2,
-            "Kiro should have at least 2 fixtures, found {}",
-            fixtures.len()
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Acceptance Criteria #6: Recording Instructions Documented
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_kiro_readme_exists() {
-        let readme = kiro_fixtures_dir().join("README.md");
-        assert!(
-            readme.exists(),
-            "Kiro fixtures README should exist at {:?}",
-            readme
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Acceptance Criteria #1: Kiro Output Format Supported
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_kiro_basic_session_fixture_loads() {
-        let fixture = kiro_fixtures_dir().join("basic_kiro_session.jsonl");
-        assert!(fixture.exists(), "basic_kiro_session.jsonl should exist");
-
-        let config = SmokeTestConfig::new(&fixture);
-        let result = SmokeRunner::run(&config).expect("Should load and run Kiro fixture");
-
-        assert!(
-            result.completed_successfully(),
-            "Kiro basic session should complete successfully"
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Acceptance Criteria #3: Autonomous Mode Validated
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_kiro_autonomous_mode_fixture() {
-        let fixture = kiro_fixtures_dir().join("kiro_autonomous.jsonl");
-        assert!(fixture.exists(), "kiro_autonomous.jsonl should exist");
-
-        let config = SmokeTestConfig::new(&fixture);
-        let result = SmokeRunner::run(&config).expect("Should run autonomous mode fixture");
-
-        assert_eq!(
-            *result.termination_reason(),
-            TerminationReason::Completed,
-            "Autonomous mode fixture should complete with LOOP_COMPLETE"
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Acceptance Criteria #4: Tool Invocation Events Parsed
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_kiro_tool_use_events_parsed() {
-        let fixture = kiro_fixtures_dir().join("kiro_tool_use.jsonl");
-        assert!(fixture.exists(), "kiro_tool_use.jsonl should exist");
-
-        let config = SmokeTestConfig::new(&fixture);
-        let result = SmokeRunner::run(&config).expect("Should run tool use fixture");
-
-        // Should have at least build.task and build.done events
-        assert!(
-            result.event_count() >= 2,
-            "Tool use fixture should have at least 2 events, got {}",
-            result.event_count()
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Acceptance Criteria #5: Cross-Backend Compatibility
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_cross_backend_compatibility() {
-        // Run Claude fixture
-        let claude_fixture = fixtures_dir().join("basic_session.jsonl");
-        let claude_config = SmokeTestConfig::new(&claude_fixture);
-        let claude_result = SmokeRunner::run(&claude_config).expect("Claude fixture should run");
-
-        // Run Kiro fixture
-        let kiro_fixture = kiro_fixtures_dir().join("basic_kiro_session.jsonl");
-        let kiro_config = SmokeTestConfig::new(&kiro_fixture);
-        let kiro_result = SmokeRunner::run(&kiro_config).expect("Kiro fixture should run");
-
-        // Both should complete successfully using the same SmokeRunner
-        assert!(
-            claude_result.completed_successfully(),
-            "Claude fixture should complete"
-        );
-        assert!(
-            kiro_result.completed_successfully(),
-            "Kiro fixture should complete"
-        );
-
-        // Both should parse events correctly
-        assert!(
-            claude_result.event_count() >= 2,
-            "Claude fixture should parse events"
-        );
-        assert!(
-            kiro_result.event_count() >= 2,
-            "Kiro fixture should parse events"
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Acceptance Criteria #7: Integration Test Validates Full Replay Flow
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_kiro_full_replay_flow() {
-        let fixture = kiro_fixtures_dir().join("basic_kiro_session.jsonl");
-        let config = SmokeTestConfig::new(&fixture);
-        let result = SmokeRunner::run(&config).expect("Should run Kiro fixture");
-
-        // Verify full flow: load -> parse -> iterate -> complete
-        assert!(
-            result.iterations_run() >= 2,
-            "Should process at least 2 chunks"
-        );
-        assert!(result.output_bytes() > 0, "Should process output bytes");
-        assert!(result.event_count() >= 2, "Should parse events");
-        assert_eq!(
-            *result.termination_reason(),
-            TerminationReason::Completed,
-            "Should detect LOOP_COMPLETE"
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // All Kiro Fixtures Valid
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_all_kiro_fixtures_are_valid() {
-        let fixtures = list_fixtures(kiro_fixtures_dir()).expect("Should list Kiro fixtures");
-
-        for fixture_path in fixtures {
-            let config = SmokeTestConfig::new(&fixture_path);
-            let result = SmokeRunner::run(&config);
-
-            assert!(
-                result.is_ok(),
-                "Kiro fixture {:?} should be valid and runnable: {:?}",
-                fixture_path,
-                result.err()
-            );
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// KIRO-ACP SMOKE TESTS
-// ═══════════════════════════════════════════════════════════════════════════════
-
-mod kiro_acp_smoke_tests {
-    use super::*;
-
-    fn kiro_acp_fixtures_dir() -> PathBuf {
-        fixtures_dir().join("kiro-acp")
-    }
-
-    #[test]
-    fn test_kiro_acp_fixtures_directory_exists() {
-        assert!(kiro_acp_fixtures_dir().exists());
-    }
-
-    #[test]
-    fn test_kiro_acp_has_at_least_two_fixtures() {
-        let fixtures =
-            list_fixtures(kiro_acp_fixtures_dir()).expect("Should list kiro-acp fixtures");
-        assert!(
-            fixtures.len() >= 2,
-            "Expected >= 2 fixtures, got {}",
-            fixtures.len()
-        );
-    }
-
-    #[test]
-    fn test_kiro_acp_readme_exists() {
-        assert!(kiro_acp_fixtures_dir().join("README.md").exists());
-    }
-
-    #[test]
-    fn test_kiro_acp_basic_session_fixture_loads() {
-        let fixture = kiro_acp_fixtures_dir().join("basic_kiro_acp_session.jsonl");
-        assert!(fixture.exists());
-        let config = SmokeTestConfig::new(&fixture);
-        let result = SmokeRunner::run(&config).expect("Should run kiro-acp fixture");
-        assert!(result.completed_successfully());
-    }
-
-    #[test]
-    fn test_kiro_acp_tool_use_events_parsed() {
-        let fixture = kiro_acp_fixtures_dir().join("kiro_acp_tool_use.jsonl");
-        assert!(fixture.exists());
-        let config = SmokeTestConfig::new(&fixture);
-        let result = SmokeRunner::run(&config).expect("Should run tool use fixture");
-        assert!(
-            result.event_count() >= 2,
-            "Expected >= 2 events, got {}",
-            result.event_count()
-        );
-    }
-
-    #[test]
-    fn test_kiro_acp_cross_backend_compatibility() {
-        let claude_fixture = fixtures_dir().join("basic_session.jsonl");
-        let claude_config = SmokeTestConfig::new(&claude_fixture);
-        let claude_result = SmokeRunner::run(&claude_config).expect("Claude fixture should run");
-
-        let kiro_acp_fixture = kiro_acp_fixtures_dir().join("basic_kiro_acp_session.jsonl");
-        let kiro_acp_config = SmokeTestConfig::new(&kiro_acp_fixture);
-        let kiro_acp_result =
-            SmokeRunner::run(&kiro_acp_config).expect("kiro-acp fixture should run");
-
-        assert!(claude_result.completed_successfully());
-        assert!(kiro_acp_result.completed_successfully());
-        assert!(claude_result.event_count() >= 2);
-        assert!(kiro_acp_result.event_count() >= 2);
-    }
-
-    #[test]
-    fn test_kiro_acp_full_replay_flow() {
-        let fixture = kiro_acp_fixtures_dir().join("basic_kiro_acp_session.jsonl");
-        let config = SmokeTestConfig::new(&fixture);
-        let result = SmokeRunner::run(&config).expect("Should run kiro-acp fixture");
-
-        assert!(result.iterations_run() >= 2);
-        assert!(result.output_bytes() > 0);
-        assert!(result.event_count() >= 2);
-        assert_eq!(*result.termination_reason(), TerminationReason::Completed);
-    }
-
-    #[test]
-    fn test_all_kiro_acp_fixtures_are_valid() {
-        let fixtures =
-            list_fixtures(kiro_acp_fixtures_dir()).expect("Should list kiro-acp fixtures");
-        for fixture_path in fixtures {
-            let config = SmokeTestConfig::new(&fixture_path);
-            let result = SmokeRunner::run(&config);
-            assert!(
-                result.is_ok(),
-                "kiro-acp fixture {:?} should be valid: {:?}",
-                fixture_path,
-                result.err()
-            );
-        }
     }
 }
 
