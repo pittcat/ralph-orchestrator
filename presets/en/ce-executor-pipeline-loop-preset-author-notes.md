@@ -1,6 +1,6 @@
 # ce-executor-pipeline-loop preset author notes
 
-## Change: fixer attempt status in `fix.done`
+## Change: executor / fixer anti-abdication settlement
 
 目标：不新增 topic、不新增消费者。`fixer` 仍然只发布 `fix.done`，`review-reentry` 仍然是唯一消费者。`fix.done` 表示 fixer 完成本轮尝试报告，不再等同于“全部修复成功”。成功、部分完成、阻塞分别由 `fix_status` 表达，并由后续 review round 与既有 `review.loop.blocked` / `reporter` 链路收口。每一轮 fixer 只写自己的 `round-<NN>/baseline-verification.md`、`round-<NN>/final-verification.md`、`round-<NN>/verification-delta.md`，顶层只保留 executor 阶段总验证。
 
@@ -11,6 +11,22 @@
 3. **fallback 是否可能路由到 success？** ✓。`fix_status` 只是报告字段，不直接跳 success。
 4. **是否有 hat 把 tasks / progress / recovery 当业务事实？** ✓。本变更只读 trigger payload 与 git/test 结果。
 5. **是否有 rescue hat 能改变业务链路？** ✓。没有新增 rescue hat。
+
+## Hat: executor
+
+- **Q1 使命:** 逐个 dispatch 原始计划的所有独立 U-ID；不得以规模或预计上下文压力替代执行。
+- **Q2 输入:** `plan.ready`、原始计划 U-ID/Dependencies、subagent 返回、git 与验证报告。
+- **Q3 执行:** Observe → baseline verifier → per-U dispatch/验收/commit → settlement → policy-check → emit/confirm。
+- **Q4 输出:** `work.done` 或包含 planned/attempted/completed/failed/blocked/skipped 的 `work.failed`。
+- **Q5 交接:** reporter 用结构化 Unit 账单生成 blocked 终态。
+
+### Hat: executor — Payload Contract
+
+| topic | 字段 | 类型 | 值源 | 可见性证据 | 身份检查 | 下游消费 | schema metadata |
+|---|---|---|---|---|---|---|---|
+| `work.failed` | Unit settlement arrays | string[] | plan、dispatch log、subagent 结果、git | executor instructions 与可见命令 | 不涉及 | reporter 解释真实执行状态 | 对应 `field_docs` |
+| `work.failed` | `baseline_verification_file` | string | baseline-verifier 产物 | executor 可见文件 | 不涉及 | reporter 提供验证证据 | 对应 `field_docs` |
+| `work.failed` | `decisions_file` / `reason` | string | decisions ledger 与观察到的失败 | executor 写入并可读 | 不涉及 | reporter 核验归因 | 对应 `field_docs` |
 
 ## Hat: fixer
 
@@ -28,6 +44,8 @@
 | `fix.done` | `fix_status` | enum string | fixer 对本轮 Unit/验证结果的判定 | fixer instructions 的 Step 6 与 Failure Handling | 不涉及 | `review-reentry` 放入 `review_plan`，review hats 检查 partial/blocked attempt | `field_docs.fix_status` |
 | `fix.done` | `failure_reason` | string | verification 失败、未完成 Unit、或 blocker 记录 | fixer 可见的 subagent 结果、验证输出、`.ralph/agent/decisions.md` | 不涉及 | 下一轮 review 和最终 reporter 解释未收敛原因 | `field_docs.failure_reason` |
 | `fix.done` | `failed_fix_units` | string array | fixer per-Unit execution log | fix plan Unit headings + subagent result | 不涉及 | 下一轮 review 聚焦未完成 Unit | `field_docs.failed_fix_units` |
+| `fix.done` | `attempted_fix_units` / `blocked_fix_units` | string array | dispatch log / fix plan Dependencies | fixer 可见 subagent 结果与 fix plan | 不涉及 | 下一轮 review 区分真实失败与依赖阻塞 | 对应 `field_docs` |
+| `fix.done` | `decisions_file` | string | `.ralph/agent/decisions.md` | fixer 写入并可读 | 不涉及 | 下一轮 review/人工核验 | `field_docs.decisions_file` |
 | `fix.done` | `fix_attempt_commit_sha` | string | `git rev-parse HEAD` after final fixer commit | fixer 可运行 git rev-parse | 不涉及 | 下一轮 review 用该提交作为 attempt 证据 | `field_docs.fix_attempt_commit_sha` |
 | `fix.done` | `worktree_status` | string | `git status --short` 为空 | fixer 可运行 git status | 不涉及 | 保证下一个 hat 不接脏工作区 | `field_docs.worktree_status` |
 | `fix.done` | `next_review_plan` | object | fixer 根据本轮 attempt 构造 | fixer instructions Step 6 | 不涉及 | `review-reentry` 的 review plan SSOT | 既有 `required_fields` + status 字段补充 |
