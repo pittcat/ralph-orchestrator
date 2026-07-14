@@ -72,7 +72,7 @@ ralph wave emit review.file --payloads "src/main.rs" "src/lib.rs" "src/config.rs
 
 ## Smoke Tests (Replay-Based)
 
-Use the `smoke_runner` entry point from Build & Test above. Per-backend filters as test name substrings, e.g. `cargo nextest run -p ralph-core -- kiro` (runs ralph-core package default parallel; see "Build & Test" section tier table).
+Use the `smoke_runner` entry point from Build & Test above. Per-backend filters as test name substrings, e.g. `cargo nextest run -p ralph-core -- pi` (runs ralph-core package default parallel; see "Build & Test" section tier table).
 
 **Fixtures location:** `crates/ralph-core/tests/fixtures/`
 

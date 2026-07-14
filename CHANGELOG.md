@@ -6,6 +6,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Removed
+
+- Removed backends: amp, roo, kiro, kiro-acp, copilot. Remaining backends: claude, gemini, codex, opencode, pi, traecli, custom. The full backend
+  surface is now 7 named backends + 1 custom adapter. Removed in plan
+  `2026-07-14-001-refactor-remove-5-backends-plan`:
+  - `copilot`: dropped `copilot_stream.rs` module, `OutputFormat::CopilotStreamJson`
+    enum variant, `CliBackend::copilot()` / `copilot_tui()` / `copilot_interactive()`
+    factories, all integration scripts in `pty_executor_integration.rs` and `cli_executor.rs`.
+  - `amp`: dropped `CliBackend::amp()` / `amp_interactive()` factories,
+    `v1_adapters::AdapterSettings::amp` field, `rph_config::get_agent_priority`
+    amp entry, all `wave.rs` 5-matrix amp cases.
+  - `roo`: dropped `CliBackend::roo()` / `roo_interactive()` factories,
+    `build_roo_prompt_file` helper (and its special case in `build_command`),
+    `v1_adapters::AdapterSettings::roo`, `get_agent_priority` roo entry,
+    all `wave.rs` 5-matrix roo cases.
+  - `kiro` + `kiro-acp` (merged unit, cannot split): dropped
+    `acp_executor.rs` module + `OutputFormat::Acp` enum variant,
+    `CliBackend::kiro()` / `kiro_with_agent()` / `kiro_acp()` /
+    `kiro_acp_with_options()` / `kiro_interactive()` factories,
+    `HatBackend::KiroAgent` variant (whole `HatBackend` enum lost the
+    `agent` + `args` from ACP-style config), `agent-client-protocol`
+    crate dependency, `loop_runner` ACP executor path (`execute_acp`,
+    `run_wave_worker_acp`, `MOCK_ACP_EXECUTIONS` mocks,
+    `acp_executor_integration.rs` + `acp_process_cleanup.rs` tests),
+    `sop_runner` ACP TUI fallback, all `wave.rs` kiro/kiro-acp cases,
+    `v1_adapters::AdapterSettings::kiro` field, `preflight::backend_command`
+    kiro arm, `detect_command` kiro → kiro-cli map.
+  - `presets/minimal/{amp,kiro,roo}.yml` removed (no orphan templates);
+    `presets/minimal/preset-evaluator.yml` CLI backend switched
+    `kiro` → `claude` (U4 deleted kiro, left the evaluator pointing at
+    a backend that no longer exists).
+  - `scripts/ralph-zsh-plugin.zsh` `_RALPH_BACKENDS=( ... )` array
+    trimmed from 12 entries to 8 (removed kiro / amp / copilot / roo).
+  - Fixtures: `crates/ralph-core/tests/fixtures/{kiro,kiro-acp}/`
+    removed; `crates/ralph-core/tests/scenarios/mixed_backends.yml`
+    removed (referenced kiro backend); `smoke_runner.rs` `kiro_smoke_tests`
+    + `kiro_acp_smoke_tests` modules removed.
+  - Docs: `docs/guide/kiro-migration.md` and `docs/guide/roo-backend.md`
+    deleted; `docs/guide/index.md` table entries removed;
+    `docs/deployment/qchat-production.md` deprecation warning updated;
+    `.cursor/rules/architecture-modules.mdc` and `feature-flags.mdc`
+    backend lists updated.
+  - `ralph-e2e`: `Backend::Kiro` enum variant deleted from
+    `crates/ralph-e2e/src/backend.rs` (and propagated through
+    `auth.rs` / `runner.rs` / all `scenarios/*.rs`).
+
+### Added
+
+- New TDD tests covering the deletion: `test_valid_backends_does_not_contain_*`
+  in `backend_support.rs`; `test_default_priority_does_not_contain_*` in
+  `auto_detect.rs`; `test_copilot_stream_module_removed` /
+  `test_acp_executor_module_removed` in `ralph-adapters/src/lib.rs`;
+  `test_build_roo_prompt_file_helper_removed` in `cli_backend.rs`;
+  `test_hat_backend_kiro_agent_variant_removed` in
+  `ralph-core/src/config/hat.rs`; `test_backend_enum_excludes_kiro`
+  + `test_kiro_cases_removed_from_scenarios` in `ralph-e2e`;
+  `test_kiro_fixtures_dir_removed` /
+  `test_kiro_acp_fixtures_dir_removed` /
+  `test_mixed_backends_scenario_excludes_deleted_backends` in
+  `ralph-core/tests/smoke_runner.rs`;
+  `test_minimal_preset_files_exclude_deleted_backends` /
+  `test_zsh_plugin_backend_array_excludes_deleted_backends` /
+  `test_tools_evaluate_scripts_exclude_kiro` in `crates/ralph-cli/src/presets.rs`.
+
 ### Historical Note (state projection phase 1)
 
 > The entries below describe the original `state projection phase 1`

@@ -7,13 +7,11 @@ Ralph supports multiple AI CLI backends. This guide covers setup and selection.
 | Backend | CLI Tool | Notes |
 |---------|----------|-------|
 | Claude Code | `claude` | Recommended, primary support |
-| Kiro | `kiro-cli` | Amazon/AWS |
 | Gemini CLI | `gemini` | Google |
 | Codex | `codex` | OpenAI |
-| Amp | `amp` | Sourcegraph |
-| Copilot CLI | `copilot` | GitHub |
 | OpenCode | `opencode` | Community |
 | Pi | `pi` | Multi-provider |
+| Trae CLI | `trae-cli` | Trae |
 
 ## Auto-Detection
 
@@ -93,42 +91,6 @@ hats:
 - Full streaming support
 - All hat features
 - Memory integration
-
-### Kiro (`kiro`)
-
-Amazon/AWS AI assistant.
-
-```bash
-# Install
-# Visit https://kiro.dev/
-
-# Verify
-kiro-cli --version
-```
-
-**Auth & env vars:**
-- Complete Kiro CLI authentication (AWS/SSO) per Kiro docs
-- `KIRO_API_KEY` (optional; used by `ralph doctor` auth hints)
-
-**Hat YAML:**
-```yaml
-hats:
-  coder:
-    backend: "kiro"
-```
-
-**Kiro agent selection (optional):**
-```yaml
-hats:
-  reviewer:
-    backend:
-      type: "kiro"
-      agent: "codex"
-```
-
-**Doctor checks:**
-- `kiro-cli --version` must succeed
-- Warns if `KIRO_API_KEY` is missing (OK if you authenticated via CLI)
 
 ### Gemini CLI (`gemini`)
 

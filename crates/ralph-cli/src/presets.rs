@@ -192,6 +192,104 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_changelog_records_backend_removal() {
+        // U8: top-level CHANGELOG.md must declare the 5-backend removal
+        // in `[Unreleased] ### Removed` (and ideally docs/reference/changelog.md too).
+        let ws_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let mut changelogs = vec![ws_root.join("CHANGELOG.md")];
+        let docs_chlog = ws_root.join("docs/reference/changelog.md");
+        if docs_chlog.exists() {
+            changelogs.push(docs_chlog);
+        }
+        let required_marker = "Removed backends: amp, roo, kiro, kiro-acp, copilot";
+        let remaining_marker = "claude, gemini, codex, opencode, pi, traecli, custom";
+        for path in changelogs {
+            let text = std::fs::read_to_string(&path).expect("read changelog");
+            assert!(
+                text.contains(required_marker),
+                "{} must declare `{required_marker}` in Removed section",
+                path.display()
+            );
+            assert!(
+                text.contains(remaining_marker),
+                "{} should also list remaining backends `{remaining_marker}`",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_docs_index_no_longer_links_deleted_backend_guides() {
+        // U8: docs/guide/index.md must no longer link to the deleted
+        // per-backend guides (kiro-migration.md, roo-backend.md).
+        let ws_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let index_md = ws_root.join("docs/guide/index.md");
+        let text = std::fs::read_to_string(&index_md).expect("read docs index");
+        for deleted in ["kiro-migration.md", "roo-backend.md"] {
+            assert!(
+                !text.contains(deleted),
+                "{index_md:?} still references deleted guide `{deleted}`"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cursor_rules_exclude_deleted_backends() {
+        // U8: `.cursor/rules/architecture-modules.mdc` and `feature-flags.mdc`
+        // backend lists must no longer mention any of the 5 deleted backends.
+        let ws_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let deleted = ["kiro", "amp", "roo", "copilot", "kiro-acp", "kiro-cli", "copilot_stream"];
+        let rules = [
+            ws_root.join(".cursor/rules/architecture-modules.mdc"),
+            ws_root.join(".cursor/rules/feature-flags.mdc"),
+        ];
+        for path in rules {
+            if path.exists() {
+                let text = std::fs::read_to_string(&path).expect("read rule");
+                for backend in deleted {
+                    // Only flag clear canonical mentions (not arbitrary
+                    // substrings inside unrelated identifiers).
+                    let patterns = [
+                        format!("`{backend}`"),
+                        format!(" `{backend}`"),
+                        format!("'{backend}'"),
+                        format!("{backend}-acp"),
+                    ];
+                    for pat in patterns {
+                        assert!(
+                            !text.contains(&pat),
+                            "{} still references deleted backend pattern `{pat}`",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_kiro_and_roo_dedicated_docs_removed() {
+        // U8: dedicated per-backend docs for deleted backends must be gone.
+        let ws_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        for deleted in ["kiro-migration.md", "roo-backend.md"] {
+            let path = ws_root.join("docs/guide").join(deleted);
+            assert!(
+                !path.exists(),
+                "expected deleted guide to be removed: {}",
+                path.display()
+            );
+        }
+    }
+
     fn assert_public_preset_has_completion_path(preset: &EmbeddedPreset) {
         let config =
             RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");

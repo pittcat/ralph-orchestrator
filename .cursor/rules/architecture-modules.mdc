@@ -47,9 +47,9 @@ CLI Config → HaBackend → auto_detect → CliExecutor / PtyExecutor → Strea
 - **CliBackend**: Defines backend CLI path, args, prompt mode, output format
 - **CliExecutor**: Spawns backend process, streams output, handles termination
 - **PtyExecutor**: PTY-based execution for Claude CLI, supports interactive and observe modes
-- **auto_detect**: Scans PATH for available backends (`claude`, `code`/`codex`, `gemini`, `kiro`, `amp`, `copilot`, `opencode`)
+- **auto_detect**: Scans PATH for available backends (`claude`, `code`/`codex`, `gemini`, `opencode`, `pi`, `traecli`)
 - **StreamHandler**: Console/pretty/quiet/TUI output handlers
-- **Backend-specific stream parsers**: `claude_stream.rs`, `copilot_stream.rs`, `pi_stream.rs`, `json_rpc_handler.rs`
+- **Backend-specific stream parsers**: `claude_stream.rs`, `pi_stream.rs`, `trae_stream.rs`, `json_rpc_handler.rs`
 
 ## Code Locations
 

@@ -12,8 +12,6 @@ Practical guides for using Ralph Orchestrator effectively.
 | [OPAC Agent Discipline](opac.md) | Observe → Precheck → Apply → Confirm workflow for isolated mode |
 | [CLI Reference](cli-reference.md) | Command-line interface |
 | [Backends](backends.md) | Supported AI backends |
-| [Roo Backend](roo-backend.md) | Roo Code / Roo Cline backend specifics |
-| [Kiro Migration](kiro-migration.md) | Migrating to the Kiro backend |
 | [Agents](agents.md) | Backend selection and configuration |
 | [Writing Prompts](prompts.md) | Prompt engineering tips |
 | [Cost Management](cost-management.md) | Controlling API costs |
