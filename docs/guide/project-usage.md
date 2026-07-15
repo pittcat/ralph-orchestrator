@@ -4,7 +4,13 @@
 
 ## 一句话理解
 
-Ralph 是一个“循环驱动”的 AI 编程协调器。你给它一个目标，它会把目标、配置、上下文和当前事件交给后端 AI CLI，例如 Claude、Gemini、Codex、OpenCode、Pi、Trae CLI。后端完成一轮工作后，Ralph 读取输出和事件，再决定下一轮该让哪个 hat 工作，直到看到完成标记，例如 `LOOP_COMPLETE`。
+<<<<<<< ours
+Ralph 是一个“循环驱动”的 AI 编程协调器。你给它一个目标，它会把目标、配置、上下文和当前事件交给后端 AI CLI，例如 Claude、Codex、Gemini、OpenCode、Pi、Trae CLI。后端完成一轮工作后，Ralph 读取输出和事件，再决定下一轮该让哪个 hat 工作，直到看到完成标记，例如 `LOOP_COMPLETE`。
+||||||| base
+Ralph 是一个“循环驱动”的 AI 编程协调器。你给它一个目标，它会把目标、配置、上下文和当前事件交给后端 AI CLI，例如 Claude、Kiro、Codex、Gemini、Pi、Roo。后端完成一轮工作后，Ralph 读取输出和事件，再决定下一轮该让哪个 hat 工作，直到看到完成标记，例如 `LOOP_COMPLETE`。
+=======
+Ralph 是一个“循环驱动”的 AI 编程协调器。你给它一个目标，它会把目标、配置、上下文和当前事件交给后端 AI CLI，例如 Claude、Codex、Gemini、OpenCode、Pi、Trae CLI。后端完成一轮工作后，Ralph 读取输出和事件，再决定下一轮该让哪个 hat 工作，直到看到完成标记，例如 `LOOP_COMPLETE`。
+>>>>>>> theirs
 
 最常见的使用方式是：
 
