@@ -1,0 +1,252 @@
+# ce_executor_pipeline_loop_fix_stabilizer_reentry: U5 new topology
+#
+# 2026-07-16-001 plan U5: in ce-executor-pipeline-loop, the fix.done
+# handoff now flows through test-stabilizer before reaching
+# review-reentry. Two reentry rounds must be visible in the event
+# ledger:
+#
+#   round 1: work.done → test-stabilizer → stabilization.done
+#          → review-reentry → review.round.ready (round 1)
+#   round 2: fix.done   → test-stabilizer → stabilization.done
+#          → review-reentry → review.round.ready (round 2)
+#
+# The test asserts:
+# - test-stabilizer fires twice (once per trigger source).
+# - review-reentry subscribes only to stabilization.done (NOT fix.done).
+# - Both stabilization.done events emit before review-reentry fires.
+# - Round 2 review.round.ready carries source_topic=fix.done,
+#   review_round=2, and round_base_sha == fix.head_sha.
+
+name: ce_executor_pipeline_loop_fix_stabilizer_reentry
+description: ce-executor-pipeline-loop U5 — fix.done now flows through test-stabilizer before reentering review (round 2)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 40
+  hats:
+    plan-reviewer:
+      subscribes_to: [work.start]
+      publishes: [plan.ready, plan.blocked]
+    executor:
+      subscribes_to: [plan.ready]
+      publishes: [work.done, work.failed]
+    test-stabilizer:
+      subscribes_to: [work.done, fix.done]
+      publishes: [stabilization.done, stabilization.blocked]
+    review-reentry:
+      subscribes_to: [stabilization.done]
+      publishes: [review.round.ready]
+    "dim:goal-alignment":
+      subscribes_to: [review.round.ready]
+      publishes: [review.goalalign.done]
+    "dim:correctness":
+      subscribes_to: [review.goalalign.done]
+      publishes: [review.correctness.done]
+    "dim:testing":
+      subscribes_to: [review.correctness.done]
+      publishes: [review.testing.done]
+    "dim:maintainability":
+      subscribes_to: [review.testing.done]
+      publishes: [review.maintainability.done]
+    "dim:project-standards":
+      subscribes_to: [review.maintainability.done]
+      publishes: [review.standards.done]
+    "dim:adversarial":
+      subscribes_to: [review.standards.done]
+      publishes: [review.adversarial.done]
+    review-synthesizer:
+      subscribes_to: [review.adversarial.done]
+      publishes: [review.synthesized]
+    review-gate:
+      subscribes_to: [review.synthesized]
+      publishes: [review.accepted, fix.requested, review.loop.blocked]
+    fix-planner:
+      subscribes_to: [fix.requested]
+      publishes: [review.complete]
+    fixer:
+      subscribes_to: [review.complete]
+      publishes: [fix.done]
+    alignment:
+      subscribes_to: [review.accepted]
+      publishes: [align.done]
+    reporter:
+      subscribes_to: [align.done, plan.blocked, work.failed, review.loop.blocked, stabilization.blocked]
+      publishes: [report.done, LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: work.start
+    completion_promise: LOOP_COMPLETE
+    required_events: [report.done]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      terminal_topics: [LOOP_COMPLETE]
+      business_topics:
+        - plan.ready
+        - plan.blocked
+        - work.done
+        - work.failed
+        - stabilization.done
+        - stabilization.blocked
+        - review.round.ready
+        - review.goalalign.done
+        - review.correctness.done
+        - review.testing.done
+        - review.maintainability.done
+        - review.standards.done
+        - review.adversarial.done
+        - review.synthesized
+        - review.accepted
+        - fix.requested
+        - review.complete
+        - fix.done
+        - review.loop.blocked
+        - align.done
+        - report.done
+
+mock_responses:
+  # Round 1: executor → test-stabilizer → review-reentry → 6-dim → gate requests fix
+  - hat: plan-reviewer
+    text: |
+      <event topic="plan.ready">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","plan_revised":false,"review_summary":"ok","flow_audit":"first_run","resolved_baseline_sha":"0000000000000000000000000000000000000001"}</event>
+  - hat: executor
+    text: |
+      <event topic="work.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","tests_run":1,"tests_passed":1,"changed_lines":4,"commit_count":1}</event>
+  - hat: test-stabilizer
+    text: |
+      <event topic="stabilization.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","tested_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000002","stabilization_audit_file":".ralph/review/plan-loop-u5/stabilization/r1-audit.md","correction_ids":[],"classification_counts":{"test_bug":0,"production_bug":0,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":0},"worktree_status":"clean","tests_run":1,"tests_passed":1}</event>
+  - hat: review-reentry
+    text: |
+      <event topic="review.round.ready">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","review_round":1,"source_topic":"work.done","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","round_base_sha":"0000000000000000000000000000000000000002","review_plan":{"focus_areas":["full diff"],"fixed_findings":[],"verification_performed":["cargo nextest"],"residual_risks":[],"diff_ranges":["0000000000000000000000000000000000000001..0000000000000000000000000000000000000002"]}}</event>
+  - hat: "dim:goal-alignment"
+    text: |
+      <event topic="review.goalalign.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"goal-alignment","findings_file":".ralph/review/plan-loop-u5/r1-goal-alignment.md","findings_count":1}</event>
+  - hat: "dim:correctness"
+    text: |
+      <event topic="review.correctness.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"correctness","findings_file":".ralph/review/plan-loop-u5/r1-correctness.md","findings_count":1}</event>
+  - hat: "dim:testing"
+    text: |
+      <event topic="review.testing.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"testing","findings_file":".ralph/review/plan-loop-u5/r1-testing.md","findings_count":0}</event>
+  - hat: "dim:maintainability"
+    text: |
+      <event topic="review.maintainability.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"maintainability","findings_file":".ralph/review/plan-loop-u5/r1-maintainability.md","findings_count":0}</event>
+  - hat: "dim:project-standards"
+    text: |
+      <event topic="review.standards.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"project-standards","findings_file":".ralph/review/plan-loop-u5/r1-standards.md","findings_count":0}</event>
+  - hat: "dim:adversarial"
+    text: |
+      <event topic="review.adversarial.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"adversarial","findings_file":".ralph/review/plan-loop-u5/r1-adversarial.md","findings_count":0}</event>
+  - hat: review-synthesizer
+    text: |
+      <event topic="review.synthesized">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","diff_patch_file":".ralph/review/plan-loop-u5/round-01/review.diff.patch","synthesized_review_file":".ralph/review/plan-loop-u5/r1-synthesized-review.md","findings_count":1,"p0_count":0,"p1_count":1,"must_fix_now_count":1,"main_conflict_count":1,"unfixed_previous_count":0,"new_regression_p0_count":0,"newly_discovered_residual_count":0,"blocking_main_conflict_count":1,"residual_findings_count":0,"findings_summary":"one P1 issue","loop_decision_basis":"round 1 P1 needs fix","verdict":"blocked"}</event>
+  - hat: review-gate
+    text: |
+      <event topic="fix.requested">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","review_round":1,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","round_base_sha":"0000000000000000000000000000000000000002","diff_patch_file":".ralph/review/plan-loop-u5/round-01/review.diff.patch","synthesized_review_file":".ralph/review/plan-loop-u5/r1-synthesized-review.md","p0_count":0,"p1_count":1,"must_fix_now_count":1,"main_conflict_count":1,"unfixed_previous_count":0,"new_regression_p0_count":0,"newly_discovered_residual_count":0,"blocking_main_conflict_count":1,"residual_findings_count":0,"findings_summary":"one P1 issue","loop_decision_basis":"round 1 P1 needs fix","verdict":"blocked"}</event>
+  - hat: fix-planner
+    text: |
+      <event topic="review.complete">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","review_round":1,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","fix_base_sha":"0000000000000000000000000000000000000002","fix_plan_file":".ralph/review/plan-loop-u5/fix-plan.md","findings_count":1,"p0_count":0,"p1_count":1,"must_fix_now_count":1,"main_conflict_count":1,"unfixed_previous_count":0,"new_regression_p0_count":0,"newly_discovered_residual_count":0,"blocking_main_conflict_count":1,"residual_findings_count":0,"findings_summary":"one P1 issue","loop_decision_basis":"fix plan covers the P1","verdict":"blocked"}</event>
+  - hat: fixer
+    text: |
+      <event topic="fix.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","review_round":1,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","fixed_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000003","fix_plan_file":".ralph/review/plan-loop-u5/fix-plan.md","review_verdict":"pass_with_residuals","fixes_applied":1,"fixes_skipped":0,"fix_summary":"applied one P1 fix","next_review_plan":{"focus_areas":["verify P1 fix"],"fixed_findings":["P1-1"],"verification_performed":["cargo nextest"],"residual_risks":[],"diff_ranges":["0000000000000000000000000000000000000002..0000000000000000000000000000000000000003"]}}</event>
+  # Round 2 NEW: fix.done routes through test-stabilizer (U5 contract).
+  - hat: test-stabilizer
+    text: |
+      <event topic="stabilization.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","tested_from_sha":"0000000000000000000000000000000000000003","head_sha":"0000000000000000000000000000000000000003","stabilization_audit_file":".ralph/review/plan-loop-u5/stabilization/r2-audit.md","correction_ids":[],"classification_counts":{"test_bug":0,"production_bug":0,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":0},"worktree_status":"clean","tests_run":1,"tests_passed":1}</event>
+  - hat: review-reentry
+    text: |
+      <event topic="review.round.ready">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","review_round":2,"source_topic":"fix.done","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","round_base_sha":"0000000000000000000000000000000000000003","review_plan":{"focus_areas":["verify P1 fix"],"fixed_findings":["P1-1"],"verification_performed":["cargo nextest"],"residual_risks":[],"diff_ranges":["0000000000000000000000000000000000000002..0000000000000000000000000000000000000003"]}}</event>
+  - hat: "dim:goal-alignment"
+    text: |
+      <event topic="review.goalalign.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"goal-alignment","findings_file":".ralph/review/plan-loop-u5/r2-goal-alignment.md","findings_count":0}</event>
+  - hat: "dim:correctness"
+    text: |
+      <event topic="review.correctness.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"correctness","findings_file":".ralph/review/plan-loop-u5/r2-correctness.md","findings_count":0}</event>
+  - hat: "dim:testing"
+    text: |
+      <event topic="review.testing.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"testing","findings_file":".ralph/review/plan-loop-u5/r2-testing.md","findings_count":0}</event>
+  - hat: "dim:maintainability"
+    text: |
+      <event topic="review.maintainability.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"maintainability","findings_file":".ralph/review/plan-loop-u5/r2-maintainability.md","findings_count":0}</event>
+  - hat: "dim:project-standards"
+    text: |
+      <event topic="review.standards.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"project-standards","findings_file":".ralph/review/plan-loop-u5/r2-standards.md","findings_count":0}</event>
+  - hat: "dim:adversarial"
+    text: |
+      <event topic="review.adversarial.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"adversarial","findings_file":".ralph/review/plan-loop-u5/r2-adversarial.md","findings_count":0}</event>
+  - hat: review-synthesizer
+    text: |
+      <event topic="review.synthesized">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","diff_patch_file":".ralph/review/plan-loop-u5/round-02/review.diff.patch","synthesized_review_file":".ralph/review/plan-loop-u5/r2-synthesized-review.md","findings_count":0,"p0_count":0,"p1_count":0,"must_fix_now_count":0,"main_conflict_count":0,"unfixed_previous_count":0,"new_regression_p0_count":0,"newly_discovered_residual_count":0,"blocking_main_conflict_count":0,"residual_findings_count":0,"findings_summary":"all clear","loop_decision_basis":"round 2 accepts","verdict":"pass"}</event>
+  - hat: review-gate
+    text: |
+      <event topic="review.accepted">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","review_round":2,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","p0_count":0,"p1_count":0,"must_fix_now_count":0,"main_conflict_count":0,"blocking_main_conflict_count":0,"residual_findings_count":0,"loop_decision_basis":"round 2 accepted","verdict":"pass"}</event>
+  - hat: alignment
+    text: |
+      <event topic="align.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","review_round":2,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","fix_plan_file":".ralph/review/plan-loop-u5/fix-plan.md","review_verdict":"pass","plan_executed":true,"fix_plan_executed":true,"residuals_count":0,"residuals_summary":"none"}</event>
+  - hat: reporter
+    text: |
+      <event topic="report.done">{"plan_name":"plan-loop-u5","report_path":".ralph/review/plan-loop-u5/report.md","verdict":"pass"}</event>
+  - hat: reporter
+    text: |
+      <event topic="LOOP_COMPLETE">{"reason":"fix path re-stabilized and accepted"}</event>
+
+expected:
+  iterations: 27
+  events:
+    - topic: plan.ready
+    - topic: work.done
+    - topic: stabilization.done
+    - topic: review.round.ready
+    - topic: fix.requested
+    - topic: review.complete
+    - topic: fix.done
+    - topic: stabilization.done
+    - topic: review.round.ready
+    - topic: review.accepted
+    - topic: align.done
+    - topic: report.done
+  absent_events:
+    - topic: stabilization.blocked
+    - topic: review.loop.blocked
+    - topic: plan.blocked
+    - topic: work.failed
+  event_topic_counts:
+    - topic: stabilization.done
+      count: 2
+    - topic: review.round.ready
+      count: 2
+    - topic: review.synthesized
+      count: 2
+    - topic: fix.done
+      count: 1
+    - topic: review.accepted
+      count: 1
+  payload_matches:
+    - topic: stabilization.done
+      occurrence: 1
+      fields:
+        tested_from_sha: "0000000000000000000000000000000000000002"
+        head_sha: "0000000000000000000000000000000000000002"
+        correction_ids: []
+    - topic: stabilization.done
+      occurrence: 2
+      fields:
+        tested_from_sha: "0000000000000000000000000000000000000003"
+        head_sha: "0000000000000000000000000000000000000003"
+        correction_ids: []
+    - topic: review.round.ready
+      occurrence: 1
+      fields:
+        review_round: 1
+        source_topic: work.done
+    - topic: review.round.ready
+      occurrence: 2
+      fields:
+        review_round: 2
+        source_topic: fix.done
+        round_base_sha: "0000000000000000000000000000000000000003"
+    - topic: review.accepted
+      fields:
+        review_round: 2
+        verdict: pass
+  completion: true

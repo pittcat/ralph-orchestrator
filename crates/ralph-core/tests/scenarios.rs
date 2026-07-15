@@ -1451,6 +1451,23 @@ fn test_ce_executor_pipeline_loop_fix_reentry() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-16-001 plan U5: in the ce-executor-pipeline-loop preset,
+/// both `work.done` (round 1) and `fix.done` (round 2) now flow
+/// through `test-stabilizer` before re-entering review-reentry. This
+/// scenario asserts the new topology:
+/// - test-stabilizer fires twice (once per trigger source).
+/// - review-reentry subscribes only to stabilization.done.
+/// - Round 2 review.round.ready carries source_topic=fix.done and
+///   round_base_sha == fix.head_sha.
+/// - Both stabilization.done events emit BEFORE review-reentry fires.
+#[test]
+fn test_ce_executor_pipeline_loop_fix_stabilizer_reentry() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_pipeline_loop_fix_stabilizer_reentry.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-07-09-004 plan U3: at review_round 6 with
 /// `blocking_main_conflict_count > 0`, the gate must emit
 /// `review.loop.blocked` and its prompt must carry the
@@ -1471,6 +1488,36 @@ fn test_ce_executor_pipeline_loop_max_round_blocked() {
 #[test]
 fn test_ce_executor_pipeline_blocked() {
     let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-16-001 plan U2: per-Unit fail-stop. When Executor fails
+/// on a non-final Unit (U2 in this scenario), it MUST emit
+/// `work.failed` with a complete Unit accounting bill
+/// (`planned_units` / `attempted_units` / `completed_units` /
+/// `failed_units` / `skipped_units`) and subsequent Units
+/// (U3..Un) MUST NOT start. Asserts no review/fix/align event
+/// fires after `work.failed`, and the bill fields are mutually
+/// exclusive and exhaustive over the planned Unit set.
+#[test]
+fn test_ce_executor_pipeline_executor_fail_stop() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_pipeline_executor_fail_stop.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-16-001 plan U7 + S15: when test-stabilizer emits
+/// `stabilization.blocked` (e.g. unattributable failures), the loop
+/// MUST short-circuit to reporter without firing any review/fix/align
+/// event. Asserts that stabilization.blocked is the sole terminal
+/// trigger path to reporter, and report.done carries verdict=blocked
+/// with reason=stabilization_blocked.
+#[test]
+fn test_ce_executor_pipeline_stabilization_blocked_report() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_pipeline_stabilization_blocked_report.yml",
+    );
     run_workflow_guard_scenario(yaml);
 }
 
