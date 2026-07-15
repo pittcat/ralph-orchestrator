@@ -1,4 +1,4 @@
-# ce_plan_reviewer_semantic_recognition: U1 Plan Reviewer semantic contract
+# ce_executor_pipeline_plan_reviewer_semantic_recognition: U1 semantic contract
 #
 # 2026-07-16-001 plan U1: Plan Reviewer MUST recognize plans
 # semantically (not by fixed heading) and emit plan.ready /

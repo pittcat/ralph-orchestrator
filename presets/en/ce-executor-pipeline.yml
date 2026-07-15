@@ -90,6 +90,7 @@ event_loop:
       - "review.standards.done"
       - "review.adversarial.done"
       - "review.synthesized"
+      - "review.accepted"
       - "review.complete"
       - "fix.done"
       - "align.done"
@@ -347,6 +348,10 @@ event_loop:
         required_fields:
           - "plan_name"
           - "plan_path"
+          - "plan_contract_version"
+          - "normalized_plan_file"
+          - "plan_contract_digest"
+          - "trace_file"
           - "plan_revised"
           - "review_summary"
           - "flow_audit"
@@ -377,7 +382,7 @@ event_loop:
             source: "plan-reviewer §Step 2.5b"
             fill_rule: "40-char git SHA; do NOT hand-write (plan-reviewer resolves)"
       plan.blocked:
-        required_fields: ["plan_name", "reason"]
+        required_fields: ["plan_name", "plan_path", "plan_contract_version", "plan_contract_digest", "reason", "semantic_gaps"]
         field_docs:
           plan_name:
             meaning: "plan file basename without extension; identifies which plan failed"
@@ -391,6 +396,10 @@ event_loop:
         required_fields:
           - "plan_name"
           - "plan_path"
+          - "plan_contract_version"
+          - "normalized_plan_file"
+          - "plan_contract_digest"
+          - "trace_file"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through from plan.ready
           - "planned_units"
@@ -575,6 +584,11 @@ event_loop:
           - "worktree_status"
           - "tests_run"
           - "tests_passed"
+          - "review_phase"
+          - "normalized_plan_file"
+          - "plan_contract_version"
+          - "plan_contract_digest"
+          - "trace_file"
       stabilization.blocked:
         required_fields:
           - "plan_name"
@@ -585,8 +599,20 @@ event_loop:
           - "reason"
           - "classification_counts"
           - "worktree_status"
+          - "review_phase"
+          - "normalized_plan_file"
+          - "plan_contract_version"
+          - "plan_contract_digest"
+          - "trace_file"
       review.goalalign.done:
         required_fields:
+          - "review_phase"
+          - "normalized_plan_file"
+          - "plan_contract_version"
+          - "plan_contract_digest"
+          - "trace_file"
+          - "stabilization_audit_file"
+          - "correction_ids"
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
@@ -630,6 +656,13 @@ event_loop:
             fill_rule: "integer >= 1 (G0 placeholder still counts)"
       review.correctness.done:
         required_fields:
+          - "review_phase"
+          - "normalized_plan_file"
+          - "plan_contract_version"
+          - "plan_contract_digest"
+          - "trace_file"
+          - "stabilization_audit_file"
+          - "correction_ids"
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
@@ -673,6 +706,13 @@ event_loop:
             fill_rule: "integer >= 1 (G0 placeholder still counts)"
       review.testing.done:
         required_fields:
+          - "review_phase"
+          - "normalized_plan_file"
+          - "plan_contract_version"
+          - "plan_contract_digest"
+          - "trace_file"
+          - "stabilization_audit_file"
+          - "correction_ids"
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
@@ -716,6 +756,13 @@ event_loop:
             fill_rule: "integer >= 1 (G0 placeholder still counts)"
       review.maintainability.done:
         required_fields:
+          - "review_phase"
+          - "normalized_plan_file"
+          - "plan_contract_version"
+          - "plan_contract_digest"
+          - "trace_file"
+          - "stabilization_audit_file"
+          - "correction_ids"
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
@@ -759,6 +806,13 @@ event_loop:
             fill_rule: "integer >= 1 (G0 placeholder still counts)"
       review.standards.done:
         required_fields:
+          - "review_phase"
+          - "normalized_plan_file"
+          - "plan_contract_version"
+          - "plan_contract_digest"
+          - "trace_file"
+          - "stabilization_audit_file"
+          - "correction_ids"
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
@@ -802,6 +856,13 @@ event_loop:
             fill_rule: "integer >= 1 (G0 placeholder still counts)"
       review.adversarial.done:
         required_fields:
+          - "review_phase"
+          - "normalized_plan_file"
+          - "plan_contract_version"
+          - "plan_contract_digest"
+          - "trace_file"
+          - "stabilization_audit_file"
+          - "correction_ids"
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
@@ -845,6 +906,12 @@ event_loop:
             fill_rule: "integer >= 1 (G0 placeholder still counts)"
       review.synthesized:
         required_fields:
+          - "normalized_plan_file"
+          - "plan_contract_version"
+          - "plan_contract_digest"
+          - "trace_file"
+          - "stabilization_audit_file"
+          - "correction_ids"
           - "plan_name"
           - "plan_path"
           - "executor_head_sha"
@@ -856,6 +923,9 @@ event_loop:
           - "p1_count"
           - "findings_summary"
           - "verdict"
+          - "review_phase"
+      review.accepted:
+        required_fields: ["plan_name", "plan_path", "executor_head_sha", "resolved_baseline_sha", "review_phase", "normalized_plan_file", "plan_contract_version", "plan_contract_digest", "trace_file", "fix_plan_file", "synthesized_review_file", "findings_count", "p0_count", "p1_count", "findings_summary", "verdict"]
         field_docs:
           plan_name:
             meaning: "plan file basename without extension; copied from the final dim's payload"
@@ -1294,7 +1364,7 @@ hats:
       runtime:
       - File does not exist → `{"reason": "plan_file_not_found: <path>"}`
       - File exists but unreadable → `{"reason": "plan_file_unreadable: <path>"}`
-      - File missing `## Implementation Units` / `## Work Breakdown` → `{"reason": "plan_missing_implementation_units"}`
+      - File lacks a semantically identifiable, strictly ordered executable Unit sequence → `{"reason": "plan_semantic_contract_incomplete", "semantic_gaps": ["ordered_units"]}`
       - File empty or placeholder content (e.g. only `TODO` or `<plan TBD>`) → `{"reason": "plan_content_empty_or_placeholder"}`
       - File is otherwise unusable (contradictory requirements, ambiguous scope, missing hard rules) → `{"reason": "plan_unusable: <brief reason>"}`
 
@@ -1307,8 +1377,10 @@ hats:
       review/fix/alignment.
 
       Audit procedure (read-only):
-      1. Read `plan_path` and extract U-IDs from `## Implementation Units`
-         (regex `### U\d+\.` → list `[U1, U3, U5, ...]`).
+      1. Read `plan_path` semantically and identify the ordered executable Units.
+         Headings, numbering, language, and Markdown layout are not acceptance criteria.
+         Preserve existing stable IDs; assign deterministic `U1..Un` IDs in document
+         order only when IDs are missing.
       2. `git log --oneline <plan_baseline_sha>..HEAD` (or
          `loop_start_sha` if baseline missing — see **Diff base** in
          dim:goal-alignment instructions) and collect commit subjects.
@@ -1450,9 +1522,9 @@ hats:
       `plan.ready`. Do not leave the revised plan as an uncommitted working-tree
       change for downstream hats.
 
-      **Quality gates (each is a one-line criterion; missing or weak → in-place fix):**
+      **Semantic quality gates (titles and numbering may vary; missing or weak → in-place fix):**
 
-      1. **Implementation Units / Work Breakdown present and actionable.** Each U has a Goal, Files, Approach, Verification, and is at the right granularity (one U per independent, testable deliverable).
+      1. **Ordered Units are semantically present and actionable.** Each Unit has a goal, observable result, dependency boundary, implementation scope, verification, and completion gate. A numbered list or the word "Unit" alone is insufficient.
       2. **Scope Boundaries explicit.** Non-goals are listed; ambiguity is resolved.
       3. **Requirements Trace present.** R-IDs are listed and mapped to U-IDs.
       4. **Verification per unit.** Each U names a concrete, project-specific test command (from repo docs — not hardcoded to `cargo`) and expected pass criteria. The verification gate must be achievable, including any baseline-aware delta classification required by this preset.
@@ -1461,8 +1533,12 @@ hats:
       7. **TDD intent.** Each U's `Execution note` says test-first or characterization-first.
       8. **No drive-by edits.** Plan does NOT request modifying unrelated files, doc sweeps, or "while we're here" cleanups.
 
-      **In-place edit policy:**
-      - Add / tighten missing sections. Do NOT delete U-IDs.
+      **Normalized artifact policy:**
+      - Preserve the source plan as the operator artifact. Create one authoritative normalized projection at `.ralph/review/<plan_name>/normalized-plan.md` and an append-only trace at `.ralph/review/<plan_name>/trace.md`.
+      - The projection MUST contain goals/scope/constraints, stable R/S/U IDs, observable Given/When/Then scenarios, requirement-to-test traceability, strictly ordered Units, per-Unit completion gates, and final quality gates.
+      - Preserve existing IDs. Assign missing R/S/U IDs deterministically in first semantic appearance order; reject duplicate, contradictory, or ambiguous mappings instead of guessing.
+      - Compute `plan_contract_digest` from both source and normalized bytes and record the exact command and component digests in the trace.
+      - Add / tighten missing source-plan sections only when the correction is unambiguous. Do NOT delete stable IDs.
       - Resolve trivial ambiguities (e.g. "fix bug" → specific file/symptom). For non-trivial ones, emit `plan.blocked` with `reason: plan_unusable: <reason>` instead of guessing.
       - Set `plan_revised: true` if you changed any line; `false` otherwise.
       - If `plan_revised: true`, stage only `plan_path` and commit it before
@@ -1474,7 +1550,7 @@ hats:
       the `flow_audit` verdict, emit EXACTLY ONE `plan.ready` event:
       ```
       <event topic="plan.ready">
-      {"plan_name": "<basename without extension>", "plan_path": "<repo-relative path>", "plan_revised": <true|false>, "review_summary": "<1-2 sentence summary>", "flow_audit": "<post_merge_complete | post_merge_no_canary | first_run>", "resolved_baseline_sha": "<sha from Step 2.5b>", "matched_uids": ["U1","U3",...], "missing_uids": ["U2",...]}
+      {"plan_name":"<basename>","plan_path":"<repo-relative source>","plan_contract_version":"ce-unified-plan/v1","normalized_plan_file":".ralph/review/<plan>/normalized-plan.md","plan_contract_digest":"<digest binding source+projection>","trace_file":".ralph/review/<plan>/trace.md","plan_revised":<true|false>,"review_summary":"<summary>","flow_audit":"<post_merge_complete|post_merge_no_canary|first_run>","resolved_baseline_sha":"<sha>"}
       </event>
       ```
       `plan_name`, `plan_path`, `plan_revised`, `review_summary`,
@@ -1491,7 +1567,7 @@ hats:
       in-place, emit EXACTLY ONE `plan.blocked` event:
       ```
       <event topic="plan.blocked">
-      {"plan_name": "<basename without extension>", "reason": "<one of the reason strings from Step 2, or 'plan_unusable: <brief reason>'>"}
+      {"plan_name":"<basename>","plan_path":"<repo-relative source>","plan_contract_version":"ce-unified-plan/v1","plan_contract_digest":"<source-plan digest>","reason":"<canonical reason>","semantic_gaps":["<specific missing or ambiguous semantic capability>"]}
       </event>
       ```
       Then stop. Reporter will receive the blocked event and emit the loop
@@ -1993,9 +2069,13 @@ hats:
       Baseline-existing failures are allowed, but they must be reflected in
       the baseline/delta reports and counts above.
 
+      Execute Units from `normalized_plan_file`, never by re-parsing source
+      headings. Copy the four unified contract fields from `plan.ready` into
+      `work.done` and append every Unit disposition to `trace_file`.
+
       Copy-pasteable example (replace placeholders):
       ```bash
-      ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"path/to/plan.md","executor_head_sha":"abc123...","resolved_baseline_sha":"<sha from plan.ready §Step 2.5b>","planned_units":["U1","U2"],"completed_units":["U1","U2"],"baseline_verification_status":"red","baseline_verification_file":".ralph/review/my-plan/baseline-verification.md","post_verification_status":"red","post_verification_file":".ralph/review/my-plan/final-verification.md","verification_delta_file":".ralph/review/my-plan/verification-delta.md","baseline_existing_count":2,"new_business_regressions_count":0,"test_compatibility_updates_count":1,"flaky_or_environmental_count":0,"tests_run":12,"tests_passed":10,"changed_lines":85,"commit_count":3}'
+      ralph emit work.done --json '{"plan_name":"my-plan","plan_path":"path/to/plan.md","plan_contract_version":"ce-unified-plan/v1","normalized_plan_file":".ralph/review/my-plan/normalized-plan.md","plan_contract_digest":"<digest>","trace_file":".ralph/review/my-plan/trace.md","executor_head_sha":"abc123...","resolved_baseline_sha":"<sha from plan.ready §Step 2.5b>","planned_units":["U1","U2"],"completed_units":["U1","U2"],"baseline_verification_status":"red","baseline_verification_file":".ralph/review/my-plan/baseline-verification.md","post_verification_status":"red","post_verification_file":".ralph/review/my-plan/final-verification.md","verification_delta_file":".ralph/review/my-plan/verification-delta.md","baseline_existing_count":2,"new_business_regressions_count":0,"test_compatibility_updates_count":1,"flaky_or_environmental_count":0,"tests_run":12,"tests_passed":10,"changed_lines":85,"commit_count":3}'
       ```
 
       MUST NOT write events directly; use `ralph emit`.
@@ -2027,7 +2107,7 @@ hats:
     # 分类失败、跑全量测试，禁止削弱权威 Oracle（详见 instructions）。
     name: "Test Hat (Stabilizer)"
     description: "Post-execution test stabilization gate. Builds a baseline, attributes failures, applies minimal test/production corrections, runs the full test suite, and emits stabilization.done or stabilization.blocked as the gate before six-dim review."
-    triggers: ["work.done"]
+    triggers: ["work.done", "fix.done"]
     publishes: ["stabilization.done", "stabilization.blocked"]
     exempt_topics: ["stabilization.done", "stabilization.blocked"]
     default_publishes: "stabilization.blocked"
@@ -2036,6 +2116,7 @@ hats:
       enabled: true
       events:
         - work.done
+        - fix.done
     timeout: 3600
     missing_event_grace_secs: 600
     instructions: |
@@ -2064,7 +2145,9 @@ hats:
 
       ### Step 1 — Read trigger & plan context
 
-      - 从 `work.done` 读 `plan_name`、`plan_path`、`executor_head_sha`（这就是你的 `tested_from_sha`）、`resolved_baseline_sha`、Unit 账单与基线/最终验证文件。
+      - 从 trigger 读 `plan_name`、`plan_path` 与统一计划 artifact 字段。`work.done.executor_head_sha` 或 `fix.done.head_sha` 就是本轮 `tested_from_sha`。
+      - `work.done` 映射为 `review_phase: initial`；`fix.done` 映射为 `review_phase: post_fix`。该字段及统一计划 artifact 字段必须原样透传。
+      - `fix.done` 路径还必须原样透传 `fix_plan_file`、attempt 结算、`fix_status` 与 `failure_reason`，使最终 Review/Alignment 能核验修复血缘；`work.done` 路径将 `fix_plan_file` 设为空字符串，仅供 phase-aware schema 统一。
       - 按需读原计划（`plan_path`），但**只**识别需要的 Unit 上下文，不重写任何计划。
       - 把当前 `git rev-parse HEAD` 留作 `candidate_head_sha`，**不要**与 `executor_head_sha` 混算。
 
@@ -2148,7 +2231,7 @@ hats:
       Emit：
       ```
       <event topic="stabilization.done">
-      {"plan_name":"<plan>","plan_path":"<repo-relative plan path>","tested_from_sha":"<executor_head_sha>","head_sha":"<git rev-parse HEAD>","stabilization_audit_file":".ralph/review/<plan>/stabilization/audit.md","correction_ids":["<id1>","<id2>"],"classification_counts":{"test_bug":<n>,"production_bug":<n>,"pre_existing_failure":<n>,"flaky_or_env":<n>,"unattributable":<n>},"worktree_status":"clean","tests_run":<n>,"tests_passed":<n>}
+      {"plan_name":"<plan>","plan_path":"<repo-relative plan path>","plan_contract_version":"ce-unified-plan/v1","normalized_plan_file":"<path from trigger>","plan_contract_digest":"<digest from trigger>","trace_file":"<trace from trigger>","review_phase":"<initial|post_fix>","tested_from_sha":"<trigger head>","head_sha":"<git rev-parse HEAD>","stabilization_audit_file":".ralph/review/<plan>/stabilization/audit.md","correction_ids":["<id1>","<id2>"],"classification_counts":{"test_bug":<n>,"production_bug":<n>,"pre_existing_failure":<n>,"flaky_or_env":<n>,"unattributable":<n>},"worktree_status":"clean","tests_run":<n>,"tests_passed":<n>}
       </event>
       ```
       然后停止。
@@ -2167,7 +2250,7 @@ hats:
       Emit：
       ```
       <event topic="stabilization.blocked">
-      {"plan_name":"<plan>","plan_path":"<repo-relative plan path>","tested_from_sha":"<executor_head_sha>","head_sha":"<git rev-parse HEAD or same as tested_from if no commits>","stabilization_audit_file":".ralph/review/<plan>/stabilization/audit.md","classification_counts":{...},"worktree_status":"<clean|dirty|unattributable_dirty>","reason":"<one of the canonical reasons>"}
+      {"plan_name":"<plan>","plan_path":"<repo-relative plan path>","plan_contract_version":"ce-unified-plan/v1","normalized_plan_file":"<path from trigger>","plan_contract_digest":"<digest from trigger>","trace_file":"<trace from trigger>","review_phase":"<initial|post_fix>","tested_from_sha":"<trigger head>","head_sha":"<git rev-parse HEAD or tested_from>","stabilization_audit_file":".ralph/review/<plan>/stabilization/audit.md","classification_counts":{...},"worktree_status":"<clean|dirty|unattributable_dirty>","reason":"<canonical reason>"}
       </event>
       ```
       然后停止。后续 review chain 与 reporter 会基于本事件生成报告 + blocked 终态。
@@ -2198,6 +2281,9 @@ hats:
     instructions: |
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:goal-alignment — read-only single-dimension reviewer
+
+      Pass through `review_phase`, unified plan artifact/trace fields,
+      stabilization audit/correction fields, and `fix_plan_file` unchanged.
 
       ### Dimension focus
       Goal alignment. Audit whether the executor's code changes
@@ -2460,6 +2546,9 @@ hats:
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:correctness — read-only single-dimension reviewer
 
+      Pass through `review_phase`, unified plan artifact/trace fields,
+      stabilization audit/correction fields, and `fix_plan_file` unchanged.
+
       ### Dimension focus
       Correctness. Audit whether the code is logically correct:
       - Boundary / edge cases: empty input, max values, off-by-one.
@@ -2590,6 +2679,9 @@ hats:
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:testing — read-only single-dimension reviewer
 
+      Pass through `review_phase`, unified plan artifact/trace fields,
+      stabilization audit/correction fields, and `fix_plan_file` unchanged.
+
       ### Dimension focus
       Testing. Audit test coverage and assertion strength:
       - Coverage: every new public function / branch has at least
@@ -2699,6 +2791,9 @@ hats:
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:maintainability — read-only single-dimension reviewer
 
+      Pass through `review_phase`, unified plan artifact/trace fields,
+      stabilization audit/correction fields, and `fix_plan_file` unchanged.
+
       ### Dimension focus
       Maintainability. Audit code structure and clarity:
       - Coupling: new code does not introduce tight coupling
@@ -2806,6 +2901,9 @@ hats:
     instructions: |
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:project-standards — read-only single-dimension reviewer
+
+      Pass through `review_phase`, unified plan artifact/trace fields,
+      stabilization audit/correction fields, and `fix_plan_file` unchanged.
 
       ### Dimension focus
       Project standards. Audit compliance with the project's
@@ -2918,6 +3016,9 @@ hats:
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:adversarial — read-only single-dimension reviewer
 
+      Pass through `review_phase`, unified plan artifact/trace fields,
+      stabilization audit/correction fields, and `fix_plan_file` unchanged.
+
       ### Dimension focus
       Adversarial. Probe the changes as an attacker would:
       - Input validation: malformed input, oversized input,
@@ -3012,11 +3113,11 @@ hats:
 
   review-synthesizer:
     name: "Review Synthesizer"
-    description: "Reads all 6 dimension products, dedupes/merges/cross-checks consistency, ranks P0-P3, writes synthesized_review_file. Emits EXACTLY ONE review.synthesized."
+    description: "Synthesizes six dimensions and routes initial review to fix planning or post-fix review to bounded acceptance/blocking."
     triggers: ["review.adversarial.done"]
-    publishes: ["review.synthesized"]
-    exempt_topics: ["review.synthesized"]
-    terminal_events: ["review.synthesized"]
+    publishes: ["review.synthesized", "review.accepted"]
+    exempt_topics: ["review.synthesized", "review.accepted"]
+    terminal_events: ["review.synthesized", "review.accepted"]
     event_filter:
       enabled: true
       events:
@@ -3028,14 +3129,16 @@ hats:
 
       You are the final aggregator of the 6-dim serial chain. You
       receive `review.adversarial.done` (the last dimension) and
-      must produce ONE `review.synthesized` event. Your output is a
-      compact synthesized review file for `fix-planner`; you do NOT
-      write the fix plan.
+      must produce ONE phase-aware event. Initial review emits
+      `review.synthesized` for fix planning; post-fix review emits
+      `review.accepted` and can only accept or block.
 
       ### HARD RULES
-      - Emit EXACTLY ONE `review.synthesized` per activation. Do NOT
-        re-emit; the runner rejects extra emits in isolated mode.
-      - Do NOT emit any review.* event besides `review.synthesized`.
+      - Emit EXACTLY ONE event per activation: `review.synthesized` when
+        `review_phase == initial`, or `review.accepted` when
+        `review_phase == post_fix`. Do not re-emit.
+      - Post-fix P0/P1 findings set `review.accepted.verdict: blocked`;
+        post-fix review never emits another `review.synthesized`.
       - Do NOT emit `work.done` / `work.failed` / `plan.*` /
         `review.complete` / `fix.*` / `align.done` / `report.done` /
         `LOOP_COMPLETE`.
@@ -3175,11 +3278,14 @@ hats:
       ### Step 8 — Emit event
       Pass through `plan_path`, `executor_head_sha`, and
       `resolved_baseline_sha` from the trigger (`review.adversarial.done`).
-      Also pass through `diff_patch_file`.
+      Also pass through `diff_patch_file`, `review_phase`, all unified
+      plan/stabilization fields, and `fix_plan_file`. Never recompute their
+      identity values in this hat.
       ```bash
-      ralph emit review.synthesized --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.adversarial.done>","diff_patch_file":".ralph/review/<plan>/review.diff.patch","synthesized_review_file":".ralph/review/<plan>/synthesized-review.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<1-2 sentence summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
+      ralph emit <review.synthesized|review.accepted> --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<stabilized sha>","resolved_baseline_sha":"<sha>","review_phase":"<initial|post_fix>","synthesized_review_file":".ralph/review/<plan>/synthesized-review.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
       ```
-      Then stop. `fix-planner` will be triggered next.
+      Then stop. Only the initial topic triggers `fix-planner`; post-fix
+      `review.accepted` triggers alignment directly.
 
       ### OPAC reference
       Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
@@ -3821,14 +3927,14 @@ hats:
   alignment:
     name: "Alignment"
     description: "Cross-checks original plan execution (executor phase) vs fix-plan execution (fixer phase) using separate git ranges. Records residuals; does NOT loop, retry, or block."
-    triggers: ["fix.done"]
+    triggers: ["review.accepted"]
     publishes: ["align.done"]
     exempt_topics: ["align.done"]
     terminal_events: ["align.done"]
     event_filter:
       enabled: true
       events:
-        - fix.done
+        - review.accepted
     disallowed_tools: ["Edit"]
     timeout: 1800
     missing_event_grace_secs: 540
@@ -3853,11 +3959,10 @@ hats:
       - Do NOT loop back to executor / fixer / review.
 
       ### Step 1 — Read context
-      - From `fix.done` payload: `plan_name`, `plan_path` (original plan),
-        `executor_head_sha`, `head_sha` (fixer final HEAD — current
-        handoff), `worktree_status`, `resolved_baseline_sha`
-        (pass-through), `fix_plan_file`, `review_verdict`,
-        `fixes_applied`, `fixes_skipped`.
+      - From `review.accepted` read the unified plan/trace fields,
+        `executor_head_sha` (the post-fix stabilized and independently
+        reviewed HEAD), `fix_plan_file`, `resolved_baseline_sha`, and
+        `verdict`. The event is valid here only with `review_phase: post_fix`.
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read the **original** plan at `plan_path`.
       - Read the **fix plan** at `fix_plan_file` (may be placeholder).
@@ -3866,14 +3971,9 @@ hats:
       Read-only reviewer. Entry Precheck validates the **current**
       handoff tip after fixer, not the historical executor boundary:
 
-      - `expected_head_sha` = `head_sha` from `fix.done` (required).
-        Empty-plan / no-commit fix paths still carry `head_sha` equal
-        to the unchanged HEAD (often identical to `executor_head_sha`).
-      - `executor_head_sha` remains the **git-log boundary** for
-        Steps 2–3 (original-plan range ends there; fix-plan range
-        starts there). Do NOT use it as Entry Precheck expected HEAD.
+      - `expected_head_sha` = `executor_head_sha` from `review.accepted`.
 
-      1. Set `expected_head_sha` from `fix.done.head_sha`.
+      1. Set `expected_head_sha` from `review.accepted.executor_head_sha`.
       2. `actual_start_head_sha` = `git rev-parse HEAD`. If mismatch,
          record in `.ralph/agent/decisions.md`, do NOT reset /
          restore / stash / clean upstream state, follow **Handoff
@@ -3940,14 +4040,14 @@ hats:
       Format `residuals_summary` as comma-separated `U<N>:reason` or `none`.
 
       ### Step 5 — Exit Precheck and emit event
-      Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`,
-      `review_verdict`. Follow the same two-stage Exit Precheck as
+      Pass through the unified plan/trace fields, `plan_path`,
+      `executor_head_sha`, `fix_plan_file`, and `verdict`. Follow the same two-stage Exit Precheck as
       the dim hats: Stage A (HEAD == start HEAD and clean filter
       empty), `ralph emit --policy-check`, Stage B (re-check HEAD +
       clean), save end evidence to
       `.ralph/review/{plan_name}/git-state-alignment-end.txt`.
       ```bash
-      ralph emit align.done --json '{"plan_name":"<plan>","plan_path":"<original plan path>","executor_head_sha":"<sha>","head_sha":"<sha from fix.done>","worktree_status":"clean","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from fix.done>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
+      ralph emit align.done --json '{"plan_name":"<plan>","plan_path":"<original plan path>","executor_head_sha":"<post-fix reviewed sha>","head_sha":"<same sha>","worktree_status":"clean","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
       ```
       Then stop. Reporter will receive `align.done`.
 

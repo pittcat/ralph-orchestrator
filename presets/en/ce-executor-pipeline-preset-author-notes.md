@@ -53,7 +53,7 @@
 ## Hat: test-stabilizer (2026-07-16-001 U3)
 
 - **Q1 使命:** executor (与 fixer, U5) 后稳定化门禁：建基线、归类失败、最小修正（必要时修改生产代码 + correction ID）、跑项目权威全量测试，发 `stabilization.done`（成功）或 `stabilization.blocked`（不可恢复阻塞）。**无自批权**——交付 HEAD 必须经下游六维 Review。
-- **Q2 输入:** `work.done` 携带 `plan_name` / `plan_path` / `executor_head_sha`（= `tested_from_sha`）/ `resolved_baseline_sha` / Unit 账单 / baseline + final 验证文件。
+- **Q2 输入:** `work.done` 或 `fix.done`；分别把 `executor_head_sha` / `head_sha` 映射为 `tested_from_sha`，并把 `review_phase` 映射为 `initial` / `post_fix`。两条路径都必须携带统一计划 artifact 与 trace 身份。
 - **Q3 执行:** Step 1 读触发与计划上下文 → Step 2 baseline + dirty-worktree gate（`git status` 排除 `.ralph/`）→ Step 3 捕获 baseline + 跑全量测试 → Step 4 失败归类（`test_bug` / `production_bug` / `pre_existing_failure` / `flaky_or_env` / `unattributable`）→ Step 5 最小修正（生产修改须 commit + correction ID）→ Step 6 写 `stabilization_audit_file` → Step 7 emit `stabilization.done` 或 Step 8 emit `stabilization.blocked`。
 - **Q4 输出:** `stabilization.done` / `stabilization.blocked`，含 `plan_name` / `plan_path` / `tested_from_sha` / `head_sha` / `stabilization_audit_file` / `correction_ids` / `classification_counts` / `worktree_status`（done 还含 `tests_run` / `tests_passed`；blocked 还含 `reason`）。
 - **Q5 交接:** 6 维 Review（trigger 改 `stabilization.done`）/ Reporter（trigger 改 `stabilization.blocked`）必须使用同一 `head_sha` 与 `stabilization_audit_file`；production 改动产生的 `correction_ids` 进入下游 finding 关联。
@@ -77,7 +77,7 @@
 
 1. runtime：未改 topic/completion 语义；新增 `stabilization.done`/`stabilization.blocked` 业务事件，由 linear preset 在 `event_policy` 中补 `schemas` 块约束。Loop preset 已通过外部 `presets/schemas/ce-executor-pipeline-loop.yml` 注入 schema。
 2. preset_lint：linear preset 加 `event_policy.schemas.stabilization.*` 后 strict lint 通过；loop preset 已通过。
-3. BDD：U3 真实 EventLoop scenario 暂留 U8 治理补完（worker 没有补 fixture，仅手动验证）。
+3. BDD：`ce_executor_pipeline_post_fix_review.yml` 使用真实 EventLoop runner 证明 `fix.done → stabilization.done → 六维 review → review.accepted → alignment`，并断言 post-fix 不再发布 `review.synthesized/review.complete`。
 4. config：未改配置字段。
 5. CLI presets：未增删 builtin。
 6. manifest/index：未增删 preset。

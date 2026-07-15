@@ -1462,9 +1462,8 @@ fn test_ce_executor_pipeline_loop_fix_reentry() {
 /// - Both stabilization.done events emit BEFORE review-reentry fires.
 #[test]
 fn test_ce_executor_pipeline_loop_fix_stabilizer_reentry() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_pipeline_loop_fix_stabilizer_reentry.yml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/ce_executor_pipeline_loop_fix_stabilizer_reentry.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -1501,9 +1500,7 @@ fn test_ce_executor_pipeline_blocked() {
 /// exclusive and exhaustive over the planned Unit set.
 #[test]
 fn test_ce_executor_pipeline_executor_fail_stop() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_pipeline_executor_fail_stop.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_executor_fail_stop.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -1515,9 +1512,14 @@ fn test_ce_executor_pipeline_executor_fail_stop() {
 /// with reason=stabilization_blocked.
 #[test]
 fn test_ce_executor_pipeline_stabilization_blocked_report() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_pipeline_stabilization_blocked_report.yml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/ce_executor_pipeline_stabilization_blocked_report.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_ce_executor_pipeline_post_fix_review() {
+    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_post_fix_review.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -1533,9 +1535,7 @@ fn test_ce_executor_pipeline_stabilization_blocked_report() {
 /// still > 0). Reporter consumes review.loop.blocked.
 #[test]
 fn test_ce_executor_pipeline_loop_fixer_fail_stop() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_pipeline_loop_fixer_fail_stop.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_loop_fixer_fail_stop.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -1549,7 +1549,7 @@ fn test_ce_executor_pipeline_loop_fixer_fail_stop() {
 #[test]
 fn test_ce_plan_reviewer_semantic_recognition_positive() {
     let yaml = load_scenario(
-        "tests/scenarios/ce_plan_reviewer_semantic_recognition.yml",
+        "tests/scenarios/ce_executor_pipeline_plan_reviewer_semantic_recognition.yml",
     );
     run_workflow_guard_scenario(yaml);
 }
@@ -1562,7 +1562,7 @@ fn test_ce_plan_reviewer_semantic_recognition_positive() {
 #[test]
 fn test_ce_plan_reviewer_semantic_blocked_negative() {
     let yaml = load_scenario(
-        "tests/scenarios/ce_plan_reviewer_semantic_blocked_negative.yml",
+        "tests/scenarios/ce_executor_pipeline_plan_reviewer_semantic_blocked_negative.yml",
     );
     run_workflow_guard_scenario(yaml);
 }
@@ -1573,9 +1573,8 @@ fn test_ce_plan_reviewer_semantic_blocked_negative() {
 /// by emitting `plan.ready` with a fake `normalized_plan_file`.
 #[test]
 fn test_ce_plan_reviewer_semantic_ambiguous() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_plan_reviewer_semantic_ambiguous.yml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/ce_executor_pipeline_plan_reviewer_semantic_ambiguous.yml");
     run_workflow_guard_scenario(yaml);
 }
 

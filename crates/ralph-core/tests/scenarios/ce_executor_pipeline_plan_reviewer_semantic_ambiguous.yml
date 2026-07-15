@@ -1,4 +1,4 @@
-# ce_plan_reviewer_semantic_ambiguous: U1 Plan Reviewer ambiguous case
+# ce_executor_pipeline_plan_reviewer_semantic_ambiguous: U1 ambiguous case
 #
 # 2026-07-16-001 plan U1 + S2: a plan with contradictory dependency
 # edges (and therefore ambiguous Unit ordering) MUST be rejected

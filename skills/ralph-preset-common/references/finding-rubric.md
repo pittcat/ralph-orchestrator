@@ -118,6 +118,9 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `blocked_failed_promoted_to_pass` | P0 | delete promotion path | topology | Q4 |
 | `topic_multi_consumer` | P1（blast radius 大则 P0） | split consumer or remove | topology | Q5 |
 | `hidden_phase_decision` | P1（改变业务事实则 P0） | lift to explicit hat transition | topology | Q4 |
+| `production_correction_bypasses_independent_review` | P0 | route every production HEAD through stabilization + independent review | topology | Q5 |
+| `normalized_plan_identity_not_propagated` | P0 | require and pass version/digest/normalized plan/trace on every handoff | handoff | Q5 |
+| `post_fix_review_reopens_unbounded_fix` | P0 | explicit post-fix phase with accept-or-block branch | topology | Q4 |
 | `prompt_wall_serial_style` | P1 | reference skill doc, do not inline | style | Q3 |
 
 数据源：`crates/ralph-core/src/preset_lint/finding_id.rs`。

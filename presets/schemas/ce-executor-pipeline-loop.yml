@@ -66,6 +66,7 @@ schemas:
   plan.blocked:
     required_fields:
       - "plan_name"
+      - "plan_path"
       - "reason"
       - "plan_contract_version"
       - "plan_contract_digest"
@@ -135,6 +136,12 @@ schemas:
               value: 0
           guidance: "If review_round >= 6 and blocking_main_conflict_count > 0: emit only review.loop.blocked with max_review_rounds: 6. Do not request another fix round."
     required_fields:
+      - "plan_contract_version"
+      - "normalized_plan_file"
+      - "plan_contract_digest"
+      - "trace_file"
+      - "stabilization_audit_file"
+      - "correction_ids"
       - "plan_name"
       - "plan_path"
       - "executor_head_sha"
@@ -545,6 +552,11 @@ schemas:
     required_fields:
       - "plan_name"
       - "plan_path"
+      - "plan_contract_version"
+      - "normalized_plan_file"
+      - "plan_contract_digest"
+      - "trace_file"
+      - "review_phase"
       - "tested_from_sha"
       - "head_sha"
       - "stabilization_audit_file"
@@ -583,6 +595,11 @@ schemas:
     required_fields:
       - "plan_name"
       - "plan_path"
+      - "plan_contract_version"
+      - "normalized_plan_file"
+      - "plan_contract_digest"
+      - "trace_file"
+      - "review_phase"
       - "tested_from_sha"
       - "head_sha"
       - "stabilization_audit_file"

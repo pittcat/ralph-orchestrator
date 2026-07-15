@@ -99,6 +99,10 @@ cargo nextest run -p ralph-core -- preset_lint
 - `ProtocolView` 仍然是 read-only 派生视图
 - BDD scenario 覆盖新增字段和新增 topic
 - 没有把协议表硬编码回 Rust
+- 输入计划按语义规范化为单一 artifact；下游消费稳定 R/S/U、digest 与 trace，不重新解释源 Markdown 标题
+- executor 与 fixer 的生产 HEAD 都经过 test-stabilizer；稳定化产生的 production correction 也进入独立 review
+- 线性流水线显式传递 `review_phase`：`initial` 可进入一次 fix plan，`post_fix` 只能 accepted 或 blocked
+- 真实 EventLoop BDD 覆盖 executor 后稳定化、fixer 后稳定化、post-fix 接受和 post-fix 阻塞
 
 修改后，至少跑：
 

@@ -1,4 +1,4 @@
-# ce_plan_reviewer_semantic_blocked_negative: U1 Plan Reviewer negative case
+# ce_executor_pipeline_plan_reviewer_semantic_blocked_negative: U1 negative case
 #
 # 2026-07-16-001 plan U1 + S2: a plan that LOOKS like a Unit list
 # (numbered items, mentions of "Units") but LACKS verification gates

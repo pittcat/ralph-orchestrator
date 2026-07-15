@@ -103,6 +103,13 @@
 4. **是否有 hat 把 tasks / progress / recovery 当业务事实？** ✓ / ✗ + ≤50 字理由
 5. **是否有 rescue hat 能改变业务链路？** ✓ / ✗ + ≤50 字理由
 
+若测试稳定化 hat 可以修改生产代码，还必须确认：
+
+- [ ] executor/fixer 的每个生产修改出口都先稳定化再独立 review；不存在直通 success/alignment。
+- [ ] phase 是显式 payload 字段并逐跳透传；最终 review 不会开启无界修复轮。
+- [ ] 稳定化事件携带输入/输出 SHA、审计、correction、统一计划/trace 身份和真实 worktree 状态。
+- [ ] blocked 路径进入 Reporter/阻塞终态，不能降级为 accepted。
+
 任一问 ✗ → 必须改写或显式说明为何单链无法表达（默认应迁移到 executor 内部 subagent）。见 `references/finding-rubric.md` 的「Single-chain-first audit」段。
 
 ## Builtin 7 点同步清单（摘要）

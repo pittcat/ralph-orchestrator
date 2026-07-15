@@ -387,11 +387,17 @@ mod tests {
             vec!["test-stabilizer".to_string()]
         );
         assert_eq!(
-            consumers.get("stabilization.done").cloned().unwrap_or_default(),
+            consumers
+                .get("stabilization.done")
+                .cloned()
+                .unwrap_or_default(),
             vec!["review-reentry".to_string()]
         );
         assert_eq!(
-            consumers.get("stabilization.blocked").cloned().unwrap_or_default(),
+            consumers
+                .get("stabilization.blocked")
+                .cloned()
+                .unwrap_or_default(),
             vec!["reporter".to_string()]
         );
         assert_eq!(
@@ -953,6 +959,31 @@ mod tests {
              satisfy the required_events completion gate. current publishes: {:?}",
             reporter.publishes
         );
+    }
+
+    #[test]
+    fn test_ce_executor_pipeline_post_fix_must_stabilize_and_re_review() {
+        let preset = get_preset("ce-executor-pipeline").expect("linear preset should exist");
+        let config = RalphConfig::parse_yaml(preset.content).expect("linear preset should parse");
+
+        let stabilizer = config.hats.get("test-stabilizer").expect("test-stabilizer");
+        assert!(stabilizer.triggers.iter().any(|topic| topic == "work.done"));
+        assert!(stabilizer.triggers.iter().any(|topic| topic == "fix.done"));
+
+        let synthesizer = config
+            .hats
+            .get("review-synthesizer")
+            .expect("review-synthesizer");
+        assert!(
+            synthesizer
+                .publishes
+                .iter()
+                .any(|topic| topic == "review.accepted"),
+            "post-fix review must terminate without creating a second fix plan"
+        );
+
+        let alignment = config.hats.get("alignment").expect("alignment");
+        assert_eq!(alignment.triggers, vec!["review.accepted".to_string()]);
     }
 
     /// 2026-07-09-001 plan (U8): the embedded `ce-executor-pipeline-loop`

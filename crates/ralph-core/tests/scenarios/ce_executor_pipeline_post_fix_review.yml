@@ -1,0 +1,77 @@
+name: ce_executor_pipeline_post_fix_review
+description: Linear fix.done must stabilize, traverse all six reviews, and accept or block without another fix plan
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 16
+  hats:
+    test-stabilizer:
+      subscribes_to: [fix.done]
+      publishes: [stabilization.done, stabilization.blocked]
+    "dim:goal-alignment":
+      subscribes_to: [stabilization.done]
+      publishes: [review.goalalign.done]
+    "dim:correctness":
+      subscribes_to: [review.goalalign.done]
+      publishes: [review.correctness.done]
+    "dim:testing":
+      subscribes_to: [review.correctness.done]
+      publishes: [review.testing.done]
+    "dim:maintainability":
+      subscribes_to: [review.testing.done]
+      publishes: [review.maintainability.done]
+    "dim:project-standards":
+      subscribes_to: [review.maintainability.done]
+      publishes: [review.standards.done]
+    "dim:adversarial":
+      subscribes_to: [review.standards.done]
+      publishes: [review.adversarial.done]
+    review-synthesizer:
+      subscribes_to: [review.adversarial.done]
+      publishes: [review.accepted]
+    alignment:
+      subscribes_to: [review.accepted]
+      publishes: [align.done]
+    reporter:
+      subscribes_to: [align.done, stabilization.blocked]
+      publishes: [report.done, LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: fix.done
+    completion_promise: LOOP_COMPLETE
+    required_events: [report.done]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+
+mock_responses:
+  - {hat: test-stabilizer, text: '<event topic="stabilization.done">{"plan_name":"p","review_phase":"post_fix","head_sha":"222"}</event>'}
+  - {hat: "dim:goal-alignment", text: '<event topic="review.goalalign.done">{"plan_name":"p","review_phase":"post_fix"}</event>'}
+  - {hat: "dim:correctness", text: '<event topic="review.correctness.done">{"plan_name":"p","review_phase":"post_fix"}</event>'}
+  - {hat: "dim:testing", text: '<event topic="review.testing.done">{"plan_name":"p","review_phase":"post_fix"}</event>'}
+  - {hat: "dim:maintainability", text: '<event topic="review.maintainability.done">{"plan_name":"p","review_phase":"post_fix"}</event>'}
+  - {hat: "dim:project-standards", text: '<event topic="review.standards.done">{"plan_name":"p","review_phase":"post_fix"}</event>'}
+  - {hat: "dim:adversarial", text: '<event topic="review.adversarial.done">{"plan_name":"p","review_phase":"post_fix"}</event>'}
+  - {hat: review-synthesizer, text: '<event topic="review.accepted">{"plan_name":"p","review_phase":"post_fix","verdict":"pass"}</event>'}
+  - {hat: alignment, text: '<event topic="align.done">{"plan_name":"p","head_sha":"222"}</event>'}
+  - {hat: reporter, text: '<event topic="report.done">{"plan_name":"p","verdict":"pass"}</event>'}
+  - {hat: reporter, text: '<event topic="LOOP_COMPLETE">{"reason":"post-fix HEAD independently reviewed"}</event>'}
+
+expected:
+  iterations: 11
+  events:
+    - {topic: stabilization.done}
+    - {topic: review.goalalign.done}
+    - {topic: review.correctness.done}
+    - {topic: review.testing.done}
+    - {topic: review.maintainability.done}
+    - {topic: review.standards.done}
+    - {topic: review.adversarial.done}
+    - {topic: review.accepted}
+    - {topic: align.done}
+    - {topic: report.done}
+  absent_events:
+    - {topic: review.synthesized}
+    - {topic: review.complete}
+  completion: true
