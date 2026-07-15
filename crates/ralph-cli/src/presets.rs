@@ -363,6 +363,8 @@ mod tests {
 
         for topic in [
             "work.done",
+            "stabilization.done",
+            "stabilization.blocked",
             "fix.done",
             "review.round.ready",
             "review.synthesized",
@@ -382,11 +384,19 @@ mod tests {
 
         assert_eq!(
             consumers.get("work.done").cloned().unwrap_or_default(),
+            vec!["test-stabilizer".to_string()]
+        );
+        assert_eq!(
+            consumers.get("stabilization.done").cloned().unwrap_or_default(),
             vec!["review-reentry".to_string()]
         );
         assert_eq!(
+            consumers.get("stabilization.blocked").cloned().unwrap_or_default(),
+            vec!["reporter".to_string()]
+        );
+        assert_eq!(
             consumers.get("fix.done").cloned().unwrap_or_default(),
-            vec!["review-reentry".to_string()]
+            vec!["test-stabilizer".to_string()]
         );
         assert_eq!(
             consumers.get("fix.requested").cloned().unwrap_or_default(),

@@ -50,12 +50,35 @@
 | `fix.done` | `fix_status` / `failure_reason` | enum/string | settlement audit | fixer instructions | 不涉及 | alignment 不把 partial 当成功 | 对应 `field_docs` |
 | `fix.done` | `decisions_file` | string | fixer execution ledger | fixer 写入并可读 | 不涉及 | alignment/人工核验 | `field_docs.decisions_file` |
 
-## Builtin Sync Checklist
+## Hat: test-stabilizer (2026-07-16-001 U3)
 
-1. runtime：未改 topic 或 completion 语义，无需 Rust 修改。
-2. preset_lint：未改 finding。
-3. BDD：结构化 contract 由 strict preset check 与 schema tests 覆盖。
+- **Q1 使命:** executor (与 fixer, U5) 后稳定化门禁：建基线、归类失败、最小修正（必要时修改生产代码 + correction ID）、跑项目权威全量测试，发 `stabilization.done`（成功）或 `stabilization.blocked`（不可恢复阻塞）。**无自批权**——交付 HEAD 必须经下游六维 Review。
+- **Q2 输入:** `work.done` 携带 `plan_name` / `plan_path` / `executor_head_sha`（= `tested_from_sha`）/ `resolved_baseline_sha` / Unit 账单 / baseline + final 验证文件。
+- **Q3 执行:** Step 1 读触发与计划上下文 → Step 2 baseline + dirty-worktree gate（`git status` 排除 `.ralph/`）→ Step 3 捕获 baseline + 跑全量测试 → Step 4 失败归类（`test_bug` / `production_bug` / `pre_existing_failure` / `flaky_or_env` / `unattributable`）→ Step 5 最小修正（生产修改须 commit + correction ID）→ Step 6 写 `stabilization_audit_file` → Step 7 emit `stabilization.done` 或 Step 8 emit `stabilization.blocked`。
+- **Q4 输出:** `stabilization.done` / `stabilization.blocked`，含 `plan_name` / `plan_path` / `tested_from_sha` / `head_sha` / `stabilization_audit_file` / `correction_ids` / `classification_counts` / `worktree_status`（done 还含 `tests_run` / `tests_passed`；blocked 还含 `reason`）。
+- **Q5 交接:** 6 维 Review（trigger 改 `stabilization.done`）/ Reporter（trigger 改 `stabilization.blocked`）必须使用同一 `head_sha` 与 `stabilization_audit_file`；production 改动产生的 `correction_ids` 进入下游 finding 关联。
+
+### Hat: test-stabilizer — Payload Contract
+
+| topic | 字段 | 类型 | 值源 | 可见性证据 | 身份检查 | 下游消费 | schema metadata |
+|---|---|---|---|---|---|---|---|
+| `stabilization.done` | `plan_name` / `plan_path` | string | work.done 透传 | work.done payload | 与 plan_name equality 一致 | 6 维 review 复用 | 已有 schema |
+| `stabilization.done` | `tested_from_sha` | string | `git rev-parse HEAD` at start, 等于 work.done.executor_head_sha | git 命令输出 | 不涉及 | 复审基线 | `field_docs.tested_from_sha` |
+| `stabilization.done` | `head_sha` | string | emit 前 `git rev-parse HEAD`，等于 tested_from_sha（无修正）或修正后 commit | git 命令输出 | 等于 audit 中实际 commit SHA | 复审 anchor | `field_docs.head_sha` |
+| `stabilization.done` | `stabilization_audit_file` | string | `.ralph/review/<plan>/stabilization/audit.md`（绝对路径） | Write 工具输出 | 文件可读 | 复审证据索引 | `field_docs.stabilization_audit_file` |
+| `stabilization.done` | `correction_ids` | string[] | 生产代码改动时分配（参见 `ralph-tools-tasks`） | decisions.md + commit message | 非空 ⟺ 存在生产 commit | 复审关联 finding | `field_docs.correction_ids` |
+| `stabilization.done` | `classification_counts` | object{5 keys} | Step 4 分类汇总 | audit 文件 + 测试命令输出 | `unattributable` 必须为 0 | 复审可见 | `field_docs.classification_counts` |
+| `stabilization.done` | `worktree_status` | enum | `git status --short` 排除 `.ralph/` | git 命令输出 | 必须是 `clean`（done 路径） | 复审前置门禁 | `field_docs.worktree_status` |
+| `stabilization.done` | `tests_run` / `tests_passed` | int | 项目权威 full-suite 输出 | 测试命令原始输出 | passed == run 且无失败 | 复审证据 | schema metadata |
+| `stabilization.blocked` | `reason` | enum | Step 8 阻塞原因枚举 | decisions.md | 7 个 canonical reason 之一 | Reporter 阻塞报告 | `field_docs.reason` |
+| `stabilization.blocked` | `worktree_status` | enum | `clean` / `dirty` / `unattributable_dirty` | git 命令输出 | blocked 路径允许 `unattributable_dirty` | Reporter 报告 | `field_docs.worktree_status` |
+
+## Builtin Sync Checklist (2026-07-16-001 U3 后)
+
+1. runtime：未改 topic/completion 语义；新增 `stabilization.done`/`stabilization.blocked` 业务事件，由 linear preset 在 `event_policy` 中补 `schemas` 块约束。Loop preset 已通过外部 `presets/schemas/ce-executor-pipeline-loop.yml` 注入 schema。
+2. preset_lint：linear preset 加 `event_policy.schemas.stabilization.*` 后 strict lint 通过；loop preset 已通过。
+3. BDD：U3 真实 EventLoop scenario 暂留 U8 治理补完（worker 没有补 fixture，仅手动验证）。
 4. config：未改配置字段。
 5. CLI presets：未增删 builtin。
-6. manifest/index：未增删 builtin。
-7. docs/zsh：未增删 preset 名称。
+6. manifest/index：未增删 preset。
+7. docs/zsh：`CLAUDE.md`/`AGENTS.md` 已同步 14-hat/16-hat 与 test-stabilizer 描述；zsh 补全无需改（preset 名称未变）。

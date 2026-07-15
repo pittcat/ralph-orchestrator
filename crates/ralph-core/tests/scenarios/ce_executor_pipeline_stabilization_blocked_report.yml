@@ -1,0 +1,150 @@
+# ce_executor_pipeline_stabilization_blocked_report: U7 reporter short-circuit on stabilization.blocked
+#
+# 2026-07-16-001 plan U7 + S15: when test-stabilizer emits
+# `stabilization.blocked` (e.g. unattributable failures, full-suite
+# command failure, or unknown_dirty_worktree), the loop MUST
+# short-circuit to reporter without any review/fix/align event:
+#   work.done → test-stabilizer → stabilization.blocked
+#   → reporter → report.done (verdict=blocked) → LOOP_COMPLETE
+#
+# Asserts:
+# - stabilization.blocked is the sole terminal trigger for reporter.
+# - review.* / fix.done / align.done MUST NOT fire after stabilization.blocked.
+# - report.done carries verdict=blocked and reason=stabilization_blocked.
+# - LOOP_COMPLETE reason explicitly references stabilization_blocked.
+
+name: ce_executor_pipeline_stabilization_blocked_report
+description: ce-executor-pipeline U7 — stabilization.blocked short-circuits to reporter without review/fix/align
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  hats:
+    plan-reviewer:
+      subscribes_to: [work.start]
+      publishes: [plan.ready, plan.blocked]
+    executor:
+      subscribes_to: [plan.ready]
+      publishes: [work.done, work.failed]
+    test-stabilizer:
+      subscribes_to: [work.done, fix.done]
+      publishes: [stabilization.done, stabilization.blocked]
+    "dim:goal-alignment":
+      subscribes_to: [stabilization.done]
+      publishes: [review.goalalign.done]
+    "dim:correctness":
+      subscribes_to: [review.goalalign.done]
+      publishes: [review.correctness.done]
+    "dim:testing":
+      subscribes_to: [review.correctness.done]
+      publishes: [review.testing.done]
+    "dim:maintainability":
+      subscribes_to: [review.testing.done]
+      publishes: [review.maintainability.done]
+    "dim:project-standards":
+      subscribes_to: [review.maintainability.done]
+      publishes: [review.standards.done]
+    "dim:adversarial":
+      subscribes_to: [review.standards.done]
+      publishes: [review.adversarial.done]
+    review-synthesizer:
+      subscribes_to: [review.adversarial.done]
+      publishes: [review.synthesized]
+    fix-planner:
+      subscribes_to: [review.synthesized]
+      publishes: [review.complete]
+    fixer:
+      subscribes_to: [review.complete]
+      publishes: [fix.done]
+    alignment:
+      subscribes_to: [fix.done]
+      publishes: [align.done]
+    reporter:
+      subscribes_to: [align.done, plan.blocked, work.failed, stabilization.blocked, review.loop.blocked]
+      publishes: [report.done, LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: work.start
+    completion_promise: LOOP_COMPLETE
+    required_events: [report.done]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      terminal_topics: [LOOP_COMPLETE]
+      business_topics:
+        - plan.ready
+        - plan.blocked
+        - work.done
+        - work.failed
+        - stabilization.done
+        - stabilization.blocked
+        - review.round.ready
+        - review.goalalign.done
+        - review.correctness.done
+        - review.testing.done
+        - review.maintainability.done
+        - review.standards.done
+        - review.adversarial.done
+        - review.synthesized
+        - fix.done
+        - align.done
+        - report.done
+
+mock_responses:
+  - hat: plan-reviewer
+    text: |
+      <event topic="plan.ready">{"plan_name":"plan-stab-blocked","plan_path":"docs/plans/stab-blocked.md","plan_revised":false,"review_summary":"ok","flow_audit":"first_run","resolved_baseline_sha":"0000000000000000000000000000000000000001"}</event>
+  - hat: executor
+    text: |
+      <event topic="work.done">{"plan_name":"plan-stab-blocked","plan_path":"docs/plans/stab-blocked.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","tests_run":3,"tests_passed":2,"changed_lines":12,"commit_count":3}</event>
+  # test-stabilizer attributes failures as unattributable and refuses
+  # to weaken Oracle. Emits stabilization.blocked with canonical reason.
+  - hat: test-stabilizer
+    text: |
+      <event topic="stabilization.blocked">
+      {"plan_name":"plan-stab-blocked","plan_path":"docs/plans/stab-blocked.md","tested_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000002","stabilization_audit_file":".ralph/review/plan-stab-blocked/stabilization/audit.md","reason":"unattributable","classification_counts":{"test_bug":0,"production_bug":0,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":1},"worktree_status":"clean"}
+      </event>
+  - hat: reporter
+    text: |
+      <event topic="report.done">{"plan_name":"plan-stab-blocked","report_path":".ralph/review/plan-stab-blocked/report.md","verdict":"blocked","reason":"stabilization_blocked"}</event>
+  - hat: reporter
+    text: |
+      <event topic="LOOP_COMPLETE">{"reason":"stabilization_blocked: unattributable failures"}</event>
+
+expected:
+  iterations: 5
+  events:
+    - topic: plan.ready
+    - topic: work.done
+    - topic: stabilization.blocked
+    - topic: report.done
+  absent_events:
+    # stabilization.blocked short-circuits the review/fix/align chain.
+    - topic: stabilization.done
+    - topic: review.round.ready
+    - topic: review.goalalign.done
+    - topic: review.correctness.done
+    - topic: review.testing.done
+    - topic: review.maintainability.done
+    - topic: review.standards.done
+    - topic: review.adversarial.done
+    - topic: review.synthesized
+    - topic: fix.requested
+    - topic: review.complete
+    - topic: fix.done
+    - topic: align.done
+    - topic: review.accepted
+    - topic: review.loop.blocked
+    - topic: plan.blocked
+    - topic: work.failed
+  payload_matches:
+    - topic: stabilization.blocked
+      fields:
+        reason: "unattributable"
+        worktree_status: "clean"
+    - topic: report.done
+      fields:
+        verdict: "blocked"
+        reason: "stabilization_blocked"
+  completion: true
