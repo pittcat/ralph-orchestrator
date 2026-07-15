@@ -131,6 +131,177 @@ mod tests {
     use ralph_core::payload_contract::validate_payload_contract;
     use ralph_core::{HatRegistry, RalphConfig};
 
+    #[test]
+    fn test_minimal_preset_files_exclude_deleted_backends() {
+        // U7: presets/minimal/ must no longer contain a per-backend yml
+        // for any of the 5 deleted backends (amp, kiro, roo, copilot, kiro-acp).
+        let preset_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("presets/minimal");
+        let deleted = ["amp", "kiro", "roo", "copilot", "kiro-acp"];
+        for name in deleted {
+            let path = preset_dir.join(format!("{name}.yml"));
+            assert!(
+                !path.exists(),
+                "{name}.yml must be removed from presets/minimal (backend deleted)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_zsh_plugin_backend_array_excludes_deleted_backends() {
+        // U7: scripts/ralph-zsh-plugin.zsh `_RALPH_BACKENDS=( ... )` array
+        // must no longer carry entries for the deleted backends.
+        let plugin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("scripts/ralph-zsh-plugin.zsh");
+        let src = std::fs::read_to_string(&plugin).expect("read zsh plugin");
+        let deleted = ["kiro", "amp", "copilot", "roo"];
+        for backend in deleted {
+            // Each removed backend must no longer appear as a quoted entry
+            // like `"<backend>:...` inside `_RALPH_BACKENDS=(...)`.
+            let marker = format!("\"{backend}:");
+            let occurrences: Vec<_> = src.matches(&marker).collect();
+            assert!(
+                occurrences.is_empty(),
+                "_RALPH_BACKENDS array still references deleted backend `{backend}` ({occurrences:?} matches in {})",
+                plugin.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_tools_evaluate_scripts_exclude_kiro() {
+        // U7: tools/PRESET_EVALUATOR_PROMPT.md and tools/evaluate-*.sh must
+        // no longer tell evaluators to use the deleted kiro-cli backend.
+        let tools_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tools");
+        for entry in [
+            "PRESET_EVALUATOR_PROMPT.md",
+            "evaluate-all-presets.sh",
+            "evaluate-preset.sh",
+        ] {
+            let path = tools_dir.join(entry);
+            if path.exists() {
+                let src = std::fs::read_to_string(&path).expect("read tool script");
+                assert!(
+                    !src.contains("kiro-cli") && !src.contains("\"kiro\""),
+                    "tools/{entry} still references deleted `kiro` backend"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_changelog_records_backend_removal() {
+        // U8: top-level CHANGELOG.md must declare the 5-backend removal
+        // in `[Unreleased] ### Removed` (and ideally docs/reference/changelog.md too).
+        let ws_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let mut changelogs = vec![ws_root.join("CHANGELOG.md")];
+        let docs_chlog = ws_root.join("docs/reference/changelog.md");
+        if docs_chlog.exists() {
+            changelogs.push(docs_chlog);
+        }
+        let required_marker = "Removed backends: amp, roo, kiro, kiro-acp, copilot";
+        let remaining_marker = "claude, gemini, codex, opencode, pi, traecli, custom";
+        for path in changelogs {
+            let text = std::fs::read_to_string(&path).expect("read changelog");
+            assert!(
+                text.contains(required_marker),
+                "{} must declare `{required_marker}` in Removed section",
+                path.display()
+            );
+            assert!(
+                text.contains(remaining_marker),
+                "{} should also list remaining backends `{remaining_marker}`",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_docs_index_no_longer_links_deleted_backend_guides() {
+        // U8: docs/guide/index.md must no longer link to the deleted
+        // per-backend guides (kiro-migration.md, roo-backend.md).
+        let ws_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let index_md = ws_root.join("docs/guide/index.md");
+        let text = std::fs::read_to_string(&index_md).expect("read docs index");
+        for deleted in ["kiro-migration.md", "roo-backend.md"] {
+            assert!(
+                !text.contains(deleted),
+                "{index_md:?} still references deleted guide `{deleted}`"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cursor_rules_exclude_deleted_backends() {
+        // U8: `.cursor/rules/architecture-modules.mdc` and `feature-flags.mdc`
+        // backend lists must no longer mention any of the 5 deleted backends.
+        let ws_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let deleted = [
+            "kiro",
+            "amp",
+            "roo",
+            "copilot",
+            "kiro-acp",
+            "kiro-cli",
+            "copilot_stream",
+        ];
+        let rules = [
+            ws_root.join(".cursor/rules/architecture-modules.mdc"),
+            ws_root.join(".cursor/rules/feature-flags.mdc"),
+        ];
+        for path in rules {
+            if path.exists() {
+                let text = std::fs::read_to_string(&path).expect("read rule");
+                for backend in deleted {
+                    // Only flag clear canonical mentions (not arbitrary
+                    // substrings inside unrelated identifiers).
+                    let patterns = [
+                        format!("`{backend}`"),
+                        format!(" `{backend}`"),
+                        format!("'{backend}'"),
+                        format!("{backend}-acp"),
+                    ];
+                    for pat in patterns {
+                        assert!(
+                            !text.contains(&pat),
+                            "{} still references deleted backend pattern `{pat}`",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_kiro_and_roo_dedicated_docs_removed() {
+        // U8: dedicated per-backend docs for deleted backends must be gone.
+        let ws_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        for deleted in ["kiro-migration.md", "roo-backend.md"] {
+            let path = ws_root.join("docs/guide").join(deleted);
+            assert!(
+                !path.exists(),
+                "expected deleted guide to be removed: {}",
+                path.display()
+            );
+        }
+    }
+
     fn assert_public_preset_has_completion_path(preset: &EmbeddedPreset) {
         let config =
             RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
@@ -309,7 +480,6 @@ mod tests {
             "ce-executor-serial lookup must return None, not a redirect"
         );
     }
-
 
     // Unit 2 (plan 2026-07-07-006): pipeline schema static self-check.
     // Lock the registry's claim that pipeline's work.done schema already
@@ -750,7 +920,6 @@ mod tests {
             ),
         }
     }
-
 
     #[test]
     fn test_ce_executor_reporter_publishes_report_done() {

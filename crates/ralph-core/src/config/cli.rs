@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// CLI backend configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliConfig {
-    /// Backend to use: "claude", "kiro", "gemini", "codex", "amp", "pi", or "custom".
+    /// Backend to use: "claude", "gemini", "codex", "opencode", "pi", "traecli", or "custom".
     #[serde(default = "default_backend")]
     pub backend: String,
 

@@ -128,7 +128,7 @@ IMPORTANT: Fix any blocking issues to complete the evaluation
 
 ## Environment
 
-- Use Kiro CLI (`kiro-cli chat`)
+- Use Claude CLI (`claude`)
 - Work in the ralph-orchestrator-2.0 directory
 - You can read preset files to understand expected behavior
 - You can check `crates/ralph-core/src/hat_registry.rs` for routing logic

@@ -7,8 +7,7 @@
 //! - Gemini (Google)
 //! - Codex (OpenAI)
 //! - Pi (pi-coding-agent)
-//! - Roo (Roo Code)
-//! - Amp
+//! - Trae CLI
 //! - Custom commands
 //!
 //! Each adapter implements the common CLI executor interface.
@@ -25,12 +24,10 @@
 //! allowing Ralph to orchestrate iterations. Supports interactive mode (user
 //! input forwarded) and observe mode (output-only).
 
-mod acp_executor;
 mod auto_detect;
 mod claude_stream;
 mod cli_backend;
 mod cli_executor;
-mod copilot_stream;
 mod json_rpc_handler;
 mod pi_stream;
 mod pty_executor;
@@ -40,7 +37,6 @@ pub mod tool_policy;
 pub mod tool_preview;
 mod trae_stream;
 
-pub use acp_executor::AcpExecutor;
 pub use auto_detect::{
     DEFAULT_PRIORITY, NoBackendError, detect_backend, detect_backend_default, is_backend_available,
 };
@@ -50,7 +46,6 @@ pub use claude_stream::{
 };
 pub use cli_backend::{CliBackend, CustomBackendError, OutputFormat, PromptMode};
 pub use cli_executor::{CliExecutor, ExecutionResult};
-pub use copilot_stream::{CopilotAssistantMessage, CopilotStreamEvent, CopilotStreamParser};
 pub use json_rpc_handler::{JsonRpcStreamHandler, stdout_json_rpc_handler};
 pub use pi_stream::{
     PiAssistantEvent, PiContentBlock, PiCost, PiSessionState, PiStreamEvent, PiStreamParser,
@@ -71,3 +66,53 @@ pub use trae_stream::{
     TraeUserMessage, dispatch_trae_stream_event, extract_assistant_text,
     extract_assistant_tool_calls, extract_user_tool_result_text, user_is_tool_result,
 };
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_copilot_stream_module_removed() {
+        // Source lines declared as `mod copilot_stream;` (the actual module
+        // declaration), excluding the comment + assertion strings inside this
+        // very test module.
+        let src = include_str!("lib.rs");
+        let has_module_decl = src
+            .lines()
+            .map(str::trim_start)
+            .any(|line| line.starts_with("mod copilot_stream;"));
+        assert!(
+            !has_module_decl,
+            "lib.rs must not declare deleted module `copilot_stream`"
+        );
+        // Check there is no `pub use copilot_stream::` re-export either.
+        let has_pub_use = src
+            .lines()
+            .map(str::trim_start)
+            .any(|line| line.starts_with("pub use copilot_stream::"));
+        assert!(
+            !has_pub_use,
+            "lib.rs must not re-export deleted `copilot_stream` types"
+        );
+    }
+
+    #[test]
+    fn test_acp_executor_module_removed() {
+        // U4: acp_executor module + AcpExecutor re-export are deleted.
+        let src = include_str!("lib.rs");
+        let has_module_decl = src
+            .lines()
+            .map(str::trim_start)
+            .any(|line| line.starts_with("mod acp_executor;"));
+        let has_pub_use = src
+            .lines()
+            .map(str::trim_start)
+            .any(|line| line.starts_with("pub use acp_executor::"));
+        assert!(
+            !has_module_decl,
+            "lib.rs must not declare deleted module `acp_executor`"
+        );
+        assert!(
+            !has_pub_use,
+            "lib.rs must not re-export deleted `AcpExecutor` type"
+        );
+    }
+}

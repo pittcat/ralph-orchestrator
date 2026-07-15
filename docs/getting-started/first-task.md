@@ -216,7 +216,7 @@ If Ralph runs forever:
 
 ```bash
 # Explicitly specify backend
-ralph run --backend kiro
+ralph run --backend claude
 ```
 
 ### Agent Errors
@@ -227,8 +227,8 @@ Check the agent is installed and authenticated:
 # Test Claude directly
 claude -p "Hello"
 
-# Test Kiro
-kiro -p "Hello"
+# Test Gemini directly
+gemini -p "Hello"
 ```
 
 ## Next Steps

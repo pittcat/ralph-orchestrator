@@ -27,12 +27,6 @@ This includes unit tests and smoke tests (344+ tests total).
 cargo test -p ralph-core smoke_runner
 ```
 
-### Kiro-Specific Tests
-
-```bash
-cargo test -p ralph-core kiro
-```
-
 ### E2E Tests
 
 ```bash
@@ -60,11 +54,7 @@ Smoke tests use recorded JSONL fixtures instead of live API calls — fast, free
 
 ```
 crates/ralph-core/tests/fixtures/
-├── basic_session.jsonl          # Claude CLI session
-└── kiro/                         # Kiro sessions
-    ├── basic.jsonl
-    ├── tool_use.jsonl
-    └── autonomous.jsonl
+└── basic_session.jsonl          # Claude CLI session
 ```
 
 ### Recording New Fixtures

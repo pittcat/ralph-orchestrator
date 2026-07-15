@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Removed backends: amp, roo, kiro, kiro-acp, copilot.** Remaining backends:
+  claude, gemini, codex, opencode, pi, traecli, custom. Removed in
+  `2026-07-14-001-refactor-remove-5-backends-plan`. See top-level CHANGELOG.md
+  for the full list of files touched across all 7 crates + presets + docs +
+  cursor rules + scripts.
+
 ## [2.1.0] - 2026-01-20
 
 ### Added

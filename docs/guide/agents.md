@@ -9,13 +9,11 @@ For per-backend installation, authentication, and doctor checks, see [Backends](
 | Backend | CLI Binary | Rough Cost (per 1M tokens) | Best For |
 |---------|------------|----------------------------|----------|
 | **Claude Code** (`claude`) | `claude` | Input ~$3, Output ~$15 | Complex code, reasoning, documentation |
-| **Kiro** (`kiro`) | `kiro-cli` | Varies (AWS) | AWS-related workloads |
 | **Gemini CLI** (`gemini`) | `gemini` | Input ~$0.50, Output ~$1.50 | Data analysis, math, multi-language |
 | **Codex** (`codex`) | `codex` | Varies (OpenAI) | OpenAI code generation |
-| **Amp** (`amp`) | `amp` | Varies (Sourcegraph) | Codebase search and context |
-| **Copilot CLI** (`copilot`) | `copilot` | Subscription (GitHub) | GitHub-integrated coding |
 | **OpenCode** (`opencode`) | `opencode` | Provider-dependent | Multi-provider proxy |
 | **Pi** (`pi`) | `pi` | Provider-dependent | Multi-provider coding agent |
+| **Trae CLI** (`traecli`) | `trae-cli` | Varies (Trae) | Trae CLI workflows |
 | **Custom** (`custom`) | Any | - | Unsupported or experimental CLIs |
 
 Costs are rough guidance; check the backend provider for current pricing.
@@ -24,11 +22,9 @@ Costs are rough guidance; check the backend provider for current pricing.
 
 - **Complex logic, production code, or deep reasoning** → `claude`
 - **Data analysis, math, or multi-language support** → `gemini`
-- **AWS-focused work** → `kiro`
 - **OpenAI/Codex ecosystem** → `codex`
-- **Sourcegraph-aware search and context** → `amp`
-- **GitHub Copilot subscription** → `copilot`
 - **Need to switch providers easily** → `opencode` or `pi`
+- **Trae CLI workflows** → `traecli`
 - **Using a CLI not listed above** → `custom`
 
 ## Configuring the Backend
@@ -50,7 +46,7 @@ ralph init --backend claude
 ralph run --backend gemini -P task.md
 ```
 
-If `cli.backend` is omitted, Ralph auto-detects installed backends in this order: `claude`, `kiro`, `gemini`, `codex`, `amp`, `copilot`, `opencode`, `pi`.
+If `cli.backend` is omitted, Ralph auto-detects installed backends in this order: `claude`, `gemini`, `codex`, `opencode`, `pi`, `traecli`.
 
 ## Per-Hat Backend Override
 
@@ -64,7 +60,7 @@ hats:
     instructions: "Create a plan..."
 
   coder:
-    backend: "kiro"
+    backend: "gemini"
     triggers: ["plan.ready"]
     instructions: "Implement the plan..."
 ```
@@ -107,10 +103,9 @@ Backend authentication is handled by the backend CLI itself. Typical env vars in
 - `ANTHROPIC_API_KEY` — Claude
 - `OPENAI_API_KEY` / `CODEX_API_KEY` — Codex
 - `GEMINI_API_KEY` — Gemini
-- `KIRO_API_KEY` — Kiro
 - `OPENCODE_API_KEY` — OpenCode
 
-`ralph doctor` checks for the expected keys as hints, but the backend's own login flow (e.g., `claude login`, `copilot auth login`) is usually sufficient.
+`ralph doctor` checks for the expected keys as hints, but the backend's own login flow (e.g., `claude login`) is usually sufficient.
 
 ## Troubleshooting
 
@@ -130,8 +125,6 @@ Follow the backend's login flow and/or set the expected env var:
 
 ```bash
 claude login
-# or
-copilot auth login
 # or
 export GEMINI_API_KEY=your-key
 ```

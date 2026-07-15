@@ -45,14 +45,6 @@ fn test_wave_worker_execution_mode_supports_all_backend_formats() {
         wave_worker_execution_mode(BackendOutputFormat::PiStreamJson),
         WaveWorkerExecutionMode::Pty
     );
-    assert_eq!(
-        wave_worker_execution_mode(BackendOutputFormat::CopilotStreamJson),
-        WaveWorkerExecutionMode::Pty
-    );
-    assert_eq!(
-        wave_worker_execution_mode(BackendOutputFormat::Acp),
-        WaveWorkerExecutionMode::Acp
-    );
 }
 
 #[cfg(unix)]
@@ -72,18 +64,6 @@ fn test_wave_worker_execution_mode_matches_supported_named_backend_roster() {
             "execution-mode:named:pi",
         ),
         (
-            "kiro-acp",
-            BackendOutputFormat::Acp,
-            WaveWorkerExecutionMode::Acp,
-            "execution-mode:named:kiro-acp",
-        ),
-        (
-            "kiro",
-            BackendOutputFormat::Text,
-            WaveWorkerExecutionMode::Pty,
-            "execution-mode:named:kiro",
-        ),
-        (
             "gemini",
             BackendOutputFormat::Text,
             WaveWorkerExecutionMode::Pty,
@@ -96,28 +76,16 @@ fn test_wave_worker_execution_mode_matches_supported_named_backend_roster() {
             "execution-mode:named:codex",
         ),
         (
-            "amp",
-            BackendOutputFormat::Text,
-            WaveWorkerExecutionMode::Pty,
-            "execution-mode:named:amp",
-        ),
-        (
-            "copilot",
-            BackendOutputFormat::CopilotStreamJson,
-            WaveWorkerExecutionMode::Pty,
-            "execution-mode:named:copilot",
-        ),
-        (
             "opencode",
             BackendOutputFormat::Text,
             WaveWorkerExecutionMode::Pty,
             "execution-mode:named:opencode",
         ),
         (
-            "roo",
-            BackendOutputFormat::Text,
+            "traecli",
+            BackendOutputFormat::TraeStreamJson,
             WaveWorkerExecutionMode::Pty,
-            "execution-mode:named:roo",
+            "execution-mode:named:traecli",
         ),
     ] {
         let backend = CliBackend::from_name(name).expect("supported named backend");
@@ -152,26 +120,6 @@ fn test_wave_worker_execution_mode_matches_supported_hat_backend_families() {
             BackendOutputFormat::Text,
             WaveWorkerExecutionMode::Pty,
             "execution-mode:hat:named-with-args",
-        ),
-        (
-            ralph_core::HatBackend::KiroAgent {
-                backend_type: "kiro".to_string(),
-                agent: "reviewer-agent".to_string(),
-                args: vec!["--kiro-extra".to_string()],
-            },
-            BackendOutputFormat::Text,
-            WaveWorkerExecutionMode::Pty,
-            "execution-mode:hat:kiro-agent",
-        ),
-        (
-            ralph_core::HatBackend::KiroAgent {
-                backend_type: "kiro-acp".to_string(),
-                agent: "reviewer-agent".to_string(),
-                args: vec!["--unused-extra".to_string()],
-            },
-            BackendOutputFormat::Acp,
-            WaveWorkerExecutionMode::Acp,
-            "execution-mode:hat:kiro-acp-agent",
         ),
         (
             ralph_core::HatBackend::Custom {
@@ -586,41 +534,6 @@ struct CapturedAcpWaveInvocation {
 }
 
 #[cfg(unix)]
-async fn run_wave_for_named_acp_backend_with_capture(
-    backend_args: Option<Vec<String>>,
-    payload: &str,
-) -> (ralph_core::CompletedWave, CapturedAcpWaveInvocation) {
-    let _mock = install_mock_acp_executions(vec![MockAcpExecution::success(
-        true,
-        vec![make_worker_event("review.done", payload)],
-    )]);
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let worker_capture_path = temp_dir.path().join("wave-w-test-0.jsonl.capture");
-    let events_file = temp_dir.path().join("events.jsonl");
-    let mut wave = make_test_wave(vec!["review.done".to_string()]);
-    wave.hat_config.backend_args = backend_args;
-    let backend = CliBackend::from_name("kiro-acp").expect("named ACP backend");
-
-    let completed = execute_wave(
-        &wave,
-        &backend,
-        &events_file,
-        false,
-        false,
-        None,
-        None,
-        "test-loop",
-        None,
-    )
-    .await
-    .expect("wave execution");
-    let captured: CapturedAcpWaveInvocation = serde_json::from_str(
-        &std::fs::read_to_string(&worker_capture_path).expect("read captured ACP invocation"),
-    )
-    .expect("parse captured ACP invocation");
-    (completed, captured)
-}
-
 #[cfg(unix)]
 async fn run_wave_for_hat_backend_with_acp_capture(
     hat_backend: ralph_core::HatBackend,
@@ -951,11 +864,11 @@ fn assert_named_backend_invocation_contract(
             assert_eq!(
                 args[expected_prefix.len()],
                 "--prompt-file",
-                "missing roo prompt file flag"
+                "missing --prompt-file flag"
             );
             assert!(
                 !args[expected_prefix.len() + 1].is_empty(),
-                "missing roo prompt file path"
+                "missing prompt file path"
             );
             assert!(
                 args[expected_prefix.len() + 1].contains("tmp")
@@ -972,13 +885,6 @@ fn assert_named_backend_invocation_contract(
 
 #[cfg(unix)]
 fn assert_acp_invocation_contract(captured: &CapturedAcpWaveInvocation, expected_args: &[&str]) {
-    assert_eq!(captured.command, "kiro-cli");
-    assert_eq!(
-        captured.args.iter().map(String::as_str).collect::<Vec<_>>(),
-        expected_args,
-        "unexpected ACP args: {:?}",
-        captured.args
-    );
     assert_captured_wave_prompt(&captured.prompt);
     assert_captured_wave_env(&captured.env, false);
 }
@@ -1222,13 +1128,6 @@ EOF"#,
 
 #[cfg(unix)]
 named_text_wave_backend_test!(
-    test_execute_wave_supports_named_kiro_backend,
-    "kiro",
-    "kiro backend ok"
-);
-
-#[cfg(unix)]
-named_text_wave_backend_test!(
     test_execute_wave_supports_named_gemini_backend,
     "gemini",
     "gemini backend ok"
@@ -1243,30 +1142,9 @@ named_text_wave_backend_test!(
 
 #[cfg(unix)]
 named_text_wave_backend_test!(
-    test_execute_wave_supports_named_amp_backend,
-    "amp",
-    "amp backend ok"
-);
-
-#[cfg(unix)]
-named_text_wave_backend_test!(
-    test_execute_wave_supports_named_copilot_backend,
-    "copilot",
-    "copilot backend ok"
-);
-
-#[cfg(unix)]
-named_text_wave_backend_test!(
     test_execute_wave_supports_named_opencode_backend,
     "opencode",
     "opencode backend ok"
-);
-
-#[cfg(unix)]
-named_text_wave_backend_test!(
-    test_execute_wave_supports_named_roo_backend,
-    "roo",
-    "roo backend ok"
 );
 
 #[cfg(unix)]
@@ -1282,18 +1160,6 @@ async fn test_execute_wave_supports_named_claude_backend() {
 async fn test_execute_wave_supports_named_pi_backend() {
     let completed = run_wave_for_named_backend("pi", &pi_backend_body("pi backend ok")).await;
     assert_single_success_marked(&completed, "pi backend ok", "named-backend:pi");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_execute_wave_supports_named_kiro_acp_backend() {
-    let _mock = install_mock_acp_executions(vec![MockAcpExecution::success(
-        true,
-        vec![make_worker_event("review.done", "kiro-acp backend ok")],
-    )]);
-
-    let completed = run_wave_for_named_backend("kiro-acp", &text_backend_body("unused")).await;
-    assert_single_success_marked(&completed, "kiro-acp backend ok", "named-backend:kiro-acp");
 }
 
 #[cfg(unix)]
@@ -1340,13 +1206,6 @@ async fn test_execute_wave_named_backend_invocation_contracts() {
             marker_id: "invocation-contract:named:pi",
         },
         NamedBackendInvocationCase {
-            name: "kiro",
-            success_payload: "kiro invocation contract ok",
-            expected_prefix: &["chat", "--no-interactive", "--trust-all-tools"],
-            prompt_delivery: PromptDeliveryExpectation::Positional,
-            marker_id: "invocation-contract:named:kiro",
-        },
-        NamedBackendInvocationCase {
             name: "gemini",
             success_payload: "gemini invocation contract ok",
             expected_prefix: &["--yolo"],
@@ -1361,32 +1220,11 @@ async fn test_execute_wave_named_backend_invocation_contracts() {
             marker_id: "invocation-contract:named:codex",
         },
         NamedBackendInvocationCase {
-            name: "amp",
-            success_payload: "amp invocation contract ok",
-            expected_prefix: &["--dangerously-allow-all"],
-            prompt_delivery: PromptDeliveryExpectation::Flag("-x"),
-            marker_id: "invocation-contract:named:amp",
-        },
-        NamedBackendInvocationCase {
-            name: "copilot",
-            success_payload: "copilot invocation contract ok",
-            expected_prefix: &["--allow-all-tools", "--output-format", "json"],
-            prompt_delivery: PromptDeliveryExpectation::Flag("-p"),
-            marker_id: "invocation-contract:named:copilot",
-        },
-        NamedBackendInvocationCase {
             name: "opencode",
             success_payload: "opencode invocation contract ok",
             expected_prefix: &["run"],
             prompt_delivery: PromptDeliveryExpectation::Positional,
             marker_id: "invocation-contract:named:opencode",
-        },
-        NamedBackendInvocationCase {
-            name: "roo",
-            success_payload: "roo invocation contract ok",
-            expected_prefix: &["--print", "--ephemeral"],
-            prompt_delivery: PromptDeliveryExpectation::PromptFile,
-            marker_id: "invocation-contract:named:roo",
         },
     ] {
         let (completed, captured) =
@@ -1440,13 +1278,6 @@ async fn test_execute_wave_named_backend_large_prompt_contracts() {
             marker_id: "large-prompt-contract:named:pi",
         },
         NamedBackendLargePromptCase {
-            name: "kiro",
-            success_payload: "kiro large prompt contract ok",
-            expected_prefix: &["chat", "--no-interactive", "--trust-all-tools"],
-            prompt_delivery: PromptDeliveryExpectation::TempFilePositional,
-            marker_id: "large-prompt-contract:named:kiro",
-        },
-        NamedBackendLargePromptCase {
             name: "gemini",
             success_payload: "gemini large prompt contract ok",
             expected_prefix: &["--yolo"],
@@ -1459,20 +1290,6 @@ async fn test_execute_wave_named_backend_large_prompt_contracts() {
             expected_prefix: &["exec", "--yolo"],
             prompt_delivery: PromptDeliveryExpectation::TempFilePositional,
             marker_id: "large-prompt-contract:named:codex",
-        },
-        NamedBackendLargePromptCase {
-            name: "amp",
-            success_payload: "amp large prompt contract ok",
-            expected_prefix: &["--dangerously-allow-all"],
-            prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-x"),
-            marker_id: "large-prompt-contract:named:amp",
-        },
-        NamedBackendLargePromptCase {
-            name: "copilot",
-            success_payload: "copilot large prompt contract ok",
-            expected_prefix: &["--allow-all-tools", "--output-format", "json"],
-            prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-p"),
-            marker_id: "large-prompt-contract:named:copilot",
         },
         NamedBackendLargePromptCase {
             name: "opencode",
@@ -1598,22 +1415,6 @@ async fn test_execute_wave_hat_backend_invocation_contracts() {
                 marker_id: "invocation-contract:hat:named-with-args:pi",
             },
             HatNamedWithArgsInvocationCase {
-                backend_type: "kiro",
-                executable_name: "kiro-cli",
-                extra_args: &["--profile", "reviewer"],
-                expected_prefix: &[
-                    "chat",
-                    "--no-interactive",
-                    "--trust-all-tools",
-                    "--profile",
-                    "reviewer",
-                    "--hat-runtime-arg",
-                ],
-                prompt_delivery: PromptDeliveryExpectation::Positional,
-                success_payload: "hat kiro named-with-args invocation contract ok",
-                marker_id: "invocation-contract:hat:named-with-args:kiro",
-            },
-            HatNamedWithArgsInvocationCase {
                 backend_type: "gemini",
                 executable_name: "gemini",
                 extra_args: &["--model", "gemini-2.5-pro"],
@@ -1630,51 +1431,6 @@ async fn test_execute_wave_hat_backend_invocation_contracts() {
                 prompt_delivery: PromptDeliveryExpectation::Positional,
                 success_payload: "hat codex named-with-args invocation contract ok",
                 marker_id: "invocation-contract:hat:named-with-args:codex",
-            },
-            HatNamedWithArgsInvocationCase {
-                backend_type: "amp",
-                executable_name: "amp",
-                extra_args: &["--model", "gpt-5"],
-                expected_prefix: &[
-                    "--dangerously-allow-all",
-                    "--model",
-                    "gpt-5",
-                    "--hat-runtime-arg",
-                ],
-                prompt_delivery: PromptDeliveryExpectation::Flag("-x"),
-                success_payload: "hat amp named-with-args invocation contract ok",
-                marker_id: "invocation-contract:hat:named-with-args:amp",
-            },
-            HatNamedWithArgsInvocationCase {
-                backend_type: "copilot",
-                executable_name: "copilot",
-                extra_args: &["--model", "gpt-5"],
-                expected_prefix: &[
-                    "--allow-all-tools",
-                    "--output-format",
-                    "json",
-                    "--model",
-                    "gpt-5",
-                    "--hat-runtime-arg",
-                ],
-                prompt_delivery: PromptDeliveryExpectation::Flag("-p"),
-                success_payload: "hat copilot named-with-args invocation contract ok",
-                marker_id: "invocation-contract:hat:named-with-args:copilot",
-            },
-            HatNamedWithArgsInvocationCase {
-                backend_type: "roo",
-                executable_name: "roo",
-                extra_args: &["--model", "claude-sonnet-4"],
-                expected_prefix: &[
-                    "--print",
-                    "--ephemeral",
-                    "--model",
-                    "claude-sonnet-4",
-                    "--hat-runtime-arg",
-                ],
-                prompt_delivery: PromptDeliveryExpectation::PromptFile,
-                success_payload: "hat roo named-with-args invocation contract ok",
-                marker_id: "invocation-contract:hat:named-with-args:roo",
             },
         ] {
             let body = invocation_capture_backend_body(case.success_payload);
@@ -1700,36 +1456,6 @@ async fn test_execute_wave_hat_backend_invocation_contracts() {
             );
             emit_wave_validation_marker(case.marker_id, &["backend"]);
         }
-    }
-
-    {
-        let body = invocation_capture_backend_body("hat kiro agent invocation contract ok");
-        let _fake = install_fake_path_backends(&[("kiro-cli", body.as_str())]);
-        let (completed, captured) = run_wave_for_hat_backend_with_capture(
-            ralph_core::HatBackend::KiroAgent {
-                backend_type: "kiro".to_string(),
-                agent: "reviewer-agent".to_string(),
-                args: vec!["--kiro-extra".to_string()],
-            },
-            Some(vec!["--hat-runtime-arg".to_string()]),
-        )
-        .await;
-
-        assert_single_success(&completed, "hat kiro agent invocation contract ok");
-        assert_named_backend_invocation_contract(
-            &captured,
-            &[
-                "chat",
-                "--no-interactive",
-                "--trust-all-tools",
-                "--agent",
-                "reviewer-agent",
-                "--kiro-extra",
-                "--hat-runtime-arg",
-            ],
-            PromptDeliveryExpectation::Positional,
-        );
-        emit_wave_validation_marker("invocation-contract:hat:kiro-agent", &["backend"]);
     }
 
     {
@@ -1808,19 +1534,6 @@ async fn test_execute_wave_hat_backend_large_prompt_contracts() {
             marker_id: "large-prompt-contract:hat:named:pi",
         },
         HatNamedLargePromptCase {
-            backend_type: "kiro",
-            executable_name: "kiro-cli",
-            expected_prefix: &[
-                "chat",
-                "--no-interactive",
-                "--trust-all-tools",
-                "--hat-runtime-arg",
-            ],
-            prompt_delivery: PromptDeliveryExpectation::TempFilePositional,
-            success_payload: "hat kiro named large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named:kiro",
-        },
-        HatNamedLargePromptCase {
             backend_type: "gemini",
             executable_name: "gemini",
             expected_prefix: &["--yolo", "--hat-runtime-arg"],
@@ -1837,41 +1550,12 @@ async fn test_execute_wave_hat_backend_large_prompt_contracts() {
             marker_id: "large-prompt-contract:hat:named:codex",
         },
         HatNamedLargePromptCase {
-            backend_type: "amp",
-            executable_name: "amp",
-            expected_prefix: &["--dangerously-allow-all", "--hat-runtime-arg"],
-            prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-x"),
-            success_payload: "hat amp named large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named:amp",
-        },
-        HatNamedLargePromptCase {
-            backend_type: "copilot",
-            executable_name: "copilot",
-            expected_prefix: &[
-                "--allow-all-tools",
-                "--output-format",
-                "json",
-                "--hat-runtime-arg",
-            ],
-            prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-p"),
-            success_payload: "hat copilot named large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named:copilot",
-        },
-        HatNamedLargePromptCase {
             backend_type: "opencode",
             executable_name: "opencode",
             expected_prefix: &["run", "--hat-runtime-arg"],
             prompt_delivery: PromptDeliveryExpectation::TempFilePositional,
             success_payload: "hat opencode named large prompt contract ok",
             marker_id: "large-prompt-contract:hat:named:opencode",
-        },
-        HatNamedLargePromptCase {
-            backend_type: "roo",
-            executable_name: "roo",
-            expected_prefix: &["--print", "--ephemeral", "--hat-runtime-arg"],
-            prompt_delivery: PromptDeliveryExpectation::PromptFile,
-            success_payload: "hat roo named large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named:roo",
         },
     ] {
         let body = invocation_capture_backend_body(case.success_payload);
@@ -1896,25 +1580,6 @@ async fn test_execute_wave_hat_backend_large_prompt_contracts() {
             case.backend_type
         );
         emit_wave_validation_marker(case.marker_id, &["backend"]);
-    }
-
-    {
-        let (completed, captured) = run_wave_for_hat_backend_with_acp_capture_and_task_payload(
-            ralph_core::HatBackend::Named("kiro-acp".to_string()),
-            Some(vec!["--hat-runtime-arg".to_string()]),
-            "hat kiro-acp named large prompt contract ok",
-            &task_payload,
-        )
-        .await;
-
-        assert_single_success(&completed, "hat kiro-acp named large prompt contract ok");
-        assert_acp_invocation_contract(&captured, &["acp", "--hat-runtime-arg"]);
-        // build_wave_worker_prompt trims the payload, so compare against the trimmed form
-        assert!(
-            captured.prompt.contains(task_payload.trim()),
-            "captured prompt should include full large task payload for kiro-acp named hat"
-        );
-        emit_wave_validation_marker("large-prompt-contract:hat:named:kiro-acp", &["backend"]);
     }
 
     for case in [
@@ -1959,22 +1624,6 @@ async fn test_execute_wave_hat_backend_large_prompt_contracts() {
             marker_id: "large-prompt-contract:hat:named-with-args:pi",
         },
         HatNamedWithArgsLargePromptCase {
-            backend_type: "kiro",
-            executable_name: "kiro-cli",
-            extra_args: &["--profile", "reviewer"],
-            expected_prefix: &[
-                "chat",
-                "--no-interactive",
-                "--trust-all-tools",
-                "--profile",
-                "reviewer",
-                "--hat-runtime-arg",
-            ],
-            prompt_delivery: PromptDeliveryExpectation::TempFilePositional,
-            success_payload: "hat kiro named-with-args large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named-with-args:kiro",
-        },
-        HatNamedWithArgsLargePromptCase {
             backend_type: "gemini",
             executable_name: "gemini",
             extra_args: &["--model", "gemini-2.5-pro"],
@@ -1991,51 +1640,6 @@ async fn test_execute_wave_hat_backend_large_prompt_contracts() {
             prompt_delivery: PromptDeliveryExpectation::TempFilePositional,
             success_payload: "hat codex named-with-args large prompt contract ok",
             marker_id: "large-prompt-contract:hat:named-with-args:codex",
-        },
-        HatNamedWithArgsLargePromptCase {
-            backend_type: "amp",
-            executable_name: "amp",
-            extra_args: &["--model", "gpt-5"],
-            expected_prefix: &[
-                "--dangerously-allow-all",
-                "--model",
-                "gpt-5",
-                "--hat-runtime-arg",
-            ],
-            prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-x"),
-            success_payload: "hat amp named-with-args large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named-with-args:amp",
-        },
-        HatNamedWithArgsLargePromptCase {
-            backend_type: "copilot",
-            executable_name: "copilot",
-            extra_args: &["--model", "gpt-5"],
-            expected_prefix: &[
-                "--allow-all-tools",
-                "--output-format",
-                "json",
-                "--model",
-                "gpt-5",
-                "--hat-runtime-arg",
-            ],
-            prompt_delivery: PromptDeliveryExpectation::TempFileFlag("-p"),
-            success_payload: "hat copilot named-with-args large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named-with-args:copilot",
-        },
-        HatNamedWithArgsLargePromptCase {
-            backend_type: "roo",
-            executable_name: "roo",
-            extra_args: &["--model", "claude-sonnet-4"],
-            expected_prefix: &[
-                "--print",
-                "--ephemeral",
-                "--model",
-                "claude-sonnet-4",
-                "--hat-runtime-arg",
-            ],
-            prompt_delivery: PromptDeliveryExpectation::PromptFile,
-            success_payload: "hat roo named-with-args large prompt contract ok",
-            marker_id: "large-prompt-contract:hat:named-with-args:roo",
         },
     ] {
         let body = invocation_capture_backend_body(case.success_payload);
@@ -2069,69 +1673,6 @@ async fn test_execute_wave_hat_backend_large_prompt_contracts() {
     }
 
     {
-        let body = invocation_capture_backend_body("hat kiro agent large prompt contract ok");
-        let _fake = install_fake_path_backends(&[("kiro-cli", body.as_str())]);
-        let (completed, captured) = run_wave_for_hat_backend_with_capture_and_task_payload(
-            ralph_core::HatBackend::KiroAgent {
-                backend_type: "kiro".to_string(),
-                agent: "reviewer-agent".to_string(),
-                args: vec!["--kiro-extra".to_string()],
-            },
-            Some(vec!["--hat-runtime-arg".to_string()]),
-            &task_payload,
-        )
-        .await;
-
-        assert_single_success(&completed, "hat kiro agent large prompt contract ok");
-        assert_named_backend_invocation_contract(
-            &captured,
-            &[
-                "chat",
-                "--no-interactive",
-                "--trust-all-tools",
-                "--agent",
-                "reviewer-agent",
-                "--kiro-extra",
-                "--hat-runtime-arg",
-            ],
-            PromptDeliveryExpectation::TempFilePositional,
-        );
-        assert!(
-            captured.prompt.contains(task_payload.trim()),
-            "captured prompt should include full large task payload for kiro agent hat"
-        );
-        emit_wave_validation_marker("large-prompt-contract:hat:kiro-agent:kiro", &["backend"]);
-    }
-
-    {
-        let (completed, captured) = run_wave_for_hat_backend_with_acp_capture_and_task_payload(
-            ralph_core::HatBackend::KiroAgent {
-                backend_type: "kiro-acp".to_string(),
-                agent: "reviewer-agent".to_string(),
-                args: vec!["--ignored-extra".to_string()],
-            },
-            Some(vec!["--hat-runtime-arg".to_string()]),
-            "hat kiro-acp agent large prompt contract ok",
-            &task_payload,
-        )
-        .await;
-
-        assert_single_success(&completed, "hat kiro-acp agent large prompt contract ok");
-        assert_acp_invocation_contract(
-            &captured,
-            &["acp", "--agent", "reviewer-agent", "--hat-runtime-arg"],
-        );
-        assert!(
-            captured.prompt.contains(task_payload.trim()),
-            "captured prompt should include full large task payload for kiro-acp agent hat"
-        );
-        emit_wave_validation_marker(
-            "large-prompt-contract:hat:kiro-agent:kiro-acp",
-            &["backend"],
-        );
-    }
-
-    {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let body = invocation_capture_backend_body("hat custom large prompt contract ok");
         let worker_path = write_fake_executable(temp_dir.path(), "custom-wave-worker", &body);
@@ -2157,101 +1698,6 @@ async fn test_execute_wave_hat_backend_large_prompt_contracts() {
         );
         emit_wave_validation_marker("large-prompt-contract:hat:custom", &["backend"]);
     }
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_execute_wave_acp_backend_invocation_contracts() {
-    {
-        let (completed, captured) = run_wave_for_named_acp_backend_with_capture(
-            Some(vec!["--hat-runtime-arg".to_string()]),
-            "named ACP invocation contract ok",
-        )
-        .await;
-
-        assert_single_success(&completed, "named ACP invocation contract ok");
-        assert_acp_invocation_contract(&captured, &["acp", "--hat-runtime-arg"]);
-        emit_wave_validation_marker("invocation-contract:acp:named:kiro-acp", &["backend"]);
-    }
-
-    {
-        let (completed, captured) = run_wave_for_hat_backend_with_acp_capture(
-            ralph_core::HatBackend::KiroAgent {
-                backend_type: "kiro-acp".to_string(),
-                agent: "reviewer-agent".to_string(),
-                args: vec!["--ignored-extra".to_string()],
-            },
-            Some(vec!["--hat-runtime-arg".to_string()]),
-            "hat ACP kiro-agent invocation contract ok",
-        )
-        .await;
-
-        assert_single_success(&completed, "hat ACP kiro-agent invocation contract ok");
-        assert_acp_invocation_contract(
-            &captured,
-            &["acp", "--agent", "reviewer-agent", "--hat-runtime-arg"],
-        );
-        emit_wave_validation_marker("invocation-contract:acp:hat:kiro-agent", &["backend"]);
-    }
-
-    {
-        let (completed, captured) = run_wave_for_hat_backend_with_acp_capture(
-            ralph_core::HatBackend::NamedWithArgs {
-                backend_type: "kiro-acp".to_string(),
-                args: vec!["--model".to_string(), "claude-sonnet-4".to_string()],
-            },
-            Some(vec!["--hat-runtime-arg".to_string()]),
-            "hat ACP named-with-args invocation contract ok",
-        )
-        .await;
-
-        assert_single_success(&completed, "hat ACP named-with-args invocation contract ok");
-        assert_acp_invocation_contract(
-            &captured,
-            &["acp", "--model", "claude-sonnet-4", "--hat-runtime-arg"],
-        );
-        emit_wave_validation_marker("invocation-contract:acp:hat:named-with-args", &["backend"]);
-    }
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_execute_wave_surfaces_named_kiro_acp_executor_error_with_synthetic_events() {
-    let _mock = install_mock_acp_executions(vec![MockAcpExecution::error(
-        "mock acp executor exploded",
-        vec![],
-    )]);
-
-    let completed = run_wave_for_named_backend("kiro-acp", &text_backend_body("unused")).await;
-
-    assert_single_failure_with_synthetic_events_marked(
-        &completed,
-        "mock acp executor exploded",
-        "acp:named-executor-error",
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_execute_wave_surfaces_hat_kiro_acp_timeout_without_events_with_synthetic_events() {
-    let _mock = install_mock_acp_executions(vec![MockAcpExecution::timeout(vec![])]);
-
-    let completed = run_wave_for_hat_backend(
-        ralph_core::HatBackend::KiroAgent {
-            backend_type: "kiro-acp".to_string(),
-            agent: "reviewer-agent".to_string(),
-            args: vec!["--unused-extra".to_string()],
-        },
-        Some(vec!["--hat-runtime-arg".to_string()]),
-        missing_global_wave_backend(),
-    )
-    .await;
-
-    assert_single_failure_with_synthetic_events_marked(
-        &completed,
-        "Worker timed out after 30s without emitting events",
-        "acp:hat-timeout-without-events",
-    );
 }
 
 #[cfg(unix)]
@@ -2322,83 +1768,6 @@ EOF"#,
         &completed,
         "hat named-with-args backend ok",
         "hat-backend:named-with-args",
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_execute_wave_supports_hat_backend_kiro_agent_with_backend_args() {
-    let _fake = install_fake_path_backends(&[(
-        "kiro-cli",
-        r#"found_agent=0
-found_kiro_arg=0
-found_hat_runtime_arg=0
-prev=''
-for arg in "$@"; do
-  if [ "$prev" = "--agent" ] && [ "$arg" = "reviewer-agent" ]; then
-    found_agent=1
-  fi
-  if [ "$arg" = "--kiro-extra" ]; then
-    found_kiro_arg=1
-  fi
-  if [ "$arg" = "--hat-runtime-arg" ]; then
-    found_hat_runtime_arg=1
-  fi
-  prev="$arg"
-done
-if [ "$found_agent" -ne 1 ] || [ "$found_kiro_arg" -ne 1 ] || [ "$found_hat_runtime_arg" -ne 1 ]; then
-  echo "missing expected kiro args: $*" >&2
-  exit 1
-fi
-cat <<'EOF' > "$RALPH_EVENTS_FILE"
-{"topic":"review.done","payload":"hat kiro agent backend ok","ts":"2026-01-01T00:00:00Z"}
-EOF"#,
-    )]);
-
-    let completed = run_wave_for_hat_backend(
-        ralph_core::HatBackend::KiroAgent {
-            backend_type: "kiro".to_string(),
-            agent: "reviewer-agent".to_string(),
-            args: vec!["--kiro-extra".to_string()],
-        },
-        Some(vec!["--hat-runtime-arg".to_string()]),
-        missing_global_wave_backend(),
-    )
-    .await;
-
-    assert_single_success_marked(
-        &completed,
-        "hat kiro agent backend ok",
-        "hat-backend:kiro-agent",
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_execute_wave_supports_hat_backend_kiro_acp_agent() {
-    let _mock = install_mock_acp_executions(vec![MockAcpExecution::success(
-        true,
-        vec![make_worker_event(
-            "review.done",
-            "hat kiro-acp agent backend ok",
-        )],
-    )]);
-
-    let completed = run_wave_for_hat_backend(
-        ralph_core::HatBackend::KiroAgent {
-            backend_type: "kiro-acp".to_string(),
-            agent: "reviewer-agent".to_string(),
-            args: vec!["--unused-extra".to_string()],
-        },
-        Some(vec!["--hat-runtime-arg".to_string()]),
-        missing_global_wave_backend(),
-    )
-    .await;
-
-    assert_single_success_marked(
-        &completed,
-        "hat kiro-acp agent backend ok",
-        "hat-backend:kiro-acp-agent",
     );
 }
 
@@ -2575,84 +1944,6 @@ EOF"#,
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_run_wave_worker_acp_timeout_with_partial_events_keeps_events_visible() {
-    let _mock =
-        install_mock_acp_executions(vec![MockAcpExecution::timeout(vec![make_worker_event(
-            "review.done",
-            "partial acp result",
-        )])]);
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let worker_events_path = temp_dir.path().join("wave-events.jsonl");
-    let merged_events_path = temp_dir.path().join("events.jsonl");
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let backend = CliBackend::kiro_acp();
-
-    let (_index, outcome) = run_wave_worker_acp(
-        0,
-        &backend,
-        "prompt",
-        &worker_events_path,
-        Duration::from_millis(1),
-        tx,
-        None,
-        None,
-        None,
-    )
-    .await;
-
-    let (events, _duration, success) =
-        outcome.expect("partial ACP timeout should preserve emitted events");
-    assert!(!success, "timed out worker should not be marked successful");
-    assert_eq!(events.len(), 1, "unexpected partial events: {events:?}");
-    assert_eq!(events[0].topic.as_str(), "review.done");
-    assert_eq!(events[0].payload.as_deref(), Some("partial acp result"));
-
-    let completed = ralph_core::CompletedWave {
-        wave_id: "w-acp".to_string(),
-        wave_total: 1,
-        results: vec![ralph_core::WaveResult {
-            index: 0,
-            events: events.into_iter().map(ralph_proto::Event::from).collect(),
-        }],
-        failures: vec![],
-        duration: Duration::from_millis(1),
-        partial: false,
-        expected_source_hat: None,
-        assigned_dimensions: std::collections::HashMap::new(),
-        dimension_retry_counts: std::collections::HashMap::new(),
-        worker_events: Vec::new(),
-    };
-
-    merge_wave_results_to_events_file(
-        &completed,
-        &merged_events_path,
-        &["review.done".to_string()],
-        "reviewer",
-        // 2026-06-16-001 U2: tests use the same default.
-        None,
-    )
-    .expect("merge partial ACP results");
-
-    let merged = std::fs::read_to_string(&merged_events_path).expect("read merged events");
-    let records: Vec<serde_json::Value> = merged
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("json event"))
-        .collect();
-
-    assert_eq!(records.len(), 1, "unexpected merged records: {records:?}");
-    assert_eq!(records[0]["topic"], "review.done");
-    assert_eq!(records[0]["payload"], "partial acp result");
-    assert!(
-        records
-            .iter()
-            .all(|record| record["topic"] != "wave.worker.failed"),
-        "partial ACP timeout should not synthesize worker failures: {records:?}"
-    );
-    emit_wave_validation_marker("acp:partial-timeout-visible-events", &["backend", "error"]);
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn test_execute_wave_keeps_text_partial_timeout_events_visible() {
     let completed = run_wave_for_backend_with_timeout(
         BackendOutputFormat::Text,
@@ -2704,29 +1995,16 @@ async fn test_execute_wave_keeps_pi_stream_partial_timeout_events_visible() {
 
 #[cfg(unix)]
 #[test]
-fn test_wave_worker_execution_mode_uses_acp_for_kiro_acp_backend() {
-    let backend = CliBackend::kiro_acp();
-    assert_eq!(
-        wave_worker_execution_mode(backend.output_format),
-        WaveWorkerExecutionMode::Acp
-    );
-    emit_wave_validation_marker("execution-mode:kiro-acp-backend", &["backend"]);
-}
-
-#[cfg(unix)]
-#[test]
-fn test_wave_worker_execution_mode_uses_acp_for_kiro_acp_hat_backend() {
-    let backend = CliBackend::from_hat_backend(&ralph_core::HatBackend::KiroAgent {
-        backend_type: "kiro-acp".to_string(),
-        agent: "reviewer".to_string(),
-        args: vec![],
-    })
-    .expect("kiro-acp backend");
-    assert_eq!(
-        wave_worker_execution_mode(backend.output_format),
-        WaveWorkerExecutionMode::Acp
-    );
-    emit_wave_validation_marker("execution-mode:kiro-acp-hat-backend", &["backend"]);
+fn test_wave_worker_execution_mode_uses_pty_for_non_acp_backends() {
+    // U4 sanity: every kept backend is now Pty-mode (no Acp variant).
+    for name in ["claude", "pi", "codex", "opencode", "traecli"] {
+        let backend = CliBackend::from_name(name).expect("supported named backend");
+        assert_eq!(
+            wave_worker_execution_mode(backend.output_format),
+            WaveWorkerExecutionMode::Pty,
+            "backend {name} should be Pty mode"
+        );
+    }
 }
 
 #[cfg(unix)]

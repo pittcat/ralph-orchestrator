@@ -17,7 +17,7 @@ use std::path::Path;
 
 /// Test scenario that verifies basic connectivity to any backend.
 ///
-/// This scenario is backend-agnostic and will work with Claude, Kiro, or OpenCode.
+/// This scenario is backend-agnostic and will work with Claude, OpenCode.
 /// It configures itself at setup time based on the target backend.
 ///
 /// The scenario:
@@ -258,9 +258,25 @@ mod tests {
     fn test_connectivity_supports_all_backends() {
         let scenario = ConnectivityScenario::new();
         let supported = scenario.supported_backends();
-        assert!(supported.contains(&Backend::Claude));
-        assert!(supported.contains(&Backend::Kiro));
-        assert!(supported.contains(&Backend::OpenCode));
+        // Verify the canonical backend set: no duplicates, and matches Backend::all().
+        let unique: std::collections::HashSet<_> = supported.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            supported.len(),
+            "supported_backends() must not contain duplicates"
+        );
+        assert_eq!(
+            supported.len(),
+            Backend::all().len(),
+            "supported_backends() must enumerate every canonical backend"
+        );
+        for backend in Backend::all() {
+            assert!(
+                supported.contains(backend),
+                "supported_backends() must include {:?}",
+                backend
+            );
+        }
     }
 
     #[test]
@@ -278,23 +294,6 @@ mod tests {
         assert!(content.contains("backend: claude"));
 
         assert_eq!(config.timeout, Backend::Claude.default_timeout());
-
-        cleanup_workspace(&workspace);
-    }
-
-    #[test]
-    fn test_connectivity_setup_kiro() {
-        let workspace = test_workspace("setup-kiro");
-        fs::create_dir_all(&workspace).unwrap();
-
-        let scenario = ConnectivityScenario::new();
-        let config = scenario.setup(&workspace, Backend::Kiro).unwrap();
-
-        let config_path = workspace.join("ralph.yml");
-        let content = fs::read_to_string(&config_path).unwrap();
-        assert!(content.contains("backend: kiro"));
-
-        assert_eq!(config.timeout, Backend::Kiro.default_timeout());
 
         cleanup_workspace(&workspace);
     }

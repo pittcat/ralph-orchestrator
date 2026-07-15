@@ -294,7 +294,6 @@ impl RalphConfig {
         if self.adapters.claude.tool_permissions.is_some()
             || self.adapters.gemini.tool_permissions.is_some()
             || self.adapters.codex.tool_permissions.is_some()
-            || self.adapters.amp.tool_permissions.is_some()
         {
             warnings.push(ConfigWarning::DroppedField {
                 field: "adapters.*.tool_permissions".to_string(),
@@ -736,7 +735,7 @@ impl RalphConfig {
     /// If empty, returns the default priority order.
     pub fn get_agent_priority(&self) -> Vec<&str> {
         if self.agent_priority.is_empty() {
-            vec!["claude", "kiro", "gemini", "codex", "amp"]
+            vec!["claude", "gemini", "codex"]
         } else {
             self.agent_priority.iter().map(String::as_str).collect()
         }
@@ -748,9 +747,7 @@ impl RalphConfig {
         match backend {
             "claude" => &self.adapters.claude,
             "gemini" => &self.adapters.gemini,
-            "kiro" => &self.adapters.kiro,
             "codex" => &self.adapters.codex,
-            "amp" => &self.adapters.amp,
             _ => &self.adapters.claude, // Default fallback
         }
     }
@@ -1128,7 +1125,7 @@ agent_priority: [gemini, claude, codex]
     fn test_default_agent_priority() {
         let config = RalphConfig::default();
         let priority = config.get_agent_priority();
-        assert_eq!(priority, vec!["claude", "kiro", "gemini", "codex", "amp"]);
+        assert_eq!(priority, vec!["claude", "gemini", "codex"]);
     }
 
     #[test]
@@ -1222,7 +1219,6 @@ adapters:
         // AdapterSettings::default() uses the 300s `default_timeout()`.
         assert_eq!(config.autonomous_idle_timeout_secs("claude"), 300);
         assert_eq!(config.autonomous_idle_timeout_secs("gemini"), 300);
-        assert_eq!(config.autonomous_idle_timeout_secs("kiro"), 300);
     }
 
     /// Per-adapter override: `adapters.<backend>.timeout` is the second-tier
@@ -1934,51 +1930,6 @@ event_loop:
     }
 
     #[test]
-    fn test_hat_backend_kiro_agent() {
-        let yaml = r#"
-type: "kiro"
-agent: "builder"
-"#;
-        let backend: HatBackend = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(backend.to_cli_backend(), "kiro");
-        match backend {
-            HatBackend::KiroAgent {
-                backend_type,
-                agent,
-                args,
-            } => {
-                assert_eq!(backend_type, "kiro");
-                assert_eq!(agent, "builder");
-                assert!(args.is_empty());
-            }
-            _ => panic!("Expected KiroAgent variant"),
-        }
-    }
-
-    #[test]
-    fn test_hat_backend_kiro_agent_with_args() {
-        let yaml = r#"
-type: "kiro"
-agent: "builder"
-args: ["--verbose", "--debug"]
-"#;
-        let backend: HatBackend = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(backend.to_cli_backend(), "kiro");
-        match backend {
-            HatBackend::KiroAgent {
-                backend_type,
-                agent,
-                args,
-            } => {
-                assert_eq!(backend_type, "kiro");
-                assert_eq!(agent, "builder");
-                assert_eq!(args, vec!["--verbose", "--debug"]);
-            }
-            _ => panic!("Expected KiroAgent variant"),
-        }
-    }
-
-    #[test]
     fn test_hat_backend_named_with_args() {
         let yaml = r#"
 type: "claude"
@@ -2087,9 +2038,9 @@ hats:
     publishes: ["build.done"]
     instructions: "Build the thing"
     backend:
-      type: "kiro"
-      agent: "builder"
-      
+      type: "claude"
+      args: ["--model", "haiku"]
+
   reviewer:
     name: "Reviewer"
     triggers: ["build.done"]
@@ -2111,20 +2062,15 @@ hats:
             _ => panic!("Expected Named backend for planner"),
         }
 
-        // Check builder (KiroAgent backend)
+        // Check builder (NamedWithArgs backend)
         let builder = config.hats.get("builder").unwrap();
         assert!(builder.backend.is_some());
         match builder.backend.as_ref().unwrap() {
-            HatBackend::KiroAgent {
-                backend_type,
-                agent,
-                args,
-            } => {
-                assert_eq!(backend_type, "kiro");
-                assert_eq!(agent, "builder");
-                assert!(args.is_empty());
+            HatBackend::NamedWithArgs { backend_type, args } => {
+                assert_eq!(backend_type, "claude");
+                assert_eq!(args, &vec!["--model".to_string(), "haiku".to_string()]);
             }
-            _ => panic!("Expected KiroAgent backend for builder"),
+            _ => panic!("Expected NamedWithArgs backend for builder"),
         }
 
         // Check reviewer (Custom backend)

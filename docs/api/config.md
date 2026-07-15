@@ -132,7 +132,7 @@ hats:
     triggers: ["plan.done"]
     publishes: ["build.done"]
     backend:
-      type: "kiro"
+      type: "claude"
       agent: "builder"
       args: ["--verbose"]
 

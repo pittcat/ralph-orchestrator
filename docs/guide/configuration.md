@@ -244,16 +244,19 @@ adapters:
   claude:
     enabled: true
     timeout: 300
-  kiro:
-    enabled: true
-    timeout: 300
   gemini:
     enabled: true
     timeout: 300
   codex:
     enabled: true
     timeout: 300
-  amp:
+  opencode:
+    enabled: true
+    timeout: 300
+  pi:
+    enabled: true
+    timeout: 300
+  traecli:
     enabled: true
     timeout: 300
 
@@ -558,7 +561,7 @@ Backend configuration.
 | `args` | list | `[]` | Extra args for custom backend |
 | `prompt_flag` | string | `null` | Custom prompt flag for arg mode |
 
-**Backend values:** `claude`, `kiro`, `gemini`, `codex`, `amp`, `copilot`, `opencode`, `pi`, `custom`.
+**Backend values:** `claude`, `gemini`, `codex`, `opencode`, `pi`, `traecli`, `custom`.
 
 **Prompt mode values:** `arg` or `stdin`.
 

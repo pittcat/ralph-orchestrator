@@ -3,7 +3,7 @@ name = "ralph-adapters"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
-description = "Agent adapters for Ralph Orchestrator (Claude, Kiro, Gemini, ACP)"
+description = "Agent adapters for Ralph Orchestrator (Claude, Gemini, Codex, OpenCode, Pi, Trae CLI, custom)"
 
 [lints]
 workspace = true
@@ -36,6 +36,5 @@ nix.workspace = true
 crossterm.workspace = true
 vt100.workspace = true
 strip-ansi-escapes.workspace = true
-agent-client-protocol = "0.9.4"
 futures.workspace = true
 tokio-util.workspace = true

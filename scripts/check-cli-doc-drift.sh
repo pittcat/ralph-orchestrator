@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # scripts/check-cli-doc-drift.sh
 # 检测 ralph-tools*.md 文档与 --help 输出的双向漂移
 # (plan U7: D1 修复 - 双向结构化对比, 覆盖新增/重命名/删除/类型变更)

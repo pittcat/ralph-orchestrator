@@ -12,7 +12,7 @@ Key types:
 
 ## Backend Detection
 
-Detect an available backend in PATH (Claude, Kiro, Gemini, Codex, Amp, Copilot, OpenCode):
+Detect an available backend in PATH (Claude, Gemini, Codex, OpenCode, Pi, Trae CLI):
 
 ```rust
 use ralph_adapters::{detect_backend_default, is_backend_available};

@@ -7,13 +7,11 @@ Ralph supports multiple AI CLI backends. This guide covers setup and selection.
 | Backend | CLI Tool | Notes |
 |---------|----------|-------|
 | Claude Code | `claude` | Recommended, primary support |
-| Kiro | `kiro-cli` | Amazon/AWS |
 | Gemini CLI | `gemini` | Google |
 | Codex | `codex` | OpenAI |
-| Amp | `amp` | Sourcegraph |
-| Copilot CLI | `copilot` | GitHub |
 | OpenCode | `opencode` | Community |
 | Pi | `pi` | Multi-provider |
+| Trae CLI | `trae-cli` | Trae |
 
 ## Auto-Detection
 
@@ -26,13 +24,11 @@ ralph init
 
 Detection order (first available wins):
 1. Claude
-2. Kiro
-3. Gemini
-4. Codex
-5. Amp
-6. Copilot
-7. OpenCode
-8. Pi
+2. Gemini
+3. Codex
+4. OpenCode
+5. Pi
+6. Trae CLI
 
 ## Explicit Selection
 
@@ -40,8 +36,8 @@ Override auto-detection:
 
 ```bash
 # Via CLI
-ralph init --backend kiro
-ralph run --backend gemini
+ralph init --backend gemini
+ralph run --backend claude
 
 # Via config
 # ralph.yml
@@ -57,7 +53,7 @@ Each backend below includes:
 - **Hat YAML** configuration
 - **`ralph doctor`** validation notes
 
-Backend names (used in YAML and CLI flags): `claude`, `kiro`, `gemini`, `codex`, `amp`, `copilot`, `opencode`, `pi`.
+Backend names (used in YAML and CLI flags): `claude`, `gemini`, `codex`, `opencode`, `pi`, `traecli`, `custom`.
 
 ### Claude Code (`claude`)
 
@@ -93,42 +89,6 @@ hats:
 - Full streaming support
 - All hat features
 - Memory integration
-
-### Kiro (`kiro`)
-
-Amazon/AWS AI assistant.
-
-```bash
-# Install
-# Visit https://kiro.dev/
-
-# Verify
-kiro-cli --version
-```
-
-**Auth & env vars:**
-- Complete Kiro CLI authentication (AWS/SSO) per Kiro docs
-- `KIRO_API_KEY` (optional; used by `ralph doctor` auth hints)
-
-**Hat YAML:**
-```yaml
-hats:
-  coder:
-    backend: "kiro"
-```
-
-**Kiro agent selection (optional):**
-```yaml
-hats:
-  reviewer:
-    backend:
-      type: "kiro"
-      agent: "codex"
-```
-
-**Doctor checks:**
-- `kiro-cli --version` must succeed
-- Warns if `KIRO_API_KEY` is missing (OK if you authenticated via CLI)
 
 ### Gemini CLI (`gemini`)
 
@@ -187,61 +147,6 @@ hats:
 **Doctor checks:**
 - `codex --version` must succeed
 - Warns if neither `OPENAI_API_KEY` nor `CODEX_API_KEY` is set
-
-### Amp (`amp`)
-
-Sourcegraph's AI assistant.
-
-```bash
-# Install
-# Visit https://github.com/sourcegraph/amp
-
-# Verify
-amp --version
-```
-
-**Auth & env vars:**
-- Authenticate via `amp` CLI per Sourcegraph docs
-- No auth env vars are checked by `ralph doctor` for Amp
-
-**Hat YAML:**
-```yaml
-hats:
-  helper:
-    backend: "amp"
-```
-
-**Doctor checks:**
-- `amp --version` must succeed
-
-### Copilot CLI (`copilot`)
-
-GitHub's AI assistant.
-
-```bash
-# Install
-npm install -g @github/copilot
-
-# Authenticate
-copilot auth login
-
-# Verify
-copilot --version
-```
-
-**Auth & env vars:**
-- Authenticate via Copilot CLI (`copilot auth login` or `gh auth login`)
-- No auth env vars are checked by `ralph doctor` for Copilot
-
-**Hat YAML:**
-```yaml
-hats:
-  reviewer:
-    backend: "copilot"
-```
-
-**Doctor checks:**
-- `copilot --version` must succeed
 
 ### OpenCode (`opencode`)
 
@@ -307,6 +212,32 @@ hats:
 - `pi --version` must succeed
 - Warns if no provider API key is set
 
+### Trae CLI (`traecli`)
+
+Trae CLI AI coding assistant.
+
+```bash
+# Install
+# Visit https://trae.ai/ for installation
+
+# Verify
+trae-cli --version
+```
+
+**Auth & env vars:**
+- Authenticate via Trae CLI per Trae docs
+- `TRAE_API_KEY` (optional; used by `ralph doctor` auth hints)
+
+**Hat YAML:**
+```yaml
+hats:
+  reviewer:
+    backend: "traecli"
+```
+
+**Doctor checks:**
+- `trae-cli --version` must succeed
+
 ## Per-Hat Backend Override
 
 Different hats can use different backends:
@@ -319,7 +250,7 @@ hats:
     instructions: "Create a plan..."
 
   coder:
-    backend: "kiro"    # Use Kiro for coding
+    backend: "gemini"  # Use Gemini for coding
     triggers: ["plan.ready"]
     instructions: "Implement..."
 ```
@@ -344,13 +275,13 @@ cli:
 
 ## Backend Comparison
 
-| Feature | Claude | Kiro | Gemini | Codex | Pi |
-|---------|--------|------|--------|-------|----|
-| Streaming | Yes | Yes | Yes | Yes | Yes |
-| Tool use | Full | Full | Partial | Partial | Full |
-| Context size | Large | Large | Large | Medium | Large |
-| Speed | Fast | Fast | Fast | Medium | Fast |
-| Cost | $$ | $ | $ | $$ | $ |
+| Feature | Claude | Gemini | Codex | Pi |
+|---------|--------|--------|-------|----|
+| Streaming | Yes | Yes | Yes | Yes |
+| Tool use | Full | Partial | Partial | Full |
+| Context size | Large | Large | Medium | Large |
+| Speed | Fast | Fast | Medium | Fast |
+| Cost | $$ | $ | $$ | $ |
 
 ## Troubleshooting
 
@@ -375,9 +306,6 @@ ERROR: Authentication required
 ```bash
 # Claude
 claude login
-
-# Copilot
-copilot auth login
 
 # Gemini - set API key
 export GEMINI_API_KEY=your-key

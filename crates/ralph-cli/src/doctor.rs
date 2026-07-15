@@ -385,7 +385,6 @@ fn auth_backend_names(config: &RalphConfig) -> Vec<String> {
         let name = match backend {
             HatBackend::Named(name) => name.clone(),
             HatBackend::NamedWithArgs { backend_type, .. } => backend_type.clone(),
-            HatBackend::KiroAgent { backend_type, .. } => backend_type.clone(),
             HatBackend::Custom { command, .. } => canonical_backend_name("custom", Some(command)),
         };
 
@@ -400,19 +399,12 @@ fn auth_env_vars(backend: &str) -> Option<Vec<&'static str>> {
         "claude" => Some(vec!["ANTHROPIC_API_KEY"]),
         "gemini" => Some(vec!["GEMINI_API_KEY"]),
         "codex" => Some(vec!["OPENAI_API_KEY", "CODEX_API_KEY"]),
-        "kiro" => Some(vec!["KIRO_API_KEY"]),
-        "kiro-acp" => Some(vec!["KIRO_API_KEY"]),
         "opencode" => Some(vec![
             "OPENCODE_API_KEY",
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
         ]),
         "pi" => Some(vec![
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "GEMINI_API_KEY",
-        ]),
-        "roo" => Some(vec![
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
             "GEMINI_API_KEY",
@@ -475,15 +467,11 @@ fn canonical_backend_name(backend: &str, command: Option<&str>) -> String {
 
     let normalized_lower = normalized.to_lowercase();
     match normalized_lower.as_str() {
-        "kiro-cli" => "kiro".to_string(),
         "claude" => "claude".to_string(),
         "gemini" => "gemini".to_string(),
         "codex" => "codex".to_string(),
-        "amp" => "amp".to_string(),
-        "copilot" => "copilot".to_string(),
         "opencode" => "opencode".to_string(),
         "pi" => "pi".to_string(),
-        "roo" => "roo".to_string(),
         "traecli" => "traecli".to_string(),
         _ => normalized,
     }

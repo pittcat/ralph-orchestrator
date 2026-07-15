@@ -583,9 +583,9 @@ mod pty_executor_integration {
             // Each line here is 800+ chars, matching real Pi output
             concat!(
                 r#"{"type":"session","version":3,"id":"test-session","timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp"}"#, "\n",
-                r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Plan is set.","partial":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set."}],"api":"kiro-api","provider":"kiro","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053},"message":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set."}],"api":"kiro-api","provider":"kiro","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053}}}"#, "\n",
-                r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"\nThree tasks created.","partial":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set.\nThree tasks created."}],"api":"kiro-api","provider":"kiro","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053},"message":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set.\nThree tasks created."}],"api":"kiro-api","provider":"kiro","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053}}}"#, "\n",
-                r#"{"type":"turn_end","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.05}},"stopReason":"stop","provider":"kiro","model":"claude-sonnet-4-6"}}"#, "\n",
+                r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Plan is set.","partial":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set."}],"api":"pi-api","provider":"pi","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053},"message":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set."}],"api":"pi-api","provider":"pi","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053}}}"#, "\n",
+                r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"\nThree tasks created.","partial":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set.\nThree tasks created."}],"api":"pi-api","provider":"pi","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053},"message":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set.\nThree tasks created."}],"api":"pi-api","provider":"pi","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053}}}"#, "\n",
+                r#"{"type":"turn_end","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.05}},"stopReason":"stop","provider":"pi","model":"claude-sonnet-4-6"}}"#, "\n",
             ),
         )
         .expect("write ndjson");
@@ -649,9 +649,9 @@ mod pty_executor_integration {
             r#"#!/bin/sh
 cat <<'NDJSON'
 {"type":"session","version":3,"id":"test-session","timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp"}
-{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Plan is set.","partial":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set."}],"api":"kiro-api","provider":"kiro","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053},"message":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set."}],"api":"kiro-api","provider":"kiro","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053}}}
-{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"\nThree tasks created.","partial":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set.\nThree tasks created."}],"api":"kiro-api","provider":"kiro","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053},"message":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set.\nThree tasks created."}],"api":"kiro-api","provider":"kiro","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053}}}
-{"type":"turn_end","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.05}},"stopReason":"stop","provider":"kiro","model":"claude-sonnet-4-6"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Plan is set.","partial":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set."}],"api":"pi-api","provider":"pi","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053},"message":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set."}],"api":"pi-api","provider":"pi","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053}}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"\nThree tasks created.","partial":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set.\nThree tasks created."}],"api":"pi-api","provider":"pi","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053},"message":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to create a detailed plan for reviewing changes."},{"type":"text","text":"Plan is set.\nThree tasks created."}],"api":"pi-api","provider":"pi","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772160820053}}}
+{"type":"turn_end","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.05}},"stopReason":"stop","provider":"pi","model":"claude-sonnet-4-6"}}
 NDJSON
 "#,
         )
@@ -688,103 +688,5 @@ NDJSON
             "Expected extracted text to contain 'Plan is set.', got: {:?}",
             result.extracted_text
         );
-    }
-
-    #[tokio::test]
-    async fn run_observe_streaming_copilot_stream_extracts_assistant_text() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let backend = CliBackend {
-            command: "sh".to_string(),
-            args: vec!["-c".to_string()],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: None,
-            output_format: OutputFormat::CopilotStreamJson,
-            env_vars: vec![],
-        };
-        let config = PtyConfig {
-            interactive: false,
-            idle_timeout_secs: 0,
-            cols: 80,
-            rows: 24,
-            workspace_root: temp_dir.path().to_path_buf(),
-        };
-        let executor = PtyExecutor::new(backend, config);
-        let (_tx, rx) = tokio::sync::watch::channel(false);
-        let mut handler = CapturingHandler::default();
-
-        let script = r#"printf '%s\n' \
-'{"type":"assistant.turn_start","data":{"turnId":"0"}}' \
-'{"type":"assistant.message","data":{"content":"Hello from Copilot"}}' \
-'{"type":"result","exitCode":0}'"#;
-
-        let result = executor
-            .run_observe_streaming(script, rx, &mut handler)
-            .await
-            .expect("run_observe_streaming");
-
-        assert!(result.success);
-        assert_eq!(handler.texts, vec!["Hello from Copilot".to_string()]);
-        assert_eq!(result.extracted_text, "Hello from Copilot\n");
-        assert_eq!(handler.completions.len(), 1);
-        assert!(!handler.completions[0].is_error);
-    }
-
-    #[tokio::test]
-    async fn run_observe_streaming_copilot_stream_reports_tool_events() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let backend = CliBackend {
-            command: "sh".to_string(),
-            args: vec!["-c".to_string()],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: None,
-            output_format: OutputFormat::CopilotStreamJson,
-            env_vars: vec![],
-        };
-        let config = PtyConfig {
-            interactive: false,
-            idle_timeout_secs: 0,
-            cols: 80,
-            rows: 24,
-            workspace_root: temp_dir.path().to_path_buf(),
-        };
-        let executor = PtyExecutor::new(backend, config);
-        let (_tx, rx) = tokio::sync::watch::channel(false);
-        let mut handler = CapturingHandler::default();
-
-        let script = r#"printf '%s\n' \
-'{"type":"assistant.turn_start","data":{"turnId":"0"}}' \
-'{"type":"assistant.message_delta","data":{"messageId":"msg-1","deltaContent":"Checking parser"}}' \
-'{"type":"assistant.message","data":{"messageId":"msg-1","content":"Checking parser","toolRequests":[{"toolCallId":"tool-1","name":"bash","arguments":{"command":"echo hi"},"type":"function"}]}}' \
-'{"type":"tool.execution_start","data":{"toolCallId":"tool-1","toolName":"bash","arguments":{"command":"echo hi"}}}' \
-'{"type":"tool.execution_complete","data":{"toolCallId":"tool-1","success":true,"result":{"content":"hi\n","detailedContent":"hi\n"}}}' \
-'{"type":"assistant.message","data":{"messageId":"msg-2","content":"Done"}}' \
-'{"type":"result","exitCode":0}'"#;
-
-        let result = executor
-            .run_observe_streaming(script, rx, &mut handler)
-            .await
-            .expect("run_observe_streaming");
-
-        assert!(result.success);
-        assert_eq!(
-            handler.texts,
-            vec![
-                "Checking parser".to_string(),
-                "\n".to_string(),
-                "Done".to_string()
-            ]
-        );
-        assert_eq!(handler.tool_calls.len(), 1);
-        assert_eq!(handler.tool_calls[0].0, "bash");
-        assert_eq!(handler.tool_calls[0].1, "tool-1");
-        assert_eq!(handler.tool_calls[0].2["command"], "echo hi");
-        assert_eq!(
-            handler.tool_results,
-            vec![("tool-1".to_string(), "hi\n".to_string())]
-        );
-        assert!(handler.errors.is_empty());
-        assert_eq!(handler.completions.len(), 1);
-        assert!(!handler.completions[0].is_error);
-        assert_eq!(result.extracted_text, "Checking parser\nDone\n");
     }
 }

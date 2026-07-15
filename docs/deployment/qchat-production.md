@@ -1,8 +1,11 @@
 # Q Chat Adapter Production Deployment Guide
 
 !!! warning "Deprecated"
-    The Q Chat CLI has been rebranded to **Kiro CLI**. This guide references the legacy Q Chat adapter.
-    Please refer to the [Kiro Migration Guide](../guide/kiro-migration.md) for information on migrating to the new `kiro` adapter.
+    The Q Chat backend and Kiro CLI have both been removed from Ralph
+    (see CHANGELOG.md "Removed backends: amp, roo, kiro, kiro-acp, copilot").
+    This deployment guide is retained for historical reference only.
+    Current operators should pick one of the retained backends
+    (claude / gemini / codex / opencode / pi / traecli / custom).
 
 This guide provides comprehensive instructions for deploying the Q Chat adapter in production environments with Ralph Orchestrator.
 

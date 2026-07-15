@@ -3025,9 +3025,6 @@ async fn run_loop_impl_inner(
                                 ralph_core::HatBackend::NamedWithArgs { backend_type, .. } => {
                                     backend_type.clone()
                                 }
-                                ralph_core::HatBackend::KiroAgent { backend_type, .. } => {
-                                    backend_type.clone()
-                                }
                                 // For Custom backends, extract command name from path
                                 // Handles both Unix ("/usr/bin/codex") and commands with args ("ollama run llama3")
                                 ralph_core::HatBackend::Custom { command, .. } => {
@@ -3179,20 +3176,7 @@ async fn run_loop_impl_inner(
         let tui_lines_for_pty = tui_lines.clone();
         let rpc_stdout_for_pty = rpc_stdout.clone();
         let execute_future = async {
-            if effective_backend.output_format == BackendOutputFormat::Acp {
-                execute_acp(
-                    &effective_backend,
-                    &config,
-                    &prompt,
-                    verbosity,
-                    tui_lines_for_pty,
-                    rpc_stdout_for_pty,
-                    iteration,
-                    display_hat.as_str(),
-                    &backend_name_for_timeout,
-                )
-                .await
-            } else if use_pty {
+            if use_pty {
                 execute_pty(
                     pty_executor.as_mut(),
                     &effective_backend,
@@ -4285,7 +4269,10 @@ async fn run_loop_impl_inner(
                     // 2026-07-13-001 plan U2: forward the loop's
                     // resolved project config path so wave workers
                     // inherit RALPH_CONFIG.
-                    config.config_path.as_deref().filter(|p| !p.as_os_str().is_empty()),
+                    config
+                        .config_path
+                        .as_deref()
+                        .filter(|p| !p.as_os_str().is_empty()),
                     // 2026-07-03-001 supervisor real-wiring: pass
                     // the loop-wide bridge through so the dispatcher
                     // takes the supervisor path when `enabled &&

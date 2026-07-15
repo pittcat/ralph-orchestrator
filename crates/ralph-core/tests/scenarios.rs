@@ -1372,12 +1372,6 @@ fn test_default_publishes() {
 }
 
 #[test]
-fn test_mixed_backends() {
-    let yaml = load_scenario("tests/scenarios/mixed_backends.yml");
-    run_scenario(yaml);
-}
-
-#[test]
 fn test_autoresearch_guard() {
     let yaml = load_scenario("tests/scenarios/autoresearch_guard.yml");
     run_workflow_guard_scenario(yaml);
@@ -3182,7 +3176,6 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         "tests/scenarios/multi_hat_isolation_lint",
         "tests/scenarios/isolated_",
         "tests/scenarios/default_publishes",
-        "tests/scenarios/mixed_backends",
         "tests/scenarios/multi_hat",
         "tests/scenarios/orphaned_events",
         "tests/scenarios/solo_mode",

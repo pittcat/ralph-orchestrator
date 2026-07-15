@@ -74,8 +74,8 @@ hats:
     
   - name: reviewer
     backend:
-      type: kiro
-      agent: codex  # Kiro with custom agent
+      type: claude
+      agent: codex  # Claude with custom agent
     triggers: ["review.request"]
 ```
 

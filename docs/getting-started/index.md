@@ -15,12 +15,11 @@ Before you begin, ensure you have:
 - **Rust 1.75+** (if building from source)
 - **At least one AI CLI tool** installed:
     - [Claude Code](https://github.com/anthropics/claude-code) (recommended)
-    - [Kiro](https://kiro.dev/)
     - [Gemini CLI](https://github.com/google-gemini/gemini-cli)
     - [Codex](https://github.com/openai/codex)
-    - [Amp](https://github.com/sourcegraph/amp)
-    - [Copilot CLI](https://docs.github.com/copilot)
     - [OpenCode](https://opencode.ai/)
+    - [Pi](https://github.com/badlogic/pi-mono)
+    - [Trae CLI](https://trae.ai/)
 
 ## Quick Installation
 

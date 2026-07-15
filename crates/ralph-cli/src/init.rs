@@ -91,7 +91,7 @@ fn check_file_exists(force: bool) -> Result<(), InitError> {
 /// Initializes ralph.yml from a minimal backend template.
 ///
 /// # Arguments
-/// * `backend` - The backend name (claude, kiro, gemini, codex, amp, copilot, opencode, custom)
+/// * `backend` - The backend name (claude, gemini, codex, opencode, custom)
 /// * `force` - If true, overwrite existing ralph.yml
 ///
 /// # Errors
@@ -227,12 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_template_kiro() {
-        let template = generate_template("kiro");
-        assert!(template.contains("backend: \"kiro\""));
-    }
-
-    #[test]
     fn test_template_is_valid_yaml() {
         for backend in VALID_BACKENDS {
             let template = generate_template(backend);
@@ -304,8 +298,8 @@ mod tests {
 event_loop:
   max_iterations: 100
 "#;
-        let result = super::override_backend_in_yaml(content, "kiro").unwrap();
-        assert!(result.contains(r#"backend: "kiro""#));
+        let result = super::override_backend_in_yaml(content, "opencode").unwrap();
+        assert!(result.contains(r#"backend: "opencode""#));
         assert!(!result.contains(r#"backend: "claude""#));
     }
 
@@ -340,7 +334,7 @@ event_loop:
 cli:
   backend: "claude"  # inline comment
 "#;
-        let result = super::override_backend_in_yaml(content, "amp").unwrap();
+        let result = super::override_backend_in_yaml(content, "opencode").unwrap();
         assert!(result.contains("# This is a preset"));
         assert!(result.contains("# With helpful comments"));
     }

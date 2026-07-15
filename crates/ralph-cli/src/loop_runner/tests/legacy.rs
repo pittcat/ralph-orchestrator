@@ -802,21 +802,6 @@ fn test_normalize_cli_output_for_parsing_extracts_pi_text_deltas() {
     );
 }
 
-#[test]
-fn test_normalize_cli_output_for_parsing_extracts_copilot_stream_text() {
-    let raw = concat!(
-        "{\"type\":\"assistant.turn_start\",\"data\":{\"turnId\":\"0\"}}\n",
-        "{\"type\":\"assistant.message\",\"data\":{\"content\":\"First line\"}}\n",
-        "{\"type\":\"assistant.message\",\"data\":{\"content\":\"LOOP_COMPLETE\"}}\n",
-        "{\"type\":\"result\",\"exitCode\":0}\n"
-    );
-
-    assert_eq!(
-        normalize_cli_output_for_parsing(BackendOutputFormat::CopilotStreamJson, raw),
-        "First line\nLOOP_COMPLETE\n"
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn test_get_last_commit_info_returns_none_without_git() {

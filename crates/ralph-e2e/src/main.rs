@@ -2,7 +2,7 @@
 //!
 //! End-to-end test harness for the Ralph Orchestrator.
 //!
-//! This binary validates Ralph's behavior against real AI backends (Claude, Kiro, OpenCode).
+//! This binary validates Ralph's behavior against real AI backends (Claude, OpenCode).
 //! It exercises the full orchestration loop including:
 //! - Backend connectivity and authentication
 //! - Event parsing and routing
@@ -84,8 +84,6 @@ pub enum Backend {
     All,
     /// Test Claude backend only
     Claude,
-    /// Test Kiro backend only
-    Kiro,
     /// Test OpenCode backend only
     Opencode,
 }
@@ -95,7 +93,6 @@ impl std::fmt::Display for Backend {
         match self {
             Backend::All => write!(f, "all"),
             Backend::Claude => write!(f, "claude"),
-            Backend::Kiro => write!(f, "kiro"),
             Backend::Opencode => write!(f, "opencode"),
         }
     }
@@ -107,7 +104,6 @@ impl Backend {
         match self {
             Backend::All => None,
             Backend::Claude => Some(LibBackend::Claude),
-            Backend::Kiro => Some(LibBackend::Kiro),
             Backend::Opencode => Some(LibBackend::OpenCode),
         }
     }

@@ -110,18 +110,6 @@ pub fn run_sop(config: SopRunConfig) -> Result<(), SopRunError> {
     // 2. Build addendums and prompt
     let is_claude = backend_name == "claude";
 
-    // kiro-acp has no TUI — it's a stdio JSON-RPC protocol. `ralph plan` is
-    // human-interactive, so we transparently fall back to the `kiro-cli chat`
-    // TUI. The event-loop path (`ralph run`) still uses AcpExecutor.
-    if backend_name == "kiro-acp" {
-        tracing::info!(
-            "kiro-acp has no interactive TUI; ralph plan will use `kiro-cli chat` instead"
-        );
-        eprintln!(
-            "note: kiro-acp is headless; falling back to `kiro-cli chat` for interactive plan session"
-        );
-    }
-
     let mut addendums: Vec<(&str, &str)> = Vec::new();
 
     if config.agent_teams {
@@ -198,7 +186,7 @@ pub fn run_sop(config: SopRunConfig) -> Result<(), SopRunError> {
 /// Precedence (highest to lowest):
 /// 1. CLI flag (`--backend`)
 /// 2. Config file (`cli.backend` in ralph.yml)
-/// 3. Auto-detect (first available from claude → kiro → gemini → codex → amp)
+/// 3. Auto-detect (first available from claude → gemini → codex)
 fn resolve_backend(
     flag_override: Option<&str>,
     config: Option<&RalphConfig>,
@@ -356,11 +344,8 @@ mod tests {
     #[test]
     fn test_validate_backend_name_valid() {
         assert!(validate_backend_name("claude").is_ok());
-        assert!(validate_backend_name("kiro").is_ok());
         assert!(validate_backend_name("gemini").is_ok());
         assert!(validate_backend_name("codex").is_ok());
-        assert!(validate_backend_name("amp").is_ok());
-        assert!(validate_backend_name("copilot").is_ok());
         assert!(validate_backend_name("opencode").is_ok());
         assert!(validate_backend_name("custom").is_ok());
     }
@@ -399,23 +384,6 @@ mod tests {
         let config_path = std::path::PathBuf::from("ralph.yml");
         let backend = resolve_backend(None, Some(&config), Some(&config_path)).expect("backend");
         assert_eq!(backend, "gemini");
-    }
-
-    /// `ralph plan --backend kiro-acp` must not fail validation. The runner
-    /// transparently falls back to `kiro-cli chat` (see `run_sop`) because the
-    /// ACP protocol has no interactive TUI.
-    #[test]
-    fn test_resolve_backend_accepts_kiro_acp_flag() {
-        let backend = resolve_backend(Some("kiro-acp"), None, None).expect("backend");
-        assert_eq!(backend, "kiro-acp");
-    }
-
-    #[test]
-    fn test_resolve_backend_accepts_kiro_acp_from_config() {
-        let config = RalphConfig::parse_yaml("cli:\n  backend: kiro-acp\n").expect("parse config");
-        let config_path = std::path::PathBuf::from("ralph.yml");
-        let backend = resolve_backend(None, Some(&config), Some(&config_path)).expect("backend");
-        assert_eq!(backend, "kiro-acp");
     }
 
     #[test]

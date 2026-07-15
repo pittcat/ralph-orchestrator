@@ -205,12 +205,10 @@ pub(crate) fn resolve_project_config_path(
     // slice / Remote-only case), fall through to env and workspace
     // discovery — that is the only path allowed to find a config
     // without an explicit user-provided File.
-    let primary = config_sources
-        .iter()
-        .find_map(|source| match source {
-            ConfigSource::File(path) => Some(path.clone()),
-            _ => None,
-        });
+    let primary = config_sources.iter().find_map(|source| match source {
+        ConfigSource::File(path) => Some(path.clone()),
+        _ => None,
+    });
     let resolved = match primary {
         Some(path) => {
             // Caller supplied a File source. If it exists on disk we
@@ -264,8 +262,6 @@ fn resolve_project_config_path_with_env(
         Some(_) | None => fallback(),
     }
 }
-
-
 
 fn user_config_path_from_home(home: Option<&Path>) -> Option<PathBuf> {
     Some(home?.join(".ralph").join("config.yml"))

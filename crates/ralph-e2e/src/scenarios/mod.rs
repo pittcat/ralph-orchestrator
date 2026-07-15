@@ -119,7 +119,7 @@ pub trait TestScenario: Send + Sync {
     /// Default implementation returns all backends. Override this to restrict
     /// the scenario to specific backends.
     fn supported_backends(&self) -> Vec<Backend> {
-        vec![Backend::Claude, Backend::Kiro, Backend::OpenCode]
+        Backend::all().to_vec()
     }
 
     /// Sets up the scenario by creating necessary files in the workspace.
@@ -377,6 +377,34 @@ fn truncate(s: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
     use crate::executor::EventRecord;
+
+    #[test]
+    fn test_kiro_cases_removed_from_scenarios() {
+        // U5: ensure no scenario source still names the deleted kiro backend.
+        // Use grep -style assertions via .contains() against the source of
+        // each scenario file (cheap, deterministic; we don't load code).
+        let sources = [
+            ("capabilities", include_str!("capabilities.rs")),
+            ("connectivity", include_str!("connectivity.rs")),
+            ("errors", include_str!("errors.rs")),
+            ("events", include_str!("events.rs")),
+            ("hats", include_str!("hats.rs")),
+            ("incremental", include_str!("incremental.rs")),
+            ("memory", include_str!("memory.rs")),
+            ("orchestration", include_str!("orchestration.rs")),
+            ("tasks", include_str!("tasks.rs")),
+        ];
+        for (name, src) in sources.iter() {
+            assert!(
+                !src.contains("Backend::Kiro"),
+                "scenarios/{name}.rs still references deleted Backend::Kiro"
+            );
+            assert!(
+                !src.contains("\"kiro\""),
+                "scenarios/{name}.rs still references deleted backend string \"kiro\""
+            );
+        }
+    }
 
     #[test]
     fn test_truncate_does_not_panic_on_multibyte_chars() {

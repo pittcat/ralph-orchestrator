@@ -16,14 +16,10 @@ pub enum OutputFormat {
     Text,
     /// Newline-delimited JSON stream (Claude with --output-format stream-json)
     StreamJson,
-    /// JSONL stream from Copilot prompt mode (`--output-format json`)
-    CopilotStreamJson,
     /// Newline-delimited JSON stream (Pi with --mode json)
     PiStreamJson,
     /// Newline-delimited JSON stream (Trae CLI with --output-format stream-json)
     TraeStreamJson,
-    /// Agent Client Protocol over stdio (Kiro v2)
-    Acp,
 }
 
 /// Error when creating a custom backend without a command.
@@ -72,15 +68,10 @@ impl CliBackend {
     pub fn from_config(config: &CliConfig) -> Result<Self, CustomBackendError> {
         let mut backend = match config.backend.as_str() {
             "claude" => Self::claude(),
-            "kiro" => Self::kiro(),
-            "kiro-acp" => Self::kiro_acp(),
             "gemini" => Self::gemini(),
             "codex" => Self::codex(),
-            "amp" => Self::amp(),
-            "copilot" => Self::copilot(),
             "opencode" => Self::opencode(),
             "pi" => Self::pi(),
-            "roo" => Self::roo(),
             "traecli" => Self::traecli(),
             "custom" => return Self::custom(config),
             _ => Self::claude(), // Default to claude
@@ -155,75 +146,6 @@ impl CliBackend {
         }
     }
 
-    /// Creates the Kiro backend.
-    ///
-    /// Uses kiro-cli in headless mode with all tools trusted.
-    pub fn kiro() -> Self {
-        Self {
-            command: "kiro-cli".to_string(),
-            args: vec![
-                "chat".to_string(),
-                "--no-interactive".to_string(),
-                "--trust-all-tools".to_string(),
-            ],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: None,
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        }
-    }
-
-    /// Creates the Kiro backend with a specific agent and optional extra args.
-    ///
-    /// Uses kiro-cli with --agent flag to select a specific agent.
-    pub fn kiro_with_agent(agent: String, extra_args: &[String]) -> Self {
-        let mut backend = Self {
-            command: "kiro-cli".to_string(),
-            args: vec![
-                "chat".to_string(),
-                "--no-interactive".to_string(),
-                "--trust-all-tools".to_string(),
-                "--agent".to_string(),
-                agent,
-            ],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: None,
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        };
-        backend.args.extend(extra_args.iter().cloned());
-        backend
-    }
-
-    /// Creates the Kiro ACP backend.
-    ///
-    /// Uses kiro-cli with the ACP subcommand for structured JSON-RPC
-    /// communication over stdio instead of PTY text scraping.
-    pub fn kiro_acp() -> Self {
-        Self::kiro_acp_with_options(None, None)
-    }
-
-    /// Creates the Kiro ACP backend with an optional agent and/or model.
-    pub fn kiro_acp_with_options(agent: Option<&str>, model: Option<&str>) -> Self {
-        let mut args = vec!["acp".to_string()];
-        if let Some(name) = agent {
-            args.push("--agent".to_string());
-            args.push(name.to_string());
-        }
-        if let Some(m) = model {
-            args.push("--model".to_string());
-            args.push(m.to_string());
-        }
-        Self {
-            command: "kiro-cli".to_string(),
-            args,
-            prompt_mode: PromptMode::Stdin,
-            prompt_flag: None,
-            output_format: OutputFormat::Acp,
-            env_vars: vec![],
-        }
-    }
-
     /// Creates a backend from a named backend with additional args.
     ///
     /// # Errors
@@ -247,15 +169,10 @@ impl CliBackend {
     pub fn from_name(name: &str) -> Result<Self, CustomBackendError> {
         match name {
             "claude" => Ok(Self::claude()),
-            "kiro" => Ok(Self::kiro()),
-            "kiro-acp" => Ok(Self::kiro_acp()),
             "gemini" => Ok(Self::gemini()),
             "codex" => Ok(Self::codex()),
-            "amp" => Ok(Self::amp()),
-            "copilot" => Ok(Self::copilot()),
             "opencode" => Ok(Self::opencode()),
             "pi" => Ok(Self::pi()),
-            "roo" => Ok(Self::roo()),
             "traecli" => Ok(Self::traecli()),
             _ => Err(CustomBackendError),
         }
@@ -270,17 +187,6 @@ impl CliBackend {
             HatBackend::Named(name) => Self::from_name(name),
             HatBackend::NamedWithArgs { backend_type, args } => {
                 Self::from_name_with_args(backend_type, args)
-            }
-            HatBackend::KiroAgent {
-                backend_type,
-                agent,
-                args,
-            } => {
-                if backend_type == "kiro-acp" {
-                    Ok(Self::kiro_acp_with_options(Some(agent), None))
-                } else {
-                    Ok(Self::kiro_with_agent(agent.clone(), args))
-                }
             }
             HatBackend::Custom { command, args } => Ok(Self {
                 command: command.clone(),
@@ -310,53 +216,6 @@ impl CliBackend {
         Self {
             command: "codex".to_string(),
             args: vec!["exec".to_string(), "--yolo".to_string()],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: None, // Positional argument
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        }
-    }
-
-    /// Creates the Amp backend.
-    pub fn amp() -> Self {
-        Self {
-            command: "amp".to_string(),
-            args: vec!["--dangerously-allow-all".to_string()],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: Some("-x".to_string()),
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        }
-    }
-
-    /// Creates the Copilot backend for autonomous mode.
-    ///
-    /// Uses GitHub Copilot CLI with `--allow-all-tools` for automated tool approval.
-    /// Prompt mode emits JSONL via `--output-format json` for programmatic parsing.
-    pub fn copilot() -> Self {
-        Self {
-            command: "copilot".to_string(),
-            args: vec![
-                "--allow-all-tools".to_string(),
-                "--output-format".to_string(),
-                "json".to_string(),
-            ],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: Some("-p".to_string()),
-            output_format: OutputFormat::CopilotStreamJson,
-            env_vars: vec![],
-        }
-    }
-
-    /// Creates the Copilot TUI backend for interactive mode.
-    ///
-    /// Runs Copilot in full interactive mode (no -p flag), allowing
-    /// Copilot's native TUI to render. The prompt is passed as a
-    /// positional argument.
-    pub fn copilot_tui() -> Self {
-        Self {
-            command: "copilot".to_string(),
-            args: vec![], // No --allow-all-tools in TUI mode
             prompt_mode: PromptMode::Arg,
             prompt_flag: None, // Positional argument
             output_format: OutputFormat::Text,
@@ -396,11 +255,8 @@ impl CliBackend {
     /// | Backend | Interactive + Prompt |
     /// |---------|---------------------|
     /// | Claude  | positional arg (no `-p` flag) |
-    /// | Kiro    | removes `--no-interactive` |
     /// | Gemini  | uses `-i` instead of `-p` |
     /// | Codex   | no `exec` subcommand |
-    /// | Amp     | removes `--dangerously-allow-all` |
-    /// | Copilot | removes `--allow-all-tools` |
     /// | OpenCode| `run` subcommand with positional prompt |
     ///
     /// # Errors
@@ -408,34 +264,12 @@ impl CliBackend {
     pub fn for_interactive_prompt(backend_name: &str) -> Result<Self, CustomBackendError> {
         match backend_name {
             "claude" => Ok(Self::claude_interactive()),
-            // kiro-acp is a headless JSON-RPC stdio protocol with no TUI.
-            // For interactive use (e.g. `ralph plan`) fall back to the
-            // `kiro-cli chat` TUI, same as the `kiro` backend.
-            "kiro" | "kiro-acp" => Ok(Self::kiro_interactive()),
             "gemini" => Ok(Self::gemini_interactive()),
             "codex" => Ok(Self::codex_interactive()),
-            "amp" => Ok(Self::amp_interactive()),
-            "copilot" => Ok(Self::copilot_interactive()),
             "opencode" => Ok(Self::opencode_interactive()),
             "pi" => Ok(Self::pi_interactive()),
-            "roo" => Ok(Self::roo_interactive()),
             "traecli" => Ok(Self::traecli_interactive()),
             _ => Err(CustomBackendError),
-        }
-    }
-
-    /// Kiro in interactive mode (removes --no-interactive).
-    ///
-    /// Unlike headless `kiro()`, this allows the user to interact with
-    /// Kiro's TUI while still passing an initial prompt.
-    pub fn kiro_interactive() -> Self {
-        Self {
-            command: "kiro-cli".to_string(),
-            args: vec!["chat".to_string(), "--trust-all-tools".to_string()],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: None,
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
         }
     }
 
@@ -464,36 +298,6 @@ impl CliBackend {
             args: vec![], // No exec, no --full-auto
             prompt_mode: PromptMode::Arg,
             prompt_flag: None, // Positional argument
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        }
-    }
-
-    /// Amp in interactive mode (removes --dangerously-allow-all).
-    ///
-    /// Unlike headless `amp()`, this runs without the auto-approve flag,
-    /// requiring user confirmation for tool usage.
-    pub fn amp_interactive() -> Self {
-        Self {
-            command: "amp".to_string(),
-            args: vec![],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: Some("-x".to_string()),
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        }
-    }
-
-    /// Copilot in interactive mode (removes --allow-all-tools).
-    ///
-    /// Unlike headless `copilot()`, this runs without the auto-approve flag,
-    /// requiring user confirmation for tool usage.
-    pub fn copilot_interactive() -> Self {
-        Self {
-            command: "copilot".to_string(),
-            args: vec![],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: Some("-p".to_string()),
             output_format: OutputFormat::Text,
             env_vars: vec![],
         }
@@ -592,38 +396,6 @@ impl CliBackend {
         }
     }
 
-    /// Creates the Roo backend for headless execution.
-    ///
-    /// Uses `--print` for non-interactive output and `--ephemeral` for clean
-    /// disk state. Prompts are always passed via `--prompt-file` (handled in
-    /// `build_command()`). Roo auto-approves tools by default, so no
-    /// `--trust-all-tools` equivalent is needed.
-    pub fn roo() -> Self {
-        Self {
-            command: "roo".to_string(),
-            args: vec!["--print".to_string(), "--ephemeral".to_string()],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: None,
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        }
-    }
-
-    /// Creates the Roo backend for interactive mode with initial prompt.
-    ///
-    /// Runs roo TUI without `--print` or `--ephemeral`, passing the prompt
-    /// as a positional argument. Used by `ralph plan` for interactive sessions.
-    pub fn roo_interactive() -> Self {
-        Self {
-            command: "roo".to_string(),
-            args: vec![],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: None,
-            output_format: OutputFormat::Text,
-            env_vars: vec![],
-        }
-    }
-
     /// Creates the Trae CLI backend for headless execution.
     ///
     /// Uses `--yolo` to auto-approve tools, `--print` for non-interactive
@@ -653,7 +425,7 @@ impl CliBackend {
     /// Runs trae-cli TUI without `--yolo` or `--print`, passing the prompt
     /// as a positional argument. Output is plain `Text` because interactive
     /// TUI mode does not emit the stream-json protocol — see
-    /// `copilot_tui()` / `claude_interactive()` for the same pattern.
+    /// `claude_interactive()` for the same pattern.
     /// Used by `ralph plan` for interactive sessions.
     pub fn traecli_interactive() -> Self {
         Self {
@@ -686,33 +458,6 @@ impl CliBackend {
             output_format: OutputFormat::Text,
             env_vars: vec![],
         })
-    }
-
-    /// Builds roo prompt-file args: writes prompt to a temp file and
-    /// appends `--prompt-file <path>` to args. Falls back to positional
-    /// arg if temp file creation fails.
-    fn build_roo_prompt_file(
-        args: &mut Vec<String>,
-        prompt: &str,
-    ) -> (Option<String>, Option<NamedTempFile>) {
-        match NamedTempFile::new() {
-            Ok(mut file) => {
-                if let Err(e) = file.write_all(prompt.as_bytes()) {
-                    tracing::warn!("Failed to write roo prompt to temp file: {}", e);
-                    args.push(prompt.to_string());
-                    (None, None)
-                } else {
-                    args.push("--prompt-file".to_string());
-                    args.push(file.path().display().to_string());
-                    (None, Some(file))
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to create temp file for roo: {}", e);
-                args.push(prompt.to_string());
-                (None, None)
-            }
-        }
     }
 
     /// Builds the command for PTY (non-interactive) execution.
@@ -756,44 +501,38 @@ impl CliBackend {
             args = self.filter_args_for_interactive(args);
         }
 
-        // Handle prompt passing: Roo uses --prompt-file, all others use temp file for large prompts
+        // Handle prompt passing: all backends use temp file for large prompts
         let (stdin_input, temp_file) = match self.prompt_mode {
             PromptMode::Arg => {
-                // Roo headless: always use --prompt-file for all prompts
-                // Only headless roo() has --print in args; roo_interactive() does not
-                if self.command == "roo" && args.contains(&"--print".to_string()) {
-                    Self::build_roo_prompt_file(&mut args, prompt)
-                } else {
-                    // Use temp file for large prompts (>7000 chars) to avoid shell ARG_MAX limits
-                    let (prompt_text, temp_file) = if prompt.len() > 7000 {
-                        match NamedTempFile::new() {
-                            Ok(mut file) => {
-                                if let Err(e) = file.write_all(prompt.as_bytes()) {
-                                    tracing::warn!("Failed to write prompt to temp file: {}", e);
-                                    (prompt.to_string(), None)
-                                } else {
-                                    let path = file.path().display().to_string();
-                                    (
-                                        format!("Please read and execute the task in {}", path),
-                                        Some(file),
-                                    )
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to create temp file: {}", e);
+                // Use temp file for large prompts (>7000 chars) to avoid shell ARG_MAX limits
+                let (prompt_text, temp_file) = if prompt.len() > 7000 {
+                    match NamedTempFile::new() {
+                        Ok(mut file) => {
+                            if let Err(e) = file.write_all(prompt.as_bytes()) {
+                                tracing::warn!("Failed to write prompt to temp file: {}", e);
                                 (prompt.to_string(), None)
+                            } else {
+                                let path = file.path().display().to_string();
+                                (
+                                    format!("Please read and execute the task in {}", path),
+                                    Some(file),
+                                )
                             }
                         }
-                    } else {
-                        (prompt.to_string(), None)
-                    };
-
-                    if let Some(ref flag) = self.prompt_flag {
-                        args.push(flag.clone());
+                        Err(e) => {
+                            tracing::warn!("Failed to create temp file: {}", e);
+                            (prompt.to_string(), None)
+                        }
                     }
-                    args.push(prompt_text);
-                    (None, temp_file)
+                } else {
+                    (prompt.to_string(), None)
+                };
+
+                if let Some(ref flag) = self.prompt_flag {
+                    args.push(flag.clone());
                 }
+                args.push(prompt_text);
+                (None, temp_file)
             }
             PromptMode::Stdin => (Some(prompt.to_string()), None),
         };
@@ -817,24 +556,8 @@ impl CliBackend {
     /// Filters args for interactive mode per spec table.
     fn filter_args_for_interactive(&self, args: Vec<String>) -> Vec<String> {
         match self.command.as_str() {
-            "kiro-cli" => args
-                .into_iter()
-                .filter(|a| a != "--no-interactive")
-                .collect(),
             "codex" => args.into_iter().filter(|a| a != "--full-auto").collect(),
-            "amp" => args
-                .into_iter()
-                .filter(|a| a != "--dangerously-allow-all")
-                .collect(),
-            "copilot" => args
-                .into_iter()
-                .filter(|a| a != "--allow-all-tools")
-                .collect(),
             "claude" => args.into_iter().filter(|a| a != "--print").collect(),
-            "roo" => args
-                .into_iter()
-                .filter(|a| a != "--print" && a != "--ephemeral")
-                .collect(),
             "trae-cli" => args
                 .into_iter()
                 .filter(|a| a != "--yolo" && a != "--print")
@@ -885,6 +608,31 @@ impl CliBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_roo_prompt_file_helper_removed() {
+        // U3: roo backend and its helper `build_roo_prompt_file` are deleted.
+        // We verify the helpers are gone by source-grepping cli_backend.rs.
+        let src = include_str!("cli_backend.rs");
+        let has_helper = src
+            .lines()
+            .map(str::trim_start)
+            .any(|l| l.starts_with("fn build_roo_prompt_file"));
+        let has_factory = src
+            .lines()
+            .map(str::trim_start)
+            .any(|l| l.starts_with("pub fn roo()"));
+        let has_interactive = src
+            .lines()
+            .map(str::trim_start)
+            .any(|l| l.starts_with("pub fn roo_interactive()"));
+        assert!(!has_helper, "build_roo_prompt_file helper must be deleted");
+        assert!(!has_factory, "CliBackend::roo() factory must be deleted");
+        assert!(
+            !has_interactive,
+            "CliBackend::roo_interactive() factory must be deleted"
+        );
+    }
 
     #[test]
     fn test_claude_backend() {
@@ -982,539 +730,6 @@ mod tests {
     }
 
     #[test]
-    fn test_non_claude_large_prompt() {
-        let backend = CliBackend::kiro();
-        let large_prompt = "x".repeat(7001);
-        let (cmd, args, _stdin, temp) = backend.build_command(&large_prompt, false);
-
-        assert_eq!(cmd, "kiro-cli");
-        assert!(temp.is_some());
-        assert!(args.iter().any(|a| a.contains("Please read and execute")));
-    }
-
-    #[test]
-    fn test_kiro_backend() {
-        let backend = CliBackend::kiro();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "kiro-cli");
-        assert_eq!(
-            args,
-            vec![
-                "chat",
-                "--no-interactive",
-                "--trust-all-tools",
-                "test prompt"
-            ]
-        );
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_gemini_backend() {
-        let backend = CliBackend::gemini();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "gemini");
-        assert_eq!(args, vec!["--yolo", "-p", "test prompt"]);
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_codex_backend() {
-        let backend = CliBackend::codex();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "codex");
-        assert_eq!(args, vec!["exec", "--yolo", "test prompt"]);
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_codex_large_prompt_uses_temp_file() {
-        let backend = CliBackend::codex();
-        let large_prompt = "x".repeat(7001);
-        let (cmd, args, _stdin, temp) = backend.build_command(&large_prompt, false);
-
-        assert_eq!(cmd, "codex");
-        assert!(temp.is_some());
-        assert!(args.iter().any(|a| a.contains("Please read and execute")));
-    }
-
-    #[test]
-    fn test_amp_backend() {
-        let backend = CliBackend::amp();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "amp");
-        assert_eq!(args, vec!["--dangerously-allow-all", "-x", "test prompt"]);
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_copilot_backend() {
-        let backend = CliBackend::copilot();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "copilot");
-        assert_eq!(
-            args,
-            vec![
-                "--allow-all-tools",
-                "--output-format",
-                "json",
-                "-p",
-                "test prompt"
-            ]
-        );
-        assert!(stdin.is_none());
-        assert_eq!(backend.output_format, OutputFormat::CopilotStreamJson);
-    }
-
-    #[test]
-    fn test_copilot_tui_backend() {
-        let backend = CliBackend::copilot_tui();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "copilot");
-        // Should have prompt as positional arg, no -p flag, no --allow-all-tools
-        assert_eq!(args, vec!["test prompt"]);
-        assert!(stdin.is_none());
-        assert_eq!(backend.output_format, OutputFormat::Text);
-        assert_eq!(backend.prompt_flag, None);
-    }
-
-    #[test]
-    fn test_from_config() {
-        let config = CliConfig {
-            backend: "claude".to_string(),
-            command: None,
-            prompt_mode: "arg".to_string(),
-            ..Default::default()
-        };
-        let backend = CliBackend::from_config(&config).unwrap();
-
-        assert_eq!(backend.command, "claude");
-        assert_eq!(backend.prompt_mode, PromptMode::Stdin);
-        assert_eq!(backend.prompt_flag, None);
-        assert!(backend.args.contains(&"--print".to_string()));
-    }
-
-    #[test]
-    fn test_from_config_command_override() {
-        let config = CliConfig {
-            backend: "claude".to_string(),
-            command: Some("my-custom-claude".to_string()),
-            prompt_mode: "arg".to_string(),
-            ..Default::default()
-        };
-        let backend = CliBackend::from_config(&config).unwrap();
-
-        assert_eq!(backend.command, "my-custom-claude");
-        assert_eq!(backend.prompt_flag, None);
-        assert_eq!(backend.prompt_mode, PromptMode::Stdin);
-        assert!(backend.args.contains(&"--print".to_string()));
-        assert_eq!(backend.output_format, OutputFormat::StreamJson);
-    }
-
-    #[test]
-    fn test_kiro_interactive_mode_omits_no_interactive_flag() {
-        let backend = CliBackend::kiro();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", true);
-
-        assert_eq!(cmd, "kiro-cli");
-        assert_eq!(args, vec!["chat", "--trust-all-tools", "test prompt"]);
-        assert!(stdin.is_none());
-        assert!(!args.contains(&"--no-interactive".to_string()));
-    }
-
-    #[test]
-    fn test_codex_interactive_mode_omits_full_auto() {
-        let backend = CliBackend::codex();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", true);
-
-        assert_eq!(cmd, "codex");
-        assert_eq!(args, vec!["exec", "--yolo", "test prompt"]);
-        assert!(stdin.is_none());
-        assert!(!args.contains(&"--full-auto".to_string()));
-    }
-
-    #[test]
-    fn test_amp_interactive_mode_no_flags() {
-        let backend = CliBackend::amp();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", true);
-
-        assert_eq!(cmd, "amp");
-        assert_eq!(args, vec!["-x", "test prompt"]);
-        assert!(stdin.is_none());
-        assert!(!args.contains(&"--dangerously-allow-all".to_string()));
-    }
-
-    #[test]
-    fn test_copilot_interactive_mode_omits_allow_all_tools() {
-        let backend = CliBackend::copilot();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", true);
-
-        assert_eq!(cmd, "copilot");
-        assert_eq!(args, vec!["--output-format", "json", "-p", "test prompt"]);
-        assert!(stdin.is_none());
-        assert!(!args.contains(&"--allow-all-tools".to_string()));
-    }
-
-    #[test]
-    fn test_claude_interactive_mode_omits_print() {
-        let backend = CliBackend::claude();
-        let (cmd, args_auto, stdin_auto, _) = backend.build_command("test prompt", false);
-        let (_, args_interactive, stdin_interactive, _) =
-            backend.build_command("test prompt", true);
-
-        assert_eq!(cmd, "claude");
-        assert!(args_auto.contains(&"--print".to_string()));
-        assert!(!args_interactive.contains(&"--print".to_string()));
-        assert_eq!(
-            args_interactive,
-            vec![
-                "--dangerously-skip-permissions",
-                "--verbose",
-                "--output-format",
-                "stream-json",
-                "--setting-sources",
-                "project,local",
-                "--disallowedTools=TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet",
-            ]
-        );
-        assert_eq!(stdin_auto, Some("test prompt".to_string()));
-        assert_eq!(stdin_interactive, Some("test prompt".to_string()));
-    }
-
-    #[test]
-    fn test_gemini_interactive_mode_unchanged() {
-        let backend = CliBackend::gemini();
-        let (cmd, args_auto, stdin_auto, _) = backend.build_command("test prompt", false);
-        let (_, args_interactive, stdin_interactive, _) =
-            backend.build_command("test prompt", true);
-
-        assert_eq!(cmd, "gemini");
-        assert_eq!(args_auto, args_interactive);
-        assert_eq!(args_auto, vec!["--yolo", "-p", "test prompt"]);
-        assert_eq!(stdin_auto, stdin_interactive);
-        assert!(stdin_auto.is_none());
-    }
-
-    #[test]
-    fn test_custom_backend_with_prompt_flag_short() {
-        let config = CliConfig {
-            backend: "custom".to_string(),
-            command: Some("my-agent".to_string()),
-            prompt_mode: "arg".to_string(),
-            prompt_flag: Some("-p".to_string()),
-            ..Default::default()
-        };
-        let backend = CliBackend::from_config(&config).unwrap();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "my-agent");
-        assert_eq!(args, vec!["-p", "test prompt"]);
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_custom_backend_with_prompt_flag_long() {
-        let config = CliConfig {
-            backend: "custom".to_string(),
-            command: Some("my-agent".to_string()),
-            prompt_mode: "arg".to_string(),
-            prompt_flag: Some("--prompt".to_string()),
-            ..Default::default()
-        };
-        let backend = CliBackend::from_config(&config).unwrap();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "my-agent");
-        assert_eq!(args, vec!["--prompt", "test prompt"]);
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_custom_backend_without_prompt_flag_positional() {
-        let config = CliConfig {
-            backend: "custom".to_string(),
-            command: Some("my-agent".to_string()),
-            prompt_mode: "arg".to_string(),
-            prompt_flag: None,
-            ..Default::default()
-        };
-        let backend = CliBackend::from_config(&config).unwrap();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "my-agent");
-        assert_eq!(args, vec!["test prompt"]);
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_custom_backend_without_command_returns_error() {
-        let config = CliConfig {
-            backend: "custom".to_string(),
-            command: None,
-            prompt_mode: "arg".to_string(),
-            ..Default::default()
-        };
-        let result = CliBackend::from_config(&config);
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "custom backend requires a command to be specified"
-        );
-    }
-
-    #[test]
-    fn test_kiro_with_agent() {
-        let backend = CliBackend::kiro_with_agent("my-agent".to_string(), &[]);
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "kiro-cli");
-        assert_eq!(
-            args,
-            vec![
-                "chat",
-                "--no-interactive",
-                "--trust-all-tools",
-                "--agent",
-                "my-agent",
-                "test prompt"
-            ]
-        );
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_kiro_with_agent_extra_args() {
-        let extra_args = vec!["--verbose".to_string(), "--debug".to_string()];
-        let backend = CliBackend::kiro_with_agent("my-agent".to_string(), &extra_args);
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "kiro-cli");
-        assert_eq!(
-            args,
-            vec![
-                "chat",
-                "--no-interactive",
-                "--trust-all-tools",
-                "--agent",
-                "my-agent",
-                "--verbose",
-                "--debug",
-                "test prompt"
-            ]
-        );
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_from_name_claude() {
-        let backend = CliBackend::from_name("claude").unwrap();
-        assert_eq!(backend.command, "claude");
-        assert_eq!(backend.prompt_mode, PromptMode::Stdin);
-        assert_eq!(backend.prompt_flag, None);
-        assert!(backend.args.contains(&"--print".to_string()));
-    }
-
-    #[test]
-    fn test_from_name_kiro() {
-        let backend = CliBackend::from_name("kiro").unwrap();
-        assert_eq!(backend.command, "kiro-cli");
-    }
-
-    #[test]
-    fn test_from_name_gemini() {
-        let backend = CliBackend::from_name("gemini").unwrap();
-        assert_eq!(backend.command, "gemini");
-    }
-
-    #[test]
-    fn test_from_name_codex() {
-        let backend = CliBackend::from_name("codex").unwrap();
-        assert_eq!(backend.command, "codex");
-    }
-
-    #[test]
-    fn test_from_name_amp() {
-        let backend = CliBackend::from_name("amp").unwrap();
-        assert_eq!(backend.command, "amp");
-    }
-
-    #[test]
-    fn test_from_name_copilot() {
-        let backend = CliBackend::from_name("copilot").unwrap();
-        assert_eq!(backend.command, "copilot");
-        assert_eq!(backend.prompt_flag, Some("-p".to_string()));
-    }
-
-    #[test]
-    fn test_from_name_invalid() {
-        let result = CliBackend::from_name("invalid");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_from_hat_backend_named() {
-        let hat_backend = HatBackend::Named("claude".to_string());
-        let backend = CliBackend::from_hat_backend(&hat_backend).unwrap();
-        assert_eq!(backend.command, "claude");
-    }
-
-    #[test]
-    fn test_from_hat_backend_kiro_agent() {
-        let hat_backend = HatBackend::KiroAgent {
-            backend_type: "kiro".to_string(),
-            agent: "my-agent".to_string(),
-            args: vec![],
-        };
-        let backend = CliBackend::from_hat_backend(&hat_backend).unwrap();
-        let (cmd, args, _, _) = backend.build_command("test", false);
-        assert_eq!(cmd, "kiro-cli");
-        assert!(args.contains(&"--agent".to_string()));
-        assert!(args.contains(&"my-agent".to_string()));
-    }
-
-    #[test]
-    fn test_from_hat_backend_kiro_acp_agent_uses_acp_executor() {
-        let hat_backend = HatBackend::KiroAgent {
-            backend_type: "kiro-acp".to_string(),
-            agent: "my-agent".to_string(),
-            args: vec![],
-        };
-        let backend = CliBackend::from_hat_backend(&hat_backend).unwrap();
-        assert_eq!(backend.command, "kiro-cli");
-        assert_eq!(backend.output_format, OutputFormat::Acp);
-        assert!(backend.args.contains(&"acp".to_string()));
-        assert!(backend.args.contains(&"--agent".to_string()));
-        assert!(backend.args.contains(&"my-agent".to_string()));
-    }
-
-    #[test]
-    fn test_from_hat_backend_kiro_agent_with_args() {
-        let hat_backend = HatBackend::KiroAgent {
-            backend_type: "kiro".to_string(),
-            agent: "my-agent".to_string(),
-            args: vec!["--verbose".to_string()],
-        };
-        let backend = CliBackend::from_hat_backend(&hat_backend).unwrap();
-        let (cmd, args, _, _) = backend.build_command("test", false);
-        assert_eq!(cmd, "kiro-cli");
-        assert!(args.contains(&"--agent".to_string()));
-        assert!(args.contains(&"my-agent".to_string()));
-        assert!(args.contains(&"--verbose".to_string()));
-    }
-
-    #[test]
-    fn test_from_hat_backend_named_with_args() {
-        let hat_backend = HatBackend::NamedWithArgs {
-            backend_type: "claude".to_string(),
-            args: vec!["--model".to_string(), "claude-sonnet-4".to_string()],
-        };
-        let backend = CliBackend::from_hat_backend(&hat_backend).unwrap();
-        assert_eq!(backend.command, "claude");
-        assert!(backend.args.contains(&"--model".to_string()));
-        assert!(backend.args.contains(&"claude-sonnet-4".to_string()));
-    }
-
-    #[test]
-    fn test_codex_named_with_args_dangerous_bypass_normalizes_to_yolo() {
-        let hat_backend = HatBackend::NamedWithArgs {
-            backend_type: "codex".to_string(),
-            args: vec!["--dangerously-bypass-approvals-and-sandbox".to_string()],
-        };
-        let backend = CliBackend::from_hat_backend(&hat_backend).unwrap();
-        let (cmd, args, _, _) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "codex");
-        assert_eq!(args, vec!["exec", "--yolo", "test prompt"]);
-    }
-
-    #[test]
-    fn test_codex_named_with_args_yolo_removes_full_auto() {
-        let hat_backend = HatBackend::NamedWithArgs {
-            backend_type: "codex".to_string(),
-            args: vec!["--yolo".to_string()],
-        };
-        let backend = CliBackend::from_hat_backend(&hat_backend).unwrap();
-        let (cmd, args, _, _) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "codex");
-        assert_eq!(args, vec!["exec", "--yolo", "test prompt"]);
-    }
-
-    #[test]
-    fn test_from_hat_backend_custom() {
-        let hat_backend = HatBackend::Custom {
-            command: "my-cli".to_string(),
-            args: vec!["--flag".to_string()],
-        };
-        let backend = CliBackend::from_hat_backend(&hat_backend).unwrap();
-        assert_eq!(backend.command, "my-cli");
-        assert_eq!(backend.args, vec!["--flag"]);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Tests for interactive prompt backends
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_for_interactive_prompt_claude() {
-        let backend = CliBackend::for_interactive_prompt("claude").unwrap();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "claude");
-        // Should use positional arg (no -p flag)
-        assert_eq!(
-            args,
-            vec![
-                "--dangerously-skip-permissions",
-                "--setting-sources",
-                "project,local",
-                "--disallowedTools=TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet",
-                "test prompt"
-            ]
-        );
-        assert!(stdin.is_none());
-        assert_eq!(backend.prompt_flag, None);
-    }
-
-    #[test]
-    fn test_for_interactive_prompt_kiro() {
-        let backend = CliBackend::for_interactive_prompt("kiro").unwrap();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "kiro-cli");
-        // Should NOT have --no-interactive
-        assert_eq!(args, vec!["chat", "--trust-all-tools", "test prompt"]);
-        assert!(!args.contains(&"--no-interactive".to_string()));
-        assert!(stdin.is_none());
-    }
-
-    /// kiro-acp has no interactive TUI; `for_interactive_prompt` must fall back
-    /// to the same `kiro-cli chat` configuration as the plain `kiro` backend so
-    /// `ralph plan --backend kiro-acp` works instead of erroring out.
-    #[test]
-    fn test_for_interactive_prompt_kiro_acp_falls_back_to_kiro_chat() {
-        let backend = CliBackend::for_interactive_prompt("kiro-acp").unwrap();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "kiro-cli");
-        // Should behave identically to the plain `kiro` interactive backend:
-        // `kiro-cli chat --trust-all-tools <prompt>` (no `acp`, no `--no-interactive`).
-        assert_eq!(args, vec!["chat", "--trust-all-tools", "test prompt"]);
-        assert!(!args.contains(&"acp".to_string()));
-        assert!(!args.contains(&"--no-interactive".to_string()));
-        assert!(stdin.is_none());
-        assert_eq!(backend.output_format, OutputFormat::Text);
-    }
-
-    #[test]
     fn test_for_interactive_prompt_gemini() {
         let backend = CliBackend::for_interactive_prompt("gemini").unwrap();
         let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
@@ -1536,30 +751,6 @@ mod tests {
         assert_eq!(args, vec!["test prompt"]);
         assert!(!args.contains(&"exec".to_string()));
         assert!(!args.contains(&"--full-auto".to_string()));
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_for_interactive_prompt_amp() {
-        let backend = CliBackend::for_interactive_prompt("amp").unwrap();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "amp");
-        // Should NOT have --dangerously-allow-all
-        assert_eq!(args, vec!["-x", "test prompt"]);
-        assert!(!args.contains(&"--dangerously-allow-all".to_string()));
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_for_interactive_prompt_copilot() {
-        let backend = CliBackend::for_interactive_prompt("copilot").unwrap();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "copilot");
-        // Should NOT have --allow-all-tools
-        assert_eq!(args, vec!["-p", "test prompt"]);
-        assert!(!args.contains(&"--allow-all-tools".to_string()));
         assert!(stdin.is_none());
     }
 
@@ -1857,14 +1048,10 @@ mod tests {
         // All non-teams constructors should have empty env_vars
         assert!(CliBackend::claude().env_vars.is_empty());
         assert!(CliBackend::claude_interactive().env_vars.is_empty());
-        assert!(CliBackend::kiro().env_vars.is_empty());
         assert!(CliBackend::gemini().env_vars.is_empty());
         assert!(CliBackend::codex().env_vars.is_empty());
-        assert!(CliBackend::amp().env_vars.is_empty());
-        assert!(CliBackend::copilot().env_vars.is_empty());
         assert!(CliBackend::opencode().env_vars.is_empty());
         assert!(CliBackend::pi().env_vars.is_empty());
-        assert!(CliBackend::roo().env_vars.is_empty());
     }
 
     #[test]
@@ -1889,176 +1076,6 @@ mod tests {
             assert_eq!(setting_sources.next(), Some("project,local"));
             assert_eq!(setting_sources.next(), None);
         }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Tests for Roo backend
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_roo_backend() {
-        let backend = CliBackend::roo();
-        let (cmd, args, stdin, temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "roo");
-        // Should use --prompt-file with temp file, not positional arg
-        assert!(
-            temp.is_some(),
-            "roo should always use temp file for prompts"
-        );
-        assert!(
-            args.contains(&"--print".to_string()),
-            "roo headless should have --print"
-        );
-        assert!(
-            args.contains(&"--ephemeral".to_string()),
-            "roo headless should have --ephemeral"
-        );
-        assert!(
-            args.contains(&"--prompt-file".to_string()),
-            "roo should use --prompt-file"
-        );
-        assert!(stdin.is_none());
-        assert_eq!(backend.output_format, OutputFormat::Text);
-    }
-
-    #[test]
-    fn test_roo_interactive() {
-        let backend = CliBackend::roo_interactive();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "roo");
-        // Interactive mode: no --print, no --ephemeral, positional prompt
-        assert_eq!(args, vec!["test prompt"]);
-        assert!(stdin.is_none());
-        assert_eq!(backend.output_format, OutputFormat::Text);
-        assert_eq!(backend.prompt_flag, None);
-    }
-
-    #[test]
-    fn test_from_name_roo() {
-        let backend = CliBackend::from_name("roo").unwrap();
-        assert_eq!(backend.command, "roo");
-        assert_eq!(backend.prompt_flag, None);
-        assert_eq!(backend.output_format, OutputFormat::Text);
-    }
-
-    #[test]
-    fn test_from_config_roo() {
-        let config = CliConfig {
-            backend: "roo".to_string(),
-            command: None,
-            prompt_mode: "arg".to_string(),
-            ..Default::default()
-        };
-        let backend = CliBackend::from_config(&config).unwrap();
-
-        assert_eq!(backend.command, "roo");
-        assert_eq!(backend.output_format, OutputFormat::Text);
-        assert!(backend.args.contains(&"--print".to_string()));
-        assert!(backend.args.contains(&"--ephemeral".to_string()));
-    }
-
-    #[test]
-    fn test_from_config_roo_with_args() {
-        let config = CliConfig {
-            backend: "roo".to_string(),
-            command: None,
-            prompt_mode: "arg".to_string(),
-            args: vec![
-                "--provider".to_string(),
-                "bedrock".to_string(),
-                "--model".to_string(),
-                "anthropic.claude-sonnet-4-6".to_string(),
-            ],
-            ..Default::default()
-        };
-        let backend = CliBackend::from_config(&config).unwrap();
-        let (_cmd, args, _stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(backend.command, "roo");
-        // Should have default args + extra args + --prompt-file
-        assert!(args.contains(&"--print".to_string()));
-        assert!(args.contains(&"--ephemeral".to_string()));
-        assert!(args.contains(&"--provider".to_string()));
-        assert!(args.contains(&"bedrock".to_string()));
-        assert!(args.contains(&"--model".to_string()));
-        assert!(args.contains(&"anthropic.claude-sonnet-4-6".to_string()));
-        assert!(args.contains(&"--prompt-file".to_string()));
-    }
-
-    #[test]
-    fn test_for_interactive_prompt_roo() {
-        let backend = CliBackend::for_interactive_prompt("roo").unwrap();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
-
-        assert_eq!(cmd, "roo");
-        // Interactive: no --print, no --ephemeral, positional prompt
-        assert_eq!(args, vec!["test prompt"]);
-        assert!(stdin.is_none());
-        assert_eq!(backend.output_format, OutputFormat::Text);
-    }
-
-    #[test]
-    fn test_roo_interactive_mode_removes_print() {
-        let backend = CliBackend::roo();
-        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", true);
-
-        assert_eq!(cmd, "roo");
-        // In interactive mode, --print and --ephemeral should be removed
-        assert!(
-            !args.contains(&"--print".to_string()),
-            "interactive mode should remove --print"
-        );
-        assert!(
-            !args.contains(&"--ephemeral".to_string()),
-            "interactive mode should remove --ephemeral"
-        );
-        assert!(stdin.is_none());
-    }
-
-    #[test]
-    fn test_roo_uses_prompt_file() {
-        let backend = CliBackend::roo();
-        // Test with small prompt
-        let (_, args_small, _, temp_small) = backend.build_command("small prompt", false);
-        assert!(
-            temp_small.is_some(),
-            "even small prompts should use temp file"
-        );
-        assert!(
-            args_small.contains(&"--prompt-file".to_string()),
-            "should use --prompt-file"
-        );
-
-        // Test with large prompt
-        let large_prompt = "x".repeat(10000);
-        let (_, args_large, _, temp_large) = backend.build_command(&large_prompt, false);
-        assert!(temp_large.is_some(), "large prompts should use temp file");
-        assert!(
-            args_large.contains(&"--prompt-file".to_string()),
-            "should use --prompt-file for large prompts"
-        );
-    }
-
-    #[test]
-    fn test_roo_prompt_file_content() {
-        use std::io::{Read, Seek};
-        let backend = CliBackend::roo();
-        let prompt = "This is a test prompt for roo";
-        let (_, _, _, temp) = backend.build_command(prompt, false);
-
-        let mut temp_file = temp.expect("should have temp file");
-        let mut content = String::new();
-        temp_file
-            .as_file_mut()
-            .seek(std::io::SeekFrom::Start(0))
-            .unwrap();
-        temp_file
-            .as_file_mut()
-            .read_to_string(&mut content)
-            .unwrap();
-        assert_eq!(content, prompt);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

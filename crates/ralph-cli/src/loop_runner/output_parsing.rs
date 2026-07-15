@@ -15,7 +15,6 @@ pub fn normalize_cli_output_for_parsing(
 ) -> String {
     match output_format {
         BackendOutputFormat::StreamJson => extract_claude_stream_text(raw_output),
-        BackendOutputFormat::CopilotStreamJson => CopilotStreamParser::extract_all_text(raw_output),
         BackendOutputFormat::PiStreamJson => extract_pi_stream_text(raw_output),
         BackendOutputFormat::TraeStreamJson => extract_trae_stream_text(raw_output),
         _ => raw_output.to_string(),

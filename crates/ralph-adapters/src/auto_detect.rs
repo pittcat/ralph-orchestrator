@@ -8,18 +8,13 @@ use std::sync::OnceLock;
 use tracing::debug;
 
 /// Default priority order for backend detection.
-pub const DEFAULT_PRIORITY: &[&str] = &[
-    "claude", "kiro", "kiro-acp", "gemini", "codex", "amp", "copilot", "opencode", "pi", "roo",
-    "traecli",
-];
+pub const DEFAULT_PRIORITY: &[&str] = &["claude", "gemini", "codex", "opencode", "pi", "traecli"];
 
 /// Maps backend config names to their actual CLI command names.
 ///
 /// Some backends have CLI binaries with different names than their config identifiers.
-/// For example, the "kiro" backend uses the "kiro-cli" binary.
 fn detection_command(backend: &str) -> &str {
     match backend {
-        "kiro" | "kiro-acp" => "kiro-cli",
         "traecli" => "trae-cli",
         _ => backend,
     }
@@ -52,17 +47,13 @@ impl std::fmt::Display for NoBackendError {
             f,
             "  • Claude CLI:   https://docs.anthropic.com/claude-code"
         )?;
-        writeln!(f, "  • Kiro CLI:     https://kiro.dev")?;
         writeln!(f, "  • Gemini CLI:   https://cloud.google.com/gemini")?;
         writeln!(f, "  • Codex CLI:    https://openai.com/codex")?;
-        writeln!(f, "  • Amp CLI:      https://amp.dev")?;
-        writeln!(f, "  • Copilot CLI:  https://docs.github.com/copilot")?;
         writeln!(f, "  • OpenCode CLI: https://opencode.ai")?;
         writeln!(
             f,
             "  • Pi CLI:       https://github.com/anthropics/pi-coding-agent"
         )?;
-        writeln!(f, "  • Roo CLI:      https://github.com/RooVetGit/Roo-Code")?;
         writeln!(f, "  • Trae CLI:     https://docs.trae.cn/cli")?;
         Ok(())
     }
@@ -74,7 +65,7 @@ impl std::error::Error for NoBackendError {}
 ///
 /// Each backend is detected by running `<command> --version` and checking
 /// for exit code 0. The command may differ from the backend name (e.g.,
-/// "kiro" backend uses "kiro-cli" command).
+/// "traecli" backend uses "trae-cli" command).
 pub fn is_backend_available(backend: &str) -> bool {
     let command = detection_command(backend);
     let result = Command::new(command).arg("--version").output();
@@ -161,6 +152,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_default_priority_does_not_contain_copilot() {
+        assert!(
+            !DEFAULT_PRIORITY.contains(&"copilot"),
+            "DEFAULT_PRIORITY must not contain deleted backend 'copilot'"
+        );
+    }
+
+    #[test]
+    fn test_default_priority_does_not_contain_amp() {
+        assert!(
+            !DEFAULT_PRIORITY.contains(&"amp"),
+            "DEFAULT_PRIORITY must not contain deleted backend 'amp'"
+        );
+    }
+
+    #[test]
+    fn test_default_priority_does_not_contain_roo() {
+        assert!(
+            !DEFAULT_PRIORITY.contains(&"roo"),
+            "DEFAULT_PRIORITY must not contain deleted backend 'roo'"
+        );
+    }
+
+    #[test]
+    fn test_default_priority_does_not_contain_kiro_and_kiro_acp() {
+        assert!(
+            !DEFAULT_PRIORITY.contains(&"kiro"),
+            "DEFAULT_PRIORITY must not contain deleted backend 'kiro'"
+        );
+        assert!(
+            !DEFAULT_PRIORITY.contains(&"kiro-acp"),
+            "DEFAULT_PRIORITY must not contain deleted backend 'kiro-acp'"
+        );
+    }
+
+    #[test]
     fn test_is_backend_available_echo() {
         // 'echo' command should always be available
         let result = Command::new("echo").arg("--version").output();
@@ -201,12 +228,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detection_command_kiro() {
-        // Kiro backend uses kiro-cli as the command
-        assert_eq!(detection_command("kiro"), "kiro-cli");
-    }
-
-    #[test]
     fn test_detection_command_others() {
         // Other backends use their name as the command
         assert_eq!(detection_command("claude"), "claude");
@@ -226,45 +247,12 @@ mod tests {
     }
 
     #[test]
-    fn test_default_priority_pi_is_third_to_last() {
-        let len = DEFAULT_PRIORITY.len();
-        assert_eq!(
-            DEFAULT_PRIORITY[len - 3],
-            "pi",
-            "Pi should be third-to-last in DEFAULT_PRIORITY"
-        );
-    }
-
-    #[test]
-    fn test_default_priority_includes_roo() {
-        assert!(
-            DEFAULT_PRIORITY.contains(&"roo"),
-            "DEFAULT_PRIORITY should include 'roo'"
-        );
-    }
-
-    #[test]
-    fn test_default_priority_roo_is_second_to_last() {
-        let len = DEFAULT_PRIORITY.len();
-        assert_eq!(
-            DEFAULT_PRIORITY[len - 2],
-            "roo",
-            "Roo should be second-to-last in DEFAULT_PRIORITY"
-        );
-    }
-
-    #[test]
     fn test_default_priority_traecli_is_last() {
         assert_eq!(
             DEFAULT_PRIORITY.last(),
             Some(&"traecli"),
             "Trae CLI should be the last entry in DEFAULT_PRIORITY"
         );
-    }
-
-    #[test]
-    fn test_detection_command_roo() {
-        assert_eq!(detection_command("roo"), "roo");
     }
 
     #[test]
@@ -278,7 +266,7 @@ mod tests {
         // Use non-existent backends to ensure they all fail
         let fake_priority = &[
             "fake_claude",
-            "fake_kiro",
+            "fake_opencode",
             "fake_gemini",
             "fake_codex",
             "fake_amp",
@@ -293,7 +281,7 @@ mod tests {
                 e.checked,
                 vec![
                     "fake_claude",
-                    "fake_kiro",
+                    "fake_opencode",
                     "fake_gemini",
                     "fake_codex",
                     "fake_amp"
@@ -319,7 +307,7 @@ mod tests {
     #[test]
     fn test_detect_backend_skips_disabled_adapters() {
         // Test that disabled adapters are skipped even if in priority list
-        let priority = &["fake_claude", "fake_gemini", "fake_kiro", "fake_codex"];
+        let priority = &["fake_claude", "fake_gemini", "fake_opencode", "fake_codex"];
         let result = detect_backend(priority, |backend| {
             // Only enable fake_gemini and fake_codex
             matches!(backend, "fake_gemini" | "fake_codex")
@@ -328,7 +316,7 @@ mod tests {
         // Should fail since no backends are actually available, but check only enabled ones were checked
         assert!(result.is_err());
         if let Err(e) = result {
-            // Should only check enabled backends (fake_gemini, fake_codex), skipping disabled ones (fake_claude, fake_kiro)
+            // Should only check enabled backends (fake_gemini, fake_codex), skipping disabled ones (fake_claude, fake_opencode)
             assert_eq!(e.checked, vec!["fake_gemini", "fake_codex"]);
         }
     }
@@ -338,14 +326,14 @@ mod tests {
         // Test priority ordering with some adapters disabled
         let priority = &[
             "fake_claude",
-            "fake_kiro",
+            "fake_opencode",
             "fake_gemini",
             "fake_codex",
             "fake_amp",
         ];
         let result = detect_backend(priority, |backend| {
-            // Disable fake_kiro and fake_codex
-            !matches!(backend, "fake_kiro" | "fake_codex")
+            // Disable fake_opencode and fake_codex
+            !matches!(backend, "fake_opencode" | "fake_codex")
         });
 
         // Should fail since no backends are actually available, but check the filtered order
@@ -371,7 +359,7 @@ mod tests {
     #[test]
     fn test_detect_backend_all_disabled() {
         // Test that all disabled adapters results in empty checked list
-        let priority = &["claude", "gemini", "kiro"];
+        let priority = &["claude", "gemini", "opencode"];
         let result = detect_backend(priority, |_| false);
 
         // Should fail with empty checked list since all are disabled

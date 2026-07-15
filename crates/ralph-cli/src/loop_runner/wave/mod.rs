@@ -22,7 +22,6 @@ pub use supervisor_bridge::{
     SlotBinding, SupervisorBridge, is_supervisor_path_enabled,
 };
 pub use worker::{
-    WaveWorkerExecutionMode, WaveWorkerOutcome, WaveWorkerStreamHandler,
-    execute_wave_worker_acp_prompt, run_wave_worker, run_wave_worker_acp, run_wave_worker_pty,
-    wave_worker_execution_mode,
+    WaveWorkerExecutionMode, WaveWorkerOutcome, WaveWorkerStreamHandler, run_wave_worker,
+    run_wave_worker_pty, wave_worker_execution_mode,
 };

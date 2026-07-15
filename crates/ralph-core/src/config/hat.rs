@@ -46,14 +46,6 @@ pub struct EventMetadata {
 #[serde(untagged)]
 pub enum HatBackend {
     // Order matters for serde untagged - most specific first
-    /// Kiro agent with custom agent name and optional args.
-    KiroAgent {
-        #[serde(rename = "type")]
-        backend_type: String,
-        agent: String,
-        #[serde(default)]
-        args: Vec<String>,
-    },
     /// Named backend with args (has `type` but no `agent`).
     NamedWithArgs {
         #[serde(rename = "type")]
@@ -77,7 +69,6 @@ impl HatBackend {
         match self {
             HatBackend::Named(name) => name.clone(),
             HatBackend::NamedWithArgs { backend_type, .. } => backend_type.clone(),
-            HatBackend::KiroAgent { backend_type, .. } => backend_type.clone(),
             HatBackend::Custom { .. } => "custom".to_string(),
         }
     }
@@ -848,6 +839,23 @@ pub fn resolve_missing_event_grace_secs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_hat_backend_kiro_agent_variant_removed() {
+        // U4: HatBackend::KiroAgent variant and its `agent` field are deleted.
+        // The enum should now contain only Named, NamedWithArgs, Custom.
+        // We assert by source-grepping hat.rs (not at runtime, since the
+        // enum no longer compiles if the variant exists).
+        let src = include_str!("hat.rs");
+        let has_variant = src
+            .lines()
+            .map(str::trim_start)
+            .any(|l| l.starts_with("KiroAgent {"));
+        assert!(
+            !has_variant,
+            "HatBackend::KiroAgent variant must be deleted from hat.rs"
+        );
+    }
 
     fn hat_with_obligations(obligations: Vec<ActivationObligation>) -> HatConfig {
         HatConfig {

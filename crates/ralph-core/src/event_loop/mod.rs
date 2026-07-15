@@ -5038,8 +5038,7 @@ impl EventLoop {
             // source topic, so the SC6 / R3 / R29 byte-identical
             // pre-feature contract holds for undeclared
             // presets.
-            let base_prompt =
-                self.prepend_trigger_context(base_prompt, hat_id, &regular_events);
+            let base_prompt = self.prepend_trigger_context(base_prompt, hat_id, &regular_events);
             let with_skills = self.prepend_auto_inject_skills(base_prompt, hat_id);
             let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
             let with_state_files = self.prepend_state_files(with_scratchpad);
