@@ -1737,9 +1737,12 @@ hats:
     # 2026-07-16-001 plan U3 (Executor 后 Test Hat)：review 阶段的前置门禁。
     # 既可以修改测试代码，也可以修改生产代码（归因后），但必须先建基线、
     # 分类失败、跑全量测试，禁止削弱权威 Oracle（详见 instructions）。
+    # 2026-07-16-001 plan U5: 此 hat 还接 fixer→review 链路的 `fix.done`，
+    # 在 fixer attempt 后再跑一次同样的基线 / 归因 / 全量测试 gate。
+    # 两个触发源共享同一个 publish 契约（stabilization.done / stabilization.blocked）。
     name: "Test Hat (Stabilizer)"
-    description: "Post-execution test stabilization gate. Builds a baseline, attributes failures, applies minimal test/production corrections, runs the full test suite, and emits stabilization.done or stabilization.blocked as the gate before six-dim review."
-    triggers: ["work.done"]
+    description: "Post-execution test stabilization gate. Triggered by work.done (executor→review handoff) and fix.done (fixer→review handoff). Builds a baseline, attributes failures, applies minimal test/production corrections, runs the full test suite, and emits stabilization.done or stabilization.blocked as the gate before six-dim review."
+    triggers: ["work.done", "fix.done"]
     publishes: ["stabilization.done", "stabilization.blocked"]
     exempt_topics: ["stabilization.done", "stabilization.blocked"]
     default_publishes: "stabilization.blocked"
@@ -1748,6 +1751,7 @@ hats:
       enabled: true
       events:
         - work.done
+        - fix.done
     timeout: 3600
     missing_event_grace_secs: 600
     instructions: |
@@ -1776,9 +1780,11 @@ hats:
 
       ### Step 1 — Read trigger & plan context
 
-      - 从 `work.done` 读 `plan_name`、`plan_path`、`executor_head_sha`（这就是你的 `tested_from_sha`）、`resolved_baseline_sha`、Unit 账单与基线/最终验证文件。
+      - 触发源决定你要读取的输入字段：
+        - `work.done` 路径：读 `plan_name`、`plan_path`、`executor_head_sha`（这就是你的 `tested_from_sha`）、`resolved_baseline_sha`、Unit 账单与基线/最终验证文件。
+        - `fix.done` 路径（fixer→review handoff）：读 `plan_name`、`plan_path`、`head_sha`（这就是你的 `tested_from_sha`，fixer attempt 的当前 HEAD）、`executor_head_sha`、`resolved_baseline_sha`、`fixed_from_sha`、`fix_plan_file`、`fix_status`、`next_review_plan`；用 `fix.done.fix_attempt_commit_sha` 作为 fix attempt 的 commit 锚点（而不是 `executor_head_sha`）。fix.done 不带 `tests_run` 计数，你必须重跑全量测试。
       - 按需读原计划（`plan_path`），但**只**识别需要的 Unit 上下文，不重写任何计划。
-      - 把当前 `git rev-parse HEAD` 留作 `candidate_head_sha`，**不要**与 `executor_head_sha` 混算。
+      - 把当前 `git rev-parse HEAD` 留作 `candidate_head_sha`，**不要**与触发事件的 head SHA 混算。
 
       ### Step 2 — Baseline & dirty-worktree gate
 
@@ -1894,13 +1900,17 @@ hats:
       Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules before every emit. Use `ralph tools task list` for live state queries (see `ralph-tools-tasks` red box on `task_id`/`task_key`/`step`).
 
   review-reentry:
-    # 2026-07-16-001 plan U3: post-executor work.done now flows
-    # through test-stabilizer first (stabilization.done/blocked). The
-    # `fix.done` branch remains the loop's only direct handoff until
-    # Unit 5 attaches test-stabilizer to fix.done.
+    # 2026-07-16-001 plan U3: post-executor work.done flows through
+    # test-stabilizer first (stabilization.done/blocked).
+    # 2026-07-16-001 plan U5: fixer→review handoff also flows through
+    # test-stabilizer first. `review-reentry` now ONLY consumes the
+    # post-stabilizer event (stabilization.done); fix.done is gated
+    # upstream by test-stabilizer, and the fix.done semantic
+    # information (review_round + 1) is propagated through the
+    # stabilization event payload.
     name: "Review Reentry"
-    description: "Normalizes stabilization.done and fix.done into the next serial review round. Emits exactly one review.round.ready event."
-    triggers: ["stabilization.done", "fix.done"]
+    description: "Normalizes stabilization.done (the sole post-gate handoff) into the next serial review round. Emits exactly one review.round.ready event."
+    triggers: ["stabilization.done"]
     publishes: ["review.round.ready"]
     exempt_topics: ["review.round.ready"]
     terminal_events: ["review.round.ready"]
@@ -1908,42 +1918,50 @@ hats:
       enabled: true
       events:
         - stabilization.done
-        - fix.done
     timeout: 900
     missing_event_grace_secs: 300
     instructions: |
       ## REVIEW REENTRY MODE — Start or continue the review loop
 
-      You receive either `stabilization.done` or `fix.done` and emit exactly one
-      `review.round.ready` event. You are a routing/normalization hat only:
-      do not review code, do not plan fixes, and do not read internal
-      `.ralph/*` ledgers.
+      You receive `stabilization.done` (the sole post-gate handoff) and
+      emit exactly one `review.round.ready` event. The upstream
+      test-stabilizer has already gated both the executor→review path
+      (work.done → stabilization.done) and the fixer→review path
+      (fix.done → stabilization.done); the `fix.done` semantic info
+      (`review_round + 1`, `next_review_plan`, `fix_status`,
+      `fix_attempt_commit_sha`, etc.) is carried inside the
+      stabilization.done payload under `trigger_*` / `next_review_plan`
+      fields — see the schema SSOT for the exact field set.
+
+      You are a routing/normalization hat only: do not review code, do
+      not plan fixes, and do not read internal `.ralph/*` ledgers.
 
       ### HARD RULES
       - Emit EXACTLY ONE `review.round.ready` event per activation.
-      - For `stabilization.done`, set `review_round: 1` and
-        `source_topic: stabilization.done`.
-      - For `fix.done`, set `review_round` to the trigger payload's
-        `review_round + 1`; leave `source_topic: fix.done` for round 2+.
+      - If the trigger carries `source_review_round` (set by
+        test-stabilizer when its trigger was `fix.done`), set
+        `review_round: source_review_round + 1` and
+        `source_topic: fix.done`. Otherwise set `review_round: 1` and
+        `source_topic: stabilization.done` (the work.done→stabilization
+        path always starts at round 1).
       - Preserve `plan_name`, `plan_path`, and `resolved_baseline_sha`
         from the trigger payload.
-      - For `stabilization.done`, prefer `head_sha` (the
-        post-stabilization HEAD, possibly with correction commits) as
-        the canonical review anchor. Fall back to the trigger's
-        `executor_head_sha` only when the trigger does not carry a
-        `head_sha`. Set `round_base_sha` to the chosen anchor and
+      - Prefer `head_sha` (the post-stabilization HEAD, possibly with
+        correction commits) as the canonical review anchor. Fall back to
+        the trigger's `executor_head_sha` only when the trigger does not
+        carry a `head_sha`. Set `round_base_sha` to the chosen anchor and
         ensure `diff_ranges` includes
         `<resolved_baseline_sha>..<anchor>`.
-      - For `fix.done`, set `round_base_sha` to `head_sha` and set
-        `review_plan` to the trigger payload's `next_review_plan`.
-      - For `fix.done`, preserve the fix attempt status inside
-        `review_plan`: include `fix_status`, `failure_reason`,
-        `failed_fix_units`, `skipped_fix_units`, `fix_attempt_commit_sha`,
-        and `worktree_status` from the
-        trigger payload. If `fix_status` is `partial` or `blocked`, make
-        those fields visible in `review_plan.focus_areas` /
-        `review_plan.residual_risks` so the next review round checks the
-        unfinished attempt instead of treating the handoff as clean success.
+      - When the trigger came from the fix.done path, the
+        stabilization.done payload must carry the original `fix.done`
+        info: include `fix_status`, `failure_reason`,
+        `failed_fix_units`, `skipped_fix_units`,
+        `fix_attempt_commit_sha`, and `worktree_status` from the
+        stabilization.done payload (test-stabilizer copied them in).
+        Surface them in `review_plan.focus_areas` /
+        `review_plan.residual_risks` so the next review round checks
+        the unfinished attempt instead of treating the handoff as clean
+        success.
 
       ### Entry Precheck (HARD RULE — read-only routing gate)
       Before generating artifacts, prove the upstream handoff is
@@ -1951,8 +1969,7 @@ hats:
       with no commit / restore authority:
 
       1. `expected_head_sha` is `head_sha` (preferred) or
-         `executor_head_sha` (fallback) for `stabilization.done`,
-         or `head_sha` from the trigger for `fix.done`.
+         `executor_head_sha` (fallback) for `stabilization.done`.
       2. `actual_start_head_sha` = `git rev-parse HEAD`. If it does
          not equal `expected_head_sha`, record the SHA mismatch in
          `.ralph/agent/decisions.md`, do NOT attempt to reset /
@@ -1998,11 +2015,13 @@ hats:
       - Also write `.ralph/review/{plan_name}/round-<NN>/review.diffstat.txt`
         for quick scanning. The diffstat file is not part of the event
         contract; `diff_patch_file` is.
-      - Diff range:
-        - `stabilization.done`: `resolved_baseline_sha..head_sha`
+      - Diff range (uniform, regardless of upstream trigger):
+        - `resolved_baseline_sha..head_sha`
           (or `resolved_baseline_sha..executor_head_sha` when the
-          trigger has no `head_sha`).
-        - `fix.done`: `fixed_from_sha..head_sha` from the trigger payload
+          trigger has no `head_sha`). The pre-gate trigger
+          (`work.done` vs `fix.done`) no longer changes the diff
+          range — test-stabilizer anchors the post-gate HEAD
+          uniformly as `head_sha` on `stabilization.done`.
       - Generate artifacts before emitting:
         ```bash
         mkdir -p ".ralph/review/<plan>/round-<NN>"

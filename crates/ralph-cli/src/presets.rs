@@ -396,7 +396,7 @@ mod tests {
         );
         assert_eq!(
             consumers.get("fix.done").cloned().unwrap_or_default(),
-            vec!["review-reentry".to_string()]
+            vec!["test-stabilizer".to_string()]
         );
         assert_eq!(
             consumers.get("fix.requested").cloned().unwrap_or_default(),

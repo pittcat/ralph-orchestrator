@@ -157,6 +157,33 @@ event_loop:
       - {hat_id: fix-planner, topic: work.failed}
       - {hat_id: fixer, topic: work.failed}
       - {hat_id: alignment, topic: work.failed}
+      # test-stabilizer owns stabilization.done / stabilization.blocked
+      - {hat_id: plan-reviewer, topic: stabilization.done}
+      - {hat_id: executor, topic: stabilization.done}
+      - {hat_id: dim:goal-alignment, topic: stabilization.done}
+      - {hat_id: dim:correctness, topic: stabilization.done}
+      - {hat_id: dim:testing, topic: stabilization.done}
+      - {hat_id: dim:maintainability, topic: stabilization.done}
+      - {hat_id: dim:project-standards, topic: stabilization.done}
+      - {hat_id: dim:adversarial, topic: stabilization.done}
+      - {hat_id: review-synthesizer, topic: stabilization.done}
+      - {hat_id: fix-planner, topic: stabilization.done}
+      - {hat_id: fixer, topic: stabilization.done}
+      - {hat_id: alignment, topic: stabilization.done}
+      - {hat_id: reporter, topic: stabilization.done}
+      - {hat_id: plan-reviewer, topic: stabilization.blocked}
+      - {hat_id: executor, topic: stabilization.blocked}
+      - {hat_id: dim:goal-alignment, topic: stabilization.blocked}
+      - {hat_id: dim:correctness, topic: stabilization.blocked}
+      - {hat_id: dim:testing, topic: stabilization.blocked}
+      - {hat_id: dim:maintainability, topic: stabilization.blocked}
+      - {hat_id: dim:project-standards, topic: stabilization.blocked}
+      - {hat_id: dim:adversarial, topic: stabilization.blocked}
+      - {hat_id: review-synthesizer, topic: stabilization.blocked}
+      - {hat_id: fix-planner, topic: stabilization.blocked}
+      - {hat_id: fixer, topic: stabilization.blocked}
+      - {hat_id: alignment, topic: stabilization.blocked}
+      - {hat_id: reporter, topic: stabilization.blocked}
       # dim:goal-alignment owns review.goalalign.done
       - {hat_id: plan-reviewer, topic: review.goalalign.done}
       - {hat_id: executor, topic: review.goalalign.done}
@@ -536,6 +563,28 @@ event_loop:
             meaning: "execution ledger containing dispatch, acceptance, commit, failure, and dependency evidence"
             source: "executor writes .ralph/agent/decisions.md"
             fill_rule: "literal .ralph/agent/decisions.md after recording every planned Unit's disposition"
+      stabilization.done:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "tested_from_sha"
+          - "head_sha"
+          - "stabilization_audit_file"
+          - "correction_ids"
+          - "classification_counts"
+          - "worktree_status"
+          - "tests_run"
+          - "tests_passed"
+      stabilization.blocked:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "tested_from_sha"
+          - "head_sha"
+          - "stabilization_audit_file"
+          - "reason"
+          - "classification_counts"
+          - "worktree_status"
       review.goalalign.done:
         required_fields:
           - "plan_name"
@@ -3908,8 +3957,8 @@ hats:
 
   reporter:
     name: "Reporter"
-    description: "Aggregates plan change / execution / 6-dim review / fixes / alignment residuals into a final report. Sole consumer of plan.blocked / work.failed. Emits report.done then LOOP_COMPLETE."
-    triggers: ["align.done", "plan.blocked", "work.failed"]
+    description: "Aggregates plan change / execution / 6-dim review / fixes / alignment residuals into a final report. Sole consumer of plan.blocked / work.failed / stabilization.blocked. Emits report.done then LOOP_COMPLETE."
+    triggers: ["align.done", "plan.blocked", "work.failed", "stabilization.blocked"]
     publishes: ["report.done", "LOOP_COMPLETE"]
     exempt_topics: ["report.done", "LOOP_COMPLETE"]
     terminal_events: ["report.done", "LOOP_COMPLETE"]
@@ -3919,6 +3968,7 @@ hats:
         - align.done
         - plan.blocked
         - work.failed
+        - stabilization.blocked
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
@@ -3926,8 +3976,8 @@ hats:
 
       You are the terminal aggregator. You emit `report.done`
       followed by `LOOP_COMPLETE`. You are the SOLE consumer of
-      `plan.blocked` and `work.failed`, which short-circuit to a
-      blocked report without the full chain having run.
+      `plan.blocked`, `work.failed`, and `stabilization.blocked`, which
+      short-circuit to a blocked report without the full chain having run.
 
       ### HARD RULES
       - Emit EXACTLY ONE `report.done` followed by EXACTLY ONE
