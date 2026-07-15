@@ -69,12 +69,12 @@ CLI backend integrations.
 
 **Supported backends:**
 - Claude Code
-- Kiro
 - Gemini CLI
 - Codex
-- Amp
-- Copilot CLI
 - OpenCode
+- Pi
+- Trae CLI
+- Custom commands
 
 **Location:** `crates/ralph-adapters/src/`
 

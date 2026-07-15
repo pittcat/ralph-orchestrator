@@ -6,7 +6,7 @@ CLI backend integrations for various AI tools.
 
 `ralph-adapters` provides:
 
-- Backend definitions for Claude, Kiro, Gemini, and more
+- Backend definitions for Claude, Gemini, Codex, and more
 - PTY-based execution for real-time output
 - Stream handlers for different output modes
 - Auto-detection of available backends
@@ -16,12 +16,11 @@ CLI backend integrations for various AI tools.
 | Backend | CLI | Status |
 |---------|-----|--------|
 | Claude Code | `claude` | Full support |
-| Kiro | `kiro` | Full support |
 | Gemini CLI | `gemini` | Full support |
 | Codex | `codex` | Full support |
-| Amp | `amp` | Full support |
-| Copilot CLI | `copilot` | Full support |
 | OpenCode | `opencode` | Full support |
+| Pi | `pi` | Full support |
+| Trae CLI | `traecli` | Full support |
 
 ## Key Components
 
@@ -55,7 +54,6 @@ pub enum OutputFormat {
 use ralph_adapters::backends;
 
 let claude = backends::claude();
-let kiro = backends::kiro();
 let gemini = backends::gemini();
 ```
 
@@ -79,12 +77,11 @@ let available = auto_detect::is_available("claude");
 **Detection order:**
 
 1. Claude
-2. Kiro
-3. Gemini
-4. Codex
-5. Amp
-6. Copilot
-7. OpenCode
+2. Gemini
+3. Codex
+4. OpenCode
+5. Pi
+6. Trae CLI
 
 ### PtyExecutor
 
@@ -214,7 +211,6 @@ pub enum AdapterError {
 |------|-------------|
 | `default` | All backends |
 | `claude` | Claude support only |
-| `kiro` | Kiro support only |
 
 ## Example: Execute Backend
 

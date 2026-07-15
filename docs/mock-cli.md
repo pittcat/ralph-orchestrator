@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-Running E2E tests against real AI backends (Claude, Kiro, Gemini, etc.) has several problems:
+Running E2E tests against real AI backends (Claude, Gemini, etc.) has several problems:
 
 1. **Cost**: Each test run consumes API credits
 2. **Speed**: Network latency and API rate limits slow down CI/CD
@@ -76,7 +76,7 @@ The mock CLI extracts:
 Cassettes are stored in `cassettes/e2e/` with the following resolution order:
 
 1. **Backend-specific**: `<scenario-id>-<backend>.jsonl`
-   - Example: `connect-claude.jsonl`, `task-add-kiro.jsonl`
+   - Example: `connect-claude.jsonl`, `task-add-gemini.jsonl`
    - Used when backend-specific behavior differs
 
 2. **Generic fallback**: `<scenario-id>.jsonl`
@@ -359,7 +359,7 @@ ralph-e2e --mock --mock-speed 0.0
 
 **Cassettes**:
 - `cassettes/e2e/format-claude.jsonl` (Claude-specific)
-- `cassettes/e2e/format-kiro.jsonl` (Kiro-specific)
+- `cassettes/e2e/format-gemini.jsonl` (Gemini-specific)
 - `cassettes/e2e/format.jsonl` (generic fallback)
 
 **Usage**:

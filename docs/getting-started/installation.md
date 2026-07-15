@@ -17,12 +17,6 @@ Ralph needs at least one AI CLI tool to function. Install one of the following:
     # Or visit https://claude.ai/code for setup instructions
     ```
 
-=== "Kiro"
-
-    ```bash
-    # Visit https://kiro.dev/ for installation
-    ```
-
 === "Gemini CLI"
 
     ```bash
@@ -35,22 +29,22 @@ Ralph needs at least one AI CLI tool to function. Install one of the following:
     # Visit https://github.com/openai/codex
     ```
 
-=== "Amp"
-
-    ```bash
-    # Visit https://github.com/sourcegraph/amp
-    ```
-
-=== "Copilot CLI"
-
-    ```bash
-    npm install -g @github/copilot
-    ```
-
 === "OpenCode"
 
     ```bash
     curl -fsSL https://opencode.ai/install | bash
+    ```
+
+=== "Pi"
+
+    ```bash
+    npm install -g @mariozechner/pi-coding-agent
+    ```
+
+=== "Trae CLI"
+
+    ```bash
+    # Visit https://trae.ai/ for installation
     ```
 
 ## Installing Ralph

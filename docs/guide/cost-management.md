@@ -11,13 +11,11 @@ Actual pricing depends on your API provider and model. The table below gives rou
 | Backend | Relative Input Cost | Relative Output Cost | Typical Range / Task |
 |---------|---------------------|----------------------|----------------------|
 | **Claude** | High | High | $5 - $50 |
-| **Codex** | Medium-High | Medium-High | $3 - $30 |
-| **Kiro** | Medium | Medium | $2 - $20 |
 | **Gemini** | Low-Medium | Low-Medium | $1 - $15 |
+| **Codex** | Medium-High | Medium-High | $3 - $30 |
 | **OpenCode** | Low | Low | $1 - $10 |
-| **Amp** | Low | Low | $1 - $10 |
-| **Copilot** | Low | Low | $1 - $10 |
 | **Pi** | Low | Low | $1 - $10 |
+| **Trae CLI** | Varies | Varies | Varies |
 | **Custom** | Varies | Varies | Varies |
 
 > These are illustrative ranges. Always check your provider's current pricing and bill against your actual usage.
@@ -216,10 +214,10 @@ jq -r '[.timestamp, .event_type, .hat // "-"] | @csv' .ralph/diagnostics/events.
 
 | Task Type | Complexity | Recommended Budget | Backend Suggestion |
 |-----------|------------|-------------------:|-------------------|
-| Simple Script | Low | $0.50 - $2 | OpenCode / Gemini / Amp |
-| Web API | Medium | $5 - $20 | Gemini / Kiro / Claude |
+| Simple Script | Low | $0.50 - $2 | OpenCode / Gemini / Trae CLI |
+| Web API | Medium | $5 - $20 | Gemini / Claude / Codex |
 | Full Application | High | $20 - $100 | Claude / Codex |
-| Data Analysis | Medium | $5 - $15 | Gemini / Copilot |
+| Data Analysis | Medium | $5 - $15 | Gemini / OpenCode |
 | Documentation | Low-Medium | $2 - $10 | Pi / OpenCode / Claude |
 | Debugging | Variable | $5 - $50 | Claude / Codex |
 

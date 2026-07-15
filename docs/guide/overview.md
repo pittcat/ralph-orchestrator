@@ -264,15 +264,18 @@ graph LR
 
     subgraph "AI Agents"
         H[Claude]
-        I[Kiro]
-        J[Gemini]
-        K[Codex]
+        I[Gemini]
+        J[Codex]
+        K[OpenCode]
+        L[Pi]
+        N[Trae CLI]
+        O[Custom]
     end
 
     subgraph "Persistence"
-        K[Git Checkpoints]
-        L[Prompt Archives]
-        M[Metrics Store]
+        P[Git Checkpoints]
+        Q[Prompt Archives]
+        R[Metrics Store]
     end
 
     A --> D
@@ -284,9 +287,11 @@ graph LR
     E --> J
     D --> F
     D --> G
-    D --> K
-    D --> L
-    G --> M
+    E --> K
+    E --> L
+    E --> N
+    E --> O
+    G --> R
 ```
 
 ## Getting Started

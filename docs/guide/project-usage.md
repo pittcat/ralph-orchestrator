@@ -4,7 +4,7 @@
 
 ## 一句话理解
 
-Ralph 是一个“循环驱动”的 AI 编程协调器。你给它一个目标，它会把目标、配置、上下文和当前事件交给后端 AI CLI，例如 Claude、Kiro、Codex、Gemini、Pi、Roo。后端完成一轮工作后，Ralph 读取输出和事件，再决定下一轮该让哪个 hat 工作，直到看到完成标记，例如 `LOOP_COMPLETE`。
+Ralph 是一个“循环驱动”的 AI 编程协调器。你给它一个目标，它会把目标、配置、上下文和当前事件交给后端 AI CLI，例如 Claude、Gemini、Codex、OpenCode、Pi、Trae CLI。后端完成一轮工作后，Ralph 读取输出和事件，再决定下一轮该让哪个 hat 工作，直到看到完成标记，例如 `LOOP_COMPLETE`。
 
 最常见的使用方式是：
 
@@ -448,16 +448,14 @@ cli:
 | backend | 用途 |
 |---|---|
 | `claude` | Claude Code |
-| `kiro` | Kiro CLI |
 | `codex` | Codex CLI |
 | `gemini` | Gemini CLI |
-| `roo` | Roo Code CLI |
-| `amp` | Amp CLI |
 | `opencode` | OpenCode |
 | `pi` | Pi coding agent |
+| `traecli` | Trae CLI |
 | `custom` | 自定义命令和参数 |
 
-如果要给后端补参数，可以在 `cli.args` 里配置。`ralph.m.yml` 和 `ralph.roo.yml` 都是这种模式。
+如果要给后端补参数，可以在 `cli.args` 里配置。`ralph.m.yml` 就是这种模式。
 
 ### `core`
 
@@ -642,9 +640,6 @@ ralph run -c ralph.yml -H builtin:debug -p "排查某个问题"
 | `claude.yml` | Claude Code 基础配置 |
 | `codex.yml` | Codex CLI 基础配置 |
 | `gemini.yml` | Gemini CLI 基础配置 |
-| `kiro.yml` | Kiro CLI 基础配置 |
-| `roo.yml` | Roo CLI 基础配置 |
-| `amp.yml` | Amp CLI 基础配置 |
 | `opencode.yml` | OpenCode 自定义命令示例 |
 | `builder.yml` | 单 builder hat，适合小任务 |
 | `smoke.yml` | 快速 smoke 测试配置 |
@@ -662,8 +657,7 @@ ralph run -c ralph.yml -H builtin:debug -p "排查某个问题"
 | `ralph.qa.yml` | 事件循环、TUI、路由、backpressure、配置解析等高风险改动的 QA 工作流 | `ralph run -H ralph.qa.yml -p "QA event loop changes"` |
 | `ralph.reviewer.yml` | 回归感知 PR 审查，会用 worktree 隔离 checkout 并跑测试 | `ralph run -H ralph.reviewer.yml -p "Review PR #207"` |
 | `ralph.e2e.yml` | E2E 测试开发/修复专用，使用独立 scratchpad | `ralph run -c ralph.e2e.yml -p ".ralph/specs/e2e-test-fixes.spec.md"` |
-| `ralph.pi.yml` | Pi backend 示例，使用 Kiro/Claude Opus 参数 | `ralph run -c ralph.pi.yml -p "..."` |
-| `ralph.roo.yml` | Roo backend 示例，使用 Bedrock/Claude 参数 | `ralph run -c ralph.roo.yml -p "..."` |
+| `ralph.pi.yml` | Pi backend 示例，使用 Claude Opus 等参数 | `ralph run -c ralph.pi.yml -p "..."` |
 | `ralph.m.yml` | 长时间“小改进循环”，持续探索和构建，手动停止 | `ralph run -c ralph.m.yml -p "Focus on ..."` |
 
 注意：有些文件写的是 `ralph run -H ralph.qa.yml`，因为它们主要作为 hats/workflow 文件使用；有些写的是 `-c`，因为它们包含完整 core 配置。实际运行时，如果文件同时包含 `event_loop`、`cli`、`core` 和 `hats`，用 `-c` 也能跑。

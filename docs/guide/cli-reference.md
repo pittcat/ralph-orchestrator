@@ -168,7 +168,7 @@ ralph init [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--backend <BACKEND>` | Backend: `claude`, `kiro`, `gemini`, `codex`, `amp`, `copilot`, `opencode`, `pi`, `custom`. |
+| `--backend <BACKEND>` | Backend: `claude`, `gemini`, `codex`, `opencode`, `pi`, `traecli`, `custom`. |
 | `--preset <PRESET>` | Removed. Monolithic presets are no longer supported; use `-H builtin:<collection>`. |
 | `--list-presets` | List available built-in hat collections. |
 | `--force` | Overwrite existing `ralph.yml`. |
