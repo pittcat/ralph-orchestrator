@@ -3,6 +3,7 @@ title: "feat: MiniMax 双 Coding Plan 配额门控与中断续跑"
 type: feat
 status: active
 date: 2026-07-15
+updated: 2026-07-15
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: user-confirmed
@@ -44,6 +45,7 @@ Ralph 通过一个既有 Proxy 使用两个 MiniMax Coding Plan 账号。Proxy �
 - 某账号查询失败时，该账号的候选时间是 `fallback_recheck_seconds` 后；最终 deadline 仍取两个账号候选时间的最早值，不能因为另一个成功账号的窗口很晚而长时间放弃重查失败账号。
 - deadline 到达后重新查询全部账号；只有总量重新严格大于预算才启动 hat。
 - 等待期间响应现有 stop/restart/workspace-gone 信号，不用固定短周期轮询 usage endpoint。
+- stop 保留脱敏 pending state 并以 `Stopped` 退出，只有操作者显式 `ralph run --continue` 才恢复；restart 保留 pending state 并沿用现有自动重启编排；workspace-gone 终止且不承诺可恢复，因为原工作区与未提交副作用已不可用。
 - quota 等待时间不计入 `max_runtime_seconds`，也不增加 iteration、consecutive failure、fallback 或 recovery 次数。
 - 设置独立的 `max_wait_seconds`（默认 86400）与 `max_rechecks`（默认 20）；一次“同时查询两个账号并形成一个池决策”只计一次 recheck，任一上限用尽后以新的明确 quota 终止原因退出。
 
@@ -107,17 +109,26 @@ Unit 1 → Unit 2 → Unit 3 → Unit 4 → Unit 5 → Unit 6 → Final Release 
 - `crates/ralph-core/src/config/loop_config.rs`：`EventLoopConfig` 使用 `#[serde(default)]` 和 master `enabled` 的 opt-in 模式；quota 配置应遵循同一零回归结构。
 - `crates/ralph-cli/src/loop_runner/runner.rs`：hat 选择、prompt 构造、isolated channel、backend 执行、accepted event 处理和终止分支的主集成点。
 - `crates/ralph-cli/src/loop_runner/execution.rs`：`ExecutionOutcome` 已区分 watchdog 与普通结果，适合增加结构化 quota 分类，而不是在 runner 多处重新匹配字符串。
-- `crates/ralph-adapters/src/cli_executor.rs`、`pty_executor.rs`、`acp_executor.rs`：不同 backend 路径必须把 output/error 统一收敛到可分类的 execution outcome。
+- `crates/ralph-adapters/src/cli_executor.rs`、`pty_executor.rs`：当前存续的非交互 CLI 与 PTY backend 路径必须把 output/error 统一收敛到可分类的 execution outcome；`acp_executor.rs` 已随 5-backend 清理删除，不再是实现或测试目标。
 - `crates/ralph-cli/src/loop_runner/suspend.rs`：现有 stop/restart sentinel 等待模式可复用信号语义，但 quota 需要 deadline 驱动的独立等待状态。
+- `crates/ralph-core/src/hooks/suspend_state.rs`：现有 `SuspendStateRecord` / `SuspendStateStore` 提供版本化持久记录、同目录临时文件 + rename、单次 resume signal 与损坏状态报错模式；quota state 应复用这些持久化约束，但保持独立 schema 与生命周期。
 - `crates/ralph-cli/src/loop_runner/hat_channel.rs`：未提交 activation 的 isolated channel 清理与 accepted event 判定边界。
 - `crates/ralph-core/src/event_loop/loop_state.rs`：`started_at: Instant` 当前直接参与 max runtime；quota pause 需要累计排除等待时长。
+- `crates/ralph-cli/src/commands/run.rs`、`crates/ralph-cli/src/display.rs`：跨进程继续入口是 `ralph run --continue [--loop-id ...]`，应沿用现有 scratchpad/loop-id 校验与 resume hint，而不是新增平行命令。
 - Workspace 已有 `reqwest`、`tokio`、`serde_json`，无需引入新的 HTTP/runtime 依赖。
 
 ### Institutional Learnings
 
 - `docs/solutions/integration-issues/fix-claude-stream-thinking-post-event-timeout-false-failure-2026-05-06.md`：backend 非零结束不必然代表 activation 失败；若事件已经成功发出，应以交接事实而不是进程退出形式判定成功。本计划沿用同一原则，把 accepted event 定义为提交点。
-- `docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`：runner 测试必须使用 nextest 的 cli-serial 隔离；新增 quota runner 测试不得使用裸 `cargo test`。
+- `docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`：runner 测试必须使用 nextest 的 cli-serial 隔离；新增 quota runner 测试不得使用裸 `cargo test`。该文档仍引用旧 `tests.rs` 路径，但当前入口已迁至 `crates/ralph-cli/src/loop_runner/tests/mod.rs`；执行规则不变。
 - `docs/solutions/patterns/critical-patterns.md` 当前不存在；计划不假装存在额外 critical pattern 结论。
+
+### Repository Update Reconciliation（2026-07-15）
+
+- 基线从计划创建时的 `ad62c947` 更新到 `ca5679e0`；期间完成 5 个 backend 的删除与文档清理。
+- ACP production executor、ACP adapter 集成测试和 `agent-client-protocol` 依赖已经删除；仅剩 wave 测试内部的 `acp_mock` 命名夹具，不代表可用 backend，也不进入 quota execution classification 范围。
+- 当前存续 backend 均经 `CliExecutor` 或 `PtyExecutor` 执行；Unit 4 的分类覆盖按这两个 execution surface 定义，而不是按已删除 backend 枚举定义。
+- `docs/guide/cost-management.md` 已是运行预算、runtime limit 与诊断的用户入口，因此 quota 配置与等待语义以该文件为主文档落点。
 
 ### External Contract
 
@@ -134,6 +145,7 @@ Unit 1 → Unit 2 → Unit 3 → Unit 4 → Unit 5 → Unit 6 → Final Release 
 - **查询严格串行**：先查账号 A，再查账号 B；不为两个 usage 请求引入并发任务。
 - **没有可信 deadline 时使用慢重查**：若所有不足/失败账号都没有未来 `end_time`，使用 `fallback_recheck_seconds`（默认 60）作为下一 deadline；仍受独立上限约束。
 - **accepted event 是提交点**：这与现有 post-event timeout 的成功语义一致，可防止重复业务事件和重复交接。
+- **提交判定晚于本 activation 的事件接收**：即使 executor 先返回 quota/non-zero，也必须先读取本 activation 的 JSONL/isolated channel 增量并走现有 policy/acceptance，再以 activation-start cursor 之后的 accepted-event snapshot 判定 Committed/PendingReplay；不得用全局历史事件或单纯 output 文本代替。
 - **未提交 activation 原位重放**：不重新调用一般 `next_hat()`；必须恢复同一个 hat 与原 trigger。
 - **quota wait 排除出 max runtime**：长期等待是产品目标，不能被现有 wall-clock runtime 上限误杀。
 - **状态不含 Key**：持久化只记录账号配置序号/名称、百分比、deadline、错误类别和 activation 元数据。
@@ -302,7 +314,7 @@ event_loop:
 
 - [ ] **Unit 4：统一识别运行中 quota 错误并定义 activation 提交点**
 
-**Goal:** 跨 CLI/PTY/ACP execution path 分类 MiniMax quota 错误，并按 accepted event 是否存在决定提交或重放。
+**Goal:** 跨当前存续的 CLI/PTY execution path 分类 MiniMax quota 错误，并按 accepted event 是否存在决定提交或重放。
 
 **Requirements:** R6、R7、R11
 
@@ -312,12 +324,10 @@ event_loop:
 - Modify: `crates/ralph-cli/src/loop_runner/execution.rs`
 - Modify: `crates/ralph-adapters/src/cli_executor.rs`
 - Modify: `crates/ralph-adapters/src/pty_executor.rs`
-- Modify: `crates/ralph-adapters/src/acp_executor.rs`
 - Test: `crates/ralph-cli/src/loop_runner/execution.rs`（模块内 quota decision tests）
 - Test: `crates/ralph-cli/src/loop_runner/tests/legacy.rs`
 - Test: `crates/ralph-adapters/src/cli_executor.rs`
 - Test: `crates/ralph-adapters/tests/pty_executor_integration.rs`
-- Test: `crates/ralph-adapters/tests/acp_executor_integration.rs`
 
 **Approach:**
 - detector 接收完整 output、stderr/stream tail 与 executor error chain，输出结构化 quota classification；signature 以 MiniMax 实测错误 fixture 为准，并避免把普通速率限制误判为 5 小时额度耗尽。
@@ -328,7 +338,7 @@ event_loop:
 **Atomic TDD gate:** 本 Unit 输入仅为 execution output/error fixture 与本 activation 的 accepted-event snapshot，输出仅为 ExistingFailure/Committed/PendingReplay 及 channel 处理决定；不得真正查询 usage、等待 deadline 或读写持久状态。完成分类与提交点的专属测试闭环后冻结 outcome contract，才可进入 Unit 5。
 
 **Test scenarios:**
-- CLI/PTY/ACP：相同 quota fixture 都产生同一结构化分类。
+- CLI/PTY：相同 quota fixture 都产生同一结构化分类；custom backend 只要走这两个 executor surface 之一，也获得相同分类，不按 backend 名称另写分支。
 - False positive：普通 1 req/s 429、网络断开、认证失败、模型不存在仍走现有错误路径。
 - Uncommitted：quota 错误且无 accepted event，输出 PendingReplay，并证明不会增加 failure 或注入 fallback；实际恢复执行属于后续装配，不在本 Unit 测试。
 - Freshness：PendingReplay 标记必须要求一次 quota cooldown + fresh recheck，不能携带“直接使用 pre-activation observation 重放”的决定。
@@ -356,7 +366,7 @@ event_loop:
 - Test: `crates/ralph-core/src/event_loop/tests/termination.rs`
 
 **Approach:**
-- `.ralph/quota-state.json` 使用版本化 schema 与原子写入，保存 pool observations、deadline、累计等待、重查次数、状态、terminal reason 和 pending activation metadata。
+- `.ralph/quota-state.json` 使用版本化 schema 与原子写入，保存 pool observations、deadline、累计等待、重查次数、状态、terminal reason 和 pending activation metadata；原子替换、临时文件清理与错误建模遵循 `SuspendStateStore` 的现有模式，不另造不兼容的持久化协议。
 - 明确禁止 Key、Authorization header、完整 quota config 和未经清洗的 backend output 进入状态文件。
 - quota state 按 owner-only 权限创建；原 trigger payload 只保存恢复所需字段，不复制完整 prompt 或 backend 输出。
 - 从 quota state 纯函数式推导恢复决定：deadline 未到为 ContinueWaiting，已到为 Recheck，pending activation 未提交为 ReplayPending；本 Unit 不接线 `--continue` 或启动 backend。
@@ -371,8 +381,8 @@ event_loop:
 - Expired deadline：启动时 deadline 已过，立即重查而不是额外睡眠。
 - Corrupt state：畸形/未知版本状态 fail-closed 并给出可操作错误，不静默选择新 hat。
 - Completed state：已提交 activation 不会因陈旧 state 被重复运行。
-- Stop：等待中 stop 写入脱敏 terminal reason；后续显式 continue 的行为有确定规则。
-- Security：状态 JSON、summary、RPC、TUI、Debug 中均搜索不到两个测试 Key。
+- Control lifecycle：等待中 stop 写入脱敏 terminal reason 并保留 pending state，只有显式 `--continue` 才恢复；restart 保留 state 供现有自动重启路径消费；workspace-gone 不尝试从已丢失工作区恢复。
+- Security：状态 JSON、序列化错误与 Debug/Display 中均搜索不到两个测试 Key；summary、RPC、TUI 属于 Unit 6 装配后的集成断言。
 
 **Verification:** quota state 经原子写入、重新读取后，恢复决定与原 activation identity 完全一致且不含凭据；不需要 runner、HTTP 或 backend。
 
@@ -393,6 +403,7 @@ event_loop:
 - Modify: `crates/ralph-cli/src/commands/run.rs`
 - Modify: `crates/ralph-core/src/event_loop/loop_state.rs`
 - Modify: `docs/guide/configuration.md`
+- Modify: `docs/guide/cost-management.md`
 - Modify: `docs/guide/backends.md`
 - Modify: `docs/reference/troubleshooting.md`
 - Modify: `crates/ralph-core/data/ralph-tools.md`
@@ -400,11 +411,12 @@ event_loop:
 - Test: `crates/ralph-cli/src/loop_runner/quota_wiring.rs`（模块内 `#[cfg(test)]`）
 
 **Approach:**
-- 用户文档解释 pool sum、严格阈值、两个 Key 仅用于查询、Proxy 认证不变、等待/终止状态和私有 YAML 风险。
+- `docs/guide/cost-management.md` 作为主入口解释 pool sum、严格阈值、等待/终止状态及与 `max_runtime_seconds` 的关系；`docs/guide/configuration.md` 记录字段契约；`docs/guide/backends.md` 只说明两个查询 Key 不改变 Proxy/backend 认证；troubleshooting 覆盖查询失败、状态损坏与恢复上限。
 - agent 注入指南只描述 agent 可执行的恢复动作：quota cold-restart 后先检查 workspace/task/scratchpad；不暴露内部 ledger 路径、函数或实现术语。
 - 本 Unit 只完成已冻结契约的装配入口、操作者文档和 agent-facing 文档；装配测试使用 fake quota facade + fake execution facade，只验证启用/禁用分流和字段传递，不重新测试各 facade 内部逻辑。
 - 在一般 `next_hat()` 之前装配 Unit 5 的恢复决定：ContinueWaiting 进入已冻结 wait 接口，Recheck 进入已冻结 quota decision 接口，ReplayPending 恢复同一个 hat/trigger；`--continue` 只负责编排，不重做持久化判断。
 - 把 Unit 2 的 Start/Wait 决策、Unit 3 的 wait outcome、Unit 4 的 ExistingFailure/Committed/PendingReplay 与 Unit 5 的 state/recovery contract 一次性接入 runner；Unit 6 是唯一修改主调度分支的 Unit。
+- executor 返回后，装配层先完成本 activation 的 JSONL/isolated channel 增量读取与 policy acceptance，再把 activation-start cursor 之后的 accepted-event snapshot 交给 Unit 4；quota 分类不得抢在事件接收之前决定 replay。
 - 只有在本装配层处理 isolated channel 的提交/丢弃，并把 Unit 3 返回的 paused duration 纳入 LoopState active-runtime 计算。
 - 在本装配层补齐 `QuotaExhausted` 的 runner exhaustive matches、RPC、summary 与 termination sentinel 映射。
 - 真实 EventLoop/runner 的 BDD/replay、静态 CLI 文档 drift 和全 workspace nextest 统一属于 Unit 6 完成后的 Final Release Gate，不得借此掩盖 Unit 1–6 的局部欠账。
@@ -415,8 +427,10 @@ event_loop:
 - Wiring：quota disabled 只调用 existing runner facade，quota facade 零调用。
 - Wiring：quota enabled 将 secret-wrapper 账号配置只交给 quota facade，且其 Debug/日志脱敏；backend facade 仍只收到原有 Proxy 环境。
 - Wiring：PendingReplay metadata 被转换为恢复上下文，不包含 Key 或内部 state 路径。
+- Commit ordering：executor 返回 quota/non-zero 但 channel 中已有本 activation 的有效事件时，先接收事件再得到 Committed；只有事件缺失、残缺或被拒绝时才得到 PendingReplay。
 - Wiring：`--continue` 对 ContinueWaiting/Recheck/ReplayPending 只调用各自一个已冻结 facade，调用参数保持原 activation identity。
 - Wiring：QuotaExhausted 在 runner、RPC、summary 与 sentinel 中得到一致且可读的专用原因。
+- Security integration：summary、RPC、TUI、termination sentinel、diagnostics 与恢复提示均不包含两个测试 Key、Authorization header 或完整 quota config。
 - Documentation：配置字段、默认值和示例与已冻结 serde 契约一致；skill guide 不包含 Key 或内部 quota ledger 指示。
 
 **Verification:** Unit 6 的装配与文档测试独立通过，且没有修改 Unit 1–5 的已冻结内部实现；随后才允许进入 Final Release Gate。
@@ -478,7 +492,7 @@ event_loop:
 
 ## Documentation / Operational Notes
 
-- 文档必须醒目标注：两个 `api_key` 只用于查询余额，hat 仍使用现有 Proxy 认证。
+- `docs/guide/cost-management.md` 必须醒目标注：两个 `api_key` 只用于查询余额，hat 仍使用现有 Proxy 认证；`configuration.md` 与 `backends.md` 分别提供字段契约和认证边界交叉链接。
 - 日志 marker 限定为：查询结果摘要（账号名+百分比）、pool insufficient/wait deadline、pool recovered/replay；不得刷屏。
 - quota state 对用户显示各账号最后已知百分比、池总量、预算、deadline、recheck 次数和 pending hat，但绝不显示 Key。
 - 本计划新增配置和 runtime 行为，实施后必须同步检查 `crates/ralph-core/data/ralph-tools*.md`；不涉及 preset schema/topology，因此不修改 builtin preset、preset schema、zsh completion 或 operator preset skills，除非实现阶段实际扩大范围。
