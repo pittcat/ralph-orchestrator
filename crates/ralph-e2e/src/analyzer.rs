@@ -744,12 +744,12 @@ mod tests {
         let config = AnalyzerConfig {
             timeout: Duration::from_mins(1),
             max_iterations: 2,
-            backend: "kiro".to_string(),
+            backend: "claude".to_string(),
         };
         let analyzer = MetaRalphAnalyzer::with_config(workspace.clone(), config);
         assert_eq!(analyzer.config().timeout, Duration::from_mins(1));
         assert_eq!(analyzer.config().max_iterations, 2);
-        assert_eq!(analyzer.config().backend, "kiro");
+        assert_eq!(analyzer.config().backend, "claude");
     }
 
     #[test]
@@ -806,12 +806,12 @@ mod tests {
         let config = AnalyzerConfig {
             timeout: Duration::from_mins(1),
             max_iterations: 3,
-            backend: "kiro".to_string(),
+            backend: "claude".to_string(),
         };
         let analyzer = MetaRalphAnalyzer::with_config(PathBuf::from(".e2e-tests"), config);
         let yaml = analyzer.generate_analyzer_config();
 
-        assert!(yaml.contains("backend: kiro"));
+        assert!(yaml.contains("backend: claude"));
         assert!(yaml.contains("max_iterations: 3"));
     }
 

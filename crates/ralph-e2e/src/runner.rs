@@ -550,7 +550,7 @@ mod tests {
                 id: id.to_string(),
                 description: format!("Mock scenario {}", id),
                 tier: "Tier 0: Mock".to_string(),
-                supported_backends: vec![Backend::Claude, Backend::OpenCode, Backend::OpenCode],
+                supported_backends: Backend::all().to_vec(),
                 should_pass: pass,
             }
         }

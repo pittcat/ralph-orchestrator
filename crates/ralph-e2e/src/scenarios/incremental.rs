@@ -97,7 +97,7 @@ impl TestScenario for IncrementalFeatureScenario {
     }
 
     fn supported_backends(&self) -> Vec<Backend> {
-        vec![Backend::Claude, Backend::OpenCode, Backend::OpenCode]
+        Backend::all().to_vec()
     }
 
     fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
@@ -454,7 +454,7 @@ impl TestScenario for ChainedLoopScenario {
     }
 
     fn supported_backends(&self) -> Vec<Backend> {
-        vec![Backend::Claude, Backend::OpenCode, Backend::OpenCode]
+        Backend::all().to_vec()
     }
 
     fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {

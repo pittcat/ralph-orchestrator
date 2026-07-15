@@ -258,9 +258,25 @@ mod tests {
     fn test_connectivity_supports_all_backends() {
         let scenario = ConnectivityScenario::new();
         let supported = scenario.supported_backends();
-        assert!(supported.contains(&Backend::Claude));
-        assert!(supported.contains(&Backend::OpenCode));
-        assert!(supported.contains(&Backend::OpenCode));
+        // Verify the canonical backend set: no duplicates, and matches Backend::all().
+        let unique: std::collections::HashSet<_> = supported.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            supported.len(),
+            "supported_backends() must not contain duplicates"
+        );
+        assert_eq!(
+            supported.len(),
+            Backend::all().len(),
+            "supported_backends() must enumerate every canonical backend"
+        );
+        for backend in Backend::all() {
+            assert!(
+                supported.contains(backend),
+                "supported_backends() must include {:?}",
+                backend
+            );
+        }
     }
 
     #[test]

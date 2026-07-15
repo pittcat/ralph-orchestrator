@@ -7,7 +7,7 @@
 //! - Gemini (Google)
 //! - Codex (OpenAI)
 //! - Pi (pi-coding-agent)
-//! - Amp
+//! - Trae CLI
 //! - Custom commands
 //!
 //! Each adapter implements the common CLI executor interface.

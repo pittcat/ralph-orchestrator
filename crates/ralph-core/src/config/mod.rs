@@ -143,7 +143,7 @@ pub struct RalphConfig {
     // These map to nested v2 fields for backwards compatibility.
     // ─────────────────────────────────────────────────────────────────────────
     /// V1 field: Backend CLI (maps to cli.backend).
-    /// Values: "claude", "kiro", "gemini", "codex", "amp", "pi", "auto", or "custom".
+    /// Values: "claude", "gemini", "codex", "opencode", "pi", "traecli", "auto", or "custom".
     #[serde(default)]
     pub agent: Option<String>,
 
