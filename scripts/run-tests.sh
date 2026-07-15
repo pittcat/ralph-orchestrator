@@ -258,7 +258,7 @@ fi
 
 if [[ "$SERIAL" -eq 1 ]]; then
   echo "🔒 RALPH_BASELINE_SERIAL=1:强制使用单线程 cargo test(跳过 nextest)..." >&2
-  run_cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output
+  run_cargo test --workspace --exclude ralph-e2e -- --test-threads=1
   echo
   echo "✅ 测试通过(serial fallback)"
   kill $TIMEOUT_PID 2>/dev/null || true
@@ -272,4 +272,4 @@ if [[ "$FALLBACK" -eq 0 ]]; then
 fi
 
 echo "⚠️  未找到 cargo-nextest。回退到单线程 cargo test(慢路径)..." >&2
-run_cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output
+run_cargo test --workspace --exclude ralph-e2e -- --test-threads=1

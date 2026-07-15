@@ -41,7 +41,7 @@ cargo nextest run -p ralph-core --features recording --test smoke_runner  # Smok
 cargo run -p ralph-e2e -- --mock                                  # E2E
 
 # Last-resort fallback ONLY when nextest is unavailable.
-cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output
+cargo test --workspace --exclude ralph-e2e -- --test-threads=1
 just test-serial                                                   # 单线程 slow path
 
 # Other build, lint and test commands.

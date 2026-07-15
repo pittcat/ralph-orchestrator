@@ -4,7 +4,7 @@
 #   - embedded files sync check
 #   - cargo fmt --all -- --check
 #   - cargo clippy --all-targets --all-features -- -D warnings
-#   - cargo test -- --skip acp_executor::tests::test_create_terminal_and_output
+#   - cargo test -- --test-threads=1
 #   - hooks BDD gate
 #   - mock E2E smoke (non-blocking, matching CI)
 

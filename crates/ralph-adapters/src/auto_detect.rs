@@ -229,13 +229,12 @@ mod tests {
 
     #[test]
     fn test_detection_command_others() {
-        // Other backends use their name as the command
+        // Supported backends use their name as the command.
         assert_eq!(detection_command("claude"), "claude");
         assert_eq!(detection_command("gemini"), "gemini");
         assert_eq!(detection_command("codex"), "codex");
-        assert_eq!(detection_command("amp"), "amp");
         assert_eq!(detection_command("pi"), "pi");
-        assert_eq!(detection_command("roo"), "roo");
+        assert_eq!(detection_command("custom"), "custom");
     }
 
     #[test]

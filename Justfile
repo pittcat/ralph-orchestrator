@@ -34,7 +34,7 @@ test-parallel:
 # Run tests on the single-threaded slow path explicitly. Mirrors the fallback
 # behavior of scripts/run-tests.sh when nextest is unavailable.
 test-serial:
-    cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output
+    cargo test --workspace --exclude ralph-e2e -- --test-threads=1
 
 # Install cargo-nextest (required for the test-parallel recipe).
 nextest-install:
