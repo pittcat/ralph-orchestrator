@@ -1,0 +1,85 @@
+# ce_plan_reviewer_semantic_ambiguous: U1 Plan Reviewer ambiguous case
+#
+# 2026-07-16-001 plan U1 + S2: a plan with contradictory dependency
+# edges (and therefore ambiguous Unit ordering) MUST be rejected
+# with plan.blocked. The Plan Reviewer MUST NOT emit plan.ready
+# with a fabricated normalized_plan_file to escape the ambiguity —
+# the contract forbids fake-ready artifacts on the blocked path.
+
+name: ce_plan_reviewer_semantic_ambiguous
+description: ce-executor-pipeline U1 ambiguous — contradictory dependencies / undetermined Unit boundary → plan.blocked (no fake-ready)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    plan-reviewer:
+      subscribes_to: [work.start]
+      publishes: [plan.ready, plan.blocked]
+    reporter:
+      subscribes_to: [plan.ready, plan.blocked, work.failed, stabilization.blocked, review.loop.blocked]
+      publishes: [report.done, LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: work.start
+    completion_promise: LOOP_COMPLETE
+    required_events: [report.done]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      terminal_topics: [LOOP_COMPLETE]
+      business_topics:
+        - plan.ready
+        - plan.blocked
+        - report.done
+      schemas:
+        plan.ready:
+          required_fields:
+            - plan_name
+            - plan_path
+            - plan_contract_version
+            - normalized_plan_file
+            - plan_contract_digest
+            - trace_file
+        plan.blocked:
+          required_fields:
+            - plan_name
+            - reason
+            - plan_contract_version
+            - plan_contract_digest
+            - semantic_gaps
+
+mock_responses:
+  # Ambiguous: Unit A depends on Unit B; Unit B depends on Unit A.
+  # The plan-reviewer cannot determine a strict serial Unit order.
+  - hat: plan-reviewer
+    text: |
+      <event topic="plan.blocked">{"plan_name":"plan-ambiguous","plan_path":"docs/plans/ambiguous.md","reason":"ambiguous_unit_boundary","plan_contract_version":"ce-unified-plan/v1","plan_contract_digest":"feedface00112233","semantic_gaps":["contradictory_dependencies_unit_a_unit_b_cycle","undetermined_unit_boundary"],"normalized_plan_file":""}</event>
+  - hat: reporter
+    text: |
+      <event topic="report.done">{"plan_name":"plan-ambiguous","report_path":".ralph/review/plan-ambiguous/report.md","verdict":"blocked","reason":"plan.blocked"}</event>
+  - hat: reporter
+    text: |
+      <event topic="LOOP_COMPLETE">{"reason":"plan.blocked: ambiguous_unit_boundary"}</event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: plan.blocked
+    - topic: report.done
+  absent_events:
+    # Critical: ambiguous MUST NOT escape via a fake plan.ready with
+    # fabricated normalized_plan_file.
+    - topic: plan.ready
+    - topic: work.failed
+    - topic: stabilization.blocked
+    - topic: review.loop.blocked
+  payload_matches:
+    - topic: plan.blocked
+      fields:
+        plan_name: "plan-ambiguous"
+        reason: "ambiguous_unit_boundary"
+        plan_contract_version: "ce-unified-plan/v1"
+        plan_contract_digest: "feedface00112233"
+  completion: true

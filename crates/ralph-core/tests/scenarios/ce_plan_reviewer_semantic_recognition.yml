@@ -1,0 +1,105 @@
+# ce_plan_reviewer_semantic_recognition: U1 Plan Reviewer semantic contract
+#
+# 2026-07-16-001 plan U1: Plan Reviewer MUST recognize plans
+# semantically (not by fixed heading) and emit plan.ready /
+# plan.blocked with the ce-unified-plan/v1 contract fields:
+#   plan.ready required: plan_name, plan_path, plan_contract_version,
+#     normalized_plan_file, plan_contract_digest, trace_file
+#   plan.blocked required: plan_name, reason, plan_contract_version,
+#     plan_contract_digest, semantic_gaps
+#
+# This scenario uses three plan variants in sequence (one per
+# activation) to exercise:
+# - Positive (semantically complete, format-drifted): plan.ready
+#   carries stable R/S/U contract fields.
+# - Negative (looks like a Unit list but lacks verification gates):
+#   plan.blocked with non-empty semantic_gaps and no fake-ready
+#   artifact (normalized_plan_file empty).
+# - Ambiguous (contradictory dependencies, can't determine Unit
+#   boundaries): plan.blocked with semantic_gaps naming the
+#   ambiguity reason. MUST NOT emit plan.ready with a fake
+#   normalized_plan_file.
+#
+# Each variant is its own complete mini-loop (work.start → plan.*),
+# reusing a single test-stabilizer/reporter pair via the multi-stage
+# loop structure. Since each scenario is independently loadable, we
+# instead ship 3 sibling scenarios under this single naming root and
+# the test runner exercises them as parameterized variants.
+
+name: ce_plan_reviewer_semantic_recognition_positive
+description: ce-executor-pipeline U1 positive — semantic-complete plan with format drift emits plan.ready with ce-unified-plan/v1 contract
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    plan-reviewer:
+      subscribes_to: [work.start]
+      publishes: [plan.ready, plan.blocked]
+    reporter:
+      subscribes_to: [plan.ready, plan.blocked, work.failed, stabilization.blocked, review.loop.blocked]
+      publishes: [report.done, LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: work.start
+    completion_promise: LOOP_COMPLETE
+    required_events: [report.done]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      terminal_topics: [LOOP_COMPLETE]
+      business_topics:
+        - plan.ready
+        - plan.blocked
+        - report.done
+      schemas:
+        plan.ready:
+          required_fields:
+            - plan_name
+            - plan_path
+            - plan_contract_version
+            - normalized_plan_file
+            - plan_contract_digest
+            - trace_file
+        plan.blocked:
+          required_fields:
+            - plan_name
+            - reason
+            - plan_contract_version
+            - plan_contract_digest
+            - semantic_gaps
+
+mock_responses:
+  # Positive: format-drifted plan (Chinese headings, no U<N> tokens)
+  # but contains goal/requirements/scenarios/units/gates semantics.
+  # Plan Reviewer accepts and emits plan.ready with stable R/S/U IDs.
+  - hat: plan-reviewer
+    text: |
+      <event topic="plan.ready">{"plan_name":"plan-positive","plan_path":"docs/plans/positive.md","plan_contract_version":"ce-unified-plan/v1","normalized_plan_file":".ralph/agent/normalized/plan-positive.md","plan_contract_digest":"a1b2c3d4e5f60718","trace_file":".ralph/agent/trace/plan-positive.md"}</event>
+  - hat: reporter
+    text: |
+      <event topic="report.done">{"plan_name":"plan-positive","report_path":".ralph/review/plan-positive/report.md","verdict":"pass"}</event>
+  - hat: reporter
+    text: |
+      <event topic="LOOP_COMPLETE">{"reason":"plan ready"}</event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: plan.ready
+    - topic: report.done
+  absent_events:
+    - topic: plan.blocked
+    - topic: work.failed
+    - topic: stabilization.blocked
+    - topic: review.loop.blocked
+  payload_matches:
+    - topic: plan.ready
+      fields:
+        plan_name: "plan-positive"
+        plan_contract_version: "ce-unified-plan/v1"
+        normalized_plan_file: ".ralph/agent/normalized/plan-positive.md"
+        plan_contract_digest: "a1b2c3d4e5f60718"
+        trace_file: ".ralph/agent/trace/plan-positive.md"
+  completion: true

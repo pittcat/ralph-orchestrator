@@ -1521,6 +1521,64 @@ fn test_ce_executor_pipeline_stabilization_blocked_report() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-16-001 plan U6: Fixer MUST execute Fix Units strictly
+/// serially. When a non-final Fix Unit fails (UF2 in this scenario),
+/// subsequent Fix Units (UF3..UF5) MUST NOT start. `fix.done` MUST
+/// carry the complete fix-unit bill
+/// (`planned_fix_units` / `attempted_fix_units` /
+/// `completed_fix_units` / `failed_fix_units` /
+/// `skipped_fix_units`). Then the new U5 topology applies:
+/// fix.done → test-stabilizer → stabilization.done →
+/// review-reentry round 2 → review.loop.blocked (must-fix count
+/// still > 0). Reporter consumes review.loop.blocked.
+#[test]
+fn test_ce_executor_pipeline_loop_fixer_fail_stop() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_pipeline_loop_fixer_fail_stop.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-16-001 plan U1: Plan Reviewer MUST accept a
+/// semantically-complete but format-drifted plan and emit
+/// `plan.ready` carrying the ce-unified-plan/v1 contract fields
+/// (`plan_contract_version`, `normalized_plan_file`,
+/// `plan_contract_digest`, `trace_file`). Asserts that plan.ready
+/// is emitted (not plan.blocked) and the contract field set is
+/// present and non-empty.
+#[test]
+fn test_ce_plan_reviewer_semantic_recognition_positive() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_plan_reviewer_semantic_recognition.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-16-001 plan U1 + S2: a list-shaped plan that lacks
+/// verification gates MUST be rejected with `plan.blocked` carrying
+/// non-empty `semantic_gaps`. The blocked event MUST NOT carry a
+/// fabricated `normalized_plan_file` (the contract forbids
+/// fake-ready artifacts on the blocked path).
+#[test]
+fn test_ce_plan_reviewer_semantic_blocked_negative() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_plan_reviewer_semantic_blocked_negative.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-16-001 plan U1 + S2: an ambiguous plan (contradictory
+/// dependencies, undetermined Unit boundary) MUST be rejected with
+/// `plan.blocked`. The Plan Reviewer MUST NOT escape the ambiguity
+/// by emitting `plan.ready` with a fake `normalized_plan_file`.
+#[test]
+fn test_ce_plan_reviewer_semantic_ambiguous() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_plan_reviewer_semantic_ambiguous.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
 /// plan.blocked short-circuits to reporter without executor or review chain.
 #[test]
 fn test_ce_executor_pipeline_plan_blocked() {

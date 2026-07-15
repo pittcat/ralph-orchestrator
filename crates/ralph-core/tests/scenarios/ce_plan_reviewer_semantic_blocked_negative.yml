@@ -1,0 +1,84 @@
+# ce_plan_reviewer_semantic_blocked_negative: U1 Plan Reviewer negative case
+#
+# 2026-07-16-001 plan U1 + S2: a plan that LOOKS like a Unit list
+# (numbered items, mentions of "Units") but LACKS verification gates
+# MUST be rejected with plan.blocked. The block reason must name
+# the missing capability (semantic_gaps), and MUST NOT carry a
+# fake-ready normalized_plan_file.
+
+name: ce_plan_reviewer_semantic_blocked_negative
+description: ce-executor-pipeline U1 negative — list-shaped but missing verification gates → plan.blocked with semantic_gaps
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    plan-reviewer:
+      subscribes_to: [work.start]
+      publishes: [plan.ready, plan.blocked]
+    reporter:
+      subscribes_to: [plan.ready, plan.blocked, work.failed, stabilization.blocked, review.loop.blocked]
+      publishes: [report.done, LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: work.start
+    completion_promise: LOOP_COMPLETE
+    required_events: [report.done]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      terminal_topics: [LOOP_COMPLETE]
+      business_topics:
+        - plan.ready
+        - plan.blocked
+        - report.done
+      schemas:
+        plan.ready:
+          required_fields:
+            - plan_name
+            - plan_path
+            - plan_contract_version
+            - normalized_plan_file
+            - plan_contract_digest
+            - trace_file
+        plan.blocked:
+          required_fields:
+            - plan_name
+            - reason
+            - plan_contract_version
+            - plan_contract_digest
+            - semantic_gaps
+
+mock_responses:
+  # Negative: numbered list with "Unit" headings but no per-Unit
+  # verification gate. Plan Reviewer rejects with plan.blocked and
+  # names the missing capability.
+  - hat: plan-reviewer
+    text: |
+      <event topic="plan.blocked">{"plan_name":"plan-negative","plan_path":"docs/plans/negative.md","reason":"missing_verification_gates","plan_contract_version":"ce-unified-plan/v1","plan_contract_digest":"deadbeef12345678","semantic_gaps":["missing_per_unit_verification_gate","missing_acceptance_test_layer","missing_completion_gate"],"normalized_plan_file":""}</event>
+  - hat: reporter
+    text: |
+      <event topic="report.done">{"plan_name":"plan-negative","report_path":".ralph/review/plan-negative/report.md","verdict":"blocked","reason":"plan.blocked"}</event>
+  - hat: reporter
+    text: |
+      <event topic="LOOP_COMPLETE">{"reason":"plan.blocked: missing_verification_gates"}</event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: plan.blocked
+    - topic: report.done
+  absent_events:
+    - topic: plan.ready
+    - topic: work.failed
+    - topic: stabilization.blocked
+    - topic: review.loop.blocked
+  payload_matches:
+    - topic: plan.blocked
+      fields:
+        plan_name: "plan-negative"
+        reason: "missing_verification_gates"
+        plan_contract_version: "ce-unified-plan/v1"
+        plan_contract_digest: "deadbeef12345678"
+  completion: true

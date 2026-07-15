@@ -1,0 +1,260 @@
+# ce_executor_pipeline_loop_fixer_fail_stop: U6 Fixer per-Fix-Unit fail-stop
+#
+# 2026-07-16-001 plan U6: Fixer MUST execute Fix Units strictly
+# serially. When a non-final Fix Unit fails (UF2 in this scenario),
+# subsequent Fix Units (UF3..U5) MUST NOT start. `fix.done` MUST
+# carry the complete Fix Unit accounting bill:
+#   planned_fix_units = [UF1, UF2, UF3, UF4, UF5]
+#   attempted_fix_units = [UF1, UF2]
+#   completed_fix_units = [UF1]
+#   failed_fix_units = [UF2]
+#   skipped_fix_units = [UF3, UF4, UF5]
+#
+# Then the new U5 topology applies: fix.done → test-stabilizer →
+# stabilization.done → review-reentry → review.loop.blocked (round 2
+# P0/P1 still not closed). Reporter consumes review.loop.blocked and
+# emits report.done + LOOP_COMPLETE with verdict=blocked.
+#
+# Asserts:
+# - fix.done carries the complete fix-unit bill (mutually exclusive,
+#   exhaustive over planned_fix_units).
+# - UF3..UF5 never start (no further fix-related events between
+#   fix.done and the next review-reentry round).
+# - review.loop.blocked fires because round 2 still has unresolved
+#   must-fix-now findings.
+# - LOOP_COMPLETE reason explicitly references max_round_blocked or
+#   review.loop.blocked.
+
+name: ce_executor_pipeline_loop_fixer_fail_stop
+description: ce-executor-pipeline-loop U6 — Fixer fail-stop on UF2 with fix-unit bill and review.loop.blocked terminal
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 50
+  hats:
+    plan-reviewer:
+      subscribes_to: [work.start]
+      publishes: [plan.ready, plan.blocked]
+    executor:
+      subscribes_to: [plan.ready]
+      publishes: [work.done, work.failed]
+    test-stabilizer:
+      subscribes_to: [work.done, fix.done]
+      publishes: [stabilization.done, stabilization.blocked]
+    review-reentry:
+      subscribes_to: [stabilization.done]
+      publishes: [review.round.ready]
+    "dim:goal-alignment":
+      subscribes_to: [review.round.ready]
+      publishes: [review.goalalign.done]
+    "dim:correctness":
+      subscribes_to: [review.goalalign.done]
+      publishes: [review.correctness.done]
+    "dim:testing":
+      subscribes_to: [review.correctness.done]
+      publishes: [review.testing.done]
+    "dim:maintainability":
+      subscribes_to: [review.testing.done]
+      publishes: [review.maintainability.done]
+    "dim:project-standards":
+      subscribes_to: [review.maintainability.done]
+      publishes: [review.standards.done]
+    "dim:adversarial":
+      subscribes_to: [review.standards.done]
+      publishes: [review.adversarial.done]
+    review-synthesizer:
+      subscribes_to: [review.adversarial.done]
+      publishes: [review.synthesized]
+    review-gate:
+      subscribes_to: [review.synthesized]
+      publishes: [review.accepted, fix.requested, review.loop.blocked]
+    fix-planner:
+      subscribes_to: [fix.requested]
+      publishes: [review.complete]
+    fixer:
+      subscribes_to: [review.complete]
+      publishes: [fix.done]
+    alignment:
+      subscribes_to: [review.accepted]
+      publishes: [align.done]
+    reporter:
+      subscribes_to: [align.done, plan.blocked, work.failed, stabilization.blocked, review.loop.blocked]
+      publishes: [report.done, LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: work.start
+    completion_promise: LOOP_COMPLETE
+    required_events: [report.done]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      terminal_topics: [LOOP_COMPLETE]
+      business_topics:
+        - plan.ready
+        - plan.blocked
+        - work.done
+        - work.failed
+        - stabilization.done
+        - stabilization.blocked
+        - review.round.ready
+        - review.goalalign.done
+        - review.correctness.done
+        - review.testing.done
+        - review.maintainability.done
+        - review.standards.done
+        - review.adversarial.done
+        - review.synthesized
+        - review.accepted
+        - fix.requested
+        - review.complete
+        - fix.done
+        - review.loop.blocked
+        - align.done
+        - report.done
+
+mock_responses:
+  # Round 1: executor → test-stabilizer → review-reentry → 6-dim → gate requests fix
+  - hat: plan-reviewer
+    text: |
+      <event topic="plan.ready">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","plan_revised":false,"review_summary":"ok","flow_audit":"first_run","resolved_baseline_sha":"0000000000000000000000000000000000000001"}</event>
+  - hat: executor
+    text: |
+      <event topic="work.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","tests_run":2,"tests_passed":1,"changed_lines":8,"commit_count":2}</event>
+  - hat: test-stabilizer
+    text: |
+      <event topic="stabilization.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","tested_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000002","stabilization_audit_file":".ralph/review/plan-u6-fail-stop/stabilization/r1-audit.md","correction_ids":[],"classification_counts":{"test_bug":0,"production_bug":0,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":0},"worktree_status":"clean","tests_run":2,"tests_passed":1}</event>
+  - hat: review-reentry
+    text: |
+      <event topic="review.round.ready">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","review_round":1,"source_topic":"work.done","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","round_base_sha":"0000000000000000000000000000000000000002","review_plan":{"focus_areas":["full diff"],"fixed_findings":[],"verification_performed":["cargo nextest"],"residual_risks":[],"diff_ranges":["0000000000000000000000000000000000000001..0000000000000000000000000000000000000002"]}}</event>
+  - hat: "dim:goal-alignment"
+    text: |
+      <event topic="review.goalalign.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"goal-alignment","findings_file":".ralph/review/plan-u6-fail-stop/r1-goal-alignment.md","findings_count":1}</event>
+  - hat: "dim:correctness"
+    text: |
+      <event topic="review.correctness.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"correctness","findings_file":".ralph/review/plan-u6-fail-stop/r1-correctness.md","findings_count":1}</event>
+  - hat: "dim:testing"
+    text: |
+      <event topic="review.testing.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"testing","findings_file":".ralph/review/plan-u6-fail-stop/r1-testing.md","findings_count":1}</event>
+  - hat: "dim:maintainability"
+    text: |
+      <event topic="review.maintainability.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"maintainability","findings_file":".ralph/review/plan-u6-fail-stop/r1-maintainability.md","findings_count":0}</event>
+  - hat: "dim:project-standards"
+    text: |
+      <event topic="review.standards.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"project-standards","findings_file":".ralph/review/plan-u6-fail-stop/r1-standards.md","findings_count":0}</event>
+  - hat: "dim:adversarial"
+    text: |
+      <event topic="review.adversarial.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"adversarial","findings_file":".ralph/review/plan-u6-fail-stop/r1-adversarial.md","findings_count":0}</event>
+  - hat: review-synthesizer
+    text: |
+      <event topic="review.synthesized">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","diff_patch_file":".ralph/review/plan-u6-fail-stop/round-01/review.diff.patch","synthesized_review_file":".ralph/review/plan-u6-fail-stop/r1-synthesized-review.md","findings_count":3,"p0_count":1,"p1_count":2,"must_fix_now_count":3,"main_conflict_count":3,"unfixed_previous_count":0,"new_regression_p0_count":0,"newly_discovered_residual_count":0,"blocking_main_conflict_count":3,"residual_findings_count":0,"findings_summary":"three must-fix findings","loop_decision_basis":"round 1 needs fix","verdict":"blocked"}</event>
+  - hat: review-gate
+    text: |
+      <event topic="fix.requested">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","review_round":1,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","round_base_sha":"0000000000000000000000000000000000000002","diff_patch_file":".ralph/review/plan-u6-fail-stop/round-01/review.diff.patch","synthesized_review_file":".ralph/review/plan-u6-fail-stop/r1-synthesized-review.md","p0_count":1,"p1_count":2,"must_fix_now_count":3,"main_conflict_count":3,"unfixed_previous_count":0,"new_regression_p0_count":0,"newly_discovered_residual_count":0,"blocking_main_conflict_count":3,"residual_findings_count":0,"findings_summary":"three must-fix findings","loop_decision_basis":"round 1 needs fix","verdict":"blocked"}</event>
+  - hat: fix-planner
+    text: |
+      <event topic="review.complete">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","review_round":1,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","fix_base_sha":"0000000000000000000000000000000000000002","fix_plan_file":".ralph/review/plan-u6-fail-stop/fix-plan.md","findings_count":3,"p0_count":1,"p1_count":2,"must_fix_now_count":3,"main_conflict_count":3,"unfixed_previous_count":0,"new_regression_p0_count":0,"newly_discovered_residual_count":0,"blocking_main_conflict_count":3,"residual_findings_count":0,"findings_summary":"three must-fix findings","loop_decision_basis":"fix plan covers the three findings","verdict":"blocked"}</event>
+  # Fixer fails on UF2; emits fix.done with complete fix-unit bill.
+  # UF3..UF5 must NOT start.
+  - hat: fixer
+    text: |
+      <event topic="fix.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","review_round":1,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","fixed_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000003","fix_plan_file":".ralph/review/plan-u6-fail-stop/fix-plan.md","review_verdict":"blocked","fixes_applied":1,"fixes_skipped":0,"fix_summary":"UF1 applied; UF2 failed; UF3..UF5 never started","next_review_plan":{"focus_areas":["re-attempt UF2 after diagnostic"],"fixed_findings":["P1-2"],"verification_performed":["cargo nextest"],"residual_risks":[],"diff_ranges":["0000000000000000000000000000000000000002..0000000000000000000000000000000000000003"]},"planned_fix_units":["UF1","UF2","UF3","UF4","UF5"],"attempted_fix_units":["UF1","UF2"],"completed_fix_units":["UF1"],"failed_fix_units":["UF2"],"blocked_fix_units":[],"skipped_fix_units":["UF3","UF4","UF5"],"fix_attempt_commit_sha":"0000000000000000000000000000000000000003","worktree_status":"clean","fix_status":"partial","failure_reason":"UF2 tests_not_green after 3 attempts","decisions_file":".ralph/agent/decisions.md","baseline_verification_status":"green","post_verification_status":"red","fix_base_sha":"0000000000000000000000000000000000000002"}</event>
+  # Round 2: fix.done → test-stabilizer → stabilization.done → review-reentry → round 2 → still blocked
+  - hat: test-stabilizer
+    text: |
+      <event topic="stabilization.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","tested_from_sha":"0000000000000000000000000000000000000003","head_sha":"0000000000000000000000000000000000000003","stabilization_audit_file":".ralph/review/plan-u6-fail-stop/stabilization/r2-audit.md","correction_ids":[],"classification_counts":{"test_bug":0,"production_bug":0,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":0},"worktree_status":"clean","tests_run":2,"tests_passed":1}</event>
+  - hat: review-reentry
+    text: |
+      <event topic="review.round.ready">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","review_round":2,"source_topic":"fix.done","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","round_base_sha":"0000000000000000000000000000000000000003","review_plan":{"focus_areas":["verify UF1 fix"],"fixed_findings":["P1-2"],"verification_performed":["cargo nextest"],"residual_risks":[],"diff_ranges":["0000000000000000000000000000000000000002..0000000000000000000000000000000000000003"]}}</event>
+  - hat: "dim:goal-alignment"
+    text: |
+      <event topic="review.goalalign.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"goal-alignment","findings_file":".ralph/review/plan-u6-fail-stop/r2-goal-alignment.md","findings_count":1}</event>
+  - hat: "dim:correctness"
+    text: |
+      <event topic="review.correctness.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"correctness","findings_file":".ralph/review/plan-u6-fail-stop/r2-correctness.md","findings_count":1}</event>
+  - hat: "dim:testing"
+    text: |
+      <event topic="review.testing.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"testing","findings_file":".ralph/review/plan-u6-fail-stop/r2-testing.md","findings_count":1}</event>
+  - hat: "dim:maintainability"
+    text: |
+      <event topic="review.maintainability.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"maintainability","findings_file":".ralph/review/plan-u6-fail-stop/r2-maintainability.md","findings_count":0}</event>
+  - hat: "dim:project-standards"
+    text: |
+      <event topic="review.standards.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"project-standards","findings_file":".ralph/review/plan-u6-fail-stop/r2-standards.md","findings_count":0}</event>
+  - hat: "dim:adversarial"
+    text: |
+      <event topic="review.adversarial.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"adversarial","findings_file":".ralph/review/plan-u6-fail-stop/r2-adversarial.md","findings_count":0}</event>
+  - hat: review-synthesizer
+    text: |
+      <event topic="review.synthesized">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","diff_patch_file":".ralph/review/plan-u6-fail-stop/round-02/review.diff.patch","synthesized_review_file":".ralph/review/plan-u6-fail-stop/r2-synthesized-review.md","findings_count":2,"p0_count":1,"p1_count":1,"must_fix_now_count":2,"main_conflict_count":2,"unfixed_previous_count":1,"new_regression_p0_count":0,"newly_discovered_residual_count":0,"blocking_main_conflict_count":2,"residual_findings_count":0,"findings_summary":"UF2 + UF3 still missing","loop_decision_basis":"must-fix count still > 0 at round 2","verdict":"blocked"}</event>
+  - hat: review-gate
+    text: |
+      <event topic="review.loop.blocked">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","review_round":2,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","p0_count":1,"p1_count":1,"must_fix_now_count":2,"main_conflict_count":2,"blocking_main_conflict_count":2,"residual_findings_count":0,"loop_decision_basis":"must-fix count still > 0 at round 2; max_review_rounds = 2 in this scenario so we stop here","reason":"max_round_blocked"}</event>
+  - hat: reporter
+    text: |
+      <event topic="report.done">{"plan_name":"plan-u6-fail-stop","report_path":".ralph/review/plan-u6-fail-stop/report.md","verdict":"blocked","reason":"review.loop.blocked: max_round_blocked"}</event>
+  - hat: reporter
+    text: |
+      <event topic="LOOP_COMPLETE">{"reason":"review.loop.blocked: max_round_blocked; UF2 + UF3 unresolved"}</event>
+
+expected:
+  iterations: 26
+  events:
+    - topic: plan.ready
+    - topic: work.done
+    - topic: stabilization.done
+    - topic: review.round.ready
+    - topic: fix.requested
+    - topic: review.complete
+    - topic: fix.done
+    - topic: stabilization.done
+    - topic: review.round.ready
+    - topic: review.loop.blocked
+    - topic: report.done
+  absent_events:
+    # U6 fail-stop: review.loop.blocked fires instead of
+    # review.accepted/align.done; only one fix.requested + one
+    # fix.done (UF3..UF5 never start a second fix cycle).
+    - topic: review.accepted
+    - topic: align.done
+  event_topic_counts:
+    - topic: stabilization.done
+      count: 2
+    - topic: review.round.ready
+      count: 2
+    - topic: review.synthesized
+      count: 2
+    - topic: fix.done
+      count: 1
+    - topic: fix.requested
+      count: 1
+  payload_matches:
+    - topic: fix.done
+      fields:
+        review_round: 1
+        head_sha: "0000000000000000000000000000000000000003"
+        planned_fix_units: ["UF1","UF2","UF3","UF4","UF5"]
+        attempted_fix_units: ["UF1","UF2"]
+        completed_fix_units: ["UF1"]
+        failed_fix_units: ["UF2"]
+        skipped_fix_units: ["UF3","UF4","UF5"]
+        fix_status: "partial"
+    - topic: review.round.ready
+      occurrence: 1
+      fields:
+        review_round: 1
+        source_topic: work.done
+    - topic: review.round.ready
+      occurrence: 2
+      fields:
+        review_round: 2
+        source_topic: fix.done
+    - topic: review.loop.blocked
+      fields:
+        review_round: 2
+        reason: "max_round_blocked"
+    - topic: report.done
+      fields:
+        verdict: "blocked"
+        reason: "review.loop.blocked: max_round_blocked"
+  completion: true
