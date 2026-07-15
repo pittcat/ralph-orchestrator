@@ -14,8 +14,14 @@
 #   The main executor delegates each Implementation Unit to exactly one
 #   subagent, then reviews, commits, checkpoints, and emits the final event
 #   itself. No runtime task breakdown (`tasks.enabled: false`).
-# - review-reentry: Normalizes work.done / fix.done into the next review
-#   round; emits review.round.ready.
+# - test-stabilizer (2026-07-16-001 U3): post-execution test
+#   stabilization gate. Subscribes to `work.done`, can modify both
+#   test code and production code (with stable correction IDs and
+#   new commits), and emits stabilization.done on success or
+#   stabilization.blocked on unrecoverable attribution / full-suite /
+#   dirty-worktree failures.
+# - review-reentry: Normalizes stabilization.done / fix.done into the
+#   next review round; emits review.round.ready.
 # - dim:goal-alignment / dim:correctness / dim:testing / dim:maintainability /
 #   dim:project-standards / dim:adversarial: Six read-only dimension hats in
 #   a flat serial chain — each reviews ONE dimension for the current
@@ -93,6 +99,9 @@ event_loop:
       - "plan.blocked"
       - "work.done"
       - "work.failed"
+      # 2026-07-16-001 plan U3: Test Hat business events.
+      - "stabilization.done"
+      - "stabilization.blocked"
       - "review.round.ready"
       - "review.goalalign.done"
       - "review.correctness.done"
@@ -160,6 +169,13 @@ event_loop:
       - {hat_id: fixer, topic: work.done}
       - {hat_id: alignment, topic: work.done}
       - {hat_id: reporter, topic: work.done}
+      # 2026-07-16-001 plan U3: review-reentry no longer consumes work.done
+      # (test-stabilizer owns the executor→review handoff now). Keep this
+      # deny so review-reentry is explicitly forbidden from publishing it.
+      - {hat_id: review-reentry, topic: work.done}
+      # 2026-07-16-001 plan U3: test-stabilizer is the gate, not the
+      # emitter — executor remains the sole work.done owner.
+      - {hat_id: test-stabilizer, topic: work.done}
       - {hat_id: plan-reviewer, topic: work.failed}
       - {hat_id: dim:goal-alignment, topic: work.failed}
       - {hat_id: dim:correctness, topic: work.failed}
@@ -171,6 +187,39 @@ event_loop:
       - {hat_id: fix-planner, topic: work.failed}
       - {hat_id: fixer, topic: work.failed}
       - {hat_id: alignment, topic: work.failed}
+      # 2026-07-16-001 plan U3: test-stabilizer owns stabilization.*
+      # No other hat (including executor) may emit these topics —
+      # they are the gate between executor and the review chain.
+      - {hat_id: plan-reviewer, topic: stabilization.done}
+      - {hat_id: plan-reviewer, topic: stabilization.blocked}
+      - {hat_id: executor, topic: stabilization.done}
+      - {hat_id: executor, topic: stabilization.blocked}
+      - {hat_id: review-reentry, topic: stabilization.done}
+      - {hat_id: review-reentry, topic: stabilization.blocked}
+      - {hat_id: "dim:goal-alignment", topic: stabilization.done}
+      - {hat_id: "dim:goal-alignment", topic: stabilization.blocked}
+      - {hat_id: "dim:correctness", topic: stabilization.done}
+      - {hat_id: "dim:correctness", topic: stabilization.blocked}
+      - {hat_id: "dim:testing", topic: stabilization.done}
+      - {hat_id: "dim:testing", topic: stabilization.blocked}
+      - {hat_id: "dim:maintainability", topic: stabilization.done}
+      - {hat_id: "dim:maintainability", topic: stabilization.blocked}
+      - {hat_id: "dim:project-standards", topic: stabilization.done}
+      - {hat_id: "dim:project-standards", topic: stabilization.blocked}
+      - {hat_id: "dim:adversarial", topic: stabilization.done}
+      - {hat_id: "dim:adversarial", topic: stabilization.blocked}
+      - {hat_id: review-synthesizer, topic: stabilization.done}
+      - {hat_id: review-synthesizer, topic: stabilization.blocked}
+      - {hat_id: review-gate, topic: stabilization.done}
+      - {hat_id: review-gate, topic: stabilization.blocked}
+      - {hat_id: fix-planner, topic: stabilization.done}
+      - {hat_id: fix-planner, topic: stabilization.blocked}
+      - {hat_id: fixer, topic: stabilization.done}
+      - {hat_id: fixer, topic: stabilization.blocked}
+      - {hat_id: alignment, topic: stabilization.done}
+      - {hat_id: alignment, topic: stabilization.blocked}
+      - {hat_id: reporter, topic: stabilization.done}
+      - {hat_id: reporter, topic: stabilization.blocked}
       # dim:goal-alignment owns review.goalalign.done
       - {hat_id: plan-reviewer, topic: review.goalalign.done}
       - {hat_id: executor, topic: review.goalalign.done}
@@ -1684,38 +1733,207 @@ hats:
       Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
       and `ralph-tools-emit` §5 for precheck rules before every emit.
 
+  test-stabilizer:
+    # 2026-07-16-001 plan U3 (Executor 后 Test Hat)：review 阶段的前置门禁。
+    # 既可以修改测试代码，也可以修改生产代码（归因后），但必须先建基线、
+    # 分类失败、跑全量测试，禁止削弱权威 Oracle（详见 instructions）。
+    name: "Test Hat (Stabilizer)"
+    description: "Post-execution test stabilization gate. Builds a baseline, attributes failures, applies minimal test/production corrections, runs the full test suite, and emits stabilization.done or stabilization.blocked as the gate before six-dim review."
+    triggers: ["work.done"]
+    publishes: ["stabilization.done", "stabilization.blocked"]
+    exempt_topics: ["stabilization.done", "stabilization.blocked"]
+    default_publishes: "stabilization.blocked"
+    terminal_events: ["stabilization.done", "stabilization.blocked"]
+    event_filter:
+      enabled: true
+      events:
+        - work.done
+    timeout: 3600
+    missing_event_grace_secs: 600
+    instructions: |
+      ## TEST HAT (STABILIZER) MODE — post-execution test stabilization gate
+
+      你拥有写权限（测试代码 + 生产代码）和阻断权（stabilization.blocked）。
+      你**没有**自批权——你交付的 HEAD 必须经过下游六维独立 Review。
+
+      ### HARD RULES
+
+      - **Emit EXACTLY ONE event per activation**：`stabilization.done` 或 `stabilization.blocked`。
+        不允许混合发；不允许在同 activation 重试 dropped emit（参见 `ralph-tools-emit` §5）。
+      - **任何 emit 之前必须先跑 `ralph emit --policy-check`**（参见 `ralph-tools-emit` §5）。
+      - **不得削弱权威 Oracle**：禁止删除测试、跳过测试、降低断言强度、
+        在没有合理解释的情况下更新快照，或掩盖失败信号。
+      - **成功前必须跑项目权威 full-suite**（如 `cargo nextest run`）。
+      - **修改生产代码时**：
+        - 必须分配一个稳定的 correction ID（见 `ralph-tools-tasks` §校正协议）；
+        - 必须独立 commit 并抵达新的 HEAD；
+        - 新 HEAD **必须**进入下游独立六维 Review，不能直接进入 Alignment；
+        - 任一 production 改动导致 upstream/downstream 新失败 → 发 `stabilization.blocked`。
+      - **不要直接读** runtime/supervisor 的私有账本（events/loops.json/supervisor.db 等）；
+        通过 `ralph tools task <cmd>` 查 task 状态、按需看 `.ralph/agent/decisions.md` 等本 hat 可读的可写 file。
+      - **不要**主动 run build/test 之外的大命令（如格式化全 repo）。
+      - **不得在同 activation 多次尝试 emit**：必须根据 audit 一次给出最终结论。
+
+      ### Step 1 — Read trigger & plan context
+
+      - 从 `work.done` 读 `plan_name`、`plan_path`、`executor_head_sha`（这就是你的 `tested_from_sha`）、`resolved_baseline_sha`、Unit 账单与基线/最终验证文件。
+      - 按需读原计划（`plan_path`），但**只**识别需要的 Unit 上下文，不重写任何计划。
+      - 把当前 `git rev-parse HEAD` 留作 `candidate_head_sha`，**不要**与 `executor_head_sha` 混算。
+
+      ### Step 2 — Baseline & dirty-worktree gate
+
+      1. 跑 `git status --porcelain --untracked-files=all | awk '!/^\?\? \.ralph\// && !/^\?\? \.ralph$/'`。
+         - 非空且无法归属到本 hat 的修改 → `stabilization.blocked`，`reason: unknown_dirty_worktree`，
+           `worktree_status: "unattributable_dirty"`。
+      2. 把 `.ralph/agent/decisions.md` 当作 append-only 决策日志，记录任何 commit / 修正 / 阻断。
+
+      ### Step 3 — Build baseline & full-suite run
+
+      1. `mkdir -p ".ralph/review/<plan>/stabilization"`。
+      2. Capture baseline：
+         - `git rev-parse HEAD` → 写入 `stabilization_audit_file` 的 `baseline_sha` 段。
+         - `git status --short` → 同上。
+         - 抓取子集相关 unit-test 运行结果，记入 audit。
+      3. 跑**项目权威**全量测试（如 `cargo nextest run` / `cargo test --workspace` / `pytest` 等，参见原计划的 Verification gate）：
+         - 失败已存在且可归类到既有基线 → 标记 `pre_existing_failure`。
+         - 失败既非基线也无干净证据 → 优先 `unattributable`，
+           除非你能写出不可抹除的证据指明是 test / production，再分类。
+         - 失败伴随 flaky 重试信号（同一测试多次结果不同） → `flaky_or_env`。
+         - 测试命令本身不可执行（缺依赖、网络、配置错误等） →
+           `stabilization.blocked`，`reason: full_test_command_failed`。
+
+      ### Step 4 — Failure attribution
+
+      对每一次失败，先看以下证据（**只在你能看到的范围内**）：
+
+      - 失败测试是否引用稳定 oracle（既定 BDD/ATDD/TDD 契约）？
+      - 产品代码是否实现该契约（看 `git diff <DIFF_BASE>..HEAD`，按需 grep）？
+      - 既有基线是否已失败？
+      - 失败是否可复现（多次运行结果一致 vs 不一致）？
+
+      把每个失败归类到以下枚举：
+
+      - `test_bug` —— 测试实现错误，生产行为符合契约。
+      - `production_bug` —— 生产代码未实现契约。
+      - `pre_existing_failure` —— 失败在 baseline 已存在，本轮新代码未引入。
+      - `flaky_or_env` —— 环境/时序 flake；需 reset/rerun 一次以上才能定性。
+      - `unattributable` —— 没有明确证据；**保守归本类，并发 stabilization.blocked**。
+
+      把分类汇总成 `classification_counts`（5 个键，缺省 0）。
+
+      ### Step 5 — Minimal corrections
+
+      - **只改最少量**：能不改则不改。
+      - 改测试代码：跑对应 failing test，验证通过；记录到 audit 的
+        `test_changes[]`。**不得**削弱测试强度。
+      - 改生产代码：
+        - 分配 correction ID（参见 `ralph-tools-tasks` 校正协议）；
+        - 写一条决定到 `.ralph/agent/decisions.md`（append-only）：包含时间、correction ID、改动文件、回归测试 ID；
+        - 立刻 commit（conventional commit 风格：`fix(stabilizer): <correction_id> <short>`）；
+        - 重新跑 focused tests + 受影响的 integration tests，确认再跑全量测试，直到 green。
+      - **如果 production 改动**：
+        1. `correction_ids` 必须**非空**；
+        2. `head_sha` 必须是改后的 `git rev-parse HEAD`；
+        3. `worktree_status` 必须是 `clean`；
+        4. 这意味着新 HEAD 必须经六维 Review（你的下游消费者 review-reentry 会接住）。
+
+      ### Step 6 — Audit file
+
+      - 写 `stabilization_audit_file`（绝对路径到 `.ralph/review/<plan>/stabilization/audit.md`）：
+        - 触发事件 metadata、`tested_from_sha`、`head_sha`、分类计数；
+        - 每个归类的失败 ID 与证据指针（test 文件、commit SHA、log 行号）；
+        - 所有 `correction_ids` 与对应 commit SHA；
+        - 所有运行过的测试命令与原始输出片段（截断足够）；
+        - 决策日志（指向 `.ralph/agent/decisions.md` 中的行）。
+      - 不要在 audit 里塞整张 trace / patch，只放**索引** + 摘要。
+
+      ### Step 7 — Emit stabilization.done
+
+      当且仅当以下条件**全部满足**：
+
+      - classification_counts 中**没有** `unattributable` > 0；
+      - `flaky_or_env == 0`（flaky 必须降为可复现的 baseline / production 问题）；
+      - 全量测试已 green；
+      - `git rev-parse HEAD` 等于 payload 中填写的 `head_sha`；
+      - `git status`（排除 `.ralph/`）为空。
+
+      Emit：
+      ```
+      <event topic="stabilization.done">
+      {"plan_name":"<plan>","plan_path":"<repo-relative plan path>","tested_from_sha":"<executor_head_sha>","head_sha":"<git rev-parse HEAD>","stabilization_audit_file":".ralph/review/<plan>/stabilization/audit.md","correction_ids":["<id1>","<id2>"],"classification_counts":{"test_bug":<n>,"production_bug":<n>,"pre_existing_failure":<n>,"flaky_or_env":<n>,"unattributable":<n>},"worktree_status":"clean","tests_run":<n>,"tests_passed":<n>}
+      </event>
+      ```
+      然后停止。
+
+      ### Step 8 — Emit stabilization.blocked
+
+      任何以下条件之一，即必须发 `stabilization.blocked`：
+
+      - 不可恢复的脏工作区；
+      - 全量测试命令失败 / 不可执行；
+      - 至少一次失败被归类为 `unattributable`；
+      - `flaky_or_env > 0` 且反复重试仍不能定性；
+      - 即将削弱 Oracle 才能让测试通过的诱惑出现；
+      - 检测到 production 改动引入**新**业务回归但无法在本次收敛。
+
+      Emit：
+      ```
+      <event topic="stabilization.blocked">
+      {"plan_name":"<plan>","plan_path":"<repo-relative plan path>","tested_from_sha":"<executor_head_sha>","head_sha":"<git rev-parse HEAD or same as tested_from if no commits>","stabilization_audit_file":".ralph/review/<plan>/stabilization/audit.md","classification_counts":{...},"worktree_status":"<clean|dirty|unattributable_dirty>","reason":"<one of the canonical reasons>"}
+      </event>
+      ```
+      然后停止。后续 review chain 与 reporter 会基于本事件生成报告 + blocked 终态。
+
+      ### Forbidden topics & routing
+
+      你**不允许**发出的 topic：除 `stabilization.done` / `stabilization.blocked` 外的任何业务事件
+      （参见 `topic_deny_rules`）。你**不允许**消费 review.* 等下游 topic——那些是其他 hat 的责任。
+
+      ### OPAC reference
+
+      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules before every emit. Use `ralph tools task list` for live state queries (see `ralph-tools-tasks` red box on `task_id`/`task_key`/`step`).
+
   review-reentry:
+    # 2026-07-16-001 plan U3: post-executor work.done now flows
+    # through test-stabilizer first (stabilization.done/blocked). The
+    # `fix.done` branch remains the loop's only direct handoff until
+    # Unit 5 attaches test-stabilizer to fix.done.
     name: "Review Reentry"
-    description: "Normalizes work.done and fix.done into the next serial review round. Emits exactly one review.round.ready event."
-    triggers: ["work.done", "fix.done"]
+    description: "Normalizes stabilization.done and fix.done into the next serial review round. Emits exactly one review.round.ready event."
+    triggers: ["stabilization.done", "fix.done"]
     publishes: ["review.round.ready"]
     exempt_topics: ["review.round.ready"]
     terminal_events: ["review.round.ready"]
     event_filter:
       enabled: true
       events:
-        - work.done
+        - stabilization.done
         - fix.done
     timeout: 900
     missing_event_grace_secs: 300
     instructions: |
       ## REVIEW REENTRY MODE — Start or continue the review loop
 
-      You receive either `work.done` or `fix.done` and emit exactly one
+      You receive either `stabilization.done` or `fix.done` and emit exactly one
       `review.round.ready` event. You are a routing/normalization hat only:
       do not review code, do not plan fixes, and do not read internal
       `.ralph/*` ledgers.
 
       ### HARD RULES
       - Emit EXACTLY ONE `review.round.ready` event per activation.
-      - For `work.done`, set `review_round: 1`.
+      - For `stabilization.done`, set `review_round: 1` and
+        `source_topic: stabilization.done`.
       - For `fix.done`, set `review_round` to the trigger payload's
-        `review_round + 1`.
-      - Preserve `plan_name`, `plan_path`, `executor_head_sha`, and
-        `resolved_baseline_sha` from the trigger payload.
-      - For `work.done`, set `round_base_sha` to `executor_head_sha` and
-        create a short `review_plan` that asks the six review hats to audit
-        the whole diff from `resolved_baseline_sha` to `executor_head_sha`.
+        `review_round + 1`; leave `source_topic: fix.done` for round 2+.
+      - Preserve `plan_name`, `plan_path`, and `resolved_baseline_sha`
+        from the trigger payload.
+      - For `stabilization.done`, prefer `head_sha` (the
+        post-stabilization HEAD, possibly with correction commits) as
+        the canonical review anchor. Fall back to the trigger's
+        `executor_head_sha` only when the trigger does not carry a
+        `head_sha`. Set `round_base_sha` to the chosen anchor and
+        ensure `diff_ranges` includes
+        `<resolved_baseline_sha>..<anchor>`.
       - For `fix.done`, set `round_base_sha` to `head_sha` and set
         `review_plan` to the trigger payload's `next_review_plan`.
       - For `fix.done`, preserve the fix attempt status inside
@@ -1732,7 +1950,8 @@ hats:
       clean. `review-reentry` is itself a routing/normalization hat
       with no commit / restore authority:
 
-      1. `expected_head_sha` is `executor_head_sha` for `work.done`,
+      1. `expected_head_sha` is `head_sha` (preferred) or
+         `executor_head_sha` (fallback) for `stabilization.done`,
          or `head_sha` from the trigger for `fix.done`.
       2. `actual_start_head_sha` = `git rev-parse HEAD`. If it does
          not equal `expected_head_sha`, record the SHA mismatch in
@@ -1780,7 +1999,9 @@ hats:
         for quick scanning. The diffstat file is not part of the event
         contract; `diff_patch_file` is.
       - Diff range:
-        - `work.done`: `resolved_baseline_sha..executor_head_sha`
+        - `stabilization.done`: `resolved_baseline_sha..head_sha`
+          (or `resolved_baseline_sha..executor_head_sha` when the
+          trigger has no `head_sha`).
         - `fix.done`: `fixed_from_sha..head_sha` from the trigger payload
       - Generate artifacts before emitting:
         ```bash
@@ -1797,17 +2018,17 @@ hats:
         "plan_name": "<plan>",
         "plan_path": "<repo-relative plan path>",
         "review_round": 1,
-        "source_topic": "work.done",
+        "source_topic": "stabilization.done",
         "executor_head_sha": "<sha>",
         "resolved_baseline_sha": "<sha>",
-        "round_base_sha": "<sha>",
+        "round_base_sha": "<head_sha>",
         "diff_patch_file": ".ralph/review/<plan>/round-01/review.diff.patch",
         "review_plan": {
-          "focus_areas": ["full implementation diff"],
+          "focus_areas": ["full implementation diff + Test Hat audit"],
           "fixed_findings": [],
           "verification_performed": [],
           "residual_risks": [],
-          "diff_ranges": ["<resolved_baseline_sha>..<executor_head_sha>"]
+          "diff_ranges": ["<resolved_baseline_sha>..<head_sha>"]
         }
       }
       ```
@@ -3908,8 +4129,8 @@ hats:
 
   reporter:
     name: "Reporter"
-    description: "Aggregates plan change / execution / review rounds / fixes / alignment residuals into a final report. Sole consumer of plan.blocked / work.failed / review.loop.blocked. Emits report.done then LOOP_COMPLETE."
-    triggers: ["align.done", "plan.blocked", "work.failed", "review.loop.blocked"]
+    description: "Aggregates plan change / execution / review rounds / fixes / alignment residuals into a final report. Sole consumer of plan.blocked / work.failed / review.loop.blocked / stabilization.blocked. Emits report.done then LOOP_COMPLETE."
+    triggers: ["align.done", "plan.blocked", "work.failed", "review.loop.blocked", "stabilization.blocked"]
     publishes: ["report.done", "LOOP_COMPLETE"]
     exempt_topics: ["report.done", "LOOP_COMPLETE"]
     terminal_events: ["report.done", "LOOP_COMPLETE"]
@@ -3920,6 +4141,7 @@ hats:
         - plan.blocked
         - work.failed
         - review.loop.blocked
+        - stabilization.blocked
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
@@ -3927,8 +4149,9 @@ hats:
 
       You are the terminal aggregator. You emit `report.done`
       followed by `LOOP_COMPLETE`. You are the SOLE consumer of
-      `plan.blocked`, `work.failed`, and `review.loop.blocked`, which
-      short-circuit to a blocked report without an accepted alignment handoff.
+      `plan.blocked`, `work.failed`, `review.loop.blocked`, and
+      `stabilization.blocked`, which short-circuit to a blocked report
+      without an accepted alignment handoff.
 
       ### HARD RULES
       - Emit EXACTLY ONE `report.done` followed by EXACTLY ONE
@@ -3938,7 +4161,7 @@ hats:
         `LOOP_COMPLETE`, do NOT rewrite `.ralph/review/{plan_name}/report.md`;
         emit only `LOOP_COMPLETE` and stop.
       - Do NOT emit `work.done` / `work.failed` / `plan.*` /
-        `review.*` / `fix.*` / `align.done`.
+        `stabilization.*` / `review.*` / `fix.*` / `align.done`.
       - Do NOT modify code (read-only audit role).
       - Do NOT loop back. After `LOOP_COMPLETE`, stop.
       - The report artifact must contain no Mermaid or AACIM diagram.
@@ -3965,6 +4188,7 @@ hats:
       ralph events --events-source main --output json | jq -c 'select(.topic=="work.done")' | tail -1
       ralph events --events-source main --output json | jq -c 'select(.topic=="align.done")' | tail -1
       ralph events --events-source main --output json | jq -c 'select(.topic=="review.loop.blocked")' | tail -1
+      ralph events --events-source main --output json | jq -c 'select(.topic=="stabilization.blocked")' | tail -1
       ```
 
       **Multi-round topics** (may appear once per review/fix round — list

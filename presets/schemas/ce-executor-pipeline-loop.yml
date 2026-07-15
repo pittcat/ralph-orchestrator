@@ -28,6 +28,66 @@
 # else stays on the required-field-only path.
 
 schemas:
+  # 2026-07-16 plan U1 (Plan Reviewer unified contract):
+  # plan.ready and plan.blocked gain the ce-unified-plan/v1
+  # normalized-artifact fields. The semantic-recognition guarantee
+  # belongs to plan-reviewer's agent instructions; the runtime only
+  # enforces (a) every plan.ready/blocked event carries a stable
+  # plan identity (`plan_name` + `plan_path`), (b) a non-empty
+  # contract version literal, and (c) on the blocked path a
+  # `normalized_plan_file` that is either empty (no fake-ready
+  # artifact) or omitted. Field docs describe semantics; presence is
+  # the SSOT contract.
+  plan.ready:
+    required_fields:
+      - "plan_name"
+      - "plan_path"
+      - "plan_contract_version"
+      - "normalized_plan_file"
+      - "plan_contract_digest"
+      - "trace_file"
+    field_docs:
+      plan_contract_version:
+        meaning: "literal version tag of the ce-unified-plan contract the agent produced; first published version is 'ce-unified-plan/v1'"
+        source: "plan-reviewer"
+        fill_rule: "literal string; do NOT hand-write; treat as a contract identifier pinned by the preset"
+      normalized_plan_file:
+        meaning: "absolute or repo-relative path to the Plan Reviewer's semantic projection of the source plan (goal/scope/Requirements/Scenarios/Units/verification gates/tracing); the canonical artifact downstream hats read"
+        source: "plan-reviewer writes it via the Write tool before emit"
+        fill_rule: "non-empty path under .ralph/agent/normalized/<plan_name>.md; do NOT make up a path — write the file first"
+      plan_contract_digest:
+        meaning: "hex digest binding the source plan content and the normalized_plan_file together; downstream anchors compare the digest rather than re-reading the source plan"
+        source: "plan-reviewer computes over plan_path + normalized_plan_file"
+        fill_rule: "16-64 hex chars; do NOT hand-write; recompute on every emit attempt"
+      trace_file:
+        meaning: "absolute or repo-relative path to the append-only Requirement→Scenario→Unit tracking file the agent opens on first ready emit and updates across the loop"
+        source: "plan-reviewer writes it via the Write tool before emit"
+        fill_rule: "non-empty path under .ralph/agent/trace/<plan_name>.md; do NOT make up a path — write the file first"
+  plan.blocked:
+    required_fields:
+      - "plan_name"
+      - "reason"
+      - "plan_contract_version"
+      - "plan_contract_digest"
+      - "semantic_gaps"
+    field_docs:
+      plan_contract_version:
+        meaning: "literal version tag of the ce-unified-plan contract the agent was operating under; first published version is 'ce-unified-plan/v1'"
+        source: "plan-reviewer"
+        fill_rule: "literal 'ce-unified-plan/v1'; the contract applies on the blocked path too so downstream audit can pin the rejection against the right version"
+      plan_contract_digest:
+        meaning: "hex digest of the source plan only (no normalized_plan_file digest on the blocked path; the rejection forbids a fake-ready artifact)"
+        source: "plan-reviewer computes over plan_path"
+        fill_rule: "16-64 hex chars; do NOT hand-write"
+      semantic_gaps:
+        meaning: "non-empty list of semantic capability gaps that prevented acceptance (missing observable outcomes, missing per-Unit verification, missing completion gate, ambiguous scope, contradictory requirements, etc.); each entry names ONE capability the agent could not recover in-place"
+        source: "plan-reviewer"
+        fill_rule: "non-empty array of strings; never empty when plan.blocked is emitted for semantic reasons; pure file-error paths (plan_file_not_found / plan_file_unreadable) may emit semantic_gaps: [\"<file-error-code>\"] but the array must remain present and non-empty"
+      normalized_plan_file:
+        meaning: "reserved field on the blocked path; MUST be empty string OR omitted — the contract forbids a non-empty normalized_plan_file when plan-reviewer rejected the plan"
+        source: "plan-reviewer"
+        fill_rule: "always empty string (\"\") or absent; never a real path; a non-empty value is a contract violation and downstream alignment MUST treat it as a fake-ready artifact"
+
   review.synthesized:
     # 2026-07-09-003 plan (U6): declare `trigger_context` for the
     # review-gate hat so the downstream isolated prompt block surfaces
@@ -476,3 +536,69 @@ schemas:
         meaning: "human-readable reason the loop gave up (exceeded max_review_rounds, etc.)"
         source: "review-gate"
         fill_rule: "free text; do NOT include the synthetic 'pass' verdict"
+
+  # 2026-07-16-001 plan U3: Test Hat (test-stabilizer) schemas.
+  # Both topics share an honest accounting of what the gate saw.
+  # Inline schemas in `ce-executor-pipeline-loop.yml` deep-merge from
+  # this SSOT via `crates/ralph-cli/build.rs`.
+  stabilization.done:
+    required_fields:
+      - "plan_name"
+      - "plan_path"
+      - "tested_from_sha"
+      - "head_sha"
+      - "stabilization_audit_file"
+      - "correction_ids"
+      - "classification_counts"
+      - "worktree_status"
+      - "tests_run"
+      - "tests_passed"
+    field_docs:
+      tested_from_sha:
+        meaning: "git SHA captured at the start of stabilization (= work.done.executor_head_sha); this is the gate's input anchor"
+        source: "test-stabilizer"
+        fill_rule: "40-char git SHA; copy from the triggering work.done payload verbatim"
+      head_sha:
+        meaning: "current git HEAD at stabilization emit time; equals tested_from_sha when the gate made no production corrections, otherwise points to the latest correction commit"
+        source: "test-stabilizer"
+        fill_rule: "40-char git SHA; recompute right before each emit attempt"
+      correction_ids:
+        meaning: "stable correction IDs for any production-code commits the gate produced; empty array when only test code (or nothing) was changed"
+        source: "test-stabilizer"
+        fill_rule: "array of strings; [] is valid but producers MUST document why an empty list is allowed alongside any production change"
+      classification_counts:
+        meaning: "summary of per-category failure counts observed during the full-suite run"
+        source: "test-stabilizer"
+        fill_rule: "object with keys test_bug, production_bug, pre_existing_failure, flaky_or_env, unattributable; integer per key"
+      worktree_status:
+        meaning: "real git worktree status at stabilization emit (excluding .ralph/)"
+        source: "test-stabilizer"
+        fill_rule: "one of clean | dirty; never fake-clean"
+      stabilization_audit_file:
+        meaning: "absolute path to the gate's audit markdown written under .ralph/review/<plan>/stabilization/"
+        source: "test-stabilizer"
+        fill_rule: "absolute path under .ralph/review/<plan>/stabilization/audit.md"
+
+  stabilization.blocked:
+    required_fields:
+      - "plan_name"
+      - "plan_path"
+      - "tested_from_sha"
+      - "head_sha"
+      - "stabilization_audit_file"
+      - "reason"
+      - "classification_counts"
+      - "worktree_status"
+    field_docs:
+      reason:
+        meaning: "canonical reason the gate refused to emit stabilization.done; lets reporter drive blocked terminal without re-deriving"
+        source: "test-stabilizer"
+        fill_rule: "one of baseline_already_failed | flaky_or_environmental | unattributable | full_test_command_failed | oracle_weakening_prohibited | unknown_dirty_worktree | correction_regression_unrecoverable"
+      worktree_status:
+        meaning: "real git worktree status at stabilization block time (excluding .ralph/)"
+        source: "test-stabilizer"
+        fill_rule: "one of clean | dirty | unattributable_dirty; never fake-clean"
+      classification_counts:
+        meaning: "summary of failure attribution leading to the block"
+        source: "test-stabilizer"
+        fill_rule: "same shape as stabilization.done; must always be present even when zero"
