@@ -1747,7 +1747,8 @@ fn emit_close_completion_warning(
     let Some((channel_path, exists)) = crate::cli::resolve_hat_channel_file(root) else {
         eprintln!(
             "{} {{ \"code\": \"close_without_completion_emit\", \
-             \"hat\": \"{caller_hat}\", \"expected_topics\": {expected:?}, \
+             \"hat\": \"{caller_hat}\", \"task_id\": \"{task_id}\", \
+             \"expected_topics\": {expected:?}, \
              \"reason\": \"hat_channel_missing_marker\", \
              \"hint\": \"{channel_hint}\" }}",
             ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX
@@ -1757,7 +1758,8 @@ fn emit_close_completion_warning(
     if !exists {
         eprintln!(
             "{} {{ \"code\": \"close_without_completion_emit\", \
-             \"hat\": \"{caller_hat}\", \"expected_topics\": {expected:?}, \
+             \"hat\": \"{caller_hat}\", \"task_id\": \"{task_id}\", \
+             \"expected_topics\": {expected:?}, \
              \"reason\": \"hat_channel_unreadable\", \
              \"hint\": \"{channel_hint}\" }}",
             ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX
@@ -1767,7 +1769,8 @@ fn emit_close_completion_warning(
     let Ok(content) = std::fs::read_to_string(&channel_path) else {
         eprintln!(
             "{} {{ \"code\": \"close_without_completion_emit\", \
-             \"hat\": \"{caller_hat}\", \"expected_topics\": {expected:?}, \
+             \"hat\": \"{caller_hat}\", \"task_id\": \"{task_id}\", \
+             \"expected_topics\": {expected:?}, \
              \"reason\": \"hat_channel_unreadable\", \
              \"hint\": \"{channel_hint}\" }}",
             ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX
@@ -1780,16 +1783,60 @@ fn emit_close_completion_warning(
     }
 
     let next = ralph_core::completion_emit::next_step_hint(&expected);
-    eprintln!(
+        eprintln!(
+            "{} {{ \"code\": \"close_without_completion_emit\", \
+             \"hat\": \"{}\", \"task_id\": \"{}\", \
+             \"expected_topics\": {expected:?}, \
+             \"observed_topics\": {tail_topics:?}, \
+             \"next_step\": \"{}\" }}",
+            ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX,
+            caller_hat,
+            task_id,
+            next,
+        );
+}
+
+/// Build the success-path stderr payload (extracted for testability).
+/// Public to `#[cfg(test)]` modules; non-test callers should use
+/// `emit_close_completion_warning` instead.
+#[doc(hidden)]
+pub fn build_close_warning_payload(
+    caller_hat: &str,
+    task_id: &str,
+    expected: &[String],
+    tail_topics: &[String],
+    next: &str,
+) -> String {
+    format!(
         "{} {{ \"code\": \"close_without_completion_emit\", \
-         \"hat\": \"{:?}\", \"task_id\": \"{}\", \
+         \"hat\": \"{}\", \"task_id\": \"{}\", \
          \"expected_topics\": {expected:?}, \
          \"observed_topics\": {tail_topics:?}, \
-         \"next_step\": \"{next}\" }}",
+         \"next_step\": \"{}\" }}",
         ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX,
         caller_hat,
         task_id,
-    );
+        next,
+    )
+}
+
+/// Build the missing-marker early-return stderr payload (test helper).
+#[doc(hidden)]
+pub fn build_close_warning_payload_missing_marker(
+    caller_hat: &str,
+    task_id: &str,
+    expected: &[String],
+) -> String {
+    let channel_hint = "hat-channel file is empty or missing; \
+                        run `ralph inspect loop` to confirm the marker is set";
+    format!(
+        "{} {{ \"code\": \"close_without_completion_emit\", \
+         \"hat\": \"{caller_hat}\", \"task_id\": \"{task_id}\", \
+         \"expected_topics\": {expected:?}, \
+         \"reason\": \"hat_channel_missing_marker\", \
+         \"hint\": \"{channel_hint}\" }}",
+        ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX
+    )
 }
 
 /// How many trailing JSONL lines `emit_close_completion_warning` scans
@@ -3828,6 +3875,53 @@ tasks:
         // Hat publishes nothing → derive_completion_publishes is empty.
         emit_close_completion_warning(&root.to_path_buf(), &config, "unknown", "task-2");
         // No assertion needed: the helper bails out early when expected==[].
+    }
+
+    /// 2026-07-16 cleanup plan U1: success-path stderr JSON must be
+    /// parseable. U5 introduced `"hat": "{:?}"` which renders to
+    /// `"hat": ""executor""` (embedded quotes break `serde_json`).
+    /// This test pins the success-path schema by asserting that
+    /// `build_close_warning_payload` returns a string whose JSON
+    /// payload parses with `serde_json`.
+    #[test]
+    fn test_close_warning_success_path_emits_parseable_json() {
+        let payload = build_close_warning_payload(
+            "executor",
+            "task-1",
+            &["work.done".to_string()],
+            &[],
+            "next-step-hint",
+        );
+        let json_str = payload
+            .split_once('{')
+            .map(|(prefix, rest)| format!("{{{rest}"))
+            .unwrap_or_else(|| panic!("payload missing JSON body: {payload}"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("stderr JSON must be parseable");
+        assert_eq!(parsed["code"], "close_without_completion_emit");
+        assert_eq!(parsed["hat"], "executor");
+        assert_eq!(parsed["task_id"], "task-1");
+    }
+
+    /// 2026-07-16 cleanup plan U1: early-return paths must also carry
+    /// `task_id` so all four stderr schemas stay consistent.
+    #[test]
+    fn test_close_warning_early_return_paths_carry_task_id() {
+        let payload = build_close_warning_payload_missing_marker(
+            "executor",
+            "task-1",
+            &["work.done".to_string()],
+        );
+        let json_str = payload
+            .split_once('{')
+            .map(|(prefix, rest)| format!("{{{rest}"))
+            .unwrap_or_else(|| panic!("payload missing JSON body: {payload}"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("early-return JSON must be parseable");
+        assert_eq!(parsed["code"], "close_without_completion_emit");
+        assert_eq!(parsed["hat"], "executor");
+        assert_eq!(parsed["task_id"], "task-1");
+        assert_eq!(parsed["reason"], "hat_channel_missing_marker");
     }
 
     // ── 2026-07-07-002 plan Unit 7: live task identity idempotency ─
