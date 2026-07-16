@@ -906,8 +906,8 @@ event_loop:
             fill_rule: "integer >= 1 (G0 placeholder still counts)"
       review.synthesized:
         required_fields:
-          - "normalized_plan_file"
           - "plan_contract_version"
+          - "normalized_plan_file"
           - "plan_contract_digest"
           - "trace_file"
           - "stabilization_audit_file"
@@ -927,6 +927,22 @@ event_loop:
       review.accepted:
         required_fields: ["plan_name", "plan_path", "executor_head_sha", "resolved_baseline_sha", "review_phase", "normalized_plan_file", "plan_contract_version", "plan_contract_digest", "trace_file", "fix_plan_file", "synthesized_review_file", "findings_count", "p0_count", "p1_count", "findings_summary", "verdict"]
         field_docs:
+          plan_contract_version:
+            meaning: "literal version tag of the ce-unified-plan contract carried through from plan.ready"
+            source: "review-synthesizer carries forward from plan.ready"
+            fill_rule: "literal copy; do NOT recompute"
+          normalized_plan_file:
+            meaning: "canonical semantic projection of the source plan that downstream hats read"
+            source: "review-synthesizer carries forward from plan.ready"
+            fill_rule: "literal copy; do NOT make up a path"
+          plan_contract_digest:
+            meaning: "hex digest binding the source plan and normalized_plan_file for this execution chain"
+            source: "review-synthesizer carries forward from plan.ready"
+            fill_rule: "literal copy; do NOT recompute"
+          trace_file:
+            meaning: "append-only requirement→scenario→unit trace file for this plan"
+            source: "review-synthesizer carries forward from plan.ready"
+            fill_rule: "literal copy; do NOT make up a path"
           plan_name:
             meaning: "plan file basename without extension; copied from the final dim's payload"
             source: "review-synthesizer carries forward from the last review.<dim>.done payload"
@@ -989,6 +1005,10 @@ event_loop:
         required_fields:
           - "plan_name"
           - "plan_path"
+          - "plan_contract_version"
+          - "normalized_plan_file"
+          - "plan_contract_digest"
+          - "trace_file"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through from plan.ready
           - "fix_plan_file"
@@ -1006,6 +1026,22 @@ event_loop:
             meaning: "repo-relative path to the original plan file"
             source: "fix-planner carries forward from review.synthesized"
             fill_rule: "literal copy"
+          plan_contract_version:
+            meaning: "literal version tag of the ce-unified-plan contract carried through from plan.ready"
+            source: "fix-planner carries forward from review.synthesized"
+            fill_rule: "literal copy; do NOT recompute"
+          normalized_plan_file:
+            meaning: "canonical semantic projection of the source plan that downstream hats read"
+            source: "fix-planner carries forward from review.synthesized"
+            fill_rule: "literal copy; do NOT make up a path"
+          plan_contract_digest:
+            meaning: "hex digest binding the source plan and normalized_plan_file for this execution chain"
+            source: "fix-planner carries forward from review.synthesized"
+            fill_rule: "literal copy; do NOT recompute"
+          trace_file:
+            meaning: "append-only requirement→scenario→unit trace file for this plan"
+            source: "fix-planner carries forward from review.synthesized"
+            fill_rule: "literal copy; do NOT make up a path"
           executor_head_sha:
             meaning: "git SHA at HEAD after the last executor commit — anchor for the fix diff"
             source: "fix-planner carries forward from review.synthesized"
@@ -1042,6 +1078,10 @@ event_loop:
         required_fields:
           - "plan_name"
           - "plan_path"
+          - "plan_contract_version"
+          - "normalized_plan_file"
+          - "plan_contract_digest"
+          - "trace_file"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through from review.complete
           - "head_sha"  # fixer final HEAD after per-Unit commits / reverts
@@ -1078,6 +1118,22 @@ event_loop:
             meaning: "repo-relative path to the original plan file"
             source: "fixer carries forward"
             fill_rule: "literal copy"
+          plan_contract_version:
+            meaning: "literal version tag of the ce-unified-plan contract carried through from plan.ready"
+            source: "fixer carries forward from review.complete"
+            fill_rule: "literal copy; do NOT recompute"
+          normalized_plan_file:
+            meaning: "canonical semantic projection of the source plan that downstream hats read"
+            source: "fixer carries forward from review.complete"
+            fill_rule: "literal copy; do NOT make up a path"
+          plan_contract_digest:
+            meaning: "hex digest binding the source plan and normalized_plan_file for this execution chain"
+            source: "fixer carries forward from review.complete"
+            fill_rule: "literal copy; do NOT recompute"
+          trace_file:
+            meaning: "append-only requirement→scenario→unit trace file for this plan"
+            source: "fixer carries forward from review.complete"
+            fill_rule: "literal copy; do NOT make up a path"
           executor_head_sha:
             meaning: "git SHA at HEAD after the last executor commit — diff base for alignment"
             source: "fixer carries forward from review.complete"

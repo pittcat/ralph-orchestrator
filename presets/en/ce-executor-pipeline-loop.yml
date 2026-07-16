@@ -670,6 +670,22 @@ event_loop:
         # to `presets/schemas/ce-executor-pipeline-loop.yml`
         # (the SSOT) so `schema_reference_parity` lint passes.
         field_docs:
+          plan_contract_version:
+            meaning: "literal version tag of the ce-unified-plan contract carried through from plan.ready"
+            source: "review-synthesizer carries forward from plan.ready"
+            fill_rule: "literal copy; do NOT recompute"
+          normalized_plan_file:
+            meaning: "canonical semantic projection of the source plan that downstream hats read"
+            source: "review-synthesizer carries forward from plan.ready"
+            fill_rule: "literal copy; do NOT make up a path"
+          plan_contract_digest:
+            meaning: "hex digest binding the source plan and normalized_plan_file for this execution chain"
+            source: "review-synthesizer carries forward from plan.ready"
+            fill_rule: "literal copy; do NOT recompute"
+          trace_file:
+            meaning: "append-only requirement→scenario→unit trace file for this plan"
+            source: "review-synthesizer carries forward from plan.ready"
+            fill_rule: "literal copy; do NOT make up a path"
           review_round:
             meaning: "current convergence round (1..max_review_rounds); review-synthesizer increments"
             source: "review-synthesizer reads it from .ralph/review/<plan>/round-<n>/"
@@ -748,6 +764,10 @@ event_loop:
         required_fields:
           - "plan_name"
           - "plan_path"
+          - "plan_contract_version"
+          - "normalized_plan_file"
+          - "plan_contract_digest"
+          - "trace_file"
           - "review_round"
           - "executor_head_sha"
           - "resolved_baseline_sha"
@@ -760,6 +780,22 @@ event_loop:
           - "loop_decision_basis"
           - "verdict"
         field_docs:
+          plan_contract_version:
+            meaning: "literal version tag of the ce-unified-plan contract carried through from plan.ready"
+            source: "review-gate"
+            fill_rule: "literal copy; do NOT recompute"
+          normalized_plan_file:
+            meaning: "canonical semantic projection of the source plan that downstream hats read"
+            source: "review-gate"
+            fill_rule: "literal copy; do NOT make up a path"
+          plan_contract_digest:
+            meaning: "hex digest binding the source plan and normalized_plan_file for this execution chain"
+            source: "review-gate"
+            fill_rule: "literal copy; do NOT recompute"
+          trace_file:
+            meaning: "append-only requirement→scenario→unit trace file for this plan"
+            source: "review-gate"
+            fill_rule: "literal copy; do NOT make up a path"
           must_fix_now_count:
             meaning: "accepted review has no remaining blocking loop obligations"
             source: "review-gate"
@@ -853,6 +889,10 @@ event_loop:
         required_fields:
           - "plan_name"
           - "plan_path"
+          - "plan_contract_version"
+          - "normalized_plan_file"
+          - "plan_contract_digest"
+          - "trace_file"
           - "review_round"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through from plan.ready
@@ -872,6 +912,22 @@ event_loop:
           - "loop_decision_basis"
           - "verdict"
         field_docs:
+          plan_contract_version:
+            meaning: "literal version tag of the ce-unified-plan contract carried through from plan.ready"
+            source: "fix-planner carries forward from review.synthesized"
+            fill_rule: "literal copy; do NOT recompute"
+          normalized_plan_file:
+            meaning: "canonical semantic projection of the source plan that downstream hats read"
+            source: "fix-planner carries forward from review.synthesized"
+            fill_rule: "literal copy; do NOT make up a path"
+          plan_contract_digest:
+            meaning: "hex digest binding the source plan and normalized_plan_file for this execution chain"
+            source: "fix-planner carries forward from review.synthesized"
+            fill_rule: "literal copy; do NOT recompute"
+          trace_file:
+            meaning: "append-only requirement→scenario→unit trace file for this plan"
+            source: "fix-planner carries forward from review.synthesized"
+            fill_rule: "literal copy; do NOT make up a path"
           fix_plan_file:
             meaning: "path to the fix plan written by fix-planner; fixer reads ONLY this file"
             source: "fix-planner"
@@ -888,6 +944,10 @@ event_loop:
         required_fields:
           - "plan_name"
           - "plan_path"
+          - "plan_contract_version"
+          - "normalized_plan_file"
+          - "plan_contract_digest"
+          - "trace_file"
           - "review_round"
           - "executor_head_sha"
           - "resolved_baseline_sha"  # pass-through from review.complete
@@ -920,6 +980,22 @@ event_loop:
           - "fix_summary"
           - "next_review_plan"
         field_docs:
+          plan_contract_version:
+            meaning: "literal version tag of the ce-unified-plan contract carried through from plan.ready"
+            source: "fixer carries forward from review.complete"
+            fill_rule: "literal copy; do NOT recompute"
+          normalized_plan_file:
+            meaning: "canonical semantic projection of the source plan that downstream hats read"
+            source: "fixer carries forward from review.complete"
+            fill_rule: "literal copy; do NOT make up a path"
+          plan_contract_digest:
+            meaning: "hex digest binding the source plan and normalized_plan_file for this execution chain"
+            source: "fixer carries forward from review.complete"
+            fill_rule: "literal copy; do NOT recompute"
+          trace_file:
+            meaning: "append-only requirement→scenario→unit trace file for this plan"
+            source: "fixer carries forward from review.complete"
+            fill_rule: "literal copy; do NOT make up a path"
           fix_status:
             meaning: "outcome of this fixer attempt; the topic is still fix.done because the fixer is handing off a complete attempt report, not claiming all fixes succeeded"
             source: "fixer"
