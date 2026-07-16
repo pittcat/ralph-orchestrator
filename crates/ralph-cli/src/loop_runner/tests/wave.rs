@@ -1,4 +1,4 @@
-// U2b: wave / acp / MockAcpExecution / forced_test_wave_pty_failure 测试 + wave 特定 helper。
+// U2b: wave / acp / forced_test_wave_pty_failure 测试 + wave 特定 helper。
 //
 // 从 `loop_runner/tests/legacy.rs` 迁出两段:
 //   - 段 1: 行 3713-6504(wave worker execution mode + execute_wave + helpers)
@@ -13,21 +13,19 @@
 //     / runner 子模块等)。`runner` 模块名(`mod runner;`)通过 sibling access path
 //     在 `loop_runner::tests::*` 命名空间下可访问,`runner::agent_wrote_any_valid_or_rejected`
 //     短名调用可解析为 `loop_runner::runner::agent_wrote_any_valid_or_rejected`(`pub fn`)。
-//   - `use super::common::*;` 引入 install_mock_acp_executions(common.rs 内 pub(super))
 //   - `use super::fake_path::*;` 引入 write_fake_executable / install_fake_path_backends /
 //     FakePathBackendsGuard / read_fake_path_backend_bin(fake_path.rs 内 pub(super))
 //   - `use std::collections::HashSet;` 用于 `make_test_wave_with_timeout_and_payload` 的
 //     `trigger_multi_consumer_topics: HashSet::new()`(原 `legacy.rs` 已 import)
 //
-// R3 锁定:本文件不重新声明 `MOCK_ACP_*` Mutex,通过 `super::common::*` 走
-// `tests/common.rs` 的 `install_mock_acp_executions` / `MockAcpExecutionGuard`(共享 helper),
-// 后者通过 `super::super::wave::MOCK_ACP_*` 引用 `loop_runner/wave/acp_mock.rs` 的 pub static。
+// 2026-07-16 (plan 2026-07-16-005, Unit 5 path B): MockAcpExecution /
+// install_mock_acp_executions 已确认死代码并删除,本文件不再 install mock queue。
 //
 // R6 锁定:本文件零修改 fn 签名 / 断言 / 输出;所有 `#[test]` / `#[tokio::test]` 函数
-// 与对应 `#[cfg(unix)]` 属性**逐字节**迁自 `legacy.rs`。
+// 与对应 `#[cfg(unix)]` 属性**逐字节**迁自 `legacy.rs`(2026-07-16 已删除唯一
+// install_mock_acp_executions 调用方)。
 
 use super::super::*;
-use super::common::*;
 use super::fake_path::*;
 use std::collections::HashSet;
 
@@ -556,10 +554,6 @@ async fn run_wave_for_hat_backend_with_acp_capture_and_task_payload(
     payload: &str,
     task_payload: &str,
 ) -> (ralph_core::CompletedWave, CapturedAcpWaveInvocation) {
-    let _mock = install_mock_acp_executions(vec![MockAcpExecution::success(
-        true,
-        vec![make_worker_event("review.done", payload)],
-    )]);
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let worker_capture_path = temp_dir.path().join("wave-w-test-0.jsonl.capture");
     let events_file = temp_dir.path().join("events.jsonl");

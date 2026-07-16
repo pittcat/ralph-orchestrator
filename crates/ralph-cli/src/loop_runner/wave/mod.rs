@@ -1,14 +1,14 @@
-#![allow(unused_imports)]
+// 2026-07-16 (plan 2026-07-16-005, Unit 5 path B): `acp_mock` 模块
+// (AcpWaveExecutionResult / MockAcpExecution / MOCK_ACP_* statics)
+// 已确认为死代码并删除。证据见 U1 笔记
+// `.ralph/review/2026-07-16-005-refactor-ralph-cli-parallel-tests-plan/scratch/u1-parallel-failure-characterization.md` §5.3。
+// git history 保留;若未来需要恢复 mock ACP,`git log -- crates/ralph-cli/src/loop_runner/wave/acp_mock.rs` 可找回。
 
-mod acp_mock;
 mod dispatcher;
 mod io;
 mod supervisor_bridge;
 mod worker;
 
-pub use acp_mock::AcpWaveExecutionResult;
-#[cfg(test)]
-pub use acp_mock::{MOCK_ACP_EXECUTION_SERIAL, MOCK_ACP_EXECUTIONS, MockAcpExecution};
 pub use dispatcher::{HandleWaveOutcome, WaveOutputs, execute_wave, handle_wave_events};
 pub use io::{
     extract_readable_delta, merge_wave_results_to_events_file, push_to_tui_iteration,

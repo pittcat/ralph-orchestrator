@@ -1,11 +1,16 @@
 // U2a: fake-PATH 后端安装 helper + 2 个 `FAKE_PATH_BACKEND_*` private `static` Mutex。
 //
-// 从原 `loop_runner/tests.rs:593-660` 行迁出。Mutex 形式逐字节不变(R5):
+// 从原 `loop_runner/tests.rs:593-660` 行迁出。
 // - `FAKE_PATH_BACKEND_SERIAL: LazyLock<Mutex<()>>` (#[cfg(unix)], private `static`)
 // - `FAKE_PATH_BACKEND_BIN: LazyLock<Mutex<Option<PathBuf>>>` (#[cfg(unix)], private `static`)
 //
-// 2 个 `MOCK_ACP_*` pub static Mutex 在 `loop_runner/wave/acp_mock.rs`,
-// 不在本 plan 范围。
+// 2026-07-16 (plan 2026-07-16-005-refactor-ralph-cli-parallel-tests-plan, Unit 5 path B):
+// 原「2 个 `MOCK_ACP_*` pub static Mutex 在 `loop_runner/wave/acp_mock.rs`」已确认死代码并删除,
+// 现仅剩 `FAKE_PATH_BACKEND_*` 2 个 Mutex。nextest 默认 process-per-test 隔离下,
+// 这两个 static Mutex 不再需要「binary 内串行化」(原 `cli-serial` 整包 override 已删除)。
+// - 跨测试共享 bin 目录:每个 nextest 测试独立进程,自己的 TempDir,跨进程不可见。
+// - PoisonError 连坐:进程退出销毁 Mutex,不传给下一进程。
+// 因此保留 `static` 字面形式仅为 fixture 兼容性,不再有「进程内串行」语义。
 
 use std::path::Path;
 
@@ -29,9 +34,8 @@ static FAKE_PATH_BACKEND_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>> =
 static FAKE_PATH_BACKEND_BIN: std::sync::LazyLock<std::sync::Mutex<Option<std::path::PathBuf>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
-// R5 严格性:`FAKE_PATH_BACKEND_BIN` 必须保持 `private static` 形式逐字节不变。
 // sibling 模块(legacy / 后续 wave)需要读 bin 目录,走 `read_fake_path_backend_bin()` 访问器
-// 间接访问,保持 Mutex 字面 `static FAKE_PATH_BACKEND_BIN: ...` 形式不动。
+// 间接访问。
 #[cfg(unix)]
 pub(super) fn read_fake_path_backend_bin() -> Option<std::path::PathBuf> {
     FAKE_PATH_BACKEND_BIN

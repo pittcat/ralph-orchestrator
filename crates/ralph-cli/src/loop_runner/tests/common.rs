@@ -7,7 +7,6 @@
 // 即 sibling 子文件(`fake_path` / 后续 `wave` / `hooks` 等)与原 `tests.rs` 内
 // `#[test]` 函数都能直接调用。
 
-use super::super::wave::{MOCK_ACP_EXECUTION_SERIAL, MOCK_ACP_EXECUTIONS, MockAcpExecution};
 use super::*;
 use ralph_core::diagnostics::HookRunTelemetryEntry;
 
@@ -302,34 +301,16 @@ pub(super) async fn dispatch_post_loop_termination_hooks(
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// MockAcpExecution + install_mock_acp_executions
-// (后续 U2b 拆 wave.rs 时迁走,本 U2a 阶段作为共享 helper)
+// MockAcpExecution / install_mock_acp_executions
+//
+// 2026-07-16 (plan 2026-07-16-005, Unit 5 path B): 全栈 grep 确认
+// `MOCK_ACP_EXECUTIONS` / `MOCK_ACP_EXECUTION_SERIAL` /
+// `MockAcpExecution` / `AcpWaveExecutionResult` 是死代码:
+//   - 生产 wave 路径(dispatcher / worker / io / supervisor_bridge)零 pop
+//   - `MockAcpExecution::write_capture` / `write_events` 零调用方
+//   - `install_mock_acp_executions` 唯一调用方 `wave.rs` 中 install 后
+//     立即丢弃(`let _mock = ...` 不读 queue)
+//   - `AcpWaveExecutionResult` 仅被 wave/mod.rs re-export,仓库零使用
+//
+// 此处不再定义 helper / guard;acp_mock.rs 自身随 path B 删除。
 // ──────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-pub(super) struct MockAcpExecutionGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
-}
-
-#[cfg(test)]
-impl Drop for MockAcpExecutionGuard {
-    fn drop(&mut self) {
-        MOCK_ACP_EXECUTIONS
-            .lock()
-            .expect("mock ACP execution queue")
-            .clear();
-    }
-}
-
-#[cfg(test)]
-pub(super) fn install_mock_acp_executions(
-    executions: Vec<MockAcpExecution>,
-) -> MockAcpExecutionGuard {
-    let guard = MOCK_ACP_EXECUTION_SERIAL
-        .lock()
-        .expect("mock ACP execution serial lock");
-    *MOCK_ACP_EXECUTIONS
-        .lock()
-        .expect("mock ACP execution queue") = executions.into_iter().collect();
-    MockAcpExecutionGuard { _guard: guard }
-}

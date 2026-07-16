@@ -12,42 +12,37 @@ use std::sync::Mutex;
 // Test execution requirements (Unit 4 of plan 2026-06-06-001, follow-up
 // to Unit 3's "5 pre-existing test failures" note):
 //
-// These tests touch four **process-global** `Mutex` / `LazyLock` singletons
-// declared further down in this file:
+// These tests touch two **process-global** `Mutex` / `LazyLock` singletons
+// declared in `loop_runner/tests/fake_path.rs`:
 //
-//   - MOCK_ACP_EXECUTIONS           (mock ACP backend queue)
-//   - MOCK_ACP_EXECUTION_SERIAL     (mock ACP execution guard)
 //   - FAKE_PATH_BACKEND_SERIAL      (fake-PATH backend installation guard)
 //   - FAKE_PATH_BACKEND_BIN         (fake-PATH backend bin dir)
 //
-// The locks are intentionally process-global because the wave / FAKE_PATH
-// test scaffolding is shared across many test functions and serializing
-// within the binary process keeps the wave fixtures consistent.
+// (Historical note: there used to be two more — `MOCK_ACP_EXECUTIONS` and
+// `MOCK_ACP_EXECUTION_SERIAL`. On 2026-07-16 they were confirmed dead code
+// and removed as part of plan `2026-07-16-005-refactor-ralph-cli-parallel-tests-plan`,
+// Unit 5 path B. See
+// `.ralph/review/2026-07-16-005-refactor-ralph-cli-parallel-tests-plan/scratch/u1-parallel-failure-characterization.md`
+// §5.3 for the grep proof.)
 //
-// Consequence: under **plain `cargo test` (default test-threads)**, the
-// 5xx+ tests in this binary run in parallel inside a single OS process
-// and **share the same Mutexes**. A panic in one test poisons the
-// `FAKE_PATH_BACKEND_SERIAL` Mutex; every subsequent test that goes
-// through `install_fake_path_backends(...)` then panics on
-// `PoisonError { .. }`. Similarly, time-sensitive tests like
-// `test_process_pending_merges_redirects_subprocess_output_to_log_file`
-// use a 500ms sleep to wait for the sub-process to flush its log file;
-// under parallel load the sub-process can take longer, producing
-// spurious failures. None of these are real bugs.
-//
-// The project's `scripts/run-tests.sh` and the `nextest` profile
-// (`.config/nextest.toml`) put this entire binary in the `cli-serial`
-// test group with `max-threads = 1`, which sidesteps both problems.
+// The two remaining `FAKE_PATH_BACKEND_*` locks live inside the same
+// binary and historically led to a `cli-serial` override in
+// `.config/nextest.toml` (`max-threads = 1`). The 2026-07-16 plan
+// removes that override after empirical proof (Unit 1 + Unit 6 of the
+// plan) that nextest's process-per-test isolation makes the
+// shared-process Mutex semantics moot — every test runs in its own
+// process, so the locks are not actually shared across tests.
 //
 // **Run via `./scripts/run-tests.sh` or `cargo nextest run -p ralph-cli --bin ralph`.**
-// If you must run with raw `cargo test`, pass `--test-threads=1`:
-//
-//     cargo test -p ralph-cli --bin ralph -- --test-threads=1
+// `cargo nextest run` is the only supported default entry point; the
+// `cargo test -p ralph-cli` fallback is documented in
+// `docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`
+// (kept for historical context, not the recommended path).
 //
 // Do NOT add `#[ignore]` to the wave / FAKE_PATH tests as a "fix" for
-// the parallel-load failures: they are real tests of the production
+// parallel-load failures: they are real tests of the production
 // runner code path, and skipping them defeats the regression guard.
-// ──────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 // U2a: tests 目录骨架。
 //
