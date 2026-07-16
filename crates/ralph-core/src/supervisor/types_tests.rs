@@ -117,7 +117,7 @@ mod tests {
         };
         let rendered = err.to_string();
         assert!(
-            rendered.contains("w-1") && rendered.contains("2"),
+            rendered.contains("w-1") && rendered.contains('2'),
             "Display must carry slot context; got {rendered}"
         );
     }

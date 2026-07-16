@@ -2,7 +2,6 @@
 
 use super::*;
 use ralph_proto::Event;
-use tempfile::TempDir;
 
 fn completion_guard_config() -> RalphConfig {
     let yaml = r#"

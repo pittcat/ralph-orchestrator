@@ -803,13 +803,12 @@ pub fn detect_required_topic_gaps(
     for t in &config.event_loop.required_events {
         topics_to_check.insert(t.clone());
     }
-    if let Some(ec) = &config.event_loop.execution_contracts {
-        if ec.enabled {
+    if let Some(ec) = &config.event_loop.execution_contracts
+        && ec.enabled {
             for topic in ec.rules.keys() {
                 topics_to_check.insert(topic.clone());
             }
         }
-    }
     if let Some(ep) = &config.event_loop.event_policy {
         for topic in ep.schemas.keys() {
             topics_to_check.insert(topic.clone());
@@ -948,7 +947,7 @@ pub fn detect_obligation_topics_not_in_publishes(
                         ),
                     )
                     .expect("obligation finding uses no reserved source")
-                    .with_detail("hat", hat_id.to_string())
+                    .with_detail("hat", hat_id.clone())
                     .with_detail("on_trigger", obligation.on_trigger.clone())
                     .with_detail("topic", topic.clone());
                     findings.push(finding);

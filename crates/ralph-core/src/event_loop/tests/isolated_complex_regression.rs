@@ -605,7 +605,7 @@ fn u2_unauthorized_terminal_rejected_with_targeted_recovery() {
     // Now drive a legal completion through reporter (the only hat
     // that declares LOOP_COMPLETE) and confirm the loop closes. Two
     // turns: report.done first, then LOOP_COMPLETE.
-    let _ = run_isolated_turn(
+    run_isolated_turn(
         &mut event_loop,
         &events_path,
         "reporter",
@@ -645,7 +645,7 @@ fn u2_unauthorized_terminal_rejected_with_targeted_recovery() {
 //  become a publisher authority (i.e. it cannot satisfy the
 //  origin guard's "must be in publishes" check for any topic). R9.
 // ─────────────────────────────────────────────────────────────────────
-#[test]
+// ─────────────────────────────────────────────────────────────────────
 //  Test 5: deterministic replay — the same fixture (same initial
 //  state, same feed of events) must produce the same selected-hat,
 //  accepted-topic, rejected-topic, and completion-owner sequence
@@ -695,7 +695,7 @@ fn u2_replay_determinism_same_sequence_for_same_input() {
         ];
 
         let mut turns = Vec::new();
-        for (topic, hat, payload) in script.iter() {
+        for (topic, hat, payload) in &script {
             // Capture the topics published to the bus BEFORE this
             // turn so we can compute the delta for this turn.
             let pre_topics = observed.lock().unwrap().clone();

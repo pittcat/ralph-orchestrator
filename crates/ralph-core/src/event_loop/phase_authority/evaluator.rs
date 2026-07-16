@@ -35,7 +35,7 @@ pub enum EventFixture<'a> {
     LoopComplete { honored: bool },
 }
 
-impl<'a> EventFixture<'a> {
+impl EventFixture<'_> {
     pub fn topic(&self) -> &str {
         match self {
             EventFixture::Bare(t) => t,
@@ -98,7 +98,7 @@ fn evaluate_transition(
 ) -> Option<String> {
     let primitive = on
         .as_mapping()
-        .and_then(|m| m.get(&serde_yaml::Value::String("primitive".into())))
+        .and_then(|m| m.get(serde_yaml::Value::String("primitive".into())))
         .and_then(|v| v.as_str());
 
     let resolved = match fixture {
@@ -120,7 +120,7 @@ fn evaluate_transition(
 
     // Matrix / honored primitives return the target phase id directly.
     let target = match primitive {
-        Some("on_review_complete_verdict") | Some("on_loop_complete_honored") => resolved,
+        Some("on_review_complete_verdict" | "on_loop_complete_honored") => resolved,
         _ => transition_to.to_string(),
     };
     Some(target)
@@ -139,6 +139,7 @@ mod tests {
     use super::super::declaration::*;
     use super::super::snapshot::ViolationKind;
     use super::super::whitelist::allows;
+    use std::collections::BTreeMap;
     use super::*;
     use std::sync::Arc;
 
@@ -150,32 +151,32 @@ mod tests {
                 PhaseDeclConfig {
                     id: "unit_loop".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: BTreeMap::default(),
                 },
                 PhaseDeclConfig {
                     id: "review".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: BTreeMap::default(),
                 },
                 PhaseDeclConfig {
                     id: "fix_units".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: BTreeMap::default(),
                 },
                 PhaseDeclConfig {
                     id: "plan_end".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: BTreeMap::default(),
                 },
                 PhaseDeclConfig {
                     id: "ship".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: BTreeMap::default(),
                 },
                 PhaseDeclConfig {
                     id: "terminal".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: BTreeMap::default(),
                 },
             ],
             transitions: vec![
@@ -183,11 +184,11 @@ mod tests {
                     from: "unit_loop".to_string(),
                     to: "review".to_string(),
                     on: serde_yaml::from_str(
-                        r#"
+                        r"
 primitive: on_test_passed_step
 step_kind: plan_unit
 when: last
-"#,
+",
                     )
                     .unwrap(),
                 },
@@ -195,10 +196,10 @@ when: last
                     from: "review".to_string(),
                     to: "fix_units".to_string(),
                     on: serde_yaml::from_str(
-                        r#"
+                        r"
 primitive: on_review_complete_verdict
 matrix: serial_default
-"#,
+",
                     )
                     .unwrap(),
                 },
@@ -206,10 +207,10 @@ matrix: serial_default
                     from: "review".to_string(),
                     to: "plan_end".to_string(),
                     on: serde_yaml::from_str(
-                        r#"
+                        r"
 primitive: on_review_complete_verdict
 matrix: serial_default
-"#,
+",
                     )
                     .unwrap(),
                 },
@@ -217,11 +218,11 @@ matrix: serial_default
                     from: "fix_units".to_string(),
                     to: "plan_end".to_string(),
                     on: serde_yaml::from_str(
-                        r#"
+                        r"
 primitive: on_test_passed_step
 step_kind: fix_unit
 when: last
-"#,
+",
                     )
                     .unwrap(),
                 },
@@ -229,9 +230,9 @@ when: last
                     from: "plan_end".to_string(),
                     to: "ship".to_string(),
                     on: serde_yaml::from_str(
-                        r#"
+                        r"
 event: plan.complete
-"#,
+",
                     )
                     .unwrap(),
                 },
@@ -239,9 +240,9 @@ event: plan.complete
                     from: "ship".to_string(),
                     to: "terminal".to_string(),
                     on: serde_yaml::from_str(
-                        r#"
+                        r"
 primitive: on_loop_complete_honored
-"#,
+",
                     )
                     .unwrap(),
                 },
@@ -338,12 +339,12 @@ primitive: on_loop_complete_honored
                 PhaseDeclConfig {
                     id: "unit_loop".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: BTreeMap::default(),
                 },
                 PhaseDeclConfig {
                     id: "review".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: BTreeMap::default(),
                 },
             ],
             transitions: vec![PhaseTransitionConfig {

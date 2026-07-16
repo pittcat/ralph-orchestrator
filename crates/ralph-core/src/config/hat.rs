@@ -265,6 +265,7 @@ impl TriggerPredicate {
         // ctx) causes the predicate to NOT match, mirroring the
         // "None treated as neutral" semantic on the typed fields.
         for (field, want) in &self.payload_field_equals {
+            #[allow(clippy::needless_continue)]
             match ctx.payload_fields.get(field) {
                 Some(got) if got == want => continue,
                 _ => return false,
@@ -832,7 +833,7 @@ pub fn resolve_missing_event_grace_secs(
         return secs;
     }
     // Fallback: scale with adapter idle, cap at 540s.
-    let scaled = (adapter_idle_secs as f64 * 0.3).floor() as u32;
+    let scaled = (f64::from(adapter_idle_secs) * 0.3).floor() as u32;
     scaled.min(540)
 }
 
@@ -946,12 +947,12 @@ mod tests {
         };
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["review.passed".into()],
+            &["review.passed".into()],
             None
         ));
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["review.wave.ready".into()],
+            &["review.wave.ready".into()],
             None
         ));
     }
@@ -970,10 +971,10 @@ mod tests {
         };
         assert!(!obligation_satisfied(
             Some(&o),
-            &vec!["work.failed".into()],
+            &["work.failed".into()],
             None
         ));
-        assert!(!obligation_satisfied(Some(&o), &vec![], None));
+        assert!(!obligation_satisfied(Some(&o), &[], None));
     }
 
     // ─── 2026-06-08 fix: conditional tightening tests ───
@@ -1006,7 +1007,7 @@ mod tests {
         assert!(
             !obligation_satisfied(
                 Some(&o),
-                &vec!["review.passed".into()],
+                &["review.passed".into()],
                 Some(&ctx_non_trivial)
             ),
             "non-trivial diff with review.passed must NOT satisfy obligation"
@@ -1014,7 +1015,7 @@ mod tests {
         // Non-trivial: agent emitted review.wave.ready → satisfied
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["review.wave.ready".into()],
+            &["review.wave.ready".into()],
             Some(&ctx_non_trivial)
         ));
         // Trivial: agent emitted review.passed → satisfied (legacy OR)
@@ -1024,7 +1025,7 @@ mod tests {
         };
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["review.passed".into()],
+            &["review.passed".into()],
             Some(&ctx_trivial)
         ));
     }
@@ -1053,12 +1054,12 @@ mod tests {
         };
         assert!(!obligation_satisfied(
             Some(&o),
-            &vec!["review.passed".into()],
+            &["review.passed".into()],
             Some(&ctx_big)
         ));
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["review.wave.ready".into()],
+            &["review.wave.ready".into()],
             Some(&ctx_big)
         ));
         // 10-line diff: review.passed still satisfies (legacy OR)
@@ -1068,7 +1069,7 @@ mod tests {
         };
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["review.passed".into()],
+            &["review.passed".into()],
             Some(&ctx_small)
         ));
     }
@@ -1095,7 +1096,7 @@ mod tests {
         };
         assert!(!obligation_satisfied(
             Some(&o),
-            &vec!["review.passed".into()],
+            &["review.passed".into()],
             Some(&ctx_untracked)
         ));
         let ctx_clean = TriggerContext {
@@ -1104,7 +1105,7 @@ mod tests {
         };
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["review.passed".into()],
+            &["review.passed".into()],
             Some(&ctx_clean)
         ));
     }
@@ -1143,12 +1144,12 @@ mod tests {
         };
         assert!(!obligation_satisfied(
             Some(&o),
-            &vec!["review.passed".into()],
+            &["review.passed".into()],
             Some(&ctx)
         ));
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["review.wave.ready".into()],
+            &["review.wave.ready".into()],
             Some(&ctx)
         ));
     }
@@ -1177,7 +1178,7 @@ mod tests {
         // updated to pass context yet.
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["review.passed".into()],
+            &["review.passed".into()],
             None
         ));
     }
@@ -1333,7 +1334,7 @@ obligations:
         assert!(
             !obligation_satisfied(
                 Some(&o),
-                &vec!["report.done".into(), "LOOP_COMPLETE".into()],
+                &["report.done".into(), "LOOP_COMPLETE".into()],
                 Some(&ctx_fail)
             ),
             "failing review + LOOP_COMPLETE in candidate set must fail obligation"
@@ -1342,7 +1343,7 @@ obligations:
         // pre-condition does not fire because LOOP_COMPLETE is absent).
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["report.done".into()],
+            &["report.done".into()],
             Some(&ctx_fail)
         ));
         // Passing review + LOOP_COMPLETE → satisfied (forbid does not
@@ -1357,7 +1358,7 @@ obligations:
         };
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["report.done".into(), "LOOP_COMPLETE".into()],
+            &["report.done".into(), "LOOP_COMPLETE".into()],
             Some(&ctx_pass)
         ));
     }
@@ -1458,7 +1459,7 @@ obligations:
         };
         assert!(obligation_satisfied(
             Some(&o),
-            &vec!["report.done".into(), "LOOP_COMPLETE".into()],
+            &["report.done".into(), "LOOP_COMPLETE".into()],
             Some(&ctx_small)
         ));
         // commit_count=42 → predicate matches → forbid applies.
@@ -1468,7 +1469,7 @@ obligations:
         };
         assert!(!obligation_satisfied(
             Some(&o),
-            &vec!["report.done".into(), "LOOP_COMPLETE".into()],
+            &["report.done".into(), "LOOP_COMPLETE".into()],
             Some(&ctx_big)
         ));
     }
@@ -1507,7 +1508,7 @@ obligations:
         //   → overall: NOT satisfied
         assert!(!obligation_satisfied(
             Some(&o),
-            &vec!["report.done".into(), "LOOP_COMPLETE".into()],
+            &["report.done".into(), "LOOP_COMPLETE".into()],
             Some(&ctx_fail)
         ));
     }

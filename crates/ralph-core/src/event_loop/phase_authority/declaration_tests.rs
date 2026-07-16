@@ -15,12 +15,12 @@ fn minimal_two_phase_config() -> PhaseAuthorityConfig {
             PhaseDeclConfig {
                 id: "unit_loop".to_string(),
                 label: None,
-                allowed_emits: Default::default(),
+                allowed_emits: std::collections::BTreeMap::default(),
             },
             PhaseDeclConfig {
                 id: "review".to_string(),
                 label: None,
-                allowed_emits: Default::default(),
+                allowed_emits: std::collections::BTreeMap::default(),
             },
         ],
         transitions: vec![PhaseTransitionConfig {
@@ -53,7 +53,7 @@ fn declaration_rejects_duplicate_phase_id() {
     cfg.phases.push(PhaseDeclConfig {
         id: "unit_loop".to_string(),
         label: None,
-        allowed_emits: Default::default(),
+        allowed_emits: std::collections::BTreeMap::default(),
     });
 
     let err = PhaseAuthorityDeclaration::try_from_config(&cfg).unwrap_err();
@@ -66,7 +66,7 @@ fn declaration_rejects_dangling_transition_from() {
     cfg.phases = vec![PhaseDeclConfig {
         id: "unit_loop".to_string(),
         label: None,
-        allowed_emits: Default::default(),
+        allowed_emits: std::collections::BTreeMap::default(),
     }];
     // transitions[0] still references `review` which no longer
     // exists.

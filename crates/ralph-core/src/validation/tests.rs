@@ -550,7 +550,7 @@ fn workflow_guard_rule_accepts_with_no_chain_configured() {
     let view = ProtocolView::from_event_loop(&minimal_config());
     let mut snap = minimal_snapshot();
     let mut ctx = ValidationContext::new(&mut snap);
-    let event = make_event("experiment.planned", r#"{}"#, None);
+    let event = make_event("experiment.planned", r"{}", None);
     let result = WorkflowGuardRule.validate(&view, &mut ctx, &event);
     assert!(result.accepted, "{result:?}");
 }
@@ -715,7 +715,7 @@ fn validate_with_preview_accepts_well_formed_work_done() {
     // configured); workflow-guard rule accepts. The
     // step-handoff rule accepts non-gated topics.
     assert!(report.accepted, "expected accepted, got {report:?}");
-    assert!(report.post_commit.is_empty() == false);
+    assert!(!report.post_commit.is_empty());
 }
 
 #[test]

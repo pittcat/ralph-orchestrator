@@ -359,13 +359,11 @@ impl SupervisorStore for InMemorySupervisorStore {
         // still ours. Cleanup failures are logged at the
         // call site (we keep going; the worktree may have
         // been removed by a previous `cleanup_worktree`).
-        if let Some(prev) = slot.resource.as_ref() {
-            if prev.worktree_path != binding.worktree_path {
-                if let Some(prev_path) = &prev.worktree_path {
+        if let Some(prev) = slot.resource.as_ref()
+            && prev.worktree_path != binding.worktree_path
+                && let Some(prev_path) = &prev.worktree_path {
                     cleanup_worktree_path(prev_path);
                 }
-            }
-        }
         slot.resource = Some(binding);
         Ok(())
     }
@@ -401,14 +399,13 @@ impl SupervisorStore for InMemorySupervisorStore {
                 event_count,
             },
         );
-        if let Some(prev) = prior {
-            if prev.content_hash != content_hash {
+        if let Some(prev) = prior
+            && prev.content_hash != content_hash {
                 // R-E2/R-E4: replace prior worker_result; the
                 // diagnostics collector can read
                 // `compaction_diagnostics` (out of scope for U3/U4).
                 let _ = prev;
             }
-        }
         // Bind the slot's `dispatches` outcome to Completed so the
         // coordinator/U8 can correlate.
         if let Some(d) = inner.dispatches.get_mut(&key) {

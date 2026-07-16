@@ -4,17 +4,13 @@ use serde::{Deserialize, Serialize};
 
 /// Opt-in workflow state guards for enforcing ordered event chains.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct WorkflowGuardsConfig {
     /// List of workflow chains. An empty list or None means guards are disabled.
     #[serde(default)]
     pub chains: Vec<WorkflowChain>,
 }
 
-impl Default for WorkflowGuardsConfig {
-    fn default() -> Self {
-        Self { chains: Vec::new() }
-    }
-}
 
 /// A named workflow chain that enforces ordered topic sequences.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -62,11 +62,10 @@ impl EmitStage for TargetHatGuardStage {
             None => return Ok(()), // Schema gate will reject empty target.
         };
 
-        if let Some(source) = event.source.as_ref() {
-            if source.as_str() == target {
+        if let Some(source) = event.source.as_ref()
+            && source.as_str() == target {
                 return Err(StageReject::new(self.name(), "target_self_loop"));
             }
-        }
 
         Ok(())
     }
@@ -86,7 +85,7 @@ mod tests {
     use crate::event_loop::repair_flow::RepairStateMachine;
     use crate::event_loop::stage_pipeline::{FlowStep, StageContext};
 
-    fn ctx<'a>(repair: &'a mut RepairStateMachine) -> StageContext<'a> {
+    fn ctx(repair: &mut RepairStateMachine) -> StageContext<'_> {
         StageContext::for_test_machine(FlowStep::new("unit_loop"), "loop-1", 1, repair)
     }
 

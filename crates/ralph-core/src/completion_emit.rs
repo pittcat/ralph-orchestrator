@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn next_step_hint_lists_topics() {
-        let s = next_step_hint(&vec!["work.done".to_string()]);
+        let s = next_step_hint(&["work.done".to_string()]);
         assert!(s.contains("work.done"), "hint missing topic: {s}");
         assert!(s.contains("--policy-check"));
     }

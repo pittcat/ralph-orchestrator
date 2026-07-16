@@ -206,7 +206,7 @@ fn stage_pipeline_order_default_matches_locked_emit_order() {
     use crate::event_loop::flow_declaration::FlowDeclaration;
 
     let flow = FlowDeclaration::from_yaml(
-        r#"
+        r"
 mechanism:
   flow:
     type: declared
@@ -215,7 +215,7 @@ mechanism:
     steps:
       - id: unit_loop
         allowed_emits: [work.ready]
-"#,
+",
     )
     .unwrap();
     let pipeline = StagePipeline::with_default_stages(flow);
@@ -241,7 +241,7 @@ fn hat_only_pipeline_omits_flow_step_scope_and_accepts_plan_ready() {
     use crate::event_loop::repair_flow::RepairStateMachine;
     use ralph_proto::Event;
 
-    let mut pipeline = StagePipeline::with_hat_only_stages_for_loop_config(None);
+    let pipeline = StagePipeline::with_hat_only_stages_for_loop_config(None);
     assert_eq!(
         pipeline.names(),
         vec!["RepairDispatch", "EmitSchemaGate", "VerdictGate"]

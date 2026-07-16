@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn custom_timeout_and_fallback_are_honored() {
         let mut tracker = HandoffTracker::new()
-            .with_default_timeout(Duration::from_secs(60))
+            .with_default_timeout(Duration::from_mins(1))
             .with_fallback_safe_target("custom-hat");
         tracker.on_handoff_accepted("work.ready", "custom-hat", "evt-1", t(0));
         let escalations = tracker.expired(t(120));

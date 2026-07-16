@@ -96,7 +96,7 @@ fn escalation_payload_shape() {
         .with_fallback_safe_target("plan-gate");
     tracker.on_handoff_accepted("work.ready", "executor", "evt-1", Instant::now());
     let escalations: Vec<HandoffEscalation> =
-        tracker.expired(Instant::now() + Duration::from_secs(60));
+        tracker.expired(Instant::now() + Duration::from_mins(1));
     assert_eq!(escalations.len(), 1);
     let esc = &escalations[0];
     assert_eq!(esc.topic, "work.ready");

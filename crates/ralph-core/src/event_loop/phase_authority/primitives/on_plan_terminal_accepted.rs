@@ -13,9 +13,9 @@ pub fn evaluate(trigger: &Value, event_topic: &str, accepted: bool) -> Option<St
     }
 
     let mapping = trigger.as_mapping()?;
-    if mapping.contains_key(&Value::String("primitive".to_string())) {
+    if mapping.contains_key(Value::String("primitive".to_string())) {
         let primitive = mapping
-            .get(&Value::String("primitive".to_string()))?
+            .get(Value::String("primitive".to_string()))?
             .as_str()?;
         if primitive != "on_plan_terminal_accepted" {
             return None;
@@ -23,7 +23,7 @@ pub fn evaluate(trigger: &Value, event_topic: &str, accepted: bool) -> Option<St
     }
 
     let event_name = mapping
-        .get(&Value::String("event".to_string()))
+        .get(Value::String("event".to_string()))
         .and_then(|v| v.as_str())?;
     if event_name != event_topic {
         return None;
@@ -40,11 +40,11 @@ mod tests {
     #[test]
     fn plan_complete_accepted_matches() {
         let trigger: Value = serde_yaml::from_str(
-            r#"
+            r"
 primitive: on_plan_terminal_accepted
 event: plan.complete
 accepted: true
-"#,
+",
         )
         .unwrap();
         assert_eq!(
@@ -56,11 +56,11 @@ accepted: true
     #[test]
     fn plan_blocked_accepted_matches() {
         let trigger: Value = serde_yaml::from_str(
-            r#"
+            r"
 primitive: on_plan_terminal_accepted
 event: plan.blocked
 accepted: true
-"#,
+",
         )
         .unwrap();
         assert_eq!(

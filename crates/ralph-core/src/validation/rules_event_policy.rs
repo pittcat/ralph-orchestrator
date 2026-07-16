@@ -148,14 +148,13 @@ impl ValidationRule for EventPolicyRule {
         }
 
         // U4: upgrade duplicate work.done hint when a wave is still open.
-        if let PolicyDecision::RejectWithResume(ref mut finding) = decision {
-            if let ViolationType::DuplicateWorkDone {
+        if let PolicyDecision::RejectWithResume(ref mut finding) = decision
+            && let ViolationType::DuplicateWorkDone {
                 ref mut hint,
                 ref key,
                 ..
             } = finding.violation_type
-            {
-                if event.wave_id.is_some() {
+                && event.wave_id.is_some() {
                     *hint = DuplicateWorkDoneHint::DuplicateStallBypass;
                     finding.message = format!(
                         "duplicate_stall_bypass: work.done for key '{key}' was already accepted \
@@ -164,8 +163,6 @@ impl ValidationRule for EventPolicyRule {
                         event.wave_id
                     );
                 }
-            }
-        }
 
         handle_payload_decision(decision, ctx, event, policy_config)
     }

@@ -77,7 +77,7 @@ fn u2_publish_event_empty_plan_blocked_rejected_to_recovery() {
     // rejected by the schema gate; bus does NOT see the
     // event; recovery envelope contains the
     // stage-rejection signature.
-    let event = Event::new("plan.blocked", r#"{}"#);
+    let event = Event::new("plan.blocked", r"{}");
     event_loop.publish_event(event);
 
     let bus_topics = captured.lock().unwrap().clone();

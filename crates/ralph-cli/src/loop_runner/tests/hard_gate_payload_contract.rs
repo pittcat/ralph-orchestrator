@@ -27,8 +27,6 @@
 //   - `use super::fake_path::*;` 引入 fake PATH helper
 
 use super::super::*;
-use super::common::*;
-use super::fake_path::*;
 
 // ──────────────────────────────────────────────────────────────────────
 // U6: payload contract violation report writing

@@ -410,8 +410,8 @@ fn remove_loop_termination_sentinel(loop_context: &Option<LoopContext>) {
 /// recover the exact reason after the loop runner exits.
 fn write_loop_termination_sentinel(loop_context: &Option<LoopContext>, reason: &TerminationReason) {
     let path = loop_termination_sentinel_path(loop_context);
-    if let Some(parent) = path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
+    if let Some(parent) = path.parent()
+        && let Err(e) = fs::create_dir_all(parent) {
             warn!(
                 target: "ralph_cli::loop_runner",
                 error = %e,
@@ -420,7 +420,6 @@ fn write_loop_termination_sentinel(loop_context: &Option<LoopContext>, reason: &
             );
             return;
         }
-    }
     match serde_json::to_string(reason) {
         Ok(json) => {
             if let Err(e) = fs::write(&path, json) {
@@ -560,11 +559,10 @@ pub async fn run_loop_impl(
         hats_source_label,
     )
     .await;
-    if let Ok(ref reason) = result {
-        if !reason.is_success() {
+    if let Ok(ref reason) = result
+        && !reason.is_success() {
             write_loop_termination_sentinel(&loop_context, reason);
         }
-    }
     result
 }
 
@@ -1736,7 +1734,7 @@ async fn run_loop_impl_inner(
     }
 
     // Record base commit at loop start for accurate handoff scope (base..HEAD)
-    let base_commit = ralph_core::get_head_sha(&ctx.workspace()).ok();
+    let base_commit = ralph_core::get_head_sha(ctx.workspace()).ok();
 
     // Record the same baseline in the event loop state so execution-contract
     // validation can detect commits produced during this loop. Without this,
@@ -1764,8 +1762,8 @@ async fn run_loop_impl_inner(
     // anchored at worktree creation time; recreating them on reuse would
     // silently re-anchor the review diff base to the current HEAD if the file
     // was ever lost.
-    if ctx.is_primary() {
-        if let Err(e) = ensure_plan_baseline_from_head(ctx.workspace(), plan_id.as_deref()) {
+    if ctx.is_primary()
+        && let Err(e) = ensure_plan_baseline_from_head(ctx.workspace(), plan_id.as_deref()) {
             warn!(
                 workspace = %ctx.workspace().display(),
                 plan_id = ?plan_id,
@@ -1773,7 +1771,6 @@ async fn run_loop_impl_inner(
                 "Failed to ensure plan baseline"
             );
         }
-    }
 
     let persisted_baseline = read_plan_baseline(ctx.workspace(), plan_id.as_deref());
     if persisted_baseline.is_none() && !ctx.is_primary() {
@@ -4036,7 +4033,7 @@ async fn run_loop_impl_inner(
                         "warmup_completed": stop_on_exit,
                     });
                     let transition_event =
-                        Event::new(transition_topic, &transition_payload.to_string());
+                        Event::new(transition_topic, transition_payload.to_string());
                     event_loop.publish_event(transition_event);
 
                     // If warmup_only mode, terminate the loop
@@ -4226,7 +4223,9 @@ async fn run_loop_impl_inner(
 
         // Execute wave if wave events detected
         let wave_outcome: Option<crate::loop_runner::wave::HandleWaveOutcome> =
-            if !wave_events.is_empty() {
+            if wave_events.is_empty() {
+                None
+            } else {
                 // U4-C2 / KTD-U4-6: compute the runner-supplied global
                 // deadline from the loop's remaining runtime budget.
                 // When `max_runtime_seconds = 0` (the default in many
@@ -4282,8 +4281,6 @@ async fn run_loop_impl_inner(
                 )
                 .await;
                 Some(outcome)
-            } else {
-                None
             };
 
         // U4-C3 / KTD-U4-6: if the global deadline fired during the
@@ -4873,7 +4870,7 @@ mod sync_timeout_tests {
 /// `preset_name = ""` and the rule silently bypasses.
 #[cfg(test)]
 mod u1_preset_name_aware_lint_gate_wiring {
-    use super::*;
+    
     use crate::loop_runner::preset_lint_gate::enforce_preset_lint_gate;
     use ralph_core::RalphConfig;
 

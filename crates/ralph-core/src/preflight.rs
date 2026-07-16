@@ -1122,9 +1122,7 @@ fn backend_command(backend: &str, override_cmd: Option<&str>) -> Option<String> 
             .map(|value| value.to_string());
     }
 
-    match backend {
-        _ => Some(backend.to_string()),
-    }
+    Some(backend.to_string())
 }
 
 fn command_supports_version(backend: &str) -> bool {
@@ -1205,6 +1203,159 @@ fn format_config_warnings(warnings: &[ConfigWarning]) -> String {
         .map(|warning| warning.to_string())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Preset topology validation check.
+///
+/// Validates that the preset's hat configuration forms a valid topology where:
+/// - The starting event can reach at least one hat.
+/// - The completion promise is reachable from the starting event.
+/// - Required events are reachable and appear on all completion paths.
+struct PresetTopologyCheck;
+
+#[async_trait]
+impl PreflightCheck for PresetTopologyCheck {
+    fn name(&self) -> &'static str {
+        "preset-topology"
+    }
+
+    async fn run(&self, config: &RalphConfig) -> CheckResult {
+        use crate::hat_registry::HatRegistry;
+        use crate::preset_validator::validate_preset_topology;
+
+        let registry = HatRegistry::from_runtime_config(config);
+        let result = validate_preset_topology(config, &registry);
+
+        if result.is_valid() {
+            if result.warnings.is_empty() {
+                CheckResult::pass(self.name(), "Preset topology is valid")
+            } else {
+                CheckResult::warn(
+                    self.name(),
+                    "Preset topology has warnings",
+                    result.warnings.join("; "),
+                )
+            }
+        } else {
+            let error_messages: Vec<String> =
+                result.errors.iter().map(|e| e.message.clone()).collect();
+            CheckResult::fail(
+                self.name(),
+                "Preset topology validation failed",
+                error_messages.join("; "),
+            )
+        }
+    }
+}
+
+/// Preset contract validation check (U5).
+///
+/// Runs the full preset contract aggregator (config, topology, payload,
+/// orphan) and wraps the result as a single `CheckResult`. This check
+/// is additive — it does NOT replace `preset-topology`. Users can skip
+/// it via `features.preflight.skip: ["preset-contract"]`.
+struct PresetContractCheck;
+
+#[async_trait]
+impl PreflightCheck for PresetContractCheck {
+    fn name(&self) -> &'static str {
+        "preset-contract"
+    }
+
+    async fn run(&self, config: &RalphConfig) -> CheckResult {
+        use crate::hat_registry::HatRegistry;
+        use crate::runtime_contract::{RuntimeContractAggregator, RuntimeContractStrictness};
+
+        let registry = HatRegistry::from_runtime_config(config);
+        let strictness = RuntimeContractStrictness::default();
+        let report =
+            RuntimeContractAggregator::aggregate("preflight", config, &registry, strictness, None);
+
+        if report.passed {
+            if report.warnings == 0 {
+                CheckResult::pass(self.name(), "Preset contract is valid")
+            } else {
+                let warning_msgs: Vec<String> = report
+                    .findings
+                    .iter()
+                    .filter(|f| {
+                        matches!(f.severity, crate::runtime_contract::FindingSeverity::Warn)
+                    })
+                    .map(|f| f.message.clone())
+                    .collect();
+                CheckResult::warn(
+                    self.name(),
+                    "Preset contract has warnings",
+                    warning_msgs.join("; "),
+                )
+            }
+        } else {
+            let error_msgs: Vec<String> = report
+                .findings
+                .iter()
+                .filter(|f| matches!(f.severity, crate::runtime_contract::FindingSeverity::Error))
+                .map(|f| f.message.clone())
+                .collect();
+            CheckResult::fail(
+                self.name(),
+                "Preset contract validation failed",
+                error_msgs.join("; "),
+            )
+        }
+    }
+}
+
+/// Multi-hat isolation policy check (U2 of 2026-06-11-003).
+///
+/// Reuses the shared [`crate::config::evaluate_multi_hat_isolation`]
+/// evaluator — the threshold, counting, and violation shape are
+/// defined exactly once in core. Lint, preflight, and the run hard
+/// gate all read from the same source of truth (R8).
+///
+/// This check is additive — it does NOT replace `preset-topology` or
+/// `preset-contract`. Users can skip it via
+/// `features.preflight.skip: ["multi-hat-isolation"]`.
+///
+/// The check has no `LintStrictness` downgrade path: R4/R5 forbid
+/// configuration, env var, test switch, or hidden compat opt-outs.
+struct MultiHatIsolationCheck;
+
+#[async_trait]
+impl PreflightCheck for MultiHatIsolationCheck {
+    fn name(&self) -> &'static str {
+        "multi-hat-isolation"
+    }
+
+    async fn run(&self, config: &RalphConfig) -> CheckResult {
+        use crate::config::evaluate_multi_hat_isolation;
+
+        let hat_count = config.hats.len();
+        let mode = config.event_loop.execution_mode.clone();
+
+        match evaluate_multi_hat_isolation(hat_count, mode) {
+            Ok(()) => CheckResult::pass(self.name(), "Hat count is within isolation policy"),
+            Err(violation) => {
+                // R9: failure message must include the actual hat count,
+                // the coordinator limit, and the isolated fix direction.
+                // The shared violation shape supplies all three; we
+                // surface the human summary as the label and the
+                // operator action hint as the structured message.
+                CheckResult::fail(
+                    self.name(),
+                    format!(
+                        "Multi-hat isolation policy violated: {}",
+                        violation.message()
+                    ),
+                    format!(
+                        "{} (actual={}, limit={}, required_mode=isolated)",
+                        violation.fix_hint(),
+                        violation.actual,
+                        violation.limit,
+                    ),
+                )
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2379,7 +2530,7 @@ hats:
 
         // Label (the short summary) names the policy + actual + limit.
         assert!(
-            label.contains("4") && label.contains("3"),
+            label.contains('4') && label.contains('3'),
             "label must surface actual=4 and limit=3, got: {label}"
         );
         // Message (the structured details) names the fix direction
@@ -2396,158 +2547,5 @@ hats:
             message.contains("required_mode=isolated"),
             "message must include required_mode=isolated, got: {message}"
         );
-    }
-}
-
-/// Preset topology validation check.
-///
-/// Validates that the preset's hat configuration forms a valid topology where:
-/// - The starting event can reach at least one hat.
-/// - The completion promise is reachable from the starting event.
-/// - Required events are reachable and appear on all completion paths.
-struct PresetTopologyCheck;
-
-#[async_trait]
-impl PreflightCheck for PresetTopologyCheck {
-    fn name(&self) -> &'static str {
-        "preset-topology"
-    }
-
-    async fn run(&self, config: &RalphConfig) -> CheckResult {
-        use crate::hat_registry::HatRegistry;
-        use crate::preset_validator::validate_preset_topology;
-
-        let registry = HatRegistry::from_runtime_config(config);
-        let result = validate_preset_topology(config, &registry);
-
-        if result.is_valid() {
-            if result.warnings.is_empty() {
-                CheckResult::pass(self.name(), "Preset topology is valid")
-            } else {
-                CheckResult::warn(
-                    self.name(),
-                    "Preset topology has warnings",
-                    result.warnings.join("; "),
-                )
-            }
-        } else {
-            let error_messages: Vec<String> =
-                result.errors.iter().map(|e| e.message.clone()).collect();
-            CheckResult::fail(
-                self.name(),
-                "Preset topology validation failed",
-                error_messages.join("; "),
-            )
-        }
-    }
-}
-
-/// Preset contract validation check (U5).
-///
-/// Runs the full preset contract aggregator (config, topology, payload,
-/// orphan) and wraps the result as a single `CheckResult`. This check
-/// is additive — it does NOT replace `preset-topology`. Users can skip
-/// it via `features.preflight.skip: ["preset-contract"]`.
-struct PresetContractCheck;
-
-#[async_trait]
-impl PreflightCheck for PresetContractCheck {
-    fn name(&self) -> &'static str {
-        "preset-contract"
-    }
-
-    async fn run(&self, config: &RalphConfig) -> CheckResult {
-        use crate::hat_registry::HatRegistry;
-        use crate::runtime_contract::{RuntimeContractAggregator, RuntimeContractStrictness};
-
-        let registry = HatRegistry::from_runtime_config(config);
-        let strictness = RuntimeContractStrictness::default();
-        let report =
-            RuntimeContractAggregator::aggregate("preflight", config, &registry, strictness, None);
-
-        if report.passed {
-            if report.warnings == 0 {
-                CheckResult::pass(self.name(), "Preset contract is valid")
-            } else {
-                let warning_msgs: Vec<String> = report
-                    .findings
-                    .iter()
-                    .filter(|f| {
-                        matches!(f.severity, crate::runtime_contract::FindingSeverity::Warn)
-                    })
-                    .map(|f| f.message.clone())
-                    .collect();
-                CheckResult::warn(
-                    self.name(),
-                    "Preset contract has warnings",
-                    warning_msgs.join("; "),
-                )
-            }
-        } else {
-            let error_msgs: Vec<String> = report
-                .findings
-                .iter()
-                .filter(|f| matches!(f.severity, crate::runtime_contract::FindingSeverity::Error))
-                .map(|f| f.message.clone())
-                .collect();
-            CheckResult::fail(
-                self.name(),
-                "Preset contract validation failed",
-                error_msgs.join("; "),
-            )
-        }
-    }
-}
-
-/// Multi-hat isolation policy check (U2 of 2026-06-11-003).
-///
-/// Reuses the shared [`crate::config::evaluate_multi_hat_isolation`]
-/// evaluator — the threshold, counting, and violation shape are
-/// defined exactly once in core. Lint, preflight, and the run hard
-/// gate all read from the same source of truth (R8).
-///
-/// This check is additive — it does NOT replace `preset-topology` or
-/// `preset-contract`. Users can skip it via
-/// `features.preflight.skip: ["multi-hat-isolation"]`.
-///
-/// The check has no `LintStrictness` downgrade path: R4/R5 forbid
-/// configuration, env var, test switch, or hidden compat opt-outs.
-struct MultiHatIsolationCheck;
-
-#[async_trait]
-impl PreflightCheck for MultiHatIsolationCheck {
-    fn name(&self) -> &'static str {
-        "multi-hat-isolation"
-    }
-
-    async fn run(&self, config: &RalphConfig) -> CheckResult {
-        use crate::config::evaluate_multi_hat_isolation;
-
-        let hat_count = config.hats.len();
-        let mode = config.event_loop.execution_mode.clone();
-
-        match evaluate_multi_hat_isolation(hat_count, mode) {
-            Ok(()) => CheckResult::pass(self.name(), "Hat count is within isolation policy"),
-            Err(violation) => {
-                // R9: failure message must include the actual hat count,
-                // the coordinator limit, and the isolated fix direction.
-                // The shared violation shape supplies all three; we
-                // surface the human summary as the label and the
-                // operator action hint as the structured message.
-                CheckResult::fail(
-                    self.name(),
-                    format!(
-                        "Multi-hat isolation policy violated: {}",
-                        violation.message()
-                    ),
-                    format!(
-                        "{} (actual={}, limit={}, required_mode=isolated)",
-                        violation.fix_hint(),
-                        violation.actual,
-                        violation.limit,
-                    ),
-                )
-            }
-        }
     }
 }

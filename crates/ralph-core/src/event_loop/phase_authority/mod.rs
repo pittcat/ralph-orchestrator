@@ -255,18 +255,18 @@ mod facade_tests {
                 PhaseDeclConfig {
                     id: "review".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: std::collections::BTreeMap::default(),
                 },
             ],
             transitions: vec![PhaseTransitionConfig {
                 from: "unit_loop".to_string(),
                 to: "review".to_string(),
                 on: serde_yaml::from_str(
-                    r#"
+                    r"
 primitive: on_test_passed_step
 step_kind: plan_unit
 when: last
-"#,
+",
                 )
                 .unwrap(),
             }],
@@ -337,22 +337,22 @@ when: last
                 PhaseDeclConfig {
                     id: "review".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: std::collections::BTreeMap::default(),
                 },
                 PhaseDeclConfig {
                     id: "fix_units".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: std::collections::BTreeMap::default(),
                 },
             ],
             transitions: vec![PhaseTransitionConfig {
                 from: "review".to_string(),
                 to: "fix_units".to_string(),
                 on: serde_yaml::from_str(
-                    r#"
+                    r"
 primitive: on_review_complete_verdict
 matrix: serial_default
-"#,
+",
                 )
                 .unwrap(),
             }],

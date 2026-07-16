@@ -372,7 +372,7 @@ impl LedgerSnapshot {
                     }
                     self.progress.current_step = Some(step.clone());
                 }
-                for task in self.tasks.iter_mut() {
+                for task in &mut self.tasks {
                     if !task.status.is_terminal() {
                         task.status = crate::task::TaskStatus::Closed;
                         task.closed = Some(chrono::Utc::now().to_rfc3339());

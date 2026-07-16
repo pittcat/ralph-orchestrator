@@ -84,11 +84,11 @@ pub(crate) fn default_core_value() -> Result<Value> {
             "supervisor",
         ];
         if let Some(event_loop) = mapping
-            .get_mut(&Value::String("event_loop".to_string()))
+            .get_mut(Value::String("event_loop".to_string()))
             .and_then(|v| v.as_mapping_mut())
         {
             for key in PRESET_OPT_IN_KEYS {
-                event_loop.remove(&Value::String((*key).to_string()));
+                event_loop.remove(Value::String((*key).to_string()));
             }
         }
 
@@ -108,28 +108,24 @@ pub(crate) fn default_core_value() -> Result<Value> {
         // without tripping `lint.preset.coordinator_missing` when the
         // operator ralph.yml omits the `tasks` subtree.
         if let Some(tasks) = mapping
-            .get_mut(&Value::String("tasks".to_string()))
+            .get_mut(Value::String("tasks".to_string()))
             .and_then(|v| v.as_mapping_mut())
         {
-            tasks.remove(&Value::String("enabled".to_string()));
+            tasks.remove(Value::String("enabled".to_string()));
         }
 
         if let Some(telemetry) = mapping
-            .get_mut(&Value::String("telemetry".to_string()))
+            .get_mut(Value::String("telemetry".to_string()))
             .and_then(|v| v.as_mapping_mut())
-        {
-            if let Some(runtime_diagnosis) = telemetry
-                .get_mut(&Value::String("runtime_diagnosis".to_string()))
+            && let Some(runtime_diagnosis) = telemetry
+                .get_mut(Value::String("runtime_diagnosis".to_string()))
                 .and_then(|v| v.as_mapping_mut())
-            {
-                if let Some(drift) = runtime_diagnosis
-                    .get_mut(&Value::String("drift".to_string()))
+                && let Some(drift) = runtime_diagnosis
+                    .get_mut(Value::String("drift".to_string()))
                     .and_then(|v| v.as_mapping_mut())
                 {
-                    drift.remove(&Value::String("coord_join_mode".to_string()));
+                    drift.remove(Value::String("coord_join_mode".to_string()));
                 }
-            }
-        }
     }
 
     Ok(value)
@@ -209,7 +205,8 @@ pub(crate) fn resolve_project_config_path(
         ConfigSource::File(path) => Some(path.clone()),
         _ => None,
     });
-    let resolved = match primary {
+    
+    match primary {
         Some(path) => {
             // Caller supplied a File source. If it exists on disk we
             // trust it; if it does not, fall through to env/default
@@ -225,8 +222,7 @@ pub(crate) fn resolve_project_config_path(
             }
         }
         None => env_then_workspace(workspace_root),
-    };
-    resolved
+    }
 }
 
 fn env_then_workspace(workspace_root: &Path) -> Option<PathBuf> {
@@ -607,12 +603,12 @@ event_loop:
         // ralph.yml omits the `event_loop.supervisor` block.
         // This pins the end-to-end strip + merge contract.
         let preset_value: Value = serde_yaml::from_str(
-            r#"
+            r"
 event_loop:
   supervisor:
     enabled: true
     max_concurrent_workers: 16
-"#,
+",
         )
         .expect("preset snippet must parse");
         let merged = merge_yaml_values(default_value, preset_value).expect("merge must succeed");

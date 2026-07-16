@@ -291,7 +291,7 @@ mod tests {
         // Backdate the wave so `now - started_at` is huge
         // (simulate a 2-hour-old in-flight wave).
         let backdated = SystemTime::now()
-            .checked_sub(std::time::Duration::from_secs(2 * 60 * 60))
+            .checked_sub(std::time::Duration::from_hours(2))
             .expect("clock supports 2h subtraction");
         store.backdate_wave_for_test(&wave, backdated).unwrap();
         // Recovery with a 60s budget: elapsed (7200s) > 60s.

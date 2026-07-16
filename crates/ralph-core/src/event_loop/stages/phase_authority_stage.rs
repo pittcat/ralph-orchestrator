@@ -93,7 +93,7 @@ mod tests {
 
     use super::*;
 
-    fn ctx<'a>(repair: &'a mut RepairStateMachine) -> StageContext<'a> {
+    fn ctx(repair: &mut RepairStateMachine) -> StageContext<'_> {
         StageContext::for_test_machine(FlowStep::new("unit_loop"), "loop-1", 1, repair)
     }
 

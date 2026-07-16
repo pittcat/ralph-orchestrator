@@ -71,6 +71,7 @@ pub const HANDOFF_TOPIC_SEEDS: &[&str] = &[
 
 /// U2 (2026-06-17-003 plan): incomplete-wave gate configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default)]
 pub struct IncompleteWaveGateConfig {
     /// Whether the gate is active. Defaults to `false`
     /// (presets opt in). When `true`, the EventLoop checks
@@ -80,11 +81,6 @@ pub struct IncompleteWaveGateConfig {
     pub enabled: bool,
 }
 
-impl Default for IncompleteWaveGateConfig {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
-}
 
 fn default_incomplete_wave_gate() -> IncompleteWaveGateConfig {
     IncompleteWaveGateConfig::default()
@@ -202,7 +198,7 @@ mod tests {
         let cfg = WorkflowContractConfig {
             handoff_dispatch_timeout_seconds: HANDOFF_DISPATCH_TIMEOUT_MAX_SECONDS + 1,
             handoff_topic_seeds: vec![],
-            incomplete_wave_gate: Default::default(),
+            incomplete_wave_gate: IncompleteWaveGateConfig::default(),
             step_handoff: StepHandoffConfig::default(),
         };
         assert_eq!(
@@ -219,7 +215,7 @@ mod tests {
         let cfg = WorkflowContractConfig {
             handoff_dispatch_timeout_seconds: 600,
             handoff_topic_seeds: vec![],
-            incomplete_wave_gate: Default::default(),
+            incomplete_wave_gate: IncompleteWaveGateConfig::default(),
             step_handoff: StepHandoffConfig::default(),
         };
         assert_eq!(cfg.effective_timeout_seconds(), 600);
@@ -230,7 +226,7 @@ mod tests {
         let cfg = WorkflowContractConfig {
             handoff_dispatch_timeout_seconds: HANDOFF_DISPATCH_TIMEOUT_MAX_SECONDS,
             handoff_topic_seeds: vec![],
-            incomplete_wave_gate: Default::default(),
+            incomplete_wave_gate: IncompleteWaveGateConfig::default(),
             step_handoff: StepHandoffConfig::default(),
         };
         assert_eq!(
@@ -241,12 +237,12 @@ mod tests {
 
     #[test]
     fn config_round_trips_through_yaml() {
-        let yaml = r#"
+        let yaml = r"
 handoff_dispatch_timeout_seconds: 45
 handoff_topic_seeds:
   - queue.advance
   - work.ready
-"#;
+";
         let cfg: WorkflowContractConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.handoff_dispatch_timeout_seconds, 45);
         assert_eq!(cfg.handoff_topic_seeds, vec!["queue.advance", "work.ready"]);
@@ -258,12 +254,12 @@ handoff_topic_seeds:
 
     #[test]
     fn step_handoff_block_round_trips_through_yaml() {
-        let yaml = r#"
+        let yaml = r"
 handoff_dispatch_timeout_seconds: 30
 handoff_topic_seeds: []
 step_handoff:
   progress_task_gate: true
-"#;
+";
         let cfg: WorkflowContractConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.step_handoff.progress_task_gate);
     }

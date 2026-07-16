@@ -81,7 +81,7 @@ fn make_finding_envelope(
 
 fn make_yaml_with_diagnosis(cfg: &RuntimeDiagnosisConfig, hats_yaml: &str) -> RalphConfig {
     let yaml = format!(
-        r#"
+        r"
 telemetry:
   runtime_diagnosis:
     enabled: {enabled}
@@ -99,7 +99,7 @@ telemetry:
       coord_join_rate_threshold: 0.6
       emit_cadence_sigma: 2.0
 {hats}
-"#,
+",
         enabled = cfg.enabled,
         prompt = cfg.prompt_injection_enabled,
         mf = cfg.max_prompt_findings,

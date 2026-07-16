@@ -151,8 +151,6 @@ pub(crate) use self::prompt_helpers::prepend_handoff_envelope_if_enabled;
 // the real prompt chain (after orchestrator context / wave
 // context) so the wiring test (`u6_handoff_envelope_wiring`) can
 // pin the behaviour without going through EventLoop.
-#[cfg(test)]
-pub(crate) use self::prompt_helpers::IsolatedPromptInputs;
 pub(crate) use self::prompt_helpers::build_isolated_prompt_with_handoff;
 
 mod prompt_helpers {
@@ -388,7 +386,6 @@ pub struct RecoverableExhaustion {
 /// promotion into a `RecoverableExhaustion` if the budget
 /// crosses the limit.  This split keeps the validator
 /// borrow-checkable under NLL.
-
 /// 2026-06-23 T2: appends a `## RUNTIME CONFIG` block exposing the
 /// runtime-resolved `event_loop.*` values that the hat preset
 /// references as variables (e.g. `max_residuals`) but cannot see
@@ -518,7 +515,7 @@ fn minimal_flow_declaration_yaml() -> &'static str {
     // want to enforce strict topic/step gating must
     // declare their own flow in the preset; the lint
     // `flow_declaration_missing` flags the absence.
-    r#"mechanism:
+    r"mechanism:
   flow:
     type: declared
     version: 1
@@ -580,7 +577,7 @@ fn minimal_flow_declaration_yaml() -> &'static str {
           - aggregate.done
           - stop_requested
           - restart_requested
-"#
+"
 }
 
 /// U6: build the default emit-time stage pipeline from the loaded
@@ -693,7 +690,6 @@ fn build_stage_pipeline_from_config(
 /// removed in U11-T4 (post-commit wiring); the recovery-envelope writer
 /// `Self::log_workflow_guard_rejection` survives because it is
 /// implementation-agnostic and is reused by the unified handler.
-
 /// P1-1 (2026-07-01-002 audit): parse the `step` field out of a
 /// `work.ready` payload and return it when (a) it claims to be a
 /// `fix-NN` step and (b) the id is **not** present in
@@ -780,13 +776,12 @@ impl EventLoop {
     pub(crate) fn collect_terminal_topic_set(&self) -> std::collections::HashSet<&str> {
         use std::collections::HashSet;
         let mut out: HashSet<&str> = HashSet::new();
-        if let Some(policy) = self.config.event_loop.event_policy.as_ref() {
-            if policy.enabled {
+        if let Some(policy) = self.config.event_loop.event_policy.as_ref()
+            && policy.enabled {
                 for topic in &policy.terminal_topics {
                     out.insert(topic.as_str());
                 }
             }
-        }
         // Always treat the configured completion promise
         // and cancellation promise as terminal — the rest of
         // the loop (U2) is anchored on these and skipping
@@ -1295,15 +1290,14 @@ impl EventLoop {
         // WARN level and the loop still starts (the JSONL
         // tasks.jsonl remains the source of truth).
         {
-            if let Ok(mut log) = idempotent_log.lock() {
-                if let Err(e) = log.replay() {
+            if let Ok(mut log) = idempotent_log.lock()
+                && let Err(e) = log.replay() {
                     warn!(
                         error = %e,
                         "U5: IdempotentLog::replay after bootstrap mirror failed; \
                          mirror records will be invisible to the main log until next save"
                     );
                 }
-            }
         }
 
         Ok(Self {
@@ -1765,13 +1759,11 @@ impl EventLoop {
             return false;
         }
         // Try structured JSON first (production path).
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.payload) {
-            if let Some(key) = value.get("task_key").and_then(|v| v.as_str()) {
-                if crate::task_store::is_fix_unit_key(key) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.payload)
+            && let Some(key) = value.get("task_key").and_then(|v| v.as_str())
+                && crate::task_store::is_fix_unit_key(key) {
                     return true;
                 }
-            }
-        }
         // Fallback: scan the raw text for the fix-unit
         // marker. The marker is `task_key:` followed
         // by a quoted string containing `fix-` and
@@ -2092,8 +2084,8 @@ impl EventLoop {
         // See fix-plan §U6 option (a): keep the divergence
         // documented rather than wiring `process_output` through
         // the helper.
-        if let Some(cfg) = self.registry.get_config(&HatId::from(consumer)) {
-            if let Err(_err) =
+        if let Some(cfg) = self.registry.get_config(&HatId::from(consumer))
+            && let Err(_err) =
                 crate::workflow_contract::handoff_index::check_hat_triggers(&cfg.triggers, topic)
             {
                 return EventLoopResumeDecision::Block(format!(
@@ -2101,7 +2093,6 @@ impl EventLoop {
                     consumer, topic
                 ));
             }
-        }
         EventLoopResumeDecision::Allow
     }
 
@@ -2171,7 +2162,15 @@ impl EventLoop {
                 continue;
             }
 
-            if !wave_observed {
+            if wave_observed {
+                // Subsequent distinct wave_id in the same read batch:
+                // typed as `IsolatedMultipleBusinessEmissions`.
+                let rejection = WaveRejection::IsolatedMultipleBusinessEmissions {
+                    wave_id: wave_id.clone(),
+                    isolated_hat: isolated_hat.to_string(),
+                };
+                self.publish_isolated_wave_violation(&rejection, isolated_hat, &group);
+            } else {
                 // First distinct wave: check isolated scope on every
                 // event. If any event is out of scope, the whole wave
                 // is dropped (one business emission rule). The wave
@@ -2192,7 +2191,7 @@ impl EventLoop {
                     if allowed {
                         None
                     } else {
-                        Some(e.topic.to_string())
+                        Some(e.topic.clone())
                     }
                 }) {
                     let rejection = WaveRejection::IsolatedScopeViolation {
@@ -2206,14 +2205,6 @@ impl EventLoop {
                 }
                 wave_observed = true;
                 kept.extend(group);
-            } else {
-                // Subsequent distinct wave_id in the same read batch:
-                // typed as `IsolatedMultipleBusinessEmissions`.
-                let rejection = WaveRejection::IsolatedMultipleBusinessEmissions {
-                    wave_id: wave_id.clone(),
-                    isolated_hat: isolated_hat.to_string(),
-                };
-                self.publish_isolated_wave_violation(&rejection, isolated_hat, &group);
             }
         }
 
@@ -2795,7 +2786,7 @@ impl EventLoop {
                     .iter()
                     .filter_map(|t| t.split(':').next())
                     .collect();
-                task_ids.sort();
+                task_ids.sort_unstable();
                 let task_ids_hash = {
                     use std::hash::{DefaultHasher, Hash, Hasher};
                     let mut h = DefaultHasher::new();
@@ -2868,8 +2859,7 @@ impl EventLoop {
         // Record completion honored in policy runtime state for downstream guarding
         if let Some(ref policy_config) = self.config.event_loop.event_policy
             && policy_config.enabled
-        {
-            if let Some(ref mut policy_state) = self.state.policy_runtime_state {
+            && let Some(ref mut policy_state) = self.state.policy_runtime_state {
                 policy_state.completion_honored = true;
                 // 2026-06-29-007 P0 fix: terminal_observed is set only when the
                 // completion promise is actually honored, not when it is merely
@@ -2879,7 +2869,6 @@ impl EventLoop {
                     Some(self.config.event_loop.completion_promise.clone());
                 policy_state.completion_iteration = Some(self.state.iteration);
             }
-        }
 
         Some(TerminationReason::CompletionPromise)
     }
@@ -2986,7 +2975,7 @@ impl EventLoop {
             .state_ledger
             .as_ref()
             .and_then(|l| l.snapshot().rejection_digest().get(&retry_key))
-            .map(|entry| entry.count as u32)
+            .map(|entry| entry.count)
             .unwrap_or(1u32);
 
         // 2026-06-26 plan U6: bounded recovery. After 3 attempts
@@ -3330,7 +3319,7 @@ impl EventLoop {
             // selection (so the next non-targeted selection resumes
             // fairly from the registered successor).
             self.bus.select_next_hat_with_pending(Some(id))?;
-            return self.bus.hat_ids().find(|hat_id| hat_id == &id).clone();
+            return self.bus.hat_ids().find(|hat_id| hat_id == &id);
         }
 
         match self.config.event_loop.execution_mode {
@@ -3857,7 +3846,7 @@ impl EventLoop {
         // accumulate their own retry budget separate from ralph's global counter.
         let stall_key = if let Some(last_hat) = &self.state.last_hat {
             if Self::is_wave_hat(last_hat) {
-                format!("flow:review-synthesizer")
+                "flow:review-synthesizer".to_string()
             } else {
                 format!("stall:{}", last_hat.as_str())
             }
@@ -3949,8 +3938,8 @@ impl EventLoop {
         // Shares the `flow:review-synthesizer` bucket with 001-U8
         // (no double counter) — the existing threshold (3) is the
         // single source of truth.
-        if hard_escalation && stall_key.starts_with("flow:") {
-            if self.maybe_emit_incomplete_wave_blocked() {
+        if hard_escalation && stall_key.starts_with("flow:")
+            && self.maybe_emit_incomplete_wave_blocked() {
                 debug!(
                     stall_count = stall_count_value,
                     stall_key = %stall_key,
@@ -3967,7 +3956,6 @@ impl EventLoop {
             // tracker has no open wave (e.g. ralph itself is the
             // last hat and `last_hat` is a wave hat from a prior
             // session).
-        }
 
         // If a custom hat was last executing, target the fallback back to it
         // This preserves hat context instead of always falling back to Ralph
@@ -4433,7 +4421,7 @@ impl EventLoop {
             DiagnosisSource::PayloadContract,
             source_hat.as_deref(),
             Some(topic.as_str()),
-            &reason_code,
+            reason_code,
             wave_id_field,
         );
         builder = builder.retry_key(retry_key);
@@ -4676,7 +4664,7 @@ impl EventLoop {
                             .unwrap_or_default();
                         self.state.push_hat_obligation(
                             hat_id.clone(),
-                            trigger_topic.to_string(),
+                            trigger_topic.clone(),
                             expected,
                         );
                     }
@@ -4921,12 +4909,12 @@ impl EventLoop {
             // cached guidance should reach the coordinator's
             // first prompt.
             let skip_guidance = self.coordinator_bootstrap_gate_closed(hat_id);
-            if !skip_guidance {
+            if skip_guidance {
+                drop(guidance_events);
+            } else {
                 // Handle guidance
                 self.update_robot_guidance(guidance_events);
                 self.apply_robot_guidance(hat_id);
-            } else {
-                drop(guidance_events);
             }
 
             // Build base prompt
@@ -5303,13 +5291,13 @@ impl EventLoop {
             }
             if seen_in_batch.insert(payload.clone()) {
                 let already = self.robot_guidance.iter().any(|p| p == &payload);
-                if !already {
-                    self.robot_guidance.push(payload);
-                } else {
+                if already {
                     debug!(
                         payload_len = payload.len(),
                         "U9 (KTD-7 in-memory layer): skipping guidance payload already cached for prompt"
                     );
+                } else {
+                    self.robot_guidance.push(payload);
                 }
             } else {
                 debug!(
@@ -5776,11 +5764,10 @@ impl EventLoop {
         // the list empty and the detector falls back to the legacy
         // string match for backwards compatibility.
         for id in self.registry.ids() {
-            if let Some(cfg) = self.registry.get_config(id) {
-                if cfg.publishes.iter().any(|t| t == "work.done") {
+            if let Some(cfg) = self.registry.get_config(id)
+                && cfg.publishes.iter().any(|t| t == "work.done") {
                     ctx.executor_hat_ids.push(id.as_str().to_string());
                 }
-            }
         }
 
         // Snapshot tracked retry keys.
@@ -5816,7 +5803,7 @@ impl EventLoop {
         }
         for event in extra_jsonl_events {
             ctx.events.push(EventSnapshot {
-                topic: event.topic.to_string(),
+                topic: event.topic.clone(),
                 payload: event.payload.clone().unwrap_or_default(),
                 iteration: self.state.iteration,
             });
@@ -6776,11 +6763,10 @@ impl EventLoop {
                 self.config.event_loop.prompt.as_deref(),
                 Some(ctx.workspace()),
             );
-            if let Some(key) = plan_key.as_deref() {
-                if let Some(sha) = read_plan_baseline(ctx.workspace(), Some(key)) {
+            if let Some(key) = plan_key.as_deref()
+                && let Some(sha) = read_plan_baseline(ctx.workspace(), Some(key)) {
                     return Some(sha);
                 }
-            }
         }
         self.state.plan_baseline_sha.clone()
     }
@@ -6896,9 +6882,9 @@ impl EventLoop {
         // latest hint wins (older hints are stale).
         let mut hint: Option<String> = None;
         for ev in regular_events.iter().rev() {
-            let payload_str = ev.payload.to_string();
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload_str) {
-                if let Some(s) = val.get("next_hint").and_then(|v| v.as_str()) {
+            let payload_str = ev.payload.clone();
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload_str)
+                && let Some(s) = val.get("next_hint").and_then(|v| v.as_str()) {
                     let trimmed = s.trim();
                     if !trimmed.is_empty() {
                         // Cap at 120 chars (U18 contract). Truncate at
@@ -6909,11 +6895,10 @@ impl EventLoop {
                         break;
                     }
                 }
-            }
         }
 
         let Some(hint) = hint else { return prompt };
-        format!("## NEXT ACTION\n\n{hint}\n\n---\n\n{prompt}",)
+        format!("## NEXT ACTION\n\n{hint}\n\n---\n\n{prompt}")
     }
 
     fn inject_pending_lint_resume(&mut self, prompt: String, hat_id: &HatId) -> String {
@@ -7062,7 +7047,7 @@ impl EventLoop {
         let mut last_rejection: Option<(String, RejectionKind, String)> = None;
         let mut kept = Vec::with_capacity(result.events.len());
         for event in result.events.drain(..) {
-            let topic = event.topic.to_string();
+            let topic = event.topic.clone();
             let payload_value = match event.payload.as_deref() {
                 Some(s) if !s.is_empty() => Self::parse_event_payload_value(s),
                 _ => serde_json::Value::Null,
@@ -7175,7 +7160,7 @@ impl EventLoop {
                     .state
                     .recent_rejection_digest
                     .get(&reason_code)
-                    .map(|e| e.count as u32)
+                    .map(|e| e.count)
                     .unwrap_or(1u32);
                 let mut state_ledger = std::mem::take(&mut self.state.state_ledger);
                 let _ctx = crate::correction::emit_correction_from_lint_hint(
@@ -8225,8 +8210,8 @@ impl EventLoop {
                 // The trigger carries the hat + diff stat so
                 // `trigger_to_reason` produces a fully-populated
                 // `TerminationReason` without further enrichment.
-                if is_read_only_dimension_reviewer {
-                    if let Err(e) = self.state.push_termination_trigger(
+                if is_read_only_dimension_reviewer
+                    && let Err(e) = self.state.push_termination_trigger(
                         crate::event_loop::termination::TerminationTrigger::ScopeViolation {
                             hat: hat_id.as_str().to_string(),
                             diff_stat: diff_stat.clone(),
@@ -8237,7 +8222,6 @@ impl EventLoop {
                             "scope_violation_hard_rejected: failed to push termination trigger"
                         );
                     }
-                }
             }
             Err(e) => {
                 debug!(error = %e, "Could not run git diff for file-modification audit");
@@ -8786,8 +8770,8 @@ impl EventLoop {
                 // Business topics from ralph are rejected here (fail-closed)
                 // so they do NOT count as progress toward the stall detector.
                 // P1-12: use prefix match so future `ralph.*` topics are recognised.
-                if event.hat.as_deref() == Some("ralph") {
-                    if !crate::event_origin::is_ralph_control_topic(topic) {
+                if event.hat.as_deref() == Some("ralph")
+                    && !crate::event_origin::is_ralph_control_topic(topic) {
                         warn!(
                             topic = %topic,
                             "ralph hat business topic rejected: ralph may only publish control topics"
@@ -8808,7 +8792,6 @@ impl EventLoop {
                         self.bus.publish(violation);
                         continue;
                     }
-                }
 
                 // 2026-06-18-001 plan U5: 对**完全没有 provenance**的
                 // business topic fail-closed,reason=`isolated_anonymous_business_topic`。
@@ -8963,7 +8946,7 @@ impl EventLoop {
                         .source(crate::diagnosis::DiagnosisSource::WorkflowGuard)
                         .severity(crate::diagnosis::DiagnosisSeverity::Warning)
                         .iteration(self.state.iteration)
-                        .topic(event.topic.to_string())
+                        .topic(event.topic.clone())
                         .source_hat(scope_hat.as_str())
                         .target_hat(scope_hat.as_str())
                         .reason_code(reason_code)
@@ -8982,7 +8965,7 @@ impl EventLoop {
                         .outcome(crate::diagnosis::DiagnosisOutcome::Escalated)
                         .evidence(crate::diagnosis::EvidenceRef {
                             kind: crate::diagnosis::EvidenceKind::Topic,
-                            ref_path: event.topic.to_string(),
+                            ref_path: event.topic.clone(),
                             snippet: Some(format!(
                                 "isolated_hat={} event_hat={}",
                                 isolated_hat.as_str(),
@@ -9031,7 +9014,7 @@ impl EventLoop {
                     // when both go through `self`).
                     let isolated_hat_str = isolated_hat.as_str().to_string();
                     let scope_hat_str = scope_hat.as_str().to_string();
-                    let topic_str = event.topic.to_string();
+                    let topic_str = event.topic.clone();
                     self.record_recovery_envelope(
                         &envelope,
                         vec![format!(
@@ -9053,7 +9036,7 @@ impl EventLoop {
                     let allowed: Vec<String> = self
                         .registry
                         .get_config(isolated_hat)
-                        .map(|c| c.publishes.iter().map(|t| t.to_string()).collect())
+                        .map(|c| c.publishes.clone())
                         .unwrap_or_default();
                     // P1 finding #6: dedup — if the target hat already
                     // has a pending `task.resume` (with the same
@@ -9095,7 +9078,7 @@ impl EventLoop {
                             self.state.scope_violation_circuit_breaker_tripped =
                                 Some(TerminationReason::ScopeViolationCircuitBreakerTripped {
                                     hat: isolated_hat.as_str().to_string(),
-                                    topic: event.topic.to_string(),
+                                    topic: event.topic.clone(),
                                     violation_count: count,
                                     allowed_topics: allowed.clone(),
                                 });
@@ -9126,7 +9109,7 @@ impl EventLoop {
                             stage: crate::event_loop::rejection::RejectionStage::Origin,
                             source_hat: Some(isolated_hat.to_string()),
                             business_hat: None,
-                            topic: event.topic.to_string(),
+                            topic: event.topic.clone(),
                             violation: format!(
                                 "hat '{}' cannot publish '{}' in isolated mode",
                                 isolated_hat.as_str(),
@@ -9351,7 +9334,7 @@ impl EventLoop {
                             // budget stays sane.
                             break;
                         }
-                        if !prev.wave_id.is_some() {
+                        if prev.wave_id.is_none() {
                             evicted_non_terminal = Some(idx);
                             break;
                         }
@@ -9474,7 +9457,49 @@ impl EventLoop {
                     }
                 }
 
-                if !should_admit {
+                if should_admit {
+                    self.mark_required_event_seen(event.topic.as_str());
+                    accepted.push(event);
+                    match event_wave_id.as_deref() {
+                        Some(wid) => {
+                            if accepted_wave_id.is_none() {
+                                accepted_wave_id = Some(wid.to_string());
+                            }
+                        }
+                        None => {
+                            // 2026-07-06 U2 (DEV-001): exempt_topics
+                            // carve-out admissions must NOT consume
+                            // the per-turn non_wave_business_event_accepted
+                            // slot, otherwise the serial walk (e.g.
+                            // review-coordinator walking 6
+                            // review.dimension.ready) drops N-1 events
+                            // and review-synthesizer receives incomplete
+                            // data. The pre-existing carve-out branch
+                            // already sets admitted_via_carveout = true
+                            // above.
+                            if !admitted_via_carveout {
+                                non_wave_business_event_accepted = true;
+                            }
+                        }
+                    }
+                    // U3 P0 fix: write the sticky per-turn budget flag so
+                    // `check_default_publishes` (which runs later in the same
+                    // turn when JSONL had zero events, or earlier when JSONL
+                    // had business events) sees a consistent view.
+                    //
+                    // 2026-07-06 U2 (DEV-001): carve-out admissions must
+                    // also keep isolated_turn_business_event_accepted
+                    // false so the default_publishes guard does not
+                    // see the slot as occupied and refuse the next
+                    // exempt topic in the serial walk.
+                    if !admitted_via_carveout {
+                        self.state.isolated_turn_business_event_accepted = true;
+                    }
+                    // 2026-06-16-001 U5: mark the per-turn
+                    // stall-detector flag so the post-validation
+                    // stall detector resets the counters.
+                    self.state.stall_detector_had_events = true;
+                } else {
                     warn!(
                         topic = %event.topic,
                         "Isolated mode: extra business event dropped — only one per turn"
@@ -9577,48 +9602,6 @@ impl EventLoop {
                             per_turn_budget_feedback_injected = true;
                         }
                     }
-                } else {
-                    self.mark_required_event_seen(event.topic.as_str());
-                    accepted.push(event);
-                    match event_wave_id.as_deref() {
-                        Some(wid) => {
-                            if accepted_wave_id.is_none() {
-                                accepted_wave_id = Some(wid.to_string());
-                            }
-                        }
-                        None => {
-                            // 2026-07-06 U2 (DEV-001): exempt_topics
-                            // carve-out admissions must NOT consume
-                            // the per-turn non_wave_business_event_accepted
-                            // slot, otherwise the serial walk (e.g.
-                            // review-coordinator walking 6
-                            // review.dimension.ready) drops N-1 events
-                            // and review-synthesizer receives incomplete
-                            // data. The pre-existing carve-out branch
-                            // already sets admitted_via_carveout = true
-                            // above.
-                            if !admitted_via_carveout {
-                                non_wave_business_event_accepted = true;
-                            }
-                        }
-                    }
-                    // U3 P0 fix: write the sticky per-turn budget flag so
-                    // `check_default_publishes` (which runs later in the same
-                    // turn when JSONL had zero events, or earlier when JSONL
-                    // had business events) sees a consistent view.
-                    //
-                    // 2026-07-06 U2 (DEV-001): carve-out admissions must
-                    // also keep isolated_turn_business_event_accepted
-                    // false so the default_publishes guard does not
-                    // see the slot as occupied and refuse the next
-                    // exempt topic in the serial walk.
-                    if !admitted_via_carveout {
-                        self.state.isolated_turn_business_event_accepted = true;
-                    }
-                    // 2026-06-16-001 U5: mark the per-turn
-                    // stall-detector flag so the post-validation
-                    // stall detector resets the counters.
-                    self.state.stall_detector_had_events = true;
                 }
             }
             accepted
@@ -9966,12 +9949,11 @@ impl EventLoop {
             // U11-T9 (P0-3 follow-up): mirror the state projector's cache
             // into the `LedgerSnapshot` so `StepHandoffRule` sees the same
             // view as the legacy disk-side gate.
-            if let Some(ref mut projector) = self.state.state_projection {
-                if let Some(ref mut ledger) = self.state.state_ledger {
+            if let Some(ref mut projector) = self.state.state_projection
+                && let Some(ref mut ledger) = self.state.state_ledger {
                     let mut guard = ledger.snapshot_mut();
                     projector.sync_to_ledger_snapshot(&mut guard);
                 }
-            }
 
             let mut state_ledger = std::mem::take(&mut self.state.state_ledger);
             let mut snapshot = state_ledger
@@ -10089,11 +10071,9 @@ impl EventLoop {
                         if r.stage == crate::validation::ValidationStage::EventPolicy
                             && r.reason_code.as_deref()
                                 == Some(crate::validation::ReasonCode::EVENT_POLICY_WARNING)
-                        {
-                            if let Some(hint) = &r.correction_hint {
+                            && let Some(hint) = &r.correction_hint {
                                 event_warnings.push(hint.clone());
                             }
-                        }
                         continue;
                     }
                     // Preserve the legacy opt-out for step-handoff when state
@@ -10137,8 +10117,8 @@ impl EventLoop {
                                 event_accepted = false;
                                 break;
                             }
-                            Some(crate::validation::ReasonCode::EVENT_POLICY_BLOCKED)
-                            | Some(crate::validation::ReasonCode::EVENT_POLICY_IGNORED) => {
+                            Some(crate::validation::ReasonCode::EVENT_POLICY_BLOCKED |
+crate::validation::ReasonCode::EVENT_POLICY_IGNORED) => {
                                 event_accepted = false;
                                 break;
                             }
@@ -10354,11 +10334,10 @@ impl EventLoop {
                 }
 
                 // Write hold artifact if policy hold was triggered.
-                if let Some(ref reason) = hold_reason {
-                    if let Err(e) = self.write_hold_artifact(Some(reason)) {
+                if let Some(ref reason) = hold_reason
+                    && let Err(e) = self.write_hold_artifact(Some(reason)) {
                         warn!(error = %e, "Failed to write hold artifact");
                     }
-                }
 
                 // U6: capture the first payload contract violation for the runner.
                 if payload_contract_violation.is_none() {
@@ -10504,8 +10483,8 @@ impl EventLoop {
                     // state projection is disabled (empty chain
                     // means "no information, accept everything").
                     let guard_active = self.state.state_projection.as_ref().is_some();
-                    if guard_active {
-                        if let Some(rejected_step) =
+                    if guard_active
+                        && let Some(rejected_step) =
                             unknown_fix_step(event.payload.as_deref(), &fix_unit_known)
                         {
                             warn!(
@@ -10529,7 +10508,6 @@ impl EventLoop {
                             // diagnostic + `task.resume`.
                             continue;
                         }
-                    }
                 }
                 // Check if this topic has a contract rule
                 if let Some(rule) = contracts.rules.get(event.topic.as_str()) {
@@ -10556,7 +10534,7 @@ impl EventLoop {
                         rule,
                         workspace_root,
                         current_loop_id.as_str(),
-                        &tasks_path,
+                        tasks_path,
                         event_provenance,
                         &DefaultGitEvidenceProvider,
                         self.state.loop_start_sha.as_deref(),
@@ -10627,7 +10605,11 @@ impl EventLoop {
                             let mut no_retry_reason: Option<String> = None;
                             let mut task_not_terminal_hint: Option<String> = None;
                             if let Some(hat_id_str) = source_hat_str {
-                                if hat_id_str != "ralph" {
+                                if hat_id_str == "ralph" {
+                                    no_retry_reason = Some(
+                                        "no business hat available for fallback ralph".to_string(),
+                                    );
+                                } else {
                                     let resolved_hat_id_str =
                                         if let ExecutionContractViolationKind::TaskNotTerminal {
                                             task_id,
@@ -10723,10 +10705,6 @@ impl EventLoop {
                                             }
                                         }
                                     }
-                                } else {
-                                    no_retry_reason = Some(
-                                        "no business hat available for fallback ralph".to_string(),
-                                    );
                                 }
                             } else {
                                 no_retry_reason =
@@ -11103,12 +11081,11 @@ impl EventLoop {
                             let rest = &payload[start..];
                             rest.find('"').map(|end| rest[..end].to_string())
                         });
-                if let Some(step) = step {
-                    if let Some(nn) = step
+                if let Some(step) = step
+                    && let Some(nn) = step
                         .strip_prefix("step-")
                         .and_then(|s| s.parse::<u32>().ok())
-                    {
-                        if nn > 1 {
+                        && nn > 1 {
                             let prev = format!("step-{:02}", nn - 1);
                             if !self.state.step_work_done_seen.contains(&prev) {
                                 warn!(
@@ -11127,8 +11104,6 @@ impl EventLoop {
                                 continue;
                             }
                         }
-                    }
-                }
             }
 
             // 2026-07-06 U7 (DEV-007): topology guard — test.passed
@@ -11147,9 +11122,7 @@ impl EventLoop {
                 );
                 let diagnostic = Event::new(
                     "event.topology.out_of_order",
-                    format!(
-                        "{{\"dropped_topic\":\"test.passed\",\"reason\":\"test.passed arrived before any work.done was admitted for this loop\"}}"
-                    ),
+                    "{\"dropped_topic\":\"test.passed\",\"reason\":\"test.passed arrived before any work.done was admitted for this loop\"}".to_string(),
                 );
                 self.bus.publish(diagnostic);
                 continue;
@@ -11295,7 +11268,7 @@ impl EventLoop {
                     ));
                     continue;
                 }
-                if let Some(ref policy_config) = policy_config_ref
+                if let Some(policy_config) = policy_config_ref
                     && let Some(decision) =
                         check_completion_guard(&event.topic, policy_config, true)
                 {
@@ -11342,11 +11315,10 @@ impl EventLoop {
 
             // Same-batch completion guard: events after a completion topic in the
             // same batch are subject to completion_after_terminal filtering.
-            if completion_seen_in_batch {
-                if let Some(ref policy_config) = policy_config_ref
+            if completion_seen_in_batch
+                && let Some(policy_config) = policy_config_ref
                     && policy_config.enabled
-                {
-                    if let Some(decision) =
+                    && let Some(decision) =
                         check_completion_guard(&event.topic, policy_config, true)
                     {
                         match &decision {
@@ -11388,8 +11360,6 @@ impl EventLoop {
                         }
                         continue;
                     }
-                }
-            }
 
             if event.topic == "build.done" {
                 // P4: structured JSON evidence is the preferred path. If
@@ -11750,7 +11720,7 @@ impl EventLoop {
         // Record and diagnose validated events (before consuming them).
         let verdict_topics = self.verdict_gate_topics();
         let verdict_topics_slice = verdict_topics.as_deref();
-        for event in validated_events.iter() {
+        for event in &validated_events {
             // 2026-06-30-001 P0-3 (primary-20260630-032648
             // diagnosis): the runtime rejects
             // `review.start` emits that arrive after the
@@ -12052,22 +12022,19 @@ impl EventLoop {
         // is intentionally ignored — the engine only feeds
         // the directive for admitted passes.
         for event in &accepted_log_events {
-            if event.topic.as_str() == "test.passed" {
-                if let Some(step) = extract_step_id(&event.payload) {
+            if event.topic.as_str() == "test.passed"
+                && let Some(step) = extract_step_id(&event.payload) {
                     let was_fix = step.starts_with("fix-");
                     self.state.record_test_passed(step, was_fix);
                 }
-            }
-            if event.topic.as_str() == "test.failed" {
-                if let Some(step) = extract_step_id(&event.payload) {
+            if event.topic.as_str() == "test.failed"
+                && let Some(step) = extract_step_id(&event.payload) {
                     self.state.record_validator_terminal(step, "failed");
                 }
-            }
-            if event.topic.as_str() == "plan.complete" {
-                if let Some(step) = extract_step_id(&event.payload) {
+            if event.topic.as_str() == "plan.complete"
+                && let Some(step) = extract_step_id(&event.payload) {
                     self.state.last_plan_complete_step = Some(step);
                 }
-            }
         }
 
         // 2026-07-01-001 plan U6 wiring was removed: plan
@@ -12118,7 +12085,7 @@ impl EventLoop {
             let batch_sync_source = "loop.batch_sync";
             let iter_counter = CommitDelta::CounterChanged {
                 counter: CounterKind::Iteration,
-                new_value: self.state.iteration as i64,
+                new_value: i64::from(self.state.iteration),
             };
             // 2026-06-30-001 P1-4: when the turn is a
             // no-progress turn, ALSO commit a
@@ -12318,13 +12285,12 @@ impl EventLoop {
             }
             let topic_str = event.topic.as_str();
 
-            if let Some(guarded) = gate::gate_topic(source_hat.as_str()) {
-                if topic_str == guarded {
+            if let Some(guarded) = gate::gate_topic(source_hat.as_str())
+                && topic_str == guarded {
                     self.precheck_retries.record_pass(&loop_id, guarded);
                     self.state.discharge_hat_obligation(&source_hat, topic_str);
                     continue;
                 }
-            }
 
             let guarded = match topic_str.strip_suffix(".rejected") {
                 Some(s) => s,
@@ -12499,7 +12465,7 @@ impl EventLoop {
             Ok(s) => s,
             Err(_) => return None,
         };
-        let prefix = format!("ce-executor:");
+        let prefix = "ce-executor:".to_string();
         let needle = format!(":{step_id}:");
         let count = store
             .all()
@@ -12714,8 +12680,8 @@ impl EventLoop {
                         self.bus
                             .publish(Event::new("event.completion.ignored", msg));
                     }
-                    Some(crate::validation::ReasonCode::EVENT_POLICY_BLOCKED)
-                    | Some(crate::validation::ReasonCode::EVENT_POLICY_IGNORED) => {}
+                    Some(crate::validation::ReasonCode::EVENT_POLICY_BLOCKED |
+crate::validation::ReasonCode::EVENT_POLICY_IGNORED) => {}
                     Some(crate::validation::ReasonCode::EVENT_POLICY_HOLD) => {
                         hold_reason = r
                             .correction_hint
@@ -12760,11 +12726,10 @@ impl EventLoop {
             wave_policy_rejections = wave_rejections;
 
             // Write hold artifact if policy hold was triggered.
-            if let Some(ref reason) = hold_reason {
-                if let Err(e) = self.write_hold_artifact(Some(reason)) {
+            if let Some(ref reason) = hold_reason
+                && let Err(e) = self.write_hold_artifact(Some(reason)) {
                     warn!(error = %e, "Failed to write hold artifact");
                 }
-            }
 
             // Post-process recoverable rejection budget.
             use crate::event_policy::ReasonClass;
@@ -12917,8 +12882,8 @@ impl EventLoop {
     /// orchestrator-internal publish paths (e.g. `inject_fallback_event`)
     /// and external callers (`runner.rs`) share the same boundary.
     pub fn publish_event(&mut self, event: Event) {
-        if let Some(ref hat) = event.source {
-            if hat.as_str() == "ralph" {
+        if let Some(ref hat) = event.source
+            && hat.as_str() == "ralph" {
                 let topic = event.topic.as_str();
                 // P1-12: uses prefix match so future `ralph.*` topics are
                 // recognized without updating the constant list.
@@ -12938,7 +12903,6 @@ impl EventLoop {
                     return;
                 }
             }
-        }
 
         // 2026-07-02 P0: `review.dimension.ready` idempotency
         // dedup must run BEFORE the emit-gate facade so a
@@ -13068,10 +13032,10 @@ impl EventLoop {
         // `mechanism.flow`, `current_plan_step` is the empty
         // string and the wave-phase value takes over so the
         // existing tests keep working.
-        let step_id = if !self.current_plan_step.is_empty() {
-            self.current_plan_step.clone()
-        } else {
+        let step_id = if self.current_plan_step.is_empty() {
             self.state.flow_lifecycle.current_step_id().to_string()
+        } else {
+            self.current_plan_step.clone()
         };
         let expected_version = self
             .idempotent_log
@@ -14025,11 +13989,10 @@ fn extract_step_id(payload: &str) -> Option<String> {
     if let Some(s) = value.get("step").and_then(|v| v.as_str()) {
         return Some(s.to_string());
     }
-    if let Some(obj) = value.get("step").and_then(|v| v.as_object()) {
-        if let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
+    if let Some(obj) = value.get("step").and_then(|v| v.as_object())
+        && let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
             return Some(id.to_string());
         }
-    }
     None
 }
 

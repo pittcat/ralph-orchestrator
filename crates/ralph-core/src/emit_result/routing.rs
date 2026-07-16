@@ -85,7 +85,9 @@ fn load_ledger_workflow_phase(workspace: &Path) -> Option<PhaseSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event_loop::phase_authority::config::{PhaseAuthorityConfig, PhaseDeclConfig};
+    use crate::event_loop::phase_authority::config::{
+        PhaseAuthorityConfig, PhaseDeclConfig, ProgressProjectionConfig, ViolationPolicyConfig,
+    };
     use std::collections::BTreeMap;
 
     fn minimal_phase_cfg() -> PhaseAuthorityConfig {
@@ -103,8 +105,8 @@ mod tests {
                 allowed_emits,
             }],
             transitions: vec![],
-            violation_policy: Default::default(),
-            progress_projection: Default::default(),
+            violation_policy: ViolationPolicyConfig::default(),
+            progress_projection: ProgressProjectionConfig::default(),
         }
     }
 

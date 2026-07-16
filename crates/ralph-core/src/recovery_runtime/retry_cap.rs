@@ -133,7 +133,7 @@ mod tests {
             RecoveryAction::ForcePlanBlocked { reason, retry_key } => {
                 assert!(reason.contains("review-synthesizer"));
                 assert!(reason.contains("unrecoverable"));
-                assert!(reason.contains("2"));
+                assert!(reason.contains('2'));
                 assert!(retry_key.contains("review-synthesizer"));
             }
             other => panic!("expected ForcePlanBlocked, got {other:?}"),

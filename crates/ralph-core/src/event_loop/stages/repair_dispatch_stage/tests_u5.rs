@@ -46,7 +46,7 @@ fn u5_first_repair_topic_accepted_by_pipeline() {
     // `ctx` is not possible — instead, we exercise
     // the stage twice with a fresh `sm` and assert
     // via the second `sm`'s state.
-    let mut second_sm = RepairStateMachine::default();
+    let second_sm = RepairStateMachine::default();
     let outcome = stage.check(&mut ctx_with_budget(&mut sm, "task.relocate_legacy"), &e);
     assert!(outcome.is_ok(), "first repair topic must be accepted");
     // Smoke: the second machine is untouched (we
@@ -62,7 +62,7 @@ fn u5_budget_exhausted_after_default_retries() {
     // Default budget is 3. Walk through Diagnosing →
     // Fixing → Verifying → Retry (consumes budget) →
     // Retry → Retry. The 4th Retry must reject.
-    let stage = RepairDispatchStage;
+    let _stage = RepairDispatchStage;
     let mut sm = RepairStateMachine::default();
     // Drive state into Verifying via direct transitions
     // (BeginDiagnosis, BeginFix, BeginVerify). The stage

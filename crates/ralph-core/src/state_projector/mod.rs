@@ -792,11 +792,10 @@ impl StateProjector {
             // call `bootstrap_from_disk` here because that returns
             // an `io::Error` we cannot surface per-event; the
             // apply loop must remain infallible.
-            if self.ctx.tasks_cache.is_empty() {
-                if let Ok(store) = crate::task_store::TaskStore::load(&self.ctx.tasks_path) {
+            if self.ctx.tasks_cache.is_empty()
+                && let Ok(store) = crate::task_store::TaskStore::load(&self.ctx.tasks_path) {
                     self.ctx.tasks_cache = store.all().to_vec();
                 }
-            }
             if self.ctx.progress_cache.completed_steps.is_empty()
                 && self.ctx.progress_cache.current_step.is_none()
             {
@@ -814,7 +813,7 @@ impl StateProjector {
             // in a one-element vec. Order of the chain is
             // semantic — `preset_lint` asserts `work.done`'s
             // `close_task` precedes `mark_step_completed`.
-            let topic_str = event.topic.to_string();
+            let topic_str = event.topic.clone();
             let chain: Vec<crate::config::StateProjectionAction> =
                 if let Some(chain) = self.ctx.config.actions_chain.get(&topic_str) {
                     chain.clone()
@@ -936,7 +935,7 @@ pub fn read_state_from_disk(workspace: &Path) -> (Vec<crate::task::Task>, Progre
     let tasks = crate::task_store::TaskStore::load(&tasks_path(workspace))
         .map(|s| s.all().to_vec())
         .unwrap_or_default();
-    let content = std::fs::read_to_string(&progress_path(workspace)).unwrap_or_default();
+    let content = std::fs::read_to_string(progress_path(workspace)).unwrap_or_default();
     let progress = ProgressSnapshot::parse(&content);
     (tasks, progress)
 }

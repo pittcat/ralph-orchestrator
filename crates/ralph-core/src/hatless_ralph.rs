@@ -637,14 +637,14 @@ Keep temporary artifacts where later steps can still inspect them, such as a rep
             if self.is_fresh_start() {
                 // Fast path: immediate delegation without planning
                 return format!(
-                    r##"## WORKFLOW
+                    r"## WORKFLOW
 
 **FAST PATH**: The workflow will start automatically via `{}`.
 Wait for the coordinator to complete its task.
 You MUST NOT manually publish this event — the orchestrator injects it.
 You MUST NOT plan or analyze — the coordinator will handle the workflow.
 
-"##,
+",
                     self.starting_event.as_ref().unwrap()
                 );
             }

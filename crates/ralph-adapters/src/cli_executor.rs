@@ -806,7 +806,7 @@ mod tests {
                 "not valid json at all".to_string(),
                 r#"{"type":"assistant","message":{"role":"assistant","content":"valid"}}"#
                     .to_string(),
-                "".to_string(),
+                String::new(),
             ],
             prompt_mode: PromptMode::Stdin,
             prompt_flag: None,

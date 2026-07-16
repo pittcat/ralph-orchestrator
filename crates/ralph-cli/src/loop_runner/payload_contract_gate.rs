@@ -53,7 +53,7 @@ pub fn write_payload_contract_violation_report(
     violation: &ralph_core::payload_contract::PayloadContractViolation,
 ) -> std::path::PathBuf {
     use std::io::Write as _;
-    let stamp = violation.timestamp.replace(':', "-").replace('.', "-");
+    let stamp = violation.timestamp.replace([':', '.'], "-");
     let path = diagnostics_dir.join(format!("payload-contract-error-{}.json", stamp));
     let body = match serde_json::to_string_pretty(violation) {
         Ok(s) => s,

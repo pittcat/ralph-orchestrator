@@ -278,7 +278,7 @@ impl StagePipeline {
             None => EmitSchemaGateStage::with_defaults(),
         };
         Self::new(vec![
-            Box::new(crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage::default()),
+            Box::new(crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage),
             Box::new(schema_gate),
             Box::new(crate::event_loop::stages::flow_step_scope_stage::FlowStepScopeStage::new(flow.clone())),
             Box::new(crate::event_loop::stages::step_close_obligation_stage::StepCloseObligationStage::new(flow.clone())),
@@ -301,7 +301,7 @@ impl StagePipeline {
         let verdict_flow = hat_only_verdict_flow_declaration();
         Self::new(vec![
             Box::new(
-                crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage::default(),
+                crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage,
             ),
             Box::new(schema_gate),
             Box::new(
@@ -333,7 +333,7 @@ impl StagePipeline {
             None => EmitSchemaGateStage::with_defaults(),
         };
         Self::new(vec![
-            Box::new(crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage::default()),
+            Box::new(crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage),
             Box::new(schema_gate),
             Box::new(crate::event_loop::stages::phase_authority_stage::PhaseAuthorityStage::new(authority)),
             Box::new(crate::event_loop::stages::flow_step_scope_stage::FlowStepScopeStage::new(flow.clone())),
@@ -397,7 +397,7 @@ impl StagePipeline {
     /// fails — that matches the pre-U12 fail-open
     /// semantics for callers that did not opt in.
     pub fn update_step_close_progress(&mut self, step_id: &str, done: u32, total: u32) {
-        for stage in self.stages.iter_mut() {
+        for stage in &mut self.stages {
             if stage.name() == "StepCloseObligation" {
                 if let Some(typed) = stage
                     .as_any_mut()
@@ -419,13 +419,13 @@ impl StagePipeline {
 /// Empty `steps` — no FlowStepScope — with `LOOP_COMPLETE` terminal alignment.
 fn hat_only_verdict_flow_declaration() -> FlowDeclaration {
     FlowDeclaration::from_yaml(
-        r#"mechanism:
+        r"mechanism:
   flow:
     type: declared
     version: 1
     terminal_emits: [LOOP_COMPLETE]
     steps: []
-"#,
+",
     )
     .expect("hat-only verdict flow YAML must parse")
 }

@@ -217,7 +217,7 @@ fn list_templates(format: PresetListFormat, use_colors: bool) -> Result<()> {
         }
         PresetListFormat::Human => {
             println!("Available workflow templates:");
-            println!("");
+            println!();
             for name in &templates {
                 if let Some(manifest) = TemplateCatalog::get_manifest(name) {
                     let difficulty_str = match manifest.difficulty {
@@ -238,7 +238,7 @@ fn list_templates(format: PresetListFormat, use_colors: bool) -> Result<()> {
                     if let Some(source) = &manifest.source {
                         println!("    Source: {}", source);
                     }
-                    println!("");
+                    println!();
                 }
             }
             println!("Use `ralph preset show <name>` to see template details.");
@@ -272,19 +272,19 @@ fn show_template(name: &str, format: PresetShowFormat, _use_colors: bool) -> Res
         }
         PresetShowFormat::Human => {
             println!("Template: {}", name);
-            println!("");
+            println!();
             println!("Version:    {}", manifest.version);
             println!("Category:  {}", manifest.category);
             println!("Difficulty: {:?}", manifest.difficulty);
             if let Some(source) = &manifest.source {
                 println!("Source:    {}", source);
             }
-            println!("");
+            println!();
             println!("Description:");
             println!("  {}", manifest.description);
-            println!("");
+            println!();
             println!("Recommended checks: {}", manifest.recommended_checks);
-            println!("");
+            println!();
             println!("Placeholders:");
             for ph in &manifest.placeholders {
                 let default_str = ph.default.as_deref().unwrap_or("(required)");
@@ -294,10 +294,10 @@ fn show_template(name: &str, format: PresetShowFormat, _use_colors: bool) -> Res
                 );
             }
             if let Some(notes) = &manifest.output_notes {
-                println!("");
+                println!();
                 println!("Output notes: {}", notes);
             }
-            println!("");
+            println!();
             println!(
                 "Use `ralph preset show {} --format yaml` to see the raw template.",
                 name
@@ -446,14 +446,14 @@ async fn new_preset(
             } else {
                 println!("Preset generated successfully!");
             }
-            println!("");
+            println!();
             println!("  Path:           {}", output_path.display());
             println!("  Template:       {}", args.template);
             println!("  Template version: {}", manifest.version);
             println!("  Name:           {}", preset_name);
             println!("  Description:    {}", description);
             println!("  Check profile:  {}", manifest.recommended_checks);
-            println!("");
+            println!();
             println!("Next steps:");
             println!("  1. Review and customize: {}", output_path.display());
             println!(
@@ -469,7 +469,7 @@ async fn new_preset(
 
     // Run --check if requested
     if args.check {
-        println!("");
+        println!();
         println!("Running authoring checks...");
         let report = build_report(&[ConfigSource::File(output_path.clone())], None, false)
             .await
@@ -575,7 +575,7 @@ fn preset_source_label(
     hats_source: Option<&HatsSource>,
 ) -> String {
     if let Some(source) = hats_source {
-        return source.label().to_string();
+        return source.label().clone();
     }
     // Use the first file-based config source as label
     for source in config_sources {
@@ -1162,9 +1162,9 @@ fn print_diff_human(result: &DiffResult, use_colors: bool) {
         for line in &result.diff_lines {
             // Color the diff lines
             if use_colors {
-                if line.starts_with("+") {
+                if line.starts_with('+') {
                     println!("{}{}", colors::GREEN, line);
-                } else if line.starts_with("-") {
+                } else if line.starts_with('-') {
                     println!("{}{}", colors::RED, line);
                 } else if line.starts_with("@@") {
                     println!("{}{}{}", colors::CYAN, line, colors::RESET);
@@ -2264,8 +2264,7 @@ hats:
         let tmp = tempfile::tempdir().unwrap();
         // Simulate a preset generated with an older version
         let path = tmp.path().join("old-preset.yml");
-        let yaml = format!(
-            r#"x_preset:
+        let yaml = r#"x_preset:
   schema_version: 1
   template: minimal-linear
   template_version: "0.9.0"
@@ -2287,8 +2286,7 @@ hats:
 event_loop:
   starting_event: "work.start"
   completion_promise: "LOOP_COMPLETE"
-"#
-        );
+"#.to_string();
         std::fs::write(&path, yaml).unwrap();
 
         let result = diff_preset(&path, DiffFormat::Human, false);

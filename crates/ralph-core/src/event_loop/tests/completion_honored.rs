@@ -669,7 +669,6 @@ fn test_review_complete_payload_dedup() {
 
 // 2026-06-30-001 P0-5: after `report.done` lands, a
 // subsequent `LOOP_COMPLETE` MUST be honoured normally.
-#[test]
 // 2026-06-30-001 P1-3: the dedup is also wired for
 // `report.done` and `LOOP_COMPLETE` (any
 // "terminal-adjacent" topic). The same byte-identical
@@ -746,7 +745,7 @@ fn test_review_start_rejected_after_fix_unit_chain_exhausted() {
     use crate::event_loop::loop_state::LoopState;
     use crate::task::Task;
     use crate::task_store::TaskStore;
-    use ralph_proto::Event;
+    
 
     // Pre-populate tasks.jsonl with two fix-unit
     // tasks that are both Closed (so the chain is

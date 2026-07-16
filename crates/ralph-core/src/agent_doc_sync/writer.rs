@@ -17,18 +17,15 @@ use crate::file_lock::FileLock;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum OnError {
     /// Log a warning and continue.
+    #[default]
     Warn,
     /// Return an error (caller may exit the process).
     Strict,
 }
 
-impl Default for OnError {
-    fn default() -> Self {
-        Self::Warn
-    }
-}
 
 /// Errors that can occur during file sync operations.
 ///

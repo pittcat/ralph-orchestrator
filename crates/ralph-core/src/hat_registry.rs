@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashSet};
 
 /// Registry for managing and creating hats from configuration.
 #[derive(Debug)]
+#[derive(Default)]
 pub struct HatRegistry {
     hats: BTreeMap<HatId, Hat>,
     configs: BTreeMap<HatId, HatConfig>,
@@ -17,16 +18,6 @@ pub struct HatRegistry {
     current_phase: Phase,
 }
 
-impl Default for HatRegistry {
-    fn default() -> Self {
-        Self {
-            hats: BTreeMap::new(),
-            configs: BTreeMap::new(),
-            prefix_index: HashSet::new(),
-            current_phase: Phase::default(),
-        }
-    }
-}
 
 impl HatRegistry {
     /// Creates a new empty registry.

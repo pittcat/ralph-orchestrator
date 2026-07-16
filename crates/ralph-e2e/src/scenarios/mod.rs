@@ -394,7 +394,7 @@ mod tests {
             ("orchestration", include_str!("orchestration.rs")),
             ("tasks", include_str!("tasks.rs")),
         ];
-        for (name, src) in sources.iter() {
+        for (name, src) in &sources {
             assert!(
                 !src.contains("Backend::Kiro"),
                 "scenarios/{name}.rs still references deleted Backend::Kiro"

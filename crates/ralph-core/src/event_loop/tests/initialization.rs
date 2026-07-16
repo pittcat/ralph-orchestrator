@@ -37,7 +37,6 @@ hats:
 }
 
 #[test]
-#[test]
 fn test_loop_thrashing_detection() {
     use tempfile::tempdir;
 

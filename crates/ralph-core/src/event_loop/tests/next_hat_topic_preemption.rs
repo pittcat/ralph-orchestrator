@@ -10,7 +10,6 @@
 //!
 //! 见 `docs/plans/2026-07-02-001-fix-hat-routing-next-hop-plan.md` U1。
 
-use super::common::*;
 use super::*;
 
 #[test]

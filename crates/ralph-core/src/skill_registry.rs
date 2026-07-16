@@ -461,13 +461,13 @@ mod tests {
         // a skill restricted to a hat list is invisible to any hat
         // outside that list.
         let mut registry = SkillRegistry::new(None);
-        let yaml = r#"---
+        let yaml = r"---
 name: hat-only-skill
 description: only for the coord hat
 hats: [coord]
 ---
 body
-"#;
+";
         registry.register_builtin("hat-only-skill", yaml).unwrap();
 
         assert!(

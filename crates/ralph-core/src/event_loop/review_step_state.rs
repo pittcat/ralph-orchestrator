@@ -167,10 +167,10 @@ fn plan_gate_step_gate(topic: &str, state: &StepReviewState) -> Option<PolicyFin
         .synth_terminal
         .as_deref()
         .is_some_and(|t| matches!(t, "review.passed" | "review.complete") && state.synth_pass);
-    if !terminal_ok {
-        Some(plan_gate_finding(topic, "plan_gate_review_not_terminal"))
-    } else {
+    if terminal_ok {
         None
+    } else {
+        Some(plan_gate_finding(topic, "plan_gate_review_not_terminal"))
     }
 }
 
@@ -267,11 +267,12 @@ impl ReviewStepTracker {
         let hat = event.hat.as_deref().unwrap_or("");
         let topic = event.topic.as_str();
 
-        if hat == "review-coordinator" && topic == "review.passed" {
-            if let Some(key) = step_key_from_event(topic, event.payload.as_deref()) {
-                if let Some(state) = self.steps.get(&key)
-                    && wave_open(state)
-                {
+        if hat == "review-coordinator"
+            && topic == "review.passed"
+            && let Some(key) = step_key_from_event(topic, event.payload.as_deref())
+            && let Some(state) = self.steps.get(&key)
+            && wave_open(state)
+        {
                     // U1 (2026-06-17-003 plan): emit the
                     // dedicated `SemanticGateViolation` variant
                     // instead of forging `InvalidFieldValue {
@@ -304,8 +305,6 @@ impl ReviewStepTracker {
                             state.wave_expected
                         ),
                     });
-                }
-            }
         }
 
         if topic == "review.passed"
@@ -343,13 +342,9 @@ impl ReviewStepTracker {
             let obj = serde_json::from_str::<Value>(p).ok()?;
             // Coordinator bootstrap work.ready has no reviewed-step correlation;
             // only step-advance handoffs from plan-gate are gated.
-            if obj
+            obj
                 .get("reviewed_task_id")
-                .and_then(|v| v.as_str())
-                .is_none()
-            {
-                return None;
-            }
+                .and_then(|v| v.as_str())?;
             if crate::event_loop::phase_authority::plan_gate_helper::plan_gate_should_skip_review_not_terminal(
                 workflow_phase_id,
             ) {
@@ -1145,14 +1140,14 @@ mod tests {
 
         tracker.backdate_open_wave_for_test("p", "t1", "1", Duration::from_secs(301));
 
-        let actions = tracker.drain_expired_aggregate_timeouts(Duration::from_secs(300));
+        let actions = tracker.drain_expired_aggregate_timeouts(Duration::from_mins(5));
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].received, 1);
         assert_eq!(actions[0].expected, 3);
         assert_eq!(actions[0].wave_id, "w-1");
         assert!(
             tracker
-                .drain_expired_aggregate_timeouts(Duration::from_secs(300))
+                .drain_expired_aggregate_timeouts(Duration::from_mins(5))
                 .is_empty(),
             "second drain must be idempotent"
         );
@@ -1281,7 +1276,7 @@ mod tests {
         );
 
         // Compress: pretend the last dimension arrived 600s ago.
-        tracker.backdate_last_dimension_for_test("p", "t1", "1", Duration::from_secs(600));
+        tracker.backdate_last_dimension_for_test("p", "t1", "1", Duration::from_mins(10));
 
         // Now at 60s staleness, the wave is stalled (4/11 unique).
         let actions = tracker.open_waves_needing_intervention(60);

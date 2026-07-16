@@ -199,7 +199,7 @@ fn prune_empty_mappings(value: &serde_yaml::Value) -> serde_yaml::Value {
     match value {
         serde_yaml::Value::Mapping(m) => {
             let mut out = serde_yaml::Mapping::new();
-            for (k, v) in m.iter() {
+            for (k, v) in m {
                 let pv = prune_empty_mappings(v);
                 if is_empty_mapping(&pv) || is_empty_sequence(&pv) {
                     continue;

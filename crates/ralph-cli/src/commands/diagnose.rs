@@ -224,14 +224,14 @@ pub fn try_diagnose(
             if result.is_ok() {
                 emit_supervisor_section(&args, &workspace_root);
             }
-            return result;
+            result
         }
         ReportKind::LegacyOnly => {
             let result = try_legacy(use_colors, &args, &diagnostics_root);
             if result.is_ok() {
                 emit_supervisor_section(&args, &workspace_root);
             }
-            return result;
+            result
         }
         ReportKind::LedgerOrLegacy => {
             // 1) Try ledger first. If it yields at least one
@@ -252,7 +252,7 @@ pub fn try_diagnose(
             if result.is_ok() {
                 emit_supervisor_section(&args, &workspace_root);
             }
-            return result;
+            result
         }
     }
 }
@@ -269,11 +269,10 @@ fn workspace_for_report(diagnostics_root: &Path, fallback_workspace: &Path) -> P
     {
         // diagnostics_root looks like `<workspace>/.ralph/diagnostics`
         // → walk up to `<workspace>`.
-        if let Some(ralph) = diagnostics_root.parent() {
-            if let Some(ws) = ralph.parent() {
+        if let Some(ralph) = diagnostics_root.parent()
+            && let Some(ws) = ralph.parent() {
                 return ws.to_path_buf();
             }
-        }
     }
     fallback_workspace.to_path_buf()
 }
@@ -958,23 +957,23 @@ pub fn compute_supervisor_state(workspace_root: &Path) -> SupervisorStateSummary
                 // dispatched yet. Until U7's `record_slot_pid` lands
                 // we approximate by counting `Pending`-only waves.
                 let queue = active;
-                return SupervisorStateSummary {
+                SupervisorStateSummary {
                     active_waves: active,
                     queue_depth: queue,
                     dedup_hits: 0,
                     db_path: db_path_str,
-                };
+                }
             }
             Err(_) => {
                 // DB missing or open failed — fall through to
                 // the dry-run defaults so the JSON section
                 // still shows up in operator output.
-                return SupervisorStateSummary {
+                SupervisorStateSummary {
                     active_waves: 0,
                     queue_depth: 0,
                     dedup_hits: 0,
                     db_path: db_path_str,
-                };
+                }
             }
         }
     }
@@ -1414,7 +1413,7 @@ mod tests {
         // `.ralph`. Here `bogus` does not exist → InvalidWorkspace.
         let result = try_diagnose(ColorMode::Never, args);
         match result {
-            Err(DiagnoseExit::InvalidSession(_)) | Err(DiagnoseExit::NoSession(_)) => {}
+            Err(DiagnoseExit::InvalidSession(_) | DiagnoseExit::NoSession(_)) => {}
             other => panic!("expected invalid/no-session, got {other:?}"),
         }
     }
@@ -2012,9 +2011,8 @@ mod tests {
             json.contains("\"active_waves\""),
             "empty-DB supervisor section must include active_waves"
         );
-        assert_eq!(
+        assert!(
             json.contains("\"queue_depth\""),
-            true,
             "empty-DB supervisor section must include queue_depth"
         );
 

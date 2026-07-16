@@ -17,7 +17,7 @@ pub fn evaluate(trigger: &Value, event_topic: &str, honored: bool) -> Option<Str
 
     let mapping = trigger.as_mapping()?;
     let primitive = mapping
-        .get(&Value::String("primitive".to_string()))?
+        .get(Value::String("primitive".to_string()))?
         .as_str()?;
     if primitive != "on_loop_complete_honored" {
         return None;

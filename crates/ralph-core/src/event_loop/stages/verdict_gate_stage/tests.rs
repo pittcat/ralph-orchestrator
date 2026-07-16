@@ -3,7 +3,7 @@ use crate::event_loop::flow_declaration::FlowDeclaration;
 use crate::event_loop::stage_pipeline::{EmitStage, FlowStep, RepairStateMachine, StageContext};
 use ralph_proto::Event;
 
-const FLOW_YAML: &str = r#"
+const FLOW_YAML: &str = r"
 mechanism:
   flow:
     type: declared
@@ -12,7 +12,7 @@ mechanism:
     steps:
       - id: unit_loop
         allowed_emits: [work.ready]
-"#;
+";
 
 fn flow() -> FlowDeclaration {
     FlowDeclaration::from_yaml(FLOW_YAML).unwrap()

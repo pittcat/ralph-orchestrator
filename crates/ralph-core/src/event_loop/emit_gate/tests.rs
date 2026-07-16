@@ -95,10 +95,10 @@ fn ctx_with_pipeline<'a>(
 
 #[test]
 fn u1_facade_accept_main_bus_for_complete_work_done() {
-    let mut pipeline = default_pipeline();
+    let pipeline = default_pipeline();
     let mut sm: std::collections::HashMap<String, RepairStateMachine> =
         std::collections::HashMap::new();
-    let mut ctx = ctx_with_pipeline(&mut pipeline, "unit_loop", &mut sm);
+    let mut ctx = ctx_with_pipeline(&pipeline, "unit_loop", &mut sm);
     let event = Event::new("work.done", r#"{"task_id":"t-1"}"#);
     let outcome = evaluate_emit_gate(&mut ctx, &event);
     assert_eq!(outcome, EmitGateOutcome::AcceptMainBus);
@@ -106,14 +106,14 @@ fn u1_facade_accept_main_bus_for_complete_work_done() {
 
 #[test]
 fn u1_facade_accept_repair_stream_for_relocate_legacy() {
-    let mut pipeline = default_pipeline();
+    let pipeline = default_pipeline();
     let mut sm: std::collections::HashMap<String, RepairStateMachine> =
         std::collections::HashMap::new();
     // `task.relocate_legacy` is a repair topic — the
     // FlowStepScopeStage short-circuits repair topics
     // BEFORE the step lookup (verdict_gate_topics), so
     // the step id here is arbitrary.
-    let mut ctx = ctx_with_pipeline(&mut pipeline, "unit_loop", &mut sm);
+    let mut ctx = ctx_with_pipeline(&pipeline, "unit_loop", &mut sm);
     let event = Event::new("task.relocate_legacy", r#"{"task_key":"legacy-1"}"#);
     let outcome = evaluate_emit_gate(&mut ctx, &event);
     assert_eq!(outcome, EmitGateOutcome::AcceptRepairStream);
@@ -121,13 +121,13 @@ fn u1_facade_accept_repair_stream_for_relocate_legacy() {
 
 #[test]
 fn u1_facade_reject_when_required_field_missing() {
-    let mut pipeline = default_pipeline();
+    let pipeline = default_pipeline();
     let mut sm: std::collections::HashMap<String, RepairStateMachine> =
         std::collections::HashMap::new();
-    let mut ctx = ctx_with_pipeline(&mut pipeline, "plan_end", &mut sm);
+    let mut ctx = ctx_with_pipeline(&pipeline, "plan_end", &mut sm);
     // `plan.blocked` requires `reason` per the default
     // schema gate. Empty payload → Reject.
-    let event = Event::new("plan.blocked", r#"{}"#);
+    let event = Event::new("plan.blocked", r"{}");
     let outcome = evaluate_emit_gate(&mut ctx, &event);
     match outcome {
         EmitGateOutcome::Reject(reject) => {
@@ -140,13 +140,13 @@ fn u1_facade_reject_when_required_field_missing() {
 
 #[test]
 fn u1_facade_empty_pipeline_accepts_every_event() {
-    let mut pipeline = empty_pipeline();
+    let pipeline = empty_pipeline();
     let mut sm: std::collections::HashMap<String, RepairStateMachine> =
         std::collections::HashMap::new();
-    let mut ctx = ctx_with_pipeline(&mut pipeline, "plan_end", &mut sm);
+    let mut ctx = ctx_with_pipeline(&pipeline, "plan_end", &mut sm);
     // Even a malformed event is accepted when there is
     // no stage to reject it.
-    let event = Event::new("plan.blocked", r#"{}"#);
+    let event = Event::new("plan.blocked", r"{}");
     let outcome = evaluate_emit_gate(&mut ctx, &event);
     assert_eq!(outcome, EmitGateOutcome::AcceptMainBus);
 }
@@ -159,11 +159,11 @@ fn u1_facade_repair_topic_with_pipeline_reject_yields_reject() {
         "task.relocate_legacy".to_string(),
         vec!["task_key".to_string()],
     );
-    let mut schema_only = StagePipeline::new(vec![Box::new(EmitSchemaGateStage::new(required))]);
+    let schema_only = StagePipeline::new(vec![Box::new(EmitSchemaGateStage::new(required))]);
     let mut sm: std::collections::HashMap<String, RepairStateMachine> =
         std::collections::HashMap::new();
-    let mut ctx = ctx_with_pipeline(&mut schema_only, "unit_loop", &mut sm);
-    let event = Event::new("task.relocate_legacy", r#"{}"#);
+    let mut ctx = ctx_with_pipeline(&schema_only, "unit_loop", &mut sm);
+    let event = Event::new("task.relocate_legacy", r"{}");
     let outcome = evaluate_emit_gate(&mut ctx, &event);
     match outcome {
         EmitGateOutcome::Reject(reject) => {
@@ -175,15 +175,15 @@ fn u1_facade_repair_topic_with_pipeline_reject_yields_reject() {
 
 #[test]
 fn u1_facade_loop_complete_topic_passes_to_main_bus() {
-    let mut pipeline = default_pipeline();
+    let pipeline = default_pipeline();
     let mut sm: std::collections::HashMap<String, RepairStateMachine> =
         std::collections::HashMap::new();
-    let mut ctx = ctx_with_pipeline(&mut pipeline, "ship", &mut sm);
+    let mut ctx = ctx_with_pipeline(&pipeline, "ship", &mut sm);
     // `LOOP_COMPLETE` is in `terminal_emits`; the
     // FlowStepScopeStage and VerdictGate short-circuit
     // terminal topics before any step lookup, so the
     // step id here is arbitrary.
-    let event = Event::new("LOOP_COMPLETE", r#"{}"#);
+    let event = Event::new("LOOP_COMPLETE", r"{}");
     let outcome = evaluate_emit_gate(&mut ctx, &event);
     assert_eq!(outcome, EmitGateOutcome::AcceptMainBus);
 }

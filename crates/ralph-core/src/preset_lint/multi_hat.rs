@@ -183,10 +183,10 @@ hats:
         );
         let msg = &finding.message;
         assert!(
-            msg.contains("4"),
+            msg.contains('4'),
             "message must include actual count: {msg}"
         );
-        assert!(msg.contains("3"), "message must include limit: {msg}");
+        assert!(msg.contains('3'), "message must include limit: {msg}");
         assert!(
             finding.action_hint.is_some(),
             "action_hint must be set: {finding:?}"
@@ -321,7 +321,7 @@ hats:
         );
         let msg = &findings[0].message;
         assert!(msg.contains("10"), "message must include actual=10: {msg}");
-        assert!(msg.contains("3"), "message must include limit=3: {msg}");
+        assert!(msg.contains('3'), "message must include limit=3: {msg}");
     }
 
     // ── Smoke: 1 hat with default mode → no finding (sanity check

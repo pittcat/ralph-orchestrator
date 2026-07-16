@@ -213,13 +213,11 @@ pub fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) ->
                 content,
                 ..
             }) => {
-                if user_is_tool_result(subtype.as_deref(), tool_use_id.as_deref(), &content) {
-                    if let Some(output) = extract_user_tool_result_text(&content) {
-                        if !output.is_empty() {
+                if user_is_tool_result(subtype.as_deref(), tool_use_id.as_deref(), &content)
+                    && let Some(output) = extract_user_tool_result_text(&content)
+                        && !output.is_empty() {
                             return Some(format!("→ {}\n", truncate_wave_worker_preview(&output)));
                         }
-                    }
-                }
                 None
             }
             _ => None,
@@ -256,11 +254,10 @@ fn parse_worker_event_line(line: &str) -> Option<ralph_core::Event> {
     // `topic` is absent or null, mirroring `EventRecordRaw`'s fallback.
     if let Some(obj) = value.as_object_mut() {
         let topic_missing = obj.get("topic").map(|v| v.is_null()).unwrap_or(true);
-        if topic_missing {
-            if let Some(type_val) = obj.remove("type") {
+        if topic_missing
+            && let Some(type_val) = obj.remove("type") {
                 obj.insert("topic".to_string(), type_val);
             }
-        }
     }
 
     serde_json::from_value::<ralph_core::Event>(value).ok()

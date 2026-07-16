@@ -45,14 +45,14 @@ fn flow_declaration_lint_passes_on_legal_yaml() {
 
 #[test]
 fn flow_declaration_lint_fires_when_mechanism_missing() {
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   event_policy:
     enabled: true
     schemas:
       work.ready:
         required_fields: []
-"#;
+";
     let findings = check_flow_declaration(yaml).unwrap();
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].id, FINDING_FLOW_DECLARATION_MISSING);
@@ -60,7 +60,7 @@ event_loop:
 
 #[test]
 fn flow_declaration_lint_fires_on_partial_state_undeclared() {
-    let yaml = r#"
+    let yaml = r"
 mechanism:
   flow:
     type: declared
@@ -69,7 +69,7 @@ mechanism:
       - id: unit_loop
         terminal_when: all_done
         allowed_emits: [work.ready]
-"#;
+";
     let findings = check_flow_declaration(yaml).unwrap();
     let ids: Vec<_> = findings.iter().map(|f| f.id).collect();
     assert!(ids.contains(&FINDING_FLOW_PARTIAL_STATE_UNDECLARED));
@@ -96,7 +96,7 @@ mechanism:
 
 #[test]
 fn flow_declaration_lint_fires_when_terminal_emits_lacks_loop_complete() {
-    let yaml = r#"
+    let yaml = r"
 mechanism:
   flow:
     type: declared
@@ -104,7 +104,7 @@ mechanism:
     steps:
       - id: unit_loop
         allowed_emits: [work.ready]
-"#;
+";
     let findings = check_flow_declaration(yaml).unwrap();
     let ids: Vec<_> = findings.iter().map(|f| f.id).collect();
     assert!(ids.contains(&FINDING_FLOW_TERMINAL_EMIT_MISSING));
@@ -112,7 +112,7 @@ mechanism:
 
 #[test]
 fn flow_declaration_lint_fires_on_unknown_allowed_emit() {
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -126,7 +126,7 @@ mechanism:
     steps:
       - id: unit_loop
         allowed_emits: [bogus.topic]
-"#;
+";
     let findings = check_flow_declaration(yaml).unwrap();
     let ids: Vec<_> = findings.iter().map(|f| f.id).collect();
     assert!(ids.contains(&FINDING_FLOW_UNKNOWN_EMIT_REJECTED));
@@ -134,7 +134,7 @@ mechanism:
 
 #[test]
 fn flow_declaration_lint_finds_multiple_findings_independently() {
-    let yaml = r#"
+    let yaml = r"
 mechanism:
   flow:
     type: declared
@@ -143,7 +143,7 @@ mechanism:
       - id: unit_loop
         terminal_when: all_done
         allowed_emits: [bogus.topic]
-"#;
+";
     let findings = check_flow_declaration(yaml).unwrap();
     let ids: std::collections::HashSet<&str> = findings.iter().map(|f| f.id).collect();
     assert!(ids.contains(FINDING_FLOW_PARTIAL_STATE_UNDECLARED));
@@ -154,14 +154,14 @@ mechanism:
 
 #[test]
 fn collect_known_topics_reads_from_event_policy_schemas() {
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   event_policy:
     enabled: true
     schemas:
       work.ready:
         required_fields: []
-"#;
+";
     let topics = collect_known_topics(yaml);
     assert!(topics.contains("work.ready"));
     assert!(topics.contains("LOOP_COMPLETE"));
@@ -181,7 +181,7 @@ fn flow_declaration_review_complete_in_review_walk_body_passes() {
     // the terminal topic of the per-plan `review_walk` step
     // (after all units are done). That is the CORRECT location.
     // The lint must stay silent.
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -207,7 +207,7 @@ mechanism:
           - review.dimension.ready
           - review.dimensions.complete
           - review.complete
-"#;
+";
     let findings = check_flow_declaration(yaml).unwrap();
     let review_complete_findings: Vec<_> = findings
         .iter()
@@ -226,7 +226,7 @@ fn flow_declaration_review_complete_in_unit_loop_body_fails() {
     // The unit_loop is `foreach over plan units`; review.complete
     // only fires after all units are done via the review_walk
     // step. The U8 guard MUST fire here.
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -246,7 +246,7 @@ mechanism:
           - work.ready
           - work.done
           - review.complete
-"#;
+";
     let findings = check_flow_declaration(yaml).unwrap();
     let review_complete_findings: Vec<_> = findings
         .iter()
@@ -271,7 +271,7 @@ fn flow_declaration_review_complete_subtopic_in_unit_loop_body_fails() {
     // A future topic family like `review.complete.something`
     // must also be rejected so the anti-pattern cannot be
     // smuggled in via a different name.
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -287,7 +287,7 @@ mechanism:
         body:
           - work.done
           - review.complete.summary
-"#;
+";
     let findings = check_flow_declaration(yaml).unwrap();
     let review_complete_findings: Vec<_> = findings
         .iter()
@@ -306,7 +306,7 @@ fn flow_declaration_no_unit_loop_step_is_silent() {
     // Presets without a `unit_loop` step (e.g.
     // `ce-executor-pipeline` is a linear hat-only pipeline)
     // are out of scope for the U8 guard.
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -319,7 +319,7 @@ mechanism:
       - id: ship
         kind: sequence
         allowed_emits: [REPORT_DONE, LOOP_COMPLETE]
-"#;
+";
     let findings = check_flow_declaration(yaml).unwrap();
     let review_complete_findings: Vec<_> = findings
         .iter()

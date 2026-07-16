@@ -205,7 +205,7 @@ fn replay_from_disk_rebuilds_snapshot() {
 
     // Empty / cold-start snapshot is the default, sanity check.
     assert_eq!(fresh.iteration, 0);
-    assert!(fresh.completion_requested == false);
+    assert!(!fresh.completion_requested);
 
     // On-disk file shape: one line per commit, parseable as a
     // single Commit.
@@ -525,7 +525,7 @@ fn fix1_persist_is_atomic_after_many_commits() {
             .commit(
                 CommitDelta::CounterChanged {
                     counter: CounterKind::ConsecutiveFailures,
-                    new_value: i as i64,
+                    new_value: i64::from(i),
                 },
                 None,
             )
@@ -1181,7 +1181,7 @@ fn p1_4_no_progress_turn_observed_preserves_dimension() {
             .commit(
                 CommitDelta::CounterChanged {
                     counter: CounterKind::Iteration,
-                    new_value: i as i64,
+                    new_value: i64::from(i),
                 },
                 Some("loop.batch_sync".to_string()),
             )

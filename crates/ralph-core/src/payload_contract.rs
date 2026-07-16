@@ -316,11 +316,10 @@ pub fn validate_payload_contract(
     let mut source_hats_by_topic: HashMap<String, Vec<String>> = HashMap::new();
     for (hat_id, hat_config) in &config.hats {
         let mut pub_topics: Vec<String> = hat_config.publishes.clone();
-        if let Some(default) = &hat_config.default_publishes {
-            if !pub_topics.contains(default) {
+        if let Some(default) = &hat_config.default_publishes
+            && !pub_topics.contains(default) {
                 pub_topics.push(default.clone());
             }
-        }
         for t in pub_topics {
             source_hats_by_topic
                 .entry(t)
@@ -539,11 +538,11 @@ mod tests {
 
     #[test]
     fn test_multiline_instructions() {
-        let instructions = r#"
+        let instructions = r"
         ## COORDINATOR MODE
         Read state from event payload: plan_name, task_id
         payload MUST include: step, complexity
-       "#;
+       ";
         let refs = extract_payload_field_refs("coordinator", instructions, &[]);
         let fields: Vec<_> = refs.iter().map(|r| r.field.clone()).collect();
         assert!(fields.contains(&"plan_name".to_string()));
@@ -922,7 +921,7 @@ hats:
             .find(|e| e.field.as_deref() == Some("plan_name"))
             .expect("expected plan_name error");
         assert!(
-            err.message.contains("b"),
+            err.message.contains('b'),
             "msg should mention hat: {}",
             err.message
         );

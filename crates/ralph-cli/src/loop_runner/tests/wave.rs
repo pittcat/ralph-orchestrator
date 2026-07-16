@@ -528,7 +528,7 @@ async fn run_wave_for_hat_backend_with_acp_capture(
 async fn run_wave_for_hat_backend_with_acp_capture_and_task_payload(
     hat_backend: ralph_core::HatBackend,
     backend_args: Option<Vec<String>>,
-    payload: &str,
+    _payload: &str,
     task_payload: &str,
 ) -> (ralph_core::CompletedWave, CapturedAcpWaveInvocation) {
     let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -855,7 +855,7 @@ fn assert_named_backend_invocation_contract(
 }
 
 #[cfg(unix)]
-fn assert_acp_invocation_contract(captured: &CapturedAcpWaveInvocation, expected_args: &[&str]) {
+fn assert_acp_invocation_contract(captured: &CapturedAcpWaveInvocation, _expected_args: &[&str]) {
     assert_captured_wave_prompt(&captured.prompt);
     assert_captured_wave_env(&captured.env, false);
 }

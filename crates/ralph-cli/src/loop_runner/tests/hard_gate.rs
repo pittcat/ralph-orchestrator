@@ -21,8 +21,6 @@
 //   - `use super::fake_path::*;` 引入 fake PATH helper
 
 use super::super::*;
-use super::common::*;
-use super::fake_path::*;
 
 // ──────────────────────────────────────────────────────────────────────
 // 本地 helper: `u4_workspace` 在原 `legacy.rs` 中定义,被 `test_u4_t4_3` /

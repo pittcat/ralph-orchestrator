@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn test_map_policy_report_to_errors_empty_suggestion_omits_field() {
         let codes = vec!["missing_task_id".to_string()];
-        let suggestions = vec!["".to_string()];
+        let suggestions = vec![String::new()];
         let errors = map_policy_report_to_errors(&codes, &suggestions);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, "missing_task_id");
@@ -100,7 +100,7 @@ mod tests {
         ];
         let suggestions = vec![
             "ralph tools task list".to_string(),
-            "".to_string(), // 无建议
+            String::new(), // 无建议
             "ralph preset check".to_string(),
         ];
         let errors = map_policy_report_to_errors(&codes, &suggestions);
@@ -134,7 +134,7 @@ mod tests {
             "missing_task_id".to_string(),
             "no_suggestion_code".to_string(),
         ];
-        let suggestions = vec!["ralph tools task list".to_string(), "".to_string()];
+        let suggestions = vec!["ralph tools task list".to_string(), String::new()];
         let errors = map_policy_report_to_errors(&codes, &suggestions);
 
         let json: Vec<serde_json::Value> = errors
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn test_map_policy_report_to_errors_message_filled_for_every_code() {
         let codes = vec!["orphan_channel_validation".to_string()];
-        let suggestions = vec!["".to_string()];
+        let suggestions = vec![String::new()];
         let errors = map_policy_report_to_errors(&codes, &suggestions);
         assert_eq!(errors.len(), 1);
         assert!(

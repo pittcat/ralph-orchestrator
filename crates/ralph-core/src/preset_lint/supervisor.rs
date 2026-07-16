@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn enabled_supervisor_without_isolated_is_error() {
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   supervisor:
     enabled: true
@@ -254,7 +254,7 @@ event_loop:
 hats:
   executor:
     publishes: [work.done]
-"#;
+";
         let findings = run(yaml);
         assert!(
             findings
@@ -266,12 +266,12 @@ hats:
 
     #[test]
     fn enabled_supervisor_with_isolated_is_silent() {
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   supervisor:
     enabled: true
   execution_mode: isolated
-"#;
+";
         let findings = run(yaml);
         assert!(
             findings.is_empty(),
@@ -281,12 +281,12 @@ event_loop:
 
     #[test]
     fn disabled_supervisor_is_silent() {
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   supervisor:
     enabled: false
   execution_mode: coordinator
-"#;
+";
         let findings = run(yaml);
         assert!(
             findings.is_empty(),
@@ -296,23 +296,23 @@ event_loop:
 
     #[test]
     fn abscent_supervisor_block_is_silent() {
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   execution_mode: coordinator
-"#;
+";
         let findings = run(yaml);
         assert!(findings.is_empty());
     }
 
     #[test]
     fn integrator_triggers_slot_done_is_error() {
-        let yaml = r#"
+        let yaml = r"
 hats:
   exec-integrator:
     triggers:
       - exec.wave.complete
       - exec.unit.done
-"#;
+";
         let findings = run(yaml);
         assert!(
             findings
@@ -324,12 +324,12 @@ hats:
 
     #[test]
     fn integrator_triggers_wave_complete_only_is_silent() {
-        let yaml = r#"
+        let yaml = r"
 hats:
   fix-integrator:
     triggers:
       - fix.wave.complete
-"#;
+";
         let findings = run(yaml);
         assert!(
             findings.is_empty(),
@@ -339,12 +339,12 @@ hats:
 
     #[test]
     fn hat_publishes_coord_topic_is_error() {
-        let yaml = r#"
+        let yaml = r"
 hats:
   rogue-integration:
     publishes:
       - exec.wave.complete
-"#;
+";
         let findings = run(yaml);
         assert!(
             findings
@@ -356,12 +356,12 @@ hats:
 
     #[test]
     fn hat_publishes_normal_topic_is_silent() {
-        let yaml = r#"
+        let yaml = r"
 hats:
   executor:
     publishes:
       - work.done
-"#;
+";
         let findings = run(yaml);
         assert!(findings.is_empty());
     }
@@ -371,12 +371,12 @@ hats:
         // The lint accepts both `review-integrator` (kebab)
         // and any `*-integrator` suffix for forward
         // compatibility.
-        let yaml = r#"
+        let yaml = r"
 hats:
   custom-review-integrator:
     triggers:
       - review.unit.done
-"#;
+";
         let findings = run(yaml);
         assert!(
             findings
@@ -413,12 +413,12 @@ hats:
         // dispatcher's origin guard (not the lint) enforces
         // the actual gate: agent emits of coord topics are
         // rejected regardless of the hat name.
-        let yaml = r#"
+        let yaml = r"
 hats:
   coordinator:
     publishes:
       - exec.wave.complete
-"#;
+";
         let findings = run(yaml);
         assert!(
             !findings
@@ -433,7 +433,7 @@ hats:
         // The minimum legal fixture: supervisor-enabled,
         // isolated, integrators trigger wave-complete, hats
         // publish normal topics only. Must pass clean.
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   supervisor:
     enabled: true
@@ -448,7 +448,7 @@ hats:
   worker:
     publishes:
       - work.done
-"#;
+";
         let findings = run(yaml);
         assert!(
             findings.is_empty(),

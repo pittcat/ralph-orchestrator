@@ -71,9 +71,7 @@ pub fn check_instructions_opac_with_preset(raw_yaml: &str, preset_name: &str) ->
 
     // U7 lint whitelist gate: only the presets on the
     // whitelist reach `check_emit_feedback_skill_reference`.
-    let lint_active = U7_EMIT_FEEDBACK_LINT_PRESET_WHITELIST
-        .iter()
-        .any(|n| *n == preset_name);
+    let lint_active = U7_EMIT_FEEDBACK_LINT_PRESET_WHITELIST.contains(&preset_name);
 
     for (hat_id, hat_value) in hats {
         let Some(hat_id_str) = hat_id.as_str() else {
@@ -219,8 +217,8 @@ fn check_supervisor_coordination_emit(
                 // chars on the same line — sufficient to catch `<TOPIC>`
                 // placeholders and bare topic names near the emit verb.
                 let lower = instructions.to_ascii_lowercase();
-                if let Some(emit_pos) = lower.find(emit) {
-                    if let Some(topic_pos) = lower.find(topic) {
+                if let Some(emit_pos) = lower.find(emit)
+                    && let Some(topic_pos) = lower.find(topic) {
                         let distance = (emit_pos as isize - topic_pos as isize).abs();
                         if distance <= 80 {
                             findings.push(
@@ -235,7 +233,6 @@ fn check_supervisor_coordination_emit(
                             return;
                         }
                     }
-                }
             }
         }
     }
@@ -398,7 +395,7 @@ mod tests {
 
     fn make_preset(extra_hats: &str) -> String {
         format!(
-            r#"
+            r"
 hats:
   coordinator:
     subscribes_to: [task.start]
@@ -408,7 +405,7 @@ hats:
     instructions: |
       Cite ralph-tools-opac for OPAC discipline and ralph-tools-emit §5 precheck.
       {extra_hats}
-"#
+"
         )
     }
 
@@ -491,7 +488,7 @@ hats:
     #[test]
     fn opac_skill_reference_missing_is_caught() {
         // No `ralph-tools-opac` reference; only generic text.
-        let yaml = r#"
+        let yaml = r"
 hats:
   implementer:
     subscribes_to: [work.ready]
@@ -499,7 +496,7 @@ hats:
       - work.done
     instructions: |
       Do the work and emit work.done at the end.
-"#;
+";
         let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             findings
@@ -510,7 +507,7 @@ hats:
 
     #[test]
     fn fix_unit_mint_template_missing_is_caught() {
-        let yaml = r#"
+        let yaml = r"
 hats:
   fixer:
     subscribes_to: [fix.unit.ready]
@@ -519,7 +516,7 @@ hats:
     instructions: |
       When a fix-unit lands, run the verification suite.
       Cite ralph-tools-opac and ralph-tools-emit §5.
-"#;
+";
         let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             findings
@@ -530,7 +527,7 @@ hats:
 
     #[test]
     fn fix_unit_mint_template_present_passes() {
-        let yaml = r#"
+        let yaml = r"
 hats:
   fixer:
     subscribes_to: [fix.unit.ready]
@@ -539,7 +536,7 @@ hats:
     instructions: |
       When a fix-unit lands, call `ralph tools task ensure --for-fix-unit --key ...`.
       Cite ralph-tools-opac and ralph-tools-emit §5.
-"#;
+";
         let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             !findings
@@ -551,13 +548,13 @@ hats:
 
     #[test]
     fn hat_without_instructions_is_skipped() {
-        let yaml = r#"
+        let yaml = r"
 hats:
   silent:
     subscribes_to: [work.ready]
     publishes:
       - work.done
-"#;
+";
         let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             findings.is_empty(),
@@ -575,7 +572,7 @@ hats:
     /// `INSTRUCTIONS_EMIT_FEEDBACK_SKILL_REFERENCE_MISSING`.
     #[test]
     fn u7_emit_feedback_skill_reference_missing_is_caught() {
-        let yaml = r#"
+        let yaml = r"
 hats:
   emitter:
     subscribes_to: [work.start]
@@ -583,7 +580,7 @@ hats:
       - work.done
     instructions: |
       Build the JSON payload for work.done and call `ralph emit work.done --json '<payload>'`.
-"#;
+";
         let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             findings
@@ -599,7 +596,7 @@ hats:
     /// `suggested_command`). The lint passes.
     #[test]
     fn u7_emit_feedback_skill_reference_present_passes() {
-        let yaml = r#"
+        let yaml = r"
 hats:
   emitter:
     subscribes_to: [work.start]
@@ -607,7 +604,7 @@ hats:
       - work.done
     instructions: |
       Build the JSON payload for work.done. Cite ralph-tools-emit and read the policy-check feedback section for `field_description` / `suggested_payload_shape` / `suggested_command` after a rejection.
-"#;
+";
         let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             !findings
@@ -627,7 +624,7 @@ hats:
     /// text).
     #[test]
     fn u7_emit_feedback_skill_reference_no_payload_mention_is_skipped() {
-        let yaml = r#"
+        let yaml = r"
 hats:
   observer:
     subscribes_to: [work.start]
@@ -635,7 +632,7 @@ hats:
       - work.done
     instructions: |
       Do the work and publish work.done at the end.
-"#;
+";
         let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(
             !findings
@@ -653,7 +650,7 @@ hats:
     /// of the rule is a deliberate code change.
     #[test]
     fn u7_emit_feedback_skill_reference_preset_whitelist_gate() {
-        let yaml = r#"
+        let yaml = r"
 hats:
   emitter:
     subscribes_to: [work.start]
@@ -661,7 +658,7 @@ hats:
       - work.done
     instructions: |
       Build the JSON payload for work.done and call `ralph emit work.done --json '<payload>'`.
-"#;
+";
         // Whitelisted preset → finding expected.
         let findings = check_instructions_opac_with_preset(yaml, "ce-executor-pipeline-loop");
         assert!(

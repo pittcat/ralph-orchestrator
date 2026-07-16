@@ -260,7 +260,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
                     &wave_id,
                     idempotency_key,
                     kind_to_str(kind),
-                    expected_total as i64,
+                    i64::from(expected_total),
                     phase_to_str(WavePhase::Dispatch),
                 ],
             )?;
@@ -270,7 +270,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
                      VALUES (?1, ?2, ?3, ?4)",
                     rusqlite::params![
                         &wave_id,
-                        idx as i64,
+                        i64::from(idx),
                         status_to_str(SlotStatus::Pending),
                         isolation_to_str(isolation),
                     ],
@@ -352,7 +352,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
             let tx = conn.transaction()?;
             tx.execute(
                 "UPDATE wave_slots SET status = 'dispatched' WHERE wave_id = ?1 AND slot_index = ?2",
-                rusqlite::params![&wave_id, slot_index as i64],
+                rusqlite::params![&wave_id, i64::from(slot_index)],
             )?;
             tx.execute(
                 "UPDATE waves SET phase = 'collect', updated_at = strftime('%s','now') WHERE wave_id = ?1",
@@ -361,7 +361,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
             tx.execute(
                 "INSERT OR IGNORE INTO dispatch_records (wave_id, slot_index, outcome)
                  VALUES (?1, ?2, NULL)",
-                rusqlite::params![&wave_id, slot_index as i64],
+                rusqlite::params![&wave_id, i64::from(slot_index)],
             )?;
             tx.commit()?;
             Ok(Some((wave_id, slot_index)))
@@ -378,7 +378,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
             let isolation: String = conn
                 .query_row(
                     "SELECT isolation FROM wave_slots WHERE wave_id = ?1 AND slot_index = ?2",
-                    rusqlite::params![wave_id, slot_index as i64],
+                    rusqlite::params![wave_id, i64::from(slot_index)],
                     |row| row.get(0),
                 )
                 .map_err(|err| match err {
@@ -404,15 +404,14 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 .query_row(
                     "SELECT worktree_path FROM slot_resources
                      WHERE wave_id = ?1 AND slot_index = ?2",
-                    rusqlite::params![wave_id, slot_index as i64],
+                    rusqlite::params![wave_id, i64::from(slot_index)],
                     |row| row.get(0),
                 )
                 .optional()?;
-            if let Some(Some(prev)) = prev_path {
-                if Some(&prev) != binding.worktree_path.as_ref() {
+            if let Some(Some(prev)) = prev_path
+                && Some(&prev) != binding.worktree_path.as_ref() {
                     cleanup_worktree_path(&prev);
                 }
-            }
             conn.execute(
                 "INSERT INTO slot_resources (wave_id, slot_index, worktree_path, branch)
                  VALUES (?1, ?2, ?3, ?4)
@@ -421,7 +420,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
                    branch = excluded.branch",
                 rusqlite::params![
                     wave_id,
-                    slot_index as i64,
+                    i64::from(slot_index),
                     binding.worktree_path,
                     binding.branch,
                 ],
@@ -440,7 +439,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 .query_row(
                     "SELECT worktree_path, branch FROM slot_resources
                      WHERE wave_id = ?1 AND slot_index = ?2",
-                    rusqlite::params![wave_id, slot_index as i64],
+                    rusqlite::params![wave_id, i64::from(slot_index)],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
@@ -464,7 +463,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
             tx.execute(
                 "UPDATE wave_slots SET status = 'completed', content_hash = ?3, event_count = ?4
                  WHERE wave_id = ?1 AND slot_index = ?2",
-                rusqlite::params![wave_id, slot_index as i64, content_hash, event_count as i64],
+                rusqlite::params![wave_id, i64::from(slot_index), content_hash, event_count as i64],
             )?;
             tx.execute(
                 "INSERT INTO worker_results (wave_id, slot_index, content_hash, event_count)
@@ -473,12 +472,12 @@ impl SupervisorStore for RusqliteSupervisorStore {
                    content_hash = excluded.content_hash,
                    event_count = excluded.event_count,
                    updated_at = strftime('%s','now')",
-                rusqlite::params![wave_id, slot_index as i64, content_hash, event_count as i64],
+                rusqlite::params![wave_id, i64::from(slot_index), content_hash, event_count as i64],
             )?;
             tx.execute(
                 "UPDATE dispatch_records SET outcome = 'completed'
                  WHERE wave_id = ?1 AND slot_index = ?2",
-                rusqlite::params![wave_id, slot_index as i64],
+                rusqlite::params![wave_id, i64::from(slot_index)],
             )?;
             tx.commit()?;
             Ok(())
@@ -496,12 +495,12 @@ impl SupervisorStore for RusqliteSupervisorStore {
             tx.execute(
                 "UPDATE wave_slots SET status = 'failed', failure_reason = ?3
                  WHERE wave_id = ?1 AND slot_index = ?2",
-                rusqlite::params![wave_id, slot_index as i64, reason],
+                rusqlite::params![wave_id, i64::from(slot_index), reason],
             )?;
             tx.execute(
                 "UPDATE dispatch_records SET outcome = 'failed'
                  WHERE wave_id = ?1 AND slot_index = ?2",
-                rusqlite::params![wave_id, slot_index as i64],
+                rusqlite::params![wave_id, i64::from(slot_index)],
             )?;
             // U2 / F-002 / KTD-8: the store MUST NOT mutate
             // `waves.phase` here; phase verdict is
@@ -723,7 +722,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
             let slot_exists: bool = conn
                 .query_row(
                     "SELECT 1 FROM wave_slots WHERE wave_id = ?1 AND slot_index = ?2",
-                    rusqlite::params![wave_id, slot_index as i64],
+                    rusqlite::params![wave_id, i64::from(slot_index)],
                     |_| Ok(true),
                 )
                 .optional()?
@@ -739,7 +738,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
                  VALUES (?1, ?2, ?3, NULL)
                  ON CONFLICT(wave_id, slot_index) DO UPDATE SET
                    pid = excluded.pid",
-                rusqlite::params![wave_id, slot_index as i64, pid as i64],
+                rusqlite::params![wave_id, i64::from(slot_index), i64::from(pid)],
             )?;
             Ok(())
         })
@@ -750,7 +749,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
             let pid: Option<Option<i64>> = conn
                 .query_row(
                     "SELECT pid FROM dispatch_records WHERE wave_id = ?1 AND slot_index = ?2",
-                    rusqlite::params![wave_id, slot_index as i64],
+                    rusqlite::params![wave_id, i64::from(slot_index)],
                     |row| row.get(0),
                 )
                 .optional()?;

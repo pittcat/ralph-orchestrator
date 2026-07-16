@@ -113,7 +113,7 @@ mod tests {
     use super::*;
     use crate::config::CompletionAfterTerminalAction;
 
-    fn frozen_input<'a>(topic: &'a str) -> TerminalClosedInput<'a> {
+    fn frozen_input(topic: &str) -> TerminalClosedInput<'_> {
         TerminalClosedInput {
             completion_honored: true,
             topic,

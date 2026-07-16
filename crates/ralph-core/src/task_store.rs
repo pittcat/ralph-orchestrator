@@ -212,9 +212,9 @@ impl TaskStore {
         if let (Some(log_arc), Some(loop_id)) = (
             self.shared_idempotent_log.as_ref(),
             self.loop_id_for_idempotent_log.as_deref(),
-        ) {
-            if let Ok(mut log) = log_arc.lock() {
-                if !log.loop_id().is_empty() {
+        )
+            && let Ok(mut log) = log_arc.lock()
+                && !log.loop_id().is_empty() {
                     for task in &self.tasks {
                         let is_final = task.status.is_terminal();
                         let payload = match serde_json::to_value(task) {
@@ -241,8 +241,6 @@ impl TaskStore {
                         }
                     }
                 }
-            }
-        }
 
         Ok(())
     }
@@ -747,11 +745,10 @@ impl TaskStore {
         // multi-unit splits) collapse to the same base `u1` and
         // are therefore allowed to coexist — that matches the
         // plan's "单 U 拆 sub-unit" carve-out.
-        if self.enforce_current_unit {
-            if let Some(collision_idx) = self.find_unit_collision_idx(&task) {
+        if self.enforce_current_unit
+            && let Some(collision_idx) = self.find_unit_collision_idx(&task) {
                 return &self.tasks[collision_idx];
             }
-        }
 
         self.tasks.push(task);
         self.tasks.last().unwrap()
@@ -911,9 +908,7 @@ fn task_locus(key: &str) -> Option<String> {
     // Canonical key has a 4th `:slug` segment.  Anything beyond that
     // is malformed for our contract — fall through to the legacy
     // behaviour so we never misclassify a foreign key.
-    if parts.next().is_none() {
-        return None;
-    }
+    parts.next()?;
     if parts.next().is_some() {
         return None;
     }
@@ -1760,7 +1755,7 @@ mod tests {
             "an open row must surface in the lookup"
         );
         // Closing the row drops it from the open-id index.
-        store.close(&id).unwrap();
+        store.close(id).unwrap();
         assert!(
             store
                 .find_open_task_id_in_loop(id, Some("loop-A"))
@@ -1800,7 +1795,7 @@ mod tests {
             .map(|(id, title, status)| {
                 let mut t = Task::new((*title).to_string(), 1);
                 t.id = (*id).to_string();
-                t.status = status.clone();
+                t.status = *status;
                 serde_json::to_string(&t).unwrap()
             })
             .collect::<Vec<_>>()

@@ -528,7 +528,7 @@ fn wiring_composition_lint_互斥() {
     // `collect_known_topics` 的白名单，否则会额外触发
     // `flow_unknown_emit_rejected`（与本测试目标无关，会污染 finding_id
     // 去重检查）。
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   event_policy:
     schemas:
@@ -549,7 +549,7 @@ mechanism:
         kind: foreach
         allowed_emits: [work.ready, work.done]
         terminal_when: partial_units_done
-"#;
+";
 
     let findings = check_flow_declaration(yaml).expect("lint must parse");
     let ids: Vec<&str> = findings.iter().map(|f| f.id).collect();
@@ -565,7 +565,7 @@ mechanism:
 
     // 不重复：每个 finding_id 至多出现一次。
     let mut sorted = ids.clone();
-    sorted.sort();
+    sorted.sort_unstable();
     let unique: Vec<&str> = {
         let mut seen = std::collections::HashSet::new();
         sorted

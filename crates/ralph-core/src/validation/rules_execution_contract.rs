@@ -106,7 +106,7 @@ fn execution_contract_check(
                     "{} payload is empty but contract requires fields: {:?}",
                     event.topic, rule.require_payload_fields
                 ),
-                topic: event.topic.to_string(),
+                topic: event.topic.clone(),
                 source_hat: None,
             },
         ]);
@@ -116,7 +116,7 @@ fn execution_contract_check(
             execution_contract::ExecutionContractFinding {
                 kind: ExecutionContractViolationKind::InvalidPayload,
                 message: format!("{} payload is not valid JSON", event.topic),
-                topic: event.topic.to_string(),
+                topic: event.topic.clone(),
                 source_hat: None,
             },
         ]);
@@ -126,7 +126,7 @@ fn execution_contract_check(
             execution_contract::ExecutionContractFinding {
                 kind: ExecutionContractViolationKind::InvalidPayload,
                 message: format!("{} payload must be a JSON object", event.topic),
-                topic: event.topic.to_string(),
+                topic: event.topic.clone(),
                 source_hat: None,
             },
         ]);
@@ -142,7 +142,7 @@ fn execution_contract_check(
                         "{} payload is missing required field: '{}'",
                         event.topic, field
                     ),
-                    topic: event.topic.to_string(),
+                    topic: event.topic.clone(),
                     source_hat: None,
                 },
             ]);

@@ -283,7 +283,7 @@ hats:
     // P0-4 of 2026-06-29-006: default timeout is 600s, so we
     // need a t0 at least 600s in the past for the entry to be
     // considered expired.
-    let t0 = std::time::Instant::now() - std::time::Duration::from_secs(700);
+    let t0 = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(700)).unwrap();
     event_loop.state.handoff_tracker.on_handoff_accepted(
         "work.ready",
         "executor",
@@ -382,13 +382,13 @@ hats:
     let diagnostics =
         crate::diagnostics::DiagnosticsCollector::with_enabled(&diagnostics_root, true)
             .expect("create diagnostics collector");
-    let session_dir = diagnostics.session_dir().unwrap().to_path_buf();
+    let _session_dir = diagnostics.session_dir().unwrap().to_path_buf();
     let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
     event_loop.initialize("P1-2 handoff escalation kind");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Pre-load a handoff that is already past its deadline.
-    let t0 = Instant::now() - Duration::from_secs(700);
+    let t0 = Instant::now().checked_sub(Duration::from_secs(700)).unwrap();
     event_loop.state.handoff_tracker.on_handoff_accepted(
         "work.ready",
         "executor",

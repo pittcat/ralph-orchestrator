@@ -5,7 +5,9 @@
 
 use crate::config::{EventLoopConfig, MechanismConfig, RalphConfig};
 use crate::event_loop::build_stage_pipeline_from_config;
-use crate::event_loop::phase_authority::config::{PhaseAuthorityConfig, PhaseDeclConfig};
+use crate::event_loop::phase_authority::config::{
+    PhaseAuthorityConfig, PhaseDeclConfig, ProgressProjectionConfig, ViolationPolicyConfig,
+};
 
 fn base_config() -> RalphConfig {
     RalphConfig {
@@ -25,11 +27,11 @@ fn phase_authority_enabled_adds_phase_authority_stage() {
             phases: vec![PhaseDeclConfig {
                 id: "unit_loop".to_string(),
                 label: None,
-                allowed_emits: Default::default(),
+                allowed_emits: std::collections::BTreeMap::default(),
             }],
             transitions: vec![],
-            violation_policy: Default::default(),
-            progress_projection: Default::default(),
+            violation_policy: ViolationPolicyConfig::default(),
+            progress_projection: ProgressProjectionConfig::default(),
         }),
     });
 
@@ -64,8 +66,8 @@ fn phase_authority_enabled_keeps_other_stages() {
             initial_phase: Some("unit_loop".to_string()),
             phases: vec![],
             transitions: vec![],
-            violation_policy: Default::default(),
-            progress_projection: Default::default(),
+            violation_policy: ViolationPolicyConfig::default(),
+            progress_projection: ProgressProjectionConfig::default(),
         }),
     });
     let (pipeline, _totals, _authority) = build_stage_pipeline_from_config(&cfg);

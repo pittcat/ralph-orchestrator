@@ -173,7 +173,7 @@ pub(super) fn validate_hooks_phase_event_keys(
         return Ok(());
     };
 
-    for (k, _) in events_map.iter() {
+    for (k, _) in events_map {
         let Some(key) = k.as_str() else {
             continue;
         };

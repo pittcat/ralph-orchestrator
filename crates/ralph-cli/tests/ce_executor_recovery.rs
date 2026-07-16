@@ -518,13 +518,13 @@ fn u4_obligation_satisfied_for_each_review_coordinator_branch() {
     // Empty-diff branch: review-coordinator picks review.passed.
     assert!(obligation_satisfied(
         Some(&o),
-        &vec!["review.passed".into()],
+        &["review.passed".into()],
         None
     ));
     // Non-empty branch: review-coordinator picks review.wave.ready.
     assert!(obligation_satisfied(
         Some(&o),
-        &vec!["review.wave.ready".into()],
+        &["review.wave.ready".into()],
         None
     ));
     // Off-obligation set: agent picked the wrong topic — this is a
@@ -532,9 +532,9 @@ fn u4_obligation_satisfied_for_each_review_coordinator_branch() {
     // downstream reporter can flag it.
     assert!(!obligation_satisfied(
         Some(&o),
-        &vec!["work.failed".into()],
+        &["work.failed".into()],
         None
     ));
     // No candidate at all: missing event — obligation not satisfied.
-    assert!(!obligation_satisfied(Some(&o), &vec![], None));
+    assert!(!obligation_satisfied(Some(&o), &[], None));
 }

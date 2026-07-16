@@ -18,7 +18,7 @@
 pub fn progress_gate_should_skip_missing_current_step(phase_id: Option<&str>) -> bool {
     match phase_id {
         None => false,
-        Some("unit_loop") | Some("fix_units") => true,
+        Some("unit_loop" | "fix_units") => true,
         Some(_) => false,
     }
 }

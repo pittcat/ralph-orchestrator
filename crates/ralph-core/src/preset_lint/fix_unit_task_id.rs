@@ -250,12 +250,12 @@ mod tests {
 
     #[test]
     fn coordinator_with_fix_unit_and_full_template_no_finding() {
-        let instructions = r#"
+        let instructions = r"
       ### Fix-Unit Task ID Minting
       Call `ralph tools task create` to mint a fresh task_id.
       The CLI derives `task-{plan_slug}-fix{NN}u{NN}-{ts_hex}` shape.
       fix-01 dispatch uses this template.
-      "#;
+      ";
         let config = cfg_with_coordinator(instructions);
         let findings = check_fix_unit_task_id_helper_derived(&config, LintStrictness::Default);
         assert!(
@@ -266,10 +266,10 @@ mod tests {
 
     #[test]
     fn coordinator_with_fix_unit_but_no_cli_template_emits_finding() {
-        let instructions = r#"
+        let instructions = r"
       Dispatch fix-01 with a fresh task_id. DO NOT reuse prior ids.
       The canonical shape is task-{plan_slug}-fix{NN}u{NN}-{ts_hex}.
-      "#;
+      ";
         let config = cfg_with_coordinator(instructions);
         let findings = check_fix_unit_task_id_helper_derived(&config, LintStrictness::Default);
         assert_eq!(
@@ -293,10 +293,10 @@ mod tests {
 
     #[test]
     fn coordinator_with_fix_unit_but_no_shape_marker_emits_finding() {
-        let instructions = r#"
+        let instructions = r"
       Dispatch fix-01. Call `ralph tools task create` to mint.
       No shape reference here.
-      "#;
+      ";
         let config = cfg_with_coordinator(instructions);
         let findings = check_fix_unit_task_id_helper_derived(&config, LintStrictness::Default);
         assert_eq!(
@@ -314,10 +314,10 @@ mod tests {
 
     #[test]
     fn coordinator_without_fix_unit_dispatch_no_finding() {
-        let instructions = r#"
+        let instructions = r"
       Dispatch step-01 with ralph tools task create.
       No fix-unit handling here.
-      "#;
+      ";
         let config = cfg_with_coordinator(instructions);
         let findings = check_fix_unit_task_id_helper_derived(&config, LintStrictness::Default);
         assert!(
@@ -450,10 +450,10 @@ mod tests {
 
     #[test]
     fn task_helper_rust_name_satisfies_shape_marker() {
-        let instructions = r#"
+        let instructions = r"
       Dispatch fix-01. Call `ralph tools task create` to mint.
       The id matches Task::fix_unit_task_id output shape.
-      "#;
+      ";
         let config = cfg_with_coordinator(instructions);
         let findings = check_fix_unit_task_id_helper_derived(&config, LintStrictness::Default);
         assert!(

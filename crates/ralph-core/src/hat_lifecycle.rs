@@ -141,7 +141,7 @@ impl FakeClock {
     pub fn fixed() -> Self {
         Self {
             now: Rc::new(Cell::new(
-                std::time::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
+                std::time::UNIX_EPOCH + Duration::from_hours(482_136),
             )),
         }
     }
@@ -434,7 +434,7 @@ impl<C: Clock> ActivationLifecycleTracker<C> {
                         completed_count = self.completed_count,
                         "Complete called for unknown or already-closed activation key"
                     );
-                } else if self.complete_unknown_count % Self::LOG_EVERY_NTH == 0 {
+                } else if self.complete_unknown_count.is_multiple_of(Self::LOG_EVERY_NTH) {
                     tracing::info!(
                         key = %key,
                         terminal_topic = %terminal_topic,
@@ -560,13 +560,13 @@ mod tests {
         assert_eq!(tracker.active_count(), 1);
 
         // Advance time and observe an event.
-        clock.advance(Duration::from_secs(60));
+        clock.advance(Duration::from_mins(1));
         tracker.observe_accepted_event(&key);
 
         // Still active, duration updated.
         let snapshots = tracker.active_activations();
         assert_eq!(snapshots.len(), 1);
-        assert!(snapshots[0].duration >= Duration::from_secs(60));
+        assert!(snapshots[0].duration >= Duration::from_mins(1));
         assert!(tracker.is_active(&key));
     }
 
@@ -697,7 +697,7 @@ mod tests {
         tracker.complete(&key, "work.done");
 
         // Late event — should be silently ignored.
-        clock.advance(Duration::from_secs(120));
+        clock.advance(Duration::from_mins(2));
         tracker.observe_accepted_event(&key);
 
         // Still not active.
@@ -819,7 +819,7 @@ mod tests {
         // alpha activated first, will have longest duration.
         let key_alpha = test_key("loop-1", "alpha", "event-a");
         tracker.activate(key_alpha.clone(), "event-a".into(), None);
-        clock.advance(Duration::from_secs(60));
+        clock.advance(Duration::from_mins(1));
         // bravo and charlie activated together → tie.
         let key_bravo = test_key("loop-1", "bravo", "event-b");
         let key_charlie = test_key("loop-1", "charlie", "event-b");
@@ -1044,7 +1044,7 @@ mod tests {
 
         // Regress the clock by 5 minutes — the snapshot's activated_at is
         // now in the future relative to "now".
-        clock.regress(Duration::from_secs(300));
+        clock.regress(Duration::from_mins(5));
 
         let snapshots = tracker.active_activations();
         assert_eq!(snapshots.len(), 1);
@@ -1069,11 +1069,11 @@ mod tests {
         let key_b = test_key_with_iter("loop-1", "reviewer", "review.start", 2);
 
         tracker.activate(key_a.clone(), "work.start".into(), None);
-        clock.advance(Duration::from_secs(60));
+        clock.advance(Duration::from_mins(1));
         tracker.activate(key_b.clone(), "review.start".into(), None);
 
         // Regress far enough that BOTH activated_at values are in the future.
-        clock.regress(Duration::from_secs(3600));
+        clock.regress(Duration::from_hours(1));
 
         let snapshots = tracker.active_activations();
         assert_eq!(snapshots.len(), 2);
@@ -1099,15 +1099,15 @@ mod tests {
         let key = test_key("loop-1", "executor", "work.start");
 
         tracker.activate(key.clone(), "work.start".into(), None);
-        clock.advance(Duration::from_secs(120));
+        clock.advance(Duration::from_mins(2));
         tracker.observe_accepted_event(&key);
 
         // Verify the pre-regression state is sane.
         let pre = tracker.active_activations();
-        assert_eq!(pre[0].duration, Duration::from_secs(120));
+        assert_eq!(pre[0].duration, Duration::from_mins(2));
 
         // Regress past activated_at.
-        clock.regress(Duration::from_secs(3600));
+        clock.regress(Duration::from_hours(1));
 
         let post = tracker.active_activations();
         assert_eq!(post[0].duration, Duration::ZERO);

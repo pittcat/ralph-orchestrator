@@ -224,8 +224,8 @@ pub(crate) fn project_ensure_task(
     // fix-unit prompt is forced to mint a fresh id per
     // (fix_round, fix_unit_index) triple. The restriction applies
     // only to fix-unit keys; ordinary runtime tasks are unaffected.
-    if task_key_is_fix_unit(&key) {
-        if let Some(provided_id) = json_pointer(payload, "task_id") {
+    if task_key_is_fix_unit(&key)
+        && let Some(provided_id) = json_pointer(payload, "task_id") {
             let candidate_id = provided_id.to_string();
             // First ensure the format is canonical. This catches hand-written
             // ids before we even check for reuse.
@@ -248,8 +248,7 @@ pub(crate) fn project_ensure_task(
                 .or_else(|| ctx.current_loop_id.clone());
             if let Some(existing) =
                 store.find_open_task_id_in_loop(&candidate_id, effective_loop_id.as_deref())
-            {
-                if existing.key.as_deref() != Some(key.as_str()) {
+                && existing.key.as_deref() != Some(key.as_str()) {
                     return Err(format!(
                         "task_id_reused_across_keys: work.ready reused open task id \
                          '{}' which is already bound to task_key {:?}; new key is \
@@ -258,9 +257,7 @@ pub(crate) fn project_ensure_task(
                         candidate_id, existing.key, key
                     ));
                 }
-            }
         }
-    }
     if let Some(plan_name) = json_pointer(payload, "plan_name") {
         task = task.with_description(Some(format!("plan: {plan_name}")));
     }
@@ -272,10 +269,10 @@ pub(crate) fn project_ensure_task(
     }
     // Reject duplicate task_id bound to a different key (coordinator
     // `task add` racing `work.ready` → projector).
-    if let Some(provided_id) = json_pointer(payload, "task_id") {
-        if !provided_id.is_empty() {
-            if let Some(existing) = store.get(provided_id) {
-                if existing.key.as_deref() != Some(key.as_str()) {
+    if let Some(provided_id) = json_pointer(payload, "task_id")
+        && !provided_id.is_empty()
+            && let Some(existing) = store.get(provided_id)
+                && existing.key.as_deref() != Some(key.as_str()) {
                     return Err(format!(
                         "duplicate_task_id: id '{provided_id}' is already bound to key \
                          {:?}; work.ready carries key '{key}'. Do not call \
@@ -284,9 +281,6 @@ pub(crate) fn project_ensure_task(
                         existing.key
                     ));
                 }
-            }
-        }
-    }
     // P0-2 (plan 2026-06-29-006): prefer the payload's `loop_id`
     // when present, otherwise fall back to the loop marker
     // threaded in via `ProjectionContext::current_loop_id`. Without

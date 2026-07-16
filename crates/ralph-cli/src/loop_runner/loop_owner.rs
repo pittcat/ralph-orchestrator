@@ -30,15 +30,14 @@ pub(crate) fn register_loop_owner_with_hat(
     // If a stale entry with our PID exists (crash recovery), reuse its
     // owner rather than overwriting it. This keeps ownership consistent
     // across crashes of an agent-owned loop.
-    if let Ok(Some(existing)) = registry.get(loop_id) {
-        if existing.pid == std::process::id() {
+    if let Ok(Some(existing)) = registry.get(loop_id)
+        && existing.pid == std::process::id() {
             debug!(
                 loop_id = %loop_id,
                 "Loop entry already registered for current PID; leaving owner untouched"
             );
             return;
         }
-    }
 
     let prompt = config
         .event_loop

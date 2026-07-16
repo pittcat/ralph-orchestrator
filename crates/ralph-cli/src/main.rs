@@ -345,25 +345,23 @@ async fn main() -> Result<()> {
             .with_env_filter(filter)
             .with_writer(std::io::stderr)
             .init();
-    } else {
-        if let Some(collector) = authoritative_diagnostics.as_ref()
-            && let Some(session_dir) = collector.session_dir()
-        {
-            use ralph_core::diagnostics::DiagnosticTraceLayer;
-            use tracing_subscriber::prelude::*;
+    } else if let Some(collector) = authoritative_diagnostics.as_ref()
+        && let Some(session_dir) = collector.session_dir()
+    {
+        use ralph_core::diagnostics::DiagnosticTraceLayer;
+        use tracing_subscriber::prelude::*;
 
-            if let Ok(trace_layer) = DiagnosticTraceLayer::new(session_dir) {
-                tracing_subscriber::registry()
-                    .with(tracing_subscriber::fmt::layer())
-                    .with(tracing_subscriber::EnvFilter::new(filter))
-                    .with(trace_layer)
-                    .init();
-            } else {
-                tracing_subscriber::fmt().with_env_filter(filter).init();
-            }
+        if let Ok(trace_layer) = DiagnosticTraceLayer::new(session_dir) {
+            tracing_subscriber::registry()
+                .with(tracing_subscriber::fmt::layer())
+                .with(tracing_subscriber::EnvFilter::new(filter))
+                .with(trace_layer)
+                .init();
         } else {
             tracing_subscriber::fmt().with_env_filter(filter).init();
         }
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
     let config_values: Vec<String> = if cli.config.is_empty() {

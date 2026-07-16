@@ -675,11 +675,9 @@ impl PolicyRuntimeState {
             // U4: Extract current_plan_name from work.ready events
             if event.topic == "work.ready"
                 && let Some(obj) = Self::payload_object(event.payload.as_deref())
-            {
-                if let Some(name) = obj.get("plan_name").and_then(|v| v.as_str()) {
+                && let Some(name) = obj.get("plan_name").and_then(|v| v.as_str()) {
                     state.current_plan_name = Some(name.to_string());
                 }
-            }
             // U5 (2026-06-17-003 plan, R6): replay prior
             // `review.dimension.ready` events to populate the
             // dedup set so cross-batch re-emits (e.g. on loop
@@ -1073,7 +1071,7 @@ pub struct EventLoopHandoffConfig<'a> {
     pub handoff_envelope: &'a crate::config::HandoffEnvelopeConfig,
 }
 
-impl<'a> HandoffEnvelopeConfigAccess for EventLoopHandoffConfig<'a> {
+impl HandoffEnvelopeConfigAccess for EventLoopHandoffConfig<'_> {
     fn handoff_envelope_enabled(&self) -> bool {
         self.handoff_envelope.enabled
     }
@@ -2157,8 +2155,8 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
             // are configured, nothing to validate.)
         } else if let Some(hat_id) = hat {
             for (field_path, per_hat_rules) in &schema.hat_allowed_values {
-                if let Some(rule) = per_hat_rules.iter().find(|r| r.hat_id == hat_id) {
-                    if let Some(p) = payload
+                if let Some(rule) = per_hat_rules.iter().find(|r| r.hat_id == hat_id)
+                    && let Some(p) = payload
                         && let Ok(value) = serde_json::from_str::<Value>(p)
                         && let Some(field_value) = extract_json_field(&value, field_path)
                         && !rule.values.contains(&field_value)
@@ -2175,7 +2173,6 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                             ),
                         });
                     }
-                }
             }
         } else {
             // Hat is missing but schema has hat-specific allowed values.
@@ -2214,9 +2211,8 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
     if config.plan_name_equality_required
         && topic == "work.done"
         && let Some(expected) = &state.current_plan_name
-    {
-        if let Some(p) = payload {
-            if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p) {
+        && let Some(p) = payload
+            && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p) {
                 let actual = obj.get("plan_name").and_then(|v| v.as_str());
                 if actual != Some(expected.as_str()) {
                     findings.push(PolicyFinding {
@@ -2235,8 +2231,6 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                     });
                 }
             }
-        }
-    }
 
     // U7 of plan 2026-07-02-005: runtime shipper strict-match backstop.
     if topic == "REVIEW_COMPLETE"
@@ -2279,12 +2273,12 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                             topic: topic.to_string(),
                             violation_type: ViolationType::PayloadTypeMismatch {
                                 expected: "array".to_string(),
-                                actual: type_name(&field).to_string(),
+                                actual: type_name(field).to_string(),
                             },
                             message: format!(
                                 "element_constraints: field '{}' must be an array, got {}",
                                 array_field,
-                                type_name(&field)
+                                type_name(field)
                             ),
                         });
                     }
@@ -2308,8 +2302,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
     if handoff_config.handoff_envelope_enabled()
         && handoff_config.handoff_envelope_validate_payload()
         && topic != "task.resume"
-    {
-        if let Some(p) = payload {
+        && let Some(p) = payload {
             match serde_json::from_str::<Value>(p) {
                 Ok(value) => {
                     if let Some(finding) = check_handoff_envelope(topic, &value) {
@@ -2323,7 +2316,6 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                 }
             }
         }
-    }
 
     if findings.is_empty() {
         if topic == "plan.blocked" {

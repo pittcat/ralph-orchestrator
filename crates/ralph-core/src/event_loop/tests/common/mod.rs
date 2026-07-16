@@ -111,11 +111,11 @@ pub(super) fn collect_pending_topics(event_loop: &EventLoop) -> Vec<String> {
 /// Helper to set up an event loop with required_events configured.
 pub(super) fn setup_loop_with_required_events(required: Vec<String>) -> EventLoop {
     let yaml = format!(
-        r#"
+        r"
 event_loop:
   required_events:
 {}
-"#,
+",
         required
             .iter()
             .map(|t| format!("    - \"{}\"", t))

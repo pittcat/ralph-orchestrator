@@ -718,15 +718,14 @@ fn worktree_file_name_prefix(
     // basename. This is the recommended way to name worktrees because
     // it is deterministic and does not depend on fragile prompt-text
     // parsing.
-    if let Some(plan) = plan_file {
-        if let Some(stem) = plan
+    if let Some(plan) = plan_file
+        && let Some(stem) = plan
             .file_stem()
             .and_then(|s| s.to_str())
             .filter(|s| !s.trim().is_empty())
         {
             return Some(stem.to_string());
         }
-    }
 
     // Fallback: if a non-default prompt file was provided explicitly
     // (-P), use its basename as the worktree prefix. We intentionally
@@ -741,7 +740,7 @@ fn worktree_file_name_prefix(
         .file_stem()
         .and_then(|stem| stem.to_str())
         .filter(|stem| !stem.trim().is_empty())
-        .filter(|stem| stem.to_ascii_lowercase() != "prompt")?;
+        .filter(|stem| !stem.eq_ignore_ascii_case("prompt"))?;
     Some(stem.to_string())
 }
 
@@ -1102,7 +1101,7 @@ pub async fn run_command(
                         Some(reusable.path.to_string_lossy().to_string()),
                         reusable.path.to_string_lossy().to_string(),
                     );
-                    *&mut pending_worktree_registration = Some(entry);
+                    pending_worktree_registration = Some(entry);
 
                     // Hand the reused context to the rest of the
                     // pipeline exactly like a freshly-created one.
@@ -1427,7 +1426,7 @@ pub async fn run_command(
             hats_source.map(|h| h.label()),
         )
         .await
-        .map_err(|e| {
+        .inspect_err(|e| {
             // P1 finding #5: lift `PresetLintGateError` out of
             // the error chain and exit with code2 here, AFTER
             // the RAII drop chain has run. The `?` shortcut
@@ -1437,10 +1436,9 @@ pub async fn run_command(
             // mapping inside `run_command` keeps the change
             // scoped to the run command path without
             // restructuring `main`.
-            if let Some(code) = run_loop_result_exit_code(&e) {
+            if let Some(code) = run_loop_result_exit_code(e) {
                 std::process::exit(code);
             }
-            e
         })?
     };
 
@@ -2655,8 +2653,8 @@ async fn run_subprocess_tui(
     );
 
     // R12: if cleanup required forceful abort, write a structured diagnostic note.
-    if reader_timed_out || forward_timed_out {
-        if let Ok(cleanup_path) = write_cleanup_diagnostic(
+    if (reader_timed_out || forward_timed_out)
+        && let Ok(cleanup_path) = write_cleanup_diagnostic(
             &args.workspace,
             reader_timed_out,
             forward_timed_out,
@@ -2668,7 +2666,6 @@ async fn run_subprocess_tui(
                 "Wrote cleanup diagnostic for timed-out I/O tasks"
             );
         }
-    }
 
     let reason = if let Some(signal) = received_signal {
         info!(signal, "Subprocess TUI returning Interrupted due to signal");
@@ -3720,7 +3717,7 @@ hats:
         tokio::time::pause();
         let handle = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(3600)).await;
+                tokio::time::sleep(Duration::from_hours(1)).await;
             }
         });
         tokio::time::advance(Duration::from_millis(50)).await;

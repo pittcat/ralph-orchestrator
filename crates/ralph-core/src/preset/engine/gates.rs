@@ -523,19 +523,19 @@ mod tests {
                 None
             }
         };
-        let first = resolve_downstream_publishes(&consumer_of, &hats, "work.ready");
-        let second = resolve_downstream_publishes(&consumer_of, &hats, "work.ready");
+        let first = resolve_downstream_publishes(consumer_of, &hats, "work.ready");
+        let second = resolve_downstream_publishes(consumer_of, &hats, "work.ready");
         assert_eq!(first, second);
         assert_eq!(
             first,
             vec!["work.done".to_string(), "report.done".to_string()]
         );
         // 不在 consumer_of 中的 topic → 空列表
-        assert!(resolve_downstream_publishes(&consumer_of, &hats, "unknown.topic").is_empty());
+        assert!(resolve_downstream_publishes(consumer_of, &hats, "unknown.topic").is_empty());
         // consumer_of 命中但 preset 无 hat 条目 → fallback 默认值
         let empty = BTreeMap::new();
         let fallback_consumer = |_: &str| Some("ghost".to_string());
-        let defaulted = resolve_downstream_publishes(&fallback_consumer, &empty, "any.topic");
+        let defaulted = resolve_downstream_publishes(fallback_consumer, &empty, "any.topic");
         assert_eq!(defaulted, vec!["work.done", "work.failed"]);
     }
 }

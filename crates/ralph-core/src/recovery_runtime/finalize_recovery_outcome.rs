@@ -245,14 +245,12 @@ mod tests {
             retry_key_states: vec![RetryKeyState {
                 retry_key: "k".to_string(),
                 last_outcome: "Recovered".to_string(),
-                outcome_history: vec![
-                    "Pending",
+                outcome_history: ["Pending",
                     "Pending",
                     "Pending",
                     "Recovered",
                     "Recovered",
-                    "Recovered",
-                ]
+                    "Recovered"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),

@@ -76,7 +76,17 @@ pub fn merge_hat_channel(
     let content = fs::read_to_string(&channel_path)
         .with_context(|| format!("Failed to read hat channel: {}", channel_path.display()))?;
 
-    if !content.trim().is_empty() {
+    if content.trim().is_empty() {
+        // 2026-07-03-002 plan U4: hat-channel 0 字节文件不再静默跳过。
+        // emit 诊断到 .ralph/diagnostics/channel-routing-fallback-{ts}.md,
+        // 让 operator 能看到 isolated 模式 hat-channel 路由失效。不
+        // fail-closed(避免阻塞 loop),但升级日志级别为 error。
+        emit_channel_routing_fallback_diagnostic(
+            ctx,
+            authoritative_hat,
+            "hat_channel_empty_after_activation",
+        );
+    } else {
         if let Some(parent) = target_file.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!(
@@ -113,9 +123,9 @@ pub fn merge_hat_channel(
                         );
                         // Backfill `triggered` from the topic's real subscriber
                         // when the agent did not provide one.
-                        if !obj.contains_key("triggered") {
-                            if let Some(topic) = obj.get("topic").and_then(|v| v.as_str()) {
-                                if let Some(derived) =
+                        if !obj.contains_key("triggered")
+                            && let Some(topic) = obj.get("topic").and_then(|v| v.as_str())
+                                && let Some(derived) =
                                     config.and_then(|c| derive_triggered_for_topic(topic, c))
                                 {
                                     obj.insert(
@@ -123,8 +133,6 @@ pub fn merge_hat_channel(
                                         serde_json::Value::String(derived),
                                     );
                                 }
-                            }
-                        }
                     }
                     serde_json::to_string(&value)?
                 }
@@ -141,16 +149,6 @@ pub fn merge_hat_channel(
                 )
             })?;
         }
-    } else {
-        // 2026-07-03-002 plan U4: hat-channel 0 字节文件不再静默跳过。
-        // emit 诊断到 .ralph/diagnostics/channel-routing-fallback-{ts}.md,
-        // 让 operator 能看到 isolated 模式 hat-channel 路由失效。不
-        // fail-closed(避免阻塞 loop),但升级日志级别为 error。
-        emit_channel_routing_fallback_diagnostic(
-            ctx,
-            authoritative_hat,
-            "hat_channel_empty_after_activation",
-        );
     }
 
     fs::remove_file(&channel_path).with_context(|| {
@@ -203,7 +201,7 @@ fn scan_orphan_subtree_events(ctx: &LoopContext) -> anyhow::Result<()> {
     .collect();
 
     let mut orphans: Vec<std::path::PathBuf> = Vec::new();
-    walk_collect_orphans(&workspace, &skip_paths, 0, 8, &mut orphans);
+    walk_collect_orphans(workspace, &skip_paths, 0, 8, &mut orphans);
 
     if orphans.is_empty() {
         return Ok(());
@@ -611,7 +609,7 @@ mod tests {
             "orphan-emit diagnostic should exist for {}",
             orphan.display()
         );
-        let diag_content = fs::read_to_string(&orphan_diag[0]).unwrap();
+        let diag_content = fs::read_to_string(orphan_diag[0]).unwrap();
         assert!(
             diag_content.contains("events.jsonl"),
             "diagnostic should mention the orphan path, got: {diag_content}"

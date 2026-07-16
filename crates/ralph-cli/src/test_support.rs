@@ -7,7 +7,6 @@
 // from inside an `unsafe { EnvVarGuard::set(...) }` block.
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 

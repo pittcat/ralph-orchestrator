@@ -172,7 +172,7 @@ impl ValidationRule for WorkflowGuardRule {
                     .collect::<Vec<_>>()
                     .join("; ")
             );
-            for d in rejections.iter_mut() {
+            for d in &mut rejections {
                 if d.reason.is_empty() {
                     d.reason = reason.clone();
                 }
@@ -404,7 +404,7 @@ mod tests {
         let result = WorkflowGuardRule.validate(
             &view,
             &mut ctx,
-            &event("experiment.planned", Some(r#"{}"#)),
+            &event("experiment.planned", Some(r"{}")),
         );
         assert!(!result.accepted);
         assert_eq!(

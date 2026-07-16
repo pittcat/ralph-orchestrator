@@ -79,7 +79,7 @@ mod tests {
         assert_eq!(names, vec!["claude", "opencode"]);
         assert_eq!(Backend::all().len(), 2);
         // No Kiro entry in any helper:
-        assert!(!Backend::all().contains(&Backend::Claude) == false);
+        assert!(Backend::all().contains(&Backend::Claude));
         // Visual confirmation that the only Display strings are Claude/OpenCode.
         let disp: Vec<String> = Backend::all().iter().map(|b| b.to_string()).collect();
         assert_eq!(disp, vec!["Claude", "OpenCode"]);

@@ -901,8 +901,8 @@ pub fn render_diagnosis_report_json(report: &DiagnosisReport) -> Value {
 ///   looks like a timestamp (e.g. `2026-06-05T10-20-30`) it is
 ///   resolved against `diagnostics_root`. When neither applies, an
 ///   `InvalidSession` error is returned.
-pub fn resolve_session<'a>(
-    selector: SessionSelector<'a>,
+pub fn resolve_session(
+    selector: SessionSelector<'_>,
     diagnostics_root: &Path,
 ) -> Result<PathBuf, ReporterError> {
     match selector {
@@ -1146,7 +1146,7 @@ fn read_active_activations(path: &Path, warnings: &mut Vec<String>) -> Vec<Activ
         Err(err) => {
             push_warning(
                 warnings,
-                format!("active-activations.json: malformed JSON ({err}); ignoring",),
+                format!("active-activations.json: malformed JSON ({err}); ignoring"),
             );
             Vec::new()
         }
@@ -1229,13 +1229,13 @@ fn compute_dup_storm_topics(
     const STORM_THRESHOLD: u32 = 3;
     let mut storms = BTreeSet::new();
 
-    if let Some(ws) = workspace_root {
-        if let Ok(records) = crate::state::read_rejection_log(ws) {
-            for record in records {
-                if record.topic == "work.ready" && record.seen_count.unwrap_or(0) >= STORM_THRESHOLD
-                {
-                    storms.insert(record.topic);
-                }
+    if let Some(ws) = workspace_root
+        && let Ok(records) = crate::state::read_rejection_log(ws)
+    {
+        for record in records {
+            if record.topic == "work.ready" && record.seen_count.unwrap_or(0) >= STORM_THRESHOLD
+            {
+                storms.insert(record.topic);
             }
         }
     }
@@ -1904,10 +1904,10 @@ fn iana_tz_name() -> &'static str {
             // via `%Z` and `chrono::LocalResult` introspection. As a
             // portable fallback we use the TZ env var if set, else
             // `/etc/localtime` symlink target via std (best-effort).
-            if let Ok(tz) = std::env::var("TZ") {
-                if !tz.is_empty() {
-                    return tz;
-                }
+            if let Ok(tz) = std::env::var("TZ")
+                && !tz.is_empty()
+            {
+                return tz;
             }
             std::fs::read_link("/etc/localtime")
                 .ok()
@@ -2671,10 +2671,10 @@ mod tests {
     fn u4_format_duration_variants() {
         assert_eq!(format_duration(Duration::from_secs(0)), "0s");
         assert_eq!(format_duration(Duration::from_secs(30)), "30s");
-        assert_eq!(format_duration(Duration::from_secs(300)), "5m");
+        assert_eq!(format_duration(Duration::from_mins(5)), "5m");
         assert_eq!(format_duration(Duration::from_secs(312)), "5m 12s");
-        assert_eq!(format_duration(Duration::from_secs(3600)), "1h");
-        assert_eq!(format_duration(Duration::from_secs(3660)), "1h 1m");
+        assert_eq!(format_duration(Duration::from_hours(1)), "1h");
+        assert_eq!(format_duration(Duration::from_mins(61)), "1h 1m");
         assert_eq!(format_duration(Duration::from_secs(5025)), "1h 23m 45s");
     }
 
@@ -3049,7 +3049,7 @@ mod tests {
         // short TZ abbreviations (CST, PST, EST — each maps to multiple
         // regions).
         assert!(
-            result.contains(" (") && result.contains(")"),
+            result.contains(" (") && result.contains(')'),
             "expected IANA zone name in parens (e.g. '(UTC)'), got: {result}"
         );
     }

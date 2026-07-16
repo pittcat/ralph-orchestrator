@@ -302,8 +302,8 @@ fn compute_effective_required_fields(
             schema.required_fields.iter().cloned().collect(),
         );
     }
-    if let Some(contracts) = contracts {
-        if contracts.enabled {
+    if let Some(contracts) = contracts
+        && contracts.enabled {
             for (topic, rule) in &contracts.rules {
                 let extras = extra_required_fields_from_rule(rule);
                 if !extras.is_empty() {
@@ -311,7 +311,6 @@ fn compute_effective_required_fields(
                 }
             }
         }
-    }
     out
 }
 

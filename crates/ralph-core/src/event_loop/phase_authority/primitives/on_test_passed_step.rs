@@ -81,14 +81,14 @@ pub fn evaluate(
 
     let mapping = trigger.as_mapping()?;
     let primitive = mapping
-        .get(&Value::String("primitive".to_string()))?
+        .get(Value::String("primitive".to_string()))?
         .as_str()?;
     if primitive != "on_test_passed_step" {
         return None;
     }
 
     let step_kind = mapping
-        .get(&Value::String("step_kind".to_string()))?
+        .get(Value::String("step_kind".to_string()))?
         .as_str()
         .and_then(StepKind::from_token)?;
     if step_kind != fixture.kind {
@@ -96,7 +96,7 @@ pub fn evaluate(
     }
 
     let when = mapping
-        .get(&Value::String("when".to_string()))
+        .get(Value::String("when".to_string()))
         .and_then(|v| v.as_str())
         .unwrap_or("always");
 
@@ -123,11 +123,11 @@ mod tests {
     #[test]
     fn last_fix_unit_matches() {
         let trigger: Value = serde_yaml::from_str(
-            r#"
+            r"
 primitive: on_test_passed_step
 step_kind: fix_unit
 when: last
-"#,
+",
         )
         .unwrap();
         let fixture = StepProgressFixture {
@@ -144,11 +144,11 @@ when: last
     #[test]
     fn last_plan_unit_matches() {
         let trigger: Value = serde_yaml::from_str(
-            r#"
+            r"
 primitive: on_test_passed_step
 step_kind: plan_unit
 when: last
-"#,
+",
         )
         .unwrap();
         let fixture = StepProgressFixture {
@@ -165,11 +165,11 @@ when: last
     #[test]
     fn non_last_plan_unit_does_not_match_last_trigger() {
         let trigger: Value = serde_yaml::from_str(
-            r#"
+            r"
 primitive: on_test_passed_step
 step_kind: plan_unit
 when: last
-"#,
+",
         )
         .unwrap();
         let fixture = StepProgressFixture {
@@ -183,11 +183,11 @@ when: last
     #[test]
     fn work_done_does_not_match() {
         let trigger: Value = serde_yaml::from_str(
-            r#"
+            r"
 primitive: on_test_passed_step
 step_kind: plan_unit
 when: last
-"#,
+",
         )
         .unwrap();
         let fixture = StepProgressFixture {
@@ -201,11 +201,11 @@ when: last
     #[test]
     fn mismatched_step_kind_does_not_match() {
         let trigger: Value = serde_yaml::from_str(
-            r#"
+            r"
 primitive: on_test_passed_step
 step_kind: plan_unit
 when: last
-"#,
+",
         )
         .unwrap();
         let fixture = StepProgressFixture {
@@ -219,11 +219,11 @@ when: last
     #[test]
     fn always_trigger_matches_any_step() {
         let trigger: Value = serde_yaml::from_str(
-            r#"
+            r"
 primitive: on_test_passed_step
 step_kind: plan_unit
 when: always
-"#,
+",
         )
         .unwrap();
         let fixture = StepProgressFixture {

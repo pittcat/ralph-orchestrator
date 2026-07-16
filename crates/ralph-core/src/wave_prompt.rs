@@ -89,7 +89,7 @@ pub fn build_wave_worker_prompt(hat: &HatConfig, event: &Event, ctx: &WaveWorker
             );
         }
     }
-    prompt.push_str("\n");
+    prompt.push('\n');
 
     // 4. Publishing results
     if !ctx.result_topics.is_empty() {

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 /// off by default; even with `enabled: true` it is a strict no-op when
 /// `RALPH_PRECHECK_MODE=off` is set.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default)]
 pub struct PrecheckConfig {
     /// Master switch. When false, the entire block is ignored.
     #[serde(default)]
@@ -22,14 +23,6 @@ pub struct PrecheckConfig {
     pub rules: BTreeMap<String, PrecheckRule>,
 }
 
-impl Default for PrecheckConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            rules: BTreeMap::new(),
-        }
-    }
-}
 
 /// One precheck rule for a target topic X.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

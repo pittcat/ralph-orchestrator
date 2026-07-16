@@ -49,8 +49,11 @@ pub fn is_ephemeral_name(name: &str) -> bool {
     if lower.ends_with(".tmp.md") {
         return true;
     }
-    if lower.ends_with(".bak") {
-        return true;
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    {
+        if lower.ends_with(".bak") {
+            return true;
+        }
     }
     false
 }
@@ -89,6 +92,7 @@ pub struct RelocationRecord {
 /// implementation skip the git round-trip when the workspace has not
 /// changed.
 #[derive(Debug, Default)]
+#[allow(clippy::struct_field_names)]
 pub struct EphemeralIsolation {
     /// Last events-file mtime/size seen when we scanned.  Used to
     /// short-circuit when nothing has changed since the last call.
@@ -249,8 +253,8 @@ impl EphemeralIsolation {
             .arg("-z")
             .current_dir(repo_root)
             .output();
-        if let Ok(out) = output {
-            if out.status.success() {
+        if let Ok(out) = output
+            && out.status.success() {
                 // Cache the raw output fingerprint (byte count of the
                 // git stdout) — when the workspace's untracked set is
                 // unchanged, the byte count is unchanged, and the
@@ -279,7 +283,6 @@ impl EphemeralIsolation {
                     .max();
                 return paths;
             }
-        }
 
         // Fallback: walk the immediate children of `repo_root` only.
         // We do NOT recurse — a recursive walk could be expensive on
@@ -376,7 +379,7 @@ fn is_forbidden_source_path(rel: &Path) -> bool {
     let Some(first_str) = first.as_os_str().to_str() else {
         return false;
     };
-    FORBIDDEN_SOURCE_DIRS.iter().any(|d| *d == first_str)
+    FORBIDDEN_SOURCE_DIRS.contains(&first_str)
 }
 
 fn path_is_allowed(rel: &Path, allowlist: &[&str]) -> bool {

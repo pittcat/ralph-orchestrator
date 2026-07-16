@@ -474,7 +474,7 @@ pub async fn handle_wave_events(
             // Plan 001 §4.3 C1: forward the explicit preset label so
             // each wave worker's `ralph emit` / `ralph wave emit`
             // inherits the loop's `event_policy.schemas`.
-            out.hats_source_label.as_deref(),
+            out.hats_source_label,
             out.config_path,
             // 2026-07-03-001 supervisor real-wiring: forward the
             // optional supervisor bridge so the dispatcher can take
@@ -807,8 +807,8 @@ pub async fn handle_wave_events(
     // Re-read events file once after all waves have been merged so that
     // every wave result is published to the bus.  The EventReader's position
     // was before any merge, so it picks up all newly appended events.
-    if any_success {
-        if let Ok(reread) = event_loop.process_events_from_jsonl_with_waves()
+    if any_success
+        && let Ok(reread) = event_loop.process_events_from_jsonl_with_waves()
             && reread.processed.had_events
         {
             info!("Published wave result events to bus for aggregator");
@@ -817,7 +817,6 @@ pub async fn handle_wave_events(
             // this batch doesn't trigger LoopStale termination.
             event_loop.reset_stale_topic_counter();
         }
-    }
     result
 }
 
@@ -2023,7 +2022,7 @@ fn record_loop_max_runtime_envelope(
         .publishes
         .first()
         .cloned()
-        .or_else(|| wave.events.first().map(|e| e.topic.to_string()))
+        .or_else(|| wave.events.first().map(|e| e.topic.clone()))
         .unwrap_or_default();
 
     let envelope = RecoveryDiagnosisEnvelope::builder()
@@ -2082,7 +2081,7 @@ fn record_wave_timeout_envelope(
         .publishes
         .first()
         .cloned()
-        .or_else(|| wave.events.first().map(|e| e.topic.to_string()))
+        .or_else(|| wave.events.first().map(|e| e.topic.clone()))
         .unwrap_or_default();
 
     let expected = completed.wave_total as usize;
@@ -2383,9 +2382,9 @@ mod tests {
     // ---------------------------------------------------------------------
 
     fn build_event_loop() -> EventLoop {
-        let yaml = r#"
+        let yaml = r"
 hats: {}
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).expect("yaml parse");
         let mut el = EventLoop::new(config);
         el.initialize("u2-rejection-test");
@@ -2652,7 +2651,7 @@ hats: {}
             },
             prompt: format!("worker-{index}"),
             worker_events_path: PathBuf::from(format!("/tmp/wave-u3-{index}.jsonl")),
-            worker_timeout: Duration::from_secs(60),
+            worker_timeout: Duration::from_mins(1),
             progress_tx,
             worker_rpc_tx: None,
             worker_tui_state: None,
@@ -2674,7 +2673,7 @@ hats: {}
         let requests: Vec<WorkerRequest> = (0..4u32)
             .map(|i| make_worker_request(i, progress_tx.clone()))
             .collect();
-        let executor = Arc::new(TestExecutor::new(Duration::from_secs(3600)));
+        let executor = Arc::new(TestExecutor::new(Duration::from_hours(1)));
 
         let wave = make_wave(4, 4, 1);
         // Compute deadlines so partial_threshold fires well before
@@ -2682,7 +2681,7 @@ hats: {}
         let aggregate = Duration::from_secs(10);
         let ctx = DispatchContext::build(
             &wave,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             aggregate,
             vec!["p0".into(), "p1".into(), "p2".into(), "p3".into()],
             false,
@@ -2747,12 +2746,12 @@ hats: {}
         let requests: Vec<WorkerRequest> = (0..3u32)
             .map(|i| make_worker_request(i, progress_tx.clone()))
             .collect();
-        let executor = Arc::new(TestExecutor::new(Duration::from_secs(3600)));
+        let executor = Arc::new(TestExecutor::new(Duration::from_hours(1)));
 
         let wave = make_wave(3, 3, 3);
         let ctx = DispatchContext::build(
             &wave,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Duration::from_secs(10),
             vec!["p0".into(), "p1".into(), "p2".into()],
             false,
@@ -2797,12 +2796,12 @@ hats: {}
             .map(|i| make_worker_request(i, progress_tx.clone()))
             .collect();
         // Workers sleep far past both deadlines.
-        let executor = Arc::new(TestExecutor::new(Duration::from_secs(3600)));
+        let executor = Arc::new(TestExecutor::new(Duration::from_hours(1)));
 
         let wave = make_wave(3, 3, 3);
         let ctx = DispatchContext::build(
             &wave,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Duration::from_secs(10),
             vec!["p0".into(), "p1".into(), "p2".into()],
             false,
@@ -2870,7 +2869,7 @@ hats: {}
         let wave = make_wave(2, 2, 2);
         let ctx = DispatchContext::build(
             &wave,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Duration::from_secs(30),
             vec!["p0".into(), "p1".into()],
             false,
@@ -2918,7 +2917,7 @@ hats: {}
         let wave = make_wave(4, 4, 2);
         let ctx = DispatchContext::build(
             &wave,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Duration::from_secs(30),
             vec!["p0".into(), "p1".into(), "p2".into(), "p3".into()],
             false,
@@ -2970,7 +2969,7 @@ hats: {}
         let wave = make_wave(2, 5, 2);
         let ctx = DispatchContext::build(
             &wave,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Duration::from_secs(30),
             vec!["p0".into(), "p1".into()],
             false,
@@ -3026,7 +3025,7 @@ hats: {}
         let wave = make_wave(3, 3, 3);
         let ctx = DispatchContext::build(
             &wave,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Duration::from_secs(30),
             vec!["p0".into(), "p1".into(), "p2".into()],
             false,
@@ -3046,11 +3045,8 @@ hats: {}
             dispatch_wave_inner(tracker, requests, ctx, executor.clone(), silent_progress()).await;
 
         // Must NOT be SpawnFailed — all 3 requests were spawned.
-        match &outcome {
-            WaveDispatchOutcome::SpawnFailed { .. } => {
-                panic!("SpawnFailed must NOT fire when all workers spawned: {outcome:?}")
-            }
-            _ => {}
+        if let WaveDispatchOutcome::SpawnFailed { .. } = &outcome {
+            panic!("SpawnFailed must NOT fire when all workers spawned: {outcome:?}")
         }
         // Otherwise should be Completed or Partial.
         match outcome {
@@ -3086,12 +3082,12 @@ hats: {}
         let requests: Vec<WorkerRequest> = (0..2u32)
             .map(|i| make_worker_request(i, progress_tx.clone()))
             .collect();
-        let executor = Arc::new(TestExecutor::new(Duration::from_secs(3600)));
+        let executor = Arc::new(TestExecutor::new(Duration::from_hours(1)));
 
         let wave = make_wave(3, 3, 3); // 3 events, total=3
         let ctx = DispatchContext::build(
             &wave,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Duration::from_secs(30),
             vec!["p0".into(), "p1".into(), "p2".into()],
             false,
@@ -3140,9 +3136,9 @@ hats: {}
         let temp = tempfile::tempdir().expect("tempdir");
         let diagnostics_root = temp.path().to_path_buf();
 
-        let yaml = r#"
+        let yaml = r"
 hats: {}
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).expect("yaml parse");
         let diagnostics = DiagnosticsCollector::with_enabled(&diagnostics_root, true)
             .expect("diagnostics enabled");
@@ -3608,18 +3604,18 @@ hats: {}
         let requests: Vec<WorkerRequest> = (0..4u32)
             .map(|i| make_worker_request(i, progress_tx.clone()))
             .collect();
-        let executor = Arc::new(TestExecutor::new(Duration::from_secs(3600)));
+        let executor = Arc::new(TestExecutor::new(Duration::from_hours(1)));
 
         let wave = make_wave(4, 4, 4);
         // Use a generous aggregate (3600s) so the partial / aggregate
         // paths CANNOT fire first; only the global deadline (10s)
         // will win.
-        let aggregate = Duration::from_secs(3600);
+        let aggregate = Duration::from_hours(1);
         // global_deadline = now + 10s in paused-time terms.
         let global_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let ctx = DispatchContext::build(
             &wave,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             aggregate,
             vec!["p0".into(), "p1".into(), "p2".into(), "p3".into()],
             false,
@@ -3682,16 +3678,16 @@ hats: {}
         let requests: Vec<WorkerRequest> = (0..2u32)
             .map(|i| make_worker_request(i, progress_tx.clone()))
             .collect();
-        let executor = Arc::new(TestExecutor::new(Duration::from_secs(3600)));
+        let executor = Arc::new(TestExecutor::new(Duration::from_hours(1)));
 
         let wave = make_wave(2, 2, 2);
         // Aggregate far in the future; only the global deadline
         // (= now, already past) should fire.
-        let aggregate = Duration::from_secs(3600);
+        let aggregate = Duration::from_hours(1);
         let global_deadline = tokio::time::Instant::now();
         let ctx = DispatchContext::build(
             &wave,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             aggregate,
             vec!["p0".into(), "p1".into()],
             false,
@@ -3753,9 +3749,9 @@ hats: {}
         let temp = tempfile::tempdir().expect("tempdir");
         let diagnostics_root = temp.path().to_path_buf();
 
-        let yaml = r#"
+        let yaml = r"
 hats: {}
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).expect("yaml parse");
         let diagnostics = DiagnosticsCollector::with_enabled(&diagnostics_root, true)
             .expect("diagnostics enabled");

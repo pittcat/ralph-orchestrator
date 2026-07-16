@@ -134,13 +134,11 @@ pub fn check_hat_scope_invariant(config: &RalphConfig) -> Vec<RuntimeContractFin
     // custom field name is allowed but the lint cannot verify
     // it (it is the operator's responsibility to keep the
     // upstream payload in sync).
-    if let Some(gate) = &config.event_loop.verdict_gate {
-        if let Some(vf) = gate.verdict_field.as_deref() {
-            if vf != "verdict" && vf != "pass_or_fail" {
+    if let Some(gate) = &config.event_loop.verdict_gate
+        && let Some(vf) = gate.verdict_field.as_deref()
+            && vf != "verdict" && vf != "pass_or_fail" {
                 findings.push(verdict_field_known_alias_finding(vf));
             }
-        }
-    }
 
     for (hat_id, hat_cfg) in &config.hats {
         let is_coordinator = coordinator_hats.contains(hat_id);
@@ -202,15 +200,14 @@ pub fn check_hat_scope_invariant(config: &RalphConfig) -> Vec<RuntimeContractFin
         }
 
         // Rule 3: coordinator must not see review-chain topics.
-        if is_coordinator {
-            if let Some(ef) = hat_cfg.event_filter.as_ref() {
+        if is_coordinator
+            && let Some(ef) = hat_cfg.event_filter.as_ref() {
                 for topic in &ef.events {
                     if COORDINATOR_FORBIDDEN_TOPICS.contains(&topic.as_str()) {
                         findings.push(coordinator_review_leak_finding(hat_id, topic));
                     }
                 }
             }
-        }
 
         // Rule 3.5 (2026-06-29-007 U2): no hat may publish topics
         // that have been removed from the agent protocol. These emits
@@ -222,11 +219,10 @@ pub fn check_hat_scope_invariant(config: &RalphConfig) -> Vec<RuntimeContractFin
                 findings.push(globally_forbidden_publish_finding(hat_id, topic));
             }
         }
-        if let Some(default) = hat_cfg.default_publishes.as_deref() {
-            if GLOBALLY_FORBIDDEN_PUBLISHES.contains(&default) {
+        if let Some(default) = hat_cfg.default_publishes.as_deref()
+            && GLOBALLY_FORBIDDEN_PUBLISHES.contains(&default) {
                 findings.push(globally_forbidden_publish_finding(hat_id, default));
             }
-        }
 
         // Rule 4 (2026-06-29-007 U2): coordinator must not publish
         // out-of-scope topics. These emits are rejected at runtime by
@@ -238,11 +234,10 @@ pub fn check_hat_scope_invariant(config: &RalphConfig) -> Vec<RuntimeContractFin
                     findings.push(coordinator_forbidden_publish_finding(hat_id, topic));
                 }
             }
-            if let Some(default) = hat_cfg.default_publishes.as_deref() {
-                if COORDINATOR_FORBIDDEN_PUBLISHES.contains(&default) {
+            if let Some(default) = hat_cfg.default_publishes.as_deref()
+                && COORDINATOR_FORBIDDEN_PUBLISHES.contains(&default) {
                     findings.push(coordinator_forbidden_publish_finding(hat_id, default));
                 }
-            }
         }
     }
 
@@ -419,11 +414,9 @@ fn verdict_field_known_alias_finding(field: &str) -> RuntimeContractFinding {
     )
     .expect("Lint source is not the reserved Preflight source")
     .with_detail("verdict_field", field.to_string())
-    .with_action_hint(format!(
-        "Rename `verdict_gate.verdict_field` to `verdict` (preferred) or \
+    .with_action_hint("Rename `verdict_gate.verdict_field` to `verdict` (preferred) or \
          `pass_or_fail` (legacy). Custom names are accepted but the lint \
-         cannot verify upstream payload consistency."
-    ))
+         cannot verify upstream payload consistency.".to_string())
 }
 
 #[cfg(test)]
@@ -432,14 +425,14 @@ mod tests {
 
     fn isolated_with_hats(yaml: &str) -> RalphConfig {
         let yaml = format!(
-            r#"
+            r"
 event_loop:
   execution_mode: isolated
   event_policy:
     enabled: true
     mode: enforce
 {hats_yaml}
-"#,
+",
             hats_yaml = yaml
         );
         serde_yaml::from_str(&yaml).expect("test config must parse")

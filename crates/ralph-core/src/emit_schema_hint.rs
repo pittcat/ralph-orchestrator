@@ -307,7 +307,6 @@ fn example_json_object(schema: &EventSchema) -> String {
 /// `ralph-proto/src/topic.rs`), so a hat publishing `review.*` will not
 /// authorise `review.sub.done` in the CLI hint path — matching the
 /// behaviour the loop will actually enforce.
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -247,8 +247,8 @@ fn test_loop_complete_text_in_output_no_fake_event() {
     let ctx = setup_context(&tmp);
 
     // Simulate raw output that mentions LOOP_COMPLETE but has no real event
-    let raw_output = r#"I have completed all tasks. LOOP_COMPLETE
-The work is done and all tests pass."#;
+    let raw_output = r"I have completed all tasks. LOOP_COMPLETE
+The work is done and all tests pass.";
 
     // Parse events from output — should NOT produce any events
     // (LOOP_COMPLETE is detected by text fallback, not as a JSONL business event)

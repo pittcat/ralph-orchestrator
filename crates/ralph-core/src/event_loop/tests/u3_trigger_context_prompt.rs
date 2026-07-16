@@ -94,7 +94,7 @@ fn u3_prepend_trigger_context_empty_declaration_is_noop() {
     // `trigger_context` is the default-empty struct. The
     // helper must short-circuit and not inject.
     let cfg = two_hat_config_with_policy(
-        r#"
+        r"
   event_policy:
     enabled: true
     mode: enforce
@@ -103,7 +103,7 @@ fn u3_prepend_trigger_context_empty_declaration_is_noop() {
       review.request:
         required_fields:
           - x
-"#,
+",
     );
     let mut event_loop = EventLoop::new(cfg);
     event_loop.initialize("unit test");
@@ -129,7 +129,7 @@ fn u3_prepend_trigger_context_non_subscriber_hat_is_noop() {
     // into the reviewer's prompt just because the synthesize
     // event reached the bus.
     let cfg = two_hat_config_with_policy(
-        r#"
+        r"
   event_policy:
     enabled: true
     mode: enforce
@@ -144,7 +144,7 @@ fn u3_prepend_trigger_context_non_subscriber_hat_is_noop() {
         trigger_context:
           summary_fields:
             - count
-"#,
+",
     );
     let mut event_loop = EventLoop::new(cfg);
     event_loop.initialize("unit test");
@@ -170,7 +170,7 @@ fn u3_prepend_trigger_context_subscriber_injects_block() {
     // appears at the top of the prompt and contains the
     // declared field name and value.
     let cfg = two_hat_config_with_policy(
-        r#"
+        r"
   event_policy:
     enabled: true
     mode: enforce
@@ -189,7 +189,7 @@ fn u3_prepend_trigger_context_subscriber_injects_block() {
           summary_fields:
             - verdict
             - count
-"#,
+",
     );
     let mut event_loop = EventLoop::new(cfg);
     event_loop.initialize("unit test");
@@ -225,7 +225,7 @@ fn u3_prepend_trigger_context_missing_field_renders_marker() {
     // SC4 / AE3: declared summary field absent from payload
     // → rendered as `<missing>`, never as a default.
     let cfg = two_hat_config_with_policy(
-        r#"
+        r"
   event_policy:
     enabled: true
     mode: enforce
@@ -238,7 +238,7 @@ fn u3_prepend_trigger_context_missing_field_renders_marker() {
           summary_fields:
             - present_field
             - absent_field
-"#,
+",
     );
     let mut event_loop = EventLoop::new(cfg);
     event_loop.initialize("unit test");
@@ -320,7 +320,7 @@ fn u3_prepend_trigger_context_source_hat_unknown_marker() {
     // `source hat` for branch decisions; the marker is the
     // observable contract.
     let cfg = two_hat_config_with_policy(
-        r#"
+        r"
   event_policy:
     enabled: true
     mode: enforce
@@ -332,7 +332,7 @@ fn u3_prepend_trigger_context_source_hat_unknown_marker() {
         trigger_context:
           summary_fields:
             - verdict
-"#,
+",
     );
     let mut event_loop = EventLoop::new(cfg);
     event_loop.initialize("unit test");
@@ -356,7 +356,7 @@ fn u3_prepend_trigger_context_no_matching_event_is_noop() {
     // but the bus has no event for the hat to react to — the
     // helper must not invent a context from thin air.
     let cfg = two_hat_config_with_policy(
-        r#"
+        r"
   event_policy:
     enabled: true
     mode: enforce
@@ -368,7 +368,7 @@ fn u3_prepend_trigger_context_no_matching_event_is_noop() {
         trigger_context:
           summary_fields:
             - x
-"#,
+",
     );
     let mut event_loop = EventLoop::new(cfg);
     event_loop.initialize("unit test");

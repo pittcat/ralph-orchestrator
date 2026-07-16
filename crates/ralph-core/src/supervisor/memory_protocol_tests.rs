@@ -110,7 +110,7 @@ fn backpressure_returns_none_when_cap_is_hit() {
 #[test]
 fn backpressure_releases_after_slot_completes() {
     let s = store();
-    let w1 = wave_into(&s, "bp-fifo-1", WaveKind::Exec, 1).unwrap();
+    let _w1 = wave_into(&s, "bp-fifo-1", WaveKind::Exec, 1).unwrap();
     let _w2 = wave_into(&s, "bp-fifo-2", WaveKind::Exec, 1).unwrap();
     let (dispatched_wave, dispatched_idx) = s.try_dispatch_next(1).unwrap().unwrap();
     let _ = s.try_dispatch_next(1).unwrap();

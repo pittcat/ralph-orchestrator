@@ -748,9 +748,7 @@ event_loop:
     let orch_path = session_path.join("orchestration.jsonl");
     let recovery_content = std::fs::read_to_string(&recovery_path).unwrap();
     let recovery_entry: crate::diagnosis::RecoveryJournalEntry = recovery_content
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .next()
+        .lines().find(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).unwrap())
         .expect("expected a recovery journal entry");
     assert_eq!(

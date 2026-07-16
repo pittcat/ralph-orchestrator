@@ -159,7 +159,7 @@ impl EmitStage for RepairDispatchStage {
         let machine = ctx
             .repair_states
             .entry(task_key)
-            .or_insert_with(RepairStateMachine::default);
+            .or_default();
         let action = if is_budget_tracked_topic(event.topic.as_str()) {
             use crate::event_loop::repair_flow::RepairState;
             match machine.state() {

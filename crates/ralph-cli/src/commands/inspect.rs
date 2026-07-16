@@ -332,14 +332,14 @@ pub async fn inspect_loop_command(
             } else {
                 0
             };
-            let warn = if !exists {
+            let warn = if exists {
+                None
+            } else {
                 Some(
                     "hat-channel marker resolves to a path that does not yet exist on disk; \
                      emit will fall back to main events until the runner creates it"
                         .to_string(),
                 )
-            } else {
-                None
             };
             (resolved.display().to_string(), size, warn)
         }
@@ -801,7 +801,9 @@ fn print_loop_view(view: &LoopInspectView, use_colors: bool) {
         view.hat_channel_file, view.hat_channel_size
     );
 
-    if !view.hat_identity.is_null() {
+    if view.hat_identity.is_null() {
+        println!("  hat_identity: {yellow}null{reset}");
+    } else {
         println!("  hat_identity:");
         match &view.hat_identity {
             serde_json::Value::Object(map) => {
@@ -811,14 +813,13 @@ fn print_loop_view(view: &LoopInspectView, use_colors: bool) {
                         println!("      - {v}");
                     }
                 }
-                if let Some(denied) = map.get("denied_task_commands").and_then(|v| v.as_array()) {
-                    if !denied.is_empty() {
+                if let Some(denied) = map.get("denied_task_commands").and_then(|v| v.as_array())
+                    && !denied.is_empty() {
                         println!("    denied_task_commands:");
                         for v in denied {
                             println!("      - {v}");
                         }
                     }
-                }
                 if let Some(pubs) = map.get("publishes").and_then(|v| v.as_array()) {
                     println!("    publishes:");
                     for v in pubs {
@@ -828,8 +829,6 @@ fn print_loop_view(view: &LoopInspectView, use_colors: bool) {
             }
             _ => println!("    {dim}(unparseable){reset}"),
         }
-    } else {
-        println!("  hat_identity: {yellow}null{reset}");
     }
 
     if !view.warnings.is_empty() {
@@ -1018,13 +1017,13 @@ fn print_human(view: &InspectProfilesView, use_colors: bool) {
     } else {
         println!("  preset: {yellow}(unresolved){reset}");
     }
-    if !view.defaults.is_empty() {
+    if view.defaults.is_empty() {
+        println!("  defaults: {dim}(none){reset}");
+    } else {
         println!("  defaults:");
         for d in &view.defaults {
             println!("    - {d}");
         }
-    } else {
-        println!("  defaults: {dim}(none){reset}");
     }
     println!("  active specs:");
     for s in &view.specs {
@@ -1482,7 +1481,7 @@ mod tests {
             ),
         };
         assert!(!view.active);
-        assert_eq!(defaults, *&defaults); // sanity: defaults is empty
+        assert_eq!(defaults, defaults); // sanity: defaults is empty
         let _ = (specs, resolved);
         assert!(view.note.is_some());
         assert!(view.fragments.is_empty());
@@ -1494,7 +1493,7 @@ mod tests {
     /// bailing out.
     #[test]
     fn inspect_view_no_hats_source_emits_warning_in_view() {
-        let specs = vec![ProfileSpec {
+        let specs = [ProfileSpec {
             scope: ProfileScope::Repo,
             name: "strict".to_string(),
         }];
@@ -1571,7 +1570,7 @@ mod tests {
     /// defaults. Confirms inspect-profiles and `ralph run` agree.
     #[test]
     fn inspect_profiles_activation_order_matches_run_helper() {
-        use crate::commands::run::collect_active_profile_specs;
+        
 
         let mut config = RalphConfig::default();
         config.profiles.default = vec![ProfileSpec {

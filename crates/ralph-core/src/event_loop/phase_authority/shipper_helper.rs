@@ -56,11 +56,10 @@ pub fn shipper_requires_plan_complete_when_phase_enabled(
     // etc.) and is intentionally conservative — false
     // positives here translate to an extra loop iteration,
     // not a missed terminal.
-    if let Some(reason) = ctx.reason.as_deref() {
-        if is_stall_recovery_reason(reason) {
+    if let Some(reason) = ctx.reason.as_deref()
+        && is_stall_recovery_reason(reason) {
             return ShipperDecision::Deny;
         }
-    }
 
     // Engine is on: only `plan_end` may forward. Every other
     // phase holds the emit so the engine can complete its
@@ -135,14 +134,13 @@ pub fn evaluate_shipper_validator_gate(
         return ShipperValidatorGateDecision::Allow;
     }
 
-    if let Some(reason) = ctx.plan_blocked_reason.as_deref() {
-        if is_stall_recovery_reason(reason) && ctx.validator_terminal_step.is_none() {
+    if let Some(reason) = ctx.plan_blocked_reason.as_deref()
+        && is_stall_recovery_reason(reason) && ctx.validator_terminal_step.is_none() {
             return ShipperValidatorGateDecision::HardFail {
                 reason: "shipper_validator_gate:stall_recovery_without_validator_terminal"
                     .to_string(),
             };
         }
-    }
 
     let terminal_step = match ctx.validator_terminal_step.as_deref() {
         Some(s) => s,

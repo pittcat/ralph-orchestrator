@@ -318,7 +318,7 @@ fn consumer_aggregate_timeout_for(hat_config: &HatConfig, registry: &HatRegistry
         .filter_map(|topic| {
             registry
                 .find_by_trigger(topic)
-                .and_then(|consumer_id| registry.get_config(&consumer_id))
+                .and_then(|consumer_id| registry.get_config(consumer_id))
                 .and_then(|cfg| cfg.aggregate.as_ref())
                 .map(|agg| u64::from(agg.timeout))
         })

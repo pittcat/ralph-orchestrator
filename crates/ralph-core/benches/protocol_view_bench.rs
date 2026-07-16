@@ -1,6 +1,6 @@
 //! U3 (KTD-8) `ProtocolView` 构造开销基准测试。
 //!
-//! 目标:验证 `from_event_loop_with_index*` 在 `ce-executor-serial`
+//! 目标:验证 `from_event_loop_with_feature` 在 `ce-executor-serial`
 //! BDD fixture 上的构造耗时,确保 per-batch 生成的开销 < 5% 基线
 //! (plan 2026-06-21-002 U3 §Performance 验收)。
 //!
@@ -64,40 +64,26 @@ fn serial_fixture() -> (RalphConfig, HandoffIndex) {
 }
 
 fn main() {
-    let (cfg, index) = serial_fixture();
+    let (cfg, _index) = serial_fixture();
 
     println!(">>> ProtocolView construction benchmark (KTD-8 / U3)");
     println!("    iterations: {}, warmups: {}", ITERATIONS, WARMUPS);
     println!("    fixture:    ce-executor-serial (3 hats, isolated)");
 
     // Both paths are constructed via the explicit
-    // `from_event_loop_with_index_and_feature` constructor so
+    // `from_event_loop_with_feature` constructor so
     // the only difference between `legacy` and `feature_on` is
     // the bool passed in. This isolates the cost of the
     // `feature_flag_enabled` field set + default branch from
     // any incidental `std::env` cost.
-    //
-    // (The `from_event_loop_with_index` shim reads the env once
-    // and forwards to `from_event_loop_with_index_and_feature`,
-    // so the env cost is one-shot at startup, not per-call.
-    // The bench therefore measures steady-state cost, which is
-    // what the runtime hot path actually pays.)
 
     let mut samples_legacy: Vec<u128> = Vec::with_capacity(ITERATIONS);
     let mut samples_feature: Vec<u128> = Vec::with_capacity(ITERATIONS);
 
     // Warmup both paths.
     for _ in 0..WARMUPS {
-        let _ = ProtocolView::from_event_loop_with_index_and_feature(
-            &cfg.event_loop,
-            Some(&index),
-            false,
-        );
-        let _ = ProtocolView::from_event_loop_with_index_and_feature(
-            &cfg.event_loop,
-            Some(&index),
-            true,
-        );
+        let _ = ProtocolView::from_event_loop_with_feature(&cfg.event_loop, false);
+        let _ = ProtocolView::from_event_loop_with_feature(&cfg.event_loop, true);
     }
 
     let start = Instant::now();
@@ -105,19 +91,11 @@ fn main() {
         let is_legacy = i % 2 == 0;
         let t0 = Instant::now();
         let view = if is_legacy {
-            let v = ProtocolView::from_event_loop_with_index_and_feature(
-                &cfg.event_loop,
-                Some(&index),
-                false,
-            );
+            let v = ProtocolView::from_event_loop_with_feature(&cfg.event_loop, false);
             samples_legacy.push(t0.elapsed().as_nanos());
             v
         } else {
-            let v = ProtocolView::from_event_loop_with_index_and_feature(
-                &cfg.event_loop,
-                Some(&index),
-                true,
-            );
+            let v = ProtocolView::from_event_loop_with_feature(&cfg.event_loop, true);
             samples_feature.push(t0.elapsed().as_nanos());
             v
         };

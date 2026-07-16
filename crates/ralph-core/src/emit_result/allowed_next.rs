@@ -34,11 +34,10 @@ pub fn allowed_next_for_hat_phase(
     if let Some(hat_topics) = phase.allowed_emits.get(hat_id) {
         topics.extend(hat_topics.iter().cloned());
     }
-    if hat_id != "*" {
-        if let Some(wildcard_topics) = phase.allowed_emits.get("*") {
+    if hat_id != "*"
+        && let Some(wildcard_topics) = phase.allowed_emits.get("*") {
             topics.extend(wildcard_topics.iter().cloned());
         }
-    }
 
     // 去重（保持稳定顺序）
     let mut seen = std::collections::HashSet::new();

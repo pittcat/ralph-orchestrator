@@ -424,14 +424,13 @@ pub fn emit_correction_context(
         }
     }
 
-    if let Some(ws) = workspace {
-        if let Err(e) = crate::state::append_rejection(ws, &record) {
+    if let Some(ws) = workspace
+        && let Err(e) = crate::state::append_rejection(ws, &record) {
             tracing::warn!(
                 error = %e,
                 "correction: failed to append to .ralph/recovery.jsonl"
             );
         }
-    }
     prompt.push_correction(ctx.clone());
     ctx
 }
@@ -485,14 +484,13 @@ pub fn emit_correction_from_lint_hint(
         }
     }
 
-    if let Some(ws) = workspace {
-        if let Err(e) = crate::state::append_rejection(ws, &record) {
+    if let Some(ws) = workspace
+        && let Err(e) = crate::state::append_rejection(ws, &record) {
             tracing::warn!(
                 error = %e,
                 "correction: failed to append lint hint to .ralph/recovery.jsonl"
             );
         }
-    }
     prompt.push_correction(ctx.clone());
     ctx
 }

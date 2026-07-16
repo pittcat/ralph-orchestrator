@@ -69,6 +69,7 @@ manual_pattern_char_comparison = "allow"
 used_underscore_binding = "allow"
 field_reassign_with_default = "allow"
 struct_excessive_bools = "allow"
+doc_lazy_continuation = "allow"
 
 [workspace.dependencies]
 # Async runtime

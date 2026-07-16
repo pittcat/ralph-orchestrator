@@ -683,10 +683,10 @@ pub fn check_trigger_publish_asymmetry(
             // Archetype 2: no subscriber (dead end on the consumer
             // side, which is the asymmetry: someone publishes but
             // nobody can pick it up).
-            let archetype = if !has_publisher {
-                "no publisher"
-            } else {
+            let archetype = if has_publisher {
                 "no subscriber"
+            } else {
+                "no publisher"
             };
 
             // R5 and R3 can both fire for the same hat — they

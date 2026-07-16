@@ -335,7 +335,7 @@ fn is_default_file_arg(file: &Path) -> bool {
     let bare = Path::new(".ralph/events.jsonl");
     // 兼容测试与跨上下文调用:clap default 是相对 `.ralph/events.jsonl`;
     // 显式绝对化 `<root>/.ralph/events.jsonl` 也算 default。
-    file == &rel_default || file == bare || file.as_os_str() == ".ralph/events.jsonl"
+    file == rel_default || file == bare || file.as_os_str() == ".ralph/events.jsonl"
 }
 
 /// U3 (R3): 比较两个路径在 canonicalize 后是否指向同一目录。
@@ -576,9 +576,7 @@ fn emit_command_with_root_and_hats(
         // explicit sources are present; explicit sources keep
         // the historical warn-on-multiple behaviour.
         let owned_config_sources: Vec<ConfigSource>;
-        let effective_config_sources: &[ConfigSource] = if !config_sources.is_empty() {
-            config_sources
-        } else {
+        let effective_config_sources: &[ConfigSource] = if config_sources.is_empty() {
             let resolved =
                 config_resolution::resolve_project_config_path(&workspace_root, config_sources);
             let config_path = match resolved {
@@ -603,6 +601,8 @@ fn emit_command_with_root_and_hats(
             }
             owned_config_sources = vec![ConfigSource::File(config_path)];
             &owned_config_sources
+        } else {
+            config_sources
         };
         let cfg = crate::preflight::load_config_for_preflight_sync(
             effective_config_sources,
@@ -669,14 +669,14 @@ fn emit_command_with_root_and_hats(
         // every supported input without requiring a `ralph.yml`
         // symlink.
         let owned_config_sources: Vec<ConfigSource>;
-        let effective_config_sources: &[ConfigSource] = if !config_sources.is_empty() {
-            config_sources
-        } else {
+        let effective_config_sources: &[ConfigSource] = if config_sources.is_empty() {
             let resolved =
                 config_resolution::resolve_project_config_path(&workspace_root, config_sources);
             let config_path = resolved.unwrap_or_else(|| workspace_root.join("ralph.yml"));
             owned_config_sources = vec![ConfigSource::File(config_path.clone())];
             &owned_config_sources
+        } else {
+            config_sources
         };
         let discovered_config_path = effective_config_sources
             .iter()
@@ -768,8 +768,8 @@ fn emit_command_with_root_and_hats(
         .is_some_and(|c| c.event_loop.execution_mode == HatExecutionMode::Isolated)
     {
         if let Some(ref env_hat) = env_hat {
-            if let Some(ref cli_hat) = args.hat {
-                if cli_hat != env_hat {
+            if let Some(ref cli_hat) = args.hat
+                && cli_hat != env_hat {
                     anyhow::bail!(
                         "Isolated mode hat mismatch: --hat '{}' conflicts with \
                          RALPH_CURRENT_HAT '{}'. In isolated mode the runner \
@@ -779,7 +779,6 @@ fn emit_command_with_root_and_hats(
                         env_hat
                     );
                 }
-            }
             Some(env_hat.clone())
         } else {
             hat
@@ -818,8 +817,8 @@ fn emit_command_with_root_and_hats(
             // produced by the loop itself and bypass the new
             // check_emit_provenance gate (see policy_check.rs). The
             // smart gate catches business-topic cases below.
-            let is_control = ralph_core::event_origin::is_ralph_control_topic(&topic);
-            let is_diagnostic = ralph_core::is_orchestrator_diagnostic_topic(&topic);
+            let is_control = ralph_core::event_origin::is_ralph_control_topic(topic);
+            let is_diagnostic = ralph_core::is_orchestrator_diagnostic_topic(topic);
             if !is_control && !is_diagnostic {
                 anyhow::bail!(
                     "Event provenance required: --hat <hat-id> or RALPH_CURRENT_HAT must be set."
@@ -838,7 +837,7 @@ fn emit_command_with_root_and_hats(
     // surfaces several seconds later when the loop runner reads the JSONL).
     if let Some(hat_id) = hat.as_deref()
         && hat_id == "ralph"
-        && !ralph_core::event_origin::is_ralph_control_topic(&topic)
+        && !ralph_core::event_origin::is_ralph_control_topic(topic)
     {
         anyhow::bail!(
             "Builtin ralph hat may only emit control topics: {:?}. \
@@ -865,7 +864,7 @@ fn emit_command_with_root_and_hats(
             .is_some_and(|p| p.enabled);
     if unified_active {
         let mut report = crate::policy_check::run_policy_check_unified(
-            &topic,
+            topic,
             Some(&args.payload),
             hat.as_deref(),
             triggered.as_deref(),
@@ -882,14 +881,14 @@ fn emit_command_with_root_and_hats(
                 .as_ref()
                 .and_then(|c| c.event_loop.event_policy.as_ref())
                 .and_then(|p| {
-                    let key: &str = topic.as_ref();
+                    let key: &str = topic;
                     p.schemas.get(key)
                 });
             let payload_value = serde_json::from_str::<serde_json::Value>(&args.payload).ok();
             let report_hat = report.hat.clone();
             report = crate::policy_check::enrich_report_with_schema(
                 report,
-                &topic,
+                topic,
                 report_hat.as_deref(),
                 payload_value.as_ref(),
                 schema_lookup,
@@ -1019,7 +1018,7 @@ fn emit_command_with_root_and_hats(
 
                 // Enforce topic-deny rules at CLI emit time so a forbidden
                 // (hat, topic) pair never reaches the events file.
-                if let Some(decision) = check_topic_deny_rules(hat.as_deref(), &topic, policy) {
+                if let Some(decision) = check_topic_deny_rules(hat.as_deref(), topic, policy) {
                     match decision {
                         ralph_core::PolicyDecision::Accept => {}
                         ralph_core::PolicyDecision::Warn(findings) => {
@@ -1042,14 +1041,14 @@ fn emit_command_with_root_and_hats(
                         | ralph_core::PolicyDecision::Ignore(finding) => {
                             record_cli_emit_rejection(
                                 &workspace_root,
-                                &topic,
+                                topic,
                                 hat.as_deref(),
                                 &finding,
                             );
                             anyhow::bail!(
                                 "Event rejected by policy: {}. Fix the issue before emitting.\n\n{}",
                                 finding.message,
-                                format_fix_hint(config.as_ref().unwrap(), hat.as_deref(), &topic)
+                                format_fix_hint(config.as_ref().unwrap(), hat.as_deref(), topic)
                             );
                         }
                     }
@@ -1057,7 +1056,7 @@ fn emit_command_with_root_and_hats(
 
                 // Run schema validation with hat-aware restrictions.
                 let decision = validate_event_with_hat(
-                    &topic,
+                    topic,
                     Some(&args.payload),
                     policy,
                     &mut state,
@@ -1087,14 +1086,14 @@ fn emit_command_with_root_and_hats(
                     | ralph_core::PolicyDecision::Ignore(finding) => {
                         record_cli_emit_rejection(
                             &workspace_root,
-                            &topic,
+                            topic,
                             hat.as_deref(),
                             &finding,
                         );
                         anyhow::bail!(
                             "Event rejected by policy: {}. Fix the issue before emitting.\n\n{}",
                             finding.message,
-                            format_fix_hint(config.as_ref().unwrap(), hat.as_deref(), &topic)
+                            format_fix_hint(config.as_ref().unwrap(), hat.as_deref(), topic)
                         );
                     }
                 }
@@ -1120,8 +1119,8 @@ fn emit_command_with_root_and_hats(
     // `check_isolated_scope` below only enforces when the hat is known;
     // `check_emit_provenance` is the matching gate for the `hat = None`
     // path. Together they form the full isolated-mode CLI guard.
-    if let Some(cfg) = config.as_ref() {
-        if let Err(err) = crate::policy_check::check_emit_provenance(hat.as_deref(), &topic, cfg) {
+    if let Some(cfg) = config.as_ref()
+        && let Err(err) = crate::policy_check::check_emit_provenance(hat.as_deref(), topic, cfg) {
             use ralph_core::{PolicyFinding, ViolationType};
             let finding = PolicyFinding {
                 violation_type: ViolationType::SemanticGateViolation {
@@ -1131,13 +1130,12 @@ fn emit_command_with_root_and_hats(
                 topic: topic.to_string(),
                 message: err.message.clone(),
             };
-            record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
+            record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
             anyhow::bail!(
                 "Event rejected by missing-provenance guard: {}",
                 err.message
             );
         }
-    }
 
     // U1 (2026-06-17-003 plan): isolated mode scope precheck. When the
     // resolved preset has `event_loop.execution_mode: isolated` and the
@@ -1153,8 +1151,8 @@ fn emit_command_with_root_and_hats(
     // `--policy-check` toggles schema enforcement, not scope
     // enforcement. Without `--hat` the call defers to the origin
     // guard (which rejects unknown/missing provenance).
-    if let Some(cfg) = config.as_ref() {
-        if let Err(err) = crate::policy_check::check_isolated_scope(hat.as_deref(), &topic, cfg) {
+    if let Some(cfg) = config.as_ref()
+        && let Err(err) = crate::policy_check::check_isolated_scope(hat.as_deref(), topic, cfg) {
             use ralph_core::{PolicyFinding, ViolationType};
             let finding = PolicyFinding {
                 violation_type: ViolationType::SemanticGateViolation {
@@ -1164,17 +1162,16 @@ fn emit_command_with_root_and_hats(
                 topic: topic.to_string(),
                 message: err.message.clone(),
             };
-            record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
+            record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
             anyhow::bail!("Event rejected by isolated scope guard: {}", err.message);
         }
-    }
 
     // U3 (R3): wave worker dimension assignment precheck. Fires before
     // any policy / step-handoff processing so a wave worker that
     // emits the wrong dimension never reaches the events file. The
     // env var is set by the loop runner on `review.dimension.done`
     // workers; non-wave callers (env unset) pass through unchanged.
-    if let Err(err) = crate::policy_check::check_wave_dimension_assignment(&topic, &args.payload) {
+    if let Err(err) = crate::policy_check::check_wave_dimension_assignment(topic, &args.payload) {
         use ralph_core::{PolicyFinding, ViolationType};
         let finding = PolicyFinding {
             violation_type: ViolationType::SemanticGateViolation {
@@ -1184,7 +1181,7 @@ fn emit_command_with_root_and_hats(
             topic: topic.to_string(),
             message: err.message.clone(),
         };
-        record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
+        record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
         anyhow::bail!("Event rejected by wave dimension guard: {}", err.message);
     }
 
@@ -1195,15 +1192,15 @@ fn emit_command_with_root_and_hats(
     // `progress_task_mismatch` backpressure before writing the event
     // to disk. The CLI is *additive* — it never replaces the loop
     // gate, it surfaces the same reason earlier.
-    if ralph_core::step_handoff::progress_task_gate::is_gated_topic(&topic)
+    if ralph_core::step_handoff::progress_task_gate::is_gated_topic(topic)
         && check_mode != PolicyCheckMode::Skip
     {
-        match crate::policy_check::check_step_handoff_gate(&topic, &args.payload, &workspace_root) {
+        match crate::policy_check::check_step_handoff_gate(topic, &args.payload, &workspace_root) {
             Ok(()) => {}
             Err(err) => {
                 record_cli_emit_rejection(
                     &workspace_root,
-                    &topic,
+                    topic,
                     hat.as_deref(),
                     &ralph_core::PolicyFinding {
                         violation_type: ViolationType::SemanticGateViolation {
@@ -1254,7 +1251,7 @@ fn emit_command_with_root_and_hats(
         // execution contract validator.
         let p_clone = payload.clone();
         serde_json::from_str::<serde_json::Value>(&payload)
-            .unwrap_or_else(|_| serde_json::Value::String(p_clone))
+            .unwrap_or(serde_json::Value::String(p_clone))
     } else {
         serde_json::Value::String(payload.clone())
     };
@@ -1270,11 +1267,10 @@ fn emit_command_with_root_and_hats(
     // An empty task_id is never valid (Ralph task ids are always non-empty
     // strings like `task-{timestamp}-{hex}`), and letting it through would
     // break the step-handoff / state-projection chain.
-    if let Some(Value::String(task_id)) = payload_value.get("task_id") {
-        if task_id.trim().is_empty() {
+    if let Some(Value::String(task_id)) = payload_value.get("task_id")
+        && task_id.trim().is_empty() {
             anyhow::bail!("task_id cannot be empty in event payload for topic '{topic}'");
         }
-    }
 
     let mut record = serde_json::json!({
         "topic": args.topic,
@@ -1289,9 +1285,9 @@ fn emit_command_with_root_and_hats(
     // topology check uses the loaded preset's `hats[]` map; an
     // unknown value yields `triggered_not_in_topology` and the
     // apply path bails before JSONL write.
-    if let Some(cfg) = config.as_ref() {
-        if let Err(err) =
-            crate::policy_check::check_envelope_triggered(&topic, triggered.as_deref(), cfg)
+    if let Some(cfg) = config.as_ref()
+        && let Err(err) =
+            crate::policy_check::check_envelope_triggered(topic, triggered.as_deref(), cfg)
         {
             use ralph_core::{PolicyFinding, ViolationType};
             let finding = PolicyFinding {
@@ -1302,13 +1298,12 @@ fn emit_command_with_root_and_hats(
                 topic: topic.to_string(),
                 message: err.message.clone(),
             };
-            record_cli_emit_rejection(&workspace_root, &topic, hat.as_deref(), &finding);
+            record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
             anyhow::bail!(
                 "Event rejected by envelope-triggered guard: {}",
                 err.message
             );
         }
-    }
 
     // Add provenance fields only when they have values (preserve old simple schema)
     if let Some(ref hat) = hat {
@@ -1323,7 +1318,7 @@ fn emit_command_with_root_and_hats(
         && config
             .as_ref()
             .is_some_and(|c| c.event_loop.execution_mode == HatExecutionMode::Isolated)
-        && !ralph_core::event_origin::is_ralph_control_topic(&topic)
+        && !ralph_core::event_origin::is_ralph_control_topic(topic)
         && hat.is_some()
     {
         // U7 (2026-06-17-004 plan, R7): in isolated mode, when a business topic
@@ -1438,7 +1433,7 @@ fn emit_command_with_root_and_hats(
         let cwd = std::env::current_dir().unwrap_or_default();
         let workspace_canon = workspace_root
             .canonicalize()
-            .unwrap_or_else(|_| workspace_root.to_path_buf());
+            .unwrap_or_else(|_| workspace_root.clone());
         let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
         let drift_outside = cwd_canon != workspace_canon
             && !cwd_canon.starts_with(&workspace_canon)
@@ -1723,7 +1718,7 @@ mod tests {
         // Write config with event policy
         std::fs::write(
             workspace.join("ralph.yml"),
-            r#"
+            r"
 event_loop:
   event_policy:
     enabled: true
@@ -1733,7 +1728,7 @@ event_loop:
       - LOOP_COMPLETE
     business_topics:
       - experiment.planned
-"#,
+",
         )
         .unwrap();
 
@@ -1798,7 +1793,7 @@ event_loop:
         // Write config with event policy
         std::fs::write(
             workspace.join("ralph.yml"),
-            r#"
+            r"
 event_loop:
   event_policy:
     enabled: true
@@ -1808,7 +1803,7 @@ event_loop:
       - LOOP_COMPLETE
     business_topics:
       - experiment.planned
-"#,
+",
         )
         .unwrap();
 
@@ -1849,7 +1844,7 @@ event_loop:
         // Write config with event policy
         std::fs::write(
             workspace.join("ralph.yml"),
-            r#"
+            r"
 event_loop:
   event_policy:
     enabled: true
@@ -1859,7 +1854,7 @@ event_loop:
       - LOOP_COMPLETE
     business_topics:
       - experiment.planned
-"#,
+",
         )
         .unwrap();
 
@@ -2016,7 +2011,7 @@ event_loop:
     #[test]
     fn test_resolve_provenance_empty_env_is_ignored() {
         // Empty env vars are treated as absent
-        let env = |_key: &str| Some("".to_string());
+        let env = |_key: &str| Some(String::new());
         let (hat, triggered, source) = resolve_provenance(None, None, None, env);
         assert_eq!(hat, None);
         assert_eq!(triggered, None);
@@ -2233,13 +2228,13 @@ event_loop:
         std::fs::create_dir_all(workspace.join(".ralph")).expect("ralph dir");
 
         // Write config with require_emit_provenance enabled
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   event_policy:
     enabled: true
     mode: enforce
     require_emit_provenance: true
-"#;
+";
         std::fs::write(workspace.join("ralph.yml"), yaml).unwrap();
 
         // Verify config loads and parses correctly in isolation
@@ -2297,13 +2292,13 @@ event_loop:
         // Write config with require_emit_provenance enabled
         std::fs::write(
             workspace.join("ralph.yml"),
-            r#"
+            r"
 event_loop:
   event_policy:
     enabled: true
     mode: enforce
     require_emit_provenance: true
-"#,
+",
         )
         .unwrap();
 
@@ -2341,7 +2336,7 @@ event_loop:
         // Write strict config: policy enabled AND require_policy_check_for_cli_emit
         std::fs::write(
             workspace.join("ralph.yml"),
-            r#"
+            r"
 event_loop:
   event_policy:
     enabled: true
@@ -2355,7 +2350,7 @@ event_loop:
           - task_key
           - hypothesis
           - falsification_condition
-"#,
+",
         )
         .unwrap();
 
@@ -2402,7 +2397,7 @@ event_loop:
         // Write strict config
         std::fs::write(
             workspace.join("ralph.yml"),
-            r#"
+            r"
 event_loop:
   event_policy:
     enabled: true
@@ -2412,7 +2407,7 @@ event_loop:
     allow_unsafe_cli_emit: true
     terminal_topics:
       - LOOP_COMPLETE
-"#,
+",
         )
         .unwrap();
 
@@ -2465,7 +2460,7 @@ event_loop:
         // Write non-strict config: policy enabled but require_policy_check_for_cli_emit is false
         std::fs::write(
             workspace.join("ralph.yml"),
-            r#"
+            r"
 event_loop:
   event_policy:
     enabled: true
@@ -2474,7 +2469,7 @@ event_loop:
     require_policy_check_for_cli_emit: false
     terminal_topics:
       - LOOP_COMPLETE
-"#,
+",
         )
         .unwrap();
 
@@ -2512,7 +2507,7 @@ event_loop:
         // Write config with event policy but NOT strict CLI enforcement
         std::fs::write(
             workspace.join("ralph.yml"),
-            r#"
+            r"
 event_loop:
   event_policy:
     enabled: true
@@ -2523,7 +2518,7 @@ event_loop:
       - LOOP_COMPLETE
     business_topics:
       - experiment.planned
-"#,
+",
         )
         .unwrap();
 
@@ -2569,7 +2564,7 @@ event_loop:
         // Write strict config but allow unsafe bypass
         std::fs::write(
             workspace.join("ralph.yml"),
-            r#"
+            r"
 event_loop:
   event_policy:
     enabled: true
@@ -2579,7 +2574,7 @@ event_loop:
     allow_unsafe_cli_emit: true
     terminal_topics:
       - LOOP_COMPLETE
-"#,
+",
         )
         .unwrap();
 
@@ -2625,7 +2620,7 @@ event_loop:
         // Write strict config that DISALLOWS unsafe bypass
         std::fs::write(
             workspace.join("ralph.yml"),
-            r#"
+            r"
 event_loop:
   event_policy:
     enabled: true
@@ -2635,7 +2630,7 @@ event_loop:
     allow_unsafe_cli_emit: false
     terminal_topics:
       - LOOP_COMPLETE
-"#,
+",
         )
         .unwrap();
 
@@ -2689,7 +2684,7 @@ event_loop:
         r#"{"topic":"experiment.planned","payload":{"task_key":"a"},"ts":"2026-05-22T00:00:00Z"}"#;
 
     fn fixture_config_yaml() -> &'static str {
-        r#"
+        r"
 event_loop:
   event_policy:
     enabled: true
@@ -2719,7 +2714,7 @@ hats:
       - experiment.planned
     publishes:
       - LOOP_COMPLETE
-"#
+"
     }
 
     fn fixture_policy_config() -> ralph_core::EventPolicyConfig {
@@ -3667,7 +3662,7 @@ hats:
     /// `build.rs` produces for builtin CE presets. We only need
     /// `event_policy.schemas.work.done` to exercise the
     /// required-fields surface.
-    const SCHEMA_FIXTURE_YAML: &str = r#"
+    const SCHEMA_FIXTURE_YAML: &str = r"
 event_loop:
   execution_mode: isolated
   event_policy:
@@ -3679,7 +3674,7 @@ event_loop:
           - plan_name
           - task_id
           - task_key
-"#;
+";
 
     fn setup_schema_workspace(tmp: &TempDir, yaml: &str) -> PathBuf {
         let workspace = tmp.path().to_path_buf();
@@ -3872,7 +3867,7 @@ event_loop:
         std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
         std::fs::write(
             workspace.join("ralph.yml"),
-            r#"
+            r"
 event_loop:
   event_policy:
     enabled: true
@@ -3884,7 +3879,7 @@ event_loop:
       experiment.planned:
         required_fields:
           - task_key
-"#,
+",
         )
         .unwrap();
         workspace
@@ -4452,7 +4447,7 @@ mod emit_policy_check_reject_json_tests {
         let temp = tempfile::TempDir::new().expect("temp dir");
         let workspace = temp.path();
 
-        let ralph_yml = r#"
+        let ralph_yml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -4464,15 +4459,15 @@ event_loop:
       work.done:
         required_fields:
           - task_id
-"#;
+";
         std::fs::write(workspace.join("ralph.yml"), ralph_yml).expect("write ralph.yml");
 
-        let hats_yml = r#"
+        let hats_yml = r"
 hats:
   coordinator:
     publishes:
       - work.done
-"#;
+";
         std::fs::create_dir_all(workspace.join(".ralph")).expect(".ralph dir");
         std::fs::write(workspace.join(".ralph/hats.yml"), hats_yml).expect("write hats.yml");
 
@@ -4566,7 +4561,7 @@ mod emit_policy_check_accept_json_tests {
         // worked when the unified pipeline ran with an empty
         // `HatRegistry`; the U1 wiring now requires the hat map
         // to be discoverable from the loaded `RalphConfig`.
-        let ralph_yml = r#"
+        let ralph_yml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -4585,7 +4580,7 @@ hats:
       - work.start
     publishes:
       - work.done
-"#;
+";
         std::fs::write(workspace.join("ralph.yml"), ralph_yml).expect("write ralph.yml");
 
         std::fs::create_dir_all(workspace.join(".ralph")).expect(".ralph dir");
@@ -4651,7 +4646,7 @@ hats:
         let temp = tempfile::TempDir::new().expect("temp dir");
         let workspace = temp.path();
 
-        let ralph_yml = r#"
+        let ralph_yml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -4673,18 +4668,18 @@ event_loop:
             coordinator:
               - work.ready
               - work.done
-"#;
+";
         std::fs::write(workspace.join("ralph.yml"), ralph_yml).expect("write ralph.yml");
         std::fs::create_dir_all(workspace.join(".ralph")).expect(".ralph dir");
         std::fs::write(
             workspace.join(".ralph/hats.yml"),
-            r#"
+            r"
 hats:
   coordinator:
     publishes:
       - work.done
       - work.ready
-"#,
+",
         )
         .expect("write hats.yml");
 
@@ -4750,7 +4745,7 @@ mod emit_apply_recorded_json_tests {
 
         // 不设置 execution_mode: isolated，让 emit 走 main events.jsonl
         // 路径而非 hat-channel 路由（参考 ralph-emit-hat-channel-routing.md）。
-        let ralph_yml = r#"
+        let ralph_yml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -4762,15 +4757,15 @@ event_loop:
       work.done:
         required_fields:
           - task_id
-"#;
+";
         std::fs::write(workspace.join("ralph.yml"), ralph_yml).expect("write ralph.yml");
 
-        let hats_yml = r#"
+        let hats_yml = r"
 hats:
   coordinator:
     publishes:
       - work.done
-"#;
+";
         std::fs::create_dir_all(workspace.join(".ralph")).expect(".ralph dir");
         std::fs::write(workspace.join(".ralph/hats.yml"), hats_yml).expect("write hats.yml");
 

@@ -358,7 +358,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&snapshot_path).unwrap()).unwrap();
         // Recovery file is valid JSONL
         let entry: RecoveryJournalEntry = serde_json::from_str(
-            &fs::read_to_string(&recovery_path)
+            fs::read_to_string(&recovery_path)
                 .unwrap()
                 .lines()
                 .next()

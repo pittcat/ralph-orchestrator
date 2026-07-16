@@ -1890,7 +1890,7 @@ event_loop:
         assert_eq!(rule.require_payload_fields, vec!["task_id"]);
         // Check defaults
         assert_eq!(rule.require_task.id_field, "task_id");
-        assert_eq!(rule.require_task.loop_scoped, true);
+        assert!(rule.require_task.loop_scoped);
         assert_eq!(rule.require_git_change.mode, "diff_or_commit");
         assert_eq!(
             rule.reject.diagnostic_topic,
@@ -3245,7 +3245,7 @@ event_loop:
 
     #[test]
     fn test_state_machine_validation_rejects_duplicate_transition_topic() {
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   state_machine:
     enabled: true
@@ -3256,7 +3256,7 @@ event_loop:
       - topic: experiment.planned
         from: [planned]
         to: planned_again
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let result = config.validate();
         assert!(result.is_err());
@@ -3270,7 +3270,7 @@ event_loop:
 
     #[test]
     fn test_state_machine_validation_rejects_empty_from_state() {
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   state_machine:
     enabled: true
@@ -3278,7 +3278,7 @@ event_loop:
       - topic: experiment.planned
         from: []
         to: planned
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let result = config.validate();
         assert!(result.is_err());
@@ -3292,7 +3292,7 @@ event_loop:
 
     #[test]
     fn test_state_machine_validation_rejects_open_and_close_transition() {
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   state_machine:
     enabled: true
@@ -3302,7 +3302,7 @@ event_loop:
         to: planned
         opens_instance: true
         closes_instance: true
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let result = config.validate();
         assert!(result.is_err());
@@ -3804,11 +3804,11 @@ event_loop:
         // Valid YAML but invalid schema structure for the topic
         std::fs::write(
             &schema_path,
-            r#"
+            r"
 experiment.planned:
   payload: json_object
   required_fields: not_an_array
-"#,
+",
         )
         .unwrap();
 
@@ -3838,7 +3838,7 @@ event_loop:
         let schema_path = temp_dir.join("merged_schema.yml");
         std::fs::write(
             &schema_path,
-            r#"
+            r"
 experiment.planned:
   payload: json_object
   required_fields:
@@ -3848,7 +3848,7 @@ work.done:
   payload: json_object
   required_fields:
     - task_id
-"#,
+",
         )
         .unwrap();
 
@@ -3905,12 +3905,12 @@ event_loop:
         let schema_path = temp_dir.join("priority_schema.yml");
         std::fs::write(
             &schema_path,
-            r#"
+            r"
 work.ready:
   payload: json_object
   required_fields:
     - file_source
-"#,
+",
         )
         .unwrap();
 
@@ -3954,10 +3954,10 @@ event_loop:
         let schema_path = temp_dir.join("absolute_schema.yml");
         std::fs::write(
             &schema_path,
-            r#"
+            r"
 test.topic:
   payload: json_object
-"#,
+",
         )
         .unwrap();
 
@@ -4113,12 +4113,12 @@ profiles:
     /// can use either style. Both must yield the same parsed list.
     #[test]
     fn test_profiles_default_yaml_sequence() {
-        let yaml = r#"
+        let yaml = r"
 profiles:
   default:
     - repo:strict
     - user:my-style
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
         assert_eq!(config.profiles.default.len(), 2);
         assert_eq!(config.profiles.default[0].scope, ProfileScope::Repo);

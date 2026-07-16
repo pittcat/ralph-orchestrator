@@ -216,11 +216,10 @@ pub fn resolve_wave_context_for_synthesizer_with_aggregate_timeout(
                 if let Some(total) = event.wave_total {
                     acc.wave_total = total;
                 }
-                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(event.payload.as_str()) {
-                    if let Some(dim) = obj.get("dimension").and_then(|v| v.as_str()) {
+                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(event.payload.as_str())
+                    && let Some(dim) = obj.get("dimension").and_then(|v| v.as_str()) {
                         acc.expected.insert(dim.to_string());
                     }
-                }
                 latest_wave_id = Some(wave_id);
             }
             "review.dimension.done" => {
@@ -232,11 +231,10 @@ pub fn resolve_wave_context_for_synthesizer_with_aggregate_timeout(
                 } else {
                     orphan_dones.entry(wave_id.clone()).or_default()
                 };
-                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(event.payload.as_str()) {
-                    if let Some(dim) = obj.get("dimension").and_then(|v| v.as_str()) {
+                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(event.payload.as_str())
+                    && let Some(dim) = obj.get("dimension").and_then(|v| v.as_str()) {
                         acc.received.insert(dim.to_string());
                     }
-                }
             }
             _ => {}
         }

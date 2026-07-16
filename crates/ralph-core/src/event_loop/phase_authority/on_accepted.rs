@@ -163,17 +163,17 @@ mod tests {
                 PhaseDeclConfig {
                     id: "unit_loop".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: std::collections::BTreeMap::default(),
                 },
                 PhaseDeclConfig {
                     id: "review".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: std::collections::BTreeMap::default(),
                 },
                 PhaseDeclConfig {
                     id: "plan_end".to_string(),
                     label: None,
-                    allowed_emits: Default::default(),
+                    allowed_emits: std::collections::BTreeMap::default(),
                 },
             ],
             transitions: vec![
@@ -181,11 +181,11 @@ mod tests {
                     from: "unit_loop".to_string(),
                     to: "review".to_string(),
                     on: serde_yaml::from_str(
-                        r#"
+                        r"
 primitive: on_test_passed_step
 step_kind: plan_unit
 when: last
-"#,
+",
                     )
                     .unwrap(),
                 },
@@ -193,10 +193,10 @@ when: last
                     from: "review".to_string(),
                     to: "plan_end".to_string(),
                     on: serde_yaml::from_str(
-                        r#"
+                        r"
 primitive: on_review_complete_verdict
 matrix: serial_default
-"#,
+",
                     )
                     .unwrap(),
                 },
@@ -260,7 +260,7 @@ matrix: serial_default
         // `update_snapshot` between events; for the unit test
         // we mutate a local facade mirror through the public
         // helper that calls update_snapshot.
-        let mut fac = WorkflowPhaseAuthority::from_declaration(serial_decl());
+        let fac = WorkflowPhaseAuthority::from_declaration(serial_decl());
         let snap0 = PhaseSnapshot::with_phase_id("unit_loop");
         fac.update_snapshot(snap0.clone());
         let payload1 = json!({"index": 8, "total_units": 8});

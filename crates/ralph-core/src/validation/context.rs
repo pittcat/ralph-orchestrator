@@ -217,7 +217,7 @@ impl<'a> ValidationContext<'a> {
     /// inserting a default when absent.
     pub fn policy_runtime_state(&mut self) -> &mut PolicyRuntimeState {
         if let Some(ref mut state) = self.policy_runtime_state {
-            return &mut **state;
+            return state;
         }
         self.snapshot
             .policy_runtime
@@ -228,7 +228,7 @@ impl<'a> ValidationContext<'a> {
     /// should mutate. Falls back to the snapshot's field.
     pub fn review_step_tracker(&mut self) -> &mut ReviewStepTracker {
         if let Some(ref mut tracker) = self.review_step_tracker {
-            return &mut **tracker;
+            return tracker;
         }
         &mut self.snapshot.review_step_tracker
     }
@@ -247,11 +247,10 @@ impl<'a> ValidationContext<'a> {
     /// Later violations are ignored so the loop surfaces only the
     /// first one.
     pub fn record_payload_contract_violation(&mut self, violation: PayloadContractViolation) {
-        if let Some(slot) = self.payload_contract_violation.as_deref_mut() {
-            if slot.is_none() {
+        if let Some(slot) = self.payload_contract_violation.as_deref_mut()
+            && slot.is_none() {
                 *slot = Some(violation);
             }
-        }
     }
 
     /// Record a policy rejection for downstream attribution (e.g. wave

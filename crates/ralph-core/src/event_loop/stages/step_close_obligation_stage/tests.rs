@@ -82,7 +82,7 @@ fn update_progress_is_idempotent_and_no_regressions() {
 
 #[test]
 fn empty_on_partial_means_no_obligation() {
-    let yaml = r#"
+    let yaml = r"
 mechanism:
   flow:
     type: declared
@@ -90,7 +90,7 @@ mechanism:
     steps:
       - id: unit_loop
         terminal_when: partial_units_done
-"#;
+";
     let flow = FlowDeclaration::from_yaml(yaml).expect("parse flow");
     let mut stage = StepCloseObligationStage::new(flow);
     stage.update_progress("unit_loop", 4, 8);

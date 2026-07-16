@@ -111,17 +111,15 @@ pub fn resolve_gate_hat_for_emit(
     event: &ralph_proto::Event,
     rules: &std::collections::BTreeMap<String, crate::config::PrecheckRule>,
 ) -> Option<String> {
-    if let Some(source) = event.source.as_ref() {
-        if is_gate_hat(source.as_str()) {
+    if let Some(source) = event.source.as_ref()
+        && is_gate_hat(source.as_str()) {
             return Some(source.to_string());
         }
-    }
     let topic = event.topic.as_str();
-    if let Some(guarded) = topic.strip_suffix(".rejected") {
-        if rules.contains_key(guarded) {
+    if let Some(guarded) = topic.strip_suffix(".rejected")
+        && rules.contains_key(guarded) {
             return Some(format!("{GATE_HAT_PREFIX}{guarded}"));
         }
-    }
     if rules.contains_key(topic) {
         return Some(format!("{GATE_HAT_PREFIX}{topic}"));
     }
@@ -355,7 +353,7 @@ mod tests {
     #[test]
     fn collect_synthetic_when_gate_is_silent() {
         use crate::event_loop::loop_state::HatObligation;
-        use ralph_proto::{Event, HatId};
+        use ralph_proto::HatId;
         use std::time::Instant;
 
         let obligations = std::collections::VecDeque::from([HatObligation {

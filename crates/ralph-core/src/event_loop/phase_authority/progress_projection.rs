@@ -56,7 +56,7 @@ pub fn apply_progress_on_phase_enter(
     // a future preset can experiment without breaking the
     // serial snapshot's behaviour.
     let directive = entry_map
-        .get(&serde_yaml::Value::String("write_current_step".to_string()))
+        .get(serde_yaml::Value::String("write_current_step".to_string()))
         .and_then(|v| v.as_str());
 
     match directive {

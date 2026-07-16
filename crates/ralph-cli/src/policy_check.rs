@@ -623,9 +623,7 @@ pub fn check_isolated_scope(
         return Ok(());
     };
     if hat_id == "ralph"
-        && ralph_core::event_origin::RALPH_CONTROL_TOPICS
-            .iter()
-            .any(|t| *t == topic)
+        && ralph_core::event_origin::RALPH_CONTROL_TOPICS.contains(&topic)
     {
         return Ok(());
     }
@@ -1012,15 +1010,14 @@ pub fn run_policy_check_unified(
     // so the gate order is "payload schema → envelope
     // topology". Mirrors the apply-path gate so `--policy-check`
     // and the real write share the same rejection surface.
-    if let Some(cfg) = config.as_ref() {
-        if let Err(err) = check_envelope_triggered(topic, triggered, cfg) {
+    if let Some(cfg) = config.as_ref()
+        && let Err(err) = check_envelope_triggered(topic, triggered, cfg) {
             let mut rej = final_report;
             rej.accepted = false;
             rej.reason_codes.push(err.reason_code);
             rej.suggestions.push(err.message);
             return Ok(rej);
         }
-    }
 
     Ok(final_report)
 }
@@ -1208,7 +1205,7 @@ mod u6_unified_path_tests {
         std::fs::create_dir_all(tmp.path().join(".ralph")).unwrap();
         std::fs::write(
             tmp.path().join("ralph.yml"),
-            r#"
+            r"
 event_loop:
   event_policy:
     enabled: true
@@ -1218,7 +1215,7 @@ event_loop:
       experiment.planned:
         required_fields:
           - task_key
-"#,
+",
         )
         .unwrap();
         let report = run_policy_check_unified(
@@ -1674,7 +1671,7 @@ pub fn check_emit_provenance(
     // Control topics are produced by the loop / runtime ralph pseudo-hat
     // and are exempt from hat provenance. Diagnostic events are emitted
     // by the loop itself for observability.
-    if ralph_core::RALPH_CONTROL_TOPICS.iter().any(|t| *t == topic) {
+    if ralph_core::RALPH_CONTROL_TOPICS.contains(&topic) {
         return Ok(());
     }
     if ralph_core::is_orchestrator_diagnostic_topic(topic) {
@@ -1953,11 +1950,10 @@ pub fn enrich_validation_error(
             "missing_required_field" => {
                 if !error.field.is_empty() {
                     error.expected = Some(error.field.clone());
-                    if let Some(EventFieldDoc { meaning, .. }) = s.field_docs.get(&error.field) {
-                        if !meaning.trim().is_empty() {
+                    if let Some(EventFieldDoc { meaning, .. }) = s.field_docs.get(&error.field)
+                        && !meaning.trim().is_empty() {
                             error.field_description = Some(meaning.clone());
                         }
-                    }
                     let shape = emit_schema_hint::suggested_payload_shape(
                         s,
                         payload.unwrap_or(&Value::Null),
@@ -2010,11 +2006,10 @@ pub fn enrich_validation_error(
                         .map(payload_type_label)
                         .unwrap_or_else(|| "json_object".to_string()),
                 );
-                if let Some(obj) = payload_obj {
-                    if let Some((_, v)) = obj.iter().next() {
+                if let Some(obj) = payload_obj
+                    && let Some((_, v)) = obj.iter().next() {
                         error.actual = Some(v.to_string());
                     }
-                }
                 // No field, no shape — a payload-level
                 // violation does not map onto a single
                 // suggestion.
@@ -2045,15 +2040,14 @@ pub fn enrich_validation_error_with_topic(
     schema: Option<&EventSchema>,
 ) -> ValidationError {
     let mut enriched = enrich_validation_error(error, hat, payload, schema);
-    if let Some(shape) = enriched.suggested_payload_shape.as_ref() {
-        if shape.is_object() {
+    if let Some(shape) = enriched.suggested_payload_shape.as_ref()
+        && shape.is_object() {
             enriched.suggested_command = Some(format!(
                 "ralph emit {topic} --policy-check -j '{shape}'",
                 topic = topic,
                 shape = shape
             ));
         }
-    }
     enriched
 }
 
@@ -2064,15 +2058,12 @@ fn resolved_allowed_values(
     hat: Option<&str>,
     field: &str,
 ) -> Option<Vec<serde_json::Value>> {
-    if let Some(hat_id) = hat {
-        if let Some(rules) = schema.hat_allowed_values.get(field) {
-            if let Some(rule) = rules.iter().find(|rule| rule.hat_id == hat_id) {
-                if !rule.values.is_empty() {
+    if let Some(hat_id) = hat
+        && let Some(rules) = schema.hat_allowed_values.get(field)
+            && let Some(rule) = rules.iter().find(|rule| rule.hat_id == hat_id)
+                && !rule.values.is_empty() {
                     return Some(rule.values.clone());
                 }
-            }
-        }
-    }
 
     schema
         .allowed_values
@@ -2352,7 +2343,7 @@ impl ValidationFailure {
         payloads: &[serde_json::Value],
         schema: Option<&EventSchema>,
     ) -> Self {
-        for error in self.validation_errors.iter_mut() {
+        for error in &mut self.validation_errors {
             let payload = payloads.get(error.payload_index);
             let enriched =
                 enrich_validation_error_with_topic(error.clone(), topic, hat, payload, schema);
@@ -2385,10 +2376,7 @@ pub fn emit_policy_validation_failure(
             let field_hint = if let Some((field, count)) = field_counts.iter().next() {
                 format!("missing required field '{field}' in {count}")
             } else if total > 0 {
-                format!(
-                    "{}",
-                    failure.validation_errors[0].reason_code.replace('_', " ")
-                )
+                failure.validation_errors[0].reason_code.replace('_', " ").clone()
             } else {
                 "policy check".to_string()
             };
@@ -2504,7 +2492,7 @@ pub fn enrich_report_with_schema(
     payload: Option<&serde_json::Value>,
     schema: Option<&EventSchema>,
 ) -> PolicyCheckReport {
-    for error in report.validation_errors.iter_mut() {
+    for error in &mut report.validation_errors {
         let enriched =
             enrich_validation_error_with_topic(error.clone(), topic, hat, payload, schema);
         *error = enriched;
@@ -2527,13 +2515,13 @@ pub fn report_to_emit_result(
     report: &PolicyCheckReport,
     config: Option<&RalphConfig>,
 ) -> ralph_core::emit_result::EmitResult {
-    let errors = if !report.validation_errors.is_empty() {
-        validation_errors_to_emit_errors(&report.validation_errors)
-    } else {
+    let errors = if report.validation_errors.is_empty() {
         ralph_core::emit_result::map_policy_report_to_errors(
             &report.reason_codes,
             &report.suggestions,
         )
+    } else {
+        validation_errors_to_emit_errors(&report.validation_errors)
     };
 
     let parts = build_emit_result_parts(
@@ -2614,10 +2602,10 @@ pub fn render_validation_error_repair_block(
     let mut lines = vec![format!("Repair hints for topic `{topic}`:")];
     for error in errors {
         let mut header = String::from("- ");
-        if !error.field.is_empty() {
-            header.push_str(&format!("field `{}`", error.field));
-        } else {
+        if error.field.is_empty() {
             header.push_str("payload-level violation");
+        } else {
+            header.push_str(&format!("field `{}`", error.field));
         }
         if errors.len() > 1 || error.payload_index != 0 {
             header.push_str(&format!(" (payload[{}])", error.payload_index));
@@ -2653,7 +2641,7 @@ mod tests {
 
     fn strict_policy_with_required(field: &str) -> EventPolicyConfig {
         let yaml = format!(
-            r#"
+            r"
 event_loop:
   event_policy:
     enabled: true
@@ -2671,7 +2659,7 @@ event_loop:
       work.ready:
         required_fields:
           - {field}
-"#
+"
         );
         let cfg: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
         cfg.event_loop.event_policy.unwrap()
@@ -2771,25 +2759,25 @@ event_loop:
     fn agent_ctx_config() -> RalphConfig {
         // Config without `require_policy_check_for_cli_emit` — agent
         // context should still default to strict via U15.
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   event_policy:
     enabled: false
     mode: enforce
     allow_unsafe_cli_emit: false
-"#;
+";
         serde_yaml::from_str(yaml).unwrap()
     }
 
     fn agent_ctx_config_optout() -> RalphConfig {
         // Preset author opts out for agent context.
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   event_policy:
     enabled: true
     mode: enforce
     allow_unsafe_cli_emit: true
-"#;
+";
         serde_yaml::from_str(yaml).unwrap()
     }
 
@@ -3200,7 +3188,7 @@ hats:
         // Pre-seed the events file with a terminal event. The strict
         // policy + business_after_completion: reject should now reject
         // any business topic that arrives after the terminal.
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -3215,7 +3203,7 @@ event_loop:
     completion_after_terminal:
       duplicate_terminal: reject
       business_after_completion: reject
-"#;
+";
         let cfg: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let policy = cfg.event_loop.event_policy.unwrap();
 
@@ -3497,12 +3485,12 @@ event_loop:
 
     fn isolated_config_with_hats(yaml_hats: &str) -> RalphConfig {
         let yaml = format!(
-            r#"
+            r"
 event_loop:
   execution_mode: isolated
 hats:
 {yaml_hats}
-"#
+"
         );
         serde_yaml::from_str(&yaml).unwrap()
     }
@@ -4175,7 +4163,7 @@ hats:
             workspace: std::path::PathBuf::from("/tmp"),
             accepted: false,
             reason_codes: vec!["missing_required_field".to_string()],
-            suggestions: vec!["".to_string()],
+            suggestions: vec![String::new()],
             post_commit_rejected: false,
             validation_errors: vec![],
         };

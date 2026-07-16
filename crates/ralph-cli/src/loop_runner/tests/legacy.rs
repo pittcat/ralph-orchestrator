@@ -14,7 +14,6 @@ use std::sync::{Arc, Mutex};
 // path 用)与 glob(给 `build_*_payload_input` / `suspend_outcome` /
 // `block_on_test_future` 等 short-name 调用用)。`use super::common;` 引入 namespace,
 // `use super::common::*;` 引入所有 pub(super) items。两者并存允许两种风格混用。
-use super::common;
 use super::common::*;
 use super::fake_path::*;
 
@@ -3241,7 +3240,7 @@ fn u6_all_builtin_presets_pass_lint_gate() {
     use ralph_core::RalphConfig;
 
     let mut failures = Vec::new();
-    for preset in list_presets().iter() {
+    for preset in &list_presets() {
         let config =
             RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
         // 2026-07-09-001 plan (U7): pass `preset.name` so the
@@ -3262,13 +3261,9 @@ fn u6_all_builtin_presets_pass_lint_gate() {
             .filter(|f| {
                 !matches!(
                     (preset.name, f.id.as_str()),
-                    (
-                        "ce-executor-pipeline-loop",
-                        "lint.preset.activation_egress_missing"
-                    ) | (
-                        "ce-executor-pipeline-loop",
-                        "lint.preset.handoff_pairing_broken"
-                    ) | ("ce-executor-pipeline-loop", "lint.preset.re_emit_trap")
+                    ("ce-executor-pipeline-loop",
+"lint.preset.activation_egress_missing" | "lint.preset.handoff_pairing_broken"
+| "lint.preset.re_emit_trap")
                 )
             })
             .map(|f| format!("{}: {}", f.id, f.message))
@@ -3754,8 +3749,8 @@ async fn u3_wave_dispatch_merge_activates_wait_for_all_aggregator() {
     let wave = make_wave_with_count("w-u3-a", 3, vec!["review.done".to_string()]);
     let completed = execute_wave(
         &wave,
-        &backend,
-        &events_file,
+        backend,
+        events_file,
         false,
         false,
         None,
@@ -3786,7 +3781,7 @@ async fn u3_wave_dispatch_merge_activates_wait_for_all_aggregator() {
     // 2. Merge the worker events into the main events file.
     merge_wave_results_to_events_file(
         &completed,
-        &events_file,
+        events_file,
         &wave.hat_config.publishes,
         wave.target_hat.as_str(),
         // 2026-06-16-001 U2: tests use the same default.
@@ -3796,7 +3791,7 @@ async fn u3_wave_dispatch_merge_activates_wait_for_all_aggregator() {
 
     // Every merged record must carry the same wave_id, unique
     // wave_index, and the correct wave_total.
-    let merged = std::fs::read_to_string(&events_file).expect("read merged");
+    let merged = std::fs::read_to_string(events_file).expect("read merged");
     let mut seen_wave_ids = std::collections::HashSet::new();
     let mut seen_indexes = std::collections::BTreeSet::new();
     for line in merged.lines().filter(|l| !l.trim().is_empty()) {
@@ -3866,7 +3861,7 @@ async fn u3_wave_dispatch_merge_activates_wait_for_all_aggregator() {
     // EventLoop so both runs see the same events.
     let observed_a = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let config1 = make_wave_aggregator_topology();
-    let loop_ctx1 = ralph_core::LoopContext::primary(workspace.to_path_buf());
+    let loop_ctx1 = ralph_core::LoopContext::primary(workspace.clone());
     let mut event_loop_a = ralph_core::EventLoop::with_context(config1, loop_ctx1);
     let observed_a_clone = std::sync::Arc::clone(&observed_a);
     event_loop_a
@@ -3883,7 +3878,7 @@ async fn u3_wave_dispatch_merge_activates_wait_for_all_aggregator() {
 
     let observed_b = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let config2 = make_wave_aggregator_topology();
-    let loop_ctx2 = ralph_core::LoopContext::primary(workspace.to_path_buf());
+    let loop_ctx2 = ralph_core::LoopContext::primary(workspace.clone());
     let mut event_loop_b = ralph_core::EventLoop::with_context(config2, loop_ctx2);
     let observed_b_clone = std::sync::Arc::clone(&observed_b);
     event_loop_b
@@ -3937,8 +3932,8 @@ async fn u3_partial_wave_does_not_activate_aggregator_until_full_set() {
     let wave = make_wave_with_count("w-u3-b", 3, vec!["review.done".to_string()]);
     let completed = execute_wave(
         &wave,
-        &backend,
-        &events_file,
+        backend,
+        events_file,
         false,
         false,
         None,
@@ -3976,7 +3971,7 @@ async fn u3_partial_wave_does_not_activate_aggregator_until_full_set() {
     };
     merge_wave_results_to_events_file(
         &partial,
-        &events_file,
+        events_file,
         &wave.hat_config.publishes,
         wave.target_hat.as_str(),
         // 2026-06-16-001 U2: tests use the same default.
@@ -3988,7 +3983,7 @@ async fn u3_partial_wave_does_not_activate_aggregator_until_full_set() {
     // 2 records (one per merged worker result), each carrying the
     // correct wave_id / wave_index / wave_total. The 3rd result
     // has not been merged yet, so the file is incomplete.
-    let merged_partial = std::fs::read_to_string(&events_file).expect("read partial");
+    let merged_partial = std::fs::read_to_string(events_file).expect("read partial");
     let partial_record_count = merged_partial
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -4028,14 +4023,14 @@ async fn u3_partial_wave_does_not_activate_aggregator_until_full_set() {
     // replay the full set deterministically without re-routing
     // partial-merge leftovers.
     let config2 = make_wave_aggregator_topology();
-    let loop_ctx2 = ralph_core::LoopContext::primary(workspace.to_path_buf());
+    let loop_ctx2 = ralph_core::LoopContext::primary(workspace.clone());
     let mut event_loop2 = ralph_core::EventLoop::with_context(config2, loop_ctx2);
 
     // Reset main events file and re-merge all 3 results.
-    std::fs::write(&events_file, "").expect("reset events");
+    std::fs::write(events_file, "").expect("reset events");
     merge_wave_results_to_events_file(
         &completed,
-        &events_file,
+        events_file,
         &wave.hat_config.publishes,
         wave.target_hat.as_str(),
         // 2026-06-16-001 U2: tests use the same default.
@@ -4124,7 +4119,7 @@ async fn u3_worker_failure_emits_synthetic_result_for_aggregator() {
     let completed = execute_wave(
         &wave,
         &backend,
-        &events_file,
+        events_file,
         false,
         false,
         None,
@@ -4156,7 +4151,7 @@ async fn u3_worker_failure_emits_synthetic_result_for_aggregator() {
     // don't deliver real results.
     merge_wave_results_to_events_file(
         &completed,
-        &events_file,
+        events_file,
         &wave.hat_config.publishes,
         wave.target_hat.as_str(),
         // 2026-06-16-001 U2: tests use the same default.
@@ -4164,7 +4159,7 @@ async fn u3_worker_failure_emits_synthetic_result_for_aggregator() {
     )
     .expect("merge must succeed");
 
-    let merged = std::fs::read_to_string(&events_file).expect("read");
+    let merged = std::fs::read_to_string(events_file).expect("read");
     let mut failure_record_count = 0;
     let mut synthetic_done_count = 0;
     let mut real_done_count = 0;
@@ -4268,8 +4263,8 @@ async fn u3_two_independent_waves_route_to_separate_aggregations() {
 
     let completed_a = execute_wave(
         &wave_a,
-        &backend,
-        &events_file,
+        backend,
+        events_file,
         false,
         false,
         None,
@@ -4281,8 +4276,8 @@ async fn u3_two_independent_waves_route_to_separate_aggregations() {
     .expect("wave A");
     let completed_b = execute_wave(
         &wave_b,
-        &backend,
-        &events_file,
+        backend,
+        events_file,
         false,
         false,
         None,
@@ -4329,7 +4324,7 @@ async fn u3_two_independent_waves_route_to_separate_aggregations() {
 
     merge_wave_results_to_events_file(
         &completed_a,
-        &events_file,
+        events_file,
         &wave_a.hat_config.publishes,
         wave_a.target_hat.as_str(),
         // 2026-06-16-001 U2: tests use the same default.
@@ -4338,7 +4333,7 @@ async fn u3_two_independent_waves_route_to_separate_aggregations() {
     .expect("merge A");
     merge_wave_results_to_events_file(
         &completed_b,
-        &events_file,
+        events_file,
         &wave_b.hat_config.publishes,
         wave_b.target_hat.as_str(),
         // 2026-06-16-001 U2: tests use the same default.
@@ -4347,7 +4342,7 @@ async fn u3_two_independent_waves_route_to_separate_aggregations() {
     .expect("merge B");
 
     // The merged events file must contain BOTH wave_ids, distinctly.
-    let merged = std::fs::read_to_string(&events_file).expect("read");
+    let merged = std::fs::read_to_string(events_file).expect("read");
     let mut wave_id_a_count = 0;
     let mut wave_id_b_count = 0;
     for line in merged.lines().filter(|l| !l.trim().is_empty()) {
@@ -4416,7 +4411,7 @@ async fn u3_two_independent_waves_route_to_separate_aggregations() {
     // event log — the canonical source of truth for wave_id
     // metadata — and the merged-events count we already verified
     // above.
-    let merged_after = std::fs::read_to_string(&events_file).expect("read merged");
+    let merged_after = std::fs::read_to_string(events_file).expect("read merged");
     let mut wave_ids_in_log: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for line in merged_after.lines().filter(|l| !l.trim().is_empty()) {
         let v: serde_json::Value = serde_json::from_str(line).expect("json");

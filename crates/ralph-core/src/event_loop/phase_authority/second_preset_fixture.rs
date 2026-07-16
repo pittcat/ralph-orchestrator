@@ -7,9 +7,11 @@
 //! extension story, not adding a second consumer.
 
 use crate::event_loop::phase_authority::config::{
-    PhaseAuthorityConfig, PhaseDeclConfig, PhaseTransitionConfig, TransitionOnConfig,
+    PhaseAuthorityConfig, PhaseDeclConfig, PhaseTransitionConfig, ProgressProjectionConfig,
+    TransitionOnConfig, ViolationPolicyConfig,
 };
 use crate::event_loop::phase_authority::declaration::PhaseAuthorityDeclaration;
+use std::collections::BTreeMap;
 
 /// Build a 2-phase declaration that mirrors a hypothetical
 /// "merge-loop" preset's minimum needs.
@@ -21,12 +23,12 @@ pub fn minimal_second_preset_declaration() -> PhaseAuthorityDeclaration {
             PhaseDeclConfig {
                 id: "work".to_string(),
                 label: None,
-                allowed_emits: Default::default(),
+                allowed_emits: BTreeMap::default(),
             },
             PhaseDeclConfig {
                 id: "ship".to_string(),
                 label: None,
-                allowed_emits: Default::default(),
+                allowed_emits: BTreeMap::default(),
             },
         ],
         transitions: vec![PhaseTransitionConfig {
@@ -34,8 +36,8 @@ pub fn minimal_second_preset_declaration() -> PhaseAuthorityDeclaration {
             to: "ship".to_string(),
             on: TransitionOnConfig(serde_yaml::from_str("event: work.start").unwrap()),
         }],
-        violation_policy: Default::default(),
-        progress_projection: Default::default(),
+        violation_policy: ViolationPolicyConfig::default(),
+        progress_projection: ProgressProjectionConfig::default(),
     };
     PhaseAuthorityDeclaration::try_from_config(&cfg).expect("2-phase declaration must parse")
 }

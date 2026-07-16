@@ -95,7 +95,7 @@ fn emit_schema_gate_stage_accepts_topics_outside_schema() {
 #[test]
 fn required_fields_from_loop_config_gates_preset_review_complete() {
     use crate::config::RalphConfig;
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -103,7 +103,7 @@ event_loop:
     schemas:
       review.complete:
         required_fields: [fix_plan_file, verdict, plan_name]
-"#;
+";
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let required = super::required_fields_from_loop_config(&config.event_loop);
     let stage = EmitSchemaGateStage::new(required);

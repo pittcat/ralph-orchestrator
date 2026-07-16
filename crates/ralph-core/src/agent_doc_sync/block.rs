@@ -208,7 +208,7 @@ mod tests {
                 "",
                 &format!("<!-- ralph:begin hang-prevention v=sha256:{old_hash} -->"),
                 "old content",
-                &format!("<!-- ralph:end hang-prevention -->"),
+                "<!-- ralph:end hang-prevention -->",
             ],
             true,
         );
@@ -230,7 +230,7 @@ mod tests {
                 "",
                 &format!("<!-- ralph:begin hang-prevention v=sha256:{hash} -->"),
                 "correct content",
-                &format!("<!-- ralph:end hang-prevention -->"),
+                "<!-- ralph:end hang-prevention -->",
             ],
             true,
         );
@@ -251,7 +251,7 @@ mod tests {
                 "",
                 &format!("<!-- ralph:begin hang-prevention v=sha256:{old_hash} -->"),
                 "old",
-                &format!("<!-- ralph:end hang-prevention -->"),
+                "<!-- ralph:end hang-prevention -->",
             ],
             true,
         );
@@ -286,7 +286,7 @@ mod tests {
             &[
                 "# My Project",
                 "",
-                &format!("<!-- ralph:end hang-prevention -->"),
+                "<!-- ralph:end hang-prevention -->",
             ],
             true,
         );
@@ -305,7 +305,7 @@ mod tests {
                 "",
                 &format!("<!-- ralph:begin other-block v=sha256:{hash} -->"),
                 "other content",
-                &format!("<!-- ralph:end other-block -->"),
+                "<!-- ralph:end other-block -->",
             ],
             true,
         );

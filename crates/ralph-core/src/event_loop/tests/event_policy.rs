@@ -5,11 +5,11 @@ use super::*;
 
 #[test]
 fn test_workflow_guards_absent_means_no_chain_validation() {
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   workflow_guards:
     chains: []
-"#;
+";
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");
@@ -114,7 +114,7 @@ fn test_completion_promise_behavior_unchanged_without_event_policy() {
 
 #[test]
 fn test_event_policy_observe_mode_allows_bad_events_with_diagnostics() {
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -123,7 +123,7 @@ event_loop:
     schemas:
       test.topic:
         payload: json_object
-"#;
+";
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");

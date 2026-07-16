@@ -84,9 +84,8 @@ fn u8_on_repair_close_clears_stall_recovery_count() {
     state
         .stall_recovery_counts
         .insert("stall:task-1".to_string(), 5);
-    assert_eq!(
+    assert!(
         state.on_repair_close("task-1"),
-        true,
         "first close must remove the entry"
     );
     assert!(
@@ -94,9 +93,8 @@ fn u8_on_repair_close_clears_stall_recovery_count() {
         "entry must be removed"
     );
     // Idempotent: second close returns false.
-    assert_eq!(
-        state.on_repair_close("task-1"),
-        false,
+    assert!(
+        !state.on_repair_close("task-1"),
         "second close must report no entry"
     );
 }
@@ -104,9 +102,8 @@ fn u8_on_repair_close_clears_stall_recovery_count() {
 #[test]
 fn u8_on_repair_close_unknown_task_is_noop() {
     let mut state = LoopState::new();
-    assert_eq!(
-        state.on_repair_close("never-stalled"),
-        false,
+    assert!(
+        !state.on_repair_close("never-stalled"),
         "unknown task must report no entry"
     );
     assert!(state.stall_recovery_counts.is_empty());

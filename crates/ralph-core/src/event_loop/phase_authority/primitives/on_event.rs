@@ -19,7 +19,7 @@ use serde_yaml::Value;
 pub fn evaluate(trigger: &Value, event_topic: &str) -> Option<String> {
     let event_name = trigger
         .as_mapping()
-        .and_then(|m| m.get(&Value::String("event".to_string())))
+        .and_then(|m| m.get(Value::String("event".to_string())))
         .and_then(|v| v.as_str())?;
     if event_name == event_topic {
         // The target phase id is encoded in the surrounding

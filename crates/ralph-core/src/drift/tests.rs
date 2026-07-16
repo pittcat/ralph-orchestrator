@@ -69,7 +69,7 @@ fn test_drift_window_bounded() {
 
 #[test]
 fn test_drift_window_from_events_pre_fills() {
-    let events: Vec<EventSnapshot> = (0..5).map(|i| snap("t", 0, i as i64, &[])).collect();
+    let events: Vec<EventSnapshot> = (0..5).map(|i| snap("t", 0, i64::from(i), &[])).collect();
     let window = DriftWindow::from_events(events, 10);
     assert_eq!(window.len(), 5);
     assert_eq!(window.capacity(), 10);
@@ -724,7 +724,7 @@ fn test_window_size_for_and_observed_topics() {
     assert_eq!(det.window_size_for("beta"), 1);
     assert_eq!(det.window_size_for("missing"), 0);
     let mut topics = det.observed_topics();
-    topics.sort();
+    topics.sort_unstable();
     assert_eq!(topics, vec!["alpha", "beta"]);
 }
 

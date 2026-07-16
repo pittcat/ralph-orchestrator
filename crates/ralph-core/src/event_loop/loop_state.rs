@@ -724,6 +724,7 @@ pub struct LoopState {
     ///   2. follow-up plans (2026-06-21-001 U4) to add
     ///      `consecutive_lint_rejections:{kind}` counters
     ///      without re-instrumenting the gate.
+    ///
     /// Seed: empty; populated by
     /// [`Self::record_typed_lint_rejection`].
     pub consecutive_lint_rejections_by_kind: HashMap<String, u32>,
@@ -1969,12 +1970,7 @@ pub fn detect_rejection_stall_kind(
         RejectionKind::UpstreamState,
         RejectionKind::PreCheck,
     ];
-    for kind in order {
-        if state.typed_lint_rejection_count(kind) >= REJECTION_WINDOW_THRESHOLD {
-            return Some(kind);
-        }
-    }
-    None
+    order.into_iter().find(|&kind| state.typed_lint_rejection_count(kind) >= REJECTION_WINDOW_THRESHOLD)
 }
 
 #[cfg(test)]

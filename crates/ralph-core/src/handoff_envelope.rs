@@ -1321,7 +1321,13 @@ mod tests {
 
     fn reject_field(payload: &mut serde_json::Value, path: &[&str], field: &str) {
         let mut current = payload.as_object_mut().unwrap();
-        if !path.is_empty() {
+        if path.is_empty() {
+            current = current
+                .get_mut("handoff_envelope")
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+        } else {
             current = current
                 .get_mut("handoff_envelope")
                 .unwrap()
@@ -1330,12 +1336,6 @@ mod tests {
             for p in path {
                 current = current.get_mut(*p).unwrap().as_object_mut().unwrap();
             }
-        } else {
-            current = current
-                .get_mut("handoff_envelope")
-                .unwrap()
-                .as_object_mut()
-                .unwrap();
         }
         current.remove(field);
     }

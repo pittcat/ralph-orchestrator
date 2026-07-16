@@ -20,8 +20,10 @@ pub const X_PRESET_SCHEMA_VERSION: i64 = 1;
 /// Check profile for generated presets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum CheckProfile {
     /// Authoring checks only: YAML parse, config load.
+    #[default]
     Authoring,
     /// Strict checks: payload schemas, topology validation.
     Strict,
@@ -29,11 +31,6 @@ pub enum CheckProfile {
     RuntimeReady,
 }
 
-impl Default for CheckProfile {
-    fn default() -> Self {
-        CheckProfile::Authoring
-    }
-}
 
 impl fmt::Display for CheckProfile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -190,17 +187,14 @@ impl std::error::Error for XPresetParseError {}
 /// Template difficulty level.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum TemplateDifficulty {
+    #[default]
     Beginner,
     Intermediate,
     Advanced,
 }
 
-impl Default for TemplateDifficulty {
-    fn default() -> Self {
-        TemplateDifficulty::Beginner
-    }
-}
 
 /// Placeholder variable defined by a template.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -625,7 +619,7 @@ impl TemplateRenderer {
     /// assert_eq!(rendered, "name: my-flow");
     /// ```
     pub fn render(template: &str, values: &[(&str, &str)]) -> Result<String, RenderError> {
-        let value_map: HashMap<&str, &str> = values.iter().cloned().collect();
+        let value_map: HashMap<&str, &str> = values.iter().copied().collect();
 
         // First pass: check for unknown placeholders
         for line in template.lines() {
@@ -763,11 +757,10 @@ fn needs_quoting(value: &str) -> bool {
         '-', '?', ':', ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@',
         '`',
     ];
-    if let Some(first) = value.chars().next() {
-        if RESERVED_START.contains(&first) {
+    if let Some(first) = value.chars().next()
+        && RESERVED_START.contains(&first) {
             return true;
         }
-    }
 
     for ch in value.chars() {
         // Any control character forces quoting (we don't want raw \0,
@@ -813,7 +806,7 @@ fn looks_like_non_string_scalar(value: &str) -> bool {
     ) || (value
         .chars()
         .next()
-        .map_or(false, |c| c.is_ascii_digit() || c == '-' || c == '+')
+        .is_some_and(|c| c.is_ascii_digit() || c == '-' || c == '+')
         && value.chars().all(|c| {
             c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-'
         }))
@@ -831,13 +824,12 @@ fn looks_like_non_string_scalar(value: &str) -> bool {
 fn contains_key_value_separator(value: &str) -> bool {
     let bytes = value.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
-        if b == b':' {
-            if i + 1 < bytes.len()
+        if b == b':'
+            && i + 1 < bytes.len()
                 && (bytes[i + 1] == b' ' || bytes[i + 1] == b'\n' || bytes[i + 1] == b'\t')
             {
                 return true;
             }
-        }
     }
     false
 }

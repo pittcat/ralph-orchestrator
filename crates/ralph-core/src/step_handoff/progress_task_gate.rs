@@ -361,9 +361,7 @@ pub fn check_alignment_with_snapshot(
     if progress.empty_headings {
         return GateDecision::Mismatch(ProgressTaskMismatch {
             reason: "progress_missing_headings".to_string(),
-            detail: format!(
-                "progress snapshot has no `Current Step` or `Completed Steps` headings"
-            ),
+            detail: "progress snapshot has no `Current Step` or `Completed Steps` headings".to_string(),
             step: step.map(|s| s.to_string()),
             task_id: task_id.map(|t| t.to_string()),
         });

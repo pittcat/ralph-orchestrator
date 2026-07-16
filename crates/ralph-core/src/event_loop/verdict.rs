@@ -109,7 +109,7 @@ impl Verdict {
                     .iter()
                     .find_map(|k| value.get(k).and_then(|v| v.as_u64()))
                     .map(|n| n as u32)
-                    .ok_or_else(|| VerdictParseError::MissingResidualCount)?;
+                    .ok_or(VerdictParseError::MissingResidualCount)?;
                 Ok(Verdict::PassWithResiduals { count })
             }
             "fail" => {
@@ -226,7 +226,7 @@ mod tests {
         assert!(resolved.is_fail(), "expected Fail, got {resolved}");
         if let Verdict::Fail { reason } = resolved {
             assert!(
-                reason.contains("12") && reason.contains("8"),
+                reason.contains("12") && reason.contains('8'),
                 "reason should reference the count and threshold, got: {reason}"
             );
         }

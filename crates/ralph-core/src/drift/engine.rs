@@ -208,8 +208,8 @@ impl DriftEngine {
                 // collector is disabled. Both writes are
                 // best-effort: errors are swallowed via the
                 // helper's own `tracing::warn!`.
-                if !loop_id.is_empty() {
-                    if let Ok(mut log) = event_loop.idempotent_log().lock() {
+                if !loop_id.is_empty()
+                    && let Ok(mut log) = event_loop.idempotent_log().lock() {
                         let payload = match serde_json::to_value(&finding) {
                             Ok(v) => v,
                             Err(_) => serde_json::Value::Null,
@@ -220,7 +220,6 @@ impl DriftEngine {
                             payload,
                         );
                     }
-                }
                 event_loop
                     .diagnostics()
                     .log_drift(finding_to_journal_entry(&finding));
@@ -322,8 +321,8 @@ impl DriftEngine {
                 // The lock is short-lived: we drop the
                 // `MutexGuard` before the `event_loop.diagnostics()`
                 // borrow so the borrow checker is happy.
-                if !idempotent_loop_id.is_empty() {
-                    if let Ok(mut log) = event_loop.idempotent_log().lock() {
+                if !idempotent_loop_id.is_empty()
+                    && let Ok(mut log) = event_loop.idempotent_log().lock() {
                         let payload = match serde_json::to_value(&envelope) {
                             Ok(v) => v,
                             Err(_) => serde_json::Value::Null,
@@ -332,7 +331,6 @@ impl DriftEngine {
                             &mut log, &key, payload, /* is_final = */ true,
                         );
                     }
-                }
                 event_loop
                     .diagnostics()
                     .log_recovery(RecoveryJournalEntry::from_envelope(envelope.clone(), notes));
@@ -846,7 +844,7 @@ mod tests {
         event_loop.initialize("lifecycle_soft");
         event_loop.set_iteration_for_test(1);
 
-        let mut engine = DriftEngine::enabled(
+        let engine = DriftEngine::enabled(
             Arc::clone(&diag),
             RequiredFields::new(),
             DeclaredEdges::new(),
@@ -941,7 +939,7 @@ mod tests {
         let config = make_config_with_diagnosis(Arc::clone(&diag));
         let mut event_loop = crate::event_loop::EventLoop::new(config);
         event_loop.initialize("lifecycle_final_error");
-        let mut engine = DriftEngine::enabled(
+        let engine = DriftEngine::enabled(
             Arc::clone(&diag),
             RequiredFields::new(),
             DeclaredEdges::new(),
@@ -997,7 +995,7 @@ mod tests {
         let config = make_config_with_diagnosis(Arc::clone(&diag));
         let mut event_loop = crate::event_loop::EventLoop::new(config);
         event_loop.initialize("p0_3_final_emits_plan_blocked");
-        let mut engine = DriftEngine::enabled(
+        let engine = DriftEngine::enabled(
             Arc::clone(&diag),
             RequiredFields::new(),
             DeclaredEdges::new(),
@@ -1092,7 +1090,7 @@ mod tests {
         let config = make_config_with_diagnosis(Arc::clone(&diag));
         let mut event_loop = crate::event_loop::EventLoop::new(config);
         event_loop.initialize("p0_3_non_final_no_plan_blocked");
-        let mut engine = DriftEngine::enabled(
+        let engine = DriftEngine::enabled(
             Arc::clone(&diag),
             RequiredFields::new(),
             DeclaredEdges::new(),
@@ -1141,7 +1139,7 @@ mod tests {
         let config = make_config_with_diagnosis(Arc::clone(&diag));
         let mut event_loop = crate::event_loop::EventLoop::new(config);
         event_loop.initialize("lifecycle_final_warning");
-        let mut engine = DriftEngine::enabled(
+        let engine = DriftEngine::enabled(
             Arc::clone(&diag),
             RequiredFields::new(),
             DeclaredEdges::new(),
@@ -1202,7 +1200,7 @@ mod tests {
         let mut event_loop = crate::event_loop::EventLoop::new(config);
         event_loop.initialize("u2_final_warning");
         event_loop.state_mut().bootstrap_complete = true;
-        let mut engine = DriftEngine::enabled(
+        let engine = DriftEngine::enabled(
             Arc::clone(&diag),
             RequiredFields::new(),
             DeclaredEdges::new(),
@@ -1254,7 +1252,7 @@ mod tests {
         let mut event_loop = crate::event_loop::EventLoop::new(config);
         event_loop.initialize("u2_final_info");
         event_loop.state_mut().bootstrap_complete = true;
-        let mut engine = DriftEngine::enabled(
+        let engine = DriftEngine::enabled(
             Arc::clone(&diag),
             RequiredFields::new(),
             DeclaredEdges::new(),

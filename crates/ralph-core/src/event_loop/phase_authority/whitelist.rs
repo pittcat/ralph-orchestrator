@@ -54,10 +54,7 @@ pub fn allows(
     };
 
     let allowed_topics: Vec<String> = phase
-        .allowed_emits
-        .iter()
-        // Flatten all hats' allow lists into a single sorted view.
-        .flat_map(|(_, topics)| topics.iter().cloned())
+        .allowed_emits.values().flat_map(|topics| topics.iter().cloned())
         .collect();
 
     // Per-hat precise match takes priority; the catch-all entry

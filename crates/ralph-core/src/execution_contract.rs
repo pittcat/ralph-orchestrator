@@ -124,7 +124,13 @@ pub fn task_not_found_resume_plan(
         .or_else(|| coordinator_hats.first().cloned())
         .unwrap_or_else(|| source_hat.to_string());
 
-    let hint = if !task_key.is_empty() {
+    let hint = if task_key.is_empty() {
+        format!(
+            "Task '{task_id}' not found in task store. Hat '{source_hat}' cannot create \
+             runtime tasks here; hat '{target}' must mint or repair the task row, then \
+             hat '{source_hat}' re-emits work.done with the live task_id."
+        )
+    } else {
         format!(
             "Task '{task_id}' live identity mismatch: payload task_key='{task_key}' does not \
              match the row bound to that id. Hat '{source_hat}' cannot fix the task ledger; \
@@ -132,12 +138,6 @@ pub fn task_not_found_resume_plan(
              via `ralph tools task` commands, then hat '{source_hat}' re-emits work.done \
              with the live task_id from `ralph tools task list`. Do not emit work.failed — \
              the implementation is not the failure."
-        )
-    } else {
-        format!(
-            "Task '{task_id}' not found in task store. Hat '{source_hat}' cannot create \
-             runtime tasks here; hat '{target}' must mint or repair the task row, then \
-             hat '{source_hat}' re-emits work.done with the live task_id."
         )
     };
     (target, hint)
@@ -248,7 +248,7 @@ impl GitEvidenceProvider for DefaultGitEvidenceProvider {
         // are stable to split.
         let range = match since_sha {
             Some(start) => format!("{}..HEAD", start),
-            None => format!("HEAD"),
+            None => "HEAD".to_string(),
         };
         let n = max_count.to_string();
         let output = Command::new("git")
@@ -361,10 +361,12 @@ impl ExecutionContractFinding {
 
 /// Kind of contract violation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Default)]
 pub enum ExecutionContractViolationKind {
     /// Payload is missing a required field.
     MissingPayloadField { field: String },
     /// Payload is not a valid JSON object.
+    #[default]
     InvalidPayload,
     /// Referenced task does not exist.
     TaskNotFound { task_id: String },
@@ -416,17 +418,6 @@ pub enum ExecutionContractViolationKind {
     },
 }
 
-impl Default for ExecutionContractViolationKind {
-    fn default() -> Self {
-        // Used only as a placeholder by `..Default::default()` on
-        // `ExecutionContractFinding` in the validate_* helpers — the
-        // actual variant is overwritten by the literal field
-        // initialiser that precedes `..Default::default()`.  Pick the
-        // simplest variant so accidental Default construction is
-        // visible in code review.
-        ExecutionContractViolationKind::InvalidPayload
-    }
-}
 
 /// Maximum number of commit messages scanned for the fix-unit footer
 /// soft check.  Keeps the loop bounded even on large monorepos.
@@ -593,27 +584,24 @@ pub fn validate_execution_contract(
     }
 
     // 2. Task validation (if payload has required fields)
-    if findings.is_empty() {
-        if let Some(rejection) = validate_task(event, rule, current_loop_id, tasks_path) {
+    if findings.is_empty()
+        && let Some(rejection) = validate_task(event, rule, current_loop_id, tasks_path) {
             findings.push(with_source_hat(rejection, source_hat.clone()));
         }
-    }
 
     // 3. Git evidence validation (if task validation passed)
-    if findings.is_empty() {
-        if let Some(rejection) =
+    if findings.is_empty()
+        && let Some(rejection) =
             validate_git_change(event, rule, workspace_root, git_provider, loop_start_sha)
         {
             findings.push(with_source_hat(rejection, source_hat.clone()));
         }
-    }
 
     // 4. Test evidence validation (if git evidence passed)
-    if findings.is_empty() {
-        if let Some(rejection) = validate_test_evidence(event, rule) {
+    if findings.is_empty()
+        && let Some(rejection) = validate_test_evidence(event, rule) {
             findings.push(with_source_hat(rejection, source_hat));
         }
-    }
 
     if findings.is_empty() {
         ExecutionContractDecision::Accept
@@ -808,7 +796,9 @@ fn validate_task(
     // to the TaskStore lookup below so a `work.done` with
     // `task_id=""` + matching `task_key` can find the
     // existing task opened under the projector-derived id.
-    let task_key_from_payload = if !rule.require_task.key_field.is_empty() {
+    let task_key_from_payload = if rule.require_task.key_field.is_empty() {
+        None
+    } else {
         match map.get(&rule.require_task.key_field) {
             Some(Value::String(s)) => Some(s.as_str()),
             Some(other) => {
@@ -836,8 +826,6 @@ fn validate_task(
                 });
             }
         }
-    } else {
-        None
     };
 
     // 2026-06-28 plan U5 (R8): when the agent's `task_id` is
@@ -968,8 +956,8 @@ fn validate_task(
     };
 
     // 2026-07-07-002 U7: payload task_key must match the live record key.
-    if let Some(payload_key) = task_key_from_payload {
-        if task.key.as_deref() != Some(payload_key) {
+    if let Some(payload_key) = task_key_from_payload
+        && task.key.as_deref() != Some(payload_key) {
             return Some(ExecutionContractFinding {
                 kind: ExecutionContractViolationKind::TaskNotFound {
                     task_id: task_id.clone(),
@@ -983,7 +971,6 @@ fn validate_task(
                 ..Default::default()
             });
         }
-    }
 
     // Check loop scoping
     if rule.require_task.loop_scoped {
@@ -1103,21 +1090,17 @@ fn validate_git_change(
 
     // Check if this step allows empty git (trivial path)
     let payload_str = event.payload.as_str();
-    if !payload_str.trim().is_empty() {
-        if let Ok(payload) = serde_json::from_str::<Value>(payload_str) {
-            if let Value::Object(map) = &payload {
-                if let Some(step) = map.get("step").and_then(|v| v.as_str()) {
-                    if rule
+    if !payload_str.trim().is_empty()
+        && let Ok(payload) = serde_json::from_str::<Value>(payload_str)
+            && let Value::Object(map) = &payload
+                && let Some(step) = map.get("step").and_then(|v| v.as_str())
+                    && rule
                         .require_git_change
                         .allow_empty_for_steps
                         .contains(&step.to_string())
                     {
                         return None;
                     }
-                }
-            }
-        }
-    }
 
     let has_uncommitted = git_provider.has_uncommitted_changes(workspace_root);
     let has_new_commits = git_provider.has_new_commits_since(workspace_root, loop_start_sha);
@@ -1403,7 +1386,7 @@ mod tests {
 
         // This test would need proper git and task setup - just verify structure here
         assert_eq!(rule.require_payload_fields.len(), 5);
-        assert_eq!(rule.require_task.loop_scoped, true);
+        assert!(rule.require_task.loop_scoped);
     }
 
     #[test]
@@ -1489,8 +1472,8 @@ mod tests {
         let rule = ExecutionContractRule {
             require_payload_fields: vec![],
             require_task: TaskCompletionRequirement {
-                id_field: "".to_string(), // Empty = task validation skipped
-                key_field: "".to_string(),
+                id_field: String::new(), // Empty = task validation skipped
+                key_field: String::new(),
                 loop_scoped: false,
                 allowed_terminal_statuses: vec![],
                 auto_close_on_valid: false,
@@ -1905,8 +1888,8 @@ mod tests {
         let rule = ExecutionContractRule {
             require_payload_fields: vec![],
             require_task: TaskCompletionRequirement {
-                id_field: "".to_string(),
-                key_field: "".to_string(),
+                id_field: String::new(),
+                key_field: String::new(),
                 loop_scoped: false,
                 allowed_terminal_statuses: vec![],
                 auto_close_on_valid: false,
@@ -2578,9 +2561,8 @@ mod recent_commit_messages_tests {
         let msgs = DefaultGitEvidenceProvider.recent_commit_messages(&dir, Some(baseline), 10);
         // Should contain post-1 and post-2 only.
         assert!(
-            msgs.iter()
-                .any(|m| m.contains("baseline") && !m.contains("post"))
-                == false,
+            !msgs.iter()
+                .any(|m| m.contains("baseline") && !m.contains("post")),
             "baseline should be excluded: {msgs:?}"
         );
         assert!(msgs.iter().any(|m| m.contains("post-1")));

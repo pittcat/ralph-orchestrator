@@ -84,7 +84,7 @@ hats:
 
     // Empty payload — missing the `reason` field that the
     // default schema gate requires on `plan.blocked`.
-    let event = Event::new("plan.blocked", r#"{}"#);
+    let event = Event::new("plan.blocked", r"{}");
     event_loop.publish_event(event);
 
     // Pin: a `RecoveryDiagnosisEnvelope` was written with

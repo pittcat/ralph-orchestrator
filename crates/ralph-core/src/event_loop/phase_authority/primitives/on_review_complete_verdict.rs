@@ -79,20 +79,20 @@ pub fn evaluate(
 
     let mapping = trigger.as_mapping()?;
     let primitive = mapping
-        .get(&Value::String("primitive".to_string()))?
+        .get(Value::String("primitive".to_string()))?
         .as_str()?;
     if primitive != "on_review_complete_verdict" {
         return None;
     }
 
     let matrix_id = mapping
-        .get(&Value::String("matrix".to_string()))
+        .get(Value::String("matrix".to_string()))
         .and_then(|v| v.as_str())
         .and_then(MatrixId::from_token)?;
 
     let matrix = MATRICES.get(&matrix_id)?;
     let target = lookup_target(matrix, fixture)?;
-    Some(target.to_string())
+    Some(target.clone())
 }
 
 fn lookup_target<'a>(
@@ -149,10 +149,10 @@ mod tests {
 
     fn serial_default_trigger() -> Value {
         serde_yaml::from_str(
-            r#"
+            r"
 primitive: on_review_complete_verdict
 matrix: serial_default
-"#,
+",
         )
         .unwrap()
     }
@@ -233,10 +233,10 @@ matrix: serial_default
     #[test]
     fn unknown_matrix_id_does_not_match() {
         let trigger: Value = serde_yaml::from_str(
-            r#"
+            r"
 primitive: on_review_complete_verdict
 matrix: future_unknown
-"#,
+",
         )
         .unwrap();
         let fx = ReviewCompleteFixture {

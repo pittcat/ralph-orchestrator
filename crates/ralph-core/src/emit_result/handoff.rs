@@ -110,7 +110,7 @@ mod tests {
     fn test_handoff_from_fixture_input_empty_string_yields_skip() {
         let input = EmitHandoffInput {
             from_hat: Some("executor".to_string()),
-            to_hat: Some("".to_string()), // 空字符串
+            to_hat: Some(String::new()), // 空字符串
             reason: Some("phase_complete".to_string()),
         };
         let handoff = handoff_from_fixture_input(&input);

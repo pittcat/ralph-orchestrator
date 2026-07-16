@@ -730,9 +730,7 @@ pub(crate) fn check_plan_sync(plan_path: &Path, tasks_path: &Path) -> CheckResul
     };
 
     // Tasks.jsonl: missing -> warn (T5.4), not a fail.
-    let tasks_summary = if !tasks_path.is_file() {
-        TaskSummary::default()
-    } else {
+    let tasks_summary = if tasks_path.is_file() {
         match read_tasks_summary(tasks_path, &plan_name) {
             Ok(summary) => summary,
             Err(err) => {
@@ -743,6 +741,8 @@ pub(crate) fn check_plan_sync(plan_path: &Path, tasks_path: &Path) -> CheckResul
                 );
             }
         }
+    } else {
+        TaskSummary::default()
     };
 
     let mut issues: Vec<String> = Vec::new();
@@ -764,15 +764,14 @@ pub(crate) fn check_plan_sync(plan_path: &Path, tasks_path: &Path) -> CheckResul
     }
 
     // Rule 2: status still references a stalled unit while tasks for that unit are closed.
-    if let Some(unit_id) = stalled_unit_from_status(&status) {
-        if tasks_summary.closed_for_unit(&unit_id) > 0 && tasks_summary.open_for_unit(&unit_id) == 0
+    if let Some(unit_id) = stalled_unit_from_status(&status)
+        && tasks_summary.closed_for_unit(&unit_id) > 0 && tasks_summary.open_for_unit(&unit_id) == 0
         {
             issues.push(format!(
                 "status='{}' but unit {} has closed tasks and no open ones",
                 status, unit_id
             ));
         }
-    }
 
     if !tasks_path.is_file() {
         // T5.4: missing tasks.jsonl is a warn, not a fail.
@@ -823,7 +822,7 @@ fn stalled_unit_from_status(status: &str) -> Option<String> {
         // Accept e.g. "stalled-after-u3" or "stalled-after-U3".
         let lower = rest.to_lowercase();
         if lower.starts_with('u') {
-            return Some(lower.to_string());
+            return Some(lower.clone());
         }
     }
     None
@@ -1020,7 +1019,7 @@ fn resolve_plan_path(explicit: Option<&str>) -> Result<std::path::PathBuf, Strin
                 if path.extension().and_then(|e| e.to_str()) == Some("md")
                     && let Ok(meta) = entry.metadata()
                     && let Ok(modified) = meta.modified()
-                    && newest.as_ref().map_or(true, |(t, _)| modified > *t)
+                    && newest.as_ref().is_none_or(|(t, _)| modified > *t)
                 {
                     newest = Some((modified, path));
                 }

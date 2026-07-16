@@ -304,18 +304,15 @@ impl RuntimeDiagnosisConfig {
 /// `Parallel` for backwards compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum CoordJoinMode {
     /// Many `from` → many `to` (wave-mode presets).
+    #[default]
     Parallel,
     /// Last `from` → one `to` (serial presets like `ce-executor-serial`).
     Serial,
 }
 
-impl Default for CoordJoinMode {
-    fn default() -> Self {
-        Self::Parallel
-    }
-}
 
 /// Drift-detector configuration.
 ///

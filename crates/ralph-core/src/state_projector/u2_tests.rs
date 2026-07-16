@@ -359,7 +359,7 @@ fn apply_from_ledger_write_failure_returns_err_and_preserves_snapshot() {
 
     let snapshot_before = ledger.snapshot().clone();
     let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
-    let result = proj.apply_from_ledger(&commit, &ledger.snapshot());
+    let result = proj.apply_from_ledger(&commit, ledger.snapshot());
     // Restore the permissions before asserting so cleanup can
     // remove the tempdir.
     let mut restore = std::fs::metadata(&agent_dir).unwrap().permissions();

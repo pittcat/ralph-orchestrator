@@ -226,8 +226,8 @@ impl CoordinatorDecisionGateStage {
                         // for `work.ready(fix-NN, last_in_phase)`;
                         // surface it under the canonical key
                         // expected by the terminal stage.
-                        if !obj.contains_key("plan_name") {
-                            if let Some(pn) = obj
+                        if !obj.contains_key("plan_name")
+                            && let Some(pn) = obj
                                 .get("plan")
                                 .and_then(|v| v.as_str())
                                 .or_else(|| obj.get("planName").and_then(|v| v.as_str()))
@@ -237,18 +237,16 @@ impl CoordinatorDecisionGateStage {
                                     serde_json::Value::String(pn.to_string()),
                                 );
                             }
-                        }
                         // `task_id` flows through unchanged when
                         // present (the projector expects the
                         // same id on `plan.complete`).
-                        if !obj.contains_key("task_id") {
-                            if let Some(tid) = obj.get("taskId").and_then(|v| v.as_str()) {
+                        if !obj.contains_key("task_id")
+                            && let Some(tid) = obj.get("taskId").and_then(|v| v.as_str()) {
                                 obj.insert(
                                     "task_id".to_string(),
                                     serde_json::Value::String(tid.to_string()),
                                 );
                             }
-                        }
                         // `completed_steps` defaults to the
                         // rewritten step id so the report
                         // builder can mark the chain
@@ -263,8 +261,7 @@ impl CoordinatorDecisionGateStage {
                                 );
                             } else if let Some(step_obj) =
                                 obj.get("step").and_then(|v| v.as_object())
-                            {
-                                if let Some(id) = step_obj.get("id").and_then(|v| v.as_str()) {
+                                && let Some(id) = step_obj.get("id").and_then(|v| v.as_str()) {
                                     obj.insert(
                                         "completed_steps".to_string(),
                                         serde_json::Value::Array(vec![serde_json::Value::String(
@@ -272,7 +269,6 @@ impl CoordinatorDecisionGateStage {
                                         )]),
                                     );
                                 }
-                            }
                         }
                     }
                     if let Ok(serialized) = serde_json::to_string(&value) {
@@ -293,7 +289,7 @@ mod tests {
     use crate::event_loop::repair_flow::RepairStateMachine;
     use crate::event_loop::stage_pipeline::{FlowStep, StageContext};
 
-    fn ctx<'a>(repair: &'a mut RepairStateMachine) -> StageContext<'a> {
+    fn ctx(repair: &mut RepairStateMachine) -> StageContext<'_> {
         StageContext::for_test_machine(FlowStep::new("review_walk"), "loop-1", 1, repair)
     }
 

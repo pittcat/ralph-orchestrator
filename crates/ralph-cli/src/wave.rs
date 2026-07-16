@@ -463,13 +463,7 @@ fn run_wave_precheck(
     let config = match config_overrides.first() {
         Some(path_str) => {
             let path = PathBuf::from(path_str);
-            if !path.is_file() {
-                eprintln!(
-                    "Warning: explicit --config '{}' is not a file; falling back to CWD-discovered ralph.yml.",
-                    path_str
-                );
-                load_policy_config_for_cli_emit(None, OnConfigError::Warn, explicit_source_slice)?
-            } else {
+            if path.is_file() {
                 use crate::preflight::load_config_for_preflight_sync;
                 let workspace_root = std::env::current_dir().unwrap_or_default();
                 let hats_source = std::env::var("RALPH_HATS_SOURCE")
@@ -491,6 +485,12 @@ fn run_wave_precheck(
                         None
                     }
                 }
+            } else {
+                eprintln!(
+                    "Warning: explicit --config '{}' is not a file; falling back to CWD-discovered ralph.yml.",
+                    path_str
+                );
+                load_policy_config_for_cli_emit(None, OnConfigError::Warn, explicit_source_slice)?
             }
         }
         None => load_policy_config_for_cli_emit(None, OnConfigError::Warn, &[])?,
@@ -733,23 +733,20 @@ pub fn write_wave_events_with_provenance(
         });
 
         // Add hat provenance if available
-        if let Some(hat_val) = hat {
-            if let Some(obj) = record.as_object_mut() {
+        if let Some(hat_val) = hat
+            && let Some(obj) = record.as_object_mut() {
                 obj.insert("hat".to_string(), serde_json::json!(hat_val));
             }
-        }
 
         // U2: Inject idempotency fields when present
-        if let Some(ik) = idempotency_key {
-            if let Some(obj) = record.as_object_mut() {
+        if let Some(ik) = idempotency_key
+            && let Some(obj) = record.as_object_mut() {
                 obj.insert("idempotency_key".to_string(), serde_json::json!(ik));
             }
-        }
-        if let Some(ih) = idempotency_hash {
-            if let Some(obj) = record.as_object_mut() {
+        if let Some(ih) = idempotency_hash
+            && let Some(obj) = record.as_object_mut() {
                 obj.insert("idempotency_hash".to_string(), serde_json::json!(ih));
             }
-        }
 
         let json_line = serde_json::to_string(&record)?;
         lines.push_str(&json_line);
@@ -1419,9 +1416,7 @@ mod tests {
         // We cannot mutate env in tests under forbid(unsafe), so this
         // asserts the guard shape: when set to "1", nested waves are
         // rejected. The integration test would exercise this end-to-end.
-        if result.as_deref() == Ok("1") {
-            panic!("nested wave check should reject inside worker");
-        }
+        assert!(result.as_deref() != Ok("1"), "nested wave check should reject inside worker")
     }
 
     #[test]
@@ -2226,7 +2221,7 @@ mod tests {
     /// `allow_unsafe_cli_emit: false`, and `schemas.review.wave.ready.required_fields: [depth]`)
     /// to `workspace`. Returns the path to a fresh events file.
     fn setup_strict_u4_workspace(workspace: &Path) -> PathBuf {
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -2238,7 +2233,7 @@ event_loop:
       review.wave.ready:
         required_fields:
           - depth
-"#;
+";
         std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
         std::fs::write(workspace.join("ralph.yml"), yaml).unwrap();
         workspace.join(".ralph/events.jsonl")
@@ -2403,7 +2398,7 @@ event_loop:
         let workspace = tmp.path();
         std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
         // Config has event_policy but it's NOT enabled.
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   event_policy:
     enabled: false
@@ -2413,7 +2408,7 @@ event_loop:
       review.wave.ready:
         required_fields:
           - depth
-"#;
+";
         std::fs::write(workspace.join("ralph.yml"), yaml).unwrap();
         let events = workspace.join(".ralph/events.jsonl");
 
@@ -2480,7 +2475,7 @@ event_loop:
         let workspace = tmp.path();
         std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
         // Strict but allows the bypass.
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   event_policy:
     enabled: true
@@ -2492,7 +2487,7 @@ event_loop:
       review.wave.ready:
         required_fields:
           - depth
-"#;
+";
         std::fs::write(workspace.join("ralph.yml"), yaml).unwrap();
         let events = workspace.join(".ralph/events.jsonl");
 

@@ -140,12 +140,11 @@ fn latest_ignores_logs_and_payload_contract_files() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(value["schema_version"], "1");
-    assert_eq!(
+    assert!(
         value["session_path"]
             .as_str()
             .unwrap()
-            .ends_with("2026-06-05T10-20-30"),
-        true
+            .ends_with("2026-06-05T10-20-30")
     );
 }
 

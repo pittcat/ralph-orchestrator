@@ -177,7 +177,7 @@ impl RejectionRecord {
         let Some(record) = records.get(line_index) else {
             return Ok(None);
         };
-        Ok(classify_record(&record))
+        Ok(classify_record(record))
     }
 
     /// Mark the record as terminal (R11 escalation).  Returns

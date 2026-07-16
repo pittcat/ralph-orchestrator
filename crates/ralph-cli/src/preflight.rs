@@ -925,7 +925,7 @@ pub(crate) fn merge_operator_hat_field_overlays(operator_core: &Value, merged: &
     let Some(merged_mapping) = merged.as_mapping_mut() else {
         return;
     };
-    let Some(merged_hats) = merged_mapping.get_mut(&Value::String("hats".to_string())) else {
+    let Some(merged_hats) = merged_mapping.get_mut(Value::String("hats".to_string())) else {
         return;
     };
     let Some(merged_hats_mapping) = merged_hats.as_mapping_mut() else {
@@ -1024,7 +1024,7 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
                     // regressions: keys outside
                     // ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS were warned
                     // then dropped, falling back to framework defaults.
-                    if !event_loop_mapping.contains_key(&key) {
+                    if !event_loop_mapping.contains_key(key) {
                         event_loop_mapping.insert(key.clone(), value.clone());
                     }
                 } else if ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS.contains(&key_str) {
@@ -1035,7 +1035,7 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
                     // execution_contracts) — those are properties of the
                     // hat collection, not operator policy.
                     event_loop_mapping.insert(key.clone(), value.clone());
-                } else if !event_loop_mapping.contains_key(&key) {
+                } else if !event_loop_mapping.contains_key(key) {
                     // Surface the silent-drop UX defect ONLY when the operator's
                     // ralph.yml has NOT already declared the key. If the operator
                     // did declare it, the operator's value wins and no fallback
@@ -1175,7 +1175,7 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
     // `tests::overlay_round_trip_preserves_all_allowed_keys` pins
     // that any `ALLOWED_HATS_TOP_LEVEL` entry with a preset-side
     // value round-trips into the deserialised `RalphConfig`.
-    for (key, value) in hats_mapping.iter() {
+    for (key, value) in hats_mapping {
         let Some(key_str) = key.as_str() else {
             continue;
         };
@@ -1597,7 +1597,7 @@ mechanism:
         }
         // The default keys (e.g. `mechanism`, `name`, `description`)
         // must all be present.
-        for key in ALLOWED_HATS_TOP_LEVEL.iter() {
+        for key in ALLOWED_HATS_TOP_LEVEL {
             if SPECIAL_OVERLAY_KEYS.contains(key) {
                 continue; // already checked above
             }
@@ -1621,7 +1621,7 @@ mechanism:
     /// in sync.
     #[test]
     fn special_overlay_keys_is_subset_of_allowed_hats_top_level() {
-        for key in SPECIAL_OVERLAY_KEYS.iter() {
+        for key in SPECIAL_OVERLAY_KEYS {
             assert!(
                 ALLOWED_HATS_TOP_LEVEL.contains(key),
                 "SPECIAL_OVERLAY_KEYS contains `{key}` which is missing from \
@@ -2311,7 +2311,7 @@ hats:
         let core = crate::config_resolution::default_core_value()
             .expect("default_core_value must succeed");
         let hats: Value = serde_yaml::from_str(
-            r#"
+            r"
 event_loop:
   state_projection:
     enabled: true
@@ -2322,7 +2322,7 @@ event_loop:
       plan.complete: {kind: plan_complete, final_step: step}
 hats:
   coordinator: {name: Coordinator}
-"#,
+",
         )
         .unwrap();
 

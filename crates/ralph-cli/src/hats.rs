@@ -802,14 +802,13 @@ fn show_hat<W: Write>(
     // the public event contract, but they determine routing behavior in
     // isolated mode. Surface them so operators/agents can discover why a
     // topic is consumed by more than one hat.
-    if let Some(config) = config_registry.get_config(&hat.id) {
-        if !config.trigger_multi_consumer_topics.is_empty() {
+    if let Some(config) = config_registry.get_config(&hat.id)
+        && !config.trigger_multi_consumer_topics.is_empty() {
             writeln!(writer, "\nMulti-consumer topics (opt-in):")?;
             for topic in &config.trigger_multi_consumer_topics {
                 writeln!(writer, "  - {}", topic)?;
             }
         }
-    }
 
     if !hat.instructions.is_empty() {
         writeln!(writer, "\nInstructions:")?;
@@ -1189,7 +1188,7 @@ event_loop:
         .unwrap_err();
         let output = String::from_utf8(buf).unwrap();
         // Must include hat id, topic, field
-        assert!(output.contains("b"), "must include hat id: {}", output);
+        assert!(output.contains('b'), "must include hat id: {}", output);
         assert!(
             output.contains("work.ready"),
             "must include topic: {}",

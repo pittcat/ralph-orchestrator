@@ -529,7 +529,7 @@ impl VerifyOutcome {
         match self {
             VerifyOutcome::Allow => Self::allowed_message(verb),
             VerifyOutcome::Deny { reason, hint } => {
-                format!("{} '{verb}': [{reason}] {hint}", Self::DENY_PREFIX,)
+                format!("{} '{verb}': [{reason}] {hint}", Self::DENY_PREFIX)
             }
         }
     }
@@ -642,7 +642,7 @@ pub(crate) fn canonical_add_payload(args: &AddArgs) -> String {
             blockers.push(piece);
         }
     }
-    blockers.sort();
+    blockers.sort_unstable();
     serde_json::json!({
         "verb": "add",
         "title": args.title,
@@ -664,7 +664,7 @@ pub(crate) fn canonical_ensure_payload(args: &EnsureArgs, derived_key: Option<&s
             blockers.push(piece);
         }
     }
-    blockers.sort();
+    blockers.sort_unstable();
     serde_json::json!({
         "verb": "ensure",
         "key": key,
@@ -1010,13 +1010,11 @@ fn load_config_or_default(
     if let Some(path) = config_resolution::resolve_project_config_path(
         &resolve_workspace_root(root),
         config_sources,
-    ) {
-        if let Ok(raw) = std::fs::read_to_string(&path) {
-            if let Ok(cfg) = serde_yaml::from_str::<ralph_core::config::RalphConfig>(&raw) {
+    )
+        && let Ok(raw) = std::fs::read_to_string(&path)
+            && let Ok(cfg) = serde_yaml::from_str::<ralph_core::config::RalphConfig>(&raw) {
                 return cfg;
             }
-        }
-    }
     serde_yaml::from_str("event_loop:\n  execution_mode: isolated\n").unwrap_or_default()
 }
 
@@ -1091,9 +1089,9 @@ fn add_task_with_args(
         );
     }
 
-    if let Some(key) = task.key.as_deref() {
-        if let Some(locus) = ralph_core::task_store::live_task_locus(key) {
-            if let Some(existing) = store.find_by_locus_in_loop(&locus, task.loop_id.as_deref()) {
+    if let Some(key) = task.key.as_deref()
+        && let Some(locus) = ralph_core::task_store::live_task_locus(key)
+            && let Some(existing) = store.find_by_locus_in_loop(&locus, task.loop_id.as_deref()) {
                 bail!(
                     "task add rejected: live identity already exists for loop {:?} step locus \
                      '{locus}' (task_id={}). Use `ralph tools task ensure` instead of add.",
@@ -1101,8 +1099,6 @@ fn add_task_with_args(
                     existing.id
                 );
             }
-        }
-    }
 
     let task_id = task.id.clone();
     let added = store
@@ -1704,11 +1700,10 @@ fn close_task_with_context_and_config(
     // taken from `ctx.current_hat_id` (not the task owner) so a
     // coordinator hat that closes someone else's task still warns based
     // on its own completion contract.
-    if let (Some(cfg), Some(root_path)) = (config, root) {
-        if let Some(caller_hat) = ctx.current_hat_id.clone() {
+    if let (Some(cfg), Some(root_path)) = (config, root)
+        && let Some(caller_hat) = ctx.current_hat_id.clone() {
             emit_close_completion_warning(root_path, cfg, &caller_hat, task_id);
         }
-    }
     Ok(())
 }
 
@@ -1868,11 +1863,10 @@ fn parse_topics_from_jsonl_tail(content: &str, max_lines: usize) -> Vec<String> 
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if let Some(topic) = v.get("topic").and_then(|t| t.as_str()) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
+            && let Some(topic) = v.get("topic").and_then(|t| t.as_str()) {
                 out.push(topic.to_string());
             }
-        }
     }
     out
 }
@@ -2540,10 +2534,9 @@ fn execute_verify_emit_bridge(args: VerifyEmitBridgeArgs, root: Option<&PathBuf>
         ));
     }
 
-    if ctx.is_agent_context {
-        if let (Some(current), Some(target)) = (ctx.current_loop_id.as_ref(), task.loop_id.as_ref())
-        {
-            if current != target {
+    if ctx.is_agent_context
+        && let (Some(current), Some(target)) = (ctx.current_loop_id.as_ref(), task.loop_id.as_ref())
+            && current != target {
                 return Err(emit_bridge_deny(
                     "loop_scope",
                     "wrong_loop",
@@ -2557,8 +2550,6 @@ fn execute_verify_emit_bridge(args: VerifyEmitBridgeArgs, root: Option<&PathBuf>
                     ),
                 ));
             }
-        }
-    }
 
     // 2. task_key must match the registered key on the task.
     let Some(registered_key) = task.key.clone() else {
@@ -3102,13 +3093,13 @@ hats:
 
     #[test]
     fn enforce_command_policy_empty_coordinator_hats_fails_closed_for_agent() {
-        let yaml = r#"
+        let yaml = r"
 event_loop:
   execution_mode: isolated
 tasks:
   enabled: true
   coordinator_hats: []
-"#;
+";
         let cfg: ralph_core::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let ctx = ctx_for(Path::new("/tmp"), Some("loop-a"), Some("coordinator"));
         let hats = hats_for(&cfg);
@@ -3530,7 +3521,7 @@ tasks:
         write_marker(root, "current-loop-id", "loop-x");
         let mut store = open_store(root);
         let ctx = ctx_for(root, Some("loop-x"), Some("coordinator"));
-        let cfg = base_config_with(&["coordinator"]);
+        let _cfg = base_config_with(&["coordinator"]);
         let before_count = store.all().len();
 
         let outcome = verify_add(
@@ -3555,7 +3546,7 @@ tasks:
         write_marker(root, "current-loop-id", "loop-x");
         let mut store = open_store(root);
         let ctx = ctx_for(root, Some("loop-x"), Some("worker"));
-        let cfg = base_config_with(&["coordinator"]);
+        let _cfg = base_config_with(&["coordinator"]);
 
         let outcome = verify_add(
             &mut store,
@@ -3579,7 +3570,7 @@ tasks:
         write_marker(root, "current-loop-id", "loop-x");
         let mut store = open_store(root);
         let ctx = ctx_for(root, Some("loop-x"), Some("coordinator"));
-        let cfg = base_config_with(&["coordinator"]);
+        let _cfg = base_config_with(&["coordinator"]);
         let mut args = verify_add_args("placeholder");
         args.title = None;
 
@@ -3598,7 +3589,7 @@ tasks:
         write_marker(root, "current-loop-id", "loop-x");
         let mut store = open_store(root);
         let ctx = ctx_for(root, Some("loop-x"), Some("coordinator"));
-        let cfg = base_config_with(&["coordinator"]);
+        let _cfg = base_config_with(&["coordinator"]);
         let mut args = verify_ensure_args("placeholder", "k");
         args.key = None;
         args.for_fix_unit = None;
@@ -3627,7 +3618,7 @@ tasks:
         write_marker(root, "current-loop-id", "loop-x");
         let mut store = open_store(root);
         let ctx = ctx_for(root, Some("loop-x"), Some("coordinator"));
-        let cfg = base_config_with(&["coordinator"]);
+        let _cfg = base_config_with(&["coordinator"]);
 
         let mut task = Task::new("done".into(), 2).with_owner_hat(Some("coordinator".into()));
         task.loop_id = Some("loop-x".into());
@@ -3654,7 +3645,7 @@ tasks:
         write_marker(root, "current-loop-id", "loop-x");
         let store = open_store(root);
         let ctx = ctx_for(root, Some("loop-x"), Some("coordinator"));
-        let cfg = base_config_with(&["coordinator"]);
+        let _cfg = base_config_with(&["coordinator"]);
 
         let outcome = verify_lifecycle(
             &store,
@@ -3896,7 +3887,7 @@ tasks:
         );
         let json_str = payload
             .split_once('{')
-            .map(|(prefix, rest)| format!("{{{rest}"))
+            .map(|(_prefix, rest)| format!("{{{rest}"))
             .unwrap_or_else(|| panic!("payload missing JSON body: {payload}"));
         let parsed: serde_json::Value =
             serde_json::from_str(&json_str).expect("stderr JSON must be parseable");
@@ -3916,7 +3907,7 @@ tasks:
         );
         let json_str = payload
             .split_once('{')
-            .map(|(prefix, rest)| format!("{{{rest}"))
+            .map(|(_prefix, rest)| format!("{{{rest}"))
             .unwrap_or_else(|| panic!("payload missing JSON body: {payload}"));
         let parsed: serde_json::Value =
             serde_json::from_str(&json_str).expect("early-return JSON must be parseable");
@@ -4054,7 +4045,7 @@ tasks:
 mod load_coordinator_hats_tests {
     use super::CoordinatorHatsError;
     use super::load_coordinator_hats;
-    use std::path::PathBuf;
+    
     use tempfile::TempDir;
 
     #[test]
@@ -4160,7 +4151,7 @@ mod load_coordinator_hats_tests {
         let err = load_coordinator_hats(root, &[]).expect_err("must error");
         match err {
             CoordinatorHatsError::InvalidYaml { path, .. } => {
-                assert_eq!(path, PathBuf::from(root.join("ralph.yml")));
+                assert_eq!(path, root.join("ralph.yml"));
             }
             other => panic!("expected InvalidYaml, got {other:?}"),
         }

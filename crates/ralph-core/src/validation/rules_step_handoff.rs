@@ -147,7 +147,7 @@ impl ValidationRule for StepHandoffRule {
             && let Some(ref found) = resolved_task
         {
             // Re-run with the disk-reloaded row appended.
-            let mut extended: Vec<Task> = snapshot.tasks.to_vec();
+            let mut extended: Vec<Task> = snapshot.tasks.clone();
             if !extended.iter().any(|t| t.id == found.id) {
                 extended.push(found.clone());
             }

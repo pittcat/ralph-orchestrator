@@ -74,7 +74,7 @@ fn u3_jsonl_empty_plan_blocked_rejected_not_in_accepted() {
     let events_path = temp.path().join("events.jsonl");
     // Empty payload — schema gate rejects with
     // missing_required_fields.
-    write_jsonl_event(&events_path, "planner", "plan.blocked", r#"{}"#);
+    write_jsonl_event(&events_path, "planner", "plan.blocked", r"{}");
 
     let result = event_loop
         .process_events_from_jsonl()
@@ -157,7 +157,7 @@ fn u3_jsonl_rejection_writes_recovery_envelope() {
     let temp = tempfile::tempdir().unwrap();
     let mut event_loop = build_loop_for_u3(temp.path());
     let events_path = temp.path().join("events.jsonl");
-    write_jsonl_event(&events_path, "planner", "plan.blocked", r#"{}"#);
+    write_jsonl_event(&events_path, "planner", "plan.blocked", r"{}");
 
     event_loop
         .process_events_from_jsonl()

@@ -112,22 +112,18 @@ pub fn check_review_synthesizer_block_guard(
     let severity = strictness.ownership_severity();
     let finding = LintFinding::new(
         FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD,
-        format!(
-            "review-synthesizer 'all_dimensions_failed' hard-gate wording drifted away from \
+        "review-synthesizer 'all_dimensions_failed' hard-gate wording drifted away from \
          the explicit 'all 6 dimensions status == failed' invariant. The runtime relies on \
          the explicit phrasing to decide between plan.blocked (all 6 failed) and the \
          residual-risks path (mixed done+failed). Loose wording such as 'All dimensions failed' \
          or 'all_dimensions_failed' without '全 6' / '6 个维度' / 'all 6' lets the silent-success \
-         shape (verdict=blocked + findings_count=0) slip through as a pass."
-        ),
+         shape (verdict=blocked + findings_count=0) slip through as a pass.".to_string(),
     )
     .with_hat(HAT_REVIEW_SYNTHESIZER.to_string())
-    .with_action_hint(format!(
-        "Rewrite the block-guard phrase to make the 6-dimension scope explicit, e.g.: \
+    .with_action_hint("Rewrite the block-guard phrase to make the 6-dimension scope explicit, e.g.: \
          'ONLY when all 6 dimensions have status == \"failed\" publish \
          plan.blocked(reason=\"all_dimensions_failed\"). Mixed (some done + some failed): \
-         route through normal verdict path; failed dimensions count toward residual_risks.'"
-    ));
+         route through normal verdict path; failed dimensions count toward residual_risks.'".to_string());
     // Override the default severity (LintFinding::new is hard-coded
     // to Error) to match the lint's actual contract — Warn in
     // default mode, Error in strict.

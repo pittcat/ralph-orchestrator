@@ -189,9 +189,9 @@ hats:
     )
 }
 
-fn find_multi_hat_finding<'a>(
-    findings: &'a [crate::runtime_contract::RuntimeContractFinding],
-) -> Option<&'a crate::runtime_contract::RuntimeContractFinding> {
+fn find_multi_hat_finding(
+    findings: &[crate::runtime_contract::RuntimeContractFinding],
+) -> Option<&crate::runtime_contract::RuntimeContractFinding> {
     findings
         .iter()
         .find(|f| f.id == format!("lint.{}", FINDING_MULTI_HAT_REQUIRES_ISOLATED))
@@ -240,8 +240,8 @@ fn u1_four_hats_default_mode_run_preset_lint_produces_error_with_details() {
         "action_hint must be set on the multi-hat finding"
     );
     let msg = &finding.message;
-    assert!(msg.contains("4"));
-    assert!(msg.contains("3"));
+    assert!(msg.contains('4'));
+    assert!(msg.contains('3'));
 }
 
 /// AE3: 4 hats with explicit `execution_mode: coordinator` →

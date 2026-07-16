@@ -104,15 +104,14 @@ pub async fn resume_command(
     // Resume is the only path where this matters — `ralph run
     // --plan` rewrites `prompt_file` directly via
     // `commands/run.rs:859-863`.
-    if let Some(plan_path) = args.plan.as_ref() {
-        if let Err(e) = write_resume_anchor_marker(plan_path) {
+    if let Some(plan_path) = args.plan.as_ref()
+        && let Err(e) = write_resume_anchor_marker(plan_path) {
             eprintln!(
                 "{}warning:{} failed to write anchor marker: {e}",
                 colors::YELLOW,
                 colors::RESET
             );
         }
-    }
 
     // Apply CLI overrides
     if let Some(max_iter) = args.max_iterations {
@@ -189,7 +188,7 @@ pub async fn resume_command(
         None,  // hats_source_label (resume re-resolves builtin via its own path)
     )
     .await
-    .map_err(|e| {
+    .inspect_err(|e| {
         // Map `agent_doc_sync` strict-mode failures (and the typed
         // preset-lint error) to their explicit exit codes so CI / cron
         // callers can distinguish them from generic failures. Without
@@ -197,10 +196,9 @@ pub async fn resume_command(
         // the process would exit with 1 — swallowing the 78 / 2
         // contract the run command already preserves (see
         // `run_loop_result_exit_code` in commands/run.rs).
-        if let Some(code) = crate::commands::run::run_loop_result_exit_code(&e) {
+        if let Some(code) = crate::commands::run::run_loop_result_exit_code(e) {
             std::process::exit(code);
         }
-        e
     })?;
     let exit_code = reason.exit_code();
 

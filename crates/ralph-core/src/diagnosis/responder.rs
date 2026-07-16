@@ -646,7 +646,7 @@ impl RecoveryResponder {
     /// iteration `N` would be self-referential and would mask
     /// genuine recovery regressions. We require `current_iteration
     /// > state.last_iteration` (the iteration the finding was
-    /// produced at) for the recovery path to fire.
+    /// > produced at) for the recovery path to fire.
     ///
     /// `accepted_evidence` should be the **accepted** event stream
     /// of the iteration that just completed (i.e. the events that
@@ -874,7 +874,8 @@ impl RecoveryResponder {
         // `get_mut` borrow so the second-arm mutation does not
         // double-borrow `self`.
         let incoming = RetryState::from_envelope(envelope);
-        let new_count = match self.state.get_mut(&retry_key) {
+        
+        match self.state.get_mut(&retry_key) {
             None => {
                 // First observation: seed the state. We do the
                 // seeding here instead of via `Entry::or_insert_with`
@@ -923,8 +924,7 @@ impl RecoveryResponder {
                 push_outcome_history(&mut entry.outcome_history, envelope.outcome);
                 entry.attempt_count
             }
-        };
-        new_count
+        }
     }
 
     /// Classify the current observation into a Soft / Hard / Final

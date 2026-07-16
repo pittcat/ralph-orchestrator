@@ -16,7 +16,7 @@ use crate::event_loop::stage_pipeline::StagePipeline;
 
 fn minimal_flow() -> FlowDeclaration {
     FlowDeclaration::from_yaml(
-        r#"
+        r"
 mechanism:
   flow:
     type: declared
@@ -25,7 +25,7 @@ mechanism:
     steps:
       - id: unit_loop
         allowed_emits: [work.ready, work.done]
-"#,
+",
     )
     .expect("minimal flow must parse")
 }

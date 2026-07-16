@@ -264,9 +264,7 @@ pub(crate) fn resolve_emit_path(
         }
     } else if let Ok(value) = fs::read_to_string(&candidate_marker) {
         let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            resolve_marker_target(workspace_root, trimmed)
-        } else {
+        if trimmed.is_empty() {
             // U2 (R4): isolated + hat marker → fall through to channel,
             // NOT the legacy `events.jsonl` default. The legacy default
             // path is reserved for non-isolated callers (manual debug,
@@ -284,12 +282,12 @@ pub(crate) fn resolve_emit_path(
             } else {
                 default_path.clone()
             }
+        } else {
+            resolve_marker_target(workspace_root, trimmed)
         }
     } else if let Ok(value) = fs::read_to_string(&current_marker) {
         let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            resolve_marker_target(workspace_root, trimmed)
-        } else {
+        if trimmed.is_empty() {
             // U2 (R4): isolated + hat marker → channel.
             if isolated_mode && current_hat.is_some() {
                 let marker_value = fs::read_to_string(&current_hat_marker)
@@ -304,6 +302,8 @@ pub(crate) fn resolve_emit_path(
             } else {
                 default_path.clone()
             }
+        } else {
+            resolve_marker_target(workspace_root, trimmed)
         }
     } else if isolated_mode
         && current_hat.is_some()
@@ -315,10 +315,10 @@ pub(crate) fn resolve_emit_path(
         // write channel is the legitimate destination for `ralph emit`
         // under isolated execution.
         let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            resolve_marker_target(workspace_root, trimmed)
-        } else {
+        if trimmed.is_empty() {
             default_path.clone()
+        } else {
+            resolve_marker_target(workspace_root, trimmed)
         }
     } else {
         default_path.clone()

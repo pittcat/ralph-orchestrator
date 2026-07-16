@@ -753,7 +753,7 @@ mod tests {
 
         // The session dir must contain the timestamped subdir (no logs fallback).
         assert!(session_dir.exists());
-        let entries: Vec<_> = std::fs::read_dir(&session_dir)
+        let entries: Vec<_> = std::fs::read_dir(session_dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .collect();
@@ -890,7 +890,7 @@ mod tests {
     /// becomes the thing under test.
     fn install_diagnostic_flow(event_loop: &mut EventLoop) {
         use crate::event_loop::flow_declaration::{FlowDeclaration, FlowStepDecl};
-        let yaml = r#"mechanism:
+        let yaml = r"mechanism:
   flow:
     type: declared
     version: 1
@@ -900,7 +900,7 @@ mod tests {
         kind: foreach
         allowed_emits: [build.start, build.done, LOOP_COMPLETE]
         terminal_when: all_done
-"#;
+";
         let flow = FlowDeclaration::from_yaml(yaml).expect("diagnostic-flow YAML must parse");
         // Sanity: the helper declares the topics the callers emit. If a
         // future test adds a new topic, this assertion fails loudly

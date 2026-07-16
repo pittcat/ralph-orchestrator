@@ -8,6 +8,19 @@ pub const VALID_BACKENDS: &[&str] = &[
 /// Human-readable list for CLI messages and docs.
 pub const VALID_BACKENDS_LABEL: &str = "claude, gemini, codex, opencode, pi, traecli, custom";
 
+/// Returns `true` if the backend identifier is known.
+pub fn is_known_backend(name: &str) -> bool {
+    VALID_BACKENDS.contains(&name)
+}
+
+/// Formats the canonical unknown-backend error with all supported backends.
+pub fn unknown_backend_message(name: &str) -> String {
+    format!(
+        "Unknown backend: {}\n\nValid backends: {}",
+        name, VALID_BACKENDS_LABEL
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,17 +76,4 @@ mod tests {
             "VALID_BACKENDS_LABEL must not contain deleted backend 'kiro'"
         );
     }
-}
-
-/// Returns `true` if the backend identifier is known.
-pub fn is_known_backend(name: &str) -> bool {
-    VALID_BACKENDS.contains(&name)
-}
-
-/// Formats the canonical unknown-backend error with all supported backends.
-pub fn unknown_backend_message(name: &str) -> String {
-    format!(
-        "Unknown backend: {}\n\nValid backends: {}",
-        name, VALID_BACKENDS_LABEL
-    )
 }

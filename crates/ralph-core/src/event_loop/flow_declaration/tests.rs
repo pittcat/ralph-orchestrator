@@ -41,14 +41,14 @@ mechanism:
 
 #[test]
 fn flow_declaration_parses_minimal_legal_flow() {
-    let yaml = r#"
+    let yaml = r"
 mechanism:
   flow:
     type: declared
     steps:
       - id: unit_loop
         allowed_emits: [work.ready, work.done]
-"#;
+";
     let decl = FlowDeclaration::from_yaml(yaml).unwrap();
     assert_eq!(decl.steps.len(), 1);
     assert_eq!(decl.steps[0].id, "unit_loop");
@@ -72,32 +72,32 @@ fn flow_declaration_parses_full_ce_executor_serial_flow() {
 
 #[test]
 fn flow_declaration_rejects_missing_mechanism_flow() {
-    let yaml = r#"some_other_key: true"#;
+    let yaml = r"some_other_key: true";
     let err = FlowDeclaration::from_yaml(yaml).unwrap_err();
     assert!(matches!(err, FlowParseError::MissingMechanismFlow));
 }
 
 #[test]
 fn flow_declaration_rejects_unsupported_type() {
-    let yaml = r#"
+    let yaml = r"
 mechanism:
   flow:
     type: inferred
     steps: []
-"#;
+";
     let err = FlowDeclaration::from_yaml(yaml).unwrap_err();
     assert!(matches!(err, FlowParseError::UnsupportedFlowType(ref t) if t == "inferred"));
 }
 
 #[test]
 fn flow_declaration_rejects_soft_enforce_schema() {
-    let yaml = r#"
+    let yaml = r"
 mechanism:
   flow:
     type: declared
     enforce_schema: soft
     steps: []
-"#;
+";
     let err = FlowDeclaration::from_yaml(yaml).unwrap_err();
     assert!(matches!(
         err,
@@ -107,13 +107,13 @@ mechanism:
 
 #[test]
 fn flow_declaration_rejects_optional_state_idempotency() {
-    let yaml = r#"
+    let yaml = r"
 mechanism:
   flow:
     type: declared
     state_idempotency: optional
     steps: []
-"#;
+";
     let err = FlowDeclaration::from_yaml(yaml).unwrap_err();
     assert!(matches!(
         err,
@@ -123,7 +123,7 @@ mechanism:
 
 #[test]
 fn flow_declaration_rejects_duplicate_step_ids() {
-    let yaml = r#"
+    let yaml = r"
 mechanism:
   flow:
     type: declared
@@ -132,7 +132,7 @@ mechanism:
         allowed_emits: [work.ready]
       - id: unit_loop
         allowed_emits: [work.done]
-"#;
+";
     let err = FlowDeclaration::from_yaml(yaml).unwrap_err();
     assert!(matches!(err, FlowParseError::DuplicateStepId(ref s) if s == "unit_loop"));
 }

@@ -1694,7 +1694,7 @@ Still working..."#;
 
     #[test]
     fn test_build_done_missing_evidence_emits_build_blocked() {
-        let missing = vec!["typecheck".to_string()];
+        let missing = ["typecheck".to_string()];
         let reason = "required checks failed: typecheck";
         let msg = build_blocked_payload(reason);
         assert!(msg.contains("typecheck"));

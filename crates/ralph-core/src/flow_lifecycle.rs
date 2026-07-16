@@ -466,6 +466,7 @@ impl FlowLifecycleRegistry {
         if !self.current_step.is_empty() {
             return self.current_step.as_str();
         }
+        #[allow(deprecated)]
         self.current_step_id_fallback()
     }
 
@@ -802,11 +803,11 @@ pub fn reconcile_wave_timeouts(
         // Integer arithmetic to avoid `u32::try_from` truncation for
         // large aggregate values. Compute (aggregate * 110 / 100) * 1000
         // using u128 to hold the intermediate without overflow.
-        let threshold_ms = ((configured.aggregate as u128)
+        let threshold_ms = (u128::from(configured.aggregate)
             .saturating_mul(110)
             .saturating_div(100)
             .saturating_mul(1000)
-            .min(u64::MAX as u128)) as u64;
+            .min(u128::from(u64::MAX))) as u64;
         if actual_wait_ms > threshold_ms {
             drift_envelope = Some(build_drift_envelope(
                 flow_unit_id,
@@ -915,7 +916,7 @@ mod tests {
             current = got;
         }
         assert_eq!(current, FlowPhase::Closed);
-        assert!(reg.is_obligation_pending("wf-1") == false);
+        assert!(!reg.is_obligation_pending("wf-1"));
     }
 
     #[test]
@@ -1092,10 +1093,10 @@ mod tests {
         assert!(reg.is_obligation_pending_for_hat("review-coordinator", &[]));
 
         // Filter that matches rec_a.source_topic -> true.
-        assert!(reg.is_obligation_pending_for_hat("review-coordinator", &[&"review.wave.ready"],));
+        assert!(reg.is_obligation_pending_for_hat("review-coordinator", &["review.wave.ready"],));
 
         // Filter for an unrelated topic -> false.
-        assert!(!reg.is_obligation_pending_for_hat("review-coordinator", &[&"unrelated.topic"],));
+        assert!(!reg.is_obligation_pending_for_hat("review-coordinator", &["unrelated.topic"],));
     }
 
     #[test]
@@ -1196,7 +1197,7 @@ mod tests {
     #[test]
     fn timeout_reconciler_within_tolerance_writes_no_envelope() {
         let deadlines = WaveDeadlines::new(60, 1800);
-        let actual = Duration::from_millis(1_750_000); // 1750s, within 10% of 1800s
+        let actual = Duration::from_secs(1750); // 1750s, within 10% of 1800s
         let r = reconcile_wave_timeouts(
             "wf-1",
             "review.wave.ready",
@@ -1215,7 +1216,7 @@ mod tests {
     #[test]
     fn timeout_reconciler_over_budget_writes_drift_envelope() {
         let deadlines = WaveDeadlines::new(60, 1800);
-        let actual = Duration::from_millis(1_990_000); // 1990s > 1800*1.10=1980s
+        let actual = Duration::from_secs(1990); // 1990s > 1800*1.10=1980s
         let r = reconcile_wave_timeouts(
             "wf-1",
             "review.wave.ready",
@@ -1233,7 +1234,7 @@ mod tests {
     #[test]
     fn timeout_reconciler_early_firing_writes_envelope() {
         let deadlines = WaveDeadlines::new(60, 1800);
-        let actual = Duration::from_millis(100_000); // 100s, well under 900s half-budget
+        let actual = Duration::from_secs(100); // 100s, well under 900s half-budget
         let r = reconcile_wave_timeouts(
             "wf-1",
             "review.wave.ready",
@@ -1272,7 +1273,7 @@ mod tests {
         // u32::MAX as the configured aggregate. The old f64 path
         // truncated this to u32::MAX anyway, so the new integer
         // path must agree: configured_aggregate_ms == u32::MAX * 1000.
-        let deadlines = WaveDeadlines::new(60, u32::MAX as u64);
+        let deadlines = WaveDeadlines::new(60, u64::from(u32::MAX));
         let actual = Duration::from_millis(0);
         let r = reconcile_wave_timeouts(
             "wf-1",
@@ -1282,7 +1283,7 @@ mod tests {
             actual,
             1,
         );
-        assert_eq!(r.configured_aggregate_ms, u32::MAX as u64 * 1000);
+        assert_eq!(r.configured_aggregate_ms, u64::from(u32::MAX) * 1000);
         // With actual_wait=0 and configured huge, the early-firing
         // branch (actual < configured/2) should fire.
         assert!(r.drift_envelope.is_some());
@@ -1457,10 +1458,7 @@ pub mod incomplete_wave_gate {
             // even been activated. The U4 path covers those
             // cases via `inject_review_aggregate_timeouts`.
             let phase = registry.get(wave_id).map(|r| r.phase);
-            match phase {
-                Some(FlowPhase::WorkersActive) | Some(FlowPhase::Spawning) => return None,
-                _ => {}
-            }
+            if let Some(FlowPhase::WorkersActive | FlowPhase::Spawning) = phase { return None }
             Some(PlanBlockedPayload {
                 reason: PlanBlockedPayload::REASON,
                 wave_id: wave_id.to_string(),

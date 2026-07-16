@@ -100,7 +100,7 @@ pub const TIER_0_WAC_PRESETS: &[&str] = &["ce-executor-pipeline"];
 /// passes WAC strict.
 #[allow(dead_code)] // 003 plan tiered-gates 预留：见 docs/solutions/developer-experience/wac-rollout-tiered-gates-2026-06-12.md
 pub fn is_tier_0_wac_preset(preset_name: &str) -> bool {
-    TIER_0_WAC_PRESETS.iter().any(|n| *n == preset_name)
+    TIER_0_WAC_PRESETS.contains(&preset_name)
 }
 
 /// Returns all embedded presets.
@@ -334,11 +334,11 @@ mod tests {
     fn test_preset_names_contains_pipeline() {
         let names = preset_names();
         assert!(
-            names.iter().any(|n| *n == "ce-executor-pipeline"),
+            names.contains(&"ce-executor-pipeline"),
             "ce-executor-pipeline must be a public builtin; got {names:?}"
         );
         assert!(
-            names.iter().any(|n| *n == "ce-executor-pipeline-loop"),
+            names.contains(&"ce-executor-pipeline-loop"),
             "ce-executor-pipeline-loop must be a public builtin; got {names:?}"
         );
     }
@@ -447,7 +447,7 @@ mod tests {
     fn test_preset_names_excludes_serial() {
         let names = preset_names();
         assert!(
-            !names.iter().any(|n| *n == "ce-executor-serial"),
+            !names.contains(&"ce-executor-serial"),
             "ce-executor-serial must not appear in preset_names(); got {names:?}"
         );
     }
@@ -883,12 +883,10 @@ mod tests {
             match validate_event_origin(&unknown_event, &registry, cancellation, completion) {
                 OriginCheck::Accepted => {
                     // Only acceptable when registry is empty (solo mode)
-                    if !registry.is_empty() {
-                        panic!(
-                            "Preset '{}': unknown hat 'strategist' should be rejected",
-                            preset.name
-                        );
-                    }
+                    assert!(registry.is_empty(), 
+                        "Preset '{}': unknown hat 'strategist' should be rejected",
+                        preset.name
+                    );
                 }
                 OriginCheck::Rejected { .. } => {} // Expected
             }
@@ -1028,7 +1026,7 @@ mod tests {
         let preset = get_preset("ce-executor-pipeline-loop")
             .expect("ce-executor-pipeline-loop preset should exist");
         let value: serde_yaml::Value =
-            serde_yaml::from_str(&preset.content).expect("embedded preset must be valid YAML");
+            serde_yaml::from_str(preset.content).expect("embedded preset must be valid YAML");
         let schemas = value
             .get("event_loop")
             .and_then(|v| v.get("event_policy"))
@@ -1625,7 +1623,7 @@ mod tests {
             let registry = HatRegistry::from_runtime_config(&config);
             let strictness = RuntimeContractStrictness::default(); // non-strict
             let report = RuntimeContractAggregator::aggregate(
-                &format!("builtin:{}", preset.name),
+                format!("builtin:{}", preset.name),
                 &config,
                 &registry,
                 strictness,
@@ -1699,7 +1697,7 @@ mod tests {
             let registry = HatRegistry::from_runtime_config(&config);
             let strictness = RuntimeContractStrictness::preset_check_strict();
             let report = RuntimeContractAggregator::aggregate(
-                &format!("builtin:{}", preset.name),
+                format!("builtin:{}", preset.name),
                 &config,
                 &registry,
                 strictness,
@@ -1787,13 +1785,13 @@ mod tests {
         const EXEMPT_FINDINGS: &[(&str, &str, &str)] = &[];
 
         let mut failures = Vec::new();
-        for preset in PRESETS.iter() {
+        for preset in PRESETS {
             let config =
                 RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
             let registry = HatRegistry::from_runtime_config(&config);
             let strictness = RuntimeContractStrictness::preset_check_strict();
             let report = RuntimeContractAggregator::aggregate(
-                &format!("builtin:{}", preset.name),
+                format!("builtin:{}", preset.name),
                 &config,
                 &registry,
                 strictness,
@@ -1873,7 +1871,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("Tier-0 preset '{preset_name}' failed to parse: {e}"));
             let registry = HatRegistry::from_runtime_config(&config);
             let report = RuntimeContractAggregator::aggregate(
-                &format!("builtin:{}", preset.name),
+                format!("builtin:{}", preset.name),
                 &config,
                 &registry,
                 RuntimeContractStrictness::preset_check_strict(),

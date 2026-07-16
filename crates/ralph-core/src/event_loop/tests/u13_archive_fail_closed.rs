@@ -14,7 +14,7 @@ use super::*;
 #[test]
 fn u13_with_context_and_diagnostics_succeeds_when_nothing_to_archive() {
     let temp = tempfile::tempdir().unwrap();
-    let events_path = temp.path().join("events.jsonl");
+    let _events_path = temp.path().join("events.jsonl");
     let diagnostics_root = temp.path().to_path_buf();
     let yaml = r#"
 event_loop:
@@ -68,7 +68,7 @@ fn u13_archive_state_for_loop_rejects_relative_workspace() {
 #[test]
 fn u13_with_context_and_diagnostics_aborts_on_archive_failure() {
     let bogus_workspace = std::path::PathBuf::from("relative/workspace");
-    let events_path = bogus_workspace.join("events.jsonl");
+    let _events_path = bogus_workspace.join("events.jsonl");
     let yaml = r#"
 event_loop:
   completion_promise: "LOOP_COMPLETE"

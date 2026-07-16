@@ -117,11 +117,11 @@ fn test_execution_contract_rejects_work_done_with_missing_payload() {
 #[test]
 fn test_execution_contract_disabled_passes_through() {
     // When execution_contracts is disabled (default), events pass through normally
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   execution_contracts:
     enabled: false
-"#;
+";
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
 
@@ -638,7 +638,7 @@ fn test_execution_contract_commit_only_clean_rejects_dirty_workspace() {
     use crate::config::execution_contracts::{
         ContractRejectConfig, TaskCompletionRequirement, TestEvidenceRequirement,
     };
-    use crate::execution_contract::{DefaultGitEvidenceProvider, validate_execution_contract};
+    
 
     // The executor's working tree is the repo root. Force-dirty it
     // by creating a fresh tracked file and leaving it uncommitted.
@@ -656,7 +656,7 @@ fn test_execution_contract_commit_only_clean_rejects_dirty_workspace() {
     let dirty_marker = tmp_dir.join("dirty_marker.txt");
     std::fs::write(&dirty_marker, "intentional-dirty").unwrap();
 
-    let rule = ExecutionContractRule {
+    let _rule = ExecutionContractRule {
         require_payload_fields: vec![],
         // Empty `id_field` skips require_task validation entirely;
         // this test only pins the "not-a-git-repo → Accept bypass"
@@ -677,7 +677,7 @@ fn test_execution_contract_commit_only_clean_rejects_dirty_workspace() {
         reject: ContractRejectConfig::default(),
     };
 
-    let event = Event::new(
+    let _event = Event::new(
         "work.done",
         r#"{"plan_name":"p","task_id":"t","task_key":"k","step":"step-01","commit_count":1,"changed_lines":1}"#,
     );

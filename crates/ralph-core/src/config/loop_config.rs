@@ -200,7 +200,9 @@ pub struct HintCondition {
 /// parse error.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum HintOp {
+    #[default]
     Eq,
     Ne,
     Gt,
@@ -216,11 +218,6 @@ pub enum HintOp {
     Unknown(String),
 }
 
-impl Default for HintOp {
-    fn default() -> Self {
-        HintOp::Eq
-    }
-}
 
 /// 2026-07-03-005 plan (P0 fix C7): per-array-field element shape
 /// constraint. Applied to every element of the named array field.
@@ -585,6 +582,7 @@ pub struct EventLoopConfig {
 /// first unit that opens `validate_payload` / `emit_result_summary`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct HandoffEnvelopeConfig {
     /// Master switch. When `false` the handoff envelope is dormant
     /// at every layer: payload validator is skipped, prompt
@@ -616,16 +614,6 @@ pub struct HandoffEnvelopeConfig {
     pub emit_result_summary: bool,
 }
 
-impl Default for HandoffEnvelopeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            prompt_injection: false,
-            validate_payload: false,
-            emit_result_summary: false,
-        }
-    }
-}
 
 /// Configuration for the macro-edge next hint (U18 P2).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -959,10 +947,10 @@ aggregate_timeout_secs: 900
     /// `database_path` from silently no-op'ing.
     #[test]
     fn u1_supervisor_config_rejects_unknown_field() {
-        let yaml = r#"
+        let yaml = r"
 enabled: true
 bogus_field: 1
-"#;
+";
         let result: Result<SupervisorConfig, _> = serde_yaml::from_str(yaml);
         assert!(
             result.is_err(),
@@ -994,11 +982,11 @@ prompt_file: "PROMPT.md"
     /// U12/U13 will exercise when wiring the dispatcher branch.
     #[test]
     fn u1_event_loop_config_supervises_when_enabled_true() {
-        let yaml = r#"
+        let yaml = r"
 supervisor:
   enabled: true
   max_concurrent_workers: 16
-"#;
+";
         let cfg: EventLoopConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.supervisor.enabled);
         assert_eq!(cfg.supervisor.max_concurrent_workers, 16);
@@ -1038,12 +1026,12 @@ supervisor:
     /// with the same defaults when omitted at the top level.
     #[test]
     fn handoff_envelope_deserializes_explicit_flags() {
-        let yaml = r#"
+        let yaml = r"
 enabled: true
 prompt_injection: true
 validate_payload: false
 emit_result_summary: false
-"#;
+";
         let cfg: HandoffEnvelopeConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.enabled);
         assert!(cfg.prompt_injection);
@@ -1054,10 +1042,10 @@ emit_result_summary: false
         // error so silent typos like `validates_payload` cannot
         // no-op. Mirrors `SupervisorConfig`'s deny_unknown_fields
         // contract (same regression防线 family).
-        let bad_yaml = r#"
+        let bad_yaml = r"
 enabled: true
 bogus_field: 1
-"#;
+";
         let result: Result<HandoffEnvelopeConfig, _> = serde_yaml::from_str(bad_yaml);
         assert!(
             result.is_err(),
@@ -1080,11 +1068,11 @@ prompt_file: "PROMPT.md"
 
         // U1 nesting with explicit enabled = true survives a full
         // EventLoopConfig parse.
-        let top_yaml2 = r#"
+        let top_yaml2 = r"
 handoff_envelope:
   enabled: true
   validate_payload: true
-"#;
+";
         let cfg: EventLoopConfig = serde_yaml::from_str(top_yaml2).unwrap();
         assert!(cfg.handoff_envelope.enabled);
         assert!(cfg.handoff_envelope.validate_payload);
@@ -1331,14 +1319,14 @@ examples:
     /// a docs promise.
     #[test]
     fn u1_event_schema_backward_compat_omits_field_docs() {
-        let yaml = r#"
+        let yaml = r"
 required_fields:
   - task_id
 allowed_values:
   verdict:
     - pass
     - blocked
-"#;
+";
         let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
         assert!(
             schema.field_docs.is_empty(),
@@ -1437,13 +1425,13 @@ mod u3_trigger_context_config_tests {
     /// runtime guarantee, not a docs promise.
     #[test]
     fn u1_trigger_context_backward_compat_omits_block() {
-        let yaml = r#"
+        let yaml = r"
 required_fields:
   - task_id
 allowed_values:
   verdict:
     - pass
-"#;
+";
         let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
         assert!(
             schema.trigger_context.summary_fields.is_empty(),
@@ -1594,11 +1582,11 @@ trigger_context:
     /// without injecting any field.
     #[test]
     fn u1_trigger_context_default_is_empty_noop() {
-        let yaml = r#"
+        let yaml = r"
 required_fields:
   - task_id
 trigger_context: {}
-"#;
+";
         let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
         assert!(schema.trigger_context.summary_fields.is_empty());
         assert!(schema.trigger_context.routing_hints.is_empty());

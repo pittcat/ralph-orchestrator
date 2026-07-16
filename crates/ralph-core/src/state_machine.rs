@@ -168,7 +168,7 @@ impl StateMachineRuntimeState {
         }
 
         // Business event handling
-        return self.validate_business_event(topic, payload, instance_key, config);
+        self.validate_business_event(topic, payload, instance_key, config)
     }
 
     /// Extracts the instance key from the event payload if required.

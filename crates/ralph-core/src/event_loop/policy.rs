@@ -91,7 +91,7 @@ pub fn publish_correction_via_context(
         stage: crate::event_loop::rejection::RejectionStage::Policy,
         source_hat: event.hat.clone(),
         business_hat: event.hat.clone(),
-        topic: event.topic.to_string(),
+        topic: event.topic.clone(),
         violation: payload.to_string(),
         retry_key: String::new(),
         retry_eligible: true,
@@ -113,7 +113,7 @@ pub fn publish_correction_via_context(
     let retry_count = ledger
         .as_ref()
         .and_then(|l| l.snapshot().rejection_digest().get(&retry_key))
-        .map(|entry| entry.count as u32)
+        .map(|entry| entry.count)
         .unwrap_or(1u32);
 
     // U11-T3: in-place mutation of the live `LoopState::prompt_context`
@@ -143,7 +143,7 @@ pub fn publish_correction_via_context(
     // so the audit log can correlate the correction with the loop
     // iteration that produced it. Idempotent if the primary commit
     // above already recorded the same key.
-    if let Some(l) = ledger.as_deref_mut() {
+    if let Some(l) = ledger {
         let delta = crate::state::CommitDelta::RejectionRecorded {
             key: ctx.retry_key.clone(),
             message: Some(payload.to_string()),

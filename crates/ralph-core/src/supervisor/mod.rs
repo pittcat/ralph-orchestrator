@@ -542,8 +542,8 @@ pub fn summarize(store: &dyn SupervisorStore) -> SupervisorInspectSummary {
     // `slot_summary` requires a per-wave read; only populate when a
     // single active wave is present (the agent-safe `inspect loop`
     // contract is "what's blocking my slot", not "full state dump").
-    if out.active_waves.len() == 1 {
-        if let Some(snap) = snapshots.first() {
+    if out.active_waves.len() == 1
+        && let Some(snap) = snapshots.first() {
             let hat_label = wave_kind_hat_label(snap.kind);
             out.slot_summary = snap
                 .slots
@@ -555,7 +555,6 @@ pub fn summarize(store: &dyn SupervisorStore) -> SupervisorInspectSummary {
                 })
                 .collect();
         }
-    }
     out
 }
 

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Each rule in `rules` maps an event topic (e.g. "work.done") to its validation
 /// requirements. Rules are only applied when the matching topic is published.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default)]
 pub struct ExecutionContractsConfig {
     /// When true, execution contracts are enforced. When false (default), contracts
     /// are parsed but not applied, preserving backward compatibility.
@@ -22,6 +23,7 @@ pub struct ExecutionContractsConfig {
 
 /// A single execution contract rule for one topic.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default)]
 pub struct ExecutionContractRule {
     /// Fields that must be present in the event payload.
     #[serde(default)]
@@ -44,26 +46,7 @@ pub struct ExecutionContractRule {
     pub reject: ContractRejectConfig,
 }
 
-impl Default for ExecutionContractRule {
-    fn default() -> Self {
-        Self {
-            require_payload_fields: Vec::new(),
-            require_task: TaskCompletionRequirement::default(),
-            require_git_change: GitChangeRequirement::default(),
-            require_test_evidence: TestEvidenceRequirement::default(),
-            reject: ContractRejectConfig::default(),
-        }
-    }
-}
 
-impl Default for ExecutionContractsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            rules: HashMap::new(),
-        }
-    }
-}
 
 /// Task completion requirement for execution contract validation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

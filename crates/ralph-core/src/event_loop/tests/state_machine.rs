@@ -135,7 +135,7 @@ fn test_state_machine_processed_events_reports_only_accepted_events() {
     let temp_dir = TempDir::new().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
 
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   state_machine:
     enabled: true
@@ -153,7 +153,7 @@ event_loop:
         from: [planned]
         to: blocked
         closes_instance: true
-"#;
+";
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("Test");

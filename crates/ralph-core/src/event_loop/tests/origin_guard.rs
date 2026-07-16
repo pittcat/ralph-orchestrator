@@ -591,7 +591,7 @@ hats:
     write_event_with_hat_to_jsonl(&events_path, "build.done", "ok", "executor");
     write_event_with_hat_to_jsonl(&events_path, "LOOP_COMPLETE", "Done", "executor");
 
-    let result = event_loop.process_events_from_jsonl().unwrap();
+    let _result = event_loop.process_events_from_jsonl().unwrap();
     // The completion event is a terminal admission and
     // honours through `accepted_log_events`, not
     // `validated_events` (the latter tracks pre-completion

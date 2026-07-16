@@ -193,11 +193,10 @@ fn check_routing_hints(
 ) {
     let mut seen_labels: HashSet<String> = HashSet::new();
     for hint in &cfg.routing_hints {
-        if !hint.label.is_empty() {
-            if !seen_labels.insert(hint.label.clone()) {
+        if !hint.label.is_empty()
+            && !seen_labels.insert(hint.label.clone()) {
                 out.push(duplicate_label_finding(topic, &hint.label));
             }
-        }
         for cond in &hint.conditions {
             check_condition(topic, hint, cond, known, out);
         }
@@ -766,7 +765,6 @@ mod u7_trigger_context_topology_lint_tests {
     //! here.
     use super::*;
     use crate::config::hat::HatConfig;
-    use std::collections::HashMap;
 
     fn schema_with_trigger_context(cfg: TriggerContextConfig) -> EventSchema {
         EventSchema {

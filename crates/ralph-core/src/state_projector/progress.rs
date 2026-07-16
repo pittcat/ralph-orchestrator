@@ -352,7 +352,7 @@ mod tests {
     fn build_ctx_for_test(dir: &std::path::Path) -> crate::state_projector::ProjectionContext {
         use crate::state_projector::ProjectionContext;
         let progress_path = dir.join("progress.md");
-        let tasks_path = dir.join("tasks.jsonl");
+        let _tasks_path = dir.join("tasks.jsonl");
         std::fs::write(&progress_path, "# Progress\n\n## Current Step\nstep-01\n").unwrap();
         let mut ctx =
             ProjectionContext::new(dir, crate::config::StateProjectionConfig::default(), false);

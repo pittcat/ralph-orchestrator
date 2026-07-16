@@ -27,7 +27,7 @@ pub fn plan_gate_should_skip_review_not_terminal(phase_id: Option<&str>) -> bool
         None => false,
         // Engine says we're not yet at plan_end; gate can
         // safely skip.
-        Some("unit_loop") | Some("fix_units") => true,
+        Some("unit_loop" | "fix_units") => true,
         // Engine says we're at plan_end or beyond; the gate
         // must evaluate the emit normally.
         Some(_) => false,

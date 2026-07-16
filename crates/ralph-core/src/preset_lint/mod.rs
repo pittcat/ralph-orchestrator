@@ -560,12 +560,11 @@ pub fn run_preset_lint_with_preset_name(
     // behaviour change. The helper reads
     // `event_policy.schemas` directly so it can also run for
     // presets whose `event_policy` is otherwise inactive.
-    if matches!(strictness, LintStrictness::Strict) {
-        if let Some(policy) = config.event_loop.event_policy.as_ref() {
+    if matches!(strictness, LintStrictness::Strict)
+        && let Some(policy) = config.event_loop.event_policy.as_ref() {
             let trigger_ctx_findings = check_trigger_context(&policy.schemas, strictness);
             findings.extend(lint_findings_to_contract_findings(&trigger_ctx_findings));
         }
-    }
 
     // 2026-07-09-003 plan (U5): trigger context topology
     // lint. Catches `trigger_context` blocks declared on a
@@ -612,7 +611,8 @@ pub fn run_preset_lint_with_preset_name(
         Some(text) => text.to_string(),
         None => {
             let config_yaml = serde_yaml::to_string(config).unwrap_or_default();
-            let config_yaml = if let Some(mechanism) = config.mechanism.as_ref() {
+            
+            if let Some(mechanism) = config.mechanism.as_ref() {
                 if config_yaml
                     .lines()
                     .any(|line| line.trim_start().starts_with("mechanism:"))
@@ -641,8 +641,7 @@ pub fn run_preset_lint_with_preset_name(
                     .filter(|line| !line.trim_start().starts_with("mechanism:"))
                     .collect::<Vec<_>>()
                     .join("\n")
-            };
-            config_yaml
+            }
         }
     };
     let has_mechanism_block = raw_yaml_owned
