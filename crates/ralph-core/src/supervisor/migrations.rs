@@ -23,6 +23,7 @@ mod imp {
     ///
     /// U4 bump: `wave_id_seq` autoincrement table replaces the
     /// pre-fix `SELECT COUNT(*) + 1 FROM waves` allocator.
+    #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
     pub const CURRENT_VERSION: i64 = 2;
 
     /// Apply migrations sequentially. Each migration is a
@@ -88,7 +89,11 @@ mod imp {
 }
 
 #[cfg(feature = "supervisor-db")]
-pub use imp::{CURRENT_VERSION, run, user_version};
+pub use imp::run;
+
+#[cfg(test)]
+#[cfg(feature = "supervisor-db")]
+pub(crate) use imp::{CURRENT_VERSION, user_version};
 
 #[cfg(test)]
 #[cfg(feature = "supervisor-db")]

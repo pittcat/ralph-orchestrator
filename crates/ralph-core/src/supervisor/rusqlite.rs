@@ -102,7 +102,7 @@ impl Default for RusqliteSupervisorStore {
 #[cfg(feature = "supervisor-db")]
 fn db_path_for_tests_helper() -> PathBuf {
     let dir = tempfile::tempdir().expect("tempdir");
-    dir.into_path().join("supervisor.db")
+    dir.keep().join("supervisor.db")
 }
 
 #[cfg(feature = "supervisor-db")]
@@ -142,7 +142,7 @@ fn parse_kind(s: &str) -> SupervisorStoreResult<WaveKind> {
     }
 }
 
-#[cfg(feature = "supervisor-db")]
+#[cfg(all(test, feature = "supervisor-db"))]
 fn parse_isolation(s: &str) -> SupervisorStoreResult<IsolationMode> {
     match s {
         "worktree" => Ok(IsolationMode::Worktree),
@@ -220,7 +220,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
             ));
         }
         self.with_conn(|conn| {
-            let mut existing: Option<String> = conn
+            let existing: Option<String> = conn
                 .query_row(
                     "SELECT wave_id FROM waves WHERE idempotency_key = ?1",
                     [idempotency_key],
