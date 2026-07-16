@@ -1706,7 +1706,7 @@ fn close_task_with_context_and_config(
     // on its own completion contract.
     if let (Some(cfg), Some(root_path)) = (config, root) {
         if let Some(caller_hat) = ctx.current_hat_id.clone() {
-            emit_close_completion_warning(root_path, cfg, &caller_hat);
+            emit_close_completion_warning(root_path, cfg, &caller_hat, task_id);
         }
     }
     Ok(())
@@ -1732,6 +1732,7 @@ fn emit_close_completion_warning(
     root: &PathBuf,
     config: &ralph_core::config::RalphConfig,
     caller_hat: &str,
+    task_id: &str,
 ) {
     let expected = if config.event_loop.event_policy.is_some() {
         ralph_core::completion_emit::derive_completion_publishes(config, caller_hat)
@@ -1781,12 +1782,13 @@ fn emit_close_completion_warning(
     let next = ralph_core::completion_emit::next_step_hint(&expected);
     eprintln!(
         "{} {{ \"code\": \"close_without_completion_emit\", \
-         \"hat\": \"{caller_hat}\", \"task_id\": \"{}\", \
+         \"hat\": \"{:?}\", \"task_id\": \"{}\", \
          \"expected_topics\": {expected:?}, \
          \"observed_topics\": {tail_topics:?}, \
          \"next_step\": \"{next}\" }}",
         ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX,
-        caller_hat = caller_hat,
+        caller_hat,
+        task_id,
     );
 }
 
@@ -3814,7 +3816,7 @@ tasks:
         // Capture stderr by sending it to a sink (the helper uses
         // eprintln!). We assert behaviour via the empty-channel and
         // happy-path checks separately; here we just confirm no panic.
-        emit_close_completion_warning(&root.to_path_buf(), &config, "executor");
+        emit_close_completion_warning(&root.to_path_buf(), &config, "executor", "task-1");
     }
 
     #[test]
@@ -3824,7 +3826,7 @@ tasks:
         let root = temp_dir.path();
         let config = config_with_completion_topics(&["some.completion"]);
         // Hat publishes nothing → derive_completion_publishes is empty.
-        emit_close_completion_warning(&root.to_path_buf(), &config, "unknown");
+        emit_close_completion_warning(&root.to_path_buf(), &config, "unknown", "task-2");
         // No assertion needed: the helper bails out early when expected==[].
     }
 
