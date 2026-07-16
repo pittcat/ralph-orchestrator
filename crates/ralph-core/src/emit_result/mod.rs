@@ -14,6 +14,7 @@ pub mod assemble;
 pub mod handoff;
 pub mod map_errors;
 pub mod routing;
+#[cfg(test)]
 pub mod tests;
 
 pub use map_errors::map_policy_report_to_errors;

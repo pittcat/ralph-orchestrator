@@ -11,8 +11,6 @@
 //! runs at most once per dedup window — the view is monotonically
 //! replaced on each accepted event (last-write-wins for visibility).
 
-use std::sync::Mutex;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

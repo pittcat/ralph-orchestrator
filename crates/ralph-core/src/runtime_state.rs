@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::state_projector::StateProjector;
 use crate::state_projector::review::{ReviewDimensionsView, render_review_summary_block};
-use crate::task::{Task, TaskStatus};
+use crate::task::Task;
 use crate::task_store::is_fix_unit_key;
 
 /// Heading the loop prepends. Logged in the prompt verbatim so
@@ -537,6 +537,7 @@ fn trailing_digits(s: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task::TaskStatus;
     use crate::config::StateProjectionConfig;
     use crate::state_projector::ProjectionContext;
     use tempfile::TempDir;

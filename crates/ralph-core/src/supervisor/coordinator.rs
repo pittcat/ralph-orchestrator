@@ -22,11 +22,9 @@ use ralph_proto::Event;
 
 use crate::event_origin::is_supervisor_coordination_topic;
 
-use super::merge_sink::{EventMergeSink, InMemoryMergeSink, MergeSinkError};
+use super::merge_sink::{EventMergeSink, InMemoryMergeSink};
 use super::phase::{FailedReason, PhaseDecision, PhaseInputs, evaluate_phase};
-use super::{
-    SupervisorStore, SupervisorStoreError, SupervisorStoreResult, WavePhase, WaveSnapshot,
-};
+use super::{SupervisorStore, SupervisorStoreResult, WavePhase, WaveSnapshot};
 use crate::supervisor::WaveKind;
 
 /// Coordinator injected by the dispatcher bridge (U12).
@@ -236,7 +234,7 @@ mod tests {
     //! The U12 bridge covers the real EventLoop wiring.
 
     use super::*;
-    use crate::supervisor::{InMemorySupervisorStore, SlotResource, SlotStatus, WaveKind};
+    use crate::supervisor::{InMemorySupervisorStore, MergeSinkError, SlotResource, SlotStatus, WaveKind};
     use std::sync::Arc;
 
     fn store_with(kind: WaveKind, n: u32) -> (Arc<InMemorySupervisorStore>, String) {

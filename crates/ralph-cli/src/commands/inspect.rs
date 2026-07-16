@@ -30,9 +30,7 @@ use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use ralph_core::RalphConfig;
 use ralph_core::config::profiles::ProfileSpec;
-use ralph_core::hat_identity::HatIdentitySnapshot;
 use ralph_core::profiles::ResolvedProfileFragments;
-use ralph_proto::HatId;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -1095,6 +1093,8 @@ mod tests {
     use ralph_core::ProfileScope;
     use ralph_core::config::hat::HatConfig;
     use ralph_core::config::profiles::ProfileSpec;
+    use ralph_core::hat_identity::HatIdentitySnapshot;
+    use ralph_proto::HatId;
     use std::path::Path;
     use tempfile::TempDir;
 

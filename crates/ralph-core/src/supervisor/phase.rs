@@ -7,7 +7,7 @@
 //! `SystemTime` reads beyond what the caller passes. The
 //! coordinator (U8) wires the function into the fan-in loop.
 
-use crate::supervisor::{SlotStatus, WavePhase, WaveSnapshot};
+use crate::supervisor::{SlotStatus, WaveSnapshot};
 
 /// Inputs that supplement `WaveSnapshot` to make the phase
 /// decision. `cancel_requested` is duplicated on the snapshot

@@ -1,14 +1,11 @@
 use super::*;
-use ralph_core::state_projector::Rejection as StateProjectorRejection;
 use ralph_core::{
-    NonRetryableReason, PolicyRejection, Rejection, RejectionKind, RejectionStage,
-    TerminationReason, U2_REJECTION_RETRY_LIMIT, ViolationType,
+    NonRetryableReason, Rejection, TerminationReason, U2_REJECTION_RETRY_LIMIT,
     config::hat::resolve_missing_event_grace_secs,
     diagnosis::{
-        DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
-        RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
+        DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope,
+        RecoveryDiagnosisEnvelopeBuilder,
     },
-    event_loop::rejection::enrich_task_resume_payload_with_stage,
 };
 
 pub fn should_hard_gate(hat_id: &HatId, event_loop: &EventLoop) -> bool {

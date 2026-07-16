@@ -145,12 +145,15 @@ pub use types::{CompletionStuck, StuckSource};
 // at module scope so the U4 tests (and U6 wiring) can reach it
 // without going through `EventLoop`. Stays `pub(crate)` so it
 // never leaks out of `ralph-core`.
+#[cfg(test)]
 pub(crate) use self::prompt_helpers::prepend_handoff_envelope_if_enabled;
 // 2026-07-06-004 plan U6: isolated-prompt wiring helper. Used by
 // the real prompt chain (after orchestrator context / wave
 // context) so the wiring test (`u6_handoff_envelope_wiring`) can
 // pin the behaviour without going through EventLoop.
-pub(crate) use self::prompt_helpers::{IsolatedPromptInputs, build_isolated_prompt_with_handoff};
+pub(crate) use self::prompt_helpers::build_isolated_prompt_with_handoff;
+#[cfg(test)]
+pub(crate) use self::prompt_helpers::IsolatedPromptInputs;
 
 mod prompt_helpers {
     use crate::config::HandoffEnvelopeConfig;

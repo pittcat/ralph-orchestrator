@@ -16,7 +16,7 @@ use crate::hat_registry::HatRegistry;
 use crate::payload_contract::{
     PayloadContractError, PayloadContractValidationResult, validate_payload_contract,
 };
-use ralph_proto::{Hat, Topic};
+use ralph_proto::Topic;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Re-export payload contract types from `payload_contract` for callers

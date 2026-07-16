@@ -16,7 +16,7 @@ use super::WorkflowPhaseAuthority;
 use super::evaluator::EventFixture;
 use super::primitives::on_review_complete_verdict;
 use super::primitives::on_test_passed_step::StepProgressFixture;
-use super::snapshot::{PhaseSnapshot, ViolationKind};
+use super::snapshot::PhaseSnapshot;
 use super::step_parse::{TestPassedRecord, parse_test_passed_step};
 use super::step_transition::advance_step_on_test_passed;
 use serde_json::Value;

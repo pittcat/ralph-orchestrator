@@ -1,6 +1,5 @@
 use crate::cli::{
-    ColorMode, OutputFormat, resolve_hat_channel_file, resolve_marker_target,
-    resolve_workspace_root,
+    ColorMode, OutputFormat, resolve_hat_channel_file, resolve_workspace_root,
 };
 use crate::display::colors;
 use crate::operation_guard::OperationContext;

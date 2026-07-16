@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::supervisor::phase::{FailedReason, PhaseDecision, PhaseInputs, evaluate_phase};
-use crate::supervisor::{SupervisorStore, SupervisorStoreResult, WavePhase, WaveSnapshot};
+use crate::supervisor::{SupervisorStore, SupervisorStoreResult, WavePhase};
 
 /// Result of running recovery at startup.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

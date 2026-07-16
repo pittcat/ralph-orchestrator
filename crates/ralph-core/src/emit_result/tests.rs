@@ -9,7 +9,7 @@
 //! 使 `cargo nextest run -p ralph-core -- emit_result_types` 一条
 //! substring 一次性命中全部 6 个 U1 测试。
 
-use super::*;
+use super::{EMIT_RESULT_SCHEMA_VERSION, EmitError, EmitHandoff, EmitResult};
 use serde_json::Value;
 
 /// schema 版本常量必须是 `"emit_result.v1"`，否则整套脚本兼容契约破防。

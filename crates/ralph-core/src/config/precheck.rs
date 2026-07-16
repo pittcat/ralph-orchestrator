@@ -112,7 +112,6 @@ impl Default for PrecheckOnFail {
 /// existing schema entries are left untouched.
 pub fn inject_precheck_event_schemas(config: &mut crate::config::RalphConfig, topic: &str) {
     use crate::config::{EventSchema, PayloadType};
-    use std::collections::HashMap;
 
     let policy = config
         .event_loop

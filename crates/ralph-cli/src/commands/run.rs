@@ -8,9 +8,7 @@ use ralph_adapters::detect_backend;
 use ralph_core::{
     CheckStatus, LockError, LockGuard, LockMetadata, LockStatus, LoopContext, LoopEntry, LoopLock,
     LoopRegistry, PreflightReport, PreflightRunner, ProfileSpec, ProfilesError, RalphConfig,
-    TerminationReason, ensure_plan_baseline_from_head,
-    profiles::parse_profile_spec,
-    truncate_with_ellipsis,
+    TerminationReason, ensure_plan_baseline_from_head, truncate_with_ellipsis,
     worktree::{
         WorktreeConfig, clean_worktree_runtime_artifacts, create_worktree, ensure_gitignore,
         find_reusable_worktree, find_reusable_worktree_by_name, remove_worktree,
