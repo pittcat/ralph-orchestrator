@@ -307,7 +307,7 @@ pub async fn handle_wave_events(
     // `ralph emit` discover the same project config the loop was
     // started with via `RALPH_CONFIG`. `None` means do not inject
     // (the worker keeps falling back to the parent process env).
-    config_path: Option<&std::path::Path>,
+    _config_path: Option<&std::path::Path>,
     // 2026-07-03-001 supervisor real-wiring: when `Some`, the
     // dispatcher takes the supervisor path (`register_wave_if_absent`
     // → `bind_slot` per slot → `dispatch_wave_inner` with per-worker

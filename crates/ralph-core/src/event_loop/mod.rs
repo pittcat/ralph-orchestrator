@@ -5461,7 +5461,7 @@ impl EventLoop {
     }
 
     /// Injects cached guidance into the next prompt build.
-    fn apply_robot_guidance(&mut self, hat_id: &HatId) {
+    fn apply_robot_guidance(&mut self, _hat_id: &HatId) {
         if self.robot_guidance.is_empty() {
             return;
         }
@@ -10765,7 +10765,7 @@ impl EventLoop {
                                     _ => "execution_contract",
                                 };
                                 let source_hat = source_hat_str.unwrap_or("unknown");
-                                let (protocol_count, protocol_exhausted) =
+                                let (_protocol_count, protocol_exhausted) =
                                     self.state.record_protocol_violation_signature(
                                         source_hat,
                                         event.topic.as_str(),
@@ -10955,10 +10955,6 @@ impl EventLoop {
         // which borrows `self.config`; the gate loop
         // needs `&mut self` for `apply_emit_gate`.
         let policy_config_owned = self.config.event_loop.event_policy.clone();
-        let policy_enabled_for_gate = policy_config_owned
-            .as_ref()
-            .map(|c| c.enabled)
-            .unwrap_or(false);
         let write_diagnostic = policy_config_owned
             .as_ref()
             .map(|c| c.completion_after_terminal.write_diagnostic_event)

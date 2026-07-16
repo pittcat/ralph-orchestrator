@@ -446,7 +446,7 @@ pub fn validate_handoff_envelope_payload_with_topology(
     // to keep the trim-then-map-to-code pattern DRY. Each
     // field's code stays stable so policy-check tests pin the
     // wire-level reason vocabulary.
-    let root_goal = require_non_empty_string(
+    let _ = require_non_empty_string(
         payload_obj,
         "handoff_envelope",
         "root_goal",

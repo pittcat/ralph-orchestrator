@@ -319,7 +319,7 @@ fn check_emit_feedback_skill_reference(
     hat_id: &str,
     instructions: &str,
     findings: &mut Vec<LintFinding>,
-    preset_name: &str,
+    _preset_name: &str,
 ) {
     // 2026-07-09-001 plan (U7): the rule accepts any of the
     // following references as proof the agent is pointed at

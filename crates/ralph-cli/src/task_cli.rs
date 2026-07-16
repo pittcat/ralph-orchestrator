@@ -1206,7 +1206,7 @@ fn ensure_task_with_args(
     ctx: &OperationContext,
     coordinator_hats: &[String],
     use_colors: bool,
-    config_sources: &[ConfigSource],
+    _config_sources: &[ConfigSource],
 ) -> Result<()> {
     // 2026-06-28-002 U8: `--for-fix-unit plan:fix_step:slug` builds
     // the canonical fix-unit task and pins the owner to
@@ -1529,7 +1529,7 @@ fn execute_start(
     root: Option<&PathBuf>,
     coordinator_hats: &[String],
     use_colors: bool,
-    config_sources: &[ConfigSource],
+    _config_sources: &[ConfigSource],
 ) -> Result<()> {
     let path = get_tasks_path(root);
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
@@ -1650,7 +1650,7 @@ fn close_task_with_context_and_config(
         .get(task_id)
         .cloned()
         .context(format!("Task {} not found", task_id))?;
-    let owner_hat = snapshot.owner_hat_id.clone();
+    let _owner_hat = snapshot.owner_hat_id.clone();
     authorize_lifecycle(&snapshot, ctx, coordinator_hats, "close")?;
 
     let title = store
@@ -1822,7 +1822,7 @@ fn execute_fail(
     root: Option<&PathBuf>,
     coordinator_hats: &[String],
     use_colors: bool,
-    config_sources: &[ConfigSource],
+    _config_sources: &[ConfigSource],
 ) -> Result<()> {
     let path = get_tasks_path(root);
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
@@ -1979,7 +1979,7 @@ fn execute_reopen(
     root: Option<&PathBuf>,
     coordinator_hats: &[String],
     use_colors: bool,
-    config_sources: &[ConfigSource],
+    _config_sources: &[ConfigSource],
 ) -> Result<()> {
     let path = get_tasks_path(root);
     let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
@@ -2033,7 +2033,7 @@ fn execute_verify(
     config_sources: &[ConfigSource],
 ) -> Result<()> {
     let root = args.root.clone();
-    let config = load_config_or_default(root.as_ref(), config_sources);
+    let _config = load_config_or_default(root.as_ref(), config_sources);
     let workspace = resolve_workspace_root(root.as_ref());
     let (coordinator_hats, coordinator_err) =
         match load_coordinator_hats(&workspace, config_sources) {

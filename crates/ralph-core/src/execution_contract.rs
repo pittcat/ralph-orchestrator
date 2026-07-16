@@ -774,7 +774,7 @@ fn validate_task(
             }
             s.trim().to_string()
         }
-        Some(other) => {
+        Some(_other) => {
             return Some(ExecutionContractFinding {
                 kind: ExecutionContractViolationKind::InvalidPayload,
                 message: format!(
