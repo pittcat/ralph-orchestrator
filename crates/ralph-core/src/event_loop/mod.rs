@@ -11003,15 +11003,10 @@ impl EventLoop {
         // mutate) before the gate loop runs so the
         // `&mut self` borrow on `apply_emit_gate` is
         // unblocked.
-        let policy_enabled_for_gate = policy_config_ref.map(|c| c.enabled).unwrap_or(false);
-        let completion_after_terminal_for_gate = policy_config_ref
-            .map(|c| c.completion_after_terminal.write_diagnostic_event)
-            .unwrap_or(false);
         // `policy_config_ref` (an `Option<&EventPolicyConfig>`)
         // is held until after the U3 gate loop completes. The
         // gate loop needs `&mut self`, so the immutable
         // borrow on `self.config` must be released first.
-        let _ = (policy_enabled_for_gate, completion_after_terminal_for_gate);
         // Snapshot the events by reference so the gate
         // loop can borrow `&mut self`. The `events` vec
         // is owned (not borrowed from self) so this is
