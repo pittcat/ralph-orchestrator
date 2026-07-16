@@ -28,23 +28,10 @@ core:
   guardrails:
     - "Fresh context each iteration — re-read scratchpad and plan."
     - "Commit after each completed step. Never commit Ralph files."
-    - "Verification is mandatory — `just ci` must pass (fmt, clippy, tests). See AGENTS.md."
+    - "Rust warning gate is mandatory — run `cargo clippy --workspace --all-targets --all-features -- -D warnings`; any non-zero exit means the agent must inspect and fix every diagnostic, then rerun the command until it exits 0."
+    - "Verification is mandatory — after the Rust warning gate passes, run `./scripts/run-tests.sh`; both commands must exit 0 before emitting LOOP_COMPLETE. See AGENTS.md."
     - "Acceptance tests must be real — no placeholder/pending/stub acceptance scenarios when emitting LOOP_COMPLETE."
     - "BDD acceptance checks must verify runtime behavior; comment-only or `Ok(())`-only evaluator passes are invalid."
     - "Confidence protocol: >80 proceed; 50-80 proceed + note in scratchpad; <50 choose safe default + note."
     - "Preserve primary sources — capture referenced code snippets with file:line attribution in scratchpad."
     - "Run targeted tests per crate via `cargo nextest run -p <crate>` during subtasks; full `./scripts/run-tests.sh` (nextest + doctest) only at final step. 若全量基线出现竞态/时序 flake（如 ralph-cli loop_runner Mutex/timeout 错误），先用 `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` 强制单线程 cargo test 兜底；serial 仍失败才是真失败。详见 CLAUDE.md / AGENTS.md「Build & Test」段 HARD RULE 1+2、「并行 vs 串行分级表」与「开发基线 vs CI 基线」段。"
-
-
-
-backpressure:
-  gates:
-    - name: fmt
-      command: cargo fmt --all -- --check
-      on_fail: "Formatting failed. Run `cargo fmt --all` and retry."
-    - name: clippy
-      command: cargo clippy --all-targets --all-features -- -D warnings
-      on_fail: "Clippy lint failures. Fix all warnings before proceeding."
-    - name: test
-      command: ./scripts/run-tests.sh
-      on_fail: "Tests failed. 先判断是否为竞态/时序 flake（特征：ralph-cli loop_runner 相关测试报 Mutex/timeout 错误、手动单独重试又能过）。若是 flake，先用 `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` 强制走单线程 cargo test 兜底；若 serial fallback 仍失败，或失败是确定性的，再修复测试。默认仍优先走 nextest 并发（ralph-cli 走 cli-serial group 串行 `max-threads=1`，其余包并行），完成后补 doctest。详见 CLAUDE.md / AGENTS.md「Build & Test」段 HARD RULE 1+2、「并行 vs 串行分级表」与「开发基线 vs CI 基线」段。绝对不要用裸 `cargo test` 跑 `ralph-cli` 测试——根因是 Mutex 中毒 + 500ms sleep 在 CPU 抢占下超时。"
