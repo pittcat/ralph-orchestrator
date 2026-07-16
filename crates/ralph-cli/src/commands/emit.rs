@@ -190,6 +190,10 @@ pub use crate::policy_check::PolicyCheckMode;
 /// emit callers that know whether the call came from an agent (true)
 /// or from the human CLI (false) can pass that signal through. Most
 /// callers should prefer the ctx-aware form.
+// 2026-07-16 cleanup U4 (KTD-3): reserved for U15 emit-path parity
+// (CLI vs agent policy-check invocation). Pinning the signature now
+// avoids churn when U15 lands.
+#[allow(dead_code)]
 pub fn should_policy_check_emit(args: &EmitArgs, config: Option<&RalphConfig>) -> PolicyCheckMode {
     let flags = PolicyCheckFlags {
         policy_check: args.policy_check,
@@ -337,6 +341,10 @@ fn is_default_file_arg(file: &Path) -> bool {
 /// U3 (R3): 比较两个路径在 canonicalize 后是否指向同一目录。
 /// 处理 macOS `/var → /private/var` 这类 OS 级 symlink,避免误判
 /// 漂移。
+// 2026-07-16 cleanup U4 (KTD-3): reserved for U15 emit-path
+// macOS-aware canonical comparison (currently uses plain Eq for
+// Linux dev builds).
+#[allow(dead_code)]
 fn paths_canonical_differ(a: &Path, b: &Path) -> bool {
     let ca = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
     let cb = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());

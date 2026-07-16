@@ -223,6 +223,10 @@ fn coordinator_topic(kind: WaveKind, success: bool) -> String {
 /// satisfies `is_supervisor_coordination_topic`. Without this,
 /// `*.wave.complete` events would be rejected at the origin
 /// guard even though the supervisor intended to inject them.
+// 2026-07-16 cleanup U4 (KTD-3): reserved for `--features
+// supervisor-db` integration test (pinned here so the public
+// sanity check survives the test-fixture purge).
+#[allow(dead_code)]
 pub fn ensure_coordinator_topic_is_recognised(topic: &str) -> bool {
     is_supervisor_coordination_topic(topic)
 }

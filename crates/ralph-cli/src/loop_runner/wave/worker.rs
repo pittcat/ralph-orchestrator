@@ -27,6 +27,12 @@ pub fn wave_worker_execution_mode(
     WaveWorkerExecutionMode::Pty
 }
 
+// 2026-07-16 cleanup U4 (KTD-3): test-fixture guard.
+// `WaveWorkerStreamHandler` + `new` / `emit_delta` are only
+// constructed inside `#[cfg(test)] mod tests` blocks. The
+// struct stays public so cross-crate test imports keep
+// resolving.
+#[allow(dead_code)]
 pub struct WaveWorkerStreamHandler {
     worker_index: u32,
     rpc_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
@@ -34,6 +40,7 @@ pub struct WaveWorkerStreamHandler {
 }
 
 impl WaveWorkerStreamHandler {
+    #[allow(dead_code)]
     pub fn new(
         worker_index: u32,
         rpc_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
@@ -46,6 +53,7 @@ impl WaveWorkerStreamHandler {
         }
     }
 
+    #[allow(dead_code)]
     fn emit_delta(&self, delta: impl Into<String>) {
         let delta = delta.into();
         if delta.is_empty() {

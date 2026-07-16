@@ -76,6 +76,11 @@ impl std::error::Error for PresetLintGateError {}
 /// WAC defects at the `lint.preset.*` Error level when the caller
 /// is in strict mode. The builtin escalation is a Tier-0 nicety
 /// for the new `ralph preset check -H builtin:foo` path.
+// 2026-07-16 cleanup U4 (KTD-3): reserved 2-arg signature is
+// pinned here; the 3-arg `*_with_preset_name` sibling is what
+// the runner currently calls. Downstream callers can opt into
+// the simpler shape without a churn round-trip.
+#[allow(dead_code)]
 pub fn enforce_preset_lint_gate(
     config: &ralph_core::RalphConfig,
     source_is_builtin_embedded: bool,

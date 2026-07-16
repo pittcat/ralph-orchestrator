@@ -60,6 +60,10 @@ pub struct PolicyCheckFlags {
 ///
 /// If `--unsafe-no-policy-check` is passed but the config disallows unsafe
 /// bypasses, this returns `Enforce` so the caller can reject the flag.
+// 2026-07-16 cleanup U4 (KTD-3): reserved for U15 emit-path parity
+// (CLI vs agent policy-check invocation). Pinning the signature now
+// avoids churn when U15 lands.
+#[allow(dead_code)]
 pub fn resolve_policy_check_mode(
     flags: &PolicyCheckFlags,
     config: Option<&RalphConfig>,
@@ -117,6 +121,9 @@ pub fn resolve_policy_check_mode_with_ctx(
 
 /// Backwards-compatible re-export of [`resolve_policy_check_mode`]
 /// without operation context. Human CLI keep the legacy semantics.
+// 2026-07-16 cleanup U4 (KTD-3): reserved for U15 emit-path parity
+// (CLI legacy callers that predate `is_agent_context`).
+#[allow(dead_code)]
 pub fn legacy_resolve(flags: &PolicyCheckFlags, config: Option<&RalphConfig>) -> PolicyCheckMode {
     resolve_policy_check_mode_with_ctx(flags, config, false)
 }
@@ -307,6 +314,10 @@ pub fn load_policy_config_for_cli_emit(
 /// `RalphConfig` carrying just the hats map so the CLI
 /// `OriginRule` accepts user-defined hats. `RALPH_HATS_SOURCE`
 /// still wins when set (the historic preset-merge path).
+// 2026-07-16 cleanup U4 (KTD-3): reserved for U15 emit-path parity
+// (hats-only discovery as a fallback for the user-scoped hats
+// flow).
+#[allow(dead_code)]
 fn load_policy_config_from_hats_only(
     root: Option<&PathBuf>,
     env_label: Option<&str>,
@@ -1879,6 +1890,10 @@ impl ValidationError {
     /// enrichment fields, but the 10+ existing call sites
     /// can keep their struct-literal shape via this helper
     /// plus `..Self::default()`.
+    // 2026-07-16 cleanup U4 (KTD-3): reserved for future preset
+    // policy rewrites that build `ValidationError` directly
+    // from the lint findings stream.
+    #[allow(dead_code)]
     pub fn new(
         payload_index: usize,
         field: impl Into<String>,

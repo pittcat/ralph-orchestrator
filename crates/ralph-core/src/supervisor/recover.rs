@@ -131,6 +131,10 @@ pub fn recover_active_waves_at_startup(
 /// short-circuits recovery". The runtime calls this when the
 /// U11 dispatcher bridge lands so we don't regress the
 /// idempotency guarantee.
+// 2026-07-16 cleanup U4 (KTD-3): reserved for `--features
+// supervisor-db` integration path (pinned here so the public
+// recovery helper survives the test-fixture purge).
+#[allow(dead_code)]
 pub fn merged_waves_skip_recovery(
     store: Arc<dyn SupervisorStore>,
     wave_id: &str,
@@ -153,6 +157,9 @@ pub fn merged_waves_skip_recovery(
 /// `true` when it transitioned the wave into the
 /// "merge intent stamped" state (i.e. flagged it for the
 /// next coordinator tick to re-merge).
+// 2026-07-16 cleanup U4 (KTD-3): reserved for `--features
+// supervisor-db` recovery path.
+#[allow(dead_code)]
 pub fn restore_unmerged_completed_slot(
     store: Arc<dyn SupervisorStore>,
     wave_id: &str,

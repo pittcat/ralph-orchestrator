@@ -57,6 +57,10 @@ pub struct CoordinatorSupervisorBridge {
 impl CoordinatorSupervisorBridge {
     /// Build a bridge around the in-memory store. Used by tests
     /// and the dry-run CLI path.
+    // 2026-07-16 cleanup U4 (KTD-3): test-fixture guard.
+    // `with_in_memory_store` / `coordinator` are only consumed
+    // inside `#[cfg(test)] mod tests` (e.g. `wave_supervisor.rs`).
+    #[allow(dead_code)]
     pub fn with_in_memory_store() -> Self {
         let store = Arc::new(InMemorySupervisorStore::new());
         let coordinator = Arc::new(SupervisorCoordinator::with_in_memory_sink(store.clone()));
@@ -64,6 +68,9 @@ impl CoordinatorSupervisorBridge {
     }
 
     /// Access the underlying store. Diagnostics-friendly.
+    // 2026-07-16 cleanup U4 (KTD-3): same test-fixture guard as
+    // `with_in_memory_store`.
+    #[allow(dead_code)]
     pub fn store(&self) -> Arc<dyn SupervisorStore> {
         self.store.clone()
     }
@@ -71,6 +78,9 @@ impl CoordinatorSupervisorBridge {
     /// Access the coordinator so the bridge can hand it to
     /// the runtime when the dispatcher needs to drive a tick
     /// outside the bridge trait.
+    // 2026-07-16 cleanup U4 (KTD-3): test-fixture guard (same as
+    // `with_in_memory_store`).
+    #[allow(dead_code)]
     pub fn coordinator(&self) -> Arc<SupervisorCoordinator> {
         self.coordinator.clone()
     }
@@ -151,6 +161,12 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
 
 /// Mock bridge for tests that need to assert the bridge
 /// surface without a real store.
+// 2026-07-16 cleanup U4 (KTD-3): test-fixture guard.
+// `MockSupervisorBridge` + `new` / `push_actions` / `snapshot`
+// are only consumed inside `#[cfg(test)] mod tests` blocks
+// (`wave_supervisor.rs` etc.). The struct + impl stay public
+// so the cross-crate test imports keep resolving.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct MockSupervisorBridge {
     ticks: Arc<std::sync::Mutex<Vec<(String, PhaseInputs)>>>,
@@ -164,6 +180,7 @@ pub struct MockSupervisorBridge {
 }
 
 impl MockSupervisorBridge {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -174,6 +191,9 @@ impl MockSupervisorBridge {
     /// mirrors the production bridge's
     /// `SupervisorCoordinator::tick` call path so dispatch
     /// tests can pin the round-trip ordering.
+    // 2026-07-16 cleanup U4 (KTD-3): test-fixture guard (same as
+    // `MockSupervisorBridge` struct).
+    #[allow(dead_code)]
     pub fn push_actions(&self, actions: Vec<CoordinatorAction>) {
         let mut guard = self.actions.lock().unwrap();
         for action in actions {
@@ -184,6 +204,9 @@ impl MockSupervisorBridge {
     /// Snapshot the recorded ticks + the next action the
     /// bridge will return. Tests use this to assert call
     /// ordering.
+    // 2026-07-16 cleanup U4 (KTD-3): test-fixture guard (same as
+    // `MockSupervisorBridge` struct).
+    #[allow(dead_code)]
     pub fn snapshot(&self) -> (Vec<(String, PhaseInputs)>, Vec<CoordinatorAction>) {
         (
             self.ticks.lock().unwrap().clone(),

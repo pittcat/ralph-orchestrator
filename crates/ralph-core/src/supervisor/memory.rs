@@ -80,6 +80,12 @@ impl Clone for InMemorySupervisorStore {
 }
 
 #[derive(Debug, Default, Clone)]
+// 2026-07-16 cleanup U4 (KTD-3): `compensation`, `queue`,
+// `dispatches`, `worker_results` are U4 stubs reserved for the
+// `--features supervisor-db` integration path. Pinning the field
+// shape now avoids a churn round-trip when the rusqlite store
+// (U5) starts reading them.
+#[allow(dead_code)]
 struct Inner {
     /// Stable wave ID assignment counter; the runtime specifies
     /// its own idempotency_key, so this is informational only.
@@ -101,18 +107,29 @@ struct Inner {
 }
 
 #[derive(Debug, Clone)]
+// 2026-07-16 cleanup U4 (KTD-3): U4 fixture for supervisor-db
+// feature; pinned so the struct shape survives future test wiring.
+#[allow(dead_code)]
 struct DispatchRecord {
     pid: Option<u32>,
     outcome: Option<DispatchOutcome>,
 }
 
 #[derive(Debug, Clone)]
+// 2026-07-16 cleanup U4 (KTD-3): U4 fixture for supervisor-db
+// feature; `event_count` is the rusqlite store's working set
+// metric.
+#[allow(dead_code)]
 struct WorkerResult {
     content_hash: String,
     event_count: usize,
 }
 
 #[derive(Debug, Clone)]
+// 2026-07-16 cleanup U4 (KTD-3): `wave_id` / `kind` / `status`
+// reserved for the supervisor compensation-hook (U4) execution
+// payload.
+#[allow(dead_code)]
 struct CompensationEntry {
     wave_id: String,
     kind: CompensationKind,
@@ -120,6 +137,10 @@ struct CompensationEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// 2026-07-16 cleanup U4 (KTD-3): U4 supervisor compensation-hook
+// discriminator; kept stable so the executor can dispatch to the
+// right hook without churn when U4 lands.
+#[allow(dead_code)]
 enum CompensationKind {
     OnTimeout,
     OnCancel,
@@ -127,6 +148,9 @@ enum CompensationKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// 2026-07-16 cleanup U4 (KTD-3): U4 supervisor compensation-hook
+// lifecycle states.
+#[allow(dead_code)]
 enum CompensationStatus {
     Pending,
     Executed,

@@ -66,6 +66,9 @@ impl TaskCommand {
 
     /// All verbs known to the ACL. Used by `allowed_task_commands` /
     /// `denied_task_commands` listings on `HatIdentitySnapshot`.
+    // 2026-07-16 cleanup U4 (KTD-3): reserved for future preset
+    // policy rewrites that expose the full verb list to the lint gate.
+    #[allow(dead_code)]
     pub const ALL: &'static [TaskCommand] = &[
         TaskCommand::Add,
         TaskCommand::Ensure,
@@ -139,6 +142,10 @@ pub enum PolicyDecision {
 /// the same config object, the only thing left to disambiguate is the
 /// shape of the failure — which is what `ConfigFault` captures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// 2026-07-16 cleanup U4 (KTD-3): reserved for U14 cli-tui
+// parity (the tui surface takes its ACL via a typed fault enum
+// instead of strings).
+#[allow(dead_code)]
 pub enum ConfigFault {
     /// `ralph.yml` (or `ralph.yaml`) does not exist in the workspace root.
     MissingRalphYml,
@@ -156,6 +163,9 @@ impl ConfigFault {
     /// Each hint is intentionally different enough that an operator (or
     /// an LLM agent) can match the failure shape from the message alone
     /// and apply the right fix without re-reading `ralph.yml`.
+    // 2026-07-16 cleanup U4 (KTD-3): reserved for U14 cli-tui
+    // parity (the tui surface renders the hint inline).
+    #[allow(dead_code)]
     pub fn hint(&self) -> String {
         match self {
             // 2026-07-13-001 plan U5 + review #C1: advertise every
@@ -171,10 +181,15 @@ impl ConfigFault {
 }
 
 impl PolicyDecision {
+    // 2026-07-16 cleanup U4 (KTD-3): `is_allow` / `is_deny`
+    // reserved for future preset policy rewrites that expose the
+    // decision shape to the lint gate.
+    #[allow(dead_code)]
     pub fn is_allow(&self) -> bool {
         matches!(self, Self::Allow { .. })
     }
 
+    #[allow(dead_code)]
     pub fn is_deny(&self) -> bool {
         matches!(self, Self::Deny { .. })
     }

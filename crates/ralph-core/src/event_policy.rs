@@ -1051,6 +1051,10 @@ pub fn check_handoff_envelope(topic: &str, payload: &Value) -> Option<PolicyFind
 /// `check_handoff_envelope` for the supplied payload. The
 /// condition is exactly `handoff_config.enabled &&
 /// handoff_config.validate_payload && payload.is_some()`.
+// 2026-07-16 cleanup U4 (KTD-3): reserved for U15 / future
+// policy-check parity; pinning the public signature now avoids
+// churn when downstream consumers start importing it.
+#[allow(dead_code)]
 pub fn handoff_envelope_validation_enabled<H: HandoffEnvelopeConfigAccess>(
     payload: Option<&str>,
     handoff_config: &H,

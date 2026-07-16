@@ -226,6 +226,11 @@ pub fn render_handoff_envelope_prompt(view: &HandoffEnvelopeView) -> String {
     out
 }
 
+// 2026-07-16 cleanup U4 (KTD-3): reserved for the long-form
+// envelope renderer (U7 follow-up). Truncation helper is kept so
+// future multi-line `must_do` blocks do not silently grow the
+// prompt past the budget.
+#[allow(dead_code)]
 fn render_truncated_list(items: &[String]) -> String {
     if items.len() <= MAX_RENDERED_LIST_ITEMS {
         items.join(", ")

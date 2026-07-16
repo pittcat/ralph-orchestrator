@@ -243,6 +243,10 @@ fn env_then_workspace(workspace_root: &Path) -> Option<PathBuf> {
 /// behaviour: honours the caller's first primary `ConfigSource::File`
 /// and falls through to `env_config` / workspace discovery only when
 /// the caller passed no File source.
+// 2026-07-16 cleanup U4 (KTD-3): reserved for U14 cli-tui
+// parity (the tui surface takes its config-source list from a
+// different env var, this helper threads the override through).
+#[allow(dead_code)]
 fn resolve_project_config_path_with_env(
     workspace_root: &Path,
     config_sources: &[ConfigSource],

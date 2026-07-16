@@ -521,6 +521,10 @@ impl VerifyOutcome {
         )
     }
 
+    // 2026-07-16 cleanup U4 (KTD-3): reserved for future preset
+    // policy rewrites that surface the verify outcome to the
+    // tui.
+    #[allow(dead_code)]
     pub fn to_human_string(&self, verb: &str) -> String {
         match self {
             VerifyOutcome::Allow => Self::allowed_message(verb),
@@ -1612,7 +1616,12 @@ fn execute_close(
     )
 }
 
-#[cfg_attr(test, allow(dead_code))]
+// 2026-07-16 cleanup U4 (KTD-3): reserved wrapper for the
+// new ACL surface (`close_task_with_context_and_config`). The
+// runtime currently calls `*_and_config` directly; this wrapper
+// stays as a stable entry point so downstream callers (e.g.
+// the tui's `verify` flow) can opt in without a churn round-trip.
+#[allow(dead_code)]
 fn close_task_with_context(
     store: &mut TaskStore,
     task_id: &str,
