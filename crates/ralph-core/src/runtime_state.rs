@@ -537,9 +537,9 @@ fn trailing_digits(s: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::TaskStatus;
     use crate::config::StateProjectionConfig;
     use crate::state_projector::ProjectionContext;
+    use crate::task::TaskStatus;
     use tempfile::TempDir;
 
     fn workspace() -> TempDir {

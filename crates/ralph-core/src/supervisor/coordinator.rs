@@ -238,7 +238,9 @@ mod tests {
     //! The U12 bridge covers the real EventLoop wiring.
 
     use super::*;
-    use crate::supervisor::{InMemorySupervisorStore, MergeSinkError, SlotResource, SlotStatus, WaveKind};
+    use crate::supervisor::{
+        InMemorySupervisorStore, MergeSinkError, SlotResource, SlotStatus, WaveKind,
+    };
     use std::sync::Arc;
 
     fn store_with(kind: WaveKind, n: u32) -> (Arc<InMemorySupervisorStore>, String) {

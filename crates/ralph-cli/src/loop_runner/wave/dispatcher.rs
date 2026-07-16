@@ -1424,7 +1424,6 @@ async fn execute_wave_via_supervisor(
     .await
 }
 
-
 /// Compute the aggregate timeout from per-worker timeout and the
 /// number of concurrent batches.
 ///

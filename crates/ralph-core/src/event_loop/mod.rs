@@ -151,9 +151,9 @@ pub(crate) use self::prompt_helpers::prepend_handoff_envelope_if_enabled;
 // the real prompt chain (after orchestrator context / wave
 // context) so the wiring test (`u6_handoff_envelope_wiring`) can
 // pin the behaviour without going through EventLoop.
-pub(crate) use self::prompt_helpers::build_isolated_prompt_with_handoff;
 #[cfg(test)]
 pub(crate) use self::prompt_helpers::IsolatedPromptInputs;
+pub(crate) use self::prompt_helpers::build_isolated_prompt_with_handoff;
 
 mod prompt_helpers {
     use crate::config::HandoffEnvelopeConfig;

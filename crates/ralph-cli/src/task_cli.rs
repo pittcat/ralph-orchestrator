@@ -1783,17 +1783,17 @@ fn emit_close_completion_warning(
     }
 
     let next = ralph_core::completion_emit::next_step_hint(&expected);
-        eprintln!(
-            "{} {{ \"code\": \"close_without_completion_emit\", \
+    eprintln!(
+        "{} {{ \"code\": \"close_without_completion_emit\", \
              \"hat\": \"{}\", \"task_id\": \"{}\", \
              \"expected_topics\": {expected:?}, \
              \"observed_topics\": {tail_topics:?}, \
              \"next_step\": \"{}\" }}",
-            ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX,
-            caller_hat,
-            task_id,
-            next,
-        );
+        ralph_core::completion_emit::CLOSE_WITHOUT_COMPLETION_PREFIX,
+        caller_hat,
+        task_id,
+        next,
+    );
 }
 
 /// Build the success-path stderr payload (extracted for testability).

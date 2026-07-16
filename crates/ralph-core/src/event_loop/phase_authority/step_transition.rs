@@ -8,10 +8,10 @@
 //! `(step_index, is_last)` tuple that the pre-006
 //! `drive_step_transition` consumed.
 
-use super::primitives::on_test_passed_step::StepProgressFixture;
-use super::step_parse::{TestPassedRecord, fixture_from_record};
 #[cfg(test)]
 use super::primitives::on_test_passed_step::StepKind;
+use super::primitives::on_test_passed_step::StepProgressFixture;
+use super::step_parse::{TestPassedRecord, fixture_from_record};
 
 /// Pure decision: when the engine is disabled, the runtime
 /// continues to drive the step close path. When the
