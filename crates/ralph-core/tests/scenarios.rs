@@ -1503,11 +1503,11 @@ fn test_ce_executor_pipeline_executor_fail_stop() {
 }
 
 /// 2026-07-16-001 plan U7 + S15: when test-stabilizer emits
-/// `stabilization.blocked` (e.g. unattributable failures), the loop
-/// MUST short-circuit to reporter without firing any review/fix/align
-/// event. Asserts that stabilization.blocked is the sole terminal
-/// trigger path to reporter, and report.done carries verdict=blocked
-/// with reason=stabilization_blocked.
+/// `stabilization.blocked` (e.g. traceability gaps or unstable
+/// evidence), the loop MUST short-circuit to reporter without firing
+/// any review/fix/align event. Asserts that stabilization.blocked is
+/// the sole terminal trigger path to reporter, and report.done
+/// carries verdict=blocked with reason=stabilization_blocked.
 #[test]
 fn test_ce_executor_pipeline_stabilization_blocked_report() {
     let yaml =

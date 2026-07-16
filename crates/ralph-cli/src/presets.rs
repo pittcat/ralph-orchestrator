@@ -973,6 +973,45 @@ mod tests {
         assert_eq!(alignment.triggers, vec!["fix.done".to_string()]);
     }
 
+    // 2026-07-16-002 plan U2: structured guard that the enhanced
+    // `test-stabilizer` hat in each CE executor preset still owns
+    // *only* the stabilization.* terminal topics and stays the sole
+    // gate between `work.done` and the review chain. This test pins
+    // the topic-level authority boundary that the BDD scenarios rely
+    // on so a future instructions edit cannot silently widen the hat's
+    // publish set.
+    #[test]
+    fn test_ce_executor_test_stabilizer_terminal_authority() {
+        for name in ["ce-executor-pipeline", "ce-executor-pipeline-loop"] {
+            let preset = get_preset(name).unwrap_or_else(|| panic!("preset {name} embedded"));
+            let config = RalphConfig::parse_yaml(preset.content)
+                .unwrap_or_else(|e| panic!("preset {name} parse: {e}"));
+            let stabilizer = config
+                .hats
+                .get("test-stabilizer")
+                .unwrap_or_else(|| panic!("{name} must declare test-stabilizer"));
+
+            assert_eq!(
+                stabilizer.triggers,
+                vec!["work.done".to_string()],
+                "{name}: test-stabilizer trigger must remain work.done"
+            );
+            let mut publishes: Vec<String> = stabilizer.publishes.clone();
+            publishes.sort();
+            assert_eq!(
+                publishes,
+                vec!["stabilization.blocked".to_string(), "stabilization.done".to_string()],
+                "{name}: test-stabilizer must publish only stabilization.done/blocked"
+            );
+            let mut terminals: Vec<String> = stabilizer.terminal_events.clone();
+            terminals.sort();
+            assert_eq!(
+                terminals, publishes,
+                "{name}: terminal_events must mirror the only allowed stabilization.* topics"
+            );
+        }
+    }
+
     /// 2026-07-09-001 plan (U8): the embedded `ce-executor-pipeline-loop`
     /// preset must declare agent-facing `field_docs` / `examples`
     /// metadata for the review/fix convergence topics so that the

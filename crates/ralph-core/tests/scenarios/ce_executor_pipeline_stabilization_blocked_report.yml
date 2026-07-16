@@ -1,9 +1,10 @@
 # ce_executor_pipeline_stabilization_blocked_report: U7 reporter short-circuit on stabilization.blocked
 #
-# 2026-07-16-001 plan U7 + S15: when test-stabilizer emits
-# `stabilization.blocked` (e.g. unattributable failures, full-suite
-# command failure, or unknown_dirty_worktree), the loop MUST
-# short-circuit to reporter without any review/fix/align event:
+# 2026-07-16-002 plan U2: when test-stabilizer cannot close the
+# traceability matrix or obtain stable pre-fix evidence, it must still
+# emit `stabilization.blocked` and the loop MUST short-circuit to
+# reporter without any review/fix/align event. This scenario uses the
+# unattributable path to prove the blocked route stays terminal:
 #   work.done → test-stabilizer → stabilization.blocked
 #   → reporter → report.done (verdict=blocked) → LOOP_COMPLETE
 #
@@ -14,7 +15,7 @@
 # - LOOP_COMPLETE reason explicitly references stabilization_blocked.
 
 name: ce_executor_pipeline_stabilization_blocked_report
-description: ce-executor-pipeline U7 — stabilization.blocked short-circuits to reporter without review/fix/align
+description: ce-executor-pipeline U2 — traceability/evidence gaps still short-circuit to reporter without review/fix/align
 
 config:
   prompt_file: PROMPT.md

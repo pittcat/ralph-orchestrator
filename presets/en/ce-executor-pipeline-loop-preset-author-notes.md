@@ -71,32 +71,39 @@
 
 ## Hat: test-stabilizer (2026-07-16-001 U3)
 
-- **Q1 使命:** executor 后仅运行一次的稳定化门禁。建基线、归类失败、最小修正（含生产代码 + correction ID）、跑全量测试，发 `stabilization.done` 或 `stabilization.blocked`。**无自批权**——交付 HEAD 必须经下游 review-reentry 或 Reporter。
-- **Q2 输入:** `work.done` 携带 `plan_name` / `plan_path` / `executor_head_sha` / `resolved_baseline_sha` / Unit 账单。
-- **Q3 执行:** Step 1 读触发与计划上下文（按 trigger 类型区分输入字段）→ Step 2 baseline + dirty-worktree gate → Step 3 捕获 baseline + 跑全量测试 → Step 4 失败归类（5 类）→ Step 5 最小修正 → Step 6 写 `stabilization_audit_file` → Step 7/8 emit。
-- **Q4 输出:** `stabilization.done` / `stabilization.blocked`，含 `head_sha` / `tested_from_sha` / `stabilization_audit_file` / `correction_ids` / `classification_counts` / `worktree_status`。
-- **Q5 交接:** review-reentry 必须使用同一 `head_sha` 启动首轮 review；后续 fixer 自己完成全量测试并由 `fix.done` 直接触发下一轮 review。
+- **Q1 mission:** the only-run stabilization gate after the executor. Build a baseline, attribute failures, apply minimal corrections (production edits require correction IDs), run the full test suite, and emit `stabilization.done` or `stabilization.blocked`. **No self-approval authority** — the delivered HEAD must pass downstream review-reentry or the reporter.
+- **Q2 input:** `work.done` carries `plan_name` / `plan_path` / `executor_head_sha` / `resolved_baseline_sha` / the Unit bill. Validation scope is restricted to `completed_units`; Units still listed under `planned_units` are explicitly out of scope.
+- **Q3 execution:** Step 1 read the trigger + plan context (input fields vary by trigger type), derive the completed Units and their already-finished prior dependencies, and build the Scenario/ATDD→test traceability matrix → dispatch at most two read-only scouts in parallel (traceability gaps / risk hypotheses) and let the main hat pick the 1–3 highest-value risks → Step 2 baseline + dirty-worktree gate → Step 3 capture baseline + run the full suite → when a production defect needs a reproduction test, dispatch at most one test-worker serially (test edits only; submit the pre-fix stable-failure evidence first) → Step 4 failure attribution (5 classes) → Step 5 main hat accepts evidence then applies minimal corrections → Step 6 write `stabilization_audit_file` covering scope, traceability, scouts, risks, worker pre/post-fix evidence, and residual risk → Step 7/8 emit. Scouts / test-workers may not commit, emit, modify production code, read/write the runtime ledger, or declare any Unit closeable. The main Test Hat owns scope adjudication, corrections, policy-check, and the final emit.
+- **Q4 output:** `stabilization.done` / `stabilization.blocked`, carrying `head_sha` / `tested_from_sha` / `stabilization_audit_file` / `correction_ids` / `classification_counts` / `worktree_status`.
+- **Q5 handoff:** review-reentry must launch the first review round using the same `head_sha`; subsequent fixers run their own full-suite verification and `fix.done` triggers the next round directly.
 
 ### Hat: test-stabilizer — Payload Contract
 
-| topic | 字段 | 类型 | 值源 | 可见性证据 | 身份检查 | 下游消费 | schema metadata |
+| topic | field | type | value source | visibility evidence | identity check | downstream consumer | schema metadata |
 |---|---|---|---|---|---|---|---|
-| `stabilization.done` | `plan_name` / `plan_path` | string | `work.done` trigger 透传 | trigger payload | 与 plan_name equality 一致 | review-reentry | schema SSOT |
-| `stabilization.done` | `tested_from_sha` | string | trigger head SHA（executor_head_sha 或 fix.head_sha） | git 命令输出 | 不涉及 | 复审基线 | `field_docs.tested_from_sha` |
-| `stabilization.done` | `head_sha` | string | emit 前 `git rev-parse HEAD` | git 命令输出 | 等于 audit 中实际 commit SHA | review-reentry anchor | `field_docs.head_sha` |
-| `stabilization.done` | `stabilization_audit_file` | string | `.ralph/review/<plan>/stabilization/audit.md` | Write 工具输出 | 文件可读 | 复审证据索引 | `field_docs.stabilization_audit_file` |
-| `stabilization.done` | `correction_ids` | string[] | 生产代码改动时分配 | decisions.md + commit message | 非空 ⟺ 存在生产 commit | 复审 finding 关联 | `field_docs.correction_ids` |
-| `stabilization.done` | `classification_counts` | object{5 keys} | Step 4 分类汇总 | audit 文件 + 测试命令输出 | `unattributable == 0` | 复审可见 | `field_docs.classification_counts` |
-| `stabilization.done` | `worktree_status` | enum | `git status --short` 排除 `.ralph/` | git 命令输出 | 必须是 `clean` | review-reentry 前置门禁 | `field_docs.worktree_status` |
-| `stabilization.done` | `tests_run` / `tests_passed` | int | 项目权威 full-suite 输出 | 测试命令原始输出 | passed == run 且无失败 | 复审证据 | schema metadata |
-| `stabilization.blocked` | `reason` | enum | 7 canonical reasons 之一 | decisions.md | 阻塞归类 | Reporter 阻塞报告 | `field_docs.reason` |
+| `stabilization.done` | `plan_name` / `plan_path` | string | passthrough from `work.done` trigger | trigger payload | matches `plan_name` equality | review-reentry | schema SSOT |
+| `stabilization.done` | `tested_from_sha` | string | trigger head SHA (`executor_head_sha` or `fix.head_sha`) | git command output | n/a | review baseline | `field_docs.tested_from_sha` |
+| `stabilization.done` | `head_sha` | string | `git rev-parse HEAD` before emit | git command output | equals the actual commit SHA in the audit | review-reentry anchor | `field_docs.head_sha` |
+| `stabilization.done` | `stabilization_audit_file` | string | `.ralph/review/<plan>/stabilization/audit.md` | Write tool output | file is readable | review evidence index | `field_docs.stabilization_audit_file` |
+| `stabilization.done` | `correction_ids` | string[] | assigned when production code is changed | `decisions.md` + commit message | non-empty iff a production commit exists | review finding linkage | `field_docs.correction_ids` |
+| `stabilization.done` | `classification_counts` | object {5 keys} | Step 4 classification rollup | audit file + test command output | `unattributable == 0` | review visibility | `field_docs.classification_counts` |
+| `stabilization.done` | `worktree_status` | enum | `git status --short` excluding `.ralph/` | git command output | must be `clean` | review-reentry precheck | `field_docs.worktree_status` |
+| `stabilization.done` | `tests_run` / `tests_passed` | int | project-authoritative full-suite output | raw test command output | `passed == run` and zero failures | review evidence | schema metadata |
+| `stabilization.blocked` | `reason` | enum | one of the seven canonical reasons | `decisions.md` | blocking classification | Reporter blocked report | `field_docs.reason` |
 
-## Builtin Sync Checklist (2026-07-16-001 U3 + U5 后)
+### Test Hat evidence discipline
 
-1. `event_loop/mod.rs`: 未改 topic 拓扑终态；新增 `stabilization.done`/`stabilization.blocked` 业务事件，schema 由 `presets/schemas/ce-executor-pipeline-loop.yml` 注入。
-2. `preset_lint`: 通过 strict lint（work.done → test-stabilizer；fix.done → review-reentry，均为单消费者）。
-3. BDD scenarios: U3/U5 真实 EventLoop scenario 暂留 U8 治理补完（worker 没有补 fixture,仅手动验证）。
-4. config/preflight/config_resolution: 未新增 config 字段。
-5. CLI presets: 未新增/删除 builtin preset。
-6. manifest/index: 未新增/删除 preset。
-7. docs/zsh: `CLAUDE.md`/`AGENTS.md` 已同步 16-hat 与 test-stabilizer 描述；zsh 补全无需改。
+- Every `completed_units` entry must have a Scenario/ATDD→test traceability row; Units still listed under `planned_units` must be enumerated under exclusions.
+- At most two read-only scouts may run in parallel to return candidate evidence; the main hat only adopts the 1–3 risks directly tied to the current Unit, and records the adopt/reject rationale.
+- At most one test-worker, never in parallel with build/test; the worker is limited to test edits and focused-test output. The main hat must accept a stable pre-fix failure before any production correction; bounded exceptions with substitute evidence are allowed only when safe automation is impossible.
+- The audit must preserve scout returns, worker pre/post-fix test results, rejected overreach/weak-evidence entries, and residual risk. These additions do not extend the `stabilization.*` payload.
+
+## Builtin Sync Checklist (post 2026-07-16-001 U3 + U5)
+
+1. `event_loop/mod.rs`: terminal topic topology unchanged; the `stabilization.done` / `stabilization.blocked` business events are added, with schema injected from `presets/schemas/ce-executor-pipeline-loop.yml`.
+2. `preset_lint`: strict lint passes (work.done → test-stabilizer; fix.done → review-reentry; both single-consumer).
+3. BDD scenarios: the U3/U5 real-EventLoop scenario is left for U8 governance (no worker fixture yet, manual verification only).
+4. config/preflight/config_resolution: no configuration fields were added.
+5. CLI presets: no builtin preset was added or removed.
+6. manifest/index: no preset was added or removed.
+7. docs/zsh: `CLAUDE.md` / `AGENTS.md` already track the 16-hat topology and `test-stabilizer` description; zsh completion needs no change.
