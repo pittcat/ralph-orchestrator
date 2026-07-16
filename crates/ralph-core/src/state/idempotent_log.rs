@@ -532,7 +532,7 @@ fn merge_records(existing: IdempotentRecord, new: IdempotentRecord) -> Idempoten
 
 /// RAII guard that releases the OS-level file lock on drop.
 #[cfg(unix)]
-struct LockGuard(Flock<File>);
+struct LockGuard(#[allow(dead_code)] Flock<File>);
 #[cfg(not(unix))]
 struct LockGuard;
 

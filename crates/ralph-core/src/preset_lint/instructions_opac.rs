@@ -381,16 +381,9 @@ fn contains_word_boundary(haystack: &str, needle: &str) -> bool {
 }
 
 // Extension trait for ergonomics — mirrors what other preset_lint modules do.
-trait WithHat {
-    fn with_hat(self, hat: &str) -> Self;
-}
-
-impl WithHat for LintFinding {
-    fn with_hat(mut self, hat: &str) -> Self {
-        self.hat = Some(hat.to_string());
-        self
-    }
-}
+// (Removed in U3: an inherent `LintFinding::with_hat` already exists in
+// `preset_lint/mod.rs`, so this trait+impl was shadowed and never imported
+// by any caller. U3 deletes it as dead code.)
 
 #[cfg(test)]
 mod tests {

@@ -28,7 +28,6 @@ mod loop_runner;
 mod loops;
 mod mcp;
 mod memory;
-mod migrate_state;
 mod operation_guard;
 mod policy_check;
 mod preflight;

@@ -31,10 +31,16 @@ pub use merge_queue::process_pending_merges_cli;
 pub use payload_contract_gate::{
     enforce_payload_contract_gate, write_payload_contract_violation_report,
 };
+// 2026-07-16 cleanup U4 (KTD-3): `enforce_preset_lint_gate` (2-arg
+// variant) is a reserved public API. The 3-arg `*_with_preset_name`
+// sibling is what the runner actually calls; the 2-arg helper stays
+// exported so preset authors / external callers can pin the simpler
+// signature without churn.
+#[allow(unused_imports)]
+pub use preset_lint_gate::enforce_preset_lint_gate;
 pub use preset_lint_gate::{
     EXIT_CODE_AGENT_DOC_SYNC_STRICT, EXIT_CODE_LINT_GATE, PresetLintGateError,
-    enforce_preset_lint_gate, enforce_preset_lint_gate_with_preset_name,
-    write_preset_lint_artifact,
+    enforce_preset_lint_gate_with_preset_name, write_preset_lint_artifact,
 };
 #[cfg(test)]
 pub use runner::resolve_loop_id;
