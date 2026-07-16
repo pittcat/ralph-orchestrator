@@ -10,23 +10,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build & Test
 
-> **⚠️ HARD RULE 1: 测试入口必须用 `cargo nextest run` 系列**(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`)。**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`——根因是 `crates/ralph-cli/src/loop_runner/tests.rs:14-49` 的 4 个 process-global Mutex + 时间敏感测试(`std::thread::sleep(500ms)`)。Nextest 的 process-per-test 隔离 Mutex 是第一道保险。允许的例外:① `cargo test --doc` 跑 doctest;② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` 强制 flake 兜底（走单线程,仅用于竞态/时序 flake 恢复,不是默认路径）;④ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。详见 `docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`。
+> **⚠️ HARD RULE 1: 测试入口必须用 `cargo nextest run` 系列**(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`)。**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`——历史根因是 `crates/ralph-cli/src/loop_runner/tests.rs`(原文件)头部注释的 4 个 process-global Mutex + 时间敏感测试(`std::thread::sleep(500ms)`)。Nextest 的 process-per-test 隔离 Mutex 是第一道保险。允许的例外:① `cargo test --doc` 跑 doctest;② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` 强制 flake 兜底（走单线程,仅用于竞态/时序 flake 恢复,不是默认路径）;④ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。详见 `docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`。
 >
-> **⚠️ HARD RULE 2: 默认走并发,确需串行时显式配置**。`ralph-cli` 整个包走 cli-serial 串行(`.config/nextest.toml:17-18, 20-22`,根因:Mutex + sleep CPU 抢占,2026-06-13 已验证不能放开);其他 6 个包(`ralph-proto` / `ralph-core` / `ralph-adapters` / `ralph-tui` / `ralph-api` / `ralph-bench` / `ralph-e2e`)走 nextest 默认并发(`test-threads = num-cpus`)。**两件事必须同时改**(sleep 改为事件驱动等待 + 4 个静态量改 per-test 隔离)才能放开 ralph-cli 并发,不在本轮范围。
+> **⚠️ HARD RULE 2: 默认走并发,确需串行时显式配置**。`ralph-cli` 自 2026-07-16 plan `2026-07-16-005-refactor-ralph-cli-parallel-tests-plan` 落地后**走 nextest 默认并发**(`max-threads = num-cpus`),不再有整包 `cli-serial` 强制串行。`MOCK_ACP_*` 系列 Mutex / `MockAcpExecution` 已确认死代码并删除(Unit 5 path B);`FAKE_PATH_BACKEND_*` 在 nextest 进程级隔离下天然 per-test 隔离(Unit 4 验证);`thread::sleep` 已确认全部在 producer/producer 线程内,断言侧是事件驱动轮询 + 有界超时(Unit 1+3 验证)。所有 7 个包(`ralph-proto` / `ralph-core` / `ralph-adapters` / `ralph-cli` / `ralph-tui` / `ralph-api` / `ralph-bench` / `ralph-e2e`)走 nextest 默认并发。证据:`.ralph/review/2026-07-16-005-refactor-ralph-cli-parallel-tests-plan/scratch/u1-parallel-failure-characterization.md`。
 
 ### 并行 vs 串行分级速查表
 
 | 范围 | 并行/串行 | 触发命令 |
 |---|---|---|
-| `ralph-cli` 全包 | **串行** | `cargo nextest run -p ralph-cli --bin ralph -- <substring>` |
-| 其他 6 个包 | **并行** | `cargo nextest run -p <pkg> -- <substring>` |
-| 单包内单测 | 走包级规则 | 同上 |
+| 全部 7 个包(含 `ralph-cli`) | **并行** | `cargo nextest run -p <pkg> -- <substring>` |
+| 单包内单测 | nextest 默认并发 | 同上 |
 | Doctest | 单独跑 | `cargo test --workspace --exclude ralph-e2e --doc` |
 | E2E | 单进程 CLI | `cargo run -p ralph-e2e -- --mock` |
 | Smoke/replay | 顺序跑 | `cargo nextest run -p ralph-core --features recording --test smoke_runner` |
 | BDD scenarios | 顺序跑 | `cargo nextest run -p ralph-core --test scenarios` |
 
-详细分级 + 根因参见 `.cursor/rules/architecture-modules.mdc`("Code Locations" + 顶部 `ralph-cli` 串行配置)。
+详细分级参见 `.cursor/rules/architecture-modules.mdc`("Code Locations")。
 
 ```bash
 # 全 workspace 并行(ralph-cli 串行,其他 6 包并行)——CI 推荐入口
@@ -199,8 +198,8 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 - **所有中文输出规则**:无论使用哪个 skill 进行操作,所有面向人类的输出——包括但不限于计划文档、设计文档、需求文档、实施计划、任务文件、报告、总结、注释说明、代码 review 意见、PR 描述等——都必须使用中文撰写。不影响:文件名、代码中的字符串字面量、代码注释中的技术标识符(如变量名、函数名、crate 名)、命令行输出块。这条规则优先于任何 skill 内置的语言默认值。
 - **CLAUDE.md 与 AGENTS.md 同步规则**:这两个文件必须保持内容完全一致。修改其中一个时,必须同步更新另一个(推荐 `cp CLAUDE.md AGENTS.md`),确保不会出现差异。
 - **测试入口强制 nextest(HARD RULE 1 + 2)**:
-  - **HARD RULE 1**:本项目所有测试入口必须是 `cargo nextest run` 系列(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`),**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`。根因是 `crates/ralph-cli/src/loop_runner/tests.rs:14-49` 的 4 个 process-global Mutex + 时间敏感测试。允许的例外:① `cargo test --doc` 跑 doctest;② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。
-  - **HARD RULE 2**:默认走并发,确需串行时显式配置。**能用并行的必须用并行**(快是默认值,不是可选优化)。具体分级见「Build & Test」段「并行 vs 串行分级速查表」——`ralph-cli` 整个包走 cli-serial 串行(根因:Mutex + sleep CPU 抢占,2026-06-13 已验证不能放开);其他 6 个包全部走 nextest 默认并发(`test-threads = num-cpus`)。
+  - **HARD RULE 1**:本项目所有测试入口必须是 `cargo nextest run` 系列(`./scripts/run-tests.sh` / `just test-parallel` / `cargo nextest run -p <pkg> --bin <bin> -- <subset>`),**禁止**裸跑 `cargo test -p ralph-cli` 或 `cargo test -p ralph-cli --bin ralph`。nextest 的 process-per-test 隔离是 `ralph-cli` 内 `FAKE_PATH_BACKEND_*` Mutex 安全的前提。允许的例外:① `cargo test --doc` 跑 doctest;② nextest 不可用时的最后兜底 `cargo test --workspace --exclude ralph-e2e -- --test-threads=1`;③ `crates/ralph-core/data/ralph-tools*.md` 这类**仅文档用途**的 cargo test 引用。
+  - **HARD RULE 2**:默认走并发,确需串行时显式配置。**能用并行的必须用并行**(快是默认值,不是可选优化)。具体分级见「Build & Test」段「并行 vs 串行分级速查表」——自 2026-07-16 起全部 7 个包(含 `ralph-cli`)均走 nextest 默认并发(`max-threads = num-cpus`);`cli-serial` 整包 override 已删除,证据见 plan `2026-07-16-005-refactor-ralph-cli-parallel-tests-plan` 的 U1+U6 验证(`scratch/u1-parallel-failure-characterization.md`)。
   - **修改任一规则须先确认所有 IDE/hook/CI 入口已切到 nextest**,并跑 3+1 验证(ralph-cli 子集 3 跑 + 全 workspace 1 跑)。
 - **Worktree 复用规则(HARD RULE 3)**:任何使用 `--worktree` 的 `ralph run` 都必须显式指定复用键:**`--plan <plan.md>`** 或 **`--worktree-name <name>`**。Ralph 会按 plan 的 basename(去掉 `.md`/`.html` 后缀)或精确名称在 `.ralph/loops.json` 与 `git worktree list` 中查找已完成的 worktree 并自动复用;**严禁**不看参数就 `EnterWorktree` / `git worktree add` 创建新 worktree,也禁止靠 prompt 文本"猜测"plan 路径。旧版"从 prompt 文本自动提取 plan 路径做模糊匹配"的行为已废弃,因为它对中文、标点或附加说明极其脆弱。推荐写法:
   ```bash
