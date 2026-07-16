@@ -1,0 +1,7 @@
+interface:
+  display_name: "Ralph Preset Author"
+  short_description: "Draft Ralph presets with per-hat AAF tables and payload contract notes"
+  default_prompt: "Use $ralph-preset-author to draft or revise a Ralph preset. For each hat, fill the AAF 五问表 plus a Payload Contract table (field, value source, visibility evidence, identity check, downstream use). Write preset-author-notes.md before recommending review."
+
+policy:
+  allow_implicit_invocation: true
