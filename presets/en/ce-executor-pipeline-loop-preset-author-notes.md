@@ -54,7 +54,7 @@
 
 ## Hat: review-reentry
 
-- **Q1 使命:** 将 `stabilization.done` 规范化为下一轮 `review.round.ready`（fix.done 路径已由 U5 改为先经 test-stabilizer，2026-07-16-001）。
+- **Q1 使命:** 将首次 `stabilization.done` 或后续 `fix.done` 规范化为下一轮 `review.round.ready`。
 - **Q2 输入 (Observe 命令 + 期望字段):** trigger `stabilization.done` 提供 `head_sha`、`tested_from_sha`、`stabilization_audit_file`、`correction_ids`、`classification_counts`、`worktree_status`、`tests_run`/`tests_passed`、`resolved_baseline_sha`。
 - **Q3 执行 (OPAC 命令序列):** Observe trigger → generate review diff artifacts (anchor = `head_sha` 优先, 回退 `executor_head_sha`) → Precheck `review.round.ready` → emit。
 - **Q4 输出 (topic + payload 合同):** `review.round.ready`，`review_round: 1`（stabilization.done 路径），`source_topic: stabilization.done`，`round_base_sha = head_sha`，`diff_ranges = [<resolved_baseline_sha>..<head_sha>]`。
@@ -64,24 +64,24 @@
 
 | topic | 字段 | 类型 | 值源 | 可见性证据 | 身份检查 | 下游消费 | schema metadata |
 |---|---|---|---|---|---|---|---|
-| `review.round.ready` | `review_plan.fix_status` | string | 仅 `fix.done` 路径触发时携带；stabilization.done 路径不存在 | trigger payload | 不涉及 | reviewers 判断本轮是否检查未完成 attempt | `fix.done.field_docs.fix_status` |
+| `review.round.ready` | `review_plan.fix_status` | string | 仅 `fix.done` trigger 携带；stabilization.done 路径不存在 | trigger payload | 不涉及 | reviewers 判断本轮是否检查未完成 attempt | `fix.done.field_docs.fix_status` |
 | `review.round.ready` | `review_plan.residual_risks` | string array | 仅 fix.done 路径 | trigger payload | 不涉及 | review-synthesizer 识别未收敛原因 | `fix.done.field_docs.failure_reason` |
 | `review.round.ready` | `round_base_sha` | string | stabilization.done 路径 = `head_sha`；fix.done 路径 = `head_sha`（已自带） | trigger payload | 不涉及 | reviewers 设定 diff 起点 | 既有 schema |
-| `review.round.ready` | `source_topic` | string | `stabilization.done`（U3 顶部）/ `fix.done`（U5 之后,经 test-stabilizer） | trigger payload | 不涉及 | reporter 区分首轮 / 修复轮 | 既有 schema |
+| `review.round.ready` | `source_topic` | string | `stabilization.done`（首次）/ `fix.done`（修复轮） | trigger topic | 不涉及 | reporter 区分首轮 / 修复轮 | 既有 schema |
 
-## Hat: test-stabilizer (2026-07-16-001 U3 + U5)
+## Hat: test-stabilizer (2026-07-16-001 U3)
 
-- **Q1 使命:** executor 后（首轮）与 fixer 后（每轮 reentry, U5）双触发的稳定化门禁。建基线、归类失败、最小修正（含生产代码 + correction ID）、跑全量测试，发 `stabilization.done` 或 `stabilization.blocked`。**无自批权**——交付 HEAD 必须经下游 review-reentry 或 Reporter。
-- **Q2 输入:** `work.done`（首轮）携带 `plan_name` / `plan_path` / `executor_head_sha` / `resolved_baseline_sha` / Unit 账单；`fix.done`（U5 修复轮）携带 `head_sha` / `fixed_from_sha` / `fix_plan_file` / `next_review_plan` / `fix_status` / `failure_reason`。
+- **Q1 使命:** executor 后仅运行一次的稳定化门禁。建基线、归类失败、最小修正（含生产代码 + correction ID）、跑全量测试，发 `stabilization.done` 或 `stabilization.blocked`。**无自批权**——交付 HEAD 必须经下游 review-reentry 或 Reporter。
+- **Q2 输入:** `work.done` 携带 `plan_name` / `plan_path` / `executor_head_sha` / `resolved_baseline_sha` / Unit 账单。
 - **Q3 执行:** Step 1 读触发与计划上下文（按 trigger 类型区分输入字段）→ Step 2 baseline + dirty-worktree gate → Step 3 捕获 baseline + 跑全量测试 → Step 4 失败归类（5 类）→ Step 5 最小修正 → Step 6 写 `stabilization_audit_file` → Step 7/8 emit。
 - **Q4 输出:** `stabilization.done` / `stabilization.blocked`，含 `head_sha` / `tested_from_sha` / `stabilization_audit_file` / `correction_ids` / `classification_counts` / `worktree_status`。
-- **Q5 交接:** review-reentry（trigger 改 stabilization.done）必须使用同一 `head_sha`；fix.done 路径的稳定化等于「重新稳定一轮」的边界，gate 据此判定是否继续修复或 `review.loop.blocked`。
+- **Q5 交接:** review-reentry 必须使用同一 `head_sha` 启动首轮 review；后续 fixer 自己完成全量测试并由 `fix.done` 直接触发下一轮 review。
 
 ### Hat: test-stabilizer — Payload Contract
 
 | topic | 字段 | 类型 | 值源 | 可见性证据 | 身份检查 | 下游消费 | schema metadata |
 |---|---|---|---|---|---|---|---|
-| `stabilization.done` | `plan_name` / `plan_path` | string | trigger 透传（work.done 或 fix.done） | trigger payload | 与 plan_name equality 一致 | review-reentry | schema SSOT |
+| `stabilization.done` | `plan_name` / `plan_path` | string | `work.done` trigger 透传 | trigger payload | 与 plan_name equality 一致 | review-reentry | schema SSOT |
 | `stabilization.done` | `tested_from_sha` | string | trigger head SHA（executor_head_sha 或 fix.head_sha） | git 命令输出 | 不涉及 | 复审基线 | `field_docs.tested_from_sha` |
 | `stabilization.done` | `head_sha` | string | emit 前 `git rev-parse HEAD` | git 命令输出 | 等于 audit 中实际 commit SHA | review-reentry anchor | `field_docs.head_sha` |
 | `stabilization.done` | `stabilization_audit_file` | string | `.ralph/review/<plan>/stabilization/audit.md` | Write 工具输出 | 文件可读 | 复审证据索引 | `field_docs.stabilization_audit_file` |
@@ -94,7 +94,7 @@
 ## Builtin Sync Checklist (2026-07-16-001 U3 + U5 后)
 
 1. `event_loop/mod.rs`: 未改 topic 拓扑终态；新增 `stabilization.done`/`stabilization.blocked` 业务事件，schema 由 `presets/schemas/ce-executor-pipeline-loop.yml` 注入。
-2. `preset_lint`: 通过 strict lint（fix.done → test-stabilizer → review-reentry 单消费者收敛）。
+2. `preset_lint`: 通过 strict lint（work.done → test-stabilizer；fix.done → review-reentry，均为单消费者）。
 3. BDD scenarios: U3/U5 真实 EventLoop scenario 暂留 U8 治理补完（worker 没有补 fixture,仅手动验证）。
 4. config/preflight/config_resolution: 未新增 config 字段。
 5. CLI presets: 未新增/删除 builtin preset。

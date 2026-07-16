@@ -10,8 +10,7 @@
 #   failed_fix_units = [UF2]
 #   skipped_fix_units = [UF3, UF4, UF5]
 #
-# Then the new U5 topology applies: fix.done → test-stabilizer →
-# stabilization.done → review-reentry → review.loop.blocked (round 2
+# Then fix.done directly triggers review-reentry → review.loop.blocked (round 2
 # P0/P1 still not closed). Reporter consumes review.loop.blocked and
 # emits report.done + LOOP_COMPLETE with verdict=blocked.
 #
@@ -39,10 +38,10 @@ config:
       subscribes_to: [plan.ready]
       publishes: [work.done, work.failed]
     test-stabilizer:
-      subscribes_to: [work.done, fix.done]
+      subscribes_to: [work.done]
       publishes: [stabilization.done, stabilization.blocked]
     review-reentry:
-      subscribes_to: [stabilization.done]
+      subscribes_to: [stabilization.done, fix.done]
       publishes: [review.round.ready]
     "dim:goal-alignment":
       subscribes_to: [review.round.ready]
@@ -159,10 +158,7 @@ mock_responses:
   - hat: fixer
     text: |
       <event topic="fix.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","review_round":1,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","fixed_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000003","fix_plan_file":".ralph/review/plan-u6-fail-stop/fix-plan.md","review_verdict":"blocked","fixes_applied":1,"fixes_skipped":0,"fix_summary":"UF1 applied; UF2 failed; UF3..UF5 never started","next_review_plan":{"focus_areas":["re-attempt UF2 after diagnostic"],"fixed_findings":["P1-2"],"verification_performed":["cargo nextest"],"residual_risks":[],"diff_ranges":["0000000000000000000000000000000000000002..0000000000000000000000000000000000000003"]},"planned_fix_units":["UF1","UF2","UF3","UF4","UF5"],"attempted_fix_units":["UF1","UF2"],"completed_fix_units":["UF1"],"failed_fix_units":["UF2"],"blocked_fix_units":[],"skipped_fix_units":["UF3","UF4","UF5"],"fix_attempt_commit_sha":"0000000000000000000000000000000000000003","worktree_status":"clean","fix_status":"partial","failure_reason":"UF2 tests_not_green after 3 attempts","decisions_file":".ralph/agent/decisions.md","baseline_verification_status":"green","post_verification_status":"red","fix_base_sha":"0000000000000000000000000000000000000002"}</event>
-  # Round 2: fix.done → test-stabilizer → stabilization.done → review-reentry → round 2 → still blocked
-  - hat: test-stabilizer
-    text: |
-      <event topic="stabilization.done">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","tested_from_sha":"0000000000000000000000000000000000000003","head_sha":"0000000000000000000000000000000000000003","stabilization_audit_file":".ralph/review/plan-u6-fail-stop/stabilization/r2-audit.md","correction_ids":[],"classification_counts":{"test_bug":0,"production_bug":0,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":0},"worktree_status":"clean","tests_run":2,"tests_passed":1}</event>
+  # Round 2: fix.done → review-reentry → round 2 → still blocked
   - hat: review-reentry
     text: |
       <event topic="review.round.ready">{"plan_name":"plan-u6-fail-stop","plan_path":"docs/plans/u6-fail-stop.md","review_round":2,"source_topic":"fix.done","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","round_base_sha":"0000000000000000000000000000000000000003","review_plan":{"focus_areas":["verify UF1 fix"],"fixed_findings":["P1-2"],"verification_performed":["cargo nextest"],"residual_risks":[],"diff_ranges":["0000000000000000000000000000000000000002..0000000000000000000000000000000000000003"]}}</event>
@@ -198,7 +194,7 @@ mock_responses:
       <event topic="LOOP_COMPLETE">{"reason":"review.loop.blocked: max_round_blocked; UF2 + UF3 unresolved"}</event>
 
 expected:
-  iterations: 26
+  iterations: 25
   events:
     - topic: plan.ready
     - topic: work.done
@@ -207,7 +203,6 @@ expected:
     - topic: fix.requested
     - topic: review.complete
     - topic: fix.done
-    - topic: stabilization.done
     - topic: review.round.ready
     - topic: review.loop.blocked
     - topic: report.done
@@ -219,7 +214,7 @@ expected:
     - topic: align.done
   event_topic_counts:
     - topic: stabilization.done
-      count: 2
+      count: 1
     - topic: review.round.ready
       count: 2
     - topic: review.synthesized

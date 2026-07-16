@@ -1451,15 +1451,13 @@ fn test_ce_executor_pipeline_loop_fix_reentry() {
     run_workflow_guard_scenario(yaml);
 }
 
-/// 2026-07-16-001 plan U5: in the ce-executor-pipeline-loop preset,
-/// both `work.done` (round 1) and `fix.done` (round 2) now flow
-/// through `test-stabilizer` before re-entering review-reentry. This
-/// scenario asserts the new topology:
-/// - test-stabilizer fires twice (once per trigger source).
-/// - review-reentry subscribes only to stabilization.done.
+/// Loop topology regression: only `work.done` flows through
+/// `test-stabilizer`; `fix.done` directly re-enters review. This
+/// scenario asserts:
+/// - test-stabilizer fires once for the initial executor handoff.
+/// - review-reentry subscribes to stabilization.done and fix.done.
 /// - Round 2 review.round.ready carries source_topic=fix.done and
 ///   round_base_sha == fix.head_sha.
-/// - Both stabilization.done events emit BEFORE review-reentry fires.
 #[test]
 fn test_ce_executor_pipeline_loop_fix_stabilizer_reentry() {
     let yaml =
@@ -1530,8 +1528,7 @@ fn test_ce_executor_pipeline_post_fix_review() {
 /// (`planned_fix_units` / `attempted_fix_units` /
 /// `completed_fix_units` / `failed_fix_units` /
 /// `skipped_fix_units`). Then the new U5 topology applies:
-/// fix.done → test-stabilizer → stabilization.done →
-/// review-reentry round 2 → review.loop.blocked (must-fix count
+/// fix.done → review-reentry round 2 → review.loop.blocked (must-fix count
 /// still > 0). Reporter consumes review.loop.blocked.
 #[test]
 fn test_ce_executor_pipeline_loop_fixer_fail_stop() {

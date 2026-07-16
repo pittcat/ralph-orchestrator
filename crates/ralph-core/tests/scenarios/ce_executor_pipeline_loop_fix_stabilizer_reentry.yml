@@ -1,24 +1,17 @@
-# ce_executor_pipeline_loop_fix_stabilizer_reentry: U5 new topology
-#
-# 2026-07-16-001 plan U5: in ce-executor-pipeline-loop, the fix.done
-# handoff now flows through test-stabilizer before reaching
-# review-reentry. Two reentry rounds must be visible in the event
-# ledger:
+# ce_executor_pipeline_loop_fix_stabilizer_reentry: direct fix reentry topology
 #
 #   round 1: work.done → test-stabilizer → stabilization.done
 #          → review-reentry → review.round.ready (round 1)
-#   round 2: fix.done   → test-stabilizer → stabilization.done
-#          → review-reentry → review.round.ready (round 2)
+#   round 2: fix.done → review-reentry → review.round.ready (round 2)
 #
 # The test asserts:
-# - test-stabilizer fires twice (once per trigger source).
-# - review-reentry subscribes only to stabilization.done (NOT fix.done).
-# - Both stabilization.done events emit before review-reentry fires.
+# - test-stabilizer fires once, only for work.done.
+# - review-reentry subscribes to stabilization.done and fix.done.
 # - Round 2 review.round.ready carries source_topic=fix.done,
 #   review_round=2, and round_base_sha == fix.head_sha.
 
 name: ce_executor_pipeline_loop_fix_stabilizer_reentry
-description: ce-executor-pipeline-loop U5 — fix.done now flows through test-stabilizer before reentering review (round 2)
+description: ce-executor-pipeline-loop fix.done directly reenters review round 2 after fixer verification
 
 config:
   prompt_file: PROMPT.md
@@ -31,10 +24,10 @@ config:
       subscribes_to: [plan.ready]
       publishes: [work.done, work.failed]
     test-stabilizer:
-      subscribes_to: [work.done, fix.done]
+      subscribes_to: [work.done]
       publishes: [stabilization.done, stabilization.blocked]
     review-reentry:
-      subscribes_to: [stabilization.done]
+      subscribes_to: [stabilization.done, fix.done]
       publishes: [review.round.ready]
     "dim:goal-alignment":
       subscribes_to: [review.round.ready]
@@ -149,10 +142,7 @@ mock_responses:
   - hat: fixer
     text: |
       <event topic="fix.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","review_round":1,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","fixed_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000003","fix_plan_file":".ralph/review/plan-loop-u5/fix-plan.md","review_verdict":"pass_with_residuals","fixes_applied":1,"fixes_skipped":0,"fix_summary":"applied one P1 fix","next_review_plan":{"focus_areas":["verify P1 fix"],"fixed_findings":["P1-1"],"verification_performed":["cargo nextest"],"residual_risks":[],"diff_ranges":["0000000000000000000000000000000000000002..0000000000000000000000000000000000000003"]}}</event>
-  # Round 2 NEW: fix.done routes through test-stabilizer (U5 contract).
-  - hat: test-stabilizer
-    text: |
-      <event topic="stabilization.done">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","tested_from_sha":"0000000000000000000000000000000000000003","head_sha":"0000000000000000000000000000000000000003","stabilization_audit_file":".ralph/review/plan-loop-u5/stabilization/r2-audit.md","correction_ids":[],"classification_counts":{"test_bug":0,"production_bug":0,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":0},"worktree_status":"clean","tests_run":1,"tests_passed":1}</event>
+  # Round 2: fix.done directly triggers review-reentry.
   - hat: review-reentry
     text: |
       <event topic="review.round.ready">{"plan_name":"plan-loop-u5","plan_path":"docs/plans/loop-u5.md","review_round":2,"source_topic":"fix.done","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","round_base_sha":"0000000000000000000000000000000000000003","review_plan":{"focus_areas":["verify P1 fix"],"fixed_findings":["P1-1"],"verification_performed":["cargo nextest"],"residual_risks":[],"diff_ranges":["0000000000000000000000000000000000000002..0000000000000000000000000000000000000003"]}}</event>
@@ -188,10 +178,10 @@ mock_responses:
       <event topic="report.done">{"plan_name":"plan-loop-u5","report_path":".ralph/review/plan-loop-u5/report.md","verdict":"pass"}</event>
   - hat: reporter
     text: |
-      <event topic="LOOP_COMPLETE">{"reason":"fix path re-stabilized and accepted"}</event>
+      <event topic="LOOP_COMPLETE">{"reason":"fix path re-reviewed and accepted"}</event>
 
 expected:
-  iterations: 27
+  iterations: 26
   events:
     - topic: plan.ready
     - topic: work.done
@@ -200,7 +190,6 @@ expected:
     - topic: fix.requested
     - topic: review.complete
     - topic: fix.done
-    - topic: stabilization.done
     - topic: review.round.ready
     - topic: review.accepted
     - topic: align.done
@@ -212,7 +201,7 @@ expected:
     - topic: work.failed
   event_topic_counts:
     - topic: stabilization.done
-      count: 2
+      count: 1
     - topic: review.round.ready
       count: 2
     - topic: review.synthesized
@@ -227,12 +216,6 @@ expected:
       fields:
         tested_from_sha: "0000000000000000000000000000000000000002"
         head_sha: "0000000000000000000000000000000000000002"
-        correction_ids: []
-    - topic: stabilization.done
-      occurrence: 2
-      fields:
-        tested_from_sha: "0000000000000000000000000000000000000003"
-        head_sha: "0000000000000000000000000000000000000003"
         correction_ids: []
     - topic: review.round.ready
       occurrence: 1

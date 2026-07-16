@@ -90,7 +90,6 @@ event_loop:
       - "review.standards.done"
       - "review.adversarial.done"
       - "review.synthesized"
-      - "review.accepted"
       - "review.complete"
       - "fix.done"
       - "align.done"
@@ -924,83 +923,6 @@ event_loop:
           - "findings_summary"
           - "verdict"
           - "review_phase"
-      review.accepted:
-        required_fields: ["plan_name", "plan_path", "executor_head_sha", "resolved_baseline_sha", "review_phase", "normalized_plan_file", "plan_contract_version", "plan_contract_digest", "trace_file", "fix_plan_file", "synthesized_review_file", "findings_count", "p0_count", "p1_count", "findings_summary", "verdict"]
-        field_docs:
-          plan_contract_version:
-            meaning: "literal version tag of the ce-unified-plan contract carried through from plan.ready"
-            source: "review-synthesizer carries forward from plan.ready"
-            fill_rule: "literal copy; do NOT recompute"
-          normalized_plan_file:
-            meaning: "canonical semantic projection of the source plan that downstream hats read"
-            source: "review-synthesizer carries forward from plan.ready"
-            fill_rule: "literal copy; do NOT make up a path"
-          plan_contract_digest:
-            meaning: "hex digest binding the source plan and normalized_plan_file for this execution chain"
-            source: "review-synthesizer carries forward from plan.ready"
-            fill_rule: "literal copy; do NOT recompute"
-          trace_file:
-            meaning: "append-only requirement→scenario→unit trace file for this plan"
-            source: "review-synthesizer carries forward from plan.ready"
-            fill_rule: "literal copy; do NOT make up a path"
-          plan_name:
-            meaning: "plan file basename without extension; copied from the final dim's payload"
-            source: "review-synthesizer carries forward from the last review.<dim>.done payload"
-            fill_rule: "literal copy; do NOT make up a name"
-          plan_path:
-            meaning: "repo-relative path to the original plan file"
-            source: "review-synthesizer carries forward from the last dim's payload"
-            fill_rule: "literal copy"
-          executor_head_sha:
-            meaning: "git SHA at HEAD after the last executor commit — anchors synthesized counts"
-            source: "review-synthesizer carries forward from the last dim's payload"
-            fill_rule: "literal copy; do NOT recompute"
-          resolved_baseline_sha:
-            meaning: "canonical baseline SHA carried through the chain from plan.ready"
-            source: "review-synthesizer carries forward"
-            fill_rule: "literal copy"
-          diff_patch_file:
-            meaning: "absolute path to the canonical review patch written by dim:goal-alignment"
-            source: "review-synthesizer reads from the last dim's payload"
-            fill_rule: "literal copy of the path; do NOT make up a path"
-          synthesized_review_file:
-            meaning: "absolute path to the synthesized review product file written by review-synthesizer"
-            source: "review-synthesizer writes it via the Write tool"
-            fill_rule: "absolute path under .ralph/review/<plan>/synthesized.md; write the file first"
-          findings_count:
-            meaning: "total findings deduped across all six dimensions"
-            source: "review-synthesizer aggregates from the six dimension product files"
-            fill_rule: "integer >= 0"
-          p0_count:
-            meaning: "count of blocker (P0) findings in the synthesized table"
-            source: "review-synthesizer classifies"
-            fill_rule: "integer >= 0"
-          p1_count:
-            meaning: "count of must-fix (P1) findings in the synthesized table"
-            source: "review-synthesizer classifies"
-            fill_rule: "integer >= 0"
-          findings_summary:
-            meaning: "short prose summarizing the synthesized findings; one or two sentences"
-            source: "review-synthesizer"
-            fill_rule: "short prose; mention P0/P1 totals and the most impactful category"
-          verdict:
-            meaning: "single-field decision driving fix-planner routing"
-            source: "review-synthesizer"
-            fill_rule: "literal one of pass, pass_with_residuals, blocked"
-        examples:
-          # Shape-illustration only; runtime never treats these as
-          # must-equal constraints. Mirror loop preset's examples block.
-          - plan_name: "2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan"
-            plan_path: "docs/plans/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan.md"
-            executor_head_sha: "0123456789abcdef0123456789abcdef01234567"
-            resolved_baseline_sha: "fedcba9876543210fedcba9876543210fedcba98"
-            diff_patch_file: ".ralph/review/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan/review.diff.patch"
-            synthesized_review_file: ".ralph/review/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan/synthesized.md"
-            findings_count: 6
-            p0_count: 2
-            p1_count: 2
-            findings_summary: "2 P0 + 2 P1 findings, mostly around executor verdict routing and downstream hat prompt assumptions"
-            verdict: "blocked"
       review.complete:
         required_fields:
           - "plan_name"
@@ -2162,8 +2084,8 @@ hats:
     # 既可以修改测试代码，也可以修改生产代码（归因后），但必须先建基线、
     # 分类失败、跑全量测试，禁止削弱权威 Oracle（详见 instructions）。
     name: "Test Hat (Stabilizer)"
-    description: "Post-execution test stabilization gate. Builds a baseline, attributes failures, applies minimal test/production corrections, runs the full test suite, and emits stabilization.done or stabilization.blocked as the gate before six-dim review."
-    triggers: ["work.done", "fix.done"]
+    description: "Post-execution test stabilization gate. Triggered once after executor completion; builds a baseline, attributes failures, applies minimal test/production corrections, runs the full test suite, and emits stabilization.done or stabilization.blocked before six-dim review."
+    triggers: ["work.done"]
     publishes: ["stabilization.done", "stabilization.blocked"]
     exempt_topics: ["stabilization.done", "stabilization.blocked"]
     default_publishes: "stabilization.blocked"
@@ -2172,7 +2094,6 @@ hats:
       enabled: true
       events:
         - work.done
-        - fix.done
     timeout: 3600
     missing_event_grace_secs: 600
     instructions: |
@@ -2201,9 +2122,8 @@ hats:
 
       ### Step 1 — Read trigger & plan context
 
-      - 从 trigger 读 `plan_name`、`plan_path` 与统一计划 artifact 字段。`work.done.executor_head_sha` 或 `fix.done.head_sha` 就是本轮 `tested_from_sha`。
-      - `work.done` 映射为 `review_phase: initial`；`fix.done` 映射为 `review_phase: post_fix`。该字段及统一计划 artifact 字段必须原样透传。
-      - `fix.done` 路径还必须原样透传 `fix_plan_file`、attempt 结算、`fix_status` 与 `failure_reason`，使最终 Review/Alignment 能核验修复血缘；`work.done` 路径将 `fix_plan_file` 设为空字符串，仅供 phase-aware schema 统一。
+      - 从 `work.done` trigger 读 `plan_name`、`plan_path` 与统一计划 artifact 字段；`work.done.executor_head_sha` 就是本轮 `tested_from_sha`。
+      - 设置 `review_phase: initial`，并原样透传统一计划 artifact 字段。`fix_plan_file` 设为空字符串，仅供统一 schema 使用。
       - 按需读原计划（`plan_path`），但**只**识别需要的 Unit 上下文，不重写任何计划。
       - 把当前 `git rev-parse HEAD` 留作 `candidate_head_sha`，**不要**与 `executor_head_sha` 混算。
 
@@ -2287,7 +2207,7 @@ hats:
       Emit：
       ```
       <event topic="stabilization.done">
-      {"plan_name":"<plan>","plan_path":"<repo-relative plan path>","plan_contract_version":"ce-unified-plan/v1","normalized_plan_file":"<path from trigger>","plan_contract_digest":"<digest from trigger>","trace_file":"<trace from trigger>","review_phase":"<initial|post_fix>","tested_from_sha":"<trigger head>","head_sha":"<git rev-parse HEAD>","stabilization_audit_file":".ralph/review/<plan>/stabilization/audit.md","correction_ids":["<id1>","<id2>"],"classification_counts":{"test_bug":<n>,"production_bug":<n>,"pre_existing_failure":<n>,"flaky_or_env":<n>,"unattributable":<n>},"worktree_status":"clean","tests_run":<n>,"tests_passed":<n>}
+      {"plan_name":"<plan>","plan_path":"<repo-relative plan path>","plan_contract_version":"ce-unified-plan/v1","normalized_plan_file":"<path from trigger>","plan_contract_digest":"<digest from trigger>","trace_file":"<trace from trigger>","review_phase":"initial","tested_from_sha":"<work.done.executor_head_sha>","head_sha":"<git rev-parse HEAD>","stabilization_audit_file":".ralph/review/<plan>/stabilization/audit.md","correction_ids":["<id1>","<id2>"],"classification_counts":{"test_bug":<n>,"production_bug":<n>,"pre_existing_failure":<n>,"flaky_or_env":<n>,"unattributable":<n>},"worktree_status":"clean","tests_run":<n>,"tests_passed":<n>}
       </event>
       ```
       然后停止。
@@ -2306,7 +2226,7 @@ hats:
       Emit：
       ```
       <event topic="stabilization.blocked">
-      {"plan_name":"<plan>","plan_path":"<repo-relative plan path>","plan_contract_version":"ce-unified-plan/v1","normalized_plan_file":"<path from trigger>","plan_contract_digest":"<digest from trigger>","trace_file":"<trace from trigger>","review_phase":"<initial|post_fix>","tested_from_sha":"<trigger head>","head_sha":"<git rev-parse HEAD or tested_from>","stabilization_audit_file":".ralph/review/<plan>/stabilization/audit.md","classification_counts":{...},"worktree_status":"<clean|dirty|unattributable_dirty>","reason":"<canonical reason>"}
+      {"plan_name":"<plan>","plan_path":"<repo-relative plan path>","plan_contract_version":"ce-unified-plan/v1","normalized_plan_file":"<path from trigger>","plan_contract_digest":"<digest from trigger>","trace_file":"<trace from trigger>","review_phase":"initial","tested_from_sha":"<work.done.executor_head_sha>","head_sha":"<git rev-parse HEAD or tested_from>","stabilization_audit_file":".ralph/review/<plan>/stabilization/audit.md","classification_counts":{...},"worktree_status":"<clean|dirty|unattributable_dirty>","reason":"<canonical reason>"}
       </event>
       ```
       然后停止。后续 review chain 与 reporter 会基于本事件生成报告 + blocked 终态。
@@ -3169,11 +3089,11 @@ hats:
 
   review-synthesizer:
     name: "Review Synthesizer"
-    description: "Synthesizes six dimensions and routes initial review to fix planning or post-fix review to bounded acceptance/blocking."
+    description: "Synthesizes six dimensions from the single review pass and routes the result to fix planning."
     triggers: ["review.adversarial.done"]
-    publishes: ["review.synthesized", "review.accepted"]
-    exempt_topics: ["review.synthesized", "review.accepted"]
-    terminal_events: ["review.synthesized", "review.accepted"]
+    publishes: ["review.synthesized"]
+    exempt_topics: ["review.synthesized"]
+    terminal_events: ["review.synthesized"]
     event_filter:
       enabled: true
       events:
@@ -3185,16 +3105,10 @@ hats:
 
       You are the final aggregator of the 6-dim serial chain. You
       receive `review.adversarial.done` (the last dimension) and
-      must produce ONE phase-aware event. Initial review emits
-      `review.synthesized` for fix planning; post-fix review emits
-      `review.accepted` and can only accept or block.
+      must produce ONE `review.synthesized` event for fix planning.
 
       ### HARD RULES
-      - Emit EXACTLY ONE event per activation: `review.synthesized` when
-        `review_phase == initial`, or `review.accepted` when
-        `review_phase == post_fix`. Do not re-emit.
-      - Post-fix P0/P1 findings set `review.accepted.verdict: blocked`;
-        post-fix review never emits another `review.synthesized`.
+      - Emit EXACTLY ONE `review.synthesized` event per activation. Do not re-emit.
       - Do NOT emit `work.done` / `work.failed` / `plan.*` /
         `review.complete` / `fix.*` / `align.done` / `report.done` /
         `LOOP_COMPLETE`.
@@ -3338,10 +3252,9 @@ hats:
       plan/stabilization fields, and `fix_plan_file`. Never recompute their
       identity values in this hat.
       ```bash
-      ralph emit <review.synthesized|review.accepted> --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<stabilized sha>","resolved_baseline_sha":"<sha>","review_phase":"<initial|post_fix>","synthesized_review_file":".ralph/review/<plan>/synthesized-review.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
+      ralph emit review.synthesized --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<stabilized sha>","resolved_baseline_sha":"<sha>","review_phase":"initial","synthesized_review_file":".ralph/review/<plan>/synthesized-review.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"findings_summary":"<summary>","verdict":"<pass|pass_with_residuals|blocked>"}'
       ```
-      Then stop. Only the initial topic triggers `fix-planner`; post-fix
-      `review.accepted` triggers alignment directly.
+      Then stop. `review.synthesized` triggers `fix-planner`.
 
       ### OPAC reference
       Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
@@ -3983,14 +3896,14 @@ hats:
   alignment:
     name: "Alignment"
     description: "Cross-checks original plan execution (executor phase) vs fix-plan execution (fixer phase) using separate git ranges. Records residuals; does NOT loop, retry, or block."
-    triggers: ["review.accepted"]
+    triggers: ["fix.done"]
     publishes: ["align.done"]
     exempt_topics: ["align.done"]
     terminal_events: ["align.done"]
     event_filter:
       enabled: true
       events:
-        - review.accepted
+        - fix.done
     disallowed_tools: ["Edit"]
     timeout: 1800
     missing_event_grace_secs: 540
@@ -4015,10 +3928,9 @@ hats:
       - Do NOT loop back to executor / fixer / review.
 
       ### Step 1 — Read context
-      - From `review.accepted` read the unified plan/trace fields,
-        `executor_head_sha` (the post-fix stabilized and independently
-        reviewed HEAD), `fix_plan_file`, `resolved_baseline_sha`, and
-        `verdict`. The event is valid here only with `review_phase: post_fix`.
+      - From `fix.done` read the unified plan/trace fields,
+        `executor_head_sha`, post-fix `head_sha`, `fix_plan_file`,
+        `resolved_baseline_sha`, and `review_verdict`.
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
       - Read the **original** plan at `plan_path`.
       - Read the **fix plan** at `fix_plan_file` (may be placeholder).
@@ -4027,9 +3939,9 @@ hats:
       Read-only reviewer. Entry Precheck validates the **current**
       handoff tip after fixer, not the historical executor boundary:
 
-      - `expected_head_sha` = `executor_head_sha` from `review.accepted`.
+      - `expected_head_sha` = `head_sha` from `fix.done`.
 
-      1. Set `expected_head_sha` from `review.accepted.executor_head_sha`.
+      1. Set `expected_head_sha` from `fix.done.head_sha`.
       2. `actual_start_head_sha` = `git rev-parse HEAD`. If mismatch,
          record in `.ralph/agent/decisions.md`, do NOT reset /
          restore / stash / clean upstream state, follow **Handoff
@@ -4103,7 +4015,7 @@ hats:
       clean), save end evidence to
       `.ralph/review/{plan_name}/git-state-alignment-end.txt`.
       ```bash
-      ralph emit align.done --json '{"plan_name":"<plan>","plan_path":"<original plan path>","executor_head_sha":"<post-fix reviewed sha>","head_sha":"<same sha>","worktree_status":"clean","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
+      ralph emit align.done --json '{"plan_name":"<plan>","plan_path":"<original plan path>","executor_head_sha":"<executor handoff sha>","head_sha":"<fix.done head_sha>","worktree_status":"clean","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
       ```
       Then stop. Reporter will receive `align.done`.
 

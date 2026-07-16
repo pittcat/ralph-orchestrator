@@ -402,7 +402,7 @@ mod tests {
         );
         assert_eq!(
             consumers.get("fix.done").cloned().unwrap_or_default(),
-            vec!["test-stabilizer".to_string()]
+            vec!["review-reentry".to_string()]
         );
         assert_eq!(
             consumers.get("fix.requested").cloned().unwrap_or_default(),
@@ -962,28 +962,15 @@ mod tests {
     }
 
     #[test]
-    fn test_ce_executor_pipeline_post_fix_must_stabilize_and_re_review() {
+    fn test_ce_executor_pipeline_fix_done_routes_directly_to_alignment() {
         let preset = get_preset("ce-executor-pipeline").expect("linear preset should exist");
         let config = RalphConfig::parse_yaml(preset.content).expect("linear preset should parse");
 
         let stabilizer = config.hats.get("test-stabilizer").expect("test-stabilizer");
-        assert!(stabilizer.triggers.iter().any(|topic| topic == "work.done"));
-        assert!(stabilizer.triggers.iter().any(|topic| topic == "fix.done"));
-
-        let synthesizer = config
-            .hats
-            .get("review-synthesizer")
-            .expect("review-synthesizer");
-        assert!(
-            synthesizer
-                .publishes
-                .iter()
-                .any(|topic| topic == "review.accepted"),
-            "post-fix review must terminate without creating a second fix plan"
-        );
+        assert_eq!(stabilizer.triggers, vec!["work.done".to_string()]);
 
         let alignment = config.hats.get("alignment").expect("alignment");
-        assert_eq!(alignment.triggers, vec!["review.accepted".to_string()]);
+        assert_eq!(alignment.triggers, vec!["fix.done".to_string()]);
     }
 
     /// 2026-07-09-001 plan (U8): the embedded `ce-executor-pipeline-loop`
