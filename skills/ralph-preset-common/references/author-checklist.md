@@ -12,6 +12,9 @@
 - [ ] **Git handoff 纪律（写入型 hat）**：每条写入型 hat（executor / fixer / 等）在 emit 终态 topic（work.done / fix.done 等）前必须有"两阶段 Git handoff precheck"：Stage A 计算 final HEAD + commit 状态 + clean worktree（在 policy-check 之前），Stage B 在真实 emit 前重检 HEAD / clean（防止 policy-check 与 emit 之间的窗口被 hook / subagent 篡改）；fabricate `worktree_status: clean` 是 contract violation。
 - [ ] **Git handoff 纪律（只读 hat）**：每条只读 review / alignment hat 在 trigger 时必须先做"Entry Precheck"：expected_head_sha（dim：executor/round tip；alignment：fixer `head_sha`，无 fix 时才是 executor tip）必须等于 actual_start_head_sha（git rev-parse HEAD），porcelain filter（排除 `.ralph/`）必须为空；violation 时走 **Handoff failure emit**（发本 hat 唯一允许事件 + `handoff_precheck_failed`，禁止 silent-stop；不可替上游 commit / restore / stash / reset）；emit 前再做 Exit Precheck 两阶段重检；start / end evidence 必须写 `.ralph/review/<plan>/{round-<NN>/}git-state-<hat>-{start,end}.txt`，不污染 Git 状态。
 - [ ] `state_projection.actions` 与 emit payload 字段对齐
+- [ ] **Artifact-First topic 判别**：每条 emit topic 的字段都先判断是否属于「完整结果 / 长内容 / 跨 hat 摘要 / 关键决策依据 / 验证证据 / 高成本重建」；若是，完整内容必须由实际执行的 hat 或其 sub-agent 写入当前 `.ralph/` 下的业务 artifact，event payload 不得直接搬运，只保留路径、短状态或摘要、必要身份与路由字段（event 是控制面，文件是数据面）。
+- [ ] **Artifact 产出责任**：每条写入型 hat（executor / fixer / sub-agent 拥有方）必须显式声明本 activation 会写入的 artifact 路径集合；sub-agent 的完整结果、证据与未解决问题必须先落盘，再只返回短状态、摘要和路径；不得把 preset 描述为文件创建者。
+- [ ] **Artifact 消费与生命周期**：每条消费型 hat 必须显式声明从哪个可见路径读取 artifact，不得依赖 prompt 中的长文本；每份重要 artifact 还要指定消费方以及最终保留、归档或清理责任。
 - [ ] 每个 agent-authored emit topic 的 `event_policy.schemas.<topic>` 已检查：required handoff / identity / verdict / count / path / reason 字段有 `field_docs`，高风险 topic 有不会伪造业务事实的 `examples`
 - [ ] 若 hat `publishes` 含 `review.dimensions.complete`，`state_projection.actions_chain` 须有对应投影 action（否则下游 Q2 看不到 review 汇总）
 - [ ] emitter 若 instructions 要求 `--triggered <hat>`，该 `<hat>` 必须在 preset `hats[]` 里声明（否则 runtime 拒收 `triggered_not_in_topology`）
@@ -32,6 +35,14 @@
 - [ ] 不复述 `ralph-tools*.md` 参数表
 - [ ] **对每个 emit topic，按 payload audit 五列填行**（见下）—— schema 通过不等于字段可达
 - [ ] **对每个 payload 字段，反查 schema metadata**：`field_docs.meaning/source/fill_rule` 与 Payload Contract 的值源、可见性、下游消费一致
+
+**Artifact-First 单 hat 视角审核项（每 hat 必填）**
+
+- [ ] **Q2 Observe**：消费重要信息时，命令或动作必须能从当前 hat 可见输入取得路径，并直接读取当前 `.ralph/` 下的业务 artifact；不得从 trigger payload 反查完整结果、长内容或长解释字段，也不得读取 runtime internal ledger。
+- [ ] **Q3 执行顺序**：产出重要信息时必须明确「实际执行的 hat 或其 sub-agent 先写 artifact → hat 验收文件 → policy-check → emit 携带路径的 event」；不得先 emit 再补文件。涉及命令语法只引用 `ralph-tools-emit`「Policy-Check 反馈」及相应章节，不复制参数表。
+- [ ] **Q4 Payload Contract**：每行填写 `artifact 落盘`，包括「必填 / 可选 / 不需要」与路径格式约定（例如 `.ralph/<plan>/<unit>/<file>.md`）；实际路径可由任务设计决定，不要求统一目录结构。
+- [ ] **Q5 handoff closure**：必须形成「emit 路径字段 → projection / 当前 hat 可见输入 → 下游 hat 读取 artifact → 消费确认」完整链路，并写明 artifact 的产出方、消费方以及最终保留 / 归档 / 清理责任。
+- [ ] **不落盘例外**：只有短暂、短小且无需恢复的信息可例外；必须在 Payload Contract 同行的 `artifact 落盘` 列写「不落盘 + 理由」，并以恢复价值、审计价值和下游依赖为判据，不能只看字符数。
 
 ## AAF 五问表模板（每 hat 必填）
 
@@ -54,13 +65,16 @@
 ```markdown
 ### Hat: <id> — Payload Contract
 
-| topic | 字段 | 类型 | 值源（哪条命令 / 哪段 projection / 哪个 trigger payload 字段） | 可见性证据（hat prompt 栈哪一段可见） | 身份检查（是否需要 live task_id） | 下游消费（下游哪个 hat 的哪个决策用到） | schema metadata |
-|---|---|---|---|---|---|---|---|
-| `<topic>` | `task_id` | string | `ralph tools task list` → 当前 active task | `## ORCHESTRATOR CONTEXT` | 必须 live；禁手写 | reviewer 决定后续 fix / block | `field_docs.task_id.source` 指向 live task list；`fill_rule` 禁手写 |
-| `<topic>` | `verdict` | enum | 本 hat work 输出 | `## HAT IDENTITY` trigger payload | 不涉及 | 同上 | `field_docs.verdict.meaning` 解释判定语义；`allowed_values` 列枚举 |
-| `<topic>` | summary field（如 `must_fix_now_count`） | 整数 | 当前 trigger payload 字段 | `## TRIGGER CONTEXT`（preset/schema `trigger_context.summary_fields` 声明） | 不涉及 | 本 hat 决定路由分支 | schema `trigger_context.summary_fields` 列声明字段；missing 渲染为 `<missing>` |
-| `<topic>` | matched hint guidance | 字符串 | `trigger_context.routing_hints` 命中条目 | `## TRIGGER CONTEXT`「Matched routing hints」段 | 不涉及 | 本 hat 行动指导 | `routing_hints[*].label` 唯一；同 `exclusive_group` 内不可同时命中 |
+| topic | 字段 | 类型 | 值源 | 可见性 | 身份检查 | 下游消费 | schema metadata | artifact 落盘 |
+|---|---|---|---|---|---|---|---|---|
+| `<topic>` | `task_id` | string | `ralph tools task list` → 当前 active task | `## ORCHESTRATOR CONTEXT` | 必须 live；禁手写 | reviewer 决定后续 fix / block | `field_docs.task_id.source` 指向 live task list；`fill_rule` 禁手写 | 必填 · 关联的完整任务结果写到 `.ralph/<plan>/tasks.jsonl`，event 仅携带 live `task_id` 与 artifact 路径 |
+| `<topic>` | `verdict` | enum | 本 hat work 输出 | `## HAT IDENTITY` trigger payload | 不涉及 | 同上 | `field_docs.verdict.meaning` 解释判定语义；`allowed_values` 列枚举 | 必填 · `reason` 若为长解释，落盘到 `.ralph/<plan>/decisions/<unit>.md`，event 只带短 verdict、短 reason 与路径 |
+| `<topic>` | summary field（如 `must_fix_now_count`） | 整数 | 当前 trigger payload 字段 | `## TRIGGER CONTEXT`（preset/schema `trigger_context.summary_fields` 声明） | 不涉及 | 本 hat 决定路由分支 | schema `trigger_context.summary_fields` 列声明字段；missing 渲染为 `<missing>` | 可选 · 若是可立即重算的短计数，写「不落盘 + 无恢复、审计或历史依赖」 |
+| `<topic>` | matched hint guidance | 字符串 | `trigger_context.routing_hints` 命中条目 | `## TRIGGER CONTEXT`「Matched routing hints」段 | 不涉及 | 本 hat 行动指导 | `routing_hints[*].label` 唯一；同 `exclusive_group` 内不可同时命中 | 不需要 · 短暂路由指导，无恢复、审计或下游历史依赖 |
+| `<topic>` | `artifact_path` | path | 本 hat 或其 sub-agent 本 activation 实际写入的业务 artifact | 本 hat 写入结果；下游从 projection / trigger 可见字段取得 | 如与 task 绑定则校验 live identity | `<consumer-hat>` 读取完整结果并确认消费；`<owner>` 负责最终保留 / 归档 / 清理 | `field_docs.artifact_path` 说明文件语义、值源和修复方式 | 必填 · `.ralph/<plan>/<unit>/<file>.md`；完整结果先落盘，event 只传此路径与短控制字段 |
 ```
+
+**新行示例使用规则：** 每个承载重要信息的 topic 至少增加一行实际 artifact 路径字段；不得因为 payload 已出现路径就省略文件语义、消费方、消费动作或生命周期责任。
 
 **Trigger Context 审核项（适用于 trigger-consuming hats）**
 
@@ -82,6 +96,12 @@
 - 某字段无任何一行说明它对 hat 可见
 - required handoff / identity / decision 字段没有 `field_docs`，也没有说明为什么现有 injected skill 已覆盖
 - `examples` 填了业务结论占位（例如固定 `0` / `pass`），而不是安全示例
+- event payload 直接携带完整结果正文（尤其是超过 200 字符，或任意长度但具有恢复、审计、下游依赖价值的内容）；字符数仅是提示，不是主判据
+- emitter hat instructions 未要求「先写业务 artifact，再 emit 携带路径的 event」
+- consumer hat instructions 未要求从当前可见路径读取完整内容，仍依赖 prompt 或 trigger payload 中的长文本
+- artifact 路径未指定消费方、消费动作或最终保留 / 归档 / 清理责任
+- event payload 把 `.ralph/events.jsonl`、`.ralph/loops.json`、`.ralph/supervisor.db` 等 runtime internal ledger 路径当作业务 artifact
+- 「不落盘」例外只以「字符很少」为理由，没有说明恢复价值、审计价值和下游依赖
 
 ## 交 review 前门禁
 
@@ -90,6 +110,9 @@
 - [ ] Payload Contract 的 `schema metadata` 列已同步到 `presets/schemas/<name>.yml` 或 preset inline `event_policy.schemas`
 - [ ] Emitter instructions 引用 `ralph-tools-emit`「Policy-Check 反馈」，不复制字段说明
 - [ ] 自问：「若我只收到这份 instructions + Ralph 注入，能否做完 Q1？Q4 每个字段我能取到值吗？」
+- [ ] **Artifact-First 路径闸口**：每条重要信息（完整结果 / 长内容 / 跨 hat 摘要 / 关键决策依据 / 验证证据 / 高成本重建信息）都有当前 `.ralph/` 下的对应业务 artifact 路径，且生产方在本 activation 写入，消费方能从当前 hat 可见输入取得该路径。
+- [ ] **控制面最小化闸口**：event / message 字段只保留短状态、短摘要、artifact 路径、必要身份与路由字段；完整结果、证据、进度和决策依据留在文件中。
+- [ ] **例外闸口**：每条「不落盘」都在 Payload Contract 同行给出可审核理由，并说明其短暂、短小、无需恢复且不承担审计或下游历史依赖；不能仅以字符数判断。
 - [ ] 对 builtin 改动：列出 7 点同步清单（见下），不自动执行
 - [ ] 建议调用 `ralph-preset-review`（不替代 `ralph preset check`）
 
@@ -111,6 +134,16 @@
 - [ ] blocked 路径进入 Reporter/阻塞终态，不能降级为 accepted。
 
 任一问 ✗ → 必须改写或显式说明为何单链无法表达（默认应迁移到 executor 内部 subagent）。见 `references/finding-rubric.md` 的「Single-chain-first audit」段。
+
+## Hard questions — Artifact-First Handoff
+
+任何 preset 交 review 前必须逐条回答；任一项不满足且没有符合例外条件的理由即拒绝交付：
+
+1. **每条写入型 hat 是否声明了当前 `.ralph/` 下的 artifact 路径集合，且拓扑层没有把这些路径描述为「preset 创建」？** ✓ / ✗ + 证据
+2. **每条 consumer hat 的 instructions 是否要求它从当前可见输入取得路径并显式读取 artifact，而不是依赖 prompt 中的长文本？** ✓ / ✗ + 证据
+3. **每个被传递的完整结果、长内容或跨 hat 摘要是否都已先落盘，event / message 是否只保留短状态、短摘要、路径、必要身份与路由字段？** ✓ / ✗ + 证据
+4. **是否有任何 hat 把 `.ralph/events.jsonl`、`.ralph/loops.json`、`.ralph/supervisor.db` 等 runtime internal ledger 当作自定义状态或 handoff 文件？** ✓ / ✗ + 证据；此项必须为 ✗
+5. **每条声明「不落盘」的信息是否都标注了简短理由，并按恢复价值、审计价值和下游依赖解释，而非只按字符数判断？** ✓ / ✗ + 证据
 
 ## Builtin 7 点同步清单（摘要）
 

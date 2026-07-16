@@ -1,0 +1,204 @@
+# AAF + artifact-first handoff negative fixture — NOT a builtin preset.
+# For ralph-preset-review acceptance only. Covers AE1-AE5 from
+# docs/plans/2026-07-16-003-feat-preset-artifact-first-handoffs-plan.md.
+# Each hat intentionally violates artifact-first handoff requirements so
+# reviewers can validate the new finding rubric rows.
+#
+# ⚠️ Fixture-only finding IDs (review-only, NOT in `ralph preset check` JSON):
+#   - `preset.artifact_first.subagent_result_not_persisted`         (R2, R4, R9 → AE1)
+#   - `preset.artifact_first.handoff_path_not_consumed`             (R4, R8, R10, R12 → AE2)
+#   - `preset.artifact_first.business_state_uses_internal_ledger`   (R3, R6 → AE3)
+#   - `preset.artifact_first.lifecycle_owner_missing`               (R5, R10 → AE4)
+#   - `preset.artifact_first.invalid_no_persist_exception`          (R7, R11 → AE5)
+# The IDs above are proposed in the plan and intentionally not yet
+# present in references/finding-rubric.md; reviewers should treat them
+# as review-only when running the AAF / Payload Audit pass.
+#
+# ⚠️ Mechanical lint caveat: this fixture does NOT declare
+# `event_policy.schemas` / `topic_deny_rules`; mechanical lint on this
+# file may stay quiet. The fixture exists to drive the **soft AAF** and
+# **Handoff Audit** paths in `ralph-preset-review`, mirroring the
+# posture of `aaf-review-negative-fixture.yml`.
+event_loop:
+  execution_mode: isolated
+  starting_event: work.start
+  completion_promise: loop.summary
+  max_iterations: 10
+hats:
+  executor:
+    name: Executor
+    description: |
+      Produces the work and delegates full review-report generation to a
+      sub-agent. Intentionally violates AE1: returns the entire report in
+      the event payload instead of writing it to `.ralph/`.
+    triggers:
+      - work.start
+    publishes:
+      - work.done
+    instructions: |
+      ## EXECUTOR MODE
+
+      Spawn a sub-agent to produce the full review report for this unit.
+      The sub-agent will run for several minutes and return its findings
+      as a long string.
+
+      Once the sub-agent returns:
+      - Take the **entire** sub-agent output and paste it verbatim into
+        the `report_body` field of your `work.done` emit.
+      - Do not write anything to `.ralph/`. The report is only in the
+        payload.
+      - Set `summary` to a one-line status string you derive yourself.
+      - Set `executor_head_report_path` (relative `.ralph/reports/...`)
+        in the payload so the next hat *could* read it later, but you do
+        not need to write the file — the path is a placeholder.
+
+      Emit `work.done` with:
+      - report_body: <full sub-agent output, raw>
+      - summary: <status string>
+      - executor_head_report_path: <string you made up>
+
+      ### AE 映射: AE1 → R2, R4, R9
+      - 这条 hat 故意让 sub-agent 的完整结果只通过 `report_body` 字段返回。
+      - 没有 `.ralph/` 业务 artifact 落盘,也没有 sub-agent 拥有的产物文件。
+      - 期望 review 报告:
+        `preset.artifact_first.subagent_result_not_persisted` (review-only)
+        → category: feasibility / payload-content; severity P0; aaf_question Q4/Q5;
+          problem: long report lives only in payload; no artifact under `.ralph/`;
+          fix: 让 sub-agent 先写 `.ralph/reports/<unit>.md`,emit 只携带路径 + 摘要。
+    terminal_events:
+      - work.done
+  reviewer:
+    name: Reviewer
+    description: |
+      Decides pass / fail based on the executor's report. Intentionally
+      violates AE2: trigger payload exposes a `report_path` field but
+      instructions only mention `report_body` summary and a fabricated
+      `executor_head_report_path`, so the reviewer cannot consume the
+      upstream artifact.
+    triggers:
+      - work.done
+    publishes:
+      - review.passed
+      - review.failed
+    instructions: |
+      ## REVIEWER MODE
+
+      When `work.done` arrives, look at the `report_body` field — it
+      contains the executor's full report inline as a string. Skim the
+      first paragraph for a verdict, and accept if it looks like a pass.
+
+      The `executor_head_report_path` placeholder is **not** something
+      you need to read; ignore it.
+
+      (Side note: if you ever see a `report_path` field on the trigger
+      event, you are not required to open that file — the inline body
+      is the source of truth.)
+
+      Emit `review.passed` or `review.failed` with:
+      - verdict: pass / fail
+      - reason: short justification
+
+      ### AE 映射: AE2 → R4, R8, R10, R12
+      - 上游 trigger 携带 `report_path`(由 producing hat 提供),但本 hat
+        的 instructions 既没有要求读 `report_path`,也不打算读
+        `executor_head_report_path`。
+      - handoff 闭环:产出动作缺失,消费动作缺失,只有「看到 inline body」。
+      - 期望 review 报告:
+        `preset.artifact_first.handoff_path_not_consumed` (review-only)
+        → category: handoff / payload-content; severity P0; aaf_question Q2/Q4/Q5;
+          problem: trigger 提供 `report_path` 但 reviewer 不读;只看 payload 摘要;
+          fix: instructions 显式 `cat <report_path>` 后再决策,移除
+            `report_body` 内联依赖。
+    terminal_events:
+      - review.passed
+      - review.failed
+  planner:
+    name: Planner
+    description: |
+      Updates the plan after a failed review. Intentionally violates AE3:
+      instructions direct the planner to write stage state into
+      `.ralph/supervisor.db`, which is a Ralph internal runtime ledger,
+      not a business artifact.
+    triggers:
+      - review.failed
+    publishes:
+      - plan.updated
+    instructions: |
+      ## PLANNER MODE
+
+      After a `review.failed` arrives, persist the new stage state for
+      this loop by writing it directly into `.ralph/supervisor.db`.
+      Update the `plan_state` row for the current loop id with the new
+      stage, the count of open findings, and the next action.
+
+      Emit `plan.updated` with:
+      - stage: <string>
+      - open_finding_count: <int>
+      - supervisor_db_path: .ralph/supervisor.db
+
+      ### AE 映射: AE3 → R3, R6
+      - 这条 hat 把阶段状态写到 `.ralph/supervisor.db`,但 `.ralph/supervisor.db`
+        是 Ralph runtime / supervisor 内部 ledger(per plan 2026-07-16-003 R6 + A5)。
+      - preset 业务状态应落到专用 `.ralph/plans/<plan>.md` 等业务 artifact。
+      - 期望 review 报告:
+        `preset.artifact_first.business_state_uses_internal_ledger` (review-only)
+        → category: feasibility / visibility; severity P0; aaf_question Q3;
+          problem: 把内部 ledger 当业务 artifact 接口,跨 hat 不可读且会被 supervisor 覆盖;
+          fix: instructions 改为写 `.ralph/plans/<plan>.md`,emit 只携带路径与摘要。
+    terminal_events:
+      - plan.updated
+  orchestrator:
+    name: Orchestrator
+    description: |
+      Wraps up the loop and decides whether to summarize or stop. Carries
+      AE4 and AE5 violations: a continuously appended intermediate file
+      has no declared consumer / archive / cleanup, and a short counter
+      is treated as a no-persist exception with no recorded rationale.
+    triggers:
+      - plan.updated
+    publishes:
+      - loop.summary
+    instructions: |
+      ## ORCHESTRATOR MODE
+
+      Several hats keep appending lines to
+      `.ralph/runtime/intermediate_metrics.json` as the loop progresses
+      (one record per hat activation). You do not need to read or
+      aggregate that file yourself — it is just a side-effect of the
+      pipeline.
+
+      For your own activation, treat the small `last_count` value
+      carried on the trigger payload as ephemeral: it is short, so do
+      not bother persisting it anywhere. You may pass the same value
+      through to `loop.summary` if you like; that is the only place
+      anything will see it.
+
+      Emit `loop.summary` with:
+      - last_count: <int from trigger payload>
+      - intermediate_metrics_path: .ralph/runtime/intermediate_metrics.json
+
+      ### AE 映射: AE4 + AE5
+      - **AE4 → R5, R10**:`intermediate_metrics.json` 由多个 hat 持续追加,
+        但 preset **没有**为它声明:
+          (a) 哪个 hat 是消费方(本 hat 自己明说不读);
+          (b) 谁负责最终保留、归档或清理。
+        期望 review 报告:
+          `preset.artifact_first.lifecycle_owner_missing` (review-only)
+          → category: handoff / feasibility; severity P0/P1(视 blast radius);
+            aaf_question Q5;
+            problem: 中间文件无消费方且无生命周期责任,可能无限增长;
+            fix: 在 preset 顶部或 orchestrator instructions 中明确写出
+              消费方 + 归档路径 + 清理时点(或声明「loop 结束时由
+              `ralph loops clean` 负责」)。
+      - **AE5 → R7, R11**:`last_count` 是可即时重算的短计数,
+        author 没有给出可审核的「无需恢复 + 下游不依赖历史证据」
+        理由,instructions 仅以「字符很短」为由不落盘。
+        期望 review 报告:
+          `preset.artifact_first.invalid_no_persist_exception` (review-only)
+          → category: feasibility / payload-content; severity P1;
+            aaf_question Q4;
+            problem: 仅有「很短」作为不落盘理由,不满足 R7 的可审核例外;
+            fix: 在 instructions 显式说明下游不再消费该值、且可由本 hat
+              在下一轮重新派生,或改为落盘到 `.ralph/runtime/last_count.json`。
+    terminal_events:
+      - loop.summary

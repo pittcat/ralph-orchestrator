@@ -46,6 +46,33 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | 终态 emit 前夹带其它业务事件 | P0 | feasibility | Q4 |
 | report finding 无 repair surface（无字段 / 无 source / 无 fix） | 拒入主表 → Unverified Suspicions | — | — |
 
+## Artifact-First Handoff → Severity（软性 / review-only）
+
+按 `docs/plans/2026-07-16-003-feat-preset-artifact-first-handoffs-plan.md` Product Contract，重要信息默认必须由实际执行的 hat 或其 sub-agent 写入当前 `.ralph/` 下的业务 artifact；event payload 仅承担控制面（短状态、摘要、路径、必要身份、路由字段）。这些缺口由 review-only AAF 独立审，**不进** `ralph preset check --format json`（详见文末「lint vs review-only」段）。
+
+|| 缺口 | Severity | category | aaf_question | 备注 |
+||---|---|---|---|---|
+|| event payload 直接携带完整结果正文（可恢复 / 长内容 / 跨 hat 摘要）而未落盘 | P0 | payload-content | Q4 | 例 AE1 |
+|| emitter hat `instructions` 未要求「先写 artifact 再 emit」 | P1 | feasibility | Q3 | 改写 instructions 即可修复 |
+|| consumer hat `instructions` 未要求「从路径读完整内容」 | P0（若阻塞下游执行则固定 P0） / P1 | payload-content | Q2 / Q5 | 例 AE2 |
+|| artifact 路径来源对消费 hat 不可见（不在 trigger payload / projection / task view / `## TRIGGER CONTEXT`） | P0 | visibility | Q2 | 例 AE2 |
+|| artifact 路径被多次声明但未指定消费方 / 保留 / 归档 / 清理责任 | P1 | payload-content | Q5 | 例 AE4 |
+|| preset 自身被描述为创建 artifact 的角色（实际由 hat 在 activation 创建） | P0 | style | Q3 | 重写 instructions，明确「由 X hat / X sub-agent 写入」 |
+|| hat `instructions` 要求把 `.ralph/events.jsonl` / `.ralph/loops.json` / `.ralph/supervisor.db` 当作业务 artifact | P0 | visibility | Q2 | 改写或参考 `preset.instructions_read_internal_ledger`；业务 artifact 必须落到 `.ralph/<plan>/<unit>/...` 等业务子目录 |
+|| 「不落盘」例外的理由仅为字符数 / 不具体 | P1（若阻塞下游则升 P0） | payload-content | Q4 | 例 AE5；理由必须基于恢复价值 / 审计价值 / 下游依赖 |
+|| passing verdict 仅因 payload 含路径字段就放行（未验证路径可见性 / 内容语义 / 消费动作） | P1（若影响终态判定则升 P0） | payload-content | Q4 / Q5 | 例 AE2；R12 强制要求路径 + 可见性 + 消费三方同时成立 |
+|| artifact 落盘与读取分散在多处 hat，但 preset 没有显式声明生命周期（owner / reader / retention / cleanup） | P1 | state | Q5 | 例 AE4 |
+|| sub-agent 完整结果通过 hat 长消息返回（未在 `.ralph/` 下落盘） | P0 | payload-content | Q4 | 例 AE1 |
+
+## Artifact-First Handoff `field_docs` 审核点
+
+`event_policy.schemas.<topic>.field_docs.<path_field>` 必须满足（参考 `agent-native-model.md` 的 Payload Audit 模型）：
+
+- **`meaning`**：描述「该路径是 artifact 落盘点，值为相对 `.ralph/` 的路径」，而不是笼统的「handoff path」「output path」。必须能让 emitting hat 在不读其它 hat instructions 的前提下知道它是磁盘文件引用、不是结构化数据。
+- **`source`**：必须指向当前 hat 可见输入——trigger payload 字段、`state_projection.actions` 投影后的字段、本 hat work 输出（自己写到 `.ralph/` 后再回填）。**禁止**指向其它 hat 内部状态 / runtime internal ledger。
+- **`fill_rule`**：必须说明 agent 在路径未提供时如何计算（按 plan/unit 命名约定拼接）或拒绝（policy-check fail），**不得诱导** agent 伪造路径或抄业务文件名。
+- **`examples[]`**：任何路径示例都应是结构占位（如 `.ralph/<plan>/<unit>/<file>.md`），不得固定具体业务文件名（避免 agent 把示例抄成真实路径后伪造写入）。
+
 ## Policy-Check Feedback → Severity
 
 这些缺口不一定改变 runtime 接受 / 拒绝语义，但会让 agent 无法从 `--policy-check` 拒收中自修复。
@@ -98,6 +125,23 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.trigger_context_duplicate_label` | P0 | 90 | Q4 | lint |
 | `preset.trigger_context_no_consumer` | P0 | 90 | Q4 | topology |
 
+### Artifact-First Handoff finding_id（review-only，lint 不直接产出）
+
+按 `docs/plans/2026-07-16-003-feat-preset-artifact-first-handoffs-plan.md` Product Contract（R2 / R3 / R4 / R5 / R6 / R7 / R9 / R10 / R11 / R12 + AE1-AE5）补充的 review-only finding。**这些 ID 不会出现在 `ralph preset check --format json`**——lint 类无法从单 hat activation 视角判断路径可见性 / 消费动作 / 生命周期责任，靠 reviewer 在第 4 / 5 步 AAF + Payload Audit 独立审。
+
+|| finding_id（裸 ID / JSON 不出现） | default_severity | default_confidence | aaf_question | category | 备注 |
+||---|---|---|---|---|---|
+|| `preset.artifact_path_not_in_visible_context` | P0 | 90 | Q2 | payload-content | review-only；artifact 路径对消费 hat 不可见（例 AE2） |
+|| `preset.artifact_no_consumer_declared` | P1 | 80 | Q5 | payload-content | review-only；路径被声明但下游未声明读取动作 |
+|| `preset.artifact_no_lifecycle_owner` | P1 | 80 | Q5 | state | review-only；多阶段落盘但缺 owner / reader / retention / cleanup 责任（例 AE4） |
+|| `preset.artifact_uses_internal_ledger` | P0 | 95 | Q2 | visibility | review-only；把 `.ralph/events.jsonl` / `.ralph/loops.json` / `.ralph/supervisor.db` 当作业务 artifact；可与 `preset.instructions_read_internal_ledger` 联动 |
+|| `preset.payload_carries_full_content` | P0 | 90 | Q4 | payload-content | review-only；event payload 直接搬运完整结果 / 长内容 / 跨 hat 摘要（例 AE1） |
+|| `preset.artifact_first_field_docs_missing` | P1 | 80 | Q4 | policy-feedback | review-only；`field_docs.<path_field>.meaning / source / fill_rule / examples` 任意一项缺失或与本表「`field_docs` 审核点」不一致 |
+|| `preset.artifact_first_exemption_unjustified` | P1（阻塞下游则升 P0） | 75 | Q4 | payload-content | review-only；「不落盘」例外理由仅为字符数 / 不具体（例 AE5） |
+|| `preset.artifact_first_passed_on_path_presence` | P1 | 75 | Q4 | payload-content | review-only；仅因 payload 含路径字段就放行，未验路径可见性 / 内容语义 / 消费动作（例 AE2，R12） |
+|| `preset.subagent_result_returned_only_in_message` | P0 | 90 | Q4 | payload-content | review-only；sub-agent 完整结果通过 hat 长消息返回，未在 `.ralph/` 下落盘（例 AE1） |
+|| `preset.artifact_described_as_preset_owned` | P0 | 85 | Q3 | style | review-only；preset 文本把自身描述为 artifact 创建者，实际由 hat / sub-agent 在 activation 创建 |
+
 ### Trigger Context 软性 AAF 缺口（review-only，不直接触发 lint）
 
 | 缺口 | Severity | category | aaf_question | 备注 |
@@ -128,3 +172,14 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 **`ralph preset check --format json` 前缀：** lint 类 finding 的 `id` 为 `lint.preset.<snake_id>`（例如 `lint.preset.instructions_read_internal_ledger`）。本表「裸 ID」列匹配时 **strip `lint.` 前缀或两端都试**。
 
 未知 `finding_id`：仍入报告，severity 取 lint 输出，confidence 用命令输出校准（Error 95 / Warn 85）。
+
+artifact-first review-only finding **不**出现在 `ralph preset check` JSON；review 报告需在 Mechanical Lint Results 段注明「artifact-first 项：review-only，不进 lint JSON」（参见 `ralph-preset-review` SKILL §6）。当 review 命中 `preset.artifact_path_not_in_visible_context` / `preset.artifact_no_consumer_declared` / `preset.artifact_no_lifecycle_owner` / `preset.artifact_uses_internal_ledger` / `preset.payload_carries_full_content` / `preset.artifact_first_field_docs_missing` / `preset.artifact_first_exemption_unjustified` / `preset.artifact_first_passed_on_path_presence` / `preset.subagent_result_returned_only_in_message` / `preset.artifact_described_as_preset_owned` 时，按上表 `default_severity` + `default_confidence` 入主表（confidence ≥ 60 门槛仍适用），并以「单 hat activation 视角 + Payload Audit」为证据来源。
+
+### 备注：lint vs review-only
+
+上表 Artifact-First Handoff finding_id（10 条）**全部为 review-only**，不在 `crates/ralph-core/src/preset_lint/finding_id.rs` 实现，也不出现在 `ralph preset check` JSON 输出中。它们是 `ralph-preset-review` 在第 4 / 5 步（AAF + Payload Audit）从单 hat activation 视角独立审出的软性缺口，原因是：
+
+- 路径可见性、内容语义、消费动作、生命周期责任等属性依赖「该 hat 在自己那一轮 activation 里实际能 Observe / 调用什么」的视角判断，机械 lint 当前没有可执行的形状契约可断言。
+- 业务 artifact 目录结构由 preset / hat 设计自定，lint 不强制统一约定（plan Product Contract §Scope Boundaries 明示），所以路径是否合理也是 review 的判断。
+
+若后续 `crates/ralph-core/src/preset_lint/` 要把这些 finding 升级为 lint（实现 R8 / R9 / R10 / R11 / R12 的机械拦截），须先把 ID 加入 `crates/ralph-core/src/preset_lint/finding_id.rs` 并同步更新 `ALL_FINDING_IDS` 数组，同时把 `default_severity` / `default_confidence` 与本表保持一致；升级前 review 仍按本表入主表，并在 Remediation Plan 中标注 review-only 来源。本任务不涉及 Rust 代码修改。

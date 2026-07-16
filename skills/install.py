@@ -181,7 +181,7 @@ def _resolve_common_refs_source(skill_src: Path) -> Path | None:
 
 def copy_skill(spec: SkillSpec, target: Path, *, force: bool) -> None:
     dest = target / spec.name
-    if dest.exists():
+    if dest.is_symlink() or dest.exists():
         if not force:
             answer = input(
                 f"  '{spec.name}' already exists at {dest}. Overwrite? [y/N] "
@@ -189,7 +189,10 @@ def copy_skill(spec: SkillSpec, target: Path, *, force: bool) -> None:
             if answer not in {"y", "yes"}:
                 print(f"  skip {spec.name} (kept existing copy)")
                 return
-        shutil.rmtree(dest)
+        if dest.is_symlink() or dest.is_file():
+            dest.unlink()
+        else:
+            shutil.rmtree(dest)
     # Skip symlinks at the source: ``references`` at the skill root
     # points to ``../ralph-preset-common/references`` relative to the
     # source skill directory (which does not exist in the destination),
