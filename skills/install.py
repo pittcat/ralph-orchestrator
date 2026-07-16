@@ -21,8 +21,11 @@ Examples
     # Install a subset
     ./skills/install.py ralph-loop ralph-hats
 
-    # Install globally for the current user
+    # Install globally for the current user (Claude Code only)
     ./skills/install.py --global
+
+    # Install into both Claude Code and the agent-agnostic .agents/skills
+    ./skills/install.py --global --agents-target global
 
     # Dry-run an install into a custom directory
     ./skills/install.py --dir /tmp/skills --dry-run
@@ -54,6 +57,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 SOURCE_ROOT = SCRIPT_DIR
 TARGET_LOCAL = Path(".claude/skills")
 TARGET_GLOBAL = Path.home() / ".claude/skills"
+TARGET_AGENTS_LOCAL = Path(".agents/skills")
+TARGET_AGENTS_GLOBAL = Path.home() / ".agents/skills"
 
 
 @dataclass(frozen=True)
@@ -87,16 +92,30 @@ def discover_skills(source: Path) -> dict[str, SkillSpec]:
     return found
 
 
-def resolve_target(args: argparse.Namespace) -> Path:
+def resolve_targets(args: argparse.Namespace) -> list[tuple[str, Path]]:
+    """Return ``[(label, path)]`` for every install target.
+
+    The primary target comes from the mutually exclusive ``--global`` /
+    ``--dir`` group (or the local default). ``--agents-target`` appends
+    extra targets for agent-agnostic discovery (``./.agents/skills`` or
+    ``~/.agents/skills``) without replacing the primary one.
+    """
     if args.global_install and args.target_dir is not None:
         raise InstallError("--global and --dir are mutually exclusive")
     if args.target_dir is not None:
-        target = Path(args.target_dir).expanduser().resolve()
+        primary: tuple[str, Path] = ("custom", Path(args.target_dir).expanduser().resolve())
     elif args.global_install:
-        target = TARGET_GLOBAL.expanduser().resolve()
+        primary = ("global", TARGET_GLOBAL.expanduser().resolve())
     else:
-        target = (Path.cwd() / TARGET_LOCAL).resolve()
-    return target
+        primary = ("local", (Path.cwd() / TARGET_LOCAL).resolve())
+
+    targets = [primary]
+    agents = args.agents_target
+    if agents in {"local", "both"}:
+        targets.append(("agents-local", (Path.cwd() / TARGET_AGENTS_LOCAL).resolve()))
+    if agents in {"global", "both"}:
+        targets.append(("agents-global", TARGET_AGENTS_GLOBAL.expanduser().resolve()))
+    return targets
 
 
 def select_skills(
@@ -193,54 +212,57 @@ def copy_skill(spec: SkillSpec, target: Path, *, force: bool) -> None:
 
 
 def run_install(
-    source: Path,
-    target: Path,
+    targets: list[tuple[str, Path]],
     requested: list[SkillSpec],
     *,
     dry_run: bool,
     prune: bool,
     force: bool,
 ) -> None:
-    target.mkdir(parents=True, exist_ok=True)
-    to_install, _, to_prune = plan_install(target, requested)
-    print(f"Target: {target}")
-    if dry_run:
-        for name in sorted(to_install):
-            spec = next(s for s in requested if s.name == name)
-            print(f"  would install {spec.name} from {spec.src}")
+    for label, target in targets:
+        target.mkdir(parents=True, exist_ok=True)
+        to_install, _, to_prune = plan_install(target, requested)
+        print(f"[{label}] Target: {target}")
+        if dry_run:
+            for name in sorted(to_install):
+                spec = next(s for s in requested if s.name == name)
+                print(f"  would install {spec.name} from {spec.src}")
+            if prune and to_prune:
+                for name in sorted(to_prune):
+                    print(f"  would prune {name}")
+            continue
+        for spec in requested:
+            print(f"  install {spec.name} <- {spec.src}")
+            copy_skill(spec, target, force=force)
         if prune and to_prune:
             for name in sorted(to_prune):
-                print(f"  would prune {name}")
-        return
-    for spec in requested:
-        print(f"  install {spec.name} <- {spec.src}")
-        copy_skill(spec, target, force=force)
-    if prune and to_prune:
-        for name in sorted(to_prune):
-            victim = target / name
-            if victim.exists():
-                print(f"  prune {name}")
-                shutil.rmtree(victim)
+                victim = target / name
+                if victim.exists():
+                    print(f"  prune {name}")
+                    shutil.rmtree(victim)
 
 
-def run_list(source: Path, target: Path) -> None:
-    available = discover_skills(source)
+def run_list(targets: list[tuple[str, Path]]) -> None:
+    available = discover_skills(SOURCE_ROOT)
     print("Available public skills:")
     for spec in available.values():
         print(f"  - {spec.name}")
-    if target.exists():
-        existing = sorted(
-            entry.name
-            for entry in target.iterdir()
-            if entry.is_dir() and (entry / "SKILL.md").is_file()
-        )
-        if existing:
-            print(f"\nInstalled in {target}:")
-            for name in existing:
-                marker = " (managed)" if name in available else " (unknown)"
-                print(f"  - {name}{marker}")
+    for label, target in targets:
+        if target.exists():
+            existing = sorted(
+                entry.name
+                for entry in target.iterdir()
+                if entry.is_dir() and (entry / "SKILL.md").is_file()
+            )
+            if existing:
+                print(f"\n[{label}] Installed in {target}:")
+                for name in existing:
+                    marker = " (managed)" if name in available else " (unknown)"
+                    print(f"  - {name}{marker}")
+            else:
+                print(f"\n[{label}] No skills currently installed in {target}.")
         else:
-            print(f"\nNo skills currently installed in {target}.")
+            print(f"\n[{label}] {target}: (directory not present)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -273,6 +295,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install into a custom directory (absolute path recommended).",
     )
     parser.add_argument(
+        "--agents-target",
+        choices=("local", "global", "both"),
+        default=None,
+        help=(
+            "Also install into the agent-agnostic skills directory "
+            "(in addition to the primary target). 'local' = "
+            f"{TARGET_AGENTS_LOCAL}, 'global' = {TARGET_AGENTS_GLOBAL}, "
+            "'both' writes both. Default: off."
+        ),
+    )
+    parser.add_argument(
         "--prune",
         action="store_true",
         help=(
@@ -302,15 +335,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        target = resolve_target(args)
+        targets = resolve_targets(args)
         if args.list:
-            run_list(SOURCE_ROOT, target)
+            run_list(targets)
             return 0
         available = discover_skills(SOURCE_ROOT)
         requested = select_skills(available, args.skills)
         run_install(
-            SOURCE_ROOT,
-            target,
+            targets,
             requested,
             dry_run=args.dry_run,
             prune=args.prune,

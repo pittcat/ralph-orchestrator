@@ -1,7 +1,0 @@
-interface:
-  display_name: "Ralph Preset Review"
-  short_description: "Per-hat activation dry-run + payload audit + preset-review-report"
-  default_prompt: "Use $ralph-preset-review to review this Ralph preset. Independently simulate each hat's activation from the visible prompt stack; build a per-hat AAF section, a payload audit table, and a handoff audit table. Write preset-review-report.md with P0/P1 findings, confidence scores, and a remediation plan ordered by runtime unblock order."
-
-policy:
-  allow_implicit_invocation: true

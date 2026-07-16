@@ -129,7 +129,6 @@ site/
 .agents/
 .playwright-cli/
 .ralph/
-.agents/
 
 # Local environment locks / MCP config
 AGENTS.md.lock
@@ -143,3 +142,4 @@ LEAN-CTX.md
 
 # Trae IDE local config
 .trae/
+.claude/
