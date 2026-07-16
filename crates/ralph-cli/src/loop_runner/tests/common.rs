@@ -301,16 +301,7 @@ pub(super) async fn dispatch_post_loop_termination_hooks(
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// MockAcpExecution / install_mock_acp_executions
-//
-// 2026-07-16 (plan 2026-07-16-005, Unit 5 path B): 全栈 grep 确认
-// `MOCK_ACP_EXECUTIONS` / `MOCK_ACP_EXECUTION_SERIAL` /
-// `MockAcpExecution` / `AcpWaveExecutionResult` 是死代码:
-//   - 生产 wave 路径(dispatcher / worker / io / supervisor_bridge)零 pop
-//   - `MockAcpExecution::write_capture` / `write_events` 零调用方
-//   - `install_mock_acp_executions` 唯一调用方 `wave.rs` 中 install 后
-//     立即丢弃(`let _mock = ...` 不读 queue)
-//   - `AcpWaveExecutionResult` 仅被 wave/mod.rs re-export,仓库零使用
-//
-// 此处不再定义 helper / guard;acp_mock.rs 自身随 path B 删除。
+// MockAcpExecution and install_mock_acp_executions were removed as dead
+// code: production wave paths never pop the queue and the helper had no
+// remaining call sites after the wave test split.
 // ──────────────────────────────────────────────────────────────────────

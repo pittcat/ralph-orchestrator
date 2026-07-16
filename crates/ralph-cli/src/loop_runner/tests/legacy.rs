@@ -1,25 +1,6 @@
-// U2a: legacy test body。
-//
-// 包含原 `loop_runner/tests.rs` 在 U2a 阶段**未迁移**的 `#[test]` 函数与少量
-// hook-specific helper(`hook_spec_*` / `recording_hook` / `payload_recording_hook` /
-// `hook_engine_with_events`)。后续 U2b-U2h 按主题逐步拆出到 `tests/{wave,hooks,...}.rs`。
-//
-// 跨子文件共享 helper(从原 tests.rs 770-1018 迁出)已迁移到 `tests/common.rs`。
-// 2 个 `FAKE_PATH_BACKEND_*` private static Mutex 与 fake_path 安装 helper 已迁移到
-// `tests/fake_path.rs`。`install_mock_acp_executions` / `MockAcpExecutionGuard` 已迁到
-// `common.rs`(后续 U2b 拆 wave.rs 时再迁走)。
-//
-// 本文件命名空间 = `loop_runner::tests::legacy`,原 tests.rs 内 helper / type 引用
-// `super::*` 解析为 `loop_runner::*`。为保持原行为,`use super::super::*;` 重新导出
-// `loop_runner::*` 到本文件作用域,等价于原 tests.rs 顶部的 `use super::*;`。
-//
-// DEC-001:见 `tests/common.rs` 注释。`use super::super::*;` 会引入
-// `loop_runner::payload_inputs` 的同名 6 个 fn(`build_*_payload_input` /
-// `dispatch_*_loop_termination_hooks`)。`tests/common.rs` 内的同名包装 fn
-// 必须在 legacy.rs 命名空间下唯一,才能让 `#[test]` 内的 `build_*_payload_input(...)`
-// 调用解析到 `common.rs` 的包装版本。本文件用 `use super::common::{...};` 显式
-// 引入这 6 个 fn 的 `common.rs` 版本,**覆盖** glob 引入的 `super::super::*` 同名 fn。
-// Rust 名称解析规则:更精确的非 glob use 优先于 glob use 引入的同名项。
+// Legacy module for the loop-runner tests that remain outside the
+// wave / hooks / hard_gate / preset-lint / pipeline slices. Cross-file
+// helpers live in `common`; fake-PATH fixtures live in `fake_path`.
 
 use super::super::*;
 use crate::test_support::CwdGuard;

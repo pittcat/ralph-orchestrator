@@ -1,29 +1,6 @@
-// U2b: wave / acp / forced_test_wave_pty_failure 测试 + wave 特定 helper。
-//
-// 从 `loop_runner/tests/legacy.rs` 迁出两段:
-//   - 段 1: 行 3713-6504(wave worker execution mode + execute_wave + helpers)
-//   - 段 2: 行 8628-8958(test_wave_policy_rejection_* 4 个测试 + compute_agent_wrote helper)
-//
-// 本文件命名空间 = `loop_runner::tests::wave`,通过 `mod wave;` 在 `tests/mod.rs` 引入。
-//
-// Import 策略(R3 / KTD4):
-//   - `use super::super::*;` 引入 `loop_runner::*` glob(execute_wave / run_wave_worker_pty
-//     / extract_readable_delta / wave_worker_execution_mode / merge_wave_results_to_events_file
-//     / WaveWorkerExecutionMode / BackendOutputFormat / CliBackend / EventLoop / RalphConfig
-//     / runner 子模块等)。`runner` 模块名(`mod runner;`)通过 sibling access path
-//     在 `loop_runner::tests::*` 命名空间下可访问,`runner::agent_wrote_any_valid_or_rejected`
-//     短名调用可解析为 `loop_runner::runner::agent_wrote_any_valid_or_rejected`(`pub fn`)。
-//   - `use super::fake_path::*;` 引入 write_fake_executable / install_fake_path_backends /
-//     FakePathBackendsGuard / read_fake_path_backend_bin(fake_path.rs 内 pub(super))
-//   - `use std::collections::HashSet;` 用于 `make_test_wave_with_timeout_and_payload` 的
-//     `trigger_multi_consumer_topics: HashSet::new()`(原 `legacy.rs` 已 import)
-//
-// 2026-07-16 (plan 2026-07-16-005, Unit 5 path B): MockAcpExecution /
-// install_mock_acp_executions 已确认死代码并删除,本文件不再 install mock queue。
-//
-// R6 锁定:本文件零修改 fn 签名 / 断言 / 输出;所有 `#[test]` / `#[tokio::test]` 函数
-// 与对应 `#[cfg(unix)]` 属性**逐字节**迁自 `legacy.rs`(2026-07-16 已删除唯一
-// install_mock_acp_executions 调用方)。
+// Wave tests and their focused helpers live in this module. They exercise
+// worker execution, wave validation, and backend output handling through the
+// real loop-runner paths; shared fixtures come from the sibling modules.
 
 use super::super::*;
 use super::fake_path::*;

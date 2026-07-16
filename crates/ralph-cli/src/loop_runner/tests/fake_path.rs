@@ -4,13 +4,10 @@
 // - `FAKE_PATH_BACKEND_SERIAL: LazyLock<Mutex<()>>` (#[cfg(unix)], private `static`)
 // - `FAKE_PATH_BACKEND_BIN: LazyLock<Mutex<Option<PathBuf>>>` (#[cfg(unix)], private `static`)
 //
-// 2026-07-16 (plan 2026-07-16-005-refactor-ralph-cli-parallel-tests-plan, Unit 5 path B):
-// 原「2 个 `MOCK_ACP_*` pub static Mutex 在 `loop_runner/wave/acp_mock.rs`」已确认死代码并删除,
-// 现仅剩 `FAKE_PATH_BACKEND_*` 2 个 Mutex。nextest 默认 process-per-test 隔离下,
-// 这两个 static Mutex 不再需要「binary 内串行化」(原 `cli-serial` 整包 override 已删除)。
-// - 跨测试共享 bin 目录:每个 nextest 测试独立进程,自己的 TempDir,跨进程不可见。
-// - PoisonError 连坐:进程退出销毁 Mutex,不传给下一进程。
-// 因此保留 `static` 字面形式仅为 fixture 兼容性,不再有「进程内串行」语义。
+// Nextest runs each test in its own process, so these fixture guards and
+// their temporary backend directory are isolated across tests. The static
+// values remain an implementation detail of this test fixture; callers use
+// the guard and accessor APIs below.
 
 use std::path::Path;
 

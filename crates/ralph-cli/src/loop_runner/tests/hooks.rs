@@ -1,13 +1,6 @@
-// U2c: dispatch_phase_event_hooks 测试族 + 相关 helper。
-//
-// 从 `loop_runner/tests/legacy.rs` 迁出。测试函数签名/断言逐字节不变(R6)。
-//
-// Import 策略(R3 / KTD4):
-//   - `use super::super::*;` 引入 loop_runner::* glob
-//   - `use super::common::*;` 引入共享 helper(install_mock_acp_executions 等)
-//   - `use super::fake_path::*;` 引入 write_fake_executable / install_fake_path_backends 等
-//
-// R3 锁定:本文件不重声明 MOCK_ACP_* / FAKE_PATH_BACKEND_* Mutex,全部通过 helper 间接访问。
+// Hooks tests live in this module. They exercise phase dispatch, lifecycle
+// hooks, mutation namespaces, and the retry/backoff outcomes against the
+// real loop-runner event loop. Shared helpers come from the sibling modules.
 
 use super::super::*;
 use super::common;
