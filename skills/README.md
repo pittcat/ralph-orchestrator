@@ -87,4 +87,10 @@ During local development you can also install from the checked-out repo:
 
 ```bash
 npx skills add . --list
+
+# Or copy public skills into this repo's .claude/skills + .agents/skills
+./skills/install.py --force
+
+# Global user install: ~/.claude/skills + ~/.agents/skills
+./skills/install.py --global --force
 ```

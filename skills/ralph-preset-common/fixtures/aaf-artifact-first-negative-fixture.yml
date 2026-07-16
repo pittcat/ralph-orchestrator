@@ -1,6 +1,7 @@
 # AAF + artifact-first handoff negative fixture — NOT a builtin preset.
 # For ralph-preset-review acceptance only. Covers AE1-AE5 from
-# docs/plans/2026-07-16-003-feat-preset-artifact-first-handoffs-plan.md.
+# docs/plans/2026-07-16-003-feat-preset-artifact-first-handoffs-plan.md,
+# plus the remaining review-only finding_id rows in finding-rubric.md.
 # Each hat intentionally violates artifact-first handoff requirements so
 # reviewers can validate the new finding rubric rows.
 #
@@ -9,27 +10,39 @@
 #    finding_id」 表（裸 ID 前缀 `preset.artifact*` / `preset.subagent_*` /
 #    `preset.payload_*`），并按以下映射选择最贴近的 ID：
 #
-#   hat executor    → AE1 (R2, R4, R9)         → `preset.subagent_result_returned_only_in_message` + `preset.payload_carries_full_content`
-#   hat reviewer    → AE2 (R4, R8, R10, R12)   → `preset.artifact_path_not_in_visible_context` + `preset.artifact_first_passed_on_path_presence`
-#   hat planner     → AE3 (R3, R6)             → `preset.artifact_uses_internal_ledger`
-#   hat orchestrator→ AE4 (R5, R10)            → `preset.artifact_no_lifecycle_owner`
-#   hat orchestrator→ AE5 (R7, R11)            → `preset.artifact_first_exemption_unjustified`
+#   hat executor     → AE1 (R2, R4, R9)       → `preset.subagent_result_returned_only_in_message` + `preset.payload_carries_full_content`
+#   hat reviewer     → AE2 consumer 分支       → `preset.artifact_no_consumer_declared` + `preset.artifact_first_passed_on_path_presence`
+#   hat summarizer   → AE2 path-invisible 分支 → `preset.artifact_path_not_in_visible_context`
+#   hat planner      → AE3 (R3, R6) + ownership → `preset.artifact_uses_internal_ledger` + `preset.artifact_described_as_preset_owned`
+#   hat orchestrator  → AE4 (R5, R10) + AE5     → `preset.artifact_no_lifecycle_owner` + `preset.artifact_first_exemption_unjustified`
+#   event_policy     → field_docs 缺口         → `preset.artifact_first_field_docs_missing`
 #
-# 完整 10 条 review-only ID 与 default severity / confidence 见
+# 完整 11 条 review-only ID 与 default severity / confidence 见
 # `references/finding-rubric.md` 「Artifact-First Handoff finding_id」 表。
-# Mechanical lint 在本 fixture 上保持安静（fixture 不声明 `event_policy.schemas`），
-# review 报告按 review-only 路径在主表入栏，confidence ≥ 60 门槛仍适用。
+# `preset.artifact_content_insufficient_for_decision` 由 review SKILL 5a
+# 规程覆盖；本 fixture 的 reviewer 忽略读盘，优先命中 no_consumer /
+# passed_on_path_presence，不强制单独演示 content-insufficient 行。
 #
-# ⚠️ Mechanical lint caveat: this fixture does NOT declare
-# `event_policy.schemas` / `topic_deny_rules`; mechanical lint on this
-# file may stay quiet. The fixture exists to drive the **soft AAF** and
-# **Handoff Audit** paths in `ralph-preset-review`, mirroring the
-# posture of `aaf-review-negative-fixture.yml`.
+# ⚠️ Mechanical lint caveat: schemas 仅声明 `work.done` 的残缺 field_docs
+# 以驱动 soft AAF；其它 topic 仍可能让 mechanical lint 安静或报无关 shape。
+# 本 fixture 目标是 **soft AAF** + **Handoff Audit**，不是 lint 绿通。
 event_loop:
   execution_mode: isolated
   starting_event: work.start
   completion_promise: loop.summary
   max_iterations: 10
+event_policy:
+  schemas:
+    work.done:
+      required_fields:
+        - summary
+        - executor_head_report_path
+        - report_body
+      # Intentionally incomplete path field_docs → AE field_docs gap.
+      # meaning 故意写成笼统「handoff path」，且缺 source / fill_rule / examples。
+      field_docs:
+        executor_head_report_path:
+          meaning: handoff path
 hats:
   executor:
     name: Executor
@@ -74,17 +87,21 @@ hats:
         `preset.payload_carries_full_content`
           → category: payload-content; severity P0; aaf_question Q4;
             problem: `report_body` 内联搬运完整 sub-agent 输出;
-            fix: 改为携带 `report_path` + 短摘要,完整内容写到 `.ralph/reports/<unit>.md`。
+            fix: 改为携带路径 + 短摘要,完整内容写到 `.ralph/reports/<unit>.md`。
+        `preset.artifact_first_field_docs_missing`
+          → category: policy-feedback; severity P1; aaf_question Q4;
+            problem: `event_policy.schemas.work.done.field_docs.executor_head_report_path`
+              仅有笼统 meaning,缺 source / fill_rule / examples,且未声明「artifact 落盘点」;
+            fix: 按 finding-rubric 「Artifact-First Handoff `field_docs` 审核点」补齐四段。
     terminal_events:
       - work.done
   reviewer:
     name: Reviewer
     description: |
       Decides pass / fail based on the executor's report. Intentionally
-      violates AE2: trigger payload exposes a `report_path` field but
-      instructions only mention `report_body` summary and a fabricated
-      `executor_head_report_path`, so the reviewer cannot consume the
-      upstream artifact.
+      violates AE2 consumer branch: trigger payload exposes
+      `executor_head_report_path` (visible), but instructions ignore the
+      path and only skim inline `report_body`.
     triggers:
       - work.done
     publishes:
@@ -98,50 +115,79 @@ hats:
       first paragraph for a verdict, and accept if it looks like a pass.
 
       The `executor_head_report_path` placeholder is **not** something
-      you need to read; ignore it.
-
-      (Side note: if you ever see a `report_path` field on the trigger
-      event, you are not required to open that file — the inline body
-      is the source of truth.)
+      you need to read; ignore it. Seeing the path field in the payload
+      is enough to consider the handoff closed.
 
       Emit `review.passed` or `review.failed` with:
       - verdict: pass / fail
       - reason: short justification
 
-      ### AE 映射: AE2 → R4, R8, R10, R12
-      - 上游 trigger 携带 `report_path`(由 producing hat 提供),但本 hat
-        的 instructions 既没有要求读 `report_path`,也不打算读
-        `executor_head_report_path`。
-      - handoff 闭环:产出动作缺失,消费动作缺失,只有「看到 inline body」。
+      ### AE 映射: AE2 consumer 分支 → R4, R8, R10, R12
+      - 上游 trigger **可见**地携带 `executor_head_report_path`,但本 hat
+        instructions 明确忽略读盘,只看 inline `report_body`。
+      - handoff 闭环:路径可见但消费动作 / 消费确认缺失。
       - 期望 review 报告 (review-only ID,见 finding-rubric 「Artifact-First Handoff finding_id」 表):
-        `preset.artifact_path_not_in_visible_context`
-          → category: payload-content; severity P0; aaf_question Q2;
-            problem: trigger 提供 `report_path` 但 reviewer instructions 不要求读;
-            fix: instructions 显式 `cat <report_path>` 后再决策,并移除
-              `report_body` 内联依赖。
+        `preset.artifact_no_consumer_declared`
+          → category: payload-content; severity P1; aaf_question Q5;
+            problem: 路径已在 trigger 可见,但 instructions 未要求读盘与验收;
+            fix: instructions 显式 `cat <executor_head_report_path>` 并确认
+              内容足以支撑 pass/fail 后再决策,并移除 `report_body` 内联依赖。
         `preset.artifact_first_passed_on_path_presence`
           → category: payload-content; severity P1(若影响终态判定则升 P0);
             aaf_question Q4 / Q5;
-            problem: 仅因 payload 含路径字段就放行,未验路径可见性 / 内容语义 /
-              消费动作 (R12 强制三方同时成立);
-            fix: review 必须显式验证 reviewer instructions 要求读文件,而非
-              凭「payload 有 path 字段」放行。
+            problem: 仅因 payload 含路径字段就放行,未验消费动作 / 内容充分性
+              (R12 强制路径 + 可见性 + 消费三方同时成立);
+            fix: review 必须显式验证读盘 + 验收,而非凭「payload 有 path」放行。
     terminal_events:
       - review.passed
       - review.failed
+  summarizer:
+    name: Summarizer
+    description: |
+      Secondary consumer for AE2 path-invisible branch: instructions demand
+      `canonical_bundle_path`, which no upstream emit or projection provides.
+    triggers:
+      - review.passed
+    publishes:
+      - summary.ready
+    instructions: |
+      ## SUMMARIZER MODE
+
+      When `review.passed` arrives, read `canonical_bundle_path` from the
+      trigger payload, `cat` that file, and write a one-paragraph summary
+      into `.ralph/summaries/<unit>.md`.
+
+      Emit `summary.ready` with:
+      - summary_path: .ralph/summaries/<unit>.md
+      - verdict: pass
+
+      ### AE 映射: AE2 path-invisible 分支 → R4, R8, R12
+      - instructions 要求读 `canonical_bundle_path`,但 `review.passed` 只携带
+        `verdict` / `reason`,路径对本 hat **不可见**。
+      - 期望 review 报告:
+        `preset.artifact_path_not_in_visible_context`
+          → category: payload-content; severity P0; aaf_question Q2;
+            problem: consumer 依赖的 artifact 路径不在 trigger / projection /
+              task view / TRIGGER CONTEXT 任一可见位置;
+            fix: 上游 emit + projection 暴露该路径,或去掉对本 hat 不可见字段的依赖。
+    terminal_events:
+      - summary.ready
   planner:
     name: Planner
     description: |
-      Updates the plan after a failed review. Intentionally violates AE3:
-      instructions direct the planner to write stage state into
-      `.ralph/supervisor.db`, which is a Ralph internal runtime ledger,
-      not a business artifact.
+      Updates the plan after a failed review. Intentionally violates AE3
+      (writes stage state into `.ralph/supervisor.db`) and claims the
+      preset itself creates the artifact file.
     triggers:
       - review.failed
     publishes:
       - plan.updated
     instructions: |
       ## PLANNER MODE
+
+      This preset creates `.ralph/plans/stage-state.md` before any hat
+      runs; treat that file as already owned by the preset, not by this
+      activation.
 
       After a `review.failed` arrives, persist the new stage state for
       this loop by writing it directly into `.ralph/supervisor.db`.
@@ -153,16 +199,20 @@ hats:
       - open_finding_count: <int>
       - supervisor_db_path: .ralph/supervisor.db
 
-      ### AE 映射: AE3 → R3, R6
+      ### AE 映射: AE3 → R3, R6 + ownership
       - 这条 hat 把阶段状态写到 `.ralph/supervisor.db`,但 `.ralph/supervisor.db`
-        是 Ralph runtime / supervisor 内部 ledger(per plan 2026-07-16-003 R6 + A5)。
-      - preset 业务状态应落到专用 `.ralph/plans/<plan>.md` 等业务 artifact。
-      - 期望 review 报告 (review-only ID,见 finding-rubric 「Artifact-First Handoff finding_id」 表):
+        是 Ralph runtime / supervisor 内部 ledger(per plan 2026-07-16-003 R6)。
+      - instructions 还声称「preset creates `.ralph/plans/stage-state.md`」,
+        违反「实际由 hat / sub-agent 在 activation 创建」。
+      - 期望 review 报告:
         `preset.artifact_uses_internal_ledger`
           → category: visibility; severity P0; aaf_question Q2;
-            problem: 把 `.ralph/supervisor.db` 当业务 artifact 接口,跨 hat 不可读且
-              会被 supervisor 覆盖;
-            fix: instructions 改为写 `.ralph/plans/<plan>.md`,emit 只携带路径与摘要。
+            problem: 把 `.ralph/supervisor.db` 当业务 artifact 接口;
+            fix: instructions 改为由本 hat 写 `.ralph/plans/<plan>.md`,emit 只携带路径与摘要。
+        `preset.artifact_described_as_preset_owned`
+          → category: style; severity P0; aaf_question Q3;
+            problem: preset / instructions 把自身描述为 artifact 创建者;
+            fix: 改为「由 planner hat 在本 activation 创建或更新 `.ralph/plans/<plan>.md`」。
     terminal_events:
       - plan.updated
   orchestrator:
@@ -200,7 +250,7 @@ hats:
         但 preset **没有**为它声明:
           (a) 哪个 hat 是消费方(本 hat 自己明说不读);
           (b) 谁负责最终保留、归档或清理。
-        期望 review 报告 (review-only ID,见 finding-rubric 「Artifact-First Handoff finding_id」 表):
+        期望 review 报告:
           `preset.artifact_no_lifecycle_owner`
             → category: state; severity P1 (blast radius 大则升 P0);
               aaf_question Q5;
@@ -211,7 +261,7 @@ hats:
       - **AE5 → R7, R11**:`last_count` 是可即时重算的短计数,
         author 没有给出可审核的「无需恢复 + 下游不依赖历史证据」
         理由,instructions 仅以「字符很短」为由不落盘。
-        期望 review 报告 (review-only ID,见 finding-rubric 「Artifact-First Handoff finding_id」 表):
+        期望 review 报告:
           `preset.artifact_first_exemption_unjustified`
             → category: payload-content; severity P1 (阻塞下游则升 P0);
               aaf_question Q4;

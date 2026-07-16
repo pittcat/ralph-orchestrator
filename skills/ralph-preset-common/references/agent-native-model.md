@@ -200,7 +200,8 @@ Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章�
 |---|---|---|
 | **artifact 落盘判定** | 独立按「恢复价值 / 审计价值 / 下游依赖」三标准对每个重要信息逐条判定，**不参考 author notes** | 重要信息仅存在于长 payload / 长 message 而无对应 `.ralph/<...>` artifact → finding（按对恢复 / 审计 / 下游的影响定 P0/P1） |
 | **路径可见性（单 hat activation 视角）** | 假设「只看到该 hat 的 prompt 栈」，验证 artifact 路径是否在 trigger payload / projection / task view / 命令输出中**任一可见位置** | 路径不可见、或仅在另一 hat 的 prompt 中出现 → finding |
-| **消费动作闭环** | 检查下游 hat `instructions:` 是否**显式要求**读取上游 emit 给出的路径字段 | 路径已 emit 但下游 instructions 未要求读文件 → handoff 未闭环 finding |
+| **消费动作闭环** | 检查下游 hat `instructions:` 是否**显式要求**读取上游 emit 给出的路径字段，且读盘后有验收 / 确认动作（文件存在、可解析、足以支撑本 hat Q1） | 路径已 emit 但下游未要求读文件 → `preset.artifact_no_consumer_declared`；仅「看到路径」无验收 → `preset.artifact_first_passed_on_path_presence` |
+| **内容充分性（R8）** | 假设 consumer 已取得路径并读盘，检查 artifact 设计是否声明足以支撑该 hat Q1 的内容（完整结果 / 证据 / 未解决问题）；不得只凭路径字符串放行 | 路径存在但内容约定不足以恢复或继续决策 → `preset.artifact_content_insufficient_for_decision` |
 | **internal ledger 边界** | 验证 hat 是否要求把 `.ralph/events.jsonl` / `.ralph/loops.json` / `.ralph/supervisor.db` 当业务 artifact 接口（写或读） | 出现 → finding（与「禁止读 internal ledger」互补） |
 | **不落盘例外** | 验证例外是否同时满足「短暂 + 短小 + 无需恢复」，以及是否在 `instructions:` 或 Payload Contract 中标注理由 | 例外无理由 / 理由仅「字符数少」 / 理由仅「给下游看」 → finding |
 

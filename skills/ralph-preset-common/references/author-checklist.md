@@ -146,7 +146,7 @@
 4. **是否有任何 hat 把 `.ralph/events.jsonl`、`.ralph/loops.json`、`.ralph/supervisor.db` 等 runtime internal ledger 当作自定义状态或 handoff 文件？** ✓ / ✗ + 证据；此项必须为 ✗
 5. **每条声明「不落盘」的信息是否都标注了简短理由，并按恢复价值、审计价值和下游依赖解释，而非只按字符数判断？** ✓ / ✗ + 证据
 
-预演 finding 时按 `references/finding-rubric.md`「Artifact-First Handoff finding_id」表入主表（review-only，不进 `ralph preset check` JSON）：`preset.artifact_path_not_in_visible_context` / `preset.artifact_no_consumer_declared` / `preset.artifact_no_lifecycle_owner` / `preset.artifact_uses_internal_ledger` / `preset.payload_carries_full_content` / `preset.artifact_first_field_docs_missing` / `preset.artifact_first_exemption_unjustified` / `preset.artifact_first_passed_on_path_presence` / `preset.subagent_result_returned_only_in_message` / `preset.artifact_described_as_preset_owned`。完整默认 severity / confidence / aaf_question 见该表。
+预演 finding 时按 `references/finding-rubric.md`「Artifact-First Handoff finding_id」表入主表（review-only，不进 `ralph preset check` JSON）：`preset.artifact_path_not_in_visible_context` / `preset.artifact_no_consumer_declared` / `preset.artifact_no_lifecycle_owner` / `preset.artifact_uses_internal_ledger` / `preset.payload_carries_full_content` / `preset.artifact_first_field_docs_missing` / `preset.artifact_first_exemption_unjustified` / `preset.artifact_first_passed_on_path_presence` / `preset.subagent_result_returned_only_in_message` / `preset.artifact_described_as_preset_owned` / `preset.artifact_content_insufficient_for_decision`。完整默认 severity / confidence / aaf_question 见该表。
 
 ## Builtin 7 点同步清单（摘要）
 

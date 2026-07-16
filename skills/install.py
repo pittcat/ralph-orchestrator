@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Install operator skills into a Claude Code skills directory.
+"""Install operator skills into local or global skills directories.
 
 Default source: this repository's ``skills/`` directory (the parent of
 this script).
 
-Default target: ``./.claude/skills`` relative to the current working
-directory. Use ``--global`` to install into ``~/.claude/skills`` or
-``--dir <path>`` to install into an arbitrary directory.
+Default (local): install into both ``./.claude/skills`` and
+``./.agents/skills``. Use ``--global`` for ``~/.claude/skills`` and
+``~/.agents/skills``, or ``--dir <path>`` for a single custom directory.
 
 By default, only the five public operator skills listed in
 ``skills/README.md`` are exposed as installable units. The shared
@@ -15,17 +15,14 @@ regular copy when one of the preset skills requests it.
 
 Examples
 --------
-    # Install all public skills into ./.claude/skills
+    # Local: ./.claude/skills + ./.agents/skills
     ./skills/install.py
 
-    # Install a subset
+    # Install a subset (still both local targets)
     ./skills/install.py ralph-loop ralph-hats
 
-    # Install globally for the current user (Claude Code only)
+    # Global: ~/.claude/skills + ~/.agents/skills
     ./skills/install.py --global
-
-    # Install into both Claude Code and the agent-agnostic .agents/skills
-    ./skills/install.py --global --agents-target global
 
     # Dry-run an install into a custom directory
     ./skills/install.py --dir /tmp/skills --dry-run
@@ -95,27 +92,23 @@ def discover_skills(source: Path) -> dict[str, SkillSpec]:
 def resolve_targets(args: argparse.Namespace) -> list[tuple[str, Path]]:
     """Return ``[(label, path)]`` for every install target.
 
-    The primary target comes from the mutually exclusive ``--global`` /
-    ``--dir`` group (or the local default). ``--agents-target`` appends
-    extra targets for agent-agnostic discovery (``./.agents/skills`` or
-    ``~/.agents/skills``) without replacing the primary one.
+    - default (local): ``./.claude/skills`` + ``./.agents/skills``
+    - ``--global``: ``~/.claude/skills`` + ``~/.agents/skills``
+    - ``--dir``: a single custom directory (no paired agents target)
     """
     if args.global_install and args.target_dir is not None:
         raise InstallError("--global and --dir are mutually exclusive")
     if args.target_dir is not None:
-        primary: tuple[str, Path] = ("custom", Path(args.target_dir).expanduser().resolve())
-    elif args.global_install:
-        primary = ("global", TARGET_GLOBAL.expanduser().resolve())
-    else:
-        primary = ("local", (Path.cwd() / TARGET_LOCAL).resolve())
-
-    targets = [primary]
-    agents = args.agents_target
-    if agents in {"local", "both"}:
-        targets.append(("agents-local", (Path.cwd() / TARGET_AGENTS_LOCAL).resolve()))
-    if agents in {"global", "both"}:
-        targets.append(("agents-global", TARGET_AGENTS_GLOBAL.expanduser().resolve()))
-    return targets
+        return [("custom", Path(args.target_dir).expanduser().resolve())]
+    if args.global_install:
+        return [
+            ("claude-global", TARGET_GLOBAL.expanduser().resolve()),
+            ("agents-global", TARGET_AGENTS_GLOBAL.expanduser().resolve()),
+        ]
+    return [
+        ("claude-local", (Path.cwd() / TARGET_LOCAL).resolve()),
+        ("agents-local", (Path.cwd() / TARGET_AGENTS_LOCAL).resolve()),
+    ]
 
 
 def select_skills(
@@ -272,8 +265,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="skills/install.py",
         description=(
-            "Install public Ralph operator skills into a Claude Code "
-            "skills directory."
+            "Install public Ralph operator skills. "
+            "Local default writes .claude/skills + .agents/skills; "
+            "--global writes ~/.claude/skills + ~/.agents/skills."
         ),
     )
     parser.add_argument(
@@ -290,29 +284,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--global",
         dest="global_install",
         action="store_true",
-        help=f"Install into {TARGET_GLOBAL} instead of the local target.",
+        help=(
+            f"Install into {TARGET_GLOBAL} and {TARGET_AGENTS_GLOBAL} "
+            "(instead of the local .claude + .agents pair)."
+        ),
     )
     target.add_argument(
         "--dir",
         dest="target_dir",
-        help="Install into a custom directory (absolute path recommended).",
-    )
-    parser.add_argument(
-        "--agents-target",
-        choices=("local", "global", "both"),
-        default=None,
         help=(
-            "Also install into the agent-agnostic skills directory "
-            "(in addition to the primary target). 'local' = "
-            f"{TARGET_AGENTS_LOCAL}, 'global' = {TARGET_AGENTS_GLOBAL}, "
-            "'both' writes both. Default: off."
+            "Install into a single custom directory "
+            "(absolute path recommended; skips the paired agents target)."
         ),
     )
     parser.add_argument(
         "--prune",
         action="store_true",
         help=(
-            "Remove existing skills in the target that are not part of "
+            "Remove existing skills in each target that are not part of "
             "this install request."
         ),
     )

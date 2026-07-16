@@ -96,7 +96,11 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
 
 5a. **Artifact-First 跨 hat 独立审核(独立于第 4 / 5 步 AAF,2026-07-16-003 必做)**:
    - **路径可见性闭环**：每条 emit topic 携带的 path 字段,沿「emit → projection → 下游 hat 可见输入」逐跳检查;任一节点路径不可见 → `preset.artifact_path_not_in_visible_context`(P0)。
-   - **消费动作闭环**：下游 consumer hat 的 instructions 必须**显式要求**读路径(若仅说「看 payload 中的摘要」,路径存在但未消费 → `preset.artifact_first_passed_on_path_presence` P1 / `preset.artifact_no_consumer_declared` P1)。
+   - **消费动作闭环**：下游 consumer hat 的 instructions 必须**显式要求**读路径,且读盘后做验收 / 确认(文件存在、可解析、足以支撑本 hat Q1)。判定规程:
+     1. instructions 未要求读路径 → `preset.artifact_no_consumer_declared`(P1)。
+     2. 仅说「看 payload 摘要 / 有 path 即可」而无读盘命令 → `preset.artifact_first_passed_on_path_presence`(P1)。
+     3. 要求读盘但无「验收 / 确认内容可用」语句 → 仍按 `preset.artifact_no_consumer_declared`(P1);R10 消费确认未闭环。
+   - **内容充分性闭环(R8)**：假设 consumer 已按路径读盘,检查 artifact 约定内容是否足以支撑该 hat Q1(完整结果 / 证据 / 未解决问题 / 可恢复进度)。路径存在但内容设计不足以恢复或继续决策 → `preset.artifact_content_insufficient_for_decision`(P0 阻塞下游 / 否则 P1)。**不得**只凭「payload 有 path」或「instructions 写了 cat」放行。
    - **生命周期闭环**：跨多 hat 的中间 / 汇总文件必须显式声明 owner / reader / retention / cleanup 任一方;缺失 → `preset.artifact_no_lifecycle_owner`(P1,blast radius 大则 P0)。
    - **payload 内容闭环**：payload 携带完整结果 / 长内容 / 跨 hat 摘要(>200 字符或可恢复) → `preset.payload_carries_full_content`(P0);sub-agent 完整结果通过 hat 长消息返回(未落盘) → `preset.subagent_result_returned_only_in_message`(P0)。
    - **internal-ledger-as-artifact**:任何 hat instructions 要求把 `.ralph/events.jsonl` / `.ralph/loops.json` / `.ralph/supervisor.db` 当业务 artifact 接口(写或读) → `preset.artifact_uses_internal_ledger`(P0)。
@@ -106,7 +110,9 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
 6. **Handoff Audit table:** for each edge A→B: A.Q4 emit fields | projection action | downstream Q2 Observe | verdict | finding id.
    - Closed handoff = upstream emit field is in projection → downstream Q2 Observe command sees it.
    - Open handoff = P0 unless runtime evidence proves otherwise.
-   - **Artifact-First handoff 子集**：对每条 artifact handoff 边额外列「artifact 路径 → projection → 下游 Q2 Observe 实际命令 → 消费确认」,open 即 `preset.artifact_path_not_in_visible_context`(P0) 或 `preset.artifact_no_consumer_declared`(P1)。
+   - **Artifact-First handoff 子集**：对每条 artifact handoff 边额外列「artifact 路径 → projection → 下游 Q2 Observe 实际命令 → 消费确认 → 内容充分性」。
+     - **消费确认(R10)判定**：consumer instructions 须同时具备 (a) 从可见输入取路径、(b) `cat`/`Read` 读盘、(c) 读后验收(存在/可解析/足以决策)。缺 (a)(b) → `preset.artifact_no_consumer_declared`(P1);有路径无读盘 → `preset.artifact_first_passed_on_path_presence`(P1);路径对 consumer 不可见 → `preset.artifact_path_not_in_visible_context`(P0)。
+     - **内容充分性(R8)判定**：在消费确认通过后,检查 artifact 约定是否覆盖 consumer Q1 所需事实;不足 → `preset.artifact_content_insufficient_for_decision`。
 
 7. **Mechanical lint** — run commands in `references/commands.md`. Map JSON `id` values (`lint.preset.*`) via `references/finding-rubric.md`. **Continue AAF and payload audit even if lint fails**; note failure in Executive Summary.
    - If `preset.instructions_emit_feedback_skill_reference_missing` appears, treat it as a real adoption gap unless the hat does not construct payloads. The repair surface is the relevant hat `instructions:` plus, if needed, `event_policy.schemas.<topic>.field_docs`.
@@ -173,13 +179,15 @@ See `references/finding-rubric.md` for `finding_id` defaults and the new **Paylo
 **Artifact-First handoff example rows**(命中按 review-only ID 入主表,confidence 起点见 `references/finding-rubric.md`):
 
 ```markdown
-|| F-101 | P0 | 90 | payload-content | Q4 | executor | hats.executor.publishes[work.done].payload.report_body | sub-agent 完整结果通过 `report_body` 内联在 payload,未在 `.ralph/reports/<unit>.md` 落盘 | emitter instructions 改为「先写 `.ralph/reports/<unit>.md`」,emit 只携带 `report_path` + 短摘要 |
+| F-101 | P0 | 90 | payload-content | Q4 | executor | hats.executor.publishes[work.done].payload.report_body | sub-agent 完整结果通过 `report_body` 内联在 payload,未在 `.ralph/reports/<unit>.md` 落盘 | emitter instructions 改为「先写 `.ralph/reports/<unit>.md`」,emit 只携带 `report_path` + 短摘要;命中 `preset.payload_carries_full_content` / `preset.subagent_result_returned_only_in_message` |
 
-|| F-102 | P0 | 90 | visibility | Q2 | reviewer | hats.reviewer.instructions | 上游 emit 携带 `report_path`,但 reviewer instructions 未要求读文件 | instructions 显式 `cat <report_path>` 后再决策,移除 `report_body` 内联依赖;命中 `preset.artifact_path_not_in_visible_context` |
+| F-102 | P1 | 80 | payload-content | Q5 | reviewer | hats.reviewer.instructions | 上游 emit 携带 `executor_head_report_path` 且对 reviewer 可见,但 instructions 明确忽略读盘、只看 inline `report_body` | instructions 显式 `cat <executor_head_report_path>` 并验收后再决策;命中 `preset.artifact_no_consumer_declared` + `preset.artifact_first_passed_on_path_presence` |
 
-|| F-103 | P0 | 95 | visibility | Q3 | planner | hats.planner.instructions | planner 把阶段状态写到 `.ralph/supervisor.db`(runtime internal ledger) | 改写为 `.ralph/plans/<plan>.md`,emit 只携带路径与摘要;命中 `preset.artifact_uses_internal_ledger` |
+| F-103 | P0 | 95 | visibility | Q3 | planner | hats.planner.instructions | planner 把阶段状态写到 `.ralph/supervisor.db`(runtime internal ledger) | 改写为 `.ralph/plans/<plan>.md`,emit 只携带路径与摘要;命中 `preset.artifact_uses_internal_ledger` |
 
-|| F-104 | P1 | 80 | state | Q5 | orchestrator | hats.orchestrator.publishes[loop.summary].payload.intermediate_metrics_path | 中间文件由多 hat 持续追加,但 preset 未声明消费方 / 保留 / 清理责任 | 在 preset 顶部或 orchestrator instructions 声明 owner + retention + cleanup;命中 `preset.artifact_no_lifecycle_owner` |
+| F-104 | P1 | 80 | state | Q5 | orchestrator | hats.orchestrator.publishes[loop.summary].payload.intermediate_metrics_path | 中间文件由多 hat 持续追加,但 preset 未声明消费方 / 保留 / 清理责任 | 在 preset 顶部或 orchestrator instructions 声明 owner + retention + cleanup;命中 `preset.artifact_no_lifecycle_owner` |
+
+| F-105 | P0 | 90 | visibility | Q2 | summarizer | hats.summarizer.instructions | instructions 要求读 `canonical_bundle_path`,但 trigger / projection 从未提供该字段 | 上游 emit + projection 暴露路径,或去掉对该不可见字段的依赖;命中 `preset.artifact_path_not_in_visible_context` |
 ```
 
 ## Guardrails (review skill itself)
@@ -188,7 +196,7 @@ See `references/finding-rubric.md` for `finding_id` defaults and the new **Paylo
 - Isolated P0 evidence must be **hat-visible** unless proving runtime injection.
 - Reject user request for chat-only review — write the report file.
 - Reject "handoff unclear" / "payload looks weak" findings that don't name field + source + fix — rewrite with evidence or move to `Unverified Suspicions`.
-- **Artifact-First 拒绝放行**：禁止因「payload 含路径字段」就判定 handoff 闭环。必须同时验证 ① 路径在 consumer hat 可见输入中、② consumer instructions 显式要求读文件、③ `field_docs.<path_field>.meaning` 明确落盘点语义、④ 生命周期责任(consume / retain / cleanup)有声明。任一缺失 → 按 `preset.artifact_path_not_in_visible_context` / `preset.artifact_no_consumer_declared` / `preset.artifact_first_passed_on_path_presence` / `preset.artifact_no_lifecycle_owner` 入主表。
+- **Artifact-First 拒绝放行**：禁止因「payload 含路径字段」就判定 handoff 闭环。必须同时验证 ① 路径在 consumer hat 可见输入中、② consumer instructions 显式要求读文件并验收、③ artifact 内容足以支撑 consumer Q1、④ `field_docs.<path_field>.meaning` 明确落盘点语义、⑤ 生命周期责任(consume / retain / cleanup)有声明。任一缺失 → 按 `preset.artifact_path_not_in_visible_context` / `preset.artifact_no_consumer_declared` / `preset.artifact_first_passed_on_path_presence` / `preset.artifact_content_insufficient_for_decision` / `preset.artifact_no_lifecycle_owner` 入主表。
 - **Artifact-First 不接受「字符很少」作为唯一例外理由**：例外必须满足短暂 + 短小 + 无需恢复,并标注恢复 / 审计 / 下游依赖依据。理由不充分 → `preset.artifact_first_exemption_unjustified` finding。
 
 ## Optional Verification
@@ -211,4 +219,4 @@ cargo nextest run -p ralph-core --test scenarios
 - Severity / confidence / finding_id(含 Payload Audit → Severity、Artifact-First Handoff → Severity、Artifact-First Handoff finding_id、Artifact-First Handoff `field_docs` 审核点): `references/finding-rubric.md`
 - Author checklist + Payload Contract template(含 Artifact-First topic 判别、Artifact-First 单 hat 视角审核项、Hard questions — Artifact-First Handoff): `references/author-checklist.md`
 - Topology context: `references/patterns.md`
-- 验收 fixture: `fixtures/aaf-artifact-first-negative-fixture.yml`(覆盖 AE1-AE5,可用于 review 流程自检)
+- 验收 fixture: `fixtures/aaf-artifact-first-negative-fixture.yml`(覆盖 AE1-AE5 + field_docs / ownership / path-invisible 分支,可用于 review 流程自检)
