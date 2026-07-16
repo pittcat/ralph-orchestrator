@@ -27,20 +27,20 @@ pub fn wave_worker_execution_mode(
     WaveWorkerExecutionMode::Pty
 }
 
-// 2026-07-16 cleanup U4 (KTD-3): test-fixture guard.
-// `WaveWorkerStreamHandler` + `new` / `emit_delta` are only
-// constructed inside `#[cfg(test)] mod tests` blocks. The
-// struct stays public so cross-crate test imports keep
-// resolving.
-#[allow(dead_code)]
+// 2026-07-16 cleanup U6 (KTD-3): test-fixture guard.
+// `WaveWorkerStreamHandler` + `new` / `emit_delta` + `StreamHandler`
+// impl are only constructed inside `#[cfg(test)]` blocks across the
+// crate. Gate the whole block to `#[cfg(test)]` so production builds
+// skip it and the type stops polluting the public API surface.
+#[cfg(test)]
 pub struct WaveWorkerStreamHandler {
     worker_index: u32,
     rpc_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
     tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
 }
 
+#[cfg(test)]
 impl WaveWorkerStreamHandler {
-    #[allow(dead_code)]
     pub fn new(
         worker_index: u32,
         rpc_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
@@ -53,7 +53,6 @@ impl WaveWorkerStreamHandler {
         }
     }
 
-    #[allow(dead_code)]
     fn emit_delta(&self, delta: impl Into<String>) {
         let delta = delta.into();
         if delta.is_empty() {
@@ -74,6 +73,7 @@ impl WaveWorkerStreamHandler {
     }
 }
 
+#[cfg(test)]
 impl StreamHandler for WaveWorkerStreamHandler {
     fn on_text(&mut self, text: &str) {
         self.emit_delta(text);

@@ -1800,6 +1800,7 @@ fn emit_close_completion_warning(
 /// Public to `#[cfg(test)]` modules; non-test callers should use
 /// `emit_close_completion_warning` instead.
 #[doc(hidden)]
+#[cfg(test)]
 pub fn build_close_warning_payload(
     caller_hat: &str,
     task_id: &str,
@@ -1822,6 +1823,7 @@ pub fn build_close_warning_payload(
 
 /// Build the missing-marker early-return stderr payload (test helper).
 #[doc(hidden)]
+#[cfg(test)]
 pub fn build_close_warning_payload_missing_marker(
     caller_hat: &str,
     task_id: &str,
