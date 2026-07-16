@@ -1,22 +1,26 @@
 # cargo-nextest configuration for ralph-orchestrator workspace
 #
+# 2026-07-16 (plan 2026-07-16-005-refactor-ralph-cli-parallel-tests-plan, Unit 6):
+#   `package(ralph-cli)` no longer bound to the `cli-serial` group.
+#   U1 / U6 evidence: nextest's process-per-test isolation already prevents
+#   the 4 (now 2 after U5) process-global Mutexes from being shared across
+#   tests; running ralph-cli in nextest default concurrency is stable green
+#   across 3 consecutive full-package runs and stress-count 3 runs on the
+#   high-risk sleep/Mutex subset. See the U1 scratch note for the full proof:
+#   `.ralph/review/2026-07-16-005-refactor-ralph-cli-parallel-tests-plan/scratch/u1-parallel-failure-characterization.md`
+#
 # Goals:
-#   - Run ralph-cli tests serially (max-threads=1) because loop_runner tests
-#     touch four process-global Mutexes (MOCK_ACP_EXECUTIONS,
-#     MOCK_ACP_EXECUTION_SERIAL, FAKE_PATH_BACKEND_SERIAL, FAKE_PATH_BACKEND_BIN)
-#     that are not safe to share across nextest's per-test processes.
-#   - Run every other workspace package in parallel (nextest's default
+#   - Run every workspace package in parallel (nextest's default
 #     behavior: test-threads = num-cpus).
 #   - Preserve the historical skip rule for
 #     ralph-adapters::acp_executor::tests::test_create_terminal_and_output
 #     that the legacy `cargo test -- --skip ...` invocation used.
+#
+# Test entry policy: `cargo nextest run` is the supported default entry
+# point. `cargo test -p ralph-cli` is documented for the historical
+# raw-cargo fallback in
+# `docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`
+# (kept for historical context only — not the recommended path).
 
 [profile.default]
 default-filter = 'not (package(ralph-adapters) and test(=acp_executor::tests::test_create_terminal_and_output))'
-
-[test-groups]
-cli-serial = { max-threads = 1 }
-
-[[profile.default.overrides]]
-filter = 'package(ralph-cli)'
-test-group = 'cli-serial'
