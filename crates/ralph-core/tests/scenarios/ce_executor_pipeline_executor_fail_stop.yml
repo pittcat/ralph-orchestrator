@@ -100,7 +100,7 @@ mock_responses:
   - hat: executor
     text: |
       <event topic="work.failed">
-      {"plan_name":"plan-fail-stop","plan_path":"docs/plans/fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","reason":"unit_failed: U2 tests_not_green after 3 attempts","planned_units":["U1","U2","U3","U4","U5","U6"],"attempted_units":["U1","U2"],"completed_units":["U1"],"failed_units":["U2"],"blocked_units":[],"skipped_units":["U3","U4","U5","U6"],"decisions_file":".ralph/agent/decisions.md"}
+      {"plan_name":"plan-fail-stop","plan_path":"docs/plans/fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","reason":"unit_failed: U2 tests_not_green after 3 attempts","planned_units":["U1","U2","U3","U4","U5","U6"],"attempted_units":["U1","U2"],"completed_units":["U1"],"failed_units":["U2"],"blocked_units":[],"skipped_units":["U3","U4","U5","U6"],"decisions_file":".ralph/agent/decisions.md","report_input_file":".ralph/review/plan-fail-stop/report-input.work-failed.json"}
       </event>
   - hat: reporter
     text: |

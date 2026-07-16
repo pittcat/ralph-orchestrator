@@ -1000,7 +1000,10 @@ mod tests {
             publishes.sort();
             assert_eq!(
                 publishes,
-                vec!["stabilization.blocked".to_string(), "stabilization.done".to_string()],
+                vec![
+                    "stabilization.blocked".to_string(),
+                    "stabilization.done".to_string()
+                ],
                 "{name}: test-stabilizer must publish only stabilization.done/blocked"
             );
             let mut terminals: Vec<String> = stabilizer.terminal_events.clone();
@@ -1898,6 +1901,182 @@ mod tests {
                     .map(|f| format!("[{}] {}: {}", f.id, f.severity.as_str(), f.message))
                     .collect::<Vec<_>>()
             );
+        }
+    }
+
+    fn collect_required_field_docs(
+        preset: &RalphConfig,
+        topic: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        // Returns (required_fields, fields_missing_full_docs).
+        let Some(entry) = preset
+            .event_loop
+            .event_policy
+            .as_ref()
+            .and_then(|policy| policy.schemas.get(topic))
+        else {
+            return (Vec::new(), Vec::new());
+        };
+        let required = entry.required_fields.clone();
+        let mut missing = Vec::new();
+        for field in &required {
+            let has_full = entry
+                .field_docs
+                .get(field)
+                .map(|fd| {
+                    !fd.meaning.trim().is_empty()
+                        && !fd.source.trim().is_empty()
+                        && !fd.fill_rule.trim().is_empty()
+                })
+                .unwrap_or(false);
+            if !has_full {
+                missing.push(field.clone());
+            }
+        }
+        (required, missing)
+    }
+
+    #[test]
+    fn test_ce_reporter_inputs_are_required_and_documented() {
+        for (name, topics) in [
+            (
+                "ce-executor-pipeline",
+                &[
+                    "plan.blocked",
+                    "work.failed",
+                    "stabilization.blocked",
+                    "review.artifact.blocked",
+                    "align.done",
+                ][..],
+            ),
+            (
+                "ce-executor-pipeline-loop",
+                &[
+                    "plan.blocked",
+                    "work.failed",
+                    "stabilization.blocked",
+                    "review.artifact.blocked",
+                    "review.loop.blocked",
+                    "align.done",
+                ][..],
+            ),
+        ] {
+            let preset_content = get_preset(name)
+                .unwrap_or_else(|| panic!("preset {name} embedded"))
+                .content;
+            let config = RalphConfig::parse_yaml(preset_content)
+                .unwrap_or_else(|e| panic!("preset {name} parse: {e}"));
+            let policy = config
+                .event_loop
+                .event_policy
+                .as_ref()
+                .expect("event policy");
+            for topic in topics {
+                let schema = policy
+                    .schemas
+                    .get(*topic)
+                    .unwrap_or_else(|| panic!("{name}: missing schema for {topic}"));
+                assert!(
+                    schema
+                        .required_fields
+                        .iter()
+                        .any(|field| field == "report_input_file"),
+                    "{name}: {topic} must require report_input_file"
+                );
+                let docs = schema
+                    .field_docs
+                    .get("report_input_file")
+                    .unwrap_or_else(|| panic!("{name}: {topic} must document report_input_file"));
+                assert!(
+                    !docs.meaning.trim().is_empty()
+                        && !docs.source.trim().is_empty()
+                        && !docs.fill_rule.trim().is_empty(),
+                    "{name}: {topic}.report_input_file needs meaning/source/fill_rule"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_ce_builtin_stabilization_schemas_declared_inline() {
+        // 原始 loop preset 必须 inline 声明 stabilization.done / blocked，
+        // 以保证 path-based authoring view 也能独立通过 strict check。
+        let loop_content = get_preset("ce-executor-pipeline-loop")
+            .expect("ce-executor-pipeline-loop embedded")
+            .content;
+        let loop_config = RalphConfig::parse_yaml(loop_content).expect("loop preset parse");
+
+        for topic in ["stabilization.done", "stabilization.blocked"] {
+            let (required, missing) = collect_required_field_docs(&loop_config, topic);
+            assert!(
+                !required.is_empty(),
+                "loop preset must declare inline schema for '{topic}'"
+            );
+            assert!(
+                missing.is_empty(),
+                "loop preset '{topic}' is missing full field_docs for: {missing:?}"
+            );
+        }
+
+        // Linear preset: the inline authoring view must also declare
+        // stabilization.* inline schemas (it inherits the same gate
+        // because business_topics carries them in both presets).
+        let linear_content = get_preset("ce-executor-pipeline")
+            .expect("ce-executor-pipeline embedded")
+            .content;
+        let linear_config = RalphConfig::parse_yaml(linear_content).expect("linear preset parse");
+        for topic in ["stabilization.done", "stabilization.blocked"] {
+            let (required, missing) = collect_required_field_docs(&linear_config, topic);
+            assert!(
+                !required.is_empty(),
+                "linear preset must declare inline schema for '{topic}'"
+            );
+            assert!(
+                missing.is_empty(),
+                "linear preset '{topic}' is missing full field_docs for: {missing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ce_builtin_loop_topic_handoff_owners_pinned() {
+        // Review-only inventory: every business topic that flows into
+        // reporter must be owned by a single emitter hat. Loop-only
+        // review.*.done topics are owned by the corresponding dim hat;
+        // convergence topics (review.synthesized / review.accepted /
+        // fix.requested / review.loop.blocked) by their declared emitter.
+        // If a future preset edit breaks this, the test fires so the
+        // reporter-only single-consumer guarantee stays intact.
+        let topics_owners = [
+            ("review.goalalign.done", "dim:goal-alignment"),
+            ("review.correctness.done", "dim:correctness"),
+            ("review.testing.done", "dim:testing"),
+            ("review.maintainability.done", "dim:maintainability"),
+            ("review.standards.done", "dim:project-standards"),
+            ("review.adversarial.done", "dim:adversarial"),
+            ("stabilization.done", "test-stabilizer"),
+            ("stabilization.blocked", "test-stabilizer"),
+        ];
+
+        for preset_name in ["ce-executor-pipeline", "ce-executor-pipeline-loop"] {
+            let preset_content = get_preset(preset_name)
+                .unwrap_or_else(|| panic!("preset {preset_name} embedded"))
+                .content;
+            let config = RalphConfig::parse_yaml(preset_content)
+                .unwrap_or_else(|e| panic!("preset {preset_name} parse: {e}"));
+
+            for (topic, owner) in topics_owners {
+                let publishes = config
+                    .hats
+                    .get(owner)
+                    .unwrap_or_else(|| panic!("{preset_name} hat '{owner}' declared"))
+                    .publishes
+                    .clone();
+                assert!(
+                    publishes.iter().any(|t| t == topic),
+                    "{preset_name}: topic '{topic}' must be in hat '{owner}' publishes; got {publishes:?}"
+                );
+            }
         }
     }
 }

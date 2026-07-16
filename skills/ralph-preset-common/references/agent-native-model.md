@@ -20,8 +20,10 @@ AAF 评审的核心是：**从 activated-hat 视角独立模拟每一步**，再
 | **Q1 使命** | 这一轮我要完成什么？完成标准？ | 单一可判定职责 + 终态 emit | 是否可判定；是否夹带其它 hat 职责 |
 | **Q2 输入** | 我此刻能 Observe 到什么？够不够开工？ | Observe 命令 + 期望字段 | 输入是否 hat 可见；是否缺上游已 emit 未投影字段 |
 | **Q3 执行** | 我要跑哪些 Ralph 允许的命令？顺序？ | OPAC 四阶段命令序列 | 命令是否存在、有权限；是否跳过 Precheck |
-| **Q4 输出** | 做完我向 runtime 交什么？ | `publishes` 内 topic + **payload 合同**（见下） | topic 在 `publishes`；`required_fields` 可填；单事件预算；**每个字段对 hat 可见且值源可达** |
+| **Q4 输出** | 做完我向 runtime 交什么？ | `publishes` 内 topic + **payload 合同**（见下） | topic 在 `publishes`；`required_fields` 可填；单事件预算（**收尾 hat 例外**：见下）；**每个字段对 hat 可见且值源可达** |
 | **Q5 交接** | 下游需要我传什么？它怎么 Observe？ | 拓扑层 `state_projection`；instructions 只写「我 emit 的字段」 | emit 字段 → projection → 下游 Q2 是否闭合 |
+
+**Q4 单事件预算例外（review-only）**：默认 Q4 单事件预算严格适用（`finding-rubric.md` 主表两条 P0）。唯一例外是 preset 显式配置的「收尾双事件终态」——当且仅当 hat 是 preset 中负责收尾的 hat（典型为 reporter / alignment），且 preset `event_loop.required_events[]` 与 `event_loop.completion_promise` 配对声明、且该 hat `publishes` 同时包含二者、且顺序为先 required event 再 completion promise、且两个事件均带同一 hat provenance 时，review 可放过其同 activation 双 emit。其它任何 hat 一律不享受本例外，复核细则见 `finding-rubric.md`「required-event-to-completion 窄例外」段。
 
 ## Payload 审计模型（Q4 第一类公民）
 
@@ -117,7 +119,7 @@ Review 模拟每 hat 时，按上面七段核对每条 Q2 Observe / Q4 字段的
 | 写盘前预检 | `ralph emit --policy-check` — 见 `ralph-tools` §5 |
 | emit 与 hat 通道预检 | `ralph tools task verify-emit-bridge` — 见 `ralph-tools-tasks` |
 
-**Artifact-First 状态传递（文件作数据面、event 作控制面）**
+### Artifact-First 状态传递（文件作数据面、event 作控制面）
 
 ```
 上游 hat 创建 / 更新 .ralph/<plan>/<unit>/<file>.md (Q3 Apply)
@@ -143,7 +145,7 @@ Review 模拟每 hat 时，按上面七段核对每条 Q2 Observe / Q4 字段的
 - 在 `crates/ralph-core/data/*.md` 写 preset 专用 hat 名 / 拓扑 / 一次性诊断术语（专用知识只放 preset instructions）
 - 引用未声明的 payload 字段（即便 schema 通过）
 
-**Artifact-First 边界（业务 artifact vs runtime internal ledger）**
+### Artifact-First 边界（业务 artifact vs runtime internal ledger）
 
 本段回答「重要状态应该放在 `.ralph/` 的哪里」。它与上方「禁止（P0 典型来源）」互补：上面禁止把 internal ledger **当作业务接口**（读）；本段规定业务 artifact **必须放在哪里**、以及 internal ledger 与业务 artifact 的区分标准。
 
@@ -173,7 +175,7 @@ Author 起草 recovery 路径时：**data docs 引用 + preset 状态表行**，
 
 Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章节**，让 doc 与 runtime 同步收敛。
 
-**Artifact-First Handoff 知识分层（三层职责划分）**
+### Artifact-First Handoff 知识分层（三层职责划分）
 
 - **`presets/en/<name>.yml` hat `instructions:`**（preset 决策层）：写**本 hat**创建 / 读 artifact 的具体路径、生命周期责任（产出方 / 消费方 / 保留 / 归档 / 清理）、例外与例外理由。粒度到字段级：「写到哪里」「从哪读」「谁负责」。
 - **`skills/ralph-preset-common/references/agent-native-model.md`**（loop 外评审层，本文件）：写 artifact-first 模型、判定标准（恢复价值 / 审计价值 / 下游依赖）、违规列表、边界（业务 artifact vs internal ledger）、灰色地带判定方法。**不写**具体的「`.ralph/<...>` 子目录命名约定」，由 preset 自决。
@@ -192,7 +194,7 @@ Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章�
 | Author · 自检 | 每 hat AAF 五问表 + payload audit 表无空项；每个 emit topic 都要列行 |
 | Review | **独立重做** AAF + payload audit；不信任 author notes；缺口 → finding + confidence |
 
-**Review 必须独立重做的 artifact-first 检查**
+### Review 必须独立重做的 artifact-first 检查
 
 | 检查项 | 重做方法 | 判定信号 |
 |---|---|---|

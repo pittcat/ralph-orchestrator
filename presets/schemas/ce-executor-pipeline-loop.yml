@@ -71,7 +71,12 @@ schemas:
       - "plan_contract_version"
       - "plan_contract_digest"
       - "semantic_gaps"
+      - "report_input_file"
     field_docs:
+      report_input_file:
+        meaning: "repo-relative path to the atomically published reporter input bundle"
+        source: "plan-reviewer writes and reopens the bundle before emitting plan.blocked"
+        fill_rule: "copy the final repo-relative path; never emit a temporary, missing, stale, or absolute path"
       plan_contract_version:
         meaning: "literal version tag of the ce-unified-plan contract the agent was operating under; first published version is 'ce-unified-plan/v1'"
         source: "plan-reviewer"
@@ -598,7 +603,12 @@ schemas:
       - "residual_findings_count"
       - "loop_decision_basis"
       - "reason"
+      - "report_input_file"
     field_docs:
+      report_input_file:
+        meaning: "repo-relative path to the atomically published reporter input bundle"
+        source: "review-gate writes and reopens the bundle before emitting review.loop.blocked"
+        fill_rule: "copy the final repo-relative path; never emit a temporary, missing, stale, or absolute path"
       max_review_rounds:
         meaning: "hard cap on the review loop (6 in ce-executor-pipeline-loop); loop.blocked fires when reached with must_fix_now > 0"
         source: "review-gate / preset"
@@ -682,7 +692,12 @@ schemas:
       - "reason"
       - "classification_counts"
       - "worktree_status"
+      - "report_input_file"
     field_docs:
+      report_input_file:
+        meaning: "repo-relative path to the atomically published reporter input bundle"
+        source: "test-stabilizer writes and reopens the bundle before emitting stabilization.blocked"
+        fill_rule: "copy the final repo-relative path; never emit a temporary, missing, stale, or absolute path"
       reason:
         meaning: "canonical reason the gate refused to emit stabilization.done; lets reporter drive blocked terminal without re-deriving"
         source: "test-stabilizer"
@@ -695,3 +710,76 @@ schemas:
         meaning: "summary of failure attribution leading to the block"
         source: "test-stabilizer"
         fill_rule: "same shape as stabilization.done; must always be present even when zero"
+
+  review.artifact.blocked:
+    # review-synthesizer 在 mandatory artifact integrity gate 失败时发送此事件
+    # any of the six mandatory dimension artifacts fails the
+    # integrity gate. Routes to reporter only; fix-planner /
+    # review-gate / alignment must NOT consume it.
+    required_fields:
+      - "plan_name"
+      - "plan_path"
+      - "review_round"
+      - "review_phase"
+      - "resolved_baseline_sha"
+      - "normalized_plan_file"
+      - "plan_contract_version"
+      - "plan_contract_digest"
+      - "trace_file"
+      - "artifact_block_file"
+      - "failure_dimensions"
+      - "failure_reasons"
+      - "report_input_file"
+    field_docs:
+      report_input_file:
+        meaning: "repo-relative path to the atomically published reporter input bundle"
+        source: "review-synthesizer writes and reopens the bundle before emitting review.artifact.blocked"
+        fill_rule: "copy the final repo-relative path; never emit a temporary, missing, stale, or absolute path"
+      plan_name:
+        meaning: "plan file basename without extension; copied from review.adversarial.done for reporter routing"
+        source: "review-synthesizer carries forward from review.adversarial.done"
+        fill_rule: "literal copy; do NOT hand-write"
+      plan_path:
+        meaning: "repo-relative path to the source plan file"
+        source: "review-synthesizer carries forward from review.adversarial.done"
+        fill_rule: "literal copy"
+      review_round:
+        meaning: "round number whose mandatory artifacts failed the integrity gate"
+        source: "review-synthesizer reads from review.adversarial.done trigger payload"
+        fill_rule: "non-negative integer; do NOT recompute"
+      review_phase:
+        meaning: "current phase token; report-only audit marker"
+        source: "review-synthesizer"
+        fill_rule: "literal 'review_artifact_blocked'; do NOT change"
+      resolved_baseline_sha:
+        meaning: "canonical baseline SHA carried through the chain from plan.ready"
+        source: "review-synthesizer carries forward from review.adversarial.done"
+        fill_rule: "literal copy"
+      normalized_plan_file:
+        meaning: "path to plan-reviewer's normalized plan artifact"
+        source: "review-synthesizer carries forward from review.adversarial.done"
+        fill_rule: "literal copy; do NOT make up a path"
+      plan_contract_version:
+        meaning: "literal version tag of the ce-unified-plan contract"
+        source: "review-synthesizer carries forward from review.adversarial.done"
+        fill_rule: "literal 'ce-unified-plan/v1'; do NOT hand-write"
+      plan_contract_digest:
+        meaning: "hex digest binding source plan + normalized plan"
+        source: "review-synthesizer carries forward from review.adversarial.done"
+        fill_rule: "16-64 hex chars; do NOT hand-write"
+      trace_file:
+        meaning: "append-only Requirement→Scenario→Unit tracking file"
+        source: "review-synthesizer carries forward from review.adversarial.done"
+        fill_rule: "literal copy"
+      artifact_block_file:
+        meaning: "absolute path to the audit block the synthesizer wrote to <ROUND_DIR>/review-synthesizer-block.md"
+        source: "review-synthesizer writes it via the Write tool before emit"
+        fill_rule: "non-empty path under .ralph/review/<plan_name>/round-<NN>/review-synthesizer-block.md; do NOT make up a path — write the file first"
+      failure_dimensions:
+        meaning: "ordered array of dimension names that failed the integrity gate (subset of goal-alignment, correctness, testing, maintainability, project-standards, adversarial)"
+        source: "review-synthesizer enumerates the failing dimensions during Step 1"
+        fill_rule: "non-empty array of strings; never empty when review.artifact.blocked is emitted"
+      failure_reasons:
+        meaning: "ordered array of failure reason codes aligned with failure_dimensions; one of missing_file, unreadable, missing_findings_section, findings_count_mismatch, dimension_field_mismatch, diff_patch_missing"
+        source: "review-synthesizer classifies per dimension during Step 1"
+        fill_rule: "non-empty array of strings; length must equal failure_dimensions"

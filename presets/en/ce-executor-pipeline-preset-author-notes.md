@@ -89,3 +89,11 @@
 5. CLI presets: no builtin preset was added or removed.
 6. manifest/index: no preset was added or removed.
 7. docs/zsh: `CLAUDE.md` / `AGENTS.md` already track the 14-hat / 16-hat topology and `test-stabilizer` description; zsh completion needs no change (preset names are unchanged).
+
+## Reporter artifact-first 收尾契约
+
+- `plan.blocked`、`work.failed`、`stabilization.blocked`、`review.artifact.blocked`、`align.done` 的生产者必须先写入 `ce-report-input.v1` bundle，经 JSON 校验、原子 rename 和重新打开确认后，才把仓库相对路径放入 `report_input_file`。
+- bundle 必须包含 plan identity、终态原因或 verdict、各阶段状态、按顺序排列的业务 artifact 引用、验证摘要和 residuals；未执行阶段必须显式写 `not_run`，不得靠 reporter 猜测。
+- reporter 只从当前 trigger 取得 `report_input_file`，只读取 bundle 声明的业务 artifact，不以 main event history、task/progress/recovery 状态重建业务事实。
+- bundle 缺失、不可读、schema version 不符、plan identity 不匹配或 artifact 缺失时，reporter 生成 blocked 报告，发送 `report.done` 后立即发送 completion promise；不得回发上游 blocked topic。
+- `report.done → LOOP_COMPLETE` 是唯一允许的 required-event-to-completion 双事件收尾形状；发送前必须分别通过同源 policy-check，且不得夹带第三个业务事件。

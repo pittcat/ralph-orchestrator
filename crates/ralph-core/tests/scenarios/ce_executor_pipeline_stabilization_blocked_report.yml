@@ -104,7 +104,7 @@ mock_responses:
   - hat: test-stabilizer
     text: |
       <event topic="stabilization.blocked">
-      {"plan_name":"plan-stab-blocked","plan_path":"docs/plans/stab-blocked.md","tested_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000002","stabilization_audit_file":".ralph/review/plan-stab-blocked/stabilization/audit.md","reason":"unattributable","classification_counts":{"test_bug":0,"production_bug":0,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":1},"worktree_status":"clean"}
+      {"plan_name":"plan-stab-blocked","plan_path":"docs/plans/stab-blocked.md","tested_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000002","stabilization_audit_file":".ralph/review/plan-stab-blocked/stabilization/audit.md","reason":"unattributable","classification_counts":{"test_bug":0,"production_bug":0,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":1},"worktree_status":"clean","report_input_file":".ralph/review/plan-stab-blocked/report-input.stabilization-blocked.json"}
       </event>
   - hat: reporter
     text: |

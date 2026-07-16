@@ -64,7 +64,7 @@ config:
 mock_responses:
   - text: |
       <event topic="plan.blocked">
-      {"plan_name":"plan-x","reason":"plan_missing_implementation_units"}
+      {"plan_name":"plan-x","reason":"plan_missing_implementation_units","report_input_file":".ralph/review/plan-x/report-input.plan-blocked.json"}
       </event>
     hat: plan-reviewer
   - text: |

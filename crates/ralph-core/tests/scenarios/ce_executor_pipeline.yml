@@ -297,7 +297,7 @@ mock_responses:
   # 10. alignment cross-checks original plan vs fix-plan execution
   - text: |
       <event topic="align.done">
-      {"plan_name":"plan-p","plan_path":"docs/plans/p.md","executor_head_sha":"aabbccddaabbccddaabbccddaabbccddaabbccdd","head_sha":"aabbccddaabbccddaabbccddaabbccddaabbccde","worktree_status":"clean","fix_plan_file":".ralph/review/plan-p/fix-plan.md","review_verdict":"pass_with_residuals","plan_executed":true,"fix_plan_executed":true,"residuals_count":2,"residuals_summary":"2 P3 maintainability findings not applied (deferred)"}
+      {"plan_name":"plan-p","plan_path":"docs/plans/p.md","executor_head_sha":"aabbccddaabbccddaabbccddaabbccddaabbccdd","head_sha":"aabbccddaabbccddaabbccddaabbccddaabbccde","worktree_status":"clean","fix_plan_file":".ralph/review/plan-p/fix-plan.md","review_verdict":"pass_with_residuals","plan_executed":true,"fix_plan_executed":true,"residuals_count":2,"residuals_summary":"2 P3 maintainability findings not applied (deferred)","report_input_file":".ralph/review/plan-p/report-input.align-done.json"}
       </event>
     hat: alignment
   # 11. reporter emits report.done

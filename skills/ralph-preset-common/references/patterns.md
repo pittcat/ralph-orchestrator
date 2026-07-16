@@ -49,6 +49,8 @@ plan-gate / work.start
   `tests_passed` / `commit_count` / `executor_head_sha` / `changed_lines`），
   **不**新增 runtime unit-loop topic
 
+**收尾双事件终态（reporter hat）**：preset 把 `event_loop.required_events: ["report.done"]` 与 `event_loop.completion_promise: LOOP_COMPLETE` 配对，作为 reporter 合法双 emit 的入口。其它 hat（plan-reviewer / executor / dimension hats / synthesizer / fix-planner / fixer / alignment）一律**不享受**该例外——它们的 `publishes` 不应同时包含 required_events 列表里的 topic 与 completion_promise。AAF 复核参见 `finding-rubric.md`「required-event-to-completion 窄例外」段。
+
 参考：`presets/en/ce-executor-pipeline.yml`。
 
 ## ce-executor-pipeline-loop（15 hat，isolated；单链环形 review/fix；2026-07-08）

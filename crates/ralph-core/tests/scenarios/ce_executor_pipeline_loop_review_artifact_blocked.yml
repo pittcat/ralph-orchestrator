@@ -1,0 +1,180 @@
+# ce_executor_pipeline_loop_review_artifact_blocked: U3 loop preset — review-synthesizer fail-close on missing dimension artifact (mid-loop round)
+#
+# 2026-07-16-004 plan U3: same fail-close contract as the linear
+# variant, but inside a multi-round review/fix loop. The synthesizer
+# detects missing mandatory artifacts in round 1 (or any subsequent
+# round) and emits ONLY review.artifact.blocked. The loop MUST NOT
+# enter another fix round; reporter MUST emit a blocked report.
+
+name: ce_executor_pipeline_loop_review_artifact_blocked
+description: ce-executor-pipeline-loop U3 — review-synthesizer fail-close inside multi-round loop
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 12
+  hats:
+    plan-reviewer:
+      subscribes_to: [work.start]
+      publishes: [plan.ready, plan.blocked]
+    executor:
+      subscribes_to: [plan.ready]
+      publishes: [work.done, work.failed]
+    test-stabilizer:
+      subscribes_to: [work.done, fix.done]
+      publishes: [stabilization.done, stabilization.blocked]
+    review-reentry:
+      subscribes_to: [stabilization.done, fix.done]
+      publishes: [review.round.ready]
+    "dim:goal-alignment":
+      subscribes_to: [review.round.ready]
+      publishes: [review.goalalign.done]
+    "dim:correctness":
+      subscribes_to: [review.goalalign.done]
+      publishes: [review.correctness.done]
+    "dim:testing":
+      subscribes_to: [review.correctness.done]
+      publishes: [review.testing.done]
+    "dim:maintainability":
+      subscribes_to: [review.testing.done]
+      publishes: [review.maintainability.done]
+    "dim:project-standards":
+      subscribes_to: [review.maintainability.done]
+      publishes: [review.standards.done]
+    "dim:adversarial":
+      subscribes_to: [review.standards.done]
+      publishes: [review.adversarial.done]
+    review-synthesizer:
+      subscribes_to: [review.adversarial.done]
+      publishes: [review.synthesized, review.artifact.blocked]
+    review-gate:
+      subscribes_to: [review.synthesized]
+      publishes: [review.accepted, fix.requested, review.loop.blocked]
+    fix-planner:
+      subscribes_to: [fix.requested]
+      publishes: [review.complete]
+    fixer:
+      subscribes_to: [review.complete]
+      publishes: [fix.done]
+    alignment:
+      subscribes_to: [review.accepted]
+      publishes: [align.done]
+    reporter:
+      subscribes_to:
+        - align.done
+        - plan.blocked
+        - work.failed
+        - review.loop.blocked
+        - stabilization.blocked
+        - review.artifact.blocked
+      publishes: [report.done, LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: work.start
+    completion_promise: LOOP_COMPLETE
+    required_events: [report.done]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      terminal_topics: [LOOP_COMPLETE]
+      business_topics:
+        - plan.ready
+        - plan.blocked
+        - work.done
+        - work.failed
+        - stabilization.done
+        - stabilization.blocked
+        - review.round.ready
+        - review.goalalign.done
+        - review.correctness.done
+        - review.testing.done
+        - review.maintainability.done
+        - review.standards.done
+        - review.adversarial.done
+        - review.synthesized
+        - review.accepted
+        - fix.requested
+        - review.loop.blocked
+        - review.artifact.blocked
+        - fix.done
+        - align.done
+        - report.done
+
+mock_responses:
+  - hat: plan-reviewer
+    text: |
+      <event topic="plan.ready">{"plan_name":"plan-loop-artifact-blocked","plan_path":"docs/plans/loop-artifact-blocked.md","plan_revised":false,"review_summary":"ok","flow_audit":"first_run","resolved_baseline_sha":"0000000000000000000000000000000000000001"}</event>
+  - hat: executor
+    text: |
+      <event topic="work.done">{"plan_name":"plan-loop-artifact-blocked","plan_path":"docs/plans/loop-artifact-blocked.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","tests_run":5,"tests_passed":5,"changed_lines":18,"commit_count":3}</event>
+  - hat: test-stabilizer
+    text: |
+      <event topic="stabilization.done">{"plan_name":"plan-loop-artifact-blocked","plan_path":"docs/plans/loop-artifact-blocked.md","tested_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000002","stabilization_audit_file":".ralph/review/plan-loop-artifact-blocked/stabilization/audit.md","correction_ids":[],"classification_counts":{"test_bug":0,"production_bug":0,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":0},"worktree_status":"clean","tests_run":5,"tests_passed":5,"review_phase":"stabilization"}</event>
+  - hat: review-reentry
+    text: |
+      <event topic="review.round.ready">{"plan_name":"plan-loop-artifact-blocked","plan_path":"docs/plans/loop-artifact-blocked.md","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","diff_patch_file":".ralph/review/plan-loop-artifact-blocked/round-01/review.diff.patch"}</event>
+  - hat: "dim:goal-alignment"
+    text: |
+      <event topic="review.goalalign.done">{"plan_name":"plan-loop-artifact-blocked","plan_path":"docs/plans/loop-artifact-blocked.md","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","diff_patch_file":".ralph/review/plan-loop-artifact-blocked/round-01/review.diff.patch","dimension":"goal-alignment","findings_file":".ralph/review/plan-loop-artifact-blocked/round-01/goal-alignment.md","findings_count":1}</event>
+  - hat: "dim:correctness"
+    text: |
+      <event topic="review.correctness.done">{"plan_name":"plan-loop-artifact-blocked","plan_path":"docs/plans/loop-artifact-blocked.md","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","diff_patch_file":".ralph/review/plan-loop-artifact-blocked/round-01/review.diff.patch","dimension":"correctness","findings_file":".ralph/review/plan-loop-artifact-blocked/round-01/correctness.md","findings_count":1}</event>
+  - hat: "dim:testing"
+    text: |
+      <event topic="review.testing.done">{"plan_name":"plan-loop-artifact-blocked","plan_path":"docs/plans/loop-artifact-blocked.md","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","diff_patch_file":".ralph/review/plan-loop-artifact-blocked/round-01/review.diff.patch","dimension":"testing","findings_file":".ralph/review/plan-loop-artifact-blocked/round-01/testing.md","findings_count":1}</event>
+  - hat: "dim:maintainability"
+    text: |
+      <event topic="review.maintainability.done">{"plan_name":"plan-loop-artifact-blocked","plan_path":"docs/plans/loop-artifact-blocked.md","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","diff_patch_file":".ralph/review/plan-loop-artifact-blocked/round-01/review.diff.patch","dimension":"maintainability","findings_file":".ralph/review/plan-loop-artifact-blocked/round-01/maintainability.md","findings_count":1}</event>
+  - hat: "dim:project-standards"
+    text: |
+      <event topic="review.standards.done">{"plan_name":"plan-loop-artifact-blocked","plan_path":"docs/plans/loop-artifact-blocked.md","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","diff_patch_file":".ralph/review/plan-loop-artifact-blocked/round-01/review.diff.patch","dimension":"project-standards","findings_file":".ralph/review/plan-loop-artifact-blocked/round-01/standards.md","findings_count":1}</event>
+  - hat: "dim:adversarial"
+    text: |
+      <event topic="review.adversarial.done">{"plan_name":"plan-loop-artifact-blocked","plan_path":"docs/plans/loop-artifact-blocked.md","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","diff_patch_file":".ralph/review/plan-loop-artifact-blocked/round-01/review.diff.patch","dimension":"adversarial","findings_file":".ralph/review/plan-loop-artifact-blocked/round-01/adversarial.md","findings_count":1}</event>
+  - hat: review-synthesizer
+    text: |
+      <event topic="review.artifact.blocked">
+      {"plan_name":"plan-loop-artifact-blocked","plan_path":"docs/plans/loop-artifact-blocked.md","review_round":1,"review_phase":"review_artifact_blocked","resolved_baseline_sha":"0000000000000000000000000000000000000001","normalized_plan_file":".ralph/agent/normalized/plan-loop-artifact-blocked.md","plan_contract_version":"ce-unified-plan/v1","plan_contract_digest":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef","trace_file":".ralph/agent/trace/plan-loop-artifact-blocked.md","artifact_block_file":".ralph/review/plan-loop-artifact-blocked/round-01/review-synthesizer-block.md","failure_dimensions":["adversarial","testing"],"failure_reasons":["findings_count_mismatch","unreadable"],"report_input_file":".ralph/review/plan-loop-artifact-blocked/round-01/report-input.review_artifact_blocked.json"}
+      </event>
+  - hat: reporter
+    text: |
+      <event topic="report.done">{"plan_name":"plan-loop-artifact-blocked","report_path":".ralph/review/plan-loop-artifact-blocked/round-01/report.md","verdict":"blocked"}</event>
+      <event topic="LOOP_COMPLETE">{"reason":"review_artifact_blocked: adversarial+testing missing"}</event>
+
+expected:
+  iterations: 12
+  completion: true
+  events:
+    - topic: plan.ready
+    - topic: work.done
+    - topic: stabilization.done
+    - topic: review.round.ready
+    - topic: review.goalalign.done
+    - topic: review.correctness.done
+    - topic: review.testing.done
+    - topic: review.maintainability.done
+    - topic: review.standards.done
+    - topic: review.adversarial.done
+    - topic: review.artifact.blocked
+    - topic: report.done
+  absent_events:
+    - topic: review.synthesized
+    - topic: review.accepted
+    - topic: fix.requested
+    - topic: review.complete
+    - topic: fix.done
+    - topic: align.done
+    - topic: review.loop.blocked
+    - topic: stabilization.blocked
+    - topic: plan.blocked
+    - topic: work.failed
+  payload_matches:
+    - topic: review.artifact.blocked
+      fields:
+        review_phase: "review_artifact_blocked"
+        review_round: 1
+        failure_dimensions: ["adversarial", "testing"]
+        failure_reasons: ["findings_count_mismatch", "unreadable"]
+    - topic: report.done
+      fields:
+        verdict: "blocked"

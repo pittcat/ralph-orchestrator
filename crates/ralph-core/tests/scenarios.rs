@@ -3364,3 +3364,22 @@ fn test_ce_executor_pipeline_u9_diagnose_from_ledger_scenario() {
     let yaml = load_scenario("tests/scenarios/diagnose_from_ledger.yml");
     run_workflow_guard_scenario(yaml);
 }
+
+/// 线性 preset：任一 mandatory dimension finding product 缺失时，
+/// review-synthesizer 只能发送 `review.artifact.blocked`，不得用 P3
+/// 或 ignore 占位 finding 合成 verdict；下游不得进入 fix、accept 或
+/// alignment，最终由 reporter 生成 blocked 报告并完成 loop。
+#[test]
+fn test_ce_executor_pipeline_review_artifact_blocked() {
+    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_review_artifact_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// Loop preset：在多轮 review/fix 流程中验证同一 fail-close 契约。
+/// 阻塞路径必须直接退出 loop，不得开启下一轮 fix，也不得进入 alignment。
+#[test]
+fn test_ce_executor_pipeline_loop_review_artifact_blocked() {
+    let yaml =
+        load_scenario("tests/scenarios/ce_executor_pipeline_loop_review_artifact_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}

@@ -1,0 +1,179 @@
+# ce_executor_pipeline_review_artifact_blocked: U3 linear preset — review-synthesizer fail-close on missing dimension artifact
+#
+# 2026-07-16-004 plan U3: when any of the six mandatory dimension
+# finding products is missing / unreadable / count-mismatched /
+# dimension-mismatched, the synthesizer MUST emit ONLY
+# `review.artifact.blocked` (not a synthesized verdict with a P3
+# placeholder). The blocked event must reach reporter and produce a
+# blocked report without any fix / accept / alignment event.
+#
+# Asserts:
+# - review.artifact.blocked is the sole terminal event from
+#   review-synthesizer when dimension artifacts fail the integrity gate.
+# - review.synthesized / review.accepted / fix.requested /
+#   review.complete / fix.done / align.done MUST NOT fire.
+# - report.done carries verdict=blocked and reason reflects
+#   review_artifact_blocked.
+# - LOOP_COMPLETE reason references review_artifact_blocked.
+
+name: ce_executor_pipeline_review_artifact_blocked
+description: ce-executor-pipeline U3 — review-synthesizer fail-close on missing mandatory review artifacts
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 12
+  hats:
+    plan-reviewer:
+      subscribes_to: [work.start]
+      publishes: [plan.ready, plan.blocked]
+    executor:
+      subscribes_to: [plan.ready]
+      publishes: [work.done, work.failed]
+    test-stabilizer:
+      subscribes_to: [work.done, fix.done]
+      publishes: [stabilization.done, stabilization.blocked]
+    "dim:goal-alignment":
+      subscribes_to: [stabilization.done]
+      publishes: [review.goalalign.done]
+    "dim:correctness":
+      subscribes_to: [review.goalalign.done]
+      publishes: [review.correctness.done]
+    "dim:testing":
+      subscribes_to: [review.correctness.done]
+      publishes: [review.testing.done]
+    "dim:maintainability":
+      subscribes_to: [review.testing.done]
+      publishes: [review.maintainability.done]
+    "dim:project-standards":
+      subscribes_to: [review.maintainability.done]
+      publishes: [review.standards.done]
+    "dim:adversarial":
+      subscribes_to: [review.standards.done]
+      publishes: [review.adversarial.done]
+    review-synthesizer:
+      subscribes_to: [review.adversarial.done]
+      publishes: [review.synthesized, review.artifact.blocked]
+    fix-planner:
+      subscribes_to: [review.synthesized]
+      publishes: [review.complete]
+    fixer:
+      subscribes_to: [review.complete]
+      publishes: [fix.done]
+    alignment:
+      subscribes_to: [fix.done]
+      publishes: [align.done]
+    reporter:
+      subscribes_to:
+        - align.done
+        - plan.blocked
+        - work.failed
+        - stabilization.blocked
+        - review.artifact.blocked
+      publishes: [report.done, LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: work.start
+    completion_promise: LOOP_COMPLETE
+    required_events: [report.done]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      terminal_topics: [LOOP_COMPLETE]
+      business_topics:
+        - plan.ready
+        - plan.blocked
+        - work.done
+        - work.failed
+        - stabilization.done
+        - stabilization.blocked
+        - review.goalalign.done
+        - review.correctness.done
+        - review.testing.done
+        - review.maintainability.done
+        - review.standards.done
+        - review.adversarial.done
+        - review.synthesized
+        - review.artifact.blocked
+        - fix.done
+        - align.done
+        - report.done
+
+mock_responses:
+  - hat: plan-reviewer
+    text: |
+      <event topic="plan.ready">{"plan_name":"plan-artifact-blocked","plan_path":"docs/plans/artifact-blocked.md","plan_revised":false,"review_summary":"ok","flow_audit":"first_run","resolved_baseline_sha":"0000000000000000000000000000000000000001"}</event>
+  - hat: executor
+    text: |
+      <event topic="work.done">{"plan_name":"plan-artifact-blocked","plan_path":"docs/plans/artifact-blocked.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","tests_run":5,"tests_passed":5,"changed_lines":18,"commit_count":3}</event>
+  - hat: test-stabilizer
+    text: |
+      <event topic="stabilization.done">{"plan_name":"plan-artifact-blocked","plan_path":"docs/plans/artifact-blocked.md","tested_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000002","stabilization_audit_file":".ralph/review/plan-artifact-blocked/stabilization/audit.md","correction_ids":[],"classification_counts":{"test_bug":0,"production_bug":0,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":0},"worktree_status":"clean","tests_run":5,"tests_passed":5,"review_phase":"stabilization"}</event>
+  # Six dim hats emit, but adversarial's findings file is intentionally
+  # missing in this scenario — the synthesizer must detect this and emit
+  # review.artifact.blocked, NOT review.synthesized.
+  - hat: "dim:goal-alignment"
+    text: |
+      <event topic="review.goalalign.done">{"plan_name":"plan-artifact-blocked","plan_path":"docs/plans/artifact-blocked.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","dimension":"goal-alignment","findings_file":".ralph/review/plan-artifact-blocked/goal-alignment.md","findings_count":1}</event>
+  - hat: "dim:correctness"
+    text: |
+      <event topic="review.correctness.done">{"plan_name":"plan-artifact-blocked","plan_path":"docs/plans/artifact-blocked.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","dimension":"correctness","findings_file":".ralph/review/plan-artifact-blocked/correctness.md","findings_count":1}</event>
+  - hat: "dim:testing"
+    text: |
+      <event topic="review.testing.done">{"plan_name":"plan-artifact-blocked","plan_path":"docs/plans/artifact-blocked.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","dimension":"testing","findings_file":".ralph/review/plan-artifact-blocked/testing.md","findings_count":1}</event>
+  - hat: "dim:maintainability"
+    text: |
+      <event topic="review.maintainability.done">{"plan_name":"plan-artifact-blocked","plan_path":"docs/plans/artifact-blocked.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","dimension":"maintainability","findings_file":".ralph/review/plan-artifact-blocked/maintainability.md","findings_count":1}</event>
+  - hat: "dim:project-standards"
+    text: |
+      <event topic="review.standards.done">{"plan_name":"plan-artifact-blocked","plan_path":"docs/plans/artifact-blocked.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","dimension":"project-standards","findings_file":".ralph/review/plan-artifact-blocked/standards.md","findings_count":1}</event>
+  # Adversarial emits review.adversarial.done but in this scenario its
+  # findings_file path is intentionally absent on disk, triggering the
+  # fail-close path in review-synthesizer.
+  - hat: "dim:adversarial"
+    text: |
+      <event topic="review.adversarial.done">{"plan_name":"plan-artifact-blocked","plan_path":"docs/plans/artifact-blocked.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","dimension":"adversarial","findings_file":".ralph/review/plan-artifact-blocked/adversarial.md","findings_count":1}</event>
+  # review-synthesizer detects missing adversarial.md and emits
+  # ONLY review.artifact.blocked. No review.synthesized.
+  - hat: review-synthesizer
+    text: |
+      <event topic="review.artifact.blocked">
+      {"plan_name":"plan-artifact-blocked","plan_path":"docs/plans/artifact-blocked.md","review_phase":"review_artifact_blocked","resolved_baseline_sha":"0000000000000000000000000000000000000001","normalized_plan_file":".ralph/agent/normalized/plan-artifact-blocked.md","plan_contract_version":"ce-unified-plan/v1","plan_contract_digest":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef","trace_file":".ralph/agent/trace/plan-artifact-blocked.md","artifact_block_file":".ralph/review/plan-artifact-blocked/review-synthesizer-block.md","failure_dimensions":["adversarial"],"failure_reasons":["missing_file"],"report_input_file":".ralph/review/plan-artifact-blocked/report-input.review_artifact_blocked.json"}
+      </event>
+  - hat: reporter
+    text: |
+      <event topic="report.done">{"plan_name":"plan-artifact-blocked","report_path":".ralph/review/plan-artifact-blocked/report.md","verdict":"blocked"}</event>
+      <event topic="LOOP_COMPLETE">{"reason":"review_artifact_blocked: adversarial missing_file"}</event>
+
+expected:
+  iterations: 11
+  completion: true
+  events:
+    - topic: plan.ready
+    - topic: work.done
+    - topic: stabilization.done
+    - topic: review.goalalign.done
+    - topic: review.correctness.done
+    - topic: review.testing.done
+    - topic: review.maintainability.done
+    - topic: review.standards.done
+    - topic: review.adversarial.done
+    - topic: review.artifact.blocked
+    - topic: report.done
+  absent_events:
+    # Fail-close path: NO synthesized verdict, NO fix / accept / align.
+    - topic: review.synthesized
+    - topic: fix.done
+    - topic: align.done
+    - topic: stabilization.blocked
+    - topic: plan.blocked
+    - topic: work.failed
+  payload_matches:
+    - topic: review.artifact.blocked
+      fields:
+        review_phase: "review_artifact_blocked"
+        failure_dimensions: ["adversarial"]
+        failure_reasons: ["missing_file"]
+    - topic: report.done
+      fields:
+        verdict: "blocked"

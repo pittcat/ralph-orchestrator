@@ -42,8 +42,8 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | 多 trigger hat 未按 trigger 拆分 payload 差异 | P1 | payload-content | Q4 |
 | loop preset 的 `fix.done.next_review_plan` 允许 `null` 或缺少下一轮 review 所需数组字段 | P0 | payload-content | Q4 / Q5 |
 | payload audit 行缺值源 / 缺可见性证据 | P1 | payload-content | Q4 |
-| 同一 hat emit 多条业务事件（违反单事件预算） | P0 | feasibility | Q4 |
-| 终态 emit 前夹带其它业务事件 | P0 | feasibility | Q4 |
+| 同一 hat emit 多条业务事件（违反单事件预算） | P0（**例外**：见下文「required-event-to-completion 窄例外」复核） | feasibility | Q4 |
+| 终态 emit 前夹带其它业务事件 | P0（**例外**：见下文「required-event-to-completion 窄例外」复核） | feasibility | Q4 |
 | report finding 无 repair surface（无字段 / 无 source / 无 fix） | 拒入主表 → Unverified Suspicions | — | — |
 
 ## Artifact-First Handoff → Severity（软性 / review-only）
@@ -167,6 +167,22 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `post_fix_review_reopens_unbounded_fix` | P0 | explicit post-fix phase with accept-or-block branch | topology | Q4 |
 | `prompt_wall_serial_style` | P1 | reference skill doc, do not inline | style | Q3 |
 
+### CE pipeline review/fix artifacts（review-only 软性缺口）
+
+Reviewer 在做 CE builtin preset review 时按本表入主表（不进 `ralph preset check` JSON，机制同 Artifact-First finding）。
+
+| 缺口 | Severity | category | aaf_question | 备注 |
+|---|---|---|---|---|
+| mandatory review artifact 缺失 / 不可读 / count 不一致时 synthesizer 仍发 `review.synthesized` 并伪造 P3/ignore finding（"降级容忍"反模式） | P0 | feasibility | Q3 / Q4 | 必须改为 fail-close，发 `review.artifact.blocked` |
+| mandatory review artifact 缺失 / 不可读但 preset 没有任何阻塞事件路径 | P0 | topology | Q4 | reporter 之外的下游禁止消费阻塞事件 |
+| reporter 用 `ralph events --events-source main` 重建跨 hat 状态（业务字段而不是诊断字段） | P0 | visibility | Q2 | 必须只读 trigger payload 与 `report_input_file` bundle |
+| reporter 的 trigger topic schema 没有 `report_input_file` required field 或 field_docs 三段不完整 | P0（缺字段）/ P1（field_docs 缺段） | payload-content | Q4 / Q5 | CE builtin 结构化契约测试在 `crates/ralph-cli/src/presets.rs` 兜底 |
+| preset 把 `report.done` + `completion_promise` 双事件配对声明，但触发 hat 身份不是 preset 的 sole 收尾 hat（多个 hat 都 publish 这对） | P0 | topology | Q4 | 只允许唯一收尾 hat 享受窄例外 |
+| 同 activation 内 emit 第三个业务事件（即使前两个合法配对） | P0 | feasibility | Q4 | 窄例外只覆盖两个事件；第三仍按单事件预算被丢弃 |
+| 本次新增或修改的 handoff / identity / artifact reference / decision 字段缺 `field_docs` 三段 | P0（缺 `source`）/ P1（缺 `meaning` 或 `fill_rule`） | policy-feedback | Q4 | 结构化契约测试只覆盖本次新增合同，不借机强制迁移无关历史字段 |
+| writing hat 在 terminal handoff 前没有从当前 activation 重新取得真实 Git 状态，或要求读取不可见状态 | P1 | style | Q3 | 保留最小、可执行的 Git 状态检查；不要新增 preset 专用注入 skill |
+| hat `instructions:` 复制大段命令参考表 / policy-check 步骤 / OPAC 四阶段规则（应引用对应注入 skill） | P1 | style | Q3 | 应引用已有 agent-facing skill 规范 |
+
 数据源：`crates/ralph-core/src/preset_lint/finding_id.rs`。
 
 **`ralph preset check --format json` 前缀：** lint 类 finding 的 `id` 为 `lint.preset.<snake_id>`（例如 `lint.preset.instructions_read_internal_ledger`）。本表「裸 ID」列匹配时 **strip `lint.` 前缀或两端都试**。
@@ -183,3 +199,22 @@ artifact-first review-only finding **不**出现在 `ralph preset check` JSON；
 - 业务 artifact 目录结构由 preset / hat 设计自定，lint 不强制统一约定（plan Product Contract §Scope Boundaries 明示），所以路径是否合理也是 review 的判断。
 
 若后续 `crates/ralph-core/src/preset_lint/` 要把这些 finding 升级为 lint（实现 R8 / R9 / R10 / R11 / R12 的机械拦截），须先把 ID 加入 `crates/ralph-core/src/preset_lint/finding_id.rs` 并同步更新 `ALL_FINDING_IDS` 数组，同时把 `default_severity` / `default_confidence` 与本表保持一致；升级前 review 仍按本表入主表，并在 Remediation Plan 中标注 review-only 来源。本任务不涉及 Rust 代码修改。
+
+## required-event-to-completion 窄例外（review 复核条件）
+
+上方「同一 hat emit 多条业务事件」「终态 emit 前夹带其它业务事件」两条 P0 不再 blanket 适用。当且仅当以下**全部条件**成立时，review 可在不重新触发 P0 的前提下放过该 hat 的双事件 emit：
+
+1. **preset 显式配置**:当前 preset 的 `event_loop.required_events[]` 非空，且 `event_loop.completion_promise`（默认 `LOOP_COMPLETE`）非空。
+2. **收尾 hat 身份**:当前 hat 是 preset 中**唯一负责收尾的 hat**（如 reporter / alignment）；其 `publishes` 同时包含一个 required_events 列表里的 topic 与 `completion_promise`，且 `terminal_events` 包含二者。其它 hat（executor、synthesizer、fixer 等）一律**不享受**本例外。
+3. **顺序正确**:先发 required_events[] 中的 topic，再发 `event_loop.completion_promise`。任何顺序错误都视为普通多事件违规。
+4. **同 hat provenance**:两个事件的 hat provenance 与当前 isolated hat 一致；跨 hat 不享受例外。
+5. **正好两个事件**:同一 activation 内只能有两个业务事件；任何第三业务事件仍按单事件预算违规（P0）。
+6. **policy-check 双阶段**:两个事件中每一个仍按 `ralph emit --policy-check` 流程通过后才正式 emit；本例外是 runtime budget 层面的判定，不是 policy-check 的旁路。
+
+review 在放过此类双事件时，应在 Remediation Plan / 报告「AAF Decision Rationale」段记录：
+
+- 引用 preset YAML 中 `event_loop.required_events[]` 与 `event_loop.completion_promise` 的具体配置值（行号或字段路径）。
+- 引用相关 runtime 测试名（如 `isolated_dual_publish_handoff_required_event_to_completion` / `isolated_required_event_then_completion_same_turn_report_done`）作为行为证据。
+- 标注当前 hat 是该 preset 的收尾 hat，其它 hat 不享受本例外。
+
+不满足上述任一条件时，仍按 P0 入主表并要求 author 修复。

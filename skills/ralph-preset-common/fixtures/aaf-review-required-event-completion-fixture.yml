@@ -1,0 +1,126 @@
+# AAF + payload-content 正向 fixture：required-event-to-completion 窄例外。
+# 仅用于 ralph-preset-review 验收。
+#
+# 本 fixture 固化 isolated 模式下 `report.done`（required event）到
+# `LOOP_COMPLETE`（completion promise）的合法双事件形状。
+#
+# 验收：strict check 通过；唯一收尾 hat 按 required event → completion
+# promise 顺序发送时不报 multi-emit P0；任一条件不满足或增加第三个业务
+# 事件时仍报 P0。负例由 `aaf-review-negative-fixture.yml` 覆盖。
+
+topic_format_whitelist:
+  - LOOP_COMPLETE
+
+tasks:
+  enabled: false
+
+event_loop:
+  execution_mode: isolated
+  starting_event: work.start
+  completion_promise: LOOP_COMPLETE
+  required_events:
+    - report.done
+  max_iterations: 5
+
+hats:
+  worker:
+    name: Worker
+    description: Does work.
+    triggers:
+      - work.start
+    publishes:
+      - work.done
+    terminal_events:
+      - work.done
+    exempt_topics:
+      - work.done
+    event_filter:
+      enabled: true
+      events:
+        - work.start
+    instructions: |
+      ## WORKER MODE
+      Emit `work.done` when the work is complete. Do NOT emit any
+      other business event in the same activation.
+  reporter:
+    name: Reporter
+    description: Final terminal hat — sole consumer of work.done.
+    triggers:
+      - work.done
+    publishes:
+      - report.done
+      - LOOP_COMPLETE
+    terminal_events:
+      - report.done
+      - LOOP_COMPLETE
+    exempt_topics:
+      - report.done
+      - LOOP_COMPLETE
+    event_filter:
+      enabled: true
+      events:
+        - work.done
+    instructions: |
+      ## REPORTER MODE — Final report + completion
+
+      You are the SOLE closing hat of this preset. You emit
+      `report.done` followed by `LOOP_COMPLETE` in the same
+      activation. This dual-publish is the legal
+      required-event-to-completion shape:
+
+      - `report.done` is listed in `event_loop.required_events[]`.
+      - `LOOP_COMPLETE` equals `event_loop.completion_promise`.
+      - You are the sole hat whose `publishes` contains both.
+
+      Hard rules:
+      - Emit exactly two business events: first `report.done`, then
+        `LOOP_COMPLETE`. No third business event.
+      - Do NOT add any other business topic (no work.*, no plan.*,
+        no fix.*).
+      - Do NOT push to remote, do NOT create worktrees, do NOT
+        switch branches.
+
+event_policy:
+  enabled: true
+  mode: enforce
+  on_violation: reject_with_resume
+  terminal_topics:
+    - LOOP_COMPLETE
+  business_topics:
+    - work.done
+    - report.done
+  completion_after_terminal:
+    duplicate_terminal: reject
+    business_after_completion: reject
+    write_diagnostic_event: true
+  require_policy_check_for_cli_emit: true
+  allow_unsafe_cli_emit: false
+  require_emit_provenance: true
+  plan_name_equality_required: true
+  topic_deny_rules:
+    # reporter is the sole owner of report.done and LOOP_COMPLETE
+    - {hat_id: worker, topic: report.done}
+    - {hat_id: worker, topic: LOOP_COMPLETE}
+  schemas:
+    report.done:
+      required_fields: [plan_name, report_path, verdict]
+      field_docs:
+        plan_name:
+          meaning: "stable identifier of the plan this report covers"
+          source: "passed-through from work.done trigger"
+          fill_rule: "literal string; do NOT hand-write"
+        report_path:
+          meaning: "absolute path to the final report file the reporter wrote"
+          source: "reporter (this hat) writes via the Write tool before emit"
+          fill_rule: "absolute path under .ralph/report/<plan_name>.md; do NOT make up a path — write the file first"
+        verdict:
+          meaning: "single final outcome token"
+          source: "reporter aggregates from upstream triggers"
+          fill_rule: "literal one of pass / pass_with_residuals / blocked"
+    LOOP_COMPLETE:
+      required_fields: [reason]
+      field_docs:
+        reason:
+          meaning: "short stable phrase identifying why the loop ended"
+          source: "reporter (or runtime) sets based on the trigger that activated it"
+          fill_rule: "literal one-of enum; never empty"

@@ -35,6 +35,7 @@
 - [ ] 不复述 `ralph-tools*.md` 参数表
 - [ ] **对每个 emit topic，按 payload audit 五列填行**（见下）—— schema 通过不等于字段可达
 - [ ] **对每个 payload 字段，反查 schema metadata**：`field_docs.meaning/source/fill_rule` 与 Payload Contract 的值源、可见性、下游消费一致
+- [ ] **收尾双事件终态**：若 hat 是 preset 的**收尾 hat**（典型为 reporter / alignment），允许其在同 activation 内先发 `event_loop.required_events[]` 中的 topic、再发 `event_loop.completion_promise`；其它 hat 的 `publishes` 一律**不得**同时包含 required_events 列表里的 topic 与 completion_promise，违反将触发 reviewer 的 P0。复核条件见 `finding-rubric.md`「required-event-to-completion 窄例外」段。
 
 **Artifact-First 单 hat 视角审核项（每 hat 必填）**
 
@@ -144,6 +145,8 @@
 3. **每个被传递的完整结果、长内容或跨 hat 摘要是否都已先落盘，event / message 是否只保留短状态、短摘要、路径、必要身份与路由字段？** ✓ / ✗ + 证据
 4. **是否有任何 hat 把 `.ralph/events.jsonl`、`.ralph/loops.json`、`.ralph/supervisor.db` 等 runtime internal ledger 当作自定义状态或 handoff 文件？** ✓ / ✗ + 证据；此项必须为 ✗
 5. **每条声明「不落盘」的信息是否都标注了简短理由，并按恢复价值、审计价值和下游依赖解释，而非只按字符数判断？** ✓ / ✗ + 证据
+
+预演 finding 时按 `references/finding-rubric.md`「Artifact-First Handoff finding_id」表入主表（review-only，不进 `ralph preset check` JSON）：`preset.artifact_path_not_in_visible_context` / `preset.artifact_no_consumer_declared` / `preset.artifact_no_lifecycle_owner` / `preset.artifact_uses_internal_ledger` / `preset.payload_carries_full_content` / `preset.artifact_first_field_docs_missing` / `preset.artifact_first_exemption_unjustified` / `preset.artifact_first_passed_on_path_presence` / `preset.subagent_result_returned_only_in_message` / `preset.artifact_described_as_preset_owned`。完整默认 severity / confidence / aaf_question 见该表。
 
 ## Builtin 7 点同步清单（摘要）
 

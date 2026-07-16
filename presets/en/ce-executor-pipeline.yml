@@ -92,6 +92,9 @@ event_loop:
       - "review.synthesized"
       - "review.complete"
       - "fix.done"
+      # review-synthesizer 的 mandatory artifact fail-close gate
+      # event. Routes to reporter only.
+      - "review.artifact.blocked"
       - "align.done"
       - "report.done"
     completion_after_terminal:
@@ -338,6 +341,24 @@ event_loop:
       - {hat_id: fix-planner, topic: LOOP_COMPLETE}
       - {hat_id: fixer, topic: LOOP_COMPLETE}
       - {hat_id: alignment, topic: LOOP_COMPLETE}
+    # review-synthesizer 是 review.artifact.blocked 的唯一 owner
+    # of `review.artifact.blocked`. Every other hat is forbidden from
+    # emitting this topic — it is the fail-close gate that prevents
+    # the review chain from synthesizing a verdict when mandatory
+    # dimension artifacts are missing or unreadable.
+      - {hat_id: plan-reviewer, topic: review.artifact.blocked}
+      - {hat_id: executor, topic: review.artifact.blocked}
+      - {hat_id: dim:goal-alignment, topic: review.artifact.blocked}
+      - {hat_id: dim:correctness, topic: review.artifact.blocked}
+      - {hat_id: dim:testing, topic: review.artifact.blocked}
+      - {hat_id: dim:maintainability, topic: review.artifact.blocked}
+      - {hat_id: dim:project-standards, topic: review.artifact.blocked}
+      - {hat_id: dim:adversarial, topic: review.artifact.blocked}
+      - {hat_id: fix-planner, topic: review.artifact.blocked}
+      - {hat_id: fixer, topic: review.artifact.blocked}
+      - {hat_id: test-stabilizer, topic: review.artifact.blocked}
+      - {hat_id: alignment, topic: review.artifact.blocked}
+      - {hat_id: reporter, topic: review.artifact.blocked}
     # Inline payload schemas (no `presets/schemas/` SSOT file for this
     # preset — same authoring pattern as `merge-loop`). Each schema
     # lists the `required_fields` for the topic; lint verifies every
@@ -364,6 +385,22 @@ event_loop:
             meaning: "repo-relative path to the plan file passed into the loop (for hat prompts to re-read)"
             source: "plan-reviewer derives from the prompt's plan file path"
             fill_rule: "absolute repo-relative path; never absolute filesystem path"
+          plan_contract_version:
+            meaning: "version of the normalized plan contract used by this run"
+            source: "plan-reviewer reads the contract declared by the source plan"
+            fill_rule: "copy the visible contract version; do not invent a value"
+          normalized_plan_file:
+            meaning: "business artifact containing the normalized plan"
+            source: "plan-reviewer writes the artifact before emit"
+            fill_rule: "write the file first, then use its repo-relative path"
+          plan_contract_digest:
+            meaning: "digest binding the source plan to the normalized plan artifact"
+            source: "plan-reviewer computes it from the two visible plan artifacts"
+            fill_rule: "recompute after either artifact changes; do not reuse a stale digest"
+          trace_file:
+            meaning: "business artifact mapping requirements, scenarios, and implementation units"
+            source: "plan-reviewer writes the trace artifact before emit"
+            fill_rule: "write the file first, then use its repo-relative path"
           plan_revised:
             meaning: "boolean flag — true when plan-reviewer edited the plan file in-place, false when the plan was already executable"
             source: "plan-reviewer"
@@ -381,12 +418,32 @@ event_loop:
             source: "plan-reviewer §Step 2.5b"
             fill_rule: "40-char git SHA; do NOT hand-write (plan-reviewer resolves)"
       plan.blocked:
-        required_fields: ["plan_name", "plan_path", "plan_contract_version", "plan_contract_digest", "reason", "semantic_gaps"]
+        required_fields: ["plan_name", "plan_path", "plan_contract_version", "plan_contract_digest", "reason", "semantic_gaps", "report_input_file"]
         field_docs:
+          report_input_file:
+            meaning: "repo-relative path to the report-input bundle the plan-reviewer wrote for reporter consumption; reporter reads ONLY this file"
+            source: "plan-reviewer writes the bundle before emitting plan.blocked"
+            fill_rule: "non-empty repo-relative path; atomically publish and reopen the bundle before emit; never point to a missing or stale file"
           plan_name:
             meaning: "plan file basename without extension; identifies which plan failed"
             source: "plan-reviewer derives from plan_path"
             fill_rule: "do NOT make up a name; copy from plan_path basename"
+          plan_path:
+            meaning: "repo-relative source plan path that could not pass review"
+            source: "plan-reviewer reads it from the current request"
+            fill_rule: "copy the visible path; never substitute another plan"
+          plan_contract_version:
+            meaning: "plan contract version used while evaluating the blocked plan"
+            source: "plan-reviewer reads the source plan contract"
+            fill_rule: "copy the visible contract version"
+          plan_contract_digest:
+            meaning: "digest of the blocked source plan used for audit identity"
+            source: "plan-reviewer computes it from the source plan"
+            fill_rule: "recompute from the current source plan"
+          semantic_gaps:
+            meaning: "specific semantic gaps that prevent safe execution"
+            source: "plan-reviewer records observed review failures"
+            fill_rule: "non-empty array; each entry names one observed gap"
           reason:
             meaning: "sole routing signal so reporter drives terminal LOOP_COMPLETE with verdict blocked"
             source: "plan-reviewer"
@@ -526,7 +583,12 @@ event_loop:
           - "baseline_verification_file"
           - "decisions_file"
           - "reason"
+          - "report_input_file"
         field_docs:
+          report_input_file:
+            meaning: "repo-relative path to the report-input bundle the executor wrote for reporter consumption; reporter reads ONLY this file"
+            source: "executor writes the bundle before emitting work.failed"
+            fill_rule: "non-empty repo-relative path; atomically publish and reopen the bundle before emit; never point to a missing or stale file"
           plan_name:
             meaning: "plan file basename without extension; identifies which plan failed"
             source: "executor derives from plan_path"
@@ -588,6 +650,67 @@ event_loop:
           - "plan_contract_version"
           - "plan_contract_digest"
           - "trace_file"
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; copied from work.done for downstream reviewer routing"
+            source: "test-stabilizer carries forward from work.done"
+            fill_rule: "literal copy; do NOT hand-write"
+          plan_path:
+            meaning: "repo-relative path to the source plan file"
+            source: "test-stabilizer carries forward from work.done"
+            fill_rule: "literal copy"
+          tested_from_sha:
+            meaning: "git SHA captured at the start of stabilization (= work.done.executor_head_sha); this is the gate's input anchor"
+            source: "test-stabilizer"
+            fill_rule: "40-char git SHA; copy from the triggering work.done payload verbatim"
+          head_sha:
+            meaning: "current git HEAD at stabilization emit time; equals tested_from_sha when the gate made no production corrections, otherwise points to the latest correction commit"
+            source: "test-stabilizer"
+            fill_rule: "40-char git SHA; recompute right before each emit attempt"
+          stabilization_audit_file:
+            meaning: "absolute path to the gate's audit markdown written under .ralph/review/<plan>/stabilization/"
+            source: "test-stabilizer"
+            fill_rule: "absolute path under .ralph/review/<plan>/stabilization/audit.md"
+          correction_ids:
+            meaning: "stable correction IDs for any production-code commits the gate produced; empty array when only test code (or nothing) was changed"
+            source: "test-stabilizer"
+            fill_rule: "array of strings; [] is valid but producers MUST document why an empty list is allowed alongside any production change"
+          classification_counts:
+            meaning: "summary of per-category failure counts observed during the full-suite run"
+            source: "test-stabilizer"
+            fill_rule: "object with keys test_bug, production_bug, pre_existing_failure, flaky_or_env, unattributable; integer per key"
+          worktree_status:
+            meaning: "real git worktree status at stabilization emit (excluding .ralph/)"
+            source: "test-stabilizer"
+            fill_rule: "one of clean | dirty; never fake-clean"
+          tests_run:
+            meaning: "total tests executed during the full-suite run"
+            source: "test-stabilizer"
+            fill_rule: "non-negative integer; do NOT fabricate numbers"
+          tests_passed:
+            meaning: "number of tests that passed during the full-suite run"
+            source: "test-stabilizer"
+            fill_rule: "non-negative integer; tests_passed <= tests_run"
+          review_phase:
+            meaning: "current phase token"
+            source: "test-stabilizer"
+            fill_rule: "literal 'stabilization'; do NOT change"
+          normalized_plan_file:
+            meaning: "path to plan-reviewer's normalized plan artifact"
+            source: "passed-through from plan.ready"
+            fill_rule: "non-empty path under .ralph/agent/normalized/<plan_name>.md"
+          plan_contract_version:
+            meaning: "literal version tag of the ce-unified-plan contract"
+            source: "passed-through from plan.ready"
+            fill_rule: "literal 'ce-unified-plan/v1'; do NOT hand-write"
+          plan_contract_digest:
+            meaning: "hex digest binding source plan + normalized plan"
+            source: "passed-through from plan.ready"
+            fill_rule: "16-64 hex chars; do NOT hand-write"
+          trace_file:
+            meaning: "append-only Requirement→Scenario→Unit tracking file"
+            source: "passed-through from plan.ready"
+            fill_rule: "non-empty path under .ralph/agent/trace/<plan_name>.md"
       stabilization.blocked:
         required_fields:
           - "plan_name"
@@ -603,6 +726,64 @@ event_loop:
           - "plan_contract_version"
           - "plan_contract_digest"
           - "trace_file"
+          - "report_input_file"
+        field_docs:
+          report_input_file:
+            meaning: "repo-relative path to the report-input bundle test-stabilizer wrote for reporter consumption; reporter reads ONLY this file"
+            source: "test-stabilizer writes the bundle before emitting stabilization.blocked"
+            fill_rule: "non-empty repo-relative path; atomically publish and reopen the bundle before emit; never point to a missing or stale file"
+          plan_name:
+            meaning: "plan file basename without extension; identifies which plan was blocked at stabilization"
+            source: "test-stabilizer carries forward from work.done"
+            fill_rule: "literal copy"
+          plan_path:
+            meaning: "repo-relative path to the source plan file"
+            source: "test-stabilizer carries forward from work.done"
+            fill_rule: "literal copy"
+          tested_from_sha:
+            meaning: "git SHA captured at the start of stabilization"
+            source: "test-stabilizer"
+            fill_rule: "40-char git SHA; copy from the triggering work.done payload verbatim"
+          head_sha:
+            meaning: "current git HEAD at stabilization block time"
+            source: "test-stabilizer"
+            fill_rule: "40-char git SHA; recompute right before each emit attempt"
+          stabilization_audit_file:
+            meaning: "absolute path to the gate's audit markdown"
+            source: "test-stabilizer"
+            fill_rule: "absolute path under .ralph/review/<plan>/stabilization/audit.md"
+          reason:
+            meaning: "canonical reason the gate refused to emit stabilization.done; lets reporter drive blocked terminal without re-deriving"
+            source: "test-stabilizer"
+            fill_rule: "one of baseline_already_failed | flaky_or_environmental | unattributable | full_test_command_failed | oracle_weakening_prohibited | unknown_dirty_worktree | correction_regression_unrecoverable"
+          classification_counts:
+            meaning: "summary of failure attribution leading to the block"
+            source: "test-stabilizer"
+            fill_rule: "same shape as stabilization.done; must always be present even when zero"
+          worktree_status:
+            meaning: "real git worktree status at stabilization block time (excluding .ralph/)"
+            source: "test-stabilizer"
+            fill_rule: "one of clean | dirty | unattributable_dirty; never fake-clean"
+          review_phase:
+            meaning: "current phase token"
+            source: "test-stabilizer"
+            fill_rule: "literal 'stabilization'; do NOT change"
+          normalized_plan_file:
+            meaning: "path to plan-reviewer's normalized plan artifact"
+            source: "passed-through from plan.ready"
+            fill_rule: "non-empty path under .ralph/agent/normalized/<plan_name>.md"
+          plan_contract_version:
+            meaning: "literal version tag of the ce-unified-plan contract"
+            source: "passed-through from plan.ready"
+            fill_rule: "literal 'ce-unified-plan/v1'; do NOT hand-write"
+          plan_contract_digest:
+            meaning: "hex digest binding source plan"
+            source: "passed-through from plan.ready"
+            fill_rule: "16-64 hex chars; do NOT hand-write"
+          trace_file:
+            meaning: "append-only Requirement→Scenario→Unit tracking file"
+            source: "passed-through from plan.ready"
+            fill_rule: "non-empty path under .ralph/agent/trace/<plan_name>.md"
       review.goalalign.done:
         required_fields:
           - "review_phase"
@@ -1209,11 +1390,16 @@ event_loop:
           - "fix_plan_executed"
           - "residuals_count"
           - "residuals_summary"
+          - "report_input_file"
         field_docs:
           plan_name:
             meaning: "plan file basename without extension; copied from fix.done for reporter routing"
             source: "alignment carries forward from fix.done"
             fill_rule: "literal copy"
+          report_input_file:
+            meaning: "repo-relative path to the report-input bundle alignment wrote for reporter consumption; reporter reads ONLY this file"
+            source: "alignment writes the bundle before emitting align.done"
+            fill_rule: "non-empty repo-relative path; atomically publish and reopen the bundle before emit; never point to a missing or stale file"
           plan_path:
             meaning: "repo-relative path to the original plan file"
             source: "alignment carries forward"
@@ -1258,6 +1444,73 @@ event_loop:
             meaning: "short prose summarizing the residuals alignment logged for the reporter"
             source: "alignment"
             fill_rule: "short prose; group residuals by category and note any deviation from the original plan"
+      # review-synthesizer 在 mandatory artifact integrity gate 失败时发送此事件
+      # any of the six mandatory dimension artifacts fails the
+      # integrity gate. Routes to reporter only; fix-planner /
+      # alignment must NOT consume it.
+      review.artifact.blocked:
+        required_fields:
+          - "plan_name"
+          - "plan_path"
+          - "review_phase"
+          - "resolved_baseline_sha"
+          - "normalized_plan_file"
+          - "plan_contract_version"
+          - "plan_contract_digest"
+          - "trace_file"
+          - "artifact_block_file"
+          - "failure_dimensions"
+          - "failure_reasons"
+          - "report_input_file"
+        field_docs:
+          plan_name:
+            meaning: "plan file basename without extension; copied from review.adversarial.done for reporter routing"
+            source: "review-synthesizer carries forward from review.adversarial.done"
+            fill_rule: "literal copy; do NOT hand-write"
+          plan_path:
+            meaning: "repo-relative path to the source plan file"
+            source: "review-synthesizer carries forward from review.adversarial.done"
+            fill_rule: "literal copy"
+          review_phase:
+            meaning: "current phase token; report-only audit marker"
+            source: "review-synthesizer"
+            fill_rule: "literal 'review_artifact_blocked'; do NOT change"
+          resolved_baseline_sha:
+            meaning: "canonical baseline SHA carried through the chain from plan.ready"
+            source: "review-synthesizer carries forward from review.adversarial.done"
+            fill_rule: "literal copy"
+          normalized_plan_file:
+            meaning: "path to plan-reviewer's normalized plan artifact"
+            source: "review-synthesizer carries forward from review.adversarial.done"
+            fill_rule: "literal copy; do NOT make up a path"
+          plan_contract_version:
+            meaning: "literal version tag of the ce-unified-plan contract"
+            source: "review-synthesizer carries forward from review.adversarial.done"
+            fill_rule: "literal 'ce-unified-plan/v1'; do NOT hand-write"
+          plan_contract_digest:
+            meaning: "hex digest binding source plan + normalized plan"
+            source: "review-synthesizer carries forward from review.adversarial.done"
+            fill_rule: "16-64 hex chars; do NOT hand-write"
+          trace_file:
+            meaning: "append-only Requirement→Scenario→Unit tracking file"
+            source: "review-synthesizer carries forward from review.adversarial.done"
+            fill_rule: "literal copy"
+          artifact_block_file:
+            meaning: "absolute path to the audit block the synthesizer wrote to .ralph/review/<plan_name>/review-synthesizer-block.md"
+            source: "review-synthesizer writes it via the Write tool before emit"
+            fill_rule: "non-empty path under .ralph/review/<plan_name>/review-synthesizer-block.md; do NOT make up a path — write the file first"
+          report_input_file:
+            meaning: "repo-relative path to the report-input bundle review-synthesizer wrote for reporter consumption; reporter reads ONLY this file"
+            source: "review-synthesizer writes the bundle before emitting review.artifact.blocked"
+            fill_rule: "non-empty repo-relative path; atomically publish and reopen the bundle before emit; never point to a missing or stale file"
+          failure_dimensions:
+            meaning: "ordered array of dimension names that failed the integrity gate (subset of goal-alignment, correctness, testing, maintainability, project-standards, adversarial)"
+            source: "review-synthesizer enumerates the failing dimensions during Step 1"
+            fill_rule: "non-empty array of strings; never empty when review.artifact.blocked is emitted"
+          failure_reasons:
+            meaning: "ordered array of failure reason codes aligned with failure_dimensions; one of missing_file, unreadable, missing_findings_section, findings_count_mismatch, dimension_field_mismatch, diff_patch_missing"
+            source: "review-synthesizer classifies per dimension during Step 1"
+            fill_rule: "non-empty array of strings; length must equal failure_dimensions"
       report.done:
         required_fields: ["plan_name", "report_path", "verdict"]
         field_docs:
@@ -1542,10 +1795,16 @@ hats:
 
       ### Step 5 — Emit `plan.blocked` (unusable plan)
       When the plan fails Step 2 / Step 3 quality gates and you cannot fix it
-      in-place, emit EXACTLY ONE `plan.blocked` event:
+      in-place, first write `.ralph/review/<plan>/report-input.plan-blocked.json.tmp`
+      with `schema_version: "ce-report-input.v1"`, the current plan identity,
+      terminal reason, known artifact references and verification state; mark
+      every stage that did not run as `not_run`. Validate the JSON, then rename
+      it atomically to `report-input.plan-blocked.json`. Only after the final
+      file is readable may you emit EXACTLY ONE `plan.blocked` event with its
+      repo-relative path in `report_input_file`:
       ```
       <event topic="plan.blocked">
-      {"plan_name":"<basename>","plan_path":"<repo-relative source>","plan_contract_version":"ce-unified-plan/v1","plan_contract_digest":"<source-plan digest>","reason":"<canonical reason>","semantic_gaps":["<specific missing or ambiguous semantic capability>"]}
+      {"plan_name":"<basename>","plan_path":"<repo-relative source>","plan_contract_version":"ce-unified-plan/v1","plan_contract_digest":"<source-plan digest>","reason":"<canonical reason>","semantic_gaps":["<specific missing or ambiguous semantic capability>"],"report_input_file":".ralph/review/<plan>/report-input.plan-blocked.json"}
       </event>
       ```
       Then stop. Reporter will receive the blocked event and emit the loop
@@ -2061,8 +2320,15 @@ hats:
       ### Failure Path
 
       If the full suite cannot reach green:
+      first write and validate
+      `.ralph/review/<plan>/report-input.work-failed.json.tmp`, using
+      `schema_version: "ce-report-input.v1"`, current plan/execution facts,
+      verification evidence, artifact references and explicit `not_run` values
+      for later stages. Atomically rename it to
+      `report-input.work-failed.json`; if this fails, stop without emitting a
+      stale path. Include the final repo-relative path as `report_input_file`.
       ```bash
-      ralph emit work.failed --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","planned_units":["U1","U2"],"attempted_units":["U1"],"completed_units":[],"failed_units":["U1"],"blocked_units":["U2"],"skipped_units":[],"baseline_verification_file":".ralph/review/<plan>/baseline-verification.md","decisions_file":".ralph/agent/decisions.md","reason":"tests_not_green: U1 failed after an actual subagent attempt; U2 explicitly depends on U1"}'
+      ralph emit work.failed --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","planned_units":["U1","U2"],"attempted_units":["U1"],"completed_units":[],"failed_units":["U1"],"blocked_units":["U2"],"skipped_units":[],"baseline_verification_file":".ralph/review/<plan>/baseline-verification.md","decisions_file":".ralph/agent/decisions.md","reason":"tests_not_green: U1 failed after an actual subagent attempt; U2 explicitly depends on U1","report_input_file":".ralph/review/<plan>/report-input.work-failed.json"}'
       ```
       The reason MUST include the unit status summary, for example:
       `completed=[U1,U3] failed=[U2] blocked=[U4] skipped=[]; see decisions.md`.
@@ -2332,10 +2598,19 @@ hats:
       - a production change introduced a **new** business regression that
         cannot be converged in this activation.
 
+      Before emitting, write and validate
+      `.ralph/review/<plan>/report-input.stabilization-blocked.json.tmp` with
+      `schema_version: "ce-report-input.v1"`, plan identity, terminal reason,
+      execution and stabilization evidence, artifact references, verification
+      state, explicit `not_run` later phases and residuals. Atomically rename
+      it to `report-input.stabilization-blocked.json` and include the final
+      repo-relative path as `report_input_file`. Stop if the file cannot be
+      written, validated, renamed or reopened.
+
       Emit:
       ```
       <event topic="stabilization.blocked">
-      {"plan_name":"<plan>","plan_path":"<repo-relative plan path>","plan_contract_version":"ce-unified-plan/v1","normalized_plan_file":"<path from trigger>","plan_contract_digest":"<digest from trigger>","trace_file":"<trace from trigger>","review_phase":"initial","tested_from_sha":"<work.done.executor_head_sha>","head_sha":"<git rev-parse HEAD or tested_from>","stabilization_audit_file":".ralph/review/<plan>/stabilization/audit.md","classification_counts":{...},"worktree_status":"<clean|dirty|unattributable_dirty>","reason":"<canonical reason>"}
+      {"plan_name":"<plan>","plan_path":"<repo-relative plan path>","plan_contract_version":"ce-unified-plan/v1","normalized_plan_file":"<path from trigger>","plan_contract_digest":"<digest from trigger>","trace_file":"<trace from trigger>","review_phase":"initial","tested_from_sha":"<work.done.executor_head_sha>","head_sha":"<git rev-parse HEAD or tested_from>","stabilization_audit_file":".ralph/review/<plan>/stabilization/audit.md","classification_counts":{...},"worktree_status":"<clean|dirty|unattributable_dirty>","reason":"<canonical reason>","report_input_file":".ralph/review/<plan>/report-input.stabilization-blocked.json"}
       </event>
       ```
       Then stop. The downstream review chain and reporter will derive the
@@ -3203,11 +3478,11 @@ hats:
 
   review-synthesizer:
     name: "Review Synthesizer"
-    description: "Synthesizes six dimensions from the single review pass and routes the result to fix planning."
+    description: "Synthesizes six dimensions from the single review pass and routes the result to fix planning. Emits EXACTLY ONE review.synthesized OR review.artifact.blocked (fail-close when mandatory review artifacts are missing or unreadable)."
     triggers: ["review.adversarial.done"]
-    publishes: ["review.synthesized"]
-    exempt_topics: ["review.synthesized"]
-    terminal_events: ["review.synthesized"]
+    publishes: ["review.synthesized", "review.artifact.blocked"]
+    exempt_topics: ["review.synthesized", "review.artifact.blocked"]
+    terminal_events: ["review.synthesized", "review.artifact.blocked"]
     event_filter:
       enabled: true
       events:
@@ -3231,10 +3506,7 @@ hats:
 
       ### Step 1 — Read all 6 dimension products
       Read `diff_patch_file` from the trigger payload. Read that patch file
-      for code context when deduping evidence. Treat a missing patch file as
-      a P1 process finding in the synthesized review: the review can continue
-      from dimension products, but the review artifact contract was not fully
-      satisfied.
+      for code context when deduping evidence.
 
       The 6 dimension hats wrote their findings to:
       - `.ralph/review/{plan_name}/goal-alignment.md`
@@ -3244,19 +3516,49 @@ hats:
       - `.ralph/review/{plan_name}/standards.md`
       - `.ralph/review/{plan_name}/adversarial.md`
 
+      **Mandatory artifact integrity gate（fail-close）**:
+      Every dimension file above is a **mandatory review artifact**; the
+      review chain can only conclude "all six dimensions independently
+      reviewed the executor HEAD" when all six exist, are readable, parse
+      to valid `## Findings` sections, and match the executor identity. For
+      each dimension file, you must verify **all** of:
+      1. File exists at `.ralph/review/{plan_name}/<dim>.md` and is non-empty.
+      2. File parses as Markdown with a `## Findings` section.
+      3. Each finding row carries the required fields (`id`, `severity`,
+         `owner`, `description`, `evidence`, `merge_decision`).
+      4. `findings_count` recorded in the trigger matches the parsed row count.
+      5. `dimension` field on each finding equals the filename dimension.
+
+      **If any of the six fails the gate, you MUST NOT emit
+      `review.synthesized`.** Instead:
+      - Write the audit block to
+        `.ralph/review/{plan_name}/review-synthesizer-block.md` listing
+        every failed dimension with the precise reason (`missing_file` /
+        `unreadable` / `missing_findings_section` /
+        `findings_count_mismatch` / `dimension_field_mismatch`).
+      - Write and validate `report-input.review-artifact-blocked.json.tmp`
+        beside that audit, with `schema_version: "ce-report-input.v1"`, plan
+        identity, terminal reason, failure dimensions, ordered artifact
+        references, verification state and explicit `not_run` later stages;
+        atomically rename it and put the final repo-relative path in
+        `report_input_file`.
+      - Emit **only** `review.artifact.blocked` (your hat's gate
+        event) with the audit block's repo-relative path in
+        `artifact_block_file` and `failure_dimensions` listing the
+        names that failed.
+      - Do NOT continue with Steps 2-7; do NOT synthesize any verdict;
+        do NOT fabricate P3 / ignore findings to mask the gap.
+
+      A missing patch file is a **process-level gate failure**: emit
+      `review.artifact.blocked` (the patch file is mandatory for the
+      review chain to prove the diff range under review); do NOT proceed
+      to a synthesized verdict with a P1 placeholder finding.
+
       Read each file. Parse the `## Findings` section into a list
       of finding records `{id, severity, owner, description,
       evidence, requires_verification, confidence.overall,
       evidence_score, impact_score, regression_probability,
       risk_score, merge_decision}`.
-
-      If a dimension file is missing or unreadable, treat that
-      dimension as having a single finding `{id: "<DIM>0",
-      severity: P3, owner: manual, description: "dimension file
-      missing", evidence: "<file path>", requires_verification: true,
-      confidence: {overall: 1.0}, evidence_score: 1.0,
-      impact_score: 0.2, regression_probability: 0.2,
-      risk_score: 0.15, merge_decision: "ignore"}`.
 
       Backward-compatible fallback: if an older dimension product is
       missing risk fields, infer them before ranking:
@@ -4088,6 +4390,15 @@ hats:
       present. This reaches reporter without pretending the audit
       succeeded.
 
+      Before every `align.done` path, write and validate
+      `.ralph/review/<plan>/report-input.align-done.json.tmp`. Record
+      `schema_version: "ce-report-input.v1"`, current plan identity, execution,
+      stabilization, review, fix, alignment, ordered artifact references,
+      verification and residuals. Atomically rename it to
+      `report-input.align-done.json`, then include that repo-relative path as
+      `report_input_file`. If writing or validation fails, keep the alignment
+      verdict blocked and never emit a missing or stale path.
+
       Only after the four checks above all pass may you proceed to
       Step 2.
 
@@ -4129,7 +4440,7 @@ hats:
       clean), save end evidence to
       `.ralph/review/{plan_name}/git-state-alignment-end.txt`.
       ```bash
-      ralph emit align.done --json '{"plan_name":"<plan>","plan_path":"<original plan path>","executor_head_sha":"<executor handoff sha>","head_sha":"<fix.done head_sha>","worktree_status":"clean","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>"}'
+      ralph emit align.done --json '{"plan_name":"<plan>","plan_path":"<original plan path>","executor_head_sha":"<executor handoff sha>","head_sha":"<fix.done head_sha>","worktree_status":"clean","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha>","review_verdict":"<pass|pass_with_residuals|blocked>","plan_executed":<bool>,"fix_plan_executed":<bool>,"residuals_count":<N>,"residuals_summary":"<summary or none>","report_input_file":".ralph/review/<plan>/report-input.align-done.json"}'
       ```
       Then stop. Reporter will receive `align.done`.
 
@@ -4139,8 +4450,8 @@ hats:
 
   reporter:
     name: "Reporter"
-    description: "Aggregates plan change / execution / 6-dim review / fixes / alignment residuals into a final report. Sole consumer of plan.blocked / work.failed / stabilization.blocked. Emits report.done then LOOP_COMPLETE."
-    triggers: ["align.done", "plan.blocked", "work.failed", "stabilization.blocked"]
+    description: "Aggregates plan change / execution / 6-dim review / fixes / alignment residuals into a final report. Sole consumer of plan.blocked / work.failed / stabilization.blocked / review.artifact.blocked. Emits report.done then LOOP_COMPLETE."
+    triggers: ["align.done", "plan.blocked", "work.failed", "stabilization.blocked", "review.artifact.blocked"]
     publishes: ["report.done", "LOOP_COMPLETE"]
     exempt_topics: ["report.done", "LOOP_COMPLETE"]
     terminal_events: ["report.done", "LOOP_COMPLETE"]
@@ -4151,6 +4462,7 @@ hats:
         - plan.blocked
         - work.failed
         - stabilization.blocked
+        - review.artifact.blocked
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
@@ -4184,20 +4496,26 @@ hats:
         same command with `--policy-check`; only emit for real after the
         policy check passes.
 
-      ### Read upstream events (HARD RULE — isolated mode shows only trigger)
-      Your `event_filter` exposes the trigger event only. For happy-path
-      fields from earlier hats, query the runtime event ledger:
+      ### Artifact-first input contract
 
-      ```bash
-      ralph events --events-source main --output json | jq -c 'select(.topic=="plan.ready")' | tail -1
-      ralph events --events-source main --output json | jq -c 'select(.topic=="work.done")' | tail -1
-      ralph events --events-source main --output json | jq -c 'select(.topic=="review.complete")' | tail -1
-      ralph events --events-source main --output json | jq -c 'select(.topic=="fix.done")' | tail -1
-      ```
+      Read `report_input_file` from the current trigger and open that bundle
+      first. It is the only business input for the report body. Require
+      `schema_version: "ce-report-input.v1"`, verify that its plan identity
+      matches the current trigger, and read only the business artifact paths
+      explicitly listed by the bundle. Do not use diagnostic event history to
+      reconstruct execution, stabilization, review, fix, or alignment state.
 
-      Parse the JSON `payload` field from each line. Do NOT invent
-      `tests_run`, `commit_count`, `baseline_verification_status`, or
-      `verdict` without this evidence.
+      The bundle records `execution`, `stabilization`, `review`, `fix`, and
+      `alignment` explicitly; a phase that did not run is `not_run`. It also
+      carries ordered artifact references, verification outcomes, terminal
+      reason, and residuals. Never convert an unrun verification into `pass`
+      or invent missing counts.
+
+      If the bundle is missing, unreadable, has an unknown schema version,
+      has mismatched plan identity, or references an unreadable/out-of-scope
+      artifact, generate a blocked report describing that validation failure.
+      Then emit `report.done` with verdict `blocked`, followed by the configured
+      completion promise. Do not emit `plan.blocked` or any other hat's topic.
 
       ### Report contract (manager body + short technical appendix)
 

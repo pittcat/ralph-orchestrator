@@ -713,3 +713,84 @@ fn test_object_payload_events_from_jsonl_converted_to_string() {
         payload
     );
 }
+
+// required-event-to-completion 合法配对的反例覆盖：第二个事件必须是配置的
+// completion_promise，第一个事件必须属于 required_events，且两个事件必须
+// 来自当前 isolated hat；第三个业务事件仍会被丢弃。
+
+fn required_completion_event_loop() -> EventLoop {
+    let config: RalphConfig = serde_yaml::from_str(
+        r#"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+  required_events: ["report.done"]
+"#,
+    )
+    .unwrap();
+    EventLoop::new(config)
+}
+
+fn event_from_hat(topic: &str, hat: &str) -> crate::event_reader::Event {
+    crate::event_reader::Event {
+        topic: topic.to_string(),
+        payload: None,
+        ts: "t".to_string(),
+        hat: Some(hat.to_string()),
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    }
+}
+
+#[test]
+fn test_isolated_required_to_completion_pair_rejects_non_required_first_topic() {
+    let event_loop = required_completion_event_loop();
+    let accepted = vec![event_from_hat("work.done", "reporter")];
+    assert!(
+        !event_loop.isolated_dual_publish_handoff(
+            "LOOP_COMPLETE",
+            "reporter",
+            "reporter",
+            &accepted
+        ),
+        "non-required first topic must not qualify as handoff to completion"
+    );
+}
+
+#[test]
+fn test_isolated_required_to_completion_pair_rejects_wrong_completion_text() {
+    let event_loop = required_completion_event_loop();
+    let accepted = vec![event_from_hat("report.done", "reporter")];
+    assert!(
+        !event_loop.isolated_dual_publish_handoff(
+            "LOOP_CANCELED",
+            "reporter",
+            "reporter",
+            &accepted
+        ),
+        "second topic must be exactly the configured completion_promise"
+    );
+
+    assert!(
+        !event_loop.isolated_dual_publish_handoff("align.done", "reporter", "reporter", &accepted),
+        "second topic other than completion_promise cannot ride the handoff"
+    );
+}
+
+#[test]
+fn test_isolated_required_to_completion_pair_rejects_cross_hat_handoff() {
+    let event_loop = required_completion_event_loop();
+    let accepted = vec![event_from_hat("report.done", "reporter")];
+    assert!(
+        !event_loop.isolated_dual_publish_handoff(
+            "LOOP_COMPLETE",
+            "alignment",
+            "reporter",
+            &accepted
+        ),
+        "cross-hat handoff must be rejected even when pair shape is correct"
+    );
+}

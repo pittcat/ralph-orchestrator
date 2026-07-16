@@ -44,10 +44,10 @@ execution: code
 
 - R7. 两套 preset 的全部 required identity、handoff、artifact reference 与 decision 字段都必须具备 `field_docs.meaning`、`field_docs.source`、`field_docs.fill_rule`；示例只能表达数据形状，不得硬编码会影响判定的业务结论。
 - R8. linear preset 应建立与 loop preset 同形态的外置 schema SSOT；原始 YAML 保留足以通过 path-based strict check 的 inline 结构化 schema，embedded 构建继续由 SSOT 深合并并接受语义 parity 校验。
-- R9. 长 instructions 必须删除通用规则复述，只保留本 hat 的职责、可见输入、决策规则、artifact 输出、允许 topic 与停止条件；命令语法、policy-check、task 三字段、OPAC 和通用 git handoff 通过注入 skill 引用。
-- R10. 若现有注入 skill 无法承载反复出现的 git entry/exit 与 writer handoff 契约，应新增通用、agent 可执行的 `ralph-tools-git-handoff` skill，并在 skill registry、入口文档和测试中注册；不得把 preset 名、U 编号、内部 ledger 或 runtime 函数名写入该 skill。
+- R9. 长 instructions 必须删除通用规则复述，只保留本 hat 的职责、可见输入、决策规则、artifact 输出、允许 topic 与停止条件；命令语法、policy-check、task 三字段和 OPAC 引用既有注入 skill，Git handoff 仅保留当前 hat 必需的最小动作。
+- R10. 不新增 git handoff 注入 skill。写入型 hat 只在自身 instructions 中保留完成职责所必需、且当前 activation 可执行的最小 Git 状态检查；通用命令语法引用现有 skill，字段来源写入 schema `field_docs`，不得把特定 pipeline 拓扑下沉到 `crates/ralph-core/data/*.md`。
 - R11. operator author/review 规则必须识别 required-event-to-completion 窄例外，同时继续把任意其它同 activation 多业务 emit 判为 P0；正反 fixture 都要覆盖。
-- R12. agent 注入文档必须说明上述窄例外的触发条件、精确顺序、字段来源和失败停止条件，并明确 main event history 是诊断入口而非业务 handoff 来源。
+- R12. 对应 reporter instructions 必须说明上述窄例外的精确顺序、字段来源和失败停止条件，并明确自身业务输入只来自 trigger 指定的 artifact；不得修改通用注入 skill 来承载这些 preset-specific 约束。
 
 **验证与同步**
 
@@ -73,7 +73,7 @@ execution: code
 
 **本轮包含**
 
-- 两套 CE pipeline preset、对应 schema、author notes、BDD、preset lint/embedded preset 测试、agent 注入 skill 与 preset operator skill。
+- 两套 CE pipeline preset、对应 schema、author notes、BDD、preset lint/embedded preset 测试与 preset operator skill。
 - 为 report bundle 和 `review.artifact.blocked` 所需的最小 runtime/preset contract 适配。
 
 **本轮不包含**
@@ -170,7 +170,7 @@ flowchart TB
 
 - **事件生命周期：** 新增一个终止型业务 topic，但 completion gate 仍由 `report.done` 控制。
 - **数据所有权：** reporter 从事件历史消费者变为显式 artifact consumer；上游终止分支承担 bundle 生成责任。
-- **agent prompt：** 通用规则集中到注入 skill，减少上下文占用与 preset/skill 漂移。
+- **agent prompt：** preset-specific 收尾契约只保留在对应 hat instructions；通用命令继续引用既有注入 skill，不向 `crates/ralph-core/data/*.md` 下沉局部例外。
 - **静态治理：** field docs 从建议提升为 strict lint 可验证契约，影响所有触及相应 schema 的维护者。
 
 ---
@@ -184,19 +184,17 @@ flowchart TB
 - **Dependencies：** 无。
 - **Files：**
   - `crates/ralph-core/src/event_loop/tests/payload_types.rs`
-  - `crates/ralph-core/data/ralph-tools.md`
-  - `crates/ralph-core/data/ralph-tools-emit.md`
   - `skills/ralph-preset-common/references/agent-native-model.md`
   - `skills/ralph-preset-common/references/finding-rubric.md`
   - `skills/ralph-preset-common/references/author-checklist.md`
   - `skills/ralph-preset-common/references/patterns.md`
-- **Approach：** 保留生产 runtime 分支不动，扩充现有单测为正反 characterization：正例必须同时满足“首 topic 在 required_events、次 topic 等于 completion_promise、顺序正确”；反例分别覆盖非 required 首 topic、错误 completion、反序与第三个业务事件。agent 文档用可执行语言解释何时能采用该例外、必须从 preset 配置读取哪些值、precheck/emit 顺序以及任一步失败即停止。operator rubric 只有在 reviewer 核对配置与行为证据后才能免除 P0。
+- **Approach：** 保留生产 runtime 分支不动，扩充现有单测为正反 characterization：正例必须同时满足“首 topic 在 required_events、次 topic 等于 completion_promise、顺序正确”；反例分别覆盖非 required 首 topic、错误 completion、反序与第三个业务事件。仅在对应 reporter instructions 中用可执行语言说明两个固定收尾事件及其顺序；通用注入 skill 不记录该 preset-specific 例外。operator rubric 只有在 reviewer 核对配置与行为证据后才能免除 P0。
 - **Test Scenarios：**
   1. reporter 依次发送 required `report.done` 和精确 `LOOP_COMPLETE`，二者均被接受并完成 loop。
   2. 首事件不是 required event 时，第二事件不得被当作合法 handoff completion。
   3. 首事件正确但 completion 文本不匹配时，loop 不完成。
   4. 任意第三个业务事件仍受单事件预算约束。
-- **Verification：** `cargo nextest run -p ralph-core -- isolated_dual_publish_handoff`；复核注入 skill 未出现内部函数名、ledger 路径或 preset 专名。
+- **Verification：** `cargo nextest run -p ralph-core -- isolated_dual_publish_handoff`；确认 `git diff -- crates/ralph-core/data` 为空，并复核 reporter instructions 未出现内部函数名或 ledger 路径。
 
 ### U2. 建立完整 schema SSOT 与 field docs 门禁
 
@@ -228,8 +226,8 @@ flowchart TB
   - `presets/en/ce-executor-pipeline-loop.yml`
   - `presets/schemas/ce-executor-pipeline.yml`
   - `presets/schemas/ce-executor-pipeline-loop.yml`
-  - `presets/author-notes/ce-executor-pipeline.md`
-  - `presets/author-notes/ce-executor-pipeline-loop.md`
+  - `presets/en/ce-executor-pipeline-preset-author-notes.md`
+  - `presets/en/ce-executor-pipeline-loop-preset-author-notes.md`
   - `crates/ralph-core/tests/scenarios/ce_executor_pipeline_review_artifact_blocked.yml`（新增）
   - `crates/ralph-core/tests/scenarios/ce_executor_pipeline_loop_review_artifact_blocked.yml`（新增）
   - `crates/ralph-core/tests/scenarios.rs`
@@ -251,15 +249,14 @@ flowchart TB
   - `presets/en/ce-executor-pipeline-loop.yml`
   - `presets/schemas/ce-executor-pipeline.yml`
   - `presets/schemas/ce-executor-pipeline-loop.yml`
-  - `presets/author-notes/ce-executor-pipeline.md`
-  - `presets/author-notes/ce-executor-pipeline-loop.md`
-  - `crates/ralph-core/data/ralph-tools-opac.md`
+  - `presets/en/ce-executor-pipeline-preset-author-notes.md`
+  - `presets/en/ce-executor-pipeline-loop-preset-author-notes.md`
   - `crates/ralph-core/tests/scenarios/ce_executor_pipeline.yml`
   - `crates/ralph-core/tests/scenarios/ce_executor_pipeline_stabilization_blocked_report.yml`
   - `crates/ralph-core/tests/scenarios/ce_executor_pipeline_loop.yml`
   - `crates/ralph-core/tests/scenarios/ce_executor_pipeline_loop_max_round_blocked.yml`
   - `crates/ralph-core/tests/scenarios.rs`
-- **Approach：** 为 `align.done`、`plan.blocked`、`work.failed`、`stabilization.blocked`、`review.loop.blocked`、`review.artifact.blocked` 统一增加 `report_input_file` required field 与完整 field docs。每个 owner 先在 `.ralph/review/<plan>/` 下临时文件写入并校验 bundle，再原子 rename 到 `report-input.json`，最后 policy-check/emit trigger；失败时不得发送一个指向不存在 bundle 的事件。reporter 验证 schema version、plan identity、引用路径边界与文件可读性，只按 bundle 生成最终报告。删除 reporter instructions 中 `--events-source main` 聚合步骤；`ralph-tools-opac` 澄清 main source 用于诊断/审计，不是跨 hat 业务 handoff。
+- **Approach：** 为 `align.done`、`plan.blocked`、`work.failed`、`stabilization.blocked`、`review.loop.blocked`、`review.artifact.blocked` 统一增加 `report_input_file` required field 与完整 field docs。每个 owner 先在 `.ralph/review/<plan>/` 下临时文件写入并校验 bundle，再原子 rename 到 `report-input.json`，最后 policy-check/emit trigger；失败时不得发送一个指向不存在 bundle 的事件。reporter 验证 schema version、plan identity、引用路径边界与文件可读性，只按 bundle 生成最终报告。删除 reporter instructions 中 `--events-source main` 聚合步骤；该局部业务边界留在 preset，不修改通用 OPAC skill。
 - **Test Scenarios：**
   1. happy path 的 bundle 含所有执行阶段与 ordered review artifacts，reporter 不读取 main history 即完成。
   2. plan blocked/work failed/stabilization blocked/max-round/review-artifact-blocked 各自生成字段完整但允许 `not_run` 阶段的 bundle。
@@ -268,7 +265,7 @@ flowchart TB
   5. trigger payload 缺 `report_input_file` 时被 schema/policy-check 拒绝。
 - **Verification：** 针对修改的 scenario 用 `cargo nextest run -p ralph-core --test scenarios <scenario_substring>`；运行两个 preset strict check；用 `rg -- '--events-source main' presets/en/ce-executor-pipeline*.yml` 确认 reporter 不再依赖该入口。
 
-### U5. 精简 hat instructions 并抽取通用 git handoff skill
+### U5. 精简 hat instructions 并保持知识分层
 
 - **Goal：** 降低 prompt 上下文与规则漂移，同时不削弱每个 isolated activation 的可执行性。
 - **Requirements：** R9、R10、R12。
@@ -276,17 +273,13 @@ flowchart TB
 - **Files：**
   - `presets/en/ce-executor-pipeline.yml`
   - `presets/en/ce-executor-pipeline-loop.yml`
-  - `crates/ralph-core/data/ralph-tools-git-handoff.md`（新增）
-  - `crates/ralph-core/data/ralph-tools.md`
-  - `crates/ralph-core/src/skill_registry.rs`
   - `crates/ralph-cli/src/presets.rs`
-- **Approach：** 将 executor、test-stabilizer、fix-planner、fixer、review-synthesizer、reporter 等 instructions 中重复的 task 三字段、policy-check 双阶段、OPAC、通用 git entry/exit/writer handoff 内容替换为对对应注入 skill 的章节引用。新增 git handoff skill 只描述通用触发条件、writer/readonly 动作、从哪里读取 live HEAD/worktree、`.ralph/` 排除、失败停止条件；注册为可按需加载的 builtin，并从 `ralph-tools.md` 建立发现入口。逐 hat 人工做 AAF 复核：每条剩余 instruction 必须只依赖该 activation 可见输入或可调用 runtime API。
+- **Approach：** 将 executor、test-stabilizer、fix-planner、fixer、review-synthesizer、reporter 等 instructions 中重复的 task 三字段、policy-check 双阶段和 OPAC 内容替换为对现有注入 skill 的章节引用。Git 状态检查只保留当前 hat 完成 handoff 所需的最小动作，不新增 runtime 注入 skill，也不把 preset 拓扑写入 `crates/ralph-core/data/*.md`。逐 hat 人工做 AAF 复核：每条剩余 instruction 必须只依赖该 activation 可见输入或可调用 runtime API。
 - **Test Scenarios：**
-  1. `ralph tools skill load ralph-tools-git-handoff` 可加载完整内容。
-  2. writer hat 能从引用 skill 得到 entry、Stage A/B、commit 与 handoff 动作；readonly hat 不被要求提交代码。
+  1. writer hat 的最小 Git 检查只依赖当前 activation 可执行命令；readonly hat 不被要求提交代码。
   3. 两个 preset strict lint 与 embedded parse 通过，所有 emitter instructions 仍明确要求 policy-check 后再真 emit。
   4. instructions 不出现内部 ledger、runtime 函数名、手写 task_id、对其它 hat 进程状态的假设或复制的大段命令参考。
-- **Verification：** `cargo nextest run -p ralph-core -- skill_registry`；`cargo nextest run -p ralph-cli --bin ralph -- presets`；执行 `ralph tools skill load ralph-tools-git-handoff` 冒烟；运行 `scripts/check-cli-doc-drift.sh --strict`。
+- **Verification：** `cargo nextest run -p ralph-cli --bin ralph -- presets`；确认 data 与 operator skill 中未新增独立 Git handoff skill；运行 `scripts/check-cli-doc-drift.sh`。
 
 ### U6. 更新 preset operator 评审模型与 AAF fixtures
 
@@ -334,7 +327,7 @@ flowchart TB
   3. 所有 reporter 路径都出现 `report.done` 后 `LOOP_COMPLETE`，无提前 completion。
   4. artifact-blocked 路径不存在 review/fix/alignment 假成功事件。
   5. 两个原始 preset、embedded presets、外置 schema SSOT 和 author notes 对新 topic/字段一致。
-- **Verification：** 先运行所有 targeted nextest gates，再运行 `./scripts/run-tests.sh`；若仅出现已确认的竞态/时序 flake，按项目规则运行 `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh`，serial 仍失败则视为真实失败。最后执行 `cmp -s CLAUDE.md AGENTS.md`、`scripts/check-cli-doc-drift.sh --strict` 与两次 strict preset check。
+- **Verification：** 先运行所有 targeted nextest gates，再运行 `./scripts/run-tests.sh`；若仅出现已确认的竞态/时序 flake，按项目规则运行 `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh`，serial 仍失败则视为真实失败。最后执行 `cmp -s CLAUDE.md AGENTS.md`、`scripts/check-cli-doc-drift.sh` 与两次 strict preset check。
 
 ---
 
@@ -349,8 +342,7 @@ flowchart TB
 | 原始 linear strict | `ralph preset check -H presets/en/ce-executor-pipeline.yml --strict` | path-based authoring view 可独立通过 | U2-U7 |
 | 原始 loop strict | `ralph preset check -H presets/en/ce-executor-pipeline-loop.yml --strict` | 缺失 stabilization schema P0 已消除 | U2-U7 |
 | Scenario 回归 | `cargo nextest run -p ralph-core --test scenarios` | 真实 EventLoop 全分支事件流 | U3、U4、U7 |
-| Skill registry | `cargo nextest run -p ralph-core -- skill_registry` | 新注入 skill 注册与加载 | U5 |
-| CLI 文档漂移 | `scripts/check-cli-doc-drift.sh --strict` | agent/operator 命令文档与 CLI 一致 | U5-U7 |
+| CLI 文档漂移 | `scripts/check-cli-doc-drift.sh` | agent/operator 命令文档与 CLI 一致 | U5-U7 |
 | 全 workspace | `./scripts/run-tests.sh` | nextest + doctest 最终基线 | U7 |
 | 指令文件一致 | `cmp -s CLAUDE.md AGENTS.md` | 两份项目硬规则字节一致 | U7 |
 
@@ -366,7 +358,7 @@ flowchart TB
 - 所有 reporter 入口携带有效 `report_input_file`；reporter instructions 不再用 main history 构建业务报告。
 - `report.done` 保持 required event，之后的 `LOOP_COMPLETE` 被 runtime 单测与 preset BDD 共同证明；operator review 正负 fixture 不再误判或漏判。
 - required handoff/identity/decision 字段拥有完整 field docs，缺失时 CE builtin 结构化契约测试稳定失败。
-- prompt 重复规则已下沉到 agent-facing skill；每个 hat instructions 仍从自身 activation 视角可独立执行。
-- preset operator skills、author notes、注入 skill、`.cursor` 规则和项目文档同步；`CLAUDE.md` 与 `AGENTS.md` 完全一致。
+- prompt 重复规则已收敛到现有 agent-facing skill 引用；未新增 preset 专用 runtime skill，每个 hat instructions 仍从自身 activation 视角可独立执行。
+- preset operator skills、author notes、`.cursor` 规则和项目文档同步；`crates/ralph-core/data/*.md` 不包含本 preset 的局部例外；`CLAUDE.md` 与 `AGENTS.md` 完全一致。
 - targeted gates、CLI drift、两个 strict checks 与 `./scripts/run-tests.sh` 全部通过。
 - diff 中不存在临时 report bundle、`.ralph/` runtime 状态、评审报告副本、死代码或中途失败方案残留。
