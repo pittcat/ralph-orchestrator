@@ -3055,7 +3055,11 @@ hats:
            `.ralph/agent/plan-baseline-{key}.sha` by the B-layer runtime
            every hat prompt — see `event_loop/mod.rs:6336`).
       - Resolve `<DIFF_BASE>` (see dim:goal-alignment **Diff base**).
-      - Read the **original** plan (look for `**Test scenarios:**` per U).
+      - Read the **original** plan (look for `**Test scenarios:**` per U;
+        if the plan presents equivalent coverage as BDD Gherkin scenarios
+        in §2/§3/§4 instead of `**Test scenarios:**` per U, treat the
+        `bdd-scenarios-not-test-scenarios` marker as equivalent and
+        proceed).
       - Read the round's canonical patch at `diff_patch_file` and
         `<ROUND_DIR>/review.diffstat.txt` if present.
       - Read `<ROUND_DIR>/correctness.md` if present.
