@@ -669,34 +669,6 @@ hats:
 // full runner main loop — that integration check belongs to U6.
 // ─────────────────────────────────────────────────────────────────────────
 
-#[cfg(unix)]
-fn u3_workspace_with_isolated_hats() -> (tempfile::TempDir, std::path::PathBuf) {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let root = temp.path().to_path_buf();
-    let diagnostics = ralph_core::diagnostics::DiagnosticsCollector::with_enabled(&root, true)
-        .expect("create diagnostics collector");
-    let yaml = r#"
-event_loop:
-  execution_mode: isolated
-hats:
-  review-coordinator:
-    name: "Review Coordinator"
-    triggers: ["work.done"]
-    publishes: ["review.wave.ready", "review.passed"]
-  executor:
-    name: "Executor"
-    triggers: ["task.start"]
-    publishes: ["work.done"]
-"#;
-    let mut config: ralph_core::RalphConfig = serde_yaml::from_str(yaml).expect("parse yaml");
-    config.core.workspace_root = root.clone();
-    let event_loop = ralph_core::EventLoop::with_diagnostics(config, diagnostics);
-    // We just need the workspace / event_loop pair returned;
-    // the caller constructs its own EventLoop to control state.
-    let _ = event_loop;
-    (temp, root)
-}
-
 #[test]
 fn test_u3_next_hat_consumes_pending_recovery_hat_and_clears() {
     // 2026-06-13 plan U3 — error path / next-iteration shape:

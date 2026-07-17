@@ -1648,27 +1648,6 @@ mod tests {
     // and MUST stay on a single line so the `HUMAN GUIDANCE` injection
     // path can copy it verbatim into a numbered list entry.
 
-    /// Write a single task to a fresh tasks.jsonl with the given id, status,
-    /// and (optional) loop_id. Mirrors the helper used by the marker/loop
-    /// tests at the bottom of this module.
-    fn write_task(
-        tasks_path: &std::path::Path,
-        task_id: &str,
-        status: TaskStatus,
-        loop_id: Option<&str>,
-    ) {
-        if let Some(parent) = tasks_path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        let mut store = TaskStore::load(tasks_path).unwrap();
-        let mut task =
-            Task::new(format!("task {task_id}"), 1).with_loop_id(loop_id.map(str::to_string));
-        task.id = task_id.to_string();
-        task.status = status;
-        store.add(task);
-        store.save().unwrap();
-    }
-
     #[test]
     fn test_task_not_terminal_message_includes_close_hint() {
         // Task exists in the store but is still `open`; the contract rule
@@ -1914,26 +1893,6 @@ mod tests {
 
         // Git evidence check should be skipped in non-git directory, so accepts
         assert!(matches!(decision, ExecutionContractDecision::Accept));
-    }
-
-    // === TaskWrongLoop primary-loop regression tests ===
-    //
-    // Background: `LoopContext::primary()` keeps `loop_id: None` (loop_context.rs:89),
-    // and primary loops identify themselves via the `.ralph/current-loop-id` marker
-    // that `LoopRunner::resolve_loop_id` writes (loop_runner.rs:183-203). The
-    // execution-contract call site at event_loop/mod.rs:3590 must pass the marker
-    // value (not the literal "default") so primary-loop tasks are not misclassified.
-    // These tests pin the validator's TaskWrongLoop behavior given a marker value,
-    // independent of the EventLoop wiring.
-
-    fn write_task_with_loop_id(tasks_path: &std::path::Path, task_id: &str, loop_id: Option<&str>) {
-        let mut store = TaskStore::load(tasks_path).unwrap();
-        let mut task =
-            Task::new(format!("task {task_id}"), 1).with_loop_id(loop_id.map(str::to_string));
-        task.id = task_id.to_string();
-        task.status = TaskStatus::Closed;
-        store.add(task);
-        store.save().unwrap();
     }
 
     // 2026-07-07-003 follow-up: plan 002 U7 added the

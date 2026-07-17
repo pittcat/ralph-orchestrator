@@ -500,85 +500,6 @@ async fn run_wave_for_hat_backend_with_capture_and_task_payload(
 }
 
 #[cfg(unix)]
-#[derive(Debug, serde::Deserialize)]
-struct CapturedAcpWaveInvocation {
-    command: String,
-    args: Vec<String>,
-    env: std::collections::BTreeMap<String, String>,
-    prompt: String,
-}
-
-#[cfg(unix)]
-#[cfg(unix)]
-async fn run_wave_for_hat_backend_with_acp_capture(
-    hat_backend: ralph_core::HatBackend,
-    backend_args: Option<Vec<String>>,
-    payload: &str,
-) -> (ralph_core::CompletedWave, CapturedAcpWaveInvocation) {
-    run_wave_for_hat_backend_with_acp_capture_and_task_payload(
-        hat_backend,
-        backend_args,
-        payload,
-        "ROLE: Validate this backend",
-    )
-    .await
-}
-
-#[cfg(unix)]
-async fn run_wave_for_hat_backend_with_acp_capture_and_task_payload(
-    hat_backend: ralph_core::HatBackend,
-    backend_args: Option<Vec<String>>,
-    _payload: &str,
-    task_payload: &str,
-) -> (ralph_core::CompletedWave, CapturedAcpWaveInvocation) {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let worker_capture_path = temp_dir.path().join("wave-w-test-0.jsonl.capture");
-    let events_file = temp_dir.path().join("events.jsonl");
-    let mut wave = make_test_wave_with_timeout_and_payload(
-        vec!["review.done".to_string()],
-        30,
-        task_payload.to_string(),
-    );
-    wave.hat_config.backend = Some(hat_backend);
-    wave.hat_config.backend_args = backend_args;
-
-    let completed = execute_wave(
-        &wave,
-        &missing_global_wave_backend(),
-        &events_file,
-        false,
-        false,
-        None,
-        None,
-        "test-loop",
-        None,
-    )
-    .await
-    .expect("wave execution");
-    let captured: CapturedAcpWaveInvocation = serde_json::from_str(
-        &std::fs::read_to_string(&worker_capture_path).expect("read captured ACP invocation"),
-    )
-    .expect("parse captured ACP invocation");
-    (completed, captured)
-}
-
-#[cfg(unix)]
-fn make_worker_event(topic: &str, payload: &str) -> ralph_core::Event {
-    ralph_core::Event {
-        topic: topic.to_string(),
-        payload: Some(payload.to_string()),
-        ts: "2026-01-01T00:00:00Z".to_string(),
-        hat: None,
-        triggered: None,
-        source: None,
-        wave_id: None,
-        wave_index: None,
-        wave_total: None,
-        system_injected: None,
-    }
-}
-
-#[cfg(unix)]
 fn text_backend_body(payload: &str) -> String {
     format!(
         r#"printf 'plain text from worker\n'
@@ -672,7 +593,6 @@ enum PromptDeliveryExpectation {
     Stdin,
     TempFileFlag(&'static str),
     TempFilePositional,
-    PromptFile,
 }
 
 #[cfg(unix)]
@@ -825,39 +745,10 @@ fn assert_named_backend_invocation_contract(
             );
             assert_temp_file_prompt_instruction(args[expected_prefix.len()], &captured.prompt);
         }
-        PromptDeliveryExpectation::PromptFile => {
-            assert_eq!(
-                args.len(),
-                expected_prefix.len() + 2,
-                "unexpected arg count: {:?}",
-                captured.args
-            );
-            assert_eq!(
-                args[expected_prefix.len()],
-                "--prompt-file",
-                "missing --prompt-file flag"
-            );
-            assert!(
-                !args[expected_prefix.len() + 1].is_empty(),
-                "missing prompt file path"
-            );
-            assert!(
-                args[expected_prefix.len() + 1].contains("tmp")
-                    || args[expected_prefix.len() + 1].contains("Temp"),
-                "expected temp prompt file path, got {:?}",
-                captured.args
-            );
-        }
     }
 
     assert_captured_wave_prompt(&captured.prompt);
     assert_captured_wave_env(&captured.env, true);
-}
-
-#[cfg(unix)]
-fn assert_acp_invocation_contract(captured: &CapturedAcpWaveInvocation, _expected_args: &[&str]) {
-    assert_captured_wave_prompt(&captured.prompt);
-    assert_captured_wave_env(&captured.env, false);
 }
 
 #[cfg(unix)]

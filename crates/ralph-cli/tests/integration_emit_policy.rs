@@ -19,14 +19,6 @@
 use std::process::Command;
 use tempfile::TempDir;
 
-fn ralph_emit(temp_path: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ralph"))
-        .args(args)
-        .current_dir(temp_path)
-        .output()
-        .expect("Failed to execute ralph emit command")
-}
-
 #[test]
 fn test_emit_isolated_mode_rejects_conflicting_hat_override() {
     let temp_dir = TempDir::new().expect("temp dir");

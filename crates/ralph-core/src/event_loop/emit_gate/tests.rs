@@ -23,15 +23,6 @@ use crate::event_loop::repair_flow::RepairStateMachine;
 use crate::event_loop::stage_pipeline::{FlowStep, StageContext, StagePipeline};
 use ralph_proto::Event;
 
-/// Empty flow declaration — `with_default_stages` does not
-/// require any steps, just a valid FlowDeclaration value.
-fn minimal_flow() -> FlowDeclaration {
-    FlowDeclaration::from_yaml(
-        "mechanism:\n  flow:\n    type: declared\n    version: 1\n    steps: []\n",
-    )
-    .expect("parse minimal flow")
-}
-
 /// Flow with steps covering every topic the U1 tests emit
 /// against — `unit_loop` for the `work.*` topics and
 /// repair-stream topics (`task.relocate_legacy`,

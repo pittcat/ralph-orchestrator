@@ -171,11 +171,6 @@ fn test_progress_steward_disabled_no_loop_stalled_publish_on_consumer_stall_repe
     // contract by setting the gate flag and trusting that the
     // `&& self.config.event_loop.progress_steward.enabled`
     // short-circuit prevents the publish.
-    let mut entry = event_loop
-        .state
-        .handoff_tracker
-        .pending_count()
-        .saturating_sub(0) as u32;
     // Bump the consumer-stall counter for an arbitrary
     // consumer past the >= 2 threshold. The internal API is
     // `bump_consumer_stall_count` which we exercise here.
@@ -183,7 +178,7 @@ fn test_progress_steward_disabled_no_loop_stalled_publish_on_consumer_stall_repe
         .state
         .handoff_tracker
         .bump_consumer_stall_count("executor");
-    entry = event_loop
+    let entry = event_loop
         .state
         .handoff_tracker
         .bump_consumer_stall_count("executor");

@@ -23,20 +23,6 @@
 use super::super::*;
 
 // ──────────────────────────────────────────────────────────────────────
-// 本地 helper: `u4_workspace` 在原 `legacy.rs` 中定义,被 `test_u4_t4_3` /
-// `test_u4_t4_4` 调用。U2d 严格原子性约束禁止修改其他测试文件,故在此
-// 复制一份同样签名的本地版本(实现与 legacy.rs 中等价)。`#[cfg(unix)]`
-// 保留以匹配原 hard_gate.rs 用例的编译条件。
-// ──────────────────────────────────────────────────────────────────────
-
-#[cfg(unix)]
-fn u4_workspace() -> (tempfile::TempDir, PathBuf) {
-    let temp = tempfile::TempDir::new().expect("tempdir");
-    let root = temp.path().to_path_buf();
-    (temp, root)
-}
-
-// ──────────────────────────────────────────────────────────────────────
 // U5: payload contract hard gate
 // ──────────────────────────────────────────────────────────────────────
 

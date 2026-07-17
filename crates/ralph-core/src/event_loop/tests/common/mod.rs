@@ -192,22 +192,6 @@ pub(super) fn setup_loop_with_workflow_guards() -> EventLoop {
 
 /// U11 fail-closed helper: build an `EventLoop` whose
 /// `FlowStepScope` admits the given topics under the
-/// `unit_loop` step. `RalphConfig::default()` produces a
-/// `FlowDeclaration` with no steps, so the default
-/// `build_stage_pipeline_from_config` would reject every
-/// business topic (`build.done`, `verify.passed`,
-/// `review.done`, ...) with `flow_step_undeclared`.
-/// Tests in this directory that exercise the JSONL
-/// ingest path need a flow that admits the topic under
-/// test; use this helper to install one. The helper
-/// also includes `LOOP_COMPLETE` in `terminal_emits` so
-/// the verdict gate accepts the dispatcher event.
-pub(super) fn setup_loop_admitting_topics(allowed: &[&str]) -> EventLoop {
-    let mut event_loop = EventLoop::new(RalphConfig::default());
-    install_admitting_flow(&mut event_loop, allowed);
-    event_loop
-}
-
 /// U11 fail-closed helper: install a `FlowStepScope`-admitting
 /// `StagePipeline` on an existing `EventLoop`. Used by tests
 /// that build their own `EventLoop` (e.g. with custom

@@ -1290,7 +1290,17 @@ event_loop:
         );
     }
 
+    // The legacy `check_progress_task_alignment` call below is
+    // intentional: this test pins the contract that the disk-read
+    // legacy gate and the unified snapshot pipeline both reject a
+    // misaligned `queue.advance`. The `#[allow(deprecated)]` only
+    // sits on the function because Rust does not propagate allow
+    // attributes from a `use` statement into the function body.
+    // Do not migrate this call to `check_alignment_with_snapshot` —
+    // it would defeat the legacy-vs-unified parity this test
+    // verifies.
     #[test]
+    #[allow(deprecated)]
     fn run_policy_check_unified_and_loop_agree_on_misaligned_progress() {
         // U6 plan §"Test scenarios" Error path: `--policy-check` and
         // the loop must produce matching verdicts (both reject) for a

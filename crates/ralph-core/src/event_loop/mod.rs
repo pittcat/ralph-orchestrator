@@ -868,17 +868,6 @@ impl EventLoop {
         })
     }
 
-    /// Test-only getter for the cached robot_guidance vec.
-    /// Used by `guidance_dedup.rs` to assert KTD-7 in-memory dedup
-    /// without going through the full `process_events_from_jsonl`
-    /// pipeline. `pub(crate)` so the sibling test modules under
-    /// `event_loop::tests` can see it; gated by `#[cfg(test)]` so
-    /// the symbol does not leak into release builds.
-    #[cfg(test)]
-    pub(crate) fn robot_guidance_for_test(&self) -> Vec<String> {
-        self.robot_guidance.clone()
-    }
-
     /// Creates a new event loop from configuration.
     pub fn new(config: RalphConfig) -> Self {
         // Try to create diagnostics collector, but fall back to disabled if it fails
