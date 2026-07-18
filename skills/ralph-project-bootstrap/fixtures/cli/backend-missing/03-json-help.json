@@ -1,0 +1,12 @@
+{
+  "description": "probe: ralph --json --help",
+  "argv_expected": ["ralph", "--json", "--help"],
+  "stdout_chunks": [
+    "{\"commands\":[\"preset\",\"preflight\",\"run\"],\"flags\":[\"--strict\",\"--json\",\"--dry-run\"]}\n"
+  ],
+  "stderr_chunks": [],
+  "exit_code": 0,
+  "expected_stage": "capability",
+  "expected_outcome": "ok",
+  "expected_blocked_reason_regex": ""
+}

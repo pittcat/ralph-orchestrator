@@ -1,0 +1,15 @@
+{
+  "description": "probe: ralph preflight --help confirms --strict",
+  "argv_expected": ["ralph", "preflight", "--help"],
+  "stdout_chunks": [
+    "Usage: ralph preflight [OPTIONS]\n",
+    "\n",
+    "Options:\n",
+    "      --strict  strict preflight gate\n"
+  ],
+  "stderr_chunks": [],
+  "exit_code": 0,
+  "expected_stage": "capability",
+  "expected_outcome": "ok",
+  "expected_blocked_reason_regex": ""
+}

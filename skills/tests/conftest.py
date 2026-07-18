@@ -40,6 +40,8 @@ for _name, _path in (
     ("_fixtures", _BOOTSTRAP_SCRIPTS / "_fixtures.py"),
     ("agent_docs", _BOOTSTRAP_SCRIPTS / "agent_docs.py"),
     ("pipeline_suite", _BOOTSTRAP_SCRIPTS / "pipeline_suite.py"),
+    ("cli_probe", _BOOTSTRAP_SCRIPTS / "cli_probe.py"),
+    ("_probe_runner", _BOOTSTRAP_SCRIPTS / "_probe_runner.py"),
 ):
     if _path.is_file():
         _load(_name, _path)

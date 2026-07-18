@@ -926,3 +926,322 @@ def test_invalid_yaml_fixture_blocks_apply(tmp_path: Path) -> None:
             },
         )
     assert excinfo.value.code == "duplicate_yaml_key"
+
+
+# ---------------------------------------------------------------------------
+# Unit 5 — CLI capability probe + staged static validation (cli_probe)
+# ---------------------------------------------------------------------------
+
+
+import subprocess  # noqa: E402  (used by the cli_probe runner tests)
+from typing import Callable  # noqa: E402
+
+import cli_probe  # noqa: E402  (Unit 5 helper, loaded by conftest)
+import _probe_runner  # noqa: E402  (Unit 5 fake runner, loaded by conftest)
+
+
+_PIPELINE_KW: dict[str, object] = dict(
+    binary="ralph",
+    config_path="ralph.pipeline.yml",
+    preset="builtin:ce-executor-pipeline",
+    prompt_file="PROMPT.pipeline.md",
+    plan_path="plan.md",
+)
+
+
+def _make_runner(name: str) -> Callable[..., subprocess.CompletedProcess]:
+    """Build the fixture-driven runner for the ``name`` fixture set."""
+    invocations = cli_probe.load_fixture(name)
+    return _probe_runner.make_runner(invocations)
+
+
+def _make_missing_runner() -> Callable[..., subprocess.CompletedProcess]:
+    """Build a runner that raises ``FileNotFoundError`` on every call.
+
+    Used for the missing-binary scenario: the staged gate must
+    classify the binary as missing without invoking the fake.
+    """
+
+    def _runner(*args, **kwargs):  # noqa: ARG001
+        raise FileNotFoundError("ralph: binary not found")
+
+    return _runner
+
+
+# --- T1 — capability ordering: missing binary -----------------------------
+
+
+def test_cli_probe_missing_binary_blocks_capability_and_skips_rest() -> None:
+    runner = _make_missing_runner()
+    decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
+    assert len(decisions) == 4
+    capability, preset, preflight, dry_run = decisions
+    assert capability.stage == "capability"
+    assert capability.outcome == "blocked_cli"
+    assert "not found" in capability.blocked_reason
+    assert capability.next_allowed_stage is None
+    for stage in (preset, preflight, dry_run):
+        assert stage.stage in {"preset_check", "preflight", "dry_run"}
+        assert stage.next_allowed_stage is None
+        assert stage.outcome == "blocked_unknown"
+
+
+# --- T2 — capability ordering: missing required flag ----------------------
+
+
+def test_cli_probe_missing_flag_blocks_capability_and_skips_rest() -> None:
+    runner = _make_runner("missing-flag")
+    decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
+    capability = decisions[0]
+    assert capability.outcome == "blocked_cli"
+    assert "required flags missing" in capability.blocked_reason
+    for stage in decisions[1:]:
+        assert stage.next_allowed_stage is None
+        assert stage.outcome == "blocked_unknown"
+
+
+# --- T3 — preset strict failure → blocked_preset ---------------------------
+
+
+def test_cli_probe_preset_strict_fail_blocks_at_preset_stage() -> None:
+    runner = _make_runner("preset-strict-fail")
+    decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
+    capability, preset_check, preflight, dry_run = decisions
+    assert capability.outcome == "ok"
+    assert capability.next_allowed_stage == "preset_check"
+    assert preset_check.outcome == "blocked_preset"
+    assert preset_check.next_allowed_stage is None
+    assert "unknown preset id" in preset_check.blocked_reason
+    assert preflight.outcome == "blocked_unknown"
+    assert dry_run.outcome == "blocked_unknown"
+
+
+# --- T4 — backend missing → blocked_backend -------------------------------
+
+
+def test_cli_probe_backend_missing_blocks_at_preflight_stage() -> None:
+    runner = _make_runner("backend-missing")
+    decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
+    capability, preset_check, preflight, dry_run = decisions
+    assert capability.outcome == "ok"
+    assert preset_check.outcome == "ok"
+    assert preflight.outcome == "blocked_backend"
+    assert "executable not found" in preflight.blocked_reason
+    assert dry_run.outcome == "blocked_unknown"
+
+
+# --- T5 — dry-run source mismatch → blocked_command -----------------------
+
+
+def test_cli_probe_dry_run_source_mismatch_blocks_at_dry_run_stage() -> None:
+    runner = _make_runner("dry-run-source-mismatch")
+    decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
+    capability, preset_check, preflight, dry_run = decisions
+    assert capability.outcome == "ok"
+    assert preset_check.outcome == "ok"
+    assert preflight.outcome == "ok"
+    assert dry_run.outcome == "blocked_command"
+    assert "does not reference requested config" in dry_run.blocked_reason
+
+
+# --- T6 — green path: 4 stages all ok -------------------------------------
+
+
+def test_cli_probe_green_path_returns_four_ok_stages() -> None:
+    runner = _make_runner("green")
+    decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
+    assert len(decisions) == 4
+    capability, preset_check, preflight, dry_run = decisions
+    assert capability.outcome == "ok" and capability.next_allowed_stage == "preset_check"
+    assert preset_check.outcome == "ok" and preset_check.next_allowed_stage == "preflight"
+    assert preflight.outcome == "ok" and preflight.next_allowed_stage == "dry_run"
+    assert dry_run.outcome == "ok" and dry_run.next_allowed_stage is None
+    # The dry-run blocked_reason is empty on a green stage.
+    assert dry_run.blocked_reason == ""
+
+
+# --- T7 — every argv carries -c <config> -H <preset> ---------------------
+
+
+def test_cli_probe_every_argv_carries_explicit_config_and_preset() -> None:
+    runner = _make_runner("green")
+    decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
+    for decision in decisions:
+        argv = decision.argv
+        assert "-c" in argv, f"argv missing -c: {argv}"
+        assert "ralph.pipeline.yml" in argv, f"argv missing config path: {argv}"
+        assert "-H" in argv, f"argv missing -H: {argv}"
+        assert "builtin:ce-executor-pipeline" in argv, f"argv missing preset: {argv}"
+
+
+def test_cli_probe_dry_run_argv_additionally_carries_dry_run_flag() -> None:
+    runner = _make_runner("green")
+    decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
+    dry_run = decisions[-1]
+    assert "--dry-run" in dry_run.argv
+    # And explicitly NOT --skip-preflight: the strict gate runs as its
+    # own stage so the dry-run never silences preflight.
+    assert "--skip-preflight" not in dry_run.argv
+
+
+# --- T8 — subprocess.TimeoutExpired → blocked_unknown ---------------------
+
+
+def test_cli_probe_timeout_classifies_as_blocked_unknown() -> None:
+    invocations = cli_probe.load_fixture("green")
+
+    def _timeout_on_preset(*args, **kwargs):  # noqa: ARG001
+        argv = tuple(args[0]) if args else ()
+        if "preset" in argv and "check" in argv and "--strict" in argv:
+            raise subprocess.TimeoutExpired("ralph", 20)
+        for inv in invocations:
+            if inv.argv_expected == argv:
+                return subprocess.CompletedProcess(
+                    args=argv,
+                    returncode=inv.exit_code,
+                    stdout="".join(inv.stdout_chunks),
+                    stderr="".join(inv.stderr_chunks),
+                )
+        raise AssertionError(f"unknown argv: {argv}")
+
+    decisions = cli_probe.validate_pipeline(
+        runner=_timeout_on_preset, **_PIPELINE_KW  # type: ignore[arg-type]
+    )
+    capability, preset_check, preflight, dry_run = decisions
+    assert capability.outcome == "ok"
+    assert preset_check.outcome == "blocked_unknown"
+    assert "timed out" in preset_check.blocked_reason
+    assert preset_check.next_allowed_stage is None
+    assert preflight.outcome == "blocked_unknown"
+    assert dry_run.outcome == "blocked_unknown"
+
+
+# --- T9 — empty stderr on nonzero exit still classifies --------------------
+
+
+def test_cli_probe_empty_stderr_on_nonzero_exit_still_classifies() -> None:
+    invocations = cli_probe.load_fixture("green")
+
+    def _empty_stderr(*args, **kwargs):  # noqa: ARG001
+        argv = tuple(args[0]) if args else ()
+        if "preset" in argv and "check" in argv and "--strict" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout="", stderr=""
+            )
+        for inv in invocations:
+            if inv.argv_expected == argv:
+                return subprocess.CompletedProcess(
+                    args=argv,
+                    returncode=inv.exit_code,
+                    stdout="".join(inv.stdout_chunks),
+                    stderr="".join(inv.stderr_chunks),
+                )
+        raise AssertionError(f"unknown argv: {argv}")
+
+    decisions = cli_probe.validate_pipeline(
+        runner=_empty_stderr, **_PIPELINE_KW  # type: ignore[arg-type]
+    )
+    preset_check = decisions[1]
+    assert preset_check.outcome == "blocked_preset"
+    # The helper MUST surface a non-empty blocked_reason even when
+    # stderr is empty; it must not pretend the stage passed.
+    assert preset_check.blocked_reason != ""
+    assert "non-zero" in preset_check.blocked_reason
+
+
+# --- T10 — proof level monotonically advances -----------------------------
+
+
+def test_cli_probe_proof_level_monotonically_advances() -> None:
+    """Once a stage transitions to ``ok``, the gate must not silently
+    downgrade to a lower severity on a later stage."""
+    runner = _make_runner("green")
+    decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
+    # Walk the decisions in order; whenever a stage is ok, the next
+    # stage must record its own argv (not a skipped marker), and the
+    # gate must never rewind from ok to blocker without recording the
+    # blocker stage's evidence first.
+    prior_stage_outcome = "ok"  # capability is the first stage
+    for decision in decisions:
+        if prior_stage_outcome == "ok" and decision.outcome != "ok":
+            # A blocker after ok is allowed, but the evidence must
+            # carry the original argv so callers can debug.
+            assert decision.argv, (
+                "blocker after ok must record the argv that was attempted"
+            )
+        if decision.outcome == "blocked_unknown":
+            # A skip must explicitly cite the upstream blocker.
+            assert any("blocked" in ev for ev in decision.evidence), (
+                "skip marker must cite the upstream blocker"
+            )
+        prior_stage_outcome = decision.outcome
+    # Final stage has no successor.
+    assert decisions[-1].next_allowed_stage is None
+
+
+# --- T11 — REQUIRED_FLAGS is the canonical literal -----------------------
+
+
+def test_cli_probe_required_flags_is_literal() -> None:
+    assert cli_probe.REQUIRED_FLAGS == frozenset(
+        {
+            "preset check --strict",
+            "preflight --strict",
+            "run --dry-run --strict",
+        }
+    )
+
+
+# --- T12 — CapabilityReport for missing binary is synthetic ---------------
+
+
+def test_cli_probe_capability_report_for_missing_binary_is_synthetic() -> None:
+    report = cli_probe.probe_capability(binary="/nonexistent/ralph", runner=_make_missing_runner())
+    assert report.version == "missing"
+    assert report.flags_present == frozenset()
+    assert report.flags_missing == frozenset(cli_probe.REQUIRED_FLAGS)
+    assert report.json_supported is False
+    assert report.run_dry_run_supported is False
+
+
+# --- T13 — capability gate never throws even on bogus argv ----------------
+
+
+def test_cli_probe_capability_gate_does_not_throw() -> None:
+    """``probe_capability`` must always return a CapabilityReport,
+    never raise — even when every subprocess call fails."""
+    report = cli_probe.probe_capability(binary="/nonexistent/ralph", runner=_make_missing_runner())
+    assert isinstance(report, cli_probe.CapabilityReport)
+    assert report.binary == Path("/nonexistent/ralph")
+
+
+# --- T14 — argv equality across green path stages -------------------------
+
+
+def test_cli_probe_dry_run_argv_matches_expected_command_shape() -> None:
+    """The dry-run argv must be ``<binary> -c <config> -H <preset>
+    run --dry-run --strict --prompt-file <pf> --plan <plan>``."""
+    runner = _make_runner("green")
+    decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
+    dry_run = decisions[-1]
+    argv = dry_run.argv
+    assert argv[0] == "ralph"
+    assert "--dry-run" in argv
+    assert "--strict" in argv
+    # --prompt-file and its value sit together.
+    pfile_idx = argv.index("--prompt-file")
+    assert argv[pfile_idx + 1] == "PROMPT.pipeline.md"
+    plan_idx = argv.index("--plan")
+    assert argv[plan_idx + 1] == "plan.md"
+
+
+# --- T15 — load_fixture loader ------------------------------------------
+
+
+def test_cli_probe_load_fixture_returns_fake_invocations() -> None:
+    invocations = cli_probe.load_fixture("green")
+    assert invocations
+    for inv in invocations:
+        assert isinstance(inv, cli_probe.FakeInvocation)
+        assert inv.argv_expected
+        assert isinstance(inv.exit_code, int)

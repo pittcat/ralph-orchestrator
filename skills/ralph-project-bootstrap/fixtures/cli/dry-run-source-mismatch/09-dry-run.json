@@ -1,0 +1,19 @@
+{
+  "description": "stage: ralph run --dry-run --strict exits 0 but does NOT reference the requested config path",
+  "argv_expected": [
+    "ralph", "-c", "ralph.pipeline.yml", "-H", "builtin:ce-executor-pipeline",
+    "run", "--dry-run", "--strict",
+    "--prompt-file", "PROMPT.pipeline.md",
+    "--plan", "plan.md"
+  ],
+  "stdout_chunks": [
+    "dry-run: static load ok\n",
+    "loaded config_path=ralph.yml\n",
+    "preset=builtin:ce-executor-pipeline\n"
+  ],
+  "stderr_chunks": [],
+  "exit_code": 0,
+  "expected_stage": "dry_run",
+  "expected_outcome": "blocked_command",
+  "expected_blocked_reason_regex": "dry-run output does not reference requested config"
+}

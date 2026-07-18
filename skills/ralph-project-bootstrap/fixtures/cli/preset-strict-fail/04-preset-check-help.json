@@ -1,0 +1,15 @@
+{
+  "description": "probe: ralph preset check --help confirms --strict",
+  "argv_expected": ["ralph", "preset", "check", "--help"],
+  "stdout_chunks": [
+    "Usage: ralph preset check [OPTIONS]\n",
+    "\n",
+    "Options:\n",
+    "      --strict  strict preset lint\n"
+  ],
+  "stderr_chunks": [],
+  "exit_code": 0,
+  "expected_stage": "capability",
+  "expected_outcome": "ok",
+  "expected_blocked_reason_regex": ""
+}

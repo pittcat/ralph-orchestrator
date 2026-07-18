@@ -1,0 +1,18 @@
+{
+  "description": "probe: ralph run --help",
+  "argv_expected": ["ralph", "run", "--help"],
+  "stdout_chunks": [
+    "Usage: ralph run [OPTIONS]\n",
+    "\n",
+    "Options:\n",
+    "      --strict         strict mode\n",
+    "      --dry-run        static load only\n",
+    "      --prompt-file F  prompt file path\n",
+    "      --plan P         plan or task file path\n"
+  ],
+  "stderr_chunks": [],
+  "exit_code": 0,
+  "expected_stage": "capability",
+  "expected_outcome": "ok",
+  "expected_blocked_reason_regex": ""
+}

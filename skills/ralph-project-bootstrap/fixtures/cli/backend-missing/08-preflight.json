@@ -1,0 +1,13 @@
+{
+  "description": "stage: ralph preflight --strict reports missing backend executable",
+  "argv_expected": [
+    "ralph", "-c", "ralph.pipeline.yml", "-H", "builtin:ce-executor-pipeline",
+    "preflight", "--strict"
+  ],
+  "stdout_chunks": [],
+  "stderr_chunks": ["error: backend executable not found: claude-cli\n"],
+  "exit_code": 1,
+  "expected_stage": "preflight",
+  "expected_outcome": "blocked_backend",
+  "expected_blocked_reason_regex": "backend-class failure: executable not found"
+}

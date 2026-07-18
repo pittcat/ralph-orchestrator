@@ -1,0 +1,16 @@
+{
+  "description": "probe: ralph run --help lacks --dry-run (this is the missing-flag case)",
+  "argv_expected": ["ralph", "run", "--help"],
+  "stdout_chunks": [
+    "Usage: ralph run [OPTIONS]\n",
+    "\n",
+    "Options:\n",
+    "      --strict  strict mode\n",
+    "      --plan P  plan or task file path\n"
+  ],
+  "stderr_chunks": [],
+  "exit_code": 0,
+  "expected_stage": "capability",
+  "expected_outcome": "blocked_cli",
+  "expected_blocked_reason_regex": "required flags missing"
+}

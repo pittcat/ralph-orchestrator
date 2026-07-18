@@ -1,0 +1,24 @@
+{
+  "description": "probe: ralph --help lists required flags",
+  "argv_expected": ["ralph", "--help"],
+  "stdout_chunks": [
+    "Usage: ralph [OPTIONS] [COMMAND]\n",
+    "\n",
+    "Commands:\n",
+    "  preset   preset operations\n",
+    "  preflight preflight checks\n",
+    "  run       run a loop\n",
+    "\n",
+    "Options:\n",
+    "  -c PATH   config file path\n",
+    "  -H NAME   hat preset name\n",
+    "      --strict  enable strict mode\n",
+    "      --json    emit JSON output\n",
+    "      --dry-run do not actually run\n"
+  ],
+  "stderr_chunks": [],
+  "exit_code": 0,
+  "expected_stage": "capability",
+  "expected_outcome": "ok",
+  "expected_blocked_reason_regex": ""
+}

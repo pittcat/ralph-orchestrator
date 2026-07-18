@@ -1,0 +1,13 @@
+{
+  "description": "stage: ralph preset check --strict fails on unknown id",
+  "argv_expected": [
+    "ralph", "-c", "ralph.pipeline.yml", "-H", "builtin:ce-executor-pipeline",
+    "preset", "check", "--strict"
+  ],
+  "stdout_chunks": [],
+  "stderr_chunks": ["error: unknown preset id 'ce-executor-pipeline'\n"],
+  "exit_code": 1,
+  "expected_stage": "preset_check",
+  "expected_outcome": "blocked_preset",
+  "expected_blocked_reason_regex": "unknown preset id"
+}

@@ -1,0 +1,13 @@
+{
+  "description": "stage: preset check --strict passes",
+  "argv_expected": [
+    "ralph", "-c", "ralph.pipeline.yml", "-H", "builtin:ce-executor-pipeline",
+    "preset", "check", "--strict"
+  ],
+  "stdout_chunks": ["preset check ok\n"],
+  "stderr_chunks": [],
+  "exit_code": 0,
+  "expected_stage": "preset_check",
+  "expected_outcome": "ok",
+  "expected_blocked_reason_regex": ""
+}

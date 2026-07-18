@@ -188,3 +188,52 @@ that touches the filesystem; `pipeline_suite.py` itself is pure and
 returns `ApplyResult(kind, text, code, reason)` records that the
 writer then commits. See `references/suite-authoring.md` for the
 full contract.
+
+## Static Validation
+
+After the suite ships, the skill runs a four-stage static gate in
+strict order: capability → preset check → preflight → dry-run.
+The gate is implemented by `scripts/cli_probe.py`; the fake runner
+that drives it deterministically in the test suite lives in
+`scripts/_probe_runner.py`. The fixture corpus under
+`fixtures/cli/` records every argv the staged gate emits so tests
+exercise the exact contract without spawning the real binary.
+
+**Stage ordering.** Stages run in this strict order and never
+overlap. A blocker at stage N skips every stage N+1..4 with
+`outcome="blocked_unknown"` and `next_allowed_stage=None`. The
+proof level monotonically advances: `capability` → `preset_check`
+→ `preflight` → `dry_run` → terminal. A green dry-run is the
+**highest** proof level the static gate offers.
+
+**Argv shape.** Every argv the helper builds starts with
+`<binary> -c ralph.pipeline.yml -H <preset>` so the runtime cannot
+silently substitute `ralph.yml` or the default preset. The dry-run
+argv additionally carries `--dry-run` so the runtime takes its
+static-only branch and never spawns the configured backend. The
+skill NEVER adds `--skip-preflight` to the dry-run argv: strict
+preflight runs as its own stage so its failure is observable and
+fail-closed.
+
+**Static load is not loop closed.** A green dry-run proves that
+the runtime successfully parsed the config, resolved the preset
+id, loaded the prompt file, resolved the plan path, performed
+backend auto-detection, and completed its auto-preflight. It does
+NOT prove that a loop can reach any business event or that the
+configured backend can produce a coherent response. Downstream
+reports must surface "static load passed; loop not closed" and
+never claim "loop closed" based on a green dry-run alone.
+
+**Blocker classification.** Each non-green stage is classified so
+callers can route the failure correctly: `blocked_cli` for
+binary-missing or unknown-command, `blocked_preset` for strict
+preset lint failure, `blocked_backend` for missing executable /
+unknown backend / auth-not-ready, `blocked_command` for
+dry-run source mismatch, `blocked_unknown` for timeout or skipped
+stages. See `references/validation.md` for the full contract.
+
+**Runner injection.** `validate_pipeline(..., runner=...)` accepts
+a callable compatible with `subprocess.run`'s signature so tests
+can drive the gate with a fake. The default runner is
+`subprocess.run`; production callers pass nothing and inherit it.
+The helper module never spawns a real binary at import time.
