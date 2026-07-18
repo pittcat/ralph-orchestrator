@@ -520,6 +520,62 @@ def _invoke(
     return completed.stdout, completed.stderr, completed.returncode
 
 
+# Stage names in pipeline order — the iteration source of truth for
+# skip-after-block branches inside ``validate_pipeline``. Using a
+# module-level constant prevents per-call reallocation and keeps the
+# ordered tuple-style Literal / dict-key comparison cheap.
+_PIPELINE_STAGES: tuple[str, ...] = ("capability", "preset_check", "preflight", "dry_run")
+
+
+def _argv_for(stage: str, argv_by_stage: dict[str, tuple[str, ...]]) -> tuple[str, ...]:
+    """Return the precomputed argv tuple for ``stage``.
+
+    ``argv_by_stage`` is built once per ``validate_pipeline`` call so
+    every block + skip branch collapses to a dictionary lookup instead
+    of rebuilding the same argv tuple from scratch. We re-raise the
+    underlying ``KeyError`` as ``ValueError`` to match ``_build_stage_argv``'s
+    "unknown stage" contract that public callers may rely on.
+    """
+    try:
+        return argv_by_stage[stage]
+    except KeyError as exc:  # pragma: no cover - invariant guard
+        raise ValueError(f"unknown stage: {stage!r}") from exc
+
+
+def _record_block_then_skip(
+    decisions: list[StageDecision],
+    argv_by_stage: dict[str, tuple[str, ...]],
+    *,
+    block_stage: str,
+    outcome: str,
+    reason: str,
+    evidence: Iterable[str],
+    skip_stages: Iterable[str],
+    skip_reason: str,
+) -> None:
+    """Append a blocker decision followed by one skip decision per stage.
+
+    The 13 ``_block_decision`` + 9 ``_skip_decision`` pattern inside
+    ``validate_pipeline`` collapses to a single helper call: record a
+    blocker for ``block_stage`` and a skip for every stage listed in
+    ``skip_stages``. ``argv`` for each row comes from the precomputed
+    ``argv_by_stage`` map, so per-branch string composition is gone.
+    """
+    decisions.append(
+        _block_decision(
+            stage=block_stage,
+            outcome=outcome,
+            reason=reason,
+            evidence=evidence,
+            argv=_argv_for(block_stage, argv_by_stage),
+        )
+    )
+    for stage in skip_stages:
+        decisions.append(
+            _skip_decision(stage, _argv_for(stage, argv_by_stage), skip_reason)
+        )
+
+
 def validate_pipeline(
     *,
     binary: Path | str,
@@ -544,15 +600,22 @@ def validate_pipeline(
     run = runner if runner is not None else subprocess.run
     decisions: list[StageDecision] = []
 
+    # Build every stage's argv once so block + skip branches become
+    # cheap dict lookups instead of re-running ``_build_stage_argv``.
+    argv_by_stage: dict[str, tuple[str, ...]] = {
+        stage: _build_stage_argv(
+            stage,
+            binary=binary_path,
+            config_path=config_path,
+            preset=preset,
+            prompt_file=prompt_file,
+            plan_path=plan_path,
+        )
+        for stage in _PIPELINE_STAGES
+    }
+
     # ----- Stage 1: capability ----------------------------------------------
-    capability_argv = _build_stage_argv(
-        "capability",
-        binary=binary_path,
-        config_path=config_path,
-        preset=preset,
-        prompt_file=prompt_file,
-        plan_path=plan_path,
-    )
+    capability_argv = argv_by_stage["capability"]
     report = probe_capability(binary_path, runner=run)
     capability_evidence: list[str] = [
         f"version={report.version!r}",
@@ -562,52 +625,30 @@ def validate_pipeline(
         f"run_dry_run_supported={report.run_dry_run_supported}",
     ]
     if report.version == "missing":
-        decisions.append(
-            _block_decision(
-                stage="capability",
-                outcome="blocked_cli",
-                reason=f"binary not found at {binary_path}",
-                evidence=capability_evidence,
-                argv=capability_argv,
-            )
+        _record_block_then_skip(
+            decisions,
+            argv_by_stage,
+            block_stage="capability",
+            outcome="blocked_cli",
+            reason=f"binary not found at {binary_path}",
+            evidence=capability_evidence,
+            skip_stages=("preset_check", "preflight", "dry_run"),
+            skip_reason="capability gate blocked",
         )
-        for stage in ("preset_check", "preflight", "dry_run"):
-            skipped_argv = _build_stage_argv(
-                stage,
-                binary=binary_path,
-                config_path=config_path,
-                preset=preset,
-                prompt_file=prompt_file,
-                plan_path=plan_path,
-            )
-            decisions.append(
-                _skip_decision(stage, skipped_argv, "capability gate blocked")
-            )
         return tuple(decisions)
 
     if report.flags_missing or not report.run_dry_run_supported:
         missing = sorted(report.flags_missing) if report.flags_missing else ["run --dry-run"]
-        decisions.append(
-            _block_decision(
-                stage="capability",
-                outcome="blocked_cli",
-                reason=f"required flags missing: {missing}",
-                evidence=capability_evidence,
-                argv=capability_argv,
-            )
+        _record_block_then_skip(
+            decisions,
+            argv_by_stage,
+            block_stage="capability",
+            outcome="blocked_cli",
+            reason=f"required flags missing: {missing}",
+            evidence=capability_evidence,
+            skip_stages=("preset_check", "preflight", "dry_run"),
+            skip_reason="capability gate blocked",
         )
-        for stage in ("preset_check", "preflight", "dry_run"):
-            skipped_argv = _build_stage_argv(
-                stage,
-                binary=binary_path,
-                config_path=config_path,
-                preset=preset,
-                prompt_file=prompt_file,
-                plan_path=plan_path,
-            )
-            decisions.append(
-                _skip_decision(stage, skipped_argv, "capability gate blocked")
-            )
         return tuple(decisions)
 
     decisions.append(
@@ -620,90 +661,50 @@ def validate_pipeline(
     )
 
     # ----- Stage 2: preset check --strict -----------------------------------
-    preset_argv = _build_stage_argv(
-        "preset_check",
-        binary=binary_path,
-        config_path=config_path,
-        preset=preset,
-        prompt_file=prompt_file,
-        plan_path=plan_path,
-    )
+    preset_argv = argv_by_stage["preset_check"]
     preset_result = _invoke(run, preset_argv)
     if preset_result == "timeout":
-        decisions.append(
-            _block_decision(
-                stage="preset_check",
-                outcome="blocked_unknown",
-                reason=f"preset check --strict timed out after {DEFAULT_TIMEOUT}s",
-                evidence=(f"argv={list(preset_argv)}",),
-                argv=preset_argv,
-            )
+        _record_block_then_skip(
+            decisions,
+            argv_by_stage,
+            block_stage="preset_check",
+            outcome="blocked_unknown",
+            reason=f"preset check --strict timed out after {DEFAULT_TIMEOUT}s",
+            evidence=(f"argv={list(preset_argv)}",),
+            skip_stages=("preflight", "dry_run"),
+            skip_reason="preset_check blocked",
         )
-        for stage in ("preflight", "dry_run"):
-            skipped_argv = _build_stage_argv(
-                stage,
-                binary=binary_path,
-                config_path=config_path,
-                preset=preset,
-                prompt_file=prompt_file,
-                plan_path=plan_path,
-            )
-            decisions.append(
-                _skip_decision(stage, skipped_argv, "preset_check blocked")
-            )
         return tuple(decisions)
 
     if preset_result == "missing":
-        decisions.append(
-            _block_decision(
-                stage="preset_check",
-                outcome="blocked_cli",
-                reason=f"binary not found at {binary_path}",
-                evidence=(f"argv={list(preset_argv)}",),
-                argv=preset_argv,
-            )
+        _record_block_then_skip(
+            decisions,
+            argv_by_stage,
+            block_stage="preset_check",
+            outcome="blocked_cli",
+            reason=f"binary not found at {binary_path}",
+            evidence=(f"argv={list(preset_argv)}",),
+            skip_stages=("preflight", "dry_run"),
+            skip_reason="preset_check blocked",
         )
-        for stage in ("preflight", "dry_run"):
-            skipped_argv = _build_stage_argv(
-                stage,
-                binary=binary_path,
-                config_path=config_path,
-                preset=preset,
-                prompt_file=prompt_file,
-                plan_path=plan_path,
-            )
-            decisions.append(
-                _skip_decision(stage, skipped_argv, "preset_check blocked")
-            )
         return tuple(decisions)
 
     stdout, stderr, exit_code = preset_result
     if exit_code != 0:
         reason = _classify_preset_stderr(stderr)
-        decisions.append(
-            _block_decision(
-                stage="preset_check",
-                outcome="blocked_preset",
-                reason=reason,
-                evidence=(
-                    f"exit_code={exit_code}",
-                    f"stderr={stderr.strip()[:400]}",
-                ),
-                argv=preset_argv,
-            )
+        _record_block_then_skip(
+            decisions,
+            argv_by_stage,
+            block_stage="preset_check",
+            outcome="blocked_preset",
+            reason=reason,
+            evidence=(
+                f"exit_code={exit_code}",
+                f"stderr={stderr.strip()[:400]}",
+            ),
+            skip_stages=("preflight", "dry_run"),
+            skip_reason="preset_check blocked",
         )
-        for stage in ("preflight", "dry_run"):
-            skipped_argv = _build_stage_argv(
-                stage,
-                binary=binary_path,
-                config_path=config_path,
-                preset=preset,
-                prompt_file=prompt_file,
-                plan_path=plan_path,
-            )
-            decisions.append(
-                _skip_decision(stage, skipped_argv, "preset_check blocked")
-            )
         return tuple(decisions)
 
     decisions.append(
@@ -716,86 +717,49 @@ def validate_pipeline(
     )
 
     # ----- Stage 3: preflight --strict --------------------------------------
-    preflight_argv = _build_stage_argv(
-        "preflight",
-        binary=binary_path,
-        config_path=config_path,
-        preset=preset,
-        prompt_file=prompt_file,
-        plan_path=plan_path,
-    )
+    preflight_argv = argv_by_stage["preflight"]
     preflight_result = _invoke(run, preflight_argv)
     if preflight_result == "timeout":
-        decisions.append(
-            _block_decision(
-                stage="preflight",
-                outcome="blocked_unknown",
-                reason=f"preflight --strict timed out after {DEFAULT_TIMEOUT}s",
-                evidence=(f"argv={list(preflight_argv)}",),
-                argv=preflight_argv,
-            )
-        )
-        dry_run_argv = _build_stage_argv(
-            "dry_run",
-            binary=binary_path,
-            config_path=config_path,
-            preset=preset,
-            prompt_file=prompt_file,
-            plan_path=plan_path,
-        )
-        decisions.append(
-            _skip_decision("dry_run", dry_run_argv, "preflight blocked")
+        _record_block_then_skip(
+            decisions,
+            argv_by_stage,
+            block_stage="preflight",
+            outcome="blocked_unknown",
+            reason=f"preflight --strict timed out after {DEFAULT_TIMEOUT}s",
+            evidence=(f"argv={list(preflight_argv)}",),
+            skip_stages=("dry_run",),
+            skip_reason="preflight blocked",
         )
         return tuple(decisions)
 
     if preflight_result == "missing":
-        decisions.append(
-            _block_decision(
-                stage="preflight",
-                outcome="blocked_cli",
-                reason=f"binary not found at {binary_path}",
-                evidence=(f"argv={list(preflight_argv)}",),
-                argv=preflight_argv,
-            )
-        )
-        dry_run_argv = _build_stage_argv(
-            "dry_run",
-            binary=binary_path,
-            config_path=config_path,
-            preset=preset,
-            prompt_file=prompt_file,
-            plan_path=plan_path,
-        )
-        decisions.append(
-            _skip_decision("dry_run", dry_run_argv, "preflight blocked")
+        _record_block_then_skip(
+            decisions,
+            argv_by_stage,
+            block_stage="preflight",
+            outcome="blocked_cli",
+            reason=f"binary not found at {binary_path}",
+            evidence=(f"argv={list(preflight_argv)}",),
+            skip_stages=("dry_run",),
+            skip_reason="preflight blocked",
         )
         return tuple(decisions)
 
     stdout, stderr, exit_code = preflight_result
     if exit_code != 0:
         outcome, reason = _classify_preflight_stderr(stderr)
-        decisions.append(
-            _block_decision(
-                stage="preflight",
-                outcome=outcome,
-                reason=reason,
-                evidence=(
-                    f"exit_code={exit_code}",
-                    f"stderr={stderr.strip()[:400]}",
-                ),
-                argv=preflight_argv,
-            )
-        )
-        dry_run_argv = _build_stage_argv(
-            "dry_run",
-            binary=binary_path,
-            config_path=config_path,
-            preset=preset,
-            prompt_file=prompt_file,
-            plan_path=plan_path,
-        )
-        decisions.append(
-            _skip_decision("dry_run", dry_run_argv, "preflight blocked")
+        _record_block_then_skip(
+            decisions,
+            argv_by_stage,
+            block_stage="preflight",
+            outcome=outcome,
+            reason=reason,
+            evidence=(
+                f"exit_code={exit_code}",
+                f"stderr={stderr.strip()[:400]}",
+            ),
+            skip_stages=("dry_run",),
+            skip_reason="preflight blocked",
         )
         return tuple(decisions)
 
@@ -809,36 +773,31 @@ def validate_pipeline(
     )
 
     # ----- Stage 4: run --dry-run --strict ----------------------------------
-    dry_run_argv = _build_stage_argv(
-        "dry_run",
-        binary=binary_path,
-        config_path=config_path,
-        preset=preset,
-        prompt_file=prompt_file,
-        plan_path=plan_path,
-    )
+    dry_run_argv = argv_by_stage["dry_run"]
     dry_result = _invoke(run, dry_run_argv)
     if dry_result == "timeout":
-        decisions.append(
-            _block_decision(
-                stage="dry_run",
-                outcome="blocked_unknown",
-                reason=f"run --dry-run timed out after {DEFAULT_TIMEOUT}s",
-                evidence=(f"argv={list(dry_run_argv)}",),
-                argv=dry_run_argv,
-            )
+        _record_block_then_skip(
+            decisions,
+            argv_by_stage,
+            block_stage="dry_run",
+            outcome="blocked_unknown",
+            reason=f"run --dry-run timed out after {DEFAULT_TIMEOUT}s",
+            evidence=(f"argv={list(dry_run_argv)}",),
+            skip_stages=(),
+            skip_reason="",
         )
         return tuple(decisions)
 
     if dry_result == "missing":
-        decisions.append(
-            _block_decision(
-                stage="dry_run",
-                outcome="blocked_cli",
-                reason=f"binary not found at {binary_path}",
-                evidence=(f"argv={list(dry_run_argv)}",),
-                argv=dry_run_argv,
-            )
+        _record_block_then_skip(
+            decisions,
+            argv_by_stage,
+            block_stage="dry_run",
+            outcome="blocked_cli",
+            reason=f"binary not found at {binary_path}",
+            evidence=(f"argv={list(dry_run_argv)}",),
+            skip_stages=(),
+            skip_reason="",
         )
         return tuple(decisions)
 
@@ -849,30 +808,32 @@ def validate_pipeline(
         # but we still surface the backend class so callers can see it).
         outcome, reason = _classify_preflight_stderr(stderr)
         if outcome == "blocked_backend":
-            decisions.append(
-                _block_decision(
-                    stage="dry_run",
-                    outcome="blocked_backend",
-                    reason=reason,
-                    evidence=(
-                        f"exit_code={exit_code}",
-                        f"stderr={stderr.strip()[:400]}",
-                    ),
-                    argv=dry_run_argv,
-                )
-            )
-            return tuple(decisions)
-        decisions.append(
-            _block_decision(
-                stage="dry_run",
-                outcome="blocked_command",
+            _record_block_then_skip(
+                decisions,
+                argv_by_stage,
+                block_stage="dry_run",
+                outcome="blocked_backend",
                 reason=reason,
                 evidence=(
                     f"exit_code={exit_code}",
                     f"stderr={stderr.strip()[:400]}",
                 ),
-                argv=dry_run_argv,
+                skip_stages=(),
+                skip_reason="",
             )
+            return tuple(decisions)
+        _record_block_then_skip(
+            decisions,
+            argv_by_stage,
+            block_stage="dry_run",
+            outcome="blocked_command",
+            reason=reason,
+            evidence=(
+                f"exit_code={exit_code}",
+                f"stderr={stderr.strip()[:400]}",
+            ),
+            skip_stages=(),
+            skip_reason="",
         )
         return tuple(decisions)
 
