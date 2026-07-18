@@ -1,0 +1,9 @@
+{
+  "name": "fixture-node",
+  "scripts": {
+    "build": "tsc",
+    "test": "node test.js",
+    "lint": "eslint src",
+    "format": "prettier --check ."
+  }
+}

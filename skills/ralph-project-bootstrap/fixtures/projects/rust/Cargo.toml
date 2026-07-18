@@ -1,0 +1,3 @@
+[package]
+name = "fixture-rust"
+edition = "2024"
