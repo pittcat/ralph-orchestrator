@@ -18,6 +18,7 @@
         "./skills/ralph-loop",
         "./skills/ralph-preset-author",
         "./skills/ralph-preset-review",
+        "./skills/ralph-project-bootstrap",
         "./skills/ralph-run-diagnosis"
       ]
     }

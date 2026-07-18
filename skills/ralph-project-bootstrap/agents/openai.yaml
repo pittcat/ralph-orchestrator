@@ -1,0 +1,30 @@
+name: ralph-project-bootstrap
+display_name: "Ralph Project Bootstrap"
+description: |
+  Bring an arbitrary target project onto an existing Ralph preset with a
+  verified runtime suite and a clear handoff.
+when_to_use: |
+  Use when the operator needs to provision a brand-new or
+  under-provisioned target project, restore a missing Ralph pipeline
+  suite, or fix a target whose static checks fail because the suite is
+  incomplete. Do NOT use this skill to author or review presets
+  (`ralph-preset-author` / `ralph-preset-review`), to monitor or resume
+  loops (`ralph-loop`), or to diagnose a loop that already ran
+  (`ralph-run-diagnosis`).
+inputs:
+  - project_root
+  - preset (path or builtin id, already passing strict lint)
+  - plan_or_task_path
+outputs:
+  - owned AGENTS.md / CLAUDE.md updates (idempotent)
+  - ralph.pipeline.yml + PROMPT.pipeline.md (idempotent)
+  - ralph.bootstrap.yml provenance
+  - staged validation evidence + verification-level handoff
+boundaries:
+  - Does not author or review presets.
+  - Does not run loops outside an authorized smoke path.
+  - Does not mutate git history, branches, worktrees, or remote refs.
+verification_gates:
+  - ralph preset check --strict
+  - ralph preflight --strict
+  - ralph run --dry-run

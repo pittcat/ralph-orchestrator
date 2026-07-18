@@ -46,8 +46,14 @@ PUBLIC_SKILLS: tuple[str, ...] = (
     "ralph-loop",
     "ralph-preset-author",
     "ralph-preset-review",
+    "ralph-project-bootstrap",
     "ralph-run-diagnosis",
 )
+
+# The catalog above is the single source of truth for which skills are
+# public. ``discover_skills`` filters filesystem candidates by name so
+# stray ``SKILL.md`` directories cannot leak into install/listing.
+CATALOG_NAMES: frozenset[str] = frozenset(PUBLIC_SKILLS)
 
 SHARED_COMMON = "ralph-preset-common"
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -70,6 +76,12 @@ class InstallError(RuntimeError):
 
 
 def discover_skills(source: Path) -> dict[str, SkillSpec]:
+    """Return the catalog members that exist under ``source``.
+
+    Discovery is intentionally catalog-driven: ``CATALOG_NAMES`` is the
+    single source of truth, so any stray ``SKILL.md`` directory outside
+    the catalog is ignored.
+    """
     if not source.is_dir():
         raise InstallError(f"source directory not found: {source}")
     found: dict[str, SkillSpec] = {}
@@ -77,6 +89,8 @@ def discover_skills(source: Path) -> dict[str, SkillSpec]:
         if not entry.is_dir():
             continue
         if entry.name == SHARED_COMMON:
+            continue
+        if entry.name not in CATALOG_NAMES:
             continue
         if not (entry / "SKILL.md").is_file():
             continue

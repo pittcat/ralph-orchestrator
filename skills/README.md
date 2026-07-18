@@ -11,6 +11,7 @@ It ships operator skills:
 | `ralph-loop` | Run, monitor, resume, merge, debug Ralph loops |
 | `ralph-preset-author` | Draft presets (builtin + local) with per-hat AAF tables **+ payload contract notes** before review |
 | `ralph-preset-review` | Per-hat activation dry-run + **payload audit** + mechanical lint → `preset-review-report.md` |
+| `ralph-project-bootstrap` | Audit a target project, generate or safely update its AGENTS.md / CLAUDE.md / `ralph.pipeline.yml` / `PROMPT.pipeline.md` from an existing preset + plan/task, run staged validation, and hand off the official launch command |
 | `ralph-run-diagnosis` | Post-run deep diagnosis: artifacts, OPAC, mechanism vs preset attribution |
 
 `ralph-preset-common/` holds shared `references/` and fixtures (not a standalone marketplace skill).
@@ -69,6 +70,7 @@ npx skills add mikeyobrien/ralph-orchestrator \
   --skill ralph-loop \
   --skill ralph-preset-author \
   --skill ralph-preset-review \
+  --skill ralph-project-bootstrap \
   --skill ralph-run-diagnosis \
   -a claude-code \
   -y

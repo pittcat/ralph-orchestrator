@@ -1,0 +1,249 @@
+"""Public installer contract tests (Unit 1).
+
+These tests lock the contract between the public catalog
+(``skills/install.py`` + ``.claude-plugin/marketplace.json``) and the set of
+directories under ``skills/`` that ship as installable skills.
+
+The contract is intentionally behavioural rather than textual:
+
+* The single source of truth for *which* skills are public lives in the
+  installer (``PUBLIC_SKILLS``). The marketplace manifest mirrors that list
+  so plugin hosts can advertise the same set; drift between the two fails
+  this suite.
+* ``discover_skills`` must surface *only* the catalog members — adding a
+  bare ``SKILL.md`` outside the catalog must not leak into install/listing.
+* Dry-run installs do not touch disk.
+* Force install overwrites existing copies; default install keeps user copy.
+* ``--prune`` only removes skills that are not part of the requested set;
+  shared references for preset skills remain readable.
+* Unknown skill names fail closed with the canonical error.
+* Duplicate explicit requests collapse to one install.
+* ``ralph-project-bootstrap`` is present in the catalog, marketplace and
+  on disk with a non-empty ``SKILL.md`` and matching agent metadata.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+import install  # type: ignore[import-not-found]  # added via conftest sys.path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SKILLS_DIR = ROOT / "skills"
+MARKETPLACE = ROOT / ".claude-plugin" / "marketplace.json"
+PROJECT_BOOTSTRAP = SKILLS_DIR / "ralph-project-bootstrap"
+SKILL_DOC = PROJECT_BOOTSTRAP / "SKILL.md"
+AGENT_METADATA = PROJECT_BOOTSTRAP / "agents" / "openai.yaml"
+
+
+@pytest.fixture
+def fresh_target(tmp_path: Path) -> Path:
+    """Return a clean custom directory that should never exist beforehand."""
+    target = tmp_path / "skills-target"
+    assert not target.exists()
+    return target
+
+
+@pytest.fixture
+def catalog_names() -> set[str]:
+    """Names currently exposed by ``install.PUBLIC_SKILLS``."""
+    return set(install.PUBLIC_SKILLS)
+
+
+# --- catalog / marketplace parity -----------------------------------------
+
+
+def test_public_skills_constant_matches_marketplace(catalog_names: set[str]) -> None:
+    """The marketplace manifest must list every public skill exactly once."""
+    data = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
+    advertised: set[str] = set()
+    for plugin in data.get("plugins", []):
+        for skill in plugin.get("skills", []):
+            advertised.add(Path(skill).name)
+    assert advertised == catalog_names, (
+        "marketplace manifest drifted from install.PUBLIC_SKILLS: "
+        f"missing={catalog_names - advertised} extra={advertised - catalog_names}"
+    )
+
+
+def test_raph_project_bootstrap_in_catalog(catalog_names: set[str]) -> None:
+    """``ralph-project-bootstrap`` must be in the catalog from day one."""
+    assert "ralph-project-bootstrap" in catalog_names
+
+
+def test_raph_project_bootstrap_in_marketplace() -> None:
+    """The marketplace manifest must advertise the new skill."""
+    data = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
+    advertised = {
+        Path(skill).name
+        for plugin in data.get("plugins", [])
+        for skill in plugin.get("skills", [])
+    }
+    assert "ralph-project-bootstrap" in advertised
+
+
+def test_raph_project_bootstrap_on_disk() -> None:
+    """The new skill must ship with at least a SKILL.md and agent metadata."""
+    assert SKILL_DOC.is_file(), f"missing {SKILL_DOC}"
+    assert SKILL_DOC.read_text(encoding="utf-8").strip(), "SKILL.md is empty"
+    assert AGENT_METADATA.is_file(), f"missing {AGENT_METADATA}"
+    agent_text = AGENT_METADATA.read_text(encoding="utf-8")
+    assert "ralph-project-bootstrap" in agent_text, (
+        "agent metadata must reference the new skill name"
+    )
+
+
+# --- discover_skills selection --------------------------------------------
+
+
+def test_discover_skills_filters_to_catalog(tmp_path: Path) -> None:
+    """Discovery must hide any stray SKILL.md outside the catalog."""
+    decoy = tmp_path / "not-in-catalog"
+    decoy.mkdir()
+    (decoy / "SKILL.md").write_text("# decoy\n", encoding="utf-8")
+    # Mix the catalog with the decoy; only catalog entries should surface.
+    catalog_root = tmp_path / "skills"
+    catalog_root.mkdir()
+    for name in install.PUBLIC_SKILLS:
+        skill = catalog_root / name
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("# stub\n", encoding="utf-8")
+    (catalog_root / "decoy-candidate").mkdir()
+    (catalog_root / "decoy-candidate" / "SKILL.md").write_text("# x\n", encoding="utf-8")
+    discovered = install.discover_skills(catalog_root)
+    assert set(discovered) == set(install.PUBLIC_SKILLS), (
+        f"unexpected selection: extra={set(discovered) - set(install.PUBLIC_SKILLS)} "
+        f"missing={set(install.PUBLIC_SKILLS) - set(discovered)}"
+    )
+
+
+def test_select_skills_rejects_unknown() -> None:
+    """Unknown skill names must fail closed with the canonical message."""
+    available = install.discover_skills(SKILLS_DIR)
+    with pytest.raises(install.InstallError) as excinfo:
+        install.select_skills(available, ["ralph-does-not-exist"])
+    assert "unknown skill 'ralph-does-not-exist'" in str(excinfo.value)
+    assert "Known public skills" in str(excinfo.value)
+
+
+def test_select_skills_dedupes() -> None:
+    """Duplicate explicit requests collapse to a single install."""
+    available = install.discover_skills(SKILLS_DIR)
+    selected = install.select_skills(available, ["ralph-loop", "ralph-loop"])
+    assert [s.name for s in selected] == ["ralph-loop"]
+
+
+def test_select_skills_default_returns_catalog(tmp_path: Path) -> None:
+    """An empty request list returns every catalog entry, sorted by name."""
+    catalog_root = tmp_path / "skills"
+    catalog_root.mkdir()
+    for name in install.PUBLIC_SKILLS:
+        skill = catalog_root / name
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("# stub\n", encoding="utf-8")
+    available = install.discover_skills(catalog_root)
+    selected = install.select_skills(available, [])
+    assert [s.name for s in selected] == sorted(install.PUBLIC_SKILLS)
+
+
+# --- dry-run/install/prune semantics --------------------------------------
+
+
+def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SKILLS_DIR / "install.py"), *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )
+
+
+def test_dry_run_does_not_write(fresh_target: Path) -> None:
+    result = _run(["--dir", str(fresh_target), "--dry-run"])
+    assert result.returncode == 0, result.stderr
+    assert not fresh_target.exists() or not any(fresh_target.iterdir()), (
+        "dry-run must not create files"
+    )
+
+
+def test_force_install_creates_skill(fresh_target: Path) -> None:
+    result = _run(
+        [
+            "--dir",
+            str(fresh_target),
+            "--force",
+            "ralph-project-bootstrap",
+        ]
+    )
+    assert result.returncode == 0, result.stderr
+    installed = fresh_target / "ralph-project-bootstrap"
+    assert installed.is_dir()
+    assert (installed / "SKILL.md").is_file()
+
+
+def test_prune_removes_unrequested(fresh_target: Path) -> None:
+    """``--prune`` must only remove skills outside the requested set."""
+    # Seed the target with a skill that is NOT in the request set.
+    seed = fresh_target / "ralph-loop"
+    seed.mkdir(parents=True)
+    (seed / "SKILL.md").write_text("# user-edited\n", encoding="utf-8")
+    result = _run(
+        [
+            "--dir",
+            str(fresh_target),
+            "--force",
+            "--prune",
+            "ralph-project-bootstrap",
+        ]
+    )
+    assert result.returncode == 0, result.stderr
+    assert not seed.exists(), "prune must remove skills outside the request"
+    assert (fresh_target / "ralph-project-bootstrap").is_dir()
+
+
+def test_install_keeps_existing_without_force(fresh_target: Path) -> None:
+    """Default install keeps an existing copy unless ``--force`` is supplied."""
+    fresh_target.mkdir(parents=True)
+    kept = fresh_target / "ralph-loop"
+    kept.mkdir()
+    sentinel = kept / "user-note.txt"
+    sentinel.write_text("user edited me\n", encoding="utf-8")
+    (kept / "SKILL.md").write_text("# user\n", encoding="utf-8")
+    # Feed ``n`` over stdin so the interactive prompt resolves to "keep".
+    result = subprocess.run(
+        [sys.executable, str(SKILLS_DIR / "install.py"), "--dir", str(fresh_target), "ralph-loop"],
+        input="n\n",
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    assert sentinel.read_text(encoding="utf-8") == "user edited me\n"
+
+
+# --- preset shared references ---------------------------------------------
+
+
+def test_preset_skills_keep_shared_references_readable(fresh_target: Path) -> None:
+    """After install, preset skills must expose readable shared references."""
+    result = _run(["--dir", str(fresh_target), "--force", "ralph-preset-author"])
+    assert result.returncode == 0, result.stderr
+    references = fresh_target / "ralph-preset-author" / "references"
+    assert references.is_dir()
+    assert any(references.iterdir()), "shared references must be installed"
+
+
+# --- help / unknown input -------------------------------------------------
+
+
+def test_unknown_skill_cli_fails() -> None:
+    result = _run(["--dir", "/tmp/ralph-test-unused", "ralph-not-a-real-skill"])
+    assert result.returncode != 0
+    assert "unknown skill" in result.stderr
