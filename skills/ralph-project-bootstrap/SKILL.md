@@ -131,3 +131,60 @@ only. The helper never opens a shell, never touches the `.ralph/`
 directory in the target project, and never changes file permissions.
 On any platform where `os.replace` is unavailable the helper must fail
 closed before any partial state is observed.
+
+## Pipeline Suite Authoring
+
+The pipeline suite (`ralph.pipeline.yml`, `PROMPT.pipeline.md`,
+`ralph.bootstrap.yml`) is generated and safely maintained by
+`scripts/pipeline_suite.py`. The helper owns exactly three files
+inside the target project and never touches `AGENTS.md` /
+`CLAUDE.md` (those flow through `agent_docs.py`) or the runtime
+ledger under `.ralph/`.
+
+**Owned keys.** `ralph.pipeline.yml` carries exactly four owned keys
+under a top-level `_bootstrap:` mapping: `preset`, `plan`,
+`prompt_file`, `preflight`. Anything outside that block is
+operator-owned and is preserved byte-for-byte across recompositions,
+including comments, blank lines, key ordering, and quote style on
+non-owned keys. The helper rejects duplicate top-level keys (other
+than a single `_bootstrap:`) with
+`OwnedYamlError("duplicate_yaml_key")`.
+
+**Config precedence.** The runtime auto-discovers `ralph.yml` as a
+default config. To prevent it from preempting the suite, every
+verification command the helper emits MUST carry
+`-c ralph.pipeline.yml -H <preset>`. The helper never writes
+`ralph.yml`, never references it in commands, and the
+`config-precedence` fixture is the canonical regression for this
+contract.
+
+**Provenance.** `ralph.bootstrap.yml` records `generator_version`,
+`input_signature` (SHA-256 of `preset + "|" + plan_path + "|" +
+cwd_anchor`), the owned-keys tuple, and a per-file SHA-256 of the
+on-disk suite bytes. `upgrade_provenance(existing, new)` returns:
+
+* `noop` when the on-disk record byte-equals the freshly-rendered one.
+* `upgraded` when the on-disk record differs but the
+  `input_signature` and per-file SHA-256s still match the current
+  compose; the freshly-rendered text is returned so the caller can
+  write it back.
+* `blocker(owned_value_user_modified | provenance_corrupt | input_signature_changed)`
+  when the operator hand-edited the owned section, when the on-disk
+  text is unparseable, or when the inputs the suite was generated
+  against no longer match the current compose.
+
+**Forbidden in emitted bytes.** The prompt must never reference
+`ralph-hats` or any specific preset name; it must never mention the
+runtime managed-block markers (`RALPH-MANAGED-BLOCK`,
+`RALPH-BOOTSTRAP-START`) or any internal ledger path
+(`.ralph/events.jsonl`, `.ralph/supervisor.db`). Every persisted
+scalar must be repo-relative: absolute paths are rejected by the
+helper with `OwnedYamlError("owned_yaml_invalid")` at every render
+entry point.
+
+**Atomic writes.** The pipeline suite is persisted via
+`AtomicWriter` from `agent_docs.py`. The writer is the only place
+that touches the filesystem; `pipeline_suite.py` itself is pure and
+returns `ApplyResult(kind, text, code, reason)` records that the
+writer then commits. See `references/suite-authoring.md` for the
+full contract.

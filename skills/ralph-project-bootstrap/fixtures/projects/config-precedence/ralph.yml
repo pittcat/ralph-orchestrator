@@ -1,0 +1,6 @@
+# Default auto-discovered config that the runtime would pick up if the
+# operator did NOT pass ``-c ralph.pipeline.yml``. The bootstrap
+# pipeline must never let this file preempt the suite.
+event_loop:
+  backend: claude
+  prompt_file: PROMPT.default.md

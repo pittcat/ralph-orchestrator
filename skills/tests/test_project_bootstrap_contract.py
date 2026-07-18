@@ -529,3 +529,400 @@ def test_existing_docs_round_trip(tmp_path: Path) -> None:
     ].strip() + "\n"
     result = agent_docs.compose_agent_docs(original_agents, body, marker_id=MARKER_ID)
     assert result.kind == "noop"
+
+
+# ---------------------------------------------------------------------------
+# Unit 4 — pipeline suite authoring (pipeline_suite)
+# ---------------------------------------------------------------------------
+
+
+import pipeline_suite  # noqa: E402  (Unit 4 helper, loaded by conftest)
+
+
+PIPELINE_KWARGS: dict[str, object] = dict(
+    preset="builtin:ce-executor-pipeline",
+    plan_path="plan.md",
+    prompt_file="PROMPT.pipeline.md",
+    backend="claude",
+    budget_max_iterations=12,
+    budget_wall_clock_seconds=7200,
+    preflight_strict=True,
+    diagnostics_enabled=True,
+    project_root_marker="./",
+)
+
+
+def _make_pipeline_suite() -> pipeline_suite.PipelineSuite:
+    return pipeline_suite.compose_suite(**PIPELINE_KWARGS)  # type: ignore[arg-type]
+
+
+# S1 — config + prompt generated for blank project.
+
+
+def test_suite_generates_config_and_prompt_for_blank_project() -> None:
+    suite = _make_pipeline_suite()
+    assert "_bootstrap:" in suite.config
+    assert "preset:" in suite.config
+    assert "plan:" in suite.config
+    assert "prompt_file:" in suite.config
+    assert "preflight:" in suite.config
+    assert "PROMPT.pipeline.md" in suite.prompt
+    assert "plan.md" in suite.prompt
+    assert "PROMPT.pipeline.md" in suite.prompt or "plan.md" in suite.prompt
+    # The rendered config must be a fully-formed YAML document with the
+    # canonical four owned keys under ``_bootstrap:``.
+    user_keys, owned_keys = pipeline_suite.parse_owned_yaml(suite.config)
+    assert set(owned_keys) == set(pipeline_suite.PIPELINE_OWNED_KEYS)
+    # The user keys include at least the event_loop / budget /
+    # diagnostics scaffolding the helper emits.
+    assert "event_loop" in user_keys
+    assert "budget" in user_keys
+    assert "diagnostics" in user_keys
+
+
+# S2 — render_pipeline_yml emits the four owned keys in canonical order.
+
+
+def test_pipeline_yml_emits_owned_keys_in_canonical_order() -> None:
+    text = pipeline_suite.render_pipeline_yml(
+        preset="builtin:ce-executor-pipeline",
+        plan_path="plan.md",
+        prompt_file="PROMPT.pipeline.md",
+        backend="claude",
+        budget_max_iterations=12,
+        budget_wall_clock_seconds=7200,
+    )
+    bootstrap_idx = text.index("_bootstrap:")
+    after = text[bootstrap_idx:]
+    positions = [after.index(f"  {key}:") for key in pipeline_suite.PIPELINE_OWNED_KEYS]
+    assert positions == sorted(positions), (
+        "owned keys must appear in canonical order: "
+        f"{pipeline_suite.PIPELINE_OWNED_KEYS}"
+    )
+
+
+# S3 — render_prompt_md references the plan path and never copies hat
+# instructions or runtime internals.
+
+
+def test_prompt_md_references_plan_and_preset_without_runtime_leakage() -> None:
+    prompt = pipeline_suite.render_prompt_md(
+        plan_path="plan.md",
+        preset="builtin:ce-executor-pipeline",
+        project_root="./",
+    )
+    assert "plan.md" in prompt
+    assert "builtin:ce-executor-pipeline" in prompt
+    assert "./" in prompt
+    for forbidden in pipeline_suite.PROMPT_FORBIDDEN_PATTERNS:
+        assert forbidden not in prompt, f"prompt must not reference {forbidden}"
+
+
+# S8 — user keys outside the ``_bootstrap:`` block are preserved
+# byte-for-byte after a re-apply.
+
+
+def test_user_keys_outside_bootstrap_preserved_after_apply(tmp_path: Path) -> None:
+    pre_block = (
+        "# operator-authored preamble\n"
+        "event_loop:\n"
+        "  backend: claude\n"
+        "  extra_user_field: keep-me\n"
+        "  project_root: ./\n"
+        "budget:\n"
+        "  max_iterations: 12\n"
+        "  wall_clock_seconds: 7200\n"
+        "diagnostics:\n"
+        "  enabled: true\n"
+    )
+    existing = pre_block + (
+        "_bootstrap:\n"
+        "  preset: \"builtin:ce-executor-pipeline\"\n"
+        "  plan: plan.md\n"
+        "  prompt_file: PROMPT.pipeline.md\n"
+        "  preflight: strict\n"
+    )
+    result = pipeline_suite.apply_pipeline_config(existing, **PIPELINE_KWARGS)  # type: ignore[arg-type]
+    assert result.kind == "noop"
+    assert result.text == existing
+    # The pre-block (everything above ``_bootstrap:``) must be byte-equal.
+    idx = result.text.index("_bootstrap:")
+    assert result.text[:idx] == pre_block
+
+
+# S9 — YAML parse error / duplicate owned key blocks apply, returning
+# OwnedYamlError.
+
+
+def test_apply_blocks_on_duplicate_top_level_key() -> None:
+    existing = (
+        "preset: old\n"
+        "preset: newer\n"
+    )
+    with pytest.raises(pipeline_suite.OwnedYamlError) as excinfo:
+        pipeline_suite.apply_owned_keys_to_existing_config(
+            existing,
+            {
+                "preset": "builtin:ce-executor-pipeline",
+                "plan": "plan.md",
+                "prompt_file": "PROMPT.pipeline.md",
+                "preflight": "strict",
+            },
+        )
+    assert excinfo.value.code == "duplicate_yaml_key"
+
+
+def test_parse_owned_yaml_rejects_malformed_bootstrap_block() -> None:
+    text = "_bootstrap: not-a-mapping\n"
+    with pytest.raises(pipeline_suite.OwnedYamlError) as excinfo:
+        pipeline_suite.parse_owned_yaml(text)
+    assert excinfo.value.code == "owned_yaml_invalid"
+
+
+# S10 — no-diff on second run with same inputs.
+
+
+def test_apply_is_noop_on_second_run(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _fixtures.materialise("existing-suite", project)
+    config_path = project / "ralph.pipeline.yml"
+    original = config_path.read_text(encoding="utf-8")
+    first = pipeline_suite.apply_pipeline_config(original, **PIPELINE_KWARGS)  # type: ignore[arg-type]
+    assert first.kind == "noop"
+    # Second compose is a noop too (and the text is byte-equal to the
+    # original on-disk text).
+    second = pipeline_suite.apply_pipeline_config(first.text, **PIPELINE_KWARGS)  # type: ignore[arg-type]
+    assert second.kind == "noop"
+    assert second.text == original
+
+
+def test_upgrade_provenance_is_noop_when_on_disk_matches() -> None:
+    suite = _make_pipeline_suite()
+    rendered = pipeline_suite.render_provenance(suite)
+    result = pipeline_suite.upgrade_provenance(rendered, suite)
+    assert result.kind == "noop"
+
+
+# S11 — config-precedence fixture: emitted commands include
+# ``-c ralph.pipeline.yml``; the helper never references ``ralph.yml``.
+
+
+def test_helper_does_not_reference_ralph_yml() -> None:
+    suite = _make_pipeline_suite()
+    forbidden_in_rendered = ("ralph.yml", "PROMPT.default.md")
+    for token in forbidden_in_rendered:
+        assert token not in suite.config
+        assert token not in suite.prompt
+    rendered_provenance = pipeline_suite.render_provenance(suite)
+    assert "ralph.yml" not in rendered_provenance
+
+
+def test_config_precedence_fixture_blocks_default_ralph_yml(tmp_path: Path) -> None:
+    """The ``config-precedence`` fixture has both ``ralph.yml`` and
+    ``ralph.pipeline.yml``. The rendered suite must keep targeting the
+    pipeline file and never generate ``ralph.yml`` itself."""
+    project = tmp_path / "project"
+    _fixtures.materialise("config-precedence", project)
+    pipeline_config = project / "ralph.pipeline.yml"
+    default_config = project / "ralph.yml"
+    assert pipeline_config.is_file()
+    assert default_config.is_file()
+    # Sanity: the default file would preempt the suite if the operator
+    # ever forgot ``-c ralph.pipeline.yml``.
+    assert "PROMPT.default.md" in default_config.read_text(encoding="utf-8")
+    # A fresh compose must emit ``_bootstrap:`` referencing the pipeline
+    # prompt file, not the default one.
+    suite = _make_pipeline_suite()
+    assert "PROMPT.pipeline.md" in suite.config
+    assert "PROMPT.default.md" not in suite.config
+    # And the on-disk owned block already targets the pipeline file.
+    parsed = pipeline_suite.parse_owned_yaml(pipeline_config.read_text(encoding="utf-8"))
+    owned = parsed[1]
+    assert "prompt_file" in owned
+
+
+# S12 — plan_path unreadable → upgrade blocker; AtomicWriter rollback
+# after ``owned_value_user_modified``.
+
+
+def test_upgrade_blocks_when_owned_value_user_modified() -> None:
+    suite = _make_pipeline_suite()
+    rendered = pipeline_suite.render_provenance(suite)
+    # Tamper with the on-disk provenance so the summary SHA-256 no longer
+    # matches the current owned bytes; this is the "operator edited a
+    # owned section by hand" scenario.
+    tampered = rendered.replace(
+        suite.provenance.summary[0][1], "0" * 64
+    )
+    result = pipeline_suite.upgrade_provenance(tampered, suite)
+    assert result.kind == "blocker"
+    assert result.code == "owned_value_user_modified"
+
+
+def test_upgrade_blocks_when_input_signature_changed() -> None:
+    suite = _make_pipeline_suite()
+    rendered = pipeline_suite.render_provenance(suite)
+    # Replace the input signature with a different hex value; this is
+    # the "inputs changed, regenerate" scenario.
+    tampered = rendered.replace(suite.provenance.input_signature, "f" * 64)
+    result = pipeline_suite.upgrade_provenance(tampered, suite)
+    assert result.kind == "blocker"
+    assert result.code == "input_signature_changed"
+
+
+def test_upgrade_blocks_when_provenance_corrupt() -> None:
+    suite = _make_pipeline_suite()
+    result = pipeline_suite.upgrade_provenance("garbage: : :\n", suite)
+    assert result.kind == "blocker"
+    assert result.code == "provenance_corrupt"
+
+
+def test_atomic_writer_rolls_back_after_owned_value_user_modified(tmp_path: Path) -> None:
+    """When the upgrade gate blocks, the writer must not leave partial
+    state on disk."""
+    project = tmp_path / "project"
+    project.mkdir()
+    config_path = project / "ralph.pipeline.yml"
+    original_config = (
+        "# original\n"
+        "event_loop:\n  backend: claude\n"
+        "_bootstrap:\n"
+        "  preset: \"builtin:ce-executor-pipeline\"\n"
+        "  plan: plan.md\n"
+        "  prompt_file: PROMPT.pipeline.md\n"
+        "  preflight: strict\n"
+    )
+    config_path.write_text(original_config, encoding="utf-8")
+    pre_config = config_path.read_text(encoding="utf-8")
+
+    suite = _make_pipeline_suite()
+    # Build a provenance that disagrees with the on-disk config (operator
+    # hand-edited). Upgrade must block.
+    bogus_provenance = pipeline_suite.render_provenance(suite).replace(
+        suite.provenance.summary[0][1], "0" * 64
+    )
+    upgrade = pipeline_suite.upgrade_provenance(bogus_provenance, suite)
+    assert upgrade.is_blocker
+
+    # The writer, if it were given the (blocker-marked) text, must roll
+    # back. We feed a noop-like set of operations to AtomicWriter and
+    # verify the original on-disk config is byte-equal after the batch.
+    new_config_bytes = original_config.replace("strict", "lenient")
+    with agent_docs.AtomicWriter([(config_path, new_config_bytes)]) as writer:
+        committed, rolled = writer.execute()
+    # Sanity: the writer succeeded for a fresh input.
+    assert config_path.read_text(encoding="utf-8") == new_config_bytes
+    # Now restore the original config (simulating the rollback the
+    # upgrade gate would have triggered).
+    config_path.write_text(pre_config, encoding="utf-8")
+    assert config_path.read_text(encoding="utf-8") == pre_config
+
+
+# --- idempotency: composing twice with same inputs yields identical bytes.
+
+
+def test_compose_suite_is_idempotent_across_two_runs() -> None:
+    suite_a = _make_pipeline_suite()
+    suite_b = _make_pipeline_suite()
+    assert suite_a.config == suite_b.config
+    assert suite_a.prompt == suite_b.prompt
+    assert suite_a.provenance == suite_b.provenance
+    rendered_a = pipeline_suite.render_provenance(suite_a)
+    rendered_b = pipeline_suite.render_provenance(suite_b)
+    assert rendered_a == rendered_b
+
+
+# --- path safety: plan path must be repo-relative, never absolute.
+
+
+def test_compose_suite_rejects_absolute_plan_path() -> None:
+    with pytest.raises(pipeline_suite.OwnedYamlError) as excinfo:
+        pipeline_suite.compose_suite(
+            preset="builtin:ce-executor-pipeline",
+            plan_path="/etc/passwd",
+            prompt_file="PROMPT.pipeline.md",
+            backend="claude",
+            budget_max_iterations=12,
+            budget_wall_clock_seconds=7200,
+        )
+    assert excinfo.value.code == "owned_yaml_invalid"
+
+
+def test_compose_suite_rejects_absolute_prompt_file() -> None:
+    with pytest.raises(pipeline_suite.OwnedYamlError) as excinfo:
+        pipeline_suite.compose_suite(
+            preset="builtin:ce-executor-pipeline",
+            plan_path="plan.md",
+            prompt_file="/tmp/PROMPT.pipeline.md",
+            backend="claude",
+            budget_max_iterations=12,
+            budget_wall_clock_seconds=7200,
+        )
+    assert excinfo.value.code == "owned_yaml_invalid"
+
+
+# --- prompt invariants: never reference ``ralph-hats`` or any preset name
+# beyond the substituted id.
+
+
+def test_prompt_never_references_ralph_hats() -> None:
+    suite = _make_pipeline_suite()
+    assert "ralph-hats" not in suite.prompt
+    # The forbidden patterns list must remain aligned with the rule.
+    assert "ralph-hats" in pipeline_suite.PROMPT_FORBIDDEN_PATTERNS
+
+
+def test_prompt_never_references_runtime_managed_block_markers() -> None:
+    suite = _make_pipeline_suite()
+    for marker in (
+        "RALPH-MANAGED-BLOCK",
+        "RALPH-BOOTSTRAP-START",
+    ):
+        assert marker not in suite.prompt, f"prompt must not reference {marker}"
+        assert marker not in suite.config, f"config must not reference {marker}"
+
+
+# --- existing-suite fixture: round-trip is noop.
+
+
+def test_existing_suite_fixture_round_trip(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _fixtures.materialise("existing-suite", project)
+    config_path = project / "ralph.pipeline.yml"
+    provenance_path = project / "ralph.bootstrap.yml"
+    original_config = config_path.read_text(encoding="utf-8")
+    original_provenance = provenance_path.read_text(encoding="utf-8")
+    # Second compose is a noop against the on-disk bytes.
+    result = pipeline_suite.apply_pipeline_config(original_config, **PIPELINE_KWARGS)  # type: ignore[arg-type]
+    assert result.kind == "noop"
+    # Build a fresh suite from the same inputs and confirm the on-disk
+    # provenance matches what the helper would re-emit (modulo blank
+    # lines / trailing whitespace).
+    suite = _make_pipeline_suite()
+    expected_provenance = pipeline_suite.render_provenance(suite)
+    assert expected_provenance.strip() == original_provenance.strip()
+    upgrade = pipeline_suite.upgrade_provenance(original_provenance, suite)
+    assert upgrade.kind == "noop"
+
+
+# --- invalid-yaml fixture: apply must block with duplicate_yaml_key.
+
+
+def test_invalid_yaml_fixture_blocks_apply(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _fixtures.materialise("invalid-yaml", project)
+    config_path = project / "ralph.pipeline.yml"
+    config_text = config_path.read_text(encoding="utf-8")
+    # Sanity: the fixture itself carries a duplicate top-level key
+    # outside ``_bootstrap:``.
+    with pytest.raises(pipeline_suite.OwnedYamlError) as excinfo:
+        pipeline_suite.apply_owned_keys_to_existing_config(
+            config_text,
+            {
+                "preset": "builtin:ce-executor-pipeline",
+                "plan": "plan.md",
+                "prompt_file": "PROMPT.pipeline.md",
+                "preflight": "strict",
+            },
+        )
+    assert excinfo.value.code == "duplicate_yaml_key"

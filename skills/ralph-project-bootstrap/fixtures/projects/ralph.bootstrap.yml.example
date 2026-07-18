@@ -1,0 +1,22 @@
+# Example ralph.bootstrap.yml
+#
+# This file is committed to the test repo so reviewers can see the
+# canonical shape of a provenance record. It MUST NOT contain real
+# credentials, real plan contents, or anything that ties back to a
+# specific operator machine. The placeholder bytes below are inert;
+# they do not correspond to any real suite on disk.
+#
+# See ``references/suite-authoring.md`` for the field contract.
+
+generator_version: 0.1.0
+input_signature: 0000000000000000000000000000000000000000000000000000000000000000
+owned_keys:
+  - preset
+  - plan
+  - prompt_file
+  - preflight
+summary:
+  - file: ralph.pipeline.yml
+    sha256: 1111111111111111111111111111111111111111111111111111111111111111
+  - file: PROMPT.pipeline.md
+    sha256: 2222222222222222222222222222222222222222222222222222222222222222
