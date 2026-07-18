@@ -38,6 +38,7 @@ for _name, _path in (
     ("_paths", _BOOTSTRAP_SCRIPTS / "_paths.py"),
     ("audit", _BOOTSTRAP_SCRIPTS / "audit.py"),
     ("_fixtures", _BOOTSTRAP_SCRIPTS / "_fixtures.py"),
+    ("agent_docs", _BOOTSTRAP_SCRIPTS / "agent_docs.py"),
 ):
     if _path.is_file():
         _load(_name, _path)

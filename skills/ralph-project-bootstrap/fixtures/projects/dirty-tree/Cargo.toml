@@ -1,0 +1,3 @@
+[package]
+name = "dirty-tree"
+edition = "2024"

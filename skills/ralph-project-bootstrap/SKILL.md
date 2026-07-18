@@ -64,3 +64,70 @@ and vetted by `ralph-preset-review`.
 - All paths written to disk must be repo-relative.
 - Stop and request operator decision on any conflict / ambiguity;
   defaulting to "best guess" is forbidden.
+
+## Agent Docs Maintenance
+
+`AGENTS.md` and `CLAUDE.md` in the target project are mutated only via
+the helpers in `scripts/agent_docs.py`. The helper is a pure stdlib
+module that owns every persistent edit through a single managed
+section.
+
+**Marker format.** Each doc carries exactly one managed block, fenced
+by `<!-- RALPH-BOOTSTRAP-START: <marker_id> v1 -->` /
+`<!-- RALPH-BOOTSTRAP-END: <marker_id> -->` lines. The boundary markers
+themselves are HTML comments so editors that strip comments will
+silently corrupt the section; the writer never inserts anything outside
+that block. The prefix `RALPH-BOOTSTRAP-` is reserved and must not be
+used elsewhere in the doc. The block ends exactly at the END marker
+(no trailing newline emitted by the helper) so any whitespace the
+operator wants after the block passes through compose byte-for-byte.
+
+**Distinct from runtime managed blocks.** The runtime loop ledger uses
+`RALPH-MANAGED-BLOCK-START` / `END` markers for its own scratch state.
+The bootstrap marker prefix is intentionally distinct; the two
+namespaces must not overlap. The parser checks the prefix string
+literally so a runtime-managed block in the same doc does not
+register as a bootstrap section.
+
+**Idempotency.** `compose_agent_docs` is a pure function over its
+arguments. Running it twice with the same inputs returns `noop` on the
+second call, never rewrites the file, and never emits `updated`. This
+guarantee is enforced by `test_compose_is_idempotent_across_two_runs`
+in the contract suite.
+
+**Dirty-tree protection.** A bootstrap write batch targets only the
+caller-supplied paths via `AtomicWriter`. The writer has no business
+walking the tree, never opens directories, and never invents new file
+names. `src/lib.rs` and any other operator-owned file must be byte-for-
+byte identical before and after a batch. The `dirty-tree` fixture is
+the canonical regression for this contract.
+
+**Conflict handling.** A doc with zero markers is `Missing` (compose
+appends a fresh section). A doc with one START and one END is `Ok`
+(compose may replace). Anything else is a hard blocker: `Duplicate`
+(multiple START/END), `Truncated` (START without END), or `Nested`
+(END before START). The compose call returns
+`ComposeResult(kind="blocker", code="marker_...", reason=...)` and the
+operator must reconcile by hand. The skill must surface that blocker;
+defaulting to a best-guess rewrite is forbidden by the guardrails
+section above.
+
+**Sync between AGENTS.md and CLAUDE.md.** When the caller passes
+`sync_with_other_doc=True` with `other_body=...`, the helper checks
+that the proposed bodies agree before composing either side. Mismatches
+return `blocker(sync_mirror_conflict)` so asymmetric pairs are never
+written. The `conflicting-docs` fixture is the canonical regression.
+
+**Atomic writes.** `AtomicWriter` stages every target into a sibling
+`.{name}.bootstrap.tmp` first, then commits each target with
+`os.replace`. If any stage or commit fails, every already-committed
+target is restored to its pre-batch bytes (or deleted if it did not
+exist) and every planned target is reported in `rolled_back`. No
+`.bootstrap.tmp` file is left behind. The `test_atomic_writer_*`
+suite is the canonical regression.
+
+**No shell, no `.ralph/`, no chmod.** The writer uses stdlib file IO
+only. The helper never opens a shell, never touches the `.ralph/`
+directory in the target project, and never changes file permissions.
+On any platform where `os.replace` is unavailable the helper must fail
+closed before any partial state is observed.
