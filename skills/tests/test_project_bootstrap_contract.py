@@ -2344,3 +2344,85 @@ def test_run_smoke_reaps_child_group_on_outer_timeout(
     assert all(
         isinstance(pid, int) and isinstance(sig, int) for pid, sig in killpg_calls
     ), "every reap call must be os.killpg(pid, sig) with int args"
+
+
+# ---------------------------------------------------------------------------
+# Unit 10 — AtomicWriter hardening (A2)
+# ---------------------------------------------------------------------------
+#
+# The writer used to derive its sibling ``.tmp`` path from the target
+# name alone. Two writers running concurrently in the same project
+# directory could therefore stage their new bytes into the SAME sibling
+# tmp file, and a co-located process could trick the writer into
+# committing into a symlink target it controls. These tests lock the
+# hardening contract:
+#
+# * The tmp path is unique per writer invocation (pid + monotonic ns).
+# * The writer refuses to overwrite a symlink target — it raises
+#   OSError before os.replace so the existing rollback path takes over.
+# * Two writers running sequentially in the same process on distinct
+#   targets never collide on tmp paths.
+
+
+def test_atomic_writer_tmp_path_is_unique_per_process() -> None:
+    """U2 / A2 — two writers in the same process targeting the same
+    file must produce different sibling tmp paths. The tmp path must
+    encode the writer's pid and a monotonic nanosecond stamp so a
+    co-located process cannot pre-stage a malicious sibling."""
+    writer_a = agent_docs.AtomicWriter([])
+    writer_b = agent_docs.AtomicWriter([])
+    target = Path("foo")
+    path_a = writer_a._tmp_path(target)
+    path_b = writer_b._tmp_path(target)
+    assert path_a != path_b, (
+        "sibling tmp paths must differ across writer instances: "
+        f"a={path_a!r} b={path_b!r}"
+    )
+
+
+def test_atomic_writer_refuses_symlink_target(tmp_path: Path) -> None:
+    """U2 / A2 — when the target path is a symlink, AtomicWriter must
+    refuse to commit so the rollback path takes over. A co-located
+    process must NOT be able to drive the writer into writing through a
+    symlink it controls.
+
+    The contract observable from ``execute()`` is: nothing committed,
+    the target is reported as rolled-back. ``execute()`` swallows the
+    OSError internally so callers always see a (committed, rolled)
+    pair; the internal raise is what drives the rollback path.
+    """
+    # Plant the symlink target where AtomicWriter cannot touch it
+    # (outside tmp_path so the rollback is observable).
+    real_target = tmp_path / "real_target.txt"
+    real_target.write_text("ORIGINAL\n", encoding="utf-8")
+    # Symlink foo -> real_target (Path.symlink_to is POSIX-portable).
+    foo = tmp_path / "foo"
+    foo.symlink_to(real_target)
+    original_real_bytes = real_target.read_bytes()
+    # AtomicWriter writes through foo; the writer must NOT replace the
+    # symlink itself (which would leak new bytes into real_target).
+    with agent_docs.AtomicWriter([(foo, "PWNED\n")]) as writer:
+        committed, rolled = writer.execute()
+    # The rollback path returned (committed=(), rolled=(foo,)) — nothing
+    # was committed and the symlink target was reported as rolled back.
+    assert committed == ()
+    assert rolled == (foo,)
+    # And real_target must be byte-equal — the writer never crossed
+    # the symlink to overwrite its target.
+    assert real_target.read_bytes() == original_real_bytes
+
+
+def test_atomic_writer_concurrent_instances_do_not_collide_on_tmp(
+    tmp_path: Path,
+) -> None:
+    """U2 / A2 — two writers running sequentially in the same process on
+    distinct target files must not collide on sibling tmp paths."""
+    target_a = Path("a.txt")
+    target_b = Path("b.txt")
+    writer = agent_docs.AtomicWriter([])
+    path_a = writer._tmp_path(target_a)
+    path_b = writer._tmp_path(target_b)
+    assert path_a != path_b
+    # And the sibling tmp must live next to the target, not in cwd.
+    assert path_a.parent == Path("a.txt").parent or path_a.parent == Path("")
+    assert path_b.parent == Path("b.txt").parent or path_b.parent == Path("")

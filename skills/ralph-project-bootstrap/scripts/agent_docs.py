@@ -22,9 +22,10 @@ Design rules (enforced by the helpers themselves):
   passed through byte-for-byte; the helper never rewrites unknown
   markers, comments, or trailing prose.
 * **Writes are atomic per batch.** ``AtomicWriter`` queues every change
-  into a sibling ``.tmp`` first and rolls back already-staged siblings
-  on the first failure so a partial write can never leave a
-  half-updated pair of docs.
+  into a sibling ``.bootstrap.tmp`` (uniquely named per writer
+  invocation via pid + monotonic-ns) first and rolls back
+  already-staged siblings on the first failure so a partial write can
+  never leave a half-updated pair of docs.
 * **No shell, no chmod, no ``.ralph/`` in the target project.** All
   operations are pure stdlib file I/O scoped to the project directory.
 """
@@ -32,6 +33,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -40,6 +42,12 @@ from typing import Iterable, Sequence
 MARKER_PREFIX = "RALPH-BOOTSTRAP"
 RUNTIME_MARKER_PREFIX = "RALPH-MANAGED-BLOCK"  # must never appear here.
 MARKER_VERSION = "v1"
+
+# Sibling-tmp suffix for ``AtomicWriter._tmp_path``. The writer derives
+# the rest of the tmp filename from the writer's pid and a monotonic
+# nanosecond stamp so two writers in the same process never collide on
+# the sibling path.
+_TMP_SUFFIX = ".bootstrap.tmp"
 
 
 def _start_marker(marker_id: str) -> str:
@@ -273,6 +281,7 @@ class _PlannedWrite:
     target: Path
     original: str | None  # None when the file did not exist before
     new_content: str
+    tmp: Path  # sibling tmp path locked in at stage time
 
 
 class AtomicWriter:
@@ -285,10 +294,13 @@ class AtomicWriter:
 
     ``operations`` is an iterable of ``(target_path, new_content)``
     pairs. The writer first stages every pair into a sibling
-    ``.{name}.bootstrap.tmp`` file, then commits each target with an
-    atomic ``os.replace``. If staging or committing any target fails,
-    the writer rolls back every staged sibling so a partial update can
-    never be observed by the next read.
+    ``.{name}.{pid}.{monotonic_ns}.bootstrap.tmp`` file, then commits
+    each target with an atomic ``os.replace``. If staging or
+    committing any target fails, the writer rolls back every staged
+    sibling so a partial update can never be observed by the next
+    read. Commits also refuse to follow symlink targets so a
+    co-located process cannot drive the writer into writing through a
+    symlink it controls.
     """
 
     def __init__(self, operations: Iterable[tuple[Path | str, str]]) -> None:
@@ -341,18 +353,34 @@ class AtomicWriter:
 
     def _stage(self, target: Path, new_content: str) -> _PlannedWrite:
         original = target.read_text(encoding="utf-8") if target.exists() else None
+        # Lock the tmp path at stage time so _commit and _rollback see the
+        # same sibling file even though _tmp_path embeds a fresh
+        # monotonic-ns stamp per call.
+        tmp = self._tmp_path(target)
         planned = _PlannedWrite(
-            target=target, original=original, new_content=new_content
+            target=target, original=original, new_content=new_content, tmp=tmp
         )
         self._planned.append(planned)
-        tmp = self._tmp_path(target)
         tmp.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(new_content, encoding="utf-8")
         return planned
 
     def _commit(self, target: Path, new_content: str) -> None:
-        tmp = self._tmp_path(target)
-        os.replace(tmp, target)
+        if target.is_symlink():
+            # A co-located process can replace the target with a
+            # symlink between _stage and _commit. Refuse to follow
+            # symlinks here so the existing rollback path takes over
+            # instead of writing through the symlink into attacker-
+            # controlled bytes.
+            raise OSError("AtomicWriter refuses to overwrite symlink target")
+        planned = self._planned_for(target)
+        os.replace(planned.tmp, target)
+
+    def _planned_for(self, target: Path) -> _PlannedWrite:
+        for planned in self._planned:
+            if planned.target == target:
+                return planned
+        raise LookupError(f"no planned write for target {target!r}")
 
     def _rollback(
         self, *, committed: Sequence[Path], report_all_planned: bool = False
@@ -360,7 +388,7 @@ class AtomicWriter:
         rolled: list[Path] = []
         for planned in self._planned:
             target = planned.target
-            tmp = self._tmp_path(target)
+            tmp = planned.tmp
             if tmp.exists():
                 try:
                     tmp.unlink()
@@ -388,6 +416,12 @@ class AtomicWriter:
 
     @staticmethod
     def _tmp_path(target: Path) -> Path:
-        # Sibling tmp file with a deterministic suffix; the writer is
-        # fully synchronous so pid-based suffixes are unnecessary.
-        return target.parent / f".{target.name}.bootstrap.tmp"
+        # Sibling tmp file with a unique-per-invocation suffix. Two
+        # writers in the same process running on the same target must
+        # never collide on the sibling tmp path, and a co-located
+        # process must not be able to predict the path so it cannot
+        # pre-stage a malicious sibling.
+        return (
+            target.parent
+            / f".{target.name}.{os.getpid()}.{time.monotonic_ns()}{_TMP_SUFFIX}"
+        )
