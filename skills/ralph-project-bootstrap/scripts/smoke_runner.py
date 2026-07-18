@@ -440,6 +440,27 @@ sys.exit({exit_code})
 # ---------------------------------------------------------------------------
 
 
+def _make_smoke_result(
+    outcome: str,
+    argv: tuple[str, ...],
+    evidence: tuple[str, ...],
+    *,
+    failure_bucket: str,
+    elapsed: float,
+    stdout_excerpt: str,
+    stderr_excerpt: str,
+) -> SmokeResult:
+    return SmokeResult(
+        outcome=outcome,
+        evidence=evidence,
+        argv=argv,
+        stderr_excerpt=stderr_excerpt,
+        stdout_excerpt=stdout_excerpt,
+        elapsed_seconds=elapsed,
+        failure_bucket=failure_bucket,
+    )
+
+
 def run_smoke(
     backend: SafeBackend | UnsafeBackend,
     smoke_cfg: SmokeConfig,
@@ -501,14 +522,12 @@ def run_smoke(
             f"backend {backend.name!r} of kind {getattr(backend, 'kind', 'unknown')!r} "
             f"is not auto-trusted; {getattr(backend, 'note', 'operator authorization required')}"
         )
-        return SmokeResult(
-            outcome="not_authorized",
-            evidence=(reason, "refused before any subprocess was constructed"),
-            argv=(),
-            stderr_excerpt="",
-            stdout_excerpt="",
-            elapsed_seconds=0.0,
-            failure_bucket="none",
+        return _make_smoke_result(
+            "not_authorized",
+            (),
+            (reason, "refused before any subprocess was constructed"),
+            failure_bucket="none", elapsed=0.0,
+            stdout_excerpt="", stderr_excerpt="",
         )
 
     # --- gate 2: real binary needs explicit operator override -------------
@@ -517,17 +536,15 @@ def run_smoke(
             f"real ralph binary refused: set {ALLOW_REAL_BACKEND_ENV}=1 to authorise; "
             f"tests must pass an explicit runner instead"
         )
-        return SmokeResult(
-            outcome="not_authorized",
-            evidence=(
+        return _make_smoke_result(
+            "not_authorized",
+            (),
+            (
                 reason,
                 "harness default runner would spawn the real binary; tests must inject a fake",
             ),
-            argv=(),
-            stderr_excerpt="",
-            stdout_excerpt="",
-            elapsed_seconds=0.0,
-            failure_bucket="none",
+            failure_bucket="none", elapsed=0.0,
+            stdout_excerpt="", stderr_excerpt="",
         )
 
     run = runner if runner is not None else subprocess.run
@@ -572,14 +589,12 @@ def run_smoke(
             f"subprocess exceeded wall_clock_timeout_s={smoke_cfg.wall_clock_timeout_s}; "
             f"elapsed={elapsed:.3f}s{reap_note}"
         )
-        return SmokeResult(
-            outcome="wall_clock_timeout",
-            evidence=tuple(evidence),
-            argv=argv,
-            stderr_excerpt=stderr_excerpt,
-            stdout_excerpt=stdout_excerpt,
-            elapsed_seconds=elapsed,
-            failure_bucket="suite",
+        return _make_smoke_result(
+            "wall_clock_timeout",
+            argv,
+            tuple(evidence),
+            failure_bucket="suite", elapsed=elapsed,
+            stdout_excerpt=stdout_excerpt, stderr_excerpt=stderr_excerpt,
         )
     stdout_excerpt, stderr_excerpt = _summarise(str(stdout), str(stderr))
 
@@ -595,59 +610,49 @@ def run_smoke(
         evidence.append(f"exit_code={returncode}")
         if stderr.strip():
             evidence.append(f"stderr={stderr.strip()[:200]}")
-        return SmokeResult(
-            outcome="non_zero_exit",
-            evidence=tuple(evidence),
-            argv=argv,
-            stderr_excerpt=stderr_excerpt,
-            stdout_excerpt=stdout_excerpt,
-            elapsed_seconds=elapsed,
-            failure_bucket=failure_bucket,
+        return _make_smoke_result(
+            "non_zero_exit",
+            argv,
+            tuple(evidence),
+            failure_bucket=failure_bucket, elapsed=elapsed,
+            stdout_excerpt=stdout_excerpt, stderr_excerpt=stderr_excerpt,
         )
 
     if ERROR_EVENT_PATTERN.search(stdout):
         bucket = _classify_failure_bucket(stdout, stderr)
         evidence.append(f"error_event_detected bucket={bucket}")
-        return SmokeResult(
-            outcome="error_event_detected",
-            evidence=tuple(evidence),
-            argv=argv,
-            stderr_excerpt=stderr_excerpt,
-            stdout_excerpt=stdout_excerpt,
-            elapsed_seconds=elapsed,
-            failure_bucket=bucket,
+        return _make_smoke_result(
+            "error_event_detected",
+            argv,
+            tuple(evidence),
+            failure_bucket=bucket, elapsed=elapsed,
+            stdout_excerpt=stdout_excerpt, stderr_excerpt=stderr_excerpt,
         )
 
     if TERMINAL_EVENT_PATTERN.search(stdout):
-        return SmokeResult(
-            outcome="bounded_terminal_reached",
-            evidence=("LOOP_COMPLETE marker observed in captured stdout",),
-            argv=argv,
-            stderr_excerpt=stderr_excerpt,
-            stdout_excerpt=stdout_excerpt,
-            elapsed_seconds=elapsed,
-            failure_bucket="none",
+        return _make_smoke_result(
+            "bounded_terminal_reached",
+            argv,
+            ("LOOP_COMPLETE marker observed in captured stdout",),
+            failure_bucket="none", elapsed=elapsed,
+            stdout_excerpt=stdout_excerpt, stderr_excerpt=stderr_excerpt,
         )
 
     if FIRST_EVENT_PATTERN.search(stdout):
-        return SmokeResult(
-            outcome="first_event_seen",
-            evidence=("plan.ready marker observed; bounded terminal not reached",),
-            argv=argv,
-            stderr_excerpt=stderr_excerpt,
-            stdout_excerpt=stdout_excerpt,
-            elapsed_seconds=elapsed,
-            failure_bucket="none",
+        return _make_smoke_result(
+            "first_event_seen",
+            argv,
+            ("plan.ready marker observed; bounded terminal not reached",),
+            failure_bucket="none", elapsed=elapsed,
+            stdout_excerpt=stdout_excerpt, stderr_excerpt=stderr_excerpt,
         )
 
-    return SmokeResult(
-        outcome="spawned",
-        evidence=("spawned; no first or terminal event observed in captured stdout",),
-        argv=argv,
-        stderr_excerpt=stderr_excerpt,
-        stdout_excerpt=stdout_excerpt,
-        elapsed_seconds=elapsed,
-        failure_bucket="none",
+    return _make_smoke_result(
+        "spawned",
+        argv,
+        ("spawned; no first or terminal event observed in captured stdout",),
+        failure_bucket="none", elapsed=elapsed,
+        stdout_excerpt=stdout_excerpt, stderr_excerpt=stderr_excerpt,
     )
 
 
