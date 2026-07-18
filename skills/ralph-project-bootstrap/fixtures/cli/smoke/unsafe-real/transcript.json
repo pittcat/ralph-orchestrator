@@ -1,0 +1,9 @@
+{
+  "description": "UnsafeBackend with kind=real; harness must return not_authorized without spawning.",
+  "kind": "real",
+  "argv_shape_required": [],
+  "stdout_lines": [],
+  "stderr_lines": [],
+  "exit_code": 0,
+  "hang_seconds": 0.0
+}

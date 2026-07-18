@@ -1,0 +1,12 @@
+{
+  "description": "Fake ralph that emits plan.ready then a preset-class error event; harness must classify error_event_detected with bucket=preset.",
+  "kind": "content_fixed_replay",
+  "argv_shape_required": [],
+  "stdout_lines": [
+    "plan.ready",
+    "ERROR_EVENT: preset validation failed for hat_x"
+  ],
+  "stderr_lines": [],
+  "exit_code": 0,
+  "hang_seconds": 0.0
+}

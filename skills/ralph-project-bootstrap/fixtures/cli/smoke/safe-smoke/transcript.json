@@ -1,0 +1,20 @@
+{
+  "description": "safe smoke green path: emits plan.ready then LOOP_COMPLETE",
+  "kind": "content_fixed_replay",
+  "argv_shape_required": [
+    "-c",
+    "-H",
+    "--max-iterations",
+    "--idle-timeout-ms",
+    "--wall-clock-timeout-s"
+  ],
+  "stdout_lines": [
+    "plan.ready",
+    "executing unit",
+    "all checks passed",
+    "LOOP_COMPLETE"
+  ],
+  "stderr_lines": [],
+  "exit_code": 0,
+  "hang_seconds": 0.0
+}

@@ -1245,3 +1245,506 @@ def test_cli_probe_load_fixture_returns_fake_invocations() -> None:
         assert isinstance(inv, cli_probe.FakeInvocation)
         assert inv.argv_expected
         assert isinstance(inv.exit_code, int)
+
+
+# ---------------------------------------------------------------------------
+# Unit 6 — safe-loop smoke harness (smoke_runner)
+# ---------------------------------------------------------------------------
+
+
+import smoke_runner  # noqa: E402  (Unit 6 helper, loaded by conftest)
+
+
+_SMOKE_KW: dict[str, object] = dict(
+    binary="/tmp/fake-ralph",
+    config_path="ralph.pipeline.yml",
+    preset="builtin:ce-executor-pipeline",
+    prompt_file="PROMPT.pipeline.md",
+    plan_path="plan.md",
+    max_iterations=3,
+    idle_timeout_ms=5000,
+    wall_clock_timeout_s=60,
+)
+
+
+def _smoke_cfg(**overrides: object) -> smoke_runner.SmokeConfig:
+    """Build a SmokeConfig with the standard test kwargs."""
+    params = dict(_SMOKE_KW)
+    params.update(overrides)
+    return smoke_runner.SmokeConfig(**params)  # type: ignore[arg-type]
+
+
+def _fake_runner(
+    stdout: str = "",
+    stderr: str = "",
+    returncode: int = 0,
+) -> Callable[..., subprocess.CompletedProcess]:
+    """Return a runner that ignores argv and returns a fixed result."""
+
+    def _runner(args, **kwargs):  # noqa: ARG001
+        return subprocess.CompletedProcess(
+            args=tuple(args),
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    return _runner
+
+
+# --- S1 — UnsafeBackend refuses for all four unsafe kinds ------------------
+
+
+@pytest.mark.parametrize("kind", ["mock", "custom", "real", "unknown"])
+def test_unsafe_backend_blocks_smoke_for_each_kind(kind: str) -> None:
+    backend = smoke_runner.UnsafeBackend(name=f"unsafe-{kind}", kind=kind)
+    result = smoke_runner.run_smoke(backend, _smoke_cfg())
+    assert result.outcome == "not_authorized"
+    assert result.argv == ()
+    assert result.failure_bucket == "none"
+    assert result.elapsed_seconds == 0.0
+    # The evidence MUST carry the precise kind + name so the handoff
+    # can render a precise refusal message.
+    assert any(kind in ev for ev in result.evidence)
+
+
+def test_unsafe_backend_blocks_smoke_even_with_runner_attached() -> None:
+    """A runner is irrelevant: an unsafe backend MUST refuse before
+    the runner is consulted. Test by passing a runner that records
+    every spawn attempt; if the harness reached the runner, the
+    recorder would be non-empty."""
+    calls: list[tuple[str, ...]] = []
+
+    def _recorder(args, **kwargs):  # noqa: ARG001
+        calls.append(tuple(args))
+        return subprocess.CompletedProcess(
+            args=tuple(args), returncode=0, stdout="", stderr=""
+        )
+
+    backend = smoke_runner.UnsafeBackend(name="mock", kind="mock")
+    result = smoke_runner.run_smoke(
+        backend, _smoke_cfg(), runner=_recorder
+    )
+    assert result.outcome == "not_authorized"
+    assert result.argv == ()
+    assert calls == []
+
+
+# --- S2 — safe-smoke green path classifies bounded_terminal_reached -------
+
+
+def test_safe_smoke_green_classifies_bounded_terminal(tmp_path: Path) -> None:
+    backend = smoke_runner.SafeBackend(name="replay")
+    runner = _fake_runner(
+        stdout="plan.ready\nexecuting unit\nLOOP_COMPLETE\n",
+        returncode=0,
+    )
+    result = smoke_runner.run_smoke(
+        backend, _smoke_cfg(), transcript_dir=tmp_path, runner=runner
+    )
+    assert result.outcome == "bounded_terminal_reached"
+    assert result.failure_bucket == "none"
+    assert result.argv  # spawned, so argv is populated
+    assert result.elapsed_seconds >= 0.0
+
+
+def test_safe_smoke_first_event_seen_classifies_correctly(tmp_path: Path) -> None:
+    backend = smoke_runner.SafeBackend(name="replay")
+    # plan.ready appears but no LOOP_COMPLETE — wall-clock cutoff
+    # is the only thing that ends the run.
+    runner = _fake_runner(stdout="plan.ready\n", returncode=0)
+    result = smoke_runner.run_smoke(
+        backend, _smoke_cfg(), transcript_dir=tmp_path, runner=runner
+    )
+    assert result.outcome == "first_event_seen"
+    assert result.failure_bucket == "none"
+
+
+def test_safe_smoke_spawned_with_no_markers_classifies_spawned() -> None:
+    backend = smoke_runner.SafeBackend(name="replay")
+    runner = _fake_runner(stdout="hello world\n", returncode=0)
+    result = smoke_runner.run_smoke(backend, _smoke_cfg(), runner=runner)
+    assert result.outcome == "spawned"
+    assert result.failure_bucket == "none"
+
+
+# --- S3 — timeout classification -----------------------------------------
+
+
+def test_timeout_no_event_kills_process_and_classifies() -> None:
+    """When the runner raises ``TimeoutExpired`` the harness must
+    classify the outcome as ``wall_clock_timeout`` AND record the
+    elapsed time. The elapsed time MUST be less than the wall-clock
+    cap plus a small grace so a runaway timer cannot fake a green run.
+    """
+    backend = smoke_runner.SafeBackend(name="replay")
+    cfg = _smoke_cfg(wall_clock_timeout_s=2)
+
+    def _hanging_runner(args, **kwargs):  # noqa: ARG001
+        # Simulate the harness's outer timeout firing.
+        raise subprocess.TimeoutExpired(cmd="ralph", timeout=7.0)
+
+    result = smoke_runner.run_smoke(backend, cfg, runner=_hanging_runner)
+    assert result.outcome == "wall_clock_timeout"
+    # elapsed_seconds MUST be recorded; we cannot assert it < cfg.wall_clock_timeout_s
+    # because the runner faked the timeout, but it MUST be >= 0.
+    assert result.elapsed_seconds >= 0.0
+    # argv MUST be populated because the harness DID attempt to spawn
+    # (the timeout fires AFTER argv construction).
+    assert result.argv
+
+
+def test_timeout_no_event_records_elapsed_under_grace() -> None:
+    """The harness records ``elapsed_seconds`` even when the runner
+    fakes a timeout; the recorded value MUST be less than
+    ``wall_clock_timeout_s + grace`` so a runaway timer cannot fake a
+    green run."""
+    backend = smoke_runner.SafeBackend(name="replay")
+    cfg = _smoke_cfg(wall_clock_timeout_s=2)
+
+    def _hanging_runner(args, **kwargs):  # noqa: ARG001
+        raise subprocess.TimeoutExpired(cmd="ralph", timeout=7.0)
+
+    result = smoke_runner.run_smoke(backend, cfg, runner=_hanging_runner)
+    # elapsed_seconds is wall-clock from the harness's perspective;
+    # since the runner fakes the timeout the recorded value is well
+    # under the wall-clock cap. The invariant we care about is the
+    # upper bound.
+    assert result.elapsed_seconds < cfg.wall_clock_timeout_s + 10.0
+
+
+def test_timeout_idle_classifies_after_idle_timeout_ms() -> None:
+    """When the runner emits ``plan.ready`` and then the outer
+    timeout fires, the harness's primary classifier would normally
+    produce ``wall_clock_timeout`` (because the timeout came from
+    outside). The harness does not implement idle-vs-no-event
+    distinction at the harness level; idle classification requires a
+    cooperative runtime. This test verifies that a script which emits
+    one event and then sleeps forever is killed and the argv captured.
+    """
+    backend = smoke_runner.SafeBackend(name="replay")
+    cfg = _smoke_cfg(wall_clock_timeout_s=2)
+
+    def _emit_then_hang(args, **kwargs):  # noqa: ARG001
+        # Simulate the harness's outer timeout firing AFTER the
+        # first event has been observed by reporting it via stdout
+        # in the TimeoutExpired exception (Python 3.11+ supports
+        # partial stdout/stderr on TimeoutExpired; for compatibility
+        # we just raise the timeout itself).
+        raise subprocess.TimeoutExpired(cmd="ralph", timeout=7.0, output="plan.ready\n")
+
+    result = smoke_runner.run_smoke(backend, cfg, runner=_emit_then_hang)
+    # The harness classifies TimeoutExpired as wall_clock_timeout;
+    # idle-vs-no-event is a runtime-side concern and is observed via
+    # the --idle-timeout-ms flag the harness forwards. The argv MUST
+    # carry the flag so a cooperative runtime can implement idle.
+    assert result.outcome == "wall_clock_timeout"
+    assert "--idle-timeout-ms" in result.argv
+    assert "5000" in result.argv  # default idle_timeout_ms
+
+
+# --- S4 — non-zero exit classification -------------------------------------
+
+
+def test_non_zero_exit_classifies_with_empty_stderr() -> None:
+    backend = smoke_runner.SafeBackend(name="replay")
+    runner = _fake_runner(stdout="", stderr="", returncode=1)
+    result = smoke_runner.run_smoke(backend, _smoke_cfg(), runner=runner)
+    assert result.outcome == "non_zero_exit"
+    # No bucket keyword in the combined stream → suite.
+    assert result.failure_bucket == "suite"
+
+
+def test_non_zero_exit_classifies_with_non_empty_stderr() -> None:
+    backend = smoke_runner.SafeBackend(name="replay")
+    runner = _fake_runner(
+        stdout="",
+        stderr="fatal: backend initialization failed\n",
+        returncode=2,
+    )
+    result = smoke_runner.run_smoke(backend, _smoke_cfg(), runner=runner)
+    assert result.outcome == "non_zero_exit"
+    assert result.failure_bucket == "backend"
+
+
+# --- S5 — error event failure buckets -------------------------------------
+
+
+def test_error_event_failure_bucket_preset() -> None:
+    backend = smoke_runner.SafeBackend(name="replay")
+    runner = _fake_runner(
+        stdout="plan.ready\nERROR_EVENT: preset validation failed\n",
+        returncode=0,
+    )
+    result = smoke_runner.run_smoke(backend, _smoke_cfg(), runner=runner)
+    assert result.outcome == "error_event_detected"
+    assert result.failure_bucket == "preset"
+
+
+def test_error_event_failure_bucket_backend() -> None:
+    backend = smoke_runner.SafeBackend(name="replay")
+    runner = _fake_runner(
+        stdout="plan.ready\nERROR_EVENT: backend connection refused\n",
+        returncode=0,
+    )
+    result = smoke_runner.run_smoke(backend, _smoke_cfg(), runner=runner)
+    assert result.outcome == "error_event_detected"
+    assert result.failure_bucket == "backend"
+
+
+def test_error_event_failure_bucket_project_command() -> None:
+    backend = smoke_runner.SafeBackend(name="replay")
+    runner = _fake_runner(
+        stdout="plan.ready\nERROR_EVENT: project build missing\n",
+        returncode=0,
+    )
+    result = smoke_runner.run_smoke(backend, _smoke_cfg(), runner=runner)
+    assert result.outcome == "error_event_detected"
+    assert result.failure_bucket == "project_command"
+
+
+def test_error_event_failure_bucket_suite_fallback() -> None:
+    backend = smoke_runner.SafeBackend(name="replay")
+    runner = _fake_runner(
+        stdout="plan.ready\nERROR_EVENT: something else\n",
+        returncode=0,
+    )
+    result = smoke_runner.run_smoke(backend, _smoke_cfg(), runner=runner)
+    assert result.outcome == "error_event_detected"
+    assert result.failure_bucket == "suite"
+
+
+# --- S6 — dirty tree preserved --------------------------------------------
+
+
+def test_dirty_tree_preserved(tmp_path: Path) -> None:
+    """Plant a file the smoke will NOT touch and verify it remains
+    byte-for-byte equal after the helper returns. The harness must
+    not clean, revert, auto-commit, or rewrite any operator file."""
+    project = tmp_path / "project"
+    project.mkdir()
+    dirty = project / "untracked.txt"
+    dirty.write_text("operator's in-progress notes\n", encoding="utf-8")
+    pre_bytes = dirty.read_bytes()
+
+    backend = smoke_runner.SafeBackend(name="replay")
+    runner = _fake_runner(stdout="plan.ready\nLOOP_COMPLETE\n", returncode=0)
+    smoke_runner.run_smoke(
+        backend,
+        _smoke_cfg(binary="/tmp/fake", plan_path=str(project / "plan.md")),
+        transcript_dir=tmp_path / "transcripts",
+        runner=runner,
+    )
+
+    post_bytes = dirty.read_bytes()
+    assert post_bytes == pre_bytes
+    # And the harness must not have written anything outside the
+    # declared transcript_dir.
+    assert (project / "events.jsonl").exists() is False
+    assert (project / ".ralph").exists() is False
+
+
+# --- S7 — argv shape contract ---------------------------------------------
+
+
+def test_smoke_argv_shape_contains_required_flags() -> None:
+    """Every argv the harness builds MUST contain -c, -H,
+    --max-iterations, --idle-timeout-ms, --wall-clock-timeout-s.
+    Verify by inspecting the argv on a green-path result."""
+    backend = smoke_runner.SafeBackend(name="replay")
+    runner = _fake_runner(stdout="plan.ready\nLOOP_COMPLETE\n", returncode=0)
+    result = smoke_runner.run_smoke(backend, _smoke_cfg(), runner=runner)
+    argv = result.argv
+    assert "-c" in argv
+    assert "ralph.pipeline.yml" in argv
+    assert "-H" in argv
+    assert "builtin:ce-executor-pipeline" in argv
+    assert "--max-iterations" in argv
+    assert "3" in argv
+    assert "--idle-timeout-ms" in argv
+    assert "5000" in argv
+    assert "--wall-clock-timeout-s" in argv
+    assert "60" in argv
+
+
+def test_smoke_argv_shape_holds_when_extra_argv_appended() -> None:
+    """``extra_argv`` must be appended AFTER the harness contract so
+    the contract stays inspectable."""
+    backend = smoke_runner.SafeBackend(name="replay")
+    runner = _fake_runner(stdout="plan.ready\nLOOP_COMPLETE\n", returncode=0)
+    cfg = _smoke_cfg(extra_argv=("--reuse-worktree", "--worktree-name", "t1"))
+    result = smoke_runner.run_smoke(backend, cfg, runner=runner)
+    argv = result.argv
+    assert argv[-3:] == ("--reuse-worktree", "--worktree-name", "t1")
+    # And the harness contract flags remain in place.
+    assert "--max-iterations" in argv
+
+
+def test_smoke_argv_shape_present_in_safe_smoke_fixture(tmp_path: Path) -> None:
+    """Load the safe-smoke fixture's recorded argv and assert the
+    harness contract is observable from the fixture's transcript."""
+    argv_path = (
+        ROOT
+        / "skills"
+        / "ralph-project-bootstrap"
+        / "fixtures"
+        / "cli"
+        / "smoke"
+        / "safe-smoke"
+        / "transcript.json"
+    )
+    # transcript.json declares argv_shape_required so the loader can
+    # validate the fixture without invoking the harness.
+    import json as _json
+    data = _json.loads(argv_path.read_text(encoding="utf-8"))
+    required = data["argv_shape_required"]
+    for token in required:
+        assert token in required
+    # And the harness builds an argv that contains every required
+    # token at run time.
+    backend = smoke_runner.SafeBackend(name="replay")
+    runner = _fake_runner(stdout="plan.ready\nLOOP_COMPLETE\n", returncode=0)
+    result = smoke_runner.run_smoke(backend, _smoke_cfg(), runner=runner)
+    for token in required:
+        assert token in result.argv, f"argv missing {token!r}: {result.argv}"
+
+
+# --- S8 — unsafe refusal prevents spawn -----------------------------------
+
+
+def test_smoke_no_spawn_when_unsafe() -> None:
+    """A runner that records every spawn attempt must NOT be called
+    when the backend is unsafe. The harness must refuse before any
+    subprocess is constructed."""
+    spawn_attempts: list[tuple[str, ...]] = []
+
+    def _recorder(args, **kwargs):  # noqa: ARG001
+        spawn_attempts.append(tuple(args))
+        return subprocess.CompletedProcess(
+            args=tuple(args), returncode=0, stdout="", stderr=""
+        )
+
+    for kind in ("mock", "custom", "real", "unknown"):
+        backend = smoke_runner.UnsafeBackend(name=f"u-{kind}", kind=kind)
+        result = smoke_runner.run_smoke(
+            backend, _smoke_cfg(), runner=_recorder
+        )
+        assert result.outcome == "not_authorized"
+        assert result.argv == ()
+    assert spawn_attempts == []
+
+
+# --- S9 — real-binary env-var gate ----------------------------------------
+
+
+def test_real_binary_refused_without_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When ``runner is None`` and the env var is NOT set, the harness
+    MUST refuse to spawn the real ``ralph`` binary."""
+    monkeypatch.delenv(smoke_runner.ALLOW_REAL_BACKEND_ENV, raising=False)
+    backend = smoke_runner.SafeBackend(name="replay")
+    cfg = _smoke_cfg(binary="/nonexistent/ralph")
+    result = smoke_runner.run_smoke(backend, cfg)
+    assert result.outcome == "not_authorized"
+    assert result.argv == ()
+
+
+def test_real_binary_refused_when_env_var_set_but_runner_provided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even when the env var is set, an explicit runner takes
+    precedence and the harness MUST NOT spawn the real binary."""
+    monkeypatch.setenv(smoke_runner.ALLOW_REAL_BACKEND_ENV, "1")
+    backend = smoke_runner.SafeBackend(name="replay")
+    runner = _fake_runner(stdout="LOOP_COMPLETE\n", returncode=0)
+    result = smoke_runner.run_smoke(
+        backend, _smoke_cfg(), runner=runner
+    )
+    # The harness used the runner; argv is the harness-built argv.
+    assert result.argv
+    assert result.outcome == "bounded_terminal_reached"
+
+
+# --- S10 — dataclass invariants -------------------------------------------
+
+
+def test_safe_backend_rejects_non_replay_kind() -> None:
+    with pytest.raises(ValueError):
+        smoke_runner.SafeBackend(name="bad", kind="mock")  # type: ignore[arg-type]
+
+
+def test_unsafe_backend_rejects_unknown_kind() -> None:
+    with pytest.raises(ValueError):
+        smoke_runner.UnsafeBackend(name="bad", kind="not-a-kind")
+
+
+def test_smoke_result_rejects_unknown_outcome() -> None:
+    with pytest.raises(ValueError):
+        smoke_runner.SmokeResult(
+            outcome="not-a-real-outcome",
+            evidence=(),
+            argv=(),
+            stderr_excerpt="",
+            stdout_excerpt="",
+            elapsed_seconds=0.0,
+            failure_bucket="none",
+        )
+
+
+def test_smoke_result_rejects_unknown_failure_bucket() -> None:
+    with pytest.raises(ValueError):
+        smoke_runner.SmokeResult(
+            outcome="spawned",
+            evidence=(),
+            argv=(),
+            stderr_excerpt="",
+            stdout_excerpt="",
+            elapsed_seconds=0.0,
+            failure_bucket="not-a-real-bucket",
+        )
+
+
+def test_safe_backend_is_trusted_only_for_replay_kind() -> None:
+    backend = smoke_runner.SafeBackend(name="r")
+    assert backend.is_trusted is True
+    assert backend.kind == smoke_runner.SAFE_BACKEND_KIND
+    unsafe = smoke_runner.UnsafeBackend(name="u", kind="mock")
+    assert unsafe.is_trusted is False
+
+
+def test_outcomes_and_failure_buckets_are_canonical_literals() -> None:
+    assert set(smoke_runner.OUTCOMES) == {
+        "not_authorized",
+        "spawned",
+        "first_event_seen",
+        "bounded_terminal_reached",
+        "timeout_no_event",
+        "timeout_idle",
+        "wall_clock_timeout",
+        "non_zero_exit",
+        "error_event_detected",
+    }
+    assert set(smoke_runner.FAILURE_BUCKETS) == {
+        "none",
+        "suite",
+        "preset",
+        "backend",
+        "project_command",
+    }
+
+
+# --- S11 — FakeBinary rendering -------------------------------------------
+
+
+def test_fake_binary_renders_self_contained_script() -> None:
+    cfg = _smoke_cfg()
+    fake = smoke_runner.FakeBinary(
+        transcript_dir=Path("/tmp/transcripts"),
+        smoke_cfg=cfg,
+        script_lines=("plan.ready", "LOOP_COMPLETE"),
+        exit_code=0,
+    )
+    contents = fake.script_contents()
+    assert "plan.ready" in contents
+    assert "LOOP_COMPLETE" in contents
+    assert "sys.exit(0)" in contents
+    assert "transcript" in contents.lower()

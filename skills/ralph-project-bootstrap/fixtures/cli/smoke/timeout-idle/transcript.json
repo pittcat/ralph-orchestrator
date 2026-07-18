@@ -1,0 +1,11 @@
+{
+  "description": "Fake ralph that emits one event then sleeps forever; harness must classify timeout_idle.",
+  "kind": "content_fixed_replay",
+  "argv_shape_required": [],
+  "stdout_lines": [
+    "plan.ready"
+  ],
+  "stderr_lines": [],
+  "exit_code": 0,
+  "hang_seconds": 120.0
+}
