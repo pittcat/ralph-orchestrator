@@ -98,6 +98,41 @@ def test_raph_project_bootstrap_on_disk() -> None:
     )
 
 
+def test_raph_project_bootstrap_still_installable() -> None:
+    """Regression — ``ralph-project-bootstrap`` must remain installable
+    via ``select_skills`` after the ``ralph-hats`` deletion (U8)."""
+    available = install.discover_skills(SKILLS_DIR)
+    selected = install.select_skills(available, ["ralph-project-bootstrap"])
+    assert [s.name for s in selected] == ["ralph-project-bootstrap"]
+
+
+@pytest.mark.parametrize("banned", ["ralph-hats"])
+def test_public_skills_excludes_banned(banned: str) -> None:
+    """The public catalog must not include ``ralph-hats`` (U8 deletion)."""
+    assert banned not in install.PUBLIC_SKILLS
+
+
+@pytest.mark.parametrize("banned_dir", [SKILLS_DIR / "ralph-hats"])
+def test_banned_skill_dir_not_shipped(banned_dir: Path) -> None:
+    """The deleted ``ralph-hats`` directory must not be present under
+    ``skills/`` (U8 atomic deletion)."""
+    assert not banned_dir.exists(), f"{banned_dir} must be deleted"
+
+
+def test_ralph_hats_not_installable() -> None:
+    """``select_skills`` must reject ``ralph-hats`` with the canonical
+    'unknown skill' message (U8 deletion guard)."""
+    available = install.discover_skills(SKILLS_DIR)
+    with pytest.raises(install.InstallError) as excinfo:
+        install.select_skills(available, ["ralph-hats"])
+    assert "unknown skill 'ralph-hats'" in str(excinfo.value)
+    assert "Known public skills" in str(excinfo.value)
+    # And the canonical error must NOT mention the now-deleted
+    # ``ralph-hats`` skill in the available set: it is no longer a
+    # known public skill.
+    assert "ralph-hats" not in install.PUBLIC_SKILLS
+
+
 # --- discover_skills selection --------------------------------------------
 
 

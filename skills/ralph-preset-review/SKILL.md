@@ -7,7 +7,7 @@ description: Review Ralph preset YAML with agent-native AAF audit, mechanical li
 
 Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）** — independent per-hat activation simulation, payload audit, and mechanical lint.
 
-**Boundary:** Does not replace Rust `preset_lint` rules. Does not run full `./scripts/run-tests.sh` by default. For drafting, use `ralph-preset-author`.
+**Boundary:** Does not replace Rust `preset_lint` rules. Does not run full `./scripts/run-tests.sh` by default. User-only `.ralph/hats/` collection authoring (create / inspect / validate user hat workflows) and topology-debug / validate-routing workflows are not owned by either preset skill. For drafting, use `ralph-preset-author`.
 
 **Deliverable:** Every review MUST write **`preset-review-report.md`** — not chat-only summaries.
 

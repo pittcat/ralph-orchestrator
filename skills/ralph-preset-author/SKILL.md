@@ -1,13 +1,13 @@
 ---
 name: ralph-preset-author
-description: Draft and validate Ralph preset YAML with per-hat Agent-Feasibility (AAF) checks. Use when creating or editing presets/en/, presets/schemas/, builtin presets, or .ralph/hats/ workflow files — including topology, state_projection, hat instructions, and handoff design. Not for user-only hat collections (use ralph-hats).
+description: Draft and validate Ralph preset YAML with per-hat Agent-Feasibility (AAF) checks. Use when creating or editing presets/en/, presets/schemas/, builtin presets, or .ralph/hats/ workflow files — including topology, state_projection, hat instructions, and handoff design.
 ---
 
 # Ralph Preset Author
 
 Use this skill to design and draft Ralph **presets** (builtin or local) with **Agent 视角可行性（AAF）** discipline.
 
-**Boundary:** `ralph-hats` manages user `.ralph/hats/` collections only. This skill covers the **full preset chain** including `presets/en/` and `presets/schemas/`. For review after drafting, hand off to `ralph-preset-review`.
+**Boundary:** This skill covers the full preset chain including `presets/en/` and `presets/schemas/`. User-only `.ralph/hats/` collection authoring (create / inspect / validate user hat workflows) and topology-debug / validate-routing workflows are not owned by either preset skill. For review after drafting, hand off to `ralph-preset-review`.
 
 ## Use This Skill For
 

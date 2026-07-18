@@ -7,7 +7,6 @@ It ships operator skills:
 
 | Skill | Purpose |
 |---|---|
-| `ralph-hats` | Create, inspect, validate user `.ralph/hats/` collections |
 | `ralph-loop` | Run, monitor, resume, merge, debug Ralph loops |
 | `ralph-preset-author` | Draft presets (builtin + local) with per-hat AAF tables **+ payload contract notes** before review |
 | `ralph-preset-review` | Per-hat activation dry-run + **payload audit** + mechanical lint → `preset-review-report.md` |
@@ -62,11 +61,10 @@ List the skills in this repository:
 npx skills add mikeyobrien/ralph-orchestrator --list
 ```
 
-Install hat + loop + preset skills for Claude Code:
+Install preset + loop + bootstrap skills for Claude Code:
 
 ```bash
 npx skills add mikeyobrien/ralph-orchestrator \
-  --skill ralph-hats \
   --skill ralph-loop \
   --skill ralph-preset-author \
   --skill ralph-preset-review \

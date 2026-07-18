@@ -390,7 +390,8 @@ ralph run -c ralph.yml -H .ralph/hats/my-flow.yml --skip-preflight -p "smoke mig
 |---|---|
 | [`skills/ralph-preset-author`](../skills/ralph-preset-author/SKILL.md) | 拓扑 + 逐 hat AAF 起草 + **Payload Contract 表**；产出 `preset-author-notes.md` 后再交 review |
 | [`skills/ralph-preset-review`](../skills/ralph-preset-review/SKILL.md) | 独立 activation dry-run + **Payload Audit 表** + 机械 lint → `preset-review-report.md`（含按 runtime unblock 排序的 remediation） |
-| [`skills/ralph-hats`](../skills/ralph-hats/SKILL.md) | 仅用户 `.ralph/hats/` 集合（不管 builtin preset） |
+
+> 用户 `.ralph/hats/` 集合（create / inspect / validate user hat workflows）、以及 topology-debug / validate-routing 这类 user-only 责任不在任一 preset skill 范围内。
 
 **两 skill 共同构成 agent-flow 闭环**：author 写 per-hat payload 合同（字段 / 值源 / 可见性 / 身份 / 下游消费），review 从 activated-hat 视角独立审计每个 emit topic 的字段可见性、值源可达性、运行时身份一致性、语义充分性与下游消费。两 skill 都不替代 `ralph preset check`——lint 只验 shape 与拓扑，看不见 / 算不出 / 决策字段语义不足这类问题由 audit 兜底。
 

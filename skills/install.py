@@ -19,7 +19,7 @@ Examples
     ./skills/install.py
 
     # Install a subset (still both local targets)
-    ./skills/install.py ralph-loop ralph-hats
+    ./skills/install.py ralph-loop ralph-run-diagnosis
 
     # Global: ~/.claude/skills + ~/.agents/skills
     ./skills/install.py --global
@@ -42,7 +42,6 @@ from pathlib import Path
 from typing import Iterable
 
 PUBLIC_SKILLS: tuple[str, ...] = (
-    "ralph-hats",
     "ralph-loop",
     "ralph-preset-author",
     "ralph-preset-review",
