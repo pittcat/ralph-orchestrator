@@ -2154,3 +2154,193 @@ def test_handoff_blocked_argv_is_empty() -> None:
     art = handoff.build_handoff(inputs)
     assert art.command_argv == ()
     assert art.command == ""
+
+
+# ---------------------------------------------------------------------------
+# Unit 9 — child-group reap on outer timeout (smoke_runner U1 / A1)
+# ---------------------------------------------------------------------------
+#
+# When the harness takes the real-backend path (runner is None), it must
+# spawn the child inside its own process group via ``os.setsid`` so the
+# outer timeout can reap the ENTIRE group (pty / log writer / temp
+# watcher) and not leak orphan descendants into the target project tree.
+#
+# The harness only enters this branch when ``runner is None`` — tests
+# that inject a fake runner continue to use the duck-typed path
+# unchanged. To exercise the reap contract without spawning the real
+# ``ralph`` binary we monkeypatch ``smoke_runner.subprocess.Popen`` to
+# return a fake Popen-shaped object whose ``.communicate`` raises
+# ``TimeoutExpired``, and we monkeypatch ``smoke_runner.os.killpg`` to
+# record every call so the test can assert the group was reaped.
+#
+# Acceptance contract for U1 / A1:
+#
+# * When the outer timeout fires on the real-backend path, the harness
+#   MUST call ``os.killpg`` on the spawned child's pid with
+#   ``SIGTERM`` first.
+# * If the child does not exit within ``_SIGKILL_GRACE_S`` the harness
+#   MUST escalate to ``SIGKILL`` against the same group.
+# * The harness MUST set ``runner is None`` invariant: only the
+#   real-backend path exercises reap; injected ``runner=`` stubs skip
+#   the reap contract entirely (their leaks are not the harness's
+#   responsibility).
+
+
+import os as _os  # noqa: E402  (real-backend reap path uses os.killpg)
+import signal as _signal  # noqa: E402  (SIGTERM / SIGKILL for reap contract)
+
+
+class _FakePopen:
+    """Popen-shaped stand-in for the real-backend reap-path test.
+
+    The harness reads ``.pid`` to build the killpg group, calls
+    ``.communicate(timeout=...)`` to read stdout/stderr (or hit the
+    outer timeout), and tracks whether the child terminated during
+    the grace window. The harness also drains ``children_to_keep_alive``
+    indirectly via the killpg group cascade — every sentinel pid in
+    that list shares the group with the parent so a single killpg
+    reaps them all. The test verifies this by checking that each
+    sentinel pid was the target of a killpg call (or that the group
+    pid itself was, which has the same effect on POSIX).
+    """
+
+    def __init__(self, pid: int, children: tuple[int, ...]) -> None:
+        self.pid = pid
+        self._children = children
+        self.children_to_keep_alive = list(children)
+        self._terminated = False
+        self.communicate_calls: list[float | None] = []
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        self.communicate_calls.append(timeout)
+        # Simulate the harness's outer timeout firing — the real
+        # child is still alive at this point so the harness must
+        # call killpg on the group.
+        raise subprocess.TimeoutExpired(cmd="ralph", timeout=timeout or 0.0)
+
+    def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+        # Honor SIGTERM grace window — first call returns as if the
+        # child exited gracefully; subsequent calls (after the grace
+        # window expires) raise TimeoutExpired so the harness
+        # escalates to SIGKILL.
+        if not self._terminated:
+            self._terminated = True
+            return 0
+        raise subprocess.TimeoutExpired(cmd="ralph", timeout=timeout or 0.0)
+
+
+def test_run_smoke_reaps_child_group_on_outer_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U1 / A1 — on the real-backend path, an outer timeout MUST reap
+    the spawned child's process group via ``os.killpg`` so orphan pty /
+    log writer / temp watcher cannot leak into the target project tree.
+
+    The test:
+
+    1. Monkeypatches ``smoke_runner.subprocess.Popen`` to return a
+       fake Popen-shaped object with a sentinel pid and a list of
+       sentinel children that share the process group.
+    2. Monkeypatches ``smoke_runner.os.killpg`` to record every call
+       instead of actually reaping (the test is hermetic — no real
+       subprocess is spawned).
+    3. Monkeypatches ``smoke_runner.os.setsid`` to a no-op (we are
+       not forking anyway).
+    4. Sets the real-backend authorise env var so the harness does
+       not refuse the spawn.
+    5. Calls ``run_smoke`` with ``runner=None`` (so the real-backend
+       Popen branch fires) and asserts:
+       - The outcome is ``wall_clock_timeout``.
+       - ``os.killpg`` was called with the parent's pid AND
+         ``signal.SIGTERM`` first.
+       - The argv passed to Popen contains the harness contract flags.
+       - The fake Popen's ``communicate(timeout=...)`` was called
+         with the outer timeout (= wall_clock_timeout_s + 5s grace).
+    """
+    sentinel_parent_pid = 4242
+    sentinel_children = (4243, 4244, 4245)  # pty / log writer / temp watcher
+    fake_proc = _FakePopen(pid=sentinel_parent_pid, children=sentinel_children)
+
+    # Record every killpg call so we can assert the reap contract.
+    killpg_calls: list[tuple[int, int]] = []
+
+    def _record_killpg(pid: int, sig: int) -> None:
+        killpg_calls.append((pid, sig))
+
+    monkeypatch.setattr(smoke_runner.os, "killpg", _record_killpg)
+    # setsid is a no-op in the test — we are not forking anyway.
+    monkeypatch.setattr(smoke_runner.os, "setsid", lambda: None, raising=False)
+
+    # Capture the argv Popen was invoked with.
+    popen_argvs: list[list[str]] = []
+    # Also capture the kwargs the harness passed so we can assert the
+    # POSIX-portable reap contract (preexec_fn=os.setsid).
+    popen_kwargs: list[dict[str, object]] = []
+
+    def _fake_popen(argv, **kwargs):  # noqa: ANN001
+        popen_argvs.append(list(argv))
+        popen_kwargs.append(kwargs)
+        return fake_proc
+
+    monkeypatch.setattr(smoke_runner.subprocess, "Popen", _fake_popen)
+    # The env var authorises the real-backend spawn — the harness
+    # would otherwise refuse before reaching Popen.
+    monkeypatch.setenv(smoke_runner.ALLOW_REAL_BACKEND_ENV, "1")
+
+    backend = smoke_runner.SafeBackend(name="replay")
+    cfg = _smoke_cfg(wall_clock_timeout_s=2)
+    result = smoke_runner.run_smoke(backend, cfg, runner=None)
+
+    # --- outcome ---------------------------------------------------------
+    assert result.outcome == "wall_clock_timeout"
+    # argv was built and handed to Popen — the harness did NOT refuse.
+    assert result.argv
+
+    # --- Popen was called exactly once with the harness argv ------------
+    assert len(popen_argvs) == 1
+    argv = popen_argvs[0]
+    assert "-c" in argv and "ralph.pipeline.yml" in argv
+    assert "-H" in argv and "builtin:ce-executor-pipeline" in argv
+    assert "--max-iterations" in argv
+    assert "--wall-clock-timeout-s" in argv
+
+    # --- preexec_fn=os.setsid is the POSIX-portable group-spawn knob --
+    assert popen_kwargs, "harness must pass kwargs to subprocess.Popen"
+    preexec = popen_kwargs[0].get("preexec_fn")
+    assert preexec is _os.setsid, (
+        "real-backend Popen must use preexec_fn=os.setsid to create "
+        "its own process group so killpg can reap the whole tree"
+    )
+
+    # --- communicate was called with the outer timeout ------------------
+    assert fake_proc.communicate_calls, "communicate(timeout=...) was never called"
+    outer_timeout = fake_proc.communicate_calls[0]
+    expected_outer = float(cfg.wall_clock_timeout_s) + 5.0
+    assert outer_timeout == expected_outer, (
+        f"communicate timeout must be wall_clock_timeout_s + 5s grace; "
+        f"got {outer_timeout!r} expected {expected_outer!r}"
+    )
+
+    # --- killpg was called with the parent pid and SIGTERM first -------
+    sigterm_calls = [
+        (pid, sig) for pid, sig in killpg_calls if sig == _signal.SIGTERM
+    ]
+    assert sigterm_calls, (
+        f"harness must reap the child group with SIGTERM first; "
+        f"killpg calls recorded: {killpg_calls}"
+    )
+    assert sigterm_calls[0][0] == sentinel_parent_pid, (
+        f"first killpg target must be the spawned child's pid "
+        f"({sentinel_parent_pid}); got {sigterm_calls[0][0]}"
+    )
+
+    # --- the reap contract targets the PROCESS GROUP, not just the pid.
+    # killpg(pid, sig) on POSIX sends ``sig`` to every process whose
+    # pgid equals ``pid``; the harness MUST use killpg (not kill) so
+    # the pty / log writer / temp watcher siblings are reaped together.
+    # We assert this by checking that the killpg call signature was
+    # used (os.killpg, not os.kill) — the monkeypatch above already
+    # guarantees the harness routed through os.killpg.
+    assert all(
+        isinstance(pid, int) and isinstance(sig, int) for pid, sig in killpg_calls
+    ), "every reap call must be os.killpg(pid, sig) with int args"

@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -93,6 +94,13 @@ ALLOW_REAL_BACKEND_ENV = "RALPH_BOOTSTRAP_ALLOW_REAL_BACKEND"
 FIRST_EVENT_PATTERN = re.compile(r"plan\.ready")
 TERMINAL_EVENT_PATTERN = re.compile(r"LOOP_COMPLETE")
 ERROR_EVENT_PATTERN = re.compile(r"ERROR_EVENT:")
+
+# Grace window for SIGTERM → SIGKILL escalation on the reap path.
+# When the outer timeout fires the harness sends SIGTERM to the entire
+# child process group (parent + pty / log writer / temp watcher); if
+# the group has not exited within this many seconds the harness
+# escalates to SIGKILL against the same group. POSIX-portable.
+_SIGKILL_GRACE_S: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -269,6 +277,92 @@ def _summarise(stdout: str, stderr: str, limit: int = 400) -> tuple[str, str]:
     return stdout[:limit], stderr[:limit]
 
 
+def _spawn_real_backend(
+    argv: tuple[str, ...], outer_timeout: float
+) -> tuple[str, str, int, float]:
+    """Spawn the real ``ralph`` binary with POSIX-portable process-group reap.
+
+    Returns ``(stdout, stderr, returncode, elapsed_seconds)``. When
+    the outer timeout fires the harness reaps the entire child
+    process group (parent + pty / log writer / temp watcher siblings)
+    via ``os.killpg`` so orphan descendants cannot leak into the
+    target project tree. POSIX-portable; uses
+    ``preexec_fn=os.setsid`` rather than ``start_new_session=True``
+    for compatibility with the widest range of POSIX libcs (setsid is
+    the canonical mechanism for detaching into a new session / new
+    process group).
+
+    On ``subprocess.TimeoutExpired`` (or any equivalent timeout
+    signal) the function reaps the group FIRST, then re-raises
+    ``subprocess.TimeoutExpired`` with the partial stdout/stderr
+    attached so ``run_smoke`` can classify the outcome uniformly
+    across the real-backend path and the duck-typed runner path.
+    The reap happens before the raise so the caller never sees a
+    TimeoutExpired without the group already being reaped.
+    """
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        list(argv),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        preexec_fn=os.setsid,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=outer_timeout)
+    except subprocess.TimeoutExpired as exc:
+        _reap_child_group(proc)
+        elapsed = time.monotonic() - started
+        # Re-raise with the partial captures attached so the caller
+        # can produce the same wall_clock_timeout evidence shape as
+        # the duck-typed runner path.
+        raise subprocess.TimeoutExpired(
+            cmd=exc.cmd,
+            timeout=exc.timeout,
+            output=exc.stdout,
+            stderr=exc.stderr,
+        ) from exc
+    elapsed = time.monotonic() - started
+    returncode = proc.returncode if proc.returncode is not None else 0
+    return stdout or "", stderr or "", returncode, elapsed
+
+
+def _reap_child_group(proc: subprocess.Popen) -> None:
+    """Reap ``proc``'s entire process group via ``os.killpg``.
+
+    SIGTERM is sent first to give the group a chance to exit
+    gracefully. If the group has not exited within
+    ``_SIGKILL_GRACE_S`` the function escalates to SIGKILL against
+    the same group. POSIX-portable.
+
+    Safe to call when the group has already exited: ``ProcessLookupError``
+    is swallowed so a benign race (process reaped by the kernel just
+    before our signal) does not mask the actual classification the
+    caller wants to make.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=_SIGKILL_GRACE_S)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    # Grace window expired — escalate.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    # Best-effort final reap so we do not leak a zombie. ``wait()``
+    # may raise again if the kernel is slow to deliver SIGKILL; swallow
+    # so the caller still gets the wall_clock_timeout classification.
+    try:
+        proc.wait(timeout=_SIGKILL_GRACE_S)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Fake-binary helper (used by the test suite)
 # ---------------------------------------------------------------------------
@@ -371,6 +465,28 @@ def run_smoke(
     hands it to the runner with a deterministic outer timeout, and
     classifies the captured stdout/stderr into one of the nine
     ``SmokeResult.outcome`` values.
+
+    Real-backend reap contract (runner is None):
+
+    When ``runner is None`` the harness spawns the real ``ralph``
+    binary via ``subprocess.Popen`` with ``preexec_fn=os.setsid`` so
+    the child is the leader of its own process group. If the outer
+    timeout fires, the harness calls ``os.killpg(proc.pid, SIGTERM)``
+    to reap the ENTIRE group — the parent, any pty / log writer /
+    temp watcher children share the group so a single killpg
+    prevents orphan descendants from leaking into the target project
+    tree. If the group does not exit within ``_SIGKILL_GRACE_S`` the
+    harness escalates to ``SIGKILL`` against the same group.
+
+    The reap contract applies ONLY to the real-backend path
+    (``runner is None``). When the caller injects a ``runner``
+    callable, the harness routes through that callable unchanged and
+    does NOT invoke ``os.killpg`` — the injected runner owns its own
+    subprocess lifecycle and the harness cannot tell what pid to
+    reap. Tests inject fakes; tests therefore take the duck-typed
+    branch and the killpg branch is exercised in production by the
+    real backend, with the contract verified by
+    ``test_run_smoke_reaps_child_group_on_outer_timeout``.
     """
     argv = _build_argv(smoke_cfg)
     stdout_excerpt = ""
@@ -420,22 +536,41 @@ def run_smoke(
     # --- spawn -----------------------------------------------------------
     started = time.monotonic()
     try:
-        completed = run(
-            list(argv),
-            timeout=outer_timeout,
-            capture_output=True,
-            text=True,
-        )
-        elapsed = time.monotonic() - started
+        if runner is None:
+            # Real-backend path: use POSIX-portable Popen with
+            # preexec_fn=os.setsid so the harness can reap the entire
+            # child process group via os.killpg on outer timeout.
+            # Tests inject ``runner=`` fakes and continue to use the
+            # duck-typed branch below unchanged.
+            stdout, stderr, returncode, elapsed = _spawn_real_backend(
+                argv, outer_timeout
+            )
+        else:
+            completed = run(
+                list(argv),
+                timeout=outer_timeout,
+                capture_output=True,
+                text=True,
+            )
+            elapsed = time.monotonic() - started
+            # The runner may be a stub that returns a duck-typed object.
+            stdout = getattr(completed, "stdout", "") or ""
+            stderr = getattr(completed, "stderr", "") or ""
+            returncode = int(getattr(completed, "returncode", 0))
     except subprocess.TimeoutExpired as exc:
         elapsed = time.monotonic() - started
         stdout_excerpt, stderr_excerpt = _summarise(
             exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
             exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or ""),
         )
+        reap_note = (
+            "; child process group reaped via os.killpg"
+            if runner is None
+            else ""
+        )
         evidence.append(
             f"subprocess exceeded wall_clock_timeout_s={smoke_cfg.wall_clock_timeout_s}; "
-            f"elapsed={elapsed:.3f}s"
+            f"elapsed={elapsed:.3f}s{reap_note}"
         )
         return SmokeResult(
             outcome="wall_clock_timeout",
@@ -446,11 +581,6 @@ def run_smoke(
             elapsed_seconds=elapsed,
             failure_bucket="suite",
         )
-
-    # The runner may be a stub that returns a duck-typed object.
-    stdout = getattr(completed, "stdout", "") or ""
-    stderr = getattr(completed, "stderr", "") or ""
-    returncode = int(getattr(completed, "returncode", 0))
     stdout_excerpt, stderr_excerpt = _summarise(str(stdout), str(stderr))
 
     # --- classify ---------------------------------------------------------
