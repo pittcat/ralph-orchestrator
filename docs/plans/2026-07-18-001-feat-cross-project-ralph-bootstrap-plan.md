@@ -312,7 +312,7 @@ And preset shared references 仍被正确复制
 | S6 | backend 三类失败可区分且不 fallback | fake preflight contract test | 否 |
 | S7 | 新 agent docs 可执行、无绝对路径/内部 ledger | 结构化内容测试 | 否 |
 | S8 | owned 内容更新且用户区逐字保持 | 单元测试 + property-based 幂等测试 | 否 |
-| S9 | marker/YAML/语义冲突 fail closed | 单元测试；对 marker parser 做 fuzz/生成式边界测试 | 否 |
+| S9 | marker/YAML/语义冲突 fail closed | 单元测试；deterministic 5-marker 边界 + marker-collision 显式 invariant（不依赖 `hypothesis`） | 否 |
 | S10 | 第二次运行零 diff、零重复区块 | Idempotency 集成测试 | 否 |
 | S11 | 所有 argv 显式绑定 config/preset且 effective source 正确 | fake CLI contract + 集成测试 | 否 |
 | S12 | 第 N 次写入故障只回滚本轮 owned 变更 | Fault-injection 单元/集成测试 | 否 |
@@ -410,7 +410,7 @@ And preset shared references 仍被正确复制
   - Modify: `skills/tests/test_project_bootstrap_contract.py`
   - Modify: `skills/ralph-project-bootstrap/SKILL.md`
 - **验收测试：** S7-S10、S12 写盘故障、S17；断言用户区逐字保持和 managed section 语义，不对整份 Markdown做 golden equality。
-- **需要拆分的单元测试：** marker 0/1/重复/嵌套/截断；同步模式与非同步模式；绝对路径与内部 ledger 拒绝；任意用户前后缀保持；重复应用幂等；provenance 缺失/损坏/版本变化/用户修改 owned 值时的三方差异。对 marker parser 增加生成式/fuzz 边界，尤其非 UTF-8/损坏输入的停止行为。
+- **需要拆分的单元测试：** marker 0/1/重复/嵌套/截断；同步模式与非同步模式；绝对路径与内部 ledger 拒绝；任意用户前后缀保持；重复应用幂等；provenance 缺失/损坏/版本变化/用户修改 owned 值时的三方差异。对 marker parser 覆盖 deterministic 5-marker 边界（marker 0/1/重复/嵌套/截断）+ marker-collision 显式 invariant（解析器遇到冲突输入必须 fail closed，不输出任何 owned 变更），尤其非 UTF-8/损坏输入的停止行为；本项目不依赖 `hypothesis`，生成式/fuzz 风格的扩展留待后续 plan。
 - **Red 预期失败原因：** 尚无 ownership、冲突判定或原子多文件更新契约。
 - **最小实现范围：** 只覆盖两份 agent docs；定义 bootstrap marker 与 Ralph runtime managed block 不重叠；写盘失败回滚本轮 owned 变更。
 - **TDD 闭环：** 先以已有内容 fixture 写失败验收；再逐个完成 marker/同步/冲突/原子写入 Red→Green→Refactor；运行 dirty-tree 集成与 Unit 1-2 回归。

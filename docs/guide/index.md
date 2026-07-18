@@ -9,6 +9,7 @@ Practical guides for using Ralph Orchestrator effectively.
 | [Configuration](configuration.md) | Full core config reference |
 | [Presets](presets.md) | Built-in hat collections |
 | [Preset Authoring](preset-authoring.md) | Creating and validating your own presets |
+| [Cross-Project Bootstrap Provenance](project-bootstrap.md) | Operator-facing guide for `ralph.bootstrap.yml` provenance keys (`generator_signature` / `input_signature` / per-file SHA-256) |
 | [OPAC Agent Discipline](opac.md) | Observe → Precheck → Apply → Confirm workflow for isolated mode |
 | [CLI Reference](cli-reference.md) | Command-line interface |
 | [Backends](backends.md) | Supported AI backends |

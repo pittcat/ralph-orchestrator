@@ -131,6 +131,8 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 - `presets/index.json` is the user-facing preset manifest
 - 线性 `ce-executor-pipeline` 只生成一份 Fix Plan、执行一轮 fixer；fixer 必须在 `fix.done` 前完成全量测试，随后 `fix.done` 直接进入 Alignment，不再重复 test-stabilizer 或六维复审。
 - **Operator skills（preset 起草/评审）:** `skills/ralph-preset-author`、`skills/ralph-preset-review`（共享 `skills/ralph-preset-common/references/`）
+- **Cross-project bootstrap provenance guide:** `docs/guide/project-bootstrap.md`（`generator_signature` / `input_signature` / per-file SHA-256 三个 key 的语义、刷新时机、与 `ralph.pipeline.yml` + `PROMPT.pipeline.md` 的关系）
+- **Bootstrap residuals deferred per plan U7:** 8 个低优先级 P2 `warn` findings(C1 / C2 / G1 / G2-S2 / M3 / A3 / A4 / A5)见 `.ralph/review/2026-07-18-001-feat-cross-project-ralph-bootstrap-plan/residuals.md`,留待后续 plan 收尾
 
 **`presets/manifest.yml` 是 builtin preset 的 single source of truth**(`crates/ralph-cli/build.rs` 和 `crates/ralph-cli/src/presets.rs` 都从这里读取并在不一致时 panic)。新增/重命名/删除一个 builtin preset 必须**同步改 4 处**:
 1. `presets/en/<name>.yml`(实际 YAML)
