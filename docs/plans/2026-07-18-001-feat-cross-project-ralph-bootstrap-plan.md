@@ -5,6 +5,7 @@ status: active
 date: 2026-07-18
 origin: docs/brainstorms/2026-07-18-ralph-cross-project-runtime-bootstrap-skill-requirements.md
 deepened: 2026-07-18
+plan_contract_version: ce-unified-plan/v1
 ---
 
 # feat: 新增跨项目 Ralph 运行套件 Skill 并删除 ralph-hats
@@ -346,6 +347,7 @@ And preset shared references 仍被正确复制
 
 - **Unit 目标：** 先用 characterization/ATDD 锁定 public skill 的单一清单、marketplace parity、默认/指定安装与 shared references 行为，再让空骨架 `ralph-project-bootstrap` 成为可发现、可安装的 public skill。
 - **对应 Scenario：** S21 的“新增 skill 可发现安装”部分；S19 的“无职责迁移”前置边界。
+- **对应需求：** R1、R21-R24（本 Unit 建立 catalog/installer 前置契约，删除本体在 U8 完成）。
 - **外部可观察结果：** list/默认安装/指定安装在临时 custom dir 中包含新 skill；其他 public skills 不回归；非 public 目录不会被默认安装。
 - **输入与输出：** 输入为 `skills/`、public catalog 和临时安装目录；输出为新 skill 骨架、统一 catalog/manifest 更新及安装行为证据。
 - **可依赖的已完成能力：** `skills/install.py`、`.claude-plugin/marketplace.json`、现有 skill 包结构。
@@ -371,6 +373,7 @@ And preset shared references 仍被正确复制
 
 - **Unit 目标：** 让 skill 在写盘前确认目标根、preset、plan/task 与项目事实来源，并对缺失、歧义或冲突 fail closed。
 - **对应 Scenario：** S2-S4。
+- **对应需求：** R1-R4、R17、R20。
 - **外部可观察结果：** 合法 fixture 产出结构化审计结论；未知技术栈、root 歧义、缺 preset/plan、不可读输入均停止且零持久写入。
 - **输入与输出：** 输入为 cwd、VCS root、嵌套指令文件、preset path/builtin id、plan/task path；输出为审计清单、证据来源与 blocking decision。
 - **可依赖的已完成能力：** Unit 1 的 skill package/fixtures 入口。
@@ -395,6 +398,7 @@ And preset shared references 仍被正确复制
 
 - **Unit 目标：** 用明确 owned section 生成/更新 agent docs，保留用户内容、处理项目同步规则、检测冲突和损坏 marker，并保证幂等。
 - **对应 Scenario：** S7-S10、S12 的 Markdown 写盘部分、S17。
+- **对应需求：** R5-R6、R10、R18-R20。
 - **外部可观察结果：** 空白项目获得可执行规则；已有项目只更新 owned section；第二次运行零 diff；冲突/损坏不写盘；dirty tree 不被清理或提交。
 - **输入与输出：** 输入为 Unit 2 审计结果与现有 docs；输出为候选 diff、原子应用结果或 blocker。
 - **可依赖的已完成能力：** Unit 2 的项目根与事实证据。
@@ -419,6 +423,7 @@ And preset shared references 仍被正确复制
 
 - **Unit 目标：** 从已验证项目事实、preset 与 plan/task 生成最小 `ralph.pipeline.yml` 和 `PROMPT.pipeline.md`，安全维护 owned keys/section并显式绑定执行目标。
 - **对应 Scenario：** S1、S8-S12、S18 的配置与 prompt 部分。
+- **对应需求：** R7-R10、R15-R20。
 - **外部可观察结果：** 配置包含 backend、预算、prompt、诊断、preflight 与项目 guardrails；prompt 连接 plan/task 和项目规则但不复制 hat instructions；已有用户内容保持；冲突 fail closed；重复运行 no-op。
 - **输入与输出：** 输入为 Unit 2 审计、Unit 3 agent docs 状态、用户 backend/预算选择；输出为候选/已写 config 与 prompt。
 - **可依赖的已完成能力：** Unit 1-3。
@@ -444,6 +449,7 @@ And preset shared references 仍被正确复制
 
 - **Unit 目标：** 基于真实 CLI surface 建立 capability probe，并严格按 preset check → preflight → run dry-run 顺序给出分级证据和阻塞分类。
 - **对应 Scenario：** S5-S6、S11、S13。
+- **对应需求：** R11、R14、R17。
 - **外部可观察结果：** 能力或兼容错误在正确阶段停止；所有 argv 显式使用目标 config/preset；dry-run 只提升到静态装载通过；backend 不被静默替换。
 - **输入与输出：** 输入为 Unit 4 套件、CLI help/version/JSON 输出；输出为阶段状态、结构化证据与 blocker。
 - **可依赖的已完成能力：** Unit 1-4。
@@ -468,6 +474,7 @@ And preset shared references 仍被正确复制
 
 - **Unit 目标：** 只在明确安全 backend 能力存在时执行有界 loop smoke；否则停止请求授权；对超时、无事件、错误事件与外部失败保留诊断并准确归因。
 - **对应 Scenario：** S14-S17。
+- **对应需求：** R12-R14、R18-R20。
 - **外部可观察结果：** 安全 fixture 能到达约定首事件/有界终态且业务树无 diff；无安全路径零 backend spawn；失败不被包装成成功且不改 preset/业务代码。
 - **输入与输出：** 输入为 Unit 5 静态通过状态、安全能力声明、运行前 Git baseline；输出为 smoke 证据或授权/失败 blocker。
 - **可依赖的已完成能力：** Unit 1-5。
@@ -492,6 +499,7 @@ And preset shared references 仍被正确复制
 
 - **Unit 目标：** 根据验证等级生成候选命令或复制可用的正式命令和完整 operator handoff；未完成目标项目授权 smoke 时只能标注“静态已验证、闭环未验证、状态 incomplete”。
 - **对应 Scenario：** S1、S15、S18。
+- **对应需求：** R15-R16、R19-R20。
 - **外部可观察结果：** 报告列出文件变更、CLI 能力、各门禁证据、剩余限制；命令显式 config/preset/plan；worktree 参数满足复用键硬规则。
 - **输入与输出：** 输入为 Unit 1-6 状态；输出为中文交付摘要，以及与验证等级对应的候选命令或正式命令。
 - **可依赖的已完成能力：** Unit 1-6。
@@ -515,6 +523,7 @@ And preset shared references 仍被正确复制
 
 - **Unit 目标：** 在新 skill 已独立可用后，原子删除 `ralph-hats` skill 和所有 active references，不迁移其职责，并保持历史材料不变。
 - **对应 Scenario：** S19-S21。
+- **对应需求：** R21-R24。
 - **外部可观察结果：** 无法 list/install/call `ralph-hats`；其他 public skills 与新 skill 正常；active docs 无旧入口；历史引用保留。
 - **输入与输出：** 输入为 Unit 1 的 public catalog contract 与引用清单；输出为删除后的 skill 包、installer/catalog/docs 状态与负向扫描证据。
 - **可依赖的已完成能力：** Unit 1-7；特别是 Unit 1 安装 characterization。
@@ -548,6 +557,7 @@ And preset shared references 仍被正确复制
 
 - **Unit 目标：** 在所有行为已分别落地后，以少量真实跨层 E2E 和全仓门禁证明整体交付，无新增失败/跳过或文档漂移。
 - **对应 Scenario：** S1-S21 全部汇总；不新增行为。
+- **对应需求：** R1-R24 的跨层回归与最终证据。
 - **外部可观察结果：** blank/existing/conflict/safe-smoke 外部 fixture 端到端结果符合规格；CLI docs/skill catalogs/agent docs 同步；全量测试通过。
 - **输入与输出：** 输入为 Unit 1-8 已验证能力；输出为最终测试证据、no-op 同步结论与剩余风险清单。
 - **可依赖的已完成能力：** Unit 1-8 全部完成。
