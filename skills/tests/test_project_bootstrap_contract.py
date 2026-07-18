@@ -1748,3 +1748,409 @@ def test_fake_binary_renders_self_contained_script() -> None:
     assert "LOOP_COMPLETE" in contents
     assert "sys.exit(0)" in contents
     assert "transcript" in contents.lower()
+
+
+# ---------------------------------------------------------------------------
+# Unit 7 — official launch command builder + handoff report (handoff)
+# ---------------------------------------------------------------------------
+
+
+import handoff  # noqa: E402  (Unit 7 helper, loaded by conftest)
+
+
+_BASE_KW: dict[str, object] = dict(
+    binary="ralph",
+    config_path="ralph.pipeline.yml",
+    preset="test-preset",
+    plan_path="plan.md",
+    prompt_file="PROMPT.pipeline.md",
+)
+
+
+def _make_inputs(**overrides: object) -> handoff.HandoffInputs:
+    params = dict(_BASE_KW)
+    params.update(overrides)
+    return handoff.HandoffInputs(**params)  # type: ignore[arg-type]
+
+
+# --- H1 — complete path emits the official command -------------------------
+
+
+def test_handoff_complete_includes_official_command() -> None:
+    inputs = _make_inputs(
+        level="complete",
+        validation_evidence=(
+            "capability ok",
+            "preset_check ok",
+            "preflight ok",
+            "dry_run ok",
+        ),
+        smoke_evidence=("bounded_terminal_reached",),
+    )
+    art = handoff.build_handoff(inputs)
+    assert art.level == "complete"
+    # The command is non-empty and contains the canonical flags.
+    assert art.command
+    assert "[CANDIDATE" not in art.command
+    argv = art.command_argv
+    assert "-c" in argv and "ralph.pipeline.yml" in argv
+    assert "-H" in argv and "test-preset" in argv
+    # The command string mirrors the argv.
+    assert "ralph -c ralph.pipeline.yml -H test-preset" in art.command
+
+
+# --- H2 — incomplete path marks the command as a candidate ----------------
+
+
+def test_handoff_incomplete_static_only_marks_command_as_candidate() -> None:
+    inputs = _make_inputs(
+        level="incomplete_static_only",
+        smoke_evidence=(),
+        validation_evidence=("capability ok", "preset_check ok", "preflight ok", "dry_run ok"),
+    )
+    art = handoff.build_handoff(inputs)
+    assert art.level == "incomplete_static_only"
+    assert art.command.startswith("[CANDIDATE")
+    # The report must explicitly mark the smoke as not authorised and
+    # must not claim the loop is ready to run.
+    assert "smoke-not-authorized" in art.report
+    assert "ready to run" not in art.report.lower()
+    # The argv itself is unchanged; only the rendered command carries
+    # the prefix.
+    assert "-c" in art.command_argv and "-H" in art.command_argv
+
+
+def test_handoff_incomplete_with_not_authorized_evidence_uses_candidate() -> None:
+    """When the smoke harness reported ``not_authorized`` explicitly,
+    the handoff must still treat the level as incomplete (i.e. emit a
+    candidate command, not the official one)."""
+    inputs = _make_inputs(
+        level="incomplete_static_only",
+        smoke_evidence=("not_authorized: backend=mock",),
+    )
+    art = handoff.build_handoff(inputs)
+    assert art.command.startswith("[CANDIDATE")
+    assert "smoke-not-authorized" in art.report
+
+
+# --- H3 — blocked path emits no executable command -------------------------
+
+
+def test_handoff_blocked_emits_no_executable_command() -> None:
+    inputs = _make_inputs(
+        level="blocked",
+        blocker_summary="preset lint failed: unknown preset id 'missing-preset'",
+    )
+    art = handoff.build_handoff(inputs)
+    assert art.level == "blocked"
+    assert art.command == ""
+    assert art.command_argv == ()
+    assert art.blocker_summary != ""
+    # The blocker is rendered into the report so the operator sees why.
+    assert "preset lint failed" in art.report
+
+
+# --- H4 — worktree mode requires a reuse key -------------------------------
+
+
+def test_handoff_worktree_mode_requires_reuse_key() -> None:
+    """When ``use_worktree=True`` AND no ``plan_arg``/``worktree_name``
+    is supplied, the helper MUST reject — even when ``reuse_worktree``
+    is also True. The error message is the contract value."""
+    with pytest.raises(ValueError) as excinfo:
+        handoff.HandoffInputs(
+            **_BASE_KW,  # type: ignore[arg-type]
+            level="complete",
+            use_worktree=True,
+            reuse_worktree=True,
+            plan_arg=None,
+            worktree_name=None,
+        )
+    assert "worktree reuse key required" in str(excinfo.value)
+
+
+def test_handoff_worktree_mode_requires_reuse_flag_when_keys_given() -> None:
+    """When ``use_worktree=True`` but ``reuse_worktree=False``, the
+    helper MUST reject because the operator opted into worktree mode
+    but forgot to enable reuse."""
+    with pytest.raises(ValueError) as excinfo:
+        handoff.HandoffInputs(
+            **_BASE_KW,  # type: ignore[arg-type]
+            level="complete",
+            use_worktree=True,
+            reuse_worktree=False,
+            plan_arg="plan.md",
+        )
+    assert "worktree reuse key required" in str(excinfo.value)
+
+
+# --- H5 — worktree mode allows either --plan or --worktree-name ------------
+
+
+def test_handoff_worktree_mode_allows_plan_arg() -> None:
+    inputs = _make_inputs(
+        level="complete",
+        use_worktree=True,
+        reuse_worktree=True,
+        plan_arg="docs/plans/foo.md",
+        smoke_evidence=("bounded_terminal_reached",),
+    )
+    art = handoff.build_handoff(inputs)
+    assert "--worktree" in art.command_argv
+    assert "--reuse-worktree" in art.command_argv
+    assert "--plan" in art.command_argv
+    assert "docs/plans/foo.md" in art.command_argv
+    # The explicit reuse plan replaces the top-level --plan position so
+    # the operator's explicit reuse key wins.
+    plan_idx = art.command_argv.index("--plan")
+    assert art.command_argv[plan_idx + 1] == "docs/plans/foo.md"
+
+
+def test_handoff_worktree_mode_allows_worktree_name() -> None:
+    inputs = _make_inputs(
+        level="complete",
+        use_worktree=True,
+        reuse_worktree=True,
+        worktree_name="2026-07-18-foo-lucky-reed",
+        smoke_evidence=("bounded_terminal_reached",),
+    )
+    art = handoff.build_handoff(inputs)
+    argv = art.command_argv
+    assert "--worktree" in argv
+    assert "--reuse-worktree" in argv
+    assert "--worktree-name" in argv
+    assert "2026-07-18-foo-lucky-reed" in argv
+    # And the worktree-name branch must NOT inject --plan with the
+    # reuse key — the operator chose the worktree name explicitly.
+    plan_idx = argv.index("--worktree-name")
+    assert argv[plan_idx + 1] == "2026-07-18-foo-lucky-reed"
+
+
+def test_handoff_worktree_command_shape_plan_branch() -> None:
+    inputs = _make_inputs(
+        level="complete",
+        use_worktree=True,
+        reuse_worktree=True,
+        plan_arg="docs/plans/foo.md",
+        smoke_evidence=("bounded_terminal_reached",),
+    )
+    art = handoff.build_handoff(inputs)
+    argv = art.command_argv
+    # Order: --worktree --reuse-worktree --plan <reuse-key>
+    wt = argv.index("--worktree")
+    reuse = argv.index("--reuse-worktree")
+    plan = argv.index("--plan", wt)  # search --plan after --worktree
+    assert wt < reuse < plan
+    assert argv[plan + 1] == "docs/plans/foo.md"
+    # Both -c and -H are still present.
+    assert "-c" in argv and "ralph.pipeline.yml" in argv
+    assert "-H" in argv and "test-preset" in argv
+
+
+def test_handoff_worktree_command_shape_name_branch() -> None:
+    inputs = _make_inputs(
+        level="complete",
+        use_worktree=True,
+        reuse_worktree=True,
+        worktree_name="lucky-reed",
+        smoke_evidence=("bounded_terminal_reached",),
+    )
+    art = handoff.build_handoff(inputs)
+    argv = art.command_argv
+    wt = argv.index("--worktree")
+    reuse = argv.index("--reuse-worktree")
+    name = argv.index("--worktree-name", wt)
+    assert wt < reuse < name
+    assert argv[name + 1] == "lucky-reed"
+    assert "-c" in argv and "-H" in argv
+
+
+# --- H6 — blocked requires a non-empty blocker_summary --------------------
+
+
+def test_handoff_blocked_requires_blocker_summary() -> None:
+    with pytest.raises(ValueError):
+        handoff.HandoffInputs(
+            **_BASE_KW,  # type: ignore[arg-type]
+            level="blocked",
+            blocker_summary="",
+        )
+    with pytest.raises(ValueError):
+        handoff.HandoffInputs(
+            **_BASE_KW,  # type: ignore[arg-type]
+            level="blocked",
+            blocker_summary="   \n  ",
+        )
+
+
+# --- H7 — report is Markdown with required sections -----------------------
+
+
+def test_handoff_report_is_markdown_with_required_sections() -> None:
+    inputs = _make_inputs(
+        level="complete",
+        files_created=("AGENTS.md", "ralph.pipeline.yml"),
+        files_updated=("CLAUDE.md",),
+        files_noop=(),
+        validation_evidence=("dry_run ok",),
+        smoke_evidence=("bounded_terminal_reached",),
+    )
+    art = handoff.build_handoff(inputs)
+    report = art.report
+    # H1 title.
+    assert report.startswith("# Ralph Bootstrap Handoff")
+    # Level line.
+    assert "Level: `complete`" in report
+    # Required sub-sections.
+    assert "## Items" in report
+    assert "## Validation" in report
+    assert "## Smoke" in report
+    assert "## Residual Risks" in report
+    assert "## Launch Command" in report
+    # Items sub-table: created / updated / noop rows present.
+    assert "AGENTS.md" in report
+    assert "ralph.pipeline.yml" in report
+    assert "CLAUDE.md" in report
+    # The smoke status token is the canonical "complete" form.
+    assert "Status: `complete`" in report
+
+
+def test_handoff_report_smoke_status_tokens() -> None:
+    """Every smoke status token documented in the reference must be
+    observable from the rendered report."""
+    # static-only -- smoke-not-authorized
+    art_static = handoff.build_handoff(
+        _make_inputs(level="incomplete_static_only", smoke_evidence=())
+    )
+    assert "Status: `static-only -- smoke-not-authorized`" in art_static.report
+    # complete
+    art_ok = handoff.build_handoff(
+        _make_inputs(level="complete", smoke_evidence=("bounded_terminal_reached",))
+    )
+    assert "Status: `complete`" in art_ok.report
+    # blocked -- <bucket>
+    art_bucket = handoff.build_handoff(
+        _make_inputs(level="blocked", blocker_summary="backend boom",
+                     smoke_evidence=("non_zero_exit bucket=backend",))
+    )
+    # blocked level suppresses the launch command and surfaces the blocker.
+    assert "## Blocker" in art_bucket.report
+    assert "backend boom" in art_bucket.report
+
+
+# --- H8 — residual risks section is populated when provided ----------------
+
+
+def test_handoff_residual_risks_present_when_present() -> None:
+    risks = (
+        "backend has not been authorised; re-confirm before launch",
+        "operator must set RALPH_API_KEY env var before running",
+    )
+    inputs = _make_inputs(
+        level="incomplete_static_only",
+        residual_risks=risks,
+    )
+    art = handoff.build_handoff(inputs)
+    assert "## Residual Risks" in art.report
+    for risk in risks:
+        assert risk in art.report
+    # And the artifact surfaces them structured.
+    assert art.residual_risks == risks
+
+
+def test_handoff_residual_risks_absent_section_renders_placeholder() -> None:
+    inputs = _make_inputs(level="complete", residual_risks=())
+    art = handoff.build_handoff(inputs)
+    assert "## Residual Risks" in art.report
+    assert "_none_" in art.report
+    assert art.residual_risks == ()
+
+
+# --- H9 — no absolute paths leak into the report ---------------------------
+
+
+def test_handoff_no_absolute_paths_in_report() -> None:
+    """Every path-like token in the rendered report must be
+    repo-relative. Absolute paths must be rejected at the API
+    boundary."""
+    inputs = _make_inputs(
+        level="complete",
+        files_created=("AGENTS.md", "docs/plan.md"),
+        files_updated=("CLAUDE.md",),
+        files_noop=("README.md",),
+        validation_evidence=("dry_run ok",),
+        smoke_evidence=("bounded_terminal_reached",),
+    )
+    art = handoff.build_handoff(inputs)
+    for token in art.report.split():
+        # Tokens that contain a "/" or start with "~" are checked for
+        # absolute paths; everything else (prose words, "Level:") is
+        # skipped.
+        if token.startswith(("/Users/", "/tmp/", "/etc/", "/home/")):
+            raise AssertionError(f"absolute path leaked into report: {token}")
+    # And the helper must reject absolute paths at the API boundary.
+    with pytest.raises(ValueError):
+        handoff.HandoffInputs(
+            binary="ralph",
+            config_path="ralph.pipeline.yml",
+            preset="test-preset",
+            plan_path="/etc/passwd",
+            prompt_file="PROMPT.pipeline.md",
+            level="complete",
+        )
+
+
+# --- H10 — preset name is not hard-coded anywhere in the module -----------
+
+
+def test_handoff_module_does_not_hard_code_preset_names() -> None:
+    """The module must accept arbitrary preset ids. A literal preset
+    name in module-level constants would force tests to mirror it and
+    would couple the helper to a specific Ralph preset."""
+    module_text = (Path(__file__).resolve().parent.parent
+                   / "ralph-project-bootstrap" / "scripts" / "handoff.py").read_text(
+        encoding="utf-8"
+    )
+    # Forbidden literals: any specific builtin preset name.
+    forbidden_literals = (
+        "ce-executor-pipeline",
+        "ce-executor-supervisor",
+        "ce-executor-lite",
+        "ralph-hats",
+    )
+    for literal in forbidden_literals:
+        assert literal not in module_text, (
+            f"handoff.py must not hard-code {literal!r}"
+        )
+
+
+# --- H11 — argv shape across the three levels ------------------------------
+
+
+def test_handoff_complete_argv_carries_canonical_flags() -> None:
+    inputs = _make_inputs(level="complete", smoke_evidence=("bounded_terminal_reached",))
+    art = handoff.build_handoff(inputs)
+    argv = art.command_argv
+    assert argv[0] == "ralph"
+    assert "-c" in argv and "ralph.pipeline.yml" in argv
+    assert "-H" in argv and "test-preset" in argv
+    assert "--prompt-file" in argv and "PROMPT.pipeline.md" in argv
+    assert "--plan" in argv and "plan.md" in argv
+
+
+def test_handoff_incomplete_argv_is_unaffected_by_prefix() -> None:
+    """The argv tuple for incomplete must equal the argv tuple for
+    complete — only the rendered command string carries the prefix."""
+    complete = _make_inputs(level="complete", smoke_evidence=("bounded_terminal_reached",))
+    incomplete = _make_inputs(level="incomplete_static_only", smoke_evidence=())
+    art_complete = handoff.build_handoff(complete)
+    art_incomplete = handoff.build_handoff(incomplete)
+    assert art_complete.command_argv == art_incomplete.command_argv
+    assert art_complete.command != art_incomplete.command
+
+
+def test_handoff_blocked_argv_is_empty() -> None:
+    inputs = _make_inputs(level="blocked", blocker_summary="boom")
+    art = handoff.build_handoff(inputs)
+    assert art.command_argv == ()
+    assert art.command == ""
