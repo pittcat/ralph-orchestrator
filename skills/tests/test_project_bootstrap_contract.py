@@ -209,6 +209,122 @@ def test_path_helper_rejects_absolute(tmp_path: Path) -> None:
     assert _paths.is_safe_relative("./docs/plan.md")
 
 
+# --- U3 — path confinement hardening (Unit 3 of plan 2026-07-19-001) -----
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "..",  # bare parent escape
+        "../etc/passwd",  # parent escape
+        "a/../../b",  # parent escape after norm
+        "/etc/passwd",  # absolute POSIX
+        "C:\\Windows\\System32",  # Windows drive
+        "C:/Windows/System32",  # Windows drive (forward slashes)
+        "c:",  # bare drive letter
+        "\\\\server\\share\\file",  # UNC backslashes
+        "//server/share/file",  # UNC forward slashes
+        "docs/\x00/plan.md",  # NUL byte
+        "docs/\x1f/plan.md",  # control byte
+        "docs/․/plan.md",  # Unicode one-dot-leader separator
+        "docs/／plan.md",  # fullwidth solidus
+        "docs/∕plan.md",  # division slash
+        "",  # empty
+    ],
+)
+def test_is_safe_relative_rejects_dangerous_tokens(token: str) -> None:
+    """The lexical gate MUST reject every escape form documented in
+    plan 2026-07-19-001 S7, including POSIX parent escape, Windows
+    drive / UNC, NUL, control bytes, and Unicode separator spoofing.
+    The check runs before any filesystem resolution so a malicious
+    input cannot sneak past via symlink traversal."""
+    assert not _paths.is_safe_relative(token), (
+        f"is_safe_relative must reject dangerous token {token!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "docs/plan.md",
+        "./docs/plan.md",
+        "scripts/audit.py",
+        "a/b/c.txt",
+        "nested/dir/file.md",
+        ".",  # bare current directory is acceptable as a relative anchor
+    ],
+)
+def test_is_safe_relative_accepts_safe_tokens(token: str) -> None:
+    """Canonical safe relative tokens must round-trip through the
+    lexical gate."""
+    assert _paths.is_safe_relative(token), (
+        f"is_safe_relative must accept safe token {token!r}"
+    )
+
+
+def test_normalise_relative_strips_leading_dot_slash() -> None:
+    """``./docs/plan.md`` and ``docs/plan.md`` MUST normalise to the
+    same canonical string so the handoff display stays portable across
+    copy-paste sources."""
+    assert _paths.normalise_relative("docs/plan.md") == "docs/plan.md"
+    assert _paths.normalise_relative("./docs/plan.md") == "docs/plan.md"
+    assert _paths.normalise_relative("././docs/plan.md") == "docs/plan.md"
+
+
+def test_contain_rejects_lexical_escape(tmp_path: Path) -> None:
+    """``contain`` must reject ``../x`` lexically even when the
+    filesystem could resolve it inside ``root`` via a symlink."""
+    assert not _paths.contain("../escape.txt", tmp_path)
+    assert not _paths.contain("/etc/passwd", tmp_path)
+    assert not _paths.contain("C:\\Windows", tmp_path)
+
+
+def test_contain_accepts_safe_relative_under_root(tmp_path: Path) -> None:
+    safe = tmp_path / "docs" / "plan.md"
+    safe.parent.mkdir(parents=True, exist_ok=True)
+    safe.write_text("# plan\n", encoding="utf-8")
+    assert _paths.contain("docs/plan.md", tmp_path)
+
+
+def test_contain_rejects_path_outside_root(tmp_path: Path) -> None:
+    """A path that lexically looks safe but resolves outside ``root``
+    must be rejected by ``contain``."""
+    sibling = tmp_path.parent / "outside.txt"
+    if sibling.exists():
+        sibling.unlink()
+    try:
+        # ``../<sibling-name>`` lexically looks safe IF the parent
+        # directory is one level up; from inside ``tmp_path`` that
+        # would point at the parent. The lexical gate rejects it
+        # before we even get to the resolution step.
+        assert not _paths.contain(f"../{sibling.name}", tmp_path)
+    finally:
+        if sibling.exists():
+            sibling.unlink()
+
+
+def test_rel_returns_marker_for_paths_outside_root(tmp_path: Path) -> None:
+    """``rel`` MUST NOT silently fall back to ``str(path)`` when the
+    input does not resolve under ``root`` — the handoff layer relies on
+    a deterministic ``"<outside-root>"`` marker so it can refuse to
+    render leaked absolute paths."""
+    outside = "/etc/passwd"
+    marker = _paths.rel(outside, root=tmp_path)
+    assert marker == "<outside-root>", (
+        f"rel must return the outside-root marker; got {marker!r}"
+    )
+
+
+def test_rel_normalises_relative_input(tmp_path: Path) -> None:
+    """When ``path`` is already relative, ``rel`` MUST return the
+    POSIX-normalised form so the handoff display never surfaces a
+    leading ``./`` that is merely redundant with the project anchor."""
+    rendered = _paths.rel("docs/plan.md", root=tmp_path)
+    assert rendered == "./docs/plan.md"
+    rendered_with_dot = _paths.rel("./docs/plan.md", root=tmp_path)
+    assert rendered_with_dot == "./docs/plan.md"
+
+
 def test_blank_project_root_resolves_to_cwd(tmp_path: Path) -> None:
     project = tmp_path / "blank"
     project.mkdir()
@@ -561,6 +677,7 @@ def _make_pipeline_suite() -> pipeline_suite.PipelineSuite:
 
 def test_suite_generates_config_and_prompt_for_blank_project() -> None:
     suite = _make_pipeline_suite()
+    # The four owned keys MUST live under ``_bootstrap:``.
     assert "_bootstrap:" in suite.config
     assert "preset:" in suite.config
     assert "plan:" in suite.config
@@ -573,11 +690,21 @@ def test_suite_generates_config_and_prompt_for_blank_project() -> None:
     # canonical four owned keys under ``_bootstrap:``.
     user_keys, owned_keys = pipeline_suite.parse_owned_yaml(suite.config)
     assert set(owned_keys) == set(pipeline_suite.PIPELINE_OWNED_KEYS)
-    # The user keys include at least the event_loop / budget /
-    # diagnostics scaffolding the helper emits.
+    # The user-keys block must contain the fields ``RalphConfig``
+    # actually consumes — NOT the legacy top-level ``budget``/
+    # ``diagnostics`` / ``event_loop.backend`` shape the old fixture
+    # claimed to set.
+    assert "cli" in user_keys, suite.config
+    assert user_keys["cli"]["backend"] == "claude"
     assert "event_loop" in user_keys
-    assert "budget" in user_keys
-    assert "diagnostics" in user_keys
+    assert user_keys["event_loop"]["prompt_file"] == "PROMPT.pipeline.md"
+    assert user_keys["event_loop"]["max_iterations"] == 12
+    assert user_keys["event_loop"]["max_runtime_seconds"] == 7200
+    # And the runtime's diagnostics namespace, not the invented
+    # ``diagnostics`` top-level field.
+    assert "diagnostics" not in user_keys, suite.config
+    assert "telemetry" in user_keys
+    assert user_keys["telemetry"]["runtime_diagnosis"]["enabled"] is True
 
 
 # S2 — render_pipeline_yml emits the four owned keys in canonical order.
@@ -592,9 +719,16 @@ def test_pipeline_yml_emits_owned_keys_in_canonical_order() -> None:
         budget_max_iterations=12,
         budget_wall_clock_seconds=7200,
     )
-    bootstrap_idx = text.index("_bootstrap:")
+    # Locate the actual ``_bootstrap:`` top-level key, NOT the
+    # substring in the header comment (``# ``_bootstrap:``; ...``).
+    bootstrap_idx = text.index("_bootstrap:\n")
     after = text[bootstrap_idx:]
-    positions = [after.index(f"  {key}:") for key in pipeline_suite.PIPELINE_OWNED_KEYS]
+    # Look for the EXACT two-space indented owned key followed by a
+    # space (so we don't match substrings of multi-token keys).
+    positions: list[int] = []
+    for key in pipeline_suite.PIPELINE_OWNED_KEYS:
+        needle = f"  {key}: "
+        positions.append(after.index(needle))
     assert positions == sorted(positions), (
         "owned keys must appear in canonical order: "
         f"{pipeline_suite.PIPELINE_OWNED_KEYS}"
@@ -625,15 +759,18 @@ def test_prompt_md_references_plan_and_preset_without_runtime_leakage() -> None:
 def test_user_keys_outside_bootstrap_preserved_after_apply(tmp_path: Path) -> None:
     pre_block = (
         "# operator-authored preamble\n"
-        "event_loop:\n"
+        "cli:\n"
         "  backend: claude\n"
         "  extra_user_field: keep-me\n"
-        "  project_root: ./\n"
-        "budget:\n"
+        "event_loop:\n"
+        "  prompt_file: PROMPT.pipeline.md\n"
         "  max_iterations: 12\n"
-        "  wall_clock_seconds: 7200\n"
-        "diagnostics:\n"
-        "  enabled: true\n"
+        "  max_runtime_seconds: 7200\n"
+        "core:\n"
+        "  project_root: ./\n"
+        "telemetry:\n"
+        "  runtime_diagnosis:\n"
+        "    enabled: true\n"
     )
     existing = pre_block + (
         "_bootstrap:\n"
@@ -785,7 +922,8 @@ def test_atomic_writer_rolls_back_after_owned_value_user_modified(tmp_path: Path
     config_path = project / "ralph.pipeline.yml"
     original_config = (
         "# original\n"
-        "event_loop:\n  backend: claude\n"
+        "cli:\n  backend: claude\n"
+        "event_loop:\n  prompt_file: PROMPT.pipeline.md\n"
         "_bootstrap:\n"
         "  preset: \"builtin:ce-executor-pipeline\"\n"
         "  plan: plan.md\n"
@@ -1040,8 +1178,14 @@ def test_cli_probe_dry_run_source_mismatch_blocks_at_dry_run_stage() -> None:
     assert capability.outcome == "ok"
     assert preset_check.outcome == "ok"
     assert preflight.outcome == "ok"
+    # Real ``ralph run --dry-run`` printed a different ``Prompt file``
+    # than the pipeline suite requested: that is a typed
+    # source/effective mismatch, NOT the legacy ``config_path=`` marker
+    # search. The helper must surface it as ``blocked_command`` so the
+    # caller cannot claim "binary printed something" ⇒ "binary used our
+    # suite".
     assert dry_run.outcome == "blocked_command"
-    assert "does not reference requested config" in dry_run.blocked_reason
+    assert "prompt_file" in dry_run.blocked_reason
 
 
 # --- T6 — green path: 4 stages all ok -------------------------------------
@@ -1187,7 +1331,7 @@ def test_cli_probe_required_flags_is_literal() -> None:
         {
             "preset check --strict",
             "preflight --strict",
-            "run --dry-run --strict",
+            "run --dry-run",
         }
     )
 
@@ -1220,14 +1364,18 @@ def test_cli_probe_capability_gate_does_not_throw() -> None:
 
 def test_cli_probe_dry_run_argv_matches_expected_command_shape() -> None:
     """The dry-run argv must be ``<binary> -c <config> -H <preset>
-    run --dry-run --strict --prompt-file <pf> --plan <plan>``."""
+    run --dry-run --prompt-file <pf> --plan <plan>`` and must NOT carry
+    ``--strict`` (the real ``ralph run`` does not accept it)."""
     runner = _make_runner("green")
     decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
     dry_run = decisions[-1]
     argv = dry_run.argv
     assert argv[0] == "ralph"
     assert "--dry-run" in argv
-    assert "--strict" in argv
+    assert "--strict" not in argv, (
+        "real ralph run does not accept --strict; the dry-run argv must "
+        "not invent one (strict gating is owned by preflight --strict)"
+    )
     # --prompt-file and its value sit together.
     pfile_idx = argv.index("--prompt-file")
     assert argv[pfile_idx + 1] == "PROMPT.pipeline.md"
@@ -1247,6 +1395,41 @@ def test_cli_probe_load_fixture_returns_fake_invocations() -> None:
         assert isinstance(inv.exit_code, int)
 
 
+# --- T16 — dry-run evidence carries parsed effective values --------------
+
+
+def test_cli_probe_dry_run_evidence_carries_effective_values() -> None:
+    """The dry-run ``StageDecision.evidence`` MUST carry the parsed
+    effective values from the real CLI's ``label: value`` block. The
+    contract is no longer satisfied by searching a fake ``config_path=``
+    marker: the helper must parse the stable ``Backend`` / ``Prompt
+    file`` / ``Max iterations`` / ``Max runtime`` labels."""
+    runner = _make_runner("green")
+    decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
+    dry_run = decisions[-1]
+    evidence_blob = "\n".join(dry_run.evidence)
+    # The real fixture emits these stable labels; the parser must
+    # surface each as ``effective_<label>=<value>``.
+    assert "effective_backend=" in evidence_blob
+    assert "effective_prompt_file=" in evidence_blob
+    assert "effective_max_iterations=" in evidence_blob
+    assert "effective_max_runtime=" in evidence_blob
+
+
+def test_cli_probe_dry_run_evidence_does_not_search_fake_marker() -> None:
+    """The dry-run outcome MUST be derived from parsed effective values,
+    NOT from searching stdout/stderr for ``config_path=`` (a fake marker
+    the real CLI never emits — see plan 2026-07-19-001 S11)."""
+    runner = _make_runner("green")
+    decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
+    dry_run = decisions[-1]
+    assert dry_run.outcome == "ok"
+    assert "config_path=" not in dry_run.argv  # type: ignore[operator]
+    # And the reason text must come from the parser, not the legacy
+    # "does not reference requested config" message.
+    assert "does not reference" not in (dry_run.blocked_reason or "")
+
+
 # ---------------------------------------------------------------------------
 # Unit 6 — safe-loop smoke harness (smoke_runner)
 # ---------------------------------------------------------------------------
@@ -1262,7 +1445,7 @@ _SMOKE_KW: dict[str, object] = dict(
     prompt_file="PROMPT.pipeline.md",
     plan_path="plan.md",
     max_iterations=3,
-    idle_timeout_ms=5000,
+    idle_timeout_secs=5,
     wall_clock_timeout_s=60,
 )
 
@@ -1436,11 +1619,11 @@ def test_timeout_idle_classifies_after_idle_timeout_ms() -> None:
     result = smoke_runner.run_smoke(backend, cfg, runner=_emit_then_hang)
     # The harness classifies TimeoutExpired as wall_clock_timeout;
     # idle-vs-no-event is a runtime-side concern and is observed via
-    # the --idle-timeout-ms flag the harness forwards. The argv MUST
+    # the --idle-timeout flag the harness forwards. The argv MUST
     # carry the flag so a cooperative runtime can implement idle.
     assert result.outcome == "wall_clock_timeout"
-    assert "--idle-timeout-ms" in result.argv
-    assert "5000" in result.argv  # default idle_timeout_ms
+    assert "--idle-timeout" in result.argv
+    assert "5" in result.argv  # default idle_timeout_secs
 
 
 # --- S4 — non-zero exit classification -------------------------------------
@@ -1549,8 +1732,9 @@ def test_dirty_tree_preserved(tmp_path: Path) -> None:
 
 def test_smoke_argv_shape_contains_required_flags() -> None:
     """Every argv the harness builds MUST contain -c, -H,
-    --max-iterations, --idle-timeout-ms, --wall-clock-timeout-s.
-    Verify by inspecting the argv on a green-path result."""
+    --max-iterations, --idle-timeout (in seconds). The wall-clock cap
+    is NOT forwarded to the CLI — it lives on the harness outer
+    ``timeout`` argument (see plan 2026-07-19-001 F6 / Unit 4)."""
     backend = smoke_runner.SafeBackend(name="replay")
     runner = _fake_runner(stdout="plan.ready\nLOOP_COMPLETE\n", returncode=0)
     result = smoke_runner.run_smoke(backend, _smoke_cfg(), runner=runner)
@@ -1561,10 +1745,14 @@ def test_smoke_argv_shape_contains_required_flags() -> None:
     assert "builtin:ce-executor-pipeline" in argv
     assert "--max-iterations" in argv
     assert "3" in argv
-    assert "--idle-timeout-ms" in argv
-    assert "5000" in argv
-    assert "--wall-clock-timeout-s" in argv
-    assert "60" in argv
+    assert "--idle-timeout" in argv
+    assert "5" in argv
+    # Negative contract: the wall-clock cap and the legacy
+    # ``--idle-timeout-ms`` flag MUST NOT appear on the argv — those
+    # belong to the harness outer ``timeout`` / the public CLI
+    # ``--idle-timeout`` seconds flag respectively.
+    assert "--idle-timeout-ms" not in argv
+    assert "--wall-clock-timeout-s" not in argv
 
 
 def test_smoke_argv_shape_holds_when_extra_argv_appended() -> None:
@@ -1785,6 +1973,10 @@ def test_handoff_complete_includes_official_command() -> None:
             "preflight ok",
             "dry_run ok",
         ),
+        # Typed outcome drives the level — free-text evidence is just
+        # a debugging footnote. See plan 2026-07-19-001 F7.
+        smoke_outcome="bounded_terminal_reached",
+        smoke_failure_bucket="none",
         smoke_evidence=("bounded_terminal_reached",),
     )
     art = handoff.build_handoff(inputs)
@@ -1826,6 +2018,7 @@ def test_handoff_incomplete_with_not_authorized_evidence_uses_candidate() -> Non
     candidate command, not the official one)."""
     inputs = _make_inputs(
         level="incomplete_static_only",
+        smoke_outcome="not_authorized",
         smoke_evidence=("not_authorized: backend=mock",),
     )
     art = handoff.build_handoff(inputs)
@@ -1893,6 +2086,8 @@ def test_handoff_worktree_mode_allows_plan_arg() -> None:
         use_worktree=True,
         reuse_worktree=True,
         plan_arg="docs/plans/foo.md",
+        smoke_outcome="bounded_terminal_reached",
+        smoke_failure_bucket="none",
         smoke_evidence=("bounded_terminal_reached",),
     )
     art = handoff.build_handoff(inputs)
@@ -1912,6 +2107,8 @@ def test_handoff_worktree_mode_allows_worktree_name() -> None:
         use_worktree=True,
         reuse_worktree=True,
         worktree_name="2026-07-18-foo-lucky-reed",
+        smoke_outcome="bounded_terminal_reached",
+        smoke_failure_bucket="none",
         smoke_evidence=("bounded_terminal_reached",),
     )
     art = handoff.build_handoff(inputs)
@@ -1932,6 +2129,8 @@ def test_handoff_worktree_command_shape_plan_branch() -> None:
         use_worktree=True,
         reuse_worktree=True,
         plan_arg="docs/plans/foo.md",
+        smoke_outcome="bounded_terminal_reached",
+        smoke_failure_bucket="none",
         smoke_evidence=("bounded_terminal_reached",),
     )
     art = handoff.build_handoff(inputs)
@@ -1953,6 +2152,8 @@ def test_handoff_worktree_command_shape_name_branch() -> None:
         use_worktree=True,
         reuse_worktree=True,
         worktree_name="lucky-reed",
+        smoke_outcome="bounded_terminal_reached",
+        smoke_failure_bucket="none",
         smoke_evidence=("bounded_terminal_reached",),
     )
     art = handoff.build_handoff(inputs)
@@ -1993,6 +2194,8 @@ def test_handoff_report_is_markdown_with_required_sections() -> None:
         files_updated=("CLAUDE.md",),
         files_noop=(),
         validation_evidence=("dry_run ok",),
+        smoke_outcome="bounded_terminal_reached",
+        smoke_failure_bucket="none",
         smoke_evidence=("bounded_terminal_reached",),
     )
     art = handoff.build_handoff(inputs)
@@ -2018,20 +2221,30 @@ def test_handoff_report_is_markdown_with_required_sections() -> None:
 def test_handoff_report_smoke_status_tokens() -> None:
     """Every smoke status token documented in the reference must be
     observable from the rendered report."""
-    # static-only -- smoke-not-authorized
+    # static-only -- smoke-not-authorized (no smoke was even attempted)
     art_static = handoff.build_handoff(
         _make_inputs(level="incomplete_static_only", smoke_evidence=())
     )
     assert "Status: `static-only -- smoke-not-authorized`" in art_static.report
-    # complete
+    # complete — typed outcome drives the level
     art_ok = handoff.build_handoff(
-        _make_inputs(level="complete", smoke_evidence=("bounded_terminal_reached",))
+        _make_inputs(
+            level="complete",
+            smoke_outcome="bounded_terminal_reached",
+            smoke_failure_bucket="none",
+            smoke_evidence=("bounded_terminal_reached",),
+        )
     )
     assert "Status: `complete`" in art_ok.report
-    # blocked -- <bucket>
+    # blocked -- <bucket> via typed outcome + failure_bucket
     art_bucket = handoff.build_handoff(
-        _make_inputs(level="blocked", blocker_summary="backend boom",
-                     smoke_evidence=("non_zero_exit bucket=backend",))
+        _make_inputs(
+            level="blocked",
+            blocker_summary="backend boom",
+            smoke_outcome="non_zero_exit",
+            smoke_failure_bucket="backend",
+            smoke_evidence=("non_zero_exit bucket=backend",),
+        )
     )
     # blocked level suppresses the launch command and surfaces the blocker.
     assert "## Blocker" in art_bucket.report
@@ -2128,7 +2341,12 @@ def test_handoff_module_does_not_hard_code_preset_names() -> None:
 
 
 def test_handoff_complete_argv_carries_canonical_flags() -> None:
-    inputs = _make_inputs(level="complete", smoke_evidence=("bounded_terminal_reached",))
+    inputs = _make_inputs(
+        level="complete",
+        smoke_outcome="bounded_terminal_reached",
+        smoke_failure_bucket="none",
+        smoke_evidence=("bounded_terminal_reached",),
+    )
     art = handoff.build_handoff(inputs)
     argv = art.command_argv
     assert argv[0] == "ralph"
@@ -2141,7 +2359,12 @@ def test_handoff_complete_argv_carries_canonical_flags() -> None:
 def test_handoff_incomplete_argv_is_unaffected_by_prefix() -> None:
     """The argv tuple for incomplete must equal the argv tuple for
     complete — only the rendered command string carries the prefix."""
-    complete = _make_inputs(level="complete", smoke_evidence=("bounded_terminal_reached",))
+    complete = _make_inputs(
+        level="complete",
+        smoke_outcome="bounded_terminal_reached",
+        smoke_failure_bucket="none",
+        smoke_evidence=("bounded_terminal_reached",),
+    )
     incomplete = _make_inputs(level="incomplete_static_only", smoke_evidence=())
     art_complete = handoff.build_handoff(complete)
     art_incomplete = handoff.build_handoff(incomplete)
@@ -2154,6 +2377,85 @@ def test_handoff_blocked_argv_is_empty() -> None:
     art = handoff.build_handoff(inputs)
     assert art.command_argv == ()
     assert art.command == ""
+
+
+# --- U5 / F7 — typed smoke outcome is the only path to ``complete`` -----
+
+
+def test_handoff_rejects_free_text_complete_without_typed_outcome() -> None:
+    """A free-text ``smoke_evidence`` string that contains the literal
+    ``bounded_terminal_reached`` MUST NOT, by itself, advance the
+    handoff to ``complete``. The caller must populate
+    ``smoke_outcome="bounded_terminal_reached"`` explicitly. This is
+    the anti-fake-positive contract (plan 2026-07-19-001 F7 / S10):
+    a fake runner that smuggled the keyword into a stderr blob MUST
+    not be able to fake a complete handoff.
+    """
+    inputs = _make_inputs(
+        level="complete",
+        # Only free-text evidence — no typed outcome.
+        smoke_outcome=None,
+        smoke_failure_bucket=None,
+        smoke_evidence=("bounded_terminal_reached",),
+    )
+    art = handoff.build_handoff(inputs)
+    # The renderable level is whatever the caller asked for, but the
+    # status token MUST reflect the unverified state — and the body
+    # MUST warn that no typed outcome was supplied.
+    assert "Status: `complete`" not in art.report
+    assert "no typed outcome" in art.report.lower()
+    # And the launch command should not be presented as an official,
+    # safe-to-run artifact: it must carry the CANDIDATE prefix.
+    assert art.command.startswith("[CANDIDATE")
+
+
+def test_handoff_blocked_outcome_blocks_complete_even_with_evidence() -> None:
+    """A ``smoke_outcome`` from ``SMOKE_BLOCKED_OUTCOMES`` (e.g.
+    ``non_zero_exit``) MUST downgrade the handoff to ``blocked`` even
+    when ``smoke_evidence`` carries the positive keyword. Anti-fake-
+    positive contract (S10)."""
+    inputs = _make_inputs(
+        level="complete",  # caller LIED; helper must refuse
+        smoke_outcome="non_zero_exit",
+        smoke_failure_bucket="backend",
+        smoke_evidence=("bounded_terminal_reached",),  # decoy keyword
+    )
+    art = handoff.build_handoff(inputs)
+    # The blocker must surface; the report must show the bucket.
+    assert "blocked" in art.report.lower()
+    assert "backend" in art.report.lower()
+    # And the launch command must not be rendered as the official one.
+    assert not art.command or art.command.startswith("[CANDIDATE")
+
+
+def test_handoff_not_run_outcome_blocks_complete() -> None:
+    """A ``smoke_outcome='not_authorized'`` MUST downgrade the handoff
+    to ``incomplete_static_only`` even when ``smoke_evidence`` carries
+    the positive keyword. Anti-fake-positive contract."""
+    inputs = _make_inputs(
+        level="complete",
+        smoke_outcome="not_authorized",
+        smoke_failure_bucket="none",
+        smoke_evidence=("bounded_terminal_reached",),  # decoy
+    )
+    art = handoff.build_handoff(inputs)
+    assert "smoke-not-authorized" in art.report
+    assert art.command.startswith("[CANDIDATE")
+
+
+def test_handoff_typed_complete_outcome_advances_level() -> None:
+    """The positive contract: a typed ``smoke_outcome="bounded_terminal_reached"``
+    drives the level to ``complete`` even with no evidence strings."""
+    inputs = _make_inputs(
+        level="complete",
+        smoke_outcome="bounded_terminal_reached",
+        smoke_failure_bucket="none",
+        smoke_evidence=(),
+    )
+    art = handoff.build_handoff(inputs)
+    assert "Status: `complete`" in art.report
+    assert not art.command.startswith("[CANDIDATE")
+    assert "-c" in art.command_argv and "-H" in art.command_argv
 
 
 # ---------------------------------------------------------------------------
@@ -2302,7 +2604,12 @@ def test_run_smoke_reaps_child_group_on_outer_timeout(
     assert "-c" in argv and "ralph.pipeline.yml" in argv
     assert "-H" in argv and "builtin:ce-executor-pipeline" in argv
     assert "--max-iterations" in argv
-    assert "--wall-clock-timeout-s" in argv
+    # The wall-clock cap is NOT forwarded to the CLI: it lives on
+    # the harness outer ``timeout`` argument only. We assert the
+    # negative contract here so a future helper regression that
+    # re-introduces ``--wall-clock-timeout-s`` is caught.
+    assert "--wall-clock-timeout-s" not in argv
+    assert "--idle-timeout" in argv
 
     # --- preexec_fn=os.setsid is the POSIX-portable group-spawn knob --
     assert popen_kwargs, "harness must pass kwargs to subprocess.Popen"

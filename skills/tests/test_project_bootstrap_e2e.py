@@ -437,7 +437,10 @@ class TestCrossLayerBootstrap:
         )
         assert smoke_result.outcome == "bounded_terminal_reached"
 
-        # Stage 6: handoff at level=complete.
+        # Stage 6: handoff at level=complete. Per the Unit 5 anti-fake-
+        # positive contract (plan 2026-07-19-001 F7), the level MUST
+        # be driven by a typed ``smoke_outcome`` field, not by a free-
+        # text evidence string.
         inputs = handoff.HandoffInputs(
             binary="ralph",
             config_path="ralph.pipeline.yml",
@@ -455,6 +458,8 @@ class TestCrossLayerBootstrap:
             validation_evidence=tuple(
                 f"{stage.stage}:{stage.outcome}" for stage in decisions
             ),
+            smoke_outcome=smoke_result.outcome,
+            smoke_failure_bucket=smoke_result.failure_bucket,
             smoke_evidence=(smoke_result.outcome,),
         )
         artifact = handoff.build_handoff(inputs)
@@ -560,6 +565,8 @@ class TestCrossLayerBootstrap:
                 "ralph.bootstrap.yml",
             ),
             validation_evidence=("capability:ok",),
+            smoke_outcome=smoke_result.outcome,
+            smoke_failure_bucket=smoke_result.failure_bucket,
             smoke_evidence=(smoke_result.outcome,),
         )
         artifact = handoff.build_handoff(inputs)
@@ -653,6 +660,8 @@ class TestCrossLayerBootstrap:
             validation_evidence=tuple(
                 f"{stage.stage}:{stage.outcome}" for stage in decisions
             ),
+            smoke_outcome=smoke_result.outcome,
+            smoke_failure_bucket=smoke_result.failure_bucket,
             smoke_evidence=(smoke_result.outcome,),
         )
         artifact = handoff.build_handoff(inputs)
