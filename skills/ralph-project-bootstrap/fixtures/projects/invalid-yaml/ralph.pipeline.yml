@@ -1,18 +1,21 @@
 # This file intentionally carries a duplicate top-level key. The
 # bootstrap helper must refuse to apply owned-key updates and surface
 # ``OwnedYamlError("duplicate_yaml_key")``.
-event_loop:
+cli:
   backend: claude
-  project_root: ./
-budget:
+event_loop:
+  prompt_file: PROMPT.pipeline.md
   max_iterations: 12
-  wall_clock_seconds: 7200
-diagnostics:
-  enabled: true
+  max_runtime_seconds: 7200
+core:
+  project_root: ./
+telemetry:
+  runtime_diagnosis:
+    enabled: true
 _bootstrap:
   preset: "builtin:ce-executor-pipeline"
   plan: plan.md
   prompt_file: PROMPT.pipeline.md
   preflight: strict
 event_loop:  # duplicate top-level key
-  backend: codex
+  prompt_file: PROMPT.pipeline.md

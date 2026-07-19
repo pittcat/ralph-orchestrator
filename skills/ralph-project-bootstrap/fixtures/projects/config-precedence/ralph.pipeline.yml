@@ -2,14 +2,17 @@
 # ``_bootstrap:``; everything else is operator-owned and preserved
 # byte-for-byte across recompositions.
 # generator_version: 0.1.0
-event_loop:
+cli:
   backend: claude
-  project_root: ./
-budget:
+event_loop:
+  prompt_file: PROMPT.pipeline.md
   max_iterations: 12
-  wall_clock_seconds: 7200
-diagnostics:
-  enabled: true
+  max_runtime_seconds: 7200
+core:
+  project_root: ./
+telemetry:
+  runtime_diagnosis:
+    enabled: true
 _bootstrap:
   preset: "builtin:ce-executor-pipeline"
   plan: plan.md

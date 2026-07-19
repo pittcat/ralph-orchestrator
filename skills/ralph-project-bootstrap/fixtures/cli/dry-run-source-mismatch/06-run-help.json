@@ -5,7 +5,6 @@
     "Usage: ralph run [OPTIONS]\n",
     "\n",
     "Options:\n",
-    "      --strict         strict mode\n",
     "      --dry-run        static load only\n",
     "      --prompt-file F  prompt file path\n",
     "      --plan P         plan or task file path\n"

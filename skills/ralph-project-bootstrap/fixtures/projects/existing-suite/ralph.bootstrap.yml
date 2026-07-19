@@ -9,6 +9,6 @@ owned_keys:
   - preflight
 summary:
   - file: ralph.pipeline.yml
-    sha256: dbd14ce01809ec8756d6763f9c5101d4985aaa9bdb4a7c835d66b5db935b68dd
+    sha256: 2eab5970c10737a31740da5399d62f1b0a5bbc3ac246e9fbf7c25b6af56bf608
   - file: PROMPT.pipeline.md
     sha256: 392516ef32a54a059271ed5f9273e481f6596ea4bc2350c5d1f133584bffbb78

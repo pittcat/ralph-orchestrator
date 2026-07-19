@@ -12,9 +12,8 @@
     "Options:\n",
     "  -c PATH   config file path\n",
     "  -H NAME   hat preset name\n",
-    "      --strict  enable strict mode\n",
-    "      --json    emit JSON output\n",
-    "      --dry-run do not actually run\n"
+    "      --strict  enable strict mode (preset/preflight only)\n",
+    "      --json    emit JSON output\n"
   ],
   "stderr_chunks": [],
   "exit_code": 0,

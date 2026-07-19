@@ -5,8 +5,7 @@
     "-c",
     "-H",
     "--max-iterations",
-    "--idle-timeout-ms",
-    "--wall-clock-timeout-s"
+    "--idle-timeout"
   ],
   "stdout_lines": [
     "plan.ready",

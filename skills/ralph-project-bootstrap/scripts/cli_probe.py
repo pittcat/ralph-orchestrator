@@ -8,7 +8,7 @@ surface matches a canonical contract. This module owns:
   present.
 * ``validate_pipeline`` — runs the four-stage static gate in strict order
   (``capability`` → ``preset check --strict`` → ``preflight --strict`` →
-  ``run --dry-run --strict``) and classifies each stage's outcome into a
+  ``run --dry-run``) and classifies each stage's outcome into a
   blocker category.
 * ``load_fixture`` — reads a fixture directory produced by the test
   authoring helpers into a list of ``FakeInvocation`` records the fake
@@ -33,14 +33,24 @@ Public surface (everything else is private):
 Hard rules:
 
 * All subprocess argv tuples MUST contain ``-c <config_path>`` and
-  ``-H <preset>``; the dry-run argv additionally carries ``--dry-run``.
+  ``-H <preset>``; the dry-run argv additionally carries ``--dry-run``
+  (only).
 * The capability gate never throws: missing binary / missing flag /
   timeout / nonzero exit all populate ``flags_missing`` or block a
   stage, never raise.
 * ``backend`` errors reported by ``preflight --strict`` translate to
-  ``blocked_backend``; source mismatch in ``run --dry-run`` translates
-  to ``blocked_command``; everything else non-backend is
+  ``blocked_backend``; effective-config mismatch in ``run --dry-run``
+  translates to ``blocked_command``; everything else non-backend is
   ``blocked_cli`` (preset/preflight) or ``blocked_command`` (dry-run).
+* The dry-run stage's source/effective proof comes from the explicit
+  ``-c <config_path> -H <preset>`` argv AND parsed effective-value
+  labels (``backend:`` / ``prompt_file:`` / ``max_iterations:`` /
+  ``max_runtime_seconds:``) emitted by the real ``ralph run --dry-run``
+  human-readable output. We do NOT search for fake markers like
+  ``config_path=...`` because the real CLI does not emit that token.
+* Strict mode is owned by ``ralph preset check --strict`` and
+  ``ralph preflight --strict``; ``ralph run`` does not accept
+  ``--strict``. ``run --dry-run`` therefore never carries that flag.
 """
 from __future__ import annotations
 
@@ -58,29 +68,34 @@ from typing import Any, Callable, Iterable
 # is the public capability id; the probe translates each id into one
 # or more concrete flag-presence checks against the observed help
 # output.
+#
+# Strict mode is split across two subcommands. ``ralph run`` does NOT
+# accept ``--strict``; dry-run relies on the strict preflight stage
+# to gate bad config. We therefore do not require ``run --strict``
+# here. (See plan 2026-07-19-001 S1 / S2.)
 REQUIRED_FLAGS: frozenset[str] = frozenset(
     {
         "preset check --strict",
         "preflight --strict",
-        "run --dry-run --strict",
+        "run --dry-run",
     }
 )
 
 # Mapping from capability id to the concrete flag tokens the probe
 # must observe in the relevant help page. The probe also records
 # whether ``--dry-run`` exists on ``ralph run --help`` separately
-# because ``run --dry-run --strict`` needs both flags.
+# because ``run --dry-run`` is its own capability row.
 _CAPABILITY_FLAG_TOKENS: dict[str, tuple[str, ...]] = {
     "preset check --strict": ("--strict",),
     "preflight --strict": ("--strict",),
-    "run --dry-run --strict": ("--dry-run", "--strict"),
+    "run --dry-run": ("--dry-run",),
 }
 
 # Which subcommand's help page to inspect for each capability id.
 _CAPABILITY_HELP_TARGET: dict[str, str] = {
     "preset check --strict": "preset check",
     "preflight --strict": "preflight",
-    "run --dry-run --strict": "run",
+    "run --dry-run": "run",
 }
 
 # Best-effort detection of ``--json --help`` support so we can populate
@@ -319,7 +334,7 @@ def probe_capability(
             continue
         found_for_sub = _parse_flags(completed.stdout, (capability,))
         flags_present.update(found_for_sub)
-        if capability == "run --dry-run --strict":
+        if capability == "run --dry-run":
             run_dry_run_supported = (
                 run_dry_run_supported or bool(found_for_sub)
             )
@@ -369,12 +384,15 @@ def _build_stage_argv(
 
     Every argv starts with the binary, then ``-c <config_path>`` and
     ``-H <preset>``. The ``dry_run`` stage additionally carries
-    ``--dry-run``. Other stages add the strict gate flag mandated by
-    the staged proof-level state machine.
+    ``--dry-run`` only — ``ralph run`` does not accept ``--strict``;
+    strict gating lives in the dedicated ``preflight --strict`` stage.
+    The optional ``--prompt-file`` and ``--plan`` flags are appended to
+    the dry-run argv in argv-order.
 
     The contract is enforced by the test suite: every argv the helper
     builds must contain ``-c <config_path>`` and ``-H <preset>``; the
-    dry-run argv must additionally contain ``--dry-run``.
+    dry-run argv must additionally contain ``--dry-run`` and must NOT
+    contain ``--strict``.
     """
     base = (
         str(binary),
@@ -390,7 +408,7 @@ def _build_stage_argv(
     if stage == "preflight":
         return base + ("preflight", "--strict")
     if stage == "dry_run":
-        argv = base + ("run", "--dry-run", "--strict")
+        argv = base + ("run", "--dry-run")
         if prompt_file:
             argv = argv + ("--prompt-file", prompt_file)
         if plan_path:
@@ -432,26 +450,77 @@ def _classify_preset_stderr(stderr: str) -> str:
     return first
 
 
-def _classify_dry_run(stdout: str, stderr: str, expected_config: str) -> tuple[str, str]:
-    """Classify a dry-run stage outcome.
+# Stable labels emitted by ``ralph run --dry-run``'s human-readable
+# configuration block. The contract relies on these labels being
+# produced by the real CLI rather than on a fake JSON / dotenv marker
+# we invent here. The probes accept any non-empty value next to the
+# label and pass the captured evidence through unchanged.
+_DRY_RUN_LABEL_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"^\s*Backend:\s*(\S.*)$", "backend"),
+    (r"^\s*Prompt file:\s*(\S.*)$", "prompt_file"),
+    (r"^\s*Max iterations:\s*(\S+)$", "max_iterations"),
+    (r"^\s*Max runtime:\s*(\S+)$", "max_runtime"),
+)
 
-    The contract: a passing dry-run means the runtime successfully
-    *statically loaded* the config / preset / prompt / backend
-    detection / auto-preflight. It is NOT a loop-closed claim. We
-    surface source-mismatch as ``blocked_command`` so callers cannot
-    mistake "the binary printed something" for "the binary used the
-    suite we asked for".
+
+def _parse_dry_run_effective_values(stdout: str) -> dict[str, str]:
+    """Parse the stable ``label: value`` lines from a real ``ralph run
+    --dry-run`` invocation.
+
+    The real CLI emits a human-readable configuration block under
+    ``Dry run mode - configuration:`` where every line has the form
+    ``Label: value``. We only look at the four labels we care about
+    (``Backend`` / ``Prompt file`` / ``Max iterations`` / ``Max runtime``)
+    and ignore everything else. Missing labels do NOT cause failure
+    here — they propagate to the caller which can decide whether the
+    label set is sufficient for the proof level it is targeting.
     """
-    combined = f"{stdout}\n{stderr}"
-    if expected_config and expected_config not in combined:
-        # The dry-run output did not even mention the requested
-        # config — the binary must have loaded something else (or
-        # nothing at all).
+    values: dict[str, str] = {}
+    for line in stdout.splitlines():
+        for pattern, key in _DRY_RUN_LABEL_PATTERNS:
+            match = re.match(pattern, line)
+            if match is None:
+                continue
+            values[key] = match.group(1).strip()
+            break
+    return values
+
+
+def _classify_dry_run(
+    stdout: str, stderr: str, expected: dict[str, str]
+) -> tuple[str, str, dict[str, str]]:
+    """Classify a dry-run stage outcome based on parsed effective values.
+
+    Returns ``(outcome, reason, evidence)`` where ``evidence`` is the
+    raw ``label: value`` map parsed from the dry-run stdout. A passing
+    dry-run means the runtime successfully *statically loaded* the
+    config / preset / prompt / backend detection / preflight. It is NOT
+    a loop-closed claim.
+
+    The contract: a mismatch between any *expected* label (from the
+    pipeline suite) and the *parsed* label from stdout must surface as
+    ``blocked_command`` so callers cannot mistake "the binary printed
+    something" for "the binary used the suite we asked for".
+    """
+    parsed = _parse_dry_run_effective_values(stdout)
+    mismatches: list[str] = []
+    for key, expected_value in expected.items():
+        if not expected_value:
+            continue
+        if key not in parsed:
+            mismatches.append(f"{key}: missing in dry-run output")
+            continue
+        if parsed[key] != expected_value:
+            mismatches.append(
+                f"{key}: dry-run reports {parsed[key]!r}, expected {expected_value!r}"
+            )
+    if mismatches:
         return (
             "blocked_command",
-            f"dry-run output does not reference requested config {expected_config!r}",
+            "dry-run effective values do not match suite: " + "; ".join(mismatches),
+            parsed,
         )
-    return ("ok", "static load passed; loop not closed")
+    return ("ok", "static load passed; loop not closed", parsed)
 
 
 def _ok_decision(
@@ -837,15 +906,25 @@ def validate_pipeline(
         )
         return tuple(decisions)
 
-    outcome, reason = _classify_dry_run(stdout, stderr, config_path)
+    outcome, reason, evidence_values = _classify_dry_run(
+        stdout,
+        stderr,
+        expected={
+            "prompt_file": prompt_file or "",
+            # max_iterations / max_runtime / backend are not part of
+            # the argv we know statically: the caller may have omitted
+            # them on purpose. We only check labels whose expected
+            # value the helper was actually given.
+        },
+    )
+    evidence = [f"exit_code={exit_code}", f"reason={reason}"]
+    for key, value in sorted(evidence_values.items()):
+        evidence.append(f"effective_{key}={value!r}")
     decisions.append(
         StageDecision(
             stage="dry_run",
             outcome=outcome,
-            evidence=(
-                f"exit_code={exit_code}",
-                f"reason={reason}",
-            ),
+            evidence=tuple(evidence),
             next_allowed_stage=None,
             blocked_reason="" if outcome == "ok" else reason,
             argv=dry_run_argv,

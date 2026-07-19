@@ -37,8 +37,10 @@ Hard rules:
   spawned process. The fake binary in tests is responsible for staging
   whatever it needs to read.
 * The argv tuple the harness builds always contains
-  ``-c <config_path> -H <preset> --max-iterations <N> --idle-timeout-ms <N>
-  --wall-clock-timeout-s <N>``. Tests assert this contract.
+  ``-c <config_path> -H <preset> --max-iterations <N>
+  --idle-timeout <S>``. Tests assert this contract. The wall-clock
+  cap belongs to the harness outer ``timeout`` parameter and is NOT
+  forwarded to the CLI.
 """
 from __future__ import annotations
 
@@ -167,16 +169,28 @@ class SmokeConfig:
     All timeout fields are *harness-side* caps. The harness enforces
     them by passing an outer ``timeout`` to the runner and by reading
     the captured stdout for the FIRST / TERMINAL event markers. The
-    three caps are intentionally orthogonal:
+    two caps are intentionally orthogonal:
 
     * ``max_iterations`` — the runtime-level iteration cap forwarded
-      as ``--max-iterations``.
-    * ``idle_timeout_ms`` — the runtime-level idle cap forwarded as
-      ``--idle-timeout-ms`` (the runtime emits no events for that many
-      ms, the harness classifies ``timeout_idle``).
-    * ``wall_clock_timeout_s`` — the harness-side wall-clock cap
-      forwarded as ``--wall-clock-timeout-s`` and used as the outer
-      subprocess timeout.
+      as ``--max-iterations`` (a real ``ralph run`` flag).
+    * ``idle_timeout_secs`` — the runtime-level idle cap forwarded as
+      ``--idle-timeout`` (a real ``ralph run`` flag with unit
+      seconds). The runtime fires ``IdleTimeout`` when no output has
+      been observed for that many seconds.
+    * ``wall_clock_timeout_s`` — the harness-side wall-clock cap. This
+      is NOT forwarded to the CLI (the real ``ralph run`` does not
+      accept a wall-clock flag); the harness enforces it via the
+      outer ``timeout`` parameter on the runner plus the process-group
+      reap path in ``_spawn_real_backend``.
+
+    Unit semantics:
+
+    * ``idle_timeout_secs`` is in SECONDS (matches the real CLI's
+      ``--idle-timeout``). Callers that need sub-second precision must
+      round up; the runtime treats 0 as "disabled".
+    * ``wall_clock_timeout_s`` is in SECONDS (matches Python's
+      ``subprocess.communicate(timeout=...)``). It is an outer
+      safety net, not an iteration cap.
     """
 
     binary: Path
@@ -185,7 +199,7 @@ class SmokeConfig:
     prompt_file: str
     plan_path: str
     max_iterations: int = 3
-    idle_timeout_ms: int = 5000
+    idle_timeout_secs: int = 30
     wall_clock_timeout_s: int = 60
     extra_argv: tuple[str, ...] = ()
 
@@ -226,10 +240,13 @@ def _build_argv(smoke_cfg: SmokeConfig) -> tuple[str, ...]:
     The shape is the single source of truth used by both the harness
     and the contract suite: every argv starts with
     ``<binary> -c <config_path> -H <preset> --max-iterations <N>
-    --idle-timeout-ms <N> --wall-clock-timeout-s <N>``. Optional
-    ``--prompt-file`` / ``--plan`` flags follow; ``extra_argv`` is
-    appended last so callers can layer in stable flags without
-    disturbing the harness contract.
+    --idle-timeout <S>``. The wall-clock cap is NOT forwarded — it
+    belongs to the harness outer ``timeout`` parameter, NOT to the
+    CLI surface (see plan 2026-07-19-001 F6 / Unit 4 / S8).
+
+    Optional ``--prompt-file`` / ``--plan`` flags follow;
+    ``extra_argv`` is appended last so callers can layer in stable
+    flags without disturbing the harness contract.
     """
     argv: list[str] = [
         str(smoke_cfg.binary),
@@ -239,10 +256,8 @@ def _build_argv(smoke_cfg: SmokeConfig) -> tuple[str, ...]:
         smoke_cfg.preset,
         "--max-iterations",
         str(smoke_cfg.max_iterations),
-        "--idle-timeout-ms",
-        str(smoke_cfg.idle_timeout_ms),
-        "--wall-clock-timeout-s",
-        str(smoke_cfg.wall_clock_timeout_s),
+        "--idle-timeout",
+        str(smoke_cfg.idle_timeout_secs),
     ]
     if smoke_cfg.prompt_file:
         argv.extend(["--prompt-file", smoke_cfg.prompt_file])

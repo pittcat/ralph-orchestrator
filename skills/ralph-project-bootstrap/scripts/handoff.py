@@ -14,14 +14,17 @@ bootstrap pipeline finishes. The handoff bundles:
 Three handoff levels are supported:
 
 * ``complete`` — U1-U5 all green AND a SafeBackend smoke reached
-  ``bounded_terminal_reached``. The launch command is the official
-  command the operator may paste into a terminal.
+  ``bounded_terminal_reached`` (a *typed* outcome, NOT a free-text
+  match). The launch command is the official command the operator may
+  paste into a terminal.
 * ``incomplete_static_only`` — U1-U5 all green, U6 smoke either not
   authorised or not run. The launch command is presented as a
   ``[CANDIDATE - operator must run manually]`` snippet and the
   report explicitly states "static load passed; loop not closed".
-* ``blocked`` — any earlier unit returned a blocker. The launch
-  command is the empty string and the report states why.
+* ``blocked`` — any earlier unit returned a blocker, OR the typed
+  smoke outcome is one of the timeout / non-zero / error-event
+  buckets. The launch command is the empty string and the report
+  states why.
 
 Hard rules:
 
@@ -36,12 +39,33 @@ Hard rules:
   are rejected with ``ValueError`` at the API boundary.
 * Worktree mode requires an explicit reuse key — either ``--plan
   <plan>`` or ``--worktree-name <name>``. Missing keys are rejected.
+* The level is computed from **typed** inputs (smoke outcome / smoke
+  failure bucket / blocker summary). Free-text evidence strings
+  (e.g. ``"bounded_terminal_reached"`` smuggled into
+  ``smoke_evidence``) MUST NOT be sufficient to reach ``complete``
+  — the level must come from a typed ``smoke_outcome`` field
+  populated by the smoke harness.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Iterable, Literal, Sequence
+
+# Canonical typed smoke outcomes. We re-declare the subset we care
+# about rather than importing the helper so handoff.py stays
+# decoupled from the harness's specific failure-bucket taxonomy.
+SMOKE_COMPLETE_OUTCOMES: frozenset[str] = frozenset({"bounded_terminal_reached"})
+SMOKE_NOT_RUN_OUTCOMES: frozenset[str] = frozenset({"not_authorized"})
+SMOKE_BLOCKED_OUTCOMES: frozenset[str] = frozenset(
+    {
+        "wall_clock_timeout",
+        "timeout_no_event",
+        "timeout_idle",
+        "non_zero_exit",
+        "error_event_detected",
+    }
+)
 
 HandoffLevel = Literal["complete", "incomplete_static_only", "blocked"]
 
@@ -67,6 +91,20 @@ class HandoffInputs:
     All path fields are repo-relative. ``binary`` is the path to the
     ``ralph`` binary the operator will run (typically the literal
     string ``"ralph"``).
+
+    Smoke classification contract:
+
+    * ``smoke_outcome`` — typed outcome from ``smoke_runner.SmokeResult``.
+      When present, it is the authoritative source of truth for the
+      smoke level. ``smoke_evidence`` is then reduced to a debugging
+      footnote.
+    * ``smoke_failure_bucket`` — typed bucket (``"preset"`` /
+      ``"backend"`` / ``"project_command"`` / ``"suite"`` /
+      ``"none"``). Used together with ``smoke_outcome`` to render the
+      ``blocked -- <bucket>`` status.
+    * ``smoke_evidence`` — list of free-text evidence strings. They
+      appear in the report's Smoke > Evidence block but MUST NOT be
+      the sole reason the level advances to ``complete``.
     """
 
     binary: str
@@ -84,6 +122,8 @@ class HandoffInputs:
     files_noop: tuple[str, ...] = ()
     validation_evidence: tuple[str, ...] = ()
     smoke_evidence: tuple[str, ...] = ()
+    smoke_outcome: str | None = None
+    smoke_failure_bucket: str | None = None
     residual_risks: tuple[str, ...] = ()
     blocker_summary: str = ""
 
@@ -207,42 +247,66 @@ def _smoke_section_text(inputs: HandoffInputs) -> tuple[str, str]:
 
     ``status_token`` is the canonical short label that downstream
     tooling may switch on: ``complete`` / ``static-only -- smoke-not-authorized``
-    / ``blocked -- <bucket>``. The status is computed deterministically
-    from the input smoke evidence.
+    / ``blocked -- <bucket>``. The status is computed from **typed**
+    inputs first; the free-text ``smoke_evidence`` strings only ever
+    appear as a debugging footnote, never as the source of truth.
+
+    Anti-fake-positive contract (plan 2026-07-19-001 S10 / F7): an
+    evidence string that merely *contains* the literal
+    ``bounded_terminal_reached`` MUST NOT, by itself, advance the
+    level to ``complete``. The caller must populate
+    ``smoke_outcome="bounded_terminal_reached"`` explicitly.
     """
+    typed_outcome = inputs.smoke_outcome
+    if typed_outcome is not None:
+        if typed_outcome in SMOKE_COMPLETE_OUTCOMES:
+            body = (
+                "Smoke reached the bounded terminal marker (`LOOP_COMPLETE`). "
+                "The end-to-end loop is verified under the triple cap."
+            )
+            return body, "complete"
+        if typed_outcome in SMOKE_NOT_RUN_OUTCOMES:
+            body = (
+                "Smoke was not authorised by the operator. Static load passed; "
+                "loop has not been verified end-to-end."
+            )
+            return body, "static-only -- smoke-not-authorized"
+        if typed_outcome in SMOKE_BLOCKED_OUTCOMES:
+            bucket = inputs.smoke_failure_bucket or "unknown"
+            body = (
+                f"Smoke classified a `{typed_outcome}` failure bucket of "
+                f"`{bucket}`. Static load is insufficient; the operator "
+                "must reconcile before launch."
+            )
+            return body, f"blocked -- {bucket}"
+        # Unrecognised typed outcome: refuse to climb to ``complete``
+        # and surface the unknown class so the operator can decide.
+        body = (
+            f"Smoke emitted an unrecognised typed outcome `{typed_outcome}`. "
+            "Static load passed; loop status is unknown."
+        )
+        return body, "blocked -- unknown"
+    # No typed outcome: downgrade to ``incomplete_static_only``. Even
+    # if the free-text evidence happens to contain the
+    # ``bounded_terminal_reached`` substring, we MUST NOT advance to
+    # ``complete`` — that would let a fake runner smuggle the keyword
+    # past the helper. We DO render the free-text evidence as a
+    # debugging footnote so the operator can see why we refused.
     combined = "\n".join(inputs.smoke_evidence).lower()
     if not combined.strip():
-        status = "static-only -- smoke-not-authorized"
         body = (
             "Smoke was not authorised. Static load passed; loop has not been "
             "verified end-to-end. Operator must run the candidate command "
             "explicitly after re-confirming the target backend."
         )
-        return body, status
-    if "bounded_terminal_reached" in combined:
-        body = (
-            "Smoke reached the bounded terminal marker (`LOOP_COMPLETE`). "
-            "The end-to-end loop is verified under the triple cap."
-        )
-        return body, "complete"
-    if "not_authorized" in combined:
-        body = (
-            "Smoke was not authorised by the operator. Static load passed; "
-            "loop has not been verified end-to-end."
-        )
         return body, "static-only -- smoke-not-authorized"
-    for bucket in ("preset", "backend", "project_command", "suite"):
-        if bucket in combined:
-            body = (
-                f"Smoke classified a failure bucket of `{bucket}`. Static load "
-                "is insufficient; the operator must reconcile before launch."
-            )
-            return body, f"blocked -- {bucket}"
     body = (
-        "Smoke produced an unclassified outcome. Static load passed; loop "
-        "status is unknown."
+        "Smoke evidence was provided as free-text strings only — no typed "
+        "outcome. Static load passed; loop has not been verified end-to-end. "
+        "Run the smoke harness with a typed ``SmokeResult`` so the handoff "
+        "can advance to ``complete``."
     )
-    return body, "blocked -- unknown"
+    return body, "incomplete_static_only"
 
 # ---------------------------------------------------------------------------
 # Markdown report rendering
@@ -332,6 +396,42 @@ def _render_report(inputs: HandoffInputs, command: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _enforce_typed_outcome(inputs: HandoffInputs) -> tuple[HandoffLevel, str]:
+    """Reconcile the caller-supplied ``level`` against the typed
+    ``smoke_outcome`` so that a caller cannot lie about evidence.
+
+    Returns ``(effective_level, effective_blocker_summary)``:
+
+    * If the typed outcome is in ``SMOKE_BLOCKED_OUTCOMES`` the handoff
+      MUST render as ``blocked`` regardless of the caller's level.
+      The blocker summary is auto-populated with the typed outcome
+      + bucket when the caller did not supply one.
+    * If the typed outcome is in ``SMOKE_NOT_RUN_OUTCOMES`` the
+      handoff MUST render as ``incomplete_static_only`` even if the
+      caller asked for ``complete``.
+    * If the caller asked for ``complete`` but no typed outcome was
+      supplied (only free-text evidence), the helper MUST downgrade
+      the level to ``incomplete_static_only`` so the launch command
+      cannot be presented as "official" / "loop-closed".
+    * Otherwise the caller's level is preserved.
+    """
+    typed_outcome = inputs.smoke_outcome
+    if typed_outcome is None:
+        if inputs.level == "complete":
+            return "incomplete_static_only", inputs.blocker_summary
+        return inputs.level, inputs.blocker_summary
+    if typed_outcome in SMOKE_BLOCKED_OUTCOMES:
+        bucket = inputs.smoke_failure_bucket or "unknown"
+        auto_summary = (
+            inputs.blocker_summary.strip()
+            or f"smoke typed outcome {typed_outcome!r} with bucket {bucket!r}"
+        )
+        return "blocked", auto_summary
+    if typed_outcome in SMOKE_NOT_RUN_OUTCOMES:
+        return "incomplete_static_only", inputs.blocker_summary
+    return inputs.level, inputs.blocker_summary
+
+
 def build_handoff(inputs: HandoffInputs) -> HandoffArtifact:
     """Render a handoff from the supplied inputs.
 
@@ -343,54 +443,86 @@ def build_handoff(inputs: HandoffInputs) -> HandoffArtifact:
     The rendered ``command`` is:
 
     * the official launch command (no prefix) when ``level ==
-      "complete"``,
+      "complete"`` AND the typed smoke outcome (when supplied) is
+      ``bounded_terminal_reached``,
     * a ``[CANDIDATE - operator must run manually]`` snippet when
       ``level == "incomplete_static_only"``,
     * the empty string when ``level == "blocked"`` (the report
       explains why).
+
+    Anti-fake-positive (F7): the helper refuses to render an
+    "official" launch command when the typed smoke outcome contradicts
+    the caller's level. The reconciliation happens in
+    ``_enforce_typed_outcome`` and is the only path through which the
+    level can change after this function is called.
     """
+    effective_level, effective_blocker = _enforce_typed_outcome(inputs)
+    # Bind the effective level / blocker into a derived inputs view so
+    # downstream rendering uses the reconciled values without
+    # mutating the caller's dataclass (which is frozen).
+    rendered_inputs = HandoffInputs(
+        binary=inputs.binary,
+        config_path=inputs.config_path,
+        preset=inputs.preset,
+        plan_path=inputs.plan_path,
+        prompt_file=inputs.prompt_file,
+        level=effective_level,
+        use_worktree=inputs.use_worktree,
+        reuse_worktree=inputs.reuse_worktree,
+        plan_arg=inputs.plan_arg,
+        worktree_name=inputs.worktree_name,
+        files_created=inputs.files_created,
+        files_updated=inputs.files_updated,
+        files_noop=inputs.files_noop,
+        validation_evidence=inputs.validation_evidence,
+        smoke_evidence=inputs.smoke_evidence,
+        smoke_outcome=inputs.smoke_outcome,
+        smoke_failure_bucket=inputs.smoke_failure_bucket,
+        residual_risks=inputs.residual_risks,
+        blocker_summary=effective_blocker,
+    )
+
     # Blocked → no executable command.
-    if inputs.level == "blocked":
+    if rendered_inputs.level == "blocked":
         return HandoffArtifact(
             level="blocked",
             command="",
             command_argv=(),
-            report=_render_report(inputs, ""),
-            created_files=_normalise_paths(inputs.files_created),
-            updated_files=_normalise_paths(inputs.files_updated),
-            noop_files=_normalise_paths(inputs.files_noop),
-            validation_summary=tuple(inputs.validation_evidence),
-            smoke_summary=tuple(inputs.smoke_evidence),
-            residual_risks=tuple(inputs.residual_risks),
-            blocker_summary=inputs.blocker_summary.strip(),
+            report=_render_report(rendered_inputs, ""),
+            created_files=_normalise_paths(rendered_inputs.files_created),
+            updated_files=_normalise_paths(rendered_inputs.files_updated),
+            noop_files=_normalise_paths(rendered_inputs.files_noop),
+            validation_summary=tuple(rendered_inputs.validation_evidence),
+            smoke_summary=tuple(rendered_inputs.smoke_evidence),
+            residual_risks=tuple(rendered_inputs.residual_risks),
+            blocker_summary=rendered_inputs.blocker_summary.strip(),
             notes=("blocked: no executable command",),
         )
 
-    argv = _build_argv(inputs)
+    argv = _build_argv(rendered_inputs)
     raw_command = _join_argv(argv)
 
-    notes: list[str] = ()
+    notes: tuple[str, ...]
     command: str
-    if inputs.level == "incomplete_static_only":
-        notes_list = ["incomplete: candidate command only; operator must run manually"]
-        notes = tuple(notes_list)
+    if rendered_inputs.level == "incomplete_static_only":
+        notes = ("incomplete: candidate command only; operator must run manually",)
         command = f"[CANDIDATE - operator must run manually]\n{raw_command}"
     else:  # complete
         notes = ("complete: official launch command",)
         command = raw_command
 
     return HandoffArtifact(
-        level=inputs.level,
+        level=rendered_inputs.level,
         command=command,
         command_argv=argv,
-        report=_render_report(inputs, command),
-        created_files=_normalise_paths(inputs.files_created),
-        updated_files=_normalise_paths(inputs.files_updated),
-        noop_files=_normalise_paths(inputs.files_noop),
-        validation_summary=tuple(inputs.validation_evidence),
-        smoke_summary=tuple(inputs.smoke_evidence),
-        residual_risks=tuple(inputs.residual_risks),
-        blocker_summary=inputs.blocker_summary.strip(),
+        report=_render_report(rendered_inputs, command),
+        created_files=_normalise_paths(rendered_inputs.files_created),
+        updated_files=_normalise_paths(rendered_inputs.files_updated),
+        noop_files=_normalise_paths(rendered_inputs.files_noop),
+        validation_summary=tuple(rendered_inputs.validation_evidence),
+        smoke_summary=tuple(rendered_inputs.smoke_evidence),
+        residual_risks=tuple(rendered_inputs.residual_risks),
+        blocker_summary=rendered_inputs.blocker_summary.strip(),
         notes=notes,
     )
 

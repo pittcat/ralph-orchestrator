@@ -1,14 +1,14 @@
 {
-  "description": "probe: ralph run --help confirms --dry-run + --strict",
+  "description": "probe: ralph run --help confirms --dry-run and never lists --strict",
   "argv_expected": ["ralph", "run", "--help"],
   "stdout_chunks": [
     "Usage: ralph run [OPTIONS]\n",
     "\n",
     "Options:\n",
-    "      --strict         strict mode\n",
     "      --dry-run        static load only\n",
     "      --prompt-file F  prompt file path\n",
-    "      --plan P         plan or task file path\n"
+    "      --plan P         plan or task file path\n",
+    "      --max-iterations N override max iterations\n"
   ],
   "stderr_chunks": [],
   "exit_code": 0,

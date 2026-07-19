@@ -5,7 +5,6 @@
     "Usage: ralph run [OPTIONS]\n",
     "\n",
     "Options:\n",
-    "      --strict  strict mode\n",
     "      --plan P  plan or task file path\n"
   ],
   "stderr_chunks": [],

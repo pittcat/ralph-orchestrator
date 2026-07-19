@@ -1,19 +1,18 @@
 {
-  "description": "stage: ralph run --dry-run --strict reports the requested config (static load only)",
+  "description": "stage: ralph run --dry-run reports the requested prompt file (static load only)",
   "argv_expected": [
     "ralph", "-c", "ralph.pipeline.yml", "-H", "builtin:ce-executor-pipeline",
-    "run", "--dry-run", "--strict",
+    "run", "--dry-run",
     "--prompt-file", "PROMPT.pipeline.md",
     "--plan", "plan.md"
   ],
   "stdout_chunks": [
-    "dry-run: static load ok\n",
-    "config_path=ralph.pipeline.yml\n",
-    "preset=builtin:ce-executor-pipeline\n",
-    "prompt_file=PROMPT.pipeline.md\n",
-    "plan=plan.md\n",
-    "backend detected: claude\n",
-    "static load passed; loop not closed\n"
+    "Dry run mode - configuration:\n",
+    "  Prompt file: PROMPT.pipeline.md\n",
+    "  Max iterations: 12\n",
+    "  Max runtime: 7200s\n",
+    "  Backend: claude\n",
+    "  Idle timeout: 30s\n"
   ],
   "stderr_chunks": [],
   "exit_code": 0,

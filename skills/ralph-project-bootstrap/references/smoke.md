@@ -7,7 +7,7 @@ static gate. End agents do not see this file; the skill owner does.
 ## What the smoke is for
 
 A green static gate (``capability`` → ``preset check --strict`` →
-``preflight --strict`` → ``run --dry-run --strict``) proves that the
+``preflight --strict`` → ``run --dry-run``) proves that the
 runtime can statically load the suite. It does NOT prove that a loop
 can reach a business event or that the configured backend can produce
 a coherent response. The smoke is the optional next step: it runs the
@@ -42,16 +42,16 @@ Every smoke is bounded by three orthogonal caps:
 1. ``max_iterations`` — the runtime-level iteration cap. Forwarded as
    ``--max-iterations <N>`` on the argv; the runtime will refuse to
    advance past N iterations regardless of any other signal.
-2. ``idle_timeout_ms`` — the runtime-level idle cap. Forwarded as
-   ``--idle-timeout-ms <N>``. If the runtime emits no event for that
-   many milliseconds, the harness classifies the outcome as
-   ``timeout_idle``.
-3. ``wall_clock_timeout_s`` — the harness-side wall-clock cap.
-   Forwarded as ``--wall-clock-timeout-s <N>`` AND used as the outer
-   subprocess ``timeout=`` argument (with a small grace of 5 s). When
-   the outer timeout fires the harness classifies the outcome as
-   ``wall_clock_timeout`` and records the elapsed time in
-   ``evidence``.
+2. ``idle_timeout_secs`` — the runtime-level idle cap. Forwarded as
+   ``--idle-timeout <S>`` on the argv (the real ``ralph run`` flag,
+   unit seconds). If the runtime emits no event for that many seconds,
+   the harness classifies the outcome as ``timeout_idle``.
+3. ``wall_clock_timeout_s`` — the harness-side wall-clock cap. NOT
+   forwarded to the CLI (the production ``ralph run`` does not
+   accept a wall-clock flag — it lives on the harness outer
+   ``timeout`` parameter). When the outer timeout fires the harness
+   classifies the outcome as ``wall_clock_timeout`` and records the
+   elapsed time in ``evidence``.
 
 The three caps are intentionally independent. A green smoke is one
 that reaches the bounded terminal marker (``LOOP_COMPLETE``) inside
@@ -111,8 +111,7 @@ Every argv the harness builds starts with:
 ```
 <binary> -c <config_path> -H <preset>
         --max-iterations <N>
-        --idle-timeout-ms <N>
-        --wall-clock-timeout-s <N>
+        --idle-timeout <S>
 ```
 
 Optional ``--prompt-file <path>`` and ``--plan <path>`` flags follow
@@ -122,8 +121,9 @@ harness contract.
 
 The contract is enforced by the test suite
 (``test_smoke_argv_shape_*``); every argv recorded in a
-``SmokeResult`` MUST contain ``-c``, ``-H``, ``--max-iterations``,
-``--idle-timeout-ms`` and ``--wall-clock-timeout-s``.
+``SmokeResult`` MUST contain ``-c``, ``-H``, ``--max-iterations``
+and ``--idle-timeout``. The wall-clock cap is NOT on the argv — it
+lives on the harness outer ``timeout`` parameter only.
 
 ## Real-binary override
 
