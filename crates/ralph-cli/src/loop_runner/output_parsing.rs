@@ -17,6 +17,7 @@ pub fn normalize_cli_output_for_parsing(
         BackendOutputFormat::StreamJson => extract_claude_stream_text(raw_output),
         BackendOutputFormat::PiStreamJson => extract_pi_stream_text(raw_output),
         BackendOutputFormat::TraeStreamJson => extract_trae_stream_text(raw_output),
+        BackendOutputFormat::AgentStreamJson => extract_agent_stream_text(raw_output),
         _ => raw_output.to_string(),
     }
 }
@@ -93,4 +94,15 @@ pub fn extract_trae_stream_text(raw_output: &str) -> String {
     } else {
         extracted
     }
+}
+
+/// Extract assistant text from a raw Cursor `agent` stream-json buffer.
+///
+/// Reuses `AgentStreamParser::extract_all_text` from the adapters crate —
+/// same fall-back contract as `extract_trae_stream_text` (assistant text →
+/// `result.result` → raw buffer). Unit 4 completes S5 with concrete tests
+/// around this entry point.
+pub fn extract_agent_stream_text(raw_output: &str) -> String {
+    use ralph_adapters::AgentStreamParser;
+    AgentStreamParser::extract_all_text(raw_output)
 }

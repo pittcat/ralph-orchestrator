@@ -6,6 +6,7 @@
 #[cfg(test)]
 use crate::cli_backend::PromptMode;
 use crate::cli_backend::{CliBackend, OutputFormat};
+use crate::agent_stream::AgentStreamParser;
 use crate::trae_stream::TraeStreamParser;
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
@@ -230,6 +231,17 @@ impl CliExecutor {
                     if self.backend.output_format == OutputFormat::TraeStreamJson {
                         // TraeStreamJson: parse NDJSON lines and extract assistant text
                         if let Some(text) = TraeStreamParser::extract_text(&line) {
+                            write!(output_writer, "{text}")?;
+                            if !text.ends_with('\n') {
+                                writeln!(output_writer)?;
+                            }
+                        }
+                    } else if self.backend.output_format == OutputFormat::AgentStreamJson {
+                        // AgentStreamJson: parse NDJSON lines and extract assistant text
+                        // (mirrors the TraeStreamJson branch above; tool events stay
+                        // on the PTY/StreamHandler path, headless just wants the text
+                        // for completion detection).
+                        if let Some(text) = AgentStreamParser::extract_text(&line) {
                             write!(output_writer, "{text}")?;
                             if !text.ends_with('\n') {
                                 writeln!(output_writer)?;

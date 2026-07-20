@@ -20,6 +20,8 @@ pub enum OutputFormat {
     PiStreamJson,
     /// Newline-delimited JSON stream (Trae CLI with --output-format stream-json)
     TraeStreamJson,
+    /// Newline-delimited JSON stream (Cursor `agent` with --output-format stream-json)
+    AgentStreamJson,
 }
 
 /// Error when creating a custom backend without a command.
@@ -73,6 +75,7 @@ impl CliBackend {
             "opencode" => Self::opencode(),
             "pi" => Self::pi(),
             "traecli" => Self::traecli(),
+            "agent" => Self::agent(),
             "custom" => return Self::custom(config),
             _ => Self::claude(), // Default to claude
         };
@@ -174,6 +177,7 @@ impl CliBackend {
             "opencode" => Ok(Self::opencode()),
             "pi" => Ok(Self::pi()),
             "traecli" => Ok(Self::traecli()),
+            "agent" => Ok(Self::agent()),
             _ => Err(CustomBackendError),
         }
     }
@@ -269,6 +273,10 @@ impl CliBackend {
             "opencode" => Ok(Self::opencode_interactive()),
             "pi" => Ok(Self::pi_interactive()),
             "traecli" => Ok(Self::traecli_interactive()),
+            // Cursor `agent` is a headless-only backend for v1; no interactive
+            // factory is provided. Falling through to the default `Err` arm
+            // keeps `agent` out of any "pseudo-interactive" surface that would
+            // silently drop the mandatory `--force`/`--trust` flags (R5/S13).
             _ => Err(CustomBackendError),
         }
     }
@@ -434,6 +442,33 @@ impl CliBackend {
             prompt_mode: PromptMode::Arg,
             prompt_flag: None,
             output_format: OutputFormat::Text,
+            env_vars: vec![],
+        }
+    }
+
+    /// Creates the Cursor Headless CLI `agent` backend for headless execution.
+    ///
+    /// Contract (R4–R6 / R5):
+    /// - `-p` / `--print` is the print flag (we pass prompt as positional arg).
+    /// - `--force` + `--trust` are pinned (R5: factory-level, no public knob
+    ///   to drop them — `NamedWithArgs` may append more args but cannot
+    ///   strip these).
+    /// - `--output-format stream-json` paired with `OutputFormat::AgentStreamJson`
+    ///   so `PtyExecutor` can dispatch to the `agent_stream` parser (S4).
+    /// - The CLI binary name is `agent`, matching PATH discovery for `auto`.
+    pub fn agent() -> Self {
+        Self {
+            command: "agent".to_string(),
+            args: vec![
+                "-p".to_string(),
+                "--force".to_string(),
+                "--trust".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+            ],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None, // positional arg follows `-p`
+            output_format: OutputFormat::AgentStreamJson,
             env_vars: vec![],
         }
     }
@@ -1174,5 +1209,89 @@ mod tests {
     fn test_traecli_env_vars_default_empty() {
         assert!(CliBackend::traecli().env_vars.is_empty());
         assert!(CliBackend::traecli_interactive().env_vars.is_empty());
+    }
+
+    // ---------- Cursor `agent` backend (U2 — S1, S9, S10, S13) ----------
+
+    #[test]
+    fn test_agent_backend() {
+        // S1: command is `agent`; args include `-p`, `--force`, `--trust`,
+        // `--output-format`, `stream-json`; output_format is AgentStreamJson.
+        let backend = CliBackend::agent();
+        let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
+
+        assert_eq!(cmd, "agent");
+        // Force/trust must remain present even after NamedWithArgs can append
+        // more args; build_command does not strip them (factory-only contract).
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args.contains(&"--force".to_string()));
+        assert!(args.contains(&"--trust".to_string()));
+        assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"stream-json".to_string()));
+        // Positional prompt at the tail (no -p prompt_flag).
+        assert_eq!(args.last().map(String::as_str), Some("test prompt"));
+        assert!(stdin.is_none());
+        assert_eq!(backend.output_format, OutputFormat::AgentStreamJson);
+        assert_eq!(backend.prompt_flag, None);
+        assert_eq!(backend.prompt_mode, PromptMode::Arg);
+    }
+
+    #[test]
+    fn test_from_name_agent() {
+        // S1 + S9 boundary: `agent` must round-trip through from_name.
+        let backend = CliBackend::from_name("agent").expect("agent must be recognized");
+        assert_eq!(backend.command, "agent");
+        assert_eq!(backend.output_format, OutputFormat::AgentStreamJson);
+    }
+
+    #[test]
+    fn test_from_name_unknown_still_errors() {
+        // S9: unknown backend name (e.g. `bogus`) still returns CustomBackendError.
+        // We must NOT silently fall back to claude via from_name; only from_config
+        // has the silent fallback (legacy config behavior, preserved by design).
+        assert!(CliBackend::from_name("bogus").is_err());
+        assert!(CliBackend::from_name("agent-but-not").is_err());
+    }
+
+    #[test]
+    fn test_from_config_agent() {
+        // S1 + R2: CliConfig { backend: "agent" } resolves to the agent factory.
+        let cfg = CliConfig {
+            backend: "agent".to_string(),
+            command: None,
+            args: vec![],
+            prompt_mode: "arg".to_string(),
+            default_mode: "autonomous".to_string(),
+            idle_timeout_secs: 30,
+            autonomous_idle_timeout_secs: None,
+            prompt_flag: None,
+        };
+        let backend = CliBackend::from_config(&cfg).expect("agent must resolve from config");
+        assert_eq!(backend.command, "agent");
+        assert!(backend.args.contains(&"--force".to_string()));
+        assert!(backend.args.contains(&"--trust".to_string()));
+        assert_eq!(backend.output_format, OutputFormat::AgentStreamJson);
+    }
+
+    #[test]
+    fn test_for_interactive_prompt_agent_errors() {
+        // S10: agent has no interactive factory; for_interactive_prompt must
+        // return Err (not silently produce a stripped-down agent backend).
+        assert!(CliBackend::for_interactive_prompt("agent").is_err());
+    }
+
+    #[test]
+    fn test_agent_args_include_force_and_trust_after_extra_args() {
+        // S13: `NamedWithArgs` may append more args but must not be able to
+        // delete --force/--trust. Factory guarantees presence; build_command
+        // does not filter them. We verify by appending an extra arg via
+        // from_name_with_args and asserting both flags still appear.
+        let backend = CliBackend::from_name_with_args("agent", &["--some-extra".to_string()])
+            .expect("agent must resolve");
+        let (cmd, args, _stdin, _temp) = backend.build_command("p", false);
+        assert_eq!(cmd, "agent");
+        assert!(args.contains(&"--force".to_string()), "--force must persist");
+        assert!(args.contains(&"--trust".to_string()), "--trust must persist");
+        assert!(args.contains(&"--some-extra".to_string()));
     }
 }

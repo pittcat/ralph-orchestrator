@@ -184,6 +184,59 @@ pub fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) ->
             }
             _ => None,
         },
+        // Cursor `agent` stream-json: dispatch via the agent_stream parser
+        // and forward assistant text + tool lifecycle events into the
+        // preview pane. Mirrors the trae pattern below.
+        BackendOutputFormat::AgentStreamJson => {
+            use ralph_adapters::{
+                AgentStreamEvent, AgentStreamParser, dispatch_agent_stream_event,
+            };
+            use std::cell::RefCell;
+
+            // StreamHandler isn't reusable across calls (mutable &mut self);
+            // thread a tiny accumulator through the dispatch and pull the
+            // captured delta out at the end. The accumulator's drop runs
+            // after this block, so no state leaks out.
+            struct WavePreviewCollector {
+                captured: RefCell<Option<String>>,
+            }
+            impl ralph_adapters::StreamHandler for WavePreviewCollector {
+                fn on_text(&mut self, text: &str) {
+                    if self.captured.borrow().is_none() && !text.is_empty() {
+                        *self.captured.borrow_mut() = Some(text.to_string());
+                    }
+                }
+                fn on_tool_call(&mut self, name: &str, _id: &str, input: &serde_json::Value) {
+                    if self.captured.borrow().is_none() {
+                        let args = if input.is_null() {
+                            String::new()
+                        } else {
+                            input.to_string()
+                        };
+                        *self.captured.borrow_mut() =
+                            Some(format!("⚙ {name}({args})\n"));
+                    }
+                }
+                fn on_tool_result(&mut self, _id: &str, _output: &str) {}
+                fn on_error(&mut self, _error: &str) {}
+                fn on_complete(&mut self, _result: &ralph_adapters::SessionResult) {}
+            }
+
+            let collector = WavePreviewCollector {
+                captured: RefCell::new(None),
+            };
+            let mut handler = collector;
+            let mut extracted_text = String::new();
+            let mut state = ralph_adapters::AgentSessionState::default();
+            if let Some(event) = AgentStreamParser::parse_line(line) {
+                if matches!(event, AgentStreamEvent::Other) {
+                    return None;
+                }
+                dispatch_agent_stream_event(event, &mut handler, &mut extracted_text, &mut state);
+            }
+            let captured = handler.captured.borrow().clone();
+            captured
+        }
         // Parse trae NDJSON: extract assistant text, tool calls, and tool results
         // for the wave worker preview pane (mirrors the pi pattern above).
         BackendOutputFormat::TraeStreamJson => match TraeStreamParser::parse_line(line) {

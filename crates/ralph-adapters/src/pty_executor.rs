@@ -22,6 +22,7 @@ use crate::claude_stream::{ClaudeStreamEvent, ClaudeStreamParser, ContentBlock, 
 use crate::cli_backend::{CliBackend, OutputFormat};
 use crate::pi_stream::{PiSessionState, PiStreamParser, dispatch_pi_stream_event};
 use crate::stream_handler::{SessionResult, StreamHandler};
+use crate::agent_stream::{AgentSessionState, AgentStreamParser, dispatch_agent_stream_event};
 use crate::trae_stream::{TraeSessionState, TraeStreamParser, dispatch_trae_stream_event};
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
@@ -659,6 +660,7 @@ impl PtyExecutor {
         let is_stream_json = output_format == OutputFormat::StreamJson;
         let is_pi_stream = output_format == OutputFormat::PiStreamJson;
         let is_trae_stream = output_format == OutputFormat::TraeStreamJson;
+        let is_agent_stream = output_format == OutputFormat::AgentStreamJson;
         // Pi thinking deltas are noisy for plain console output but useful in TUI.
         let show_pi_thinking = is_pi_stream && self.tui_mode;
         let is_real_pi_backend = self.backend.command == "pi";
@@ -703,6 +705,7 @@ impl PtyExecutor {
         // Pi session state for accumulating cost/turns (wall-clock for duration)
         let mut pi_state = PiSessionState::new();
         let mut trae_state = TraeSessionState::default();
+        let mut agent_state = AgentSessionState::default();
         let mut completion: Option<SessionResult> = None;
         let start_time = Instant::now();
         // See the corresponding comment in `run_observe`: this field is the
@@ -863,6 +866,24 @@ impl PtyExecutor {
                                             &mut trae_state,
                                         );
                                     }
+                                } else if is_agent_stream {
+                                    // AgentStreamJson format: Parse NDJSON lines from Cursor `agent`.
+                                    // Cursor emits assistant/tool_call/system/result envelopes
+                                    // (see `agent_stream` module); dispatch each line through
+                                    // the AgentStreamParser and forward via StreamHandler.
+                                    line_buffer.push_str(text);
+
+                                    while let Some(newline_pos) = line_buffer.find('\n') {
+                                        let line = line_buffer[..newline_pos].to_string();
+                                        line_buffer = line_buffer[newline_pos + 1..].to_string();
+
+                                        handle_agent_stream_line(
+                                            &line,
+                                            handler,
+                                            &mut extracted_text,
+                                            &mut agent_state,
+                                        );
+                                    }
                                 } else {
                                     // Text format: Stream raw output directly to handler
                                     // This preserves ANSI escape codes for TUI rendering
@@ -908,6 +929,13 @@ impl PtyExecutor {
                                     handler,
                                     &mut extracted_text,
                                     &mut trae_state,
+                                );
+                            } else if is_agent_stream && !line_buffer.is_empty() {
+                                handle_agent_stream_line(
+                                    &line_buffer,
+                                    handler,
+                                    &mut extracted_text,
+                                    &mut agent_state,
                                 );
                             }
                             break;
@@ -1005,6 +1033,19 @@ impl PtyExecutor {
                                         &mut trae_state,
                                     );
                                 }
+                            } else if is_agent_stream {
+                                // AgentStreamJson: parse NDJSON lines
+                                line_buffer.push_str(text);
+                                while let Some(newline_pos) = line_buffer.find('\n') {
+                                    let line = line_buffer[..newline_pos].to_string();
+                                    line_buffer = line_buffer[newline_pos + 1..].to_string();
+                                    handle_agent_stream_line(
+                                        &line,
+                                        handler,
+                                        &mut extracted_text,
+                                        &mut agent_state,
+                                    );
+                                }
                             } else {
                                 // Text: stream raw output to handler
                                 handler.on_text(text);
@@ -1083,6 +1124,19 @@ impl PtyExecutor {
                                             &mut trae_state,
                                         );
                                     }
+                                } else if is_agent_stream {
+                                    // AgentStreamJson: parse NDJSON lines
+                                    line_buffer.push_str(text);
+                                    while let Some(newline_pos) = line_buffer.find('\n') {
+                                        let line = line_buffer[..newline_pos].to_string();
+                                        line_buffer = line_buffer[newline_pos + 1..].to_string();
+                                        handle_agent_stream_line(
+                                            &line,
+                                            handler,
+                                            &mut extracted_text,
+                                            &mut agent_state,
+                                        );
+                                    }
                                 } else {
                                     // Text: stream raw output to handler
                                     handler.on_text(text);
@@ -1136,6 +1190,13 @@ impl PtyExecutor {
                         handler,
                         &mut extracted_text,
                         &mut trae_state,
+                    );
+                } else if is_agent_stream && !line_buffer.is_empty() {
+                    handle_agent_stream_line(
+                        &line_buffer,
+                        handler,
+                        &mut extracted_text,
+                        &mut agent_state,
                     );
                 }
 
@@ -1806,6 +1867,21 @@ fn handle_trae_stream_line<H: StreamHandler>(
 ) {
     if let Some(event) = TraeStreamParser::parse_line(line) {
         dispatch_trae_stream_event(event, handler, extracted_text, trae_state);
+    }
+}
+
+/// Single-line dispatch wrapper for Cursor `agent` NDJSON. Mirrors the
+/// Trae wrapper above; bad lines (invalid JSON / unknown `type`) are
+/// silently skipped by `AgentStreamParser::parse_line`, so the PTY loop
+/// stays uninterrupted.
+fn handle_agent_stream_line<H: StreamHandler>(
+    line: &str,
+    handler: &mut H,
+    extracted_text: &mut String,
+    agent_state: &mut AgentSessionState,
+) {
+    if let Some(event) = AgentStreamParser::parse_line(line) {
+        dispatch_agent_stream_event(event, handler, extracted_text, agent_state);
     }
 }
 
