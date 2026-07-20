@@ -24,6 +24,7 @@
 //! allowing Ralph to orchestrate iterations. Supports interactive mode (user
 //! input forwarded) and observe mode (output-only).
 
+mod agent_stream;
 mod auto_detect;
 mod claude_stream;
 mod cli_backend;
@@ -37,6 +38,9 @@ pub mod tool_policy;
 pub mod tool_preview;
 mod trae_stream;
 
+pub use agent_stream::{
+    AgentSessionState, AgentStreamEvent, AgentStreamParser, dispatch_agent_stream_event,
+};
 pub use auto_detect::{
     DEFAULT_PRIORITY, NoBackendError, detect_backend, detect_backend_default, is_backend_available,
 };
