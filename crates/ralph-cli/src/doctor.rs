@@ -766,13 +766,14 @@ pub(crate) fn check_plan_sync(plan_path: &Path, tasks_path: &Path) -> CheckResul
 
     // Rule 2: status still references a stalled unit while tasks for that unit are closed.
     if let Some(unit_id) = stalled_unit_from_status(&status)
-        && tasks_summary.closed_for_unit(&unit_id) > 0 && tasks_summary.open_for_unit(&unit_id) == 0
-        {
-            issues.push(format!(
-                "status='{}' but unit {} has closed tasks and no open ones",
-                status, unit_id
-            ));
-        }
+        && tasks_summary.closed_for_unit(&unit_id) > 0
+        && tasks_summary.open_for_unit(&unit_id) == 0
+    {
+        issues.push(format!(
+            "status='{}' but unit {} has closed tasks and no open ones",
+            status, unit_id
+        ));
+    }
 
     if !tasks_path.is_file() {
         // T5.4: missing tasks.jsonl is a warn, not a fail.
@@ -1158,14 +1159,8 @@ mod tests {
         // U5 (S11): a custom command named `agent` must canonicalize to
         // the registered `agent` backend id, so doctor matches it against
         // the auth/whitelist tables just like the explicit backend.
-        assert_eq!(
-            canonical_backend_name("custom", Some("agent")),
-            "agent"
-        );
-        assert_eq!(
-            canonical_backend_name("custom", Some("agent.exe")),
-            "agent"
-        );
+        assert_eq!(canonical_backend_name("custom", Some("agent")), "agent");
+        assert_eq!(canonical_backend_name("custom", Some("agent.exe")), "agent");
     }
 
     #[test]

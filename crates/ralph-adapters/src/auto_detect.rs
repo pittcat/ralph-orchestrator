@@ -14,13 +14,7 @@ use tracing::debug;
 /// state assumption that we don't want to silently win over the explicit
 /// first-party backends.
 pub const DEFAULT_PRIORITY: &[&str] = &[
-    "claude",
-    "gemini",
-    "codex",
-    "opencode",
-    "pi",
-    "traecli",
-    "agent",
+    "claude", "gemini", "codex", "opencode", "pi", "traecli", "agent",
 ];
 
 /// Maps backend config names to their actual CLI command names.

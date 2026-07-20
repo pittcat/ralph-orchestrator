@@ -1290,8 +1290,14 @@ mod tests {
             .expect("agent must resolve");
         let (cmd, args, _stdin, _temp) = backend.build_command("p", false);
         assert_eq!(cmd, "agent");
-        assert!(args.contains(&"--force".to_string()), "--force must persist");
-        assert!(args.contains(&"--trust".to_string()), "--trust must persist");
+        assert!(
+            args.contains(&"--force".to_string()),
+            "--force must persist"
+        );
+        assert!(
+            args.contains(&"--trust".to_string()),
+            "--trust must persist"
+        );
         assert!(args.contains(&"--some-extra".to_string()));
     }
 }
