@@ -145,6 +145,96 @@ mod pty_executor_integration {
     }
 
     #[tokio::test]
+    async fn run_observe_streaming_agent_stream_json_parses_events() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string()],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::AgentStreamJson,
+            env_vars: vec![],
+        };
+        let config = PtyConfig {
+            interactive: false,
+            idle_timeout_secs: 0,
+            cols: 80,
+            rows: 24,
+            workspace_root: temp_dir.path().to_path_buf(),
+        };
+        let executor = PtyExecutor::new(backend, config);
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let mut handler = CapturingHandler::default();
+
+        let script = r#"printf '%s\n' \
+'not-json-line' \
+'{"type":"system","subtype":"init","session_id":"test"}' \
+'{"type":"assistant","message":{"content":[{"type":"text","text":"Hello from Cursor"}]}}' \
+'{"type":"tool_call","subtype":"started","call_id":"call_1","tool_call":{"readToolCall":{"args":{"path":"README.md"}}}}' \
+'{"type":"tool_call","subtype":"completed","call_id":"call_1","tool_call":{"readToolCall":{"result":{"success":{"content":"file contents"}}}}}' \
+'{"type":"result","subtype":"success","result":"final answer","is_error":false}'"#;
+
+        let result = executor
+            .run_observe_streaming(script, rx, &mut handler)
+            .await
+            .expect("run_observe_streaming");
+
+        assert!(result.success);
+        assert!(
+            handler.texts.iter().any(|text| text == "Hello from Cursor"),
+            "expected assistant text, got: {:?}",
+            handler.texts
+        );
+        assert_eq!(handler.tool_calls.len(), 1);
+        assert_eq!(handler.tool_calls[0].0, "readToolCall");
+        assert_eq!(handler.tool_calls[0].1, "call_1");
+        assert_eq!(handler.tool_results.len(), 1);
+        assert_eq!(
+            handler.tool_results[0],
+            ("call_1".to_string(), "file contents".to_string())
+        );
+        assert_eq!(handler.completions.len(), 1);
+        assert!(!handler.completions[0].is_error);
+        assert_eq!(handler.texts, vec!["Hello from Cursor".to_string()]);
+        assert!(result.extracted_text.contains("Hello from Cursor"));
+        assert!(!result.extracted_text.contains("not-json-line"));
+    }
+
+    #[tokio::test]
+    async fn run_observe_streaming_agent_result_error_marks_execution_failed() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string()],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::AgentStreamJson,
+            env_vars: vec![],
+        };
+        let config = PtyConfig {
+            interactive: false,
+            idle_timeout_secs: 0,
+            cols: 80,
+            rows: 24,
+            workspace_root: temp_dir.path().to_path_buf(),
+        };
+        let executor = PtyExecutor::new(backend, config);
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let mut handler = CapturingHandler::default();
+
+        let script = r#"printf '%s\n' '{"type":"result","subtype":"error","result":"failed","is_error":true}'"#;
+        let result = executor
+            .run_observe_streaming(script, rx, &mut handler)
+            .await
+            .expect("run_observe_streaming");
+
+        assert!(!result.success);
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(handler.completions.len(), 1);
+        assert!(handler.completions[0].is_error);
+    }
+
+    #[tokio::test]
     async fn run_observe_streaming_pi_stream_json_parses_events() {
         let temp_dir = TempDir::new().expect("temp dir");
         let backend = CliBackend {

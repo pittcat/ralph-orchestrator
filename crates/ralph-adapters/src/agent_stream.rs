@@ -23,8 +23,7 @@ use crate::stream_handler::StreamHandler;
 ///
 /// All shapes keep their unmodeled payload under `extra: serde_json::Value`
 /// so future schema bumps cannot break the parser. The discriminated `type`
-/// tag drives the match — `serde(other)` catches every event the orchestrator
-/// does not yet understand.
+/// tag drives the match, while `serde(other)` catches unknown event types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentStreamEvent {
@@ -41,21 +40,17 @@ pub enum AgentStreamEvent {
     /// - `"started"`    → tool invocation begins
     /// - `"completed"`  → tool finished (success or error)
     /// - `"failed"`     → tool failed before completion
+    ///
+    /// Cursor nests the concrete tool kind under `tool_call`, for example
+    /// `{ "readToolCall": { "args": ... } }`.
     ToolCall {
         #[serde(default)]
         subtype: Option<String>,
         /// Stable tool call identifier (matches `started` ↔ `completed`).
         #[serde(default)]
         call_id: Option<String>,
-        /// Tool name (e.g. `readToolCall`, `writeToolCall`).
         #[serde(default)]
-        tool_name: Option<String>,
-        /// Tool input (started) or output (completed). May be absent.
-        #[serde(default)]
-        args: Option<serde_json::Value>,
-        /// Tool result text (completed/failed). May be absent.
-        #[serde(default)]
-        result: Option<String>,
+        tool_call: serde_json::Value,
         /// Error message when `subtype == "failed"`.
         #[serde(default)]
         error: Option<String>,
@@ -141,6 +136,17 @@ impl AgentStreamParser {
         }
     }
 
+    /// Extract terminal result text from one NDJSON line.
+    ///
+    /// Headless callers use this only as a fallback when no assistant text was
+    /// streamed, avoiding duplicate display of the same final answer.
+    pub fn extract_result_text(line: &str) -> Option<String> {
+        match Self::parse_line(line)? {
+            AgentStreamEvent::Result { result, .. } => result,
+            _ => None,
+        }
+    }
+
     /// Extract all assistant text from a raw NDJSON buffer.
     ///
     /// Concatenates text deltas across all assistant events. Each text
@@ -217,11 +223,34 @@ fn extract_assistant_text(message: &serde_json::Value) -> Option<String> {
     if any { Some(out) } else { None }
 }
 
-/// Dispatch a Cursor `agent` stream event to the [`StreamHandler`].
-///
-/// Accumulates result data in `state` for the final `on_complete()` call
-/// (parallel contract to `dispatch_trae_stream_event`). Appends text
-/// content to `extracted_text` for LOOP_COMPLETE detection.
+fn parse_tool_call(tool_call: &serde_json::Value) -> Option<(&str, &serde_json::Value)> {
+    tool_call
+        .as_object()?
+        .iter()
+        .next()
+        .map(|(name, body)| (name.as_str(), body))
+}
+
+fn tool_result_text(body: &serde_json::Value) -> String {
+    let result = body.get("result").unwrap_or(&serde_json::Value::Null);
+    let value = result
+        .get("success")
+        .or_else(|| result.get("error"))
+        .unwrap_or(result);
+
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Object(map) if map.len() == 1 => map
+            .values()
+            .next()
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| value.to_string()),
+        _ => value.to_string(),
+    }
+}
+
 pub fn dispatch_agent_stream_event<H: StreamHandler>(
     event: AgentStreamEvent,
     handler: &mut H,
@@ -238,55 +267,45 @@ pub fn dispatch_agent_stream_event<H: StreamHandler>(
         AgentStreamEvent::ToolCall {
             subtype,
             call_id,
-            tool_name,
-            args,
-            result,
+            tool_call,
             error,
             ..
         } => {
-            // Treat missing/unknown subtype as `started` defensively: if we
-            // see a call_id and tool_name without `completed`/`failed`, emit
-            // `on_tool_call`. This keeps the existing parser behavior — only
-            // started emits on_tool_call.
-            let subtype = subtype.as_deref().unwrap_or("started");
-            match subtype {
+            let Some(id) = call_id.as_deref() else {
+                return;
+            };
+            let Some((name, body)) = parse_tool_call(&tool_call) else {
+                return;
+            };
+
+            match subtype.as_deref().unwrap_or("started") {
                 "started" => {
-                    if let (Some(id), Some(name)) = (call_id.as_deref(), tool_name.as_deref()) {
-                        let input = args.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-                        handler.on_tool_call(name, id, &input);
-                    }
+                    let input = body.get("args").unwrap_or(&serde_json::Value::Null);
+                    handler.on_tool_call(name, id, input);
                 }
-                "completed" => {
-                    if let Some(id) = call_id.as_deref() {
-                        let output = result.unwrap_or_default();
-                        handler.on_tool_result(id, &output);
-                    }
-                }
+                "completed" => handler.on_tool_result(id, &tool_result_text(body)),
                 "failed" => {
-                    if let Some(id) = call_id.as_deref() {
-                        let output = result.unwrap_or_default();
-                        handler.on_tool_result(id, &output);
-                        if let Some(err) = error.as_deref() {
-                            handler.on_error(err);
-                        }
+                    handler.on_tool_result(id, &tool_result_text(body));
+                    if let Some(err) = error.as_deref() {
+                        handler.on_error(err);
                     }
                 }
-                _ => {
-                    // Unknown tool_call subtype — ignore silently.
-                }
+                _ => {}
             }
         }
         AgentStreamEvent::Result {
-            subtype: _,
+            subtype,
             result,
             is_error,
             ..
         } => {
             state.final_result = result.clone();
-            state.is_error = is_error;
-            if let Some(text) = result {
-                handler.on_text(&text);
-                extracted_text.push_str(&text);
+            state.is_error = is_error || subtype.as_deref() == Some("error");
+            if extracted_text.is_empty() {
+                if let Some(text) = result {
+                    handler.on_text(&text);
+                    extracted_text.push_str(&text);
+                }
             }
         }
         AgentStreamEvent::System { .. } => {}
@@ -428,14 +447,15 @@ mod tests {
 
     #[test]
     fn parse_tool_call_started_emits_on_tool_call() {
-        // S3 (read-style): tool_call.started triggers on_tool_call.
+        // S3 (read-style): Cursor's nested tool_call.started shape.
         let line = json!({
             "type": "tool_call",
             "subtype": "started",
             "call_id": "call_abc",
-            "tool_name": "readToolCall",
-            "args": {
-                "path": "/tmp/example.txt"
+            "tool_call": {
+                "readToolCall": {
+                    "args": {"path": "/tmp/example.txt"}
+                }
             }
         })
         .to_string();
@@ -455,13 +475,16 @@ mod tests {
 
     #[test]
     fn parse_tool_call_completed_emits_on_tool_result() {
-        // S3: tool_call.completed with same call_id triggers on_tool_result.
+        // S3: Cursor nests completed output under result.success.
         let line = json!({
             "type": "tool_call",
             "subtype": "completed",
             "call_id": "call_abc",
-            "tool_name": "readToolCall",
-            "result": "file contents here"
+            "tool_call": {
+                "readToolCall": {
+                    "result": {"success": {"content": "file contents here"}}
+                }
+            }
         })
         .to_string();
 
@@ -479,21 +502,26 @@ mod tests {
 
     #[test]
     fn parse_tool_call_started_then_completed_round_trip() {
-        // Realistic shape: started then completed for the same call_id.
         let started = json!({
             "type": "tool_call",
             "subtype": "started",
             "call_id": "call_42",
-            "tool_name": "writeToolCall",
-            "args": {"path": "/tmp/out.md", "content": "hi"}
+            "tool_call": {
+                "writeToolCall": {
+                    "args": {"path": "/tmp/out.md", "content": "hi"}
+                }
+            }
         })
         .to_string();
         let completed = json!({
             "type": "tool_call",
             "subtype": "completed",
             "call_id": "call_42",
-            "tool_name": "writeToolCall",
-            "result": "ok"
+            "tool_call": {
+                "writeToolCall": {
+                    "result": {"success": "ok"}
+                }
+            }
         })
         .to_string();
 
@@ -509,7 +537,10 @@ mod tests {
         assert_eq!(handler.tool_calls.len(), 1);
         assert_eq!(handler.tool_calls[0].1, "call_42");
         assert_eq!(handler.tool_results.len(), 1);
-        assert_eq!(handler.tool_results[0].0, "call_42");
+        assert_eq!(
+            handler.tool_results[0],
+            ("call_42".to_string(), "ok".to_string())
+        );
     }
 
     // ---------- parse_line: noop paths (S4 + ignored types) ----------
@@ -630,6 +661,50 @@ mod tests {
     }
 
     #[test]
+    fn result_does_not_duplicate_preceding_assistant_text() {
+        let assistant = json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "final answer"}]}
+        });
+        let result = json!({
+            "type": "result",
+            "subtype": "success",
+            "result": "final answer",
+            "is_error": false
+        });
+        let mut handler = RecordingHandler::default();
+        let mut extracted = String::new();
+        let mut state = AgentSessionState::default();
+
+        for line in [assistant.to_string(), result.to_string()] {
+            let event = AgentStreamParser::parse_line(&line).expect("parse ok");
+            dispatch_agent_stream_event(event, &mut handler, &mut extracted, &mut state);
+        }
+
+        assert_eq!(handler.texts, vec!["final answer".to_string()]);
+        assert_eq!(extracted, "final answer");
+        assert_eq!(state.final_result.as_deref(), Some("final answer"));
+    }
+
+    #[test]
+    fn result_error_subtype_marks_state_error_without_is_error() {
+        let line = json!({
+            "type": "result",
+            "subtype": "error",
+            "result": "failed"
+        })
+        .to_string();
+        let mut handler = RecordingHandler::default();
+        let mut extracted = String::new();
+        let mut state = AgentSessionState::default();
+
+        let event = AgentStreamParser::parse_line(&line).expect("parse ok");
+        dispatch_agent_stream_event(event, &mut handler, &mut extracted, &mut state);
+
+        assert!(state.is_error);
+    }
+
+    #[test]
     fn parse_result_error_event_marks_state_error() {
         let line = json!({
             "type": "result",
@@ -725,7 +800,12 @@ mod tests {
         let s = "a".repeat(50);
         let t = truncate(&s, 10);
         // ASCII inputs: 10 chars + 1 ellipsis = 11 bytes (ellipsis is `…` = 3 bytes UTF-8).
-        assert!(t.len() <= 14, "truncated len should be ≤ 10 + 3-byte ellipsis, got {} ({:?})", t.len(), t);
+        assert!(
+            t.len() <= 14,
+            "truncated len should be ≤ 10 + 3-byte ellipsis, got {} ({:?})",
+            t.len(),
+            t
+        );
         assert!(t.ends_with('…'));
         assert!(t.starts_with("aaaaaaaaaa"));
     }

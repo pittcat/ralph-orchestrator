@@ -3,10 +3,10 @@
 //! Executes prompts via CLI tools with real-time streaming output.
 //! Supports optional execution timeout with graceful SIGTERM termination.
 
+use crate::agent_stream::AgentStreamParser;
 #[cfg(test)]
 use crate::cli_backend::PromptMode;
 use crate::cli_backend::{CliBackend, OutputFormat};
-use crate::agent_stream::AgentStreamParser;
 use crate::trae_stream::TraeStreamParser;
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
@@ -172,6 +172,8 @@ impl CliExecutor {
         let mut stdout_done = stdout_task.is_none();
         let mut stderr_done = stderr_task.is_none();
         let mut accumulated_output = String::new();
+        let mut agent_text_written = false;
+        let mut agent_fallback_result = None;
 
         if let Some(duration) = timeout {
             debug!(
@@ -246,6 +248,9 @@ impl CliExecutor {
                             if !text.ends_with('\n') {
                                 writeln!(output_writer)?;
                             }
+                            agent_text_written = true;
+                        } else if let Some(text) = AgentStreamParser::extract_result_text(&line) {
+                            agent_fallback_result = Some(text);
                         }
                     } else {
                         writeln!(output_writer, "{line}")?;
@@ -275,6 +280,14 @@ impl CliExecutor {
                     stderr_done = true;
                 }
             }
+        }
+
+        if !agent_text_written && let Some(text) = agent_fallback_result {
+            write!(output_writer, "{text}")?;
+            if !text.ends_with('\n') {
+                writeln!(output_writer)?;
+            }
+            output_writer.flush()?;
         }
 
         let status = if let Some(status) = terminated_status {
@@ -773,6 +786,58 @@ mod tests {
         // never the system/result envelopes.
         let written = String::from_utf8(output).unwrap();
         assert_eq!(written, "hello from trae\n");
+    }
+
+    #[tokio::test]
+    async fn test_execute_agent_stream_falls_back_to_terminal_result() {
+        let backend = CliBackend {
+            command: "printf".to_string(),
+            args: vec![
+                "%s\n%s\n".to_string(),
+                r#"{"type":"tool_call","subtype":"started","call_id":"call_1","tool_call":{"readToolCall":{"args":{"path":"README.md"}}}}"#.to_string(),
+                r#"{"type":"result","subtype":"success","result":"final answer","is_error":false}"#.to_string(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::AgentStreamJson,
+            env_vars: vec![],
+        };
+        let executor = CliExecutor::new(backend);
+        let mut output = Vec::new();
+
+        let result = executor
+            .execute("ignored", &mut output, None, false)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(String::from_utf8(output).unwrap(), "final answer\n");
+    }
+
+    #[tokio::test]
+    async fn test_execute_agent_stream_does_not_duplicate_terminal_result() {
+        let backend = CliBackend {
+            command: "printf".to_string(),
+            args: vec![
+                "%s\n%s\n".to_string(),
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"final answer"}]}}"#.to_string(),
+                r#"{"type":"result","subtype":"success","result":"final answer","is_error":false}"#.to_string(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::AgentStreamJson,
+            env_vars: vec![],
+        };
+        let executor = CliExecutor::new(backend);
+        let mut output = Vec::new();
+
+        let result = executor
+            .execute("ignored", &mut output, None, false)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(String::from_utf8(output).unwrap(), "final answer\n");
     }
 
     #[tokio::test]

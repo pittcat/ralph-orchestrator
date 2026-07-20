@@ -18,11 +18,11 @@
 // Exit codes and PIDs are always within i32 range in practice
 #![allow(clippy::cast_possible_wrap)]
 
+use crate::agent_stream::{AgentSessionState, AgentStreamParser, dispatch_agent_stream_event};
 use crate::claude_stream::{ClaudeStreamEvent, ClaudeStreamParser, ContentBlock, UserContentBlock};
 use crate::cli_backend::{CliBackend, OutputFormat};
 use crate::pi_stream::{PiSessionState, PiStreamParser, dispatch_pi_stream_event};
 use crate::stream_handler::{SessionResult, StreamHandler};
-use crate::agent_stream::{AgentSessionState, AgentStreamParser, dispatch_agent_stream_event};
 use crate::trae_stream::{TraeSessionState, TraeStreamParser, dispatch_trae_stream_event};
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
@@ -1202,6 +1202,16 @@ impl PtyExecutor {
 
                 let final_termination = resolve_termination_type(exit_code, termination);
 
+                if is_agent_stream {
+                    let session_result = SessionResult {
+                        duration_ms: start_time.elapsed().as_millis() as u64,
+                        is_error: agent_state.is_error || !status.success(),
+                        ..Default::default()
+                    };
+                    handler.on_complete(&session_result);
+                    completion = Some(session_result);
+                }
+
                 // Synthesize on_complete for Pi sessions (pi has no dedicated result event)
                 if is_pi_stream {
                     if is_real_pi_backend {
@@ -1229,7 +1239,7 @@ impl PtyExecutor {
                 // Pass extracted_text for event parsing from NDJSON
                 return Ok(build_result(
                     &output,
-                    status.success(),
+                    status.success() && !agent_state.is_error,
                     Some(exit_code),
                     final_termination,
                     extracted_text,
@@ -1259,6 +1269,16 @@ impl PtyExecutor {
             }
         };
 
+        if is_agent_stream {
+            let session_result = SessionResult {
+                duration_ms: start_time.elapsed().as_millis() as u64,
+                is_error: agent_state.is_error || !success,
+                ..Default::default()
+            };
+            handler.on_complete(&session_result);
+            completion = Some(session_result);
+        }
+
         // Synthesize on_complete for Pi sessions (pi has no dedicated result event)
         if is_pi_stream {
             if is_real_pi_backend {
@@ -1285,7 +1305,7 @@ impl PtyExecutor {
         // Pass extracted_text for event parsing from NDJSON
         Ok(build_result(
             &output,
-            success,
+            success && !agent_state.is_error,
             exit_code,
             final_termination,
             extracted_text,
