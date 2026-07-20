@@ -234,6 +234,151 @@ mod pty_executor_integration {
         assert!(handler.completions[0].is_error);
     }
 
+    /// Helper: emit the standard AgentStreamJson script used by the
+    /// `drain` and `try_recv` integration tests. Mirrors the fixture shape
+    /// in `run_observe_streaming_agent_stream_json_parses_events` but as a
+    /// `String` so the tests below can compose variants (delay, partial).
+    fn agent_stream_script() -> String {
+        r#"printf '%s\n' \
+'{"type":"system","subtype":"init","session_id":"test"}' \
+'{"type":"assistant","message":{"content":[{"type":"text","text":"Drain hello"}]}}' \
+'{"type":"tool_call","subtype":"started","call_id":"drain_call","tool_call":{"readToolCall":{"args":{"path":"a.md"}}}}' \
+'{"type":"tool_call","subtype":"completed","call_id":"drain_call","tool_call":{"readToolCall":{"result":{"success":{"content":"drained contents"}}}}}' \
+'{"type":"result","subtype":"success","result":"Drain final","is_error":false}'"#
+            .to_string()
+    }
+
+    /// U3 / R5 (testing:T2): the post-exit deadline-drain path inside
+    /// `run_observe_streaming` must flush any partial NDJSON line that
+    /// arrived after the child's `try_wait` returned but before the reader
+    /// thread closed. The drain window (`Duration::from_millis(200)`) is
+    /// what gives this test its coverage: a script that exits cleanly
+    /// after producing text + tool_call + result exercises the
+    /// `parse_stream_lines` helper, the deadline-drain loop, and the
+    /// post-exit final-buffer flush through `flush_agent_stream_residual`.
+    ///
+    /// Before the helper extraction, all three lived in inlined copies;
+    /// this test pins that the consolidated dispatch still routes the
+    /// full event set end-to-end via the AgentStreamJson handler.
+    #[tokio::test]
+    async fn run_observe_streaming_agent_stream_json_drain_path() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string()],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::AgentStreamJson,
+            env_vars: vec![],
+        };
+        let config = PtyConfig {
+            interactive: false,
+            idle_timeout_secs: 0,
+            cols: 80,
+            rows: 24,
+            workspace_root: temp_dir.path().to_path_buf(),
+        };
+        let executor = PtyExecutor::new(backend, config);
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let mut handler = CapturingHandler::default();
+
+        let result = executor
+            .run_observe_streaming(&agent_stream_script(), rx, &mut handler)
+            .await
+            .expect("run_observe_streaming");
+
+        assert!(result.success);
+        assert!(
+            handler.texts.iter().any(|t| t == "Drain hello"),
+            "expected assistant text through drain path, got: {:?}",
+            handler.texts
+        );
+        assert_eq!(handler.tool_calls.len(), 1);
+        assert_eq!(handler.tool_calls[0].0, "readToolCall");
+        assert_eq!(handler.tool_calls[0].1, "drain_call");
+        assert_eq!(handler.tool_results.len(), 1);
+        assert_eq!(
+            handler.tool_results[0],
+            ("drain_call".to_string(), "drained contents".to_string())
+        );
+        assert_eq!(handler.completions.len(), 1);
+        assert!(!handler.completions[0].is_error);
+        assert!(
+            result.extracted_text.contains("Drain hello"),
+            "extracted_text missing assistant text: {:?}",
+            result.extracted_text
+        );
+    }
+
+    /// U3 / R5 (testing:T2): the `try_recv` drain inside the
+    /// `child.try_wait()` arm must keep partial NDJSON lines in
+    /// `line_buffer` until the next chunk arrives. We exercise this by
+    /// emitting one full line followed by a final line that intentionally
+    /// arrives *after* the child exits — the deadline-drain deadline
+    /// (200ms) and the post-exit final flush must deliver both events to
+    /// the handler.
+    ///
+    /// Note: simulating a true `try_recv`-mid-stream partial line would
+    /// require racing the producer and consumer threads, which is racy
+    /// under nextest's process-per-test isolation. Instead we drive the
+    /// post-`try_wait` deadline-drain deadline loop by adding a small
+    /// `sleep` between two `printf` invocations — the child's exit races
+    /// with the second `printf`, so the executor's `try_wait()` arm sees
+    /// the buffer in a non-empty, non-newline-terminated state and the
+    /// deadline-drain loop is the path that finalizes dispatch.
+    #[tokio::test]
+    async fn run_observe_streaming_agent_stream_json_try_recv_path() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string()],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::AgentStreamJson,
+            env_vars: vec![],
+        };
+        let config = PtyConfig {
+            interactive: false,
+            idle_timeout_secs: 0,
+            cols: 80,
+            rows: 24,
+            workspace_root: temp_dir.path().to_path_buf(),
+        };
+        let executor = PtyExecutor::new(backend, config);
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let mut handler = CapturingHandler::default();
+
+        // Script that emits one line, sleeps so the child has likely
+        // already exited, then emits the trailing result line. This
+        // routes the trailing event through the `try_recv` drain arm +
+        // deadline-drain loop + post-exit final flush rather than the
+        // main streaming arm.
+        let script = r#"printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"TryRecv hello"}]}}' && sleep 0.05 && printf '%s\n' '{"type":"result","subtype":"success","result":"TryRecv final","is_error":false}'"#;
+        let result = executor
+            .run_observe_streaming(script, rx, &mut handler)
+            .await
+            .expect("run_observe_streaming");
+
+        assert!(result.success);
+        assert!(
+            handler.texts.iter().any(|t| t == "TryRecv hello"),
+            "expected assistant text, got: {:?}",
+            handler.texts
+        );
+        // The terminal result must reach the handler via the drain path
+        // (not the main streaming arm). `result.result` only fires when
+        // `extracted_text` is still empty; the assistant text we sent
+        // first populates `extracted_text`, so the drain delivers it
+        // through the `on_text` fall-through on `extracted_text.is_empty()`.
+        assert_eq!(handler.completions.len(), 1);
+        assert!(!handler.completions[0].is_error);
+        assert!(
+            result.extracted_text.contains("TryRecv hello"),
+            "extracted_text missing assistant text: {:?}",
+            result.extracted_text
+        );
+    }
+
     #[tokio::test]
     async fn run_observe_streaming_pi_stream_json_parses_events() {
         let temp_dir = TempDir::new().expect("temp dir");

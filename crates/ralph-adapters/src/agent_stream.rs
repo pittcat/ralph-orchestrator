@@ -221,19 +221,61 @@ fn extract_assistant_text(message: &serde_json::Value) -> Option<String> {
     if any { Some(out) } else { None }
 }
 
+/// Pull the single known tool kind out of a Cursor `tool_call` object.
+///
+/// Cursor `agent` emits one concrete tool per event, nested under its
+/// tool name (PascalCase):
+///
+/// ```text
+/// { "readToolCall":  { "args": {...}, "result": {...} } }
+/// { "writeToolCall": { "args": {...}, "result": {...} } }
+/// ```
+///
+/// The object must carry **exactly one** key — that key is the tool name.
+/// Multi-key objects are rejected as off-spec (this fails loud if Cursor
+/// ever ships an event with sibling tools instead of silently picking
+/// whichever key BTreeMap iteration surfaces first). Empty objects are
+/// also rejected; that means the JSON value is not a Cursor tool envelope
+/// at all (e.g. a stray `{}` from a partial line) and the caller should
+/// drop it rather than synthesize a phantom tool name.
 fn parse_tool_call(tool_call: &serde_json::Value) -> Option<(&str, &serde_json::Value)> {
-    tool_call
-        .as_object()?
-        .iter()
-        .next()
-        .map(|(name, body)| (name.as_str(), body))
+    let obj = tool_call.as_object()?;
+    if obj.len() != 1 {
+        return None;
+    }
+    obj.iter().next().map(|(name, body)| (name.as_str(), body))
 }
 
+/// Reduce a Cursor `tool_call.*.result` body to a single user-visible
+/// string. Cursor wraps success / error under `result.success.*` /
+/// `result.error.*`; the `success` and `error` keys can co-exist when a
+/// tool emits partial output plus a failure marker.
+///
+/// Precedence (most important first):
+/// 1. **`error`** is preferred when present — a failed tool result must
+///    surface the failure to the operator pane, never be hidden by a
+///    co-emitted success marker. Picking `success` here would silently
+///    swallow real failures.
+/// 2. **`success`** is the happy-path text (typically `{ "content":
+///    "..." }` from `readToolCall`).
+/// 3. **`result` itself** is the fallback when neither wrapper is set
+///    (Cursor may evolve the schema — keep the function tolerant).
+///
+/// Empty `result` objects (`{}`) and `Null` collapse to `""` so the
+/// caller never receives the literal `"{}"` string for a missing body.
 fn tool_result_text(body: &serde_json::Value) -> String {
     let result = body.get("result").unwrap_or(&serde_json::Value::Null);
+
+    // Empty object / null body → empty preview (no spurious "{}").
+    if result.is_null() || matches!(result, serde_json::Value::Object(map) if map.is_empty()) {
+        return String::new();
+    }
+
+    // Failure semantics win: pick `error` when present, even if a sibling
+    // `success` key also exists.
     let value = result
-        .get("success")
-        .or_else(|| result.get("error"))
+        .get("error")
+        .or_else(|| result.get("success"))
         .unwrap_or(result);
 
     match value {
@@ -538,6 +580,182 @@ mod tests {
             handler.tool_results[0],
             ("call_42".to_string(), "ok".to_string())
         );
+    }
+
+    /// U3 / R6 (testing:T4 + adversarial:A2): a `ToolCall { subtype:
+    /// "failed" }` payload must route through the same dispatch as
+    /// `completed` (callers get `on_tool_result` with the failure body)
+    /// AND additionally raise `on_error` when the envelope carries an
+    /// `error` string. Without this guard, Cursor's failure path silently
+    /// disappears from the operator pane because `subtype` defaults to
+    /// `"started"` when omitted.
+    #[test]
+    fn parse_tool_call_completed_failed_subtype() {
+        let line = json!({
+            "type": "tool_call",
+            "subtype": "failed",
+            "call_id": "call_fail",
+            "error": "permission denied",
+            "tool_call": {
+                "readToolCall": {
+                    "result": {"error": {"message": "permission denied"}}
+                }
+            }
+        })
+        .to_string();
+
+        let mut handler = RecordingHandler::default();
+        let mut extracted = String::new();
+        let mut state = AgentSessionState::default();
+        let event = AgentStreamParser::parse_line(&line).expect("parse ok");
+        dispatch_agent_stream_event(event, &mut handler, &mut extracted, &mut state);
+
+        // `on_tool_result` fires with the error body so the agent loop
+        // can still correlate call_id ↔ body.
+        assert_eq!(handler.tool_results.len(), 1);
+        assert_eq!(handler.tool_results[0].0, "call_fail");
+        assert!(
+            handler.tool_results[0].1.contains("permission denied"),
+            "tool result text must surface the failure body, got {:?}",
+            handler.tool_results[0].1
+        );
+        // `on_error` fires with the envelope-level error message.
+        assert_eq!(handler.errors.len(), 1);
+        assert_eq!(handler.errors[0], "permission denied");
+        // Failure does not flip dispatch state to success.
+        assert!(
+            !state.is_error,
+            "tool_call.failed must not mark session success"
+        );
+    }
+
+    /// U3 / R7 (testing:T4): `tool_result_text` must collapse an empty
+    /// `result` object (`{}`) to an empty string instead of the literal
+    /// `"{}"` string. The previous implementation ran `value.to_string()`
+    /// on the empty object, which surfaced `{}` in the operator pane —
+    /// a UX bug because the operator would see `{` braces with no
+    /// content and assume the tool emitted JSON output.
+    #[test]
+    fn tool_result_text_empty_object_returns_empty_str() {
+        let body = json!({"result": {}});
+        assert_eq!(tool_result_text(&body), "");
+        // Null result also collapses to empty.
+        let body_null = json!({"result": null});
+        assert_eq!(tool_result_text(&body_null), "");
+    }
+
+    /// U3 / R7 (testing:T4): when `success` and `error` co-exist on the
+    /// same `result` body, the failure `error` marker wins. Picking
+    /// `success` here would silently hide real failures behind a
+    /// stale success marker (a Cursor agent may stream partial success
+    /// data before the tool aborts). This test pins the
+    /// `error → success → bare result` precedence documented in
+    /// `tool_result_text`'s rustdoc.
+    #[test]
+    fn tool_result_text_prefers_error_on_failure() {
+        // Co-presence: error must win over success.
+        let body = json!({
+            "result": {
+                "success": {"content": "partial output"},
+                "error":   {"message": "tool aborted"}
+            }
+        });
+        let text = tool_result_text(&body);
+        assert!(
+            text.contains("tool aborted"),
+            "error marker must surface, got {text:?}"
+        );
+        assert!(
+            !text.contains("partial output"),
+            "success body must NOT override error, got {text:?}"
+        );
+    }
+
+    /// U3 / R7 (testing:T4): happy-path `{"result": {"success": ...}}`
+    /// still picks the success body — regression guard for the new
+    /// precedence (only the failure branch flips, success-only payloads
+    /// are unchanged).
+    #[test]
+    fn tool_result_text_success_only_unchanged() {
+        let body = json!({"result": {"success": {"content": "file contents"}}});
+        assert_eq!(tool_result_text(&body), "file contents");
+    }
+
+    /// U3 / R7 (testing:T4): `parse_tool_call` honors the documented
+    /// "exactly one known tool key" contract. Picking an arbitrary first
+    /// key from a multi-key object would silently misroute if Cursor
+    /// ever ships an event with sibling tools; this test pins the
+    /// single-key invariant by rejecting multi-key payloads.
+    #[test]
+    fn parse_tool_call_rejects_multi_key_object() {
+        // Two sibling tools under `tool_call` is off-spec — fail loud.
+        let bad = json!({
+            "readToolCall":  {"args": {"path": "a"}},
+            "writeToolCall": {"args": {"path": "b"}}
+        });
+        assert!(
+            parse_tool_call(&bad).is_none(),
+            "multi-key tool_call object must be rejected (off-spec)"
+        );
+        // Empty object is also rejected (defensive against partial JSON).
+        let empty = json!({});
+        assert!(
+            parse_tool_call(&empty).is_none(),
+            "empty tool_call object must be rejected"
+        );
+    }
+
+    /// U3 / R7 (testing:T4): `parse_tool_call` picks the only key the
+    /// payload carries — keeps the existing `readToolCall` /
+    /// `writeToolCall` protocol shape. Pairs with the multi-key
+    /// rejection test above.
+    #[test]
+    fn parse_tool_call_picks_documented_key() {
+        let read = json!({"readToolCall": {"args": {"path": "x"}}});
+        let (name, body) = parse_tool_call(&read).expect("single-key object must parse");
+        assert_eq!(name, "readToolCall");
+        assert_eq!(body.get("args").cloned(), Some(json!({"path": "x"})));
+
+        let write = json!({"writeToolCall": {"args": {"path": "y", "content": "hi"}}});
+        let (name, body) = parse_tool_call(&write).expect("single-key object must parse");
+        assert_eq!(name, "writeToolCall");
+        assert_eq!(
+            body.get("args").cloned(),
+            Some(json!({"path": "y", "content": "hi"}))
+        );
+    }
+
+    /// U3 / R7 (testing:T4): end-to-end `ToolCall { subtype: "failed" }`
+    /// dispatch: combined failure-path coverage with the error-body
+    /// precedence (above). Asserts that a `failed` event whose
+    /// `tool_call.readToolCall.result` carries only `success` still
+    /// routes through the `failed` branch and surfaces a useful
+    /// fallback (the success body) instead of an empty string.
+    #[test]
+    fn parse_tool_call_failed_falls_back_to_success_body() {
+        let line = json!({
+            "type": "tool_call",
+            "subtype": "failed",
+            "call_id": "call_fb",
+            "error": "transient network error",
+            "tool_call": {
+                "readToolCall": {
+                    "result": {"success": {"content": "partial file content"}}
+                }
+            }
+        })
+        .to_string();
+
+        let mut handler = RecordingHandler::default();
+        let mut extracted = String::new();
+        let mut state = AgentSessionState::default();
+        let event = AgentStreamParser::parse_line(&line).expect("parse ok");
+        dispatch_agent_stream_event(event, &mut handler, &mut extracted, &mut state);
+
+        assert_eq!(handler.tool_results.len(), 1);
+        assert_eq!(handler.tool_results[0].1, "partial file content");
+        assert_eq!(handler.errors.len(), 1);
+        assert_eq!(handler.errors[0], "transient network error");
     }
 
     // ---------- parse_line: noop paths (S4 + ignored types) ----------

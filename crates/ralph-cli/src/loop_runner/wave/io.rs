@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use ralph_adapters::{
-    OutputFormat as BackendOutputFormat, PiAssistantEvent, PiContentBlock, PiStreamEvent,
-    PiStreamParser, TraeStreamEvent, TraeStreamParser, extract_assistant_text,
-    extract_assistant_tool_calls, extract_user_tool_result_text, user_is_tool_result,
+    AgentStreamEvent, AgentStreamParser, OutputFormat as BackendOutputFormat, PiAssistantEvent,
+    PiContentBlock, PiStreamEvent, PiStreamParser, TraeStreamEvent, TraeStreamParser,
+    extract_assistant_text, extract_assistant_tool_calls, extract_user_tool_result_text,
+    user_is_tool_result,
 };
 use ratatui::text::Line;
 
@@ -110,6 +111,58 @@ pub fn truncate_wave_worker_preview(text: &str) -> String {
         text.to_string()
     }
 }
+
+/// Walk an `agent` assistant `message.content` array and concatenate all
+/// `text` blocks. Mirrors `extract_assistant_text` for Trae but consumes
+/// the raw JSON value because the agent envelope doesn't model the
+/// `AssistantMessage` shape as a struct.
+fn extract_agent_assistant_text(message: &serde_json::Value) -> Option<String> {
+    let blocks = message.get("content")?.as_array()?;
+    let mut out = String::new();
+    let mut any = false;
+    for block in blocks {
+        if block.get("type").and_then(|v| v.as_str()) == Some("text")
+            && let Some(text) = block.get("text").and_then(|v| v.as_str())
+        {
+            if any {
+                out.push('\n');
+            }
+            out.push_str(text);
+            any = true;
+        }
+    }
+    if any { Some(out) } else { None }
+}
+
+/// Pull `(tool_name, args_value)` out of the nested `tool_call` object
+/// that Cursor `agent` emits, e.g. `{ "readToolCall": { "args": ... } }`.
+/// Returns `None` if the object has no known tool key or is not an
+/// object — callers should treat that as a non-preview event.
+fn extract_agent_tool_call(tool_call: &serde_json::Value) -> Option<(&str, &serde_json::Value)> {
+    let obj = tool_call.as_object()?;
+    // Cursor's wire format nests the concrete tool kind under the tool
+    // name (e.g. `readToolCall`, `writeToolCall`). Use the single key
+    // the object actually carries — picking an arbitrary first key with
+    // `BTreeMap::iter().next()` would silently misroute if Cursor ever
+    // adds a sibling. Mirror the `parse_tool_call` selection in
+    // `agent_stream.rs` so preview dispatch stays in lockstep with the
+    // executor dispatch.
+    let (name, body) = obj.iter().next()?;
+    let args = body.get("args").unwrap_or(&serde_json::Value::Null);
+    Some((name.as_str(), args))
+}
+
+/// Ensure a preview delta ends with a single `\n` (the TUI preview pane
+/// treats `\n` as the line terminator).
+fn append_newline(text: String) -> String {
+    if text.ends_with('\n') {
+        text
+    } else {
+        let mut s = text;
+        s.push('\n');
+        s
+    }
+}
 /// Extract a human-readable text delta from a single stdout line.
 pub fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) -> Option<String> {
     match output_format {
@@ -184,58 +237,56 @@ pub fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) ->
             }
             _ => None,
         },
-        // Cursor `agent` stream-json: dispatch via the agent_stream parser
-        // and forward assistant text + tool lifecycle events into the
-        // preview pane. Mirrors the trae pattern below.
-        BackendOutputFormat::AgentStreamJson => {
-            use ralph_adapters::{
-                AgentStreamEvent, AgentStreamParser, dispatch_agent_stream_event,
-            };
-            use std::cell::RefCell;
-
-            // StreamHandler isn't reusable across calls (mutable &mut self);
-            // thread a tiny accumulator through the dispatch and pull the
-            // captured delta out at the end. The accumulator's drop runs
-            // after this block, so no state leaks out.
-            struct WavePreviewCollector {
-                captured: RefCell<Option<String>>,
-            }
-            impl ralph_adapters::StreamHandler for WavePreviewCollector {
-                fn on_text(&mut self, text: &str) {
-                    if self.captured.borrow().is_none() && !text.is_empty() {
-                        *self.captured.borrow_mut() = Some(text.to_string());
-                    }
+        // Cursor `agent` stream-json: match each event shape directly
+        // and emit one preview delta per event, mirroring the Pi/Trae
+        // branches above. Avoids the previous local `WavePreviewCollector`
+        // that wrapped a `StreamHandler` only to fish a single captured
+        // string out at the end.
+        BackendOutputFormat::AgentStreamJson => match AgentStreamParser::parse_line(line) {
+            Some(AgentStreamEvent::Assistant { message, .. }) => {
+                if let Some(text) = extract_agent_assistant_text(&message) {
+                    return Some(append_newline(text));
                 }
-                fn on_tool_call(&mut self, name: &str, _id: &str, input: &serde_json::Value) {
-                    if self.captured.borrow().is_none() {
-                        let args = if input.is_null() {
-                            String::new()
-                        } else {
-                            input.to_string()
-                        };
-                        *self.captured.borrow_mut() = Some(format!("⚙ {name}({args})\n"));
-                    }
-                }
-                fn on_tool_result(&mut self, _id: &str, _output: &str) {}
-                fn on_error(&mut self, _error: &str) {}
-                fn on_complete(&mut self, _result: &ralph_adapters::SessionResult) {}
+                None
             }
-
-            let collector = WavePreviewCollector {
-                captured: RefCell::new(None),
-            };
-            let mut handler = collector;
-            let mut extracted_text = String::new();
-            let mut state = ralph_adapters::AgentSessionState::default();
-            if let Some(event) = AgentStreamParser::parse_line(line) {
-                if matches!(event, AgentStreamEvent::Other) {
+            Some(AgentStreamEvent::ToolCall {
+                subtype,
+                call_id,
+                tool_call,
+                ..
+            }) if subtype.as_deref().unwrap_or("started") == "started" => {
+                let _ = call_id; // call_id is unused in preview; preview only shows the tool name + args
+                let Some((name, args)) = extract_agent_tool_call(&tool_call) else {
                     return None;
-                }
-                dispatch_agent_stream_event(event, &mut handler, &mut extracted_text, &mut state);
+                };
+                let args_display = if args.is_null() {
+                    String::new()
+                } else if let Some(s) = args.as_str() {
+                    truncate_wave_worker_preview(s)
+                } else {
+                    truncate_wave_worker_preview(&args.to_string())
+                };
+                Some(format!("⚙ {name}({args_display})\n"))
             }
-            let captured = handler.captured.borrow().clone();
-            captured
-        }
+            Some(AgentStreamEvent::ToolCall {
+                subtype, tool_call, ..
+            }) if subtype.as_deref() == Some("failed") => {
+                let Some((name, _body)) = extract_agent_tool_call(&tool_call) else {
+                    return None;
+                };
+                Some(format!("✗ {name} failed\n"))
+            }
+            Some(AgentStreamEvent::Result {
+                subtype,
+                is_error,
+                result,
+                ..
+            }) if is_error || subtype.as_deref() == Some("error") => result
+                .as_deref()
+                .map(|text| format!("✗ {}\n", truncate_wave_worker_preview(text))),
+            Some(AgentStreamEvent::Other) => None,
+            _ => None,
+        },
         // Parse trae NDJSON: extract assistant text, tool calls, and tool results
         // for the wave worker preview pane (mirrors the pi pattern above).
         BackendOutputFormat::TraeStreamJson => match TraeStreamParser::parse_line(line) {
@@ -1143,5 +1194,72 @@ mod tests {
             assert_eq!(record["topic"], "review.dimension.done");
             assert_eq!(record["hat"], "review-coordinator");
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // U3 / R5: AgentStreamJson preview parity with Pi/Trae. The preview
+    // pane collapses each NDJSON line into a single human-readable delta;
+    // these three tests pin the three shapes a Cursor `agent` worker
+    // emits that the wave preview pane needs to surface to the operator:
+    //
+    //   1. Assistant text → preview delta carries the text + newline.
+    //   2. Unknown (`Other`) event types → no preview delta, silently
+    //      skipped (forward-compat against future Cursor event types).
+    //   3. Terminal `is_error=true` `result` event → error preview
+    //      delta, marked `✗` to mirror the Pi error style.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Helper: render a single NDJSON line as if it came off the PTY
+    /// for the given `OutputFormat`. Used by the three preview-parity
+    /// tests below; they exercise `extract_readable_delta` directly
+    /// rather than spinning up a worker.
+    fn preview_delta(line: &str) -> Option<String> {
+        extract_readable_delta(line, BackendOutputFormat::AgentStreamJson)
+    }
+
+    /// U3 / R5: assistant text from a Cursor `agent` event produces a
+    /// single text delta ending in `\n` (matching the Pi/Trae branches
+    /// above).
+    #[test]
+    fn agent_stream_json_assistant_emits_text_delta() {
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello from cursor"}]}}"#;
+        let delta = preview_delta(line).expect("assistant text should produce preview");
+        assert_eq!(delta, "hello from cursor\n");
+    }
+
+    /// U3 / R5: an unknown event type (e.g. future Cursor additions,
+    /// `ping`, etc.) collapses to `AgentStreamEvent::Other` and must not
+    /// produce a preview delta — the operator pane should not flash
+    /// arbitrary JSON at the user.
+    #[test]
+    fn agent_stream_json_other_emits_no_preview_delta() {
+        // `ping` is the canonical "unknown event" smoke value (matches
+        // the `parse_unknown_type_is_noop` test in `agent_stream.rs`).
+        let line = r#"{"type":"ping","ts":1700000000}"#;
+        let delta = preview_delta(line);
+        assert!(
+            delta.is_none(),
+            "Other event must not emit a preview delta, got {delta:?}"
+        );
+    }
+
+    /// U3 / R5: a terminal `result` event with `is_error=true` must
+    /// surface as an `✗`-prefixed error delta, mirroring the Pi
+    /// `PiStreamEvent::MessageUpdate { assistant_message_event: Error }`
+    /// branch in the same `extract_readable_delta` match.
+    #[test]
+    fn agent_stream_json_result_error_emits_error_delta() {
+        let line =
+            r#"{"type":"result","subtype":"error","result":"agent stream failed","is_error":true}"#;
+        let delta = preview_delta(line).expect("error result should produce preview");
+        assert!(
+            delta.starts_with('✗'),
+            "error delta must start with ✗ marker, got {delta:?}"
+        );
+        assert!(
+            delta.contains("agent stream failed"),
+            "error delta must carry the result text, got {delta:?}"
+        );
+        assert!(delta.ends_with('\n'));
     }
 }

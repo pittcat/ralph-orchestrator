@@ -871,19 +871,14 @@ impl PtyExecutor {
                                     // Cursor emits assistant/tool_call/system/result envelopes
                                     // (see `agent_stream` module); dispatch each line through
                                     // the AgentStreamParser and forward via StreamHandler.
-                                    line_buffer.push_str(text);
-
-                                    while let Some(newline_pos) = line_buffer.find('\n') {
-                                        let line = line_buffer[..newline_pos].to_string();
-                                        line_buffer = line_buffer[newline_pos + 1..].to_string();
-
+                                    parse_stream_lines(&mut line_buffer, text, |line| {
                                         handle_agent_stream_line(
-                                            &line,
+                                            line,
                                             handler,
                                             &mut extracted_text,
                                             &mut agent_state,
                                         );
-                                    }
+                                    });
                                 } else {
                                     // Text format: Stream raw output directly to handler
                                     // This preserves ANSI escape codes for TUI rendering
@@ -930,13 +925,15 @@ impl PtyExecutor {
                                     &mut extracted_text,
                                     &mut trae_state,
                                 );
-                            } else if is_agent_stream && !line_buffer.is_empty() {
-                                handle_agent_stream_line(
-                                    &line_buffer,
-                                    handler,
-                                    &mut extracted_text,
-                                    &mut agent_state,
-                                );
+                            } else if is_agent_stream {
+                                flush_agent_stream_residual(&mut line_buffer, |line| {
+                                    handle_agent_stream_line(
+                                        line,
+                                        handler,
+                                        &mut extracted_text,
+                                        &mut agent_state,
+                                    );
+                                });
                             }
                             break;
                         }
@@ -1035,17 +1032,14 @@ impl PtyExecutor {
                                 }
                             } else if is_agent_stream {
                                 // AgentStreamJson: parse NDJSON lines
-                                line_buffer.push_str(text);
-                                while let Some(newline_pos) = line_buffer.find('\n') {
-                                    let line = line_buffer[..newline_pos].to_string();
-                                    line_buffer = line_buffer[newline_pos + 1..].to_string();
+                                parse_stream_lines(&mut line_buffer, text, |line| {
                                     handle_agent_stream_line(
-                                        &line,
+                                        line,
                                         handler,
                                         &mut extracted_text,
                                         &mut agent_state,
                                     );
-                                }
+                                });
                             } else {
                                 // Text: stream raw output to handler
                                 handler.on_text(text);
@@ -1126,17 +1120,14 @@ impl PtyExecutor {
                                     }
                                 } else if is_agent_stream {
                                     // AgentStreamJson: parse NDJSON lines
-                                    line_buffer.push_str(text);
-                                    while let Some(newline_pos) = line_buffer.find('\n') {
-                                        let line = line_buffer[..newline_pos].to_string();
-                                        line_buffer = line_buffer[newline_pos + 1..].to_string();
+                                    parse_stream_lines(&mut line_buffer, text, |line| {
                                         handle_agent_stream_line(
-                                            &line,
+                                            line,
                                             handler,
                                             &mut extracted_text,
                                             &mut agent_state,
                                         );
-                                    }
+                                    });
                                 } else {
                                     // Text: stream raw output to handler
                                     handler.on_text(text);
@@ -1191,13 +1182,15 @@ impl PtyExecutor {
                         &mut extracted_text,
                         &mut trae_state,
                     );
-                } else if is_agent_stream && !line_buffer.is_empty() {
-                    handle_agent_stream_line(
-                        &line_buffer,
-                        handler,
-                        &mut extracted_text,
-                        &mut agent_state,
-                    );
+                } else if is_agent_stream {
+                    flush_agent_stream_residual(&mut line_buffer, |line| {
+                        handle_agent_stream_line(
+                            line,
+                            handler,
+                            &mut extracted_text,
+                            &mut agent_state,
+                        );
+                    });
                 }
 
                 let final_termination = resolve_termination_type(exit_code, termination);
@@ -1887,6 +1880,54 @@ fn handle_trae_stream_line<H: StreamHandler>(
 ) {
     if let Some(event) = TraeStreamParser::parse_line(line) {
         dispatch_trae_stream_event(event, handler, extracted_text, trae_state);
+    }
+}
+
+/// Drain a PTY text chunk into a newline-delimited line buffer and feed each
+/// complete line to `on_line`. The remaining partial line (after the last
+/// `'\n'`) stays in `line_buffer` and is returned unchanged so the next
+/// chunk can extend it. Pass `chunk = ""` to dispatch the residual line
+/// that was left over by the previous chunk without appending anything.
+///
+/// This helper collapses the five formerly-duplicated `push_str → find('\n')
+/// → slice → handle_agent_stream_line` blocks that lived in the streaming
+/// `tokio::select!` arms of `run_observe_streaming` and its post-exit
+/// drain / `try_recv` paths. Behavior is identical to the inlined version:
+/// empty lines are skipped by the per-format `handle_*_stream_line`
+/// wrappers, and the trailing partial line is preserved for the next call.
+fn parse_stream_lines<F>(line_buffer: &mut String, chunk: &str, mut on_line: F)
+where
+    F: FnMut(&str),
+{
+    if !chunk.is_empty() {
+        line_buffer.push_str(chunk);
+    }
+    while let Some(newline_pos) = line_buffer.find('\n') {
+        let line = line_buffer[..newline_pos].to_string();
+        line_buffer.replace_range(..newline_pos + 1, "");
+        on_line(&line);
+    }
+}
+
+/// Dispatch any leftover NDJSON line that survived in `line_buffer` after
+/// the producer closed (EOF, exit, drain deadline). Mirrors the per-line
+/// dispatch `parse_stream_lines` performs, but skips the `push_str` /
+/// `find('\n')` work because there's no incoming chunk — only the
+/// trailing residual. No-op when the buffer is empty.
+///
+/// Pairs with `parse_stream_lines`: that helper handles the streaming
+/// `push_str → find('\n') → slice` loop for in-flight chunks; this one
+/// handles the post-shutdown single-line flush. Both keep AgentStreamJson
+/// dispatch code paths in lockstep across the five call sites in
+/// `run_observe_streaming` (main arm, EOF, `try_recv` drain, deadline
+/// drain, final flush).
+fn flush_agent_stream_residual<F>(line_buffer: &mut String, mut on_line: F)
+where
+    F: FnMut(&str),
+{
+    if !line_buffer.is_empty() {
+        let line = std::mem::take(line_buffer);
+        on_line(&line);
     }
 }
 
