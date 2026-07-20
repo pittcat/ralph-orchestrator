@@ -13,7 +13,7 @@ Detailed module path index. For high-level architecture + isolation policy, see 
 ```
 ralph-proto    → Foundation types: Event, Hat, HatId, Topic, EventBus
 ralph-core     → Orchestration logic, event loop, state machine, hats, memories, tasks, hooks, skills
-ralph-adapters → Backend adapters (Claude, Kiro, Gemini, Codex, Amp, Copilot CLI, OpenCode)
+ralph-adapters → Backend adapters (Claude, Kiro, Gemini, Codex, Amp, Copilot CLI, OpenCode, agent)
 ralph-cli      → CLI entry point, commands (run, plan, task, loops, web, mcp, wave)
 ralph-tui      → Terminal UI (ratatui-based)
 ralph-e2e      → End-to-end test framework (scenarios, mock CLI, reporters)
@@ -47,9 +47,9 @@ CLI Config → HaBackend → auto_detect → CliExecutor / PtyExecutor → Strea
 - **CliBackend**: Defines backend CLI path, args, prompt mode, output format
 - **CliExecutor**: Spawns backend process, streams output, handles termination
 - **PtyExecutor**: PTY-based execution for Claude CLI, supports interactive and observe modes
-- **auto_detect**: Scans PATH for available backends (`claude`, `code`/`codex`, `gemini`, `opencode`, `pi`, `traecli`)
+- **auto_detect**: Scans PATH for available backends (`claude`, `code`/`codex`, `gemini`, `opencode`, `pi`, `traecli`, `agent`)
 - **StreamHandler**: Console/pretty/quiet/TUI output handlers
-- **Backend-specific stream parsers**: `claude_stream.rs`, `pi_stream.rs`, `trae_stream.rs`, `json_rpc_handler.rs`
+- **Backend-specific stream parsers**: `claude_stream.rs`, `pi_stream.rs`, `trae_stream.rs`, `agent_stream.rs`, `json_rpc_handler.rs`
 
 ## Code Locations
 
