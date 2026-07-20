@@ -173,8 +173,12 @@ impl CliExecutor {
         let mut stdout_done = stdout_task.is_none();
         let mut stderr_done = stderr_task.is_none();
         let mut accumulated_output = String::new();
-        let mut agent_text_written = false;
         let mut agent_state = AgentSessionState::default();
+        // Cross-line extracted-text accumulator — the dispatcher's
+        // `Result` branch suppresses its terminal fallback when this is
+        // non-empty, so we must hoist it outside the per-line dispatch
+        // to honor "only one terminal fallback after any assistant text".
+        let mut agent_extracted = String::new();
 
         if let Some(duration) = timeout {
             debug!(
@@ -246,26 +250,28 @@ impl CliExecutor {
                         // terminal `is_error` / `subtype=="error"` flag gates
                         // `success` below) and surfaces assistant / fallback
                         // terminal text to the writer without double-parsing.
+                        //
+                        // The dispatcher owns the "only one terminal fallback"
+                        // rule — it suppresses result text when any assistant
+                        // text was already emitted (`if extracted_text.is_empty()`
+                        // inside `dispatch_agent_stream_event`). The headless
+                        // path therefore forwards every `on_text` it receives:
+                        // each assistant delta is written verbatim, and the
+                        // terminal result only reaches the writer when no
+                        // assistant text preceded it.
                         if let Some(event) = AgentStreamParser::parse_line(&line) {
                             let mut headless_handler = HeadlessTextHandler::default();
-                            let mut extracted = String::new();
                             dispatch_agent_stream_event(
                                 event,
                                 &mut headless_handler,
-                                &mut extracted,
+                                &mut agent_extracted,
                                 &mut agent_state,
                             );
-                            // Preserve the existing contract: if assistant text
-                            // was already written, do not duplicate it with the
-                            // terminal result fallback (which would otherwise
-                            // re-emit on_text from a per-line empty `extracted`).
-                            if !agent_text_written && let Some(text) = headless_handler.into_text()
-                            {
+                            for text in headless_handler.into_texts() {
                                 write!(output_writer, "{text}")?;
                                 if !text.ends_with('\n') {
                                     writeln!(output_writer)?;
                                 }
-                                agent_text_written = true;
                             }
                         }
                     } else {
@@ -475,29 +481,35 @@ fn inject_ralph_runtime_env(command: &mut Command, workspace_root: &std::path::P
 }
 
 /// Tiny `StreamHandler` used by the headless `AgentStreamJson` branch
-/// to surface the assistant / terminal text a single `dispatch_agent_stream_event`
-/// pass produced. We do not care about tool calls, tool results, errors,
+/// to surface every text a single `dispatch_agent_stream_event` pass
+/// produced. We do not care about tool calls, tool results, errors,
 /// or completion events here — the headless path only mirrors PTY's
-/// `agent_state.is_error` for `success` gating and forwards the extracted
-/// text to the caller-supplied writer.
+/// `agent_state.is_error` for `success` gating and forwards each
+/// extracted text to the caller-supplied writer.
+///
+/// The dispatcher fires `on_text` at most once per event:
+/// - `AgentStreamEvent::Assistant` → one `on_text` with the joined text blocks
+/// - `AgentStreamEvent::Result`    → one `on_text` with the result fallback
+///                                    (only when no assistant text preceded it)
+/// - All other event variants are no-ops for `on_text`.
+///
+/// We collect every `on_text` the dispatcher emits in a single vector so the
+/// caller can write them verbatim in dispatch order. A single-slot buffer
+/// would swallow subsequent assistant deltas and break streaming output.
 #[derive(Default)]
 struct HeadlessTextHandler {
-    text: Option<String>,
+    texts: Vec<String>,
 }
 
 impl HeadlessTextHandler {
-    fn into_text(self) -> Option<String> {
-        self.text
+    fn into_texts(self) -> Vec<String> {
+        self.texts
     }
 }
 
 impl StreamHandler for HeadlessTextHandler {
     fn on_text(&mut self, text: &str) {
-        // The dispatcher only emits a single `on_text` per line (assistant
-        // content OR terminal fallback), so a single-slot buffer is enough.
-        if self.text.is_none() {
-            self.text = Some(text.to_string());
-        }
+        self.texts.push(text.to_string());
     }
     fn on_tool_call(&mut self, _name: &str, _id: &str, _input: &serde_json::Value) {}
     fn on_tool_result(&mut self, _id: &str, _output: &str) {}

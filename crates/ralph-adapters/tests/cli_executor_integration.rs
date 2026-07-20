@@ -34,6 +34,18 @@ mod cli_executor_integration {
 '{"type":"tool_call","subtype":"completed","call_id":"c1","tool_call":{"readToolCall":{"result":{"success":{"content":"file contents"}}}}}' \
 '{"type":"result","subtype":"error","is_error":true,"result":"fatal"}'"#;
 
+    /// Regression guard for the headless multi-assistant-delta contract:
+    /// every assistant `on_text` event must reach the writer verbatim,
+    /// not just the first one. The terminal `result` fallback is suppressed
+    /// by the dispatcher when any assistant text was emitted (the
+    /// `if extracted_text.is_empty()` guard inside
+    /// `dispatch_agent_stream_event`).
+    const SCRIPT_MULTIPLE_ASSISTANT_DELTAS: &str = r#"printf '%s\n' \
+'{"type":"assistant","message":{"content":[{"type":"text","text":"first "}]}}' \
+'{"type":"assistant","message":{"content":[{"type":"text","text":"second "}]}}' \
+'{"type":"assistant","message":{"content":[{"type":"text","text":"third"}]}}' \
+'{"type":"result","subtype":"success","result":"should-not-appear","is_error":false}'"#;
+
     fn agent_stream_json_backend() -> CliBackend {
         CliBackend {
             command: "sh".to_string(),
@@ -116,6 +128,62 @@ mod cli_executor_integration {
         assert!(
             written.contains("partial answer"),
             "writer should preserve assistant text before the error payload; got: {written:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_agent_stream_json_emits_every_assistant_delta() {
+        // Regression guard: previously the headless branch held an
+        // `agent_text_written` flag that swallowed every assistant delta
+        // after the first one. The contract is: every `on_text` from the
+        // dispatcher reaches the writer, in dispatch order.
+        let executor = CliExecutor::new(agent_stream_json_backend());
+        let mut output = Vec::new();
+
+        let result = executor
+            .execute(SCRIPT_MULTIPLE_ASSISTANT_DELTAS, &mut output, None, false)
+            .await
+            .expect("execute ok");
+
+        // R1: terminal `is_error=false` keeps the run successful even
+        // though no assistant text precedes the result event in a
+        // degenerate case — here we have multiple assistant deltas so
+        // the terminal fallback is suppressed by the dispatcher.
+        assert!(
+            result.success,
+            "headless multi-assistant success payload should report success=true; got exit_code={:?}",
+            result.exit_code
+        );
+        assert_eq!(result.exit_code, Some(0));
+
+        let written = String::from_utf8(output).expect("utf8");
+
+        // Every assistant delta must appear in the writer in dispatch order.
+        assert!(
+            written.contains("first "),
+            "writer should contain first assistant delta; got: {written:?}"
+        );
+        assert!(
+            written.contains("second "),
+            "writer should contain second assistant delta; got: {written:?}"
+        );
+        assert!(
+            written.contains("third"),
+            "writer should contain third assistant delta; got: {written:?}"
+        );
+        // The literal concatenation (each delta ends with a newline because
+        // the headless path appends one when the input does not) must be
+        // present, asserting dispatch order.
+        assert!(
+            written.contains("first \nsecond \nthird\n"),
+            "writer should contain all three deltas in dispatch order; got: {written:?}"
+        );
+        // The terminal `result` text must NOT be forwarded when any
+        // assistant delta preceded it — the dispatcher's
+        // `extracted_text.is_empty()` guard owns that contract.
+        assert!(
+            !written.contains("should-not-appear"),
+            "terminal result fallback must be suppressed when assistant text preceded it; got: {written:?}"
         );
     }
 
