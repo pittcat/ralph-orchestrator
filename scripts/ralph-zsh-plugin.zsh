@@ -92,6 +92,7 @@ _RALPH_BACKENDS=(
   "opencode:Opencode backend"
   "pi:Pi backend"
   "traecli:Trae CLI backend"
+  "agent:Cursor Agent (Headless CLI) backend"
   "custom:Custom backend"
 )
 

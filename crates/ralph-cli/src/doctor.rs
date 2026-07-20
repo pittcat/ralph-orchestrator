@@ -473,6 +473,7 @@ fn canonical_backend_name(backend: &str, command: Option<&str>) -> String {
         "opencode" => "opencode".to_string(),
         "pi" => "pi".to_string(),
         "traecli" => "traecli".to_string(),
+        "agent" => "agent".to_string(),
         _ => normalized,
     }
 }
@@ -1149,6 +1150,33 @@ mod tests {
         assert_eq!(
             canonical_backend_name("custom", Some("my-cli.exe")),
             "my-cli"
+        );
+    }
+
+    #[test]
+    fn canonical_backend_name_recognizes_agent_basename() {
+        // U5 (S11): a custom command named `agent` must canonicalize to
+        // the registered `agent` backend id, so doctor matches it against
+        // the auth/whitelist tables just like the explicit backend.
+        assert_eq!(
+            canonical_backend_name("custom", Some("agent")),
+            "agent"
+        );
+        assert_eq!(
+            canonical_backend_name("custom", Some("agent.exe")),
+            "agent"
+        );
+    }
+
+    #[test]
+    fn auth_env_vars_for_agent_is_none() {
+        // U5 (S11 / R9–R10): missing CURSOR_API_KEY must NOT hard-fail
+        // doctor for the `agent` backend — authentication is delegated
+        // to the Cursor CLI itself (it relies on `agent login` from the
+        // local machine).
+        assert!(
+            auth_env_vars("agent").is_none(),
+            "doctor must not require CURSOR_API_KEY (or any env var) for the `agent` backend"
         );
     }
 

@@ -173,6 +173,22 @@ mod tests {
     }
 
     #[test]
+    fn test_zsh_plugin_backend_array_includes_agent() {
+        // U5 (R3a): scripts/ralph-zsh-plugin.zsh `_RALPH_BACKENDS` must
+        // expose `agent` so the user-facing completion matches the
+        // backend registry surfaced by `ralph --backend agent`.
+        let plugin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("scripts/ralph-zsh-plugin.zsh");
+        let src = std::fs::read_to_string(&plugin).expect("read zsh plugin");
+        assert!(
+            src.contains("\"agent:Cursor Agent"),
+            "_RALPH_BACKENDS must include the Cursor `agent` backend (R3a)"
+        );
+    }
+
+    #[test]
     fn test_tools_evaluate_scripts_exclude_kiro() {
         // U7: tools/PRESET_EVALUATOR_PROMPT.md and tools/evaluate-*.sh must
         // no longer tell evaluators to use the deleted kiro-cli backend.

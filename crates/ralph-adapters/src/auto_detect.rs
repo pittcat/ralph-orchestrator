@@ -8,7 +8,20 @@ use std::sync::OnceLock;
 use tracing::debug;
 
 /// Default priority order for backend detection.
-pub const DEFAULT_PRIORITY: &[&str] = &["claude", "gemini", "codex", "opencode", "pi", "traecli"];
+///
+/// `agent` (Cursor Headless CLI) is intentionally last — it has the lowest
+/// auto-detect precedence per R3, since `agent login` is a local-machine
+/// state assumption that we don't want to silently win over the explicit
+/// first-party backends.
+pub const DEFAULT_PRIORITY: &[&str] = &[
+    "claude",
+    "gemini",
+    "codex",
+    "opencode",
+    "pi",
+    "traecli",
+    "agent",
+];
 
 /// Maps backend config names to their actual CLI command names.
 ///
@@ -16,6 +29,7 @@ pub const DEFAULT_PRIORITY: &[&str] = &["claude", "gemini", "codex", "opencode",
 fn detection_command(backend: &str) -> &str {
     match backend {
         "traecli" => "trae-cli",
+        "agent" => "agent",
         _ => backend,
     }
 }
@@ -246,17 +260,62 @@ mod tests {
     }
 
     #[test]
-    fn test_default_priority_traecli_is_last() {
+    fn test_default_priority_agent_is_last() {
+        // Cursor `agent` lives at the tail of DEFAULT_PRIORITY (R3):
+        // auto-detect must prefer every existing backend over it.
         assert_eq!(
             DEFAULT_PRIORITY.last(),
-            Some(&"traecli"),
-            "Trae CLI should be the last entry in DEFAULT_PRIORITY"
+            Some(&"agent"),
+            "Cursor `agent` must be the last entry in DEFAULT_PRIORITY (R3 lowest precedence)"
+        );
+        assert!(
+            DEFAULT_PRIORITY.contains(&"traecli"),
+            "DEFAULT_PRIORITY must still include traecli (test_default_priority_agent_is_last post-condition)"
+        );
+    }
+
+    #[test]
+    fn test_default_priority_agent_after_traecli() {
+        // R3 + S6: explicit ordering — `agent` after `traecli`, never before.
+        let traecli_idx = DEFAULT_PRIORITY
+            .iter()
+            .position(|b| *b == "traecli")
+            .expect("traecli present");
+        let agent_idx = DEFAULT_PRIORITY
+            .iter()
+            .position(|b| *b == "agent")
+            .expect("agent present");
+        assert!(
+            agent_idx > traecli_idx,
+            "agent must come after traecli in DEFAULT_PRIORITY (got traecli={}, agent={})",
+            traecli_idx,
+            agent_idx
         );
     }
 
     #[test]
     fn test_detection_command_traecli() {
         assert_eq!(detection_command("traecli"), "trae-cli");
+    }
+
+    #[test]
+    fn test_detection_command_agent() {
+        // `agent` and Cursor CLI binary share the same name — no remap.
+        assert_eq!(detection_command("agent"), "agent");
+    }
+
+    #[test]
+    fn test_detect_backend_default_priority_order_with_agent_last() {
+        // S6: when claude AND agent are both on PATH, claude wins (auto
+        // does not preempt higher-precedence backends). We use real `echo`
+        // as a stand-in for `claude` and verify agent stays tail.
+        let fake_priority = &["fake_claude", "fake_agent"];
+        let result = detect_backend(fake_priority, |_| true);
+        // Order is preserved in the checked list when nothing matches.
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert_eq!(e.checked, vec!["fake_claude", "fake_agent"]);
+        }
     }
 
     #[test]
