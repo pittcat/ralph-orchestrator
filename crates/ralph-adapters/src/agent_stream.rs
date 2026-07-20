@@ -91,8 +91,6 @@ pub enum AgentStreamEvent {
 /// after the loop to populate LOOP_COMPLETE diagnostics.
 #[derive(Debug, Clone, Default)]
 pub struct AgentSessionState {
-    /// Final `result.result` text (last seen Result event).
-    pub final_result: Option<String>,
     /// `true` if the final `result` event carried `is_error: true` or
     /// `subtype == "error"`.
     pub is_error: bool,
@@ -299,7 +297,6 @@ pub fn dispatch_agent_stream_event<H: StreamHandler>(
             is_error,
             ..
         } => {
-            state.final_result = result.clone();
             state.is_error = is_error || subtype.as_deref() == Some("error");
             if extracted_text.is_empty() {
                 if let Some(text) = result {
@@ -656,7 +653,6 @@ mod tests {
 
         assert_eq!(handler.texts, vec!["final answer".to_string()]);
         assert_eq!(extracted, "final answer");
-        assert_eq!(state.final_result.as_deref(), Some("final answer"));
         assert!(!state.is_error);
     }
 
@@ -683,7 +679,7 @@ mod tests {
 
         assert_eq!(handler.texts, vec!["final answer".to_string()]);
         assert_eq!(extracted, "final answer");
-        assert_eq!(state.final_result.as_deref(), Some("final answer"));
+        assert!(!state.is_error);
     }
 
     #[test]
@@ -721,7 +717,6 @@ mod tests {
         dispatch_agent_stream_event(event, &mut handler, &mut extracted, &mut state);
 
         assert!(state.is_error);
-        assert_eq!(state.final_result.as_deref(), Some("something went wrong"));
         // Final result text still surfaces through on_text for completion
         // detection — error semantics live in state, not in dropped payloads.
         assert_eq!(handler.texts, vec!["something went wrong".to_string()]);

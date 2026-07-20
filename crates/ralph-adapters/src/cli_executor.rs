@@ -3,10 +3,11 @@
 //! Executes prompts via CLI tools with real-time streaming output.
 //! Supports optional execution timeout with graceful SIGTERM termination.
 
-use crate::agent_stream::AgentStreamParser;
+use crate::agent_stream::{AgentSessionState, AgentStreamParser, dispatch_agent_stream_event};
 #[cfg(test)]
 use crate::cli_backend::PromptMode;
 use crate::cli_backend::{CliBackend, OutputFormat};
+use crate::stream_handler::{SessionResult, StreamHandler};
 use crate::trae_stream::TraeStreamParser;
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
@@ -173,7 +174,7 @@ impl CliExecutor {
         let mut stderr_done = stderr_task.is_none();
         let mut accumulated_output = String::new();
         let mut agent_text_written = false;
-        let mut agent_fallback_result = None;
+        let mut agent_state = AgentSessionState::default();
 
         if let Some(duration) = timeout {
             debug!(
@@ -239,18 +240,33 @@ impl CliExecutor {
                             }
                         }
                     } else if self.backend.output_format == OutputFormat::AgentStreamJson {
-                        // AgentStreamJson: parse NDJSON lines and extract assistant text
-                        // (mirrors the TraeStreamJson branch above; tool events stay
-                        // on the PTY/StreamHandler path, headless just wants the text
-                        // for completion detection).
-                        if let Some(text) = AgentStreamParser::extract_text(&line) {
-                            write!(output_writer, "{text}")?;
-                            if !text.ends_with('\n') {
-                                writeln!(output_writer)?;
+                        // AgentStreamJson: dispatch each NDJSON line through the
+                        // shared accumulator (mirrors `pty_executor.rs`).
+                        // A single pass populates `AgentSessionState` (so the
+                        // terminal `is_error` / `subtype=="error"` flag gates
+                        // `success` below) and surfaces assistant / fallback
+                        // terminal text to the writer without double-parsing.
+                        if let Some(event) = AgentStreamParser::parse_line(&line) {
+                            let mut headless_handler = HeadlessTextHandler::default();
+                            let mut extracted = String::new();
+                            dispatch_agent_stream_event(
+                                event,
+                                &mut headless_handler,
+                                &mut extracted,
+                                &mut agent_state,
+                            );
+                            // Preserve the existing contract: if assistant text
+                            // was already written, do not duplicate it with the
+                            // terminal result fallback (which would otherwise
+                            // re-emit on_text from a per-line empty `extracted`).
+                            if !agent_text_written && let Some(text) = headless_handler.into_text()
+                            {
+                                write!(output_writer, "{text}")?;
+                                if !text.ends_with('\n') {
+                                    writeln!(output_writer)?;
+                                }
+                                agent_text_written = true;
                             }
-                            agent_text_written = true;
-                        } else if let Some(text) = AgentStreamParser::extract_result_text(&line) {
-                            agent_fallback_result = Some(text);
                         }
                     } else {
                         writeln!(output_writer, "{line}")?;
@@ -282,14 +298,6 @@ impl CliExecutor {
             }
         }
 
-        if !agent_text_written && let Some(text) = agent_fallback_result {
-            write!(output_writer, "{text}")?;
-            if !text.ends_with('\n') {
-                writeln!(output_writer)?;
-            }
-            output_writer.flush()?;
-        }
-
         let status = if let Some(status) = terminated_status {
             status
         } else {
@@ -303,10 +311,31 @@ impl CliExecutor {
             handle.await.map_err(join_error_to_io)??;
         }
 
+        // For AgentStreamJson, the terminal payload's `is_error` /
+        // `subtype=="error"` is the logical success signal. The shell exit
+        // code is informational; treat it as a logical error when the
+        // payload says so (mirrors `pty_executor.rs:1242,1308`).
+        // We also surface a non-zero exit code (1) when the shell exited 0
+        // but the agent payload flagged an error — callers keying off
+        // `exit_code` (bash, orchestration, this suite's RED assertions)
+        // then observe the logical error too.
+        let shell_succeeded = status.success() && !timed_out;
+        let agent_stream_json = self.backend.output_format == OutputFormat::AgentStreamJson;
+        let logical_error = agent_stream_json && agent_state.is_error;
+        let success = if agent_stream_json {
+            (shell_succeeded && !logical_error) || post_event_timed_out
+        } else {
+            shell_succeeded || post_event_timed_out
+        };
+        let exit_code = match status.code() {
+            Some(0) if logical_error => Some(1),
+            other => other,
+        };
+
         Ok(ExecutionResult {
             output: accumulated_output,
-            success: (status.success() && !timed_out) || post_event_timed_out,
-            exit_code: status.code(),
+            success,
+            exit_code,
             timed_out,
             post_event_timed_out,
         })
@@ -443,6 +472,37 @@ fn inject_ralph_runtime_env(command: &mut Command, workspace_root: &std::path::P
         command.env("TMP", "/var/tmp");
         command.env("TEMP", "/var/tmp");
     }
+}
+
+/// Tiny `StreamHandler` used by the headless `AgentStreamJson` branch
+/// to surface the assistant / terminal text a single `dispatch_agent_stream_event`
+/// pass produced. We do not care about tool calls, tool results, errors,
+/// or completion events here — the headless path only mirrors PTY's
+/// `agent_state.is_error` for `success` gating and forwards the extracted
+/// text to the caller-supplied writer.
+#[derive(Default)]
+struct HeadlessTextHandler {
+    text: Option<String>,
+}
+
+impl HeadlessTextHandler {
+    fn into_text(self) -> Option<String> {
+        self.text
+    }
+}
+
+impl StreamHandler for HeadlessTextHandler {
+    fn on_text(&mut self, text: &str) {
+        // The dispatcher only emits a single `on_text` per line (assistant
+        // content OR terminal fallback), so a single-slot buffer is enough.
+        if self.text.is_none() {
+            self.text = Some(text.to_string());
+        }
+    }
+    fn on_tool_call(&mut self, _name: &str, _id: &str, _input: &serde_json::Value) {}
+    fn on_tool_result(&mut self, _id: &str, _output: &str) {}
+    fn on_error(&mut self, _error: &str) {}
+    fn on_complete(&mut self, _result: &SessionResult) {}
 }
 
 #[cfg(test)]
