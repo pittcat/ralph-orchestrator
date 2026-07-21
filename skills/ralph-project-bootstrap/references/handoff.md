@@ -69,17 +69,16 @@ When ``use_worktree=True`` the handoff MUST include BOTH
 
 Missing the reuse key is a hard reject. ``build_handoff`` raises
 ``ValueError("worktree reuse key required")`` when ``use_worktree``
-is True but neither key is supplied. Worktree mode is opt-in: when
-``use_worktree`` is False the helper does not add any of the
-``--worktree`` / ``--reuse-worktree`` / ``--plan`` /
-``--worktree-name`` flags.
+is True but neither key is supplied. Worktree mode is opt-in. Outside
+worktree mode the helper appends optional ``--prompt-file`` and ``--plan``
+launch inputs only when present; preset-native mode appends neither.
 
 When ``use_worktree`` is True AND a reuse key is supplied the argv
 shape is exactly:
 
 ```
-<binary> -c <config_path> -H <preset> --prompt-file <prompt_file>
-         --plan <plan_path>
+<binary> -c <config_path> -H <preset>
+         [--prompt-file <prompt_file>]
          --worktree --reuse-worktree
          (--plan <plan_arg> | --worktree-name <worktree_name>)
 ```
@@ -93,7 +92,7 @@ paths are rejected.
 
 The static gate (Unit 5) proves that the runtime can statically
 load the suite: it can parse the config, resolve the preset id,
-load the prompt file, resolve the plan path, perform backend
+resolve the selected prompt/plan paths when present, perform backend
 auto-detection, and complete its auto-preflight step. None of that
 proves a loop can reach any business event or that the configured
 backend can produce a coherent response. The smoke (Unit 6) is the

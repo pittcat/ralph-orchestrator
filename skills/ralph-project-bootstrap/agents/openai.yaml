@@ -14,11 +14,11 @@ when_to_use: |
 inputs:
   - project_root
   - preset (path or builtin id, already passing strict lint)
-  - plan_or_task_path
+  - optional launch context (prompt file, plan, environment, or runtime id)
 outputs:
   - owned AGENTS.md / CLAUDE.md updates (idempotent)
-  - ralph.pipeline.yml + PROMPT.pipeline.md (idempotent)
-  - ralph.bootstrap.yml provenance
+  - only the missing runtime artifacts (idempotent; may be none)
+  - provenance for files actually managed by bootstrap
   - staged validation evidence + verification-level handoff
 boundaries:
   - Does not author or review presets.

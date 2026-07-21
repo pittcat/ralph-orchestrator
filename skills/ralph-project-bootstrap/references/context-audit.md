@@ -12,7 +12,7 @@ operator 调用 skill 时，必须先通过上下文审计。任何持久写盘�
 2. 从 cwd 向上收集 `AGENTS.md` / `CLAUDE.md` 的可见 scope。
 3. 在 VCS 根与最近的 AGENTS/CLAUDE scope 冲突时，立即阻塞并返回 `root_ambiguous`。
 4. 在没有 VCS 根且存在多个 AGENTS scope 时，按相同规则阻塞。
-5. 在 root 唯一时，继续校验 preset 与 plan/task 输入。
+5. 在 root 唯一时，完整读取并校验 preset，再校验操作者实际选择的可选 plan / prompt 路径。两者都没有时表示 preset-native，并不自动构成 blocker；skill agent 仍须确认 preset 的 prompt 与动态上下文足以启动。
 6. 输入校验失败或 root 解析失败时返回 `AuditDecision(blocking=True)`，**不**调用 helper 写盘。
 
 ## 命令与动作
@@ -24,7 +24,7 @@ operator 调用 skill 时，必须先通过上下文审计。任何持久写盘�
 ## 关键字段从哪里取得
 
 - `root` 解析：`audit_project_root` 走 VCS 根优先，缺则走最近的 AGENTS/CLAUDE scope，否则使用 cwd。
-- `inputs_ok`：`audit_inputs` 校验 `preset` 与 `plan_path`。
+- `inputs_ok`：`audit_inputs` 校验 `preset`，以及非空的 `plan_path` / `prompt_file`。它不替代 agent 对 preset 运行契约的语义判断。
 - `facts`：`collect_project_facts` 通过文件存在性判断技术栈（Rust/Node/Python/unknown）。
 - `issues`：审计发现的可枚举阻塞，全部带 `code` + `message` + `paths`。
 - `notes`：附加可观察说明（如未发现任何可证实命令）。

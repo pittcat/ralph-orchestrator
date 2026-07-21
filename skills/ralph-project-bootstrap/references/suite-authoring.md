@@ -14,12 +14,13 @@ The skill owner does.
 The bootstrap pipeline owns exactly three files inside the target
 project:
 
-* `ralph.pipeline.yml` — runtime config binding preset + plan +
-  prompt file + preflight strictness. User-owned keys live outside the
+* `ralph.pipeline.yml` — runtime config binding preset + optional plan +
+  optional prompt file + preflight strictness. User-owned keys live outside the
   owned block.
-* `PROMPT.pipeline.md` — the prompt file referenced by
-  `event_loop.prompt_file`. The prompt is template-shaped: it REFs the
-  plan path and preset id and never copies hat instructions.
+* `PROMPT.pipeline.md` — generated only when bootstrap owns a prompt. It
+  references the optional plan path and preset id and never copies hat
+  instructions. Operator-owned prompt files may be referenced but never
+  rendered or hashed by bootstrap. Preset-native mode creates no prompt file.
 * `ralph.bootstrap.yml` — provenance: generator version, input
   signature, owned-key tuple, per-file owned-bytes SHA-256 digest.
 
@@ -36,8 +37,8 @@ top-level `_bootstrap:` mapping:
 | Key | Type | Notes |
 | --- | --- | --- |
 | `preset` | string | preset path or `builtin:<id>`. The helper quotes this value when it contains a `:`. |
-| `plan` | string | repo-relative path to the plan/task file. Absolute paths are rejected. |
-| `prompt_file` | string | repo-relative path to the prompt file. Absolute paths are rejected. |
+| `plan` | string | Optional repo-relative plan/task path; empty for non-plan runs. Absolute paths are rejected. |
+| `prompt_file` | string | Optional repo-relative prompt path; empty when the preset supplies its own prompt. Absolute paths are rejected. |
 | `preflight` | string | `"strict"` (default) or `"lenient"`. |
 
 The owned block is delimited by the `_bootstrap:` line and the first
@@ -110,8 +111,8 @@ the filesystem.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `generator_version` | string | semver-like; currently `0.1.0`. |
-| `input_signature` | string | SHA-256 of `preset + "\|" + plan_path + "\|" + cwd_anchor`. |
+| `generator_version` | string | semver-like; currently `0.2.0`. |
+| `input_signature` | string | SHA-256 of preset + optional prompt path + optional plan path + prompt ownership (`managed` / `referenced`) + cwd anchor. |
 | `owned_keys` | list of string | the four owned keys, in canonical order. |
 | `summary` | list of `{file, sha256}` | SHA-256 of each suite file's on-disk owned bytes. |
 
@@ -151,7 +152,7 @@ The following are forbidden in any artifact the helper emits and will
 be rejected by reviewers:
 
 * **Reference to `ralph-hats` or any preset name inside the prompt.**
-  The prompt is template-shaped: it REFs the preset id and plan path,
+  A managed prompt is template-shaped: it REFs the preset id and optional plan path,
   but never copies hat instructions and never names specific hat
   collections.
 * **Reference to runtime-internal ledgers.** The prompt must never

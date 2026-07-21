@@ -110,8 +110,8 @@ class HandoffInputs:
     binary: str
     config_path: str
     preset: str
-    plan_path: str
-    prompt_file: str
+    plan_path: str | None
+    prompt_file: str | None
     level: HandoffLevel
     use_worktree: bool = False
     reuse_worktree: bool = False
@@ -133,11 +133,17 @@ class HandoffInputs:
             ("binary", self.binary),
             ("config_path", self.config_path),
             ("preset", self.preset),
-            ("plan_path", self.plan_path),
-            ("prompt_file", self.prompt_file),
         ):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{label} must be a non-empty string")
+        for label, value in (
+            ("plan_path", self.plan_path),
+            ("prompt_file", self.prompt_file),
+            ("plan_arg", self.plan_arg),
+            ("worktree_name", self.worktree_name),
+        ):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"{label} must be None or a non-empty string")
         if self.use_worktree:
             if not self.reuse_worktree:
                 raise ValueError("worktree reuse key required")
@@ -211,12 +217,12 @@ def _normalise_paths(items: Iterable[str]) -> tuple[str, ...]:
 def _build_argv(inputs: HandoffInputs) -> tuple[str, ...]:
     """Compose the argv tuple for the launch command.
 
-    The shape is identical for every non-empty command: ``<binary> -c
-    <config_path> -H <preset> --prompt-file <prompt_file> --plan
-    <plan_path>``. Worktree mode replaces the top-level ``--plan
-    <plan_path>`` with ``--worktree --reuse-worktree`` and exactly one
-    of ``--plan <plan_arg>`` or ``--worktree-name <worktree_name>``
-    (the operator's explicit reuse key wins).
+    Every command starts with ``<binary> -c <config_path> -H <preset>``.
+    Non-worktree launches append optional ``--prompt-file`` and ``--plan``
+    inputs. Worktree mode appends ``--worktree --reuse-worktree`` and
+    exactly one of ``--plan <plan_arg>`` or
+    ``--worktree-name <worktree_name>``; the optional prompt file remains
+    independent of that reuse key.
     """
     argv: list[str] = [
         inputs.binary,
@@ -224,9 +230,10 @@ def _build_argv(inputs: HandoffInputs) -> tuple[str, ...]:
         inputs.config_path,
         "-H",
         inputs.preset,
-        "--prompt-file",
-        inputs.prompt_file,
     ]
+    if inputs.prompt_file is not None:
+        argv.append("--prompt-file")
+        argv.append(inputs.prompt_file)
     if inputs.use_worktree:
         argv.append("--worktree")
         argv.append("--reuse-worktree")
@@ -236,7 +243,7 @@ def _build_argv(inputs: HandoffInputs) -> tuple[str, ...]:
         elif inputs.worktree_name is not None:
             argv.append("--worktree-name")
             argv.append(inputs.worktree_name)
-    else:
+    elif inputs.plan_path is not None:
         argv.append("--plan")
         argv.append(inputs.plan_path)
     return tuple(argv)

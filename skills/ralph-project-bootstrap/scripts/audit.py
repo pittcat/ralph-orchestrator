@@ -154,8 +154,15 @@ def audit_inputs(
     preset: str | None,
     plan_path: str | None,
     root: Path,
+    prompt_file: str | None = None,
 ) -> tuple[bool, tuple[AuditIssue, ...]]:
-    """Confirm the preset + plan/task inputs are usable."""
+    """Confirm the preset and any operator-supplied input files are usable.
+
+    A plan is deliberately optional.  A preset may carry its own prompt or
+    obtain dynamic context at launch time; deciding whether that contract is
+    sufficient belongs to the skill agent after it has read the preset.  This
+    helper only validates concrete paths the agent elected to use.
+    """
     issues: list[AuditIssue] = []
     if not preset:
         issues.append(
@@ -182,19 +189,20 @@ def audit_inputs(
                 paths=(preset,),
             )
         )
-    if not plan_path:
-        issues.append(
-            AuditIssue(
-                code="input_missing_plan",
-                message="plan or task path is required",
-            )
-        )
-    elif not (root / plan_path).is_file():
+    if plan_path and not (root / plan_path).is_file():
         issues.append(
             AuditIssue(
                 code="input_missing_plan_file",
                 message=f"plan or task file not readable: {plan_path}",
                 paths=(plan_path,),
+            )
+        )
+    if prompt_file and not (root / prompt_file).is_file():
+        issues.append(
+            AuditIssue(
+                code="input_missing_prompt_file",
+                message=f"prompt file not readable: {prompt_file}",
+                paths=(prompt_file,),
             )
         )
     return (not issues), tuple(issues)
@@ -280,7 +288,8 @@ def run_audit(
     cwd: Path,
     *,
     preset: str | None,
-    plan_path: str | None,
+    plan_path: str | None = None,
+    prompt_file: str | None = None,
 ) -> AuditDecision:
     """Top-level entry: resolve root, validate inputs, collect facts."""
     cwd = cwd.resolve()
@@ -293,7 +302,7 @@ def run_audit(
             issues=root_issues,
             blocking=True,
         )
-    inputs_ok, input_issues = audit_inputs(preset, plan_path, cwd)
+    inputs_ok, input_issues = audit_inputs(preset, plan_path, cwd, prompt_file)
     facts = collect_project_facts(cwd) if root_rel else ProjectFacts()
     notes: tuple[str, ...] = ()
     if facts.is_empty():

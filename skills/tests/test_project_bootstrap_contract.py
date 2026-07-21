@@ -11,8 +11,8 @@ Tests are grouped by unit:
 
 The contract:
 
-* Inputs that are missing or unreadable (preset / plan / task) cause a
-  blocking ``AuditDecision`` and no helper is allowed to persist state.
+* A preset is required; optional plan/prompt paths block only when supplied
+  but unreadable. Preset-native input is valid at the mechanical audit layer.
 * Conflicting root scope signals produce ``root_ambiguous`` and stop.
 * Verifiable build / test / lint entry points are surfaced only when
   their marker files exist; the audit never invents commands.
@@ -25,6 +25,7 @@ The contract:
 """
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -58,7 +59,9 @@ def test_missing_preset_blocks(tmp_path: Path, fixture_name: str) -> None:
 
 
 @pytest.mark.parametrize("fixture_name", ["blank", "rust"])
-def test_missing_plan_blocks(tmp_path: Path, fixture_name: str) -> None:
+def test_missing_plan_allows_preset_native_bootstrap(
+    tmp_path: Path, fixture_name: str
+) -> None:
     project = tmp_path / "project"
     _fixtures.materialise(fixture_name, project)
     decision = run_audit(
@@ -66,9 +69,23 @@ def test_missing_plan_blocks(tmp_path: Path, fixture_name: str) -> None:
         preset="builtin:ce-executor-pipeline",
         plan_path=None,
     )
+    assert not decision.is_blocking
+    assert decision.inputs_ok
+    assert not decision.issues
+
+
+def test_unreadable_prompt_file_blocks(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _fixtures.materialise("rust", project)
+    decision = run_audit(
+        project,
+        preset="builtin:merge-loop",
+        prompt_file="docs/missing-request.md",
+    )
     assert decision.is_blocking
-    codes = {issue.code for issue in decision.issues}
-    assert "input_missing_plan" in codes
+    assert {issue.code for issue in decision.issues} == {
+        "input_missing_prompt_file"
+    }
 
 
 def test_unreadable_preset_blocks(tmp_path: Path) -> None:
@@ -707,6 +724,123 @@ def test_suite_generates_config_and_prompt_for_blank_project() -> None:
     assert user_keys["telemetry"]["runtime_diagnosis"]["enabled"] is True
 
 
+def test_suite_supports_preset_native_without_plan_or_prompt_artifact() -> None:
+    suite = pipeline_suite.compose_suite(
+        preset="builtin:merge-loop",
+        backend="auto",
+        budget_max_iterations=15,
+        budget_wall_clock_seconds=1800,
+        manage_prompt=False,
+    )
+    user_keys, owned_keys = pipeline_suite.parse_owned_yaml(suite.config)
+    assert suite.prompt is None
+    assert "prompt_file" not in user_keys["event_loop"]
+    assert set(owned_keys) == set(pipeline_suite.PIPELINE_OWNED_KEYS)
+    assert pipeline_suite._render_owned_value(suite.config, "plan") == ""
+    assert pipeline_suite._render_owned_value(suite.config, "prompt_file") == ""
+    assert [path for path, _ in suite.provenance.summary] == [
+        "ralph.pipeline.yml"
+    ]
+
+
+def test_suite_references_operator_prompt_without_owning_its_bytes() -> None:
+    suite = pipeline_suite.compose_suite(
+        preset="presets/docs-writer.yml",
+        prompt_file="docs/writing-request.md",
+        backend="auto",
+        budget_max_iterations=8,
+        budget_wall_clock_seconds=1200,
+        manage_prompt=False,
+    )
+    user_keys, _ = pipeline_suite.parse_owned_yaml(suite.config)
+    assert user_keys["event_loop"]["prompt_file"] == "docs/writing-request.md"
+    assert suite.prompt is None
+    assert [path for path, _ in suite.provenance.summary] == [
+        "ralph.pipeline.yml"
+    ]
+
+
+def test_prompt_ownership_changes_input_signature() -> None:
+    common = dict(
+        preset="presets/docs-writer.yml",
+        prompt_file="docs/writing-request.md",
+        backend="auto",
+        budget_max_iterations=8,
+        budget_wall_clock_seconds=1200,
+    )
+    managed = pipeline_suite.compose_suite(**common, manage_prompt=True)
+    referenced = pipeline_suite.compose_suite(**common, manage_prompt=False)
+    assert managed.provenance.input_signature != referenced.provenance.input_signature
+
+
+def test_manage_prompt_requires_a_prompt_path() -> None:
+    with pytest.raises(pipeline_suite.OwnedYamlError) as excinfo:
+        pipeline_suite.compose_suite(
+            preset="builtin:merge-loop",
+            backend="auto",
+            budget_max_iterations=15,
+            budget_wall_clock_seconds=1800,
+            manage_prompt=True,
+        )
+    assert excinfo.value.code == "owned_yaml_invalid"
+
+
+def test_validation_and_handoff_support_preset_native() -> None:
+    dry_run_argv = cli_probe._build_stage_argv(
+        "dry_run",
+        binary="ralph",
+        config_path="ralph.pipeline.yml",
+        preset="builtin:merge-loop",
+        prompt_file=None,
+        plan_path=None,
+    )
+    assert "--prompt-file" not in dry_run_argv
+    assert "--plan" not in dry_run_argv
+
+    artifact = handoff.build_handoff(
+        handoff.HandoffInputs(
+            binary="ralph",
+            config_path="ralph.pipeline.yml",
+            preset="builtin:merge-loop",
+            plan_path=None,
+            prompt_file=None,
+            level="incomplete_static_only",
+        )
+    )
+    assert artifact.command_argv == (
+        "ralph",
+        "-c",
+        "ralph.pipeline.yml",
+        "-H",
+        "builtin:merge-loop",
+    )
+
+
+def test_preset_native_dry_run_accepts_runtime_resolved_prompt() -> None:
+    outcome, reason, _ = cli_probe._classify_dry_run(
+        "Backend: claude\nPrompt file: PRESET_PROMPT.md\n",
+        "",
+        expected={},
+    )
+    assert outcome == "ok"
+    assert reason == "static load passed; loop not closed"
+
+
+@pytest.mark.parametrize("field", ["plan_path", "prompt_file"])
+def test_handoff_rejects_empty_optional_launch_paths(field: str) -> None:
+    kwargs = {
+        "binary": "ralph",
+        "config_path": "ralph.pipeline.yml",
+        "preset": "builtin:merge-loop",
+        "plan_path": None,
+        "prompt_file": None,
+        "level": "incomplete_static_only",
+    }
+    kwargs[field] = ""
+    with pytest.raises(ValueError, match=field):
+        handoff.HandoffInputs(**kwargs)
+
+
 # S2 — render_pipeline_yml emits the four owned keys in canonical order.
 
 
@@ -1039,6 +1173,14 @@ def test_existing_suite_fixture_round_trip(tmp_path: Path) -> None:
     suite = _make_pipeline_suite()
     expected_provenance = pipeline_suite.render_provenance(suite)
     assert expected_provenance.strip() == original_provenance.strip()
+    recorded_summary = dict(suite.provenance.summary)
+    assert recorded_summary["ralph.pipeline.yml"] == hashlib.sha256(
+        original_config.encode("utf-8")
+    ).hexdigest()
+    original_prompt = (project / "PROMPT.pipeline.md").read_text(encoding="utf-8")
+    assert recorded_summary["PROMPT.pipeline.md"] == hashlib.sha256(
+        original_prompt.encode("utf-8")
+    ).hexdigest()
     upgrade = pipeline_suite.upgrade_provenance(original_provenance, suite)
     assert upgrade.kind == "noop"
 

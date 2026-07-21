@@ -2,10 +2,10 @@
 
 The bootstrap pipeline owns three artifacts inside the target project:
 
-* ``ralph.pipeline.yml`` — runtime config binding preset + plan + budget +
-  preflight.
-* ``PROMPT.pipeline.md`` — the prompt file referenced by
-  ``event_loop.prompt_file``.
+* ``ralph.pipeline.yml`` — runtime config binding a preset to optional
+  prompt/plan inputs, budget, and preflight.
+* ``PROMPT.pipeline.md`` — optional bootstrap-owned prompt; preset-native
+  and operator-owned-prompt launches do not create it.
 * ``ralph.bootstrap.yml`` — provenance: generator version, input
   signature, owned-key summary, and per-file owned-bytes SHA-256.
 
@@ -22,8 +22,8 @@ Design rules (enforced by the helpers themselves):
   (``preset``, ``plan``, ``prompt_file``, ``preflight``); user keys
   live outside that block and are preserved byte-for-byte by
   ``apply_owned_keys_to_existing_config``.
-* **``PROMPT.pipeline.md`` is reference-only.** The prompt REFs the plan
-  path and preset id; it never copies hat instructions or surface
+* **``PROMPT.pipeline.md`` is reference-only.** When managed, the prompt
+  REFs the optional plan path and preset id; it never copies hat instructions or surface
   internal ledgers.
 * **Provenance is computed from the owned bytes the suite actually
   ships.** ``upgrade_provenance`` blocks when the on-disk provenance
@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-GENERATOR_VERSION = "0.1.0"
+GENERATOR_VERSION = "0.2.0"
 
 # Owned keys that always exist under the top-level ``_bootstrap:`` mapping
 # of ``ralph.pipeline.yml``. Operators may add additional top-level user
@@ -110,7 +110,7 @@ class PipelineSuite:
     """In-memory representation of a generated pipeline suite."""
 
     config: str
-    prompt: str
+    prompt: str | None
     provenance: Provenance
     owned_keys_in_config: tuple[str, ...]
     owned_keys_in_prompt: tuple[str, ...]
@@ -155,7 +155,13 @@ def _sha256_hex(data: str | bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def compute_input_signature(preset: str, plan_path: str, cwd_anchor: str) -> str:
+def compute_input_signature(
+    preset: str,
+    plan_path: str | None,
+    cwd_anchor: str,
+    prompt_file: str | None = None,
+    manage_prompt: bool = False,
+) -> str:
     """Compute the deterministic input signature for a suite.
 
     The signature feeds the provenance record so two generates with
@@ -163,7 +169,10 @@ def compute_input_signature(preset: str, plan_path: str, cwd_anchor: str) -> str
     repo-relative anchor (typically ``"./"``); callers must not pass
     absolute paths.
     """
-    payload = f"{preset}|{plan_path}|{cwd_anchor}"
+    ownership = "managed" if manage_prompt else "referenced"
+    payload = (
+        f"{preset}|{prompt_file or ''}|{plan_path or ''}|{ownership}|{cwd_anchor}"
+    )
     return _sha256_hex(payload)
 
 
@@ -196,8 +205,8 @@ def _render_mapping_lines(items: Mapping[str, str], indent: str = "  ") -> list[
 def render_pipeline_yml(
     *,
     preset: str,
-    plan_path: str,
-    prompt_file: str,
+    plan_path: str | None = None,
+    prompt_file: str | None = None,
     backend: str,
     budget_max_iterations: int,
     budget_wall_clock_seconds: int,
@@ -232,13 +241,9 @@ def render_pipeline_yml(
     """
     if not preset:
         raise OwnedYamlError("owned_yaml_invalid", "preset is required")
-    if not plan_path:
-        raise OwnedYamlError("owned_yaml_invalid", "plan is required")
-    if not prompt_file:
-        raise OwnedYamlError("owned_yaml_invalid", "prompt_file is required")
-    if Path(plan_path).is_absolute():
+    if plan_path and Path(plan_path).is_absolute():
         raise OwnedYamlError("owned_yaml_invalid", "plan path must be repo-relative")
-    if Path(prompt_file).is_absolute():
+    if prompt_file and Path(prompt_file).is_absolute():
         raise OwnedYamlError("owned_yaml_invalid", "prompt_file must be repo-relative")
     if budget_max_iterations <= 0:
         raise OwnedYamlError(
@@ -253,8 +258,8 @@ def render_pipeline_yml(
 
     owned: dict[str, str] = {
         "preset": preset,
-        "plan": plan_path,
-        "prompt_file": prompt_file,
+        "plan": plan_path or "",
+        "prompt_file": prompt_file or "",
         "preflight": "strict" if preflight_strict else "lenient",
     }
     header = (
@@ -272,7 +277,8 @@ def render_pipeline_yml(
     lines.append("cli:")
     lines.append(f"  backend: {_yaml_escape(backend)}")
     lines.append("event_loop:")
-    lines.append(f"  prompt_file: {_yaml_escape(prompt_file)}")
+    if prompt_file:
+        lines.append(f"  prompt_file: {_yaml_escape(prompt_file)}")
     lines.append(f"  max_iterations: {int(budget_max_iterations)}")
     lines.append(f"  max_runtime_seconds: {int(budget_wall_clock_seconds)}")
     lines.append("core:")
@@ -295,7 +301,7 @@ def render_pipeline_yml(
 
 def render_prompt_md(
     *,
-    plan_path: str,
+    plan_path: str | None,
     preset: str,
     project_root: str,
     prompt_file: str = "PROMPT.pipeline.md",
@@ -306,7 +312,7 @@ def render_prompt_md(
     it just declares the inputs the runtime needs and points at the
     plan file the suite was generated against.
     """
-    if Path(plan_path).is_absolute():
+    if plan_path and Path(plan_path).is_absolute():
         raise OwnedYamlError("owned_yaml_invalid", "plan path must be repo-relative")
     if Path(project_root).is_absolute():
         raise OwnedYamlError("owned_yaml_invalid", "project_root must be repo-relative")
@@ -315,14 +321,20 @@ def render_prompt_md(
     prompt_file_line = (
         f"- prompt_file: `{prompt_file}`\n" if prompt_file else ""
     )
+    source_line = f"- plan: `{plan_path}`\n" if plan_path else ""
+    instruction = (
+        "Read the plan at the referenced path. "
+        if plan_path
+        else "Use this prompt together with the selected preset. "
+    )
     body = (
         f"# Ralph Pipeline Prompt\n\n"
         f"- project_root: `{project_root}`\n"
         f"- preset: `{preset}`\n"
-        f"- plan: `{plan_path}`\n"
+        f"{source_line}"
         f"{prompt_file_line}"
         f"\n"
-        "Read the plan at the referenced path. Do not invent preset\n"
+        f"{instruction}Do not invent preset\n"
         "contents, do not look up hat collections by name, and do not\n"
         "read any runtime-managed block from the target project. The\n"
         "runtime injects the preset-specific instructions downstream.\n"
@@ -523,21 +535,22 @@ def apply_owned_keys_to_existing_config(
 def compose_suite(
     *,
     preset: str,
-    plan_path: str,
-    prompt_file: str,
+    plan_path: str | None = None,
+    prompt_file: str | None = None,
     backend: str,
     budget_max_iterations: int,
     budget_wall_clock_seconds: int,
     preflight_strict: bool = True,
     diagnostics_enabled: bool = True,
     project_root_marker: str = "./",
+    manage_prompt: bool | None = None,
 ) -> PipelineSuite:
     """Render the full suite in one shot.
 
     The provenance record's ``input_signature`` is the SHA-256 of
     ``preset + "|" + plan_path + "|" + project_root_marker``.
     """
-    if Path(plan_path).is_absolute():
+    if plan_path and Path(plan_path).is_absolute():
         raise OwnedYamlError("owned_yaml_invalid", "plan path must be repo-relative")
     config = render_pipeline_yml(
         preset=preset,
@@ -550,21 +563,35 @@ def compose_suite(
         diagnostics_enabled=diagnostics_enabled,
         project_root_marker=project_root_marker,
     )
-    prompt = render_prompt_md(
-        plan_path=plan_path,
-        preset=preset,
-        project_root=project_root_marker,
-        prompt_file=prompt_file,
+    manage_prompt = bool(prompt_file) if manage_prompt is None else manage_prompt
+    if manage_prompt and not prompt_file:
+        raise OwnedYamlError(
+            "owned_yaml_invalid",
+            "manage_prompt requires a repo-relative prompt_file",
+        )
+    prompt = None
+    if prompt_file and manage_prompt:
+        prompt = render_prompt_md(
+            plan_path=plan_path,
+            preset=preset,
+            project_root=project_root_marker,
+            prompt_file=prompt_file,
+        )
+    input_signature = compute_input_signature(
+        preset,
+        plan_path,
+        project_root_marker,
+        prompt_file,
+        manage_prompt,
     )
-    input_signature = compute_input_signature(preset, plan_path, project_root_marker)
+    summary = [("ralph.pipeline.yml", _sha256_hex(config))]
+    if prompt is not None:
+        summary.append((prompt_file or "PROMPT.pipeline.md", _sha256_hex(prompt)))
     provenance = Provenance(
         generator_version=GENERATOR_VERSION,
         input_signature=input_signature,
         owned_keys=PIPELINE_OWNED_KEYS,
-        summary=(
-            ("ralph.pipeline.yml", _sha256_hex(config)),
-            ("PROMPT.pipeline.md", _sha256_hex(prompt)),
-        ),
+        summary=tuple(summary),
     )
     return PipelineSuite(
         config=config,
@@ -659,14 +686,15 @@ def apply_pipeline_config(
     existing_text: str | None,
     *,
     preset: str,
-    plan_path: str,
-    prompt_file: str,
+    plan_path: str | None = None,
+    prompt_file: str | None = None,
     backend: str,
     budget_max_iterations: int,
     budget_wall_clock_seconds: int,
     preflight_strict: bool = True,
     diagnostics_enabled: bool = True,
     project_root_marker: str = "./",
+    manage_prompt: bool | None = None,
 ) -> ApplyResult:
     """Compute the new ``ralph.pipeline.yml`` bytes for a target project.
 
@@ -696,6 +724,7 @@ def apply_pipeline_config(
         preflight_strict=preflight_strict,
         diagnostics_enabled=diagnostics_enabled,
         project_root_marker=project_root_marker,
+        manage_prompt=manage_prompt,
     )
 
     if existing_text is None:

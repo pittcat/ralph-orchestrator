@@ -377,7 +377,7 @@ def _build_stage_argv(
     binary: Path | str,
     config_path: str,
     preset: str,
-    prompt_file: str,
+    prompt_file: str | None,
     plan_path: str | None,
 ) -> tuple[str, ...]:
     """Compose the argv tuple for a stage invocation.
@@ -650,7 +650,7 @@ def validate_pipeline(
     binary: Path | str,
     config_path: str,
     preset: str,
-    prompt_file: str,
+    prompt_file: str | None = None,
     plan_path: str | None = None,
     runner: Callable[..., subprocess.CompletedProcess] | None = None,
 ) -> tuple[StageDecision, ...]:
@@ -906,16 +906,13 @@ def validate_pipeline(
         )
         return tuple(decisions)
 
+    expected: dict[str, str] = {}
+    if prompt_file:
+        expected["prompt_file"] = prompt_file
     outcome, reason, evidence_values = _classify_dry_run(
         stdout,
         stderr,
-        expected={
-            "prompt_file": prompt_file or "",
-            # max_iterations / max_runtime / backend are not part of
-            # the argv we know statically: the caller may have omitted
-            # them on purpose. We only check labels whose expected
-            # value the helper was actually given.
-        },
+        expected=expected,
     )
     evidence = [f"exit_code={exit_code}", f"reason={reason}"]
     for key, value in sorted(evidence_values.items()):

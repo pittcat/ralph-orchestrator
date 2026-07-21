@@ -1,6 +1,6 @@
 ---
 name: ralph-project-bootstrap
-description: Audit a target project, generate or safely update its Ralph runtime suite (AGENTS.md / CLAUDE.md / ralph.pipeline.yml / PROMPT.pipeline.md) from an existing preset + plan/task, run staged validation, and deliver a verification-level-tagged handoff with the official launch command. Use this skill whenever an operator asks to bring a brand-new or under-provisioned project onto Ralph, restore a missing pipeline suite, or fix a target whose static checks fail because the suite is incomplete. Do NOT use it to author or review presets — that belongs to `ralph-preset-author` / `ralph-preset-review`. Do NOT use it for day-to-day loop monitoring / resume / merge — that belongs to `ralph-loop`. Do NOT use it for diagnosing a loop that already ran — that belongs to `ralph-run-diagnosis`.
+description: Read an existing Ralph preset, audit a target project, fill only the runtime artifacts that preset actually needs, run staged validation, and deliver the exact launch command plus unresolved preconditions. Use this skill whenever an operator asks to bring a project onto a supplied preset or repair an incomplete runtime suite. A plan/task is optional: presets may be self-contained, use an ordinary prompt file, consume runtime context, or use a plan. Do NOT use it to author or review presets — that belongs to `ralph-preset-author` / `ralph-preset-review`. Do NOT use it for day-to-day loop monitoring / resume / merge — that belongs to `ralph-loop`. Do NOT use it for diagnosing a loop that already ran — that belongs to `ralph-run-diagnosis`.
 ---
 
 # Ralph Project Bootstrap
@@ -12,10 +12,12 @@ and vetted by `ralph-preset-review`.
 
 ## Boundaries
 
-- **Inputs.** Caller supplies the project directory (current cwd), the
-  preset path or builtin id (already passing strict lint), and the
-  plan/task path that will drive the first run. Skill must stop with a
-  precise missing-input report if any of the three is absent or unreadable.
+- **Inputs.** Caller supplies the project directory (current cwd) and the
+  preset path or builtin id. Read the resolved preset in full before deciding
+  what else is needed. A plan, ordinary prompt file, environment variable,
+  loop id, worktree name, or other runtime context is required only when the
+  preset's actual launch contract needs it. Stop with a precise missing-input
+  report for required context; never invent a placeholder plan.
 - **No preset authoring.** Hat routing, AAF tables, preset schemas and
   builtin completions live in `ralph-preset-author` / `ralph-preset-review`.
   If the caller needs to change the preset, hand off there.
@@ -29,15 +31,24 @@ and vetted by `ralph-preset-review`.
 
 ## Workflow
 
-1. **Audit** the target project. Confirm root, gather verifiable project
-   facts (build / test / lint / format entry points), classify the
-   technology stack from evidence (not from a fixed list), and stop with
-   a blocker if inputs or root are ambiguous.
-2. **Generate / safely update** the four owned artifacts
-   (`AGENTS.md`, `CLAUDE.md`, `ralph.pipeline.yml`, `PROMPT.pipeline.md`)
-   and the `ralph.bootstrap.yml` provenance file. Preserve user content
-   outside owned sections / keys; abort on marker / YAML / ownership
-   conflict.
+1. **Read the preset, then audit.** Resolve and read the supplied preset in
+   full. Confirm the target root, gather verifiable build / test / lint /
+   format entry points, and derive a launch contract from the preset plus
+   operator input. Record optional `prompt_file`, optional `plan_path`,
+   runtime environment/argument preconditions, worktree strategy, and which
+   files (if any) need bootstrap ownership. A preset-native run has neither
+   prompt nor plan. Stop on ambiguity; do not classify by preset name.
+   For a file preset, read the repo-relative YAML directly. For a builtin,
+   run `ralph preset show <name> --format yaml` (strip the `builtin:` prefix)
+   and inspect the returned YAML; a manifest description or preset name is
+   not sufficient evidence.
+2. **Generate / safely update only missing artifacts.** Agent docs,
+   `ralph.pipeline.yml`, a managed `PROMPT.pipeline.md`, and provenance are
+   candidates, not a mandatory bundle. An operator-owned prompt may be
+   referenced but never rewritten. When the preset and project already form
+   a runnable combination, return `noop` and proceed to validation. Preserve
+   user content outside owned sections / keys; abort on marker / YAML /
+   ownership conflict.
 3. **Stage validation** in this strict order: strict preset check →
    strict preflight → `ralph run --dry-run`. Capture structured evidence
    for each stage; downgrade reports to "static-only" when the loop has
@@ -47,10 +58,12 @@ and vetted by `ralph-preset-review`.
    backend (mock / custom / real) must be authorized by the operator
    after the side-effect surface is shown. Without authorization the
    skill reports `incomplete` and stops.
-5. **Handoff.** Emit a verification-level-tagged report plus the official
-   launch command. Worktree invocations must include an explicit reuse
-   key (`--plan <plan>` or `--worktree-name <name>`); missing keys are
-   rejected by the handoff.
+5. **Handoff.** Always emit a verification-level-tagged report plus the
+   command matching the launch contract. Include required environment
+   variables and dynamic arguments. Missing dynamic values make the command
+   a candidate/blocker, never a ready command. Worktree invocations must
+   include an explicit reuse key (`--plan <plan>` or
+   `--worktree-name <name>`); missing keys are rejected.
 
 ## Guardrails
 
@@ -141,9 +154,11 @@ inside the target project and never touches `AGENTS.md` /
 `CLAUDE.md` (those flow through `agent_docs.py`) or the runtime
 ledger under `.ralph/`.
 
-**Owned keys.** `ralph.pipeline.yml` carries exactly four owned keys
+**Owned keys.** When `ralph.pipeline.yml` is needed it carries four owned keys
 under a top-level `_bootstrap:` mapping: `preset`, `plan`,
-`prompt_file`, `preflight`. Anything outside that block is
+`prompt_file`, `preflight`. `plan` and `prompt_file` may be empty when the
+preset supplies its own prompt. They describe launch inputs, not universal
+requirements. Anything outside that block is
 operator-owned and is preserved byte-for-byte across recompositions,
 including comments, blank lines, key ordering, and quote style on
 non-owned keys. The helper rejects duplicate top-level keys (other
@@ -158,10 +173,17 @@ verification command the helper emits MUST carry
 `config-precedence` fixture is the canonical regression for this
 contract.
 
-**Provenance.** `ralph.bootstrap.yml` records `generator_version`,
-`input_signature` (SHA-256 of `preset + "|" + plan_path + "|" +
-cwd_anchor`), the owned-keys tuple, and a per-file SHA-256 of the
-on-disk suite bytes. `upgrade_provenance(existing, new)` returns:
+**Prompt ownership.** A prompt path and prompt ownership are independent.
+Use `manage_prompt=False` for an operator-owned prompt file: the config may
+reference it, but bootstrap must not render or hash its bytes. Use
+`manage_prompt=True` only for a bootstrap-managed prompt path. Preset-native
+mode uses neither path nor managed prompt.
+
+**Provenance.** When bootstrap manages files, `ralph.bootstrap.yml` records
+`generator_version`, `input_signature` (SHA-256 of preset + optional prompt
+path + optional plan path + prompt ownership + cwd anchor), the owned-keys tuple, and per-file
+SHA-256 only for files bootstrap actually owns. `upgrade_provenance(existing,
+new)` returns:
 
 * `noop` when the on-disk record byte-equals the freshly-rendered one.
 * `upgraded` when the on-disk record differs but the
@@ -217,7 +239,7 @@ fail-closed.
 
 **Static load is not loop closed.** A green dry-run proves that
 the runtime successfully parsed the config, resolved the preset
-id, loaded the prompt file, resolved the plan path, performed
+id, resolved the selected prompt source when one exists, performed
 backend auto-detection, and completed its auto-preflight. It does
 NOT prove that a loop can reach any business event or that the
 configured backend can produce a coherent response. Downstream

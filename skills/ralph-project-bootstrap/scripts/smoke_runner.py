@@ -196,8 +196,8 @@ class SmokeConfig:
     binary: Path
     config_path: str
     preset: str
-    prompt_file: str
-    plan_path: str
+    prompt_file: str | None
+    plan_path: str | None
     max_iterations: int = 3
     idle_timeout_secs: int = 30
     wall_clock_timeout_s: int = 60

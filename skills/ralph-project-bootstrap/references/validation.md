@@ -2,7 +2,7 @@
 
 This document is the implementation reference for the staged static
 gate in `ralph-project-bootstrap`. The gate proves that a freshly
-authored pipeline suite (preset + plan + prompt + config + preflight)
+authored launch contract (preset + optional plan/prompt + config + preflight)
 is structurally compatible with the local `ralph` binary before any
 backend call is attempted. It is **not** proof that a loop has run,
 that a loop can run, or that the suite is correct.
@@ -60,7 +60,7 @@ A green `dry_run` proves that the runtime:
 * parsed the config file at the requested path,
 * resolved the preset id against the registry,
 * loaded the prompt file at the requested path,
-* resolved the plan path against the file system,
+* resolved the selected prompt/plan paths when present,
 * performed backend auto-detection,
 * and completed its auto-preflight step.
 
