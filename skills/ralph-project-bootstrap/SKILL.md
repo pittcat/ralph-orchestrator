@@ -16,8 +16,10 @@ and vetted by `ralph-preset-review`.
   preset path or builtin id. Read the resolved preset in full before deciding
   what else is needed. A plan, ordinary prompt file, environment variable,
   loop id, worktree name, or other runtime context is required only when the
-  preset's actual launch contract needs it. Stop with a precise missing-input
-  report for required context; never invent a placeholder plan.
+  preset's actual launch contract needs it. Missing first-run business input
+  does **not** block provisioning: generate the reusable suite, mark the
+  handoff incomplete, and show the exact command template the operator must
+  finish. Never invent a placeholder plan file.
 - **No preset authoring.** Hat routing, AAF tables, preset schemas and
   builtin completions live in `ralph-preset-author` / `ralph-preset-review`.
   If the caller needs to change the preset, hand off there.
@@ -37,11 +39,19 @@ and vetted by `ralph-preset-review`.
    operator input. Record optional `prompt_file`, optional `plan_path`,
    runtime environment/argument preconditions, worktree strategy, and which
    files (if any) need bootstrap ownership. A preset-native run has neither
-   prompt nor plan. Stop on ambiguity; do not classify by preset name.
+   prompt nor plan. Distinguish a **provisioning blocker** (invalid preset,
+   ambiguous root, ownership conflict) from a **first-run input gap** (missing
+   plan, loop id, document brief): only the former stops writes. Do not
+   classify by preset name.
    For a file preset, read the repo-relative YAML directly. For a builtin,
-   run `ralph preset show <name> --format yaml` (strip the `builtin:` prefix)
-   and inspect the returned YAML; a manifest description or preset name is
-   not sufficient evidence.
+   first validate the hats source with `ralph -H builtin:<id> preset check
+   --strict`. `preset show` addresses **template names**, which may differ
+   from the builtin hats id. Run `ralph preset list --format json`, find the
+   manifest whose `source` equals `builtin:<id>`, then run `ralph preset show
+   <template-name> --format yaml`. If no template maps to that source, resolve
+   the builtin from the installed Ralph distribution; never assume that
+   stripping `builtin:` yields a template name. A manifest description alone
+   is not sufficient evidence.
 2. **Generate / safely update only missing artifacts.** Agent docs,
    `ralph.pipeline.yml`, a managed `PROMPT.pipeline.md`, and provenance are
    candidates, not a mandatory bundle. An operator-owned prompt may be
@@ -49,10 +59,22 @@ and vetted by `ralph-preset-review`.
    a runnable combination, return `noop` and proceed to validation. Preserve
    user content outside owned sections / keys; abort on marker / YAML /
    ownership conflict.
+   For a plan-driven preset with no plan yet, generate `ralph.pipeline.yml`,
+   provenance, agent-doc managed sections when needed, and a managed fallback
+   prompt at the preset's configured `event_loop.prompt_file`. The fallback
+   must state that a real repo-relative plan is supplied with `--plan`, and
+   must stop without changing the project if executed directly. Do not create
+   a fake `plan.md`.
+   The final plan-driven launch template must pass only `--plan PLAN_PATH` as
+   its CLI prompt source; do **not** also pass `--prompt-file` because CLI
+   prompt-file precedence would select the fallback instead of the real plan.
+   The generated config may still reference the fallback so standalone
+   preflight/config loading has a safe, readable file.
 3. **Stage validation** in this strict order: strict preset check →
    strict preflight → `ralph run --dry-run`. Capture structured evidence
    for each stage; downgrade reports to "static-only" when the loop has
-   not been smoke-verified.
+   not been smoke-verified. A missing first-run value may prevent validation
+   of the final command, but it does not undo generated artifacts.
 4. **Optional authorized smoke.** Only when the target backend is a
    content-fixed replay harness shipped with this skill. Any other
    backend (mock / custom / real) must be authorized by the operator
@@ -60,8 +82,9 @@ and vetted by `ralph-preset-review`.
    skill reports `incomplete` and stops.
 5. **Handoff.** Always emit a verification-level-tagged report plus the
    command matching the launch contract. Include required environment
-   variables and dynamic arguments. Missing dynamic values make the command
-   a candidate/blocker, never a ready command. Worktree invocations must
+   variables and dynamic arguments. Missing dynamic values produce an
+   `incomplete_static_only` command template such as `--plan PLAN_PATH`, not
+   a `blocked` handoff and not a ready command. Worktree invocations must
    include an explicit reuse key (`--plan <plan>` or
    `--worktree-name <name>`); missing keys are rejected.
 

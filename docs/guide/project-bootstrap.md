@@ -74,6 +74,12 @@ changed, the operator's first check should be: does the file on disk
 match the SHA-256 listed in provenance? If not, the file was edited
 out-of-band.
 
+Missing first-run business input does not prevent these files from being
+provisioned. For example, a plan-driven preset without a plan yet receives a
+safe managed fallback prompt and an `incomplete_static_only` handoff containing
+`--plan PLAN_PATH`. The operator supplies the real repo-relative plan when
+starting the first loop; bootstrap never fabricates a placeholder plan file.
+
 Source: `skills/ralph-project-bootstrap/scripts/pipeline_suite.py:108-116`
 (`PipelineSuite` dataclass).
 

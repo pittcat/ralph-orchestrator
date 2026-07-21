@@ -113,6 +113,7 @@ class HandoffInputs:
     plan_path: str | None
     prompt_file: str | None
     level: HandoffLevel
+    requires_plan: bool = False
     use_worktree: bool = False
     reuse_worktree: bool = False
     plan_arg: str | None = None
@@ -246,6 +247,9 @@ def _build_argv(inputs: HandoffInputs) -> tuple[str, ...]:
     elif inputs.plan_path is not None:
         argv.append("--plan")
         argv.append(inputs.plan_path)
+    elif inputs.requires_plan:
+        argv.append("--plan")
+        argv.append("PLAN_PATH")
     return tuple(argv)
 
 
@@ -474,6 +478,7 @@ def build_handoff(inputs: HandoffInputs) -> HandoffArtifact:
         plan_path=inputs.plan_path,
         prompt_file=inputs.prompt_file,
         level=effective_level,
+        requires_plan=inputs.requires_plan,
         use_worktree=inputs.use_worktree,
         reuse_worktree=inputs.reuse_worktree,
         plan_arg=inputs.plan_arg,
@@ -512,8 +517,12 @@ def build_handoff(inputs: HandoffInputs) -> HandoffArtifact:
     notes: tuple[str, ...]
     command: str
     if rendered_inputs.level == "incomplete_static_only":
-        notes = ("incomplete: candidate command only; operator must run manually",)
-        command = f"[CANDIDATE - operator must run manually]\n{raw_command}"
+        if rendered_inputs.requires_plan and rendered_inputs.plan_path is None:
+            notes = ("incomplete: fill PLAN_PATH before running",)
+            command = f"[TEMPLATE - replace PLAN_PATH before running]\n{raw_command}"
+        else:
+            notes = ("incomplete: candidate command only; operator must run manually",)
+            command = f"[CANDIDATE - operator must run manually]\n{raw_command}"
     else:  # complete
         notes = ("complete: official launch command",)
         command = raw_command

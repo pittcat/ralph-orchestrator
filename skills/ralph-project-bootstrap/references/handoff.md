@@ -49,6 +49,10 @@ set by the bootstrap pipeline based on the upstream unit outcomes;
   message. Static load has passed; the loop has not been closed.
   The operator must run the candidate command explicitly after
   re-confirming the target backend.
+* **Missing first-run input:** provisioning may still be complete. When a
+  required plan is not available, render `[TEMPLATE - replace PLAN_PATH before
+  running]` and append `--plan PLAN_PATH`; do not downgrade the provisioning
+  result to `blocked` and do not suppress the files already created.
 
 ### `blocked`
 

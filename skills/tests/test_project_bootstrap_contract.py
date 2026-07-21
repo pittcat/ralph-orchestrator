@@ -773,6 +773,35 @@ def test_prompt_ownership_changes_input_signature() -> None:
     assert managed.provenance.input_signature != referenced.provenance.input_signature
 
 
+def test_plan_driven_bootstrap_generates_suite_before_plan_exists() -> None:
+    suite = pipeline_suite.compose_suite(
+        preset="builtin:ce-executor-pipeline",
+        plan_path=None,
+        prompt_file="PROMPT.md",
+        backend="claude",
+        budget_max_iterations=20,
+        budget_wall_clock_seconds=7200,
+        manage_prompt=True,
+        requires_plan=True,
+    )
+    assert suite.prompt is not None
+    assert "requires a real plan" in suite.prompt
+    assert "--plan <repo-relative-path>" in suite.prompt
+    assert "stop and report" in suite.prompt
+    user_keys, _ = pipeline_suite.parse_owned_yaml(suite.config)
+    assert user_keys["event_loop"]["prompt_file"] == "PROMPT.md"
+
+
+def test_required_plan_changes_input_signature() -> None:
+    optional = pipeline_suite.compute_input_signature(
+        "builtin:example", None, "./", "PROMPT.md", True, False
+    )
+    required = pipeline_suite.compute_input_signature(
+        "builtin:example", None, "./", "PROMPT.md", True, True
+    )
+    assert optional != required
+
+
 def test_manage_prompt_requires_a_prompt_path() -> None:
     with pytest.raises(pipeline_suite.OwnedYamlError) as excinfo:
         pipeline_suite.compose_suite(
@@ -839,6 +868,34 @@ def test_handoff_rejects_empty_optional_launch_paths(field: str) -> None:
     kwargs[field] = ""
     with pytest.raises(ValueError, match=field):
         handoff.HandoffInputs(**kwargs)
+
+
+def test_missing_required_plan_produces_template_not_blocker() -> None:
+    artifact = handoff.build_handoff(
+        handoff.HandoffInputs(
+            binary="ralph",
+            config_path="ralph.pipeline.yml",
+            preset="builtin:ce-executor-pipeline",
+            plan_path=None,
+            prompt_file=None,
+            level="incomplete_static_only",
+            requires_plan=True,
+            files_created=(
+                "ralph.pipeline.yml",
+                "PROMPT.md",
+                "ralph.bootstrap.yml",
+            ),
+        )
+    )
+    assert artifact.level == "incomplete_static_only"
+    assert artifact.command.startswith("[TEMPLATE - replace PLAN_PATH")
+    assert artifact.command_argv[-2:] == ("--plan", "PLAN_PATH")
+    assert "--prompt-file" not in artifact.command_argv
+    assert artifact.created_files == (
+        "ralph.pipeline.yml",
+        "PROMPT.md",
+        "ralph.bootstrap.yml",
+    )
 
 
 # S2 — render_pipeline_yml emits the four owned keys in canonical order.

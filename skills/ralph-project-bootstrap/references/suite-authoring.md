@@ -21,6 +21,9 @@ project:
   references the optional plan path and preset id and never copies hat
   instructions. Operator-owned prompt files may be referenced but never
   rendered or hashed by bootstrap. Preset-native mode creates no prompt file.
+  For a plan-driven preset whose first plan is not available yet, the managed
+  prompt is a safe fallback: it requires `--plan`, performs no project work if
+  reached directly, and allows the reusable suite to be provisioned now.
 * `ralph.bootstrap.yml` — provenance: generator version, input
   signature, owned-key tuple, per-file owned-bytes SHA-256 digest.
 
@@ -112,7 +115,7 @@ the filesystem.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `generator_version` | string | semver-like; currently `0.2.0`. |
-| `input_signature` | string | SHA-256 of preset + optional prompt path + optional plan path + prompt ownership (`managed` / `referenced`) + cwd anchor. |
+| `input_signature` | string | SHA-256 of preset + optional prompt path + optional plan path + prompt ownership (`managed` / `referenced`) + plan requirement (`required` / `optional`) + cwd anchor. |
 | `owned_keys` | list of string | the four owned keys, in canonical order. |
 | `summary` | list of `{file, sha256}` | SHA-256 of each suite file's on-disk owned bytes. |
 

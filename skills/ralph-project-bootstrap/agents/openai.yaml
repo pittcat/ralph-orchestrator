@@ -20,6 +20,7 @@ outputs:
   - only the missing runtime artifacts (idempotent; may be none)
   - provenance for files actually managed by bootstrap
   - staged validation evidence + verification-level handoff
+  - command template for missing first-run inputs (without blocking provisioning)
 boundaries:
   - Does not author or review presets.
   - Does not run loops outside an authorized smoke path.

@@ -161,6 +161,7 @@ def compute_input_signature(
     cwd_anchor: str,
     prompt_file: str | None = None,
     manage_prompt: bool = False,
+    requires_plan: bool = False,
 ) -> str:
     """Compute the deterministic input signature for a suite.
 
@@ -170,8 +171,10 @@ def compute_input_signature(
     absolute paths.
     """
     ownership = "managed" if manage_prompt else "referenced"
+    plan_contract = "required" if requires_plan else "optional"
     payload = (
-        f"{preset}|{prompt_file or ''}|{plan_path or ''}|{ownership}|{cwd_anchor}"
+        f"{preset}|{prompt_file or ''}|{plan_path or ''}|{ownership}|"
+        f"{plan_contract}|{cwd_anchor}"
     )
     return _sha256_hex(payload)
 
@@ -305,6 +308,7 @@ def render_prompt_md(
     preset: str,
     project_root: str,
     prompt_file: str = "PROMPT.pipeline.md",
+    requires_plan: bool = False,
 ) -> str:
     """Render ``PROMPT.pipeline.md`` referencing the plan + preset.
 
@@ -325,7 +329,14 @@ def render_prompt_md(
     instruction = (
         "Read the plan at the referenced path. "
         if plan_path
-        else "Use this prompt together with the selected preset. "
+        else (
+            "This is a safe bootstrap fallback. The selected preset requires "
+            "a real plan supplied with `ralph run --plan <repo-relative-path>`. "
+            "If this fallback prompt reaches an agent, stop and report that "
+            "the required plan was not supplied; do not perform project work. "
+            if requires_plan
+            else "Use this prompt together with the selected preset. "
+        )
     )
     body = (
         f"# Ralph Pipeline Prompt\n\n"
@@ -544,11 +555,12 @@ def compose_suite(
     diagnostics_enabled: bool = True,
     project_root_marker: str = "./",
     manage_prompt: bool | None = None,
+    requires_plan: bool = False,
 ) -> PipelineSuite:
     """Render the full suite in one shot.
 
-    The provenance record's ``input_signature`` is the SHA-256 of
-    ``preset + "|" + plan_path + "|" + project_root_marker``.
+    The provenance signature covers the preset, optional prompt/plan paths,
+    prompt ownership, whether a plan is required, and the project anchor.
     """
     if plan_path and Path(plan_path).is_absolute():
         raise OwnedYamlError("owned_yaml_invalid", "plan path must be repo-relative")
@@ -576,6 +588,7 @@ def compose_suite(
             preset=preset,
             project_root=project_root_marker,
             prompt_file=prompt_file,
+            requires_plan=requires_plan,
         )
     input_signature = compute_input_signature(
         preset,
@@ -583,6 +596,7 @@ def compose_suite(
         project_root_marker,
         prompt_file,
         manage_prompt,
+        requires_plan,
     )
     summary = [("ralph.pipeline.yml", _sha256_hex(config))]
     if prompt is not None:
@@ -695,6 +709,7 @@ def apply_pipeline_config(
     diagnostics_enabled: bool = True,
     project_root_marker: str = "./",
     manage_prompt: bool | None = None,
+    requires_plan: bool = False,
 ) -> ApplyResult:
     """Compute the new ``ralph.pipeline.yml`` bytes for a target project.
 
@@ -725,6 +740,7 @@ def apply_pipeline_config(
         diagnostics_enabled=diagnostics_enabled,
         project_root_marker=project_root_marker,
         manage_prompt=manage_prompt,
+        requires_plan=requires_plan,
     )
 
     if existing_text is None:
