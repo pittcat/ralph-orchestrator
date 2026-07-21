@@ -220,6 +220,30 @@ def test_force_install_creates_skill(fresh_target: Path) -> None:
     installed = fresh_target / "ralph-project-bootstrap"
     assert installed.is_dir()
     assert (installed / "SKILL.md").is_file()
+    assert "Install mode: custom" in result.stdout
+    assert "Install method: physical copy" in result.stdout
+    assert "Selected skills (1):" in result.stdout
+    assert "Install targets (1):" in result.stdout
+    assert f"destination: {installed}" in result.stdout
+    assert "result:      installed" in result.stdout
+    assert not any(path.is_symlink() for path in installed.rglob("*"))
+    source_skill_md = PROJECT_BOOTSTRAP / "SKILL.md"
+    installed_skill_md = installed / "SKILL.md"
+    assert source_skill_md.stat().st_ino != installed_skill_md.stat().st_ino, (
+        "installed files must be independent copies, not hard links"
+    )
+
+
+def test_global_dry_run_prints_both_absolute_destinations() -> None:
+    result = _run(["--global", "--dry-run", "ralph-project-bootstrap"])
+    assert result.returncode == 0, result.stderr
+    claude_dest = install.TARGET_GLOBAL / "ralph-project-bootstrap"
+    agents_dest = install.TARGET_AGENTS_GLOBAL / "ralph-project-bootstrap"
+    assert "Install mode: global" in result.stdout
+    assert "Install targets (2):" in result.stdout
+    assert f"destination: {claude_dest}" in result.stdout
+    assert f"destination: {agents_dest}" in result.stdout
+    assert result.stdout.count("result:      would") == 2
 
 
 def test_prune_removes_unrequested(fresh_target: Path) -> None:

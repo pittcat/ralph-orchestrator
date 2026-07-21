@@ -185,16 +185,22 @@ def _resolve_common_refs_source(skill_src: Path) -> Path | None:
     return (refs.parent / target).resolve()
 
 
-def copy_skill(spec: SkillSpec, target: Path, *, force: bool) -> None:
+def copy_skill(spec: SkillSpec, target: Path, *, force: bool) -> str:
+    """Copy one skill and return ``installed``, ``replaced``, or ``skipped``.
+
+    Installation is always a physical directory copy. Source symlinks are
+    skipped or materialised as regular directories; destination symlinks and
+    hard-link based installs are never created.
+    """
     dest = target / spec.name
-    if dest.is_symlink() or dest.exists():
+    existed = dest.is_symlink() or dest.exists()
+    if existed:
         if not force:
             answer = input(
                 f"  '{spec.name}' already exists at {dest}. Overwrite? [y/N] "
             ).strip().lower()
             if answer not in {"y", "yes"}:
-                print(f"  skip {spec.name} (kept existing copy)")
-                return
+                return "skipped"
         if dest.is_symlink() or dest.is_file():
             dest.unlink()
         else:
@@ -218,6 +224,13 @@ def copy_skill(spec: SkillSpec, target: Path, *, force: bool) -> None:
             elif common_dest.is_dir():
                 shutil.rmtree(common_dest)
         shutil.copytree(common_refs, common_dest, ignore=_skip_symlinks)
+    linked_paths = [path for path in dest.rglob("*") if path.is_symlink()]
+    if linked_paths:
+        rendered = ", ".join(str(path) for path in linked_paths)
+        raise InstallError(
+            f"copied skill contains forbidden destination symlink(s): {rendered}"
+        )
+    return "replaced" if existed else "installed"
 
 
 def run_install(
@@ -228,27 +241,68 @@ def run_install(
     prune: bool,
     force: bool,
 ) -> None:
+    mode = (
+        "global"
+        if any(label.endswith("-global") for label, _ in targets)
+        else "custom" if len(targets) == 1 and targets[0][0] == "custom"
+        else "local"
+    )
+    print(f"Install mode: {mode}")
+    print("Install method: physical copy (replace destination; no symlinks or hardlinks)")
+    print(f"Selected skills ({len(requested)}):")
+    for spec in requested:
+        print(f"  - {spec.name}")
+    print(f"Install targets ({len(targets)}):")
+    for label, target in targets:
+        print(f"  - {label}: {target}")
+
     for label, target in targets:
         target.mkdir(parents=True, exist_ok=True)
         to_install, _, to_prune = plan_install(target, requested)
-        print(f"[{label}] Target: {target}")
+        print(f"\n[{label}] Installing into: {target}")
         if dry_run:
             for name in sorted(to_install):
                 spec = next(s for s in requested if s.name == name)
-                print(f"  would install {spec.name} from {spec.src}")
+                destination = target / spec.name
+                if destination.is_symlink() or destination.exists():
+                    result = (
+                        "would replace"
+                        if force
+                        else "would prompt before replacing"
+                    )
+                else:
+                    result = "would install"
+                print(f"  {spec.name}")
+                print(f"    source:      {spec.src}")
+                print(f"    destination: {destination}")
+                print(f"    result:      {result}")
             if prune and to_prune:
                 for name in sorted(to_prune):
-                    print(f"  would prune {name}")
+                    print(f"  {name}")
+                    print(f"    destination: {target / name}")
+                    print("    result:      would prune")
             continue
+        results: dict[str, int] = {"installed": 0, "replaced": 0, "skipped": 0}
         for spec in requested:
-            print(f"  install {spec.name} <- {spec.src}")
-            copy_skill(spec, target, force=force)
+            destination = target / spec.name
+            result = copy_skill(spec, target, force=force)
+            results[result] += 1
+            print(f"  {spec.name}")
+            print(f"    source:      {spec.src}")
+            print(f"    destination: {destination}")
+            print(f"    result:      {result}")
         if prune and to_prune:
             for name in sorted(to_prune):
                 victim = target / name
                 if victim.exists():
-                    print(f"  prune {name}")
                     shutil.rmtree(victim)
+                    print(f"  {name}")
+                    print(f"    destination: {victim}")
+                    print("    result:      pruned")
+        summary = ", ".join(
+            f"{count} {name}" for name, count in results.items() if count
+        )
+        print(f"  Summary: {summary or 'no skill changes'}")
 
 
 def run_list(targets: list[tuple[str, Path]]) -> None:
