@@ -256,26 +256,21 @@ pub fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) ->
                 ..
             }) if subtype.as_deref().unwrap_or("started") == "started" => {
                 let _ = call_id; // call_id is unused in preview; preview only shows the tool name + args
-                let Some((name, args)) = extract_agent_tool_call(&tool_call) else {
-                    return None;
-                };
-                let args_display = if args.is_null() {
-                    String::new()
-                } else if let Some(s) = args.as_str() {
-                    truncate_wave_worker_preview(s)
-                } else {
-                    truncate_wave_worker_preview(&args.to_string())
-                };
-                Some(format!("⚙ {name}({args_display})\n"))
+                extract_agent_tool_call(&tool_call).map(|(name, args)| {
+                    let args_display = if args.is_null() {
+                        String::new()
+                    } else if let Some(s) = args.as_str() {
+                        truncate_wave_worker_preview(s)
+                    } else {
+                        truncate_wave_worker_preview(&args.to_string())
+                    };
+                    format!("⚙ {name}({args_display})\n")
+                })
             }
             Some(AgentStreamEvent::ToolCall {
                 subtype, tool_call, ..
-            }) if subtype.as_deref() == Some("failed") => {
-                let Some((name, _body)) = extract_agent_tool_call(&tool_call) else {
-                    return None;
-                };
-                Some(format!("✗ {name} failed\n"))
-            }
+            }) if subtype.as_deref() == Some("failed") => extract_agent_tool_call(&tool_call)
+                .map(|(name, _body)| format!("✗ {name} failed\n")),
             Some(AgentStreamEvent::Result {
                 subtype,
                 is_error,

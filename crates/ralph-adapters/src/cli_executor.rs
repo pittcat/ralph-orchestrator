@@ -490,7 +490,7 @@ fn inject_ralph_runtime_env(command: &mut Command, workspace_root: &std::path::P
 /// The dispatcher fires `on_text` at most once per event:
 /// - `AgentStreamEvent::Assistant` → one `on_text` with the joined text blocks
 /// - `AgentStreamEvent::Result`    → one `on_text` with the result fallback
-///                                    (only when no assistant text preceded it)
+///   (only when no assistant text preceded it)
 /// - All other event variants are no-ops for `on_text`.
 ///
 /// We collect every `on_text` the dispatcher emits in a single vector so the

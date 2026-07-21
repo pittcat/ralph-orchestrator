@@ -340,11 +340,9 @@ pub fn dispatch_agent_stream_event<H: StreamHandler>(
             ..
         } => {
             state.is_error = is_error || subtype.as_deref() == Some("error");
-            if extracted_text.is_empty() {
-                if let Some(text) = result {
-                    handler.on_text(&text);
-                    extracted_text.push_str(&text);
-                }
+            if extracted_text.is_empty() && let Some(text) = result {
+                handler.on_text(&text);
+                extracted_text.push_str(&text);
             }
         }
         AgentStreamEvent::System { .. } => {}

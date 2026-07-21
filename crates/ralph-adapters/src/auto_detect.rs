@@ -124,29 +124,48 @@ where
         return Ok(backend.clone());
     }
 
+    let result = detect_backend_with(priority, adapter_enabled, is_backend_available);
+    match &result {
+        Ok(backend) => {
+            let _ = DETECTED_BACKEND.set(Some(backend.clone()));
+        }
+        Err(_) => {
+            let _ = DETECTED_BACKEND.set(None);
+        }
+    }
+    result
+}
+
+/// Select the first enabled and available backend without consulting or
+/// mutating the process-wide detection cache.
+///
+/// Keeping the availability probe injectable makes priority behavior
+/// deterministic in tests while production continues to use the real PATH.
+fn detect_backend_with<E, A>(
+    priority: &[&str],
+    adapter_enabled: E,
+    backend_available: A,
+) -> Result<String, NoBackendError>
+where
+    E: Fn(&str) -> bool,
+    A: Fn(&str) -> bool,
+{
     let mut checked = Vec::new();
 
     for &backend in priority {
-        // Skip if adapter is disabled in config
         if !adapter_enabled(backend) {
-            debug!(backend = backend, "Skipping disabled adapter");
+            debug!(backend, "Skipping disabled adapter");
             continue;
         }
 
         checked.push(backend.to_string());
-
-        if is_backend_available(backend) {
-            debug!(backend = backend, "Backend detected and selected");
-            // Cache the result (ignore if already set)
-            let _ = DETECTED_BACKEND.set(Some(backend.to_string()));
+        if backend_available(backend) {
+            debug!(backend, "Backend detected and selected");
             return Ok(backend.to_string());
         }
     }
 
     debug!(checked = ?checked, "No backends available");
-    // Cache the failure too
-    let _ = DETECTED_BACKEND.set(None);
-
     Err(NoBackendError { checked })
 }
 
@@ -300,16 +319,24 @@ mod tests {
 
     #[test]
     fn test_detect_backend_default_priority_order_with_agent_last() {
-        // S6: when claude AND agent are both on PATH, claude wins (auto
-        // does not preempt higher-precedence backends). We use real `echo`
-        // as a stand-in for `claude` and verify agent stays tail.
-        let fake_priority = &["fake_claude", "fake_agent"];
-        let result = detect_backend(fake_priority, |_| true);
-        // Order is preserved in the checked list when nothing matches.
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert_eq!(e.checked, vec!["fake_claude", "fake_agent"]);
-        }
+        // S6: when claude AND agent are available, claude wins because it
+        // appears first. The injected probe keeps this independent of PATH.
+        let result = detect_backend_with(
+            &["claude", "agent"],
+            |_| true,
+            |backend| matches!(backend, "claude" | "agent"),
+        );
+
+        assert_eq!(result.expect("one backend must be selected"), "claude");
+    }
+
+    #[test]
+    fn test_detect_backend_selects_agent_when_it_is_the_only_available_backend() {
+        // S7: unavailable higher-priority backends must be skipped and the
+        // tail-positioned Cursor backend selected when it alone is present.
+        let result = detect_backend_with(DEFAULT_PRIORITY, |_| true, |backend| backend == "agent");
+
+        assert_eq!(result.expect("agent must be selected"), "agent");
     }
 
     #[test]

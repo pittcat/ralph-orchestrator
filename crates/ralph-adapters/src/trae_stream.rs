@@ -324,7 +324,7 @@ pub fn dispatch_trae_stream_event<H: StreamHandler>(
             // Tool calls: emit on_tool_call per call.
             for call in extract_assistant_tool_calls(&message) {
                 let input: serde_json::Value = if call.function.arguments.is_empty() {
-                    serde_json::Value::Object(Default::default())
+                    serde_json::Value::Object(serde_json::Map::default())
                 } else {
                     serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| {
                         serde_json::Value::String(call.function.arguments.clone())

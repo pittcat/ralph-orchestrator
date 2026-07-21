@@ -86,7 +86,7 @@ BDD scenarios (YAML, exercise real runtime paths) live in `crates/ralph-core/tes
 ```
 ralph-proto → Foundation types: Event, Hat, HatId, Topic, EventBus
 ralph-core → Orchestration logic, event loop, state machine, hats, memories, tasks, hooks, skills
-ralph-adapters → Backend adapters (Claude, Kiro, Gemini, Codex, Amp, Copilot CLI, OpenCode)
+ralph-adapters → Backend adapters (Claude, Gemini, Codex, OpenCode, Pi, Trae CLI, Cursor Agent)
 ralph-cli → CLI entry point, commands (run, plan, task, loops, web, mcp, wave)
 ralph-tui → Terminal UI (ratatui-based)
 ralph-e2e → End-to-end test framework
