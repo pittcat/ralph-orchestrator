@@ -57,6 +57,20 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
    - `fixtures/aaf-fallback-success-terminal.yml`（负）— 期望：fallback-reaches-success P0 出现。
    - `fixtures/payload-audit-negative-fixture.yml`（负）— 期望：payload 系列 P0 / P1 出现。
    - `fixtures/trigger-context-negative-fixture.yml`（负）— 期望：trigger-context 系列 P0 出现。
+   - `fixtures/aaf-wave-capability-negative-fixture.yml`（负）— 期望：Wave capability audit 系列 P0 出现。
+   - `fixtures/aaf-supervisor-capability-negative-fixture.yml`（负）— 期望：Supervisor capability audit 系列 P0 出现。
+
+3d. **Wave capability audit (2026-07-22-002 plan U5)** — **capability-triggered**, **不**按 preset 名称点名门控：
+   1. **检测顺序**：先读 `references/author-checklist.md` Intent Confirmation 的 `execution_model` 字段 → 再扫 YAML `event_loop.supervisor.enabled` 与 hat `instructions` / `publishes` 中是否出现 `ralph wave emit` / `ralph wave verify` / `## WAVE CONTEXT` 字样。
+   2. **触发条件**：`execution_model ∈ {wave, supervisor+wave}` **或** 上述命令字样出现在非 builtin-cli 位置。**未触发**：review 把本步记为 `N/A`（不假装已审）。
+   3. **判定**：按 `references/finding-rubric.md`「Wave capability audit」段逐项查 `preset.wave_worker_calls_wave_emit` / `preset.wave_missing_verify_before_emit` / `preset.wave_confirm_uses_hat_channel` / `preset.wave_agent_emits_coordination_topic`；命中 → 主表，默认 P0。
+   4. **触发条件不得按 preset 名称**：检测顺序中**禁止**写「`name starts with ...`」之类的名缀门控；详见 `references/agent-native-model.md`「执行模型」段的硬约束。
+
+3e. **Supervisor capability audit (2026-07-22-002 plan U5)** — **capability-triggered**, **不**按 preset 名称点名门控：
+   1. **检测顺序**：先读 Intent.execution_model → 再扫 YAML `event_loop.supervisor.enabled` 与 hat `instructions` 是否引用 `.ralph/supervisor.db` / 协调 topic。
+   2. **触发条件**：`execution_model ∈ {supervisor, supervisor+wave}` **或** `event_loop.supervisor.enabled: true` **或** 上述命令 / 路径字样出现。**未触发**：N/A。
+   3. **判定**：按 `references/finding-rubric.md`「Supervisor capability audit」段逐项查 `preset.supervisor_requires_isolated` / `preset.supervisor_hat_publishes_coord_topic` / `preset.supervisor_unit_state_not_via_task_api` / `preset.artifact_uses_internal_ledger` / `preset.execution_model_intent_mismatch`；命中 → 主表，默认 P0。
+   4. **与 3b 既有 CE pipeline 检查的关系**：3e **不**修改 3b 的「仅 `ce-executor-pipeline*` preset 触发」语义；3e 是 capability-triggered 的新通用审计，**新增** 5 条 finding_id（含 review-only 软性），3b 既有 4 条 review-only 软性 finding 保留不动。
 
 4. **Per-hat AAF review** (mandatory — one hat at a time, strict sequence per hat):
    - Declare: simulating hat `<id>` activation.

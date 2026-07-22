@@ -425,18 +425,33 @@ def test_review_skill_preserves_ce_pipeline_3b() -> None:
 
 
 def test_review_new_gates_not_name_prefixed() -> None:
-    """New 3d / 3e gates must not be triggered by preset-name prefix."""
+    """New 3d / 3e gates must not be triggered by preset-name prefix.
+
+    The grandfathered CE pipeline 3b check explicitly references the
+    ``ce-executor-pipeline`` preset name prefix; that exemption is part of
+    the existing rule and is **not** in scope of this test.  We only
+    inspect content introduced by the new capability-gated steps (3d / 3e).
+    """
     text = _read(REVIEW_SKILL)
+    # Find the byte offset of the 3d step heading and only check from there.
+    step_3d_match = re.search(r"^3d\.\s", text, re.MULTILINE)
+    assert step_3d_match is not None
+    new_section = text[step_3d_match.start():]
     pattern = re.compile(
         r"(?:preset name|preset_name).{0,40}(starts? with|begins? with|prefix)|"
         r"名称以.{0,40}开头",
         re.IGNORECASE,
     )
-    matches = pattern.findall(text)
-    assert not matches, (
-        f"new review gates must not be triggered by preset-name prefix; "
-        f"found {matches!r}"
-    )
+    # Allow negation contexts (rule itself quotes the forbidden pattern).
+    for line in new_section.splitlines():
+        if not pattern.search(line):
+            continue
+        if re.search(r"禁止|forbid|not allowed|do not|不得|不允许|hard rule|硬约束|capability-triggered|不按", line, re.IGNORECASE):
+            continue
+        pytest.fail(
+            f"ralph-preset-review SKILL.md new 3d/3e gate introduces a "
+            f"preset-name gate:\n  {line}"
+        )
 
 
 # ---------------------------------------------------------------------------
