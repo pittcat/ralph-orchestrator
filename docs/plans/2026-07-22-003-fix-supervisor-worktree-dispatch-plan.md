@@ -7,7 +7,10 @@ artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
 execution: code
 origin: docs/report/2026-07-22-ce-executor-supervisor-primary-20260722-084810-diagnosis.md
+superseded_by: docs/plans/2026-07-23-001-fix-supervisor-worktree-dispatch-closure-plan.md
 ---
+
+> **SUPERSEDED (2026-07-23):** 请改执行 `docs/plans/2026-07-23-001-fix-supervisor-worktree-dispatch-closure-plan.md`。本文件仅保留历史；基线审计发现旧 U4 生产接线假绿，且旧 U5–U13 未落地。
 
 # Supervisor Worktree Dispatch Closure - Plan
 
