@@ -139,9 +139,24 @@ emit 全路径用 `resolve_workspace_root` 单一锚点 (priority：`RALPH_WORKS
 - `--output json` 路径下 `EmitResult.target_path` 字段在 `recorded: true` 时为绝对落盘路径;`recorded: false` 或拒收场景下整键被 `skip_serializing_if` 省略。
 - text 模式成功行追加 `→ <absolute_path>`:例如 `Event emitted: test.passed → /home/.../.ralph/agent/events-hat-validator-001-1.jsonl`。stderr 截断场景下仍能肉眼核对落盘位置。
 
-**Payload 字段自洽检查**
+**Payload 字段自洽检查（runtime gate）**
 
-emit 任何 step handoff 事件前，确认 payload 内部一致：
+`event_policy` 在 schema 校验之外，还会对 step handoff / 终态等业务事件的 payload 字段之间的**一致性**做硬检查。该 gate 在 Precheck 阶段执行，事件**不会**先落到 bus — 拒收时 `--policy-check` 与正式 apply 都返回 `validation_errors[]`，并带上 `gate: "payload_consistency:<rule_id>"` 前缀标识触发的规则族。
+
+**触发条件**：preset 已为当前 topic 声明 `event_policy.payload_consistency` 规则；你提交的 payload 触发其中任意一条（如 step / task_key / task_id / 已落盘事件流 与本次 claim 之间存在不自洽）。
+
+**Agent 动作**：
+
+1. 拒收时读 `validation_errors[]` 每条的 `field` / `expected` / `message` / `gate` —— 字段修复路径与 schema 拒收完全相同。
+2. 修 payload（按 `gate` 命中的规则族对照 `field` 与 `expected`；**不要**只复制错误消息的字面量重新拼）。
+3. 再跑 `ralph emit <topic> --policy-check -j '...'`；通过后去掉 `--policy-check` 正式 emit。
+4. 同类 violation signature 第二次触发 → runtime fail-close（`plan.blocked`），不要无限重试。
+
+**关键字段从哪里取得**：`validation_errors[].field` / `expected` / `message` / `gate` 是 runtime 给出的可机读反馈；具体规则形状写在 preset YAML / schema 里，agent **不**需要在 prompt 里枚举规则——规则随 preset 演进，prompt 里复述会产生漂移。
+
+**失败停止条件**：若你连续两次同类 `payload_consistency:*` 拒收，**停止**重发并按本文件「错误恢复」段处理 — runtime 可能已转入 fail-close。
+
+通用 SOFT 自洽提醒（仍然适用，与上述 gate 互补）：
 
 - 如果 preset 同时定义了 `step` 字段和 `task_key` 字段，两者描述的 step 必须一致。
   反例：`step=fix-02` 但 `task_key=...:fix-01:u2` ❌

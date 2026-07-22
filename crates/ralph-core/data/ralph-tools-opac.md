@@ -17,7 +17,7 @@ metadata:
 | 阶段 | 目的 | 工具 |
 |------|------|------|
 | **O — Observe** | 「我现在是谁？系统是什么状态？」 | `ralph inspect loop` + `ralph tools task list` + 必要时 `ralph events --events-source hat-channel\|main`;**`event_loop.supervisor.enabled: true` 时 inspect loop JSON 含 supervisor 块**（`active_waves` / `slot_summary` / `last_coordination_topics`） |
-| **P — Precheck** | 「这次操作会成功吗？写盘后会留下什么？」 | `ralph tools task verify <verb>` 或 `ralph emit/wave emit --policy-check` |
+| **P — Precheck** | 「这次操作会成功吗？写盘后会留下什么？」 | `ralph tools task verify <verb>` 或 `ralph emit/wave emit --policy-check`（覆盖 schema、required_fields、origin guard、payload_consistency gate） |
 | **A — Apply** | 「实际写盘」 | `ralph tools task <verb>` 或 `ralph emit` / `ralph wave emit`（去掉 `--policy-check`） |
 | **C — Confirm** | 「预期状态真的产生了吗？下一步要做什么？」 | 优先检查本次操作通过公开接口给出的成功反馈；反馈不足时，再按对应 skill 使用只读查询接口确认 |
 
