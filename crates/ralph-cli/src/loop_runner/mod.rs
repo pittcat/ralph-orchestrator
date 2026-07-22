@@ -47,8 +47,8 @@ pub use runner::resolve_loop_id;
 pub use runner::run_loop_impl;
 #[cfg(test)]
 pub(crate) use runner::{
-    build_supervisor_bridge, build_termination_diagnostics, persist_starting_event_to_events_file,
-    write_termination_diagnostics,
+    bridge_build_invocations, build_supervisor_bridge, build_termination_diagnostics,
+    persist_starting_event_to_events_file, write_termination_diagnostics,
 };
 // Re-export all other module items for internal use and test access
 pub use event_logging::*;

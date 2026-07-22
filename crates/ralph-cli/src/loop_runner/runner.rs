@@ -566,6 +566,31 @@ pub async fn run_loop_impl(
     result
 }
 
+/// 2026-07-22-003 plan U1: a strictly-additive counter incremented
+/// each time `build_supervisor_bridge` enters. The counter exists
+/// solely so U1 characterization tests in
+/// `loop_runner::tests::wave_supervisor` can read it and assert that
+/// the production gate (`is_supervisor_path_enabled`) keeps the
+/// bridge builder un-invoked for `ce-executor-pipeline` (and any
+/// other preset that does not opt into `supervisor.enabled`).
+///
+/// This counter is a read-only test seam; it never alters the
+/// behaviour of `build_supervisor_bridge` or the runner that calls
+/// it. U2+ keep the counter in place so subsequent units can reuse
+/// it for their own gate assertions.
+pub(crate) static BRIDGE_BUILD_INVOCATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 2026-07-22-003 plan U1: read the bridge builder counter so tests
+/// can take before/after snapshots and assert the production gate
+/// does not call `build_supervisor_bridge` when `supervisor.enabled`
+/// is `false`. See `BRIDGE_BUILD_INVOCATIONS` for the rationale.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn bridge_build_invocations() -> u64 {
+    BRIDGE_BUILD_INVOCATIONS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// 2026-07-03-001 supervisor real-wiring: build the production
 /// `CoordinatorSupervisorBridge` from `SupervisorConfig`.
 ///
@@ -579,11 +604,21 @@ pub async fn run_loop_impl(
 /// Errors surface as `anyhow` so the caller can fail-closed
 /// (R-C4) without leaking `SupervisorStoreError` across module
 /// boundaries.
+///
+/// 2026-07-22-003 plan U1: each invocation increments the
+/// `BRIDGE_BUILD_INVOCATIONS` counter so U1 characterization tests
+/// can observe the production gate from outside. The counter is
+/// strictly additive (no behaviour change to the build path); the
+/// whole point is to let `loop_runner::tests::wave_supervisor`
+/// assertions read it without spawning a real `ralph run`. U2+
+/// keep the counter intact for downstream unit gates.
 pub(crate) fn build_supervisor_bridge(
     cfg: &ralph_core::config::SupervisorConfig,
     ctx: &ralph_core::LoopContext,
 ) -> std::result::Result<crate::loop_runner::wave::CoordinatorSupervisorBridge, anyhow::Error> {
     use crate::loop_runner::wave::CoordinatorSupervisorBridge;
+
+    BRIDGE_BUILD_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     // Resolve db_path: absolute paths honoured as-is; relative
     // paths resolve against `<workspace>/.ralph/` so a preset

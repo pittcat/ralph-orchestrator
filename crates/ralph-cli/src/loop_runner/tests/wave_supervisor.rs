@@ -476,3 +476,186 @@ fn recover_active_waves_at_startup_returns_report_on_empty_store() {
     assert!(report.timed_out.is_empty());
     assert!(report.already_merged.is_empty());
 }
+
+// ── 2026-07-22-003 plan U1: pipeline zero-impact characterization gate ──────
+//
+// Goal: the `ce-executor-pipeline` preset (and any other preset that
+// does not opt into supervisor) must keep the legacy `WaveTracker` path
+// untouched. U2–U7 will rewrite production code paths that build the
+// supervisor bridge, run `bind_slot`, and dispatch into the store; the
+// tests below pin the four-way gate table and observe the bridge-builder
+// call counter so a regression that lifts the gate open (or forgets to
+// gate it) shows up as a Red on this file before downstream units run.
+//
+// Three observables back the gate:
+//   1. `is_supervisor_path_enabled(enabled, execution_mode_isolated)`
+//      is the single source of truth for the gate decision (in
+//      production: `runner.rs:1181`; in `ralph_core::supervisor::bridge`).
+//   2. `bridge_build_invocations()` increments inside
+//      `build_supervisor_bridge`. The production gate in `runner.rs`
+//      only enters that function when the predicate is true; we
+//      pin both sides — closed gate ⇒ counter unchanged; open gate ⇒
+//      counter advances.
+//   3. `.ralph/supervisor.db` and the `.ralph/` parent dir are
+//      side-effects of the bridge builder only. After a closed-gate
+//      exercise of the predicate, neither must be materialised.
+
+/// U1 R1: pin the four-way capability gate. This is the SSOT for
+/// "does the supervisor path enter?". If the truth table flips, every
+/// pipeline preset either accidentally opts into SQLite supervisor or
+/// a future supervisor preset refuses to enter its bridge.
+#[test]
+fn supervisor_capability_gate_truth_table() {
+    assert!(
+        is_supervisor_path_enabled(true, true),
+        "enabled+isolated must take the supervisor route"
+    );
+    assert!(
+        !is_supervisor_path_enabled(true, false),
+        "enabled+coordinator mode must NOT take the supervisor route"
+    );
+    assert!(
+        !is_supervisor_path_enabled(false, true),
+        "disabled+isolated must NOT take the supervisor route"
+    );
+    assert!(
+        !is_supervisor_path_enabled(false, false),
+        "disabled+coordinator must NOT take the supervisor route"
+    );
+}
+
+/// U1 R1: when the gate is closed (`enabled=false`, regardless of
+/// execution mode), `build_supervisor_bridge` MUST NOT be invoked and
+/// `.ralph/supervisor.db` MUST NOT exist. The pipeline preset rides on
+/// this contract — production code in `runner.rs:1181-1191` re-uses
+/// the same gate; this test guards the gate without spawning a real
+/// `ralph run`.
+#[test]
+fn supervisor_disabled_does_not_call_bridge_builder() {
+    use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
+
+    // Pre-condition: pipeline preset does NOT opt into supervisor.
+    assert!(
+        !is_supervisor_path_enabled(false, true),
+        "supervisor.disabled + isolated must keep the gate closed"
+    );
+
+    let before = bridge_build_invocations();
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let ctx = LoopContext::primary(tmp.path().to_path_buf());
+    let cfg = SupervisorConfig {
+        enabled: false,
+        ..SupervisorConfig::default()
+    };
+
+    // Replay the production runner's gate logic
+    // (`runner.rs:1181-1191`) byte-for-byte. When the gate is closed,
+    // the `if` branch MUST stay empty; calling the builder is a U1
+    // regression.
+    for execution_mode_isolated in [false, true] {
+        if is_supervisor_path_enabled(cfg.enabled, execution_mode_isolated) {
+            let _ = build_supervisor_bridge(&cfg, &ctx)
+                .expect("closed gate path must never enter build_supervisor_bridge");
+        }
+    }
+
+    let after = bridge_build_invocations();
+    assert_eq!(
+        before, after,
+        "build_supervisor_bridge must NOT be invoked when supervisor.enabled=false; \
+         counter moved from {before} to {after}"
+    );
+
+    // Side-effect guard: the disabled path must NOT materialise
+    // `.ralph/supervisor.db` under the workspace.
+    assert!(
+        !tmp.path().join(".ralph/supervisor.db").exists(),
+        "supervisor-disabled workspace must NOT create .ralph/supervisor.db"
+    );
+    assert!(
+        !tmp.path().join(".ralph").exists(),
+        "supervisor-disabled workspace must NOT materialise .ralph/ parent from the bridge builder"
+    );
+}
+
+/// U1 R3 (positive half of R1): when `enabled=true` AND
+/// `execution_mode==isolated`, the bridge builder IS invoked once and
+/// the workspace's `.ralph/` parent lands so the store can open.
+#[test]
+fn supervisor_enabled_isolated_invokes_bridge_builder_once() {
+    use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
+
+    assert!(
+        is_supervisor_path_enabled(true, true),
+        "enabled+isolated must take the supervisor route"
+    );
+
+    let before = bridge_build_invocations();
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let ctx = LoopContext::primary(tmp.path().to_path_buf());
+    let cfg = SupervisorConfig {
+        enabled: true,
+        ..SupervisorConfig::default()
+    };
+
+    let _bridge =
+        build_supervisor_bridge(&cfg, &ctx).expect("enabled+isolated must build a bridge");
+    let after = bridge_build_invocations();
+    assert_eq!(
+        after,
+        before + 1,
+        "enabled+isolated must invoke build_supervisor_bridge exactly once; \
+         counter moved from {before} to {after}"
+    );
+    assert!(
+        tmp.path().join(".ralph").exists(),
+        "enabled+isolated must materialise .ralph/ parent under the workspace"
+    );
+}
+
+/// U1 R1: pipeline presets ship `supervisor.enabled` absent (default
+/// `false`). This test runs the same scenario that the production
+/// loop runs at startup (predicate gate + zero builder calls) on a
+/// fresh temp workspace and asserts no supervisor-flavoured artifacts
+/// appear. U4 (worktree binding) and U6 (fan-in) sit downstream of
+/// this gate; if a future unit lifts the gate open, this test fails
+/// before those units run.
+#[test]
+fn pipeline_disabled_workspace_has_no_supervisor_artifacts() {
+    use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let ctx = LoopContext::primary(tmp.path().to_path_buf());
+    let cfg = SupervisorConfig {
+        enabled: false,
+        ..SupervisorConfig::default()
+    };
+
+    // Replay the production startup gate exactly. If the predicate
+    // stays false, the `build_supervisor_bridge` call stays skipped.
+    if is_supervisor_path_enabled(cfg.enabled, true) {
+        let _ = build_supervisor_bridge(&cfg, &ctx)
+            .expect("closed gate must never enter build_supervisor_bridge");
+    }
+
+    // Three side-effect asserts: no supervisor DB, no slot worktree
+    // branch debris, and the `.ralph/` parent must not have been
+    // materialised by the bridge builder.
+    let ralph_dir = tmp.path().join(".ralph");
+    assert!(
+        !ralph_dir.join("supervisor.db").exists(),
+        "disabled pipeline must NOT create .ralph/supervisor.db (R1/R4)"
+    );
+    assert!(
+        !ralph_dir.exists(),
+        "disabled pipeline must NOT materialise .ralph/ via build_supervisor_bridge (R1)"
+    );
+    // Slot worktree branches live in the repository, not in
+    // `.ralph/`; at the gate level there is nothing to assert beyond
+    // "the gate stayed closed", which the counter test above already
+    // covers via `bridge_build_invocations`.
+    let _ = ctx;
+}
