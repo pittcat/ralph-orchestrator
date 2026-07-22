@@ -419,7 +419,7 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
 pub use crate::worktree::Worktree;
 pub use coordinator::{CoordinatorAction, SupervisorCoordinator};
 pub use memory::InMemorySupervisorStore;
-pub use merge_sink::{EventMergeSink, InMemoryMergeSink, MergeSinkError};
+pub use merge_sink::{EventMergeSink, FileEventMergeSink, InMemoryMergeSink, MergeSinkError};
 pub use phase::{FailedReason, PhaseDecision, PhaseInputs, evaluate_phase};
 #[cfg(feature = "supervisor-db")]
 pub use rusqlite::RusqliteSupervisorStore;

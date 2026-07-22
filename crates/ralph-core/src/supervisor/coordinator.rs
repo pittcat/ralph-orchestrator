@@ -103,10 +103,35 @@ impl SupervisorCoordinator {
     /// `merged_to_events` flag (mark_merge_to_events runs only
     /// once per wave). Returns the action the runtime should
     /// log/forward to `ralph diagnose`.
+    ///
+    /// U6: this is the backwards-compatible entry point used by
+    /// the in-memory U8 tests; it merges an **empty** business
+    /// event batch. The production dispatcher calls
+    /// [`Self::tick_with_slot_events`] with the per-slot worker
+    /// events (sorted by slot index, de-duplicated) so the merge
+    /// sink writes the real fan-in output to the main ledger.
     pub fn tick(
         &self,
         wave_id: &str,
         inputs: PhaseInputs,
+    ) -> SupervisorStoreResult<CoordinatorAction> {
+        self.tick_with_slot_events(wave_id, inputs, Vec::new())
+    }
+
+    /// U6: run one tick of fan-in, merging `slot_events` (the
+    /// per-slot worker business events, ordered by slot index and
+    /// de-duplicated by the caller) through the sink on the
+    /// `Integrate` path. Idempotent on `merged_to_events`
+    /// (KTD-7 / F-001): once merged, subsequent ticks return
+    /// `AlreadyDone` without re-appending. This is the entry
+    /// point the production dispatcher's `run_supervisor_fan_in`
+    /// calls; the in-memory U8 tests keep using [`Self::tick`]
+    /// (empty batch).
+    pub fn tick_with_slot_events(
+        &self,
+        wave_id: &str,
+        inputs: PhaseInputs,
+        slot_events: Vec<Event>,
     ) -> SupervisorStoreResult<CoordinatorAction> {
         let snapshot = self.store.fan_in_status(wave_id)?;
         // KTD-7 + KTD-6: the merge gate is the only place we
@@ -115,7 +140,7 @@ impl SupervisorCoordinator {
         let decision = evaluate_phase(&snapshot, &inputs);
         match decision {
             PhaseDecision::ContinueCollect => Ok(CoordinatorAction::ContinueCollect),
-            PhaseDecision::Integrate => self.merge_and_complete(&snapshot),
+            PhaseDecision::Integrate => self.merge_and_complete(&snapshot, slot_events),
             PhaseDecision::Failed {
                 reason,
                 blocking_slots,
@@ -128,9 +153,17 @@ impl SupervisorCoordinator {
     /// true, return `AlreadyDone` so the JSONL append layer
     /// never re-injects `*.wave.complete`. Subsequent ticks
     /// are pure no-ops.
+    ///
+    /// U6: `slot_events` is the per-slot worker business event
+    /// batch (sorted by slot index, de-duplicated by the
+    /// dispatcher's `run_supervisor_fan_in`). The merge sink
+    /// appends it to the main ledger; on `Err` the wave stays in
+    /// `Collect` so recovery retries the merge exactly once
+    /// (KTD-7). The in-memory U8 tests pass an empty batch.
     fn merge_and_complete(
         &self,
         snapshot: &WaveSnapshot,
+        slot_events: Vec<Event>,
     ) -> SupervisorStoreResult<CoordinatorAction> {
         if snapshot.merged_to_events {
             // U1 / F-001 / KTD-7: do NOT re-merge and do NOT
@@ -141,23 +174,19 @@ impl SupervisorCoordinator {
             // tick". Recovery (U11) re-tick path lands here.
             return Ok(CoordinatorAction::AlreadyDone);
         }
-        // Slot events (the runtime provides these externally;
-        // the in-memory store tracks `worker_results` and
-        // U8 tests craft synthetic events here). The merge sink
-        // appends whatever the runtime hands in. For now we
-        // hand an empty batch — U12 wires the slot worker
-        // events in production. This still exercises the
-        // success path because the sink records the batch.
-        let events = Vec::<Event>::new();
-        if let Err(error) = self.merge_sink.append_events(events) {
+        // U6: merge the per-slot worker events through the sink.
+        // Production hands in the sorted + de-duplicated batch
+        // gathered by `run_supervisor_fan_in`; the in-memory U8
+        // tests pass an empty batch (the sink records it). On
+        // failure we deliberately leave `merged_to_events` false
+        // so recovery (U11) retries the merge against the same
+        // rows (KTD-7).
+        if let Err(error) = self.merge_sink.append_events(slot_events) {
             let topic = coordinator_topic(snapshot.kind, true);
             let action = CoordinatorAction::MergeFailed {
                 topic,
                 error: error.to_string(),
             };
-            // We deliberately leave `merged_to_events` false on
-            // failure so recovery (U11) retries the merge
-            // against the same rows (KTD-7).
             return Ok(action);
         }
         // Mark the wave as merged + advanced; U11 reads this

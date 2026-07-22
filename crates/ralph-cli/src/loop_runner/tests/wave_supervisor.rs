@@ -290,8 +290,12 @@ fn build_supervisor_bridge_relative_db_path_resolves_under_ralph_dir() {
         max_concurrent_workers: 2,
         aggregate_timeout_secs: 60,
     };
-    let bridge = crate::loop_runner::build_supervisor_bridge(&cfg, &ctx)
-        .expect("relative db_path must open a bridge");
+    let bridge = crate::loop_runner::build_supervisor_bridge(
+        &cfg,
+        &ctx,
+        ctx.workspace().join(".ralph").join("events.jsonl"),
+    )
+    .expect("relative db_path must open a bridge");
     let snaps = bridge.recover().expect("recover on fresh bridge");
     assert!(snaps.is_empty(), "fresh bridge must have no active waves");
     assert!(
@@ -315,8 +319,12 @@ fn build_supervisor_bridge_absolute_db_path_honoured_as_is() {
         max_concurrent_workers: 1,
         aggregate_timeout_secs: 30,
     };
-    let bridge = crate::loop_runner::build_supervisor_bridge(&cfg, &ctx)
-        .expect("absolute db_path must open a bridge");
+    let bridge = crate::loop_runner::build_supervisor_bridge(
+        &cfg,
+        &ctx,
+        ctx.workspace().join(".ralph").join("events.jsonl"),
+    )
+    .expect("absolute db_path must open a bridge");
     // The parent dir was materialised by the bridge builder.
     assert!(
         tmp.path().join("nested").exists(),
@@ -341,8 +349,12 @@ fn build_supervisor_bridge_without_feature_enabled_returns_error() {
         ..SupervisorConfig::default()
     };
 
-    let err = crate::loop_runner::build_supervisor_bridge(&cfg, &ctx)
-        .expect_err("enabled=true without supervisor-db feature must fail-closed");
+    let err = crate::loop_runner::build_supervisor_bridge(
+        &cfg,
+        &ctx,
+        ctx.workspace().join(".ralph").join("events.jsonl"),
+    )
+    .expect_err("enabled=true without supervisor-db feature must fail-closed");
     let msg = format!("{err}");
     assert!(
         msg.contains("supervisor-db"),
@@ -370,8 +382,12 @@ fn build_supervisor_bridge_default_db_path_collapses_to_single_ralph() {
         enabled: true,
         ..SupervisorConfig::default()
     };
-    let _bridge = crate::loop_runner::build_supervisor_bridge(&cfg, &ctx)
-        .expect("enabled+feature must build a bridge");
+    let _bridge = crate::loop_runner::build_supervisor_bridge(
+        &cfg,
+        &ctx,
+        ctx.workspace().join(".ralph").join("events.jsonl"),
+    )
+    .expect("enabled+feature must build a bridge");
     let nested = tmp
         .path()
         .join(".ralph")
@@ -406,8 +422,12 @@ fn build_supervisor_bridge_absolute_db_path_outside_workspace_preserved() {
         db_path: abs_db.display().to_string(),
         ..SupervisorConfig::default()
     };
-    let _bridge = crate::loop_runner::build_supervisor_bridge(&cfg, &ctx)
-        .expect("absolute db_path must open a bridge");
+    let _bridge = crate::loop_runner::build_supervisor_bridge(
+        &cfg,
+        &ctx,
+        ctx.workspace().join(".ralph").join("events.jsonl"),
+    )
+    .expect("absolute db_path must open a bridge");
     assert!(
         abs_db.exists(),
         "absolute db_path must land at the operator-specified location; missing {abs_db:?}"
@@ -596,8 +616,12 @@ fn supervisor_disabled_does_not_call_bridge_builder() {
     // regression.
     for execution_mode_isolated in [false, true] {
         if is_supervisor_path_enabled(cfg.enabled, execution_mode_isolated) {
-            let _ = build_supervisor_bridge(&cfg, &ctx)
-                .expect("closed gate path must never enter build_supervisor_bridge");
+            let _ = build_supervisor_bridge(
+                &cfg,
+                &ctx,
+                ctx.workspace().join(".ralph").join("events.jsonl"),
+            )
+            .expect("closed gate path must never enter build_supervisor_bridge");
         }
     }
 
@@ -644,8 +668,12 @@ fn supervisor_enabled_isolated_invokes_bridge_builder_once() {
         ..SupervisorConfig::default()
     };
 
-    let _bridge =
-        build_supervisor_bridge(&cfg, &ctx).expect("enabled+isolated must build a bridge");
+    let _bridge = build_supervisor_bridge(
+        &cfg,
+        &ctx,
+        ctx.workspace().join(".ralph").join("events.jsonl"),
+    )
+    .expect("enabled+isolated must build a bridge");
     let after = bridge_build_invocations();
     assert_eq!(
         after,
@@ -681,8 +709,12 @@ fn pipeline_disabled_workspace_has_no_supervisor_artifacts() {
     // Replay the production startup gate exactly. If the predicate
     // stays false, the `build_supervisor_bridge` call stays skipped.
     if is_supervisor_path_enabled(cfg.enabled, true) {
-        let _ = build_supervisor_bridge(&cfg, &ctx)
-            .expect("closed gate must never enter build_supervisor_bridge");
+        let _ = build_supervisor_bridge(
+            &cfg,
+            &ctx,
+            ctx.workspace().join(".ralph").join("events.jsonl"),
+        )
+        .expect("closed gate must never enter build_supervisor_bridge");
     }
 
     // Three side-effect asserts: no supervisor DB, no slot worktree
@@ -839,6 +871,7 @@ fn production_bridge_with_factory(
     let context = ProductionBridgeContext {
         loop_id: loop_id.to_string(),
         repo_root: loop_ctx.repo_root().to_path_buf(),
+        events_path: None,
     };
     let store = std::sync::Arc::new(InMemorySupervisorStore::new());
     let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
@@ -1101,6 +1134,7 @@ fn production_bridge_default_factory_is_default_worktree_factory() {
         ProductionBridgeContext {
             loop_id: "u4-default".to_string(),
             repo_root: tmp.path().to_path_buf(),
+            events_path: None,
         },
         std::sync::Arc::new(DefaultWorktreeFactory),
     );
@@ -1236,8 +1270,12 @@ fn test_build_supervisor_bridge_provides_context_for_exec() {
         ..SupervisorConfig::default()
     };
 
-    let bridge = build_supervisor_bridge(&cfg, &ctx)
-        .expect("build_supervisor_bridge must succeed when supervisor-db is enabled");
+    let bridge = build_supervisor_bridge(
+        &cfg,
+        &ctx,
+        ctx.workspace().join(".ralph").join("events.jsonl"),
+    )
+    .expect("build_supervisor_bridge must succeed when supervisor-db is enabled");
 
     let store_wave_id = bridge
         .register_wave_if_absent(WaveKind::Exec, "u1-wave-exec", 2)
@@ -1319,8 +1357,12 @@ fn test_build_supervisor_bridge_provides_context_for_fix() {
         ..SupervisorConfig::default()
     };
 
-    let bridge = build_supervisor_bridge(&cfg, &ctx)
-        .expect("build_supervisor_bridge must succeed when supervisor-db is enabled");
+    let bridge = build_supervisor_bridge(
+        &cfg,
+        &ctx,
+        ctx.workspace().join(".ralph").join("events.jsonl"),
+    )
+    .expect("build_supervisor_bridge must succeed when supervisor-db is enabled");
 
     let store_wave_id = bridge
         .register_wave_if_absent(WaveKind::Fix, "u1-wave-fix", 3)
@@ -1386,8 +1428,12 @@ fn test_build_supervisor_bridge_review_returns_none() {
         ..SupervisorConfig::default()
     };
 
-    let bridge = build_supervisor_bridge(&cfg, &ctx)
-        .expect("build_supervisor_bridge must succeed when supervisor-db is enabled");
+    let bridge = build_supervisor_bridge(
+        &cfg,
+        &ctx,
+        ctx.workspace().join(".ralph").join("events.jsonl"),
+    )
+    .expect("build_supervisor_bridge must succeed when supervisor-db is enabled");
 
     let binding = bridge
         .bind_slot(WaveKind::Review, "u1-wave-review", 0)
@@ -1463,6 +1509,7 @@ fn test_bind_slot_factory_failure_returns_err() {
     let context = crate::loop_runner::wave::ProductionBridgeContext {
         loop_id: "u1-fail".to_string(),
         repo_root: tmp.path().to_path_buf(),
+        events_path: None,
     };
     let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
         store.clone() as std::sync::Arc<dyn SupervisorStore>,
@@ -2733,5 +2780,490 @@ async fn test_dispatcher_records_empty_batch_stable_hash() {
         *hash,
         empty_batch_hash(),
         "U5: empty batch must hash to the stable empty sha256"
+    );
+}
+
+// =============================================================================
+// 2026-07-23-001 plan U6: production ledger sink + unique coordination event.
+//
+// These tests exercise the real production fan-in path:
+// `run_supervisor_fan_in` drives the coordinator's
+// `tick_with_slot_events`, which merges the per-slot business events
+// through the production `FileEventMergeSink` into `events.jsonl` and
+// injects the unique `*.wave.complete` / `*.wave.failed` coordination
+// event (with the `success_slots` branch / worktree_path payload).
+// =============================================================================
+
+use crate::loop_runner::wave::{SupervisorFanInOutcome, run_supervisor_fan_in};
+
+/// Build a production bridge whose coordinator merges through a
+/// `FileEventMergeSink` pointed at `events_path`, then register a
+/// wave with `n` slots and record every slot as a success (bound
+/// worktree resource + dispatched + completed). Returns the bridge
+/// (as a trait object) and the store-assigned wave id.
+fn setup_u6_production_bridge(
+    events_path: std::path::PathBuf,
+    wave_key: &str,
+    n: u32,
+) -> (std::sync::Arc<dyn SupervisorBridge>, String) {
+    use crate::loop_runner::wave::{CoordinatorSupervisorBridge, ProductionBridgeContext};
+    use ralph_core::supervisor::SlotResource;
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let context = ProductionBridgeContext {
+        loop_id: "u6-loop".to_string(),
+        repo_root: std::path::PathBuf::from("/tmp/u6-repo"),
+        events_path: Some(events_path),
+    };
+    let bridge = CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+        store.clone() as std::sync::Arc<dyn SupervisorStore>,
+        context,
+        std::sync::Arc::new(DefaultWorktreeFactory),
+        n.max(1),
+    );
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, wave_key, n)
+        .expect("register wave must succeed");
+    for i in 0..n {
+        bridge
+            .store()
+            .bind_worktree(
+                &store_wave_id,
+                i,
+                SlotResource {
+                    slot_index: i,
+                    worktree_path: Some(format!("/tmp/u6-wt/{i}")),
+                    branch: Some(format!("u6-loop-exec-{i}")),
+                },
+            )
+            .expect("bind worktree must succeed");
+    }
+    for _ in 0..n {
+        bridge
+            .store()
+            .try_dispatch_next(n.max(1))
+            .expect("dispatch must succeed")
+            .expect("a slot must be dispatchable");
+    }
+    for i in 0..n {
+        bridge
+            .record_slot_result(&store_wave_id, i, &format!("hash-{i}"), 1)
+            .expect("record slot result must succeed");
+    }
+    (std::sync::Arc::new(bridge), store_wave_id)
+}
+
+/// Build a `CompletedWave` carrying one distinct `exec.unit.done`
+/// business event per slot. The `results` are emitted in REVERSE
+/// slot order so the test can assert the fan-in re-sorts them by
+/// slot index before writing to the ledger.
+fn make_u6_completed(wave_key: &str, n: u32) -> ralph_core::CompletedWave {
+    let results = (0..n)
+        .rev()
+        .map(|i| ralph_core::WaveResult {
+            index: i,
+            events: vec![
+                ralph_proto::Event::new("exec.unit.done", format!("{{\"unit\":\"u6-{i}\"}}"))
+                    .with_source("executor")
+                    .with_wave(wave_key.to_string(), i, n),
+            ],
+        })
+        .collect();
+    ralph_core::CompletedWave {
+        wave_id: wave_key.to_string(),
+        wave_total: n,
+        results,
+        failures: vec![],
+        duration: std::time::Duration::from_millis(1),
+        partial: false,
+        expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: Vec::new(),
+    }
+}
+
+/// Read the ledger file and parse each non-empty line as JSON.
+fn read_u6_ledger(path: &std::path::Path) -> Vec<serde_json::Value> {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("ledger line must be JSON"))
+        .collect()
+}
+
+/// U6 acceptance #1 + #3: 5 successful slots → the main ledger holds
+/// the business events sorted by slot index (de-duplicated) plus
+/// exactly one `exec.wave.complete` whose payload lists all 5
+/// success_slots (branch + worktree_path). A second fan-in tick is
+/// idempotent (no duplicate coord event, `AlreadyDone`).
+#[test]
+fn test_production_fan_in_writes_ledger_and_injects_complete_once() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let events_path = tmp.path().join(".ralph").join("events.jsonl");
+    let (bridge, _store_wave_id) = setup_u6_production_bridge(events_path.clone(), "u6-wave-5", 5);
+
+    let completed = make_u6_completed("u6-wave-5", 5);
+    let detected = make_u3_wave("u6-wave-5", 5, 5);
+
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    assert_eq!(
+        outcome,
+        SupervisorFanInOutcome::InjectedComplete,
+        "5/5 success must inject exec.wave.complete"
+    );
+
+    let lines = read_u6_ledger(&events_path);
+    // 5 business events + 1 coordination event.
+    assert_eq!(
+        lines.len(),
+        6,
+        "ledger must hold 5 business events + 1 coord event; got {lines:?}"
+    );
+
+    // Business events are sorted by slot index (0..5) even though the
+    // CompletedWave handed them in reverse order.
+    let business: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.unit.done"))
+        .collect();
+    assert_eq!(business.len(), 5, "5 de-duplicated business events");
+    for (pos, ev) in business.iter().enumerate() {
+        let expected_payload = format!("{{\"unit\":\"u6-{pos}\"}}");
+        assert_eq!(
+            ev.get("payload").and_then(|p| p.as_str()),
+            Some(expected_payload.as_str()),
+            "business event at ledger position {pos} must be slot {pos} (sorted by slot index)"
+        );
+    }
+
+    // Exactly one coord event, with all 5 success_slots.
+    let completes: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.wave.complete"))
+        .collect();
+    assert_eq!(completes.len(), 1, "exactly one exec.wave.complete");
+    let coord = completes[0];
+    assert_eq!(
+        coord.get("system_injected").and_then(|v| v.as_bool()),
+        Some(true),
+        "coord event must be system_injected"
+    );
+    let success_slots = coord
+        .get("payload")
+        .and_then(|p| p.get("success_slots"))
+        .and_then(|s| s.as_array())
+        .expect("payload.success_slots must be an array");
+    assert_eq!(
+        success_slots.len(),
+        5,
+        "success_slots must list all 5 slots"
+    );
+    for (i, slot) in success_slots.iter().enumerate() {
+        assert_eq!(
+            slot.get("slot_index").and_then(|v| v.as_u64()),
+            Some(i as u64),
+            "success_slots[{i}].slot_index"
+        );
+        assert_eq!(
+            slot.get("branch").and_then(|v| v.as_str()),
+            Some(format!("u6-loop-exec-{i}").as_str()),
+            "success_slots[{i}].branch"
+        );
+        assert_eq!(
+            slot.get("worktree_path").and_then(|v| v.as_str()),
+            Some(format!("/tmp/u6-wt/{i}").as_str()),
+            "success_slots[{i}].worktree_path"
+        );
+    }
+
+    // Idempotency: a second tick must NOT re-inject the coord event.
+    let outcome2 = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    assert_eq!(
+        outcome2,
+        SupervisorFanInOutcome::AlreadyDone,
+        "post-merge tick must return AlreadyDone (KTD-7)"
+    );
+    let lines2 = read_u6_ledger(&events_path);
+    let completes2 = lines2
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.wave.complete"))
+        .count();
+    assert_eq!(
+        completes2, 1,
+        "still exactly one exec.wave.complete after re-tick"
+    );
+    assert_eq!(
+        lines2.len(),
+        6,
+        "no new lines appended on the idempotent re-tick"
+    );
+}
+
+/// U6 acceptance #2: a wave where every slot is terminal but some
+/// failed must inject `exec.wave.failed` (KTD-8: no silent partial
+/// complete) carrying the blocking slots.
+#[test]
+fn test_production_fan_in_partial_failure_injects_failed() {
+    use ralph_core::supervisor::SlotResource;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let events_path = tmp.path().join(".ralph").join("events.jsonl");
+
+    // Build a 3-slot wave: slots 0,1 succeed; slot 2 fails.
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let context = crate::loop_runner::wave::ProductionBridgeContext {
+        loop_id: "u6-loop".to_string(),
+        repo_root: std::path::PathBuf::from("/tmp/u6-repo"),
+        events_path: Some(events_path.clone()),
+    };
+    let bridge =
+        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+            store.clone() as std::sync::Arc<dyn SupervisorStore>,
+            context,
+            std::sync::Arc::new(DefaultWorktreeFactory),
+            3,
+        );
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "u6-wave-fail", 3)
+        .expect("register");
+    for i in 0..3 {
+        bridge
+            .store()
+            .bind_worktree(
+                &store_wave_id,
+                i,
+                SlotResource {
+                    slot_index: i,
+                    worktree_path: Some(format!("/tmp/u6-wt/{i}")),
+                    branch: Some(format!("u6-loop-exec-{i}")),
+                },
+            )
+            .expect("bind");
+    }
+    for _ in 0..3 {
+        bridge.store().try_dispatch_next(3).expect("dispatch");
+    }
+    bridge
+        .record_slot_result(&store_wave_id, 0, "h0", 1)
+        .expect("s0");
+    bridge
+        .record_slot_result(&store_wave_id, 1, "h1", 1)
+        .expect("s1");
+    bridge
+        .record_slot_failure(&store_wave_id, 2, "boom")
+        .expect("f2");
+
+    let bridge: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
+    let completed = make_u6_completed("u6-wave-fail", 2); // only 2 results (slot 2 failed)
+    let detected = make_u3_wave("u6-wave-fail", 3, 3);
+
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    assert_eq!(
+        outcome,
+        SupervisorFanInOutcome::InjectedFailed,
+        "a terminal wave with a failed slot must inject exec.wave.failed"
+    );
+
+    let lines = read_u6_ledger(&events_path);
+    let failed: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.wave.failed"))
+        .collect();
+    assert_eq!(failed.len(), 1, "exactly one exec.wave.failed");
+    let blocking = failed[0]
+        .get("payload")
+        .and_then(|p| p.get("blocking_slots"))
+        .and_then(|b| b.as_array())
+        .expect("payload.blocking_slots");
+    assert!(
+        blocking.iter().any(|v| v.as_u64() == Some(2)),
+        "blocking_slots must name the failed slot 2; got {blocking:?}"
+    );
+    // No spurious complete event on the failure path.
+    assert!(
+        !lines
+            .iter()
+            .any(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.wave.complete")),
+        "failure path must not inject exec.wave.complete"
+    );
+}
+
+/// U6 acceptance #4: when the merge sink rejects the batch, the fan-in
+/// returns `MergeFailed`, leaves `merged_to_events` false (no coord
+/// event written), so the next tick retries the merge exactly once.
+#[test]
+fn test_production_fan_in_sink_failure_defers_complete() {
+    use ralph_core::supervisor::{EventMergeSink, InMemoryMergeSink, MergeSinkError, SlotResource};
+
+    // A sink that fails the first append, then succeeds — modelling a
+    // transient ledger write failure that recovery retries (KTD-7).
+    #[derive(Debug)]
+    struct FailOnceSink {
+        inner: InMemoryMergeSink,
+    }
+    impl EventMergeSink for FailOnceSink {
+        fn append_events(&self, events: Vec<ralph_proto::Event>) -> Result<(), MergeSinkError> {
+            self.inner.append_events(events)
+        }
+    }
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let wave = store
+        .register_wave("u6-retry", WaveKind::Exec, 1)
+        .expect("register");
+    store
+        .bind_worktree(
+            &wave,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some("/tmp/u6-wt/0".to_string()),
+                branch: Some("u6-loop-exec-0".to_string()),
+            },
+        )
+        .expect("bind");
+    let _ = store.try_dispatch_next(1).expect("dispatch").expect("slot");
+    store.record_slot_result(&wave, 0, "h0", 1).expect("record");
+
+    let sink = std::sync::Arc::new(InMemoryMergeSink::new());
+    sink.fail_with("ledger locked");
+    let coord = ralph_core::supervisor::SupervisorCoordinator::new(
+        store.clone() as std::sync::Arc<dyn SupervisorStore>,
+        sink.clone() as std::sync::Arc<dyn EventMergeSink>,
+    );
+
+    let inputs = ralph_core::supervisor::PhaseInputs {
+        aggregate_timeout_secs: 600,
+        elapsed_secs: 0,
+        cancel_requested: false,
+    };
+    // First tick: sink fails → MergeFailed, merged_to_events stays false.
+    let action1 = coord
+        .tick_with_slot_events(&wave, inputs.clone(), vec![])
+        .expect("tick");
+    assert!(
+        matches!(
+            action1,
+            ralph_core::supervisor::CoordinatorAction::MergeFailed { .. }
+        ),
+        "sink failure must surface MergeFailed; got {action1:?}"
+    );
+    assert!(
+        !store.fan_in_status(&wave).expect("snap").merged_to_events,
+        "merged_to_events must stay false after a sink failure"
+    );
+
+    // Clear the fault: the retry merges + completes exactly once.
+    sink.clear_failure();
+    let action2 = coord
+        .tick_with_slot_events(&wave, inputs.clone(), vec![])
+        .expect("tick");
+    assert!(
+        matches!(
+            action2,
+            ralph_core::supervisor::CoordinatorAction::InjectedComplete { .. }
+        ),
+        "retry after sink recovery must inject complete; got {action2:?}"
+    );
+    // A third tick is idempotent (no second complete).
+    let action3 = coord
+        .tick_with_slot_events(&wave, inputs, vec![])
+        .expect("tick");
+    assert!(
+        matches!(
+            action3,
+            ralph_core::supervisor::CoordinatorAction::AlreadyDone
+                | ralph_core::supervisor::CoordinatorAction::ContinueCollect
+        ),
+        "post-merge tick must not re-inject; got {action3:?}"
+    );
+    let _ = FailOnceSink {
+        inner: InMemoryMergeSink::new(),
+    };
+}
+
+/// U6 acceptance #5: the production bridge path (events_path set)
+/// writes the fan-in output to a real `events.jsonl` file via the
+/// `FileEventMergeSink` — it no longer fakes the main ledger with an
+/// in-memory sink. The legacy `from_store` entry point (in-memory
+/// sink) leaves the file untouched.
+#[test]
+fn test_production_bridge_writes_real_ledger_not_in_memory() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let events_path = tmp.path().join(".ralph").join("events.jsonl");
+    assert!(!events_path.exists(), "ledger must not exist before fan-in");
+
+    let (bridge, _store_wave_id) =
+        setup_u6_production_bridge(events_path.clone(), "u6-wave-real", 2);
+    let completed = make_u6_completed("u6-wave-real", 2);
+    let detected = make_u3_wave("u6-wave-real", 2, 2);
+
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    assert_eq!(outcome, SupervisorFanInOutcome::InjectedComplete);
+
+    assert!(
+        events_path.exists(),
+        "production FileEventMergeSink must create the real events.jsonl"
+    );
+    let lines = read_u6_ledger(&events_path);
+    assert!(
+        !lines.is_empty(),
+        "production sink must write the fan-in business + coord events to disk"
+    );
+    // The business events actually landed in the file (not an in-memory buffer).
+    assert!(
+        lines
+            .iter()
+            .any(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.unit.done")),
+        "business events must be present in the on-disk ledger"
+    );
+}
+
+/// U6: the fan-in de-duplicates identical business events across slots
+/// (the main ledger must not carry repeated records).
+#[test]
+fn test_production_fan_in_dedups_identical_business_events() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let events_path = tmp.path().join(".ralph").join("events.jsonl");
+    let (bridge, _store_wave_id) =
+        setup_u6_production_bridge(events_path.clone(), "u6-wave-dedup", 3);
+
+    // Every slot emits the SAME business event (same topic + payload).
+    let results = (0..3)
+        .map(|i| ralph_core::WaveResult {
+            index: i,
+            events: vec![
+                ralph_proto::Event::new("exec.unit.done", "{\"unit\":\"shared\"}".to_string())
+                    .with_source("executor"),
+            ],
+        })
+        .collect();
+    let completed = ralph_core::CompletedWave {
+        wave_id: "u6-wave-dedup".to_string(),
+        wave_total: 3,
+        results,
+        failures: vec![],
+        duration: std::time::Duration::from_millis(1),
+        partial: false,
+        expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: Vec::new(),
+    };
+    let detected = make_u3_wave("u6-wave-dedup", 3, 3);
+
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    assert_eq!(outcome, SupervisorFanInOutcome::InjectedComplete);
+
+    let lines = read_u6_ledger(&events_path);
+    let business_count = lines
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.unit.done"))
+        .count();
+    assert_eq!(
+        business_count, 1,
+        "identical business events across 3 slots must de-dup to a single ledger record"
     );
 }

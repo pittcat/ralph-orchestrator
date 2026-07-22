@@ -663,6 +663,7 @@ pub(crate) fn clear_factory_override_for_test() {
 pub(crate) fn build_supervisor_bridge(
     cfg: &ralph_core::config::SupervisorConfig,
     ctx: &ralph_core::LoopContext,
+    events_path: std::path::PathBuf,
 ) -> std::result::Result<crate::loop_runner::wave::CoordinatorSupervisorBridge, anyhow::Error> {
     BRIDGE_BUILD_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
@@ -707,7 +708,15 @@ pub(crate) fn build_supervisor_bridge(
         // root that per-slot worktrees branch off.
         let loop_id = ctx.loop_id().unwrap_or("primary").to_string();
         let repo_root = ctx.repo_root().to_path_buf();
-        let context = ProductionBridgeContext { loop_id, repo_root };
+        // U6: hand the coordinator the loop's main ledger path so
+        // the production `FileEventMergeSink` writes the fan-in
+        // business events to the same `events.jsonl` the
+        // dispatcher merges into (KTD-6).
+        let context = ProductionBridgeContext {
+            loop_id,
+            repo_root,
+            events_path: Some(events_path),
+        };
 
         // U1: factory resolution — production uses the default
         // (real git worktree); tests inject a recording/failing
@@ -1304,7 +1313,16 @@ async fn run_loop_impl_inner(
     );
     let supervisor_bridge: Option<Arc<dyn ralph_core::supervisor::SupervisorBridge>> =
         if supervisor_path_enabled {
-            match build_supervisor_bridge(supervisor_cfg, &ctx) {
+            // U6: resolve the loop's main ledger path so the
+            // supervisor's production merge sink writes the fan-in
+            // business events to the same `events.jsonl` the
+            // dispatcher merges into (KTD-6). Mirrors the
+            // dispatcher's `resolve_emit_events_path` call.
+            let supervisor_events_path = resolve_emit_events_path(
+                &ctx,
+                crate::loop_runner::paths::config_state_machine_enabled(&config),
+            );
+            match build_supervisor_bridge(supervisor_cfg, &ctx, supervisor_events_path) {
                 Ok(concrete) => {
                     // U11: reconcile in-flight waves before the loop
                     // accepts new events. We clone the store out of

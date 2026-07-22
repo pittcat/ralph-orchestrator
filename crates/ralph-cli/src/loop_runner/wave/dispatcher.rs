@@ -634,106 +634,133 @@ pub async fn handle_wave_events(
                 // [`crate::correction::CorrectionContext`] block
                 // in the next hat prompt; U9 will migrate the
                 // production code to the new API.
-                let (mismatch_info, pending_task_resumes) = match merge_wave_results_to_events_file(
-                    &completed,
-                    &main_events_file,
-                    &detected.hat_config.publishes,
-                    detected.target_hat.as_str(),
-                    // 2026-06-16-001 U2: synthetic `wave.worker.failed`
-                    // records attribute to `review-synthesizer` (the
-                    // wave-result consumer) instead of the wave target
-                    // hat. Pass `None` to use the default.
-                    None,
-                ) {
-                    Ok(parts) => parts,
-                    Err(e) => {
-                        warn!(error = %e, "Failed to merge wave results to events file");
-                        (Vec::new(), Vec::new())
-                    }
-                };
+                // U6: the supervisor path merges the per-slot business
+                // events through the bridge's production sink and injects
+                // the unique `*.wave.complete` / `*.wave.failed`
+                // coordination event (with the success_slots payload).
+                // It replaces the legacy `merge_wave_results_to_events_file`
+                // path below so the business events are not double-written.
+                if let Some(bridge) = supervisor_bridge {
+                    let aggregate_timeout_secs = event_loop
+                        .config()
+                        .event_loop
+                        .supervisor
+                        .aggregate_timeout_secs;
+                    let fan_in = run_supervisor_fan_in(
+                        bridge,
+                        &completed,
+                        &detected,
+                        &main_events_file,
+                        aggregate_timeout_secs,
+                    );
+                    info!(
+                        wave_id = %completed.wave_id,
+                        fan_in = ?fan_in,
+                        "U6: supervisor fan-in tick completed"
+                    );
+                } else {
+                    let (mismatch_info, pending_task_resumes) =
+                        match merge_wave_results_to_events_file(
+                            &completed,
+                            &main_events_file,
+                            &detected.hat_config.publishes,
+                            detected.target_hat.as_str(),
+                            // 2026-06-16-001 U2: synthetic `wave.worker.failed`
+                            // records attribute to `review-synthesizer` (the
+                            // wave-result consumer) instead of the wave target
+                            // hat. Pass `None` to use the default.
+                            None,
+                        ) {
+                            Ok(parts) => parts,
+                            Err(e) => {
+                                warn!(error = %e, "Failed to merge wave results to events file");
+                                (Vec::new(), Vec::new())
+                            }
+                        };
 
-                // U5/R5: filter the pending `task.resume` records
-                // through the per-slot retry budget carried on the
-                // CompletedWave (the tracker transferred it via
-                // `take_wave_results`, so the budget persists
-                // across dispatch rounds — P0#1 fix). Survivors
-                // are appended to the events file in a single
-                // `write_all` (P0#4 fix — no separate
-                // file-open/`writeln!` interleaving). A write
-                // failure does NOT roll back the budget: the count
-                // was already bumped before the disk syscall, so a
-                // future dispatch sees the slot as exhausted and
-                // the wave terminates via the existing
-                // `wave.worker.failed` (P1#11 fix).
-                if !pending_task_resumes.is_empty() {
-                    use std::io::Write;
-                    let mut resume_buf = String::new();
-                    let mut injected = 0usize;
-                    // Build a per-round increment map and apply
-                    // it to the CompletedWave counts after we've
-                    // chosen which records to inject. This keeps
-                    // the budget consistent even when the file
-                    // write fails.
-                    let mut round_increments: std::collections::HashMap<u32, u32> =
-                        std::collections::HashMap::new();
-                    for pending in &pending_task_resumes {
-                        let used = completed
-                            .dimension_retry_counts
-                            .get(&pending.wave_index)
-                            .copied()
-                            .unwrap_or(0);
-                        if used >= ralph_core::MAX_DIMENSION_RETRIES_PER_SLOT {
-                            tracing::debug!(
-                                wave_id = %completed.wave_id,
-                                wave_index = pending.wave_index,
-                                used,
-                                "U5/R5: dimension retry budget exhausted; skipping task.resume"
-                            );
-                            continue;
+                    // U5/R5: filter the pending `task.resume` records
+                    // through the per-slot retry budget carried on the
+                    // CompletedWave (the tracker transferred it via
+                    // `take_wave_results`, so the budget persists
+                    // across dispatch rounds — P0#1 fix). Survivors
+                    // are appended to the events file in a single
+                    // `write_all` (P0#4 fix — no separate
+                    // file-open/`writeln!` interleaving). A write
+                    // failure does NOT roll back the budget: the count
+                    // was already bumped before the disk syscall, so a
+                    // future dispatch sees the slot as exhausted and
+                    // the wave terminates via the existing
+                    // `wave.worker.failed` (P1#11 fix).
+                    if !pending_task_resumes.is_empty() {
+                        use std::io::Write;
+                        let mut resume_buf = String::new();
+                        let mut injected = 0usize;
+                        // Build a per-round increment map and apply
+                        // it to the CompletedWave counts after we've
+                        // chosen which records to inject. This keeps
+                        // the budget consistent even when the file
+                        // write fails.
+                        let mut round_increments: std::collections::HashMap<u32, u32> =
+                            std::collections::HashMap::new();
+                        for pending in &pending_task_resumes {
+                            let used = completed
+                                .dimension_retry_counts
+                                .get(&pending.wave_index)
+                                .copied()
+                                .unwrap_or(0);
+                            if used >= ralph_core::MAX_DIMENSION_RETRIES_PER_SLOT {
+                                tracing::debug!(
+                                    wave_id = %completed.wave_id,
+                                    wave_index = pending.wave_index,
+                                    used,
+                                    "U5/R5: dimension retry budget exhausted; skipping task.resume"
+                                );
+                                continue;
+                            }
+                            resume_buf.push_str(&pending.jsonl_line);
+                            resume_buf.push('\n');
+                            *round_increments.entry(pending.wave_index).or_insert(0) += 1;
+                            injected += 1;
                         }
-                        resume_buf.push_str(&pending.jsonl_line);
-                        resume_buf.push('\n');
-                        *round_increments.entry(pending.wave_index).or_insert(0) += 1;
-                        injected += 1;
-                    }
-                    // Apply the increments up-front. If the file
-                    // write fails below, the budget still reflects
-                    // the consumed retries — the slot is now
-                    // exhausted, so subsequent dispatches will
-                    // skip the task.resume injection (no
-                    // infinite-loop on disk failure).
-                    for (idx, inc) in &round_increments {
-                        let prev = completed
-                            .dimension_retry_counts
-                            .get(idx)
-                            .copied()
-                            .unwrap_or(0);
-                        completed.dimension_retry_counts.insert(*idx, prev + inc);
-                    }
-                    if injected > 0 {
-                        let write_result = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&main_events_file)
-                            .map_err(anyhow::Error::from)
-                            .and_then(|mut f| {
-                                f.write_all(resume_buf.as_bytes())
-                                    .map_err(anyhow::Error::from)
-                            });
-                        if let Err(e) = write_result {
-                            warn!(
-                                error = %e,
-                                injected,
-                                "U5/R5: failed to write task.resume events to events file; \
-                                 retry budget already consumed, slot is now exhausted"
-                            );
-                        } else {
-                            tracing::info!(
-                                wave_id = %completed.wave_id,
-                                injected,
-                                mismatched = mismatch_info.len(),
-                                "U5/R5: injected task.resume events to retry dimension-reviewer"
-                            );
+                        // Apply the increments up-front. If the file
+                        // write fails below, the budget still reflects
+                        // the consumed retries — the slot is now
+                        // exhausted, so subsequent dispatches will
+                        // skip the task.resume injection (no
+                        // infinite-loop on disk failure).
+                        for (idx, inc) in &round_increments {
+                            let prev = completed
+                                .dimension_retry_counts
+                                .get(idx)
+                                .copied()
+                                .unwrap_or(0);
+                            completed.dimension_retry_counts.insert(*idx, prev + inc);
+                        }
+                        if injected > 0 {
+                            let write_result = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&main_events_file)
+                                .map_err(anyhow::Error::from)
+                                .and_then(|mut f| {
+                                    f.write_all(resume_buf.as_bytes())
+                                        .map_err(anyhow::Error::from)
+                                });
+                            if let Err(e) = write_result {
+                                warn!(
+                                    error = %e,
+                                    injected,
+                                    "U5/R5: failed to write task.resume events to events file; \
+                                     retry budget already consumed, slot is now exhausted"
+                                );
+                            } else {
+                                tracing::info!(
+                                    wave_id = %completed.wave_id,
+                                    injected,
+                                    mismatched = mismatch_info.len(),
+                                    "U5/R5: injected task.resume events to retry dimension-reviewer"
+                                );
+                            }
                         }
                     }
                 }
@@ -1626,6 +1653,267 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         Some(store_wave_id),
     )
     .await
+}
+
+/// U6: outcome of a production supervisor fan-in tick. The
+/// dispatcher logs this and uses `injected` to decide whether a
+/// fresh coordination event landed in the ledger this round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SupervisorFanInOutcome {
+    /// A fresh `*.wave.complete` was merged + injected.
+    InjectedComplete,
+    /// A fresh `*.wave.failed` was injected.
+    InjectedFailed,
+    /// The wave was already merged on a prior tick (KTD-7
+    /// idempotency); no new coordination event.
+    AlreadyDone,
+    /// The wave is still collecting slots; nothing injected.
+    ContinueCollect,
+    /// The merge sink rejected the batch; `merged_to_events`
+    /// stayed false so the next tick retries exactly once
+    /// (KTD-7). No coordination event injected.
+    MergeFailed,
+    /// The bridge/store errored; logged, treated as no-op so the
+    /// next tick retries.
+    StoreError,
+}
+
+impl SupervisorFanInOutcome {
+    /// True when a fresh coordination event was injected this tick.
+    #[allow(dead_code)] // consumed by diagnostics + follow-up units
+    pub(crate) fn injected(self) -> bool {
+        matches!(
+            self,
+            SupervisorFanInOutcome::InjectedComplete | SupervisorFanInOutcome::InjectedFailed
+        )
+    }
+}
+
+/// U6: production supervisor fan-in. Merges the per-slot worker
+/// business events (sorted by slot index, de-duplicated) into the
+/// loop's main ledger via the bridge's production merge sink, then
+/// injects the unique `*.wave.complete` / `*.wave.failed`
+/// coordination event (with the successful slots' `branch` /
+/// `worktree_path` payload).
+///
+/// Contract (KTD-6 / KTD-7):
+/// - The merge gate is the coordinator's `tick_with_slot_events`:
+///   on `Integrate` it appends the sorted business events through
+///   the sink and flips `merged_to_events`. If the sink fails, the
+///   wave stays in `Collect` and NO coordination event is injected
+///   — the next tick retries the merge exactly once.
+/// - `merged_to_events` makes the injection idempotent: once merged,
+///   subsequent ticks return `AlreadyDone` and never re-inject.
+/// - The coordination event is appended to the SAME ledger the sink
+///   wrote to, marked `system_injected: true`, WITHOUT advancing the
+///   reader cursor; the caller's post-wave `process_events_from_jsonl`
+///   re-read publishes the business + coordination events to the bus
+///   exactly once.
+///
+/// This function does NOT perform any Git merge (the integrator path
+/// owns that); it only merges the JSONL event fan-in.
+pub(crate) fn run_supervisor_fan_in(
+    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+    completed: &CompletedWave,
+    detected: &ralph_core::DetectedWave,
+    main_events_file: &Path,
+    aggregate_timeout_secs: u64,
+) -> SupervisorFanInOutcome {
+    use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
+
+    // Infer the wave kind from the trigger topic (mirrors
+    // `execute_wave_via_supervisor_with_executor`).
+    let trigger_topic = detected
+        .events
+        .first()
+        .map(|e| e.topic.as_str())
+        .unwrap_or("");
+    let wave_kind = if trigger_topic.starts_with("review.wave.") {
+        WaveKind::Review
+    } else if trigger_topic.starts_with("fix.") {
+        WaveKind::Fix
+    } else {
+        WaveKind::Exec
+    };
+
+    // Re-derive the store-assigned wave id idempotently. The
+    // dispatcher's supervisor spawn path already registered the wave
+    // under `completed.wave_id`; `register_wave_if_absent` returns
+    // the existing store id on re-entry so the coordinator reads the
+    // same row the slot results were recorded against.
+    let store_wave_id =
+        match bridge.register_wave_if_absent(wave_kind, &completed.wave_id, completed.wave_total) {
+            Ok(id) => id,
+            Err(err) => {
+                warn!(
+                    wave_id = %completed.wave_id,
+                    error = %err,
+                    "U6: supervisor register_wave_if_absent failed during fan-in"
+                );
+                return SupervisorFanInOutcome::StoreError;
+            }
+        };
+
+    // Gather the per-slot business events, ordered by slot index and
+    // de-duplicated by (topic, payload). Sorting by `WaveResult.index`
+    // gives the deterministic slot-index order the plan requires; the
+    // dedup keeps the main ledger free of repeated business events
+    // when two slots emit an identical record.
+    let mut results_by_index: Vec<&ralph_core::WaveResult> = completed.results.iter().collect();
+    results_by_index.sort_by_key(|r| r.index);
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut slot_events: Vec<ralph_proto::Event> = Vec::new();
+    for result in results_by_index {
+        for event in &result.events {
+            let key = (event.topic.as_str().to_string(), event.payload.clone());
+            if seen.insert(key) {
+                slot_events.push(event.clone());
+            }
+        }
+    }
+
+    let inputs = ralph_core::supervisor::PhaseInputs {
+        aggregate_timeout_secs,
+        elapsed_secs: 0,
+        cancel_requested: false,
+    };
+
+    // The coordinator is the merge gate: on `Integrate` it appends
+    // `slot_events` through the production sink and flips
+    // `merged_to_events`. Sink failure → `MergeFailed` (no injection,
+    // retry next tick).
+    let action = match bridge.tick_with_slot_events(&store_wave_id, inputs, slot_events) {
+        Ok(action) => action,
+        Err(err) => {
+            warn!(
+                wave_id = %completed.wave_id,
+                store_wave_id = %store_wave_id,
+                error = %err,
+                "U6: supervisor tick_with_slot_events failed during fan-in"
+            );
+            return SupervisorFanInOutcome::StoreError;
+        }
+    };
+
+    match action {
+        ralph_core::supervisor::CoordinatorAction::InjectedComplete { topic, .. } => {
+            // Build the `success_slots` payload from the store's
+            // per-slot resource bindings, filtered to the slots that
+            // actually completed this wave. Each entry carries the
+            // slot index + branch + worktree_path so the integrator
+            // knows which branches to merge.
+            let success_indices: std::collections::HashSet<u32> =
+                completed.results.iter().map(|r| r.index).collect();
+            let mut success_slots: Vec<serde_json::Value> = Vec::new();
+            match bridge.slot_resources(&store_wave_id) {
+                Ok(resources) => {
+                    let mut resources = resources;
+                    resources.sort_by_key(|r| r.slot_index);
+                    for res in resources {
+                        if !success_indices.contains(&res.slot_index) {
+                            continue;
+                        }
+                        success_slots.push(serde_json::json!({
+                            "slot_index": res.slot_index,
+                            "branch": res.branch,
+                            "worktree_path": res.worktree_path,
+                        }));
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        wave_id = %completed.wave_id,
+                        error = %err,
+                        "U6: slot_resources failed; success_slots payload will be empty"
+                    );
+                }
+            }
+            let payload = serde_json::json!({
+                "wave_id": completed.wave_id,
+                "success_slots": success_slots,
+                "blocking_slots": Vec::<u32>::new(),
+            });
+            append_supervisor_coord_event(main_events_file, &topic, &payload);
+            SupervisorFanInOutcome::InjectedComplete
+        }
+        ralph_core::supervisor::CoordinatorAction::InjectedFailed {
+            topic,
+            reason,
+            blocking_slots,
+        } => {
+            let payload = serde_json::json!({
+                "wave_id": completed.wave_id,
+                "reason": reason,
+                "blocking_slots": blocking_slots,
+            });
+            append_supervisor_coord_event(main_events_file, &topic, &payload);
+            SupervisorFanInOutcome::InjectedFailed
+        }
+        ralph_core::supervisor::CoordinatorAction::AlreadyDone => {
+            SupervisorFanInOutcome::AlreadyDone
+        }
+        ralph_core::supervisor::CoordinatorAction::ContinueCollect => {
+            SupervisorFanInOutcome::ContinueCollect
+        }
+        ralph_core::supervisor::CoordinatorAction::MergeFailed { topic, error } => {
+            warn!(
+                wave_id = %completed.wave_id,
+                topic = %topic,
+                error = %error,
+                "U6: supervisor merge sink rejected the batch; \
+                 merged_to_events stays false, retrying on next tick (KTD-7)"
+            );
+            SupervisorFanInOutcome::MergeFailed
+        }
+    }
+}
+
+/// U6: append a `system_injected: true` coordination event
+/// (`*.wave.complete` / `*.wave.failed`) to the loop's main ledger
+/// WITHOUT advancing the reader cursor. The caller's post-wave
+/// `process_events_from_jsonl` re-read picks it up (alongside the
+/// sink-written business events) and publishes it to the bus exactly
+/// once. The `integrator` hat attribution matches the fan-in owner.
+fn append_supervisor_coord_event(
+    main_events_file: &Path,
+    topic: &str,
+    payload: &serde_json::Value,
+) {
+    use std::io::Write;
+    let record = serde_json::json!({
+        "topic": topic,
+        "payload": payload,
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "hat": "integrator",
+        "source": "integrator",
+        "system_injected": true,
+    });
+    let result = (|| -> std::io::Result<()> {
+        if let Some(parent) = main_events_file.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(main_events_file)?;
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&record).unwrap_or_default()
+        )?;
+        file.flush()?;
+        Ok(())
+    })();
+    if let Err(err) = result {
+        warn!(
+            topic = %topic,
+            path = %main_events_file.display(),
+            error = %err,
+            "U6: failed to append supervisor coordination event to ledger"
+        );
+    }
 }
 
 /// Compute the aggregate timeout from per-worker timeout and the
