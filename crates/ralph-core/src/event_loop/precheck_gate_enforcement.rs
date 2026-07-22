@@ -112,14 +112,16 @@ pub fn resolve_gate_hat_for_emit(
     rules: &std::collections::BTreeMap<String, crate::config::PrecheckRule>,
 ) -> Option<String> {
     if let Some(source) = event.source.as_ref()
-        && is_gate_hat(source.as_str()) {
-            return Some(source.to_string());
-        }
+        && is_gate_hat(source.as_str())
+    {
+        return Some(source.to_string());
+    }
     let topic = event.topic.as_str();
     if let Some(guarded) = topic.strip_suffix(".rejected")
-        && rules.contains_key(guarded) {
-            return Some(format!("{GATE_HAT_PREFIX}{guarded}"));
-        }
+        && rules.contains_key(guarded)
+    {
+        return Some(format!("{GATE_HAT_PREFIX}{guarded}"));
+    }
     if rules.contains_key(topic) {
         return Some(format!("{GATE_HAT_PREFIX}{topic}"));
     }

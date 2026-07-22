@@ -120,12 +120,12 @@ pub(crate) fn default_core_value() -> Result<Value> {
             && let Some(runtime_diagnosis) = telemetry
                 .get_mut(Value::String("runtime_diagnosis".to_string()))
                 .and_then(|v| v.as_mapping_mut())
-                && let Some(drift) = runtime_diagnosis
-                    .get_mut(Value::String("drift".to_string()))
-                    .and_then(|v| v.as_mapping_mut())
-                {
-                    drift.remove(Value::String("coord_join_mode".to_string()));
-                }
+            && let Some(drift) = runtime_diagnosis
+                .get_mut(Value::String("drift".to_string()))
+                .and_then(|v| v.as_mapping_mut())
+        {
+            drift.remove(Value::String("coord_join_mode".to_string()));
+        }
     }
 
     Ok(value)
@@ -205,7 +205,7 @@ pub(crate) fn resolve_project_config_path(
         ConfigSource::File(path) => Some(path.clone()),
         _ => None,
     });
-    
+
     match primary {
         Some(path) => {
             // Caller supplied a File source. If it exists on disk we

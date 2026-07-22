@@ -1010,11 +1010,11 @@ fn load_config_or_default(
     if let Some(path) = config_resolution::resolve_project_config_path(
         &resolve_workspace_root(root),
         config_sources,
-    )
-        && let Ok(raw) = std::fs::read_to_string(&path)
-            && let Ok(cfg) = serde_yaml::from_str::<ralph_core::config::RalphConfig>(&raw) {
-                return cfg;
-            }
+    ) && let Ok(raw) = std::fs::read_to_string(&path)
+        && let Ok(cfg) = serde_yaml::from_str::<ralph_core::config::RalphConfig>(&raw)
+    {
+        return cfg;
+    }
     serde_yaml::from_str("event_loop:\n  execution_mode: isolated\n").unwrap_or_default()
 }
 
@@ -1091,14 +1091,15 @@ fn add_task_with_args(
 
     if let Some(key) = task.key.as_deref()
         && let Some(locus) = ralph_core::task_store::live_task_locus(key)
-            && let Some(existing) = store.find_by_locus_in_loop(&locus, task.loop_id.as_deref()) {
-                bail!(
-                    "task add rejected: live identity already exists for loop {:?} step locus \
+        && let Some(existing) = store.find_by_locus_in_loop(&locus, task.loop_id.as_deref())
+    {
+        bail!(
+            "task add rejected: live identity already exists for loop {:?} step locus \
                      '{locus}' (task_id={}). Use `ralph tools task ensure` instead of add.",
-                    task.loop_id,
-                    existing.id
-                );
-            }
+            task.loop_id,
+            existing.id
+        );
+    }
 
     let task_id = task.id.clone();
     let added = store
@@ -1701,9 +1702,10 @@ fn close_task_with_context_and_config(
     // coordinator hat that closes someone else's task still warns based
     // on its own completion contract.
     if let (Some(cfg), Some(root_path)) = (config, root)
-        && let Some(caller_hat) = ctx.current_hat_id.clone() {
-            emit_close_completion_warning(root_path, cfg, &caller_hat, task_id);
-        }
+        && let Some(caller_hat) = ctx.current_hat_id.clone()
+    {
+        emit_close_completion_warning(root_path, cfg, &caller_hat, task_id);
+    }
     Ok(())
 }
 
@@ -1864,9 +1866,10 @@ fn parse_topics_from_jsonl_tail(content: &str, max_lines: usize) -> Vec<String> 
             continue;
         }
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
-            && let Some(topic) = v.get("topic").and_then(|t| t.as_str()) {
-                out.push(topic.to_string());
-            }
+            && let Some(topic) = v.get("topic").and_then(|t| t.as_str())
+        {
+            out.push(topic.to_string());
+        }
     }
     out
 }
@@ -2536,20 +2539,21 @@ fn execute_verify_emit_bridge(args: VerifyEmitBridgeArgs, root: Option<&PathBuf>
 
     if ctx.is_agent_context
         && let (Some(current), Some(target)) = (ctx.current_loop_id.as_ref(), task.loop_id.as_ref())
-            && current != target {
-                return Err(emit_bridge_deny(
-                    "loop_scope",
-                    "wrong_loop",
-                    format!(
-                        "task '{}' belongs to loop '{}' but caller is in loop '{}'; open or pick a task from the current loop",
-                        args.task_id, target, current
-                    ),
-                    format!(
-                        "task_verify_emit_bridge: task '{}' belongs to loop '{}' but current loop is '{}'",
-                        args.task_id, target, current
-                    ),
-                ));
-            }
+        && current != target
+    {
+        return Err(emit_bridge_deny(
+            "loop_scope",
+            "wrong_loop",
+            format!(
+                "task '{}' belongs to loop '{}' but caller is in loop '{}'; open or pick a task from the current loop",
+                args.task_id, target, current
+            ),
+            format!(
+                "task_verify_emit_bridge: task '{}' belongs to loop '{}' but current loop is '{}'",
+                args.task_id, target, current
+            ),
+        ));
+    }
 
     // 2. task_key must match the registered key on the task.
     let Some(registered_key) = task.key.clone() else {
@@ -4045,7 +4049,7 @@ tasks:
 mod load_coordinator_hats_tests {
     use super::CoordinatorHatsError;
     use super::load_coordinator_hats;
-    
+
     use tempfile::TempDir;
 
     #[test]

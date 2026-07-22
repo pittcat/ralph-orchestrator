@@ -899,7 +899,8 @@ mod tests {
             match validate_event_origin(&unknown_event, &registry, cancellation, completion) {
                 OriginCheck::Accepted => {
                     // Only acceptable when registry is empty (solo mode)
-                    assert!(registry.is_empty(), 
+                    assert!(
+                        registry.is_empty(),
                         "Preset '{}': unknown hat 'strategist' should be rejected",
                         preset.name
                     );

@@ -679,9 +679,10 @@ impl PolicyRuntimeState {
             // U4: Extract current_plan_name from work.ready events
             if event.topic == "work.ready"
                 && let Some(obj) = Self::payload_object(event.payload.as_deref())
-                && let Some(name) = obj.get("plan_name").and_then(|v| v.as_str()) {
-                    state.current_plan_name = Some(name.to_string());
-                }
+                && let Some(name) = obj.get("plan_name").and_then(|v| v.as_str())
+            {
+                state.current_plan_name = Some(name.to_string());
+            }
             // U5 (2026-06-17-003 plan, R6): replay prior
             // `review.dimension.ready` events to populate the
             // dedup set so cross-batch re-emits (e.g. on loop
@@ -2161,11 +2162,11 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
             for (field_path, per_hat_rules) in &schema.hat_allowed_values {
                 if let Some(rule) = per_hat_rules.iter().find(|r| r.hat_id == hat_id)
                     && let Some(p) = payload
-                        && let Ok(value) = serde_json::from_str::<Value>(p)
-                        && let Some(field_value) = extract_json_field(&value, field_path)
-                        && !rule.values.contains(&field_value)
-                    {
-                        findings.push(PolicyFinding {
+                    && let Ok(value) = serde_json::from_str::<Value>(p)
+                    && let Some(field_value) = extract_json_field(&value, field_path)
+                    && !rule.values.contains(&field_value)
+                {
+                    findings.push(PolicyFinding {
                             topic: topic.to_string(),
                             violation_type: ViolationType::InvalidFieldValue {
                                 field: field_path.clone(),
@@ -2176,7 +2177,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                                 hat_id, field_value, field_path, rule.values
                             ),
                         });
-                    }
+                }
             }
         } else {
             // Hat is missing but schema has hat-specific allowed values.
@@ -2216,25 +2217,26 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
         && topic == "work.done"
         && let Some(expected) = &state.current_plan_name
         && let Some(p) = payload
-            && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p) {
-                let actual = obj.get("plan_name").and_then(|v| v.as_str());
-                if actual != Some(expected.as_str()) {
-                    findings.push(PolicyFinding {
-                        topic: topic.to_string(),
-                        violation_type: ViolationType::InvalidFieldValue {
-                            field: "plan_name".to_string(),
-                            value: actual
-                                .map(|s| Value::String(s.to_string()))
-                                .unwrap_or(Value::Null),
-                        },
-                        message: format!(
-                            "work.done plan_name mismatch: expected '{}', got {:?}",
-                            expected,
-                            actual.unwrap_or("(missing)")
-                        ),
-                    });
-                }
-            }
+        && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+    {
+        let actual = obj.get("plan_name").and_then(|v| v.as_str());
+        if actual != Some(expected.as_str()) {
+            findings.push(PolicyFinding {
+                topic: topic.to_string(),
+                violation_type: ViolationType::InvalidFieldValue {
+                    field: "plan_name".to_string(),
+                    value: actual
+                        .map(|s| Value::String(s.to_string()))
+                        .unwrap_or(Value::Null),
+                },
+                message: format!(
+                    "work.done plan_name mismatch: expected '{}', got {:?}",
+                    expected,
+                    actual.unwrap_or("(missing)")
+                ),
+            });
+        }
+    }
 
     // U7 of plan 2026-07-02-005: runtime shipper strict-match backstop.
     if topic == "REVIEW_COMPLETE"
@@ -2306,20 +2308,21 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
     if handoff_config.handoff_envelope_enabled()
         && handoff_config.handoff_envelope_validate_payload()
         && topic != "task.resume"
-        && let Some(p) = payload {
-            match serde_json::from_str::<Value>(p) {
-                Ok(value) => {
-                    if let Some(finding) = check_handoff_envelope(topic, &value) {
-                        findings.push(finding);
-                    }
-                }
-                Err(_) => {
-                    // If the payload does not parse as JSON we
-                    // don't add a finding here — earlier
-                    // validation layers will surface that.
+        && let Some(p) = payload
+    {
+        match serde_json::from_str::<Value>(p) {
+            Ok(value) => {
+                if let Some(finding) = check_handoff_envelope(topic, &value) {
+                    findings.push(finding);
                 }
             }
+            Err(_) => {
+                // If the payload does not parse as JSON we
+                // don't add a finding here — earlier
+                // validation layers will surface that.
+            }
         }
+    }
 
     // U3 (plan 2026-07-22-004): opt-in same-payload consistency gates.
     // After schema / allowed-values / hat-aware / element_constraints

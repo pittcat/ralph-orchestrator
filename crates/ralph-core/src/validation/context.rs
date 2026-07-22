@@ -248,9 +248,10 @@ impl<'a> ValidationContext<'a> {
     /// first one.
     pub fn record_payload_contract_violation(&mut self, violation: PayloadContractViolation) {
         if let Some(slot) = self.payload_contract_violation.as_deref_mut()
-            && slot.is_none() {
-                *slot = Some(violation);
-            }
+            && slot.is_none()
+        {
+            *slot = Some(violation);
+        }
     }
 
     /// Record a policy rejection for downstream attribution (e.g. wave

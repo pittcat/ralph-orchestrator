@@ -622,9 +622,7 @@ pub fn check_isolated_scope(
     let Some(hat_id) = hat else {
         return Ok(());
     };
-    if hat_id == "ralph"
-        && ralph_core::event_origin::RALPH_CONTROL_TOPICS.contains(&topic)
-    {
+    if hat_id == "ralph" && ralph_core::event_origin::RALPH_CONTROL_TOPICS.contains(&topic) {
         return Ok(());
     }
 
@@ -1011,13 +1009,14 @@ pub fn run_policy_check_unified(
     // topology". Mirrors the apply-path gate so `--policy-check`
     // and the real write share the same rejection surface.
     if let Some(cfg) = config.as_ref()
-        && let Err(err) = check_envelope_triggered(topic, triggered, cfg) {
-            let mut rej = final_report;
-            rej.accepted = false;
-            rej.reason_codes.push(err.reason_code);
-            rej.suggestions.push(err.message);
-            return Ok(rej);
-        }
+        && let Err(err) = check_envelope_triggered(topic, triggered, cfg)
+    {
+        let mut rej = final_report;
+        rej.accepted = false;
+        rej.reason_codes.push(err.reason_code);
+        rej.suggestions.push(err.message);
+        return Ok(rej);
+    }
 
     Ok(final_report)
 }
@@ -1961,9 +1960,10 @@ pub fn enrich_validation_error(
                 if !error.field.is_empty() {
                     error.expected = Some(error.field.clone());
                     if let Some(EventFieldDoc { meaning, .. }) = s.field_docs.get(&error.field)
-                        && !meaning.trim().is_empty() {
-                            error.field_description = Some(meaning.clone());
-                        }
+                        && !meaning.trim().is_empty()
+                    {
+                        error.field_description = Some(meaning.clone());
+                    }
                     let shape = emit_schema_hint::suggested_payload_shape(
                         s,
                         payload.unwrap_or(&Value::Null),
@@ -2017,9 +2017,10 @@ pub fn enrich_validation_error(
                         .unwrap_or_else(|| "json_object".to_string()),
                 );
                 if let Some(obj) = payload_obj
-                    && let Some((_, v)) = obj.iter().next() {
-                        error.actual = Some(v.to_string());
-                    }
+                    && let Some((_, v)) = obj.iter().next()
+                {
+                    error.actual = Some(v.to_string());
+                }
                 // No field, no shape — a payload-level
                 // violation does not map onto a single
                 // suggestion.
@@ -2051,13 +2052,14 @@ pub fn enrich_validation_error_with_topic(
 ) -> ValidationError {
     let mut enriched = enrich_validation_error(error, hat, payload, schema);
     if let Some(shape) = enriched.suggested_payload_shape.as_ref()
-        && shape.is_object() {
-            enriched.suggested_command = Some(format!(
-                "ralph emit {topic} --policy-check -j '{shape}'",
-                topic = topic,
-                shape = shape
-            ));
-        }
+        && shape.is_object()
+    {
+        enriched.suggested_command = Some(format!(
+            "ralph emit {topic} --policy-check -j '{shape}'",
+            topic = topic,
+            shape = shape
+        ));
+    }
     enriched
 }
 
@@ -2070,10 +2072,11 @@ fn resolved_allowed_values(
 ) -> Option<Vec<serde_json::Value>> {
     if let Some(hat_id) = hat
         && let Some(rules) = schema.hat_allowed_values.get(field)
-            && let Some(rule) = rules.iter().find(|rule| rule.hat_id == hat_id)
-                && !rule.values.is_empty() {
-                    return Some(rule.values.clone());
-                }
+        && let Some(rule) = rules.iter().find(|rule| rule.hat_id == hat_id)
+        && !rule.values.is_empty()
+    {
+        return Some(rule.values.clone());
+    }
 
     schema
         .allowed_values
@@ -2525,7 +2528,10 @@ pub fn emit_policy_validation_failure(
             let field_hint = if let Some((field, count)) = field_counts.iter().next() {
                 format!("missing required field '{field}' in {count}")
             } else if total > 0 {
-                failure.validation_errors[0].reason_code.replace('_', " ").clone()
+                failure.validation_errors[0]
+                    .reason_code
+                    .replace('_', " ")
+                    .clone()
             } else {
                 "policy check".to_string()
             };

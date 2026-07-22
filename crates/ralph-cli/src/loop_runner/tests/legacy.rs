@@ -3261,9 +3261,12 @@ fn u6_all_builtin_presets_pass_lint_gate() {
             .filter(|f| {
                 !matches!(
                     (preset.name, f.id.as_str()),
-                    ("ce-executor-pipeline-loop",
-"lint.preset.activation_egress_missing" | "lint.preset.handoff_pairing_broken"
-| "lint.preset.re_emit_trap")
+                    (
+                        "ce-executor-pipeline-loop",
+                        "lint.preset.activation_egress_missing"
+                            | "lint.preset.handoff_pairing_broken"
+                            | "lint.preset.re_emit_trap"
+                    )
                 )
             })
             .map(|f| format!("{}: {}", f.id, f.message))

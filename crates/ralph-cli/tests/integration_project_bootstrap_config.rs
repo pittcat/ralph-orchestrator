@@ -102,8 +102,11 @@ fn pipeline_helper_backend_is_honoured_by_dry_run() {
     let plan = dir.path().join("plan.md");
     fs::write(&prompt, "# prompt\n").expect("write prompt");
     fs::write(&plan, "# plan\n").expect("write plan");
-    fs::write(&cfg, pipeline_yml("ce-executor-pipeline", "plan.md", "PROMPT.x.md"))
-        .expect("write pipeline config");
+    fs::write(
+        &cfg,
+        pipeline_yml("ce-executor-pipeline", "plan.md", "PROMPT.x.md"),
+    )
+    .expect("write pipeline config");
 
     let (stdout, stderr, ok) = run_ralph(&[
         "--color",
@@ -119,7 +122,10 @@ fn pipeline_helper_backend_is_honoured_by_dry_run() {
         "--plan",
         plan.to_str().unwrap(),
     ]);
-    assert!(ok, "dry-run must succeed; stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        ok,
+        "dry-run must succeed; stderr: {stderr}\nstdout: {stdout}"
+    );
     assert!(
         stdout.contains("Backend: claude"),
         "effective backend must be the operator-supplied 'claude' from \
@@ -139,8 +145,11 @@ fn pipeline_helper_max_iterations_is_honoured_by_dry_run() {
     let plan = dir.path().join("plan.md");
     fs::write(&prompt, "# prompt\n").expect("write prompt");
     fs::write(&plan, "# plan\n").expect("write plan");
-    fs::write(&cfg, pipeline_yml("ce-executor-pipeline", "plan.md", "PROMPT.x.md"))
-        .expect("write pipeline config");
+    fs::write(
+        &cfg,
+        pipeline_yml("ce-executor-pipeline", "plan.md", "PROMPT.x.md"),
+    )
+    .expect("write pipeline config");
 
     let (stdout, stderr, ok) = run_ralph(&[
         "--color",
@@ -156,7 +165,10 @@ fn pipeline_helper_max_iterations_is_honoured_by_dry_run() {
         "--plan",
         plan.to_str().unwrap(),
     ]);
-    assert!(ok, "dry-run must succeed; stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        ok,
+        "dry-run must succeed; stderr: {stderr}\nstdout: {stdout}"
+    );
     assert!(
         stdout.contains("Max iterations: 42"),
         "effective max_iterations must come from the helper's emitted \
@@ -174,8 +186,11 @@ fn pipeline_helper_max_runtime_is_honoured_by_dry_run() {
     let plan = dir.path().join("plan.md");
     fs::write(&prompt, "# prompt\n").expect("write prompt");
     fs::write(&plan, "# plan\n").expect("write plan");
-    fs::write(&cfg, pipeline_yml("ce-executor-pipeline", "plan.md", "PROMPT.x.md"))
-        .expect("write pipeline config");
+    fs::write(
+        &cfg,
+        pipeline_yml("ce-executor-pipeline", "plan.md", "PROMPT.x.md"),
+    )
+    .expect("write pipeline config");
 
     let (stdout, stderr, ok) = run_ralph(&[
         "--color",
@@ -191,7 +206,10 @@ fn pipeline_helper_max_runtime_is_honoured_by_dry_run() {
         "--plan",
         plan.to_str().unwrap(),
     ]);
-    assert!(ok, "dry-run must succeed; stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        ok,
+        "dry-run must succeed; stderr: {stderr}\nstdout: {stdout}"
+    );
     assert!(
         stdout.contains("Max runtime: 3600s"),
         "effective max_runtime must come from the helper's emitted \
@@ -214,8 +232,11 @@ fn pipeline_helper_prompt_file_is_honoured_by_dry_run() {
     let plan = dir.path().join("plan.md");
     fs::write(&prompt, "# prompt\n").expect("write prompt");
     fs::write(&plan, "# plan\n").expect("write plan");
-    fs::write(&cfg, pipeline_yml("ce-executor-pipeline", "plan.md", "PROMPT.x.md"))
-        .expect("write pipeline config");
+    fs::write(
+        &cfg,
+        pipeline_yml("ce-executor-pipeline", "plan.md", "PROMPT.x.md"),
+    )
+    .expect("write pipeline config");
 
     let (stdout, stderr, ok) = run_ralph(&[
         "--color",
@@ -231,7 +252,10 @@ fn pipeline_helper_prompt_file_is_honoured_by_dry_run() {
         "--plan",
         plan.to_str().unwrap(),
     ]);
-    assert!(ok, "dry-run must succeed; stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        ok,
+        "dry-run must succeed; stderr: {stderr}\nstdout: {stdout}"
+    );
     assert!(
         stdout.contains("PROMPT.x.md"),
         "effective prompt_file must reference the helper's emitted \
@@ -270,8 +294,11 @@ core: {}
     let plan = dir.path().join("plan.md");
     fs::write(&prompt, "# prompt\n").expect("write prompt");
     fs::write(&plan, "# plan\n").expect("write plan");
-    fs::write(&cfg, pipeline_yml("ce-executor-pipeline", "plan.md", "PROMPT.x.md"))
-        .expect("write pipeline config");
+    fs::write(
+        &cfg,
+        pipeline_yml("ce-executor-pipeline", "plan.md", "PROMPT.x.md"),
+    )
+    .expect("write pipeline config");
 
     let (stdout, stderr, ok) = run_ralph(&[
         "--color",
@@ -287,7 +314,10 @@ core: {}
         "--plan",
         plan.to_str().unwrap(),
     ]);
-    assert!(ok, "dry-run must succeed; stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        ok,
+        "dry-run must succeed; stderr: {stderr}\nstdout: {stdout}"
+    );
     // The dry-run reports a canonicalised (possibly absolute) path
     // for the effective prompt file. Assert on the basename so we
     // are robust to canonicalisation, but assert that the pipeline

@@ -803,12 +803,13 @@ fn show_hat<W: Write>(
     // isolated mode. Surface them so operators/agents can discover why a
     // topic is consumed by more than one hat.
     if let Some(config) = config_registry.get_config(&hat.id)
-        && !config.trigger_multi_consumer_topics.is_empty() {
-            writeln!(writer, "\nMulti-consumer topics (opt-in):")?;
-            for topic in &config.trigger_multi_consumer_topics {
-                writeln!(writer, "  - {}", topic)?;
-            }
+        && !config.trigger_multi_consumer_topics.is_empty()
+    {
+        writeln!(writer, "\nMulti-consumer topics (opt-in):")?;
+        for topic in &config.trigger_multi_consumer_topics {
+            writeln!(writer, "  - {}", topic)?;
         }
+    }
 
     if !hat.instructions.is_empty() {
         writeln!(writer, "\nInstructions:")?;

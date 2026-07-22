@@ -41,7 +41,7 @@
 
 use super::super::*;
 use crate::loop_runner::wave::{
-    is_supervisor_path_enabled, BridgeError, MockSupervisorBridge, SlotBinding, SupervisorBridge,
+    BridgeError, MockSupervisorBridge, SlotBinding, SupervisorBridge, is_supervisor_path_enabled,
 };
 use ralph_core::supervisor::{PhaseInputs, WaveKind};
 use std::collections::HashMap;
@@ -269,8 +269,8 @@ fn bridge_off_no_feature_returns_error_path() {
 #[cfg(feature = "supervisor-db")]
 #[test]
 fn build_supervisor_bridge_relative_db_path_resolves_under_ralph_dir() {
-    use ralph_core::config::SupervisorConfig;
     use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let ctx = LoopContext::primary(tmp.path().to_path_buf());
@@ -293,8 +293,8 @@ fn build_supervisor_bridge_relative_db_path_resolves_under_ralph_dir() {
 #[cfg(feature = "supervisor-db")]
 #[test]
 fn build_supervisor_bridge_absolute_db_path_honoured_as_is() {
-    use ralph_core::config::SupervisorConfig;
     use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let ctx = LoopContext::primary(tmp.path().to_path_buf());
@@ -321,8 +321,8 @@ fn build_supervisor_bridge_absolute_db_path_honoured_as_is() {
 #[cfg(not(feature = "supervisor-db"))]
 #[test]
 fn build_supervisor_bridge_without_feature_enabled_returns_error() {
-    use ralph_core::config::SupervisorConfig;
     use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let ctx = LoopContext::primary(tmp.path().to_path_buf());
@@ -351,8 +351,8 @@ fn build_supervisor_bridge_without_feature_enabled_returns_error() {
 #[cfg(feature = "supervisor-db")]
 #[test]
 fn build_supervisor_bridge_default_db_path_collapses_to_single_ralph() {
-    use ralph_core::config::SupervisorConfig;
     use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let ctx = LoopContext::primary(tmp.path().to_path_buf());
@@ -384,8 +384,8 @@ fn build_supervisor_bridge_default_db_path_collapses_to_single_ralph() {
 #[cfg(feature = "supervisor-db")]
 #[test]
 fn build_supervisor_bridge_absolute_db_path_outside_workspace_preserved() {
-    use ralph_core::config::SupervisorConfig;
     use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
 
     let workspace = tempfile::tempdir().expect("workspace");
     let db_dir = tempfile::tempdir().expect("db dir");
@@ -497,7 +497,7 @@ fn review_kind_bind_slot_returns_none_for_shared_readonly() {
 #[test]
 fn recover_active_waves_at_startup_returns_report_on_empty_store() {
     use ralph_core::supervisor::{
-        recover_active_waves_at_startup, InMemorySupervisorStore, SupervisorStore,
+        InMemorySupervisorStore, SupervisorStore, recover_active_waves_at_startup,
     };
     use std::sync::Arc;
 
@@ -563,8 +563,8 @@ fn supervisor_capability_gate_truth_table() {
 /// `ralph run`.
 #[test]
 fn supervisor_disabled_does_not_call_bridge_builder() {
-    use ralph_core::config::SupervisorConfig;
     use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
 
     // Pre-condition: pipeline preset does NOT opt into supervisor.
     assert!(
@@ -618,8 +618,8 @@ fn supervisor_disabled_does_not_call_bridge_builder() {
 #[cfg(feature = "supervisor-db")]
 #[test]
 fn supervisor_enabled_isolated_invokes_bridge_builder_once() {
-    use ralph_core::config::SupervisorConfig;
     use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
 
     assert!(
         is_supervisor_path_enabled(true, true),
@@ -658,8 +658,8 @@ fn supervisor_enabled_isolated_invokes_bridge_builder_once() {
 /// before those units run.
 #[test]
 fn pipeline_disabled_workspace_has_no_supervisor_artifacts() {
-    use ralph_core::config::SupervisorConfig;
     use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let ctx = LoopContext::primary(tmp.path().to_path_buf());

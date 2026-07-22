@@ -156,10 +156,7 @@ impl EmitStage for RepairDispatchStage {
         //     `Retry` (consumes one unit of budget).
         //   - `Closed` → leave the action as-is; the
         //     machine surfaces `IllegalTransition`.
-        let machine = ctx
-            .repair_states
-            .entry(task_key)
-            .or_default();
+        let machine = ctx.repair_states.entry(task_key).or_default();
         let action = if is_budget_tracked_topic(event.topic.as_str()) {
             use crate::event_loop::repair_flow::RepairState;
             match machine.state() {

@@ -543,8 +543,7 @@ pub const FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_FIELD: &str =
 /// turns the gated topic into a hard reject. The lint surfaces this
 /// at preset-load time instead. `Warn` in default mode, `Error` in
 /// strict.
-pub const FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP: &str =
-    "preset.payload_consistency_unknown_op";
+pub const FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP: &str = "preset.payload_consistency_unknown_op";
 
 /// U3 (fix-plan 2026-07-22-004 adversarial:A1): a `payload_consistency`
 /// rule's `when` is not a JSON object (it is a scalar, array, or null).

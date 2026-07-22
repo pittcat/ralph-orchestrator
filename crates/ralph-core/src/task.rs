@@ -227,9 +227,10 @@ pub fn lifecycle_close_delegate_hat(
         return source_hat.to_string();
     }
     if let Some(owner) = task.owner_hat_id.as_deref()
-        && coordinator_hats.iter().any(|h| h == owner) {
-            return owner.to_string();
-        }
+        && coordinator_hats.iter().any(|h| h == owner)
+    {
+        return owner.to_string();
+    }
     coordinator_hats
         .first()
         .cloned()

@@ -745,7 +745,6 @@ fn test_review_start_rejected_after_fix_unit_chain_exhausted() {
     use crate::event_loop::loop_state::LoopState;
     use crate::task::Task;
     use crate::task_store::TaskStore;
-    
 
     // Pre-populate tasks.jsonl with two fix-unit
     // tasks that are both Closed (so the chain is

@@ -283,7 +283,9 @@ hats:
     // P0-4 of 2026-06-29-006: default timeout is 600s, so we
     // need a t0 at least 600s in the past for the entry to be
     // considered expired.
-    let t0 = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(700)).unwrap();
+    let t0 = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(700))
+        .unwrap();
     event_loop.state.handoff_tracker.on_handoff_accepted(
         "work.ready",
         "executor",
@@ -388,7 +390,9 @@ hats:
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
     // Pre-load a handoff that is already past its deadline.
-    let t0 = Instant::now().checked_sub(Duration::from_secs(700)).unwrap();
+    let t0 = Instant::now()
+        .checked_sub(Duration::from_secs(700))
+        .unwrap();
     event_loop.state.handoff_tracker.on_handoff_accepted(
         "work.ready",
         "executor",

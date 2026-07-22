@@ -411,15 +411,16 @@ fn remove_loop_termination_sentinel(loop_context: &Option<LoopContext>) {
 fn write_loop_termination_sentinel(loop_context: &Option<LoopContext>, reason: &TerminationReason) {
     let path = loop_termination_sentinel_path(loop_context);
     if let Some(parent) = path.parent()
-        && let Err(e) = fs::create_dir_all(parent) {
-            warn!(
-                target: "ralph_cli::loop_runner",
-                error = %e,
-                path = %path.display(),
-                "Failed to create termination sentinel parent directory"
-            );
-            return;
-        }
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        warn!(
+            target: "ralph_cli::loop_runner",
+            error = %e,
+            path = %path.display(),
+            "Failed to create termination sentinel parent directory"
+        );
+        return;
+    }
     match serde_json::to_string(reason) {
         Ok(json) => {
             if let Err(e) = fs::write(&path, json) {
@@ -560,9 +561,10 @@ pub async fn run_loop_impl(
     )
     .await;
     if let Ok(ref reason) = result
-        && !reason.is_success() {
-            write_loop_termination_sentinel(&loop_context, reason);
-        }
+        && !reason.is_success()
+    {
+        write_loop_termination_sentinel(&loop_context, reason);
+    }
     result
 }
 
@@ -1790,14 +1792,15 @@ async fn run_loop_impl_inner(
     // silently re-anchor the review diff base to the current HEAD if the file
     // was ever lost.
     if ctx.is_primary()
-        && let Err(e) = ensure_plan_baseline_from_head(ctx.workspace(), plan_id.as_deref()) {
-            warn!(
-                workspace = %ctx.workspace().display(),
-                plan_id = ?plan_id,
-                error = %e,
-                "Failed to ensure plan baseline"
-            );
-        }
+        && let Err(e) = ensure_plan_baseline_from_head(ctx.workspace(), plan_id.as_deref())
+    {
+        warn!(
+            workspace = %ctx.workspace().display(),
+            plan_id = ?plan_id,
+            error = %e,
+            "Failed to ensure plan baseline"
+        );
+    }
 
     let persisted_baseline = read_plan_baseline(ctx.workspace(), plan_id.as_deref());
     if persisted_baseline.is_none() && !ctx.is_primary() {
@@ -4897,7 +4900,7 @@ mod sync_timeout_tests {
 /// `preset_name = ""` and the rule silently bypasses.
 #[cfg(test)]
 mod u1_preset_name_aware_lint_gate_wiring {
-    
+
     use crate::loop_runner::preset_lint_gate::enforce_preset_lint_gate;
     use ralph_core::RalphConfig;
 

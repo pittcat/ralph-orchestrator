@@ -29,8 +29,8 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use ralph_core::supervisor::worktree_bind::WorktreeFactory;
 use ralph_core::supervisor::PhaseInputs;
+use ralph_core::supervisor::worktree_bind::WorktreeFactory;
 use ralph_core::supervisor::{
     CoordinatorAction, InMemorySupervisorStore, SupervisorCoordinator, SupervisorStore, WaveKind,
     WaveSnapshot,
@@ -43,7 +43,7 @@ use ralph_core::supervisor::{
 use ralph_core::supervisor::DefaultWorktreeFactory;
 pub use ralph_core::supervisor::WorktreeError as BridgeWorktreeError;
 pub use ralph_core::supervisor::{
-    is_supervisor_path_enabled, BridgeDispatchOutcome, BridgeError, SlotBinding, SupervisorBridge,
+    BridgeDispatchOutcome, BridgeError, SlotBinding, SupervisorBridge, is_supervisor_path_enabled,
 };
 
 /// Bundle the production bridge needs from the runtime so it

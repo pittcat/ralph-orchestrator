@@ -100,7 +100,7 @@ fn u10_publish_report_done_does_not_trigger_termination() {
     // `terminal_emits` set after U9 retired the
     // mirror). The pipeline probe is the canonical
     // authority.
-    
+
     let event_probe = Event::new("report.done", "{}");
     assert!(
         !event_loop.stage_pipeline.is_terminal(&event_probe),

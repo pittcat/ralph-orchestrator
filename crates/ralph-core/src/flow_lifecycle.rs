@@ -1458,7 +1458,9 @@ pub mod incomplete_wave_gate {
             // even been activated. The U4 path covers those
             // cases via `inject_review_aggregate_timeouts`.
             let phase = registry.get(wave_id).map(|r| r.phase);
-            if let Some(FlowPhase::WorkersActive | FlowPhase::Spawning) = phase { return None }
+            if let Some(FlowPhase::WorkersActive | FlowPhase::Spawning) = phase {
+                return None;
+            }
             Some(PlanBlockedPayload {
                 reason: PlanBlockedPayload::REASON,
                 wave_id: wave_id.to_string(),

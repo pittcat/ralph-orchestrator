@@ -3,8 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// State machine configuration for instance lifecycle validation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StateMachineConfig {
     /// When true, enable state machine validation.
     #[serde(default)]
@@ -31,10 +30,8 @@ pub struct StateMachineConfig {
     pub transitions: Vec<TransitionConfig>,
 }
 
-
 /// Configuration for extracting an instance key from an event payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InstanceKeyConfig {
     /// The JSON field name within the payload to extract as the instance key.
     /// Example: "task_key" extracts `payload.task_key`.
@@ -44,7 +41,6 @@ pub struct InstanceKeyConfig {
     #[serde(default)]
     pub required_for: Vec<String>,
 }
-
 
 /// A single state transition in the state machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]

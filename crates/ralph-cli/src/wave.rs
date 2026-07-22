@@ -734,19 +734,22 @@ pub fn write_wave_events_with_provenance(
 
         // Add hat provenance if available
         if let Some(hat_val) = hat
-            && let Some(obj) = record.as_object_mut() {
-                obj.insert("hat".to_string(), serde_json::json!(hat_val));
-            }
+            && let Some(obj) = record.as_object_mut()
+        {
+            obj.insert("hat".to_string(), serde_json::json!(hat_val));
+        }
 
         // U2: Inject idempotency fields when present
         if let Some(ik) = idempotency_key
-            && let Some(obj) = record.as_object_mut() {
-                obj.insert("idempotency_key".to_string(), serde_json::json!(ik));
-            }
+            && let Some(obj) = record.as_object_mut()
+        {
+            obj.insert("idempotency_key".to_string(), serde_json::json!(ik));
+        }
         if let Some(ih) = idempotency_hash
-            && let Some(obj) = record.as_object_mut() {
-                obj.insert("idempotency_hash".to_string(), serde_json::json!(ih));
-            }
+            && let Some(obj) = record.as_object_mut()
+        {
+            obj.insert("idempotency_hash".to_string(), serde_json::json!(ih));
+        }
 
         let json_line = serde_json::to_string(&record)?;
         lines.push_str(&json_line);
@@ -1416,7 +1419,10 @@ mod tests {
         // We cannot mutate env in tests under forbid(unsafe), so this
         // asserts the guard shape: when set to "1", nested waves are
         // rejected. The integration test would exercise this end-to-end.
-        assert!(result.as_deref() != Ok("1"), "nested wave check should reject inside worker")
+        assert!(
+            result.as_deref() != Ok("1"),
+            "nested wave check should reject inside worker"
+        )
     }
 
     #[test]

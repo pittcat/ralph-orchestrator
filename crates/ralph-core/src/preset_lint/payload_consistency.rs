@@ -401,7 +401,11 @@ mod tests {
             has_finding(&findings, FINDING_PAYLOAD_CONSISTENCY_DUPLICATE_ID),
             "duplicate id must be flagged, got {findings:?}"
         );
-        assert!(findings[0].message.contains("fix-done-blocked-zero-fixes-applied"));
+        assert!(
+            findings[0]
+                .message
+                .contains("fix-done-blocked-zero-fixes-applied")
+        );
     }
 
     /// 3. Unknown topic → `FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_TOPIC`.
@@ -492,11 +496,7 @@ mod tests {
     ///    strictness-appropriate severity.
     #[test]
     fn non_object_when_fails_with_strictness_severity() {
-        let config = config_with_rules(vec![rule(
-            "r1",
-            "fix.done",
-            json!("literal"),
-        )]);
+        let config = config_with_rules(vec![rule("r1", "fix.done", json!("literal"))]);
 
         for (strictness, expected_severity) in [
             (LintStrictness::Default, LintSeverity::Warn),
@@ -561,9 +561,11 @@ mod tests {
                 .all(|f| f.severity == LintSeverity::Warn)
         );
         let strict_findings = check_payload_consistency(&config, LintStrictness::Strict);
-        assert!(strict_findings
-            .iter()
-            .all(|f| f.severity == LintSeverity::Error));
+        assert!(
+            strict_findings
+                .iter()
+                .all(|f| f.severity == LintSeverity::Error)
+        );
     }
 
     /// 7. No `event_policy` → no findings (opt-in surface).

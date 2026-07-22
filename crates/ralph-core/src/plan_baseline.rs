@@ -51,9 +51,10 @@ pub fn derive_baseline_key(
         .map(|w| w.join(prompt_file))
         .unwrap_or_else(|| PathBuf::from(prompt_file));
     if let Ok(content) = std::fs::read_to_string(&resolved)
-        && !content.trim().is_empty() {
-            return Some(format!("prompt-{}", short_hash(content.as_bytes())));
-        }
+        && !content.trim().is_empty()
+    {
+        return Some(format!("prompt-{}", short_hash(content.as_bytes())));
+    }
     None
 }
 

@@ -73,7 +73,8 @@ pub enum EvalOutcome {
 /// Shared with `crate::preset_lint::payload_consistency` so lint and
 /// runtime stay in lockstep on the whitelist. Adding a new op here
 /// must revisit both call sites and the lint test matrix.
-pub(crate) const WHITELISTED_PREDICATE_OPS: &[&str] = &["eq", "ne", "gt", "gte", "exists", "non_empty"];
+pub(crate) const WHITELISTED_PREDICATE_OPS: &[&str] =
+    &["eq", "ne", "gt", "gte", "exists", "non_empty"];
 
 /// Evaluate a parsed `when` against a single payload.
 ///

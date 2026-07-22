@@ -212,35 +212,35 @@ impl TaskStore {
         if let (Some(log_arc), Some(loop_id)) = (
             self.shared_idempotent_log.as_ref(),
             self.loop_id_for_idempotent_log.as_deref(),
-        )
-            && let Ok(mut log) = log_arc.lock()
-                && !log.loop_id().is_empty() {
-                    for task in &self.tasks {
-                        let is_final = task.status.is_terminal();
-                        let payload = match serde_json::to_value(task) {
-                            Ok(v) => v,
-                            Err(err) => {
-                                tracing::warn!(
-                                    target: "ralph_core::task_store",
-                                    task_id = %task.id,
-                                    error = %err,
-                                    "task serialization failed for hot-path idempotent log; skipping",
-                                );
-                                continue;
-                            }
-                        };
-                        if let Err(err) = crate::event_loop::idempotent_wiring::write_task(
-                            &mut log, &task.id, loop_id, payload, is_final,
-                        ) {
-                            tracing::warn!(
-                                target: "ralph_core::task_store",
-                                task_id = %task.id,
-                                error = %err,
-                                "hot-path idempotent log write failed; continuing without blocking the loop",
-                            );
-                        }
+        ) && let Ok(mut log) = log_arc.lock()
+            && !log.loop_id().is_empty()
+        {
+            for task in &self.tasks {
+                let is_final = task.status.is_terminal();
+                let payload = match serde_json::to_value(task) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "ralph_core::task_store",
+                            task_id = %task.id,
+                            error = %err,
+                            "task serialization failed for hot-path idempotent log; skipping",
+                        );
+                        continue;
                     }
+                };
+                if let Err(err) = crate::event_loop::idempotent_wiring::write_task(
+                    &mut log, &task.id, loop_id, payload, is_final,
+                ) {
+                    tracing::warn!(
+                        target: "ralph_core::task_store",
+                        task_id = %task.id,
+                        error = %err,
+                        "hot-path idempotent log write failed; continuing without blocking the loop",
+                    );
                 }
+            }
+        }
 
         Ok(())
     }
@@ -746,9 +746,10 @@ impl TaskStore {
         // are therefore allowed to coexist — that matches the
         // plan's "单 U 拆 sub-unit" carve-out.
         if self.enforce_current_unit
-            && let Some(collision_idx) = self.find_unit_collision_idx(&task) {
-                return &self.tasks[collision_idx];
-            }
+            && let Some(collision_idx) = self.find_unit_collision_idx(&task)
+        {
+            return &self.tasks[collision_idx];
+        }
 
         self.tasks.push(task);
         self.tasks.last().unwrap()

@@ -793,9 +793,10 @@ impl StateProjector {
             // an `io::Error` we cannot surface per-event; the
             // apply loop must remain infallible.
             if self.ctx.tasks_cache.is_empty()
-                && let Ok(store) = crate::task_store::TaskStore::load(&self.ctx.tasks_path) {
-                    self.ctx.tasks_cache = store.all().to_vec();
-                }
+                && let Ok(store) = crate::task_store::TaskStore::load(&self.ctx.tasks_path)
+            {
+                self.ctx.tasks_cache = store.all().to_vec();
+            }
             if self.ctx.progress_cache.completed_steps.is_empty()
                 && self.ctx.progress_cache.current_step.is_none()
             {

@@ -283,11 +283,7 @@ mod tests {
     #[test]
     fn parse_marker_state_missing_when_only_end() {
         let content = build_content(
-            &[
-                "# My Project",
-                "",
-                "<!-- ralph:end hang-prevention -->",
-            ],
+            &["# My Project", "", "<!-- ralph:end hang-prevention -->"],
             true,
         );
         let (state, begin, end) = parse_marker_state(&content, "hang-prevention");

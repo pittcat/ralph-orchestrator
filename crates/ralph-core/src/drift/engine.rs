@@ -209,17 +209,18 @@ impl DriftEngine {
                 // best-effort: errors are swallowed via the
                 // helper's own `tracing::warn!`.
                 if !loop_id.is_empty()
-                    && let Ok(mut log) = event_loop.idempotent_log().lock() {
-                        let payload = match serde_json::to_value(&finding) {
-                            Ok(v) => v,
-                            Err(_) => serde_json::Value::Null,
-                        };
-                        event_loop.diagnostics().log_drift_via_idempotent(
-                            &mut log,
-                            &finding.finding_id,
-                            payload,
-                        );
-                    }
+                    && let Ok(mut log) = event_loop.idempotent_log().lock()
+                {
+                    let payload = match serde_json::to_value(&finding) {
+                        Ok(v) => v,
+                        Err(_) => serde_json::Value::Null,
+                    };
+                    event_loop.diagnostics().log_drift_via_idempotent(
+                        &mut log,
+                        &finding.finding_id,
+                        payload,
+                    );
+                }
                 event_loop
                     .diagnostics()
                     .log_drift(finding_to_journal_entry(&finding));
@@ -322,15 +323,16 @@ impl DriftEngine {
                 // `MutexGuard` before the `event_loop.diagnostics()`
                 // borrow so the borrow checker is happy.
                 if !idempotent_loop_id.is_empty()
-                    && let Ok(mut log) = event_loop.idempotent_log().lock() {
-                        let payload = match serde_json::to_value(&envelope) {
-                            Ok(v) => v,
-                            Err(_) => serde_json::Value::Null,
-                        };
-                        event_loop.diagnostics().log_recovery_via_idempotent(
-                            &mut log, &key, payload, /* is_final = */ true,
-                        );
-                    }
+                    && let Ok(mut log) = event_loop.idempotent_log().lock()
+                {
+                    let payload = match serde_json::to_value(&envelope) {
+                        Ok(v) => v,
+                        Err(_) => serde_json::Value::Null,
+                    };
+                    event_loop.diagnostics().log_recovery_via_idempotent(
+                        &mut log, &key, payload, /* is_final = */ true,
+                    );
+                }
                 event_loop
                     .diagnostics()
                     .log_recovery(RecoveryJournalEntry::from_envelope(envelope.clone(), notes));

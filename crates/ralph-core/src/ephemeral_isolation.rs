@@ -254,35 +254,36 @@ impl EphemeralIsolation {
             .current_dir(repo_root)
             .output();
         if let Ok(out) = output
-            && out.status.success() {
-                // Cache the raw output fingerprint (byte count of the
-                // git stdout) — when the workspace's untracked set is
-                // unchanged, the byte count is unchanged, and the
-                // next call's `cache_hit` short-circuits without
-                // re-running the per-file work below.
-                let raw_bytes = out.stdout.len() as u64;
-                let mut paths: Vec<PathBuf> = Vec::new();
-                for chunk in out.stdout.split(|b| *b == 0) {
-                    if chunk.is_empty() {
-                        continue;
-                    }
-                    if let Ok(rel) = std::str::from_utf8(chunk) {
-                        let p = repo_root.join(rel);
-                        if p.is_file() {
-                            paths.push(p);
-                        }
+            && out.status.success()
+        {
+            // Cache the raw output fingerprint (byte count of the
+            // git stdout) — when the workspace's untracked set is
+            // unchanged, the byte count is unchanged, and the
+            // next call's `cache_hit` short-circuits without
+            // re-running the per-file work below.
+            let raw_bytes = out.stdout.len() as u64;
+            let mut paths: Vec<PathBuf> = Vec::new();
+            for chunk in out.stdout.split(|b| *b == 0) {
+                if chunk.is_empty() {
+                    continue;
+                }
+                if let Ok(rel) = std::str::from_utf8(chunk) {
+                    let p = repo_root.join(rel);
+                    if p.is_file() {
+                        paths.push(p);
                     }
                 }
-                self.last_events_size = Some(raw_bytes);
-                self.last_events_mtime = paths
-                    .iter()
-                    .filter_map(|p| fs::metadata(p).ok())
-                    .filter_map(|m| m.modified().ok())
-                    .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .max();
-                return paths;
             }
+            self.last_events_size = Some(raw_bytes);
+            self.last_events_mtime = paths
+                .iter()
+                .filter_map(|p| fs::metadata(p).ok())
+                .filter_map(|m| m.modified().ok())
+                .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .max();
+            return paths;
+        }
 
         // Fallback: walk the immediate children of `repo_root` only.
         // We do NOT recurse — a recursive walk could be expensive on

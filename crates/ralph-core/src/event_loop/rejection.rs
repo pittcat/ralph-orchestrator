@@ -766,12 +766,13 @@ pub fn enrich_task_resume_payload_full(
         "message": free_form_message,
     });
     if let Some(stage_value) = stage
-        && let serde_json::Value::Object(ref mut map) = obj {
-            map.insert(
-                "stage".into(),
-                serde_json::Value::String(stage_value.as_str().into()),
-            );
-        }
+        && let serde_json::Value::Object(ref mut map) = obj
+    {
+        map.insert(
+            "stage".into(),
+            serde_json::Value::String(stage_value.as_str().into()),
+        );
+    }
     // 2026-06-23-005 U1 (R1+R2): typed kind SSOT.
     let kind_value_string = kind
         .map(|k| k.reason_code().to_string())

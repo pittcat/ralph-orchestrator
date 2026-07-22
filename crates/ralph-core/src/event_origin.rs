@@ -218,18 +218,23 @@ pub fn is_anonymous_business_topic(
     // 3) hat 字段存在:交给 scope enforcement
     //    (不论 hat 注册与否,scope_hat = event.hat 路径已被覆盖)
     if let Some(ref hat) = event.hat
-        && !hat.is_empty() {
-            return false;
-        }
+        && !hat.is_empty()
+    {
+        return false;
+    }
     // 4) source / triggered 字段指向注册 hat → 有 provenance,放行
     if let Some(ref source) = event.source
-        && !source.is_empty() && registered_hats.ids().any(|h| h.as_str() == source) {
-            return false;
-        }
+        && !source.is_empty()
+        && registered_hats.ids().any(|h| h.as_str() == source)
+    {
+        return false;
+    }
     if let Some(ref trig) = event.triggered
-        && !trig.is_empty() && registered_hats.ids().any(|h| h.as_str() == trig) {
-            return false;
-        }
+        && !trig.is_empty()
+        && registered_hats.ids().any(|h| h.as_str() == trig)
+    {
+        return false;
+    }
     // 5) isolated 模式下,若 isolated_hat 是注册 hat(几乎都是),
     //    scope enforcement 会 fallback 到 isolated_hat——属于既有的
     //    "agent backend 无 hat 但 fallback 到 current_isolated_hat"
@@ -342,18 +347,17 @@ pub fn validate_event_origin(
     // a workflow hat (e.g. signing `review.complete` or `work.start`).
     // P1-12: uses `is_ralph_control_topic` so future `ralph.*` topics are
     // automatically recognized without updating the constant list.
-    if event.hat.as_deref() == Some("ralph")
-        && !is_ralph_control_topic(topic_str) {
-            warn!(
-                topic = %topic_str,
-                "Builtin ralph hat may only publish control topics; rejecting business topic"
-            );
-            return OriginCheck::Rejected {
-                topic: topic_str.to_string(),
-                hat: event.hat.clone(),
-                reason: "ralph_control_only",
-            };
-        }
+    if event.hat.as_deref() == Some("ralph") && !is_ralph_control_topic(topic_str) {
+        warn!(
+            topic = %topic_str,
+            "Builtin ralph hat may only publish control topics; rejecting business topic"
+        );
+        return OriginCheck::Rejected {
+            topic: topic_str.to_string(),
+            hat: event.hat.clone(),
+            reason: "ralph_control_only",
+        };
+    }
 
     // Registered hat + business topic: enforce publish scope.
     if !registry.can_publish(&hat_id, topic_str) {

@@ -342,13 +342,14 @@ pub fn dispatch_trae_stream_event<H: StreamHandler>(
         } => {
             if user_is_tool_result(subtype.as_deref(), tool_use_id.as_deref(), &content) {
                 if let Some(output) = extract_user_tool_result_text(&content)
-                    && !output.is_empty() {
-                        // We don't have the tool call ID here in the legacy
-                        // dispatch path; the executor routes this through
-                        // on_text so LOOP_COMPLETE detection still works.
-                        handler.on_text(&output);
-                        extracted_text.push_str(&output);
-                    }
+                    && !output.is_empty()
+                {
+                    // We don't have the tool call ID here in the legacy
+                    // dispatch path; the executor routes this through
+                    // on_text so LOOP_COMPLETE detection still works.
+                    handler.on_text(&output);
+                    extracted_text.push_str(&output);
+                }
             } else if let Some(text) = message.get("content").and_then(|v| v.as_str()) {
                 // Original user input is also text — include it for debug
                 // visibility but don't drive tool flow.

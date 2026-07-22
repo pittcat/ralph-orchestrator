@@ -490,9 +490,10 @@ pub fn fix_unit_known_ids(
     for t in &tasks {
         let Some(k) = t.key.as_deref() else { continue };
         if is_fix_unit_key(k)
-            && let Some(id) = fix_id_from_key(k) {
-                ids.insert(id);
-            }
+            && let Some(id) = fix_id_from_key(k)
+        {
+            ids.insert(id);
+        }
     }
     ids
 }

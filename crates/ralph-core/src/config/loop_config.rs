@@ -218,7 +218,6 @@ pub enum HintOp {
     Unknown(String),
 }
 
-
 /// 2026-07-03-005 plan (P0 fix C7): per-array-field element shape
 /// constraint. Applied to every element of the named array field.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -613,7 +612,6 @@ pub struct HandoffEnvelopeConfig {
     #[serde(default)]
     pub emit_result_summary: bool,
 }
-
 
 /// Configuration for the macro-edge next hint (U18 P2).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

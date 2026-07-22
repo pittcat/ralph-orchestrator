@@ -270,9 +270,10 @@ fn workspace_for_report(diagnostics_root: &Path, fallback_workspace: &Path) -> P
         // diagnostics_root looks like `<workspace>/.ralph/diagnostics`
         // → walk up to `<workspace>`.
         if let Some(ralph) = diagnostics_root.parent()
-            && let Some(ws) = ralph.parent() {
-                return ws.to_path_buf();
-            }
+            && let Some(ws) = ralph.parent()
+        {
+            return ws.to_path_buf();
+        }
     }
     fallback_workspace.to_path_buf()
 }

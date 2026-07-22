@@ -10,15 +10,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Where the event landed.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum Channel {
     Main,
     Repair,
     #[default]
     Unknown,
 }
-
 
 /// Inputs the runtime feeds to the helper.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -139,8 +139,8 @@ mod tests {
     use super::super::declaration::*;
     use super::super::snapshot::ViolationKind;
     use super::super::whitelist::allows;
-    use std::collections::BTreeMap;
     use super::*;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn build_serial_decl() -> PhaseAuthorityDeclaration {

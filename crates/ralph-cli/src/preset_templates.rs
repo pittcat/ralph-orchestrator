@@ -31,7 +31,6 @@ pub enum CheckProfile {
     RuntimeReady,
 }
 
-
 impl fmt::Display for CheckProfile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -194,7 +193,6 @@ pub enum TemplateDifficulty {
     Intermediate,
     Advanced,
 }
-
 
 /// Placeholder variable defined by a template.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -758,9 +756,10 @@ fn needs_quoting(value: &str) -> bool {
         '`',
     ];
     if let Some(first) = value.chars().next()
-        && RESERVED_START.contains(&first) {
-            return true;
-        }
+        && RESERVED_START.contains(&first)
+    {
+        return true;
+    }
 
     for ch in value.chars() {
         // Any control character forces quoting (we don't want raw \0,
@@ -826,10 +825,10 @@ fn contains_key_value_separator(value: &str) -> bool {
     for (i, &b) in bytes.iter().enumerate() {
         if b == b':'
             && i + 1 < bytes.len()
-                && (bytes[i + 1] == b' ' || bytes[i + 1] == b'\n' || bytes[i + 1] == b'\t')
-            {
-                return true;
-            }
+            && (bytes[i + 1] == b' ' || bytes[i + 1] == b'\n' || bytes[i + 1] == b'\t')
+        {
+            return true;
+        }
     }
     false
 }

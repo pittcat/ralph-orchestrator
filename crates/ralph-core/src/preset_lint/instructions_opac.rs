@@ -218,10 +218,11 @@ fn check_supervisor_coordination_emit(
                 // placeholders and bare topic names near the emit verb.
                 let lower = instructions.to_ascii_lowercase();
                 if let Some(emit_pos) = lower.find(emit)
-                    && let Some(topic_pos) = lower.find(topic) {
-                        let distance = (emit_pos as isize - topic_pos as isize).abs();
-                        if distance <= 80 {
-                            findings.push(
+                    && let Some(topic_pos) = lower.find(topic)
+                {
+                    let distance = (emit_pos as isize - topic_pos as isize).abs();
+                    if distance <= 80 {
+                        findings.push(
                                 LintFinding::new(
                                     FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC,
                                     format!(
@@ -230,9 +231,9 @@ fn check_supervisor_coordination_emit(
                                 )
                                 .with_hat(hat_id),
                             );
-                            return;
-                        }
+                        return;
                     }
+                }
             }
         }
     }

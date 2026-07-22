@@ -64,7 +64,8 @@ fn order_finding() -> LintFinding {
              before `mark_step_completed` (R3 / KTD-3). The current order would \
              let `progress_task_gate` see the step AFTER the task close and \
              reject the next emit, reintroducing the \
-             `ce-executor-serial-primary-20260619` 死循环.".to_string(),
+             `ce-executor-serial-primary-20260619` 死循环."
+            .to_string(),
         topic: Some(WORK_DONE_TOPIC.to_string()),
         hat: None,
         owner: None,

@@ -125,14 +125,11 @@ pub fn merge_hat_channel(
                         // when the agent did not provide one.
                         if !obj.contains_key("triggered")
                             && let Some(topic) = obj.get("topic").and_then(|v| v.as_str())
-                                && let Some(derived) =
-                                    config.and_then(|c| derive_triggered_for_topic(topic, c))
-                                {
-                                    obj.insert(
-                                        "triggered".to_string(),
-                                        serde_json::Value::String(derived),
-                                    );
-                                }
+                            && let Some(derived) =
+                                config.and_then(|c| derive_triggered_for_topic(topic, c))
+                        {
+                            obj.insert("triggered".to_string(), serde_json::Value::String(derived));
+                        }
                     }
                     serde_json::to_string(&value)?
                 }

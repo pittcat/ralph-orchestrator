@@ -1970,7 +1970,9 @@ pub fn detect_rejection_stall_kind(
         RejectionKind::UpstreamState,
         RejectionKind::PreCheck,
     ];
-    order.into_iter().find(|&kind| state.typed_lint_rejection_count(kind) >= REJECTION_WINDOW_THRESHOLD)
+    order
+        .into_iter()
+        .find(|&kind| state.typed_lint_rejection_count(kind) >= REJECTION_WINDOW_THRESHOLD)
 }
 
 #[cfg(test)]
