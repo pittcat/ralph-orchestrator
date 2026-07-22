@@ -707,22 +707,33 @@ impl SupervisorStore for RusqliteSupervisorStore {
     }
 
     fn recover_active_waves(&self) -> SupervisorStoreResult<Vec<WaveSnapshot>> {
-        self.with_conn(|conn| {
+        // U8 / R11 (crash-restart recovery): read the active wave
+        // ids under the connection lock, then RELEASE it before
+        // building snapshots. We must NOT call `fan_in_status`
+        // while still holding the guard — `fan_in_status`
+        // re-enters `with_conn`, and `std::sync::Mutex` is not
+        // reentrant, so nesting the two deadlocks the store the
+        // instant a wave survives a crash. The in-memory store
+        // mirror never exercises this path, which is why the
+        // deadlock stayed latent until the real-DB reopen tests.
+        let wave_ids: Vec<String> = self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT wave_id FROM waves
                  WHERE phase NOT IN ('done','failed')
                  ORDER BY wave_id ASC",
             )?;
-            let wave_ids: Vec<String> = stmt
+            let ids = stmt
                 .query_map([], |row| row.get(0))?
                 .collect::<Result<_, _>>()?;
-            drop(stmt);
-            let mut out = Vec::new();
-            for id in wave_ids {
-                out.push(self.fan_in_status(&id)?);
-            }
-            Ok(out)
-        })
+            Ok(ids)
+        })?;
+        // Lock released: each `fan_in_status` call takes and drops
+        // the guard on its own, so no reentrant acquisition.
+        let mut out = Vec::with_capacity(wave_ids.len());
+        for id in wave_ids {
+            out.push(self.fan_in_status(&id)?);
+        }
+        Ok(out)
     }
 
     fn list_worktree_paths(&self, wave_id: &str) -> SupervisorStoreResult<Vec<SlotResource>> {
@@ -1217,6 +1228,342 @@ mod tests {
             .unwrap();
         let calls = cleanup_calls_snapshot();
         assert!(calls.is_empty());
+    }
+}
+
+/// 2026-07-23-001 plan U8 / R11: real-rusqlite crash/restart
+/// recovery evidence.
+///
+/// Every test in this module drives a **file-backed** SQLite
+/// database inside a `tempfile::TempDir` (never the dev repo's
+/// `.ralph/supervisor.db`), writes wave/slot state, **drops the
+/// store entirely** to simulate an unclean process exit, then
+/// reopens the *same path with a brand-new connection* and proves
+/// the recovery contract:
+///
+/// 1. state is continuous across the reopen (slot statuses,
+///    counts and the `merged_to_events` inject key all survive —
+///    something an in-memory store fundamentally cannot do);
+/// 2. `recover_active_waves_at_startup` does NOT re-dispatch
+///    completed slots and does NOT re-inject an already-merged
+///    coordination event;
+/// 3. genuinely pending slots resume dispatch, still gated by the
+///    U3/U4 backpressure cap reconstructed from persisted rows.
+///
+/// A fresh connection reading data that a dropped connection wrote
+/// is, by construction, proof the evidence came from the DB file on
+/// disk rather than from process memory.
+#[cfg(feature = "supervisor-db")]
+#[cfg(test)]
+mod recovery_reopen_tests {
+    use super::RusqliteSupervisorStore;
+    use crate::supervisor::{
+        CoordinatorAction, PhaseInputs, SlotResource, SlotStatus, SupervisorCoordinator,
+        SupervisorStore, WaveKind, WavePhase, recover_active_waves_at_startup,
+    };
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// Open a file-backed store at `path` (runs migrations).
+    fn file_store(path: &Path) -> RusqliteSupervisorStore {
+        RusqliteSupervisorStore::open(path).unwrap()
+    }
+
+    /// Bind a worktree-isolation slot so `try_dispatch_next` will
+    /// consider it (worktree slots are skipped until bound).
+    fn bind(store: &RusqliteSupervisorStore, wave: &str, idx: u32) {
+        store
+            .bind_worktree(
+                wave,
+                idx,
+                SlotResource {
+                    slot_index: idx,
+                    worktree_path: Some(format!(".ralph/u8/{wave}/{idx}")),
+                    branch: Some(format!("ralph/u8/{wave}/{idx}")),
+                },
+            )
+            .unwrap();
+    }
+
+    /// Seed a 5-slot wave with the exact crash shape the U8
+    /// acceptance test pins: slots 0,1 completed; slots 2,3
+    /// dispatched (in flight); slot 4 still pending. Returns the
+    /// `wave_id`.
+    fn seed_mixed_wave(store: &RusqliteSupervisorStore) -> String {
+        let wave = store
+            .register_wave("u8-recover", WaveKind::Exec, 5)
+            .unwrap();
+        for idx in 0..5 {
+            bind(store, &wave, idx);
+        }
+        // Dispatch 0,1 then complete them → Completed.
+        assert_eq!(
+            store.try_dispatch_next(10).unwrap(),
+            Some((wave.clone(), 0))
+        );
+        assert_eq!(
+            store.try_dispatch_next(10).unwrap(),
+            Some((wave.clone(), 1))
+        );
+        store.record_slot_result(&wave, 0, "hash-0", 1).unwrap();
+        store.record_slot_result(&wave, 1, "hash-1", 1).unwrap();
+        // Dispatch 2,3 → left in flight when the "process dies".
+        assert_eq!(
+            store.try_dispatch_next(10).unwrap(),
+            Some((wave.clone(), 2))
+        );
+        assert_eq!(
+            store.try_dispatch_next(10).unwrap(),
+            Some((wave.clone(), 3))
+        );
+        // Slot 4 remains pending.
+        let snap = store.fan_in_status(&wave).unwrap();
+        assert_eq!(snap.completed_count, 2);
+        assert_eq!(snap.in_flight_count, 2);
+        assert_eq!(snap.pending_count, 1);
+        wave
+    }
+
+    /// Reopen continuity + no-double-dispatch + pending-resumes.
+    ///
+    /// The task's named RED test. After an unclean exit the store
+    /// is dropped and reopened on the same file; recovery must see
+    /// the identical slot partition, and a subsequent dispatch
+    /// drain must hand out ONLY the pending slot (4) — never a
+    /// completed (0,1) or in-flight (2,3) slot.
+    #[test]
+    fn test_reopen_recovery_no_double_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.db");
+
+        // ---- Phase 1: run, then "crash" (drop the store). ----
+        let wave = {
+            let store = file_store(&path);
+            let wave = seed_mixed_wave(&store);
+            // Real-file evidence: the DB file exists and is
+            // non-empty before the store is dropped.
+            assert!(path.exists(), "supervisor.db must exist on disk");
+            assert!(
+                std::fs::metadata(&path).unwrap().len() > 0,
+                "supervisor.db must be non-empty before crash"
+            );
+            wave
+            // `store` drops here → the Connection closes, WAL is
+            // checkpointed, all committed rows are durable.
+        };
+
+        // ---- Phase 2: restart on the same file. ----
+        let store = Arc::new(file_store(&path));
+
+        // (a) State is continuous across the reopen. A fresh
+        // connection reads back exactly what the dropped
+        // connection committed — impossible for in-memory state.
+        let snap = store.fan_in_status(&wave).unwrap();
+        assert_eq!(snap.expected_total, 5);
+        assert_eq!(snap.completed_count, 2, "completed must survive reopen");
+        assert_eq!(snap.in_flight_count, 2, "in-flight must survive reopen");
+        assert_eq!(snap.pending_count, 1, "pending must survive reopen");
+        assert!(!snap.merged_to_events);
+        assert_eq!(snap.phase, WavePhase::Collect);
+        assert_eq!(
+            snap.slots,
+            vec![
+                (0, SlotStatus::Completed),
+                (1, SlotStatus::Completed),
+                (2, SlotStatus::Dispatched),
+                (3, SlotStatus::Dispatched),
+                (4, SlotStatus::Pending),
+            ],
+            "per-slot statuses must be byte-for-byte continuous"
+        );
+
+        // (b) Recovery inspects the wave, does not time it out
+        // (fresh wave, generous budget) and does not mutate it.
+        let report = recover_active_waves_at_startup(store.clone(), 3600).unwrap();
+        assert_eq!(report.inspected, 1);
+        assert!(report.timed_out.is_empty());
+        assert!(report.already_merged.is_empty());
+        let after = store.fan_in_status(&wave).unwrap();
+        assert_eq!(
+            after.completed_count, 2,
+            "recovery must not touch completed"
+        );
+        assert_eq!(
+            after.phase,
+            WavePhase::Collect,
+            "recovery must not fail a fresh wave"
+        );
+
+        // (c) Dispatch drain: ONLY the pending slot (4) is handed
+        // out. Completed (0,1) and in-flight (2,3) are never
+        // re-dispatched → "complete once", no double spawn.
+        let mut dispatched = Vec::new();
+        while let Some((w, idx)) = store.try_dispatch_next(10).unwrap() {
+            assert_eq!(w, wave);
+            dispatched.push(idx);
+        }
+        assert_eq!(
+            dispatched,
+            vec![4],
+            "after restart only the surviving pending slot resumes; \
+             completed/in-flight slots must not be re-dispatched"
+        );
+        // Drained: no further dispatch.
+        assert_eq!(store.try_dispatch_next(10).unwrap(), None);
+    }
+
+    /// Idempotent inject key across a restart: a wave whose coord
+    /// event was already merged (`merged_to_events = true`) must
+    /// (a) persist that flag to disk, (b) be skipped by recovery
+    /// (landed in `already_merged`, not re-injected), and (c) make
+    /// the coordinator return `AlreadyDone` instead of
+    /// `InjectedComplete` on the restarted store.
+    #[test]
+    fn test_reopen_merged_wave_not_reinjected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.db");
+
+        // ---- Phase 1: fully merge the wave, then crash. ----
+        let wave = {
+            let store = file_store(&path);
+            let wave = store.register_wave("u8-merged", WaveKind::Exec, 2).unwrap();
+            bind(&store, &wave, 0);
+            bind(&store, &wave, 1);
+            assert_eq!(
+                store.try_dispatch_next(10).unwrap(),
+                Some((wave.clone(), 0))
+            );
+            assert_eq!(
+                store.try_dispatch_next(10).unwrap(),
+                Some((wave.clone(), 1))
+            );
+            store.record_slot_result(&wave, 0, "m-0", 1).unwrap();
+            store.record_slot_result(&wave, 1, "m-1", 1).unwrap();
+            // The coordinator already injected the coord event and
+            // stamped the idempotent-inject marker before the crash.
+            store.mark_merge_to_events(&wave).unwrap();
+            assert!(store.fan_in_status(&wave).unwrap().merged_to_events);
+            wave
+        };
+
+        // ---- Phase 2: restart on the same file. ----
+        let store = Arc::new(file_store(&path));
+
+        // (a) The inject key survived the round-trip to disk.
+        let snap = store.fan_in_status(&wave).unwrap();
+        assert!(
+            snap.merged_to_events,
+            "merged_to_events inject key must persist across reopen"
+        );
+
+        // (b) Recovery skips it: it lands in `already_merged` and
+        // is NOT escalated/re-injected.
+        let report = recover_active_waves_at_startup(store.clone(), 3600).unwrap();
+        assert_eq!(
+            report.already_merged,
+            vec![wave.clone()],
+            "already-merged wave must be skipped by recovery, not re-injected"
+        );
+        assert!(report.timed_out.is_empty());
+
+        // (c) The coordinator tick on the restarted store refuses
+        // to re-inject: every slot is terminal so the phase gate
+        // says Integrate, but the `merged_to_events` guard in
+        // `merge_and_complete` short-circuits to `AlreadyDone`.
+        let coord = SupervisorCoordinator::with_in_memory_sink(store.clone());
+        let action = coord
+            .tick(
+                &wave,
+                PhaseInputs {
+                    aggregate_timeout_secs: 3600,
+                    elapsed_secs: 0,
+                    cancel_requested: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            action,
+            CoordinatorAction::AlreadyDone,
+            "coordinator must not re-inject the coord event after restart"
+        );
+        // And the merge sink received nothing on the restart tick.
+        assert!(
+            coord.sink_batches().is_empty(),
+            "no merge batch may be appended for an already-merged wave"
+        );
+    }
+
+    /// Pending slots resume dispatch after a restart but remain
+    /// gated by the U3/U4 backpressure cap, which is reconstructed
+    /// from the persisted in-flight (dispatched) rows.
+    #[test]
+    fn test_reopen_recovery_respects_dispatch_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.db");
+
+        // ---- Phase 1: 2 in-flight + 2 pending, then crash. ----
+        let wave = {
+            let store = file_store(&path);
+            let wave = store.register_wave("u8-cap", WaveKind::Exec, 4).unwrap();
+            for idx in 0..4 {
+                bind(&store, &wave, idx);
+            }
+            // Slots 0,1 dispatched → in flight (count against cap).
+            assert_eq!(
+                store.try_dispatch_next(10).unwrap(),
+                Some((wave.clone(), 0))
+            );
+            assert_eq!(
+                store.try_dispatch_next(10).unwrap(),
+                Some((wave.clone(), 1))
+            );
+            let snap = store.fan_in_status(&wave).unwrap();
+            assert_eq!(snap.in_flight_count, 2);
+            assert_eq!(snap.pending_count, 2);
+            wave
+        };
+
+        // ---- Phase 2: restart on the same file. ----
+        let store = file_store(&path);
+        let _ = recover_active_waves_at_startup(Arc::new(store.clone()), 3600).unwrap();
+
+        // Cap == active (2): the persisted in-flight rows still
+        // saturate the ceiling, so dispatch is refused even though
+        // pending slots exist.
+        assert_eq!(
+            store.try_dispatch_next(2).unwrap(),
+            None,
+            "persisted in-flight slots must still count against the cap after restart"
+        );
+
+        // Cap == 3: one permit frees up, the lowest pending slot
+        // (2) resumes — proving pending continuation is real but
+        // cap-gated.
+        assert_eq!(
+            store.try_dispatch_next(3).unwrap(),
+            Some((wave.clone(), 2)),
+            "a freed cap permit resumes the lowest pending slot after restart"
+        );
+        // Cap back to 3 but active is now 3 (0,1,2) → saturated.
+        assert_eq!(store.try_dispatch_next(3).unwrap(), None);
+    }
+
+    /// Recovery does not manufacture state on an empty DB file:
+    /// reopening a freshly-migrated (but wave-free) database yields
+    /// an empty report. Pins that recovery reads real rows rather
+    /// than replaying any in-memory cache from the prior process.
+    #[test]
+    fn test_reopen_empty_db_recovers_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.db");
+        {
+            let _store = file_store(&path); // migrations only, no waves
+        }
+        let store = Arc::new(file_store(&path));
+        let report = recover_active_waves_at_startup(store, 3600).unwrap();
+        assert_eq!(report.inspected, 0);
+        assert!(report.timed_out.is_empty());
+        assert!(report.already_merged.is_empty());
     }
 }
 
