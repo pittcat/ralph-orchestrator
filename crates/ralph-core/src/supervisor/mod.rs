@@ -307,6 +307,19 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
         max_concurrent_workers: u32,
     ) -> SupervisorStoreResult<Option<(String, u32)>>;
 
+    /// Release a dispatched slot when its worker reaches a terminal
+    /// outcome. This is separate from result persistence so the
+    /// dispatcher can return capacity before U5 records event batches
+    /// and content hashes. Repeated release calls are idempotent: a
+    /// slot already in a terminal state remains terminal and returns
+    /// `Ok(())`.
+    fn release_slot_dispatch(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        outcome: DispatchOutcome,
+    ) -> SupervisorStoreResult<()>;
+
     /// Record a slot's worktree/resource binding before spawn
     /// (U10's helper calls this). Implementations MUST reject
     /// dispatch of a `Worktree`-isolation slot whose

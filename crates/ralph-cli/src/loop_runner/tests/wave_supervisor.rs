@@ -142,6 +142,15 @@ impl SupervisorBridge for SpyBindingBridge {
     ) -> Result<(), BridgeError> {
         Ok(())
     }
+
+    fn release_slot_dispatch(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+        _outcome: ralph_core::supervisor::DispatchOutcome,
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
 }
 
 /// U9 happy path: supervisor `enabled == false` → the
@@ -1765,6 +1774,17 @@ impl SupervisorBridge for U3DispatchBridge {
     ) -> Result<(), BridgeError> {
         Ok(())
     }
+
+    fn release_slot_dispatch(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        outcome: ralph_core::supervisor::DispatchOutcome,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .release_slot_dispatch(wave_id, slot_index, outcome)
+            .map_err(|error| BridgeError::Store(error.to_string()))
+    }
 }
 
 /// Drive `execute_wave_via_supervisor_with_executor` with a
@@ -2184,8 +2204,65 @@ fn make_u3_wave_with_concurrency(
     }
 }
 
-// Helper `run_u3_execute_wave_with_err` was removed in U3:
-// KTD-4 is now driven by `test_dispatcher_propagates_try_dispatch_err`
-// directly via `run_u3_execute_wave`, which goes through the
-// real supervisor path. Previously the helper replicated the
-// spawn loop; the production-shaped test is more representative.
+#[test]
+fn test_u4_cap4_barrier_releases_fifth_fifo_slot() {
+    use ralph_core::supervisor::{InMemorySupervisorStore, SlotResource, SupervisorStore};
+    use std::sync::{Arc, Barrier};
+
+    let store = Arc::new(InMemorySupervisorStore::new());
+    let wave = store
+        .register_wave("u4-cap4-barrier", WaveKind::Exec, 5)
+        .unwrap();
+    for index in 0..5 {
+        store
+            .bind_worktree(
+                &wave,
+                index,
+                SlotResource {
+                    slot_index: index,
+                    worktree_path: Some(format!("/tmp/u4-cap4/{index}")),
+                    branch: Some(format!("u4-cap4-{index}")),
+                },
+            )
+            .unwrap();
+    }
+
+    let barrier = Arc::new(Barrier::new(5));
+    let outcomes = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            handles.push(scope.spawn(move || {
+                barrier.wait();
+                store.try_dispatch_next(4).unwrap()
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("barrier worker must not panic"))
+            .collect::<Vec<_>>()
+    });
+
+    let dispatched: Vec<_> = outcomes.into_iter().flatten().collect();
+    assert_eq!(dispatched.len(), 4, "cap=4 must approve exactly four slots");
+    assert_eq!(
+        store.fan_in_status(&wave).unwrap().in_flight_count,
+        4,
+        "concurrent approvals must never exceed cap"
+    );
+    for (wave_id, slot_index) in &dispatched {
+        store
+            .release_slot_dispatch(
+                wave_id,
+                *slot_index,
+                ralph_core::supervisor::DispatchOutcome::Completed,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store.try_dispatch_next(4).unwrap().unwrap().1,
+        4,
+        "the fifth pending slot must follow the registered FIFO order"
+    );
+}

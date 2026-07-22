@@ -144,6 +144,17 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         slot_index: u32,
         reason: &str,
     ) -> Result<(), BridgeError>;
+
+    /// Release the global dispatch permit after a worker reaches a
+    /// terminal state. Bridges without a store retain the legacy no-op.
+    fn release_slot_dispatch(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+        _outcome: crate::supervisor::DispatchOutcome,
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
 }
 
 /// BDD-specific bridge that wires a `SupervisorCoordinator`
@@ -266,6 +277,17 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
     ) -> Result<(), BridgeError> {
         self.store
             .record_slot_failure(wave_id, slot_index, reason)?;
+        Ok(())
+    }
+
+    fn release_slot_dispatch(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        outcome: crate::supervisor::DispatchOutcome,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .release_slot_dispatch(wave_id, slot_index, outcome)?;
         Ok(())
     }
 }

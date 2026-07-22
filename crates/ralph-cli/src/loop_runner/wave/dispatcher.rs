@@ -159,6 +159,33 @@ pub(crate) trait WaveWorkerExecutor: Send + Sync + 'static {
 /// itself stays free of dispatcher-scoped state.
 pub(crate) struct ProductionExecutor;
 
+/// Synchronously returns a supervisor slot to terminal state when a
+/// worker task exits, including JoinSet cancellation/abort. A Drop
+/// guard is required because an aborted async task never executes code
+/// after its awaited executor future.
+struct SupervisorSlotRelease {
+    bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+    wave_id: String,
+    slot_index: u32,
+    outcome: ralph_core::supervisor::DispatchOutcome,
+}
+
+impl Drop for SupervisorSlotRelease {
+    fn drop(&mut self) {
+        if let Err(error) =
+            self.bridge
+                .release_slot_dispatch(&self.wave_id, self.slot_index, self.outcome)
+        {
+            tracing::warn!(
+                wave_id = %self.wave_id,
+                slot_index = self.slot_index,
+                %error,
+                "supervisor terminal permit release failed"
+            );
+        }
+    }
+}
+
 impl WaveWorkerExecutor for ProductionExecutor {
     fn execute(
         &self,
@@ -1577,7 +1604,7 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         });
     }
 
-    dispatch_wave_inner(
+    dispatch_wave_inner_with_release(
         tracker,
         worker_requests,
         DispatchContext::build(
@@ -1595,6 +1622,8 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
             rpc_event_tx,
             tui_state,
         },
+        Some(Arc::clone(bridge)),
+        Some(store_wave_id),
     )
     .await
 }
@@ -1656,11 +1685,35 @@ fn parse_assigned_dimension(payload: Option<&str>) -> Option<String> {
 /// same `finalize_*` helper handles Completed / Partial /
 /// AggregateDeadlineExceeded / GlobalDeadlineExceeded.
 pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
+    tracker: ralph_core::WaveTracker,
+    worker_requests: Vec<WorkerRequest>,
+    ctx: DispatchContext,
+    executor: Arc<E>,
+    progress: ProgressChannels,
+) -> WaveDispatchOutcome {
+    dispatch_wave_inner_with_release(
+        tracker,
+        worker_requests,
+        ctx,
+        executor,
+        progress,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Supervisor variant of the dispatch loop. The terminal bridge is
+/// notified from each joined worker path so store capacity is returned
+/// before the next wave asks for approval.
+async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
     mut tracker: ralph_core::WaveTracker,
     worker_requests: Vec<WorkerRequest>,
     ctx: DispatchContext,
     executor: Arc<E>,
     progress: ProgressChannels,
+    terminal_bridge: Option<Arc<dyn ralph_core::supervisor::SupervisorBridge>>,
+    terminal_wave_id: Option<String>,
 ) -> WaveDispatchOutcome {
     // KTD-U3-3: permit is acquired inside each worker task; the
     // semaphore limits the number of concurrent workers to the
@@ -1689,12 +1742,26 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
     for request in worker_requests {
         let semaphore = Arc::clone(&semaphore);
         let executor = Arc::clone(&executor);
+        let terminal_bridge = terminal_bridge.clone();
+        let terminal_wave_id = terminal_wave_id.clone();
         let request_index = request.index;
         // Replace the placeholder progress_tx with the real sender.
         let mut request = request;
         request.progress_tx = progress_tx.clone();
 
         join_set.spawn(async move {
+            // The Drop guard is installed before waiting on the local
+            // semaphore, so JoinSet abort/cancellation also releases
+            // the store-side permit for an approved slot.
+            let mut release_guard =
+                terminal_bridge
+                    .zip(terminal_wave_id)
+                    .map(|(bridge, wave_id)| SupervisorSlotRelease {
+                        bridge,
+                        wave_id,
+                        slot_index: request_index,
+                        outcome: ralph_core::supervisor::DispatchOutcome::Failed,
+                    });
             // KTD-U3-3: permit acquisition happens inside the task.
             // The Tokio semaphore only errors on close(), which the
             // dispatcher never does, so we map any error to a
@@ -1710,11 +1777,17 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
                 }
             };
             // Move the permit into the worker future so it lives
-            // until the worker future completes.  We don't expose
+            // until the worker future completes. We don't expose
             // the permit to the executor; the executor does not
             // need it.
             let _permit = permit;
-            executor.execute(request).await
+            let result = executor.execute(request).await;
+            if result.1.is_ok()
+                && let Some(guard) = release_guard.as_mut()
+            {
+                guard.outcome = ralph_core::supervisor::DispatchOutcome::Completed;
+            }
+            result
         });
         spawned_count += 1;
     }

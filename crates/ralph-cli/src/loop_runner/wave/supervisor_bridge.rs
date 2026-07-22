@@ -348,6 +348,17 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
             .record_slot_failure(wave_id, slot_index, reason)?;
         Ok(())
     }
+
+    fn release_slot_dispatch(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        outcome: ralph_core::supervisor::DispatchOutcome,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .release_slot_dispatch(wave_id, slot_index, outcome)?;
+        Ok(())
+    }
 }
 
 /// U4 R8 fail-closed helper: when `bridge.bind_slot` returns

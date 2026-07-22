@@ -452,6 +452,38 @@ impl SupervisorStore for RusqliteSupervisorStore {
         })
     }
 
+    fn release_slot_dispatch(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        outcome: DispatchOutcome,
+    ) -> SupervisorStoreResult<()> {
+        self.with_conn(|conn| {
+            let status = match outcome {
+                DispatchOutcome::Completed => "completed",
+                DispatchOutcome::Failed => "failed",
+            };
+            let tx = conn.transaction()?;
+            // Only an in-flight row is transitioned. This makes a
+            // duplicate terminal signal a no-op and preserves the
+            // first terminal status across cancellation races.
+            tx.execute(
+                "UPDATE wave_slots SET status = ?3
+                 WHERE wave_id = ?1 AND slot_index = ?2
+                   AND status IN ('dispatched','running')",
+                rusqlite::params![wave_id, i64::from(slot_index), status],
+            )?;
+            tx.execute(
+                "UPDATE dispatch_records SET outcome = ?3
+                 WHERE wave_id = ?1 AND slot_index = ?2
+                   AND outcome IS NULL",
+                rusqlite::params![wave_id, i64::from(slot_index), status],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     fn record_slot_result(
         &self,
         wave_id: &str,
@@ -952,6 +984,29 @@ mod tests {
         // No more slots -> dispatch returns None but is not blocked by cap.
         let next = store.try_dispatch_next(1).unwrap();
         assert!(next.is_none(), "no further slots should exist");
+    }
+
+    /// U4 parity: explicit terminal release returns a permit and is
+    /// idempotent when repeated for the same slot.
+    #[test]
+    fn release_dispatch_permit_is_idempotent() {
+        let store = store();
+        let wave = store
+            .register_wave("release-sql", WaveKind::Exec, 2)
+            .unwrap();
+        for i in 0..2 {
+            store.bind_worktree(&wave, i, bind(i)).unwrap();
+        }
+        store.try_dispatch_next(1).unwrap().unwrap();
+        assert!(store.try_dispatch_next(1).unwrap().is_none());
+        store
+            .release_slot_dispatch(&wave, 0, DispatchOutcome::Failed)
+            .unwrap();
+        store
+            .release_slot_dispatch(&wave, 0, DispatchOutcome::Failed)
+            .unwrap();
+        assert_eq!(store.fan_in_status(&wave).unwrap().failed_count, 1);
+        assert_eq!(store.try_dispatch_next(1).unwrap().unwrap().1, 1);
     }
 
     /// R-E1: same content_hash re-recorded does not double-append
