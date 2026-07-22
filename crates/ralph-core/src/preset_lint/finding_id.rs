@@ -348,6 +348,20 @@ pub const FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE: &str =
 pub const FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC: &str =
     "preset.supervisor_hat_publishes_coord_topic";
 
+/// 2026-07-22 plan U3 (R5): a wave consumer hat (one whose
+/// `triggers:` includes a `*.unit.ready` topic) declares
+/// `concurrency <= 1` (the default). The runtime wave
+/// detector in `wave_detection.rs` rejects such hats as
+/// `SequentialTarget`, silently dropping the entire wave
+/// batch the dispatcher published. This lint forces the
+/// author to explicitly opt in to wave concurrency by
+/// setting `concurrency > 1` on every `*.unit.ready`
+/// consumer. Always `Error` severity so the preset fails
+/// to load with a clear remediation hint before runtime
+/// discovers the same gap.
+pub const FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY: &str =
+    "preset.supervisor_wave_consumer_low_concurrency";
+
 // ──────────────────────────────────────────────────────────────────────────
 // OPAC instructions lint finding IDs (2026-07-04-001 plan U11)
 // ──────────────────────────────────────────────────────────────────────────
@@ -528,6 +542,7 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_SUPERVISOR_REQUIRES_ISOLATED,
     FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE,
     FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC,
+    FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY,
     FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL,
     FINDING_INSTRUCTIONS_FIX_UNIT_MINT_TEMPLATE_MISSING,
     FINDING_INSTRUCTIONS_OPAC_SKILL_REFERENCE_MISSING,

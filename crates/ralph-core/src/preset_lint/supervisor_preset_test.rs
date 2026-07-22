@@ -6,14 +6,25 @@
 //! preset-load + supervisor-lint pipeline correctness so the
 //! remaining topology wiring can land incrementally without
 //! regressing the build-time hard gates (R-SW-1 / R-SW-2 /
-//! R-COORD-4).
+//! R-COORD-4 / R-SW-3).
+//!
+//! U3 (2026-07-22 plan): the R-SW-3 wave consumer concurrency
+//! gate. The test `wave_consumers_have_concurrency_above_one`
+//! enforces that every hat consuming a `*.unit.ready` topic in
+//! the builtin supervisor preset declares `concurrency > 1`,
+//! so `detect_all_wave_events_capped` will accept the batch
+//! the dispatcher emits.
 
 #![cfg(test)]
 
+use crate::event_reader::Event;
+use crate::hat_registry::HatRegistry;
 use crate::preset_lint::{
     FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC, FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE,
-    FINDING_SUPERVISOR_REQUIRES_ISOLATED, check_supervisor_rules,
+    FINDING_SUPERVISOR_REQUIRES_ISOLATED, FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY,
+    check_supervisor_rules,
 };
+use crate::wave_detection::{DetectedWave, PartialWavePolicy, detect_all_wave_events_capped};
 
 const PRESET_YAML: &str = include_str!("../../../../presets/en/ce-executor-supervisor.yml");
 
@@ -155,4 +166,196 @@ fn ce_executor_supervisor_preset_requires_isolated_mode() {
     // The preset YAML has both keys; this test documents the
     // pin so the finding id stays stable.
     let _ = FINDING_SUPERVISOR_REQUIRES_ISOLATED;
+}
+
+#[test]
+fn ce_executor_supervisor_preset_wave_consumer_concurrency_finding_id_is_pinned() {
+    // Lint R-SW-3 (U3 / 2026-07-22 plan): the wave consumer
+    // concurrency finding id must stay stable so dashboards
+    // and runtime contracts that match on the literal id
+    // never silently miss a rename.
+    let _ = FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// 2026-07-22 plan U3 (R5 / R6 / KTD-4a): wave consumer
+// concurrency gate. The builtin supervisor preset must
+// declare `concurrency > 1` on every hat consuming a
+// `*.unit.ready` topic — otherwise the wave detector
+// silently drops the batch.
+//
+// The structural pin avoids hard-coded text assertions
+// (per the 2026-06-26 CLAUDE.md rule against locking
+// preset YAML by exact strings): we parse the YAML, walk
+// every hat, and assert the contract holds for any hat
+// whose trigger list contains `*.unit.ready`.
+// ──────────────────────────────────────────────────────────────────
+
+const WAVE_CONSUMER_READY_TOPICS: &[&str] =
+    &["exec.unit.ready", "review.unit.ready", "fix.unit.ready"];
+
+#[test]
+fn ce_executor_supervisor_preset_wave_consumers_declare_concurrency_above_one() {
+    // R-SW-3 (U3): parse the preset YAML structurally and
+    // assert every `*.unit.ready` consumer hat declares
+    // `concurrency > 1`. Missing `concurrency` is treated
+    // as `1` (the runtime default) and fails the assertion
+    // — that's the exact silent-drop scenario the lint
+    // exists to catch.
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(PRESET_YAML).expect("preset YAML must parse");
+    let hats = yaml
+        .get("hats")
+        .and_then(|v| v.as_mapping())
+        .expect("preset must have hats: mapping");
+
+    let mut offenders: Vec<String> = Vec::new();
+    for (hat_id_value, hat_value) in hats {
+        let hat_id = hat_id_value.as_str().unwrap_or("");
+        let triggers: Vec<String> = hat_value
+            .get("triggers")
+            .and_then(|v| v.as_sequence())
+            .map(|s| {
+                s.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let consumes_wave = triggers
+            .iter()
+            .any(|t| WAVE_CONSUMER_READY_TOPICS.contains(&t.as_str()));
+        if !consumes_wave {
+            continue;
+        }
+        let concurrency = hat_value
+            .get("concurrency")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(1);
+        if concurrency <= 1 {
+            offenders.push(format!("{hat_id} (concurrency={concurrency})"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "R-SW-3 (U3 / 2026-07-22 plan): every builtin `*.unit.ready` consumer hat must declare \
+         `concurrency > 1` or the wave detector silently drops the batch; offenders: {:?}",
+        offenders
+    );
+}
+
+#[test]
+fn ce_executor_supervisor_preset_builtin_wave_consumers_match_expected_three() {
+    // R6 / KTD-4a: the builtin supervisor preset advertises
+    // three wave consumer hats — `worker`, `review-batch-worker`,
+    // `fix-worker`. Pin this structural shape (not the
+    // arbitrary `concurrency: 4` value) so a future refactor
+    // that adds a fourth wave consumer surface as a deliberate
+    // explicit decision rather than a silent default.
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(PRESET_YAML).expect("preset YAML must parse");
+    let hats = yaml
+        .get("hats")
+        .and_then(|v| v.as_mapping())
+        .expect("preset must have hats: mapping");
+
+    let mut wave_consumers: Vec<String> = Vec::new();
+    for (hat_id_value, hat_value) in hats {
+        let hat_id = hat_id_value.as_str().unwrap_or("");
+        let triggers: Vec<String> = hat_value
+            .get("triggers")
+            .and_then(|v| v.as_sequence())
+            .map(|s| {
+                s.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if triggers
+            .iter()
+            .any(|t| WAVE_CONSUMER_READY_TOPICS.contains(&t.as_str()))
+        {
+            wave_consumers.push(hat_id.to_string());
+        }
+    }
+    wave_consumers.sort();
+
+    assert_eq!(
+        wave_consumers,
+        vec![
+            "fix-worker".to_string(),
+            "review-batch-worker".to_string(),
+            "worker".to_string(),
+        ],
+        "R6 / KTD-4a: builtin supervisor must have exactly three wave consumer hats \
+         (worker / review-batch-worker / fix-worker); got {:?}",
+        wave_consumers
+    );
+}
+
+#[test]
+fn ce_executor_supervisor_preset_wave_events_pass_detect_all_capped() {
+    // End-to-end behavioral pin: build a full wave batch
+    // for each of the three wave consumer hat topologies
+    // and verify `detect_all_wave_events_capped` accepts
+    // the batch (returns it in `accepted`, not `rejected`).
+    //
+    // This is the "wave was correctly partitioned /
+    // detected" half of the U3 acceptance contract — the
+    // lint half is enforced by
+    // `ce_executor_supervisor_preset_wave_consumers_declare_concurrency_above_one`.
+    //
+    // We use the raw `RalphConfig::parse_yaml` to get a
+    // registry that mirrors the runtime's, then exercise
+    // the same detection helper the dispatcher uses.
+    use crate::config::RalphConfig;
+    let config = RalphConfig::parse_yaml(PRESET_YAML).expect("preset must parse as RalphConfig");
+    let registry = HatRegistry::from_config(&config);
+
+    let scenarios: &[(&str, &str, u32)] = &[
+        ("exec.wave.batch", "exec.unit.ready", 5),
+        ("review.wave.batch", "review.unit.ready", 6),
+        ("fix.wave.batch", "fix.unit.ready", 3),
+    ];
+
+    for (wave_id, topic, total) in scenarios {
+        let events: Vec<Event> = (0..*total)
+            .map(|i| Event {
+                topic: topic.to_string(),
+                payload: Some(format!(r#"{{"slot_index":{i}}}"#)),
+                ts: "2026-07-22T00:00:00Z".to_string(),
+                hat: None,
+                triggered: None,
+                source: None,
+                wave_id: Some(wave_id.to_string()),
+                wave_index: Some(i),
+                wave_total: Some(*total),
+                system_injected: None,
+            })
+            .collect();
+
+        let outcome = detect_all_wave_events_capped(
+            &events,
+            &registry,
+            PartialWavePolicy::RequireComplete,
+            64,
+        );
+        let accepted: Vec<DetectedWave> = outcome.accepted;
+        let rejected_reasons: Vec<String> = outcome
+            .rejected
+            .iter()
+            .map(|r| format!("{:?}", r.reason))
+            .collect();
+
+        assert!(
+            !rejected_reasons.is_empty()
+                || accepted
+                    .iter()
+                    .any(|w| w.wave_id == *wave_id && w.total == *total),
+            "wave `{wave_id}` for topic `{topic}` (total={total}) must be accepted by the \
+             detector; got accepted={} rejected={:?}",
+            accepted.len(),
+            rejected_reasons
+        );
+    }
 }

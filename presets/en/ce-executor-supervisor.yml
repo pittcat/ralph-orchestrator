@@ -519,6 +519,14 @@ hats:
   worker:
     name: "Worker"
     description: "Per-slot TDD implementation hat running in an isolated worktree."
+    # 2026-07-22 plan U3 (R6 / KTD-4a): wave consumer hat
+    # MUST declare `concurrency > 1`. The wave detector
+    # in `wave_detection.rs` rejects `concurrency <= 1`
+    # hats as `SequentialTarget`, silently dropping the
+    # whole batch. `concurrency: 4` is the explicit
+    # builtin value; effective per-wave parallelism is
+    # `min(hat.concurrency, supervisor.max_concurrent_workers)`.
+    concurrency: 4
     triggers:
       - exec.unit.ready
     publishes:
@@ -830,6 +838,13 @@ hats:
   review-batch-worker:
     name: "Review Batch Worker"
     description: "Runs one review dimension and emits a per-dimension verdict."
+    # 2026-07-22 plan U3 (R6 / KTD-4a): wave consumer hat
+    # MUST declare `concurrency > 1`. Six review dimensions
+    # share the same consumer hat id (one activation per
+    # dimension), so the wave batch is six `review.unit.ready`
+    # payloads; without `concurrency: 4` (here matching the
+    # effective cap) the wave detector rejects the batch.
+    concurrency: 4
     triggers:
       - review.unit.ready
     publishes:
@@ -1235,6 +1250,12 @@ hats:
   fix-worker:
     name: "Fix Worker"
     description: "Per-slot fix implementation hat running in an isolated worktree."
+    # 2026-07-22 plan U3 (R6 / KTD-4a): wave consumer hat
+    # MUST declare `concurrency > 1`. Same justification as
+    # `worker`; fix waves are dispatched on
+    # `fix.unit.ready` and the wave detector rejects
+    # `concurrency <= 1` consumers.
+    concurrency: 4
     triggers:
       - fix.unit.ready
     publishes:

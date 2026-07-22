@@ -118,7 +118,8 @@ pub use state_projection::check_work_done_action_chain_order;
 // can wire it (next line: into the unified orchestrator).
 pub use supervisor::{
     FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC, FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE,
-    FINDING_SUPERVISOR_REQUIRES_ISOLATED, check_supervisor_rules,
+    FINDING_SUPERVISOR_REQUIRES_ISOLATED, FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY,
+    check_supervisor_rules,
 };
 pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,
@@ -561,10 +562,11 @@ pub fn run_preset_lint_with_preset_name(
     // `event_policy.schemas` directly so it can also run for
     // presets whose `event_policy` is otherwise inactive.
     if matches!(strictness, LintStrictness::Strict)
-        && let Some(policy) = config.event_loop.event_policy.as_ref() {
-            let trigger_ctx_findings = check_trigger_context(&policy.schemas, strictness);
-            findings.extend(lint_findings_to_contract_findings(&trigger_ctx_findings));
-        }
+        && let Some(policy) = config.event_loop.event_policy.as_ref()
+    {
+        let trigger_ctx_findings = check_trigger_context(&policy.schemas, strictness);
+        findings.extend(lint_findings_to_contract_findings(&trigger_ctx_findings));
+    }
 
     // 2026-07-09-003 plan (U5): trigger context topology
     // lint. Catches `trigger_context` blocks declared on a
@@ -611,7 +613,7 @@ pub fn run_preset_lint_with_preset_name(
         Some(text) => text.to_string(),
         None => {
             let config_yaml = serde_yaml::to_string(config).unwrap_or_default();
-            
+
             if let Some(mechanism) = config.mechanism.as_ref() {
                 if config_yaml
                     .lines()

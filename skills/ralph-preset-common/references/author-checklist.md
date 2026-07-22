@@ -215,6 +215,7 @@
 4. **unit 状态经 task API / 业务 artifact**：每个 sub-unit 必须有 live `task_id`（`ralph tools task list` 取得,禁手写),或 sub-unit 进度落业务 artifact 由 dispatcher 汇总。✓ / ✗ + 列命令路径
 5. **timeout / partial 有业务可见出口**：supervisor 触发 partial / timeout 时必须通过 dispatcher 发 `plan.blocked` 或 `work.failed` 等业务可见事件；不得 silent-success 留在 supervisor 内部。✓ / ✗ + 列事件与 schema 字段
 6. **与 Intent 一致**：preset `event_loop.supervisor.enabled` 必须与 Intent.execution_model 一致;不一致按 `finding-rubric.md` 「Supervisor capability audit」 段 `preset.execution_model_intent_mismatch` 入 review 主表。✓ / ✗ + 字段值
+7. **wave consumer `concurrency > 1`**：每个 `triggers:` 含 `*.unit.ready` 的 hat 必须显式声明 `concurrency > 1`；缺省（=1）会被 wave detector 静默拒收（`SequentialTarget`），整个 batch 不会被分发。✓ / ✗ + 列出每个 wave consumer hat 的 `concurrency` 值
 
 任一问 ✗ → 必须改写或显式说明为何 supervisor 无法表达。完整 finding 默认 severity / confidence / aaf_question 见 `finding-rubric.md`「Supervisor capability audit」段。
 

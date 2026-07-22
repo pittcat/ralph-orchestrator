@@ -118,6 +118,7 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.flow_unknown_emit_rejected` | P0 | 95 | Q4 | topology |
 | `preset.supervisor_requires_isolated` | P0 | 95 | Q3 | lint |
 | `preset.supervisor_hat_publishes_coord_topic` | P0 | 95 | Q4 | lint |
+| `preset.supervisor_wave_consumer_low_concurrency` | P0 | 95 | Q3 | lint |
 | `preset.metadata_runtime_drift` | P1 | 85 | — | lint |
 | `preset.dimension_reviewer_write_plan` | P0 | 95 | Q3 | lint |
 | `preset.trigger_context_unknown_field` | P0 | 90 | Q4 | lint |
@@ -192,6 +193,7 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 |---|---|---|---|---|
 | preset 启用了 `event_loop.supervisor.enabled` 但 `event_loop.execution_mode` 不是 `isolated` | P0 | feasibility | Q3 | `preset.supervisor_requires_isolated` |
 | hat `publishes` 含 supervisor 协调 topic（`exec.wave.*` / `slot.*` 等） | P0 | topology | Q4 | `preset.supervisor_hat_publishes_coord_topic` |
+| supervisor wave consumer hat（`triggers:` 含 `*.unit.ready`）未声明 `concurrency > 1`（默认 1） | P0 | feasibility | Q3 | `preset.supervisor_wave_consumer_low_concurrency` |
 | supervisor sub-unit 状态未走 `ralph tools task list` 或业务 artifact，而是依赖读 `.ralph/supervisor.db` | P0 | visibility | Q2 / Q5 | `preset.supervisor_unit_state_not_via_task_api` |
 | hat `instructions` 要求把 `.ralph/supervisor.db` 当业务 artifact 接口（写或读） | P0 | visibility | Q2 | `preset.artifact_uses_internal_ledger` |
 | `execution_model` Intent 字段与 YAML 能力信号不一致（如 Intent= `single-chain` 但 `event_loop.supervisor.enabled: true`） | P0 | payload-content | Q4 | `preset.execution_model_intent_mismatch` |
