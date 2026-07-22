@@ -411,3 +411,84 @@ graph LR
 - **报告路径**: `/home/chaowen/Dev/agent_tools/ralph-orchestrator/docs/report/2026-07-22-ce-executor-supervisor-primary-20260722-084810-diagnosis.md`
 - **生成 agent chain**: Phase 0 (主 Agent 盘点) → Phase 1A + 1B 并行 (流程还原 + 历史) → Phase 2 C (对账) → Phase 3 D (归因 + 置信度) → Phase 4 (主 Agent 汇总)
 - **下次重入建议**: 启用 `cargo build --features supervisor-db` + 补 agent-output (`ralph diagnose --full`) 后重写本报告，可消除 §7 大半疑点
+
+---
+
+## 10. 后续补遗：2026-07-23 closure plan 视角下的真实断点重排
+
+> 本节为 **2026-07-23-001-fix-supervisor-worktree-dispatch-closure-plan**（U10 文档同步）补遗。
+> 报告 §1.3 / §5 当时把「`supervisor-db cargo feature off → in-memory fallback`」与「U16 `task.resume.misrouted`」并列 P0；2026-07-23 closure plan 的 Baseline Audit 对该诊断做了**根因重排**，明确了**真实 P0 断点链**。本节只**补充**视角，不改写原 §1–§9（保持历史诊断原貌）。
+
+### 10.1 重排后的真实 P0 断点链
+
+按 closure plan U1–U9 的代码证据，`primary-20260722-084810` 的「真凶」是**生产 worktree binding 接线缺失**（旧 plan U4 假绿），其因果链与原报告的断点排序不同：
+
+```text
+[真实 P0 链 / closure plan]
+runner.build_supervisor_bridge
+  → CoordinatorSupervisorBridge::from_store(store)   # context = None
+  → bind_slot(Exec|Fix) → Ok(None)                   # 测试路径才有 context
+  → execute_wave_via_supervisor 仍 push WorkerRequest{ cwd: None }
+  → worker 在主 workspace 执行                        # 与 R7/R8 目标相反
+```
+
+这意味着：
+
+1. **更上游的真因**是生产 `build_supervisor_bridge` 未注入 `ProductionBridgeContext`，**而非** cargo feature off；feature off 只是放大了 fan-in 不收敛的可见性。
+2. **§5 原 P0-3 / P0-4 合并**：closure plan 把「in-memory 不持久」与「fan-in 不收敛」**都收敛到 U1 的 `from_store` 接线**——修好 U1 后 P0-3 的 operator workaround（`cargo build --features supervisor-db`）不再是首要建议。
+3. **§6.3.2 长期建议（warn 升级 error + fail-closed）**在 closure plan 中由 U2 + 默认 `supervisor-db` feature 一并落地，不需要单独立项。
+
+### 10.2 P0 重排对照表
+
+| 原报告 P0 | 原置信度 | 原归因 | **closure plan 视角下的真实归因** | 关联 U-ID |
+|---|---|---|---|---|
+| P0-1 LOOP_COMPLETE 3 次拒收 → loop_stale | 85 | mechanism (compound) | 不变；属终态检查机制正确生效 | 全部 |
+| P0-2 U16 `task.resume.misrouted consumer=supervisor` | 85 | compound: mechanism + preset 拓扑 | 不变；**U7 虚拟 supervisor 特判**已闭合 | U7 |
+| P0-3 `cargo feature supervisor-db off → in-memory` | 80 | preset（invariant 泄漏） | **降级为 P1**——默认 features 已含 `supervisor-db`（U2），无 operator workaround 必要 | U2 |
+| P0-4 supervisor fan-in 永不收敛 | 76 | compound: in-memory + preset worker triggers | **降级为 P1（衍生断点）**——真因是 P0-X 「生产 binding 缺失」 | U1（真因）+ U6（sink/协调） |
+| **P0-X 生产 worktree binding 缺失（新增）** | n/a（旧报告未单列） | n/a | **升至 P0-1（最高）**：runner 生产接线调用 `from_store`，`bind_slot(Exec/Fix)` 返 `Ok(None)`，worker 静默主 workspace 执行 | **U1** |
+| **P0-Y 全局 cap/fan-in 批准 + FIFO（新增）** | n/a | n/a | **升至 P0-2**：`try_dispatch_next` 与跨 wave FIFO 接线闭合；`max_concurrent_workers=4` 与 hat `concurrency` 取 min | **U2 / U3 / U4** |
+| **P0-Z 唯一 `*.wave.complete` + 资源 payload（新增）** | n/a | n/a | **升至 P0-3**：生产 ledger sink 经 U6 注入唯一协调事件，payload 含成功 slot branch/worktree_path | **U6** |
+| **P0-W crash/restart 恢复（新增）** | n/a | n/a | **升至 P0-4**：rusqlite reopen 不重跑 completed、不重复注入协调事件 | **U8** |
+
+### 10.3 closure plan 完成的 11 条证据链
+
+按 U1–U9 落地清单，原报告 §6 建议项的**真实落地映射**：
+
+| 原报告建议 | closure plan 实际落地 |
+|---|---|
+| §6.1.1 `cargo build --features supervisor-db` | **不再需要**——`crates/ralph-cli/Cargo.toml` `default = ["supervisor-db"]`（U2 commit `09903aa1`） |
+| §6.1.2 监控 `.ralph/supervisor.db` | 默认 features 下路径唯一，监控逻辑仍有效 |
+| §6.2.1 preset-lint R-SUP-1（`required_events` 闭环） | 由既有 `preset.required_events_completion` / `preset.terminal_publisher_incomplete` lint 覆盖；新增独立 finding 不必要 |
+| §6.2.2 preset-lint R-SUP-2（bridge 不需 hat triggers 显式声明） | 落地为 U7 虚拟 supervisor 特判；**未**新增 lint，而是由 runtime 直接豁免 |
+| §6.2.3 progress-steward 重写 | 保留为 P1 follow-up（不在 closure 范围内） |
+| §6.2.4 schema `execution_contracts` 增补 | 未实施（pipeline 拓扑未改） |
+| §6.3.1 handoff U16 misrouted 可恢复 | **U7** 在 runtime 层闭环（virtual supervisor 特判） |
+| §6.3.2 in-memory warn 升级 error + fail-closed | **不适用**——默认 features 含 supervisor-db；in-memory 仅在 `cargo build --no-default-features` 下走 fail-closed（R3） |
+| §6.3.3 hat-channel fallback fail-closed | 不在 closure 范围 |
+| §6.3.4 docs/solutions/runtime 文档 | 由本报告 §10 + closure plan U10 文档同步项联合覆盖 |
+
+### 10.4 不变的事实
+
+closure plan 不改变本报告**对症状的描述**：
+
+- 24 events、`exec.unit.ready×15` 被 isolated 单业务预算 drop、L18 单次 `exec.unit.done`、L19–L24 三次 plan.blocked + LOOP_COMPLETE 拒收、stale-breaker count=3 → loop_stale 终结——这些是历史事件，**不可改写**。
+- §7 候选问题（DEV-006/009/010/011）置信度 < 60 仍待 `ralph diagnose --full` 补 agent-output 才能升级；closure plan 不涉及。
+- silent-success 家族第 8 次延伸、dispatch-gap 家族第 3 次延伸、task.resume-target-hat-dead-path 在 supervisor 模式首次出现——这些**家族血缘判定仍成立**。
+
+### 10.5 当前可信 P0 排序（2026-07-23 closure 视角）
+
+1. **P0-1** 生产 binding 缺失 → `bind_slot(Exec/Fix)` 返 `None` → 主 workspace 静默执行（**U1 闭合**）
+2. **P0-2** 全局 cap/fan-in 批准 + FIFO 未接线 → `try_dispatch_next` + `max_concurrent_workers` 由 bridge 层缺接口（**U2 + U3 + U4 闭合**）
+3. **P0-3** 唯一 `*.wave.complete` + payload 资源字段未注入 → fan-in 永不发或重复发（**U6 闭合**）
+4. **P0-4** crash/restart 不跨进程收敛 → rusqlite reopen 未与生产路径接续（**U8 闭合**）
+5. **P0-5** 终态 `required_events` 拒收 → LOOP_COMPLETE 反复 → loop_stale（**机制正确生效，不需修复**）
+6. **P0-6** U16 `task.resume.misrouted consumer=supervisor` → 虚拟 consumer 特判未做（**U7 闭合**）
+
+### 10.6 本节与原报告的关系
+
+- 本节是**补遗（addendum）**，不改写 §1–§9 的历史诊断结论；
+- §5 原始 P0（DEV-001/002/003/004）按原报告时间点（2026-07-22）仍成立；
+- §6 修复建议中 **§6.1.1（feature rebuild）** 与 **§6.3.2（in-memory fail-closed）** 由 U2（默认 `supervisor-db`）+ U8（重启恢复）覆盖，**不再需要 operator 手动操作**；
+- §6.2 / §6.3 其余建议由 U1 / U3 / U4 / U6 / U7 落地映射；
+- 真实生产行为参考 `docs/plans/2026-07-23-001-fix-supervisor-worktree-dispatch-closure-plan.md` 的 U1–U9 验收测试与 R5–R12 需求追踪矩阵。
