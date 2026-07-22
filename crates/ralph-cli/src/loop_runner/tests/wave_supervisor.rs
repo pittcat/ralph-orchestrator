@@ -2148,10 +2148,20 @@ async fn test_dispatcher_effective_cap_hat_lower_than_bridge() {
     let _ = outcome;
 
     let n = started.load(std::sync::atomic::Ordering::SeqCst);
-    assert!(
-        n <= 2,
-        "U3 KTD-5 (A): dispatcher MUST truncate at min(hat.concurrency=2, bridge.cap=4) = 2; \
-         got {n} spawns"
+    // 2026-07-23-001 plan U9: U3 originally asserted the
+    // dispatcher pre-truncated at `effective_cap` and never
+    // spawned the remaining slots. U9 closes the U4 "fifth slot
+    // starts after release" observable: the dispatcher now
+    // dispatches up to `effective_cap` per round and re-runs
+    // rounds for still-pending slots. With `U3CountingExecutor`
+    // each worker returns immediately so by the time the loop
+    // exits every slot has been spawned exactly once — the new
+    // invariant is `n == wave.total` (all slots dispatched
+    // eventually), while per-round concurrency stays bounded by
+    // `min(hat.concurrency, bridge.cap)`.
+    assert_eq!(
+        n as u32, 4,
+        "U3 KTD-5 (A): all 4 slots must eventually be spawned across rounds; got {n}"
     );
 }
 
@@ -2192,10 +2202,13 @@ async fn test_dispatcher_effective_cap_bridge_lower_than_hat() {
     let _ = outcome;
 
     let n = started.load(std::sync::atomic::Ordering::SeqCst);
-    assert!(
-        n <= 2,
-        "U3 KTD-5 (B): dispatcher MUST truncate at min(hat.concurrency=4, bridge.cap=2) = 2; \
-         got {n} spawns"
+    // See the comment on `test_dispatcher_effective_cap_hat_lower_than_bridge`
+    // for the U9 change: all 4 slots must end up spawned across
+    // rounds (the dispatcher's batched rounds close the U4 "fifth
+    // slot starts after release" contract).
+    assert_eq!(
+        n as u32, 4,
+        "U3 KTD-5 (B): all 4 slots must eventually be spawned across rounds; got {n}"
     );
 }
 

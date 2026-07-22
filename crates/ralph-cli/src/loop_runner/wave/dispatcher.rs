@@ -241,6 +241,15 @@ pub(crate) struct DispatchContext {
     /// U2: actual number of events in this wave. Used for the spawn guarantee
     /// check — we must spawn exactly `events_len` workers, not `expected_total`.
     events_len: u32,
+    /// 2026-07-23-001 plan U9: indices the synthetic-failure sweep
+    /// in `dispatch_wave_inner_with_release` inspects. Legacy
+    /// `build()` sets this to `0..wave.total` so partial waves
+    /// still mark slots that never got a worker event. Supervisor
+    /// per-round builders overwrite it with the indices actually
+    /// spawned in that round — pending slots stay pending in the
+    /// store and are dispatched in a later round, not marked
+    /// failed here.
+    sweep_indices: Vec<u32>,
     wave_id: String,
     payload_previews: Vec<String>,
     show_progress: bool,
@@ -290,7 +299,48 @@ impl DispatchContext {
             show_progress,
             use_colors,
             assigned_dimensions,
+            // 2026-07-23-001 plan U9: legacy / non-supervisor waves
+            // sweep `0..expected_total` so partial waves still
+            // surface missing-slot synthetic failures. Supervisor
+            // rounds construct via `build_supervisor_round` (below)
+            // with a per-round `sweep_indices`.
+            sweep_indices: (0..wave.total).collect(),
         }
+    }
+
+    /// 2026-07-23-001 plan U9: build a per-round supervisor
+    /// dispatch context. `sweep_indices` is the round's spawned
+    /// slot indices so the synthetic-failure sweep never marks a
+    /// still-pending slot as failed. `expected_total` is the
+    /// round's spawned count (must match the per-round tracker
+    /// registration so spawned_count / expected_count stay
+    /// consistent).
+    fn build_supervisor_round(
+        wave: &ralph_core::DetectedWave,
+        worker_timeout: Duration,
+        aggregate_timeout: Duration,
+        expected_total: u32,
+        sweep_indices: Vec<u32>,
+        payload_previews: Vec<String>,
+        show_progress: bool,
+        use_colors: bool,
+        limits: WaveDispatchLimits,
+        assigned_dimensions: std::collections::HashMap<u32, String>,
+    ) -> Self {
+        let mut ctx = Self::build(
+            wave,
+            worker_timeout,
+            aggregate_timeout,
+            payload_previews,
+            show_progress,
+            use_colors,
+            limits,
+            assigned_dimensions,
+        );
+        ctx.expected_total = expected_total;
+        ctx.events_len = expected_total;
+        ctx.sweep_indices = sweep_indices;
+        ctx
     }
 }
 
@@ -1318,11 +1368,19 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         };
 
     // 2026-07-03-001 supervisor real-wiring: infer the wave
-    // kind from the first event's topic. `review.wave.*` →
-    // Review, `fix.*` → Fix, everything else → Exec (the
-    // default for `exec.unit.ready` / `exec.wave.ready`).
+    // kind from the first event's topic. `review.*` (both
+    // `review.wave.ready` and `review.unit.ready`) → Review;
+    // `fix.*` → Fix; everything else → Exec (the default for
+    // `exec.unit.ready` / `exec.wave.ready`).
+    //
+    // 2026-07-23-001 plan U9: widened `review.wave.` → `review.`
+    // so the builtin `ce-executor-supervisor` preset's review
+    // wave (trigger topic `review.unit.ready`, emitted by the
+    // `review-coordinator` hat) is correctly classified Review
+    // and dispatches via `SharedReadonly` instead of accidentally
+    // taking the Exec path's per-slot worktree binding.
     let trigger_topic = wave.events.first().map(|e| e.topic.as_str()).unwrap_or("");
-    let wave_kind = if trigger_topic.starts_with("review.wave.") {
+    let wave_kind = if trigger_topic.starts_with("review.") {
         WaveKind::Review
     } else if trigger_topic.starts_with("fix.") {
         WaveKind::Fix
@@ -1369,68 +1427,50 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     };
 
     // Supervisor path uses an empty tracker; the spawn mechanism
-    // (permit queue, JoinSet, deadline checks) is fully reused
-    // via `dispatch_wave_inner`. The tracker's count is not
-    // consumed because fan-in is driven by `bridge.tick`, not by
-    // `take_wave_results`.
-    let mut tracker = WaveTracker::new();
-    tracker.register_wave_with_source(
-        wave.wave_id.clone(),
-        wave.total,
-        Some(wave.target_hat.clone()),
-    );
+    // 2026-07-03-001 supervisor real-wiring: the join / permit
+    // release / progress plumbing in `dispatch_wave_inner_with_release`
+    // drives batched dispatch below. `sweep_indices` (set by
+    // per-round builders) keeps the synthetic-failure sweep from
+    // marking still-pending slots as failed; failing that, the
+    // outer batch loop in this function dispatches the leftover
+    // slots in subsequent rounds once their permits are released.
+    //
+    // 2026-07-23-001 plan U9 (closes the U4 "fifth slot starts
+    // after release" contract): the slot loop below PREPARES every
+    // slot (prompt / backend / worktree binding) without consulting
+    // the store. The wave-level round loop then asks the store to
+    // approve up to `effective_cap` pending slots per round,
+    // spawns + joins that round's workers, and repeats. Each
+    // released permit lets the next round approve its FIFO slot,
+    // so a wave wider than the cap (e.g. 5-slot exec wave under
+    // cap=4) does not silently drop the trailing slots.
 
     let wave_dir = main_events_file
         .parent()
         .unwrap_or(Path::new(".ralph"))
         .to_path_buf();
-    let payload_previews: Vec<String> = wave
-        .events
-        .iter()
-        .map(|e| e.payload.as_deref().unwrap_or("").replace('\n', " "))
-        .collect();
 
-    let mut worker_requests: Vec<WorkerRequest> = Vec::with_capacity(wave.events.len());
-    let mut assigned_dimensions: std::collections::HashMap<u32, String> =
-        std::collections::HashMap::new();
-
-    // 2026-07-23-001 plan U3 KTD-5: the local effective cap is
+    // U3 KTD-5: the local effective cap is
     // `min(hat.concurrency, bridge.max_concurrent_workers())`.
-    // The dispatcher tracks how many slots it has approved
-    // for this wave and stops pushing WorkerRequests once the
-    // cap is reached. The store-side cap still applies (any
-    // subsequent `try_dispatch_next` returns `Ok(false)` once
-    // `active_workers` reaches `max_concurrent_workers`), but
-    // the dispatcher pre-truncates so the test signal is
-    // deterministic.
     let effective_cap: u32 = (wave.hat_config.concurrency as u32)
         .min(bridge.max_concurrent_workers())
         .max(1);
-    let mut approved_in_wave: u32 = 0;
+
+    struct PreparedSlot {
+        index: u32,
+        request: Option<WorkerRequest>,
+        preview: String,
+        dimension: Option<String>,
+    }
+
+    let mut prepared: Vec<PreparedSlot> = Vec::with_capacity(wave.events.len());
 
     for (index, event) in wave.events.iter().enumerate() {
         let wave_id = wave.wave_id.clone();
         let index_u32 = index as u32;
         let hat_config = wave.hat_config.clone();
         let assigned_dimension = parse_assigned_dimension(event.payload.as_deref());
-
-        // 2026-07-23-001 plan U3 KTD-5: stop iterating once we
-        // reach the effective cap. Slots past the cap are not
-        // pushed as WorkerRequests; the supervisor store
-        // remains the long-term source of truth for backpressure
-        // (the next iteration's `try_dispatch_next` will return
-        // `Ok(false)` naturally).
-        if approved_in_wave >= effective_cap {
-            warn!(
-                wave_id = %wave.wave_id,
-                slot_index = index_u32,
-                effective_cap,
-                approved_in_wave,
-                "supervisor dispatch: hit local effective cap; \
-                 skipping remaining slots (hat.concurrency * bridge.max_concurrent_workers)"
-            );
-            break;
-        }
+        let preview = event.payload.as_deref().unwrap_or("").replace('\n', " ");
 
         let worker_events_file = wave_dir.join(format!("wave-{}-{}.jsonl", wave_id, index_u32));
         let ctx = WaveWorkerContext {
@@ -1480,41 +1520,11 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
 
         ralph_adapters::apply_hat_tool_policy(&mut worker_backend, &hat_config.disallowed_tools);
 
-        // 2026-07-03-001 supervisor real-wiring: per-slot
-        // binding. The bridge returns a `SlotBinding` with env
-        // vars (RALPH_WAVE_WORKTREE_PATH etc.) and an optional
-        // `worktree_path` that becomes the worker's cwd.
-        // `None` for SharedReadonly (review) slots.
-        //
-        // U4 fail-closed: when `bind_slot` returns `Err` for an
-        // Exec/Fix slot, the dispatcher MUST NOT fall back to
-        // spawning a worker against the main workspace cwd.
-        // We surface the error via `fail_closed_on_bind_error`
-        // and skip this slot entirely. The slot's `SlotResource`
-        // is NOT persisted to the store (the bridge did not
-        // succeed in creating a binding), and the slot never
-        // reaches `ProductionExecutor`. Review slots may still
-        // return `Ok(None)` legitimately (SharedReadonly).
-        //
-        // 2026-07-23-001 plan U1 KTD-4 fail-closed: when
-        // `bind_slot` returns `Ok(None)` for an Exec/Fix slot,
-        // this is a contract violation — the production bridge
-        // is supposed to hand back `Some(SlotBinding)` for
-        // Exec/Fix (the legacy `from_store`/`with_in_memory_store`
-        // entry points left `context: None` and produced silent
-        // `Ok(None)`, which is exactly the failure mode U1
-        // eliminates). The dispatcher MUST treat Exec/Fix
-        // `Ok(None)` as fail-closed (skip the slot) and NOT
-        // fall back to spawning the worker against the main
-        // workspace (`cwd: None` = main workspace). Review
-        // `Ok(None)` is still legitimate (SharedReadonly) so it
-        // proceeds without a worktree_path.
+        // U1: per-slot binding (fail-closed on error; SharedReadonly
+        // for review kinds returns Ok(None)).
         let binding = match bridge.bind_slot(wave_kind, &store_wave_id, index_u32) {
             Ok(opt) => opt,
             Err(err) => {
-                // Fail-closed: skip the slot — do not add it to
-                // `worker_requests`. The main workspace never
-                // receives a worker spawn for this slot.
                 use crate::loop_runner::wave::fail_closed_on_bind_error;
                 let closed = fail_closed_on_bind_error(&err, &wave.wave_id, index_u32);
                 debug_assert!(
@@ -1525,12 +1535,7 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
             }
         };
 
-        // U1 KTD-4: Exec/Fix MUST get a worktree binding. If
-        // the bridge returns `Ok(None)` for an Exec/Fix slot
-        // (e.g. because the production bridge lost its
-        // ProductionBridgeContext), fail-closed: do not spawn
-        // the worker against the main workspace. Review
-        // `Ok(None)` is the legitimate SharedReadonly path.
+        // U1 KTD-4: Exec/Fix MUST get a worktree binding.
         if binding.is_none() && !matches!(wave_kind, WaveKind::Review) {
             warn!(
                 wave_id = %wave.wave_id,
@@ -1544,10 +1549,7 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
 
         let slot_cwd = binding.as_ref().and_then(|b| b.worktree_path.clone());
         if let Some(ref b) = binding {
-            // Merge binding env (overwriting same-name keys).
-            // `extend` on `Vec<(K, V)>` does not deduplicate, so
-            // we drain-rebuild to keep the last-write-wins
-            // semantics the plan calls for.
+            // Merge binding env (last-write-wins).
             let binding_env: std::collections::HashMap<String, String> =
                 b.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             worker_backend
@@ -1562,97 +1564,203 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         let worker_rpc_tx = rpc_event_tx.clone();
         let worker_tui_state = tui_state.clone();
 
-        if let Some(dim) = assigned_dimension.as_ref() {
-            assigned_dimensions.insert(index_u32, dim.clone());
-        }
-
-        // 2026-07-23-001 plan U3 KTD-1..KTD-4: the dispatcher
-        // MUST query the bridge's `try_dispatch_next(wave_id,
-        // slot_index)` for store approval BEFORE pushing the
-        // WorkerRequest. The store decides whether a slot is
-        // dispatchable right now (FIFO/priority/backpressure);
-        // the dispatcher only pushes a worker process for
-        // approved slots.
-        //
-        // Three outcomes:
-        //   - `Ok(true)`  → store approved; push the
-        //     WorkerRequest and increment `approved_in_wave`.
-        //   - `Ok(false)` → store did not approve (queue empty,
-        //     other wave's slot, cap reached, ...); skip this
-        //     slot. The slot's status in the store stays
-        //     pending and the next iteration will re-check.
-        //   - `Err(...)`  → fail-closed: skip this slot
-        //     (production runtime logs the error and continues
-        //     so other slots can still spawn). The dispatcher's
-        //     spawn-guarantee check below may downgrade the
-        //     wave outcome to `SpawnFailed` if the cumulative
-        //     skip rate makes the spawn count fall below
-        //     `events_len`. The caller (handle_wave_events)
-        //     surfaces `SpawnFailed` as a hard error.
-        match bridge.try_dispatch_next(&store_wave_id, index_u32) {
-            Ok(true) => {
-                // Approved: counted below when we push the
-                // WorkerRequest.
-            }
-            Ok(false) => {
-                warn!(
-                    wave_id = %wave.wave_id,
-                    slot_index = index_u32,
-                    store_wave_id = %store_wave_id,
-                    "supervisor dispatch: store did not approve slot; skipping spawn"
-                );
-                continue;
-            }
-            Err(err) => {
-                warn!(
-                    wave_id = %wave.wave_id,
-                    slot_index = index_u32,
-                    store_wave_id = %store_wave_id,
-                    error = %err,
-                    "supervisor dispatch: try_dispatch_next returned Err; \
-                     failing closed (slot skipped, no spawn)"
-                );
-                continue;
-            }
-        }
-
-        approved_in_wave += 1;
-        worker_requests.push(WorkerRequest {
+        prepared.push(PreparedSlot {
             index: index_u32,
-            backend: worker_backend,
-            prompt,
-            worker_events_path: worker_events_file,
-            worker_timeout: wave_timeout,
-            progress_tx,
-            worker_rpc_tx,
-            worker_tui_state,
-            assigned_dimension,
-            cwd: slot_cwd,
+            request: Some(WorkerRequest {
+                index: index_u32,
+                backend: worker_backend,
+                prompt,
+                worker_events_path: worker_events_file,
+                worker_timeout: wave_timeout,
+                progress_tx,
+                worker_rpc_tx,
+                worker_tui_state,
+                assigned_dimension: assigned_dimension.clone(),
+                cwd: slot_cwd,
+            }),
+            preview,
+            dimension: assigned_dimension,
         });
     }
 
-    dispatch_wave_inner_with_release(
-        tracker,
-        worker_requests,
-        DispatchContext::build(
+    // Approval rounds: each round lets up to `effective_cap`
+    // pending slots dispatch in parallel; permits released by
+    // earlier rounds (via inner's per-worker SlotGuard) make the
+    // FIFO slots waiting in the next round approvable.
+    let mut spawned: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    let mut merged_wave: Option<ralph_core::CompletedWave> = None;
+    let mut terminal_outcome: Option<WaveDispatchOutcome> = None;
+
+    loop {
+        let mut round_requests: Vec<WorkerRequest> = Vec::new();
+        let mut round_previews: Vec<String> = Vec::new();
+        let mut round_dims: std::collections::HashMap<u32, String> =
+            std::collections::HashMap::new();
+        let mut round_indices: Vec<u32> = Vec::new();
+        let mut approved_this_round: u32 = 0;
+
+        for slot in prepared.iter_mut() {
+            if spawned.contains(&slot.index) {
+                continue;
+            }
+            if approved_this_round >= effective_cap {
+                // Remaining pending slots wait for the next round
+                // after released permits free up.
+                break;
+            }
+            // U3 KTD-1..KTD-4: store approval gates every spawn
+            // (FIFO/backpressure). `Ok(false)` keeps the slot
+            // pending for the next round instead of dropping it
+            // (the U4 contract: "the fifth slot starts after
+            // release"). `Err` is fail-closed: never retry the
+            // slot.
+            match bridge.try_dispatch_next(&store_wave_id, slot.index) {
+                Ok(true) => {
+                    approved_this_round += 1;
+                    spawned.insert(slot.index);
+                    round_indices.push(slot.index);
+                    round_previews.push(slot.preview.clone());
+                    if let Some(ref dim) = slot.dimension {
+                        round_dims.insert(slot.index, dim.clone());
+                    }
+                    round_requests.push(
+                        slot.request
+                            .take()
+                            .expect("prepared slot's request is taken once on first approval"),
+                    );
+                }
+                Ok(false) => continue,
+                Err(err) => {
+                    warn!(
+                        wave_id = %wave.wave_id,
+                        slot_index = slot.index,
+                        store_wave_id = %store_wave_id,
+                        error = %err,
+                        "supervisor dispatch: try_dispatch_next returned Err; \
+                         failing closed (slot skipped, no spawn)"
+                    );
+                    spawned.insert(slot.index);
+                    continue;
+                }
+            }
+        }
+
+        if round_requests.is_empty() {
+            // Either every prepared slot was spawned (or fail-closed
+            // at bind time) or the store approved nothing this round
+            // (U3 "dispatcher awaits store approval" gate).
+            break;
+        }
+
+        let mut round_tracker = WaveTracker::new();
+        round_tracker.register_wave_with_source(
+            wave.wave_id.clone(),
+            round_requests.len() as u32,
+            Some(wave.target_hat.clone()),
+        );
+        let round_ctx = DispatchContext::build_supervisor_round(
             wave,
             wave_timeout,
             aggregate_timeout,
-            payload_previews,
+            round_requests.len() as u32,
+            round_indices,
+            round_previews,
             show_progress,
             use_colors,
             limits,
-            assigned_dimensions,
-        ),
-        executor,
-        ProgressChannels {
-            rpc_event_tx,
-            tui_state,
-        },
-        Some(Arc::clone(bridge)),
-        Some(store_wave_id),
-    )
-    .await
+            round_dims,
+        );
+        let round_outcome = dispatch_wave_inner_with_release(
+            round_tracker,
+            round_requests,
+            round_ctx,
+            executor.clone(),
+            ProgressChannels {
+                rpc_event_tx: rpc_event_tx.clone(),
+                tui_state: tui_state.clone(),
+            },
+            Some(Arc::clone(bridge)),
+            Some(store_wave_id.clone()),
+        )
+        .await;
+
+        match round_outcome {
+            WaveDispatchOutcome::Completed(round) | WaveDispatchOutcome::Partial(round) => {
+                merge_round_into(&mut merged_wave, round);
+            }
+            WaveDispatchOutcome::AggregateDeadlineExceeded(round) => {
+                merge_round_into(&mut merged_wave, round);
+                terminal_outcome = merged_wave
+                    .take()
+                    .map(WaveDispatchOutcome::AggregateDeadlineExceeded);
+                break;
+            }
+            WaveDispatchOutcome::GlobalDeadlineExceeded => {
+                terminal_outcome = Some(WaveDispatchOutcome::GlobalDeadlineExceeded);
+                break;
+            }
+            spawn_failed @ WaveDispatchOutcome::SpawnFailed { .. } => {
+                terminal_outcome = Some(spawn_failed);
+                break;
+            }
+        }
+    }
+
+    if let Some(outcome) = terminal_outcome {
+        return outcome;
+    }
+
+    let mut completed = match merged_wave {
+        Some(merged) => merged,
+        None => {
+            // No round spawned anything (every slot fail-closed at
+            // bind time, or the store never approved — U3 gate).
+            // Replay the legacy empty-wave pass so the tracker
+            // surfaces the full-wave synthetic failures, mirroring
+            // the pre-U9 single-pass behaviour on this edge case.
+            let mut tracker = WaveTracker::new();
+            tracker.register_wave_with_source(
+                wave.wave_id.clone(),
+                wave.total,
+                Some(wave.target_hat.clone()),
+            );
+            let full_indices: Vec<u32> = (0..wave.total).collect();
+            let full_previews: Vec<String> = wave
+                .events
+                .iter()
+                .map(|e| e.payload.as_deref().unwrap_or("").replace('\n', " "))
+                .collect();
+            return dispatch_wave_inner_with_release(
+                tracker,
+                Vec::new(),
+                DispatchContext::build_supervisor_round(
+                    wave,
+                    wave_timeout,
+                    aggregate_timeout,
+                    wave.total,
+                    full_indices,
+                    full_previews,
+                    show_progress,
+                    use_colors,
+                    limits,
+                    std::collections::HashMap::new(),
+                ),
+                executor,
+                ProgressChannels {
+                    rpc_event_tx,
+                    tui_state,
+                },
+                Some(Arc::clone(bridge)),
+                Some(store_wave_id),
+            )
+            .await;
+        }
+    };
+    // Normalize back to the full wave's totals before handing off
+    // (per-round CompletedWaves carry round-scoped totals).
+    completed.wave_total = wave.total;
+    completed.partial = completed.partial || (completed.results.len() as u32) < wave.total;
+    outcome_for_completion(completed)
 }
 
 /// U6: outcome of a production supervisor fan-in tick. The
@@ -1728,7 +1836,13 @@ pub(crate) fn run_supervisor_fan_in(
         .first()
         .map(|e| e.topic.as_str())
         .unwrap_or("");
-    let wave_kind = if trigger_topic.starts_with("review.wave.") {
+    // 2026-07-23-001 plan U9: widened `review.wave.` → `review.`
+    // to keep the kind inference consistent between the spawn
+    // path and this fan-in path. See the matching note on
+    // `execute_wave_via_supervisor_with_executor` for why the
+    // builtin preset's `review.unit.ready` trigger needs to be
+    // classified Review.
+    let wave_kind = if trigger_topic.starts_with("review.") {
         WaveKind::Review
     } else if trigger_topic.starts_with("fix.") {
         WaveKind::Fix
@@ -1830,8 +1944,9 @@ pub(crate) fn run_supervisor_fan_in(
             }
             let payload = serde_json::json!({
                 "wave_id": completed.wave_id,
+                "completed_slots": success_slots.len(),
                 "success_slots": success_slots,
-                "blocking_slots": Vec::<u32>::new(),
+                "merge_root_event_id": format!("fan-in:exec.wave.complete:{}", completed.wave_id),
             });
             append_supervisor_coord_event(main_events_file, &topic, &payload);
             SupervisorFanInOutcome::InjectedComplete
@@ -1845,6 +1960,11 @@ pub(crate) fn run_supervisor_fan_in(
                 "wave_id": completed.wave_id,
                 "reason": reason,
                 "blocking_slots": blocking_slots,
+                // 2026-07-23-001 plan U9: the U6 fan-in sink builds the
+                // `*.wave.failed` payload. The schema (`presets/schemas/ce-executor-supervisor.yml`)
+                // requires `wave_id`, `blocking_slots`, and `reason` —
+                // everything above — so the system_injected ledger event
+                // passes the engine gate's required_fields check.
             });
             append_supervisor_coord_event(main_events_file, &topic, &payload);
             SupervisorFanInOutcome::InjectedFailed
@@ -2378,7 +2498,12 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
 
     // JoinSet fully drained. Record synthetic failures for any
     // worker index that never reported (panicked or cancelled).
-    for i in 0..ctx.expected_total {
+    // 2026-07-23-001 plan U9: sweep over `sweep_indices`
+    // (round-scoped for the supervisor's batch dispatch) instead
+    // of `0..expected_total`, so a still-pending slot from a
+    // larger wave is never mis-classified as failed here — it
+    // is dispatched by the next round instead.
+    for &i in &ctx.sweep_indices {
         if !tracker.has_reported(&ctx.wave_id, i) {
             // U4/R4 (2026-06-17-002): when the un-reported slot
             // had a dimension assignment, record a
@@ -2484,6 +2609,27 @@ fn take_results(
 /// `take_wave_results`) so it survives across dispatch rounds.
 /// See `PendingTaskResumeRecord` in `super::io` for the
 /// pre-rendered line format.
+
+/// 2026-07-23-001 plan U9: fold one approval round's `CompletedWave`
+/// into the wave-level accumulator inside the supervisor's batched
+/// dispatch. Per-round waves carry round-scoped `wave_total` /
+/// `partial`; the caller normalizes them against the full wave after
+/// the last round (`final_completed.wave_total = wave.total`).
+fn merge_round_into(
+    base: &mut Option<ralph_core::CompletedWave>,
+    round: ralph_core::CompletedWave,
+) {
+    match base {
+        None => *base = Some(round),
+        Some(base) => {
+            base.results.extend(round.results);
+            base.failures.extend(round.failures);
+            base.worker_events.extend(round.worker_events);
+            base.duration += round.duration;
+            base.partial = base.partial || round.partial;
+        }
+    }
+}
 
 fn outcome_for_completion(completed: CompletedWave) -> WaveDispatchOutcome {
     if completed.partial {
