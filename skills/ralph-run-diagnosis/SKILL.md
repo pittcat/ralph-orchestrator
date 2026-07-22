@@ -58,6 +58,26 @@ Phase 4  主 Agent 汇总落盘
 
 Diagnostics 四档：`FULL` | `MINIMAL` | `LOGS_ONLY` | `DISABLED` — 决定 L2/L OPAC 深度。
 
+### Phase 0 能力推断（execution capabilities）
+
+> **目的**：在写报告 §0 与 §1 之前，先声明这次 run 的 capability 集合，便于后续对账（supervisor.db 是否存在、wave_id Confirm 走哪条路径）有锚点。**禁止**按 builtin preset 名称点名门控；一律 capability-triggered（Intent.execution_model + YAML 信号 + 产物信号）。
+
+**推断步骤（顺序固定）**：
+
+1. 读 `references/agent-native-model.md`「执行模型（Execution Model）」段确认枚举与检测信号；该节是 frozen vocabulary，本 plan 不再扩展。
+2. 解析 preset：
+   - `event_loop.supervisor.enabled: true` → capability +supervisor
+   - hat `publishes` 含 `exec.wave.*` / hat `instructions` 含 `ralph wave emit` → capability +wave
+3. 解析 Intent（如有作者 notes）：`execution_model: wave | supervisor | supervisor+wave` → 与上面 capability 一致则 OK；不一致 → 主表 P0（详见 `references/finding-rubric.md`「Supervisor capability audit」段 `preset.execution_model_intent_mismatch`）。
+4. 扫描产物：
+   - `.ralph/supervisor.db` 存在 → capability +supervisor（**仅**当上一步 YAML 也声明；产物不应推翻配置）
+   - events 含 `wave_id` → capability +wave
+5. 输出到报告 §0 的 **`execution_capabilities`** 字段（字符串数组），例如 `["single-chain"]` / `["wave"]` / `["supervisor", "wave"]`。
+
+**缺 db / 缺 wave_id 不算故障（hard rule）**：在 capability 推断结果为单链时，缺 `.ralph/supervisor.db` 是**预期**，**不**是异常；events 无 `wave_id` 也是**预期**，**不**是异常。**仅**当 capability +supervisor 时缺 db 才列为缺失（runtime 异常）；**仅**当 capability +wave 时缺 wave_id 对账才列为缺失。
+
+**wave Confirm 路径**：capability +wave 时，worker / dispatcher 完成态由 `ralph events --events-source main`（main ledger）对账；hat-channel 是 dispatcher 自己 private 落盘点，**不**用作 wave Confirm。L3 / L4 验证按 `references/mechanism-checklist.md`（如有 wave Confirm 源行则引用）。
+
 ## Phase 1–3 Sub-Agent
 
 见 [subagent-charters.md](references/subagent-charters.md)、[verification-pipeline.md](references/verification-pipeline.md)。

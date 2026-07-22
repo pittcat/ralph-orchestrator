@@ -67,3 +67,15 @@ runtime 拒收/路由错误 → mechanism
 正确拒收 + agent 反复违例 → compound
 instructions 诱导非法 emit → preset + agent
 ```
+
+## 能力感知对账（capability-aware reconciliation）
+
+按 `SKILL.md`「Phase 0 能力推断」段结果，对账 Tier B 条件产物与 events / log：
+
+| capability 信号 | 期望产物 / 路径 | Confirm 路径 | 缺失判定 |
+|---|---|---|---|
+| `event_loop.supervisor.enabled: true` | `.ralph/supervisor.db` | `ralph inspect loop --format json` 的 `supervisor` 块 | 缺 db → capability +supervisor 必需时记 P0；否则 N/A |
+| events 含 `wave_id` | hat-channel（dispatcher）+ main ledger（worker Confirm） | worker 完成态走 `ralph events --events-source main`（main ledger） | events 无 wave_id → capability +wave 必需时记缺失；否则 N/A |
+| 既无 supervisor.enabled 又无 `ralph wave emit` | 仅 main events + tasks + Tier C | `ralph events --events-source main` + Tier C artifact | 缺 supervisor.db / wave_id 是预期，**不**列为故障 |
+
+报告 §0 与 §5 引用 capability 推断结果而非 preset 名称；详见 `SKILL.md`「Phase 0 能力推断」段。

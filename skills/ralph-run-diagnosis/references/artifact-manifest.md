@@ -56,7 +56,7 @@
 | `.ralph/agent/events-hat-{hat}-{loop_id}-{iter}.jsonl` | isolated hat-channel | 私有 emit |
 | `.ralph/agent/.ralph-enforce-current-unit` | `enforce_current_unit: true` | R4 标记文件 |
 | `.ralph/merge-queue.jsonl` | merge preset | 合并队列 |
-| `.ralph/supervisor.db` | supervisor + feature | runtime only |
+| `.ralph/supervisor.db` | supervisor + feature | runtime only（**仅** capability +supervisor 时存在属预期；缺则按 Phase 0 推断结果分情况记为缺失 / 正常） |
 | `run_dir/ralph.yml` | 用户工作区 | 配置漂移（**必读**） |
 
 `LoopStateSnapshot` **无磁盘文件** — `ralph inspect loop` / events 回放。
