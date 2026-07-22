@@ -15,9 +15,9 @@ origin: docs/report/2026-07-22-ce-executor-supervisor-primary-20260722-084810-di
 
 - Objective: 修复 `ce-executor-supervisor` 从 wave 识别、SQLite supervisor、slot worktree、全局反压、结果登记、fan-in 到终态事件的生产链路，使 exec/review/fix 并行路径真实可运行。
 - Authority: 本计划 Product Contract、会话确认的 KTD、仓库 HARD RULE；发生冲突时，`ce-executor-pipeline` 零行为变化与 supervisor 默认持久化优先。
-- Execution profile: 严格执行 `U1 → U2 → U3 → U4 → U5 → U6 → U7 → U8`；每个 Unit 独立完成验收测试、Red、最小实现、Refactor、targeted regression 后才能进入下一 Unit。
+- Execution profile: 严格执行 `U1 → U2 → … → U13`；每个 Unit 独立完成验收测试、Red、最小实现、Refactor、targeted regression 后才能进入下一 Unit。**Unit 包装硬约束（来自本计划首轮 U5 失败）：** 单个 Unit 必须可由一个 executor subagent 在一轮内安全闭合；禁止把「跨 crate 表面 + 生产 spawn 门控 + permit 释放 + 全套并发/FIFO 验收」或「record + production sink + 协调 payload + U16 特判」塞进同一 Unit。
 - Stop when: Verification Contract 全部通过，真实临时 Git 仓库中可观察到受并发上限约束的独立 slot worktree，完整 supervisor 主路径闭环，所有 pipeline 场景保持原行为。
-- Tail ownership: U8 统一收口 agent skill、operator skill、架构规则、诊断报告和 CLI 文档漂移；任何失败或跳过测试必须在完成前清零。
+- Tail ownership: U13 统一收口 agent skill、operator skill、架构规则、诊断报告和 CLI 文档漂移；任何失败或跳过测试必须在完成前清零。
 
 Product Contract preservation: 本计划由已确认的运行诊断与会话约束直接建立；不改变 pipeline 产品契约，不吸收 `docs/plans/2026-07-22-001-feat-wave-protocol-suite-default-plan.md` 的默认 wave 重构范围。
 
@@ -207,11 +207,11 @@ Feature: Supervisor preset 真实执行并行 worktree 且不影响 pipeline
 | R2–R4 | 默认 SQLite 与路径 | 默认构建启动 supervisor | path resolver | feature matrix + packaging contract | install smoke |
 | R5–R6 | 并发声明 | strict lint fixture | supervisor lint positive/negative | embedded preset parse + wave detection | 不需要 |
 | R7–R8 | worktree binding | distinct cwd/branch；failure fail-closed | binding factory cases | production bridge + temp Git | exec wave E2E |
-| R9 | 全局反压 | 5 slots cap 4 FIFO | memory/rusqlite parity | dispatcher concurrency integration | exec wave E2E |
-| R10–R12 | result/fan-in/production sink/U16 | slot events与complete once、载荷可合并、无 misrouted | idempotency + payload ordering + virtual consumer | EventLoop + coordinator + fault injection | exec wave E2E |
-| R13 | 恢复 | restart continuation | recovery state transitions | rusqlite reopen | restart smoke |
-| R14 | 完整主路径 | required events 与成功终态 | 最小必要单元覆盖 | BDD scenarios | 关键 mock/replay E2E |
-| R15–R16 | 文档和诊断一致 | drift/checklist 全绿 | 文档契约测试 | preset review fixture | 不需要 |
+| R9 | 全局反压 | 5 slots cap 4 FIFO | memory/rusqlite parity | U5 bridge表面 + U6 spawn门控 + U7 permit/FIFO | exec wave E2E |
+| R10–R12 | result/fan-in/production sink/U16 | slot events与complete once、载荷可合并、无 misrouted | U8 record + U9 sink/payload + U10 virtual consumer | EventLoop + coordinator + fault injection | exec wave E2E |
+| R13 | 恢复 | restart continuation | recovery state transitions | U11 rusqlite reopen | restart smoke |
+| R14 | 完整主路径 | required events 与成功终态 | 最小必要单元覆盖 | BDD scenarios | U12 关键 mock/replay E2E |
+| R15–R16 | 文档和诊断一致 | drift/checklist 全绿 | 文档契约测试 | U13 preset review fixture | 不需要 |
 
 ### Scope Boundaries
 
@@ -311,9 +311,10 @@ sequenceDiagram
 1. 从 operator 看到的 pipeline 零变化和 supervisor 成功/失败启动行为建立外层契约。
 2. 从完整 wave batch 是否进入 dispatcher，发现 preset concurrency 与 lint 能力。
 3. 从 worker cwd/worktree 的外部证据，发现 production bridge binding。
-4. 从同时运行数量和 FIFO 顺序，发现 store dispatch/backpressure 接线。
-5. 从协调事件唯一性和 integrator 激活，发现 result recording、tick 与虚拟 handoff。
-6. 最后用完整 mock/replay E2E 验证各层协作，不用 E2E 替代低层精确测试。
+4. 从同时运行数量和 FIFO 顺序，发现 store dispatch/backpressure 接线（拆为 bridge 表面 → spawn 门控 → permit/FIFO 验收）。
+5. 从 store terminal、协调事件唯一性和 integrator 激活，发现 result recording、production sink 与虚拟 handoff（拆为 record → sink/complete → U16）。
+6. 再以 rusqlite restart 与少量 mock/replay E2E 验证各层协作，不用 E2E 替代低层精确测试。
+7. 最后同步文档/skills/诊断，不提前文档化未落地行为。
 
 ### Risks and Mitigations
 
@@ -325,7 +326,8 @@ sequenceDiagram
 | 多 wave 反压错误造成饥饿 | slot 永久 pending | memory/rusqlite differential + FIFO state-machine test |
 | 特殊处理 virtual supervisor 放松真实 hat 校验 | 权限回归 | 正反配对测试：virtual 接受、普通 misrouted 仍拒绝 |
 | E2E fake 继续绕过 production wiring | 假绿 | 禁止调用手工 fan-in helper作为关键 E2E；断言 DB rows、worktree cwd 与生产日志边界 |
-| preset 文档与 schema/operator skill 漂移 | 后续 author 再造错误 preset | U3/U8 更新通用 lint finding、rubric、fixtures 和 drift checks |
+| preset 文档与 schema/operator skill 漂移 | 后续 author 再造错误 preset | U3/U13 更新通用 lint finding、rubric、fixtures 和 drift checks |
+| 单 Unit 跨层过大导致 subagent 整包回滚 | 像首轮旧 U5：能力未交付却记 failed，下游全 blocked | U5–U7 / U8–U10 按单层接线拆分；每 Unit 窄验收，禁止“顺手”吞并下一层 |
 
 ---
 
@@ -333,7 +335,11 @@ sequenceDiagram
 
 ### 5. 严格串行开发单元
 
-> 执行顺序固定为 `U1 → U2 → U3 → U4 → U5 → U6 → U7 → U8`。每个 Unit 的 Red、Green、Refactor、集成验证和回归范围全部完成后才能进入下一 Unit。
+> 执行顺序固定为 `U1 → U2 → U3 → U4 → U5 → U6 → U7 → U8 → U9 → U10 → U11 → U12 → U13`。每个 Unit 的 Red、Green、Refactor、集成验证和回归范围全部完成后才能进入下一 Unit。
+>
+> **再入说明：** U1–U4 已在 baseline `15bd550c` 的祖先提交中落地。本计划修订后，执行从 **新 U5** 起；旧“单体 U5（bridge+dispatcher+permit+全套并发验收）”已拆为 U5–U7，旧 U6–U8 对应 U8–U13。
+>
+> **单轮 subagent 预算：** 每个 Unit 默认只动一层（trait/bridge **或** dispatcher **或** sink/event-loop **或** 测试/文档），验收用例不超过该层的最小可观察闭环。
 
 ### U1. 建立 pipeline 零影响 characterization 门禁
 
@@ -361,7 +367,7 @@ sequenceDiagram
 - **外部可观察结果:** 默认构建启动 supervisor 时生成唯一 `.ralph/supervisor.db`；无 feature 构建在任何 worker 前报错；pipeline 仍无 DB。
 - **输入与输出:** 输入为 Cargo default features、`SupervisorConfig.db_path` 与 `LoopContext`；输出为 store 或结构化启动错误。
 - **可依赖的已完成能力:** U1 非干扰门禁、现有 `RusqliteSupervisorStore::open` 和 R-C4 runner error path。
-- **明确禁止依赖的未来能力:** 不要求 U3–U7 的 wave/worktree/fan-in 已工作；本 Unit 只证明 capability、store 类型和路径。
+- **明确禁止依赖的未来能力:** 不要求 U3 及之后的 wave/worktree/dispatch/fan-in 已工作；本 Unit 只证明 capability、store 类型和路径。
 - **Files:** `crates/ralph-cli/Cargo.toml`、`crates/ralph-cli/src/loop_runner/runner.rs`、`crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs`、`.github/workflows/ci.yml`、`.github/workflows/release.yml`、`scripts/ci-rust-gate.sh`；必要时更新 dist/build validation 配置。
 - **验收测试:** 默认 feature 编译下构建 bridge 并断言 SQLite 文件位于 `<workspace>/.ralph/supervisor.db`；显式 no-default/no-supervisor-db 编译的 contract test 断言 supervisor enabled 报错而 disabled 正常；发布 smoke 断言默认安装无需 feature 参数。
 - **需要拆分的单元测试:** DB path normalization 表驱动测试：`supervisor.db`、`.ralph/supervisor.db`、绝对路径、worktree LoopContext；feature gate 的 enabled/disabled 分支。
@@ -399,7 +405,7 @@ sequenceDiagram
 - **外部可观察结果:** exec/fix 返回非空且唯一 binding，review 返回 shared-readonly；worker cwd 与 binding 一致；失败 slot 不 spawn。
 - **输入与输出:** 输入为 loop id、workspace/repo root、wave kind/id、slot index；输出为 `SlotBinding` 或 typed failure。
 - **可依赖的已完成能力:** U1–U3、`bind_slot_worktree`、`DefaultWorktreeFactory`、`SupervisorStore::bind_worktree`、dispatcher `WorkerRequest.cwd`。
-- **明确禁止依赖的未来能力:** 不等待 U5 的全局反压或 U6 fan-in；可用单 wave/单 slot独立验收 binding。
+- **明确禁止依赖的未来能力:** 不等待 U5–U7 的全局反压或 U8+ fan-in；可用单 wave/单 slot独立验收 binding。
 - **Files:** `crates/ralph-cli/src/loop_runner/wave/supervisor_bridge.rs`、`crates/ralph-cli/src/loop_runner/runner.rs`、`crates/ralph-cli/src/loop_runner/wave/dispatcher.rs`、`crates/ralph-core/src/supervisor/worktree_bind.rs`、`crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs`；必要时新增专用 integration test 文件。
 - **验收测试:** 临时 Git repo 中两个 exec slots 获得不同 branch/path/cwd；fix 同理；review 不创建 worktree；注入 factory failure 时 store 记录失败、ProductionExecutor 未调用、主 workspace 无写入。
 - **需要拆分的单元测试:** wave kind→isolation mapping；loop/wave/slot branch命名；binding env一致性；重复 bind 幂等；失败清理。
@@ -411,81 +417,176 @@ sequenceDiagram
 - **完成标准:** 不再存在“生产 Exec/Fix 返回 None 是合法默认”的测试或路径；失败绝不落主 cwd。
 - **风险与注意事项:** 测试不得在当前开发仓库创建 worktree；必须使用 temp repo和 fake factory边界。
 
-### U5. 将全局反压与 slot dispatch 接入 SupervisorStore
+### U5. 暴露 bridge 层全局 dispatch 批准表面
 
-- **Unit 目标:** 让 `max_concurrent_workers` 真正限制跨 wave/slot 并发，并使 pending slots 通过 FIFO 获得启动资格。
-- **对应 Scenario:** 五个 exec slots 受全局上限约束地使用独立 worktree。
-- **外部可观察结果:** cap=4 时最多四个 worker同时运行，第五个保持 pending并在 permit释放后启动；多个 wave间仍按 FIFO。
-- **输入与输出:** 输入为已注册/绑定 slots和全局并发上限；输出为 store批准的 `(wave_id, slot_index)` dispatch序列。
-- **可依赖的已完成能力:** U1–U4，特别是已绑定worktree的可调度slots。
-- **明确禁止依赖的未来能力:** 不要求 fan-in协调事件已实现；worker可由barrier-controlled fake executor完成。
-- **Files:** `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs`、`crates/ralph-cli/src/loop_runner/wave/supervisor_bridge.rs`、`crates/ralph-core/src/supervisor/bridge.rs`、memory/rusqlite store tests、`crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs`。
-- **验收测试:** barrier控制的5-slot cap4测试；两个waves交错入队的FIFO测试；hat concurrency小于global cap时取较小值；cap边界1；取消/失败释放全局permit。
-- **需要拆分的单元测试:** effective concurrency计算；`try_dispatch_next` None/Some；slot从Pending→Dispatched合法迁移；memory/rusqlite differential。
-- **Red 预期失败原因:** 当前 runner只打印 `max_concurrent_workers`；生产dispatcher不调用 `try_dispatch_next`，只用hat concurrency构造本地worker requests。
-- **最小实现范围:** 把global cap传入bridge/dispatch context，由store批准后才spawn；不重写worker executor或store schema。
-- **TDD 闭环:** concurrency验收 Red → store-gated dispatch Green → 合并重复permit逻辑 Refactor → differential/integration → U1–U4 regression。
+- **Unit 目标:** 让 dispatcher 可通过 `SupervisorBridge` 读取全局 cap，并调用与 `SupervisorStore::try_dispatch_next` 同源的批准 API；本 Unit **只做表面接线**，不改生产 spawn 路径。
+- **对应 Scenario / 需求:** R9 的接口前置；为 U6 提供可测的 bridge seam。
+- **外部可观察结果:** `SupervisorBridge::max_concurrent_workers` 返回配置 cap（legacy bridge 仍可 `u32::MAX`）；`try_dispatch_next(max)` 转发 store 的 `Some((wave_id, slot))` / `None`；CLI production bridge 构造时带入 cap。
+- **输入与输出:** 输入为已注册 pending slots 的 store + `max_concurrent_workers`；输出为 bridge 方法契约与单测。
+- **可依赖的已完成能力:** U1–U4；既有 `SupervisorStore::try_dispatch_next`（memory/rusqlite）。
+- **明确禁止依赖的未来能力:** **禁止**改 `dispatcher.rs` 的 spawn/JoinSet 路径；禁止写 cap=4/FIFO 全套并发验收（留给 U6/U7）；禁止碰 fan-in/record。
+- **Files:** `crates/ralph-core/src/supervisor/bridge.rs`、`crates/ralph-cli/src/loop_runner/wave/supervisor_bridge.rs`；必要时窄测文件。**不得**为“顺手”编辑 `dispatcher.rs`。
+- **验收测试:** bridge 转发 `Some`/`None`；cap 从构造参数可读；legacy/default 实现不破坏既有 mock bridge 编译。
+- **需要拆分的单元测试:** trait default vs production override；store error 映射为 `BridgeError`。
+- **Red 预期失败原因:** trait 无 `max_concurrent_workers` / `try_dispatch_next`；production bridge 未持有或未转发 cap。
+- **最小实现范围:** 仅 trait + production bridge 字段/转发；不重写 store schema。
+- **TDD 闭环:** bridge 契约 Red → 转发 Green → 去重复 default Refactor → U1–U4 regression。
+- **集成验证:** `cargo nextest run -p ralph-core -- supervisor`；`cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor`（仅既有桥接相关）。
+- **回归范围:** mock bridge、BDD InMemory bridge、pipeline。
+- **完成标准:** dispatcher **尚未**依赖该 API 也可编译；表面可被单测单独调用；无生产行为变化（除 bridge API 可用）。
+- **风险与注意事项:** 本 Unit 故意不做行为闭合；若 subagent 发现必须改 dispatcher 才能编译，应停在可编译的 trait default（返回 `None` / `u32::MAX`）并留给 U6。
+
+### U6. Dispatcher 仅在 store 批准后 spawn
+
+- **Unit 目标:** 生产 dispatcher 在 supervisor 路径上对每个 slot 先 `try_dispatch_next`，仅当批准的 `(wave_id, slot_index)` 匹配时才进入 worker pool / spawn。
+- **对应 Scenario / 需求:** R9 的 spawn 门控半段；单 wave 内“未批准则不 spawn”。
+- **外部可观察结果:** 未获批的 slot 不调用 ProductionExecutor；获批 slot 的 spawn 可追溯到一次 bridge/`try_dispatch_next` 成功；effective 上限取 `min(hat.concurrency, bridge.max_concurrent_workers)` 用于本 wave 的本地请求构造（与全局 FIFO 完整语义的差集见 U7）。
+- **输入与输出:** 输入为 U5 已暴露的 bridge API + 已 bind 的 worker requests；输出为仅含已批准请求的 dispatch 集合。
+- **可依赖的已完成能力:** U1–U5、U4 binding、`WorkerRequest`。
+- **明确禁止依赖的未来能力:** **禁止**实现跨 wave FIFO 全套与“第五个等 permit 释放后再启动”的完整 barrier 套件（U7）；禁止 `record_slot_*` / tick / sink；禁止改 store schema。
+- **Files:** 主改 `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs`；仅当签名需要时触碰 bridge 调用方。不扩 coordinator/event_loop。
+- **验收测试:** 单 wave：store 返回 `None` 时 executor 未被调用；返回匹配 `(wave, slot)` 时恰好 spawn 该 slot；错误路径有可观察 warn/fail 且不静默当 hat-local semaphore 成功。
+- **需要拆分的单元测试:** 批准 wave/slot 不匹配时不吞并错误 slot；`min(hat, global)` 计算。
+- **Red 预期失败原因:** 生产路径仍只按 hat concurrency 构造本地 semaphore，从不调用 `try_dispatch_next`。
+- **最小实现范围:** 在既有 supervisor 分支、register/bind 之后插入批准门控；worker executor / JoinSet 骨架不重写。
+- **TDD 闭环:** “未批准不 spawn” Red → 门控 Green → 抽取 approval helper Refactor → U1–U5 regression。
+- **集成验证:** targeted dispatcher + wave_supervisor nextest。
+- **回归范围:** per-wave timeout、partial wave、legacy WaveTracker、pipeline。
+- **完成标准:** supervisor 路径每个成功 spawn 至少对应一次 store 批准；无“只打日志的 max_concurrent_workers”。
+- **风险与注意事项:** 若批准循环可能自旋，使用 `yield_now`/有界等待，禁止测试侧裸 sleep；完整 cap 释放语义留 U7。
+
+### U7. Permit 释放与跨 wave FIFO / cap 验收闭合
+
+- **Unit 目标:** worker 成功/失败/取消后释放全局 in-flight，使 pending slot 可再次 `try_dispatch_next`；用 barrier 证明 cap 与跨 wave FIFO。
+- **对应 Scenario:** 五个 exec slots / cap 4 / 独立 worktree；R9 完整可观察行为。
+- **外部可观察结果:** cap=4 时最大同时 4、第五个在释放后启动；两 wave 交错入队按 FIFO；取消/失败同样释放；hat concurrency < global 时取较小值。
+- **输入与输出:** 输入为 U6 已门控的 spawn 路径；输出为 barrier 记录的 max in-flight 与启动顺序。
+- **可依赖的已完成能力:** U1–U6；memory/rusqlite `try_dispatch_next` 状态机。
+- **明确禁止依赖的未来能力:** 不要求 fan-in 协调事件、production sink、U16、E2E 主路径；可用 fake executor + barrier。
+- **Files:** `dispatcher.rs` 中与终态/释放相关的最小补丁；memory/rusqlite differential 与 `wave_supervisor` 并发验收测试。不改 event_loop fan-in。
+- **验收测试:** barrier 5-slot cap4；两 wave FIFO；cap=1 边界；取消/失败释放后再批准；memory/rusqlite 同一序列差分一致。
+- **需要拆分的单元测试:** Pending→Dispatched→terminal 后容量回升；重复释放幂等。
+- **Red 预期失败原因:** U6 门控后若终态不回到 store 可调度容量，第五个 slot 永久 pending；或仅单测 store、生产路径无 barrier 证据。
+- **最小实现范围:** 接线已有 store 状态迁移/释放；不重写 executor；不引入 sleep 判并发。
+- **TDD 闭环:** cap4/FIFO 验收 Red → 释放路径 Green → 合并重复释放逻辑 Refactor → differential → U1–U6 regression。
 - **集成验证:** nextest memory/rusqlite supervisor protocol + dispatcher barrier tests。
-- **回归范围:** per-wave timeout、global deadline、partial wave、legacy WaveTracker、pipeline。
-- **完成标准:** 所有生产spawn均可追溯到一次store dispatch批准；没有仅日志可见但未使用的max配置。
-- **风险与注意事项:** 不使用时间睡眠判断并发；用channel/barrier记录最大in-flight和启动顺序。
+- **回归范围:** U5/U6 门控、timeout/deadline、pipeline。
+- **完成标准:** R9 的外部可观察结果全部由生产 dispatcher+store 路径证明；无仅 helper 手工 `try_dispatch_next` 的假绿。
+- **风险与注意事项:** 禁止时间 sleep；用 channel/barrier；若发现缺 store API，先补最小 store 测试再接线，仍保持本 Unit 不碰 fan-in。
 
-### U6. 接通真实事件 fan-in、结果登记与虚拟 supervisor handoff
+### U8. 登记 slot 成功/失败到 SupervisorStore
 
-- **Unit 目标:** 将worker join结果及其真实事件批次登记到fan-in上下文，使用生产ledger sink按稳定顺序合并事件，驱动coordinator产生含slot资源的唯一协调事件，并消除virtual supervisor的U16误路由。
-- **对应 Scenario:** slot结果驱动唯一fan-in协调事件；重复slot结果不重复完成或merge；主ledger写入失败时fan-in可恢复且禁止提前合并代码。
-- **外部可观察结果:** store计数正确；主ledger包含每个成功slot的业务事件且无重复；complete/failed只注入一次且payload可指导Git merge；integrator被激活；无`task.resume.misrouted consumer=supervisor`。
-- **输入与输出:** 输入为每slot成功事件批次/content hash或失败reason以及slot资源；输出为store terminal状态、主ledger事件和system-injected协调事件payload。
-- **可依赖的已完成能力:** U1–U5、现有`SupervisorCoordinator::tick`、wave merge layer、origin guard、U4已登记的slot resources。
-- **明确禁止依赖的未来能力:** 不依赖U7完整16-hat E2E；使用最小exec topology即可验收。
-- **Files:** `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs`、`crates/ralph-cli/src/loop_runner/wave/supervisor_bridge.rs`、`crates/ralph-core/src/supervisor/coordinator.rs`、`crates/ralph-core/src/event_loop/mod.rs`、handoff index相关tests、`crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs`。
-- **验收测试:** 成功N/N→slot事件按index稳定写入且单次`exec.wave.complete`；payload列出成功slot的branch/path；含失败且全部terminal→契约规定的complete/failed及blocking slots；重复record/tick幂等；sink首次失败不标merged/不发complete、恢复重试exactly-once；virtual supervisor不报misrouted；普通真实consumer缺trigger仍报U16。
-- **需要拆分的单元测试:** join outcome→record API与事件批次映射；content hash稳定性；slot事件排序/去重；resource payload排序与字段完整性；production sink append失败状态转换；tick action→system event；coordination injection dedup；virtual consumer predicate正反例。
-- **Red 预期失败原因:** 当前dispatcher从未调用`record_slot_result`/`record_slot_failure`，源码只有注释提到不存在的`run_supervisor_fan_in`；coordinator向sink提交空`Vec<Event>`，production bridge的`from_store`仍使用`InMemoryMergeSink`，协调action不携带worktree资源；event loop把supervisor当普通hat查registry。
-- **最小实现范围:** 在现有structured outcome边界保留slot事件、登记store并tick；为production bridge注入主ledger sink；扩展协调action/payload承载稳定排序的成功slot资源；复用origin/system_injected路径；对virtual supervisor做窄特判，不放宽普通hat规则。不得在本Unit自动执行Git merge，代码fan-in仍由integrator消费公开payload完成。
-- **TDD 闭环:** minimal topology与非空sink验收 Red → record/event merge/tick/payload/virtual route Green → 统一成功失败与排序逻辑 Refactor → sink fault injection和真实EventLoop integration → U1–U5 regression。
-- **集成验证:** nextest targeted dispatcher/coordinator/handoff；真实EventLoop runner断言events而非仅iteration数。
-- **回归范围:** origin guard、task.resume misrouting、协调topic agent拒收、legacy wave merge、pipeline。
-- **完成标准:** fan-in由生产store状态触发；不存在生产空事件batch或in-memory sink；slot事件与协调事件exactly-once；integrator只依赖agent可见payload即可确定待合并branches；U16无假阳性且无权限放宽。
-- **风险与注意事项:** 明确store terminal、主ledger append、`merged_to_events`和协调事件的顺序；若现有JSONL API不能原子提交slot事件与协调事件，必须用幂等键/恢复测试证明崩溃窗口不会重复或丢失，不得以注释代替保证。
+- **Unit 目标:** worker join 后调用 `record_slot_result` / `record_slot_failure`，保留真实事件批次/content hash 或 reason；重复登记幂等。
+- **对应 Scenario / 需求:** R10；为后续 fan-in 提供 store terminal 输入。
+- **外部可观察结果:** store `completed_count` / failed 状态正确；重复 record 不增加计数；dispatcher 保留每 slot 事件批次与 terminal 关联。
+- **输入与输出:** 输入为 structured worker outcome；输出为 store terminal 状态（尚不要求主 ledger 合并或 wave.complete）。
+- **可依赖的已完成能力:** U1–U7、既有 store record API。
+- **明确禁止依赖的未来能力:** **禁止**接 production `EventMergeSink`、禁止注入 `*.wave.complete/failed`、禁止改 U16、禁止 Git merge。本 Unit 验收停在 store 状态。
+- **Files:** `dispatcher.rs` 的 outcome→record 边界；相关 store/dispatcher 测试。不改 `event_loop/mod.rs` handoff。
+- **验收测试:** N 成功 → completed_count=N；含失败 → 对应 failed+reason；重复 record 幂等；事件批次/hash 稳定可测。
+- **需要拆分的单元测试:** join outcome→record 映射；空事件/非空事件；failure reason 截断策略（若已有则复用）。
+- **Red 预期失败原因:** 生产 dispatcher 从不调用 `record_slot_*`，仅有注释或 BDD helper 手工 record。
+- **最小实现范围:** 在既有 structured outcome 边界登记 store；不重写 coordinator tick。
+- **TDD 闭环:** record 幂等验收 Red → 接线 Green → 统一 success/fail helper Refactor → U1–U7 regression。
+- **集成验证:** targeted dispatcher/store nextest。
+- **回归范围:** U6/U7 dispatch、legacy wave merge（不得被误触发）。
+- **完成标准:** 每个 terminal slot 在 store 可查且幂等；仍可不存在生产 wave.complete（那是 U9）。
+- **风险与注意事项:** 不要为了“看起来完整”在本 Unit 调用 tick/inject。
 
-### U7. 用真实生产路径闭合恢复与完整 supervisor 主流程
+### U9. 生产 ledger sink 与唯一协调事件（含资源 payload）
 
-- **Unit 目标:** 建立少量关键Outside-In E2E，证明builtin preset从exec fan-out到终态真实经过dispatcher/SQLite/worktree/fan-in，而不是BDD helper手工模拟。
-- **对应 Scenario:** 崩溃恢复继续未完成wave；完整supervisor主路径闭环。
-- **外部可观察结果:** temp repo出现受控slot worktrees和SQLite状态；exec/review/fix协调事件及业务handoff完整；required events满足；loop成功结束。
-- **输入与输出:** 输入为builtin preset、deterministic fake backend、5-unit plan和可选review/fix分支；输出为Git提交/merge结果、events、DB可公开派生状态和终态。
-- **可依赖的已完成能力:** U1–U6全部能力。
-- **明确禁止依赖的未来能力:** 不依赖U8文档修正；不得继续使用`run_bdd_supervisor_fan_in`替代production runner。
-- **Files:** `crates/ralph-cli` integration test适当位置、`crates/ralph-core/tests/scenarios/supervisor/*.yml`与`scenarios.rs`（组件BDD保留但标清边界）、必要的`crates/ralph-e2e` mock fixture；不新增live API测试。
-- **验收测试:** 5 exec slots/cap4/worktree唯一；slot事件真实进入主ledger；coordination payload驱动integrator合并全部成功branches并在全测后发`work.done`；review六维shared-readonly；有finding时fix worktrees及对应代码合并；无finding时合法skip；进程中断后重启不重跑completed slot；成功终态；binding/store/sink/tick/Git merge fault各有失败恢复出口；终态后无泄漏worktree/branch。
-- **需要拆分的单元测试:** 本Unit不新增无业务价值的细碎单测；若E2E暴露新状态转换，先回到所属U4–U6测试层补最小Red，再恢复本Unit。
-- **Red 预期失败原因:** 当前builtin缺concurrency、production binding为空、store dispatch/result/tick未接线；现有BDD通过手工helper绕开这些缺口。
-- **最小实现范围:** 只新增/调整fixture和必要测试基础设施；若生产缺陷已由U1–U6修完，本Unit不再改生产行为。
-- **TDD 闭环:** 主路径E2E Red → 仅补测试基础设施/修复遗漏Green → 精简重复fixture Refactor → crash recovery与fault tests → 全部targeted regression。
-- **集成验证:** `cargo nextest run -p ralph-core --test scenarios -- supervisor`；对应`ralph-cli` integration nextest；`cargo run -p ralph-e2e -- --mock`若fixture归属E2E crate。
-- **回归范围:** 全部supervisor scenarios、pipeline scenarios、smoke/replay、agent env污染复跑。
-- **完成标准:** 关键E2E不用手工fan-in helper且稳定绿；能从外部证据证明真实worktree并发和SQLite恢复；无loop_stale。
-- **风险与注意事项:** E2E只保留覆盖跨层契约的少量场景，具体边界仍由低层测试负责；避免把所有Scenario堆成E2E。
+- **Unit 目标:** fan-in 时经生产 sink 按 slot index 稳定合并业务事件到主 ledger，再只注入一次 `*.wave.complete` / `*.wave.failed`；payload 含稳定排序的成功 slot `branch`/`worktree_path`。
+- **对应 Scenario / 需求:** R11；唯一 fan-in；ledger 写失败可恢复（不标 merged、不发 complete）。
+- **外部可观察结果:** 主 ledger 含去重 slot 事件；complete/failed exactly-once；payload 足以驱动 integrator；`from_store` 生产路径不再使用 `InMemoryMergeSink`。
+- **输入与输出:** 输入为 U8 已 terminal 的 store + 保留的 slot 事件；输出为 sink 写入与 system-injected 协调事件。
+- **可依赖的已完成能力:** U1–U8、`SupervisorCoordinator::tick`、origin/system_injected 路径、U4 slot resources。
+- **明确禁止依赖的未来能力:** **禁止**改 virtual supervisor U16 特判（U10）；禁止完整 16-hat E2E（U12）；禁止在本 Unit 执行 Git merge。
+- **Files:** `supervisor_bridge.rs`（生产 sink 注入）、`coordinator.rs`（若需扩展 action/payload）、`dispatcher.rs` tick 调用边界；针对性测试。尽量不扩手改 U16。
+- **验收测试:** 成功 N/N → 事件按 index 写入 + 单次 complete + payload 列出 branch/path；含失败且全 terminal → 契约规定的 complete/failed；重复 tick 幂等；sink 首次失败不标 merged/不发 complete，重试 exactly-once。
+- **需要拆分的单元测试:** slot 事件排序/去重；resource payload 字段完整性；sink append 失败状态机；injection dedup。
+- **Red 预期失败原因:** coordinator 向 sink 交空 `Vec<Event>`；production `from_store` 仍 `InMemoryMergeSink`；action 无 worktree 资源。
+- **最小实现范围:** 接生产 sink + tick + payload；不自动 Git merge。
+- **TDD 闭环:** 非空 sink/唯一 complete Red → Green → 排序/失败路径 Refactor → EventLoop 最小 topology integration → U1–U8 regression。
+- **集成验证:** dispatcher/coordinator nextest；真实 EventLoop 断言 events（禁止只数 iterations）。
+- **回归范围:** origin guard、协调 topic agent 拒收、legacy wave merge、pipeline。
+- **完成标准:** 生产路径无空 batch / 无 in-memory sink；integrator 只依赖 agent 可见 payload 即可列出待合并 branches。
+- **风险与注意事项:** 明确 store terminal → sink append → `merged_to_events` → 协调事件顺序；崩溃窗口用幂等键/恢复测证明，不用注释代替。
 
-### U8. 同步agent/operator文档并纠正诊断报告
+### U10. 虚拟 supervisor 的 U16 handoff 特判
 
-- **Unit 目标:** 让agent指南、preset operator规则、项目硬规则和诊断报告与最终生产行为一致，防止错误根因和错误preset再次出现。
-- **对应 Scenario:** 所有Scenario的文档/审计可发现对应违规，尤其是缺concurrency、无DB能力和内部ledger边界。
-- **外部可观察结果:** 新lint finding在rubric/fixtures可查；CLI/skill示例与help一致；报告P0因果链按真实断点排序；`CLAUDE.md`与`AGENTS.md`完全一致。
-- **输入与输出:** 输入为U1–U7最终行为、help输出、lint IDs和测试证据；输出为同步文档与修订报告。
-- **可依赖的已完成能力:** U1–U7全部完成并验证。
-- **明确禁止依赖的未来能力:** 不把计划编号、一次事故路径、特定builtin名称或源码内部函数写入通用注入skill。
-- **Files:** `crates/ralph-core/data/ralph-tools-wave.md`及确有agent可见变化的相关guides、`skills/ralph-preset-common/references/{agent-native-model,author-checklist,commands,finding-rubric,patterns}.md`、`skills/ralph-preset-{author,review}/SKILL.md`与fixtures、`.cursor/rules/{multi-hat-isolation,feature-flags}.mdc`、`CLAUDE.md`、`AGENTS.md`、`docs/report/2026-07-22-ce-executor-supervisor-primary-20260722-084810-diagnosis.md`。
-- **验收测试:** operator negative fixture缺concurrency时报新finding；commands与`ralph <cmd> --help`一致；注入skill说明触发条件/动作/字段来源/失败停止且无内部ledger路径依赖；报告明确区分根因、下游症状和已推翻假设。
-- **需要拆分的单元测试:** 文档契约/drift检查；`CLAUDE.md`/`AGENTS.md`字节一致；finding ID rubric parity。
-- **Red 预期失败原因:** 当前报告遗漏production bind/dispatch/result/tick断点并把feature-off内存store误判为fan-in根因；项目规则仍写 supervisor需手工feature；operator checklist未检查consumer concurrency。
-- **最小实现范围:** 只同步最终已实现行为；不提前文档化未来默认wave重构；preset名称列表未变，不改zsh补全。
-- **TDD 闭环:** 文档/fixture contract Red → 同步Green → 去事故化/去实现细节Refactor → drift与fixture验收 → 全量回归。
-- **集成验证:** `scripts/check-cli-doc-drift.sh`；preset review negative fixture流程；skill契约测试；`cmp CLAUDE.md AGENTS.md`。
-- **回归范围:** 所有operator skill fixtures、agent reference tests、preset lint/parity、U1 pipeline门禁。
-- **完成标准:** 文档无漂移；报告不再误导；所有人类输出中文；未编辑runtime状态文件。
-- **风险与注意事项:** `crates/ralph-core/data/*.md`只写agent下一步可执行内容，不泄漏内部DB/store/函数/行号；实现背景留在开发文档与报告。
+- **Unit 目标:** 将虚拟 `supervisor` 识别为 runtime 内部 consumer，合法 `*.unit.done` 不报 `task.resume.misrouted`；普通真实 hat 的 U16 行为不变。
+- **对应 Scenario / 需求:** R12。
+- **外部可观察结果:** virtual supervisor 无 misrouted；故意缺 trigger 的普通 hat 仍报 U16。
+- **输入与输出:** 输入为 handoff/consumer 判定路径；输出为正反配对诊断/事件。
+- **可依赖的已完成能力:** U1–U9（至少要有真实 unit.done 流入，可用最小 fixture）。
+- **明确禁止依赖的未来能力:** 不放宽普通 hat ACL；不改 preset 拓扑；不做 E2E 主路径大扫除。
+- **Files:** `crates/ralph-core/src/event_loop/mod.rs`（或既有 handoff 判定模块）、handoff 相关测试。
+- **验收测试:** virtual 正例 + 普通 hat 反例必须成对存在。
+- **需要拆分的单元测试:** consumer predicate 正反例。
+- **Red 预期失败原因:** event loop 把 supervisor 当 HatRegistry 普通 hat 查 triggers。
+- **最小实现范围:** 窄特判；不借机重构整个 U16。
+- **TDD 闭环:** 正反配对 Red → 特判 Green → 命名/注释澄清 Refactor → U1/U9 regression。
+- **集成验证:** handoff/misrouted targeted nextest。
+- **回归范围:** 普通 hat U16、task.resume、pipeline。
+- **完成标准:** R12 正反例全绿；无权限放宽。
+- **风险与注意事项:** 特判必须按“虚拟 consumer”语义，不按 builtin 名称散落 hardcode（若需名字，集中一处并测）。
+
+### U11. 真实 rusqlite 路径的 crash/restart 恢复
+
+- **Unit 目标:** 进程中断后从 SQLite 恢复未完成 wave：不重跑 completed slot，不重复注入已完成协调事件，pending 可续调度。
+- **对应 Scenario / 需求:** R13。
+- **外部可观察结果:** reopen DB 后状态连续；completed 不双 spawn；complete once。
+- **输入与输出:** 输入为中断前 rusqlite 状态；输出为恢复后调度/注入行为。
+- **可依赖的已完成能力:** U1–U10。
+- **明确禁止依赖的未来能力:** 不要求完整 16-hat 业务 E2E（U12）；可用最小 exec topology + fake backend。
+- **Files:** rusqlite recovery / reopen 测试与必要的最小生产补丁；不借机改文档。
+- **验收测试:** 中断于 partial completed；重启后只跑剩余 pending；已注入协调事件不重复。
+- **需要拆分的单元测试:** recovery 状态迁移；idempotent inject 键。
+- **Red 预期失败原因:** 恢复路径未接线或重启后重复 dispatch/inject。
+- **最小实现范围:** 闭合已有 recover API 到生产 runner 必要调用点；不新增大范围架构。
+- **TDD 闭环:** restart smoke Red → 恢复 Green → 去重复 fixture Refactor → U7–U10 regression。
+- **集成验证:** rusqlite recovery nextest；必要时进程级 smoke。
+- **回归范围:** U7 FIFO/cap、U9 exactly-once、pipeline。
+- **完成标准:** R13 由真实 DB 文件证据证明，不是内存 store 冒充。
+- **风险与注意事项:** 临时目录 DB；测后清理；禁止依赖开发仓库 `.ralph/supervisor.db`。
+
+### U12. 完整 supervisor 主路径 Outside-In E2E
+
+- **Unit 目标:** 少量关键 E2E 证明 builtin supervisor 从 exec fan-out 到终态真实经过 dispatcher/SQLite/worktree/fan-in，而非 BDD helper 手工模拟。
+- **对应 Scenario / 需求:** R14；完整主路径。
+- **外部可观察结果:** temp repo 受控 worktree + SQLite；协调事件与业务 handoff；`work.done` 与 `LOOP_COMPLETE`；无 `loop_stale`。
+- **输入与输出:** 输入为 builtin preset、deterministic fake backend、5-unit plan；输出为 Git/events/DB/终态。
+- **可依赖的已完成能力:** U1–U11 全部。
+- **明确禁止依赖的未来能力:** 不依赖 U13 文档；**禁止** `run_bdd_supervisor_fan_in` 充当关键证明。
+- **Files:** `ralph-cli` integration / `ralph-core/tests/scenarios/supervisor/*` / 必要 `ralph-e2e` mock fixture；不新增 live API。
+- **验收测试:** 5 slots/cap4/worktree 唯一；slot 事件进主 ledger；payload 驱动 integrator 合并；review shared-readonly；有/无 finding 的 fix 分支；关键 fault 出口；终态无泄漏 worktree/branch。细节边界仍以 U4–U11 下层测试为准。
+- **需要拆分的单元测试:** 本 Unit 不堆细碎单测；E2E 暴露的新缺口回退到所属 Unit 补 Red。
+- **Red 预期失败原因:** 下层未闭合时主路径仍断；或仅 helper 场景绿。
+- **最小实现范围:** 测试基础设施与 fixture；生产行为应已由 U5–U11 修完，本 Unit 只补遗漏接线。
+- **TDD 闭环:** 主路径 E2E Red → 最小补齐 Green → 精简 fixture Refactor → 污染 env 复跑。
+- **集成验证:** `cargo nextest run -p ralph-core --test scenarios -- supervisor`；对应 cli integration；`cargo run -p ralph-e2e -- --mock`（若归属 e2e）。
+- **回归范围:** supervisor + pipeline scenarios、smoke/replay、HARD RULE 5 污染复跑。
+- **完成标准:** 关键 E2E 稳定绿且外部证据链完整。
+- **风险与注意事项:** E2E 保持少量；不把所有 Scenario 堆进 E2E。
+
+### U13. 同步 agent/operator 文档并纠正诊断报告
+
+- **Unit 目标:** agent 指南、preset operator 规则、项目硬规则和诊断报告与最终生产行为一致。
+- **对应 Scenario / 需求:** R15–R16。
+- **外部可观察结果:** 新 lint finding 在 rubric/fixtures 可查；CLI/skill 与 help 一致；报告 P0 因果链按真实断点排序；`CLAUDE.md` 与 `AGENTS.md` 完全一致。
+- **输入与输出:** 输入为 U1–U12 最终行为、help、lint IDs、测试证据；输出为同步文档与修订报告。
+- **可依赖的已完成能力:** U1–U12 全部完成并验证。
+- **明确禁止依赖的未来能力:** 不把计划编号、一次事故路径、特定 builtin 名或内部函数写入通用注入 skill。
+- **Files:** `crates/ralph-core/data/ralph-tools-wave.md`（及确有 agent 可见变化的 guides）、`skills/ralph-preset-common/references/{agent-native-model,author-checklist,commands,finding-rubric,patterns}.md`、`skills/ralph-preset-{author,review}/SKILL.md` 与 fixtures、`.cursor/rules/{multi-hat-isolation,feature-flags}.mdc`、`CLAUDE.md`、`AGENTS.md`、`docs/report/2026-07-22-ce-executor-supervisor-primary-20260722-084810-diagnosis.md`。
+- **验收测试:** operator negative fixture 缺 concurrency 报新 finding；commands 与 `ralph <cmd> --help` 一致；注入 skill 含触发/动作/字段来源/失败停止且无内部 ledger 路径依赖；报告区分根因/症状/已推翻假设。
+- **需要拆分的单元测试:** 文档契约/drift；`CLAUDE.md`/`AGENTS.md` 字节一致；finding ID rubric parity。
+- **Red 预期失败原因:** 报告遗漏 production bind/dispatch/result/tick 断点；规则仍写需手工 feature；checklist 未查 consumer concurrency。
+- **最小实现范围:** 只同步已实现行为；不提前文档化未来默认 wave 重构；preset 名未变则不改 zsh。
+- **TDD 闭环:** 文档/fixture contract Red → 同步 Green → 去事故化/去实现细节 Refactor → drift 验收 → 全量回归。
+- **集成验证:** `scripts/check-cli-doc-drift.sh`；preset review negative fixture；skill 契约测试；`cmp CLAUDE.md AGENTS.md`。
+- **回归范围:** operator fixtures、agent reference、preset lint/parity、U1 pipeline 门禁。
+- **完成标准:** 文档无漂移；报告不再误导；人类输出中文；未编辑 runtime 状态文件。
+- **风险与注意事项:** `crates/ralph-core/data/*.md` 只写 agent 下一步可执行内容。
 
 ---
 
@@ -507,27 +608,27 @@ sequenceDiagram
 ### Risk-driven Test Selection
 
 - Characterization: U1固定pipeline现状。
-- Contract: U2 Cargo feature/发布产物，U3 preset lint/schema，U8 CLI/skills。
-- State-machine: U5 slot dispatch与U6 fan-in。
-- Idempotency/Concurrency: U5跨wave cap/FIFO，U6重复结果/complete once。
-- Fault injection: U4 worktree创建失败，U6 store/merge边界，U7 restart。
-- Differential: memory与rusqlite store对同一dispatch/fan-in序列输出一致。
-- E2E: 仅U7关键supervisor主路径与restart；pipeline用既有EventLoop BDD而非重复E2E。
+- Contract: U2 Cargo feature/发布产物，U3 preset lint/schema，U13 CLI/skills。
+- State-machine: U5–U7 slot dispatch；U8–U9 fan-in/sink。
+- Idempotency/Concurrency: U7跨wave cap/FIFO；U8重复 record；U9 complete once。
+- Fault injection: U4 worktree创建失败；U9 store/merge边界；U11 restart。
+- Differential: memory与rusqlite store对同一dispatch/fan-in序列输出一致（U7/U9）。
+- E2E: 仅U12关键supervisor主路径；U11负责restart组件；pipeline用既有EventLoop BDD而非重复E2E。
 
 ### Required Commands and Gates
 
 | Gate | Command | Timing | Pass condition |
 | --- | --- | --- | --- |
 | Pipeline characterization | `cargo nextest run -p ralph-core --test scenarios -- ce_executor_pipeline` | 每个Unit | 全绿且事件/终态无差异 |
-| Supervisor targeted | `cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor` | U2–U7 | targeted tests全绿 |
-| Supervisor core | `cargo nextest run -p ralph-core -- supervisor` | U3–U7 | store/coordinator/lint全绿 |
-| Preset lint CLI | `cargo nextest run -p ralph-cli --bin ralph -- preset_lint` | U3/U8 | 全绿 |
-| Preset lint core | `cargo nextest run -p ralph-core -- preset_lint` | U3/U8 | 全绿 |
-| Embedded preset parity | `cargo nextest run -p ralph-cli --bin ralph -- presets` | U3/U8 | manifest/schema/strict lint全绿 |
-| BDD supervisor | `cargo nextest run -p ralph-core --test scenarios -- supervisor` | U6/U7 | 真实EventLoop场景全绿 |
-| Mock E2E | `cargo run -p ralph-e2e -- --mock` | U7/最终 | 全绿 |
-| Agent env污染 | 带`RALPH_CURRENT_HAT`等污染运行相关`cargo nextest` integration | U7 | scrub后行为不变 |
-| CLI doc drift | `scripts/check-cli-doc-drift.sh` | U8/最终 | 无新增drift |
+| Supervisor targeted | `cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor` | U2–U12 | targeted tests全绿 |
+| Supervisor core | `cargo nextest run -p ralph-core -- supervisor` | U3–U12 | store/coordinator/lint全绿 |
+| Preset lint CLI | `cargo nextest run -p ralph-cli --bin ralph -- preset_lint` | U3/U13 | 全绿 |
+| Preset lint core | `cargo nextest run -p ralph-core -- preset_lint` | U3/U13 | 全绿 |
+| Embedded preset parity | `cargo nextest run -p ralph-cli --bin ralph -- presets` | U3/U13 | manifest/schema/strict lint全绿 |
+| BDD supervisor | `cargo nextest run -p ralph-core --test scenarios -- supervisor` | U9–U12 | 真实EventLoop场景全绿 |
+| Mock E2E | `cargo run -p ralph-e2e -- --mock` | U12/最终 | 全绿 |
+| Agent env污染 | 带`RALPH_CURRENT_HAT`等污染运行相关`cargo nextest` integration | U12 | scrub后行为不变 |
+| CLI doc drift | `scripts/check-cli-doc-drift.sh` | U13/最终 | 无新增drift |
 | Formatting | `cargo fmt --all -- --check` | 每个实现Unit | 无diff |
 | Lint/build | `cargo clippy --all-targets --all-features -- -D warnings`与默认feature build | 最终 | 全绿 |
 | Full baseline | `./scripts/run-tests.sh` | 最终 | nextest+doctest全绿；若仅竞态flake，按规则serial fallback确认 |
@@ -550,7 +651,7 @@ sequenceDiagram
 
 ## Definition of Done
 
-- U1–U8严格按顺序分别完成TDD闭环与回归，不存在交替开发或后置测试债务。
+- U1–U13严格按顺序分别完成TDD闭环与回归，不存在交替开发或后置测试债务；每个实现 Unit 符合单轮 subagent 预算（单层接线 + 窄验收）。
 - 默认Ralph CLI运行supervisor preset时无需额外Cargo feature参数，SQLite路径正确且启动失败策略明确。
 - builtin supervisor三类wave均可识别；exec/fix有真实per-slot worktree，review shared-readonly。
 - 全局反压、slot状态、结果幂等、生产ledger fan-in、协调topic、Git branch合并交接与crash recovery由真实生产链路闭合。
