@@ -32,6 +32,10 @@ A hat modified tracked files despite its read-only or tool-restriction contract.
 
 Observe → Precheck → Apply → Confirm。isolated 模式下 state-changing 操作的纪律框架；Precheck/ACL 可由 CLI 硬闸，Confirm 对 wave/task 逐步硬化为 ticket 或公开查询证据。
 
+### payload consistency（载荷一致性闸）
+
+挂在 `event_policy.payload_consistency` 的同 payload 验收 checkpoint：在 `ralph emit` / `--policy-check` 同源路径上，按 preset 声明的谓词检查**当前交卷 JSON 是否自洽**（例如声称成功却与计数/状态互斥）。命中则拒收并给出 agent 可读恢复说明。不读事件历史（跨事件互斥是 follow-up）。与 OPAC（操作纪律）和 `execution_contracts`（完成证据义务）分工，不互相替代。
+
 ### wave protocol suite（六件套）
 
 Wave/supervisor 协议层能力集合：反压、分布式取消、状态持久化、幂等键、内容哈希去重、补偿。语义 SSOT 在 `SupervisorStore`；默认 wave 路径应吸收该套件，而非仅 `supervisor.enabled` preset。
