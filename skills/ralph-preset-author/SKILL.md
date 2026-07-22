@@ -44,6 +44,19 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
      - put the recommended choice first and explain its consequence in one sentence;
      - allow the user to supply a custom answer when none fits;
      - avoid exposing internal topology jargon when a business-language choice is possible.
+   - **Execution-model menu (MUST ask when material topology or parallelism is in scope)**: for a new preset or any material topology change that touches parallelism / multiple units / unclear orchestration, present the execution-model menu below. The vocabulary (single-chain | wave | supervisor | supervisor+wave) is frozen in `references/agent-native-model.md`「执行模型（Execution Model）」段; do not invent synonyms. Required behavior:
+     1. **Recommended first**: `single-chain` — default path; lowest complexity; parallel work stays inside the executor hat's subagent boundary.
+     2. Second: `wave` — main chain has one step that fans out across many workers on the same topic (uses `ralph wave emit` / `ralph wave verify`).
+     3. Third: `supervisor` — runtime manages multiple slots / worktrees / queueing / fan-in (`event_loop.supervisor.enabled: true`).
+     4. Fourth: `supervisor+wave` — supervisor where the dispatcher also fans out with wave.
+     5. The first item is always `single-chain`; do **not** reorder or hide it.
+     6. The user may supply a custom answer; if the answer is non-observable ("适当并行", "必要时用 supervisor", "由作者决定"), grill again with these same options before drafting.
+   - **Deny → lock single-chain (hard rule)**: if the user denies wave / supervisor (or selects single-chain outright), the author must:
+     1. Write `execution_model: single-chain` into the Intent Confirmation (field defined in `references/author-checklist.md`).
+     2. **Not** introduce `event_loop.supervisor.enabled: true` in the YAML.
+     3. **Not** introduce a dispatcher hat that calls `ralph wave emit` / `ralph wave verify`.
+     4. **Not** silently upgrade to wave / supervisor under any pretext ("作者觉得这样更清晰" / "调度更顺手" / etc.).
+   - **Narrow mechanical-edit exception**: when the change is a narrow mechanical edit (renames, doc-only changes, value tweaks) with no behavior ambiguity and no topology implication, the author may skip the execution-model menu. The author must still record the inferred execution-model in the Intent notes (or in commit message) so review can confirm consistency.
    - Ask in small rounds (prefer 1–3 related questions). Use each answer to inspect or infer the next real uncertainty; **do not dump a static questionnaire** and do not ask already-settled questions.
    - Grill further whenever the answer is vague, contradictory, non-observable, or shifts a critical choice elsewhere (for example「适当处理」「必要时修复」「由上游决定」). Turn it into selectable operational alternatives and ask again.
    - Before drafting, show a concise **Preset Intent Confirmation** containing: goal, operator journey, inputs/source of truth, success condition, blocked condition, allowed mutation scope, required independent review, important artifacts/consumers, non-goals, and author assumptions. Use a final choice menu: **确认并开始设计（recommended） / 返回修改 / 暂停**.
@@ -53,7 +66,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 1. **Classify target:** local (`.ralph/hats/*.yml`) vs builtin (`presets/en/` + `presets/schemas/`). Note `execution_mode` and hat count (4+ → `isolated` mandatory). This step begins only after the Discovery gate passes.
 
 2. **Topology phase (author brain):**
-   - **Default execution model = single-chain** (`ce-executor-pipeline` 同型:linear hat chain + executor-owned subagent work)。仅当显式证明单链无法表达时,才允许引入多角色 runtime orchestration（如 `ce-executor-supervisor` 风格）。
+   - **Default execution model = single-chain**. The single-chain default is **only** relaxed when the user's Intent Confirmation has `execution_model ∈ {wave, supervisor, supervisor+wave}` **and** the corresponding hard-question section in `references/author-checklist.md` is fully ✓ with evidence. Do **not** upgrade the model on author preference or to "match a builtin preset name"; the choice is capability-triggered and user-owned.
    - Read schema SSOT for builtin presets.
    - Sketch event flow (topics, not prompts).
    - Align each handoff: upstream Q4 fields ↔ downstream Q2 Observe path.

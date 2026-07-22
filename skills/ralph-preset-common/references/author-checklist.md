@@ -10,6 +10,12 @@
 - [ ] 遇到「适当处理」「必要时」「上游决定」等不可观察答案，继续追问为可执行、可验收的选择
 - [ ] 不让用户替 author 决定 hat 数、topic 名或内部 topology；除非它们本身是用户明确的产品约束
 - [ ] 已回显 `Preset Intent Confirmation`：目标、操作路径、输入/事实源、成功、阻塞、修改范围、独立评审、artifact/消费者、非目标、author 假设
+- [ ] **执行模型菜单与 Intent Confirmation 字段**（仅当变更涉及实质拓扑 / 并行 / 多 unit / 未声明编排方式时强制；窄机械编辑可在笔记里记录推断来源后跳过）：
+  - [ ] 提问菜单覆盖 `single-chain`（推荐首项）/ `wave` / `supervisor` / `supervisor+wave` 四选项，并允许自定义答案
+  - [ ] 不可观察答案（「适当并行」「必要时用 supervisor」）已 grill 回到上述四选项后再继续
+  - [ ] 用户否认 wave / supervisor → 一律锁定 `single-chain`，并在 Intent 写入 `execution_model: single-chain` 与 ≤50 字 why；后续拓扑不得引入 `event_loop.supervisor.enabled: true`、dispatcher 不得调 `ralph wave emit` / `ralph wave verify`
+  - [ ] 选定 wave / supervisor(*) 时，按模型分支填对应 Hard questions（见「Hard questions — wave fan-out」/「Hard questions — supervisor orchestration」段）
+  - [ ] YAML 能力信号（`event_loop.supervisor.enabled` / hat instructions 含 `ralph wave emit`）与 Intent.execution_model 一致；不一致按 `finding-rubric.md`「Wave / Supervisor capability audit」 段 `preset.execution_model_intent_mismatch` 入 review 主表
 - [ ] 新 preset 或实质行为变更已通过最终菜单获得明确确认：「确认并开始设计 / 返回修改 / 暂停」
 - [ ] 用户未确认或仍有重大歧义时已 STOP，未起草 YAML/schema
 
