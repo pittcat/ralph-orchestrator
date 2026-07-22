@@ -60,7 +60,7 @@ A green `dry_run` proves that the runtime:
 * parsed the config file at the requested path,
 * resolved the preset id against the registry,
 * loaded the prompt file at the requested path,
-* resolved the selected prompt/plan paths when present,
+* resolved the selected prompt or plan path when present,
 * performed backend auto-detection,
 * and completed its auto-preflight step.
 

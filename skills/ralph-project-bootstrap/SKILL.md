@@ -1,6 +1,12 @@
 ---
 name: ralph-project-bootstrap
-description: Read an existing Ralph preset, audit a target project, fill only the runtime artifacts that preset actually needs, run staged validation, and deliver the exact launch command plus unresolved preconditions. Use this skill whenever an operator asks to bring a project onto a supplied preset or repair an incomplete runtime suite. A plan/task is optional: presets may be self-contained, use an ordinary prompt file, consume runtime context, or use a plan. Do NOT use it to author or review presets — that belongs to `ralph-preset-author` / `ralph-preset-review`. Do NOT use it for day-to-day loop monitoring / resume / merge — that belongs to `ralph-loop`. Do NOT use it for diagnosing a loop that already ran — that belongs to `ralph-run-diagnosis`.
+description: >-
+  Read an existing Ralph preset, audit a target project, generate a useful
+  project-specific runtime suite, run staged validation, and deliver the exact
+  launch command plus unresolved preconditions. Use when bringing a project
+  onto a builtin or file preset or repairing an incomplete suite. A plan/task
+  is optional. Do not use for preset authoring/review, loop operations, or
+  post-run diagnosis.
 ---
 
 # Ralph Project Bootstrap
@@ -34,8 +40,10 @@ and vetted by `ralph-preset-review`.
 ## Workflow
 
 1. **Read the preset, then audit.** Resolve and read the supplied preset in
-   full. Confirm the target root, gather verifiable build / test / lint /
-   format entry points, and derive a launch contract from the preset plus
+   full. Confirm the target root, then inspect the nearest `AGENTS.md` /
+   `CLAUDE.md`, dependency manifests, task runners, CI workflows, and test /
+   lint configuration. Gather verifiable build / test / lint / format entry
+   points and derive a launch contract from the preset plus
    operator input. Record optional `prompt_file`, optional `plan_path`,
    runtime environment/argument preconditions, worktree strategy, and which
    files (if any) need bootstrap ownership. A preset-native run has neither
@@ -52,13 +60,29 @@ and vetted by `ralph-preset-review`.
    the builtin from the installed Ralph distribution; never assume that
    stripping `builtin:` yields a template name. A manifest description alone
    is not sufficient evidence.
-2. **Generate / safely update only missing artifacts.** Agent docs,
+2. **Generate / safely update only needed artifacts.** Agent docs,
    `ralph.pipeline.yml`, a managed `PROMPT.pipeline.md`, and provenance are
    candidates, not a mandatory bundle. An operator-owned prompt may be
    referenced but never rewritten. When the preset and project already form
    a runnable combination, return `noop` and proceed to validation. Preserve
    user content outside owned sections / keys; abort on marker / YAML /
-   ownership conflict.
+   ownership conflict. Use `assets/ralph.pipeline.base.yml` as the structural
+   baseline rather than emitting a skeletal config. Adapt that baseline to
+   the target project: populate `core.guardrails` with concise rules supported
+   by project evidence and include the discovered verification commands. Do
+   not copy source-project language, commands, paths, or assumptions into the
+   target. A newly generated config containing only `core.project_root` is an
+   incomplete bootstrap result.
+
+   If a previous bootstrap-generated config is skeletal, first verify its
+   bytes against `ralph.bootstrap.yml`, then call
+   pass the existing `ralph.bootstrap.yml` bytes to
+   `apply_pipeline_config(..., refresh_generated_profile=True,
+   existing_provenance_text=...)`. The helper must verify the recorded
+   `ralph.pipeline.yml` SHA-256 before refreshing the generator-owned profile.
+   Preserve an operator-authored config byte-for-byte outside
+   `_bootstrap:` and report the exact suggested `core.guardrails` instead of
+   silently taking ownership.
    For a plan-driven preset with no plan yet, generate `ralph.pipeline.yml`,
    provenance, agent-doc managed sections when needed, and a managed fallback
    prompt at the preset's configured `event_loop.prompt_file`. The fallback
@@ -176,6 +200,17 @@ The pipeline suite (`ralph.pipeline.yml`, `PROMPT.pipeline.md`,
 inside the target project and never touches `AGENTS.md` /
 `CLAUDE.md` (those flow through `agent_docs.py`) or the runtime
 ledger under `.ralph/`.
+
+**Baseline plus project overlay.** Read `assets/ralph.pipeline.base.yml`
+before composing a new config. The asset defines reusable runtime safety and
+diagnosis defaults. Pass the audited `ProjectFacts` directly as
+`project_facts=decision.facts` to `compose_suite` /
+`apply_pipeline_config`; do not manually reconstruct or omit this link.
+Only emit commands proven by manifests, project docs, task
+runners, or CI. For an unknown stack, retain the generic baseline and tell the
+agent to discover the authoritative gate instead of inventing one. Builtin
+presets and file presets use the same project-overlay path; builtin status is
+only a preset-resolution detail.
 
 **Owned keys.** When `ralph.pipeline.yml` is needed it carries four owned keys
 under a top-level `_bootstrap:` mapping: `preset`, `plan`,

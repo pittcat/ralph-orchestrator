@@ -386,8 +386,8 @@ def _build_stage_argv(
     ``-H <preset>``. The ``dry_run`` stage additionally carries
     ``--dry-run`` only — ``ralph run`` does not accept ``--strict``;
     strict gating lives in the dedicated ``preflight --strict`` stage.
-    The optional ``--prompt-file`` and ``--plan`` flags are appended to
-    the dry-run argv in argv-order.
+    The dry-run uses exactly one explicit prompt source. ``--plan`` wins
+    when a plan path exists; otherwise ``--prompt-file`` may be appended.
 
     The contract is enforced by the test suite: every argv the helper
     builds must contain ``-c <config_path>`` and ``-H <preset>``; the
@@ -409,10 +409,10 @@ def _build_stage_argv(
         return base + ("preflight", "--strict")
     if stage == "dry_run":
         argv = base + ("run", "--dry-run")
-        if prompt_file:
-            argv = argv + ("--prompt-file", prompt_file)
         if plan_path:
             argv = argv + ("--plan", plan_path)
+        elif prompt_file:
+            argv = argv + ("--prompt-file", prompt_file)
         return argv
     raise ValueError(f"unknown stage: {stage!r}")
 

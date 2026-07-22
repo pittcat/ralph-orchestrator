@@ -15,8 +15,9 @@ The bootstrap pipeline owns exactly three files inside the target
 project:
 
 * `ralph.pipeline.yml` — runtime config binding preset + optional plan +
-  optional prompt file + preflight strictness. User-owned keys live outside the
-  owned block.
+  optional prompt file + preflight strictness, plus a baseline runtime profile
+  and project-backed `core.guardrails`. User-owned keys live outside the owned
+  block.
 * `PROMPT.pipeline.md` — generated only when bootstrap owns a prompt. It
   references the optional plan path and preset id and never copies hat
   instructions. Operator-owned prompt files may be referenced but never
@@ -50,17 +51,24 @@ operator-owned: it is preserved byte-for-byte across recompositions,
 including comments, blank lines, key ordering, and quote style on
 non-owned keys.
 
-The user-keys block commonly carries:
+For a newly generated file, start from `../assets/ralph.pipeline.base.yml` and
+overlay evidence gathered from the target project. The user-keys block commonly
+carries:
 
 ```yaml
-event_loop:
+cli:
   backend: <one of claude|codex|kiro|...>
-  project_root: ./
-budget:
+event_loop:
   max_iterations: <int>
-  wall_clock_seconds: <int>
-diagnostics:
-  enabled: true|false
+  max_runtime_seconds: <int>
+core:
+  project_root: ./
+  guardrails:
+    - <generic baseline rule>
+    - <rule containing only commands verified in this project>
+telemetry:
+  runtime_diagnosis:
+    enabled: true|false
 ```
 
 …but operators may add additional top-level keys (e.g. `state_projection:`,
@@ -104,6 +112,11 @@ entry point:
 * duplicate top-level key detected → returns
   `ApplyResult(kind="blocker", code="duplicate_yaml_key", ...)`.
 
+For a whole-profile refresh of an older generated config, pass
+`refresh_generated_profile=True` together with the existing provenance text.
+The helper verifies the recorded `ralph.pipeline.yml` SHA-256 before replacing
+the generated profile; a header alone never proves ownership.
+
 Atomic disk ops live in `agent_docs.AtomicWriter`. This helper only
 computes the new bytes; the writer is the only place that touches
 the filesystem.
@@ -114,7 +127,7 @@ the filesystem.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `generator_version` | string | semver-like; currently `0.2.0`. |
+| `generator_version` | string | semver-like; currently `0.3.0`. |
 | `input_signature` | string | SHA-256 of preset + optional prompt path + optional plan path + prompt ownership (`managed` / `referenced`) + plan requirement (`required` / `optional`) + cwd anchor. |
 | `owned_keys` | list of string | the four owned keys, in canonical order. |
 | `summary` | list of `{file, sha256}` | SHA-256 of each suite file's on-disk owned bytes. |

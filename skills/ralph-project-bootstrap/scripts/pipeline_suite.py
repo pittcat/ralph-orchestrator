@@ -45,7 +45,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-GENERATOR_VERSION = "0.2.0"
+GENERATOR_VERSION = "0.3.0"
+
+BASELINE_GUARDRAILS: tuple[str, ...] = (
+    "Re-read the supplied business input and the nearest project instructions at the start of each activation.",
+    "Keep changes scoped to the requested work and preserve unrelated operator changes.",
+    "Never push remotes, create or switch branches/worktrees, or stop the Ralph process; the operator owns those actions.",
+    "Never report completion while required verification is failing, skipped, or replaced by placeholder evidence.",
+)
 
 # Owned keys that always exist under the top-level ``_bootstrap:`` mapping
 # of ``ralph.pipeline.yml``. Operators may add additional top-level user
@@ -144,6 +151,19 @@ class UpgradeResult:
         return self.kind == "blocker"
 
 
+def _guardrails_from_facts(project_facts: Any | None) -> tuple[str, ...]:
+    """Extract the audited project overlay without coupling to audit.py."""
+    if project_facts is None:
+        return ()
+    renderer = getattr(project_facts, "runtime_guardrails", None)
+    if not callable(renderer):
+        raise OwnedYamlError(
+            "owned_yaml_invalid",
+            "project_facts must expose runtime_guardrails()",
+        )
+    return tuple(renderer())
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -162,6 +182,7 @@ def compute_input_signature(
     prompt_file: str | None = None,
     manage_prompt: bool = False,
     requires_plan: bool = False,
+    project_guardrails: Sequence[str] = (),
 ) -> str:
     """Compute the deterministic input signature for a suite.
 
@@ -174,7 +195,7 @@ def compute_input_signature(
     plan_contract = "required" if requires_plan else "optional"
     payload = (
         f"{preset}|{prompt_file or ''}|{plan_path or ''}|{ownership}|"
-        f"{plan_contract}|{cwd_anchor}"
+        f"{plan_contract}|{cwd_anchor}|" + "\n".join(project_guardrails)
     )
     return _sha256_hex(payload)
 
@@ -216,6 +237,7 @@ def render_pipeline_yml(
     preflight_strict: bool = True,
     diagnostics_enabled: bool = True,
     project_root_marker: str = "./",
+    project_guardrails: Sequence[str] = (),
 ) -> str:
     """Render ``ralph.pipeline.yml`` with explicit owned keys.
 
@@ -274,11 +296,10 @@ def render_pipeline_yml(
     lines: list[str] = []
     lines.extend(header.splitlines())
     # The runtime does NOT consult ``event_loop.backend``; the canonical
-    # place to set the backend is ``cli.backend``. Both are emitted so
-    # that operator-side tooling reading either field gets the same
-    # answer, and so the dry-run's ``Backend: <name>`` label matches.
+    # place to set the backend is ``cli.backend``.
     lines.append("cli:")
     lines.append(f"  backend: {_yaml_escape(backend)}")
+    lines.append("  autonomous_idle_timeout_secs: 900")
     lines.append("event_loop:")
     if prompt_file:
         lines.append(f"  prompt_file: {_yaml_escape(prompt_file)}")
@@ -286,6 +307,10 @@ def render_pipeline_yml(
     lines.append(f"  max_runtime_seconds: {int(budget_wall_clock_seconds)}")
     lines.append("core:")
     lines.append(f"  project_root: {_yaml_escape(project_root_marker)}")
+    lines.append("  guardrails:")
+    guardrails = tuple(dict.fromkeys((*BASELINE_GUARDRAILS, *project_guardrails)))
+    for guardrail in guardrails:
+        lines.append(f"    - {_yaml_escape(guardrail)}")
     # Diagnostic intent goes under the runtime's actual namespace
     # (``telemetry.runtime_diagnosis``), not under an invented top-level
     # ``diagnostics`` key. We only emit the field when the operator
@@ -296,6 +321,13 @@ def render_pipeline_yml(
         lines.append("telemetry:")
         lines.append("  runtime_diagnosis:")
         lines.append("    enabled: true")
+        lines.append("    write_artifacts: true")
+        lines.append("    prompt_injection_enabled: true")
+        lines.append("    max_repeated_recoveries: 2")
+        lines.append("    max_prompt_findings: 8")
+        lines.append("    artifact_retention: 20")
+        lines.append("    max_prompt_chars: 4096")
+        lines.append("    retry_window_iterations: 8")
     lines.append("_bootstrap:")
     for key in PIPELINE_OWNED_KEYS:
         lines.append(f"  {key}: {_yaml_escape(owned[key])}")
@@ -556,6 +588,8 @@ def compose_suite(
     project_root_marker: str = "./",
     manage_prompt: bool | None = None,
     requires_plan: bool = False,
+    project_guardrails: Sequence[str] = (),
+    project_facts: Any | None = None,
 ) -> PipelineSuite:
     """Render the full suite in one shot.
 
@@ -564,6 +598,10 @@ def compose_suite(
     """
     if plan_path and Path(plan_path).is_absolute():
         raise OwnedYamlError("owned_yaml_invalid", "plan path must be repo-relative")
+    audited_guardrails = _guardrails_from_facts(project_facts)
+    effective_guardrails = tuple(
+        dict.fromkeys((*audited_guardrails, *project_guardrails))
+    )
     config = render_pipeline_yml(
         preset=preset,
         plan_path=plan_path,
@@ -574,6 +612,7 @@ def compose_suite(
         preflight_strict=preflight_strict,
         diagnostics_enabled=diagnostics_enabled,
         project_root_marker=project_root_marker,
+        project_guardrails=effective_guardrails,
     )
     manage_prompt = bool(prompt_file) if manage_prompt is None else manage_prompt
     if manage_prompt and not prompt_file:
@@ -597,6 +636,7 @@ def compose_suite(
         prompt_file,
         manage_prompt,
         requires_plan,
+        effective_guardrails,
     )
     summary = [("ralph.pipeline.yml", _sha256_hex(config))]
     if prompt is not None:
@@ -710,6 +750,10 @@ def apply_pipeline_config(
     project_root_marker: str = "./",
     manage_prompt: bool | None = None,
     requires_plan: bool = False,
+    project_guardrails: Sequence[str] = (),
+    project_facts: Any | None = None,
+    refresh_generated_profile: bool = False,
+    existing_provenance_text: str | None = None,
 ) -> ApplyResult:
     """Compute the new ``ralph.pipeline.yml`` bytes for a target project.
 
@@ -741,10 +785,50 @@ def apply_pipeline_config(
         project_root_marker=project_root_marker,
         manage_prompt=manage_prompt,
         requires_plan=requires_plan,
+        project_guardrails=project_guardrails,
+        project_facts=project_facts,
     )
 
     if existing_text is None:
         return ApplyResult(kind="created", text=new_suite.config)
+
+    if refresh_generated_profile:
+        if not existing_text.startswith("# Generated by ralph-project-bootstrap."):
+            return ApplyResult(
+                kind="blocker",
+                code="profile_not_generator_owned",
+                reason="refuse to refresh a pipeline not marked as bootstrap-generated",
+                text=existing_text,
+            )
+        if not existing_provenance_text:
+            return ApplyResult(
+                kind="blocker",
+                code="profile_provenance_required",
+                reason="refresh requires the existing ralph.bootstrap.yml bytes",
+                text=existing_text,
+            )
+        try:
+            recorded = _parse_provenance_text(existing_provenance_text)
+            recorded_summary = _summary_to_dict(
+                recorded.get("summary") if recorded else None
+            )
+        except OwnedYamlError as exc:
+            return ApplyResult(
+                kind="blocker",
+                code="provenance_corrupt",
+                reason=exc.reason,
+                text=existing_text,
+            )
+        if recorded_summary.get("ralph.pipeline.yml") != _sha256_hex(existing_text):
+            return ApplyResult(
+                kind="blocker",
+                code="owned_value_user_modified",
+                reason="pipeline bytes do not match existing provenance",
+                text=existing_text,
+            )
+        if existing_text == new_suite.config:
+            return ApplyResult(kind="noop", text=existing_text)
+        return ApplyResult(kind="updated", text=new_suite.config)
 
     # Fast path: if the on-disk ``_bootstrap:`` block already carries the
     # exact values we would write, we treat the operation as a noop. This

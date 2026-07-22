@@ -219,8 +219,9 @@ def _build_argv(inputs: HandoffInputs) -> tuple[str, ...]:
     """Compose the argv tuple for the launch command.
 
     Every command starts with ``<binary> -c <config_path> -H <preset>``.
-    Non-worktree launches append optional ``--prompt-file`` and ``--plan``
-    inputs. Worktree mode appends ``--worktree --reuse-worktree`` and
+    Non-worktree launches append exactly one optional prompt source:
+    ``--plan`` when present, otherwise ``--prompt-file``. Worktree mode
+    appends ``--worktree --reuse-worktree`` and
     exactly one of ``--plan <plan_arg>`` or
     ``--worktree-name <worktree_name>``; the optional prompt file remains
     independent of that reuse key.
@@ -232,7 +233,15 @@ def _build_argv(inputs: HandoffInputs) -> tuple[str, ...]:
         "-H",
         inputs.preset,
     ]
-    if inputs.prompt_file is not None:
+    # A plan-driven launch must have exactly one CLI prompt source. Ralph gives
+    # --prompt-file precedence over --plan, so carrying both would silently
+    # execute the bootstrap fallback instead of the operator's real plan.
+    if (
+        inputs.prompt_file is not None
+        and inputs.plan_path is None
+        and inputs.plan_arg is None
+        and not inputs.requires_plan
+    ):
         argv.append("--prompt-file")
         argv.append(inputs.prompt_file)
     if inputs.use_worktree:

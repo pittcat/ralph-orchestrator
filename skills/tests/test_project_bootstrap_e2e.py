@@ -55,7 +55,7 @@ import smoke_runner  # noqa: F401  (Unit-6 helper)
 import _fixtures  # noqa: F401
 import _paths  # noqa: F401
 import _probe_runner  # noqa: F401
-from audit import run_audit  # noqa: F401  (Unit-2 audit)
+from audit import collect_project_facts, run_audit  # noqa: F401  (Unit-2 audit)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -161,7 +161,9 @@ def _apply_compose(
         else None
     )
     pipeline_result = pipeline_suite.apply_pipeline_config(
-        config_text, **PIPELINE_KWARGS  # type: ignore[arg-type]
+        config_text,
+        **PIPELINE_KWARGS,  # type: ignore[arg-type]
+        project_facts=collect_project_facts(project),
     )
     return agents_result, claude_result, pipeline_result
 
@@ -171,7 +173,10 @@ def _write_pipeline_suite(project: Path) -> tuple[Path, Path, Path]:
 
     Returns ``(pipeline_yml_path, prompt_path, provenance_path)``.
     """
-    suite = pipeline_suite.compose_suite(**PIPELINE_KWARGS)  # type: ignore[arg-type]
+    suite = pipeline_suite.compose_suite(
+        **PIPELINE_KWARGS,  # type: ignore[arg-type]
+        project_facts=collect_project_facts(project),
+    )
     prompt_text = pipeline_suite.render_prompt_md(
         plan_path=str(PIPELINE_KWARGS["plan_path"]),
         preset=str(PIPELINE_KWARGS["preset"]),
@@ -524,14 +529,16 @@ class TestCrossLayerBootstrap:
         assert claude_result.kind == "noop"
         assert pipeline_result.kind == "noop"
 
-        # upgrade_provenance must be noop too (existing-suite provenance
-        # byte-equals the freshly rendered provenance).
+        # The fixture deliberately represents a legacy 0.2.0 suite. Ordinary
+        # recomposition leaves it byte-stable; provenance upgrade blocks until
+        # the explicit verified whole-profile refresh path is selected.
         suite = pipeline_suite.compose_suite(**PIPELINE_KWARGS)  # type: ignore[arg-type]
         existing_provenance = (project / "ralph.bootstrap.yml").read_text(
             encoding="utf-8"
         )
         upgrade = pipeline_suite.upgrade_provenance(existing_provenance, suite)
-        assert upgrade.kind == "noop"
+        assert upgrade.kind == "blocker"
+        assert upgrade.code == "provenance_corrupt"
 
         # Smoke still ends OK, so handoff stays at level=complete.
         backend = smoke_runner.SafeBackend(name="replay-fixture")

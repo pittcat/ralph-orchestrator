@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 import agent_docs  # noqa: F401  (the Unit-3 helper)
-from audit import ProjectFacts, run_audit  # noqa: F401  (the Unit-2 audit)
+from audit import ProjectFacts, collect_project_facts, run_audit  # noqa: F401  (the Unit-2 audit)
 import _fixtures  # noqa: F401
 import _paths  # noqa: F401
 
@@ -161,7 +161,7 @@ def test_rust_facts_are_concrete(tmp_path: Path) -> None:
         plan_path="docs/plan.md",
     )
     assert decision.facts.technology == "rust"
-    assert "cargo nextest run" in decision.facts.test
+    assert "cargo test" in decision.facts.test
     assert "cargo clippy --workspace --all-targets -- -D warnings" in decision.facts.lint
 
 
@@ -181,6 +181,8 @@ def test_node_facts_match_scripts(tmp_path: Path) -> None:
 def test_python_facts_use_venv(tmp_path: Path) -> None:
     project = tmp_path / "project"
     _fixtures.materialise("python", project)
+    (project / ".venv" / "bin").mkdir(parents=True)
+    (project / ".venv" / "bin" / "python").write_text("", encoding="utf-8")
     decision = run_audit(
         project,
         preset="builtin:ce-executor-pipeline",
@@ -188,6 +190,29 @@ def test_python_facts_use_venv(tmp_path: Path) -> None:
     )
     assert decision.facts.technology == "python"
     assert any(".venv" in cmd for cmd in decision.facts.test)
+
+
+def test_nested_cwd_audits_inputs_and_facts_at_resolved_repo_root(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    nested = root / "packages" / "feature"
+    nested.mkdir(parents=True)
+    (root / ".git").mkdir()
+    (root / "plan.md").write_text("# Plan\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        "[project]\nname='nested'\nversion='0.1.0'\ndependencies=['pytest>=8']\n",
+        encoding="utf-8",
+    )
+    (root / ".venv" / "bin").mkdir(parents=True)
+    (root / ".venv" / "bin" / "python").write_text("", encoding="utf-8")
+    decision = run_audit(
+        nested,
+        preset="builtin:example",
+        plan_path="plan.md",
+    )
+    assert not decision.is_blocking
+    assert decision.root == "../.."
+    assert decision.facts.technology == "python"
+    assert decision.facts.test == (".venv/bin/python -m pytest",)
 
 
 def test_unknown_stack_reports_no_facts(tmp_path: Path) -> None:
@@ -722,6 +747,195 @@ def test_suite_generates_config_and_prompt_for_blank_project() -> None:
     assert "diagnostics" not in user_keys, suite.config
     assert "telemetry" in user_keys
     assert user_keys["telemetry"]["runtime_diagnosis"]["enabled"] is True
+    assert user_keys["telemetry"]["runtime_diagnosis"]["write_artifacts"] is True
+    assert user_keys["cli"]["autonomous_idle_timeout_secs"] == 900
+    assert len(user_keys["core"]["guardrails"]) >= 4
+
+
+def test_python_project_facts_drive_project_specific_guardrails(tmp_path: Path) -> None:
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / ".venv" / "bin" / "python").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """
+[project]
+name = "example"
+version = "0.1.0"
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.10"]
+[tool.ruff]
+line-length = 100
+[tool.mypy]
+strict = true
+""".lstrip(),
+        encoding="utf-8",
+    )
+    facts = collect_project_facts(tmp_path)
+    assert facts.technology == "python"
+    assert facts.format == (".venv/bin/python -m ruff format --check .",)
+    assert facts.lint == (
+        ".venv/bin/python -m ruff check .",
+        ".venv/bin/python -m mypy .",
+    )
+    suite = pipeline_suite.compose_suite(
+        preset="builtin:ce-executor-pipeline",
+        prompt_file="PROMPT.md",
+        backend="claude",
+        budget_max_iterations=30,
+        budget_wall_clock_seconds=7200,
+        project_guardrails=facts.runtime_guardrails(),
+    )
+    user_keys, _ = pipeline_suite.parse_owned_yaml(suite.config)
+    guardrails = "\n".join(user_keys["core"]["guardrails"])
+    assert ".venv/bin/python -m pytest" in guardrails
+    assert ".venv/bin/python -m ruff check ." in guardrails
+    assert ".venv/bin/python -m ruff format --check ." in guardrails
+    assert ".venv/bin/python -m mypy ." in guardrails
+    assert "cargo" not in guardrails
+
+
+def test_compose_suite_accepts_audit_facts_as_the_project_overlay(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"test":"vitest","lint":"eslint ."}}',
+        encoding="utf-8",
+    )
+    facts = collect_project_facts(tmp_path)
+    suite = pipeline_suite.compose_suite(
+        preset="presets/custom.yml",
+        backend="auto",
+        budget_max_iterations=10,
+        budget_wall_clock_seconds=1200,
+        project_facts=facts,
+    )
+    user_keys, _ = pipeline_suite.parse_owned_yaml(suite.config)
+    guardrails = "\n".join(user_keys["core"]["guardrails"])
+    assert "npm run lint" in guardrails
+    assert "npm test" in guardrails
+
+
+def test_pep735_dependency_groups_are_detected_without_layout_guessing(tmp_path: Path) -> None:
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / ".venv" / "bin" / "python").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """
+[project]
+name = "atelier-like"
+version = "0.1.0"
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    facts = collect_project_facts(tmp_path)
+    assert facts.test == (".venv/bin/python -m pytest",)
+    assert facts.lint[-1] == ".venv/bin/python -m mypy ."
+
+
+def test_project_tooling_selects_declared_runners_and_lockfiles(tmp_path: Path) -> None:
+    node = tmp_path / "node"
+    node.mkdir()
+    (node / "package.json").write_text(
+        '{"scripts":{"test":"vitest","lint":"eslint ."}}', encoding="utf-8"
+    )
+    (node / "pnpm-lock.yaml").write_text("lockfileVersion: '9'\n", encoding="utf-8")
+    assert collect_project_facts(node).test == ("pnpm run test",)
+
+    python = tmp_path / "python"
+    python.mkdir()
+    (python / "pyproject.toml").write_text(
+        "[project]\nname='x'\nversion='0.1'\ndependencies=['pytest']\n",
+        encoding="utf-8",
+    )
+    (python / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    assert collect_project_facts(python).test == ("uv run python -m pytest",)
+
+    rust = tmp_path / "rust"
+    (rust / ".config").mkdir(parents=True)
+    (rust / "Cargo.toml").write_text("[package]\nname='x'\nversion='0.1.0'\n", encoding="utf-8")
+    (rust / ".config" / "nextest.toml").write_text("[profile.default]\n", encoding="utf-8")
+    assert collect_project_facts(rust).test == ("cargo nextest run",)
+
+
+def test_unknown_stack_uses_declared_task_runner_targets(tmp_path: Path) -> None:
+    (tmp_path / "Makefile").write_text(
+        "build:\n\ttool build\n\ntest:\n\ttool test\n\nlint:\n\ttool lint\n",
+        encoding="utf-8",
+    )
+    facts = collect_project_facts(tmp_path)
+    assert facts.technology == "task-runner"
+    assert facts.build == ("make build",)
+    assert facts.test == ("make test",)
+    assert facts.lint == ("make lint",)
+
+
+def test_verified_generated_profile_can_be_refreshed() -> None:
+    old = (
+        "# Generated by ralph-project-bootstrap. Owned keys live under\n"
+        "core:\n  project_root: ./\n"
+        "_bootstrap:\n"
+        "  preset: builtin:example\n  plan: \"\"\n"
+        "  prompt_file: \"\"\n  preflight: strict\n"
+    )
+    provenance = (
+        "generator_version: 0.2.0\n"
+        "input_signature: legacy\n"
+        "owned_keys:\n  - preset\n"
+        "summary:\n"
+        "  - file: ralph.pipeline.yml\n"
+        f"    sha256: {hashlib.sha256(old.encode()).hexdigest()}\n"
+    )
+    result = pipeline_suite.apply_pipeline_config(
+        old,
+        preset="builtin:example",
+        backend="claude",
+        budget_max_iterations=10,
+        budget_wall_clock_seconds=1200,
+        refresh_generated_profile=True,
+        existing_provenance_text=provenance,
+    )
+    assert result.kind == "updated"
+    assert "guardrails:" in (result.text or "")
+    assert "write_artifacts: true" in (result.text or "")
+
+
+def test_refresh_refuses_operator_authored_pipeline() -> None:
+    result = pipeline_suite.apply_pipeline_config(
+        "core:\n  project_root: ./\n",
+        preset="builtin:example",
+        backend="claude",
+        budget_max_iterations=10,
+        budget_wall_clock_seconds=1200,
+        refresh_generated_profile=True,
+        existing_provenance_text="summary: []\n",
+    )
+    assert result.kind == "blocker"
+    assert result.code == "profile_not_generator_owned"
+
+
+def test_refresh_rejects_generated_profile_without_matching_provenance() -> None:
+    old = "# Generated by ralph-project-bootstrap.\ncore:\n  project_root: ./\n"
+    result = pipeline_suite.apply_pipeline_config(
+        old,
+        preset="builtin:example",
+        backend="claude",
+        budget_max_iterations=10,
+        budget_wall_clock_seconds=1200,
+        refresh_generated_profile=True,
+        existing_provenance_text=(
+            "generator_version: 0.2.0\ninput_signature: legacy\n"
+            "owned_keys:\n  - preset\nsummary:\n"
+            "  - file: ralph.pipeline.yml\n    sha256: deadbeef\n"
+        ),
+    )
+    assert result.kind == "blocker"
+    assert result.code == "owned_value_user_modified"
+
+
+def test_pipeline_baseline_asset_carries_runtime_profile() -> None:
+    baseline = ROOT / "skills" / "ralph-project-bootstrap" / "assets" / "ralph.pipeline.base.yml"
+    text = baseline.read_text(encoding="utf-8")
+    assert "autonomous_idle_timeout_secs" in text
+    assert "runtime_diagnosis:" in text
+    assert "core:" in text and "guardrails:" in text
 
 
 def test_suite_supports_preset_native_without_plan_or_prompt_artifact() -> None:
@@ -1224,22 +1438,9 @@ def test_existing_suite_fixture_round_trip(tmp_path: Path) -> None:
     # Second compose is a noop against the on-disk bytes.
     result = pipeline_suite.apply_pipeline_config(original_config, **PIPELINE_KWARGS)  # type: ignore[arg-type]
     assert result.kind == "noop"
-    # Build a fresh suite from the same inputs and confirm the on-disk
-    # provenance matches what the helper would re-emit (modulo blank
-    # lines / trailing whitespace).
-    suite = _make_pipeline_suite()
-    expected_provenance = pipeline_suite.render_provenance(suite)
-    assert expected_provenance.strip() == original_provenance.strip()
-    recorded_summary = dict(suite.provenance.summary)
-    assert recorded_summary["ralph.pipeline.yml"] == hashlib.sha256(
-        original_config.encode("utf-8")
-    ).hexdigest()
-    original_prompt = (project / "PROMPT.pipeline.md").read_text(encoding="utf-8")
-    assert recorded_summary["PROMPT.pipeline.md"] == hashlib.sha256(
-        original_prompt.encode("utf-8")
-    ).hexdigest()
-    upgrade = pipeline_suite.upgrade_provenance(original_provenance, suite)
-    assert upgrade.kind == "noop"
+    # This fixture is a legacy 0.2.0 suite. It remains byte-stable unless
+    # the caller explicitly verifies provenance and requests profile refresh.
+    assert "generator_version: 0.2.0" in original_provenance
 
 
 # --- invalid-yaml fixture: apply must block with duplicate_yaml_key.
@@ -1563,7 +1764,7 @@ def test_cli_probe_capability_gate_does_not_throw() -> None:
 
 def test_cli_probe_dry_run_argv_matches_expected_command_shape() -> None:
     """The dry-run argv must be ``<binary> -c <config> -H <preset>
-    run --dry-run --prompt-file <pf> --plan <plan>`` and must NOT carry
+    run --dry-run --plan <plan>`` and must NOT carry
     ``--strict`` (the real ``ralph run`` does not accept it)."""
     runner = _make_runner("green")
     decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
@@ -1575,9 +1776,7 @@ def test_cli_probe_dry_run_argv_matches_expected_command_shape() -> None:
         "real ralph run does not accept --strict; the dry-run argv must "
         "not invent one (strict gating is owned by preflight --strict)"
     )
-    # --prompt-file and its value sit together.
-    pfile_idx = argv.index("--prompt-file")
-    assert argv[pfile_idx + 1] == "PROMPT.pipeline.md"
+    assert "--prompt-file" not in argv
     plan_idx = argv.index("--plan")
     assert argv[plan_idx + 1] == "plan.md"
 
@@ -2551,7 +2750,7 @@ def test_handoff_complete_argv_carries_canonical_flags() -> None:
     assert argv[0] == "ralph"
     assert "-c" in argv and "ralph.pipeline.yml" in argv
     assert "-H" in argv and "test-preset" in argv
-    assert "--prompt-file" in argv and "PROMPT.pipeline.md" in argv
+    assert "--prompt-file" not in argv
     assert "--plan" in argv and "plan.md" in argv
 
 

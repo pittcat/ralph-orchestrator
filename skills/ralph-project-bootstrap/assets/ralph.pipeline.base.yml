@@ -1,0 +1,33 @@
+# Structural baseline for ralph-project-bootstrap.
+# Copy the shape, then replace PROJECT_* entries with evidence from the target.
+cli:
+  backend: PROJECT_BACKEND
+  autonomous_idle_timeout_secs: 900
+
+event_loop:
+  max_iterations: PROJECT_MAX_ITERATIONS
+  max_runtime_seconds: PROJECT_MAX_RUNTIME_SECONDS
+
+telemetry:
+  runtime_diagnosis:
+    enabled: true
+    write_artifacts: true
+    prompt_injection_enabled: true
+    max_repeated_recoveries: 2
+    max_prompt_findings: 8
+    artifact_retention: 20
+    max_prompt_chars: 4096
+    retry_window_iterations: 8
+
+core:
+  project_root: ./
+  guardrails:
+    - "Read the supplied business input and nearest project instructions before acting."
+    - "Preserve unrelated operator changes and keep work inside the target repository."
+    - "Run only project-backed verification commands; failures block success."
+
+_bootstrap:
+  preset: PROJECT_PRESET
+  plan: ""
+  prompt_file: ""
+  preflight: strict

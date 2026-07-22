@@ -18,6 +18,8 @@ or shell calls leave this module.
 from __future__ import annotations
 
 import re
+import tomllib
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -49,6 +51,33 @@ class ProjectFacts:
 
     def is_empty(self) -> bool:
         return not (self.build or self.test or self.lint or self.format or self.ci)
+
+    @property
+    def verification_commands(self) -> tuple[str, ...]:
+        """Return project-backed quality commands in a stable order."""
+        return self.format + self.lint + self.test + self.build
+
+    def runtime_guardrails(self) -> tuple[str, ...]:
+        """Turn discovered project facts into instructions useful to hats."""
+        rules: list[str] = []
+        if self.verification_commands:
+            commands = "; then ".join(f"`{command}`" for command in self.verification_commands)
+            rules.append(
+                "Before reporting implementation or repair work complete, run the "
+                f"project-backed verification commands: {commands}. A non-zero exit "
+                "blocks success; fix the cause and rerun."
+            )
+        else:
+            rules.append(
+                "No authoritative verification command was discovered. Inspect project "
+                "documentation and CI before choosing a command; do not invent a passing gate."
+            )
+        if self.ci:
+            rules.append(
+                "Use the repository CI workflows as verification evidence and keep local "
+                "commands aligned with them: " + ", ".join(f"`{path}`" for path in self.ci) + "."
+            )
+        return tuple(rules)
 
 
 @dataclass(frozen=True)
@@ -147,7 +176,11 @@ def audit_project_root(cwd: Path) -> tuple[str | None, tuple[AuditIssue, ...]]:
         )
         return None, tuple(issues)
     root = vcs_root or (agent_scopes[0].parent if agent_scopes else cwd)
-    return _paths.rel(root, cwd), ()
+    # Root discovery is allowed to walk to an ancestor of cwd. This value is
+    # navigation state, not an artifact path, so ``..`` segments are expected
+    # here and are resolved before any persisted repo-relative path is built.
+    relative_root = Path(os.path.relpath(root, cwd)).as_posix()
+    return ("./" if relative_root == "." else relative_root), ()
 
 
 def audit_inputs(
@@ -225,6 +258,44 @@ def _grep_patterns(text: str, patterns: Iterable[str]) -> tuple[str, ...]:
     return tuple(matches)
 
 
+def _task_runner_commands(root: Path) -> dict[str, tuple[str, ...]]:
+    """Discover conventional quality targets declared by the project itself."""
+    categories = {
+        "build": ("build",),
+        "test": ("test", "tests"),
+        "lint": ("lint", "check", "ci"),
+        "format": ("format-check", "fmt-check", "format", "fmt"),
+    }
+    runners: list[tuple[Path, str, re.Pattern[str]]] = [
+        (
+            root / "justfile",
+            "just",
+            re.compile(r"^(?P<name>[A-Za-z][A-Za-z0-9_-]*)(?:\s[^:]*)?:\s*(?:#.*)?$"),
+        ),
+        (
+            root / "Makefile",
+            "make",
+            re.compile(r"^(?P<name>[A-Za-z][A-Za-z0-9_.-]*):(?!=)"),
+        ),
+    ]
+    for path, executable, pattern in runners:
+        if not path.is_file():
+            continue
+        names = {
+            match.group("name")
+            for line in _read_text(path).splitlines()
+            if (match := pattern.match(line)) is not None
+        }
+        discovered: dict[str, tuple[str, ...]] = {}
+        for category, candidates in categories.items():
+            selected = next((name for name in candidates if name in names), None)
+            if selected:
+                discovered[category] = (f"{executable} {selected}",)
+        if discovered:
+            return discovered
+    return {}
+
+
 def collect_project_facts(root: Path) -> ProjectFacts:
     """Inspect ``root`` and return verified commands/technology.
 
@@ -242,34 +313,87 @@ def collect_project_facts(root: Path) -> ProjectFacts:
     if (root / "Cargo.toml").is_file():
         tech = "rust"
         build = ("cargo build",)
-        test = ("cargo nextest run",)
+        has_nextest = (root / ".config" / "nextest.toml").is_file() or (
+            root / "nextest.toml"
+        ).is_file()
+        test = (("cargo nextest run",) if has_nextest else ("cargo test",))
         lint = ("cargo clippy --workspace --all-targets -- -D warnings",)
         fmt = ("cargo fmt --all -- --check",)
     elif (root / "package.json").is_file():
         tech = "node"
         pkg = _read_text(root / "package.json")
         scripts = re.findall(r'"(?P<key>[^"]+)"\s*:\s*"[^"]*"', pkg)
+        manager = (
+            "pnpm" if (root / "pnpm-lock.yaml").is_file()
+            else "yarn" if (root / "yarn.lock").is_file()
+            else "bun" if (root / "bun.lockb").is_file() or (root / "bun.lock").is_file()
+            else "npm"
+        )
+        run = (lambda script: f"npm {script}" if manager == "npm" and script == "test" else f"{manager} run {script}")
         if "build" in scripts:
-            build = ("npm run build",)
+            build = (run("build"),)
         if "test" in scripts:
-            test = ("npm test",)
+            test = (run("test"),)
         if "lint" in scripts:
-            lint = ("npm run lint",)
+            lint = (run("lint"),)
         if "format" in scripts or "fmt" in scripts:
-            fmt = ("npm run format",)
+            fmt = (run("format" if "format" in scripts else "fmt"),)
     elif (root / "pyproject.toml").is_file():
         tech = "python"
         build = ()
-        test = (".venv/bin/python -m pytest",)
-        lint = ()
-        fmt = ()
+        try:
+            pyproject = tomllib.loads(_read_text(root / "pyproject.toml"))
+        except tomllib.TOMLDecodeError:
+            pyproject = {}
+        project = pyproject.get("project", {}) if isinstance(pyproject, dict) else {}
+        optional = project.get("optional-dependencies", {}) if isinstance(project, dict) else {}
+        dependency_groups = pyproject.get("dependency-groups", {}) if isinstance(pyproject, dict) else {}
+        dependency_items = list(project.get("dependencies", [])) if isinstance(project, dict) else []
+        dependency_items.extend(
+            item
+            for groups in (optional, dependency_groups)
+            if isinstance(groups, dict)
+            for group in groups.values()
+            if isinstance(group, list)
+            for item in group
+        )
+        dependency_text = " ".join(
+            str(item).lower()
+            for item in dependency_items
+        )
+        tool = pyproject.get("tool", {}) if isinstance(pyproject, dict) else {}
+        python_runner = (
+            "uv run python" if (root / "uv.lock").is_file()
+            else "poetry run python" if (root / "poetry.lock").is_file()
+            else ".venv/bin/python" if (root / ".venv" / "bin" / "python").exists()
+            else "python"
+        )
+        has_pytest = "pytest" in dependency_text or (isinstance(tool, dict) and "pytest" in tool)
+        has_ruff = "ruff" in dependency_text or (isinstance(tool, dict) and "ruff" in tool)
+        has_mypy = "mypy" in dependency_text or (isinstance(tool, dict) and "mypy" in tool)
+        test = (f"{python_runner} -m pytest",) if has_pytest else ()
+        lint_commands: list[str] = []
+        if has_ruff:
+            lint_commands.append(f"{python_runner} -m ruff check .")
+            fmt = (f"{python_runner} -m ruff format --check .",)
+        if has_mypy:
+            lint_commands.append(f"{python_runner} -m mypy .")
+        lint = tuple(lint_commands)
+
+    task_commands = _task_runner_commands(root)
+    build = task_commands.get("build", build)
+    test = task_commands.get("test", test)
+    lint = task_commands.get("lint", lint)
+    fmt = task_commands.get("format", fmt)
+    if tech == "unknown" and task_commands:
+        tech = "task-runner"
 
     ci_entries: tuple[str, ...] = ()
     workflow_dir = root / ".github" / "workflows"
     if workflow_dir.is_dir():
         ci_entries = tuple(
             sorted(
-                _paths.rel(path)
+                path.relative_to(root).as_posix()
                 for path in workflow_dir.glob("*.y*ml")
             )
         )
@@ -302,8 +426,14 @@ def run_audit(
             issues=root_issues,
             blocking=True,
         )
-    inputs_ok, input_issues = audit_inputs(preset, plan_path, cwd, prompt_file)
-    facts = collect_project_facts(cwd) if root_rel else ProjectFacts()
+    resolved_root = (cwd / root_rel).resolve() if root_rel else None
+    inputs_ok, input_issues = audit_inputs(
+        preset,
+        plan_path,
+        resolved_root or cwd,
+        prompt_file,
+    )
+    facts = collect_project_facts(resolved_root) if resolved_root else ProjectFacts()
     notes: tuple[str, ...] = ()
     if facts.is_empty():
         notes = ("no verifiable build/test/lint entry points discovered",)

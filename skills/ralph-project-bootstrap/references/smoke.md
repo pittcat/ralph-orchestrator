@@ -114,8 +114,8 @@ Every argv the harness builds starts with:
         --idle-timeout <S>
 ```
 
-Optional ``--prompt-file <path>`` and ``--plan <path>`` flags follow
-when the ``SmokeConfig`` supplies them. ``extra_argv`` is appended
+Exactly one optional prompt source follows: ``--plan <path>`` when present,
+otherwise ``--prompt-file <path>``. ``extra_argv`` is appended
 last so callers can layer in stable flags without disturbing the
 harness contract.
 

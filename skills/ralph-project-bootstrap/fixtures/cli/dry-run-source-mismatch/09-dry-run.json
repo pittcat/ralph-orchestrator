@@ -3,7 +3,6 @@
   "argv_expected": [
     "ralph", "-c", "ralph.pipeline.yml", "-H", "builtin:ce-executor-pipeline",
     "run", "--dry-run",
-    "--prompt-file", "PROMPT.pipeline.md",
     "--plan", "plan.md"
   ],
   "stdout_chunks": [

@@ -74,18 +74,23 @@ When ``use_worktree=True`` the handoff MUST include BOTH
 Missing the reuse key is a hard reject. ``build_handoff`` raises
 ``ValueError("worktree reuse key required")`` when ``use_worktree``
 is True but neither key is supplied. Worktree mode is opt-in. Outside
-worktree mode the helper appends optional ``--prompt-file`` and ``--plan``
-launch inputs only when present; preset-native mode appends neither.
+worktree mode the helper appends exactly one optional prompt source:
+``--plan`` when present, otherwise ``--prompt-file``. Preset-native mode
+appends neither.
 
 When ``use_worktree`` is True AND a reuse key is supplied the argv
 shape is exactly:
 
 ```
 <binary> -c <config_path> -H <preset>
-         [--prompt-file <prompt_file>]
+         [--prompt-file <prompt_file> | --plan <plan>]
          --worktree --reuse-worktree
          (--plan <plan_arg> | --worktree-name <worktree_name>)
 ```
+
+`--prompt-file` and `--plan` are mutually exclusive prompt sources. When a
+plan path or plan reuse key exists, omit `--prompt-file`; otherwise Ralph's
+prompt-file precedence would hide the plan.
 
 Note that the explicit reuse ``--plan`` (when supplied) replaces
 the top-level ``--plan <plan_path>`` so the operator's explicit

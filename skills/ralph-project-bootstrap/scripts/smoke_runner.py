@@ -244,7 +244,8 @@ def _build_argv(smoke_cfg: SmokeConfig) -> tuple[str, ...]:
     belongs to the harness outer ``timeout`` parameter, NOT to the
     CLI surface (see plan 2026-07-19-001 F6 / Unit 4 / S8).
 
-    Optional ``--prompt-file`` / ``--plan`` flags follow;
+    Exactly one optional prompt source follows: ``--plan`` when present,
+    otherwise ``--prompt-file``;
     ``extra_argv`` is appended last so callers can layer in stable
     flags without disturbing the harness contract.
     """
@@ -259,10 +260,10 @@ def _build_argv(smoke_cfg: SmokeConfig) -> tuple[str, ...]:
         "--idle-timeout",
         str(smoke_cfg.idle_timeout_secs),
     ]
-    if smoke_cfg.prompt_file:
-        argv.extend(["--prompt-file", smoke_cfg.prompt_file])
     if smoke_cfg.plan_path:
         argv.extend(["--plan", smoke_cfg.plan_path])
+    elif smoke_cfg.prompt_file:
+        argv.extend(["--prompt-file", smoke_cfg.prompt_file])
     argv.extend(smoke_cfg.extra_argv)
     return tuple(argv)
 
