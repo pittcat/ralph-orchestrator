@@ -809,14 +809,14 @@ pub async fn handle_wave_events(
     // was before any merge, so it picks up all newly appended events.
     if any_success
         && let Ok(reread) = event_loop.process_events_from_jsonl_with_waves()
-            && reread.processed.had_events
-        {
-            info!("Published wave result events to bus for aggregator");
-            // Wave results legitimately share the same topic (e.g.
-            // 3x review.done). Reset the stale-loop counter so
-            // this batch doesn't trigger LoopStale termination.
-            event_loop.reset_stale_topic_counter();
-        }
+        && reread.processed.had_events
+    {
+        info!("Published wave result events to bus for aggregator");
+        // Wave results legitimately share the same topic (e.g.
+        // 3x review.done). Reset the stale-loop counter so
+        // this batch doesn't trigger LoopStale termination.
+        event_loop.reset_stale_topic_counter();
+    }
     result
 }
 
@@ -1348,16 +1348,29 @@ async fn execute_wave_via_supervisor(
         // vars (RALPH_WAVE_WORKTREE_PATH etc.) and an optional
         // `worktree_path` that becomes the worker's cwd.
         // `None` for SharedReadonly (review) slots.
+        //
+        // U4 fail-closed: when `bind_slot` returns `Err` for an
+        // Exec/Fix slot, the dispatcher MUST NOT fall back to
+        // spawning a worker against the main workspace cwd.
+        // We surface the error via `fail_closed_on_bind_error`
+        // and skip this slot entirely. The slot's `SlotResource`
+        // is NOT persisted to the store (the bridge did not
+        // succeed in creating a binding), and the slot never
+        // reaches `ProductionExecutor`. Review slots may still
+        // return `Ok(None)` legitimately (SharedReadonly).
         let binding = match bridge.bind_slot(wave_kind, &store_wave_id, index_u32) {
             Ok(opt) => opt,
             Err(err) => {
-                warn!(
-                    wave_id = %wave.wave_id,
-                    slot_index = index_u32,
-                    error = %err,
-                    "supervisor bind_slot failed; slot will dispatch without binding"
+                // Fail-closed: skip the slot — do not add it to
+                // `worker_requests`. The main workspace never
+                // receives a worker spawn for this slot.
+                use crate::loop_runner::wave::fail_closed_on_bind_error;
+                let closed = fail_closed_on_bind_error(&err, &wave.wave_id, index_u32);
+                debug_assert!(
+                    closed.is_some(),
+                    "bind_slot error must be fail-closed; got {err:?}"
                 );
-                None
+                continue;
             }
         };
 

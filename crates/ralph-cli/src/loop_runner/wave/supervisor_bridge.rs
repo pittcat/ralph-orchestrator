@@ -29,6 +29,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use ralph_core::supervisor::worktree_bind::WorktreeFactory;
 use ralph_core::supervisor::PhaseInputs;
 use ralph_core::supervisor::{
     CoordinatorAction, InMemorySupervisorStore, SupervisorCoordinator, SupervisorStore, WaveKind,
@@ -39,19 +40,61 @@ use ralph_core::supervisor::{
 // working. The types live in `ralph_core::supervisor::bridge`
 // but the module itself is private — we import from the
 // `ralph_core::supervisor` re-export surface.
+use ralph_core::supervisor::DefaultWorktreeFactory;
+pub use ralph_core::supervisor::WorktreeError as BridgeWorktreeError;
 pub use ralph_core::supervisor::{
-    BridgeDispatchOutcome, BridgeError, SlotBinding, SupervisorBridge, is_supervisor_path_enabled,
+    is_supervisor_path_enabled, BridgeDispatchOutcome, BridgeError, SlotBinding, SupervisorBridge,
 };
+
+/// Bundle the production bridge needs from the runtime so it
+/// can satisfy `bind_slot` without re-resolving workspace paths
+/// or reading the supervisor config a second time. The runtime
+/// constructs one of these once per loop and threads it through
+/// `CoordinatorSupervisorBridge::with_context_and_factory`
+/// (U4 closure for the production `bind_slot` empty
+/// implementation).
+#[derive(Debug, Clone)]
+pub struct ProductionBridgeContext {
+    /// Loop identifier; encoded into the per-slot branch name
+    /// (`{loop_id}-{kind}-{slot_index}`, see
+    /// `worktree_bind::exec_binding`).
+    pub loop_id: String,
+    /// Absolute path to the repo root where the worker will
+    /// spawn the per-slot worktree.
+    pub repo_root: std::path::PathBuf,
+}
 
 /// Production bridge: holds an `Arc<dyn SupervisorStore>` +
 /// `SupervisorCoordinator`. Construction is gated behind the
 /// `supervisor-db` feature for the SQLite branch; the
 /// in-memory branch is always available so dry-runs work in
 /// default builds.
+///
+/// U4: the production `bind_slot` now invokes
+/// `worktree_bind::bind_slot_worktree` with the loop's repo
+/// root + loop_id and a `WorktreeFactory` (injected in tests,
+/// `DefaultWorktreeFactory` in production). Exec/Fix slots
+/// hand back `Some(SlotBinding { worktree_path, env })` so the
+/// dispatcher can set `WorkerRequest.cwd` and inject the
+/// `RALPH_WAVE_*` env vars into the spawned worker. Review
+/// slots hand back `Ok(None)` (SharedReadonly) without touching
+/// the factory.
 #[derive(Debug, Clone)]
 pub struct CoordinatorSupervisorBridge {
     store: Arc<dyn SupervisorStore>,
     coordinator: Arc<SupervisorCoordinator>,
+    /// U4: context required to drive `bind_slot`. `None` keeps
+    /// the legacy behaviour (`Ok(None)` for every kind) so the
+    /// old `MockSupervisorBridge`-only tests still resolve. The
+    /// runner constructs a concrete `Some(...)` via
+    /// `with_context_and_factory` once `supervisor.enabled: true`
+    /// is in effect.
+    context: Option<ProductionBridgeContext>,
+    /// U4: factory for creating per-slot git worktrees. Tests
+    /// inject `RecordingFactory` / `FailingFactory` to assert
+    /// factory call args without invoking git; production uses
+    /// `DefaultWorktreeFactory`.
+    factory: Arc<dyn WorktreeFactory>,
 }
 
 impl CoordinatorSupervisorBridge {
@@ -64,7 +107,33 @@ impl CoordinatorSupervisorBridge {
     pub fn with_in_memory_store() -> Self {
         let store = Arc::new(InMemorySupervisorStore::new());
         let coordinator = Arc::new(SupervisorCoordinator::with_in_memory_sink(store.clone()));
-        Self { store, coordinator }
+        let factory: Arc<dyn WorktreeFactory> = Arc::new(DefaultWorktreeFactory);
+        Self {
+            store,
+            coordinator,
+            context: None,
+            factory,
+        }
+    }
+
+    /// Build a production bridge with a runtime-supplied
+    /// context (loop_id + repo_root) and an injected
+    /// `WorktreeFactory`. This is the entry point the runner
+    /// uses after `is_supervisor_path_enabled` returns `true`
+    /// (R7 / U4 closure for the empty `bind_slot`).
+    #[allow(dead_code)] // wired by the runner in a follow-up unit (U5).
+    pub fn with_context_and_factory(
+        store: Arc<dyn SupervisorStore>,
+        context: ProductionBridgeContext,
+        factory: Arc<dyn WorktreeFactory>,
+    ) -> Self {
+        let coordinator = Arc::new(SupervisorCoordinator::with_in_memory_sink(store.clone()));
+        Self {
+            store,
+            coordinator,
+            context: Some(context),
+            factory,
+        }
     }
 
     /// Access the underlying store. Diagnostics-friendly.
@@ -78,8 +147,8 @@ impl CoordinatorSupervisorBridge {
     /// Access the coordinator so the bridge can hand it to
     /// the runtime when the dispatcher needs to drive a tick
     /// outside the bridge trait.
-    // 2026-07-16 cleanup U4 (KTD-3): test-fixture guard (same as
-    // `with_in_memory_store`).
+    // 2026-07-16 cleanup U4 (KTD-3): same test-fixture guard as
+    // `with_in_memory_store`.
     #[allow(dead_code)]
     pub fn coordinator(&self) -> Arc<SupervisorCoordinator> {
         self.coordinator.clone()
@@ -90,7 +159,13 @@ impl CoordinatorSupervisorBridge {
     /// once and shares it across ticks).
     pub fn from_store(store: Arc<dyn SupervisorStore>) -> Self {
         let coordinator = Arc::new(SupervisorCoordinator::with_in_memory_sink(store.clone()));
-        Self { store, coordinator }
+        let factory: Arc<dyn WorktreeFactory> = Arc::new(DefaultWorktreeFactory);
+        Self {
+            store,
+            coordinator,
+            context: None,
+            factory,
+        }
     }
 }
 
@@ -103,16 +178,90 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
 
     fn bind_slot(
         &self,
-        _kind: WaveKind,
-        _wave_id: &str,
-        _slot_index: u32,
+        kind: WaveKind,
+        wave_id: &str,
+        slot_index: u32,
     ) -> Result<Option<SlotBinding>, BridgeError> {
-        // Production wiring is delegated to `dispatcher.rs`
-        // (U12 plan: the existing wave dispatcher reads the
-        // binding and forwards the env to the spawned worker).
-        // Returning `Ok(None)` here keeps the bridge interface
-        // a one-method hot path; real bindings come from U10.
-        Ok(None)
+        // U4: the production bridge now drives the
+        // `worktree_bind::bind_slot_worktree` helper. The
+        // legacy `Ok(None)` stub is removed; only the `Review`
+        // (SharedReadonly) branch returns `Ok(None)`. The
+        // factory is injected (production: `DefaultWorktreeFactory`;
+        // tests: `RecordingFactory` / `FailingFactory`) so the
+        // Git boundary stays behind a single trait method.
+        let Some(ctx) = self.context.as_ref() else {
+            // Legacy entry points (`with_in_memory_store`,
+            // `from_store`) keep returning `Ok(None)` so the
+            // older test seam still resolves. New tests must
+            // use `with_context_and_factory` to exercise the
+            // production wiring.
+            return Ok(None);
+        };
+
+        // Review slots are SharedReadonly: no worktree, no
+        // writeable branch. Return `Ok(None)` so the dispatcher
+        // doesn't override `WorkerRequest.cwd` (KTD-5).
+        if matches!(kind, WaveKind::Review) {
+            return Ok(None);
+        }
+
+        // U4: build the per-slot binding via the helper so the
+        // branch naming + env-var SSOT lives in
+        // `worktree_bind::bind_slot_worktree`. We invoke the
+        // factory directly (the helper is generic over `F:
+        // WorktreeFactory` and would require `Sized`) so the
+        // production bridge keeps its `Arc<dyn WorktreeFactory>`
+        // storage. The factory contract is the same: success
+        // yields a `Worktree { path, branch }`, failure yields
+        // `BridgeError::Store`.
+        let branch = format!("{}-{}-{}", ctx.loop_id, kind, slot_index);
+        let wt = self
+            .factory
+            .create(ctx.repo_root.clone(), branch.clone())
+            .map_err(|err| BridgeError::Store(err.to_string()))?;
+        let worktree_path = wt.path.clone();
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKER.to_string(),
+            "1".to_string(),
+        );
+        env.insert(
+            ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKTREE_PATH.to_string(),
+            worktree_path.to_string_lossy().into_owned(),
+        );
+        env.insert(
+            ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKTREE_BRANCH.to_string(),
+            branch.clone(),
+        );
+        env.insert(
+            ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_ID.to_string(),
+            wave_id.to_string(),
+        );
+        env.insert(
+            ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_INDEX.to_string(),
+            slot_index.to_string(),
+        );
+        env.insert(
+            ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_KIND.to_string(),
+            kind.to_string(),
+        );
+        let resource = ralph_core::supervisor::SlotResource {
+            slot_index,
+            worktree_path: Some(worktree_path.to_string_lossy().into_owned()),
+            branch: Some(branch),
+        };
+
+        // Persist the `SlotResource` in the store so fan-in
+        // can resolve branch/path later (R7 / R10).
+        self.store
+            .bind_worktree(wave_id, slot_index, resource)
+            .map_err(|err| BridgeError::Store(err.to_string()))?;
+
+        Ok(Some(SlotBinding {
+            slot_index,
+            env,
+            worktree_path: Some(worktree_path),
+        }))
     }
 
     fn recover(&self) -> Result<Vec<WaveSnapshot>, BridgeError> {
@@ -156,6 +305,36 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         self.store
             .record_slot_failure(wave_id, slot_index, reason)?;
         Ok(())
+    }
+}
+
+/// U4 R8 fail-closed helper: when `bridge.bind_slot` returns
+/// `Err`, the dispatcher MUST NOT spawn a worker against the
+/// main workspace. This helper converts the error into a typed
+/// `(wave_id, slot_index)` payload the dispatcher can log + map
+/// to a fail-closed signal without touching `WorkerRequest.cwd`.
+/// The function name mirrors the dispatcher's contract in
+/// `execute_wave_via_supervisor`.
+pub fn fail_closed_on_bind_error(
+    err: &BridgeError,
+    wave_id: &str,
+    slot_index: u32,
+) -> Option<(String, u32)> {
+    match err {
+        BridgeError::Store(_) | BridgeError::NotDispatchable(_) => {
+            tracing::warn!(
+                wave_id,
+                slot_index,
+                error = %err,
+                "supervisor bind_slot failed; slot will fail-closed without spawning a worker"
+            );
+            Some((wave_id.to_string(), slot_index))
+        }
+        // `Disabled` is a hard "supervisor not wired" signal
+        // that the dispatcher routes via the legacy `WaveTracker`
+        // path; we leave that to the dispatcher rather than
+        // folding it into this helper.
+        BridgeError::Disabled => None,
     }
 }
 
@@ -404,11 +583,21 @@ mod tests {
         assert!(snaps.is_empty());
     }
 
+    /// U4 closure: the production `bind_slot` MUST return
+    /// `Ok(None)` when invoked through the legacy entry
+    /// points (`with_in_memory_store` / `from_store`) — those
+    /// carry no `ProductionBridgeContext` so the new real
+    /// wiring has nothing to bind. Production callers now use
+    /// `with_context_and_factory` and assert
+    /// `Ok(Some(_))` for Exec/Fix.
     #[test]
-    fn bind_slot_returns_none_for_test_bridge() {
+    fn bind_slot_returns_none_for_legacy_entry_points() {
         let bridge = CoordinatorSupervisorBridge::with_in_memory_store();
         let binding = bridge.bind_slot(WaveKind::Exec, "w-1", 0).unwrap();
-        assert!(binding.is_none());
+        assert!(
+            binding.is_none(),
+            "legacy entry point must return None (no context); got {binding:?}"
+        );
     }
 
     #[test]

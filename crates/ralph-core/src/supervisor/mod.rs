@@ -403,6 +403,7 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     fn set_wave_phase(&self, wave_id: &str, phase: WavePhase) -> SupervisorStoreResult<()>;
 }
 
+pub use crate::worktree::Worktree;
 pub use coordinator::{CoordinatorAction, SupervisorCoordinator};
 pub use memory::InMemorySupervisorStore;
 pub use merge_sink::{EventMergeSink, InMemoryMergeSink, MergeSinkError};
@@ -428,7 +429,7 @@ mod recover;
 mod rusqlite;
 #[cfg(test)]
 mod types_tests;
-mod worktree_bind;
+pub mod worktree_bind;
 
 // 2026-07-03-001 supervisor real-wiring: re-export the sunk-down
 // bridge surface so `ralph-cli` and the BDD scenarios can depend on
@@ -543,18 +544,19 @@ pub fn summarize(store: &dyn SupervisorStore) -> SupervisorInspectSummary {
     // single active wave is present (the agent-safe `inspect loop`
     // contract is "what's blocking my slot", not "full state dump").
     if out.active_waves.len() == 1
-        && let Some(snap) = snapshots.first() {
-            let hat_label = wave_kind_hat_label(snap.kind);
-            out.slot_summary = snap
-                .slots
-                .iter()
-                .map(|(idx, status)| SlotSummaryEntry {
-                    slot_id: *idx,
-                    hat: hat_label.to_string(),
-                    status: status.to_string(),
-                })
-                .collect();
-        }
+        && let Some(snap) = snapshots.first()
+    {
+        let hat_label = wave_kind_hat_label(snap.kind);
+        out.slot_summary = snap
+            .slots
+            .iter()
+            .map(|(idx, status)| SlotSummaryEntry {
+                slot_id: *idx,
+                hat: hat_label.to_string(),
+                status: status.to_string(),
+            })
+            .collect();
+    }
     out
 }
 
