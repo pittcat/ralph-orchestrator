@@ -29,8 +29,8 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use ralph_core::supervisor::worktree_bind::WorktreeFactory;
 use ralph_core::supervisor::PhaseInputs;
+use ralph_core::supervisor::worktree_bind::WorktreeFactory;
 use ralph_core::supervisor::{
     CoordinatorAction, InMemorySupervisorStore, SupervisorCoordinator, SupervisorStore, WaveKind,
     WaveSnapshot,
@@ -43,7 +43,7 @@ use ralph_core::supervisor::{
 use ralph_core::supervisor::DefaultWorktreeFactory;
 pub use ralph_core::supervisor::WorktreeError as BridgeWorktreeError;
 pub use ralph_core::supervisor::{
-    is_supervisor_path_enabled, BridgeDispatchOutcome, BridgeError, SlotBinding, SupervisorBridge,
+    BridgeDispatchOutcome, BridgeError, SlotBinding, SupervisorBridge, is_supervisor_path_enabled,
 };
 
 /// Bundle the production bridge needs from the runtime so it
@@ -157,6 +157,17 @@ impl CoordinatorSupervisorBridge {
     /// Build a bridge around a store owned elsewhere (e.g. the
     /// dispatcher bridge reads the store from the runtime
     /// once and shares it across ticks).
+    ///
+    /// 2026-07-23-001 plan U1: this is the legacy entry point
+    /// that left `context: None` and made `bind_slot` return
+    /// `Ok(None)` for every kind — the silent failure mode U1
+    /// eliminates. Production runners now use
+    /// `with_context_and_factory` via `build_supervisor_bridge`.
+    /// The function stays available for the legacy
+    /// characterization test (`test_legacy_from_store_returns_none_for_exec`)
+    /// which pins the old failure mode so a future regression
+    /// that re-introduces `from_store` on the hot path is caught.
+    #[cfg(test)]
     pub fn from_store(store: Arc<dyn SupervisorStore>) -> Self {
         let coordinator = Arc::new(SupervisorCoordinator::with_in_memory_sink(store.clone()));
         let factory: Arc<dyn WorktreeFactory> = Arc::new(DefaultWorktreeFactory);

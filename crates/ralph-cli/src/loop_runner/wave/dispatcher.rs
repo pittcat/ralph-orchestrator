@@ -1358,6 +1358,20 @@ async fn execute_wave_via_supervisor(
         // succeed in creating a binding), and the slot never
         // reaches `ProductionExecutor`. Review slots may still
         // return `Ok(None)` legitimately (SharedReadonly).
+        //
+        // 2026-07-23-001 plan U1 KTD-4 fail-closed: when
+        // `bind_slot` returns `Ok(None)` for an Exec/Fix slot,
+        // this is a contract violation — the production bridge
+        // is supposed to hand back `Some(SlotBinding)` for
+        // Exec/Fix (the legacy `from_store`/`with_in_memory_store`
+        // entry points left `context: None` and produced silent
+        // `Ok(None)`, which is exactly the failure mode U1
+        // eliminates). The dispatcher MUST treat Exec/Fix
+        // `Ok(None)` as fail-closed (skip the slot) and NOT
+        // fall back to spawning the worker against the main
+        // workspace (`cwd: None` = main workspace). Review
+        // `Ok(None)` is still legitimate (SharedReadonly) so it
+        // proceeds without a worktree_path.
         let binding = match bridge.bind_slot(wave_kind, &store_wave_id, index_u32) {
             Ok(opt) => opt,
             Err(err) => {
@@ -1373,6 +1387,23 @@ async fn execute_wave_via_supervisor(
                 continue;
             }
         };
+
+        // U1 KTD-4: Exec/Fix MUST get a worktree binding. If
+        // the bridge returns `Ok(None)` for an Exec/Fix slot
+        // (e.g. because the production bridge lost its
+        // ProductionBridgeContext), fail-closed: do not spawn
+        // the worker against the main workspace. Review
+        // `Ok(None)` is the legitimate SharedReadonly path.
+        if binding.is_none() && !matches!(wave_kind, WaveKind::Review) {
+            warn!(
+                wave_id = %wave.wave_id,
+                slot_index = index_u32,
+                wave_kind = ?wave_kind,
+                "supervisor bind_slot returned Ok(None) for Exec/Fix slot; \
+                 failing closed (slot skipped, no main-workspace spawn)"
+            );
+            continue;
+        }
 
         let slot_cwd = binding.as_ref().and_then(|b| b.worktree_path.clone());
         if let Some(ref b) = binding {

@@ -411,15 +411,16 @@ fn remove_loop_termination_sentinel(loop_context: &Option<LoopContext>) {
 fn write_loop_termination_sentinel(loop_context: &Option<LoopContext>, reason: &TerminationReason) {
     let path = loop_termination_sentinel_path(loop_context);
     if let Some(parent) = path.parent()
-        && let Err(e) = fs::create_dir_all(parent) {
-            warn!(
-                target: "ralph_cli::loop_runner",
-                error = %e,
-                path = %path.display(),
-                "Failed to create termination sentinel parent directory"
-            );
-            return;
-        }
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        warn!(
+            target: "ralph_cli::loop_runner",
+            error = %e,
+            path = %path.display(),
+            "Failed to create termination sentinel parent directory"
+        );
+        return;
+    }
     match serde_json::to_string(reason) {
         Ok(json) => {
             if let Err(e) = fs::write(&path, json) {
@@ -560,9 +561,10 @@ pub async fn run_loop_impl(
     )
     .await;
     if let Ok(ref reason) = result
-        && !reason.is_success() {
-            write_loop_termination_sentinel(&loop_context, reason);
-        }
+        && !reason.is_success()
+    {
+        write_loop_termination_sentinel(&loop_context, reason);
+    }
     result
 }
 
@@ -591,6 +593,44 @@ pub(crate) fn bridge_build_invocations() -> u64 {
     BRIDGE_BUILD_INVOCATIONS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// 2026-07-23-001 plan U1: factory override seam for tests that
+/// exercise the production `build_supervisor_bridge` path
+/// without invoking `git worktree add`. Tests install a
+/// `RecordingFactory` (or `FailingFactory`) and verify
+/// `bind_slot(Exec|Fix)` returns `Some(SlotBinding)` (or
+/// `Err` on factory failure). Production code never installs
+/// anything — the override stays `None` and the bridge uses
+/// `DefaultWorktreeFactory` (which calls
+/// `worktree::create_worktree`).
+#[cfg(feature = "supervisor-db")]
+#[cfg(test)]
+pub(crate) static WORKTREE_FACTORY_OVERRIDE: std::sync::Mutex<
+    Option<std::sync::Arc<dyn ralph_core::supervisor::worktree_bind::WorktreeFactory>>,
+> = std::sync::Mutex::new(None);
+
+/// 2026-07-23-001 plan U1: install a factory override so the
+/// production `build_supervisor_bridge` path uses the supplied
+/// factory instead of `DefaultWorktreeFactory`. See
+/// `WORKTREE_FACTORY_OVERRIDE` for the rationale.
+#[cfg(feature = "supervisor-db")]
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn install_factory_override_for_test(
+    factory: std::sync::Arc<dyn ralph_core::supervisor::worktree_bind::WorktreeFactory>,
+) {
+    *WORKTREE_FACTORY_OVERRIDE.lock().unwrap() = Some(factory);
+}
+
+/// 2026-07-23-001 plan U1: clear the factory override installed
+/// by `install_factory_override_for_test`. Production code does
+/// not call this — tests use it to clean up between assertions.
+#[cfg(feature = "supervisor-db")]
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn clear_factory_override_for_test() {
+    *WORKTREE_FACTORY_OVERRIDE.lock().unwrap() = None;
+}
+
 /// Build the production `CoordinatorSupervisorBridge` from `SupervisorConfig`.
 ///
 /// Resolves `db_path` relative to the loop workspace when it is not
@@ -599,6 +639,19 @@ pub(crate) fn bridge_build_invocations() -> u64 {
 /// `supervisor.enabled: true` preset fails fast at bridge
 /// construction rather than silently losing wave state across
 /// restarts.
+///
+/// 2026-07-23-001 plan U1: the bridge is constructed via
+/// `CoordinatorSupervisorBridge::with_context_and_factory` so
+/// `bind_slot(Exec|Fix)` hands back `Some(SlotBinding)` against
+/// per-slot worktrees (U5 / R5 / R7 / KTD-3). The legacy
+/// `from_store` path left `context: None` and made every
+/// `bind_slot` return `Ok(None)`, so the dispatcher spawned
+/// Exec/Fix workers against the main workspace — the silent
+/// failure mode U1 closes. `loop_id` resolves from
+/// `ctx.loop_id()`; primary loops fall back to `"primary"`.
+/// The factory is `DefaultWorktreeFactory` (which calls
+/// `worktree::create_worktree`); tests inject a recording/
+/// failing factory via `install_factory_override_for_test`.
 ///
 /// Errors surface as `anyhow` so the caller can fail-closed
 /// (R-C4) without leaking `SupervisorStoreError` across module
@@ -629,7 +682,8 @@ pub(crate) fn build_supervisor_bridge(
 
     #[cfg(feature = "supervisor-db")]
     {
-        use crate::loop_runner::wave::CoordinatorSupervisorBridge;
+        use crate::loop_runner::wave::{CoordinatorSupervisorBridge, ProductionBridgeContext};
+        use ralph_core::supervisor::worktree_bind::DefaultWorktreeFactory;
 
         if let Some(parent) = resolved_db_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -644,7 +698,38 @@ pub(crate) fn build_supervisor_bridge(
             })?;
         let store: std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore> =
             std::sync::Arc::new(store);
-        Ok(CoordinatorSupervisorBridge::from_store(store))
+
+        // U1: derive the ProductionBridgeContext from the runtime
+        // `LoopContext`. `ctx.loop_id()` is `Option<&str>` —
+        // primary loops return `None`; fall back to `"primary"`
+        // so the branch naming still produces a stable, unique
+        // per-slot key. `ctx.repo_root()` is the absolute repo
+        // root that per-slot worktrees branch off.
+        let loop_id = ctx.loop_id().unwrap_or("primary").to_string();
+        let repo_root = ctx.repo_root().to_path_buf();
+        let context = ProductionBridgeContext { loop_id, repo_root };
+
+        // U1: factory resolution — production uses the default
+        // (real git worktree); tests inject a recording/failing
+        // factory via the `WORKTREE_FACTORY_OVERRIDE` seam so
+        // they can assert the production wiring without spawning
+        // a real `git worktree add`.
+        let factory: std::sync::Arc<dyn ralph_core::supervisor::worktree_bind::WorktreeFactory> = {
+            #[cfg(test)]
+            {
+                if let Some(override_factory) = WORKTREE_FACTORY_OVERRIDE.lock().unwrap().clone() {
+                    override_factory
+                } else {
+                    std::sync::Arc::new(DefaultWorktreeFactory)
+                }
+            }
+            #[cfg(not(test))]
+            std::sync::Arc::new(DefaultWorktreeFactory)
+        };
+
+        Ok(CoordinatorSupervisorBridge::with_context_and_factory(
+            store, context, factory,
+        ))
     }
 }
 
@@ -1790,14 +1875,15 @@ async fn run_loop_impl_inner(
     // silently re-anchor the review diff base to the current HEAD if the file
     // was ever lost.
     if ctx.is_primary()
-        && let Err(e) = ensure_plan_baseline_from_head(ctx.workspace(), plan_id.as_deref()) {
-            warn!(
-                workspace = %ctx.workspace().display(),
-                plan_id = ?plan_id,
-                error = %e,
-                "Failed to ensure plan baseline"
-            );
-        }
+        && let Err(e) = ensure_plan_baseline_from_head(ctx.workspace(), plan_id.as_deref())
+    {
+        warn!(
+            workspace = %ctx.workspace().display(),
+            plan_id = ?plan_id,
+            error = %e,
+            "Failed to ensure plan baseline"
+        );
+    }
 
     let persisted_baseline = read_plan_baseline(ctx.workspace(), plan_id.as_deref());
     if persisted_baseline.is_none() && !ctx.is_primary() {
@@ -4897,7 +4983,7 @@ mod sync_timeout_tests {
 /// `preset_name = ""` and the rule silently bypasses.
 #[cfg(test)]
 mod u1_preset_name_aware_lint_gate_wiring {
-    
+
     use crate::loop_runner::preset_lint_gate::enforce_preset_lint_gate;
     use ralph_core::RalphConfig;
 
