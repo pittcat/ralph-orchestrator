@@ -18,6 +18,7 @@ Practical guides for using Ralph Orchestrator effectively.
 | [Cost Management](cost-management.md) | Controlling API costs |
 | [Harness Extensions](harness-extensions.md) | Event filter / projection / state injection / preflight hooks |
 | [Payload Contracts](payload-contracts.md) | Schema-based field enforcement between hats, schema metadata (`field_docs` / `examples` / `known_fields` / `trigger_context`), `--policy-check` 拒收后 5 个 agent-facing 字段如何读，`## TRIGGER CONTEXT` 区块如何解读 |
+| [Payload Consistency Gates](payload-consistency.md) | Opt-in same-payload consistency gates (`event_policy.payload_consistency`) — preset-declared inter-field invariants checked at Precheck and Apply |
 | [Execution Contracts](execution-contracts.md) | `work.done` completion gate (task closed, git evidence, tests) |
 | [Precheck Gates](precheck-gates.md) | Opt-in LLM-as-judge gate before key topics (`event_loop.precheck`) |
 | [Runtime Contracts](runtime-contracts.md) | Unified preset/workflow quality gates |

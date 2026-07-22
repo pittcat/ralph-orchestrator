@@ -804,11 +804,12 @@ pub fn detect_required_topic_gaps(
         topics_to_check.insert(t.clone());
     }
     if let Some(ec) = &config.event_loop.execution_contracts
-        && ec.enabled {
-            for topic in ec.rules.keys() {
-                topics_to_check.insert(topic.clone());
-            }
+        && ec.enabled
+    {
+        for topic in ec.rules.keys() {
+            topics_to_check.insert(topic.clone());
         }
+    }
     if let Some(ep) = &config.event_loop.event_policy {
         for topic in ep.schemas.keys() {
             topics_to_check.insert(topic.clone());

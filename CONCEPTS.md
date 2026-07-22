@@ -34,7 +34,7 @@ Observe → Precheck → Apply → Confirm。isolated 模式下 state-changing �
 
 ### payload consistency（载荷一致性闸）
 
-挂在 `event_policy.payload_consistency` 的同 payload 验收 checkpoint：在 `ralph emit` / `--policy-check` 同源路径上，按 preset 声明的谓词检查**当前交卷 JSON 是否自洽**（例如声称成功却与计数/状态互斥）。命中则拒收并给出 agent 可读恢复说明。不读事件历史（跨事件互斥是 follow-up）。与 OPAC（操作纪律）和 `execution_contracts`（完成证据义务）分工，不互相替代。
+挂在 `event_policy.payload_consistency` 的同 payload 验收 checkpoint（默认关闭、preset opt-in）：在 `ralph emit` / `--policy-check` 与真实 Apply 使用同源路径上，按 preset 声明的谓词检查**当前交卷 JSON 是否自洽**（例如声称成功却与计数/状态互斥）。命中时以 `payload_consistency:<rule_id>` 拒收，agent 可读恢复说明沿用其他 `SemanticGateViolation` 拒收的同一条恢复通道；不读事件历史（跨事件互斥是 follow-up）。与 OPAC（操作纪律）和 `execution_contracts`（完成证据义务）分工，不互相替代。
 
 ### wave protocol suite（六件套）
 

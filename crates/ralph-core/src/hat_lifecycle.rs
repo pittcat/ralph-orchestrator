@@ -434,7 +434,10 @@ impl<C: Clock> ActivationLifecycleTracker<C> {
                         completed_count = self.completed_count,
                         "Complete called for unknown or already-closed activation key"
                     );
-                } else if self.complete_unknown_count.is_multiple_of(Self::LOG_EVERY_NTH) {
+                } else if self
+                    .complete_unknown_count
+                    .is_multiple_of(Self::LOG_EVERY_NTH)
+                {
                     tracing::info!(
                         key = %key,
                         terminal_topic = %terminal_topic,

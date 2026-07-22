@@ -1,0 +1,117 @@
+# payload_consistency / reject_inconsistent_fix_done
+#
+# Locks the external behavior of the opt-in `payload_consistency`
+# gate through the REAL EventLoop workflow-guard runner
+# (`run_workflow_guard_scenario`), never the `run_scenario` stub.
+#
+# Topology (abstract fixture — no builtin preset binding):
+#   fixer  --(fix.done)-->  finisher --(LOOP_COMPLETE)-->
+#
+# The config enables ONE `payload_consistency` rule on `fix.done`
+# that fires when the same payload simultaneously claims
+#   review_verdict == "blocked"  AND
+#   fixes_applied  == 0          AND
+#   fix_status     == "applied"
+# i.e. "fix applied" while the review is blocked and zero fixes
+# landed — a self-contradictory payload.
+#
+# Reject on hit:
+#   The fixer emits a hitting `fix.done`. The gate must reject it,
+#   so `fix.done` never reaches the bus (`absent_events`) and the
+#   downstream `finisher` never wakes — `LOOP_COMPLETE` is never
+#   honored (`completion: false`).
+#
+# Recoverable path, no false success:
+#   `on_violation: reject_with_resume` routes the rejection into a
+#   recoverable CorrectionContext (the deterministic-correction
+#   contract — rendered as `## ORCHESTRATOR CORRECTION` in the next
+#   prompt; the modern replacement for the legacy `task.resume`
+#   bus event). We assert the correction block is queued in
+#   `state.prompt_context.correction_blocks`
+#   (`assert_state.correction_block_present`) and that the loop
+#   does NOT treat the rejected event as a success
+#   (`completion: false` + `LOOP_COMPLETE` absent).
+#
+# Non-vacuity: a consistent payload (or a disabled rule) is
+# ACCEPTED — see the sibling `accept_consistent_fix_done.yml`. The
+# rejection here is therefore caused by the gate, not the harness.
+
+name: payload_consistency_reject_inconsistent_fix_done
+description: payload_consistency gate rejects a self-contradictory fix.done and routes a recoverable correction (no false completion)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 2
+  hats:
+    fixer:
+      subscribes_to:
+        - task.start
+        - task.resume
+      publishes:
+        - fix.done
+      default_publishes: fix.done
+    finisher:
+      subscribes_to:
+        - fix.done
+      publishes:
+        - LOOP_COMPLETE
+      default_publishes: LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      payload_consistency:
+        enabled: true
+        rules:
+          - id: fix-done-no-fixes
+            topic: fix.done
+            when:
+              all:
+                - field: review_verdict
+                  eq: blocked
+                - field: fixes_applied
+                  eq: 0
+                - field: fix_status
+                  eq: applied
+            message: "fix_status=applied is inconsistent with review_verdict=blocked and zero fixes"
+
+mock_responses:
+  # iter 1: fixer emits the self-contradictory fix.done → the
+  # payload_consistency gate rejects it; a correction block is
+  # queued for the next prompt.
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":0,"fix_status":"applied"}
+      </event>
+  # iter 2: fixer still emits the contradictory payload (it has not
+  # corrected yet) → rejected again. The loop never reaches a
+  # terminal success from the rejected event.
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":0,"fix_status":"applied"}
+      </event>
+
+expected:
+  iterations: 2
+  # No business event is accepted: every fix.done is rejected by the
+  # gate, so the finisher never fires.
+  events: []
+  absent_events:
+    - topic: fix.done
+    - topic: LOOP_COMPLETE
+  completion: false
+  assert_state:
+    # After the first rejection the recoverable correction block is
+    # queued (reason_code carries the policy-stage prefix). This is
+    # the recovery path: the loop continues with corrective guidance
+    # instead of honoring the rejected event as a success.
+    - at_iteration: 1
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false

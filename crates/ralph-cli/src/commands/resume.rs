@@ -105,13 +105,14 @@ pub async fn resume_command(
     // --plan` rewrites `prompt_file` directly via
     // `commands/run.rs:859-863`.
     if let Some(plan_path) = args.plan.as_ref()
-        && let Err(e) = write_resume_anchor_marker(plan_path) {
-            eprintln!(
-                "{}warning:{} failed to write anchor marker: {e}",
-                colors::YELLOW,
-                colors::RESET
-            );
-        }
+        && let Err(e) = write_resume_anchor_marker(plan_path)
+    {
+        eprintln!(
+            "{}warning:{} failed to write anchor marker: {e}",
+            colors::YELLOW,
+            colors::RESET
+        );
+    }
 
     // Apply CLI overrides
     if let Some(max_iter) = args.max_iterations {

@@ -401,11 +401,8 @@ mod tests {
         let mut details: Vec<WorkflowGuardRejectionDetail> = Vec::new();
         let mut ctx =
             ctx_with_progress(&mut snap, &mut progress).with_workflow_guard_details(&mut details);
-        let result = WorkflowGuardRule.validate(
-            &view,
-            &mut ctx,
-            &event("experiment.planned", Some(r"{}")),
-        );
+        let result =
+            WorkflowGuardRule.validate(&view, &mut ctx, &event("experiment.planned", Some(r"{}")));
         assert!(!result.accepted);
         assert_eq!(
             result.reason_code.as_deref(),

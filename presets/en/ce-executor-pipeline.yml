@@ -105,6 +105,33 @@ event_loop:
     allow_unsafe_cli_emit: false
     require_emit_provenance: true
     plan_name_equality_required: true
+    # plan 2026-07-22-004 U5: opt-in same-payload consistency gates.
+    # Each rule predicates on the CURRENT fix.done payload only (never
+    # event history); a hit rejects the emit with a
+    # `payload_consistency:<id>` semantic gate whose message tells the
+    # fixer exactly which fields contradict. Guards are deliberate:
+    # rule 1 keeps `planned_fix_units non_empty` (empty-plan fast path)
+    # AND `fix_status=applied` (legal partial/blocked exits) so it only
+    # fires on the genuine "claimed applied but applied nothing" shape.
+    payload_consistency:
+      enabled: true
+      rules:
+        - id: fix-done-blocked-zero-fixes-applied
+          topic: fix.done
+          when:
+            all:
+              - {field: review_verdict, eq: blocked}
+              - {field: fixes_applied, eq: 0}
+              - {field: planned_fix_units, non_empty: true}
+              - {field: fix_status, eq: applied}
+          message: "fix_status=applied contradicts review_verdict=blocked with zero fixes applied and a non-empty planned_fix_units; set fix_status to partial or blocked and add failure_reason, or apply the planned fixes"
+        - id: fix-done-green-with-regressions
+          topic: fix.done
+          when:
+            all:
+              - {field: new_business_regressions_count, gt: 0}
+              - {field: post_verification_status, eq: green}
+          message: "post_verification_status=green contradicts new_business_regressions_count>0; set post_verification_status to red or resolve the introduced regressions"
     # Topic-deny rules: every business topic has exactly one owner hat.
     # Every other hat is denied the topic. This is the runtime's second
     # line of defense after `publishes` declarations on each hat — if

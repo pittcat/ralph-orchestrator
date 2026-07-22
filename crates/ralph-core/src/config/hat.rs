@@ -1005,11 +1005,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            !obligation_satisfied(
-                Some(&o),
-                &["review.passed".into()],
-                Some(&ctx_non_trivial)
-            ),
+            !obligation_satisfied(Some(&o), &["review.passed".into()], Some(&ctx_non_trivial)),
             "non-trivial diff with review.passed must NOT satisfy obligation"
         );
         // Non-trivial: agent emitted review.wave.ready → satisfied

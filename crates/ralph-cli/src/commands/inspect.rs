@@ -814,12 +814,13 @@ fn print_loop_view(view: &LoopInspectView, use_colors: bool) {
                     }
                 }
                 if let Some(denied) = map.get("denied_task_commands").and_then(|v| v.as_array())
-                    && !denied.is_empty() {
-                        println!("    denied_task_commands:");
-                        for v in denied {
-                            println!("      - {v}");
-                        }
+                    && !denied.is_empty()
+                {
+                    println!("    denied_task_commands:");
+                    for v in denied {
+                        println!("      - {v}");
                     }
+                }
                 if let Some(pubs) = map.get("publishes").and_then(|v| v.as_array()) {
                     println!("    publishes:");
                     for v in pubs {
@@ -1570,8 +1571,6 @@ mod tests {
     /// defaults. Confirms inspect-profiles and `ralph run` agree.
     #[test]
     fn inspect_profiles_activation_order_matches_run_helper() {
-        
-
         let mut config = RalphConfig::default();
         config.profiles.default = vec![ProfileSpec {
             scope: ProfileScope::Repo,

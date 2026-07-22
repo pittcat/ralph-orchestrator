@@ -5,8 +5,7 @@ use ralph_proto::{Hat, HatId, Topic};
 use std::collections::{BTreeMap, HashSet};
 
 /// Registry for managing and creating hats from configuration.
-#[derive(Debug)]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct HatRegistry {
     hats: BTreeMap<HatId, Hat>,
     configs: BTreeMap<HatId, HatConfig>,
@@ -17,7 +16,6 @@ pub struct HatRegistry {
     /// Current orchestration phase for phase-aware trigger routing.
     current_phase: Phase,
 }
-
 
 impl HatRegistry {
     /// Creates a new empty registry.

@@ -874,7 +874,7 @@ impl RecoveryResponder {
         // `get_mut` borrow so the second-arm mutation does not
         // double-borrow `self`.
         let incoming = RetryState::from_envelope(envelope);
-        
+
         match self.state.get_mut(&retry_key) {
             None => {
                 // First observation: seed the state. We do the

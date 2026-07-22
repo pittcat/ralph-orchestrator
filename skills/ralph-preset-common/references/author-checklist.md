@@ -139,6 +139,12 @@
 - [ ] **guidance 是 agent 行动**：hint `guidance` 用「你应该如何处理」表达，不要写 runtime 控制命令、不要修改 routing / 权限。
 - [ ] **instructions 不复制**：hat `instructions` 只引用 `## TRIGGER CONTEXT` 区块，不要把 hint 条件值复制进 instructions。
 
+**Payload Consistency 审核项（适用于声明 `event_policy.payload_consistency.rules` 的 preset）**
+
+- [ ] **每个 `rule.topic` 在 `event_policy.schemas` 内**：所有规则的 `topic` 都必须在 schema map 里声明；未声明的 `topic` 会被 lint 拒收为 `preset.payload_consistency_unknown_topic`。
+- [ ] **`when` 引用的 `field` 在该 topic schema 字段并集内**：声明字段必须出现在 `required_fields` ∪ `known_fields` ∪ `field_docs.keys()` ∪ `allowed_values.keys()` ∪ `element_constraints` 中；未声明字段会让谓词永不命中（runtime 视为 miss），lint 拒收为 `preset.payload_consistency_unknown_field`。
+- [ ] **`rule.id` 在 preset 内唯一**：`id` 是 runtime `payload_consistency:<id>` gate 的稳定标识；重复的 `id` 会被 lint 拒收为 `preset.payload_consistency_duplicate_id`，并使 agent 收到的拒收原因变得无法解析。
+
 **拒交付信号：**
 
 - 字段值源写「上游会处理」「待定」「约定俗成」

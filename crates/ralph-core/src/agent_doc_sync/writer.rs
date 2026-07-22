@@ -26,7 +26,6 @@ pub enum OnError {
     Strict,
 }
 
-
 /// Errors that can occur during file sync operations.
 ///
 /// Returned by [`sync_file`] and [`super::sync_all`] when `on_error` is `OnError::Strict`.

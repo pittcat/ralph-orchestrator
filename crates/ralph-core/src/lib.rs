@@ -30,6 +30,10 @@ pub mod event_loop;
 pub mod event_origin;
 mod event_parser;
 mod event_policy;
+/// U2 of plan 2026-07-22-004: pure same-payload predicate evaluator
+/// for `payload_consistency` rules. Side-effect-free; U3 is the only
+/// consumer that wires it into `validate_event_with_options`.
+pub mod event_policy_payload_consistency;
 mod event_projection;
 mod event_reader;
 pub mod execution_contract;

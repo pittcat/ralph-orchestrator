@@ -769,16 +769,17 @@ fn emit_command_with_root_and_hats(
     {
         if let Some(ref env_hat) = env_hat {
             if let Some(ref cli_hat) = args.hat
-                && cli_hat != env_hat {
-                    anyhow::bail!(
-                        "Isolated mode hat mismatch: --hat '{}' conflicts with \
+                && cli_hat != env_hat
+            {
+                anyhow::bail!(
+                    "Isolated mode hat mismatch: --hat '{}' conflicts with \
                          RALPH_CURRENT_HAT '{}'. In isolated mode the runner \
                          controls provenance; emit as '{}'.",
-                        cli_hat,
-                        env_hat,
-                        env_hat
-                    );
-                }
+                    cli_hat,
+                    env_hat,
+                    env_hat
+                );
+            }
             Some(env_hat.clone())
         } else {
             hat
@@ -1084,12 +1085,7 @@ fn emit_command_with_root_and_hats(
                     | ralph_core::PolicyDecision::Hold(finding)
                     | ralph_core::PolicyDecision::Block(finding)
                     | ralph_core::PolicyDecision::Ignore(finding) => {
-                        record_cli_emit_rejection(
-                            &workspace_root,
-                            topic,
-                            hat.as_deref(),
-                            &finding,
-                        );
+                        record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
                         anyhow::bail!(
                             "Event rejected by policy: {}. Fix the issue before emitting.\n\n{}",
                             finding.message,
@@ -1120,22 +1116,23 @@ fn emit_command_with_root_and_hats(
     // `check_emit_provenance` is the matching gate for the `hat = None`
     // path. Together they form the full isolated-mode CLI guard.
     if let Some(cfg) = config.as_ref()
-        && let Err(err) = crate::policy_check::check_emit_provenance(hat.as_deref(), topic, cfg) {
-            use ralph_core::{PolicyFinding, ViolationType};
-            let finding = PolicyFinding {
-                violation_type: ViolationType::SemanticGateViolation {
-                    gate: "missing_provenance".to_string(),
-                    context: err.message.clone(),
-                },
-                topic: topic.to_string(),
-                message: err.message.clone(),
-            };
-            record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
-            anyhow::bail!(
-                "Event rejected by missing-provenance guard: {}",
-                err.message
-            );
-        }
+        && let Err(err) = crate::policy_check::check_emit_provenance(hat.as_deref(), topic, cfg)
+    {
+        use ralph_core::{PolicyFinding, ViolationType};
+        let finding = PolicyFinding {
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: "missing_provenance".to_string(),
+                context: err.message.clone(),
+            },
+            topic: topic.to_string(),
+            message: err.message.clone(),
+        };
+        record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
+        anyhow::bail!(
+            "Event rejected by missing-provenance guard: {}",
+            err.message
+        );
+    }
 
     // U1 (2026-06-17-003 plan): isolated mode scope precheck. When the
     // resolved preset has `event_loop.execution_mode: isolated` and the
@@ -1152,19 +1149,20 @@ fn emit_command_with_root_and_hats(
     // enforcement. Without `--hat` the call defers to the origin
     // guard (which rejects unknown/missing provenance).
     if let Some(cfg) = config.as_ref()
-        && let Err(err) = crate::policy_check::check_isolated_scope(hat.as_deref(), topic, cfg) {
-            use ralph_core::{PolicyFinding, ViolationType};
-            let finding = PolicyFinding {
-                violation_type: ViolationType::SemanticGateViolation {
-                    gate: "isolated_scope".to_string(),
-                    context: err.message.clone(),
-                },
-                topic: topic.to_string(),
-                message: err.message.clone(),
-            };
-            record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
-            anyhow::bail!("Event rejected by isolated scope guard: {}", err.message);
-        }
+        && let Err(err) = crate::policy_check::check_isolated_scope(hat.as_deref(), topic, cfg)
+    {
+        use ralph_core::{PolicyFinding, ViolationType};
+        let finding = PolicyFinding {
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: "isolated_scope".to_string(),
+                context: err.message.clone(),
+            },
+            topic: topic.to_string(),
+            message: err.message.clone(),
+        };
+        record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
+        anyhow::bail!("Event rejected by isolated scope guard: {}", err.message);
+    }
 
     // U3 (R3): wave worker dimension assignment precheck. Fires before
     // any policy / step-handoff processing so a wave worker that
@@ -1268,9 +1266,10 @@ fn emit_command_with_root_and_hats(
     // strings like `task-{timestamp}-{hex}`), and letting it through would
     // break the step-handoff / state-projection chain.
     if let Some(Value::String(task_id)) = payload_value.get("task_id")
-        && task_id.trim().is_empty() {
-            anyhow::bail!("task_id cannot be empty in event payload for topic '{topic}'");
-        }
+        && task_id.trim().is_empty()
+    {
+        anyhow::bail!("task_id cannot be empty in event payload for topic '{topic}'");
+    }
 
     let mut record = serde_json::json!({
         "topic": args.topic,
@@ -1288,22 +1287,22 @@ fn emit_command_with_root_and_hats(
     if let Some(cfg) = config.as_ref()
         && let Err(err) =
             crate::policy_check::check_envelope_triggered(topic, triggered.as_deref(), cfg)
-        {
-            use ralph_core::{PolicyFinding, ViolationType};
-            let finding = PolicyFinding {
-                violation_type: ViolationType::SemanticGateViolation {
-                    gate: "envelope_triggered".to_string(),
-                    context: err.message.clone(),
-                },
-                topic: topic.to_string(),
-                message: err.message.clone(),
-            };
-            record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
-            anyhow::bail!(
-                "Event rejected by envelope-triggered guard: {}",
-                err.message
-            );
-        }
+    {
+        use ralph_core::{PolicyFinding, ViolationType};
+        let finding = PolicyFinding {
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: "envelope_triggered".to_string(),
+                context: err.message.clone(),
+            },
+            topic: topic.to_string(),
+            message: err.message.clone(),
+        };
+        record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
+        anyhow::bail!(
+            "Event rejected by envelope-triggered guard: {}",
+            err.message
+        );
+    }
 
     // Add provenance fields only when they have values (preserve old simple schema)
     if let Some(ref hat) = hat {

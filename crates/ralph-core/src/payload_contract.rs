@@ -317,9 +317,10 @@ pub fn validate_payload_contract(
     for (hat_id, hat_config) in &config.hats {
         let mut pub_topics: Vec<String> = hat_config.publishes.clone();
         if let Some(default) = &hat_config.default_publishes
-            && !pub_topics.contains(default) {
-                pub_topics.push(default.clone());
-            }
+            && !pub_topics.contains(default)
+        {
+            pub_topics.push(default.clone());
+        }
         for t in pub_topics {
             source_hats_by_topic
                 .entry(t)

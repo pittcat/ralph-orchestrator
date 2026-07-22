@@ -139,9 +139,28 @@ emit 全路径用 `resolve_workspace_root` 单一锚点 (priority：`RALPH_WORKS
 - `--output json` 路径下 `EmitResult.target_path` 字段在 `recorded: true` 时为绝对落盘路径;`recorded: false` 或拒收场景下整键被 `skip_serializing_if` 省略。
 - text 模式成功行追加 `→ <absolute_path>`:例如 `Event emitted: test.passed → /home/.../.ralph/agent/events-hat-validator-001-1.jsonl`。stderr 截断场景下仍能肉眼核对落盘位置。
 
-**Payload 字段自洽检查**
+**Payload 字段自洽检查（runtime gate）**
 
-emit 任何 step handoff 事件前，确认 payload 内部一致：
+`event_policy` 在 schema 校验之外，还会对 step handoff / 终态等业务事件的 payload 字段之间的**一致性**做硬检查。该 gate 在 Precheck 阶段执行，事件**不会**先落到 bus — 拒收时 `--policy-check` 与正式 apply 都返回 `validation_errors[]`，并带上 `gate: "payload_consistency:<rule_id>"` 前缀标识触发的规则族。
+
+**触发条件**：preset 已为当前 topic 声明 `event_policy.payload_consistency.rules[]`；你提交的 payload 中某条规则的 `when` 谓词命中。**规则形状**：
+
+- 每条 rule 是 `{id, topic, when, message}` 四字段；`message` 是命中的直观描述。
+- `when` 是单谓词 `{field, op, value}` 或组合 `{all:[...]} / {any:[...]}`；`op` 限定为 `eq` / `ne` / `gt` / `gte` / `exists` / `non_empty`（其它 op 视为配置错误，runtime fail-close 拒收）。
+- 规则只对**本次** payload 字段做检查；**不**读事件历史、不读 events.jsonl、不读 supervisor 状态、不读 peer topic。builtin 案例见 `presets/en/ce-executor-pipeline.yml`（fix.done 上的两条规则）。
+
+**Agent 动作**：
+
+1. 拒收时读 `validation_errors[]` 每条的 `field` / `reason_code` / `message` / `gate` —— 这些是 runtime 给出的可机读反馈。修 payload 时按 `field` 提示修复对应字段，**不要**凭 message 字面量猜字段名；具体规则形状写在 preset YAML 里，agent **不**需要在 prompt 里枚举规则——规则随 preset 演进，prompt 里复述会产生漂移。
+2. 修完 payload 后再跑 `ralph emit <topic> --policy-check -j '<payload>'` 预检；通过后去掉 `--policy-check` 正式 emit。
+3. 同类 violation signature（同一 `gate` 前缀 + `field` + `task_key` + step）**第 3 次**触发后 runtime 走 correction 通道 fail-close（`plan.blocked(reason=correction_3_strike_exhausted)`）。payload_consistency 拒收**不**参与 rejection retry budget（runtime 显式跳过 SemanticGateViolation 类拒收，不做 schema-style retry budget 计数）；不要无限重试。
+4. **`protocol_violation_repeated:*`** 是 execution-contract 路径的 fail-close 标记，**不**是 payload_consistency 的 fail-close 标记；混用会误判修复路径。
+
+**关键字段从哪里取得**：`validation_errors[].field` / `reason_code` / `message` / `gate` 是 runtime 给出的可机读反馈；其它字段（`field_description` / `suggested_payload_shape` / `suggested_command`）含义见上方「Policy-Check 反馈」段。
+
+**失败停止条件**：若你连续 3 次同类 `payload_consistency:*` 拒收，**停止**重发并按本文件「错误恢复」段处理 — runtime 已转入 `plan.blocked(reason=correction_3_strike_exhausted)`。
+
+通用 SOFT 自洽提醒（与上述 payload_consistency gate 互补，由 schema.required_fields 与 trigger_context 评估，不由 payload_consistency gate 评估）：
 
 - 如果 preset 同时定义了 `step` 字段和 `task_key` 字段，两者描述的 step 必须一致。
   反例：`step=fix-02` 但 `task_key=...:fix-01:u2` ❌
@@ -163,7 +182,7 @@ emit 任何 step handoff 事件前，确认 payload 内部一致：
 - **一个 turn 只发射一个业务事件**是默认纪律；去重层再强也只是兜底，不要在同一回合内通过“多发一次”来尝试修复。
 - 如果某条事件被去重层拒绝并收到 `task.resume`，下一回合只发一次修正后的事件，不要在同一回合继续补发。
 
-**NULL payload 拒收白名单**（`crates/ralph-core/src/event_policy.rs:938-948` `NULL_PAYLOAD_REJECT_TOPICS`）：以下 9 个 topic 不接受空 payload（`[PAYLOAD]` 省略 + 无 `-j`）— 必须传 JSON object：
+**NULL payload 拒收白名单**（`crates/ralph-core/src/event_policy.rs:1217-1227` `NULL_PAYLOAD_REJECT_TOPICS`）：以下 9 个 topic 不接受空 payload（`[PAYLOAD]` 省略 + 无 `-j`）— 必须传 JSON object：
 
 | Topic | 出现位置 |
 |-------|---------|

@@ -1233,8 +1233,7 @@ fn compute_dup_storm_topics(
         && let Ok(records) = crate::state::read_rejection_log(ws)
     {
         for record in records {
-            if record.topic == "work.ready" && record.seen_count.unwrap_or(0) >= STORM_THRESHOLD
-            {
+            if record.topic == "work.ready" && record.seen_count.unwrap_or(0) >= STORM_THRESHOLD {
                 storms.insert(record.topic);
             }
         }

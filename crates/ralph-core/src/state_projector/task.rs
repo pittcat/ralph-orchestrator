@@ -225,39 +225,41 @@ pub(crate) fn project_ensure_task(
     // (fix_round, fix_unit_index) triple. The restriction applies
     // only to fix-unit keys; ordinary runtime tasks are unaffected.
     if task_key_is_fix_unit(&key)
-        && let Some(provided_id) = json_pointer(payload, "task_id") {
-            let candidate_id = provided_id.to_string();
-            // First ensure the format is canonical. This catches hand-written
-            // ids before we even check for reuse.
-            if !is_valid_task_id_format(&candidate_id) {
-                return Err(format!(
-                    "invalid_task_id_format: '{}' does not match the canonical \
+        && let Some(provided_id) = json_pointer(payload, "task_id")
+    {
+        let candidate_id = provided_id.to_string();
+        // First ensure the format is canonical. This catches hand-written
+        // ids before we even check for reuse.
+        if !is_valid_task_id_format(&candidate_id) {
+            return Err(format!(
+                "invalid_task_id_format: '{}' does not match the canonical \
                      task id shapes (task-{{ts}}-{{4hex}} or \
                      task-{{plan_slug}}-fix{{NN}}u{{NN}}-{{ts_hex}}). \
                      Hand-written suffixes such as 'u2' or 'f002' are not allowed; \
                      mint a fresh id per fix-unit via Task::fix_unit_task_id.",
-                    candidate_id
-                ));
-            }
-            // Task loop_id may not be set yet (it is set below from payload or
-            // context). For the reuse check we need the effective loop id the
-            // task will end up with, otherwise cross-loop scoping is lost and
-            // the lookup returns None.
-            let effective_loop_id = ctx_loop_id(payload)
-                .map(|s| s.to_string())
-                .or_else(|| ctx.current_loop_id.clone());
-            if let Some(existing) =
-                store.find_open_task_id_in_loop(&candidate_id, effective_loop_id.as_deref())
-                && existing.key.as_deref() != Some(key.as_str()) {
-                    return Err(format!(
-                        "task_id_reused_across_keys: work.ready reused open task id \
+                candidate_id
+            ));
+        }
+        // Task loop_id may not be set yet (it is set below from payload or
+        // context). For the reuse check we need the effective loop id the
+        // task will end up with, otherwise cross-loop scoping is lost and
+        // the lookup returns None.
+        let effective_loop_id = ctx_loop_id(payload)
+            .map(|s| s.to_string())
+            .or_else(|| ctx.current_loop_id.clone());
+        if let Some(existing) =
+            store.find_open_task_id_in_loop(&candidate_id, effective_loop_id.as_deref())
+            && existing.key.as_deref() != Some(key.as_str())
+        {
+            return Err(format!(
+                "task_id_reused_across_keys: work.ready reused open task id \
                          '{}' which is already bound to task_key {:?}; new key is \
                          '{}'. Mint a fresh id per fix-unit via \
                          Task::fix_unit_task_id(plan, fix_round, fix_unit_index, unix_ts).",
-                        candidate_id, existing.key, key
-                    ));
-                }
+                candidate_id, existing.key, key
+            ));
         }
+    }
     if let Some(plan_name) = json_pointer(payload, "plan_name") {
         task = task.with_description(Some(format!("plan: {plan_name}")));
     }
@@ -271,16 +273,17 @@ pub(crate) fn project_ensure_task(
     // `task add` racing `work.ready` → projector).
     if let Some(provided_id) = json_pointer(payload, "task_id")
         && !provided_id.is_empty()
-            && let Some(existing) = store.get(provided_id)
-                && existing.key.as_deref() != Some(key.as_str()) {
-                    return Err(format!(
-                        "duplicate_task_id: id '{provided_id}' is already bound to key \
+        && let Some(existing) = store.get(provided_id)
+        && existing.key.as_deref() != Some(key.as_str())
+    {
+        return Err(format!(
+            "duplicate_task_id: id '{provided_id}' is already bound to key \
                          {:?}; work.ready carries key '{key}'. Do not call \
                          `ralph tools task add` before work.ready — the projector is the \
                          sole writer for plan units.",
-                        existing.key
-                    ));
-                }
+            existing.key
+        ));
+    }
     // P0-2 (plan 2026-06-29-006): prefer the payload's `loop_id`
     // when present, otherwise fall back to the loop marker
     // threaded in via `ProjectionContext::current_loop_id`. Without

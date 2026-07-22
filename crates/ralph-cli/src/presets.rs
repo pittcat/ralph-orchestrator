@@ -899,7 +899,8 @@ mod tests {
             match validate_event_origin(&unknown_event, &registry, cancellation, completion) {
                 OriginCheck::Accepted => {
                     // Only acceptable when registry is empty (solo mode)
-                    assert!(registry.is_empty(), 
+                    assert!(
+                        registry.is_empty(),
                         "Preset '{}': unknown hat 'strategist' should be rejected",
                         preset.name
                     );
@@ -985,6 +986,192 @@ mod tests {
 
         let alignment = config.hats.get("alignment").expect("alignment");
         assert_eq!(alignment.triggers, vec!["fix.done".to_string()]);
+    }
+
+    // plan 2026-07-22-004 U5 (S6 / AE2): the REAL embedded
+    // `ce-executor-pipeline` preset declares a `payload_consistency`
+    // gate on `fix.done` that rejects the self-contradictory
+    // `review_verdict=blocked + fixes_applied=0 + planned_fix_units
+    // non-empty + fix_status=applied` shape while accepting the legal
+    // `fix_status=blocked + non-empty failure_reason` exit and the
+    // empty-plan fast path (`planned_fix_units=[]`). This test loads
+    // the genuine embedded (schema-merged) preset — NOT a hand-built
+    // config — and drives `validate_event` over hitting vs legal
+    // payloads to lock the gate's runtime behaviour.
+    #[test]
+    fn test_ce_executor_pipeline_fix_done_payload_consistency_gate() {
+        use ralph_core::{PolicyDecision, PolicyRuntimeState, ViolationType, validate_event};
+
+        let preset = get_preset("ce-executor-pipeline").expect("linear preset should exist");
+        let config = RalphConfig::parse_yaml(preset.content).expect("linear preset should parse");
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("pipeline preset must declare event_policy");
+
+        // The gate must actually be enabled on the real preset.
+        assert!(
+            policy.payload_consistency.enabled,
+            "ce-executor-pipeline must enable payload_consistency"
+        );
+
+        // A fully schema-valid `fix.done` payload (all required fields
+        // present) representing the LEGAL blocked exit: verdict blocked,
+        // zero fixes applied, non-empty planned_fix_units, but
+        // fix_status=blocked with a non-empty failure_reason. The
+        // `fix_status=applied` guard in rule 1 keeps this legal.
+        let legal = serde_json::json!({
+            "plan_name": "2026-07-12-003-demo-plan",
+            "plan_path": "docs/plans/2026-07-12-003-demo-plan.md",
+            "plan_contract_version": "ce-unified-plan/v1",
+            "normalized_plan_file": ".ralph/review/2026-07-12-003-demo-plan/normalized-plan.md",
+            "plan_contract_digest": "sha256:deadbeef",
+            "trace_file": ".ralph/review/2026-07-12-003-demo-plan/trace.jsonl",
+            "executor_head_sha": "0123456789abcdef0123456789abcdef01234567",
+            "resolved_baseline_sha": "fedcba9876543210fedcba9876543210fedcba98",
+            "head_sha": "89abcdef0123456789abcdef0123456789abcdef",
+            "fix_attempt_commit_sha": "89abcdef0123456789abcdef0123456789abcdef",
+            "worktree_status": "clean",
+            "fix_plan_file": ".ralph/review/2026-07-12-003-demo-plan/fix-plan.md",
+            "review_verdict": "blocked",
+            "fixes_applied": 0,
+            "fixes_skipped": 0,
+            "planned_fix_units": ["U1", "U2"],
+            "attempted_fix_units": ["U1", "U2"],
+            "completed_fix_units": [],
+            "failed_fix_units": ["U1", "U2"],
+            "blocked_fix_units": [],
+            "skipped_fix_units": [],
+            "fix_status": "blocked",
+            "failure_reason": "U1 and U2 verification remained red after honest attempts",
+            "decisions_file": ".ralph/agent/decisions.md",
+            "baseline_verification_status": "green",
+            "baseline_verification_file": ".ralph/review/2026-07-12-003-demo-plan/baseline-verification.md",
+            "post_verification_status": "red",
+            "post_verification_file": ".ralph/review/2026-07-12-003-demo-plan/final-verification.md",
+            "verification_delta_file": ".ralph/review/2026-07-12-003-demo-plan/verification-delta.md",
+            "baseline_existing_count": 0,
+            "new_business_regressions_count": 0,
+            "test_compatibility_updates_count": 0,
+            "flaky_or_environmental_count": 0
+        });
+
+        // 1. Legal blocked exit (fix_status=blocked + failure_reason)
+        //    must be ACCEPTED — the fix_status=applied guard prevents
+        //    rule 1 from misfiring on an honest blocked settlement.
+        let mut state = PolicyRuntimeState::default();
+        let legal_str = legal.to_string();
+        let decision = validate_event("fix.done", Some(&legal_str), policy, &mut state);
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "legal fix_status=blocked + failure_reason exit must be accepted"
+        );
+
+        // 2. HITTING payload: flip fix_status to applied (and clear the
+        //    failure_reason) while keeping blocked + zero fixes + non-empty
+        //    planned_fix_units. Rule 1 must reject with the
+        //    `payload_consistency:fix-done-blocked-zero-fixes-applied` gate.
+        let mut hitting = legal.clone();
+        hitting["fix_status"] = serde_json::json!("applied");
+        hitting["failure_reason"] = serde_json::json!("");
+        let hitting_str = hitting.to_string();
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("fix.done", Some(&hitting_str), policy, &mut state);
+        let PolicyDecision::RejectWithResume(finding) = decision else {
+            panic!("hitting fix.done must be rejected, got {decision:?}");
+        };
+        let ViolationType::SemanticGateViolation { gate, context } = &finding.violation_type else {
+            panic!(
+                "hitting fix.done must trip a SemanticGateViolation, got {:?}",
+                finding.violation_type
+            );
+        };
+        assert_eq!(
+            gate,
+            "payload_consistency:fix-done-blocked-zero-fixes-applied"
+        );
+        assert!(
+            context.contains("fix_status=applied contradicts"),
+            "gate context must carry the actionable rule message, got {context}"
+        );
+
+        // 3. Empty-plan fast path NON-MISFIRE: planned_fix_units=[] with
+        //    fixes_applied=0 + review_verdict=blocked + fix_status=applied
+        //    must NOT trip rule 1 (the `planned_fix_units non_empty` guard).
+        let mut empty_plan = legal.clone();
+        empty_plan["planned_fix_units"] = serde_json::json!([]);
+        empty_plan["attempted_fix_units"] = serde_json::json!([]);
+        empty_plan["failed_fix_units"] = serde_json::json!([]);
+        empty_plan["fix_status"] = serde_json::json!("applied");
+        empty_plan["failure_reason"] = serde_json::json!("");
+        let empty_plan_str = empty_plan.to_string();
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("fix.done", Some(&empty_plan_str), policy, &mut state);
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "empty-plan fast path (planned_fix_units=[]) must not trip rule 1"
+        );
+
+        // 4. Legal partial exit NON-MISFIRE: fix_status=partial with a
+        //    non-empty failure_reason and non-empty planned_fix_units must
+        //    NOT trip rule 1 (the fix_status=applied guard).
+        let mut partial = legal.clone();
+        partial["fix_status"] = serde_json::json!("partial");
+        partial["fixes_applied"] = serde_json::json!(1);
+        partial["completed_fix_units"] = serde_json::json!(["U1"]);
+        partial["failed_fix_units"] = serde_json::json!(["U2"]);
+        partial["failure_reason"] = serde_json::json!("U2 verification remained red");
+        let partial_str = partial.to_string();
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("fix.done", Some(&partial_str), policy, &mut state);
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "legal fix_status=partial exit must not trip rule 1"
+        );
+
+        // 5. Rule 2 HITTING: new_business_regressions_count>0 while
+        //    post_verification_status=green must be rejected with the
+        //    `payload_consistency:fix-done-green-with-regressions` gate.
+        let mut green_with_regressions = legal.clone();
+        green_with_regressions["fix_status"] = serde_json::json!("applied");
+        green_with_regressions["review_verdict"] = serde_json::json!("pass");
+        green_with_regressions["fixes_applied"] = serde_json::json!(2);
+        green_with_regressions["completed_fix_units"] = serde_json::json!(["U1", "U2"]);
+        green_with_regressions["failed_fix_units"] = serde_json::json!([]);
+        green_with_regressions["new_business_regressions_count"] = serde_json::json!(1);
+        green_with_regressions["post_verification_status"] = serde_json::json!("green");
+        let green_str = green_with_regressions.to_string();
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("fix.done", Some(&green_str), policy, &mut state);
+        let PolicyDecision::RejectWithResume(finding) = decision else {
+            panic!("green-with-regressions fix.done must be rejected, got {decision:?}");
+        };
+        let ViolationType::SemanticGateViolation { gate, .. } = &finding.violation_type else {
+            panic!(
+                "green-with-regressions fix.done must trip a SemanticGateViolation, got {:?}",
+                finding.violation_type
+            );
+        };
+        assert_eq!(gate, "payload_consistency:fix-done-green-with-regressions");
+
+        // 6. Rule 2 NON-MISFIRE: new_business_regressions_count>0 with an
+        //    honest post_verification_status=red must NOT trip rule 2.
+        let mut honest_red = green_with_regressions.clone();
+        honest_red["fix_status"] = serde_json::json!("partial");
+        honest_red["failure_reason"] = serde_json::json!("introduced regression left red");
+        honest_red["post_verification_status"] = serde_json::json!("red");
+        let honest_red_str = honest_red.to_string();
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("fix.done", Some(&honest_red_str), policy, &mut state);
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "honest red post-verification with regressions must not trip rule 2"
+        );
     }
 
     // 2026-07-16-002 plan U2: structured guard that the enhanced

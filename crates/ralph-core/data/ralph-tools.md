@@ -126,6 +126,7 @@ metadata:
 | `events file not in allowlist` | `RALPH_EVENTS_FILE`/`--file` 指向了非 allowlist 路径 | 查看错误信息中列出的 allowlist 条目；优先移除显式参数让 `ralph emit` 走 marker 解析 |
 | `topic is required` | 缺少必需的位置参数 | 补上 topic 参数 |
 | `policy check failed` | 事件不符合策略 | 读 stderr / `--output json` 取 `validation_errors[].field`；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再正式发出 |
+| `payload_consistency:*`（gate 前缀） | payload 字段之间不自洽（runtime gate） | 与 `policy check failed` 同源：`validation_errors[].field` / `expected` / `message` / `gate` 是修复入口；详见 `ralph-tools-emit` 「Payload 字段自洽检查」段 |
 | `task not found` | task ID 不存在或属于其他 loop | `ralph tools task list` 确认当前可用任务 |
 | `memory not found` | memory ID 不存在或无权访问 | `ralph tools memory list` 确认可用记忆 |
 | `skill not found` | skill 名称错误或对当前 hat 不可见 / `RALPH_CURRENT_HAT` 未设 | `ralph tools skill list` 确认可用 skill；检查 `RALPH_CURRENT_HAT` |

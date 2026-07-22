@@ -569,8 +569,6 @@ fn run_bdd_supervisor_fan_in(
     accepted_events: &[ralph_proto::Event],
     aggregate_timeout_secs: u64,
 ) -> usize {
-    
-
     // Bucket slot completions by wave_id. The payload shape is
     // JSON; we extract `wave_id`, `slot_index`, and
     // `content_hash` defensively (the scenario fixtures may
@@ -1280,12 +1278,13 @@ fn apply_yaml_hats(yaml: &ScenarioYaml, config: &mut RalphConfig) {
     let mut hats = std::collections::HashMap::new();
     for (hat_id, mut hat_value) in hat_map {
         if let serde_yaml::Value::Mapping(ref mut map) = hat_value
-            && !map.contains_key(serde_yaml::Value::String("name".to_string())) {
-                map.insert(
-                    serde_yaml::Value::String("name".to_string()),
-                    serde_yaml::Value::String(hat_id.clone()),
-                );
-            }
+            && !map.contains_key(serde_yaml::Value::String("name".to_string()))
+        {
+            map.insert(
+                serde_yaml::Value::String("name".to_string()),
+                serde_yaml::Value::String(hat_id.clone()),
+            );
+        }
         let hat_config: HatConfig = serde_yaml::from_value(hat_value)
             .unwrap_or_else(|e| panic!("Failed to parse hat config for '{}': {}", hat_id, e));
         hats.insert(hat_id, hat_config);
@@ -1395,6 +1394,37 @@ fn test_isolated_boundary_violation() {
 #[test]
 fn test_review_passed_while_wave_open() {
     let yaml = load_scenario("tests/scenarios/flow_reliability/review_passed_while_wave_open.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-22-004 plan U4 (S2 + S5): an enabled `payload_consistency`
+/// rule that hits the current `fix.done` payload must reject the event
+/// through the REAL EventLoop runner. The rejected `fix.done` never
+/// reaches the bus (`absent_events`), the downstream finisher never
+/// wakes, and `on_violation: reject_with_resume` routes a recoverable
+/// CorrectionContext into `state.prompt_context.correction_blocks`
+/// (`assert_state.correction_block_present`) — the loop does NOT honor
+/// the rejected event as a success (`completion: false`).
+///
+/// MUST use `run_workflow_guard_scenario` (real EventLoop), never the
+/// `run_scenario` stub (plan §U4): the stub only checks iteration count
+/// and would silently swallow a topology/gate mismatch.
+#[test]
+fn test_payload_consistency_reject_inconsistent_fix_done() {
+    let yaml =
+        load_scenario("tests/scenarios/payload_consistency/reject_inconsistent_fix_done.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-22-004 plan U4 (non-vacuity control + S5 clarity): the SAME
+/// topology and rule as the reject scenario, but with a consistent
+/// payload that misses the rule. The `fix.done` is accepted and the
+/// loop completes normally. Proves the rejection in the sibling
+/// scenario is caused by the `payload_consistency` gate (not the
+/// harness): flipping the payload from hit→miss flips reject→accept.
+#[test]
+fn test_payload_consistency_accept_consistent_fix_done() {
+    let yaml = load_scenario("tests/scenarios/payload_consistency/accept_consistent_fix_done.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -1948,22 +1978,23 @@ fn test_preset_static_lint_scenario() {
         && let Ok(hat_map) = serde_yaml::from_value::<
             std::collections::HashMap<String, serde_yaml::Value>,
         >(yaml.config.hats.clone())
-        {
-            let mut hats = std::collections::HashMap::new();
-            for (hat_id, mut hat_value) in hat_map {
-                if let Some(map) = hat_value.as_mapping_mut()
-                    && !map.contains_key(serde_yaml::Value::String("name".to_string())) {
-                        map.insert(
-                            serde_yaml::Value::String("name".to_string()),
-                            serde_yaml::Value::String(hat_id.clone()),
-                        );
-                    }
-                let hat_config: HatConfig = serde_yaml::from_value(hat_value)
-                    .unwrap_or_else(|e| panic!("Failed to parse hat '{}': {}", hat_id, e));
-                hats.insert(hat_id, hat_config);
+    {
+        let mut hats = std::collections::HashMap::new();
+        for (hat_id, mut hat_value) in hat_map {
+            if let Some(map) = hat_value.as_mapping_mut()
+                && !map.contains_key(serde_yaml::Value::String("name".to_string()))
+            {
+                map.insert(
+                    serde_yaml::Value::String("name".to_string()),
+                    serde_yaml::Value::String(hat_id.clone()),
+                );
             }
-            config.hats = hats;
+            let hat_config: HatConfig = serde_yaml::from_value(hat_value)
+                .unwrap_or_else(|e| panic!("Failed to parse hat '{}': {}", hat_id, e));
+            hats.insert(hat_id, hat_config);
         }
+        config.hats = hats;
+    }
     if !yaml.config.event_loop.is_null() {
         config.event_loop = serde_yaml::from_value(yaml.config.event_loop).unwrap();
     }
@@ -2077,23 +2108,23 @@ fn test_multi_hat_isolation_lint_bdd_4_hat_default_fails() {
         && let Ok(hat_map) = serde_yaml::from_value::<
             std::collections::HashMap<String, serde_yaml::Value>,
         >(yaml.config.hats.clone())
-        {
-            let mut hats = std::collections::HashMap::new();
-            for (hat_id, mut hat_value) in hat_map {
-                if let Some(map) = hat_value.as_mapping_mut()
-                    && !map.contains_key(serde_yaml::Value::String("name".to_string()))
-                {
-                    map.insert(
-                        serde_yaml::Value::String("name".to_string()),
-                        serde_yaml::Value::String(hat_id.clone()),
-                    );
-                }
-                let hat_config: HatConfig = serde_yaml::from_value(hat_value)
-                    .unwrap_or_else(|e| panic!("Failed to parse hat '{}': {}", hat_id, e));
-                hats.insert(hat_id, hat_config);
+    {
+        let mut hats = std::collections::HashMap::new();
+        for (hat_id, mut hat_value) in hat_map {
+            if let Some(map) = hat_value.as_mapping_mut()
+                && !map.contains_key(serde_yaml::Value::String("name".to_string()))
+            {
+                map.insert(
+                    serde_yaml::Value::String("name".to_string()),
+                    serde_yaml::Value::String(hat_id.clone()),
+                );
             }
-            config.hats = hats;
+            let hat_config: HatConfig = serde_yaml::from_value(hat_value)
+                .unwrap_or_else(|e| panic!("Failed to parse hat '{}': {}", hat_id, e));
+            hats.insert(hat_id, hat_config);
         }
+        config.hats = hats;
+    }
     if !yaml.config.event_loop.is_null() {
         config.event_loop = serde_yaml::from_value(yaml.config.event_loop).unwrap();
     }
@@ -2664,10 +2695,15 @@ fn evaluate_assert_state(
         // R-H3: out-of-range at_iteration fails fast with a
         // clear pointer to the offending entry (1-based
         // assertion index in the YAML list).
-        assert!(!(at < 1 || at > max_iter), 
+        assert!(
+            !(at < 1 || at > max_iter),
             "{}: assert_state[{}].at_iteration = {} is out of range [1, {}] \
              (scenario produced {} iterations; check the YAML `expected.iterations`)",
-            scenario_name, idx, at, max_iter, max_iter
+            scenario_name,
+            idx,
+            at,
+            max_iter,
+            max_iter
         );
         let state_snap = &state_snapshots[at - 1];
         let prompt_snap = prompt_snapshots
@@ -2739,17 +2775,20 @@ fn evaluate_correction_block_present(
     );
     let mut matched = entries.iter().filter(|c| {
         if let Some(ref prefix) = expected.reason_code_prefix
-            && !c.reason_code.starts_with(prefix.as_str()) {
-                return false;
-            }
+            && !c.reason_code.starts_with(prefix.as_str())
+        {
+            return false;
+        }
         if let Some(rc) = expected.retry_count
-            && c.retry_count != rc {
-                return false;
-            }
+            && c.retry_count != rc
+        {
+            return false;
+        }
         if let Some(ne) = expected.needs_escalation
-            && c.needs_escalation != ne {
-                return false;
-            }
+            && c.needs_escalation != ne
+        {
+            return false;
+        }
         true
     });
     let first_match = matched.next();
@@ -2789,10 +2828,14 @@ fn evaluate_rejection_log_contains_reason_code(
             scenario_name, assertion_idx, at
         )
     });
-    assert!(path.exists(), 
+    assert!(
+        path.exists(),
         "{}: assert_state[{}] rejection_log_contains_reason_code at_iteration={} \
          recovery.jsonl not found at {:?}",
-        scenario_name, assertion_idx, at, path
+        scenario_name,
+        assertion_idx,
+        at,
+        path
     );
     let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
         panic!(
@@ -2812,10 +2855,11 @@ fn evaluate_rejection_log_contains_reason_code(
             Err(_) => continue,
         };
         if let Some(rc) = v.get("reason_code").and_then(|x| x.as_str())
-            && rc.starts_with(prefix) {
-                found = true;
-                break;
-            }
+            && rc.starts_with(prefix)
+        {
+            found = true;
+            break;
+        }
     }
     assert!(
         found,
@@ -2938,11 +2982,15 @@ fn evaluate_prompt_injects(
     expected: &PromptInjectsYaml,
     snap: &BuildPromptSnapshot,
 ) {
-    assert!(!snap.hat.is_empty(), 
+    assert!(
+        !snap.hat.is_empty(),
         "{}: assert_state[{}] prompt_injects at_iteration={} \
          expected a prompt for hat {:?}, but no prompt was built this iteration \
          (no hat activated)",
-        scenario_name, assertion_idx, at, expected.hat
+        scenario_name,
+        assertion_idx,
+        at,
+        expected.hat
     );
     assert_eq!(
         snap.hat, expected.hat,
@@ -3279,6 +3327,9 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         // 三个 pipeline-named 测试条目,见 d294be76 的 commit message)
         "tests/scenarios/correction_",
         "tests/scenarios/diagnose_from_ledger",
+        // payload_consistency 门的通用行为(fixture-neutral,抽象 topic/rule,
+        // 不绑定任何 builtin preset;plan 2026-07-22-004 U4)
+        "tests/scenarios/payload_consistency/",
     ];
     const SUPERVISOR_PATH_PREFIXES: &[&str] =
         &["tests/scenarios/opac/", "tests/scenarios/supervisor/"];

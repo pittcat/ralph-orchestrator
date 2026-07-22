@@ -305,7 +305,6 @@ fn p0_1_plan_complete_with_object_step_id_fix_skips_gate() {
 
 #[test]
 fn u1_review_complete_with_fix_plan_file_prefills_fix_steps() {
-    
     use crate::event_reader::Event as JsonlEvent;
 
     // 把 review.complete(fix_plan_file=...) 喂给 tracker。

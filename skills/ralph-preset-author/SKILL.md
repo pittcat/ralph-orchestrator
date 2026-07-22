@@ -73,6 +73,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
    - **Artifact-First topic 判别**（每条 emit topic）：每条 emit 字段先判定是否属于「完整结果 / 长内容 / 跨 hat 摘要 / 关键决策依据 / 验证证据 / 高成本重建」。若是,完整内容必须由执行该 hat 或其 sub-agent 写到当前 `.ralph/` 下的业务 artifact;event payload 只携带路径 / 短摘要 / 必要身份 / 路由字段。判定三标准(恢复价值 / 审计价值 / 下游依赖)与术语定义见 `references/agent-native-model.md`「Artifact-First Handoff 模型」段。
    - For every agent-authored emit topic, decide whether `event_policy.schemas.<topic>.field_docs` and `examples` are needed. Any required handoff, identity, verdict, count, file path, or reason field needs field-level metadata unless the field is already self-evident from injected skill docs. **`field_docs.<path_field>.meaning` 必须明确「该路径是 artifact 落盘点」**,`source` 必须指向当前 hat 可见输入,`fill_rule` 不能诱导 agent 伪造路径,`examples[]` 用结构占位(`.ralph/<plan>/<unit>/<file>.md`)而非固定业务文件名(详见 `references/finding-rubric.md` 「Artifact-First Handoff `field_docs` 审核点」)。
    - See `references/patterns.md` for examples only at this stage.
+   - **Opt-in same-payload consistency rules**: when a preset needs an inter-field invariant on a single emit payload (e.g. two fields that must agree), declare rules under `event_loop.event_policy.payload_consistency.rules` (lint covers `rule.id` / `rule.topic` / `when` field references); see `references/author-checklist.md`「Payload Consistency 审核项」for the audit items.
 
 3. **Drafting phase (single-hat agent brain):**
    - For each hat, **pretend other hats do not exist**.

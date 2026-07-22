@@ -303,14 +303,15 @@ fn compute_effective_required_fields(
         );
     }
     if let Some(contracts) = contracts
-        && contracts.enabled {
-            for (topic, rule) in &contracts.rules {
-                let extras = extra_required_fields_from_rule(rule);
-                if !extras.is_empty() {
-                    out.entry(topic.clone()).or_default().extend(extras);
-                }
+        && contracts.enabled
+    {
+        for (topic, rule) in &contracts.rules {
+            let extras = extra_required_fields_from_rule(rule);
+            if !extras.is_empty() {
+                out.entry(topic.clone()).or_default().extend(extras);
             }
         }
+    }
     out
 }
 

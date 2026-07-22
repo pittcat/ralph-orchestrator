@@ -165,9 +165,10 @@ fn make_retry_key(finding: &DriftFinding) -> String {
 /// no `field`.
 fn topic_or_edge_ref(finding: &DriftFinding) -> (String, EvidenceKind) {
     if let Some(from) = &finding.from_topic
-        && let Some(to) = &finding.to_topic {
-            return (format!("{from}->{to}"), EvidenceKind::Topic);
-        }
+        && let Some(to) = &finding.to_topic
+    {
+        return (format!("{from}->{to}"), EvidenceKind::Topic);
+    }
     if let Some(topic) = &finding.topic {
         return (topic.clone(), EvidenceKind::Topic);
     }

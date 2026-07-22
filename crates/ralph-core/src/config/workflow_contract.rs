@@ -70,8 +70,7 @@ pub const HANDOFF_TOPIC_SEEDS: &[&str] = &[
 ];
 
 /// U2 (2026-06-17-003 plan): incomplete-wave gate configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IncompleteWaveGateConfig {
     /// Whether the gate is active. Defaults to `false`
     /// (presets opt in). When `true`, the EventLoop checks
@@ -80,7 +79,6 @@ pub struct IncompleteWaveGateConfig {
     /// target `shipper`.
     pub enabled: bool,
 }
-
 
 fn default_incomplete_wave_gate() -> IncompleteWaveGateConfig {
     IncompleteWaveGateConfig::default()

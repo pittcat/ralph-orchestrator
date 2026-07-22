@@ -59,6 +59,10 @@ pub enum ViolationType {
     /// `ReviewStepTracker`. Kept fail-closed (event does NOT enter
     /// the bus) but loop continues — see
     /// `is_recoverable_policy_finding` for the bucket mapping.
+    /// U3 (2026-07-22-004 plan): this variant ALSO covers same-payload
+    /// consistency gates, identified by the `payload_consistency:<rule_id>`
+    /// gate prefix — distinct from timing/state gates because the
+    /// violation is internal to the current payload (no event history).
     SemanticGateViolation {
         gate: String,
         context: String,
@@ -675,9 +679,10 @@ impl PolicyRuntimeState {
             // U4: Extract current_plan_name from work.ready events
             if event.topic == "work.ready"
                 && let Some(obj) = Self::payload_object(event.payload.as_deref())
-                && let Some(name) = obj.get("plan_name").and_then(|v| v.as_str()) {
-                    state.current_plan_name = Some(name.to_string());
-                }
+                && let Some(name) = obj.get("plan_name").and_then(|v| v.as_str())
+            {
+                state.current_plan_name = Some(name.to_string());
+            }
             // U5 (2026-06-17-003 plan, R6): replay prior
             // `review.dimension.ready` events to populate the
             // dedup set so cross-batch re-emits (e.g. on loop
@@ -2157,11 +2162,11 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
             for (field_path, per_hat_rules) in &schema.hat_allowed_values {
                 if let Some(rule) = per_hat_rules.iter().find(|r| r.hat_id == hat_id)
                     && let Some(p) = payload
-                        && let Ok(value) = serde_json::from_str::<Value>(p)
-                        && let Some(field_value) = extract_json_field(&value, field_path)
-                        && !rule.values.contains(&field_value)
-                    {
-                        findings.push(PolicyFinding {
+                    && let Ok(value) = serde_json::from_str::<Value>(p)
+                    && let Some(field_value) = extract_json_field(&value, field_path)
+                    && !rule.values.contains(&field_value)
+                {
+                    findings.push(PolicyFinding {
                             topic: topic.to_string(),
                             violation_type: ViolationType::InvalidFieldValue {
                                 field: field_path.clone(),
@@ -2172,7 +2177,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                                 hat_id, field_value, field_path, rule.values
                             ),
                         });
-                    }
+                }
             }
         } else {
             // Hat is missing but schema has hat-specific allowed values.
@@ -2212,25 +2217,26 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
         && topic == "work.done"
         && let Some(expected) = &state.current_plan_name
         && let Some(p) = payload
-            && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p) {
-                let actual = obj.get("plan_name").and_then(|v| v.as_str());
-                if actual != Some(expected.as_str()) {
-                    findings.push(PolicyFinding {
-                        topic: topic.to_string(),
-                        violation_type: ViolationType::InvalidFieldValue {
-                            field: "plan_name".to_string(),
-                            value: actual
-                                .map(|s| Value::String(s.to_string()))
-                                .unwrap_or(Value::Null),
-                        },
-                        message: format!(
-                            "work.done plan_name mismatch: expected '{}', got {:?}",
-                            expected,
-                            actual.unwrap_or("(missing)")
-                        ),
-                    });
-                }
-            }
+        && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+    {
+        let actual = obj.get("plan_name").and_then(|v| v.as_str());
+        if actual != Some(expected.as_str()) {
+            findings.push(PolicyFinding {
+                topic: topic.to_string(),
+                violation_type: ViolationType::InvalidFieldValue {
+                    field: "plan_name".to_string(),
+                    value: actual
+                        .map(|s| Value::String(s.to_string()))
+                        .unwrap_or(Value::Null),
+                },
+                message: format!(
+                    "work.done plan_name mismatch: expected '{}', got {:?}",
+                    expected,
+                    actual.unwrap_or("(missing)")
+                ),
+            });
+        }
+    }
 
     // U7 of plan 2026-07-02-005: runtime shipper strict-match backstop.
     if topic == "REVIEW_COMPLETE"
@@ -2302,20 +2308,62 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
     if handoff_config.handoff_envelope_enabled()
         && handoff_config.handoff_envelope_validate_payload()
         && topic != "task.resume"
-        && let Some(p) = payload {
-            match serde_json::from_str::<Value>(p) {
-                Ok(value) => {
-                    if let Some(finding) = check_handoff_envelope(topic, &value) {
-                        findings.push(finding);
-                    }
-                }
-                Err(_) => {
-                    // If the payload does not parse as JSON we
-                    // don't add a finding here — earlier
-                    // validation layers will surface that.
+        && let Some(p) = payload
+    {
+        match serde_json::from_str::<Value>(p) {
+            Ok(value) => {
+                if let Some(finding) = check_handoff_envelope(topic, &value) {
+                    findings.push(finding);
                 }
             }
+            Err(_) => {
+                // If the payload does not parse as JSON we
+                // don't add a finding here — earlier
+                // validation layers will surface that.
+            }
         }
+    }
+
+    // U3 (plan 2026-07-22-004): opt-in same-payload consistency gates.
+    // After schema / allowed-values / hat-aware / element_constraints
+    // checks have gathered their findings, evaluate any enabled
+    // `payload_consistency` rule whose `topic` matches the current
+    // topic against the CURRENT payload only (R2 — never event
+    // history). The first hit in stable declaration order is surfaced
+    // as a `SemanticGateViolation` with gate `payload_consistency:<id>`;
+    // the decision mapper below takes `findings.into_iter().next()`, so
+    // we push only the first hit and break (simplest correct approach,
+    // preserves declaration order). Reuses the existing
+    // `ViolationType::SemanticGateViolation` variant (KTD3) — the
+    // `payload_consistency:` gate prefix distinguishes it from
+    // timing/state semantic gates. A missing or non-object payload
+    // cannot satisfy a field predicate, so it is treated as no-hit
+    // (NOT an error) — schema validation already handles payload shape.
+    if config.payload_consistency.enabled
+        && let Some(p) = payload
+        && let Ok(value) = serde_json::from_str::<Value>(p)
+        && value.is_object()
+    {
+        for rule in &config.payload_consistency.rules {
+            if rule.topic != topic {
+                continue;
+            }
+            if crate::event_policy_payload_consistency::evaluate(&rule.when, &value)
+                == crate::event_policy_payload_consistency::EvalOutcome::Hit
+            {
+                let gate = format!("payload_consistency:{}", rule.id);
+                findings.push(PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::SemanticGateViolation {
+                        gate: gate.clone(),
+                        context: rule.message.clone(),
+                    },
+                    message: format!("{gate}: {}", rule.message),
+                });
+                break;
+            }
+        }
+    }
 
     if findings.is_empty() {
         if topic == "plan.blocked" {
@@ -2341,7 +2389,10 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
 }
 
 /// Extract a nested field from a JSON value using dot notation.
-fn extract_json_field(value: &Value, path: &str) -> Option<Value> {
+///
+/// Shared with the payload-consistency evaluator and lint. Keep this
+/// single implementation; do not re-introduce local copies.
+pub(crate) fn extract_json_field(value: &Value, path: &str) -> Option<Value> {
     let mut current = value;
     for part in path.split('.') {
         match current {
@@ -6987,6 +7038,7 @@ hats:
             require_emit_provenance: false,
             completion_after_terminal: Default::default(),
             topic_deny_rules: vec![],
+            payload_consistency: Default::default(),
             plan_name_equality_required: false,
         }
     }
@@ -7149,5 +7201,191 @@ hats:
         };
         assert!(!adapter.handoff_envelope_enabled());
         assert!(!adapter.handoff_envelope_validate_payload());
+    }
+
+    // -----------------------------------------------------------------
+    // U3 (plan 2026-07-22-004): payload_consistency gate wiring tests.
+    // The gate reuses `ViolationType::SemanticGateViolation` with a
+    // `payload_consistency:<rule_id>` gate prefix and fires only when
+    // `config.payload_consistency.enabled` is true and a rule declared
+    // for the current topic hits the current payload (R2: current
+    // payload only — no event history).
+    // -----------------------------------------------------------------
+
+    fn consistency_rule(
+        id: &str,
+        topic: &str,
+        when: Value,
+        message: &str,
+    ) -> crate::config::PayloadConsistencyRule {
+        crate::config::PayloadConsistencyRule {
+            id: id.to_string(),
+            topic: topic.to_string(),
+            when,
+            message: message.to_string(),
+        }
+    }
+
+    /// The canonical `fix.done` self-contradiction rule used across tests.
+    fn fix_done_contradiction_rule() -> crate::config::PayloadConsistencyRule {
+        consistency_rule(
+            "fix-done-no-fixes",
+            "fix.done",
+            serde_json::json!({"all": [
+                {"field": "review_verdict", "eq": "blocked"},
+                {"field": "fixes_applied", "eq": 0},
+                {"field": "fix_status", "eq": "applied"}
+            ]}),
+            "fix.done claims applied but no fixes were applied while verdict is blocked",
+        )
+    }
+
+    fn consistency_config(
+        enabled: bool,
+        rules: Vec<crate::config::PayloadConsistencyRule>,
+    ) -> EventPolicyConfig {
+        let mut config = test_config();
+        config.payload_consistency = crate::config::PayloadConsistencyConfig { enabled, rules };
+        config
+    }
+
+    const HITTING_PAYLOAD: &str =
+        r#"{"review_verdict":"blocked","fixes_applied":0,"fix_status":"applied"}"#;
+
+    #[test]
+    fn payload_consistency_happy_payload_not_matching_rule_is_accepted() {
+        // S1: payload does NOT satisfy the rule's `when` → Accept, no finding.
+        let config = consistency_config(true, vec![fix_done_contradiction_rule()]);
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event(
+            "fix.done",
+            Some(r#"{"review_verdict":"passed","fixes_applied":2,"fix_status":"applied"}"#),
+            &config,
+            &mut state,
+        );
+        assert_eq!(decision, PolicyDecision::Accept);
+    }
+
+    #[test]
+    fn payload_consistency_hitting_payload_is_rejected_with_semantic_gate() {
+        // S2: payload satisfies `when` → RejectWithResume carrying a
+        // SemanticGateViolation whose gate is `payload_consistency:<id>`.
+        let config = consistency_config(true, vec![fix_done_contradiction_rule()]);
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("fix.done", Some(HITTING_PAYLOAD), &config, &mut state);
+
+        let PolicyDecision::RejectWithResume(finding) = decision else {
+            panic!("expected RejectWithResume, got {decision:?}");
+        };
+        let ViolationType::SemanticGateViolation { gate, context } = &finding.violation_type else {
+            panic!(
+                "expected SemanticGateViolation, got {:?}",
+                finding.violation_type
+            );
+        };
+        assert!(
+            gate.starts_with("payload_consistency:"),
+            "gate must start with payload_consistency: prefix, got {gate}"
+        );
+        assert!(
+            gate.contains("fix-done-no-fixes"),
+            "gate must contain the rule id, got {gate}"
+        );
+        assert_eq!(gate, "payload_consistency:fix-done-no-fixes");
+        // context should carry the rule's actionable message.
+        assert!(
+            context.contains("no fixes were applied"),
+            "context should reflect rule message, got {context}"
+        );
+    }
+
+    #[test]
+    fn payload_consistency_disabled_does_not_fire() {
+        // S4: enabled=false with a hitting payload → Accept (gate off by default).
+        let config = consistency_config(false, vec![fix_done_contradiction_rule()]);
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("fix.done", Some(HITTING_PAYLOAD), &config, &mut state);
+        assert_eq!(decision, PolicyDecision::Accept);
+    }
+
+    #[test]
+    fn payload_consistency_rule_is_scoped_to_its_topic() {
+        // Topic filter: rule declared for fix.done, emit work.done with a
+        // hitting payload → Accept (rule must not fire for other topics).
+        let config = consistency_config(true, vec![fix_done_contradiction_rule()]);
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("work.done", Some(HITTING_PAYLOAD), &config, &mut state);
+        assert_eq!(decision, PolicyDecision::Accept);
+    }
+
+    #[test]
+    fn payload_consistency_first_hit_in_declaration_order_wins() {
+        // Two rules both hit; the surfaced finding carries the FIRST
+        // rule's id (stable declaration order).
+        let first = consistency_rule(
+            "first-rule",
+            "fix.done",
+            serde_json::json!({"field": "review_verdict", "eq": "blocked"}),
+            "first rule message",
+        );
+        let second = consistency_rule(
+            "second-rule",
+            "fix.done",
+            serde_json::json!({"field": "fix_status", "eq": "applied"}),
+            "second rule message",
+        );
+        let config = consistency_config(true, vec![first, second]);
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("fix.done", Some(HITTING_PAYLOAD), &config, &mut state);
+
+        let PolicyDecision::RejectWithResume(finding) = decision else {
+            panic!("expected RejectWithResume, got {decision:?}");
+        };
+        let ViolationType::SemanticGateViolation { gate, .. } = &finding.violation_type else {
+            panic!(
+                "expected SemanticGateViolation, got {:?}",
+                finding.violation_type
+            );
+        };
+        assert_eq!(gate, "payload_consistency:first-rule");
+    }
+
+    #[test]
+    fn payload_consistency_rule_message_is_surfaced_to_agent() {
+        // Message passthrough: the finding message/context reflects the
+        // rule's `message` so the agent gets actionable guidance.
+        let rule = consistency_rule(
+            "msg-rule",
+            "fix.done",
+            serde_json::json!({"field": "review_verdict", "eq": "blocked"}),
+            "ACTIONABLE: re-run the fixer before claiming fix.done",
+        );
+        let config = consistency_config(true, vec![rule]);
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("fix.done", Some(HITTING_PAYLOAD), &config, &mut state);
+
+        let PolicyDecision::RejectWithResume(finding) = decision else {
+            panic!("expected RejectWithResume, got {decision:?}");
+        };
+        let ViolationType::SemanticGateViolation { context, .. } = &finding.violation_type else {
+            panic!(
+                "expected SemanticGateViolation, got {:?}",
+                finding.violation_type
+            );
+        };
+        assert!(
+            context.contains("ACTIONABLE: re-run the fixer"),
+            "context must carry the rule message, got {context}"
+        );
+        assert!(
+            finding.message.contains("ACTIONABLE: re-run the fixer"),
+            "finding.message must carry the rule message, got {}",
+            finding.message
+        );
+        assert!(
+            finding.message.contains("payload_consistency:msg-rule"),
+            "finding.message must name the gate, got {}",
+            finding.message
+        );
     }
 }

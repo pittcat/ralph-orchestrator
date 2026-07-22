@@ -54,13 +54,7 @@ fn test_task_add_succeeds_after_scrubbing_simulated_hat_env() {
     common::scrub_agent_runtime_env(&mut cmd);
 
     let output = cmd
-        .args([
-            "tools",
-            "task",
-            "add",
-            "Under pollution",
-            "--root",
-        ])
+        .args(["tools", "task", "add", "Under pollution", "--root"])
         .arg(temp_path)
         .current_dir(temp_path)
         .output()

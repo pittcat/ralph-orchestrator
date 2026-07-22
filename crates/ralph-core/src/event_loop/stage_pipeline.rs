@@ -300,9 +300,7 @@ impl StagePipeline {
         };
         let verdict_flow = hat_only_verdict_flow_declaration();
         Self::new(vec![
-            Box::new(
-                crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage,
-            ),
+            Box::new(crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage),
             Box::new(schema_gate),
             Box::new(
                 crate::event_loop::stages::verdict_gate_stage::VerdictGateStage::new(verdict_flow),

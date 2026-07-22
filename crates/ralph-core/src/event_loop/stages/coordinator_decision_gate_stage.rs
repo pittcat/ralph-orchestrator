@@ -231,22 +231,23 @@ impl CoordinatorDecisionGateStage {
                                 .get("plan")
                                 .and_then(|v| v.as_str())
                                 .or_else(|| obj.get("planName").and_then(|v| v.as_str()))
-                            {
-                                obj.insert(
-                                    "plan_name".to_string(),
-                                    serde_json::Value::String(pn.to_string()),
-                                );
-                            }
+                        {
+                            obj.insert(
+                                "plan_name".to_string(),
+                                serde_json::Value::String(pn.to_string()),
+                            );
+                        }
                         // `task_id` flows through unchanged when
                         // present (the projector expects the
                         // same id on `plan.complete`).
                         if !obj.contains_key("task_id")
-                            && let Some(tid) = obj.get("taskId").and_then(|v| v.as_str()) {
-                                obj.insert(
-                                    "task_id".to_string(),
-                                    serde_json::Value::String(tid.to_string()),
-                                );
-                            }
+                            && let Some(tid) = obj.get("taskId").and_then(|v| v.as_str())
+                        {
+                            obj.insert(
+                                "task_id".to_string(),
+                                serde_json::Value::String(tid.to_string()),
+                            );
+                        }
                         // `completed_steps` defaults to the
                         // rewritten step id so the report
                         // builder can mark the chain
@@ -261,14 +262,15 @@ impl CoordinatorDecisionGateStage {
                                 );
                             } else if let Some(step_obj) =
                                 obj.get("step").and_then(|v| v.as_object())
-                                && let Some(id) = step_obj.get("id").and_then(|v| v.as_str()) {
-                                    obj.insert(
-                                        "completed_steps".to_string(),
-                                        serde_json::Value::Array(vec![serde_json::Value::String(
-                                            id.to_string(),
-                                        )]),
-                                    );
-                                }
+                                && let Some(id) = step_obj.get("id").and_then(|v| v.as_str())
+                            {
+                                obj.insert(
+                                    "completed_steps".to_string(),
+                                    serde_json::Value::Array(vec![serde_json::Value::String(
+                                        id.to_string(),
+                                    )]),
+                                );
+                            }
                         }
                     }
                     if let Ok(serialized) = serde_json::to_string(&value) {

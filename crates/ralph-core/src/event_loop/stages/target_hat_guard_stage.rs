@@ -63,9 +63,10 @@ impl EmitStage for TargetHatGuardStage {
         };
 
         if let Some(source) = event.source.as_ref()
-            && source.as_str() == target {
-                return Err(StageReject::new(self.name(), "target_self_loop"));
-            }
+            && source.as_str() == target
+        {
+            return Err(StageReject::new(self.name(), "target_self_loop"));
+        }
 
         Ok(())
     }

@@ -313,7 +313,6 @@ pub enum CoordJoinMode {
     Serial,
 }
 
-
 /// Drift-detector configuration.
 ///
 /// Sits under `telemetry.runtime_diagnosis.drift`. The thresholds and

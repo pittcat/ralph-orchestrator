@@ -638,7 +638,6 @@ fn test_execution_contract_commit_only_clean_rejects_dirty_workspace() {
     use crate::config::execution_contracts::{
         ContractRejectConfig, TaskCompletionRequirement, TestEvidenceRequirement,
     };
-    
 
     // The executor's working tree is the repo root. Force-dirty it
     // by creating a fresh tracked file and leaving it uncommitted.

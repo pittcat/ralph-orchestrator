@@ -1,0 +1,94 @@
+# Payload Consistency Gates
+
+`event_policy.payload_consistency` 用于校验**同一条事件 payload 内部**的字段是否相互矛盾。它与 [Payload Contracts](payload-contracts.md) 分工明确：Payload Contracts 校验必填字段及字段形状，本页描述字段组合的不变式。
+
+## 启用方式
+
+该能力默认关闭，preset 必须显式启用：
+
+```yaml
+event_policy:
+  payload_consistency:
+    enabled: true
+    rules:
+      - id: fix-done-blocked-zero-fixes-applied
+        topic: fix.done
+        when:
+          all:
+            - { field: fix_status, eq: blocked }
+            - { field: fixes_applied, eq: 0 }
+        message: blocked fix attempt must report applied work honestly
+```
+
+每条规则包含四个字段：
+
+| 字段 | 含义 |
+|---|---|
+| `id` | 稳定且唯一的规则标识 |
+| `topic` | 规则适用的事件 topic |
+| `when` | 单谓词或 `all` / `any` 组合谓词 |
+| `message` | 命中规则时返回的可读说明 |
+
+单谓词使用 `{field, op, value}`。允许的 `op` 为 `eq`、`ne`、`gt`、`gte`、`exists`、`non_empty`；`exists` 与 `non_empty` 不要求 `value`。
+
+## 评估边界
+
+规则只读取当前事件的 payload：
+
+- 不读取事件历史。
+- 不读取 runtime ledger 或 supervisor 状态。
+- 不读取其它 topic 的 payload。
+- `field` 使用点号路径读取嵌套对象；数组下标不属于支持范围。
+
+命中规则时，当前 topic 被拒收，runtime 通过结构化 correction 指导发布方修复当前 payload。
+
+## Fail-close 行为
+
+规则配置不明确时不会静默放行。以下情况按命中处理并拒收事件：
+
+- 使用未知 `op`。
+- 谓词缺少 `field`。
+- `when` 不是对象。
+- `gt` / `gte` 的两侧无法进行数值比较。
+
+Preset 作者应在启动前运行 strict lint，避免把配置错误推迟到 runtime。
+
+## 拒收反馈
+
+`ralph emit <topic> --policy-check` 返回的 `validation_errors[]` 包含：
+
+- `field`：需要修复的 payload 字段。
+- `reason_code`：结构化原因码。
+- `message`：面向人的说明。
+- `gate`：以 `payload_consistency:<rule_id>` 标识命中的规则。
+- `field_description`、`suggested_payload_shape`、`suggested_command`：字段说明与下一步修复提示。
+
+Wave 批量预检还可能返回 `payload_index`，用于定位批次中的具体 payload。
+
+修复时先按 `field` 和 `gate` 调整 payload，再重新运行 `--policy-check`；预检通过后才能去掉该 flag 正式 emit。
+
+## Retry 与终止条件
+
+`payload_consistency` 属于语义一致性拒收，不参与 execution-contract 的 rejection retry budget。Correction 通道独立计数；同类 correction 第 3 次耗尽后，runtime 进入 `plan.blocked(reason=correction_3_strike_exhausted)`。
+
+`protocol_violation_repeated:*` 属于 execution-contract 路径，不应作为 payload-consistency 的终止原因解读。
+
+## CLI 与 runtime
+
+CLI precheck 在 Observe 和 Enforce 模式下都必须把 `payload_consistency:*` finding 作为错误返回，避免 preset 作者通过 Observe 模式意外绕过同 payload 不变式。Runtime 是否写入其它 policy finding 仍由 `event_policy.mode` 决定。
+
+## Builtin 示例
+
+Builtin pipeline preset 的 `fix.done` 规则保护两类不变式：
+
+- `fix-done-blocked-zero-fixes-applied`：阻止“宣称已执行修复但实际应用数为零”的矛盾 payload。
+- `fix-done-green-with-regressions`：阻止 `post_verification_status=green` 与 `new_business_regressions_count>0` 同时出现。
+
+这些示例只说明通用规则形状；业务 preset 可以声明自己的 topic 与不变式。
+
+## See also
+
+- [Payload Contracts](payload-contracts.md)：必填字段、类型和结构约束。
+- [Event Policy](event-policy.md)：Observe / Enforce 模式及整体决策流程。
+- `crates/ralph-core/data/ralph-tools-emit.md`：注入给 agent 的 emit、precheck 与 correction 操作说明。
+- `presets/en/ce-executor-pipeline.yml`：builtin 规则实例。

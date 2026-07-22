@@ -273,38 +273,38 @@ impl ReviewStepTracker {
             && let Some(state) = self.steps.get(&key)
             && wave_open(state)
         {
-                    // U1 (2026-06-17-003 plan): emit the
-                    // dedicated `SemanticGateViolation` variant
-                    // instead of forging `InvalidFieldValue {
-                    // field: "skip_reason" }`. The payload itself
-                    // is well-formed; the violation is in the
-                    // **state** (wave open + coordinator
-                    // fast-pathing). The runtime loop classifies
-                    // this as recoverable and continues — see
-                    // `is_recoverable_policy_finding` and the
-                    // runner's `PayloadContractViolation` branch.
-                    // The `gate` field carries the canonical name
-                    // (`review_passed_while_wave_open`) for
-                    // audit/diagnostics.
-                    return Some(PolicyFinding {
-                        topic: topic.to_string(),
-                        violation_type: ViolationType::SemanticGateViolation {
-                            gate: "review_passed_while_wave_open".to_string(),
-                            context: format!(
-                                "wave='{}' received={}/{} expected",
-                                state.open_wave_id.as_deref().unwrap_or("?"),
-                                state.dimensions_received.len(),
-                                state.wave_expected,
-                            ),
-                        },
-                        message: format!(
-                            "review_passed_while_wave_open: review-coordinator must not emit \
+            // U1 (2026-06-17-003 plan): emit the
+            // dedicated `SemanticGateViolation` variant
+            // instead of forging `InvalidFieldValue {
+            // field: "skip_reason" }`. The payload itself
+            // is well-formed; the violation is in the
+            // **state** (wave open + coordinator
+            // fast-pathing). The runtime loop classifies
+            // this as recoverable and continues — see
+            // `is_recoverable_policy_finding` and the
+            // runner's `PayloadContractViolation` branch.
+            // The `gate` field carries the canonical name
+            // (`review_passed_while_wave_open`) for
+            // audit/diagnostics.
+            return Some(PolicyFinding {
+                topic: topic.to_string(),
+                violation_type: ViolationType::SemanticGateViolation {
+                    gate: "review_passed_while_wave_open".to_string(),
+                    context: format!(
+                        "wave='{}' received={}/{} expected",
+                        state.open_wave_id.as_deref().unwrap_or("?"),
+                        state.dimensions_received.len(),
+                        state.wave_expected,
+                    ),
+                },
+                message: format!(
+                    "review_passed_while_wave_open: review-coordinator must not emit \
                              review.passed while wave '{}' is incomplete ({}/{} dimensions)",
-                            state.open_wave_id.as_deref().unwrap_or("?"),
-                            state.dimensions_received.len(),
-                            state.wave_expected
-                        ),
-                    });
+                    state.open_wave_id.as_deref().unwrap_or("?"),
+                    state.dimensions_received.len(),
+                    state.wave_expected
+                ),
+            });
         }
 
         if topic == "review.passed"
@@ -342,9 +342,7 @@ impl ReviewStepTracker {
             let obj = serde_json::from_str::<Value>(p).ok()?;
             // Coordinator bootstrap work.ready has no reviewed-step correlation;
             // only step-advance handoffs from plan-gate are gated.
-            obj
-                .get("reviewed_task_id")
-                .and_then(|v| v.as_str())?;
+            obj.get("reviewed_task_id").and_then(|v| v.as_str())?;
             if crate::event_loop::phase_authority::plan_gate_helper::plan_gate_should_skip_review_not_terminal(
                 workflow_phase_id,
             ) {

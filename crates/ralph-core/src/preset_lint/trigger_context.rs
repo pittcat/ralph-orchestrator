@@ -193,10 +193,9 @@ fn check_routing_hints(
 ) {
     let mut seen_labels: HashSet<String> = HashSet::new();
     for hint in &cfg.routing_hints {
-        if !hint.label.is_empty()
-            && !seen_labels.insert(hint.label.clone()) {
-                out.push(duplicate_label_finding(topic, &hint.label));
-            }
+        if !hint.label.is_empty() && !seen_labels.insert(hint.label.clone()) {
+            out.push(duplicate_label_finding(topic, &hint.label));
+        }
         for cond in &hint.conditions {
             check_condition(topic, hint, cond, known, out);
         }

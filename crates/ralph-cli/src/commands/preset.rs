@@ -2286,7 +2286,8 @@ hats:
 event_loop:
   starting_event: "work.start"
   completion_promise: "LOOP_COMPLETE"
-"#.to_string();
+"#
+        .to_string();
         std::fs::write(&path, yaml).unwrap();
 
         let result = diff_preset(&path, DiffFormat::Human, false);

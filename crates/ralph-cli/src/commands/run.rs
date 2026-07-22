@@ -723,9 +723,9 @@ fn worktree_file_name_prefix(
             .file_stem()
             .and_then(|s| s.to_str())
             .filter(|s| !s.trim().is_empty())
-        {
-            return Some(stem.to_string());
-        }
+    {
+        return Some(stem.to_string());
+    }
 
     // Fallback: if a non-default prompt file was provided explicitly
     // (-P), use its basename as the worktree prefix. We intentionally
@@ -2660,12 +2660,13 @@ async fn run_subprocess_tui(
             forward_timed_out,
             cleanup_elapsed,
             received_signal,
-        ) {
-            warn!(
-                diagnostic_path = %cleanup_path.display(),
-                "Wrote cleanup diagnostic for timed-out I/O tasks"
-            );
-        }
+        )
+    {
+        warn!(
+            diagnostic_path = %cleanup_path.display(),
+            "Wrote cleanup diagnostic for timed-out I/O tasks"
+        );
+    }
 
     let reason = if let Some(signal) = received_signal {
         info!(signal, "Subprocess TUI returning Interrupted due to signal");

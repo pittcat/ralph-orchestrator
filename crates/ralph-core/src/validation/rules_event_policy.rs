@@ -154,15 +154,16 @@ impl ValidationRule for EventPolicyRule {
                 ref key,
                 ..
             } = finding.violation_type
-                && event.wave_id.is_some() {
-                    *hint = DuplicateWorkDoneHint::DuplicateStallBypass;
-                    finding.message = format!(
-                        "duplicate_stall_bypass: work.done for key '{key}' was already accepted \
+            && event.wave_id.is_some()
+        {
+            *hint = DuplicateWorkDoneHint::DuplicateStallBypass;
+            finding.message = format!(
+                "duplicate_stall_bypass: work.done for key '{key}' was already accepted \
                          but wave_id={:?} is still open. Wait for review-synthesizer terminal \
                          (review.passed or review.complete) or plan.blocked before re-sending work.done.",
-                        event.wave_id
-                    );
-                }
+                event.wave_id
+            );
+        }
 
         handle_payload_decision(decision, ctx, event, policy_config)
     }
