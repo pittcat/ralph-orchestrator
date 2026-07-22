@@ -26,9 +26,9 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 **Trigger:** `task.resume` with `target_hat=<被恢复的 hat>` and a payload-level `violation` whose `gate` 字段前缀为 `payload_consistency:`。该 gate 与现有 `event_policy:semantic_gate_violation` 走同一 recovery 通道（`task.resume` → CorrectionContext）。
 
 **行为规范：**
-- 把 `task.resume` payload 视作结构化 correction：读 `field` / `expected` / `message` / `gate`（与 `validation_errors[]` 字段含义一致），按命中的字段修复 payload。
+- 把 `task.resume` payload 视作结构化 correction：读 `field` / `reason_code` / `message` / `gate`（与 `validation_errors[]` 字段含义一致），按命中的字段修复 payload。
 - 修复后**必须**先 `ralph emit <topic> --policy-check -j '<payload>'` 通过，再正式 emit。
-- 同类 violation signature（同一 `gate` 前缀 + `field` + `task_key` + step）**第一次**给 structured correction；**第二次**同类违规 runtime fail-close（`plan.blocked(reason=protocol_violation_repeated:…)`），**不要** infinite retry。
+- 同类 violation signature（同一 `gate` 前缀 + `field` + `task_key` + step）**第 3 次**同类 task.resume 后 runtime fail-close（`plan.blocked(reason=correction_3_strike_exhausted:…)`）。payload_consistency 走 correction 通道，**不**参与 rejection retry budget（runtime 显式跳过该类拒收，不做 schema-style retry budget 计数）。**`protocol_violation_repeated:*`** 是 execution-contract 路径的 fail-close 标记，**不**用于 payload_consistency；不要把两者混用。
 
 **禁止：** 在没有按 `gate` 命中的字段重新对齐 payload 的情况下，机械重发同一份 payload。
 
