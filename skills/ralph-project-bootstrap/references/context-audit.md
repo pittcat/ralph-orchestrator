@@ -12,7 +12,7 @@ operator 调用 skill 时，必须先通过上下文审计。任何持久写盘�
 2. 从 cwd 向上收集 `AGENTS.md` / `CLAUDE.md` 的可见 scope。
 3. 在 VCS 根与最近的 AGENTS/CLAUDE scope 冲突时，立即阻塞并返回 `root_ambiguous`。
 4. 在没有 VCS 根且存在多个 AGENTS scope 时，按相同规则阻塞。
-5. 在 root 唯一时，完整读取并校验 preset，再校验操作者实际选择的可选 plan / prompt 路径。两者都没有时表示 preset-native，并不自动构成 blocker；skill agent 仍须确认 preset 的 prompt 与动态上下文足以启动。
+5. 在 root 唯一时，完整读取并校验 preset，再校验操作者实际选择的可选 plan / prompt 路径。两者都没有时，必须把 preset 的非空 `event_loop.prompt` 快照为 `PROMPT.<stem>.md`；该字段不会通过 hats-source overlay 直接成为 runtime prompt。
 
 缺少 plan、loop id、写作 brief 等“第一次运行输入”不是 bootstrap provisioning blocker。继续生成 preset 所需的配置、fallback prompt、provenance 和 agent docs，最后把 handoff 标成 `incomplete_static_only` 并列出待填参数。只有 preset 无效、root 歧义或 ownership 冲突才在写入前停止。
 6. 输入校验失败或 root 解析失败时返回 `AuditDecision(blocking=True)`，**不**调用 helper 写盘。
@@ -20,7 +20,7 @@ operator 调用 skill 时，必须先通过上下文审计。任何持久写盘�
 ## 命令与动作
 
 - 不发出 `ralph` 子命令、不写任何 owned 文件、不动 `.ralph`。
-- 不复制 hat instructions、不预生成 `ralph.pipeline.yml`。
+- 不复制 hat instructions；只快照 preset 顶层 `event_loop.prompt`，并生成 `ralph.<stem>.yml`。
 - 输出 `AuditDecision` 结构体：`root`、`inputs_ok`、`facts`、`issues`、`blocking`、`notes`。
 
 ## 关键字段从哪里取得

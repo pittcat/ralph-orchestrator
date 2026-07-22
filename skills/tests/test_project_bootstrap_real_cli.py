@@ -41,6 +41,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import pipeline_suite
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE_BIN = ROOT / "target" / "debug" / "ralph"
@@ -271,6 +272,58 @@ def test_real_cli_accepts_dry_run_argv_built_by_helper(
     assert "unexpected argument" not in combined.lower(), (
         f"real CLI rejected helper argv as unexpected:\n{combined}"
     )
+
+
+def test_real_cli_uses_preset_bound_prompt_snapshot(
+    ralph_binary: Path, sanitised_env: dict[str, str]
+) -> None:
+    preset_text = """
+event_loop:
+  execution_mode: isolated
+  prompt: Generate source-grounded documentation.
+  completion_promise: DOCS_COMPLETE
+  starting_event: docs.start
+hats:
+  writer:
+    name: Writer
+    description: Writes documentation
+    triggers: [docs.start]
+    publishes: [DOCS_COMPLETE]
+    instructions: Write the requested documentation, then emit DOCS_COMPLETE.
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        preset_path = root / "modem-case-docs.yml"
+        preset_path.write_text(preset_text, encoding="utf-8")
+        suite = pipeline_suite.compose_preset_bound_suite(
+            preset=preset_path.name,
+            preset_text=preset_text,
+            backend="claude",
+            budget_max_iterations=5,
+            budget_wall_clock_seconds=600,
+        )
+        (root / suite.config_path).write_text(suite.config, encoding="utf-8")
+        (root / suite.prompt_path).write_text(suite.prompt, encoding="utf-8")
+        proc = subprocess.run(
+            [
+                str(ralph_binary),
+                "-c",
+                suite.config_path,
+                "-H",
+                preset_path.name,
+                "run",
+                "--dry-run",
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            env=sanitised_env,
+            timeout=20,
+        )
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 0, combined
+    assert f"Prompt file: {suite.prompt_path}" in combined
+    assert "Prompt file: PROMPT.md" not in combined
     # And it must NOT have produced a clap usage block (that would mean
     # argv parse failed). Success here means clap accepted the argv.
     assert "Usage:" not in proc.stderr, (

@@ -1,13 +1,13 @@
 """Pipeline-suite authoring helpers for ``ralph-project-bootstrap``.
 
-The bootstrap pipeline owns three artifacts inside the target project:
+The preset-bound bootstrap pipeline owns two artifacts inside the target project:
 
-* ``ralph.pipeline.yml`` — runtime config binding a preset to optional
-  prompt/plan inputs, budget, and preflight.
-* ``PROMPT.pipeline.md`` — optional bootstrap-owned prompt; preset-native
-  and operator-owned-prompt launches do not create it.
-* ``ralph.bootstrap.yml`` — provenance: generator version, input
-  signature, owned-key summary, and per-file owned-bytes SHA-256.
+* ``ralph.<preset-stem>.yml`` — runtime config plus embedded provenance.
+* ``PROMPT.<preset-stem>.md`` — the resolved preset's inline prompt snapshot.
+
+Legacy low-level helpers for generic config/prompt/provenance composition remain
+available for existing callers. New bootstrap flows must enter through
+``compose_preset_bound_suite``.
 
 Every persistent edit goes through the helpers in this module. They are
 deliberately pure: no shell, no ``.ralph`` writes, no chmod, no PyYAML
@@ -17,22 +17,13 @@ module produces the new bytes it hands over.
 
 Design rules (enforced by the helpers themselves):
 
-* **Owned vs user content is partitioned by a top-level ``_bootstrap:``
-  mapping.** ``ralph.pipeline.yml`` carries exactly four owned keys
-  (``preset``, ``plan``, ``prompt_file``, ``preflight``); user keys
-  live outside that block and are preserved byte-for-byte by
-  ``apply_owned_keys_to_existing_config``.
-* **``PROMPT.pipeline.md`` is reference-only.** When managed, the prompt
-  REFs the optional plan path and preset id; it never copies hat instructions or surface
-  internal ledgers.
-* **Provenance is computed from the owned bytes the suite actually
-  ships.** ``upgrade_provenance`` blocks when the on-disk provenance
-  disagrees with the current owned bytes (operator hand-edit), and
-  blocks when ``input_signature`` no longer matches the inputs the
-  suite was generated against.
-* **No reference to ``ralph-hats`` or any specific preset name.** The
-  prompt is template-shaped; callers substitute identifiers at run
-  time.
+* **Owned state lives under a top-level ``_bootstrap:`` mapping.** The
+  preset-bound flow adds hashes for the generated profile and prompt.
+* **The prompt is executable input.** Snapshot the literal
+  ``event_loop.prompt`` because Ralph intentionally filters that field from
+  hats-source overlays.
+* **Provenance is embedded.** ``reconcile_preset_bound_suite`` blocks when
+  either on-disk file disagrees with its recorded digest.
 * **Hand-rolled YAML emitter for the owned block.** PyYAML is imported
   when available for parsing only; emission of the owned block uses
   explicit string composition so quote style, ordering and indentation
@@ -41,6 +32,7 @@ Design rules (enforced by the helpers themselves):
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -124,6 +116,43 @@ class PipelineSuite:
 
 
 @dataclass(frozen=True)
+class PresetBoundPaths:
+    """Repo-relative artifact paths derived from one preset identity."""
+
+    config: str
+    prompt: str
+
+
+@dataclass(frozen=True)
+class PresetBoundSuite:
+    """Self-contained bootstrap output for a preset-backed Ralph run."""
+
+    config_path: str
+    prompt_path: str
+    config: str
+    prompt: str
+
+    @property
+    def provenance_path(self) -> None:
+        """Provenance is embedded in ``config``; no sidecar is emitted."""
+        return None
+
+
+@dataclass(frozen=True)
+class PresetBoundApplyResult:
+    """Safe reconciliation result for a preset-bound two-file suite."""
+
+    kind: str
+    suite: PresetBoundSuite | None = None
+    code: str = ""
+    reason: str = ""
+
+    @property
+    def is_blocker(self) -> bool:
+        return self.kind == "blocker"
+
+
+@dataclass(frozen=True)
 class ApplyResult:
     """Outcome of composing a suite against an existing config file."""
 
@@ -162,6 +191,49 @@ def _guardrails_from_facts(project_facts: Any | None) -> tuple[str, ...]:
             "project_facts must expose runtime_guardrails()",
         )
     return tuple(renderer())
+
+
+def derive_preset_bound_paths(preset: str) -> PresetBoundPaths:
+    """Derive collision-resistant suite paths from a file or builtin preset."""
+    if not preset:
+        raise OwnedYamlError("owned_yaml_invalid", "preset is required")
+    raw_name = preset.removeprefix("builtin:") if preset.startswith("builtin:") else Path(preset).name
+    stem = raw_name
+    for suffix in (".yaml", ".yml"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    if not stem or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", stem):
+        raise OwnedYamlError(
+            "owned_yaml_invalid",
+            f"preset name cannot produce a safe artifact stem: {preset}",
+        )
+    return PresetBoundPaths(
+        config=f"ralph.{stem}.yml",
+        prompt=f"PROMPT.{stem}.md",
+    )
+
+
+def extract_inline_preset_prompt(preset_text: str) -> str:
+    """Return the literal ``event_loop.prompt`` carried by a resolved preset."""
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - environment contract
+        raise OwnedYamlError(
+            "owned_yaml_invalid", "PyYAML is required to parse preset YAML"
+        ) from exc
+    try:
+        loaded = yaml.safe_load(preset_text)
+    except yaml.YAMLError as exc:
+        raise OwnedYamlError("owned_yaml_invalid", f"preset YAML is invalid: {exc}") from exc
+    event_loop = loaded.get("event_loop") if isinstance(loaded, dict) else None
+    prompt = event_loop.get("prompt") if isinstance(event_loop, dict) else None
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise OwnedYamlError(
+            "preset_prompt_missing",
+            "preset does not contain a non-empty event_loop.prompt; supply a plan or prompt explicitly",
+        )
+    return prompt
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +726,175 @@ def compose_suite(
         owned_keys_in_config=PIPELINE_OWNED_KEYS,
         owned_keys_in_prompt=(),
     )
+
+
+def compose_preset_bound_suite(
+    *,
+    preset: str,
+    preset_text: str,
+    backend: str,
+    budget_max_iterations: int,
+    budget_wall_clock_seconds: int,
+    preflight_strict: bool = True,
+    diagnostics_enabled: bool = True,
+    project_root_marker: str = "./",
+    project_guardrails: Sequence[str] = (),
+    project_facts: Any | None = None,
+) -> PresetBoundSuite:
+    """Compose the runnable, preset-specific two-file bootstrap contract.
+
+    A hats source cannot supply ``event_loop.prompt`` through Ralph's preset
+    overlay boundary. Bootstrap therefore snapshots that resolved preset text
+    into a dedicated prompt file and points the generated core config at it.
+    Provenance stays inside ``_bootstrap`` so no ``ralph.bootstrap.yml``
+    sidecar is needed.
+    """
+    paths = derive_preset_bound_paths(preset)
+    prompt = extract_inline_preset_prompt(preset_text)
+    audited_guardrails = _guardrails_from_facts(project_facts)
+    effective_guardrails = tuple(
+        dict.fromkeys((*audited_guardrails, *project_guardrails))
+    )
+    config = render_pipeline_yml(
+        preset=preset,
+        prompt_file=paths.prompt,
+        backend=backend,
+        budget_max_iterations=budget_max_iterations,
+        budget_wall_clock_seconds=budget_wall_clock_seconds,
+        preflight_strict=preflight_strict,
+        diagnostics_enabled=diagnostics_enabled,
+        project_root_marker=project_root_marker,
+        project_guardrails=effective_guardrails,
+    )
+    input_signature = _sha256_hex(
+        "\n".join(
+            (
+                preset,
+                preset_text,
+                backend,
+                str(budget_max_iterations),
+                str(budget_wall_clock_seconds),
+                project_root_marker,
+                *effective_guardrails,
+            )
+        )
+    )
+    metadata = (
+        f"  generator_version: {_yaml_escape(GENERATOR_VERSION)}\n"
+        f"  input_signature: {_yaml_escape(input_signature)}\n"
+        f"  profile_sha256: {_yaml_escape(_sha256_hex(config))}\n"
+        f"  prompt_sha256: {_yaml_escape(_sha256_hex(prompt))}\n"
+    )
+    config = config + metadata
+    return PresetBoundSuite(
+        config_path=paths.config,
+        prompt_path=paths.prompt,
+        config=config,
+        prompt=prompt,
+    )
+
+
+_EMBEDDED_PROVENANCE_KEYS: tuple[str, ...] = (
+    "generator_version",
+    "input_signature",
+    "profile_sha256",
+    "prompt_sha256",
+)
+
+
+def _config_without_embedded_provenance(config_text: str) -> str:
+    prefixes = tuple(f"  {key}:" for key in _EMBEDDED_PROVENANCE_KEYS)
+    return "".join(
+        line
+        for line in config_text.splitlines(keepends=True)
+        if not line.startswith(prefixes)
+    )
+
+
+def reconcile_preset_bound_suite(
+    existing_config: str | None,
+    existing_prompt: str | None,
+    requested: PresetBoundSuite,
+) -> PresetBoundApplyResult:
+    """Create, refresh, or reject a preset-bound suite without a sidecar."""
+    if existing_config is None and existing_prompt is None:
+        return PresetBoundApplyResult(kind="created", suite=requested)
+    if existing_config is None or existing_prompt is None:
+        return PresetBoundApplyResult(
+            kind="blocker",
+            code="preset_suite_incomplete",
+            reason="config and prompt must either both exist or both be absent",
+        )
+    try:
+        import yaml  # type: ignore[import-not-found]
+
+        loaded = yaml.safe_load(existing_config)
+    except Exception as exc:
+        return PresetBoundApplyResult(
+            kind="blocker", code="provenance_corrupt", reason=str(exc)
+        )
+    bootstrap = loaded.get("_bootstrap") if isinstance(loaded, dict) else None
+    if not isinstance(bootstrap, dict) or any(
+        not isinstance(bootstrap.get(key), str) for key in _EMBEDDED_PROVENANCE_KEYS
+    ):
+        return PresetBoundApplyResult(
+            kind="blocker",
+            code="provenance_corrupt",
+            reason="embedded bootstrap provenance is missing or malformed",
+        )
+    if bootstrap["profile_sha256"] != _sha256_hex(
+        _config_without_embedded_provenance(existing_config)
+    ):
+        return PresetBoundApplyResult(
+            kind="blocker",
+            code="owned_value_user_modified",
+            reason="config bytes do not match embedded provenance",
+        )
+    if bootstrap["prompt_sha256"] != _sha256_hex(existing_prompt):
+        return PresetBoundApplyResult(
+            kind="blocker",
+            code="owned_value_user_modified",
+            reason="prompt bytes do not match embedded provenance",
+        )
+    if existing_config == requested.config and existing_prompt == requested.prompt:
+        return PresetBoundApplyResult(kind="noop", suite=requested)
+    return PresetBoundApplyResult(kind="updated", suite=requested)
+
+
+def verify_preset_bound_files(
+    project_root: Path, suite: PresetBoundSuite
+) -> PresetBoundApplyResult:
+    """Reopen a written suite and verify paths, bytes, and prompt binding."""
+    root = project_root.resolve()
+    config_path = root / suite.config_path
+    prompt_path = root / suite.prompt_path
+    if not config_path.is_file() or not prompt_path.is_file():
+        return PresetBoundApplyResult(
+            kind="blocker",
+            code="preset_suite_incomplete",
+            reason="preset-bound config and prompt must both exist before validation",
+        )
+    config_text = config_path.read_text(encoding="utf-8")
+    prompt_text = prompt_path.read_text(encoding="utf-8")
+    reconciled = reconcile_preset_bound_suite(config_text, prompt_text, suite)
+    if reconciled.is_blocker:
+        return reconciled
+    try:
+        import yaml  # type: ignore[import-not-found]
+
+        loaded = yaml.safe_load(config_text)
+        effective_prompt = loaded["event_loop"]["prompt_file"]
+    except Exception as exc:
+        return PresetBoundApplyResult(
+            kind="blocker", code="preset_suite_invalid", reason=str(exc)
+        )
+    if effective_prompt != suite.prompt_path:
+        return PresetBoundApplyResult(
+            kind="blocker",
+            code="prompt_source_mismatch",
+            reason=f"config references {effective_prompt!r}, expected {suite.prompt_path!r}",
+        )
+    return PresetBoundApplyResult(kind="noop", suite=suite)
 
 
 def upgrade_provenance(existing: str, new: PipelineSuite) -> UpgradeResult:

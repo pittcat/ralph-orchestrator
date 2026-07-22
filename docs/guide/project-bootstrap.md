@@ -1,103 +1,53 @@
-# Cross-Project Bootstrap — Provenance Guide
+# Cross-Project Bootstrap — Preset-Bound Suite
 
-> Operator-facing reference for the provenance three-key written by
-> `ralph-project-bootstrap` into `ralph.bootstrap.yml`. Use this when
-> deciding whether to refresh, what each field means, and how the
-> bootstrap YAML relates to `ralph.pipeline.yml` and
-> `PROMPT.pipeline.md`.
+`ralph-project-bootstrap` 为每个 preset 生成一套互不覆盖的运行文件。对于
+`modem-case-docs.yml`，产物是：
 
-## Why provenance exists
+- `ralph.modem-case-docs.yml`
+- `PROMPT.modem-case-docs.md`
 
-When `ralph-project-bootstrap` fills missing runtime artifacts for an
-external project, it ships a deterministic, repeatable record under
-`ralph.bootstrap.yml` → `_bootstrap:`. That record lets later runs
-detect:
+启动时必须同时显式指定 config 与 preset：
 
-- The suite was produced by a known generator version.
-- The inputs the suite was generated against still match the current
-  audit (no silent drift).
-- The owned block on disk has not been hand-edited since generation.
+```bash
+ralph -c ralph.modem-case-docs.yml -H modem-case-docs.yml run
+```
 
-Without provenance, bootstrap can re-emit identical YAML forever even
-when the upstream audit or owned bytes change — that is the failure
-mode the three keys exist to prevent.
+## 为什么必须生成 prompt 文件
 
-Source: `skills/ralph-project-bootstrap/scripts/pipeline_suite.py:33-92`.
+通过 `-H` 加载的文件或 builtin preset 属于 hats source。Ralph 的
+operator/preset 合并边界不会把 preset 的 `event_loop.prompt` 合并为最终运行
+配置，因此 bootstrap 会读取完整 preset，把该字段的原始文本快照到
+`PROMPT.<stem>.md`，并在 `ralph.<stem>.yml` 中显式设置
+`event_loop.prompt_file`。
 
-## The three keys in `ralph.bootstrap.yml`
+如果 preset 没有非空 `event_loop.prompt`，操作者又没有提供 plan 或外部
+prompt，bootstrap 必须以 `preset_prompt_missing` 停止，不能生成依赖默认
+`PROMPT.md` 的不完整套件。
 
-| Key | Type | What it captures | When it changes |
-|-----|------|------------------|-----------------|
-| `generator_version` | string | The bootstrap generator version (currently `0.2.0`). | When the bootstrap skill is upgraded. |
-| `input_signature` | string | A digest over the preset, optional prompt/plan paths, and project anchor. | When any launch input changes. |
-| per-file SHA-256 | string | A `path: sha256` entry for every file the suite owns, under `_bootstrap:`. | When the owned bytes change. |
+## 内嵌 provenance
 
-If any of these three are missing, malformed, or stale, the next
-bootstrap run refuses to silently overwrite the owned block and
-returns an `OwnedYamlError` instead.
+生成配置的 `_bootstrap:` 映射保存：
 
-Source: `skills/ralph-project-bootstrap/scripts/pipeline_suite.py:81-95`
-(`Provenance` dataclass).
+| 字段 | 作用 |
+| --- | --- |
+| `preset` | 原始 file preset 路径或 builtin id |
+| `prompt_file` | preset 专属 prompt 路径 |
+| `generator_version` | bootstrap 生成器版本 |
+| `input_signature` | resolved preset 与生成输入的摘要 |
+| `profile_sha256` | 不含 provenance 行的生成配置摘要 |
+| `prompt_sha256` | prompt 快照摘要 |
 
-## When to refresh
+不再生成 `ralph.bootstrap.yml`。再次 bootstrap 时，必须先用
+`reconcile_preset_bound_suite` 核对两个摘要：输入变化且现有文件仍与摘要一致时
+可以安全刷新；人工修改任一受管文件时返回 `owned_value_user_modified`，停止
+覆盖。
 
-Refresh the bootstrap suite whenever **any** of the following holds:
+## 验证要求
 
-1. **Generator upgrade.** Bumping the bootstrap skill's
-   `generator_version` requires a clean re-emission so the new
-   generator is the one stamping the owned block.
-2. **Input drift.** Audit results, fixture sources, or the operator
-   preset or optional launch-input choice changed since the last bootstrap. Run
-   `ralph-project-bootstrap` again to recompute `input_signature`.
-3. **Hand-edit detected.** The per-file SHA-256 entry diverges from
-   the on-disk owned bytes (operator edited the block directly). This
-   is treated as a blocker — either revert the hand-edit or accept the
-   refresh that re-stamps the owned block.
+静态校验顺序为 preset strict check、strict preflight、dry-run。每条命令都要
+显式携带 `-c ralph.<stem>.yml -H <preset>`。dry-run 输出的 prompt 来源必须
+精确等于 `PROMPT.<stem>.md`；回落到 `PROMPT.md` 即为失败。
 
-Do **not** hand-edit the `_bootstrap:` block. The bootstrap skill is
-the only sanctioned writer.
-
-## Relationship to `ralph.pipeline.yml` and `PROMPT.pipeline.md`
-
-`ralph.bootstrap.yml` carries **provenance** for the suite; it does
-**not** run anything by itself. The runtime artifacts are:
-
-- `ralph.pipeline.yml` — runtime configuration for the preset and optional
-  prompt/plan inputs. It is written only when the project needs an override.
-- `PROMPT.pipeline.md` — optional bootstrap-owned prompt. An existing
-  operator-owned prompt can be referenced without being rewritten; a
-  preset-native run needs no prompt artifact.
-
-Only files actually owned by bootstrap have their SHA-256 listed in
-`ralph.bootstrap.yml` `summary`. If bootstrap refuses to refresh and the inputs have not
-changed, the operator's first check should be: does the file on disk
-match the SHA-256 listed in provenance? If not, the file was edited
-out-of-band.
-
-Missing first-run business input does not prevent these files from being
-provisioned. For example, a plan-driven preset without a plan yet receives a
-safe managed fallback prompt and an `incomplete_static_only` handoff containing
-`--plan PLAN_PATH`. The operator supplies the real repo-relative plan when
-starting the first loop; bootstrap never fabricates a placeholder plan file.
-
-Source: `skills/ralph-project-bootstrap/scripts/pipeline_suite.py:108-116`
-(`PipelineSuite` dataclass).
-
-## Operator checklist
-
-When the bootstrap suite refuses to refresh, walk this list before
-overriding:
-
-- [ ] Confirm `generator_version` matches the running bootstrap
-      version (`ralph tools memory search "ralph-project-bootstrap"` or
-      `python -c "import skills.ralph_project_bootstrap as b; print(b.GENERATOR_VERSION)"`).
-- [ ] Confirm `input_signature` matches the current audit output
-      (re-run the audit; if its digest changed, refresh is correct).
-- [ ] Diff each path in `summary` against the on-disk SHA-256 to
-      detect hand-edits (`shasum -a 256 <path>` per entry).
-- [ ] If a hand-edit is intentional, accept the refresh explicitly
-      and re-stamp the suite; otherwise revert the hand-edit first.
-- [ ] After refresh, run the project's authoritative test suite
-      (`python -m pytest skills/tests/test_project_bootstrap_contract.py
-      skills/tests/test_project_bootstrap_e2e.py`) to confirm the
-      refresh did not break existing contracts.
+green dry-run 只证明配置与 prompt 来源解析正确，不证明 loop 已闭环。真实或
+mock backend smoke 仍需操作者授权；只有 skill 自带的固定 replay harness 可以
+自动运行。

@@ -70,7 +70,7 @@ or that the budget / iteration caps are reachable. Downstream stages
 must surface "static load passed; loop not closed" and never claim
 "loop closed".
 
-## Why every argv carries `-c ralph.pipeline.yml -H <preset>`
+## Why every argv carries `-c ralph.<stem>.yml -H <preset>`
 
 The runtime auto-discovers `ralph.yml` as a default config and a
 default preset. Without explicit `-c` and `-H` flags the binary may
@@ -85,6 +85,11 @@ argv the staged gate builds therefore starts with:
 The dry-run stage additionally carries `--dry-run` so the runtime
 takes its static-only branch and never spawns the configured
 backend.
+
+Before the staged gate, reopen `PROMPT.<stem>.md` and verify its SHA-256
+against `_bootstrap.prompt_sha256`. Pass that same path as `prompt_file` to
+`validate_pipeline`; a dry-run that reports `PROMPT.md` or any other source
+must return `blocked_command`.
 
 ## Evidence
 

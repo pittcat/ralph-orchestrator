@@ -17,8 +17,8 @@ inputs:
   - optional launch context (prompt file, plan, environment, or runtime id)
 outputs:
   - owned AGENTS.md / CLAUDE.md updates (idempotent)
-  - only the missing runtime artifacts (idempotent; may be none)
-  - provenance for files actually managed by bootstrap
+  - preset-bound ralph.<stem>.yml and PROMPT.<stem>.md (idempotent)
+  - provenance embedded in the generated config
   - staged validation evidence + verification-level handoff
   - command template for missing first-run inputs (without blocking provisioning)
 boundaries:

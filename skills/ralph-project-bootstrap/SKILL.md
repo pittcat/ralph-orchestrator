@@ -46,8 +46,10 @@ and vetted by `ralph-preset-review`.
    points and derive a launch contract from the preset plus
    operator input. Record optional `prompt_file`, optional `plan_path`,
    runtime environment/argument preconditions, worktree strategy, and which
-   files (if any) need bootstrap ownership. A preset-native run has neither
-   prompt nor plan. Distinguish a **provisioning blocker** (invalid preset,
+   files (if any) need bootstrap ownership. A hats source cannot carry
+   `event_loop.prompt` across Ralph's operator/preset merge boundary, so an
+   inline preset prompt is generation input, not a runtime prompt source.
+   Distinguish a **provisioning blocker** (invalid preset,
    ambiguous root, ownership conflict) from a **first-run input gap** (missing
    plan, loop id, document brief): only the former stops writes. Do not
    classify by preset name.
@@ -60,11 +62,16 @@ and vetted by `ralph-preset-review`.
    the builtin from the installed Ralph distribution; never assume that
    stripping `builtin:` yields a template name. A manifest description alone
    is not sufficient evidence.
-2. **Generate / safely update only needed artifacts.** Agent docs,
-   `ralph.pipeline.yml`, a managed `PROMPT.pipeline.md`, and provenance are
-   candidates, not a mandatory bundle. An operator-owned prompt may be
-   referenced but never rewritten. When the preset and project already form
-   a runnable combination, return `noop` and proceed to validation. Preserve
+2. **Generate / safely update the preset-bound suite.** Derive the preset
+   stem with `derive_preset_bound_paths`, then call
+   `compose_preset_bound_suite` with the full resolved preset YAML. For
+   `<stem>`, own exactly `ralph.<stem>.yml` and `PROMPT.<stem>.md`. Copy the
+   preset's literal `event_loop.prompt` into the prompt artifact and point the
+   generated config at it. Never emit generic `ralph.pipeline.yml`,
+   `PROMPT.md`, `PROMPT.pipeline.md`, or a separate `ralph.bootstrap.yml` for
+   this flow. If the preset has no non-empty inline prompt and the operator
+   supplied neither a plan nor an external prompt, stop with
+   `preset_prompt_missing`. Preserve
    user content outside owned sections / keys; abort on marker / YAML /
    ownership conflict. Use `assets/ralph.pipeline.base.yml` as the structural
    baseline rather than emitting a skeletal config. Adapt that baseline to
@@ -74,18 +81,12 @@ and vetted by `ralph-preset-review`.
    target. A newly generated config containing only `core.project_root` is an
    incomplete bootstrap result.
 
-   If a previous bootstrap-generated config is skeletal, first verify its
-   bytes against `ralph.bootstrap.yml`, then call
-   pass the existing `ralph.bootstrap.yml` bytes to
-   `apply_pipeline_config(..., refresh_generated_profile=True,
-   existing_provenance_text=...)`. The helper must verify the recorded
-   `ralph.pipeline.yml` SHA-256 before refreshing the generator-owned profile.
-   Preserve an operator-authored config byte-for-byte outside
-   `_bootstrap:` and report the exact suggested `core.guardrails` instead of
-   silently taking ownership.
-   For a plan-driven preset with no plan yet, generate `ralph.pipeline.yml`,
-   provenance, agent-doc managed sections when needed, and a managed fallback
-   prompt at the preset's configured `event_loop.prompt_file`. The fallback
+   Reconcile an existing pair with `reconcile_preset_bound_suite`. Embedded
+   `profile_sha256` and `prompt_sha256` must match before refresh; a mismatch
+   is an ownership blocker. Provenance lives under the config's `_bootstrap:`
+   mapping, never in a sidecar.
+   For a plan-driven preset with no plan yet, generate the preset-bound config,
+   agent-doc managed sections when needed, and a managed fallback prompt. The fallback
    must state that a real repo-relative plan is supplied with `--plan`, and
    must stop without changing the project if executed directly. Do not create
    a fake `plan.md`.
@@ -118,7 +119,7 @@ and vetted by `ralph-preset-review`.
 - Never touch `presets/` or `crates/ralph-cli/` source.
 - Never create, switch, or rename git branches / worktrees on the
   operator's behalf.
-- Every verification command must carry explicit `-c ralph.pipeline.yml
+- Every verification command must carry explicit `-c ralph.<stem>.yml
   -H <preset>` so `$RALPH_CONFIG` / `ralph.yml` cannot preempt the
   target suite.
 - All paths written to disk must be repo-relative.
@@ -194,9 +195,8 @@ closed before any partial state is observed.
 
 ## Pipeline Suite Authoring
 
-The pipeline suite (`ralph.pipeline.yml`, `PROMPT.pipeline.md`,
-`ralph.bootstrap.yml`) is generated and safely maintained by
-`scripts/pipeline_suite.py`. The helper owns exactly three files
+The pipeline suite (`ralph.<stem>.yml`, `PROMPT.<stem>.md`) is generated and
+safely maintained by `scripts/pipeline_suite.py`. The helper owns exactly two files
 inside the target project and never touches `AGENTS.md` /
 `CLAUDE.md` (those flow through `agent_docs.py`) or the runtime
 ledger under `.ralph/`.
@@ -204,54 +204,32 @@ ledger under `.ralph/`.
 **Baseline plus project overlay.** Read `assets/ralph.pipeline.base.yml`
 before composing a new config. The asset defines reusable runtime safety and
 diagnosis defaults. Pass the audited `ProjectFacts` directly as
-`project_facts=decision.facts` to `compose_suite` /
-`apply_pipeline_config`; do not manually reconstruct or omit this link.
+`project_facts=decision.facts` to `compose_preset_bound_suite`; do not
+manually reconstruct or omit this link.
 Only emit commands proven by manifests, project docs, task
 runners, or CI. For an unknown stack, retain the generic baseline and tell the
 agent to discover the authoritative gate instead of inventing one. Builtin
 presets and file presets use the same project-overlay path; builtin status is
 only a preset-resolution detail.
 
-**Owned keys.** When `ralph.pipeline.yml` is needed it carries four owned keys
-under a top-level `_bootstrap:` mapping: `preset`, `plan`,
-`prompt_file`, `preflight`. `plan` and `prompt_file` may be empty when the
-preset supplies its own prompt. They describe launch inputs, not universal
-requirements. Anything outside that block is
-operator-owned and is preserved byte-for-byte across recompositions,
-including comments, blank lines, key ordering, and quote style on
-non-owned keys. The helper rejects duplicate top-level keys (other
-than a single `_bootstrap:`) with
-`OwnedYamlError("duplicate_yaml_key")`.
+**Owned keys.** `ralph.<stem>.yml` carries launch inputs plus embedded
+`generator_version`, `input_signature`, `profile_sha256`, and
+`prompt_sha256` under `_bootstrap:`. The hashes prove both generated files
+still match before an idempotent refresh. There is no provenance sidecar.
 
 **Config precedence.** The runtime auto-discovers `ralph.yml` as a
 default config. To prevent it from preempting the suite, every
 verification command the helper emits MUST carry
-`-c ralph.pipeline.yml -H <preset>`. The helper never writes
+`-c ralph.<stem>.yml -H <preset>`. The helper never writes
 `ralph.yml`, never references it in commands, and the
 `config-precedence` fixture is the canonical regression for this
 contract.
 
-**Prompt ownership.** A prompt path and prompt ownership are independent.
-Use `manage_prompt=False` for an operator-owned prompt file: the config may
-reference it, but bootstrap must not render or hash its bytes. Use
-`manage_prompt=True` only for a bootstrap-managed prompt path. Preset-native
-mode uses neither path nor managed prompt.
-
-**Provenance.** When bootstrap manages files, `ralph.bootstrap.yml` records
-`generator_version`, `input_signature` (SHA-256 of preset + optional prompt
-path + optional plan path + prompt ownership + cwd anchor), the owned-keys tuple, and per-file
-SHA-256 only for files bootstrap actually owns. `upgrade_provenance(existing,
-new)` returns:
-
-* `noop` when the on-disk record byte-equals the freshly-rendered one.
-* `upgraded` when the on-disk record differs but the
-  `input_signature` and per-file SHA-256s still match the current
-  compose; the freshly-rendered text is returned so the caller can
-  write it back.
-* `blocker(owned_value_user_modified | provenance_corrupt | input_signature_changed)`
-  when the operator hand-edited the owned section, when the on-disk
-  text is unparseable, or when the inputs the suite was generated
-  against no longer match the current compose.
+**Prompt ownership.** The preset-bound flow snapshots the exact resolved
+`event_loop.prompt` bytes into `PROMPT.<stem>.md`. A later preset change
+changes `input_signature`; refresh is allowed only when both existing files
+still match their embedded hashes. An operator-owned external prompt is a
+different launch contract and is referenced rather than copied.
 
 **Forbidden in emitted bytes.** The prompt must never reference
 `ralph-hats` or any specific preset name; it must never mention the
@@ -287,7 +265,7 @@ proof level monotonically advances: `capability` → `preset_check`
 **highest** proof level the static gate offers.
 
 **Argv shape.** Every argv the helper builds starts with
-`<binary> -c ralph.pipeline.yml -H <preset>` so the runtime cannot
+`<binary> -c ralph.<stem>.yml -H <preset>` so the runtime cannot
 silently substitute `ralph.yml` or the default preset. The dry-run
 argv additionally carries `--dry-run` so the runtime takes its
 static-only branch and never spawns the configured backend. The

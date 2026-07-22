@@ -714,6 +714,107 @@ def _make_pipeline_suite() -> pipeline_suite.PipelineSuite:
     return pipeline_suite.compose_suite(**PIPELINE_KWARGS)  # type: ignore[arg-type]
 
 
+def test_preset_bound_suite_uses_preset_specific_paths_and_prompt() -> None:
+    preset_text = """
+event_loop:
+  prompt: |
+    Generate the modem case documentation.
+    Do not execute hardware operations.
+  max_iterations: 120
+"""
+
+    suite = pipeline_suite.compose_preset_bound_suite(
+        preset="modem-case-docs.yml",
+        preset_text=preset_text,
+        backend="claude",
+        budget_max_iterations=120,
+        budget_wall_clock_seconds=28_800,
+    )
+
+    assert suite.config_path == "ralph.modem-case-docs.yml"
+    assert suite.prompt_path == "PROMPT.modem-case-docs.md"
+    assert suite.prompt == (
+        "Generate the modem case documentation.\n"
+        "Do not execute hardware operations.\n"
+    )
+    user_keys, owned_keys = pipeline_suite.parse_owned_yaml(suite.config)
+    assert user_keys["event_loop"]["prompt_file"] == suite.prompt_path
+    assert "input_signature" in owned_keys
+    assert "profile_sha256" in owned_keys
+    assert "prompt_sha256" in owned_keys
+    assert suite.provenance_path is None
+
+    assert pipeline_suite.reconcile_preset_bound_suite(
+        suite.config, suite.prompt, suite
+    ).kind == "noop"
+
+
+def test_preset_bound_suite_blocks_hand_edited_prompt() -> None:
+    suite = pipeline_suite.compose_preset_bound_suite(
+        preset="modem-case-docs.yml",
+        preset_text="event_loop:\n  prompt: Generate docs.\n",
+        backend="claude",
+        budget_max_iterations=3,
+        budget_wall_clock_seconds=60,
+    )
+    result = pipeline_suite.reconcile_preset_bound_suite(
+        suite.config, suite.prompt + "operator edit\n", suite
+    )
+    assert result.kind == "blocker"
+    assert result.code == "owned_value_user_modified"
+
+
+def test_written_preset_bound_suite_reopens_with_exact_prompt_source(
+    tmp_path: Path,
+) -> None:
+    suite = pipeline_suite.compose_preset_bound_suite(
+        preset="modem-case-docs.yml",
+        preset_text="event_loop:\n  prompt: Generate docs.\n",
+        backend="claude",
+        budget_max_iterations=3,
+        budget_wall_clock_seconds=60,
+    )
+    with agent_docs.AtomicWriter(
+        [
+            (tmp_path / suite.config_path, suite.config),
+            (tmp_path / suite.prompt_path, suite.prompt),
+        ]
+    ) as writer:
+        committed, rolled_back = writer.execute()
+    assert len(committed) == 2
+    assert rolled_back == ()
+    assert pipeline_suite.verify_preset_bound_files(tmp_path, suite).kind == "noop"
+
+
+def test_preset_bound_suite_rejects_missing_inline_prompt() -> None:
+    with pytest.raises(pipeline_suite.OwnedYamlError) as excinfo:
+        pipeline_suite.compose_preset_bound_suite(
+            preset="no-prompt.yml",
+            preset_text="event_loop:\n  max_iterations: 2\n",
+            backend="claude",
+            budget_max_iterations=2,
+            budget_wall_clock_seconds=60,
+        )
+
+    assert excinfo.value.code == "preset_prompt_missing"
+
+
+@pytest.mark.parametrize(
+    ("preset", "expected_stem"),
+    [
+        ("modem-case-docs.yml", "modem-case-docs"),
+        ("presets/custom.docs.yaml", "custom.docs"),
+        ("builtin:ce-executor-pipeline", "ce-executor-pipeline"),
+    ],
+)
+def test_preset_bound_paths_are_derived_from_preset(
+    preset: str, expected_stem: str
+) -> None:
+    paths = pipeline_suite.derive_preset_bound_paths(preset)
+    assert paths.config == f"ralph.{expected_stem}.yml"
+    assert paths.prompt == f"PROMPT.{expected_stem}.md"
+
+
 # S1 — config + prompt generated for blank project.
 
 

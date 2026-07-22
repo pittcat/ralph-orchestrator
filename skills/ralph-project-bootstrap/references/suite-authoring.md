@@ -2,8 +2,8 @@
 
 This document is implementation guidance for the next skill implementor
 working on `ralph-project-bootstrap` and the `scripts/pipeline_suite.py`
-helper. It explains the owned-key contract for `ralph.pipeline.yml`, the
-provenance model in `ralph.bootstrap.yml`, and the upgrade rules that
+helper. It explains the preset-bound two-file contract, embedded provenance,
+and the upgrade rules that
 govern re-running the helper against an existing suite.
 
 End agents (the hat processes Ralph spawns) do **not** see this file.
@@ -11,22 +11,21 @@ The skill owner does.
 
 ## Files the helper owns
 
-The bootstrap pipeline owns exactly three files inside the target
-project:
+For a preset stem `<stem>`, bootstrap owns exactly two files:
 
-* `ralph.pipeline.yml` — runtime config binding preset + optional plan +
+* `ralph.<stem>.yml` — runtime config binding preset + optional plan +
   optional prompt file + preflight strictness, plus a baseline runtime profile
   and project-backed `core.guardrails`. User-owned keys live outside the owned
   block.
-* `PROMPT.pipeline.md` — generated only when bootstrap owns a prompt. It
-  references the optional plan path and preset id and never copies hat
-  instructions. Operator-owned prompt files may be referenced but never
-  rendered or hashed by bootstrap. Preset-native mode creates no prompt file.
+* `PROMPT.<stem>.md` — the literal non-empty `event_loop.prompt` extracted
+  from the fully resolved preset. This snapshot is required because Ralph's
+  hats-source overlay does not carry `event_loop.prompt` into operator config.
+  Operator-owned prompt files may instead be referenced but never rewritten.
   For a plan-driven preset whose first plan is not available yet, the managed
   prompt is a safe fallback: it requires `--plan`, performs no project work if
   reached directly, and allows the reusable suite to be provisioned now.
-* `ralph.bootstrap.yml` — provenance: generator version, input
-  signature, owned-key tuple, per-file owned-bytes SHA-256 digest.
+Provenance is embedded under the config's `_bootstrap:` mapping. Never create
+`ralph.bootstrap.yml` for the preset-bound flow.
 
 No other files are touched by `pipeline_suite.py`. The skill never
 writes `.ralph/` content, never edits `AGENTS.md` / `CLAUDE.md`
@@ -35,7 +34,7 @@ through this helper, and never creates derivative files such as
 
 ## Owned-key contract
 
-`ralph.pipeline.yml` carries **exactly four owned keys** under a
+`ralph.<stem>.yml` carries launch keys and provenance under a
 top-level `_bootstrap:` mapping:
 
 | Key | Type | Notes |
@@ -44,6 +43,10 @@ top-level `_bootstrap:` mapping:
 | `plan` | string | Optional repo-relative plan/task path; empty for non-plan runs. Absolute paths are rejected. |
 | `prompt_file` | string | Optional repo-relative prompt path; empty when the preset supplies its own prompt. Absolute paths are rejected. |
 | `preflight` | string | `"strict"` (default) or `"lenient"`. |
+| `generator_version` | string | Bootstrap generator version. |
+| `input_signature` | string | Digest of resolved preset and generation inputs. |
+| `profile_sha256` | string | Digest of the generated config before embedded provenance fields. |
+| `prompt_sha256` | string | Digest of `PROMPT.<stem>.md`. |
 
 The owned block is delimited by the `_bootstrap:` line and the first
 non-indented line that follows it. Anything outside that block is
@@ -112,10 +115,9 @@ entry point:
 * duplicate top-level key detected → returns
   `ApplyResult(kind="blocker", code="duplicate_yaml_key", ...)`.
 
-For a whole-profile refresh of an older generated config, pass
-`refresh_generated_profile=True` together with the existing provenance text.
-The helper verifies the recorded `ralph.pipeline.yml` SHA-256 before replacing
-the generated profile; a header alone never proves ownership.
+Use `reconcile_preset_bound_suite(existing_config, existing_prompt, requested)`
+before every refresh. Both embedded hashes must match the existing bytes;
+otherwise the helper returns `owned_value_user_modified` and nothing is written.
 
 Atomic disk ops live in `agent_docs.AtomicWriter`. This helper only
 computes the new bytes; the writer is the only place that touches
@@ -123,21 +125,22 @@ the filesystem.
 
 ## Provenance model
 
-`render_provenance(suite)` emits a YAML file with these fields:
+`compose_preset_bound_suite(...)` embeds these provenance fields:
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `generator_version` | string | semver-like; currently `0.3.0`. |
 | `input_signature` | string | SHA-256 of preset + optional prompt path + optional plan path + prompt ownership (`managed` / `referenced`) + plan requirement (`required` / `optional`) + cwd anchor. |
-| `owned_keys` | list of string | the four owned keys, in canonical order. |
-| `summary` | list of `{file, sha256}` | SHA-256 of each suite file's on-disk owned bytes. |
+| `profile_sha256` | string | SHA-256 of the generated config profile before provenance lines. |
+| `prompt_sha256` | string | SHA-256 of the generated prompt bytes. |
 
 The `summary` SHA-256 is computed over the on-disk bytes of the suite
 file. The hash is what the upgrade gate inspects to detect hand-edits.
 
 ## Upgrade rules
 
-`upgrade_provenance(existing, new)` returns one of:
+`reconcile_preset_bound_suite(existing_config, existing_prompt, requested)`
+returns one of:
 
 * `noop` — on-disk provenance byte-equals the freshly-rendered one.
   No write is needed.

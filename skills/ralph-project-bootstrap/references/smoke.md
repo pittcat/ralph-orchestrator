@@ -96,8 +96,8 @@ then ``backend``, then ``project_command``, then ``suite``.
 The harness NEVER touches the operator's working tree. It does not
 ``git clean``, ``git reset``, ``git checkout``, ``git stash``, or
 ``git commit``; it does not ``rm`` files outside ``transcript_dir``;
-it does not modify ``AGENTS.md`` / ``CLAUDE.md`` / ``ralph.pipeline.yml``
-/ ``PROMPT.pipeline.md``; it does not write to ``.ralph/``.
+it does not modify ``AGENTS.md`` / ``CLAUDE.md`` / the preset-bound config
+/ prompt pair; it does not write to ``.ralph/``.
 
 The harness only writes into the optional ``transcript_dir`` (when the
 caller supplies one) and only as a side-effect of the spawned

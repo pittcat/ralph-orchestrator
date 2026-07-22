@@ -29,7 +29,7 @@ def materialise(name: str, target: Path) -> Path:
     # Copytree refuses to copy into an existing dir; fall back to manual copy.
     if target.exists():
         shutil.rmtree(target)
-    shutil.copytree(src, target)
+    shutil.copytree(src, target, ignore=shutil.ignore_patterns(".gitkeep"))
     return target
 
 
