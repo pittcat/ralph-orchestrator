@@ -9,7 +9,8 @@
 #
 # Not registered in presets/manifest.yml; intentionally anonymous.
 event_loop:
-  execution_mode: isolated
+  # Axis (a): supervisor.enabled without isolated → preset.supervisor_requires_isolated
+  execution_mode: coordinator
   supervisor:
     enabled: true
   starting_event: work.start

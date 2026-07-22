@@ -486,8 +486,7 @@ def test_fixtures_readme_lists_wave_and_supervisor_fixtures() -> None:
 def test_wave_capability_fixture_has_no_builtin_preset_name_gate() -> None:
     """The wave negative fixture must not be gated by any builtin preset name."""
     fixture = FIXTURES_DIR / "aaf-wave-capability-negative-fixture.yml"
-    if not fixture.is_file():
-        pytest.skip("wave fixture will land in U6")
+    assert fixture.is_file(), f"missing fixture: {fixture}"
     text = fixture.read_text(encoding="utf-8")
     pattern = re.compile(r"ce-executor-supervisor")
     assert not pattern.search(text), (
@@ -499,8 +498,7 @@ def test_wave_capability_fixture_has_no_builtin_preset_name_gate() -> None:
 def test_supervisor_capability_fixture_has_no_builtin_preset_name_gate() -> None:
     """The supervisor negative fixture must not be gated by any builtin preset name."""
     fixture = FIXTURES_DIR / "aaf-supervisor-capability-negative-fixture.yml"
-    if not fixture.is_file():
-        pytest.skip("supervisor fixture will land in U6")
+    assert fixture.is_file(), f"missing fixture: {fixture}"
     text = fixture.read_text(encoding="utf-8")
     pattern = re.compile(r"ce-executor-supervisor")
     assert not pattern.search(text), (
@@ -509,9 +507,47 @@ def test_supervisor_capability_fixture_has_no_builtin_preset_name_gate() -> None
     )
 
 
+def test_supervisor_capability_fixture_axis_a_non_isolated() -> None:
+    """Axis (a) must plant non-isolated mode so ``preset.supervisor_requires_isolated`` is reachable.
+
+    Review P1: fixture previously set ``execution_mode: isolated`` while the
+    header claimed the opposite, making the soft AAF matrix unreachable.
+    """
+    fixture = FIXTURES_DIR / "aaf-supervisor-capability-negative-fixture.yml"
+    text = fixture.read_text(encoding="utf-8")
+    assert re.search(r"(?m)^\s*supervisor:\s*$", text) or "supervisor:" in text
+    assert "enabled: true" in text
+    # Must NOT be isolated — coordinator (or any non-isolated) plants the lint.
+    assert re.search(r"(?m)^\s*execution_mode:\s*isolated\s*$", text) is None, (
+        "supervisor capability negative fixture axis (a) requires "
+        "execution_mode != isolated so preset.supervisor_requires_isolated can fire"
+    )
+    assert re.search(r"(?m)^\s*execution_mode:\s*\S+", text), (
+        "supervisor capability negative fixture must declare execution_mode"
+    )
+    readme = _read(FIXTURES_README)
+    assert "preset.supervisor_requires_isolated" in readme
+    assert re.search(
+        r"Supervisor \(a\).{0,120}(coordinator|non-isolated|!= isolated|不是 isolated)",
+        readme,
+        re.IGNORECASE | re.DOTALL,
+    ), "fixtures README axis (a) must describe non-isolated / coordinator mode"
+
+
 # ---------------------------------------------------------------------------
 # U7 — diagnosis: execution_capabilities + capability-aware reconciliation
 # ---------------------------------------------------------------------------
+
+
+DIAGNOSIS_ARTIFACT_DISCOVERY = (
+    ROOT / "skills" / "ralph-run-diagnosis" / "references" / "artifact-discovery.md"
+)
+DIAGNOSIS_VERIFICATION_PIPELINE = (
+    ROOT / "skills" / "ralph-run-diagnosis" / "references" / "verification-pipeline.md"
+)
+DIAGNOSIS_REPORT_TEMPLATE = (
+    ROOT / "skills" / "ralph-run-diagnosis" / "references" / "report-template.md"
+)
 
 
 def test_diagnosis_report_template_has_execution_capabilities() -> None:
@@ -519,6 +555,9 @@ def test_diagnosis_report_template_has_execution_capabilities() -> None:
     text = _read(DIAGNOSIS_SKILL)
     assert "execution_capabilities" in text, (
         "ralph-run-diagnosis SKILL.md must declare execution_capabilities"
+    )
+    assert "execution_capabilities" in _read(DIAGNOSIS_REPORT_TEMPLATE), (
+        "report-template.md must declare execution_capabilities"
     )
 
 
@@ -553,6 +592,68 @@ def test_diagnosis_missing_supervisor_db_not_fault_without_signal() -> None:
     )
 
 
+def test_diagnosis_wave_signal_excludes_coord_topics() -> None:
+    """``+wave`` must not be inferred from ``exec.wave.*`` coordination topics.
+
+    Review P1: treating supervisor coordination publishes as wave fan-out
+    falsely requires wave_id reconciliation on non-wave runs.
+    """
+    text = _read(DIAGNOSIS_SKILL)
+    # Positive wave signals must remain.
+    assert "ralph wave emit" in text
+    assert "WAVE CONTEXT" in text or "wave_id" in text
+    # The Phase 0 section must forbid coord-topic → +wave.
+    phase0 = re.search(
+        r"Phase 0 能力推断.*?(?=^##\s|\Z)",
+        text,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert phase0 is not None, "diagnosis SKILL.md missing Phase 0 能力推断 section"
+    body = phase0.group(0)
+    assert re.search(
+        r"禁止.{0,40}exec\.wave|exec\.wave\.\*.{0,80}禁止|不是 wave",
+        body,
+        re.IGNORECASE | re.DOTALL,
+    ), (
+        "Phase 0 must explicitly forbid inferring +wave from exec.wave.* "
+        "coordination topics"
+    )
+    # Must not keep the old buggy one-liner that OR'd exec.wave into +wave.
+    assert not re.search(
+        r"publishes.{0,40}exec\.wave\.\*.{0,40}\+wave|"
+        r"exec\.wave\.\*.{0,40}ralph wave emit.{0,40}\+wave",
+        body,
+        re.IGNORECASE | re.DOTALL,
+    ), "Phase 0 must not treat exec.wave.* publishes as a +wave signal"
+
+
+def test_diagnosis_links_to_preset_common_rubric() -> None:
+    """Diagnosis must link finding-rubric via ralph-preset-common, not a missing local path."""
+    text = _read(DIAGNOSIS_SKILL)
+    assert "ralph-preset-common/references/finding-rubric.md" in text, (
+        "diagnosis SKILL.md must point at ../ralph-preset-common/references/finding-rubric.md "
+        "(local references/finding-rubric.md does not exist)"
+    )
+    assert not re.search(
+        r"(?<!\.\./ralph-preset-common/)references/finding-rubric\.md",
+        text,
+    ), "diagnosis must not cite a broken local references/finding-rubric.md"
+
+
+def test_diagnosis_artifact_discovery_has_execution_capabilities() -> None:
+    """U7: artifact-discovery must document execution_capabilities inference."""
+    text = _read(DIAGNOSIS_ARTIFACT_DISCOVERY)
+    assert "execution_capabilities" in text
+    assert "supervisor.db" in text
+
+
+def test_diagnosis_verification_pipeline_has_execution_capabilities() -> None:
+    """U7: verification-pipeline L0/L3 must be capability-triggered."""
+    text = _read(DIAGNOSIS_VERIFICATION_PIPELINE)
+    assert "execution_capabilities" in text
+    assert "wave_id" in text or "supervisor.db" in text
+
+
 # ---------------------------------------------------------------------------
 # U8 — cross-cutting: no new preset-name gates; install still works
 # ---------------------------------------------------------------------------
@@ -580,7 +681,7 @@ def test_no_new_preset_name_gates_for_supervisor_wave(path: Path) -> None:
     rule itself quotes the forbidden pattern.
     """
     if not path.is_file():
-        pytest.skip(f"{path} will land in a later unit")
+        pytest.fail(f"expected plan-scoped file missing: {path}")
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
     for idx, line in enumerate(lines):

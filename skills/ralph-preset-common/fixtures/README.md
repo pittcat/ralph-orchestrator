@@ -133,7 +133,7 @@ shape error the soft AAF path is supposed to catch.
 | Wave (b) | `dispatcher` skips `ralph wave verify` before real emit | `preset.wave_missing_verify_before_emit` | U4 finding |
 | Wave (c) | `worker_alpha` Confirm path reads hat-channel | `preset.wave_confirm_uses_hat_channel` | U4 finding |
 | Wave (d) | `coordinator` publishes `exec.wave.complete` (coordination topic) | `preset.wave_agent_emits_coordination_topic` | U4 finding |
-| Supervisor (a) | `execution_mode: isolated` + `supervisor.enabled: true` (lint) + hat reads `supervisor.db` | `preset.supervisor_requires_isolated` / `preset.supervisor_unit_state_not_via_task_api` | existing lint + U4 finding |
+| Supervisor (a) | `execution_mode: coordinator` + `supervisor.enabled: true`（非 isolated） | `preset.supervisor_requires_isolated`（软性 AAF / review 读 YAML 形状命中；当前 `ralph preset check` CLI 路径可能不吐出该 lint id） | existing lint id / U4 finding |
 | Supervisor (b) | `worker` publishes `exec.wave.failed` | `preset.supervisor_hat_publishes_coord_topic` | U4 finding |
 | Supervisor (c) | `dispatcher` reads `.ralph/supervisor.db` as unit state | `preset.supervisor_unit_state_not_via_task_api` | U4 finding |
 | Supervisor (d) | `dispatcher` reads `supervisor.db` as business artifact | `preset.artifact_uses_internal_ledger` | existing review-only |

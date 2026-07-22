@@ -96,18 +96,41 @@ test -f "$RUN/.ralph/loop.lock" && echo "LOCK_HELD" || echo "lock_released"
 
 ---
 
+## Step 5b：执行能力推断（execution_capabilities）
+
+在写《产物盘点表》之前，按主 skill「Phase 0 能力推断」段产出 `execution_capabilities`（字符串数组）。检测信号冻结在 [`../../ralph-preset-common/references/agent-native-model.md`](../../ralph-preset-common/references/agent-native-model.md)「执行模型（Execution Model）」段：
+
+| 信号 | → capability |
+|------|----------------|
+| `event_loop.supervisor.enabled: true` | +supervisor |
+| hat `instructions` 含 `ralph wave emit` / `ralph wave verify`，或 `## WAVE CONTEXT` | +wave |
+| events 含 `wave_id` | +wave（产物侧） |
+| `.ralph/supervisor.db` 存在 | +supervisor（**仅**当 YAML 也声明；产物不推翻配置） |
+
+**硬规则**：
+
+- **禁止**用 `exec.wave.*` / `slot.*` 推断 +wave（协调 topic ≠ wave fan-out）。
+- 能力集合为单链（或不含 supervisor/wave）时：缺 `.ralph/supervisor.db`、events 无 `wave_id` 均为**预期**，**不**标故障。
+- 将 `execution_capabilities` 写入报告 §0（见 [report-template.md](report-template.md)）。
+
+---
+
 ## Step 6：《产物盘点表》
 
 | Tier | 路径 | 存在 | 行数 | 备注 |
 |------|------|------|------|------|
-| S | events（指针解析后） | | | |
+| S | events（指针解析后） | | | 扫 `wave_id` 作 capability 信号 |
 | S | recovery.jsonl | | 0行=无拒收 | |
 | A | tasks.jsonl | | | tasks.enabled? |
 | B | diagnostics mode | | | FULL/MINIMAL/LOGS_ONLY |
+| B | `.ralph/supervisor.db` | | | **仅** capability +supervisor 时缺则记缺失；否则 N/A |
 | C | （逐条） | | | |
+
+盘点表上方必填一行：`execution_capabilities: [...]`（Phase 0 / Step 5b 结果）。
 
 **门禁**：
 
 - 缺 `current-events` 或指向文件 → **停止**
 - LOGS_ONLY → 报告必须含 OPAC 降级声明（见 [opac-audit-by-mode.md](opac-audit-by-mode.md)）
 - 报告写入 **`$REPO/docs/report/`**（非 run_dir）
+- 未声明 `execution_capabilities` → **不得**把缺 `supervisor.db` / 缺 `wave_id` 写成故障

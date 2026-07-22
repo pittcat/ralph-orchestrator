@@ -64,11 +64,12 @@ Diagnostics 四档：`FULL` | `MINIMAL` | `LOGS_ONLY` | `DISABLED` — 决定 L2
 
 **推断步骤（顺序固定）**：
 
-1. 读 `references/agent-native-model.md`「执行模型（Execution Model）」段确认枚举与检测信号；该节是 frozen vocabulary，本 plan 不再扩展。
+1. 读 [`../ralph-preset-common/references/agent-native-model.md`](../ralph-preset-common/references/agent-native-model.md)「执行模型（Execution Model）」段确认枚举与检测信号；该节是 frozen vocabulary，本 plan 不再扩展。
 2. 解析 preset：
    - `event_loop.supervisor.enabled: true` → capability +supervisor
-   - hat `publishes` 含 `exec.wave.*` / hat `instructions` 含 `ralph wave emit` → capability +wave
-3. 解析 Intent（如有作者 notes）：`execution_model: wave | supervisor | supervisor+wave` → 与上面 capability 一致则 OK；不一致 → 主表 P0（详见 `references/finding-rubric.md`「Supervisor capability audit」段 `preset.execution_model_intent_mismatch`）。
+   - hat `instructions` 含 `ralph wave emit` / `ralph wave verify`，或 hat 依赖 `## WAVE CONTEXT` → capability +wave
+   - **禁止**用 `exec.wave.*` / `slot.*` 等协调 topic 推断 +wave（那些是 supervisor 协调面，走 supervisor audit，不是 wave fan-out 信号）
+3. 解析 Intent（如有作者 notes）：`execution_model: wave | supervisor | supervisor+wave` → 与上面 capability 一致则 OK；不一致 → 主表 P0（详见 [`../ralph-preset-common/references/finding-rubric.md`](../ralph-preset-common/references/finding-rubric.md)「Supervisor capability audit」段 `preset.execution_model_intent_mismatch`）。
 4. 扫描产物：
    - `.ralph/supervisor.db` 存在 → capability +supervisor（**仅**当上一步 YAML 也声明；产物不应推翻配置）
    - events 含 `wave_id` → capability +wave

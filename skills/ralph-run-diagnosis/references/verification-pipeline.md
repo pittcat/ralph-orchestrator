@@ -25,7 +25,9 @@ L0 盘点 → L1 拓扑 → L2 日志三联 → L3 产物五证 → L4 机制十
 
 **产出**：《Run 元数据表》+ 《产物盘点表》+ diagnostics 盲区声明（若无 full session）。
 
-**门禁**：Tier S 的 `current-events` 或指向的 events 缺失 → **停止**。
+**能力字段（强制）**：L0 必须带出 Phase 0 的 **`execution_capabilities`**（见 [artifact-discovery.md](artifact-discovery.md) Step 5b 与主 skill「Phase 0 能力推断」）。后续 L3/L4 对 `.ralph/supervisor.db` / `wave_id` 的缺失判定一律 capability-triggered；单链或缺能力信号时不得把缺 db / 缺 wave_id 标为故障。
+
+**门禁**：Tier S 的 `current-events` 或指向的 events 缺失 → **停止**。未写出 `execution_capabilities` → **不得**进入把缺 supervisor.db / wave_id 当故障的归因。
 
 ---
 
@@ -75,6 +77,15 @@ L0 盘点 → L1 拓扑 → L2 日志三联 → L3 产物五证 → L4 机制十
 - hat-channel：`events-hat-{hat}-{loop_id}-{iter}.jsonl`
 - Tier C：`review-sequence.json` 等在 `.agents/...`（非 `.ralph/`）
 - `run_dir/ralph.yml`、`git log` / `git diff`
+
+**capability 条件对账（L3）**：
+
+| 条件 | 动作 |
+|------|------|
+| `execution_capabilities` 含 supervisor | 勾差 `.ralph/supervisor.db`；缺 → 记缺失（runtime） |
+| 不含 supervisor | 缺 `supervisor.db` → **N/A**，非故障 |
+| `execution_capabilities` 含 wave，或 events 已见 `wave_id` | worker/dispatcher Confirm 走 `ralph events --events-source main`（main ledger）；**禁止**用 hat-channel 做 wave Confirm |
+| 不含 wave | events 无 `wave_id` → **N/A**，非故障 |
 
 **产出**：Agent C《偏离证据清单》DEV-xxx + §3.4 OPAC/机制行为表。
 
