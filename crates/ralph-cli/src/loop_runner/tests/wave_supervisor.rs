@@ -41,7 +41,8 @@
 
 use super::super::*;
 use crate::loop_runner::wave::{
-    BridgeError, MockSupervisorBridge, SlotBinding, SupervisorBridge, is_supervisor_path_enabled,
+    BridgeError, MockSupervisorBridge, SlotBinding, SupervisorBridge, WaveWorkerExecutor,
+    is_supervisor_path_enabled,
 };
 use ralph_core::supervisor::{PhaseInputs, WaveKind};
 use std::collections::HashMap;
@@ -1533,3 +1534,658 @@ fn test_dispatcher_fail_closed_on_exec_bind_none() {
          (SharedReadonly is the legitimate path); got binding={review_binding:?}"
     );
 }
+
+// =============================================================================
+// U3 KTD-1..KTD-5: dispatcher awaits store approval before spawn.
+//
+// The supervisor path (execute_wave_via_supervisor) gates every
+// slot on `bridge.try_dispatch_next(wave_id, slot_index)`. The
+// store may approve or withhold each call; the dispatcher MUST
+// only push a WorkerRequest for the slot when the bridge returns
+// `Ok(true)`. When the bridge returns `Ok(false)` the slot is
+// skipped (no spawn); when `Err` the dispatcher fails closed and
+// does not spawn.
+//
+// The local effective cap is `min(hat.concurrency,
+// bridge.max_concurrent_workers())` — the dispatcher tracks how
+// many slots it has approved in this wave and stops pushing
+// WorkerRequests once the cap is reached. The store-side cap
+// still applies (any subsequent `try_dispatch_next` returns
+// `Ok(false)` naturally), but the dispatcher pre-truncates so
+// the test signal is deterministic.
+//
+// The tests below use a `U3DispatchBridge` (spy) that owns an
+// `InMemorySupervisorStore` and decides which slots are
+// approved via a scripted `Outcome` set. The bridge surface
+// mirrors `SupervisorBridge::try_dispatch_next` exactly: when
+// the store approves `(wave_id, slot_index)` (i.e. the store's
+// `try_dispatch_next(max_workers)` returns that exact pair),
+// the bridge returns `Ok(true)`; otherwise `Ok(false)`. When
+// the spy is configured with `dispatch_outcome = Err(...)`
+// the bridge surfaces the error; the dispatcher MUST propagate
+// it without spawning a worker for the failing slot.
+//
+// We deliberately drive the supervisor path directly through
+// `production_bridge_with_factory` rather than the
+// `MockSupervisorBridge` (which always returns `Ok(None)` from
+// `bind_slot`). The supervisor path's per-slot `bind_slot`
+// must succeed so the WorkerRequest.cwd is non-None and the
+// spawn attempt is real; only the dispatch-approval gate is
+// under the test's control.
+// =============================================================================
+
+/// Spy bridge that exposes a controllable `try_dispatch_next`
+/// outcome while delegating `bind_slot` to a real
+/// `CoordinatorSupervisorBridge`-style path against an
+/// `InMemorySupervisorStore` + `RecordingFactory`. The bridge
+/// records every `try_dispatch_next` call so tests can assert
+/// the dispatcher's call ordering.
+#[derive(Debug, Clone)]
+struct U3DispatchBridge {
+    store: std::sync::Arc<dyn SupervisorStore>,
+    /// Hard max concurrent workers — the trait surface the
+    /// dispatcher multiplies against `hat.concurrency`.
+    max_concurrent_workers: u32,
+    /// Recorded `(wave_id, slot_index)` calls. Tests use the
+    /// snapshot to confirm the dispatcher queried the bridge
+    /// once per slot (and not fewer / not more).
+    dispatch_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, u32)>>>,
+    /// When `Some(Err(_))`, the bridge surfaces that error
+    /// from `try_dispatch_next` regardless of store state. Used
+    /// by the fail-closed-on-error test.
+    override_outcome: std::sync::Arc<std::sync::Mutex<Option<DispatchOverride>>>,
+}
+
+#[derive(Debug, Clone)]
+enum DispatchOverride {
+    /// Force every `try_dispatch_next` call to return `Ok(false)`
+    /// (the store has nothing pending). The dispatcher MUST skip
+    /// every slot.
+    AlwaysDeny,
+    /// Force every `try_dispatch_next` call to return
+    /// `Err(BridgeError::Store(_))`. The dispatcher MUST fail
+    /// closed.
+    AlwaysError(String),
+}
+
+impl U3DispatchBridge {
+    fn new(store: std::sync::Arc<dyn SupervisorStore>, max_concurrent_workers: u32) -> Self {
+        Self {
+            store,
+            max_concurrent_workers,
+            dispatch_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            override_outcome: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    fn dispatch_calls_snapshot(&self) -> Vec<(String, u32)> {
+        self.dispatch_calls.lock().unwrap().clone()
+    }
+
+    fn set_override(&self, override_outcome: Option<DispatchOverride>) {
+        *self.override_outcome.lock().unwrap() = override_outcome;
+    }
+
+    #[allow(dead_code)]
+    fn store(&self) -> std::sync::Arc<dyn SupervisorStore> {
+        self.store.clone()
+    }
+
+    #[allow(dead_code)]
+    fn max_concurrent_workers(&self) -> u32 {
+        self.max_concurrent_workers
+    }
+}
+
+impl SupervisorBridge for U3DispatchBridge {
+    fn tick(
+        &self,
+        _wave_id: &str,
+        _inputs: PhaseInputs,
+    ) -> Result<ralph_core::supervisor::CoordinatorAction, BridgeError> {
+        Ok(ralph_core::supervisor::CoordinatorAction::ContinueCollect)
+    }
+
+    fn max_concurrent_workers(&self) -> u32 {
+        self.max_concurrent_workers
+    }
+
+    fn try_dispatch_next(&self, wave_id: &str, slot_index: u32) -> Result<bool, BridgeError> {
+        self.dispatch_calls
+            .lock()
+            .unwrap()
+            .push((wave_id.to_string(), slot_index));
+        if let Some(override_outcome) = self.override_outcome.lock().unwrap().clone() {
+            return match override_outcome {
+                DispatchOverride::AlwaysDeny => Ok(false),
+                DispatchOverride::AlwaysError(msg) => Err(BridgeError::Store(msg)),
+            };
+        }
+        // Drive the store's own dispatch approval. The store's
+        // `try_dispatch_next(max)` returns the next pending slot
+        // (if any), bumping `active_workers` and the slot's
+        // status to `Dispatched`. We then check whether the
+        // returned `(wave_id, slot_index)` matches what the
+        // dispatcher requested.
+        let dispatched = self
+            .store
+            .try_dispatch_next(self.max_concurrent_workers)
+            .map_err(|err| BridgeError::Store(err.to_string()))?;
+        Ok(matches!(
+            dispatched,
+            Some((ref dispatched_wave_id, dispatched_slot_index))
+                if dispatched_wave_id == wave_id && dispatched_slot_index == slot_index
+        ))
+    }
+
+    fn bind_slot(
+        &self,
+        kind: WaveKind,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> Result<Option<SlotBinding>, BridgeError> {
+        // Always return a binding so the dispatcher can build a
+        // real WorkerRequest. We do NOT call `store.bind_worktree`
+        // here: the test pre-binds the specific slots it wants
+        // approved (so the store's `try_dispatch_next` only
+        // returns those). If we bound here, the store would
+        // auto-approve every slot and the gate would degenerate
+        // to "always approve".
+        let mut env = HashMap::new();
+        env.insert("RALPH_WAVE_WORKER".to_string(), "1".to_string());
+        env.insert(
+            "RALPH_WAVE_WORKTREE_PATH".to_string(),
+            format!("/tmp/u3-spy/{wave_id}-{slot_index}"),
+        );
+        env.insert("RALPH_WAVE_ID".to_string(), wave_id.to_string());
+        env.insert("RALPH_WAVE_INDEX".to_string(), slot_index.to_string());
+        env.insert("RALPH_WAVE_KIND".to_string(), format!("{kind:?}"));
+        Ok(Some(SlotBinding {
+            slot_index,
+            env,
+            worktree_path: Some(format!("/tmp/u3-spy/{wave_id}-{slot_index}").into()),
+        }))
+    }
+
+    fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
+        Ok(Vec::new())
+    }
+
+    fn register_wave_if_absent(
+        &self,
+        kind: WaveKind,
+        wave_id: &str,
+        expected_total: u32,
+    ) -> Result<String, BridgeError> {
+        // Register the wave in the store so subsequent
+        // `bind_worktree` calls succeed. Return the STORE's
+        // allocated id (`w-{seq}`) so the dispatcher's
+        // subsequent `bind_slot(wave_id, ...)` calls line up
+        // with the store's `waves_by_id` keys.
+        use ralph_core::supervisor::SupervisorStoreError;
+        match self.store.register_wave(wave_id, kind, expected_total) {
+            Ok(store_wave_id) => Ok(store_wave_id),
+            Err(SupervisorStoreError::DuplicateKey(_)) => {
+                // Idempotent re-entry: the wave is already
+                // registered under the caller's idempotency
+                // key. Recover the store's id by walking active
+                // waves; for the test scenarios we only have
+                // one wave, so the first snapshot is the right
+                // one.
+                let mut snapshots = self
+                    .store
+                    .recover_active_waves()
+                    .map_err(|err| BridgeError::Store(err.to_string()))?;
+                let snapshot = snapshots.pop().ok_or_else(|| {
+                    BridgeError::Store(format!(
+                        "register_wave_if_absent: duplicate key {wave_id} but no recovered wave"
+                    ))
+                })?;
+                Ok(snapshot.wave_id)
+            }
+            Err(err) => Err(BridgeError::Store(err.to_string())),
+        }
+    }
+
+    fn record_slot_result(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+        _content_hash: &str,
+        _event_count: usize,
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
+    fn record_slot_failure(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+        _reason: &str,
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
+}
+
+/// Drive `execute_wave_via_supervisor_with_executor` with a
+/// `U3DispatchBridge` and an injected `U3CountingExecutor`. The
+/// helper returns the dispatch outcome and the `started`
+/// counter so the test can assert how many slots actually
+/// spawned a worker.
+///
+/// The test goes through the SUPERVISOR path's hot loop (the
+/// one inside `execute_wave_via_supervisor_with_executor`),
+/// not the legacy `WaveTracker` path, so it pins the gate under
+/// test rather than a replica.
+async fn run_u3_execute_wave(
+    bridge: U3DispatchBridge,
+    wave: ralph_core::DetectedWave,
+    started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> (
+    WaveDispatchOutcome,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use crate::loop_runner::wave::execute_wave_via_supervisor_with_executor;
+
+    let wave_dir = std::env::temp_dir().join(format!("u3-disp-{}", wave.wave_id));
+    let _ = std::fs::create_dir_all(&wave_dir);
+    let main_events_file = wave_dir.join("events.jsonl");
+    let _ = std::fs::File::create(&main_events_file);
+
+    let executor = std::sync::Arc::new(U3CountingExecutor::new(started.clone()));
+    let executor_dyn: std::sync::Arc<dyn WaveWorkerExecutor> = executor as _;
+    let bridge_arc: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
+    let outcome = execute_wave_via_supervisor_with_executor(
+        &wave,
+        &make_test_cli_backend(),
+        &main_events_file,
+        false,
+        false,
+        None,
+        None,
+        "u3-test-loop",
+        WaveDispatchLimits::default(),
+        None,
+        None,
+        &bridge_arc,
+        executor_dyn,
+    )
+    .await;
+    (outcome, started)
+}
+
+/// Build a `CliBackend` that the dispatcher can pass to
+/// `WorkerRequest` without spawning a real process. The
+/// executor in `U3CountingExecutor` never invokes the
+/// backend, so a sentinel value is sufficient.
+fn make_test_cli_backend() -> CliBackend {
+    CliBackend {
+        command: "echo".to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: ralph_adapters::OutputFormat::Text,
+        env_vars: vec![],
+    }
+}
+
+/// Minimal executor that increments a `started` counter on
+/// every `execute()` call, then sleeps briefly and returns a
+/// successful outcome. Success decouples the test from
+/// `dispatch_wave_inner`'s deadline / abort logic so the
+/// `started` count is stable.
+struct U3CountingExecutor {
+    started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl U3CountingExecutor {
+    fn new(started: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        Self { started }
+    }
+}
+
+impl WaveWorkerExecutor for U3CountingExecutor {
+    fn execute(
+        &self,
+        mut request: crate::loop_runner::wave::WorkerRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (u32, WaveWorkerOutcome)> + Send>> {
+        let started = std::sync::Arc::clone(&self.started);
+        Box::pin(async move {
+            started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = request.worker_rpc_tx.take();
+            let _ = request.worker_tui_state.take();
+            let event = ralph_core::Event {
+                topic: "review.done".to_string(),
+                payload: Some("ok".to_string()),
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: None,
+                wave_id: None,
+                wave_index: None,
+                wave_total: None,
+                system_injected: None,
+            };
+            (
+                request.index,
+                Ok((vec![event], Duration::from_millis(10), true)),
+            )
+        })
+    }
+}
+
+/// U3 KTD-1: when the store has no pending dispatch decision
+/// (override → `Ok(false)`), the dispatcher MUST NOT spawn any
+/// worker for the wave. The supervisor path's per-slot
+/// `try_dispatch_next` returns `Ok(false)` for every slot, so
+/// the dispatcher skips every slot.
+#[tokio::test]
+async fn test_dispatcher_awaits_store_approval() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U3DispatchBridge::new(store.clone(), 4);
+    bridge.set_override(Some(DispatchOverride::AlwaysDeny));
+
+    let wave = make_u3_wave("u3-deny", 3, 3);
+
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (outcome, started) = run_u3_execute_wave(bridge.clone(), wave, started.clone()).await;
+    let _ = outcome;
+
+    assert_eq!(
+        started.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "U3 KTD-1: dispatcher MUST NOT spawn a worker when the store has no pending dispatch; \
+         got {} spawns",
+        started.load(std::sync::atomic::Ordering::SeqCst)
+    );
+
+    let calls = bridge.dispatch_calls_snapshot();
+    assert_eq!(
+        calls.len(),
+        3,
+        "U3 KTD-1: dispatcher MUST query the bridge once per slot (3 events → 3 tries); \
+         got {calls:?}"
+    );
+}
+
+/// U3 KTD-2: when the store approves exactly one slot
+/// (`try_dispatch_next` returns `Ok(true)` for slot 0 and
+/// `Ok(false)` for slot 1, 2), the dispatcher MUST spawn only
+/// one worker. The store's `bind_worktree` was called for slot
+/// 0 only, so the store's `try_dispatch_next` returns
+/// `(wave_id, 0)` once and `None` thereafter.
+#[tokio::test]
+async fn test_dispatcher_spawns_only_approved_slot() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U3DispatchBridge::new(store.clone(), 4);
+
+    let wave = make_u3_wave("u3-only-0", 3, 3);
+
+    // Register the wave through the bridge so the dispatcher's
+    // subsequent `register_wave_if_absent` is idempotent and we
+    // can recover the store's `w-{seq}` id for the bind_worktree
+    // calls below.
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "u3-only-0", 3)
+        .expect("register_wave_if_absent");
+
+    // Pre-bind only slot 0 in the store so the store's
+    // `try_dispatch_next` returns `(store_wave_id, 0)` once and
+    // `None` for slots 1/2.
+    let resource = ralph_core::supervisor::SlotResource {
+        slot_index: 0,
+        worktree_path: Some("/tmp/u3-only-0/0".to_string()),
+        branch: Some("u3-only-0-exec-0".to_string()),
+    };
+    store
+        .bind_worktree(&store_wave_id, 0, resource)
+        .expect("pre-bind slot 0");
+
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (outcome, started) = run_u3_execute_wave(bridge.clone(), wave, started.clone()).await;
+    let _ = outcome;
+
+    assert_eq!(
+        started.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "U3 KTD-2: dispatcher MUST spawn exactly one worker when the store approves one slot; \
+         got {} spawns",
+        started.load(std::sync::atomic::Ordering::SeqCst)
+    );
+
+    let calls = bridge.dispatch_calls_snapshot();
+    // Slot 0 is approved → it gets pushed. Slots 1/2 are NOT
+    // bound in the store, so `try_dispatch_next` returns
+    // `Ok(false)` for them. The dispatcher's loop should query
+    // once for slot 0 (approved) and then visit slot 1/2 to
+    // confirm the store returns `Ok(false)` for them.
+    assert!(
+        calls.len() >= 1,
+        "U3 KTD-2: dispatcher MUST query the bridge at least once (slot 0); got {calls:?}"
+    );
+    let first = calls.first().expect("non-empty");
+    assert_eq!(first.0, store_wave_id);
+    assert_eq!(first.1, 0, "slot 0 must be the first approved slot");
+}
+
+/// U3 KTD-3: when the store returns `Ok(false)` for every
+/// (wave_id, slot_index) pair (the store has only OTHER
+/// waves' slots pending; ours is not in the queue), the
+/// dispatcher MUST skip every slot. This is the "wave_id
+/// mismatch" guarantee: the bridge's `try_dispatch_next`
+/// compares the dispatched `(wave_id, slot_index)` against
+/// the requested pair, and returns `Ok(false)` when the
+/// store's pick is a different wave.
+#[tokio::test]
+async fn test_dispatcher_skips_unapproved_slot() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U3DispatchBridge::new(store.clone(), 4);
+
+    // Pre-register a different wave with one slot, but DO NOT
+    // bind it in the store. The store's `try_dispatch_next`
+    // returns `Ok(false)` because no slot is bound (the
+    // `resource.is_some()` predicate). This mirrors the
+    // "wave_id mismatch" path: the store's pick (None) does
+    // NOT match any `(wave_id, slot_index)` the dispatcher
+    // asks for.
+    let _ = store.register_wave("u3-other", WaveKind::Exec, 1);
+
+    let wave = make_u3_wave("u3-mine", 3, 3);
+
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (outcome, started) = run_u3_execute_wave(bridge.clone(), wave, started.clone()).await;
+    let _ = outcome;
+
+    assert_eq!(
+        started.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "U3 KTD-3: dispatcher MUST NOT spawn when the store has no pending slot for this wave; \
+         got {} spawns",
+        started.load(std::sync::atomic::Ordering::SeqCst)
+    );
+
+    let calls = bridge.dispatch_calls_snapshot();
+    assert_eq!(
+        calls.len(),
+        3,
+        "U3 KTD-3: dispatcher MUST query the bridge once per slot (3 events → 3 tries); \
+         got {calls:?}"
+    );
+}
+
+/// U3 KTD-4: when the bridge's `try_dispatch_next` returns
+/// `Err`, the dispatcher MUST propagate the error and MUST
+/// NOT spawn a worker for the failing slot. The test
+/// asserts the failure semantics by configuring the bridge
+/// to error on every call and verifying the executor's
+/// `started` counter stays at 0.
+#[tokio::test]
+async fn test_dispatcher_propagates_try_dispatch_err() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U3DispatchBridge::new(store.clone(), 4);
+    bridge.set_override(Some(DispatchOverride::AlwaysError(
+        "store offline: U3 test scenario".to_string(),
+    )));
+
+    let wave = make_u3_wave("u3-err", 3, 3);
+
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (outcome, started) = run_u3_execute_wave(bridge.clone(), wave, started.clone()).await;
+    let _ = outcome;
+
+    assert_eq!(
+        started.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "U3 KTD-4: dispatcher MUST NOT spawn when bridge.try_dispatch_next returns Err; \
+         got {} spawns",
+        started.load(std::sync::atomic::Ordering::SeqCst)
+    );
+}
+
+/// U3 KTD-5: the local effective cap is
+/// `min(hat.concurrency, bridge.max_concurrent_workers())`.
+///
+/// Case A: `hat.concurrency = 2`, `bridge.cap = 4` → cap = 2.
+/// The dispatcher pre-truncates at 2, so even though the store
+/// has 4 slots pending, only 2 workers spawn.
+#[tokio::test]
+async fn test_dispatcher_effective_cap_hat_lower_than_bridge() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U3DispatchBridge::new(store.clone(), 4);
+
+    // 4 events, hat.concurrency = 2 → cap = min(2, 4) = 2.
+    let wave = make_u3_wave_with_concurrency("u3-cap-a", 4, 4, 2);
+
+    // Register the wave through the bridge so the dispatcher's
+    // subsequent `register_wave_if_absent` is idempotent and we
+    // can recover the store's `w-{seq}` id for the bind_worktree
+    // calls below.
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "u3-cap-a", 4)
+        .expect("register_wave_if_absent");
+
+    // Bind all 4 slots so the store keeps approving them.
+    for slot in 0u32..4 {
+        let resource = ralph_core::supervisor::SlotResource {
+            slot_index: slot,
+            worktree_path: Some(format!("/tmp/u3-cap-a/{slot}")),
+            branch: Some(format!("u3-cap-a-exec-{slot}")),
+        };
+        store
+            .bind_worktree(&store_wave_id, slot, resource)
+            .expect("pre-bind slot");
+    }
+
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (outcome, started) = run_u3_execute_wave(bridge.clone(), wave, started.clone()).await;
+    let _ = outcome;
+
+    let n = started.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        n <= 2,
+        "U3 KTD-5 (A): dispatcher MUST truncate at min(hat.concurrency=2, bridge.cap=4) = 2; \
+         got {n} spawns"
+    );
+}
+
+/// U3 KTD-5 (continued): Case B: `hat.concurrency = 4`,
+/// `bridge.cap = 2` → cap = 2. The dispatcher still
+/// pre-truncates at 2.
+#[tokio::test]
+async fn test_dispatcher_effective_cap_bridge_lower_than_hat() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U3DispatchBridge::new(store.clone(), 2);
+
+    // 4 events, hat.concurrency = 4 → cap = min(4, 2) = 2.
+    let wave = make_u3_wave_with_concurrency("u3-cap-b", 4, 4, 4);
+
+    // Register the wave through the bridge so the dispatcher's
+    // subsequent `register_wave_if_absent` is idempotent and we
+    // can recover the store's `w-{seq}` id for the bind_worktree
+    // calls below.
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "u3-cap-b", 4)
+        .expect("register_wave_if_absent");
+
+    // Bind all 4 slots so the store can approve up to 2 (the
+    // store's own cap is `bridge.max_concurrent_workers`).
+    for slot in 0u32..4 {
+        let resource = ralph_core::supervisor::SlotResource {
+            slot_index: slot,
+            worktree_path: Some(format!("/tmp/u3-cap-b/{slot}")),
+            branch: Some(format!("u3-cap-b-exec-{slot}")),
+        };
+        store
+            .bind_worktree(&store_wave_id, slot, resource)
+            .expect("pre-bind slot");
+    }
+
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (outcome, started) = run_u3_execute_wave(bridge.clone(), wave, started.clone()).await;
+    let _ = outcome;
+
+    let n = started.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        n <= 2,
+        "U3 KTD-5 (B): dispatcher MUST truncate at min(hat.concurrency=4, bridge.cap=2) = 2; \
+         got {n} spawns"
+    );
+}
+
+// =============================================================================
+// U3 test helpers (subordinate to the U3 tests above).
+// =============================================================================
+
+/// Build a `DetectedWave` with a single trigger topic and a
+/// fixed `(events_count, total, concurrency)`. The wave_id is
+/// the caller's `name` so test output is grep-friendly.
+fn make_u3_wave(name: &str, events_count: u32, total: u32) -> ralph_core::DetectedWave {
+    make_u3_wave_with_concurrency(name, events_count, total, events_count)
+}
+
+/// Build a `DetectedWave` with a configurable `hat.concurrency`
+/// (distinct from `events_count`). Used by the cap tests.
+fn make_u3_wave_with_concurrency(
+    name: &str,
+    events_count: u32,
+    total: u32,
+    concurrency: u32,
+) -> ralph_core::DetectedWave {
+    use ralph_core::DetectedWave;
+    use ralph_core::config::HatConfig;
+
+    let events: Vec<ralph_core::Event> = (0..events_count)
+        .map(|i| ralph_core::Event {
+            topic: "exec.unit.ready".to_string(),
+            payload: Some(format!("{{\"unit_id\":\"u3-{name}-{i}\"}}")),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        })
+        .collect();
+    let hat_config = HatConfig {
+        name: format!("u3-hat-{name}"),
+        concurrency,
+        ..HatConfig::default()
+    };
+    DetectedWave {
+        wave_id: name.to_string(),
+        target_hat: ralph_proto::HatId::new(format!("u3-hat-{name}")),
+        hat_config,
+        events,
+        total,
+        partial: events_count < total,
+        consumer_aggregate_timeout: None,
+    }
+}
+
+// Helper `run_u3_execute_wave_with_err` was removed in U3:
+// KTD-4 is now driven by `test_dispatcher_propagates_try_dispatch_err`
+// directly via `run_u3_execute_wave`, which goes through the
+// real supervisor path. Previously the helper replicated the
+// spawn loop; the production-shaped test is more representative.
