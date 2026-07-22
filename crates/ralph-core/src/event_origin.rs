@@ -166,6 +166,32 @@ pub fn is_supervisor_slot_topic(topic: &str) -> bool {
         || (matches!(prefix, "exec" | "fix" | "review") && topic.ends_with(".unit.failed"))
 }
 
+/// U7 (2026-07-23-001, R10 / KTD-7): the canonical identifier of the
+/// **virtual supervisor** runtime consumer.
+///
+/// When `event_loop.supervisor.enabled` is `true`, the static
+/// [`HandoffGraph`](crate::preset_lint::workflow_activation::HandoffGraph)
+/// wires a virtual `supervisor` node as the unique consumer of the
+/// slot-level `*.unit.done` / `*.unit.failed` topics so the WAC rules
+/// see the fan-in as a closed path. That node is NOT an agent hat in
+/// the `HatRegistry` — it is an internal runtime consumer that fans the
+/// per-slot results in at wave completion. Any runtime path that
+/// resolves a handoff consumer must recognize it through
+/// [`is_virtual_supervisor_consumer`] rather than hard-coding the
+/// string, so the "virtual consumer" semantics stay centralized.
+pub const VIRTUAL_SUPERVISOR_CONSUMER: &str = "supervisor";
+
+/// U7 (R10 / KTD-7): `true` when `consumer` is the virtual supervisor
+/// runtime consumer (see [`VIRTUAL_SUPERVISOR_CONSUMER`]).
+///
+/// The U16 handoff misrouted check must exempt this consumer: it has no
+/// `HatRegistry` entry and therefore no `triggers` list to declare the
+/// slot topic, yet consuming `*.unit.done` is its legitimate role.
+/// Ordinary hats return `false` here and remain subject to U16.
+pub fn is_virtual_supervisor_consumer(consumer: &str) -> bool {
+    consumer == VIRTUAL_SUPERVISOR_CONSUMER
+}
+
 /// P1-1 fix: explicit allowlist (see `ORCHESTRATOR_DIAGNOSTIC_TOPICS`)
 /// instead of `event.*` prefix match.
 pub fn is_orchestrator_diagnostic_topic(topic: &str) -> bool {
