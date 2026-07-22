@@ -38,6 +38,12 @@ pub mod instructions_opac;
 pub mod metadata_runtime_drift;
 pub mod multi_hat;
 pub mod ownership;
+// plan 2026-07-22-004 (U5): payload_consistency rule sanity lint.
+// Validates every `event_policy.payload_consistency.rules[]` entry
+// (unique id, known topic, referenced fields declared on the topic
+// schema) so a misconfigured gate fails close at preset-load time
+// instead of silently rejecting every gated event at runtime.
+pub mod payload_consistency;
 // 2026-07-04-004 plan U3: review-synthesizer block-guard drift
 // lint. Catches presets whose `review-synthesizer` `instructions:`
 // drift away from the explicit "all 6 dimensions status == failed"
@@ -112,6 +118,7 @@ pub use review_synthesizer_block_guard::{
 // 2026-07-04-004 plan U4: review-complete misrouting drift lint
 // exported alongside U3 so callers have a single import surface.
 pub use ownership::{check_owner_references, check_ownership_rules};
+pub use payload_consistency::check_payload_consistency;
 pub use state_projection::check_work_done_action_chain_order;
 // 2026-07-03-001 plan U9: export the supervisor lint entry
 // point so `ralph preset check` / `run_preset_lint` callers
@@ -578,6 +585,18 @@ pub fn run_preset_lint_with_preset_name(
         let topology_findings = check_trigger_context_topology(config, strictness);
         findings.extend(lint_findings_to_contract_findings(&topology_findings));
     }
+
+    // plan 2026-07-22-004 (U5): payload_consistency rule sanity lint.
+    // Validates every `event_policy.payload_consistency.rules[]` entry
+    // (unique id, topic exists in `event_policy.schemas`, and every
+    // `field` referenced in `when` is declared on that topic's schema).
+    // The runtime evaluator is fail-close, so a misconfigured rule
+    // would silently reject every gated event; surfacing it here means
+    // the preset fails to load (strict) instead of failing mid-run.
+    // Severity graded by strictness (Warn default, Error strict).
+    findings.extend(lint_findings_to_contract_findings(
+        &check_payload_consistency(config, strictness),
+    ));
 
     // 2026-06-27 mechanism foundation U5: flow declaration lint.
     // Only presets that declare a `mechanism:` block are checked.

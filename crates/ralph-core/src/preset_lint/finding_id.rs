@@ -495,12 +495,46 @@ pub const FINDING_TRIGGER_CONTEXT_DUPLICATE_LABEL: &str = "preset.trigger_contex
 /// declaration is dead. R21 / R22. Always `Error`.
 pub const FINDING_TRIGGER_CONTEXT_NO_CONSUMER: &str = "preset.trigger_context_no_consumer";
 
-/// U5 (plan 2026-07-09-003): the `trigger_context` block
+/// U5 (plan 2026-07-22-003): the `trigger_context` block
 /// references a source topic, but a hat that does subscribe to
 /// that topic is misconfigured in a way that would still let
 /// the block leak. Reserved for future use; current U5 work
 /// is no-op here.
 pub const FINDING_TRIGGER_CONTEXT_TOPOLOGY_LEAK: &str = "preset.trigger_context_topology_leak";
+
+// ──────────────────────────────────────────────────────────────────────────
+// plan 2026-07-22-004 (U5): payload_consistency rule sanity lint
+// finding IDs. R6 / R3 / S6 / S3. The `payload_consistency` prefix is
+// deliberately distinct from the `trigger_context_*` family above so a
+// payload-consistency rule finding can never collide with a
+// trigger-context finding (both validate a different `event_policy`
+// block and both enumerate predicate field references).
+// ──────────────────────────────────────────────────────────────────────────
+
+/// U5 (plan 2026-07-22-004): two `event_policy.payload_consistency`
+/// rules in the same preset share an `id`. The id is embedded in the
+/// runtime `payload_consistency:<id>` gate, so duplicates scramble the
+/// agent-facing rejection reason. `Warn` in default mode, `Error` in
+/// strict.
+pub const FINDING_PAYLOAD_CONSISTENCY_DUPLICATE_ID: &str =
+    "preset.payload_consistency_duplicate_id";
+
+/// U5 (plan 2026-07-22-004): a `payload_consistency` rule targets a
+/// `topic` with no entry in `event_policy.schemas`. Almost always a
+/// typo; the rule references a topic the policy does not validate.
+/// `Warn` in default mode, `Error` in strict.
+pub const FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_TOPIC: &str =
+    "preset.payload_consistency_unknown_topic";
+
+/// U5 (plan 2026-07-22-004): a `field` referenced anywhere in a
+/// `payload_consistency` rule's `when` (recursively through `all` /
+/// `any`) is not declared on the topic's schema (`required_fields ∪
+/// known_fields ∪ field_docs ∪ allowed_values ∪ element_constraints`).
+/// The runtime evaluator treats the missing field as a miss, so the
+/// predicate can never fire as authored — a silent correctness bug.
+/// `Warn` in default mode, `Error` in strict.
+pub const FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_FIELD: &str =
+    "preset.payload_consistency_unknown_field";
 
 /// Inventory of every finding id in this module. Use this in tests
 /// that assert the lint surface does not silently re-introduce a
@@ -556,4 +590,7 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_TRIGGER_CONTEXT_DUPLICATE_LABEL,
     FINDING_TRIGGER_CONTEXT_NO_CONSUMER,
     FINDING_TRIGGER_CONTEXT_TOPOLOGY_LEAK,
+    FINDING_PAYLOAD_CONSISTENCY_DUPLICATE_ID,
+    FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_TOPIC,
+    FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_FIELD,
 ];
