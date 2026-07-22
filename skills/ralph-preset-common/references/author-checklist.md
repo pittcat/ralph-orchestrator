@@ -188,6 +188,47 @@
 
 任一问 ✗ → 必须改写或显式说明为何单链无法表达（默认应迁移到 executor 内部 subagent）。见 `references/finding-rubric.md` 的「Single-chain-first audit」段。
 
+## Hard questions — wave fan-out
+
+> **触发条件**：`execution_model ∈ {wave, supervisor+wave}`。`single-chain` preset **不**适用本段（标记 N/A 而不是留空）；详见下方「N/A 规则」段。
+> **目的**：在 topolo­gy 选 wave 前,把 hat 视角可答的问题先钉死;这些是 hat 在自己那一轮 activation 里能 Observe / 能调用的能力,不是 framework 内部细节。
+> **命中时**:`ralph-preset-review` 按 `finding-rubric.md`「Wave capability audit」段逐项判定;`preset.wave_*` 系列 finding 默认 P0（详见 rubric）。
+
+1. **唯一 dispatcher**：本 preset 中**只有 1 个 hat**（典型为 executor / dispatcher）允许调用 `ralph wave emit` / `ralph wave verify`；其它 hat 一律通过 dispatcher 走事件流。✓ / ✗ + 列出 dispatcher hat id + 证据
+2. **worker 禁 `wave emit`**：所有非 dispatcher hat 的 `instructions:` 中不得出现 `ralph wave emit` 字样（哪怕只是示例）。✓ / ✗ + grep 证据
+3. **`wave verify` → emit**：dispatcher 必须先 `ralph wave verify --payloads-stdin` 零写盘预检，通过后再去掉 verify 真正写盘；不在同一调用里合并预检 + 写盘。✓ / ✗ + 引用 `ralph-tools-wave` Policy-Check feedback 章节
+4. **Confirm 用 main ledger**：worker 完成态由 dispatcher 通过 `ralph events --events-source main` 对账，**不**用 hat-channel（hat-channel 是 dispatcher's own 私有落盘点，不是 worker 的 Confirm 入口）。✓ / ✗ + 列命令
+5. **禁 agent 发协调 topic**：worker / dispatcher 一律不得 publish 任何 `wave.*` / `exec.wave.*` 协调 topic；这些由 runtime / supervisor 管。✓ / ✗ + grep `publishes`
+6. **batch 失败可定位**：`ralph wave verify` 拒收时 policy-check JSON 必须含 `payload_index`；dispatcher 必须按 index 定位失败 item 并精准修复（而不是整批重发）。✓ / ✗ + 引用 `ralph-tools-wave`「Policy-Check 反馈」段
+7. **emitter cite skill**：dispatcher / worker 涉及 `ralph wave emit` / `ralph wave verify` 时必须引用 `ralph-tools-wave` 与 `ralph-tools-emit` §5「Policy-Check」反馈，**不**复制参数表。✓ / ✗ + 引用章节名
+
+任一问 ✗ → 必须改写或显式说明为何 wave 无法表达。完整 finding 默认 severity / confidence / aaf_question 见 `finding-rubric.md`「Wave capability audit」段。
+
+## Hard questions — supervisor orchestration
+
+> **触发条件**：`execution_model ∈ {supervisor, supervisor+wave}`。`single-chain` 与 `wave` preset **不**适用本段（标记 N/A）。
+> **目的**：把 supervisor 视角下 hat 能 Observe / 调用的边界先钉死; supervisor 内部 ledger / 队列 / slot 调度由 runtime 管控,hat 不得越界。
+
+1. **`supervisor.enabled` + isolated**：preset `event_loop.execution_mode: isolated` 且 `event_loop.supervisor.enabled: true`。✓ / ✗ + 引用字段路径
+2. **禁读 / 写 `supervisor.db` 作业务接口**：任何 hat `instructions:` 不得要求把 `.ralph/supervisor.db` 当业务 artifact 接口（写或读）。需要 unit 状态 → 走 `ralph tools task list` 或读业务 artifact；需要 history → 走 `ralph events --events-source main`。✓ / ✗ + grep
+3. **禁发 coordination topic**：所有 hat `publishes` 一律不得包含 `exec.wave.*` / `slot.*` 等 supervisor 协调 topic；这些由 runtime emit。✓ / ✗ + grep
+4. **unit 状态经 task API / 业务 artifact**：每个 sub-unit 必须有 live `task_id`（`ralph tools task list` 取得,禁手写),或 sub-unit 进度落业务 artifact 由 dispatcher 汇总。✓ / ✗ + 列命令路径
+5. **timeout / partial 有业务可见出口**：supervisor 触发 partial / timeout 时必须通过 dispatcher 发 `plan.blocked` 或 `work.failed` 等业务可见事件；不得 silent-success 留在 supervisor 内部。✓ / ✗ + 列事件与 schema 字段
+6. **与 Intent 一致**：preset `event_loop.supervisor.enabled` 必须与 Intent.execution_model 一致;不一致按 `finding-rubric.md` 「Supervisor capability audit」 段 `preset.execution_model_intent_mismatch` 入 review 主表。✓ / ✗ + 字段值
+
+任一问 ✗ → 必须改写或显式说明为何 supervisor 无法表达。完整 finding 默认 severity / confidence / aaf_question 见 `finding-rubric.md`「Supervisor capability audit」段。
+
+## Hard questions — N/A 规则（执行模型分支）
+
+| `execution_model` | 「Hard questions — single-chain-first」 | 「Hard questions — wave fan-out」 | 「Hard questions — supervisor orchestration」 |
+|---|---|---|---|
+| `single-chain`（默认 / 用户否认） | 必填（5 问全 ✓） | **N/A**（不得留空假装已答;不写 wave 字段、不写 dispatcher emit、不写 supervisor） | **N/A**（不得引入 `event_loop.supervisor.enabled`） |
+| `wave` | 必填（与 wave 同存） | 必填（7 问全 ✓ + 证据） | **N/A** |
+| `supervisor` | 必填（single-chain-first 默认也仍答,作为基线） | **N/A** | 必填（6 问全 ✓ + 证据） |
+| `supervisor+wave` | 必填 | 必填 | 必填（三段并列;每段独立判定） |
+
+**N/A 写法**:勾选框标 `N/A` + ≤30 字理由（如「execution_model=single-chain,无 wave 拓扑」），**不得**留空 / 写「同上」 / 写「由 wave 段覆盖」。N/A 不是「跳过」而是「显式不适用」。
+
 ## Hard questions — Artifact-First Handoff
 
 任何 preset 交 review 前必须逐条回答；任一项不满足且没有符合例外条件的理由即拒绝交付：

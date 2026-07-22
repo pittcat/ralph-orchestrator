@@ -104,6 +104,12 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
    - Emitter instructions reference `ralph-tools-emit` Policy-Check feedback when they mention payload construction, `ralph emit`, `ralph wave emit`, required fields, or field shape.
    - Ask: "If I only received this hat's instructions + injection, can I complete Q1? Can I construct every Q4 field from visible sources?"
    - **Single-chain-first 5 问全 ✓**: 填 `references/author-checklist.md` 的「Hard questions — single-chain-first」段；任一 ✗ 必须改写或显式 justify。
+   - **执行模型分支 Hard questions 全 ✓（按 model 分支强制 / N/A）**: 按 `references/author-checklist.md`「Hard questions — N/A 规则」段的模型-分支矩阵填：
+     - `single-chain` → wave / supervisor 两段标 N/A（不得留空 / 不得引入 `event_loop.supervisor.enabled` / 不得写 dispatcher `wave emit`）。
+     - `wave` → 「Hard questions — wave fan-out」7 问全 ✓ + 证据；supervisor 段标 N/A。
+     - `supervisor` → 「Hard questions — supervisor orchestration」6 问全 ✓ + 证据；wave 段标 N/A。
+     - `supervisor+wave` → wave 7 问与 supervisor 6 问同时全 ✓，与 Intent.execution_model 一致。
+     - 不一致（YAML 与 Intent）按 `finding-rubric.md`「Wave / Supervisor capability audit」段 `preset.execution_model_intent_mismatch` 入 review 主表。
    - **Artifact-First Handoff 5 问全 ✓**: 填 `references/author-checklist.md` 的「Hard questions — Artifact-First Handoff」段；任一 ✗ 必须改写或显式 justify。
    - For builtin edits, list the 7-point sync checklist (do not auto-apply).
    - **If any check fails: STOP.** Do not recommend review or deliver YAML as complete.
