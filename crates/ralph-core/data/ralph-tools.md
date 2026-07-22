@@ -51,8 +51,8 @@ metadata:
 ## 核心规则
 
 1. **绝不用 echo/cat 写 tasks 或 memories** — 必须用 CLI 工具
-2. **emit 后必须校验** — 确认事件已写入事件文件
-3. **task/memory 操作后必须确认状态** — 用 `--format json` + `jq` 验证
+2. **emit 后必须完成 Confirm** — 加载 `ralph-tools-emit`，按其中规定的公开证据确认；证据不足或不一致时停止
+3. **task/memory 操作后必须确认状态** — 按已注入的对应专项 skill 检查其规定的公开证据；不要套用其它操作的确认方式
 4. **失败时先查 `--help`** — 不要猜测参数，文档可能已更新
 5. **emit step handoff 事件前，先用 schema 预检** — `ralph emit --schema <TOPIC>` 会列出 `required_fields`；payload 必须包含全部 required fields，且字段之间不自相矛盾（例如 `step` 与 `task_key` 中的 step 段必须一致）。不要凭记忆构造 payload。
 6. **isolated 模式:一个 activation 只发 1 个业务事件** —— 运行时只保留你这一回合最先发出的那个,其后的全部静默丢弃(不分 topic)。发完即停,**终态事件(如 `plan.complete`)前面绝不要夹带 `work.ready` 等其它 emit**,否则终态事件会被丢弃。细则见 `ralph emit` 深参考「isolated mode 单业务事件 / 重发规则」。

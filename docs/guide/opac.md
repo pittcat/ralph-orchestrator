@@ -20,9 +20,9 @@ Use this guide when:
 | **O — Observe** | "Who am I? What is the loop state?" | `ralph inspect loop`, `ralph tools task list`, `ralph events --events-source hat-channel` |
 | **P — Precheck** | "Will this operation succeed without side effects?" | `ralph tools task verify ...`, `ralph emit <topic> --policy-check ...`, `ralph wave verify ...` |
 | **A — Apply** | "Execute the operation now." | `ralph tools task ...`, `ralph emit ...`, `ralph wave emit ...` |
-| **C — Confirm** | "Did it land? What is the next expected event?" | `ralph events --events-source hat-channel` (single emit) or `--events-source main` (wave emit) |
+| **C — Confirm** | “预期状态真的产生了吗？下一步是什么？” | 优先检查操作通过公开接口给出的成功反馈；反馈不足时，再使用该操作文档规定的只读查询接口 |
 
-**Rule:** every `Apply` must be preceded by a `Precheck`, and every `Apply` must be followed by a `Confirm`. Skipping Precheck bypasses the schema gate; skipping Confirm risks silent drops.
+**规则：**每个 `Apply` 之前必须有 `Precheck`，每个 `Apply` 之后必须完成 `Confirm`；Confirm 不可省略。Apply 后必须找到当前操作对应的专项 skill，并取得该 skill 规定的有效证据。未找到 skill、未取得证据或证据不一致时，必须停止，不得继续下一次状态变更。Confirm 不要求所有操作机械地执行同一条查询命令；具体证据与查询方式由专项 skill 定义。
 
 ## Where the rules come from
 
@@ -116,14 +116,22 @@ ralph wave emit --payloads-stdin < payloads.jsonl
 
 ## Confirm
 
-After Apply, read back the correct ledger.
+通过该操作的公开契约确认预期效果：
 
-| Write path | Confirm command | File |
-|------------|-----------------|------|
-| `ralph emit` (single event) | `ralph events --events-source hat-channel` | `.ralph/current-hat-events` |
-| `ralph wave emit` (batch) | `ralph events --events-source main` | `.ralph/events.jsonl` |
+1. 先按下表找到并加载当前操作对应的专项 skill，不得凭经验猜测什么证据有效。
+2. 按专项 skill 检查公开成功反馈或只读查询结果；仅有命令退出成功不算完成 Confirm。
+3. 区分**操作成功**与**流程推进**。状态变更成功不代表下游 hat 已经处理，也不代表工作流已经推进。只有当前任务要求这类更强证据时，才查询下游可见状态。
+4. 状态不明确时停止。未找到专项 skill、缺少有效证据、只读查询结果不一致，或 warning 指出仍有必需动作时，应先解决问题，再执行下一次状态变更。
 
-`--events-source auto` prefers the hat-channel when running inside an activation, so single emits are confirmed automatically. Wave emits always write the main ledger, so wave Confirm must use `--events-source main`.
+| 当前操作 | Confirm 规则来源 | Agent 动作 |
+|---------|------------------|------------|
+| `ralph emit` | `ralph-tools-emit` | `ralph tools skill load ralph-tools-emit` |
+| `ralph tools task` | `ralph-tools-tasks` | 使用 prompt 中已注入的 task skill；若不可见则停止 |
+| `ralph tools memory` | `ralph-tools-memories` | 使用 prompt 中已注入的 memory skill；若不可见则停止 |
+| `ralph wave` | `ralph-tools-wave` | `ralph tools skill load ralph-tools-wave` |
+| 无法判断操作类别 | 当前 hat 的可见 skill 列表 | `ralph tools skill list --format json`；仍找不到就停止，不得猜测 |
+
+不要为了完成 Confirm 而读取或修改 runtime 内部文件。使用 `ralph-tools-emit`、`ralph-tools-tasks` 和 `ralph-tools-wave` 记录的公开入口。
 
 ### Task close warning
 
@@ -157,7 +165,7 @@ Advanced presets can add `tasks.command_rules` to extend or restrict the default
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | `ralph emit` rejected with missing required field | Skipped Precheck or wrong payload | Run `ralph emit <topic> --schema <TOPIC>` to see required fields |
-| Event emitted but next hat never triggered | Confirmed on wrong ledger, or event was silently dropped after a second business event | Use `ralph events --events-source hat-channel` and emit only one business event per activation |
+| event 操作成功但下一个 hat 未触发 | 把操作成功误当成下游流程已经推进，或额外业务事件被丢弃 | 使用 event 指南支持的诊断查询；每次 activation 只发送一条真正需要的业务事件 |
 | `task.resume` injected after `task close` | Closed task without emitting a completion topic | Emit `work.done` / `test.passed` / etc. before closing, or before activation ends |
 | Worker hat denied `task add` | Hat is not in `tasks.coordinator_hats` | Only coordinator-style hats may create tasks; worker hats should receive tasks via events |
 | `review.wave.complete` rejected | Supervisor-only coordination topic emitted by an agent | Let the runtime inject coordination topics; agents emit only their own completion topics |

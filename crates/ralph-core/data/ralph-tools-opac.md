@@ -19,16 +19,16 @@ metadata:
 | **O — Observe** | 「我现在是谁？系统是什么状态？」 | `ralph inspect loop` + `ralph tools task list` + 必要时 `ralph events --events-source hat-channel\|main`;**`event_loop.supervisor.enabled: true` 时 inspect loop JSON 含 supervisor 块**（`active_waves` / `slot_summary` / `last_coordination_topics`） |
 | **P — Precheck** | 「这次操作会成功吗？写盘后会留下什么？」 | `ralph tools task verify <verb>` 或 `ralph emit/wave emit --policy-check` |
 | **A — Apply** | 「实际写盘」 | `ralph tools task <verb>` 或 `ralph emit` / `ralph wave emit`（去掉 `--policy-check`） |
-| **C — Confirm** | 「我真的写下去了吗？下一步要做什么？」 | `ralph events --events-source hat-channel`（单 emit）或 `--events-source main`（wave emit），跟 task close 后的 stderr warning（`close_without_completion_emit`）一起看 |
+| **C — Confirm** | 「预期状态真的产生了吗？下一步要做什么？」 | 优先检查本次操作通过公开接口给出的成功反馈；反馈不足时，再按对应 skill 使用只读查询接口确认 |
 
-**每个 A 之前必须有 P，每个 A 之后必须有 C**。省略 Precheck 等于绕过 schema gate；省略 Confirm 等于 silent drop。
+**每个 A 之前必须有 P，每个 A 之后必须完成 C；Confirm 不可省略**。Apply 后必须按下方路由找到专项 skill，并取得该 skill 规定的有效证据。Confirm 不等于“所有操作固定再跑同一条查询命令”：具体证据和查询方式由专项 skill 定义。未找到 skill、未取得证据或证据不一致时，必须停止，不得继续下一次状态变更。省略 Precheck 会绕过写入前约束；省略 Confirm 会把“命令已执行”误当成“预期状态已产生”。
 
 ## Observe 阶段关键问题
 
 1. **我是谁**：`ralph inspect loop --format json`（或在 prompt 中找 `## HAT IDENTITY` 块）
 2. **loop 处于哪一阶段**：`## ORCHESTRATOR CONTEXT` 段
 3. **任务当前状态**：`ralph tools task list` + `ready` 子命令
-4. **我刚刚发的事件落到哪了**：同 activation 内用 `ralph events --events-source hat-channel`；跨 hat / 调试用 `--events-source main`
+4. **上一操作产生了什么状态**：先检查该操作的公开成功反馈；需要进一步确认时，按对应 skill 使用公开只读接口，不读取内部 ledger
 5. **supervisor 在做什么（仅当 `event_loop.supervisor.enabled: true`）**：`ralph inspect loop --format json` 的 `supervisor` 键
 6. **loop 锚定的 plan 是哪个**：`ralph inspect loop --format json` 的 `loop_anchor` 键
 
@@ -113,21 +113,28 @@ ralph inspect loop --format json | jq 'has("supervisor")'
 - 同一 activation 内发第 2 条业务事件 → runtime 静默丢弃（终态事件前面的夹带事件会被一起丢）
 - 对不存在的 `task_id` emit → payload_contract 拒收；先 `ralph tools task list` 拿 live id
 
-## Confirm 阶段两种路径
+## Confirm 阶段通用规则
 
-| 写入路径 | Confirm 命令 | 文件 |
-|---------|-------------|------|
-| `ralph emit`（单事件） | `ralph events --events-source hat-channel` | `.ralph/current-hat-events` |
-| `ralph wave emit`（批量） | `ralph events --events-source main` | `.ralph/events.jsonl`（wave 写 main 而非 hat-channel） |
+Confirm 验证的是**预期效果**，不是机械重复读取：
 
-agent context 默认 `--events-source auto` 优先 hat-channel；显式 `--events-source main` 用于 wave Confirm。
+1. **先找到专项规则**：按下表加载或阅读当前操作对应的 skill，不得凭经验猜测有效证据。
+2. **按专项规则检查证据**：只有专项 skill 规定的公开成功反馈或只读查询结果可以完成 Confirm；仅有命令退出成功不算完成。
+3. **区分本地操作成功与流程推进**：操作成功只证明本次修改已生效，不代表下游 hat 已处理或工作流已进入下一阶段。只有当前任务要求确认流程推进时，才查询下游可见状态。
+4. **失败即停止**：未找到专项 skill、没有取得有效证据、查询结果不一致或出现 warning 时，不要继续下一次状态变更；先按专项 skill 的恢复步骤处理。
+
+| 当前操作 | Confirm 规则来源 | Agent 动作 |
+|---------|------------------|------------|
+| `ralph emit` | `ralph-tools-emit` | `ralph tools skill load ralph-tools-emit` |
+| `ralph tools task` | `ralph-tools-tasks` | 使用 prompt 中已注入的 task skill；若不可见则停止 |
+| `ralph tools memory` | `ralph-tools-memories` | 使用 prompt 中已注入的 memory skill；若不可见则停止 |
+| `ralph wave` | `ralph-tools-wave` | `ralph tools skill load ralph-tools-wave` |
+| 无法判断操作类别 | 当前 hat 的可见 skill 列表 | `ralph tools skill list --format json`；仍找不到就停止，不得猜测 |
+
+不要为了 Confirm 读取或修改 runtime 内部文件。专项确认方式见上表列出的 skill。
 
 ## 完成后：什么都不漏
 
-`ralph tools task close` 后：
-
-- 若 `event_loop.event_policy.{terminal_topics,business_topics}` 与 hat `publishes` 的交集中任一 topic 已写进 hat-channel → 无 warning
-- 若无 → stderr JSON `close_without_completion_emit` 提示 `expected_topics` + `next_step`。**这个 warning 不阻塞 close**，但忽略它意味着 loop 进入 stall 30s 等待 rescue path
+完成状态变更后，检查公开成功反馈和 warning。若反馈指出仍缺少后续动作，就按其中给出的下一步处理；不要因为命令退出成功就直接结束 activation。task close 的具体完成检查见 `ralph-tools-tasks`，event 与 wave 的确认方式分别见 `ralph-tools-emit`、`ralph-tools-wave`。
 
 ## 与其它 skill 的关系
 
@@ -144,7 +151,7 @@ agent context 默认 `--events-source auto` 优先 hat-channel；显式 `--event
 
 1. 直接 `echo … >> .ralph/agent/tasks.jsonl` — 绕过 store lock + auth
 2. 在 hat instructions 里写完整 `ralph emit --policy-check -j '{"topic": ...}'` 字符串 — 这是 skill 的内容，**引用**而非**复述**
-3. 用 `ralph events` 不带 `--events-source` 假设读 main — agent context 下默认 hat-channel
-4. close 后立即走人 — 漏掉 Confirm 的 `close_without_completion_emit` warning
+3. 把某一种 event 查询方式当成所有操作的通用 Confirm — 应按对应 skill 选择公开反馈或只读接口
+4. 命令退出成功后立即走人 — 应先确认预期状态，并处理公开反馈中的 warning 或下一步动作
 5. 跨 activation 共享一个 `task_id` — close 是 terminal，第二次 emit 一定被拒
 6. 在 hat instructions 里写"读 `.ralph/supervisor.db`"或"运行 `ralph diagnose --supervisor`" — supervisor 的内部 ledger 与诊断输出都不在 hat 可观测范围；Observe 阶段用 `ralph inspect loop --format json` 的 `supervisor` 块即可
