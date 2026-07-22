@@ -181,6 +181,32 @@ Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章�
 - **`skills/ralph-preset-common/references/agent-native-model.md`**（loop 外评审层，本文件）：写 artifact-first 模型、判定标准（恢复价值 / 审计价值 / 下游依赖）、违规列表、边界（业务 artifact vs internal ledger）、灰色地带判定方法。**不写**具体的「`.ralph/<...>` 子目录命名约定」，由 preset 自决。
 - **`crates/ralph-core/data/ralph-tools*.md`**（runtime 注入层）：**不写** artifact-first 通用规则。artifact-first 是 **preset 决策**，不是 runtime 决策；运行时只提供文件读写命令（如 OPAC Apply 阶段的 `Write` / `Edit`），不约束写哪里、什么时候写、是否落盘。`ralph-tools*.md` 最多以引用形式指向本 reference 的「Artifact-First Handoff 模型」或「Artifact-First 边界」段，不复制判定标准。
 
+## 执行模型（Execution Model）
+
+> **范围**：本节冻结「执行模型」枚举与能力检测信号，供 `ralph-preset-author` / `ralph-preset-review` / `ralph-run-diagnosis` 三套通用 skill 共用。**禁止**按 builtin preset 名称点名门控（例如不得新增「`ce-executor-supervisor*` 风格」类专检）；所有 audit / checklist / 诊断一律 **capability-triggered**（Intent + YAML / 产物信号触发）。
+
+**枚举（冻结，跨 plan 不再扩）**：
+
+| 值 | 含义 | 关键可见差异 |
+|---|---|---|
+| `single-chain` | 单条主链顺序推进，并行只在执行 hat 内部 subagent 拆分 | 默认推荐；无 `event_loop.supervisor.enabled`；无 dispatcher `ralph wave emit` |
+| `wave` | 主链上某步对多份同构工作做同 topic 批并行 fan-out | hat 依赖 `## WAVE CONTEXT`；dispatcher 调 `ralph wave emit` + `ralph wave verify` |
+| `supervisor` | runtime 管理多 slot / worktree / 排队与 fan-in | `event_loop.supervisor.enabled: true`；存在 `.ralph/supervisor.db`；协调 topic 由 runtime 管 |
+| `supervisor+wave` | supervisor 且 dispatcher 使用 wave fan-out | 上述两类信号同时出现 |
+
+**能力检测信号（冻结，供 review / diagnose 共用）**：
+
+| 信号来源 | 触发字段 / 关键字 |
+|---|---|
+| Intent 字段 | `execution_model` ∈ {`wave`, `supervisor`, `supervisor+wave`} |
+| YAML 拓扑 | `event_loop.supervisor.enabled: true` |
+| YAML / instructions | 出现 `ralph wave emit` / `ralph wave verify`，或 hat 依赖 `## WAVE CONTEXT` |
+| 产物（diagnose） | 存在 `.ralph/supervisor.db`，或 events 含 `wave_id`，或日志出现 wave fan-out |
+
+**默认推荐**：菜单第一项永远是 `single-chain`。用户否认 wave / supervisor → 锁定 `execution_model: single-chain`，后续拓扑不得引入 `event_loop.supervisor.enabled`、dispatcher 不得调用 `ralph wave emit`。
+
+**通用性硬约束**：**禁止**「preset 名称以 X 开头」之类名缀门控。`ce-executor-pipeline` 的 3b 既有规则保留，本计划不扩展该模式；**新加内容必须按 capability 触发**。
+
 ## Coordinator 分支（≤3 hat）
 
 `execution_mode: coordinator` 时单 prompt 可见多 hat 上下文；AAF 表须标注 **mode: coordinator** 及哪些 Q2/Q5 答案依赖 coordinator 注入。4+ hat **必须** `isolated`（`preset.multi_hat_requires_isolated`）。
