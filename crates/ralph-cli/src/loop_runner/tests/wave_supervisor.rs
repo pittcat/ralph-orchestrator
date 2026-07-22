@@ -2266,3 +2266,472 @@ fn test_u4_cap4_barrier_releases_fifth_fifo_slot() {
         "the fifth pending slot must follow the registered FIFO order"
     );
 }
+
+// =============================================================================
+// U5 (2026-07-23-001 plan): 登记 slot 成功/失败到 SupervisorStore
+//
+// The production dispatcher MUST call `bridge.record_slot_result`
+// (success) / `bridge.record_slot_failure` (failure) at the structured
+// worker-outcome boundary so the supervisor store's `completed_count` /
+// `failed_count` reflect the wave's terminal slots (R8). These tests
+// drive the real supervisor path (`execute_wave_via_supervisor_with_executor`)
+// with a store-backed spy bridge and assert on the store snapshot +
+// the captured record calls.
+// =============================================================================
+
+/// Per-slot script for the U5 test executor.
+#[derive(Clone, Debug)]
+enum U5SlotOutcome {
+    /// Worker succeeds, producing `usize` events.
+    Success(usize),
+    /// Worker fails with the given reason.
+    Fail(String),
+}
+
+/// Executor whose per-slot outcome is scripted by the test. Slots
+/// without an explicit entry fall back to `default`.
+struct U5RecordingExecutor {
+    plan: std::sync::Arc<std::collections::HashMap<u32, U5SlotOutcome>>,
+    default: U5SlotOutcome,
+}
+
+impl U5RecordingExecutor {
+    fn new(default: U5SlotOutcome) -> Self {
+        Self {
+            plan: std::sync::Arc::new(std::collections::HashMap::new()),
+            default,
+        }
+    }
+
+    fn with_slot(mut self, index: u32, outcome: U5SlotOutcome) -> Self {
+        let map = std::sync::Arc::make_mut(&mut self.plan);
+        map.insert(index, outcome);
+        self
+    }
+}
+
+/// Build a deterministic `ralph_core::Event` for a (slot, seq) pair so
+/// the content hash is stable across runs.
+fn u5_event(slot_index: u32, seq: usize) -> ralph_core::Event {
+    ralph_core::Event {
+        topic: "exec.done".to_string(),
+        payload: Some(format!("{{\"slot\":{slot_index},\"seq\":{seq}}}")),
+        ts: String::new(),
+        hat: None,
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    }
+}
+
+impl WaveWorkerExecutor for U5RecordingExecutor {
+    fn execute(
+        &self,
+        mut request: crate::loop_runner::wave::WorkerRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (u32, WaveWorkerOutcome)> + Send>> {
+        let plan = std::sync::Arc::clone(&self.plan);
+        let default = self.default.clone();
+        Box::pin(async move {
+            let _ = request.worker_rpc_tx.take();
+            let _ = request.worker_tui_state.take();
+            let index = request.index;
+            let outcome = plan.get(&index).cloned().unwrap_or(default);
+            match outcome {
+                U5SlotOutcome::Success(count) => {
+                    let events: Vec<ralph_core::Event> =
+                        (0..count).map(|seq| u5_event(index, seq)).collect();
+                    (index, Ok((events, Duration::from_millis(5), true)))
+                }
+                U5SlotOutcome::Fail(reason) => (index, Err((reason, Duration::from_millis(5)))),
+            }
+        })
+    }
+}
+
+/// Store-backed spy bridge for U5. `record_slot_result` /
+/// `record_slot_failure` capture the call AND delegate to the real
+/// store so tests can assert both on the captured payload (hash /
+/// count / reason) and on `fan_in_status` (completed/failed counts).
+#[derive(Clone)]
+struct U5RecordingBridge {
+    store: std::sync::Arc<dyn SupervisorStore>,
+    /// `(slot_index, content_hash, event_count)` per successful record.
+    slot_results: std::sync::Arc<Mutex<Vec<(u32, String, usize)>>>,
+    /// `(slot_index, reason)` per failure record.
+    slot_failures: std::sync::Arc<Mutex<Vec<(u32, String)>>>,
+}
+
+impl std::fmt::Debug for U5RecordingBridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("U5RecordingBridge").finish()
+    }
+}
+
+impl U5RecordingBridge {
+    fn new(store: std::sync::Arc<dyn SupervisorStore>) -> Self {
+        Self {
+            store,
+            slot_results: std::sync::Arc::new(Mutex::new(Vec::new())),
+            slot_failures: std::sync::Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn results_snapshot(&self) -> Vec<(u32, String, usize)> {
+        self.slot_results.lock().unwrap().clone()
+    }
+
+    fn failures_snapshot(&self) -> Vec<(u32, String)> {
+        self.slot_failures.lock().unwrap().clone()
+    }
+}
+
+impl SupervisorBridge for U5RecordingBridge {
+    fn tick(
+        &self,
+        _wave_id: &str,
+        _inputs: PhaseInputs,
+    ) -> Result<ralph_core::supervisor::CoordinatorAction, BridgeError> {
+        // U5 does NOT drive the coordinator fan-in (that is U6).
+        Ok(ralph_core::supervisor::CoordinatorAction::ContinueCollect)
+    }
+
+    fn bind_slot(
+        &self,
+        _kind: WaveKind,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> Result<Option<SlotBinding>, BridgeError> {
+        // Return a real binding (worktree_path = Some) so Exec/Fix
+        // slots pass the U1 KTD-4 fail-closed gate.
+        Ok(Some(SlotBinding {
+            slot_index,
+            env: HashMap::new(),
+            worktree_path: Some(format!("/tmp/u5/{wave_id}-{slot_index}").into()),
+        }))
+    }
+
+    fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
+        self.store
+            .recover_active_waves()
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn register_wave_if_absent(
+        &self,
+        kind: WaveKind,
+        wave_id: &str,
+        expected_total: u32,
+    ) -> Result<String, BridgeError> {
+        use ralph_core::supervisor::SupervisorStoreError;
+        match self.store.register_wave(wave_id, kind, expected_total) {
+            Ok(store_wave_id) => Ok(store_wave_id),
+            Err(SupervisorStoreError::DuplicateKey(_)) => {
+                let mut snapshots = self
+                    .store
+                    .recover_active_waves()
+                    .map_err(|err| BridgeError::Store(err.to_string()))?;
+                let snapshot = snapshots.pop().ok_or_else(|| {
+                    BridgeError::Store(format!(
+                        "register_wave_if_absent: duplicate key {wave_id} but no recovered wave"
+                    ))
+                })?;
+                Ok(snapshot.wave_id)
+            }
+            Err(err) => Err(BridgeError::Store(err.to_string())),
+        }
+    }
+
+    fn try_dispatch_next(&self, _wave_id: &str, _slot_index: u32) -> Result<bool, BridgeError> {
+        // Approve every slot the dispatcher asks about.
+        Ok(true)
+    }
+
+    fn record_slot_result(
+        &self,
+        _wave_id: &str,
+        slot_index: u32,
+        content_hash: &str,
+        event_count: usize,
+    ) -> Result<(), BridgeError> {
+        self.slot_results
+            .lock()
+            .unwrap()
+            .push((slot_index, content_hash.to_string(), event_count));
+        self.store
+            .record_slot_result(_wave_id, slot_index, content_hash, event_count)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn record_slot_failure(
+        &self,
+        _wave_id: &str,
+        slot_index: u32,
+        reason: &str,
+    ) -> Result<(), BridgeError> {
+        self.slot_failures
+            .lock()
+            .unwrap()
+            .push((slot_index, reason.to_string()));
+        self.store
+            .record_slot_failure(_wave_id, slot_index, reason)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn release_slot_dispatch(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        outcome: ralph_core::supervisor::DispatchOutcome,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .release_slot_dispatch(wave_id, slot_index, outcome)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+}
+
+/// Drive `execute_wave_via_supervisor_with_executor` with a
+/// `U5RecordingBridge` and the scripted `U5RecordingExecutor`.
+/// Returns the dispatch outcome and the bridge (for spy assertions).
+async fn run_u5_execute_wave(
+    bridge: U5RecordingBridge,
+    wave: ralph_core::DetectedWave,
+    executor: U5RecordingExecutor,
+) -> (WaveDispatchOutcome, U5RecordingBridge) {
+    use crate::loop_runner::wave::execute_wave_via_supervisor_with_executor;
+
+    let wave_dir = std::env::temp_dir().join(format!("u5-disp-{}", wave.wave_id));
+    let _ = std::fs::create_dir_all(&wave_dir);
+    let main_events_file = wave_dir.join("events.jsonl");
+    let _ = std::fs::File::create(&main_events_file);
+
+    let executor_dyn: std::sync::Arc<dyn WaveWorkerExecutor> = std::sync::Arc::new(executor) as _;
+    let bridge_arc: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge.clone());
+    let outcome = execute_wave_via_supervisor_with_executor(
+        &wave,
+        &make_test_cli_backend(),
+        &main_events_file,
+        false,
+        false,
+        None,
+        None,
+        "u5-test-loop",
+        WaveDispatchLimits::default(),
+        None,
+        None,
+        &bridge_arc,
+        executor_dyn,
+    )
+    .await;
+    (outcome, bridge)
+}
+
+/// The sha256 of the empty string — the stable fingerprint the
+/// dispatcher must record for an empty event batch.
+fn empty_batch_hash() -> String {
+    ralph_core::agent_doc_sync::compute_sha256_hex("")
+}
+
+/// U5 验收 #1: N successful workers → the supervisor store records
+/// `completed_count == N` (one `record_slot_result` per terminal slot).
+#[tokio::test]
+async fn test_dispatcher_records_slot_outcomes() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>);
+
+    let wave = make_u3_wave("u5-all-ok", 3, 3);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(1));
+
+    let (outcome, bridge) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    // The wave must complete (all workers succeed well within budget).
+    assert!(
+        matches!(
+            outcome,
+            WaveDispatchOutcome::Completed(_) | WaveDispatchOutcome::Partial(_)
+        ),
+        "U5: expected a completed wave, got {outcome:?}"
+    );
+
+    // One record_slot_result per slot.
+    let results = bridge.results_snapshot();
+    assert_eq!(
+        results.len(),
+        3,
+        "U5: dispatcher must call record_slot_result once per successful slot (3); got {results:?}"
+    );
+    assert!(
+        bridge.failures_snapshot().is_empty(),
+        "U5: no failures expected"
+    );
+
+    // The store snapshot reflects 3 completed slots.
+    let store_wave_id = bridge
+        .store
+        .recover_active_waves()
+        .expect("recover")
+        .pop()
+        .expect("one wave")
+        .wave_id;
+    let snap = bridge
+        .store
+        .fan_in_status(&store_wave_id)
+        .expect("snapshot");
+    assert_eq!(
+        snap.completed_count, 3,
+        "U5: store completed_count must equal the number of successful slots"
+    );
+    assert_eq!(snap.failed_count, 0, "U5: no failed slots expected");
+}
+
+/// U5 验收 #2: 2 success + 1 failure → `completed_count == 2`,
+/// `failed_count == 1`, and the failure reason is preserved.
+#[tokio::test]
+async fn test_dispatcher_records_failure_with_reason() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>);
+
+    let wave = make_u3_wave("u5-one-fail", 3, 3);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(1))
+        .with_slot(1, U5SlotOutcome::Fail("boom: worker crashed".to_string()));
+
+    let (_outcome, bridge) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    let results = bridge.results_snapshot();
+    let failures = bridge.failures_snapshot();
+    assert_eq!(
+        results.len(),
+        2,
+        "U5: two successful slots; got {results:?}"
+    );
+    assert_eq!(failures.len(), 1, "U5: one failed slot; got {failures:?}");
+    assert_eq!(failures[0].0, 1, "U5: slot 1 is the failed slot");
+    assert!(
+        failures[0].1.contains("boom"),
+        "U5: failure reason must be preserved, got {:?}",
+        failures[0].1
+    );
+
+    let store_wave_id = bridge
+        .store
+        .recover_active_waves()
+        .expect("recover")
+        .pop()
+        .expect("one wave")
+        .wave_id;
+    let snap = bridge
+        .store
+        .fan_in_status(&store_wave_id)
+        .expect("snapshot");
+    assert_eq!(snap.completed_count, 2, "U5: completed_count == 2");
+    assert_eq!(snap.failed_count, 1, "U5: failed_count == 1");
+}
+
+/// U5 验收 #3: re-dispatching the same wave MUST NOT double-count.
+/// The store's `record_slot_*` is idempotent per `(wave, slot)`; the
+/// dispatcher relies on this and must not assume single-call.
+#[tokio::test]
+async fn test_dispatcher_record_idempotent_across_reruns() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>);
+
+    let wave = make_u3_wave("u5-idem", 2, 2);
+
+    // First dispatch: both slots succeed and are recorded.
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(1));
+    let (_outcome, bridge) = run_u5_execute_wave(bridge.clone(), wave, executor).await;
+
+    let store_wave_id = bridge
+        .store
+        .recover_active_waves()
+        .expect("recover")
+        .pop()
+        .expect("one wave")
+        .wave_id;
+    assert_eq!(
+        bridge
+            .store
+            .fan_in_status(&store_wave_id)
+            .unwrap()
+            .completed_count,
+        2,
+        "U5: first run records 2 completed slots"
+    );
+
+    // Re-record the SAME slots directly through the bridge (simulating
+    // a duplicate record — e.g. a crash/replay that re-reports a slot).
+    // The completed_count MUST stay at 2 (idempotent).
+    bridge
+        .record_slot_result(&store_wave_id, 0, "dup-hash", 1)
+        .expect("re-record slot 0");
+    bridge
+        .record_slot_result(&store_wave_id, 1, "dup-hash", 1)
+        .expect("re-record slot 1");
+
+    let snap = bridge
+        .store
+        .fan_in_status(&store_wave_id)
+        .expect("snapshot");
+    assert_eq!(
+        snap.completed_count, 2,
+        "U5: duplicate record_slot_result must NOT increase completed_count"
+    );
+}
+
+/// U5 验收 #4: a worker producing K events → the recorded
+/// `event_count` for that slot is K (batch is preserved).
+#[tokio::test]
+async fn test_dispatcher_records_event_batch_count() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>);
+
+    let wave = make_u3_wave("u5-batch", 2, 2);
+    // Slot 0 → 4 events, slot 1 → 1 event.
+    let executor =
+        U5RecordingExecutor::new(U5SlotOutcome::Success(1)).with_slot(0, U5SlotOutcome::Success(4));
+
+    let (_outcome, bridge) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    let results = bridge.results_snapshot();
+    assert_eq!(results.len(), 2, "U5: two slots recorded; got {results:?}");
+    let by_slot: std::collections::HashMap<u32, usize> = results
+        .iter()
+        .map(|(slot, _hash, count)| (*slot, *count))
+        .collect();
+    assert_eq!(
+        by_slot.get(&0).copied(),
+        Some(4),
+        "U5: slot 0 must record event_count == 4"
+    );
+    assert_eq!(
+        by_slot.get(&1).copied(),
+        Some(1),
+        "U5: slot 1 must record event_count == 1"
+    );
+}
+
+/// U5 验收 #5: an empty-event worker → `event_count == 0` and a
+/// stable empty-batch content hash (sha256 of "").
+#[tokio::test]
+async fn test_dispatcher_records_empty_batch_stable_hash() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>);
+
+    let wave = make_u3_wave("u5-empty", 1, 1);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(0));
+
+    let (_outcome, bridge) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    let results = bridge.results_snapshot();
+    assert_eq!(results.len(), 1, "U5: one slot recorded; got {results:?}");
+    let (slot, hash, count) = &results[0];
+    assert_eq!(*slot, 0);
+    assert_eq!(*count, 0, "U5: empty batch → event_count == 0");
+    assert_eq!(
+        *hash,
+        empty_batch_hash(),
+        "U5: empty batch must hash to the stable empty sha256"
+    );
+}

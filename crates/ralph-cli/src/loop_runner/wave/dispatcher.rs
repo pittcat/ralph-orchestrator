@@ -1782,6 +1782,55 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
             // need it.
             let _permit = permit;
             let result = executor.execute(request).await;
+
+            // 2026-07-23-001 plan U5 (R8): record the terminal slot
+            // outcome into the supervisor store at the structured
+            // worker-outcome boundary. Success → the batch fingerprint
+            // (content_hash + event_count); failure → the worker's
+            // error reason. The store's `record_slot_*` is idempotent
+            // per `(wave, slot)`, so a re-reported slot does not
+            // double-count (the dispatcher does not assume single-call).
+            // A record error is logged but does not change the dispatch
+            // outcome — the Drop guard below still returns the
+            // store-side permit. Cancellation (JoinSet abort) never
+            // reaches this point; the Drop guard releases the slot as
+            // `Failed` for those. This is persistence only: no sink,
+            // no `wave.complete` injection, no `tick` (all U6).
+            if let Some(guard) = release_guard.as_ref() {
+                match &result.1 {
+                    Ok((events, _duration, _success)) => {
+                        let (content_hash, event_count) = compute_slot_batch_fingerprint(events);
+                        if let Err(error) = guard.bridge.record_slot_result(
+                            &guard.wave_id,
+                            guard.slot_index,
+                            &content_hash,
+                            event_count,
+                        ) {
+                            warn!(
+                                wave_id = %guard.wave_id,
+                                slot_index = guard.slot_index,
+                                %error,
+                                "U5: supervisor record_slot_result failed"
+                            );
+                        }
+                    }
+                    Err((reason, _duration)) => {
+                        if let Err(error) = guard.bridge.record_slot_failure(
+                            &guard.wave_id,
+                            guard.slot_index,
+                            reason,
+                        ) {
+                            warn!(
+                                wave_id = %guard.wave_id,
+                                slot_index = guard.slot_index,
+                                %error,
+                                "U5: supervisor record_slot_failure failed"
+                            );
+                        }
+                    }
+                }
+            }
+
             if result.1.is_ok()
                 && let Some(guard) = release_guard.as_mut()
             {
@@ -2090,6 +2139,31 @@ fn record_outcome(
             tracker.record_failure(wave_id, index, error, duration);
         }
     }
+}
+
+/// 2026-07-23-001 plan U5 (R8): compute a stable `(content_hash,
+/// event_count)` fingerprint for a worker's produced event batch,
+/// suitable for `SupervisorBridge::record_slot_result`.
+///
+/// The hash is a sha256 over the canonical JSONL serialization of the
+/// events (one line per event, in worker order). An empty batch hashes
+/// to the sha256 of the empty string, so the store sees a stable
+/// "empty" fingerprint and the R-E1 dedup contract holds across
+/// re-dispatches. The dispatcher only persists the fingerprint +
+/// count into the store slot; the event batch itself stays in the
+/// worker's events file until U6's sink merges it.
+fn compute_slot_batch_fingerprint(events: &[ralph_core::Event]) -> (String, usize) {
+    let mut buf = String::new();
+    for event in events {
+        if let Ok(line) = serde_json::to_string(event) {
+            buf.push_str(&line);
+            buf.push('\n');
+        }
+    }
+    (
+        ralph_core::agent_doc_sync::compute_sha256_hex(&buf),
+        events.len(),
+    )
 }
 
 fn take_results(
