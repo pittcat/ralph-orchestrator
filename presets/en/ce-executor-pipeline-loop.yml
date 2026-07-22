@@ -1695,13 +1695,39 @@ hats:
         after its subagent returns an observed failure; it may be blocked
         without dispatch only when its explicit Dependencies field names an
         actually failed U-ID.
-      - **Unit isolation (HARD RULE)**: a failed U-ID is not permission to
-        abandon the rest of the plan. Mark that U-ID failed, decide which
-        later U-IDs depend on it, continue any independent later U-IDs, and
-        mark only dependent U-IDs as blocked. End the activation with a
-        single `work.done` only if all planned U-IDs completed; otherwise
-        emit `work.failed` with completed / failed / blocked / skipped
-        U-IDs summarized in `reason` and detailed in decisions.md.
+      - **Finish-the-plan / in-activation retry (HARD RULE)**: the operator
+        gave you a plan — **this activation must process every remaining
+        U-ID end-to-end**. One-subagent-per-Unit is only a
+        **context-management** tool; it is NOT permission to stop after one
+        Unit or to defer "the rest" to a later loop.
+        **Per-Unit retry budget**: on subagent / test / build / lint / skill
+        failure for a U-ID, write a short failure brief (what broke, what
+        you tried, next angle) and **retry that U-ID exactly 3 times**
+        (retry #1, #2, #3 after the first failure; 4 total attempts). Do not
+        stop after 1–2 retries. If it still cannot land after retry #3,
+        **park that U-ID** as failed (record brief + attempt count in
+        `decisions.md`) — then **continue** every later independent U-ID.
+        Dependent later U-IDs (explicit Dependencies on the parked one) may
+        be marked blocked without dispatch.
+        **Terminal after the full walk**:
+        - `work.done` — every planned U-ID completed green (none parked /
+          failed / blocked).
+        - `work.failed` — full remaining plan walked AND ≥1 U-ID remains
+          parked/failed/blocked after its 3-retry budget (summarize
+          completed / failed / blocked / parked in `reason` +
+          `decisions.md`).
+        **Forbidden**: emit `work.failed` / stop while any independent U-ID
+        remains unattempted, or because of `partial_execution`,
+        "single-Unit budget", "defer remaining Units", "context pressure",
+        "too many Units", or "failed once".
+      - **Unit isolation (HARD RULE)**: a parked/failed U-ID is not
+        permission to abandon the rest of the plan. Mark that U-ID failed,
+        decide which later U-IDs depend on it, continue any independent
+        later U-IDs, and mark only dependent U-IDs as blocked. Emit only
+        after the full remaining plan has been walked — `work.done` if all
+        U-IDs completed green; otherwise `work.failed` with completed /
+        failed / blocked / parked summarized in `reason` and detailed in
+        `decisions.md`.
       - **Per-U commit (HARD RULE)**: each Implementation Unit (U-ID) that
         passes its unit-level tests MUST get its own `git commit` before you
         start the next U-ID. Do NOT batch multiple U-IDs into one commit.
@@ -4283,6 +4309,28 @@ hats:
         enter `failed_fix_units` only after its subagent returns an observed
         failure; it may enter `blocked_fix_units` without dispatch only when
         its explicit Dependencies field names an actually failed Unit.
+      - **Finish-the-fix-plan / in-activation retry (HARD RULE)**: the
+        fix-planner gave you a fix plan — **this activation must process
+        every actionable Unit end-to-end**. One-subagent-per-Unit is only
+        context management, not a stop-after-one-Unit budget.
+        **Per-Unit retry budget**: on subagent / test / build / lint / skill
+        failure, write a short failure brief and **retry that Unit exactly
+        3 times** (retry #1, #2, #3 after the first failure; 4 total
+        attempts). If it still cannot land after retry #3, **park that
+        Unit** (`failed_fix_units` + brief + attempt count) and
+        **continue** every later independent fix Unit (dependents may go to
+        `blocked_fix_units`).
+        **`fix_status` after the full walk**:
+        - `applied` — every actionable Unit applied green and full suite
+          gate green (or empty-plan no-op path).
+        - `partial` — full fix plan walked AND ≥1 Unit parked/blocked after
+          its 3-retry budget (at least one other Unit applied).
+        - `blocked` — full walk done and no safe independent progress
+          remains after retries.
+        **Forbidden early exits**: `partial` / `blocked` because of "too
+        many Units", "context pressure", "single-Unit budget", "one failure
+        is enough", or "defer to next round" while any independent Unit
+        remains unattempted.
       - Do NOT emit `work.done` / `work.failed` /
         `plan.*` / `review.*` / `align.done` / `report.done` /
         `LOOP_COMPLETE`.

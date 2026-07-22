@@ -15,7 +15,7 @@ origin: docs/report/2026-07-22-ce-executor-supervisor-primary-20260722-084810-di
 
 - Objective: 修复 `ce-executor-supervisor` 从 wave 识别、SQLite supervisor、slot worktree、全局反压、结果登记、fan-in 到终态事件的生产链路，使 exec/review/fix 并行路径真实可运行。
 - Authority: 本计划 Product Contract、会话确认的 KTD、仓库 HARD RULE；发生冲突时，`ce-executor-pipeline` 零行为变化与 supervisor 默认持久化优先。
-- Execution profile: 严格执行 `U1 → U2 → … → U13`；每个 Unit 独立完成验收测试、Red、最小实现、Refactor、targeted regression 后才能进入下一 Unit。**Unit 包装硬约束（来自本计划首轮 U5 失败）：** 单个 Unit 必须可由一个 executor subagent 在一轮内安全闭合；禁止把「跨 crate 表面 + 生产 spawn 门控 + permit 释放 + 全套并发/FIFO 验收」或「record + production sink + 协调 payload + U16 特判」塞进同一 Unit。
+- Execution profile: 严格执行 `U1 → U2 → … → U13`；每个 Unit 独立完成验收测试、Red、最小实现、Refactor、targeted regression 后才能进入下一 Unit。**Unit 包装硬约束（来自本计划首轮 U5 失败）：** 单个 Unit 必须可由一个 executor subagent 安全闭合；禁止把「跨 crate 表面 + 生产 spawn 门控 + permit 释放 + 全套并发/FIFO 验收」或「record + production sink + 协调 payload + U16 特判」塞进同一 Unit。**Executor 激活硬约束：** 一次 activation 必须把所有剩余 Unit 走完（每 Unit 一个 subagent）；单 Unit 失败带 brief 恰好 retry 3 次（首次失败后再试 #1/#2/#3，共 4 次尝试），仍不行则搁置并记报告，然后继续后续独立 Unit——禁止因一个 Unit 失败或以 `partial_execution` /「单轮预算」提前发 `work.failed` 留下未尝试 Unit。
 - Stop when: Verification Contract 全部通过，真实临时 Git 仓库中可观察到受并发上限约束的独立 slot worktree，完整 supervisor 主路径闭环，所有 pipeline 场景保持原行为。
 - Tail ownership: U13 统一收口 agent skill、operator skill、架构规则、诊断报告和 CLI 文档漂移；任何失败或跳过测试必须在完成前清零。
 
@@ -339,7 +339,7 @@ sequenceDiagram
 >
 > **再入说明：** U1–U4 已在 baseline `15bd550c` 的祖先提交中落地。本计划修订后，执行从 **新 U5** 起；旧“单体 U5（bridge+dispatcher+permit+全套并发验收）”已拆为 U5–U7，旧 U6–U8 对应 U8–U13。
 >
-> **单轮 subagent 预算：** 每个 Unit 默认只动一层（trait/bridge **或** dispatcher **或** sink/event-loop **或** 测试/文档），验收用例不超过该层的最小可观察闭环。
+> **Unit 包装预算（不是 activation 预算）：** 每个 Unit 默认只动一层（trait/bridge **或** dispatcher **或** sink/event-loop **或** 测试/文档），验收用例不超过该层的最小可观察闭环，以便「一个 Unit = 一个 subagent」能安全闭合。**Executor 行为：** 一次 activation 必须把所有剩余 Unit 走完；单个 Unit 失败时带 brief 恰好 retry 3 次（首次失败后再试 #1/#2/#3），仍不行则搁置该 Unit 并记入 `decisions.md`，然后继续做后续独立 Unit——**禁止**因一个 Unit 失败或以「单轮预算」提前发 `work.failed` 留下未尝试 Unit。
 
 ### U1. 建立 pipeline 零影响 characterization 门禁
 
@@ -651,7 +651,7 @@ sequenceDiagram
 
 ## Definition of Done
 
-- U1–U13严格按顺序分别完成TDD闭环与回归，不存在交替开发或后置测试债务；每个实现 Unit 符合单轮 subagent 预算（单层接线 + 窄验收）。
+- U1–U13严格按顺序分别走完TDD闭环与回归，不存在交替开发或后置测试债务；每个实现 Unit 符合 Unit 包装预算（单层接线 + 窄验收，便于单 subagent 闭合）；executor 一次 activation 必须处理完所有剩余 Unit（单 Unit 失败恰好 retry 3 次后可搁置并写报告，但不得留下未尝试的独立 Unit）。
 - 默认Ralph CLI运行supervisor preset时无需额外Cargo feature参数，SQLite路径正确且启动失败策略明确。
 - builtin supervisor三类wave均可识别；exec/fix有真实per-slot worktree，review shared-readonly。
 - 全局反压、slot状态、结果幂等、生产ledger fan-in、协调topic、Git branch合并交接与crash recovery由真实生产链路闭合。
