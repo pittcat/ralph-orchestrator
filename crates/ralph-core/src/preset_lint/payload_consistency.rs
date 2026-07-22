@@ -40,8 +40,10 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use crate::config::{EventSchema, RalphConfig};
+use crate::event_policy_payload_consistency::WHITELISTED_PREDICATE_OPS;
 use crate::preset_lint::finding_id::{
-    FINDING_PAYLOAD_CONSISTENCY_DUPLICATE_ID, FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_FIELD,
+    FINDING_PAYLOAD_CONSISTENCY_DUPLICATE_ID, FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN,
+    FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_FIELD, FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP,
     FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_TOPIC,
 };
 use crate::preset_lint::{LintFinding, LintSeverity, LintStrictness};
@@ -75,9 +77,37 @@ pub fn check_payload_consistency(
         }
     }
 
-    // Rules 2 + 3: topic must exist in the schema map, and every field
-    // referenced in `when` must be declared on that topic's schema.
+    // Rules 2 + 3 + 4 + 5: topic must exist in the schema map, every field
+    // referenced in `when` must be declared on that topic's schema, the
+    // `when` must be a JSON object, and every predicate op inside `when`
+    // must be in the runtime whitelist. The object-shape and op-whitelist
+    // checks (adversarial:A1) mirror the runtime fail-close paths in
+    // `event_policy_payload_consistency` so a typo'd rule is rejected at
+    // preset-load time instead of turning the gated topic into a hard
+    // runtime reject.
     for rule in rules {
+        let when_is_object = matches!(rule.when, Value::Object(_));
+        if !when_is_object {
+            findings.push(non_object_when_finding(
+                severity,
+                &rule.id,
+                json_kind_label(&rule.when),
+            ));
+            // No structured shape to walk further (no fields, no ops);
+            // the non-object finding is the actionable root cause.
+            continue;
+        }
+
+        // Predicate-shape (unknown op) check runs even when the topic is
+        // unknown: the op whitelist is the runtime's first line of defence
+        // and a typo'd op on a typo'd topic is still a typo.
+        let mut seen_ops: HashSet<String> = HashSet::new();
+        for op in collect_when_predicate_ops(&rule.when) {
+            if seen_ops.insert(op.clone()) && !WHITELISTED_PREDICATE_OPS.contains(&op.as_str()) {
+                findings.push(unknown_op_finding(severity, &rule.id, &op));
+            }
+        }
+
         let Some(schema) = policy.schemas.get(&rule.topic) else {
             findings.push(unknown_topic_finding(severity, &rule.id, &rule.topic));
             // No schema to enumerate fields from; the unknown-topic
@@ -119,6 +149,57 @@ fn collect_when_fields(when: &Value, out: &mut Vec<String>) {
     }
     if let Some(Value::String(field)) = obj.get("field") {
         out.push(field.clone());
+    }
+}
+
+/// Walk a parsed `when` predicate and collect every predicate op key
+/// (i.e. every object key that is NOT a combinator key `all` / `any` and
+/// NOT the `field` selector), recursing through combinators. The set of
+/// op names returned is then compared against the runtime whitelist
+/// [`WHITELISTED_PREDICATE_OPS`] to surface typos at preset-load time.
+///
+/// Anything that is not a JSON object is skipped at the helper level —
+/// the top-level non-object-when guard is responsible for surfacing
+/// that case via [`FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN`] before
+/// this helper runs.
+fn collect_when_predicate_ops(when: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    collect_when_predicate_ops_inner(when, &mut out);
+    out
+}
+
+fn collect_when_predicate_ops_inner(when: &Value, out: &mut Vec<String>) {
+    let Value::Object(obj) = when else {
+        return;
+    };
+    if let Some(Value::Array(items)) = obj.get("all").or_else(|| obj.get("any")) {
+        for item in items {
+            collect_when_predicate_ops_inner(item, out);
+        }
+    }
+    for (key, value) in obj {
+        match key.as_str() {
+            "all" | "any" | "field" => {}
+            _ => {
+                if value.is_object() {
+                    continue;
+                }
+                out.push(key.clone());
+            }
+        }
+    }
+}
+
+/// Human-readable label of a non-object `when` shape so the agent can
+/// tell scalar / array / null cases apart at a glance.
+fn json_kind_label(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 
@@ -196,6 +277,44 @@ fn unknown_field_finding(
             "add `{field}` to the `{topic}` schema (required_fields, known_fields, \
              field_docs, allowed_values, or element_constraints), or fix the rule's \
              `field` reference"
+        )),
+    }
+}
+
+fn unknown_op_finding(severity: LintSeverity, rule_id: &str, op: &str) -> LintFinding {
+    LintFinding {
+        id: FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP,
+        severity,
+        message: format!(
+            "payload_consistency rule \"{rule_id}\" references unknown op \"{op}\"; \
+             the runtime whitelist is {op:?} and any unknown op causes the rule \
+             to fail-close on every emit, rejecting the gated topic"
+        ),
+        topic: None,
+        hat: None,
+        owner: None,
+        action_hint: Some(format!(
+            "rename \"{op}\" to one of the whitelisted ops (eq / ne / gt / gte / \
+             exists / non_empty) or remove the predicate from the rule"
+        )),
+    }
+}
+
+fn non_object_when_finding(severity: LintSeverity, rule_id: &str, kind: &str) -> LintFinding {
+    LintFinding {
+        id: FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN,
+        severity,
+        message: format!(
+            "payload_consistency rule \"{rule_id}\" has a `when` that is a {kind} \
+             instead of a JSON object; the runtime treats a non-object `when` as \
+             fail-close Hit, rejecting every emit on the gated topic"
+        ),
+        topic: None,
+        hat: None,
+        owner: None,
+        action_hint: Some(format!(
+            "rewrite \"{rule_id}\" `when` as a JSON object: a single predicate \
+             `{{field, <op>, value}}` or a combinator `{{all: [...]}}` / `{{any: [...]}}`"
         )),
     }
 }
@@ -341,7 +460,92 @@ mod tests {
         assert!(findings.iter().any(|f| f.message.contains("deep_ghost")));
     }
 
-    /// 6. Default strictness grades findings as `Warn`; strict grades
+    /// 6. Unknown predicate op is surfaced in both modes with the
+    ///    strictness-appropriate severity.
+    #[test]
+    fn unknown_op_fails_with_strictness_severity() {
+        let config = config_with_rules(vec![rule(
+            "r1",
+            "fix.done",
+            json!({"field": "review_verdict", "eqz": "blocked"}),
+        )]);
+
+        for (strictness, expected_severity) in [
+            (LintStrictness::Default, LintSeverity::Warn),
+            (LintStrictness::Strict, LintSeverity::Error),
+        ] {
+            let findings = check_payload_consistency(&config, strictness);
+            let matching: Vec<_> = findings
+                .iter()
+                .filter(|finding| {
+                    finding.id
+                        == crate::preset_lint::finding_id::FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP
+                })
+                .collect();
+            assert_eq!(matching.len(), 1, "got {findings:?}");
+            assert_eq!(matching[0].severity, expected_severity);
+            assert!(matching[0].message.contains("eqz"));
+        }
+    }
+
+    /// 7. A non-object `when` is surfaced in both modes with the
+    ///    strictness-appropriate severity.
+    #[test]
+    fn non_object_when_fails_with_strictness_severity() {
+        let config = config_with_rules(vec![rule(
+            "r1",
+            "fix.done",
+            json!("literal"),
+        )]);
+
+        for (strictness, expected_severity) in [
+            (LintStrictness::Default, LintSeverity::Warn),
+            (LintStrictness::Strict, LintSeverity::Error),
+        ] {
+            let findings = check_payload_consistency(&config, strictness);
+            let matching: Vec<_> = findings
+                .iter()
+                .filter(|finding| {
+                    finding.id
+                        == crate::preset_lint::finding_id::FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN
+                })
+                .collect();
+            assert_eq!(matching.len(), 1, "got {findings:?}");
+            assert_eq!(matching[0].severity, expected_severity);
+        }
+    }
+
+    /// 8. Nested legal combinators and whitelisted predicate ops do not
+    ///    trigger either shape finding.
+    #[test]
+    fn valid_nested_combinators_do_not_report_shape_findings() {
+        let config = config_with_rules(vec![rule(
+            "r1",
+            "fix.done",
+            json!({"all": [
+                {"field": "review_verdict", "eq": "blocked"},
+                {"any": [
+                    {"field": "fixes_applied", "gte": 1},
+                    {"field": "planned_fix_units", "non_empty": true}
+                ]}
+            ]}),
+        )]);
+
+        for strictness in [LintStrictness::Default, LintStrictness::Strict] {
+            let findings = check_payload_consistency(&config, strictness);
+            assert!(
+                findings.iter().all(|finding| {
+                    finding.id
+                        != crate::preset_lint::finding_id::FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP
+                        && finding.id
+                            != crate::preset_lint::finding_id::FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN
+                }),
+                "valid nested predicates must not trigger shape findings under {strictness:?}, got {findings:?}"
+            );
+        }
+    }
+
+    /// 9. Default strictness grades findings as `Warn`; strict grades
     ///    them as `Error` (warn-by-default pattern).
     #[test]
     fn severity_follows_strictness() {

@@ -536,6 +536,25 @@ pub const FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_TOPIC: &str =
 pub const FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_FIELD: &str =
     "preset.payload_consistency_unknown_field";
 
+/// U3 (fix-plan 2026-07-22-004 adversarial:A1): a `payload_consistency`
+/// rule's `when` references an op that is not in the runtime whitelist
+/// (`eq` / `ne` / `gt` / `gte` / `exists` / `non_empty`). The runtime
+/// evaluator treats unknown ops as fail-close `Hit`, which silently
+/// turns the gated topic into a hard reject. The lint surfaces this
+/// at preset-load time instead. `Warn` in default mode, `Error` in
+/// strict.
+pub const FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP: &str =
+    "preset.payload_consistency_unknown_op";
+
+/// U3 (fix-plan 2026-07-22-004 adversarial:A1): a `payload_consistency`
+/// rule's `when` is not a JSON object (it is a scalar, array, or null).
+/// The runtime evaluator treats non-object `when` as fail-close `Hit`.
+/// The lint surfaces this at preset-load time so the rule author can
+/// rewrite the `when` as `{all:[...]}` / `{any:[...]}` or a single
+/// predicate object. `Warn` in default mode, `Error` in strict.
+pub const FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN: &str =
+    "preset.payload_consistency_non_object_when";
+
 /// Inventory of every finding id in this module. Use this in tests
 /// that assert the lint surface does not silently re-introduce a
 /// serial-only or coordinator-loop finding. Plan 2026-07-07-006
@@ -593,4 +612,6 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_PAYLOAD_CONSISTENCY_DUPLICATE_ID,
     FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_TOPIC,
     FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_FIELD,
+    FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP,
+    FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN,
 ];
