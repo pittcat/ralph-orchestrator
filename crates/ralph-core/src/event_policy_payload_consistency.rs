@@ -46,13 +46,12 @@
 //!
 //! # Field lookup
 //!
-//! The `field` path uses dot notation identical to
-//! `event_policy::extract_json_field`: split on `.`, descend into
-//! `Value::Object` keys, return `None` on any miss or non-object
-//! intermediate. Re-implemented locally rather than imported so this
-//! module stays self-contained and the visibility of the private
-//! helper in `event_policy.rs` does not have to change.
+//! The `field` path uses dot notation; we share
+//! `event_policy::extract_json_field` (visibility `pub(crate)`)
+//! rather than re-implement locally, so this evaluator and the
+//! `event_policy` evaluator cannot drift on the same input.
 
+use crate::event_policy::extract_json_field;
 use serde_json::Value;
 
 /// Result of evaluating a `when` predicate against a single payload.
@@ -290,22 +289,6 @@ fn json_type_tag(v: &Value) -> &'static str {
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     }
-}
-
-/// Local copy of `event_policy::extract_json_field` (kept identical
-/// so U3 can sanity-check the contract stays the same). Public
-/// visibility is not changed on the upstream helper.
-fn extract_json_field(value: &Value, path: &str) -> Option<Value> {
-    let mut current = value;
-    for part in path.split('.') {
-        match current {
-            Value::Object(obj) => {
-                current = obj.get(part)?;
-            }
-            _ => return None,
-        }
-    }
-    Some(current.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -660,5 +643,73 @@ mod tests {
         let payload = json!({"a": [1, 2, 3]});
         let when = json!({"field": "a.b", "exists": true});
         assert_eq!(evaluate(&when, &payload), EvalOutcome::Miss);
+    }
+}
+
+#[cfg(test)]
+mod cross_impl_consistency_tests {
+    use super::{EvalOutcome, evaluate};
+    use crate::event_policy::extract_json_field;
+    use serde_json::{Value, json};
+
+    fn assert_equal_value(payload: &Value, path: &str, expected: Value) {
+        assert_eq!(extract_json_field(payload, path), Some(expected.clone()));
+        assert_eq!(
+            evaluate(&json!({"field": path, "eq": expected}), payload),
+            EvalOutcome::Hit
+        );
+    }
+
+    fn assert_missing(payload: &Value, path: &str) {
+        assert_eq!(extract_json_field(payload, path), None);
+        assert_eq!(
+            evaluate(&json!({"field": path, "exists": true}), payload),
+            EvalOutcome::Miss
+        );
+    }
+
+    #[test]
+    fn nested_leaf_matches_evaluator() {
+        assert_equal_value(&json!({"a": {"b": {"c": 42}}}), "a.b.c", json!(42));
+    }
+
+    #[test]
+    fn missing_nested_field_matches_evaluator() {
+        assert_missing(&json!({"a": {"b": 1}}), "a.c");
+    }
+
+    #[test]
+    fn top_level_object_matches_evaluator() {
+        assert_equal_value(&json!({"a": {"b": 1}}), "a", json!({"b": 1}));
+    }
+
+    #[test]
+    fn array_index_is_unsupported_in_both_paths() {
+        assert_missing(&json!({"a": [1, 2]}), "a.0");
+    }
+
+    #[test]
+    fn top_level_array_matches_evaluator() {
+        assert_equal_value(&json!({"a": [1, 2]}), "a", json!([1, 2]));
+    }
+
+    #[test]
+    fn non_object_intermediate_matches_evaluator() {
+        assert_missing(&json!({"a": "scalar"}), "a.b");
+    }
+
+    #[test]
+    fn null_is_present_in_both_paths() {
+        let payload = json!({"a": null});
+        assert_eq!(extract_json_field(&payload, "a"), Some(Value::Null));
+        assert_eq!(
+            evaluate(&json!({"field": "a", "exists": true}), &payload),
+            EvalOutcome::Hit
+        );
+    }
+
+    #[test]
+    fn empty_path_matches_empty_key_in_both_paths() {
+        assert_equal_value(&json!({"": "empty-key"}), "", json!("empty-key"));
     }
 }

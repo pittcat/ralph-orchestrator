@@ -2386,7 +2386,10 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
 }
 
 /// Extract a nested field from a JSON value using dot notation.
-fn extract_json_field(value: &Value, path: &str) -> Option<Value> {
+///
+/// Shared with the payload-consistency evaluator and lint. Keep this
+/// single implementation; do not re-introduce local copies.
+pub(crate) fn extract_json_field(value: &Value, path: &str) -> Option<Value> {
     let mut current = value;
     for part in path.split('.') {
         match current {
