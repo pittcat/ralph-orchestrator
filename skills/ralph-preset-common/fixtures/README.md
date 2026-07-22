@@ -9,6 +9,8 @@
 | `aaf-review-negative-fixture.yml` | AAF + invisible-input violations (Q2 missing / ledger read / unprojected handoff) |
 | `payload-audit-negative-fixture.yml` | Mechanically valid topology with payload-content violations (fabricated identity, vague decision, missing upstream field) |
 | `trigger-context-negative-fixture.yml` | Trigger Context anti-pattern index (2026-07-09-003 plan U8 step 11): unknown summary field, duplicate hint label, unsupported predicate, value-shape mismatch, no consumer, and instructions duplicating hint conditions |
+| `aaf-wave-capability-negative-fixture.yml` | Wave capability audit axes (2026-07-22-002 plan U6): worker `ralph wave emit`, missing `wave verify`, hat-channel Confirm, hat publishes coordination topic |
+| `aaf-supervisor-capability-negative-fixture.yml` | Supervisor capability audit axes (2026-07-22-002 plan U6): supervisor with non-isolated mode, hat publishes `exec.wave.*`, dispatcher reads `supervisor.db`, execution_model Intent mismatch |
 
 ## Acceptance Checklist
 
@@ -113,6 +115,46 @@ cargo nextest run -p ralph-core -- preset_lint::trigger_context
 但 typed-config 链路在本 CLI 表面上对这 5 类 ID 的暴露路径当前与 unit-test
 路径不一致。这是已知 follow-up，本 fixture 的 lint 验收以 nextest 子集为准，
 **不要把 CLI 输出当作这 5 类 finding 的判 fail 依据**。
+
+### 7. Wave / Supervisor capability negative fixtures (2026-07-22-002 plan U6)
+
+`aaf-wave-capability-negative-fixture.yml` and
+`aaf-supervisor-capability-negative-fixture.yml` carry four / five
+anti-pattern axes each, covering the new `preset.wave_*` and
+`preset.supervisor_*` review-only findings in
+`references/finding-rubric.md`「Wave capability audit」 /
+「Supervisor capability audit」 段. Each axis is tagged in an inline
+comment so review-skill trainees can read a single YAML and locate every
+shape error the soft AAF path is supposed to catch.
+
+| Axis | What the YAML contains | Expected finding | Source |
+|---|---|---|---|
+| Wave (a) | `worker_alpha` instructions require `ralph wave emit` | `preset.wave_worker_calls_wave_emit` | U4 finding |
+| Wave (b) | `dispatcher` skips `ralph wave verify` before real emit | `preset.wave_missing_verify_before_emit` | U4 finding |
+| Wave (c) | `worker_alpha` Confirm path reads hat-channel | `preset.wave_confirm_uses_hat_channel` | U4 finding |
+| Wave (d) | `coordinator` publishes `exec.wave.complete` (coordination topic) | `preset.wave_agent_emits_coordination_topic` | U4 finding |
+| Supervisor (a) | `execution_mode: isolated` + `supervisor.enabled: true` (lint) + hat reads `supervisor.db` | `preset.supervisor_requires_isolated` / `preset.supervisor_unit_state_not_via_task_api` | existing lint + U4 finding |
+| Supervisor (b) | `worker` publishes `exec.wave.failed` | `preset.supervisor_hat_publishes_coord_topic` | U4 finding |
+| Supervisor (c) | `dispatcher` reads `.ralph/supervisor.db` as unit state | `preset.supervisor_unit_state_not_via_task_api` | U4 finding |
+| Supervisor (d) | `dispatcher` reads `supervisor.db` as business artifact | `preset.artifact_uses_internal_ledger` | existing review-only |
+| Supervisor (e) | `execution_model: single-chain` Intent vs `supervisor.enabled: true` YAML | `preset.execution_model_intent_mismatch` | U4 finding |
+
+**Acceptance gates:**
+
+```bash
+# CLI 冒烟 — 不要求 strict 模式吐出新 finding (无新增 lint); 仅验证
+# fixture 可被加载 + 结构化 lint 不崩.
+ralph preset check -H skills/ralph-preset-common/fixtures/aaf-wave-capability-negative-fixture.yml --strict --format json
+ralph preset check -H skills/ralph-preset-common/fixtures/aaf-supervisor-capability-negative-fixture.yml --strict --format json
+
+# 软性 AAF (Wave/Supervisor capability audit) 是 review-only, 通过阅读
+# fixture 配合 references/finding-rubric.md 新增段对照命中。
+```
+
+**Capability-triggered invariant**: 两个 fixture **不**复制 `ce-executor-supervisor`
+或任何 builtin preset 的全拓扑; 触发条件写在 fixture 顶部注释里, 与 builtin
+preset 名称完全无关。 任何 review 脚本不得按 `name starts with ce-executor-supervisor`
+对这两个 fixture 做特殊分支。
 
 ## Report output
 

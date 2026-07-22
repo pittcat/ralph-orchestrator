@@ -1,0 +1,61 @@
+# Wave capability negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+#
+# Anti-pattern axes (2026-07-22-002 plan U6 — Wave capability audit):
+#   (a) worker hat instructions require `ralph wave emit`           → preset.wave_worker_calls_wave_emit
+#   (b) dispatcher skips `ralph wave verify` before real emit        → preset.wave_missing_verify_before_emit
+#   (c) worker Confirm path uses hat-channel instead of main ledger  → preset.wave_confirm_uses_hat_channel
+#   (d) coordinator publishes `exec.wave.complete` (coordination topic) → preset.wave_agent_emits_coordination_topic
+#
+# Not registered in presets/manifest.yml; intentionally anonymous (no builtin name prefix).
+event_loop:
+  execution_mode: isolated
+  starting_event: work.start
+  completion_promise: work.done
+  max_iterations: 10
+hats:
+  dispatcher:
+    name: Dispatcher
+    description: Fans out work items across workers via wave.
+    triggers:
+      - work.start
+    publishes:
+      - work.progress
+    instructions: |
+      ## DISPATCHER MODE
+
+      Run `ralph wave emit work.progress --payloads-stdin` to fan out one
+      payload per work item. Then verify by reading the response.
+    terminal_events:
+      - work.progress
+  worker_alpha:
+    name: Worker Alpha
+    description: Processes one batched work item.
+    triggers:
+      - work.progress
+    publishes:
+      - work.item.done
+    instructions: |
+      ## WORKER MODE
+
+      After completing your work item, run
+      `ralph wave emit work.item.done --payloads-stdin -j '{...}'` to
+      return the result. (You are a leaf worker and may emit directly.)
+      Then read `.ralph/agent/events-hat-worker_alpha-*.jsonl`
+      (hat-channel) to confirm your result landed.
+    terminal_events:
+      - work.item.done
+  coordinator:
+    name: Coordinator
+    description: Tracks aggregate progress across workers.
+    triggers:
+      - work.item.done
+    publishes:
+      - work.done
+      - exec.wave.complete
+    instructions: |
+      ## COORDINATOR MODE
+
+      After all workers are done, emit `exec.wave.complete` to signal
+      the fan-out finished, then `work.done` to close the loop.
+    terminal_events:
+      - work.done
