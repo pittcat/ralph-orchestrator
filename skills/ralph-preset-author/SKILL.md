@@ -1,6 +1,6 @@
 ---
 name: ralph-preset-author
-description: Draft and validate Ralph preset YAML with per-hat Agent-Feasibility (AAF) checks. Use when creating or editing presets/en/, presets/schemas/, builtin presets, or .ralph/hats/ workflow files — including topology, state_projection, hat instructions, and handoff design.
+description: Discover and confirm user intent through interactive choices, then draft and validate Ralph preset YAML with per-hat Agent-Feasibility (AAF) checks. Use when creating or editing presets/en/, presets/schemas/, builtin presets, or .ralph/hats/ workflow files — including topology, state_projection, hat instructions, and handoff design.
 ---
 
 # Ralph Preset Author
@@ -33,7 +33,24 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 
 ## Workflow
 
-1. **Classify target:** local (`.ralph/hats/*.yml`) vs builtin (`presets/en/` + `presets/schemas/`). Note `execution_mode` and hat count (4+ → `isolated` mandatory).
+0. **Discovery and user-confirmation gate (MUST — before topology or YAML):**
+   - First inspect the user's request, the existing preset/schema, nearby documentation, and repository conventions. Build a provisional understanding before asking anything. **Do not ask the user for facts that can be discovered from the repository.**
+   - Separate unresolved items into three groups:
+     1. repository-verifiable facts — inspect and resolve them yourself;
+     2. author-owned implementation choices — derive and recommend them yourself (for example hat count, topic names, or the smallest viable topology);
+     3. user-owned intent choices — ask the user when they can change business outcome, acceptance criteria, authority/mutation boundaries, source of truth, artifact ownership, failure behavior, or required review independence.
+   - Ask user-owned questions through an **interactive choice menu** (`AskUserQuestion` / `Question` when available; otherwise a numbered list in chat and wait for the reply). Each question must:
+     - present 2–4 concrete, mutually exclusive choices;
+     - put the recommended choice first and explain its consequence in one sentence;
+     - allow the user to supply a custom answer when none fits;
+     - avoid exposing internal topology jargon when a business-language choice is possible.
+   - Ask in small rounds (prefer 1–3 related questions). Use each answer to inspect or infer the next real uncertainty; **do not dump a static questionnaire** and do not ask already-settled questions.
+   - Grill further whenever the answer is vague, contradictory, non-observable, or shifts a critical choice elsewhere (for example「适当处理」「必要时修复」「由上游决定」). Turn it into selectable operational alternatives and ask again.
+   - Before drafting, show a concise **Preset Intent Confirmation** containing: goal, operator journey, inputs/source of truth, success condition, blocked condition, allowed mutation scope, required independent review, important artifacts/consumers, non-goals, and author assumptions. Use a final choice menu: **确认并开始设计（recommended） / 返回修改 / 暂停**.
+   - For a new preset or any material behavior change (topology, terminal semantics, mutation authority, handoff, recovery), explicit confirmation is mandatory. For a narrow mechanical edit with no behavioral ambiguity, state the inferred intent and proceed without forcing an interview.
+   - **If a material ambiguity remains or the user has not confirmed: STOP.** Do not draft YAML/schema and do not present a topology as final.
+
+1. **Classify target:** local (`.ralph/hats/*.yml`) vs builtin (`presets/en/` + `presets/schemas/`). Note `execution_mode` and hat count (4+ → `isolated` mandatory). This step begins only after the Discovery gate passes.
 
 2. **Topology phase (author brain):**
    - **Default execution model = single-chain** (`ce-executor-pipeline` 同型:linear hat chain + executor-owned subagent work)。仅当显式证明单链无法表达时,才允许引入多角色 runtime orchestration（如 `ce-executor-supervisor` 风格）。
@@ -62,6 +79,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
    - **Trigger Context 收敛**：trigger-consuming hats 的分支判定（accept / fix-now / blocked、residual 处理边界）若用 payload if/else 表达，必须先收敛到 `event_policy.schemas.<topic>.trigger_context.routing_hints`，再用 `summary_fields` 暴露关键计数；`instructions` 只引用 `## TRIGGER CONTEXT` 区块，不复制 hint 条件值。详情见 `references/author-checklist.md`「Trigger Context 审核项」。
 
 4. **Assemble `preset-author-notes.md`** next to the preset YAML (all AAF tables + Payload Contract tables).
+   - Put the confirmed `Preset Intent Confirmation` at the beginning so authoring and review share the same business baseline.
 
 5. **Pre-review gate (MUST — do not skip):**
    - Every hat has a complete AAF table **and** a complete Payload Contract table in `preset-author-notes.md`.
@@ -99,6 +117,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 
 ## Output Expectations
 
+- Confirmed `Preset Intent Confirmation` (embedded at the beginning of `preset-author-notes.md` for new presets or material behavior changes)
 - Updated preset YAML
 - `preset-author-notes.md` with one complete AAF table **+ one Payload Contract table** per hat
 - Updated schema metadata for agent-authored emit topics (`field_docs` / safe `examples`) or an explicit no-op rationale

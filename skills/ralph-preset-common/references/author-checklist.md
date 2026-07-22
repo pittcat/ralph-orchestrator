@@ -1,5 +1,46 @@
 # Author Checklist
 
+## 阶段 0：主动发现与用户确认（强制）
+
+- [ ] 先读用户需求、现有 preset/schema、相邻文档和仓库约定；没有把仓库可查事实反问给用户
+- [ ] 把缺口分为：仓库事实（自己查）、author 实现选择（自己推导并推荐）、用户意图选择（菜单确认）
+- [ ] 对会改变业务结果、验收条件、修改权限、事实源、artifact 责任、失败行为或独立评审要求的缺口，使用交互选择菜单提问
+- [ ] 每题提供 2–4 个互斥选项；推荐项排第一并说明影响；允许用户自定义答案
+- [ ] 每轮优先只问 1–3 个相关问题；根据回答继续发现，不一次性倾倒静态问卷
+- [ ] 遇到「适当处理」「必要时」「上游决定」等不可观察答案，继续追问为可执行、可验收的选择
+- [ ] 不让用户替 author 决定 hat 数、topic 名或内部 topology；除非它们本身是用户明确的产品约束
+- [ ] 已回显 `Preset Intent Confirmation`：目标、操作路径、输入/事实源、成功、阻塞、修改范围、独立评审、artifact/消费者、非目标、author 假设
+- [ ] 新 preset 或实质行为变更已通过最终菜单获得明确确认：「确认并开始设计 / 返回修改 / 暂停」
+- [ ] 用户未确认或仍有重大歧义时已 STOP，未起草 YAML/schema
+
+### 提问菜单示例（按真实缺口选用，不得照抄为固定问卷）
+
+```text
+1. 当独立评审发现必须立即修复的问题时，流程应该怎样结束本轮？
+   1) 进入有界修复并再次独立评审（推荐）— 保证修复结果重新过门禁
+   2) 记录问题并以 blocked 结束 — 不允许流程自行修改
+   3) 生成报告后结束 — 只保留发现，不阻断完成状态
+   4) 自定义
+```
+
+### Preset Intent Confirmation 模板
+
+```markdown
+## Preset Intent Confirmation
+
+- **目标：**
+- **操作者与启动路径：**
+- **输入与事实源：**
+- **成功条件：**
+- **阻塞条件：**
+- **允许的修改范围：**
+- **必须独立执行的评审：**
+- **重要 artifact、生产方与消费者：**
+- **非目标：**
+- **Author 推导与假设：**
+- **用户确认：** 已确认 / 返回修改 / 暂停
+```
+
 ## 双阶段大脑（强制）
 
 ### 阶段 1：拓扑（作者视角 OK）
@@ -106,6 +147,7 @@
 
 ## 交 review 前门禁
 
+- [ ] `preset-author-notes.md` 首部包含已确认的 `Preset Intent Confirmation`（新 preset 或实质行为变更）
 - [ ] 每 hat 一张 AAF 表 + Payload Contract 表，写入 `preset-author-notes.md`
 - [ ] hat 表数 == YAML hat 数；每 emit topic 都填了 Payload Contract 行
 - [ ] Payload Contract 的 `schema metadata` 列已同步到 `presets/schemas/<name>.yml` 或 preset inline `event_policy.schemas`
