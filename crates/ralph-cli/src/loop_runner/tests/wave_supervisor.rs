@@ -260,15 +260,13 @@ fn bridge_off_no_feature_returns_error_path() {
     );
 }
 
-// ── 2026-07-03-001 plan Phase 7: build_supervisor_bridge ──────────────
-// Pin the bridge construction path: relative db_path resolves against
-// the loop workspace's `.ralph/`, absolute paths are honoured as-is,
-// and the in-memory fallback (no `supervisor-db` feature) still
-// produces a working bridge. R-C4 fail-closed is exercised by
-// feeding an unopenable absolute path under the `supervisor-db`
-// feature; without the feature the in-memory branch always succeeds
-// so the fail-closed path is covered by the rusqlite store's own
-// open-error unit tests.
+// Pin the bridge construction path: relative `db_path` resolves
+// against the loop workspace, absolute paths are honoured as-is,
+// and the `supervisor-db` feature flag is the binary capability
+// gate. The `cfg(feature = "supervisor-db")` guard keeps these
+// tests from invoking a guaranteed-fail-closed path on
+// `--no-default-features` builds.
+#[cfg(feature = "supervisor-db")]
 #[test]
 fn build_supervisor_bridge_relative_db_path_resolves_under_ralph_dir() {
     use ralph_core::LoopContext;
@@ -278,26 +276,21 @@ fn build_supervisor_bridge_relative_db_path_resolves_under_ralph_dir() {
     let ctx = LoopContext::primary(tmp.path().to_path_buf());
     let cfg = SupervisorConfig {
         enabled: true,
-        db_path: "supervisor.db".to_string(),
+        db_path: ".ralph/supervisor.db".to_string(),
         max_concurrent_workers: 2,
         aggregate_timeout_secs: 60,
     };
     let bridge = crate::loop_runner::build_supervisor_bridge(&cfg, &ctx)
         .expect("relative db_path must open a bridge");
-    // The bridge surface is usable: recover on a fresh store returns
-    // an empty snapshot list (no waves registered yet).
     let snaps = bridge.recover().expect("recover on fresh bridge");
     assert!(snaps.is_empty(), "fresh bridge must have no active waves");
-    // The runtime materialised `<workspace>/.ralph/` so the store
-    // file can land there. We do NOT assert the file itself exists
-    // because the in-memory fallback (no `supervisor-db` feature)
-    // does not create one; the dir materialisation is the contract.
     assert!(
         tmp.path().join(".ralph").exists(),
         "build_supervisor_bridge must materialise .ralph/ parent"
     );
 }
 
+#[cfg(feature = "supervisor-db")]
 #[test]
 fn build_supervisor_bridge_absolute_db_path_honoured_as_is() {
     use ralph_core::LoopContext;
@@ -322,58 +315,96 @@ fn build_supervisor_bridge_absolute_db_path_honoured_as_is() {
     let _ = bridge.store();
 }
 
+/// `enabled: true` without the `supervisor-db` feature must
+/// fail-closed at bridge construction rather than fall back to
+/// in-memory state. The error path must not materialise `.ralph/`.
+#[cfg(not(feature = "supervisor-db"))]
 #[test]
-fn build_supervisor_bridge_in_memory_fallback_round_trips() {
-    // When `supervisor-db` is off (the default dev build), the
-    // bridge falls back to `InMemorySupervisorStore`. Pin that
-    // the fallback path produces a bridge whose `tick` works
-    // end-to-end so dry-runs in dev builds still exercise the
-    // coordinator path.
+fn build_supervisor_bridge_without_feature_enabled_returns_error() {
     use ralph_core::LoopContext;
     use ralph_core::config::SupervisorConfig;
-    use ralph_core::supervisor::{PhaseInputs, SlotResource, SupervisorBridge as _};
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let ctx = LoopContext::primary(tmp.path().to_path_buf());
-    let cfg = SupervisorConfig::default();
-    let bridge = crate::loop_runner::build_supervisor_bridge(&cfg, &ctx)
-        .expect("in-memory fallback must always succeed");
-    let store = bridge.store();
-    let wave = store
-        .register_wave("fallback", ralph_core::supervisor::WaveKind::Exec, 1)
-        .expect("register_wave");
-    store
-        .bind_worktree(
-            &wave,
-            0,
-            SlotResource {
-                slot_index: 0,
-                worktree_path: Some(".ralph/fallback".to_string()),
-                branch: Some("ralph/fallback".to_string()),
-            },
-        )
-        .expect("bind_worktree");
-    let _ = store.try_dispatch_next(2).unwrap().unwrap();
-    store
-        .record_slot_result(&wave, 0, "h", 1)
-        .expect("record_slot_result");
-    let action = bridge
-        .tick(
-            &wave,
-            PhaseInputs {
-                aggregate_timeout_secs: 60,
-                elapsed_secs: 0,
-                cancel_requested: false,
-            },
-        )
-        .expect("tick must succeed on fallback bridge");
+    let cfg = SupervisorConfig {
+        enabled: true,
+        ..SupervisorConfig::default()
+    };
+
+    let err = crate::loop_runner::build_supervisor_bridge(&cfg, &ctx)
+        .expect_err("enabled=true without supervisor-db feature must fail-closed");
+    let msg = format!("{err}");
     assert!(
-        matches!(
-            action,
-            ralph_core::supervisor::CoordinatorAction::InjectedComplete { ref topic, .. }
-                if topic == "exec.wave.complete"
-        ),
-        "in-memory fallback bridge must drive coordinator tick to InjectedComplete; got {action:?}"
+        msg.contains("supervisor-db"),
+        "fail-closed error must mention the supervisor-db cargo feature; got: {msg}"
+    );
+    assert!(
+        !tmp.path().join(".ralph").exists(),
+        "fail-closed path must not materialise .ralph/"
+    );
+}
+
+/// Path normalisation: the default `db_path`
+/// (`.ralph/supervisor.db`) MUST resolve to
+/// `<workspace>/.ralph/supervisor.db`, not the double-prefixed
+/// `<workspace>/.ralph/.ralph/supervisor.db`.
+#[cfg(feature = "supervisor-db")]
+#[test]
+fn build_supervisor_bridge_default_db_path_collapses_to_single_ralph() {
+    use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let ctx = LoopContext::primary(tmp.path().to_path_buf());
+    let cfg = SupervisorConfig {
+        enabled: true,
+        ..SupervisorConfig::default()
+    };
+    let _bridge = crate::loop_runner::build_supervisor_bridge(&cfg, &ctx)
+        .expect("enabled+feature must build a bridge");
+    let nested = tmp
+        .path()
+        .join(".ralph")
+        .join(".ralph")
+        .join("supervisor.db");
+    assert!(
+        !nested.exists(),
+        "default db_path must NOT materialise `.ralph/.ralph/supervisor.db`; found {nested:?}"
+    );
+    let single = tmp.path().join(".ralph").join("supervisor.db");
+    assert!(
+        single.exists(),
+        "default db_path must materialise `.ralph/supervisor.db`; missing {single:?}"
+    );
+}
+
+/// Path normalisation: an absolute `db_path` is honoured as-is
+/// even when it points outside the loop workspace; no implicit
+/// parent substitution must happen.
+#[cfg(feature = "supervisor-db")]
+#[test]
+fn build_supervisor_bridge_absolute_db_path_outside_workspace_preserved() {
+    use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let db_dir = tempfile::tempdir().expect("db dir");
+    let ctx = LoopContext::primary(workspace.path().to_path_buf());
+    let abs_db = db_dir.path().join("custom-supervisor.db");
+    let cfg = SupervisorConfig {
+        enabled: true,
+        db_path: abs_db.display().to_string(),
+        ..SupervisorConfig::default()
+    };
+    let _bridge = crate::loop_runner::build_supervisor_bridge(&cfg, &ctx)
+        .expect("absolute db_path must open a bridge");
+    assert!(
+        abs_db.exists(),
+        "absolute db_path must land at the operator-specified location; missing {abs_db:?}"
+    );
+    assert!(
+        !workspace.path().join(".ralph").exists(),
+        "absolute db_path outside workspace must NOT materialise `.ralph/` under the workspace"
     );
 }
 
@@ -582,6 +613,9 @@ fn supervisor_disabled_does_not_call_bridge_builder() {
 /// U1 R3 (positive half of R1): when `enabled=true` AND
 /// `execution_mode==isolated`, the bridge builder IS invoked once and
 /// the workspace's `.ralph/` parent lands so the store can open.
+/// Gated on `supervisor-db` because the counter asserts the SQLite
+/// path actually opens.
+#[cfg(feature = "supervisor-db")]
 #[test]
 fn supervisor_enabled_isolated_invokes_bridge_builder_once() {
     use ralph_core::LoopContext;

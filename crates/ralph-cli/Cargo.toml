@@ -18,9 +18,13 @@ build = "build.rs"
 
 # 2026-07-03-001 supervisor real-wiring: pass-through so `ralph-cli`
 # can gate its `build_supervisor_bridge` SQLite branch on the same
-# feature that `ralph-core` exposes. Operators opt in via
-# `cargo build -p ralph-cli --features supervisor-db`.
+# feature that `ralph-core` exposes. The default release/install
+# artifact carries `supervisor-db` so a preset that sets
+# `event_loop.supervisor.enabled: true` gets a working SQLite
+# store out of the box; explicit `--no-default-features` builds
+# fail-closed at bridge construction (no in-memory fallback).
 [features]
+default = ["supervisor-db"]
 supervisor-db = ["ralph-core/supervisor-db"]
 
 # `build.rs` deep-merges `presets/schemas/<name>.yml` (schema SSOT)

@@ -591,61 +591,50 @@ pub(crate) fn bridge_build_invocations() -> u64 {
     BRIDGE_BUILD_INVOCATIONS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// 2026-07-03-001 supervisor real-wiring: build the production
-/// `CoordinatorSupervisorBridge` from `SupervisorConfig`.
+/// Build the production `CoordinatorSupervisorBridge` from `SupervisorConfig`.
 ///
-/// Resolves `db_path` relative to the loop workspace when it is
-/// not absolute (the plan says "Relative paths resolve against
-/// `<workspace>/.ralph/`"). When the `supervisor-db` cargo feature
-/// is off, the bridge falls back to the in-memory store so
-/// dry-runs in dev builds still exercise the coordinator path
-/// without a SQLite dependency.
+/// Resolves `db_path` relative to the loop workspace when it is not
+/// absolute; absolute paths are honoured as-is. Without the
+/// `supervisor-db` cargo feature this returns an error so a
+/// `supervisor.enabled: true` preset fails fast at bridge
+/// construction rather than silently losing wave state across
+/// restarts.
 ///
 /// Errors surface as `anyhow` so the caller can fail-closed
 /// (R-C4) without leaking `SupervisorStoreError` across module
 /// boundaries.
 ///
-/// 2026-07-22-003 plan U1: each invocation increments the
-/// `BRIDGE_BUILD_INVOCATIONS` counter so U1 characterization tests
-/// can observe the production gate from outside. The counter is
-/// strictly additive (no behaviour change to the build path); the
-/// whole point is to let `loop_runner::tests::wave_supervisor`
-/// assertions read it without spawning a real `ralph run`. U2+
-/// keep the counter intact for downstream unit gates.
+/// The counter increment is a read-only test seam kept for the
+/// gate assertions in `loop_runner::tests::wave_supervisor`; it
+/// does not alter the build path.
 pub(crate) fn build_supervisor_bridge(
     cfg: &ralph_core::config::SupervisorConfig,
     ctx: &ralph_core::LoopContext,
 ) -> std::result::Result<crate::loop_runner::wave::CoordinatorSupervisorBridge, anyhow::Error> {
-    use crate::loop_runner::wave::CoordinatorSupervisorBridge;
-
     BRIDGE_BUILD_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // Resolve db_path: absolute paths honoured as-is; relative
-    // paths resolve against `<workspace>/.ralph/` so a preset
-    // that ships `db_path: "supervisor.db"` lands at
-    // `<workspace>/.ralph/supervisor.db` (the same convention
-    // the rest of the runtime uses for `.ralph/` artifacts).
-    let db_path = std::path::Path::new(&cfg.db_path);
-    let resolved_db_path: std::path::PathBuf = if db_path.is_absolute() {
-        db_path.to_path_buf()
-    } else {
-        ctx.ralph_dir().join(db_path)
-    };
+    #[cfg(feature = "supervisor-db")]
+    let resolved_db_path = resolve_supervisor_db_path(cfg, ctx);
+    #[cfg(not(feature = "supervisor-db"))]
+    let _ = resolve_supervisor_db_path(cfg, ctx);
 
-    // Ensure the parent directory exists so `RusqliteSupervisorStore::open`
-    // does not fail on a fresh workspace where `.ralph/` has not been
-    // materialised yet (R-C4 fail-closed would otherwise abort the
-    // loop on a first-run preset).
-    if let Some(parent) = resolved_db_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    #[cfg(not(feature = "supervisor-db"))]
+    {
+        return Err(anyhow::anyhow!(
+            "supervisor-db cargo feature is off in this build; \
+             rebuild ralph-cli with --features supervisor-db (or rely on \
+             the default features) to enable event_loop.supervisor.enabled: true"
+        ));
     }
 
     #[cfg(feature = "supervisor-db")]
     {
-        // The cargo feature is on: open a real SQLite store backed
-        // by `rusqlite`. `RusqliteSupervisorStore::open` runs
-        // migrations (U5) so the returned store is ready for
-        // `register_wave` / `tick` calls.
+        use crate::loop_runner::wave::CoordinatorSupervisorBridge;
+
+        if let Some(parent) = resolved_db_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
         let store = ralph_core::supervisor::RusqliteSupervisorStore::open(&resolved_db_path)
             .map_err(|err| {
                 anyhow::anyhow!(
@@ -657,22 +646,25 @@ pub(crate) fn build_supervisor_bridge(
             std::sync::Arc::new(store);
         Ok(CoordinatorSupervisorBridge::from_store(store))
     }
+}
 
-    #[cfg(not(feature = "supervisor-db"))]
-    {
-        // Feature off: fall back to the in-memory store. The
-        // coordinator path still runs end-to-end, but wave state
-        // does not survive a process restart. Acceptable for
-        // dry-runs and the BDD scenarios that do not enable the
-        // cargo feature.
-        warn!(
-            db_path = %resolved_db_path.display(),
-            "supervisor-db cargo feature is off; falling back to in-memory store \
-             (wave state will not persist across restarts)"
-        );
-        let store: std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore> =
-            std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
-        Ok(CoordinatorSupervisorBridge::from_store(store))
+/// Resolve the supervisor SQLite store path. Absolute
+/// `cfg.db_path` values are honoured as-is; relative values
+/// resolve against the loop workspace so the default
+/// `SupervisorConfig::db_path` (`.ralph/supervisor.db`) lands at
+/// `<workspace>/.ralph/supervisor.db` exactly once — a bare
+/// `supervisor.db` and `.ralph/supervisor.db` both produce the
+/// same target without a double `.ralph` segment. The caller
+/// decides whether to create the parent dir.
+fn resolve_supervisor_db_path(
+    cfg: &ralph_core::config::SupervisorConfig,
+    ctx: &ralph_core::LoopContext,
+) -> std::path::PathBuf {
+    let db_path = std::path::Path::new(&cfg.db_path);
+    if db_path.is_absolute() {
+        db_path.to_path_buf()
+    } else {
+        ctx.workspace().join(db_path)
     }
 }
 
