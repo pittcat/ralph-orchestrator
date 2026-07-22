@@ -29,12 +29,11 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use ralph_core::supervisor::worktree_bind::WorktreeFactory;
 use ralph_core::supervisor::PhaseInputs;
 use ralph_core::supervisor::worktree_bind::WorktreeFactory;
 use ralph_core::supervisor::{
-    CoordinatorAction, InMemorySupervisorStore, SupervisorCoordinator, SupervisorStore, WaveKind,
-    WaveSnapshot,
+    CoordinatorAction, FileEventMergeSink, InMemorySupervisorStore, SupervisorCoordinator,
+    SupervisorStore, WaveKind, WaveSnapshot,
 };
 // 2026-07-03-001 supervisor real-wiring: re-export the sunk
 // types so existing `crate::loop_runner::wave::*` imports keep
@@ -44,7 +43,7 @@ use ralph_core::supervisor::{
 use ralph_core::supervisor::DefaultWorktreeFactory;
 pub use ralph_core::supervisor::WorktreeError as BridgeWorktreeError;
 pub use ralph_core::supervisor::{
-    is_supervisor_path_enabled, BridgeDispatchOutcome, BridgeError, SlotBinding, SupervisorBridge,
+    BridgeDispatchOutcome, BridgeError, SlotBinding, SupervisorBridge, is_supervisor_path_enabled,
 };
 
 /// Bundle the production bridge needs from the runtime so it
@@ -63,6 +62,15 @@ pub struct ProductionBridgeContext {
     /// Absolute path to the repo root where the worker will
     /// spawn the per-slot worktree.
     pub repo_root: std::path::PathBuf,
+    /// U6: absolute path to the loop's main JSONL event ledger
+    /// (`events.jsonl`). When `Some`, the bridge constructs its
+    /// `SupervisorCoordinator` with a production
+    /// [`ralph_core::supervisor::FileEventMergeSink`] pointed at
+    /// this path so the fan-in merge writes the real per-slot
+    /// business events to the ledger (instead of the in-memory
+    /// sink the legacy `from_store` path used). `None` keeps the
+    /// in-memory sink for the legacy / dry-run entry points.
+    pub events_path: Option<std::path::PathBuf>,
 }
 
 /// Production bridge: holds an `Arc<dyn SupervisorStore>` +
@@ -96,6 +104,17 @@ pub struct CoordinatorSupervisorBridge {
     /// factory call args without invoking git; production uses
     /// `DefaultWorktreeFactory`.
     factory: Arc<dyn WorktreeFactory>,
+    /// Global supervisor worker cap supplied by the loop config.
+    max_concurrent_workers: u32,
+    /// U6: map from the caller-supplied idempotency key (the
+    /// dispatcher's wave_id) to the store-assigned wave id
+    /// (`w-{seq}`). `register_wave_if_absent` populates this on
+    /// first registration and returns the stored id on idempotent
+    /// re-entry, so the dispatcher's spawn path and the later
+    /// `run_supervisor_fan_in` re-registration agree on the same
+    /// store row. Without this, a duplicate registration returned
+    /// the bare key and the fan-in ticked a non-existent wave id.
+    registered: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
 
 impl CoordinatorSupervisorBridge {
@@ -114,6 +133,8 @@ impl CoordinatorSupervisorBridge {
             coordinator,
             context: None,
             factory,
+            max_concurrent_workers: u32::MAX,
+            registered: Default::default(),
         }
     }
 
@@ -128,12 +149,37 @@ impl CoordinatorSupervisorBridge {
         context: ProductionBridgeContext,
         factory: Arc<dyn WorktreeFactory>,
     ) -> Self {
-        let coordinator = Arc::new(SupervisorCoordinator::with_in_memory_sink(store.clone()));
+        Self::with_context_and_factory_with_cap(store, context, factory, u32::MAX)
+    }
+
+    /// Build a production bridge with the configured global worker cap.
+    ///
+    /// U6: when `context.events_path` is `Some`, the coordinator is
+    /// constructed with a production [`FileEventMergeSink`] pointed
+    /// at the loop's main ledger so `run_supervisor_fan_in` writes
+    /// the real per-slot business events to `events.jsonl` (KTD-6 /
+    /// KTD-7). `None` keeps the in-memory sink for the legacy /
+    /// dry-run entry points.
+    pub fn with_context_and_factory_with_cap(
+        store: Arc<dyn SupervisorStore>,
+        context: ProductionBridgeContext,
+        factory: Arc<dyn WorktreeFactory>,
+        max_concurrent_workers: u32,
+    ) -> Self {
+        let coordinator = Arc::new(match context.events_path.as_ref() {
+            Some(path) => SupervisorCoordinator::new(
+                store.clone(),
+                Arc::new(FileEventMergeSink::new(path.clone())),
+            ),
+            None => SupervisorCoordinator::with_in_memory_sink(store.clone()),
+        });
         Self {
             store,
             coordinator,
             context: Some(context),
             factory,
+            max_concurrent_workers,
+            registered: Default::default(),
         }
     }
 
@@ -158,6 +204,17 @@ impl CoordinatorSupervisorBridge {
     /// Build a bridge around a store owned elsewhere (e.g. the
     /// dispatcher bridge reads the store from the runtime
     /// once and shares it across ticks).
+    ///
+    /// 2026-07-23-001 plan U1: this is the legacy entry point
+    /// that left `context: None` and made `bind_slot` return
+    /// `Ok(None)` for every kind — the silent failure mode U1
+    /// eliminates. Production runners now use
+    /// `with_context_and_factory` via `build_supervisor_bridge`.
+    /// The function stays available for the legacy
+    /// characterization test (`test_legacy_from_store_returns_none_for_exec`)
+    /// which pins the old failure mode so a future regression
+    /// that re-introduces `from_store` on the hot path is caught.
+    #[cfg(test)]
     pub fn from_store(store: Arc<dyn SupervisorStore>) -> Self {
         let coordinator = Arc::new(SupervisorCoordinator::with_in_memory_sink(store.clone()));
         let factory: Arc<dyn WorktreeFactory> = Arc::new(DefaultWorktreeFactory);
@@ -166,6 +223,8 @@ impl CoordinatorSupervisorBridge {
             coordinator,
             context: None,
             factory,
+            max_concurrent_workers: u32::MAX,
+            registered: Default::default(),
         }
     }
 }
@@ -175,6 +234,49 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         self.coordinator
             .tick(wave_id, inputs)
             .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn tick_with_slot_events(
+        &self,
+        wave_id: &str,
+        inputs: PhaseInputs,
+        slot_events: Vec<ralph_proto::Event>,
+    ) -> Result<CoordinatorAction, BridgeError> {
+        // U6: thread the per-slot worker business events into the
+        // coordinator's merge gate so the production sink writes
+        // them to the main ledger on the `Integrate` path.
+        self.coordinator
+            .tick_with_slot_events(wave_id, inputs, slot_events)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn slot_resources(
+        &self,
+        wave_id: &str,
+    ) -> Result<Vec<ralph_core::supervisor::SlotResource>, BridgeError> {
+        // U6: expose the per-slot resource bindings so the
+        // dispatcher's `run_supervisor_fan_in` can build the
+        // `success_slots` payload (slot_index + branch +
+        // worktree_path) on the `*.wave.complete` event.
+        self.store
+            .list_worktree_paths(wave_id)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn max_concurrent_workers(&self) -> u32 {
+        self.max_concurrent_workers
+    }
+
+    fn try_dispatch_next(&self, wave_id: &str, slot_index: u32) -> Result<bool, BridgeError> {
+        let dispatched = self
+            .store
+            .try_dispatch_next(self.max_concurrent_workers)
+            .map_err(BridgeError::from)?;
+        Ok(matches!(
+            dispatched,
+            Some((ref dispatched_wave_id, dispatched_slot_index))
+                if dispatched_wave_id == wave_id && dispatched_slot_index == slot_index
+        ))
     }
 
     fn bind_slot(
@@ -278,8 +380,25 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         expected_total: u32,
     ) -> Result<String, BridgeError> {
         use ralph_core::supervisor::SupervisorStoreError;
+        // U6: return the stable store-assigned id on idempotent
+        // re-entry. The first registration records the key → store
+        // id mapping; subsequent calls (e.g. `run_supervisor_fan_in`
+        // re-registering after the spawn path) return the SAME store
+        // id so the coordinator ticks the row the slot results were
+        // recorded against. Without the map, a duplicate registration
+        // returned the bare key and the fan-in ticked a wave id the
+        // store does not know.
+        if let Some(existing) = self.registered.lock().unwrap().get(wave_id) {
+            return Ok(existing.clone());
+        }
         match self.store.register_wave(wave_id, kind, expected_total) {
-            Ok(id) => Ok(id),
+            Ok(id) => {
+                self.registered
+                    .lock()
+                    .unwrap()
+                    .insert(wave_id.to_string(), id.clone());
+                Ok(id)
+            }
             Err(SupervisorStoreError::DuplicateKey(_)) => Ok(wave_id.to_string()),
             Err(err) => Err(BridgeError::Store(err.to_string())),
         }
@@ -305,6 +424,17 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
     ) -> Result<(), BridgeError> {
         self.store
             .record_slot_failure(wave_id, slot_index, reason)?;
+        Ok(())
+    }
+
+    fn release_slot_dispatch(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        outcome: ralph_core::supervisor::DispatchOutcome,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .release_slot_dispatch(wave_id, slot_index, outcome)?;
         Ok(())
     }
 }
@@ -726,6 +856,46 @@ mod tests {
             remaining.is_empty(),
             "all pre-scripted actions were drained in FIFO order"
         );
+    }
+
+    #[test]
+    fn mock_bridge_uses_legacy_dispatch_defaults() {
+        let bridge = MockSupervisorBridge::new();
+        assert_eq!(bridge.max_concurrent_workers(), u32::MAX);
+        assert!(bridge.try_dispatch_next("w-1", 0).unwrap());
+    }
+
+    #[test]
+    fn production_bridge_exposes_cap_and_forwards_dispatch_approval() {
+        let store = Arc::new(InMemorySupervisorStore::new());
+        let wave = store
+            .register_wave("dispatch-surface", WaveKind::Exec, 1)
+            .unwrap();
+        store
+            .bind_worktree(
+                &wave,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/dispatch-surface".to_string()),
+                    branch: Some("ralph/dispatch-surface".to_string()),
+                },
+            )
+            .unwrap();
+        let bridge = CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+            store.clone() as Arc<dyn SupervisorStore>,
+            ProductionBridgeContext {
+                loop_id: "dispatch-surface".to_string(),
+                repo_root: std::path::PathBuf::from("/tmp/dispatch-surface"),
+                events_path: None,
+            },
+            Arc::new(DefaultWorktreeFactory),
+            1,
+        );
+
+        assert_eq!(bridge.max_concurrent_workers(), 1);
+        assert!(bridge.try_dispatch_next(&wave, 0).unwrap());
+        assert!(!bridge.try_dispatch_next(&wave, 0).unwrap());
     }
 
     /// U5 / F-005 edge: empty actions queue → default

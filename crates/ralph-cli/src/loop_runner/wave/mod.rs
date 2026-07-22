@@ -8,7 +8,19 @@ mod io;
 mod supervisor_bridge;
 mod worker;
 
-pub use dispatcher::{HandleWaveOutcome, WaveOutputs, execute_wave, handle_wave_events};
+pub use dispatcher::{
+    HandleWaveOutcome, WaveDispatchLimits, WaveDispatchOutcome, WaveOutputs, execute_wave,
+    handle_wave_events,
+};
+// 2026-07-23-001 plan U3: `WaveWorkerExecutor` +
+// `execute_wave_via_supervisor_with_executor` + `WorkerRequest`
+// are needed by tests that inject a counting executor into the
+// supervisor path without spawning real workers. The surface
+// stays `pub(crate)` so no new public API escapes the crate.
+pub(crate) use dispatcher::{
+    SupervisorFanInOutcome, WaveWorkerExecutor, WorkerRequest,
+    execute_wave_via_supervisor_with_executor, run_supervisor_fan_in,
+};
 pub use io::{
     extract_readable_delta, merge_wave_results_to_events_file, push_to_tui_iteration,
     push_to_wave_worker_buffer, read_worker_events, read_worker_events_with_retry,

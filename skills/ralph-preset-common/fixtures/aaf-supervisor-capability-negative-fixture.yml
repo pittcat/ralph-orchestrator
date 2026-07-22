@@ -6,6 +6,8 @@
 #   (c) dispatcher reads `.ralph/supervisor.db` for unit state          → preset.supervisor_unit_state_not_via_task_api
 #   (d) hat instructions require reading supervisor.db as business artifact → preset.artifact_uses_internal_ledger
 #   (e) execution_model Intent mismatch: yaml enables supervisor but intent stays single-chain → preset.execution_model_intent_mismatch
+#   (f) supervisor wave consumer hat (triggers contain `*.unit.ready`) without concurrency declaration
+#       (concurrency defaults to 1 → no parallelism)                      → preset.supervisor_wave_consumer_low_concurrency
 #
 # Not registered in presets/manifest.yml; intentionally anonymous.
 event_loop:
@@ -23,7 +25,7 @@ hats:
     triggers:
       - work.start
     publishes:
-      - work.unit.scheduled
+      - exec.unit.ready
     instructions: |
       ## DISPATCHER MODE
 
@@ -32,33 +34,39 @@ hats:
       finish, read the final state from the same db to compose the
       final summary. The db is the source of truth for unit state.
     terminal_events:
-      - work.unit.scheduled
+      - exec.unit.ready
   worker:
     name: Worker
+    # Axis (f): supervisor wave consumer hat (`*.unit.ready` trigger)
+    # WITHOUT an explicit `concurrency` field (default 1) — exercising
+    # `preset.supervisor_wave_consumer_low_concurrency`. A production
+    # supervisor worker must declare `concurrency >= 2` to actually
+    # parallelize (R4) and the value is further clamped by
+    # `event_loop.supervisor.max_concurrent_workers` (U2/U3).
     description: Executes a single unit.
     triggers:
-      - work.unit.scheduled
+      - exec.unit.ready
     publishes:
-      - work.unit.done
+      - exec.unit.done
       - exec.wave.failed
     instructions: |
       ## WORKER MODE
 
-      Do the unit, then emit `work.unit.done` with the result. If the
+      Do the unit, then emit `exec.unit.done` with the result. If the
       unit fails for any reason, emit `exec.wave.failed` so the
       supervisor can re-schedule.
     terminal_events:
-      - work.unit.done
+      - exec.unit.done
   coordinator:
     name: Coordinator
     description: Closes the loop.
     triggers:
-      - work.unit.done
+      - exec.unit.done
     publishes:
       - work.done
     instructions: |
       ## COORDINATOR MODE
 
-      Emit `work.done` when all sub-units report `work.unit.done`.
+      Emit `work.done` when all sub-units report `exec.unit.done`.
     terminal_events:
       - work.done

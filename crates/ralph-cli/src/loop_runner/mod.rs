@@ -48,6 +48,7 @@ pub use runner::run_loop_impl;
 #[cfg(test)]
 pub(crate) use runner::{
     bridge_build_invocations, build_supervisor_bridge, build_termination_diagnostics,
+    clear_factory_override_for_test, install_factory_override_for_test,
     persist_starting_event_to_events_file, write_termination_diagnostics,
 };
 // Re-export all other module items for internal use and test access

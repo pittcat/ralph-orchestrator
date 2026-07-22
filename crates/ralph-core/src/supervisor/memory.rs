@@ -369,6 +369,44 @@ impl SupervisorStore for InMemorySupervisorStore {
         Ok(())
     }
 
+    fn release_slot_dispatch(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        outcome: DispatchOutcome,
+    ) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        let key = (wave_id.to_string(), slot_index);
+        let wave = inner
+            .waves_by_id
+            .get_mut(wave_id)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
+        let slot =
+            wave.slots
+                .get_mut(&slot_index)
+                .ok_or_else(|| SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                })?;
+        // Terminal release is deliberately idempotent. U5 may persist
+        // the same result after this capacity transition, and a
+        // cancellation/abort path may race with the normal join path.
+        if matches!(
+            slot.status,
+            SlotStatus::Completed | SlotStatus::Failed | SlotStatus::Cancelled
+        ) {
+            return Ok(());
+        }
+        slot.status = match outcome {
+            DispatchOutcome::Completed => SlotStatus::Completed,
+            DispatchOutcome::Failed => SlotStatus::Failed,
+        };
+        if let Some(dispatch) = inner.dispatches.get_mut(&key) {
+            dispatch.outcome = Some(outcome);
+        }
+        Ok(())
+    }
+
     fn record_slot_result(
         &self,
         wave_id: &str,

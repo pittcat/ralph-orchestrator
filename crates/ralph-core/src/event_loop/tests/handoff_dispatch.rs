@@ -290,3 +290,145 @@ fn u16_check_hat_triggers_glob_pattern_matches_single_segment() {
         "single-`*` glob must NOT match two-segment topics; use `review.**` (or two patterns) for nested matching"
     );
 }
+
+// ----------------------------------------------------------------
+// U7 (2026-07-23-001, R10 / KTD-7): the virtual `supervisor` is a
+// runtime consumer, NOT a `HatRegistry` agent hat. It is wired into
+// the `HandoffGraph` as the unique consumer of the slot-level
+// `*.unit.done` / `*.unit.failed` topics (see
+// `preset_lint::workflow_activation::HandoffGraph::from_config`), so
+// `HandoffIndex::consumer_of("exec.unit.done")` returns
+// `Some("supervisor")`. But `registry.get_config("supervisor")` is
+// `None`, so the U16 misrouted wire-up — which reads the consumer's
+// `triggers` from the registry — would treat the missing entry as
+// "triggers do not declare the topic" and emit a spurious
+// `task.resume.misrouted`. The U7 narrow exemption recognizes the
+// virtual consumer centrally (`event_origin::is_virtual_supervisor_consumer`)
+// and skips the U16 check for it, while leaving normal-hat U16 intact.
+// ----------------------------------------------------------------
+
+/// Build a minimal `event_reader::Event` (aliased `JsonlEvent` in the
+/// loop) for a topic, for driving `apply_contract_committed_side_effects`.
+fn u7_jsonl_event(topic: &str) -> crate::event_reader::Event {
+    serde_json::from_str(&format!(
+        r#"{{"topic":"{topic}","ts":"2026-07-23T00:00:00Z"}}"#
+    ))
+    .expect("valid jsonl event")
+}
+
+/// Config with `supervisor.enabled` + isolated mode and a single worker
+/// hat that publishes `exec.unit.done`. The virtual supervisor is the
+/// unique consumer of that slot topic; no real hat subscribes to it.
+fn u7_supervisor_enabled_config() -> crate::config::RalphConfig {
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  supervisor:
+    enabled: true
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["exec.unit.done", "work.done"]
+"#;
+    serde_yaml::from_str(yaml).expect("valid supervisor config")
+}
+
+/// U7 consumer-predicate 正例: the canonical virtual supervisor id is
+/// recognized as the virtual runtime consumer.
+#[test]
+fn u7_virtual_supervisor_consumer_predicate_positive() {
+    use crate::event_origin::is_virtual_supervisor_consumer;
+    assert!(
+        is_virtual_supervisor_consumer("supervisor"),
+        "the canonical virtual supervisor id must be recognized as the virtual consumer"
+    );
+}
+
+/// U7 consumer-predicate 反例: ordinary hats are NOT the virtual
+/// consumer, so they stay subject to the U16 misrouted check (the
+/// exemption must not widen to normal hats).
+#[test]
+fn u7_virtual_supervisor_consumer_predicate_negative() {
+    use crate::event_origin::is_virtual_supervisor_consumer;
+    for hat in ["executor", "integrator", "reviewer", "plan-reviewer", ""] {
+        assert!(
+            !is_virtual_supervisor_consumer(hat),
+            "ordinary hat `{hat}` must NOT be treated as the virtual supervisor consumer"
+        );
+    }
+}
+
+/// U7 正例 (RED→GREEN): feeding a legitimate `exec.unit.done` whose
+/// unique consumer is the virtual `supervisor` must NOT emit
+/// `task.resume.misrouted`. Before the narrow exemption the registry
+/// lookup for `supervisor` returns `None`, which the U16 wire-up
+/// misreads as "triggers do not declare the topic".
+#[test]
+fn test_virtual_supervisor_unit_done_no_misrouted() {
+    let config = u7_supervisor_enabled_config();
+    // Sanity: the virtual supervisor really is the unique consumer of
+    // the slot topic in this config (the pre-condition under test).
+    {
+        let index = crate::workflow_contract::HandoffIndex::from_config(&config);
+        assert_eq!(
+            index.consumer_of("exec.unit.done"),
+            Some("supervisor"),
+            "virtual supervisor must be the unique consumer of exec.unit.done"
+        );
+    }
+    let mut event_loop = crate::EventLoop::new(config);
+    event_loop.apply_contract_committed_side_effects(&[u7_jsonl_event("exec.unit.done")]);
+    assert!(
+        !event_loop
+            .state
+            .seen_topics
+            .contains("task.resume.misrouted"),
+        "virtual supervisor consuming exec.unit.done must NOT produce task.resume.misrouted"
+    );
+}
+
+/// U7 反例 (regression guard): an ordinary hat that is the HandoffIndex
+/// consumer of a slot topic but does NOT declare it in its `triggers`
+/// still produces `task.resume.misrouted`. The U7 exemption is keyed on
+/// the virtual-supervisor id only, so normal-hat U16 behavior is
+/// unchanged.
+#[test]
+fn u7_normal_hat_consumer_still_reports_misrouted() {
+    use crate::workflow_contract::{HandoffEntry, HandoffIndex, HandoffSource};
+
+    // Normal `executor` hat whose `triggers` is only `work.ready` —
+    // it does NOT declare `exec.unit.done`.
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["exec.unit.done", "work.done"]
+"#;
+    let config: crate::config::RalphConfig = serde_yaml::from_str(yaml).expect("valid config");
+    let mut event_loop = crate::EventLoop::new(config);
+
+    // Force the HandoffIndex to name the ordinary `executor` hat as the
+    // consumer of `exec.unit.done` (a misroute: its triggers lack it).
+    let mut index = HandoffIndex::default();
+    index.entries.insert(
+        "exec.unit.done".to_string(),
+        HandoffEntry {
+            source: HandoffSource::Derived,
+            consumer: Some("executor".to_string()),
+        },
+    );
+    event_loop.handoff_index = index;
+
+    event_loop.apply_contract_committed_side_effects(&[u7_jsonl_event("exec.unit.done")]);
+    assert!(
+        event_loop
+            .state
+            .seen_topics
+            .contains("task.resume.misrouted"),
+        "an ordinary hat consumer whose triggers lack the topic must still report task.resume.misrouted"
+    );
+}

@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::supervisor::{CoordinatorAction, WaveKind, WaveSnapshot};
+use crate::supervisor::{CoordinatorAction, SlotResource, WaveKind, WaveSnapshot};
 use crate::supervisor::{PhaseInputs, SupervisorStore, SupervisorStoreError};
 
 /// Outcome of dispatching a single slot through the bridge.
@@ -71,6 +71,48 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
     /// decide whether to merge worker events + persist the
     /// `*.wave.complete` / `*.wave.failed` coordination event.
     fn tick(&self, wave_id: &str, inputs: PhaseInputs) -> Result<CoordinatorAction, BridgeError>;
+
+    /// U6: run one tick of the supervisor fan-in, merging the
+    /// per-slot worker business events (`slot_events`, ordered by
+    /// slot index and de-duplicated by the caller) through the
+    /// coordinator's merge sink on the `Integrate` path. The
+    /// production dispatcher's `run_supervisor_fan_in` calls this
+    /// so the real fan-in output lands in the main ledger. The
+    /// default delegates to [`Self::tick`] (empty batch) so mocks
+    /// and the in-memory BDD bridge keep working unchanged.
+    fn tick_with_slot_events(
+        &self,
+        wave_id: &str,
+        inputs: PhaseInputs,
+        slot_events: Vec<ralph_proto::Event>,
+    ) -> Result<CoordinatorAction, BridgeError> {
+        let _ = slot_events;
+        self.tick(wave_id, inputs)
+    }
+
+    /// U6: fetch the per-slot resource bindings for a wave
+    /// (`slot_index` + `branch` + `worktree_path`). The
+    /// dispatcher's `run_supervisor_fan_in` uses this to build
+    /// the `success_slots` payload on the `*.wave.complete`
+    /// coordination event. Default: no resources (mocks / bridges
+    /// without a store).
+    fn slot_resources(&self, _wave_id: &str) -> Result<Vec<SlotResource>, BridgeError> {
+        Ok(Vec::new())
+    }
+
+    /// Global worker cap exposed to the dispatcher. Bridges that do not
+    /// provide store-backed dispatch approval retain the legacy unlimited
+    /// behavior.
+    fn max_concurrent_workers(&self) -> u32 {
+        u32::MAX
+    }
+
+    /// Ask the bridge whether the requested slot is approved for dispatch.
+    /// The default keeps legacy/mock bridges compatible: without a store
+    /// approval surface, the caller may proceed with its existing spawn path.
+    fn try_dispatch_next(&self, _wave_id: &str, _slot_index: u32) -> Result<bool, BridgeError> {
+        Ok(true)
+    }
 
     /// Open a slot dispatch decision: returns the binding (or
     /// `None` for `SharedReadonly`) so the dispatcher knows
@@ -130,6 +172,17 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         slot_index: u32,
         reason: &str,
     ) -> Result<(), BridgeError>;
+
+    /// Release the global dispatch permit after a worker reaches a
+    /// terminal state. Bridges without a store retain the legacy no-op.
+    fn release_slot_dispatch(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+        _outcome: crate::supervisor::DispatchOutcome,
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
 }
 
 /// BDD-specific bridge that wires a `SupervisorCoordinator`
@@ -181,6 +234,23 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
     fn tick(&self, wave_id: &str, inputs: PhaseInputs) -> Result<CoordinatorAction, BridgeError> {
         self.coordinator
             .tick(wave_id, inputs)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn tick_with_slot_events(
+        &self,
+        wave_id: &str,
+        inputs: PhaseInputs,
+        slot_events: Vec<ralph_proto::Event>,
+    ) -> Result<CoordinatorAction, BridgeError> {
+        self.coordinator
+            .tick_with_slot_events(wave_id, inputs, slot_events)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn slot_resources(&self, wave_id: &str) -> Result<Vec<SlotResource>, BridgeError> {
+        self.store
+            .list_worktree_paths(wave_id)
             .map_err(|err| BridgeError::Store(err.to_string()))
     }
 
@@ -252,6 +322,17 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
     ) -> Result<(), BridgeError> {
         self.store
             .record_slot_failure(wave_id, slot_index, reason)?;
+        Ok(())
+    }
+
+    fn release_slot_dispatch(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        outcome: crate::supervisor::DispatchOutcome,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .release_slot_dispatch(wave_id, slot_index, outcome)?;
         Ok(())
     }
 }
@@ -338,5 +419,20 @@ mod tests {
         assert!(!is_supervisor_path_enabled(true, false));
         assert!(!is_supervisor_path_enabled(false, true));
         assert!(!is_supervisor_path_enabled(false, false));
+    }
+}
+
+#[cfg(test)]
+mod dispatch_surface_tests {
+    use super::*;
+
+    #[test]
+    fn test_trait_exposes_dispatch_surface() {
+        let store = std::sync::Arc::new(crate::supervisor::InMemorySupervisorStore::new());
+        let bridge =
+            InMemoryCoordinatorBridge::from_store(store as std::sync::Arc<dyn SupervisorStore>);
+
+        assert_eq!(bridge.max_concurrent_workers(), u32::MAX);
+        assert!(bridge.try_dispatch_next("missing-wave", 0).unwrap());
     }
 }

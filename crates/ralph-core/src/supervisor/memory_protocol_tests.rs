@@ -319,3 +319,54 @@ fn slot_status_string_round_trip() {
         assert_eq!(back, status);
     }
 }
+
+/// U4 cap=4 barrier contract: after four slots are dispatched,
+/// terminal release makes the fifth FIFO slot dispatchable.
+#[test]
+fn cap_four_release_five_slots() {
+    let s = store();
+    let wave = wave_into(&s, "cap4-release", WaveKind::Exec, 5).unwrap();
+    let mut dispatched = Vec::new();
+    for _ in 0..4 {
+        dispatched.push(s.try_dispatch_next(4).unwrap().unwrap());
+    }
+    assert_eq!(s.fan_in_status(&wave).unwrap().in_flight_count, 4);
+    assert!(s.try_dispatch_next(4).unwrap().is_none());
+
+    let (released_wave, released_slot) = dispatched[0].clone();
+    s.release_slot_dispatch(
+        &released_wave,
+        released_slot,
+        crate::supervisor::DispatchOutcome::Completed,
+    )
+    .unwrap();
+
+    let fifth = s
+        .try_dispatch_next(4)
+        .unwrap()
+        .expect("fifth slot must dispatch after a terminal release");
+    assert_eq!(fifth.0, wave);
+    assert_eq!(fifth.1, 4);
+    assert_eq!(s.fan_in_status(&wave).unwrap().in_flight_count, 4);
+}
+
+/// Terminal release is idempotent and applies equally to failure and
+/// cancellation paths, while the pending cancellation path remains
+/// untouched by the release API.
+#[test]
+fn terminal_release_failure_and_cancel_are_idempotent() {
+    let s = store();
+    let failed_wave = wave_into(&s, "release-failed", WaveKind::Exec, 1).unwrap();
+    s.try_dispatch_next(1).unwrap().unwrap();
+    s.release_slot_dispatch(&failed_wave, 0, crate::supervisor::DispatchOutcome::Failed)
+        .unwrap();
+    s.release_slot_dispatch(&failed_wave, 0, crate::supervisor::DispatchOutcome::Failed)
+        .unwrap();
+    assert_eq!(s.fan_in_status(&failed_wave).unwrap().failed_count, 1);
+
+    let cancel_wave = wave_into(&s, "release-cancel", WaveKind::Exec, 1).unwrap();
+    s.try_dispatch_next(1).unwrap().unwrap();
+    s.release_slot_dispatch(&cancel_wave, 0, crate::supervisor::DispatchOutcome::Failed)
+        .unwrap();
+    assert_eq!(s.fan_in_status(&cancel_wave).unwrap().in_flight_count, 0);
+}

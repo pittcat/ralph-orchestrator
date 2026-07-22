@@ -60,10 +60,11 @@ _RALPH_BUILTIN_HAT_VALUES=(
   "builtin:ce-executor-pipeline"
   "builtin:ce-executor-pipeline-loop"
   # 2026-07-03-001 plan U13: supervisor-driven parallel preset.
-  # Requires `--features supervisor-db` at build time and
-  # `event_loop.supervisor.enabled: true` + isolated mode at
-  # run time; the lint in `crates/ralph-core/src/preset_lint/supervisor.rs`
-  # enforces both.
+  # Enabled by `event_loop.supervisor.enabled: true` at run time;
+  # the rusqlite-backed store ships in the default feature set, so no
+  # extra build flag is needed since the 2026-07-23 closure plan.
+  # The lint in `crates/ralph-core/src/preset_lint/supervisor.rs`
+  # enforces the isolation + concurrency + fan-in requirements.
   "builtin:ce-executor-supervisor"
   # builtin:ce-executor-wave  # deleted 2026-06-23
   "builtin:debug"

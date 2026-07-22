@@ -1516,47 +1516,60 @@ impl EventLoop {
         self.update_bootstrap_flags_from_accepted(events);
         for accepted in events {
             if let Some(consumer) = self.handoff_index.consumer_of(&accepted.topic) {
-                let consumer_triggers_ok = self
-                    .registry
-                    .get_config(&HatId::from(consumer))
-                    .map(|cfg| {
-                        crate::workflow_contract::handoff_index::check_hat_triggers(
-                            &cfg.triggers,
-                            accepted.topic.as_str(),
+                // U7 (2026-07-23-001, R10 / KTD-7): the virtual `supervisor`
+                // is a runtime consumer, not a `HatRegistry` agent hat. It
+                // legitimately consumes the slot-level `*.unit.done` /
+                // `*.unit.failed` topics at fan-in but has no registry entry
+                // and therefore no `triggers` list, so the U16 check below
+                // would misread the missing entry as "triggers do not declare
+                // the topic" and emit a spurious `task.resume.misrouted`.
+                // Skip both the misrouted check and the 600s pending-handoff
+                // registration for the virtual consumer; it is dispatched by
+                // the supervisor runtime, never via handoff/`task.resume`.
+                // Ordinary hats fall through to the unchanged U16 logic.
+                if !crate::event_origin::is_virtual_supervisor_consumer(consumer) {
+                    let consumer_triggers_ok = self
+                        .registry
+                        .get_config(&HatId::from(consumer))
+                        .map(|cfg| {
+                            crate::workflow_contract::handoff_index::check_hat_triggers(
+                                &cfg.triggers,
+                                accepted.topic.as_str(),
+                            )
+                            .is_ok()
+                        })
+                        .unwrap_or(false);
+                    if !consumer_triggers_ok {
+                        warn!(
+                            topic = %accepted.topic,
+                            consumer = %consumer,
+                            "U16 handoff: consumer hat's `triggers` does not declare \
+                             this topic — emitting task.resume.misrouted diagnostic, \
+                             skipping 600s pending registration"
+                        );
+                        let diagnostic = Event::new(
+                            "task.resume.misrouted",
+                            format!(
+                                "U16: consumer hat `{}` does not declare `{}` in its \
+                                 `triggers` list; handoff skipped to avoid 600s stall \
+                                 escalation. Fix: add `{}` to the hat's `triggers:` or \
+                                 remove the producer from this hat's emission scope.",
+                                consumer, accepted.topic, accepted.topic
+                            ),
                         )
-                        .is_ok()
-                    })
-                    .unwrap_or(false);
-                if !consumer_triggers_ok {
-                    warn!(
-                        topic = %accepted.topic,
-                        consumer = %consumer,
-                        "U16 handoff: consumer hat's `triggers` does not declare \
-                         this topic — emitting task.resume.misrouted diagnostic, \
-                         skipping 600s pending registration"
+                        .with_source(HatId::from("ralph"));
+                        self.state.record_event(&diagnostic);
+                        self.bus.publish(diagnostic);
+                        continue;
+                    }
+                    let event_id = format!("{}:{}", accepted.ts, accepted.topic);
+                    self.state.handoff_tracker.on_handoff_accepted(
+                        accepted.topic.clone(),
+                        consumer.to_string(),
+                        event_id.clone(),
+                        std::time::Instant::now(),
                     );
-                    let diagnostic = Event::new(
-                        "task.resume.misrouted",
-                        format!(
-                            "U16: consumer hat `{}` does not declare `{}` in its \
-                             `triggers` list; handoff skipped to avoid 600s stall \
-                             escalation. Fix: add `{}` to the hat's `triggers:` or \
-                             remove the producer from this hat's emission scope.",
-                            consumer, accepted.topic, accepted.topic
-                        ),
-                    )
-                    .with_source(HatId::from("ralph"));
-                    self.state.record_event(&diagnostic);
-                    self.bus.publish(diagnostic);
-                    continue;
                 }
-                let event_id = format!("{}:{}", accepted.ts, accepted.topic);
-                self.state.handoff_tracker.on_handoff_accepted(
-                    accepted.topic.clone(),
-                    consumer.to_string(),
-                    event_id.clone(),
-                    std::time::Instant::now(),
-                );
             }
 
             match accepted.topic.as_str() {
