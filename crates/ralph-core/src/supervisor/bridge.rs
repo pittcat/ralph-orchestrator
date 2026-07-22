@@ -72,6 +72,20 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
     /// `*.wave.complete` / `*.wave.failed` coordination event.
     fn tick(&self, wave_id: &str, inputs: PhaseInputs) -> Result<CoordinatorAction, BridgeError>;
 
+    /// Global worker cap exposed to the dispatcher. Bridges that do not
+    /// provide store-backed dispatch approval retain the legacy unlimited
+    /// behavior.
+    fn max_concurrent_workers(&self) -> u32 {
+        u32::MAX
+    }
+
+    /// Ask the bridge whether the requested slot is approved for dispatch.
+    /// The default keeps legacy/mock bridges compatible: without a store
+    /// approval surface, the caller may proceed with its existing spawn path.
+    fn try_dispatch_next(&self, _wave_id: &str, _slot_index: u32) -> Result<bool, BridgeError> {
+        Ok(true)
+    }
+
     /// Open a slot dispatch decision: returns the binding (or
     /// `None` for `SharedReadonly`) so the dispatcher knows
     /// whether to spawn a real worker process and with which
@@ -338,5 +352,20 @@ mod tests {
         assert!(!is_supervisor_path_enabled(true, false));
         assert!(!is_supervisor_path_enabled(false, true));
         assert!(!is_supervisor_path_enabled(false, false));
+    }
+}
+
+#[cfg(test)]
+mod dispatch_surface_tests {
+    use super::*;
+
+    #[test]
+    fn test_trait_exposes_dispatch_surface() {
+        let store = std::sync::Arc::new(crate::supervisor::InMemorySupervisorStore::new());
+        let bridge =
+            InMemoryCoordinatorBridge::from_store(store as std::sync::Arc<dyn SupervisorStore>);
+
+        assert_eq!(bridge.max_concurrent_workers(), u32::MAX);
+        assert!(bridge.try_dispatch_next("missing-wave", 0).unwrap());
     }
 }

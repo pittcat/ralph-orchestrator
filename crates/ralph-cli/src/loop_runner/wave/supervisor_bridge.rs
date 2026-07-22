@@ -95,6 +95,8 @@ pub struct CoordinatorSupervisorBridge {
     /// factory call args without invoking git; production uses
     /// `DefaultWorktreeFactory`.
     factory: Arc<dyn WorktreeFactory>,
+    /// Global supervisor worker cap supplied by the loop config.
+    max_concurrent_workers: u32,
 }
 
 impl CoordinatorSupervisorBridge {
@@ -113,6 +115,7 @@ impl CoordinatorSupervisorBridge {
             coordinator,
             context: None,
             factory,
+            max_concurrent_workers: u32::MAX,
         }
     }
 
@@ -127,12 +130,23 @@ impl CoordinatorSupervisorBridge {
         context: ProductionBridgeContext,
         factory: Arc<dyn WorktreeFactory>,
     ) -> Self {
+        Self::with_context_and_factory_with_cap(store, context, factory, u32::MAX)
+    }
+
+    /// Build a production bridge with the configured global worker cap.
+    pub fn with_context_and_factory_with_cap(
+        store: Arc<dyn SupervisorStore>,
+        context: ProductionBridgeContext,
+        factory: Arc<dyn WorktreeFactory>,
+        max_concurrent_workers: u32,
+    ) -> Self {
         let coordinator = Arc::new(SupervisorCoordinator::with_in_memory_sink(store.clone()));
         Self {
             store,
             coordinator,
             context: Some(context),
             factory,
+            max_concurrent_workers,
         }
     }
 
@@ -176,6 +190,7 @@ impl CoordinatorSupervisorBridge {
             coordinator,
             context: None,
             factory,
+            max_concurrent_workers: u32::MAX,
         }
     }
 }
@@ -185,6 +200,22 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         self.coordinator
             .tick(wave_id, inputs)
             .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn max_concurrent_workers(&self) -> u32 {
+        self.max_concurrent_workers
+    }
+
+    fn try_dispatch_next(&self, wave_id: &str, slot_index: u32) -> Result<bool, BridgeError> {
+        let dispatched = self
+            .store
+            .try_dispatch_next(self.max_concurrent_workers)
+            .map_err(BridgeError::from)?;
+        Ok(matches!(
+            dispatched,
+            Some((ref dispatched_wave_id, dispatched_slot_index))
+                if dispatched_wave_id == wave_id && dispatched_slot_index == slot_index
+        ))
     }
 
     fn bind_slot(
@@ -736,6 +767,45 @@ mod tests {
             remaining.is_empty(),
             "all pre-scripted actions were drained in FIFO order"
         );
+    }
+
+    #[test]
+    fn mock_bridge_uses_legacy_dispatch_defaults() {
+        let bridge = MockSupervisorBridge::new();
+        assert_eq!(bridge.max_concurrent_workers(), u32::MAX);
+        assert!(bridge.try_dispatch_next("w-1", 0).unwrap());
+    }
+
+    #[test]
+    fn production_bridge_exposes_cap_and_forwards_dispatch_approval() {
+        let store = Arc::new(InMemorySupervisorStore::new());
+        let wave = store
+            .register_wave("dispatch-surface", WaveKind::Exec, 1)
+            .unwrap();
+        store
+            .bind_worktree(
+                &wave,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/dispatch-surface".to_string()),
+                    branch: Some("ralph/dispatch-surface".to_string()),
+                },
+            )
+            .unwrap();
+        let bridge = CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+            store.clone() as Arc<dyn SupervisorStore>,
+            ProductionBridgeContext {
+                loop_id: "dispatch-surface".to_string(),
+                repo_root: std::path::PathBuf::from("/tmp/dispatch-surface"),
+            },
+            Arc::new(DefaultWorktreeFactory),
+            1,
+        );
+
+        assert_eq!(bridge.max_concurrent_workers(), 1);
+        assert!(bridge.try_dispatch_next(&wave, 0).unwrap());
+        assert!(!bridge.try_dispatch_next(&wave, 0).unwrap());
     }
 
     /// U5 / F-005 edge: empty actions queue → default

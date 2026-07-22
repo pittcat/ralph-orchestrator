@@ -727,9 +727,14 @@ pub(crate) fn build_supervisor_bridge(
             std::sync::Arc::new(DefaultWorktreeFactory)
         };
 
-        Ok(CoordinatorSupervisorBridge::with_context_and_factory(
-            store, context, factory,
-        ))
+        Ok(
+            CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+                store,
+                context,
+                factory,
+                cfg.max_concurrent_workers,
+            ),
+        )
     }
 }
 
