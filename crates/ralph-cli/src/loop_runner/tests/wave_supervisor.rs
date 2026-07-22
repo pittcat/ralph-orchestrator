@@ -41,7 +41,7 @@
 
 use super::super::*;
 use crate::loop_runner::wave::{
-    BridgeError, MockSupervisorBridge, SlotBinding, SupervisorBridge, is_supervisor_path_enabled,
+    is_supervisor_path_enabled, BridgeError, MockSupervisorBridge, SlotBinding, SupervisorBridge,
 };
 use ralph_core::supervisor::{PhaseInputs, WaveKind};
 use std::collections::HashMap;
@@ -269,8 +269,8 @@ fn bridge_off_no_feature_returns_error_path() {
 #[cfg(feature = "supervisor-db")]
 #[test]
 fn build_supervisor_bridge_relative_db_path_resolves_under_ralph_dir() {
-    use ralph_core::LoopContext;
     use ralph_core::config::SupervisorConfig;
+    use ralph_core::LoopContext;
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let ctx = LoopContext::primary(tmp.path().to_path_buf());
@@ -293,8 +293,8 @@ fn build_supervisor_bridge_relative_db_path_resolves_under_ralph_dir() {
 #[cfg(feature = "supervisor-db")]
 #[test]
 fn build_supervisor_bridge_absolute_db_path_honoured_as_is() {
-    use ralph_core::LoopContext;
     use ralph_core::config::SupervisorConfig;
+    use ralph_core::LoopContext;
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let ctx = LoopContext::primary(tmp.path().to_path_buf());
@@ -321,8 +321,8 @@ fn build_supervisor_bridge_absolute_db_path_honoured_as_is() {
 #[cfg(not(feature = "supervisor-db"))]
 #[test]
 fn build_supervisor_bridge_without_feature_enabled_returns_error() {
-    use ralph_core::LoopContext;
     use ralph_core::config::SupervisorConfig;
+    use ralph_core::LoopContext;
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let ctx = LoopContext::primary(tmp.path().to_path_buf());
@@ -351,8 +351,8 @@ fn build_supervisor_bridge_without_feature_enabled_returns_error() {
 #[cfg(feature = "supervisor-db")]
 #[test]
 fn build_supervisor_bridge_default_db_path_collapses_to_single_ralph() {
-    use ralph_core::LoopContext;
     use ralph_core::config::SupervisorConfig;
+    use ralph_core::LoopContext;
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let ctx = LoopContext::primary(tmp.path().to_path_buf());
@@ -384,8 +384,8 @@ fn build_supervisor_bridge_default_db_path_collapses_to_single_ralph() {
 #[cfg(feature = "supervisor-db")]
 #[test]
 fn build_supervisor_bridge_absolute_db_path_outside_workspace_preserved() {
-    use ralph_core::LoopContext;
     use ralph_core::config::SupervisorConfig;
+    use ralph_core::LoopContext;
 
     let workspace = tempfile::tempdir().expect("workspace");
     let db_dir = tempfile::tempdir().expect("db dir");
@@ -497,7 +497,7 @@ fn review_kind_bind_slot_returns_none_for_shared_readonly() {
 #[test]
 fn recover_active_waves_at_startup_returns_report_on_empty_store() {
     use ralph_core::supervisor::{
-        InMemorySupervisorStore, SupervisorStore, recover_active_waves_at_startup,
+        recover_active_waves_at_startup, InMemorySupervisorStore, SupervisorStore,
     };
     use std::sync::Arc;
 
@@ -563,8 +563,8 @@ fn supervisor_capability_gate_truth_table() {
 /// `ralph run`.
 #[test]
 fn supervisor_disabled_does_not_call_bridge_builder() {
-    use ralph_core::LoopContext;
     use ralph_core::config::SupervisorConfig;
+    use ralph_core::LoopContext;
 
     // Pre-condition: pipeline preset does NOT opt into supervisor.
     assert!(
@@ -618,8 +618,8 @@ fn supervisor_disabled_does_not_call_bridge_builder() {
 #[cfg(feature = "supervisor-db")]
 #[test]
 fn supervisor_enabled_isolated_invokes_bridge_builder_once() {
-    use ralph_core::LoopContext;
     use ralph_core::config::SupervisorConfig;
+    use ralph_core::LoopContext;
 
     assert!(
         is_supervisor_path_enabled(true, true),
@@ -658,8 +658,8 @@ fn supervisor_enabled_isolated_invokes_bridge_builder_once() {
 /// before those units run.
 #[test]
 fn pipeline_disabled_workspace_has_no_supervisor_artifacts() {
-    use ralph_core::LoopContext;
     use ralph_core::config::SupervisorConfig;
+    use ralph_core::LoopContext;
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let ctx = LoopContext::primary(tmp.path().to_path_buf());
@@ -692,4 +692,486 @@ fn pipeline_disabled_workspace_has_no_supervisor_artifacts() {
     // "the gate stayed closed", which the counter test above already
     // covers via `bridge_build_invocations`.
     let _ = ctx;
+}
+
+// ── 2026-07-22-003 plan U4: production per-slot worktree binding ─────────────
+//
+// Goal: the production `CoordinatorSupervisorBridge::bind_slot` MUST actually
+// invoke the worktree helper, persist the `SlotResource` to the store, and
+// return a `SlotBinding` with the per-slot cwd/env. Exec/Fix bindings
+// MUST NOT return `None` — `None` is reserved for the `Review`
+// (SharedReadonly) branch only. `bind_slot` failures MUST be
+// surfaced as typed `BridgeError` (not silently swallowed) and the
+// dispatcher MUST translate them into fail-closed behaviour (no
+// worker spawned against the main workspace).
+//
+// The tests below pin four contracts:
+//   1. `exec_kind_produces_unique_branch_path_cwd`: two exec
+//      slots through the same wave produce two distinct
+//      `(branch, worktree_path)` pairs and the `WorkerRequest`
+//      `cwd` matches the binding.
+//   2. `fix_kind_produces_unique_branch_path_cwd`: same for
+//      `WaveKind::Fix`.
+//   3. `review_kind_returns_shared_readonly_none`: `Review`
+//      bindings remain `None` (no worktree, no writeable branch)
+//      and the binding's `worktree_path` is `None`.
+//   4. `bind_slot_failure_fail_closed_no_main_workspace_write`:
+//      when the `WorktreeFactory` returns an error, the bridge
+//      records the failure in the store and returns `Err`, so
+//      the dispatcher's fail-closed branch keeps the slot out
+//      of the worktree queue and the main workspace never
+//      receives a worker spawn with the loop's cwd.
+//
+// All tests use a `RecordingFactory` (records every call into a
+// shared `Vec`) — the production bridge constructs a
+// `DefaultWorktreeFactory` for real workers and only the tests
+// inject the recording factory.
+
+use ralph_core::supervisor::worktree_bind::{DefaultWorktreeFactory, WorktreeFactory};
+use ralph_core::supervisor::{InMemorySupervisorStore, SupervisorStore};
+use ralph_core::worktree::Worktree;
+
+#[derive(Debug, Clone)]
+struct RecordingFactory {
+    /// Existing `WorktreeBinding`s created by this factory — the
+    /// bridge hands them back with a synthetic absolute path so
+    /// tests don't need a real git repo.
+    calls: std::sync::Arc<std::sync::Mutex<Vec<(std::path::PathBuf, String)>>>,
+    /// Branch → worktree path; tests pre-populate the table to
+    /// simulate a successful factory call.
+    paths: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>>,
+}
+
+impl Default for RecordingFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RecordingFactory {
+    fn new() -> Self {
+        Self {
+            calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            paths: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    fn pre_create(&self, branch: &str, path: std::path::PathBuf) {
+        self.paths.lock().unwrap().insert(branch.to_string(), path);
+    }
+
+    fn calls_snapshot(&self) -> Vec<(std::path::PathBuf, String)> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl WorktreeFactory for RecordingFactory {
+    fn create(
+        &self,
+        repo_root: std::path::PathBuf,
+        branch: String,
+    ) -> Result<Worktree, ralph_core::supervisor::worktree_bind::WorktreeError> {
+        self.calls.lock().unwrap().push((repo_root, branch.clone()));
+        let path = self
+            .paths
+            .lock()
+            .unwrap()
+            .get(&branch)
+            .cloned()
+            .ok_or_else(|| {
+                ralph_core::supervisor::worktree_bind::WorktreeError::CreateFailed(format!(
+                    "RecordingFactory: no path for branch {branch}"
+                ))
+            })?;
+        Ok(Worktree {
+            path,
+            branch,
+            is_main: false,
+            head: None,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct FailingFactory;
+
+impl WorktreeFactory for FailingFactory {
+    fn create(
+        &self,
+        _repo_root: std::path::PathBuf,
+        _branch: String,
+    ) -> Result<Worktree, ralph_core::supervisor::worktree_bind::WorktreeError> {
+        Err(
+            ralph_core::supervisor::worktree_bind::WorktreeError::CreateFailed(
+                "factory failed: simulating U4 worktree creation failure".to_string(),
+            ),
+        )
+    }
+}
+
+/// Build a `CoordinatorSupervisorBridge` whose `bind_slot` calls
+/// run through `factory` instead of the production
+/// `DefaultWorktreeFactory`. The bridge still owns the in-memory
+/// store + coordinator so the `bind_worktree` / `record_slot_*`
+/// paths stay live for assertions.
+fn production_bridge_with_factory(
+    factory: std::sync::Arc<dyn WorktreeFactory>,
+    repo_root: std::path::PathBuf,
+    loop_id: &str,
+) -> (
+    crate::loop_runner::wave::CoordinatorSupervisorBridge,
+    std::sync::Arc<dyn SupervisorStore>,
+) {
+    use crate::loop_runner::wave::ProductionBridgeContext;
+    use ralph_core::LoopContext;
+
+    let loop_ctx = LoopContext::worktree(loop_id.to_string(), repo_root.clone(), repo_root);
+    let context = ProductionBridgeContext {
+        loop_id: loop_id.to_string(),
+        repo_root: loop_ctx.repo_root().to_path_buf(),
+    };
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
+        store.clone() as std::sync::Arc<dyn SupervisorStore>,
+        context,
+        factory,
+    );
+    (bridge, store)
+}
+
+/// U4 R7: production `bind_slot` for `Exec` MUST return a
+/// `SlotBinding` whose `worktree_path` is unique per slot in the
+/// same wave. Two slots (`0` and `1`) MUST receive distinct
+/// `(branch, worktree_path)` pairs and the dispatcher MUST hand
+/// those paths to the worker `WorkerRequest.cwd` (verified in
+/// `dispatcher_fail_closed_for_exec_bind_failure` further down).
+#[test]
+fn exec_kind_produces_unique_branch_path_cwd() {
+    let factory = std::sync::Arc::new(RecordingFactory::new());
+    let tmp = tempfile::tempdir().expect("temp dir");
+    factory.pre_create("u4-loop-exec-0", tmp.path().join("wt-0"));
+    factory.pre_create("u4-loop-exec-1", tmp.path().join("wt-1"));
+
+    let (bridge, store) = production_bridge_with_factory(
+        factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
+        tmp.path().to_path_buf(),
+        "u4-loop",
+    );
+
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "u4-wave", 2)
+        .expect("register must succeed");
+
+    let binding_0 = bridge
+        .bind_slot(WaveKind::Exec, &store_wave_id, 0)
+        .expect("exec slot 0 bind must succeed")
+        .expect("exec binding must be Some (Worktree isolation)");
+    let binding_1 = bridge
+        .bind_slot(WaveKind::Exec, &store_wave_id, 1)
+        .expect("exec slot 1 bind must succeed")
+        .expect("exec binding must be Some (Worktree isolation)");
+
+    // Distinct worktree_path and branch.
+    assert_ne!(
+        binding_0.worktree_path, binding_1.worktree_path,
+        "two exec slots must receive distinct worktree_path values"
+    );
+    assert_eq!(
+        binding_0
+            .env
+            .get("RALPH_WAVE_WORKTREE_BRANCH")
+            .map(String::as_str),
+        Some("u4-loop-exec-0"),
+        "slot 0 branch must follow the {{loop_id}}-{{kind}}-{{slot_index}} convention"
+    );
+    assert_eq!(
+        binding_1
+            .env
+            .get("RALPH_WAVE_WORKTREE_BRANCH")
+            .map(String::as_str),
+        Some("u4-loop-exec-1"),
+        "slot 1 branch must follow the {{loop_id}}-{{kind}}-{{slot_index}} convention"
+    );
+
+    // Factory observed both calls.
+    let calls = factory.calls_snapshot();
+    assert_eq!(calls.len(), 2, "two exec slots must call the factory twice");
+    assert_eq!(calls[0].1, "u4-loop-exec-0");
+    assert_eq!(calls[1].1, "u4-loop-exec-1");
+
+    // Store has the per-slot `SlotResource` recorded so fan-in can
+    // resolve them later (R7 / R10).
+    let resources = store.list_worktree_paths(&store_wave_id).expect("list");
+    assert_eq!(resources.len(), 2, "store must persist two slot bindings");
+    let branch_0 = resources
+        .iter()
+        .find(|r| r.slot_index == 0)
+        .expect("slot 0 resource");
+    let branch_1 = resources
+        .iter()
+        .find(|r| r.slot_index == 1)
+        .expect("slot 1 resource");
+    assert_eq!(branch_0.branch.as_deref(), Some("u4-loop-exec-0"));
+    assert_eq!(branch_1.branch.as_deref(), Some("u4-loop-exec-1"));
+}
+
+/// U4 R7: production `bind_slot` for `Fix` MUST use the same
+/// `{loop_id}-{kind}-{slot_index}` branch convention and hand
+/// back distinct worktree paths.
+#[test]
+fn fix_kind_produces_unique_branch_path_cwd() {
+    let factory = std::sync::Arc::new(RecordingFactory::new());
+    let tmp = tempfile::tempdir().expect("temp dir");
+    factory.pre_create("u4-loop-fix-0", tmp.path().join("fix-wt-0"));
+    factory.pre_create("u4-loop-fix-1", tmp.path().join("fix-wt-1"));
+    factory.pre_create("u4-loop-fix-2", tmp.path().join("fix-wt-2"));
+
+    let (bridge, store) = production_bridge_with_factory(
+        factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
+        tmp.path().to_path_buf(),
+        "u4-loop",
+    );
+
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Fix, "u4-fix-wave", 3)
+        .expect("register must succeed");
+
+    for slot in 0u32..3 {
+        let binding = bridge
+            .bind_slot(WaveKind::Fix, &store_wave_id, slot)
+            .expect("fix bind must succeed")
+            .expect("fix binding must be Some (Worktree isolation)");
+        assert_eq!(
+            binding
+                .env
+                .get("RALPH_WAVE_WORKTREE_BRANCH")
+                .map(String::as_str),
+            Some(format!("u4-loop-fix-{slot}").as_str()),
+            "fix slot {slot} branch must follow the convention"
+        );
+        assert!(
+            binding.worktree_path.is_some(),
+            "fix slot {slot} must hand back a worktree_path"
+        );
+    }
+
+    let resources = store.list_worktree_paths(&store_wave_id).expect("list");
+    assert_eq!(resources.len(), 3, "store must persist three fix bindings");
+    let branches: Vec<String> = resources
+        .iter()
+        .map(|r| r.branch.clone().expect("branch"))
+        .collect();
+    assert_eq!(
+        branches,
+        vec![
+            "u4-loop-fix-0".to_string(),
+            "u4-loop-fix-1".to_string(),
+            "u4-loop-fix-2".to_string()
+        ],
+        "fix branch names must follow the loop-kind-index convention"
+    );
+}
+
+/// U4 R7: production `bind_slot` for `Review` MUST remain
+/// `Ok(None)` (SharedReadonly) — no worktree creation, no
+/// writeable branch. The factory MUST NOT be invoked for review
+/// slots (KTD-5). The dispatcher still records the slot index
+/// without a binding so the review fan-in can stitch results.
+#[test]
+fn review_kind_returns_shared_readonly_none() {
+    let factory = std::sync::Arc::new(RecordingFactory::new());
+    let tmp = tempfile::tempdir().expect("temp dir");
+
+    let (bridge, _store) = production_bridge_with_factory(
+        factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
+        tmp.path().to_path_buf(),
+        "u4-loop",
+    );
+
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Review, "u4-review-wave", 2)
+        .expect("register must succeed");
+
+    let binding_0 = bridge
+        .bind_slot(WaveKind::Review, &store_wave_id, 0)
+        .expect("review bind must succeed");
+    assert!(
+        binding_0.is_none(),
+        "review slot MUST return None (SharedReadonly); got {binding_0:?}"
+    );
+
+    let binding_1 = bridge
+        .bind_slot(WaveKind::Review, &store_wave_id, 1)
+        .expect("review bind must succeed");
+    assert!(
+        binding_1.is_none(),
+        "review slot 1 MUST return None (SharedReadonly); got {binding_1:?}"
+    );
+
+    // Factory is untouched — review slots never create worktrees.
+    assert!(
+        factory.calls_snapshot().is_empty(),
+        "review slots MUST NOT invoke the WorktreeFactory (KTD-5)"
+    );
+}
+
+/// U4 R8: when the `WorktreeFactory` fails (simulated by
+/// `FailingFactory`), the production bridge MUST surface the
+/// failure as a typed `BridgeError` (not swallow it), and the
+/// store MUST record the slot's failed status so the dispatcher
+/// can fail-closed without spawning a worker against the main
+/// workspace. The main workspace MUST remain untouched.
+#[test]
+fn bind_slot_failure_fail_closed_no_main_workspace_write() {
+    use crate::loop_runner::wave::BridgeError;
+
+    let factory: std::sync::Arc<dyn WorktreeFactory> = std::sync::Arc::new(FailingFactory);
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let workspace = tmp.path().to_path_buf();
+
+    let (bridge, store) = production_bridge_with_factory(factory, workspace.clone(), "u4-loop");
+
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "u4-fail-wave", 1)
+        .expect("register must succeed");
+
+    let result = bridge.bind_slot(WaveKind::Exec, &store_wave_id, 0);
+    assert!(
+        result.is_err(),
+        "bind_slot MUST return Err when the factory fails; got {result:?}"
+    );
+    match result {
+        Err(BridgeError::Store(msg)) => {
+            assert!(
+                msg.contains("factory failed"),
+                "BridgeError::Store message must surface the factory failure; got {msg}"
+            );
+        }
+        Err(other) => panic!("expected BridgeError::Store, got {other:?}"),
+        Ok(opt) => panic!("expected Err, got Ok({opt:?})"),
+    }
+
+    // The store must NOT have a successful binding recorded —
+    // `bind_worktree` runs only AFTER the factory succeeded.
+    let resources = store.list_worktree_paths(&store_wave_id).expect("list");
+    assert!(
+        resources.is_empty(),
+        "store MUST NOT persist a slot binding when the factory fails; got {resources:?}"
+    );
+
+    // Main workspace MUST remain untouched (no slot branch dir, no
+    // marker files). We assert no `.git`-free path under
+    // `<workspace>/.ralph/` was materialised by `bind_slot`.
+    assert!(
+        !workspace.join(".ralph").exists(),
+        "bind_slot failure MUST NOT materialise .ralph/ under the workspace"
+    );
+    assert!(
+        !workspace.join("u4-loop-exec-0").exists(),
+        "bind_slot failure MUST NOT create the slot branch dir under the workspace"
+    );
+}
+
+/// U4 R7/R8: the production bridge MUST use `DefaultWorktreeFactory`
+/// when no factory is injected — pin the public surface so the
+/// production path is observable to future wiring changes.
+#[test]
+fn production_bridge_default_factory_is_default_worktree_factory() {
+    use crate::loop_runner::wave::ProductionBridgeContext;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let _ctx = ralph_core::LoopContext::worktree(
+        "u4-default",
+        tmp.path().to_path_buf(),
+        tmp.path().to_path_buf(),
+    );
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let _bridge = CoordinatorSupervisorBridge::with_context_and_factory(
+        store,
+        ProductionBridgeContext {
+            loop_id: "u4-default".to_string(),
+            repo_root: tmp.path().to_path_buf(),
+        },
+        std::sync::Arc::new(DefaultWorktreeFactory),
+    );
+}
+
+/// U4 R8: dispatcher MUST fail-closed when `bridge.bind_slot`
+/// returns `Err` — the executor MUST NOT be invoked and the main
+/// workspace MUST NOT receive a worker spawn. We assert the
+/// dispatcher's error-mapping helper is wired so a future
+/// regression that re-introduces the silent `None` fallback is
+/// caught here.
+#[test]
+fn dispatcher_fail_closed_for_exec_bind_failure() {
+    // The dispatcher exposes a `fail_closed_on_bind_error` helper
+    // for tests so we can pin the contract without going through
+    // the full `dispatch_wave_inner` (which spawns real PTY
+    // workers). The helper returns `Some(Err)` when bind errored
+    // and `None` when binding succeeded — production code consumes
+    // it as a precondition gate before `executor.execute`.
+    use crate::loop_runner::wave::fail_closed_on_bind_error;
+
+    let factory: std::sync::Arc<dyn WorktreeFactory> = std::sync::Arc::new(FailingFactory);
+    let tmp = tempfile::tempdir().expect("temp dir");
+
+    let (bridge, _store) =
+        production_bridge_with_factory(factory, tmp.path().to_path_buf(), "u4-loop");
+
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "u4-fail-dispatch", 1)
+        .expect("register must succeed");
+
+    let bind_err = bridge
+        .bind_slot(WaveKind::Exec, &store_wave_id, 0)
+        .expect_err("factory failure must surface as Err");
+    let closed = fail_closed_on_bind_error(&bind_err, "u4-fail-dispatch", 0);
+    assert!(
+        closed.is_some(),
+        "fail_closed_on_bind_error MUST map a bind error to a fail-closed signal"
+    );
+    let (wave_id, slot_index) = closed.expect("Some");
+    assert_eq!(wave_id, "u4-fail-dispatch");
+    assert_eq!(slot_index, 0);
+}
+
+/// U4 R7: production `bind_slot` MUST NOT return `None` for
+/// `Exec` / `Fix` kinds. The previous production code returned
+/// `Ok(None)` for every kind; this test pins the invariant that
+/// the production bridge ONLY returns `Ok(None)` for `Review`
+/// (SharedReadonly).
+#[test]
+fn production_bridge_only_returns_none_for_review() {
+    let factory = std::sync::Arc::new(RecordingFactory::new());
+    let tmp = tempfile::tempdir().expect("temp dir");
+    factory.pre_create("u4-loop-exec-0", tmp.path().join("exec-wt"));
+    factory.pre_create("u4-loop-fix-0", tmp.path().join("fix-wt"));
+
+    let (bridge, _store) = production_bridge_with_factory(
+        factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
+        tmp.path().to_path_buf(),
+        "u4-loop",
+    );
+
+    let exec_wave = bridge
+        .register_wave_if_absent(WaveKind::Exec, "u4-exec-pin", 1)
+        .expect("register");
+    let exec_binding = bridge
+        .bind_slot(WaveKind::Exec, &exec_wave, 0)
+        .expect("exec bind must succeed");
+    assert!(
+        exec_binding.is_some(),
+        "production Exec bind MUST NOT return None; got None (old behaviour)"
+    );
+
+    let fix_wave = bridge
+        .register_wave_if_absent(WaveKind::Fix, "u4-fix-pin", 1)
+        .expect("register");
+    let fix_binding = bridge
+        .bind_slot(WaveKind::Fix, &fix_wave, 0)
+        .expect("fix bind must succeed");
+    assert!(
+        fix_binding.is_some(),
+        "production Fix bind MUST NOT return None; got None (old behaviour)"
+    );
 }

@@ -409,9 +409,10 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 )
                 .optional()?;
             if let Some(Some(prev)) = prev_path
-                && Some(&prev) != binding.worktree_path.as_ref() {
-                    cleanup_worktree_path(&prev);
-                }
+                && Some(&prev) != binding.worktree_path.as_ref()
+            {
+                cleanup_worktree_path(&prev);
+            }
             conn.execute(
                 "INSERT INTO slot_resources (wave_id, slot_index, worktree_path, branch)
                  VALUES (?1, ?2, ?3, ?4)
@@ -463,7 +464,12 @@ impl SupervisorStore for RusqliteSupervisorStore {
             tx.execute(
                 "UPDATE wave_slots SET status = 'completed', content_hash = ?3, event_count = ?4
                  WHERE wave_id = ?1 AND slot_index = ?2",
-                rusqlite::params![wave_id, i64::from(slot_index), content_hash, event_count as i64],
+                rusqlite::params![
+                    wave_id,
+                    i64::from(slot_index),
+                    content_hash,
+                    event_count as i64
+                ],
             )?;
             tx.execute(
                 "INSERT INTO worker_results (wave_id, slot_index, content_hash, event_count)
@@ -472,7 +478,12 @@ impl SupervisorStore for RusqliteSupervisorStore {
                    content_hash = excluded.content_hash,
                    event_count = excluded.event_count,
                    updated_at = strftime('%s','now')",
-                rusqlite::params![wave_id, i64::from(slot_index), content_hash, event_count as i64],
+                rusqlite::params![
+                    wave_id,
+                    i64::from(slot_index),
+                    content_hash,
+                    event_count as i64
+                ],
             )?;
             tx.execute(
                 "UPDATE dispatch_records SET outcome = 'completed'

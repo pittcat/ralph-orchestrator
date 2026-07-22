@@ -17,7 +17,8 @@ pub use io::{
 // Re-export the supervisor bridge so the runtime can spawn it when `supervisor.enabled: true`.
 pub use supervisor_bridge::{
     BridgeDispatchOutcome, BridgeError, CoordinatorSupervisorBridge, MockSupervisorBridge,
-    SlotBinding, SupervisorBridge, is_supervisor_path_enabled,
+    ProductionBridgeContext, SlotBinding, SupervisorBridge, fail_closed_on_bind_error,
+    is_supervisor_path_enabled,
 };
 pub use worker::{
     WaveWorkerExecutionMode, WaveWorkerOutcome, run_wave_worker, run_wave_worker_pty,
