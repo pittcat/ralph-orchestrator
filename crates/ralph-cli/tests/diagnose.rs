@@ -7,15 +7,12 @@
 //! the U7 plan is enforced at the binary boundary, not just at the
 //! reporter API.
 
+mod common;
+
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use tempfile::TempDir;
-
-fn ralph_bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_ralph"))
-}
 
 fn write_recovery_entry(dir: &Path) {
     let entry = "{\"schema_version\":1,\"envelope\":{\"schema_version\":1,\"diagnosis_id\":\"d1\",\"iteration\":1,\"source\":\"missing_event_gate\",\"severity\":\"error\",\"reason_code\":\"no_emit\",\"message\":\"builder did not emit work.done\",\"source_hat\":\"builder\",\"target_hat\":\"builder\",\"topic\":\"work.done\",\"retry_key\":\"missing_event_gate:builder:work_done:no_emit:*\",\"retry_attempt\":0,\"safe_target\":true,\"outcome\":\"pending\",\"timestamp\":\"2026-06-05T10:20:30Z\"},\"iteration\":1,\"timestamp\":\"2026-06-05T10:20:30Z\"}\n";
@@ -66,7 +63,7 @@ fn fresh_session(tmp: &TempDir, name: &str) -> std::path::PathBuf {
 #[test]
 fn no_sessions_exits_non_zero() {
     let tmp = TempDir::new().unwrap();
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .arg("--diagnostics-root")
         .arg(tmp.path().join(".ralph/diagnostics"))
@@ -100,7 +97,7 @@ fn default_session_renders_markdown_to_stdout() {
     write_orchestration(&session);
     write_errors(&session);
 
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .current_dir(tmp.path())
         .output()
@@ -129,7 +126,7 @@ fn latest_ignores_logs_and_payload_contract_files() {
     let _old = fresh_session(&tmp, "2026-05-01T00-00-00");
     let _latest = fresh_session(&tmp, "2026-06-05T10-20-30");
 
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .arg("--format")
         .arg("json")
@@ -155,7 +152,7 @@ fn json_format_does_not_emit_markdown_headings() {
     write_recovery_entry(&session);
     write_summary(&session);
 
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .arg("--format")
         .arg("json")
@@ -179,7 +176,7 @@ fn output_flag_writes_file_and_keeps_stdout_short() {
     write_recovery_entry(&session);
     let out = tmp.path().join("report.md");
 
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .arg("--output")
         .arg(&out)
@@ -206,7 +203,7 @@ fn missing_recovery_journal_does_not_fail() {
     write_orchestration(&session);
     write_summary(&session);
 
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .current_dir(tmp.path())
         .output()
@@ -232,7 +229,7 @@ fn malformed_jsonl_is_reported_as_warning_not_failure() {
         "not json\n{\"unrelated\":true}\n",
     )
     .unwrap();
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .current_dir(tmp.path())
         .output()
@@ -252,7 +249,7 @@ fn explicit_session_id_under_root() {
     let session = fresh_session(&tmp, "2026-06-05T10-20-30");
     write_recovery_entry(&session);
 
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .arg("--session")
         .arg("2026-06-05T10-20-30")
@@ -273,7 +270,7 @@ fn invalid_session_exits_3() {
     let tmp = TempDir::new().unwrap();
     let diag = tmp.path().join(".ralph/diagnostics");
     fs::create_dir_all(&diag).unwrap();
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .arg("--session")
         .arg("not-a-timestamp")
@@ -316,7 +313,7 @@ fn u4_diagnose_falls_back_to_workspace_recovery_journal() {
     let cli_emit_entry = "{\"schema_version\":1,\"envelope\":{\"schema_version\":1,\"diagnosis_id\":\"cli-1\",\"iteration\":1,\"source\":\"cli_emit\",\"severity\":\"error\",\"reason_code\":\"policy_denied\",\"message\":\"reject\",\"source_hat\":\"ralph\",\"target_hat\":\"executor\",\"topic\":\"work.done\",\"retry_key\":\"cli_emit:executor:work_done:policy_denied:*\",\"retry_attempt\":0,\"safe_target\":false,\"outcome\":\"failed\",\"timestamp\":\"2026-06-05T10:20:30Z\"},\"iteration\":1,\"timestamp\":\"2026-06-05T10:20:30Z\"}\n";
     fs::write(&workspace_journal, cli_emit_entry.repeat(3)).unwrap();
 
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .arg("--format")
         .arg("json")
@@ -358,7 +355,7 @@ fn u4_diagnose_no_journal_no_findings_no_panic() {
     write_summary(&session);
     write_orchestration(&session);
 
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .arg("--format")
         .arg("json")
@@ -399,7 +396,7 @@ fn u4_diagnose_session_takes_precedence_over_workspace() {
     let cli_emit_entry = "{\"schema_version\":1,\"envelope\":{\"schema_version\":1,\"diagnosis_id\":\"cli-1\",\"iteration\":1,\"source\":\"cli_emit\",\"severity\":\"error\",\"reason_code\":\"policy_denied\",\"message\":\"reject\",\"source_hat\":\"ralph\",\"target_hat\":\"executor\",\"topic\":\"work.done\",\"retry_key\":\"cli_emit:executor:work_done:policy_denied:*\",\"retry_attempt\":0,\"safe_target\":false,\"outcome\":\"failed\",\"timestamp\":\"2026-06-05T10:20:30Z\"},\"iteration\":1,\"timestamp\":\"2026-06-05T10:20:30Z\"}\n";
     fs::write(&workspace_journal, cli_emit_entry).unwrap();
 
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .arg("--format")
         .arg("json")
@@ -448,7 +445,7 @@ fn u8_diagnose_from_ledger_renders_ledger_schema() {
     let record = r#"{"ts":"2026-06-22T01:00:00Z","hat":"executor","topic":"work.done","reason_code":"execution_contract:missing_field","retry_count":1,"terminal_reason":null}"#;
     write_workspace_rejection(tmp.path(), record);
 
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .arg("--from-ledger")
         .arg("--format")
@@ -483,7 +480,7 @@ fn u8_diagnose_from_ledger_with_empty_workspace_returns_no_session() {
     let ralph_dir = tmp.path().join(".ralph");
     fs::create_dir_all(&ralph_dir).unwrap();
     // Empty `.ralph/` directory; no rejection.jsonl, no ledger.jsonl.
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .arg("--from-ledger")
         .arg("--format")
@@ -516,7 +513,7 @@ fn u8_diagnose_default_prefers_ledger_view() {
     let record = r#"{"ts":"2026-06-22T02:00:00Z","hat":"reviewer","topic":"review.passed","reason_code":"policy:missing_field","retry_count":2,"terminal_reason":null}"#;
     write_workspace_rejection(tmp.path(), record);
 
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .arg("--format")
         .arg("json")
@@ -558,7 +555,7 @@ fn u8_diagnose_legacy_flag_uses_session_view() {
     let session = fresh_session(&tmp, "2026-06-05T10-20-30");
     write_recovery_entry(&session);
 
-    let output = ralph_bin()
+    let output = common::ralph_bin()
         .arg("diagnose")
         .arg("--legacy")
         .arg("--format")

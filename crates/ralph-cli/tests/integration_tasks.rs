@@ -1,11 +1,13 @@
 //! Integration tests for `ralph tools task` CLI commands.
 
+mod common;
+
 use ralph_core::{Task, TaskStatus};
 use std::process::Command;
 use tempfile::TempDir;
 
 fn ralph_task(temp_path: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ralph"))
+    common::ralph_bin()
         .arg("tools")
         .arg("task")
         .args(args)
@@ -32,6 +34,43 @@ fn list_tasks(temp_path: &std::path::Path, extra_args: &[&str]) -> Vec<Task> {
     args.extend_from_slice(extra_args);
     let stdout = ralph_task_ok(temp_path, &args);
     serde_json::from_str(&stdout).expect("Failed to parse task list JSON")
+}
+
+/// Regression: outer `ralph run` hat env must not poison human-CLI task helpers.
+///
+/// Simulates inherited `RALPH_CURRENT_HAT` / `EVENTS_FILE` / `LOOP_ID` on the
+/// Command, then scrubs via `common::scrub_agent_runtime_env` before invoke.
+#[test]
+fn test_task_add_succeeds_after_scrubbing_simulated_hat_env() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+
+    // Start from a raw Command so we can attach inherited-style pollution,
+    // then prove scrub clears it before invoke (human-CLI semantics).
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ralph"));
+    cmd.env("RALPH_CURRENT_HAT", "executor");
+    cmd.env("RALPH_CURRENT_LOOP_ID", "loop-pollution");
+    cmd.env("RALPH_EVENTS_FILE", "/tmp/should-not-be-used.jsonl");
+    common::scrub_agent_runtime_env(&mut cmd);
+
+    let output = cmd
+        .args([
+            "tools",
+            "task",
+            "add",
+            "Under pollution",
+            "--root",
+        ])
+        .arg(temp_path)
+        .current_dir(temp_path)
+        .output()
+        .expect("spawn ralph tools task add");
+
+    assert!(
+        output.status.success(),
+        "task add must succeed after scrubbing hat env; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

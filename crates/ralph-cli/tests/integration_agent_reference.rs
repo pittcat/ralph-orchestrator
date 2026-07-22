@@ -8,14 +8,16 @@
 //! These tests use CARGO_BIN_EXE_ralph, which requires building the binary first.
 //! They're in the cli-serial group (see .config/nextest.toml).
 
+mod common;
+
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 use tempfile::TempDir;
 
 /// Run `ralph tools skill` with an explicit --root for isolation.
 fn ralph_skill(temp_path: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ralph"))
+    common::ralph_bin()
         .arg("tools")
         .arg("skill")
         .args(args)
@@ -28,18 +30,14 @@ fn ralph_skill(temp_path: &Path, args: &[&str]) -> Output {
 
 /// Run `ralph tools skill` with custom env vars for agent context simulation.
 fn ralph_skill_with_env(temp_path: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ralph"));
+    let mut cmd = common::ralph_bin();
     cmd.arg("tools")
         .arg("skill")
         .args(args)
         .arg("--root")
         .arg(temp_path)
         .current_dir(temp_path);
-    // Drop any RALPH_* agent env from the outer test runner
-    cmd.env_remove("RALPH_CURRENT_HAT");
-    cmd.env_remove("RALPH_CURRENT_LOOP_ID");
-    cmd.env_remove("RALPH_EVENTS_FILE");
-    cmd.env_remove("RALPH_WAVE_WORKER");
+    // ralph_bin() already scrubbed; re-apply explicit agent overlays.
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -60,7 +58,7 @@ fn _ralph_emit(temp_path: &Path, args: &[&str]) -> Output {
     fs::write(ralph_dir.join("current-events"), ".ralph/events.jsonl")
         .expect("write current-events marker");
 
-    Command::new(env!("CARGO_BIN_EXE_ralph"))
+    common::ralph_bin()
         .arg("emit")
         .args(args)
         .arg("--root")
@@ -159,7 +157,7 @@ fn test_agent_reference_emit_writes_event_file() {
     fs::write(ralph_dir.join("current-events"), ".ralph/events.jsonl")
         .expect("write current-events marker");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let output = common::ralph_bin()
         .arg("emit")
         .arg("build.done")
         .arg(r#"{"ok":true}"#)

@@ -1,10 +1,11 @@
 //! Integration tests for `ralph doctor plan-sync` (U5 / R7).
 
-use std::process::Command;
+mod common;
+
 use tempfile::TempDir;
 
 fn ralph_doctor_plan_sync(temp_path: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ralph"))
+    common::ralph_bin()
         .args(args)
         .current_dir(temp_path)
         .output()

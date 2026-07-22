@@ -14,8 +14,9 @@
 //! loop itself. They run without a paid backend (no ``claude`` /
 //! ``codex`` / ``gemini`` invocation) and without network access.
 
+mod common;
+
 use std::fs;
-use std::process::Command;
 use tempfile::TempDir;
 
 /// Build the canonical ``ralph.pipeline.yml`` the bootstrap helper
@@ -70,7 +71,7 @@ fn sanitised_env() -> Vec<(&'static str, Option<&'static str>)> {
 /// Drive the ralph binary with a sanitised environment so provider
 /// credentials / user-level ralph.yml cannot leak in.
 fn run_ralph(args: &[&str]) -> (String, String, bool) {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ralph"));
+    let mut cmd = common::ralph_bin();
     cmd.args(args);
     for (key, value) in sanitised_env() {
         match value {

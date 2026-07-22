@@ -26,6 +26,14 @@ cd "$REPO_ROOT"
 # Strip HTTP(S)/ALL proxy env vars before invoking cargo.
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy 2>/dev/null || true
 
+# Strip agent-context env inherited from an outer `ralph run` hat.
+# Without this, integration tests that spawn `ralph` treat the suite as
+# an in-loop agent (ACL / emit allowlist / skill visibility) and fail
+# even though the same suite passes in a human shell.
+unset RALPH_CURRENT_HAT RALPH_CURRENT_LOOP_ID RALPH_EVENTS_FILE \
+  RALPH_WAVE_WORKER RALPH_TRIGGERED_HAT RALPH_HATS_SOURCE RALPH_CONFIG \
+  2>/dev/null || true
+
 # 全局总超时:防止意外卡住(例如 IPC deadlock、PTY 未释放)。
 # 25 分钟覆盖 workspace 全量基线:本地 macOS nextest ~3 分钟 + doctest ~2-3 分钟(已跳过空 crate)
 # + rustdoc 全量首跑开销;CI ubuntu-latest 上实测 ~5-7 分钟,本地 macOS 跳过 doctest 后 ~6-8 分钟。

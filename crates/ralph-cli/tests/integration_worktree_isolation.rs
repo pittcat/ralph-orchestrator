@@ -12,6 +12,8 @@
 //!
 //! See docs/plans/2026-06-10-001-fix-ce-executor-worktree-isolation-plan.md
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -102,7 +104,7 @@ fn test_worktree_creates_exactly_one_and_registry_correct() {
     // created BEFORE the orchestration loop runs (see run.rs:741 spawn_worktree_loop),
     // so even if the backend never starts (e.g. preset-lint gate or short max-iterations),
     // the worktree artifacts must exist.
-    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let output = common::ralph_bin()
         .args([
             "run",
             "--worktree",
@@ -187,7 +189,7 @@ fn test_worktree_no_duplicate_across_runs() {
     write_minimal_config(main_repo);
 
     // First run
-    let _ = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let _ = common::ralph_bin()
         .args([
             "run",
             "--worktree",
@@ -213,7 +215,7 @@ fn test_worktree_no_duplicate_across_runs() {
     // Note: each run IS expected to create a new worktree (loop_id is unique
     // per run), but this test guards that a SINGLE run doesn't create
     // duplicates. We check: after each run, the worktree count is bounded.
-    let _ = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let _ = common::ralph_bin()
         .args([
             "run",
             "--worktree",
@@ -248,7 +250,7 @@ fn test_no_worktree_no_worktrees_dir() {
     setup_git_repo(main_repo);
     write_minimal_config(main_repo);
 
-    let _ = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let _ = common::ralph_bin()
         .args(["run", "--no-tui", "--skip-preflight", "--prompt", "test"])
         .current_dir(main_repo)
         .output()
@@ -278,7 +280,7 @@ fn test_worktree_path_nonexistent_dir_fails_cleanly() {
 
     let bogus_path = main_repo.join(".worktrees/does-not-exist");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let output = common::ralph_bin()
         .args([
             "run",
             "--worktree-path",
@@ -323,7 +325,7 @@ fn test_worktree_and_worktree_path_priority() {
     write_minimal_config(main_repo);
 
     // First create a real worktree
-    let _ = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let _ = common::ralph_bin()
         .args([
             "run",
             "--worktree",
@@ -351,7 +353,7 @@ fn test_worktree_and_worktree_path_priority() {
         .map(|e| e.path());
 
     if let Some(wt) = worktree_path {
-        let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        let output = common::ralph_bin()
             .args([
                 "run",
                 "--worktree",
@@ -407,7 +409,7 @@ fn test_stderr_log_in_worktree_not_main_repo() {
     // at all (it's only created in subprocess TUI mode). So this test
     // primarily guards against main repo pollution.
 
-    let _ = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let _ = common::ralph_bin()
         .args([
             "run",
             "--worktree",
@@ -535,7 +537,7 @@ fn test_reuse_worktree_reuses_existing_dir_and_clears_artifacts() {
 
     // Run with --reuse-worktree. The plan file's stem
     // (`fix-header-swift-peacock`) drives the loop-name prefix.
-    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let output = common::ralph_bin()
         .args([
             "run",
             "--worktree",
@@ -590,7 +592,7 @@ fn test_reuse_worktree_falls_back_to_create_on_clean_repo() {
     fs::write(&plan_path, "# plan body\n").unwrap();
 
     // No prior worktree, no registry entry — nothing to reuse.
-    let _ = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let _ = common::ralph_bin()
         .args([
             "run",
             "--worktree",
@@ -647,7 +649,7 @@ fn test_reuse_worktree_skips_live_entry_and_creates_new() {
     let plan_path = main_repo.join("fix-header-bright-falcon.md");
     fs::write(&plan_path, "# plan body\n").unwrap();
 
-    let _ = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let _ = common::ralph_bin()
         .args([
             "run",
             "--worktree",
@@ -686,7 +688,7 @@ fn test_reuse_worktree_with_no_auto_merge_accepted() {
     setup_git_repo(main_repo);
     write_minimal_config(main_repo);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let output = common::ralph_bin()
         .args([
             "run",
             "--worktree",
@@ -743,7 +745,7 @@ fn test_worktree_context_md_does_not_expose_main_repo() {
     setup_git_repo(main_repo);
     write_minimal_config(main_repo);
 
-    let _ = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let _ = common::ralph_bin()
         .args([
             "run",
             "--worktree",

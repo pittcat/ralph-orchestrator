@@ -1,12 +1,13 @@
 //! Integration tests for `ralph tools skill` CLI commands.
 
-use std::process::Command;
+mod common;
+
 use std::process::Output;
 use std::{fs, path::Path};
 use tempfile::TempDir;
 
 fn ralph_skill(temp_path: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ralph"))
+    common::ralph_bin()
         .arg("tools")
         .arg("skill")
         .args(args)
@@ -18,7 +19,7 @@ fn ralph_skill(temp_path: &std::path::Path, args: &[&str]) -> std::process::Outp
 }
 
 fn ralph_skill_no_root(current_path: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ralph"))
+    common::ralph_bin()
         .arg("tools")
         .arg("skill")
         .args(args)
@@ -248,19 +249,14 @@ Loaded from configured parent skills dir.
 /// context simulation. Always uses an explicit `--root` so the fixture
 /// workspace is read.
 fn ralph_skill_with_env(temp_path: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ralph"));
+    let mut cmd = common::ralph_bin();
     cmd.arg("tools")
         .arg("skill")
         .args(args)
         .arg("--root")
         .arg(temp_path)
         .current_dir(temp_path);
-    // Drop any RALPH_* agent env from the outer test runner first so
-    // the explicit `env` slice is authoritative.
-    cmd.env_remove("RALPH_CURRENT_HAT");
-    cmd.env_remove("RALPH_CURRENT_LOOP_ID");
-    cmd.env_remove("RALPH_EVENTS_FILE");
-    cmd.env_remove("RALPH_WAVE_WORKER");
+    // ralph_bin() already scrubbed; re-apply explicit agent overlays.
     for (k, v) in env {
         cmd.env(k, v);
     }

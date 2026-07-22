@@ -16,7 +16,8 @@
 //! needs to pass strict validation; per-hat/per-topic ownership is
 //! covered by the preset_lint suite and the SSOT merge tests.
 
-use std::process::Command;
+mod common;
+
 use tempfile::TempDir;
 
 #[test]
@@ -25,7 +26,7 @@ fn test_emit_isolated_mode_rejects_conflicting_hat_override() {
     let temp_path = temp_dir.path();
     std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let output = common::ralph_bin()
         .args([
             "-H",
             "builtin:ce-executor-pipeline",
@@ -80,7 +81,7 @@ fn test_emit_with_malformed_hats_source_fails_closed() {
     // Create a workspace ralph.yml so fail-closed engages.
     std::fs::write(temp_path.join("ralph.yml"), "agent: claude\n").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let output = common::ralph_bin()
         .args(["emit", "work.ready", "--json", "{}", "--hat", "coordinator"])
         .current_dir(temp_path)
         .env("RALPH_HATS_SOURCE", "builtin:not-a-real-preset")
@@ -112,7 +113,7 @@ fn test_emit_rejection_hint_excludes_unauthorised_topics() {
     let temp_path = temp_dir.path();
     std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+    let output = common::ralph_bin()
         .args([
             "emit",
             "work.ready",

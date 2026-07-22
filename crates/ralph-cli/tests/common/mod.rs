@@ -1,0 +1,38 @@
+//! Shared helpers for ralph-cli integration tests.
+//!
+//! When a hat runs `cargo nextest` / `./scripts/run-tests.sh` under
+//! `ralph run`, the process inherits agent-context env vars from
+//! `inject_hat_execution_env`. Tests that spawn the `ralph` binary and
+//! assume human-CLI semantics must scrub those keys first; otherwise
+//! ACL / emit allowlist / skill visibility checks treat the fixture as
+//! an in-loop agent and fail.
+
+use std::process::Command;
+
+/// Keys that mark agent-owned CLI context (plus hat-execution overlays).
+pub const AGENT_CONTEXT_ENV_KEYS: &[&str] = &[
+    "RALPH_CURRENT_HAT",
+    "RALPH_CURRENT_LOOP_ID",
+    "RALPH_EVENTS_FILE",
+    "RALPH_WAVE_WORKER",
+    "RALPH_TRIGGERED_HAT",
+    "RALPH_HATS_SOURCE",
+    "RALPH_CONFIG",
+];
+
+/// Drop agent-context env so the spawned `ralph` sees a human CLI.
+///
+/// Call this before any intentional `.env(...)` overlays that simulate
+/// a specific agent scenario.
+pub fn scrub_agent_runtime_env(cmd: &mut Command) {
+    for key in AGENT_CONTEXT_ENV_KEYS {
+        cmd.env_remove(*key);
+    }
+}
+
+/// `ralph` binary command with agent-context env scrubbed.
+pub fn ralph_bin() -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ralph"));
+    scrub_agent_runtime_env(&mut cmd);
+    cmd
+}
