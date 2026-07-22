@@ -804,11 +804,16 @@ _EMBEDDED_PROVENANCE_KEYS: tuple[str, ...] = (
 
 def _config_without_embedded_provenance(config_text: str) -> str:
     prefixes = tuple(f"  {key}:" for key in _EMBEDDED_PROVENANCE_KEYS)
-    return "".join(
+    split = _split_owned_block(config_text)
+    if split is None:
+        return config_text
+    pre, owned, post = split
+    clean_owned = "".join(
         line
-        for line in config_text.splitlines(keepends=True)
+        for line in owned.splitlines(keepends=True)
         if not line.startswith(prefixes)
     )
+    return pre + clean_owned + post
 
 
 def reconcile_preset_bound_suite(
@@ -827,9 +832,13 @@ def reconcile_preset_bound_suite(
         )
     try:
         import yaml  # type: ignore[import-not-found]
-
+    except ImportError as exc:  # pragma: no cover - environment contract
+        return PresetBoundApplyResult(
+            kind="blocker", code="provenance_corrupt", reason=str(exc)
+        )
+    try:
         loaded = yaml.safe_load(existing_config)
-    except Exception as exc:
+    except yaml.YAMLError as exc:
         return PresetBoundApplyResult(
             kind="blocker", code="provenance_corrupt", reason=str(exc)
         )
@@ -879,6 +888,12 @@ def verify_preset_bound_files(
     reconciled = reconcile_preset_bound_suite(config_text, prompt_text, suite)
     if reconciled.is_blocker:
         return reconciled
+    if reconciled.kind != "noop":
+        return PresetBoundApplyResult(
+            kind="blocker",
+            code="preset_suite_stale",
+            reason="written suite does not match the requested preset inputs",
+        )
     try:
         import yaml  # type: ignore[import-not-found]
 
