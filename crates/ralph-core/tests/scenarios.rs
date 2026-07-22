@@ -1398,6 +1398,38 @@ fn test_review_passed_while_wave_open() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-22-004 plan U4 (S2 + S5): an enabled `payload_consistency`
+/// rule that hits the current `fix.done` payload must reject the event
+/// through the REAL EventLoop runner. The rejected `fix.done` never
+/// reaches the bus (`absent_events`), the downstream finisher never
+/// wakes, and `on_violation: reject_with_resume` routes a recoverable
+/// CorrectionContext into `state.prompt_context.correction_blocks`
+/// (`assert_state.correction_block_present`) — the loop does NOT honor
+/// the rejected event as a success (`completion: false`).
+///
+/// MUST use `run_workflow_guard_scenario` (real EventLoop), never the
+/// `run_scenario` stub (plan §U4): the stub only checks iteration count
+/// and would silently swallow a topology/gate mismatch.
+#[test]
+fn test_payload_consistency_reject_inconsistent_fix_done() {
+    let yaml =
+        load_scenario("tests/scenarios/payload_consistency/reject_inconsistent_fix_done.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-22-004 plan U4 (non-vacuity control + S5 clarity): the SAME
+/// topology and rule as the reject scenario, but with a consistent
+/// payload that misses the rule. The `fix.done` is accepted and the
+/// loop completes normally. Proves the rejection in the sibling
+/// scenario is caused by the `payload_consistency` gate (not the
+/// harness): flipping the payload from hit→miss flips reject→accept.
+#[test]
+fn test_payload_consistency_accept_consistent_fix_done() {
+    let yaml =
+        load_scenario("tests/scenarios/payload_consistency/accept_consistent_fix_done.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 #[test]
 fn test_incomplete_wave_plan_blocked() {
     let yaml = load_scenario("tests/scenarios/flow_reliability/incomplete_wave_plan_blocked.yml");
@@ -3279,6 +3311,9 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         // 三个 pipeline-named 测试条目,见 d294be76 的 commit message)
         "tests/scenarios/correction_",
         "tests/scenarios/diagnose_from_ledger",
+        // payload_consistency 门的通用行为(fixture-neutral,抽象 topic/rule,
+        // 不绑定任何 builtin preset;plan 2026-07-22-004 U4)
+        "tests/scenarios/payload_consistency/",
     ];
     const SUPERVISOR_PATH_PREFIXES: &[&str] =
         &["tests/scenarios/opac/", "tests/scenarios/supervisor/"];

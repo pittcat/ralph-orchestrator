@@ -1,0 +1,91 @@
+# payload_consistency / accept_consistent_fix_done
+#
+# Sibling contrast to `reject_inconsistent_fix_done.yml`. Same
+# abstract topology and the SAME `payload_consistency` rule — only
+# the payload differs.
+#
+#   fixer  --(fix.done)-->  finisher --(LOOP_COMPLETE)-->
+#
+# Here the fixer emits a CONSISTENT `fix.done`
+# (review_verdict=passed, fixes_applied=2, fix_status=applied)
+# that does NOT satisfy the rule's `when`. The gate must MISS, so
+# the event is accepted, the finisher wakes, and the loop reaches
+# its natural terminal success.
+#
+# Purpose:
+#   * Non-vacuity control for the reject scenario — it proves the
+#     rejection there is caused by the `payload_consistency` gate
+#     (a miss payload flows through the identical harness), not by
+#     some other layer.
+#   * Recovery is achievable: once the payload is made consistent, the
+#     same topology completes normally.
+
+name: payload_consistency_accept_consistent_fix_done
+description: a consistent fix.done misses the payload_consistency rule and the loop completes normally (non-vacuity control)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 2
+  hats:
+    fixer:
+      subscribes_to:
+        - task.start
+        - task.resume
+      publishes:
+        - fix.done
+      default_publishes: fix.done
+    finisher:
+      subscribes_to:
+        - fix.done
+      publishes:
+        - LOOP_COMPLETE
+      default_publishes: LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      payload_consistency:
+        enabled: true
+        rules:
+          - id: fix-done-no-fixes
+            topic: fix.done
+            when:
+              all:
+                - field: review_verdict
+                  eq: blocked
+                - field: fixes_applied
+                  eq: 0
+                - field: fix_status
+                  eq: applied
+            message: "fix_status=applied is inconsistent with review_verdict=blocked and zero fixes"
+
+mock_responses:
+  # iter 1: fixer emits a consistent fix.done → the rule misses →
+  # accepted → finisher wakes.
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"passed","fixes_applied":2,"fix_status":"applied"}
+      </event>
+  # iter 2: finisher honors the completion promise.
+  - hat: finisher
+    text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"fix verified consistent"}
+      </event>
+
+expected:
+  iterations: 2
+  # The consistent fix.done is accepted (the rule misses). The
+  # completion promise is honored via `check_completion_event`
+  # (`completion: true`); like `precheck-gate-pass.yml`, the
+  # terminal LOOP_COMPLETE itself is not asserted in `seen_topics`.
+  events:
+    - topic: fix.done
+  absent_events:
+    - topic: plan.blocked
+  completion: true
