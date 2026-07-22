@@ -169,6 +169,35 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `post_fix_review_reopens_unbounded_fix` | P0 | explicit post-fix phase with accept-or-block branch | topology | Q4 |
 | `prompt_wall_serial_style` | P1 | reference skill doc, do not inline | style | Q3 |
 
+### Wave capability audit (2026-07-22-002 plan U4)
+
+> **触发条件**：`execution_model ∈ {wave, supervisor+wave}`；或 YAML / hat `instructions` 含 `ralph wave emit` / `ralph wave verify`；或 hat 依赖 `## WAVE CONTEXT`。**capability-triggered**，**禁止**按 preset 名称点名门控。
+> **未触发**：review 把本段记为 N/A（按 plan U5 SKILL §3d 规则），不假装已审。
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| 非 dispatcher hat `instructions` 要求 / 暗示调用 `ralph wave emit` 或 `ralph wave verify` | P0 | feasibility | Q3 | `preset.wave_worker_calls_wave_emit` |
+| dispatcher 在 `ralph wave emit --payloads-stdin` 之前未先跑 `ralph wave verify --payloads-stdin` 预检 | P0 | opac | Q3 / Q4 | `preset.wave_missing_verify_before_emit` |
+| worker 完成态由 hat-channel 验证（应走 `ralph events --events-source main`） | P0 | visibility | Q2 | `preset.wave_confirm_uses_hat_channel` |
+| 任何 hat `publishes` 含 `wave.*` / `exec.wave.*` 等协调 topic | P0 | topology | Q4 | `preset.wave_agent_emits_coordination_topic` |
+
+review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 起点 60 入主表（与 `ralph-tools-wave` §「Policy-Check 反馈」联动）。若 `ralph wave verify` policy-check JSON 缺 `payload_index` 导致 wave batch 无法定位失败 item，按「Policy-Check Feedback → Severity」段 `payload_index` 缺失行入栏。
+
+### Supervisor capability audit (2026-07-22-002 plan U4)
+
+> **触发条件**：`event_loop.supervisor.enabled: true`；或 `execution_model ∈ {supervisor, supervisor+wave}`；或 hat `instructions` 含 supervisor 协调 topic / 引用 `supervisor.db`。**capability-triggered**，**禁止**按 preset 名称点名门控。
+> **未触发**：review 把本段记为 N/A。
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| preset 启用了 `event_loop.supervisor.enabled` 但 `event_loop.execution_mode` 不是 `isolated` | P0 | feasibility | Q3 | `preset.supervisor_requires_isolated` |
+| hat `publishes` 含 supervisor 协调 topic（`exec.wave.*` / `slot.*` 等） | P0 | topology | Q4 | `preset.supervisor_hat_publishes_coord_topic` |
+| supervisor sub-unit 状态未走 `ralph tools task list` 或业务 artifact，而是依赖读 `.ralph/supervisor.db` | P0 | visibility | Q2 / Q5 | `preset.supervisor_unit_state_not_via_task_api` |
+| hat `instructions` 要求把 `.ralph/supervisor.db` 当业务 artifact 接口（写或读） | P0 | visibility | Q2 | `preset.artifact_uses_internal_ledger` |
+| `execution_model` Intent 字段与 YAML 能力信号不一致（如 Intent= `single-chain` 但 `event_loop.supervisor.enabled: true`） | P0 | payload-content | Q4 | `preset.execution_model_intent_mismatch` |
+
+命中按上表入主表；`preset.execution_model_intent_mismatch` 是 U4 新增 review-only 软性 finding，与既有 lint id `preset.supervisor_requires_isolated` / `preset.supervisor_hat_publishes_coord_topic` / `preset.artifact_uses_internal_ledger` 复用底层问题，但触发条件是 **capability + Intent 一致性**而非 preset 名。`presets/en/ce-executor-supervisor.yml` 等既有 builtin 仍受既有 lint 约束，不在本表新触发条件内。
+
 ### CE pipeline review/fix artifacts（review-only 软性缺口）
 
 Reviewer 在做 CE builtin preset review 时按本表入主表（不进 `ralph preset check` JSON，机制同 Artifact-First finding）。
