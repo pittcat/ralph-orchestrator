@@ -2097,6 +2097,133 @@ fn payload_type_label(p: &PayloadType) -> String {
     }
 }
 
+/// U4 (2026-07-22-004 plan A2): `ralph emit --policy-check` must
+/// surface `PolicyDecision::Warn(findings)` whose `gate` is
+/// prefixed `payload_consistency:` as a `ValidationError`, so the
+/// CLI rejects the payload even when `event_policy.mode` is
+/// `observe`. Without this escalation, preset authors who lower
+/// `event_policy.payload_consistency.mode` to `observe` would
+/// bypass the gate at CLI precheck time even though the runtime
+/// still rejects it on the JSONL write path. TDD RED -> GREEN.
+#[cfg(test)]
+mod u4_payload_consistency_warn_tests {
+    use super::*;
+    use ralph_core::PolicyFinding;
+
+    fn payload_consistency_finding(rule_id: &str) -> PolicyFinding {
+        PolicyFinding {
+            topic: "fix.done".to_string(),
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: format!("payload_consistency:{rule_id}"),
+                context: "test context".to_string(),
+            },
+            message: format!("payload_consistency rule '{rule_id}' violated"),
+        }
+    }
+
+    fn other_namespace_warn_finding() -> PolicyFinding {
+        PolicyFinding {
+            topic: "work.done".to_string(),
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: "other_namespace:rule-1".to_string(),
+                context: "test context".to_string(),
+            },
+            message: "other namespace warning".to_string(),
+        }
+    }
+
+    fn non_semantic_gate_warn_finding() -> PolicyFinding {
+        PolicyFinding {
+            topic: "work.done".to_string(),
+            violation_type: ViolationType::MissingRequiredField {
+                field: "task_id".to_string(),
+            },
+            message: "missing required field".to_string(),
+        }
+    }
+
+    #[test]
+    fn u4_payload_consistency_warn_is_escalated_to_error() {
+        // Happy path: a Warn carrying a `payload_consistency:`
+        // gate must surface as `Some(ValidationError)`.
+        let decision = PolicyDecision::Warn(vec![payload_consistency_finding(
+            "fix-done-blocked-zero-fixes-applied",
+        )]);
+        let result = finding_to_validation_error(&decision, "fix.done");
+        assert!(
+            result.is_some(),
+            "payload_consistency Warn must surface as ValidationError, got None"
+        );
+        let err = result.unwrap();
+        assert_eq!(err.reason_code, "semantic_gate_violation");
+        assert!(err.message.contains("payload_consistency"));
+        assert!(err.message.contains("fix-done-blocked-zero-fixes-applied"));
+    }
+
+    #[test]
+    fn u4_other_namespace_warn_remains_dropped() {
+        // Edge: a Warn whose gate does NOT carry the
+        // `payload_consistency:` prefix keeps the legacy drop
+        // behaviour (returns `None`).
+        let decision = PolicyDecision::Warn(vec![other_namespace_warn_finding()]);
+        let result = finding_to_validation_error(&decision, "work.done");
+        assert!(
+            result.is_none(),
+            "non-payload_consistency Warn must keep drop behaviour, got Some"
+        );
+    }
+
+    #[test]
+    fn u4_non_semantic_gate_warn_remains_dropped() {
+        // Edge: a Warn with a non-SemanticGateViolation variant
+        // (e.g. `MissingRequiredField`) is dropped -- the U4
+        // escalation only targets `SemanticGateViolation` with
+        // the `payload_consistency:` gate prefix.
+        let decision = PolicyDecision::Warn(vec![non_semantic_gate_warn_finding()]);
+        let result = finding_to_validation_error(&decision, "work.done");
+        assert!(
+            result.is_none(),
+            "non-SemanticGateViolation Warn must keep drop behaviour, got Some"
+        );
+    }
+
+    #[test]
+    fn u4_payload_consistency_warn_with_mixed_findings_picks_consistency() {
+        // Edge: a Warn carrying multiple findings where only one
+        // has the `payload_consistency:` prefix. The function must
+        // surface the consistency one as the error.
+        let decision = PolicyDecision::Warn(vec![
+            other_namespace_warn_finding(),
+            payload_consistency_finding("rule-x"),
+        ]);
+        let result = finding_to_validation_error(&decision, "fix.done");
+        assert!(
+            result.is_some(),
+            "mixed Warn with payload_consistency finding must surface, got None"
+        );
+        assert!(result.unwrap().message.contains("rule-x"));
+    }
+
+    #[test]
+    fn u4_accept_decision_still_returns_none() {
+        // Regression: `PolicyDecision::Accept` keeps returning
+        // `None`.
+        let result = finding_to_validation_error(&PolicyDecision::Accept, "fix.done");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn u4_reject_with_resume_still_returns_error() {
+        // Regression: `PolicyDecision::RejectWithResume` keeps
+        // returning `Some(ValidationError)`.
+        let finding = payload_consistency_finding("rule-y");
+        let decision = PolicyDecision::RejectWithResume(finding);
+        let result = finding_to_validation_error(&decision, "fix.done");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().reason_code, "semantic_gate_violation");
+    }
+}
+
 /// 2026-07-09-001 plan (U3): best-effort extractor for the
 /// offending value embedded in a legacy `message` string.
 /// The legacy `invalid_field_value` message format is
@@ -2229,15 +2356,27 @@ fn finding_to_validation_error(decision: &PolicyDecision, _topic: &str) -> Optio
     let finding = match decision {
         PolicyDecision::Accept => return None,
         PolicyDecision::Warn(findings) => {
-            // Warn is non-fatal at the loop level too, so we still
-            // accept the payload. Surfacing warns as errors here
-            // would change CLI behavior compared to the loop
-            // (loop writes the event + logs the warning). We follow
-            // the loop's behavior: skip the warning. The findings
-            // are logged via the loop's normal warning path; CLI
-            // callers can inspect the events file for the warning
-            // field if they need to surface it.
-            let _ = findings; // intentionally not propagated as errors
+            // U4 (2026-07-22-004 plan A2): the `payload_consistency:`
+            // gate is a same-payload consistency check, not a
+            // policy-mode choice. It must surface as a CLI
+            // precheck error even when `event_policy.mode` is
+            // `observe`, so preset authors cannot accidentally
+            // disable the gate by lowering the mode. Other Warn
+            // findings remain non-fatal at the loop level too,
+            // so we still accept those payloads (the loop writes
+            // the event + logs the warning). The findings are
+            // logged via the loop's normal warning path; CLI
+            // callers can inspect the events file for the
+            // warning field if they need to surface them.
+            if let Some(f) = findings.iter().find(|f| {
+                matches!(
+                    &f.violation_type,
+                    ViolationType::SemanticGateViolation { gate, .. }
+                        if gate.starts_with("payload_consistency:")
+                )
+            }) {
+                return Some(finding_record(f));
+            }
             return None;
         }
         // U2 (plan 2026-07-04-004): AcknowledgeAndForward is the
