@@ -172,6 +172,8 @@ Advanced presets can add `tasks.command_rules` to extend or restrict the default
 
 ## Relationship to other guides
 
+OPAC 是状态变更的操作纪律框架；`event_policy.payload_consistency` 是可选的同 payload 验收硬闸，`execution_contracts` 则负责 PostCommit 证据义务，三者互补而不互相替代。
+
 - [Payload Contracts](payload-contracts.md) — schema enforcement between hats.
 - [Execution Contracts](execution-contracts.md) — `work.done` completion gate.
 - [Precheck Gates](precheck-gates.md) — optional LLM-as-judge gate before key topics.
