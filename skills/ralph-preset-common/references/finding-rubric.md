@@ -126,6 +126,9 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.trigger_context_value_shape` | P0 | 90 | Q4 | lint |
 | `preset.trigger_context_duplicate_label` | P0 | 90 | Q4 | lint |
 | `preset.trigger_context_no_consumer` | P0 | 90 | Q4 | topology |
+| `preset.payload_consistency_duplicate_id` | P0 | 90 | Q4 | lint |
+| `preset.payload_consistency_unknown_topic` | P0 | 90 | Q4 | lint |
+| `preset.payload_consistency_unknown_field` | P0 | 90 | Q4 | lint |
 
 ### Artifact-First Handoff finding_id（review-only，lint 不直接产出）
 
