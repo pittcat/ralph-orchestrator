@@ -6987,6 +6987,7 @@ hats:
             require_emit_provenance: false,
             completion_after_terminal: Default::default(),
             topic_deny_rules: vec![],
+            payload_consistency: Default::default(),
             plan_name_equality_required: false,
         }
     }

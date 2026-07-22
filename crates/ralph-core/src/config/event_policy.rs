@@ -20,6 +20,30 @@ pub struct TopicDenyRule {
     pub topic: String,
 }
 
+/// Opt-in payload consistency checks; default-off preserves existing event behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct PayloadConsistencyConfig {
+    /// Whether payload consistency checks are enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Consistency rules evaluated for matching topics.
+    #[serde(default)]
+    pub rules: Vec<PayloadConsistencyRule>,
+}
+
+/// A payload consistency rule declared by a preset.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PayloadConsistencyRule {
+    /// Stable rule identifier.
+    pub id: String,
+    /// Event topic to which the rule applies.
+    pub topic: String,
+    /// Permissive predicate placeholder; a later unit tightens this shape.
+    pub when: serde_json::Value,
+    /// Human-readable validation failure message.
+    pub message: String,
+}
+
 /// Opt-in event policy for typed payload validation and lifecycle enforcement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventPolicyConfig {
@@ -54,6 +78,9 @@ pub struct EventPolicyConfig {
     /// rejected with reason "topic_denied".  Exact match only (no glob).
     #[serde(default)]
     pub topic_deny_rules: Vec<TopicDenyRule>,
+    /// Opt-in payload consistency checks. Missing configuration remains disabled.
+    #[serde(default)]
+    pub payload_consistency: PayloadConsistencyConfig,
     /// When true, `work.done` events are validated to have their `plan_name`
     /// payload field equal to the `current_plan_name` extracted from the most
     /// recent `work.ready` event.  Default false (backward compatible).
@@ -76,6 +103,7 @@ impl Default for EventPolicyConfig {
             require_emit_provenance: false,
             completion_after_terminal: CompletionAfterTerminalConfig::default(),
             topic_deny_rules: Vec::new(),
+            payload_consistency: PayloadConsistencyConfig::default(),
             plan_name_equality_required: false,
         }
     }
@@ -129,4 +157,148 @@ pub struct CompletionAfterTerminalConfig {
     /// Whether to write diagnostic events for blocked/ignored events.
     #[serde(default)]
     pub write_diagnostic_event: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_consistency_defaults_to_disabled() {
+        let config = EventPolicyConfig::default();
+
+        assert!(!config.payload_consistency.enabled);
+        assert!(config.payload_consistency.rules.is_empty());
+    }
+
+    #[test]
+    fn parses_payload_consistency_block() {
+        let config: EventPolicyConfig = serde_yaml::from_str(
+            r#"
+enabled: true
+mode: enforce
+payload_consistency:
+  enabled: true
+  rules:
+    - id: r1
+      topic: fix.done
+      when:
+        all:
+          - field: x
+            eq: y
+      message: payload fields must agree
+"#,
+        )
+        .expect("payload_consistency block should parse");
+
+        assert!(config.payload_consistency.enabled);
+        assert_eq!(config.payload_consistency.rules.len(), 1);
+        let rule = &config.payload_consistency.rules[0];
+        assert_eq!(rule.id, "r1");
+        assert_eq!(rule.topic, "fix.done");
+        assert_eq!(rule.message, "payload fields must agree");
+    }
+
+    #[test]
+    fn missing_payload_consistency_block_defaults_to_disabled() {
+        let config: EventPolicyConfig = serde_yaml::from_str(
+            r#"
+enabled: true
+mode: observe
+"#,
+        )
+        .expect("legacy event policy should parse");
+
+        assert!(!config.payload_consistency.enabled);
+        assert!(config.payload_consistency.rules.is_empty());
+    }
+
+    #[test]
+    fn parses_rule_when_as_json_value() {
+        let config: EventPolicyConfig = serde_yaml::from_str(
+            r#"
+enabled: true
+mode: enforce
+payload_consistency:
+  enabled: true
+  rules:
+    - id: r1
+      topic: fix.done
+      when:
+        all:
+          - field: x
+            eq: y
+      message: payload fields must agree
+"#,
+        )
+        .expect("minimal payload consistency rule should parse");
+
+        assert_eq!(
+            config.payload_consistency.rules[0].when,
+            serde_json::json!({"all": [{"field": "x", "eq": "y"}]})
+        );
+    }
+
+    #[test]
+    fn existing_event_policy_yaml_parses_with_unchanged_fields() {
+        let config: EventPolicyConfig = serde_yaml::from_str(
+            r#"
+enabled: true
+mode: enforce
+on_violation: reject_with_resume
+terminal_topics:
+  - plan.complete
+  - LOOP_COMPLETE
+business_topics:
+  - work.done
+require_policy_check_for_cli_emit: true
+allow_unsafe_cli_emit: false
+require_emit_provenance: true
+"#,
+        )
+        .expect("existing event policy YAML should remain valid");
+
+        assert!(config.enabled);
+        assert_eq!(config.mode, EventPolicyMode::Enforce);
+        assert_eq!(config.on_violation, ViolationAction::RejectWithResume);
+        assert_eq!(config.terminal_topics, ["plan.complete", "LOOP_COMPLETE"]);
+        assert_eq!(config.business_topics, ["work.done"]);
+        assert!(config.require_policy_check_for_cli_emit);
+        assert!(!config.allow_unsafe_cli_emit);
+        assert!(config.require_emit_provenance);
+        assert!(!config.payload_consistency.enabled);
+    }
+
+    #[test]
+    fn rejects_non_boolean_payload_consistency_enabled() {
+        let result = serde_yaml::from_str::<EventPolicyConfig>(
+            r#"
+enabled: true
+mode: enforce
+payload_consistency:
+  enabled: "yes"
+  rules: []
+"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_payload_consistency_rule_missing_required_field() {
+        let result = serde_yaml::from_str::<EventPolicyConfig>(
+            r#"
+enabled: true
+mode: enforce
+payload_consistency:
+  enabled: true
+  rules:
+    - id: r1
+      topic: fix.done
+      when: {}
+"#,
+        );
+
+        assert!(result.is_err());
+    }
 }
