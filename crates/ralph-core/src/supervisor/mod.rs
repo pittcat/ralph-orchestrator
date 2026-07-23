@@ -462,7 +462,7 @@ mod memory_protocol_tests;
 mod merge_sink;
 #[cfg(feature = "supervisor-db")]
 mod migrations;
-mod phase;
+pub mod phase;
 mod recover;
 #[cfg(feature = "supervisor-db")]
 mod rusqlite;
