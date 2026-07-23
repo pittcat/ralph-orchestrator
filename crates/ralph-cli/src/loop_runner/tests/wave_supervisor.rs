@@ -872,6 +872,7 @@ fn production_bridge_with_factory(
         loop_id: loop_id.to_string(),
         repo_root: loop_ctx.repo_root().to_path_buf(),
         events_path: None,
+        tasks_path: None,
     };
     let store = std::sync::Arc::new(InMemorySupervisorStore::new());
     let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
@@ -1135,6 +1136,7 @@ fn production_bridge_default_factory_is_default_worktree_factory() {
             loop_id: "u4-default".to_string(),
             repo_root: tmp.path().to_path_buf(),
             events_path: None,
+            tasks_path: None,
         },
         std::sync::Arc::new(DefaultWorktreeFactory),
     );
@@ -1510,6 +1512,7 @@ fn test_bind_slot_factory_failure_returns_err() {
         loop_id: "u1-fail".to_string(),
         repo_root: tmp.path().to_path_buf(),
         events_path: None,
+        tasks_path: None,
     };
     let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
         store.clone() as std::sync::Arc<dyn SupervisorStore>,
@@ -2889,6 +2892,7 @@ async fn run_u2_execute_wave_with_env_capture(
     wave: ralph_core::DetectedWave,
     executor: U5RecordingExecutor,
     main_events_file: &std::path::Path,
+    loop_id: &str,
 ) -> WaveDispatchOutcome {
     use crate::loop_runner::wave::execute_wave_via_supervisor_with_executor;
 
@@ -2904,7 +2908,7 @@ async fn run_u2_execute_wave_with_env_capture(
         false,
         None,
         None,
-        "u2-loop",
+        loop_id,
         WaveDispatchLimits::default(),
         None,
         None,
@@ -2969,6 +2973,7 @@ async fn test_u2_workspace_root_and_channel_injected_into_worker_env() {
         loop_id: "u2-loop".to_string(),
         repo_root: workspace_root.clone(),
         events_path: Some(main_events_file.clone()),
+        tasks_path: None,
     };
     let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
         store.clone() as std::sync::Arc<dyn SupervisorStore>,
@@ -2981,7 +2986,7 @@ async fn test_u2_workspace_root_and_channel_injected_into_worker_env() {
 
     let capture = captured_env();
     capture.lock().unwrap().clear();
-    let _outcome = run_u2_execute_wave_with_env_capture(bridge, wave, executor, &main_events_file).await;
+    let _outcome = run_u2_execute_wave_with_env_capture(bridge, wave, executor, &main_events_file, "u2-loop").await;
 
     let snap = capture.lock().unwrap().clone();
     assert_eq!(snap.len(), 1, "U2/007: one slot captured; got {snap:?}");
@@ -3030,6 +3035,90 @@ async fn test_u2_workspace_root_and_channel_injected_into_worker_env() {
     );
 }
 
+/// 2026-07-23-007 plan U4 (R-W5): when the production bridge
+/// carries a `tasks.jsonl` path, the dispatcher projects each
+/// slot's terminal state onto a stable task row. A successful
+/// slot ends up as `TaskStatus::Closed` in `tasks.jsonl`;
+/// `ralph tools task list` (via `TaskStore::load`) sees it.
+/// Idempotent re-projection does not duplicate rows.
+#[tokio::test]
+async fn test_u4_slot_terminal_projects_to_tasks_jsonl() {
+    use crate::loop_runner::wave::CoordinatorSupervisorBridge;
+    use ralph_core::TaskStore;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let workspace_root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    let tasks_dir = workspace_root.join(".ralph").join("agent");
+    std::fs::create_dir_all(&tasks_dir).expect("create tasks dir");
+    let tasks_path = tasks_dir.join("tasks.jsonl");
+    let main_events_file = workspace_root.join(".ralph").join("events.jsonl");
+
+    #[derive(Debug)]
+    struct StubFactory;
+    impl ralph_core::supervisor::worktree_bind::WorktreeFactory for StubFactory {
+        fn create(
+            &self,
+            repo_root: std::path::PathBuf,
+            branch: String,
+        ) -> Result<
+            ralph_core::worktree::Worktree,
+            ralph_core::supervisor::worktree_bind::WorktreeError,
+        > {
+            let wt = repo_root.join(format!("wt-{branch}"));
+            std::fs::create_dir_all(&wt).ok();
+            Ok(ralph_core::worktree::Worktree {
+                path: wt,
+                branch,
+                is_main: false,
+                head: None,
+            })
+        }
+    }
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let context = ProductionBridgeContext {
+        loop_id: "u4-loop".to_string(),
+        repo_root: workspace_root.clone(),
+        events_path: Some(main_events_file.clone()),
+        tasks_path: Some(tasks_path.clone()),
+    };
+    let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
+        store.clone() as std::sync::Arc<dyn SupervisorStore>,
+        context,
+        std::sync::Arc::new(StubFactory),
+    );
+
+    let wave = make_u3_wave("u4-projection", 1, 1);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(1));
+    let _outcome = run_u2_execute_wave_with_env_capture(bridge, wave, executor, &main_events_file, "u4-loop").await;
+
+    // U4/007: tasks.jsonl now carries one row for slot 0 with a
+    // stable task_key and a terminal status.
+    let task_store = TaskStore::load(&tasks_path).expect("load");
+    let rows: Vec<_> = task_store.all().iter().collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "U4/007: exactly one task row projected; got {rows:?}"
+    );
+    let row = &rows[0];
+    let key = row.key.as_deref().unwrap_or("");
+    // U4/007: the task_key MUST start with `supervisor:u4-loop:`
+    // (loop-scoped) and reference slot 0. The wave-id portion is
+    // produced by the supervisor store's allocator, so we only
+    // assert the loop + slot shape to keep the test stable
+    // against allocator changes.
+    assert!(
+        key.starts_with("supervisor:u4-loop:") && key.ends_with(":slot-0"),
+        "U4/007: stable task_key must carry loop_id + slot_index; got {key:?}"
+    );
+    let status_str = format!("{:?}", row.status);
+    assert!(
+        status_str.to_lowercase().contains("closed") || status_str.to_lowercase().contains("done"),
+        "U4/007: completed slot must project to terminal status; got {status_str}"
+    );
+}
+
 // =============================================================================
 // 2026-07-23-001 plan U6: production ledger sink + unique coordination event.
 //
@@ -3061,6 +3150,7 @@ fn setup_u6_production_bridge(
         loop_id: "u6-loop".to_string(),
         repo_root: std::path::PathBuf::from("/tmp/u6-repo"),
         events_path: Some(events_path),
+        tasks_path: None,
     };
     let bridge = CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
         store.clone() as std::sync::Arc<dyn SupervisorStore>,
@@ -3264,6 +3354,7 @@ fn test_production_fan_in_partial_failure_injects_failed() {
         loop_id: "u6-loop".to_string(),
         repo_root: std::path::PathBuf::from("/tmp/u6-repo"),
         events_path: Some(events_path.clone()),
+        tasks_path: None,
     };
     let bridge =
         crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(

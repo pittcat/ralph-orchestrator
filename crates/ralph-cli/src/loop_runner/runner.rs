@@ -712,10 +712,20 @@ pub(crate) fn build_supervisor_bridge(
         // the production `FileEventMergeSink` writes the fan-in
         // business events to the same `events.jsonl` the
         // dispatcher merges into (KTD-6).
+        // U4 (2026-07-23-007): hand the bridge the loop's
+        // `tasks.jsonl` path so the supervisor path can project
+        // slot transitions onto the runtime task ledger. The path
+        // is derived from the events file's parent directory
+        // (canonical `.ralph/agent/tasks.jsonl`).
+        let tasks_path = events_path
+            .parent()
+            .map(|p| p.join("agent").join("tasks.jsonl"))
+            .unwrap_or_else(|| std::path::PathBuf::from(".ralph/agent/tasks.jsonl"));
         let context = ProductionBridgeContext {
-            loop_id,
+            loop_id: loop_id.clone(),
             repo_root,
             events_path: Some(events_path),
+            tasks_path: Some(tasks_path),
         };
 
         // U1: factory resolution — production uses the default

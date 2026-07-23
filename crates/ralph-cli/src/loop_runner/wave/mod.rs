@@ -6,6 +6,7 @@
 mod dispatcher;
 mod io;
 mod supervisor_bridge;
+pub(crate) mod task_projection;
 mod worker;
 
 pub use dispatcher::{

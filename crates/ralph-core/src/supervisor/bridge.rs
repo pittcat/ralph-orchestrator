@@ -119,6 +119,16 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         None
     }
 
+    /// 2026-07-23-007 plan U4 (R-W5): return the loop's
+    /// `tasks.jsonl` path when the bridge was constructed with
+    /// one. The dispatcher projects slot transitions onto the
+    /// runtime task ledger; `None` disables the projection
+    /// (legacy / mock bridges). Default `None` keeps the
+    /// existing mock contracts working.
+    fn tasks_path(&self) -> Option<&std::path::Path> {
+        None
+    }
+
     /// Ask the bridge whether the requested slot is approved for dispatch.
     /// The default keeps legacy/mock bridges compatible: without a store
     /// approval surface, the caller may proceed with its existing spawn path.

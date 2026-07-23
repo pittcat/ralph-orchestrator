@@ -1776,6 +1776,7 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
             },
             Some(Arc::clone(bridge)),
             Some(store_wave_id.clone()),
+            Some(loop_id.to_string()),
         )
         .await;
 
@@ -1847,6 +1848,7 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
                 },
                 Some(Arc::clone(bridge)),
                 Some(store_wave_id),
+                Some(loop_id.to_string()),
             )
             .await;
         }
@@ -2356,6 +2358,7 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
         progress,
         None,
         None,
+        None,
     )
     .await
 }
@@ -2371,6 +2374,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
     progress: ProgressChannels,
     terminal_bridge: Option<Arc<dyn ralph_core::supervisor::SupervisorBridge>>,
     terminal_wave_id: Option<String>,
+    terminal_loop_id: Option<String>,
 ) -> WaveDispatchOutcome {
     // KTD-U3-3: permit is acquired inside each worker task; the
     // semaphore limits the number of concurrent workers to the
@@ -2401,6 +2405,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
         let executor = Arc::clone(&executor);
         let terminal_bridge = terminal_bridge.clone();
         let terminal_wave_id = terminal_wave_id.clone();
+        let terminal_loop_id = terminal_loop_id.clone();
         let request_index = request.index;
         // Replace the placeholder progress_tx with the real sender.
         let mut request = request;
@@ -2419,6 +2424,13 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                         slot_index: request_index,
                         outcome: ralph_core::supervisor::DispatchOutcome::Failed,
                     });
+            // 2026-07-23-007 plan U4 (R-W5): bring the loop id into
+            // the worker task so the post-terminal task projection
+            // can build the stable task_key. The clone is moved
+            // into the task; the outer `terminal_loop_id` is
+            // captured-by-move so each iteration needs its own
+            // `clone()` above.
+            let terminal_loop_id = terminal_loop_id;
             // KTD-U3-3: permit acquisition happens inside the task.
             // The Tokio semaphore only errors on close(), which the
             // dispatcher never does, so we map any error to a
@@ -2551,6 +2563,9 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                 let _ = (reason_to_record, completed_outcome);
             }
 
+            // U4/007 projection is applied AFTER the classifier has set the
+            // drop guard's outcome (Completed vs Failed); see below.
+
             // U1/007: drop-guard outcome follows the classifier —
             // only an explicitly Completed outcome releases the
             // slot as Completed. Failed / empty / cancel outcomes
@@ -2590,6 +2605,39 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                 if matches!(classified, SlotOutcome::Completed(_)) {
                     guard.outcome = ralph_core::supervisor::DispatchOutcome::Completed;
                 }
+            }
+
+            // 2026-07-23-007 plan U4 (R-W5): project the slot's
+            // terminal status onto `tasks.jsonl`. Done after the
+            // classifier above so the projection sees the correct
+            // Completed / Failed outcome. Idempotent — repeated
+            // projections (re-report + recovery replay) do not
+            // duplicate rows.
+            let projection_input = release_guard.as_ref().map(|g| {
+                (
+                    g.bridge.tasks_path().map(|p| p.to_path_buf()),
+                    g.outcome,
+                    g.wave_id.clone(),
+                    g.slot_index,
+                )
+            });
+            if let Some((Some(tasks_path), outcome, wave_id, slot_index)) = projection_input {
+                use super::task_projection::{SlotProjection, project_slot};
+                let projection = match outcome {
+                    ralph_core::supervisor::DispatchOutcome::Completed => {
+                        SlotProjection::Completed
+                    }
+                    ralph_core::supervisor::DispatchOutcome::Failed => {
+                        SlotProjection::Failed
+                    }
+                };
+                project_slot(
+                    &tasks_path,
+                    terminal_loop_id.as_deref().unwrap_or(""),
+                    &wave_id,
+                    slot_index,
+                    projection,
+                );
             }
             result
         });
