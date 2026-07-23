@@ -431,15 +431,51 @@ hats:
         with `unit_id`, `title`, `scope`, `files_written`
         (best-effort from the plan), `verification`,
         `original_provenance` (the plan heading line).
+      - `edges`: ordered list of dependency edges, each
+        with `kind` ∈ {`explicit`, `artifact_io`,
+        `file_conflict`, `coupled_merge`}, `from`,
+        `to`, and `evidence` (a short prose rationale
+        pointing at the plan section that justifies the
+        edge; do NOT omit `evidence`).
+      - `waves`: optional; U5 will compute the
+        ready-wave selection. U3 leaves this empty so
+        downstream units fill it deterministically.
+
+      Edge rules (you MUST enforce — see §3 for the
+      fail-closed exception):
+
+      - **Explicit dependencies** from the plan's
+        `**Dependencies:**` lines are first-class.
+      - **Artifact I/O dependencies**: when unit B's
+        verification reads a file or artifact that
+        unit A writes, derive an `artifact_io` edge
+        `A → B`. Evidence: cite the file path or
+        artifact name.
+      - **File conflict**: when two units write the
+        same path, add a `file_conflict` edge between
+        them (ordering determined by stable
+        topological sort or, if tied, `coupled_merge`
+        below).
+      - **Coupled merge**: when two units cannot be
+        validated independently (B's verification
+        needs A's not-yet-merged output), emit a
+        single `coupled_merge` node that lists the
+        source unit ids in `merged_from`; downstream
+        hats will treat this as one execution unit.
+
+      Stable ordering: nodes and edges MUST be sorted
+      by `unit_id` ascending so re-runs produce
+      byte-identical artifacts. Use `unit_id` (string
+      sort) — `U2 < U10` lexicographically.
 
       The artifact MUST NOT include dynamic state
       (`started` / `done` / `failed`). Dynamic state
       lives only in the runtime task API
       (`ralph tools task list`).
 
-      U3 will extend this artifact with `edges:` and
-      `waves:`. U2 only requires the source + nodes
-      block.
+      U3 extends this artifact with `edges:`; U4
+      materializes nodes into runtime tasks; U5 owns
+      the iteration of ready waves.
 
       ### 3. Invalid plan → `plan.blocked`
 
@@ -453,12 +489,28 @@ hats:
         or it lists zero `U<number>` headings.
       - Any unit id is duplicated or does not match
         the `U<number>` shape.
+      - An edge references an unknown `from` or `to`
+        (not present in the `nodes` list).
+      - A unit declares itself as a dependency
+        (self-dependency, `from == to`).
+      - The edge graph contains a cycle
+        (no valid topological order).
+      - A `coupled_merge` node references a unit id
+        that is missing from `nodes`.
+      - The graph has no ready node (every node has
+        an unsatisfied dependency and no node has
+        been marked as a `coupled_merge` root).
 
       `reason` MUST be exactly one of:
       `plan_missing`, `plan_unreadable`,
       `plan_empty_units`, `plan_duplicate_unit_id`,
-      `plan_invalid_unit_id_shape`. The runtime treats
-      any other value as a hard error and rejects the
+      `plan_invalid_unit_id_shape`,
+      `plan_unknown_dependency`,
+      `plan_self_dependency`,
+      `plan_cycle_detected`,
+      `plan_coupled_merge_missing_unit`,
+      `plan_no_ready_node`. The runtime treats any
+      other value as a hard error and rejects the
       event.
 
       ### 4. Replay safety

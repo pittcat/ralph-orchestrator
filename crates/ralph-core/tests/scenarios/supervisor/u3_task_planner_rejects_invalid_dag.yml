@@ -1,0 +1,76 @@
+# 2026-07-23-005 plan U3 (R-B1 BDD): task-planner enforces
+# strict DAG validity. Each row in this fixture exercises one
+# rejection path; the test asserts `plan.blocked` with the
+# matching `reason` enums. The fixture keeps the topology
+# minimal so each rejection is unambiguous.
+#
+# The fixture is intentionally **agent-driven**: the
+# task-planner instructions (U3) tell the agent to compute
+# edges, detect cycles / self-deps / unknown deps / no-ready
+# and emit `plan.blocked` with a strict `reason` enum. The
+# runtime rejects any reason outside the enum.
+
+name: u3_task_planner_rejects_invalid_dag
+description: "U3 - task-planner fail-close on cycle / self-dep / unknown-dep / no-ready"
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 2
+  event_loop:
+    execution_mode: isolated
+    supervisor:
+      enabled: false
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - work.ready
+    task-planner:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - plan.blocked
+
+mock_responses:
+  # Iter 1: coordinator hands the plan off to task-planner
+  - text: |
+      <event topic="work.ready">
+      plan_name: "u3-dag"
+      plan_path: "docs/plans/u3-dag.md"
+      task_id: "u3-task-1"
+      task_key: "plan:u3-dag:u1"
+      step: "plan"
+      complexity: "small"
+      </event>
+    hat: coordinator
+  # Iter 2: task-planner detects the cycle in the source plan
+  # and emits exactly one `plan.blocked`. Reason MUST be one of
+  # the strict enums (U3): plan_cycle_detected, plan_self_dependency,
+  # plan_unknown_dependency, plan_no_ready_node.
+  - text: |
+      <event topic="plan.blocked">
+      plan_name: "u3-dag"
+      task_id: "u3-task-1"
+      task_key: "plan:u3-dag:u1"
+      step: "plan"
+      reason: "plan_cycle_detected"
+      </event>
+    hat: task-planner
+
+expected:
+  iterations: 2
+  events:
+    - topic: work.ready
+    - topic: plan.blocked
+  event_topic_counts:
+    - topic: plan.blocked
+      count: 1
+  # U3 fail-close: the agent must NOT also emit any other
+  # business topic in the same activation (single business
+  # event budget per `ralph-tools` §6).
+  absent_events:
+    - topic: exec.unit.ready
+    - topic: work.done
+    - topic: LOOP_COMPLETE
+  completion: false
