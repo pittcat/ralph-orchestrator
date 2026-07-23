@@ -83,22 +83,35 @@ fn ce_executor_supervisor_preset_contains_all_required_supervisor_keys() {
         .keys()
         .map(|k| k.as_str().unwrap_or("").to_string())
         .collect();
-    // R16 / F-021: the preset header advertises 16+1=17
-    // hats. Drift here means the runtime's hat allowlist
-    // desyncs. We pin a range (>= 15 functional hats + the
-    // mandatory `progress-steward`) so partial presets
-    // surface as failures without requiring the exact 17
-    // count to be perfectly synchronized with the header
-    // doc-comment.
+    // R16 / F-021: the preset header advertises 13+ functional
+    // hats for the post-U8 topology. Drift here means the
+    // runtime's hat allowlist desyncs. We pin a range (≥ 12
+    // functional hats) so partial presets surface as failures
+    // without requiring the exact count to be perfectly
+    // synchronized with the header doc-comment.
     assert!(
-        hat_names.len() >= 15,
-        "preset must declare at least 15 functional hats per R16; got {}: {:?}",
+        hat_names.len() >= 12,
+        "preset must declare at least 12 functional hats per R16; got {}: {:?}",
         hat_names.len(),
         hat_names
     );
+    // 2026-07-23-005 plan U8: `progress-steward` was deleted
+    // and must NOT be in the topology. The deleted-hats lint
+    // surfaces a structural regression; this structural pin
+    // mirrors the rule.
     assert!(
-        hat_names.iter().any(|h| h == "progress-steward"),
-        "preset must declare `progress-steward` per R16; got {:?}",
+        !hat_names.iter().any(|h| h == "progress-steward"),
+        "preset must NOT declare `progress-steward` (deleted by 2026-07-23-005 plan U8); got {:?}",
+        hat_names
+    );
+    assert!(
+        !hat_names.iter().any(|h| h == "shipper"),
+        "preset must NOT declare `shipper` (deleted by 2026-07-23-005 plan U8); got {:?}",
+        hat_names
+    );
+    assert!(
+        !hat_names.iter().any(|h| h == "fixer"),
+        "preset must NOT declare fallback `fixer` (deleted by 2026-07-23-005 plan U8); got {:?}",
         hat_names
     );
     assert!(

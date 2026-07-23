@@ -2,24 +2,25 @@
 # Pattern (2026-07-03-001 plan): plan.ready → parallel worker fan-out via
 # SupervisorStore rusqlite → per-slot worktrees → fan-in merge → integrator
 # runs full suite → work.done → parallel review wave → fix wave → fix.done
-# → progress-steward / reporter → LOOP_COMPLETE.
+# → reporter → LOOP_COMPLETE.
 #
-# 16 + 1 functional hats + progress-steward:
-# - coordinator: dispatch units to the supervisor + integrate waves
-# - task-planner: emit work.ready per plan unit (with --payloads batch)
+# 2026-07-23-005 plan U8 topology (after atomic deletion):
+# - coordinator: route to task-planner and integrate wave results
+# - task-planner: dependency auditor; writes execution-plan artifact
+# - exec-wave-dispatcher: dependency-aware iterative ready-wave fan-out
 # - worker: per-slot TDD implementation (worktree isolated)
 # - exec-integrator: subscribed to exec.wave.complete; merges + full-suite
-# - review-coordinator: emits 6 review-batch payloads (single emit,
-#   KTD-12) so review-synthesizer gets the aggregate fan-in
-# - review-batch-worker (×6): one per dimension; emits review.dimension.done
-# - review-synthesizer: synthesizes fix plan; emits review.complete
-# - fix-task-planner: emits fix.unit.ready per fix unit
+# - exec-failure-handler: subscribed to exec.wave.failed; emits work.failed
+# - review-coordinator: 7-payload shared-readonly review wave (testing +
+#   6 review dimensions) with pre/post write-set fingerprint gate
+# - review-batch-worker (×7): one per dimension; emits review.unit.done
+# - review-synthesizer: writes review.complete; consumed by fix-task-planner
+# - fix-task-planner: emits fix.unit.ready per fix unit (single Fix chain)
 # - fix-worker: parallel fix worktrees
 # - fix-integrator: subscribed to fix.wave.complete; merges + tests
-# - alignment: alignment pass
-# - reporter: manager-facing report
-# - fixer: hard fallback for isolated failures
-# - progress-steward: loop-level fallback on stall
+# - alignment: read-only verifier; emits plan.complete / plan.blocked
+# - reporter: single owner of plan-level reporting and LOOP_COMPLETE
+# (deleted hats: progress-steward, shipper, fallback fixer)
 #
 # Topological contract (KTD-1 / KTD-5 / KTD-8):
 # - supervisor.enabled: true + execution_mode: isolated (R-SW-1 lint)
@@ -153,7 +154,6 @@ tasks:
   enabled: true
   coordinator_hats:
     - coordinator
-    - progress-steward
 
 # 16 functional hats + progress-steward. Per-hat `publishes`
 # and `triggers` are deliberately minimal: the supervisor
@@ -1768,167 +1768,102 @@ hats:
         → fix-integrator），不要在本 hat 内部尝试。
 
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
-  shipper:
-    name: "Shipper"
-    description: "Promotes the plan completion event through the workflow."
-    triggers:
-      - plan.complete
-    publishes:
-      - plan.complete
-    event_filter:
-      enabled: true
-      events:
-      - plan.complete
-    exempt_topics:
-      - plan.complete
-    trigger_multi_consumer_topics:
-      - plan.complete
-    terminal_events:
-      - plan.complete
-    instructions: |
-      ## SHIPPER MODE — Plan Completion Gate
-
-      You are the hand-off hat for `plan.complete`. Your only job is to
-      forward the completion signal to downstream consumers (e.g. reporter).
-
-      ### `plan.blocked` reason routing (P0-2 STRICT-MATCH)
-      If you are ever triggered by `plan.blocked` instead of `plan.complete`,
-      route as follows using **STRICT EXACT MATCH** on the `reason` field:
-
-      1. Normalise `reason` with `trim()` + `to_lowercase()`.
-      2. Compare the normalised string with `==` against the whitelist below.
-         Substring, "starts with", or narrative prefix matching is **forbidden**.
-      3. Recoverable reasons that may route to forward-after-verification:
-         - `loop_stalled_max_iterations`
-         - `steward_escalation`
-         - `review_terminal_drift`
-      4. Any other reason is a hard-fail: forward as blocked and do not promote
-         to completion.
-
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   reporter:
     name: "Reporter"
-    description: "Produces the manager-facing report and terminates the loop."
+    # 2026-07-23-005 plan U8: reporter is the **single** owner
+    # of plan-level reporting and loop termination. It now
+    # handles both `plan.complete` (success) and
+    # `plan.blocked` (failure) and produces a single
+    # `LOOP_COMPLETE` per loop with the appropriate verdict.
+    # The deleted `shipper` / `fixer` / `progress-steward`
+    # hats are no longer in the topology; this hat is the
+    # only consumer of `plan.complete` and `plan.blocked`.
+    description: "Single owner of plan-level reporting and loop termination. Consumes plan.complete and plan.blocked."
     triggers:
       - plan.complete
+      - plan.blocked
     publishes:
       - LOOP_COMPLETE
     event_filter:
       enabled: true
       events:
       - plan.complete
+      - plan.blocked
     exempt_topics:
       - LOOP_COMPLETE
     trigger_multi_consumer_topics:
       - plan.complete
+      - plan.blocked
     terminal_events:
       - LOOP_COMPLETE
     instructions: |
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
-      ## REPORTER MODE — Manager-facing report + terminate
+      ## REPORTER MODE — Single owner of report + loop termination
 
-      Activated by `plan.complete`. Produce a manager-facing
-      summary and emit `LOOP_COMPLETE`.
+      You are the **only** reporter and the **only**
+      emitter of `LOOP_COMPLETE` in this preset. You are
+      activated by either `plan.complete` (success) or
+      `plan.blocked` (failure). Your job is to:
+
+      1. Write the manager-facing report (success or
+         failure summary).
+      2. Emit exactly one `LOOP_COMPLETE` with the
+         verdict embedded in the payload.
+
+      ### `plan.blocked` reason whitelist (U8 strict)
+
+      When you are activated by `plan.blocked`, you
+      MUST use **strict exact match** on the `reason`
+      field (after `trim()` + `to_lowercase()`) to
+      classify the failure. Whitelisted reasons:
+
+      - `loop_stalled_max_iterations`
+      - `steward_escalation`
+      - `review_terminal_drift`
+      - `plan_missing`
+      - `plan_unreadable`
+      - `plan_empty_units`
+      - `plan_duplicate_unit_id`
+      - `plan_invalid_unit_id_shape`
+      - `plan_unknown_dependency`
+      - `plan_self_dependency`
+      - `plan_cycle_detected`
+      - `plan_coupled_merge_missing_unit`
+      - `plan_no_ready_node`
+      - `upstream_dependency_failed`
+      - `merge_conflict`
+      - `aggregate_timeout`
+      - `cancel`
+      - `alignment_failed`
+
+      Any other `reason` is a hard failure: emit
+      `LOOP_COMPLETE` with `verdict=failed`,
+      `reason="unrecognized_blocked_reason"`, and
+      surface the original `reason` in the report.
+
+      ### Report-write failure handling
+
+      If writing the report file fails, do **NOT**
+      retry. Emit exactly one `LOOP_COMPLETE` with
+      `report_written=false`, the target path, the
+      write error, and a minimal failure summary in
+      the payload. This guarantees the loop terminates
+      with `verdict=failed` instead of silently waiting
+      for a consumer that never arrives.
 
       ### OPAC 四阶段 (本 hat 视角)
 
-      - **Observe**: `ralph tools task list -s done` + 读
-        `plan.complete` payload。
-      - **Precheck**: `ralph emit LOOP_COMPLETE --policy-check`
-        （LOOP_COMPLETE 是 terminal，需含合规摘要）。
+      - **Observe**: `ralph tools task list -s done`
+        + 读 `plan.complete` / `plan.blocked` payload。
+      - **Precheck**: `ralph emit LOOP_COMPLETE
+        --policy-check`。
       - **Apply**: 写报告，emit `LOOP_COMPLETE`。
       - **Confirm**: `ralph events --events-source main`。
 
       ### Constraints
 
       - 一条业务事件即停。
-  fixer:
-    name: "Fixer"
-    description: "Hard fallback hat that attempts recovery on work.failed."
-    triggers:
-      - work.failed
-    publishes:
-      - fix.applied
-      - fix.exhausted
-    event_filter:
-      enabled: true
-      events:
-      - work.failed
-    terminal_events:
-      - fix.applied
-      - fix.exhausted
-    exempt_topics:
-      - fix.applied
-      - fix.exhausted
-    instructions: |
-      ## FIXER MODE — Hard fallback recovery
-
-      Activated by `work.failed`. Try a targeted fix; emit
-      `fix.applied` on success or `fix.exhausted` when you
-      give up. Do **not** chain: one activation = one
-      outcome event.
-
-      ### OPAC 四阶段 (本 hat 视角)
-
-      - **Observe**: `ralph tools task list` + 读 `work.failed`
-        payload（含失败原因 + task_key）。
-      - **Precheck**: `ralph emit fix.applied --policy-check` 或
-        `fix.exhausted`。
-      - **Apply**: 尝试恢复；emit 终态。
-      - **Confirm**: `ralph events --events-source hat-channel`。
-
-      ### Constraints
-
-      - 一条业务事件即停（isolated 单事件预算）。
-      - 不能调 wave emit。
-
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
-  progress-steward:
-    name: "Progress Steward"
-    description: "Loop-level fallback hat that recovers or escalates on stall."
-    triggers:
-      - loop.stalled
-    publishes:
-      - work.ready
-      - review.start
-      - task.resume
-      - plan.blocked
-    event_filter:
-      enabled: true
-      events:
-      - loop.stalled
-    terminal_events:
-      - plan.blocked
-    exempt_topics:
-      - work.ready
-      - review.start
-      - task.resume
-      - plan.blocked
-    instructions: |
-      ## PROGRESS STEWARD MODE — Loop-level stall recovery
-
-      Activated by `loop.stalled`. Recover the stalled
-      sequence by emitting `work.ready` (mint fresh unit),
-      `review.start` (re-dispatch review), `task.resume`
-      (U16: HandoffIndex consumer triggers routing
-      validation), or `plan.blocked` (escalate to operator).
-
-      ### OPAC 四阶段 (本 hat 视角)
-
-      - **Observe**: `ralph inspect loop` + `ralph tools task list`。
-      - **Precheck**: `ralph emit <chosen topic> --policy-check`。
-      - **Apply**: emit 单条 rescue 事件。
-      - **Confirm**: `ralph events --events-source main`。
-
-      ### Constraints
-
-      - 一条业务事件即停。
-      - `task.resume` 必须引用已知 consumer 的 `triggers`
-        （U16 routing 校验）。
-      - 不能调 wave emit。
-
-      # Default publishes fallback so cli/agents can emit any of
-      # the work.ready family without an explicit `publishes`.
-      default_publishes: [work.ready]
-
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+      - 报告写失败时**绝对不**重试——把失败摘要塞进
+        LOOP_COMPLETE payload，保证 loop 一定终止。
+      - 不要消费 `task.resume`——那是 runtime 内部
+        recovery 通道，不属于本 hat 的输入。

@@ -393,6 +393,25 @@ pub const FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY: &str =
 pub const FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY: &str =
     "preset.supervisor_alignment_triggers_wave_ready";
 
+/// 2026-07-23-005 plan U8: the deleted hats
+/// (`progress-steward`, `shipper`, `fixer`) MUST NOT
+/// appear in any supervisor preset. The lint is a
+/// hard error because each of these hats was deleted
+/// for a specific architectural reason (single owner of
+/// reporting, no fallback fixer, no progress rescue) and
+/// resurrecting them silently regresses the topology.
+pub const FINDING_SUPERVISOR_DELETED_HAT_REINSTATED: &str =
+    "preset.supervisor_deleted_hat_reinstated";
+
+/// 2026-07-23-005 plan U8: the deleted hats must not
+/// appear anywhere in the preset (not just `hats:` —
+/// also no orphan trigger publishes / deny rules /
+/// state-projection references). The lint walks every
+/// string-typed value in the preset and reports any
+/// match.
+pub const FINDING_SUPERVISOR_DELETED_HAT_REFERENCED: &str =
+    "preset.supervisor_deleted_hat_referenced";
+
 // ──────────────────────────────────────────────────────────────────────────
 // OPAC instructions lint finding IDs (2026-07-04-001 plan U11)
 // ──────────────────────────────────────────────────────────────────────────
@@ -641,6 +660,8 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY,
     FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY,
     FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY,
+    FINDING_SUPERVISOR_DELETED_HAT_REINSTATED,
+    FINDING_SUPERVISOR_DELETED_HAT_REFERENCED,
     FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL,
     FINDING_INSTRUCTIONS_FIX_UNIT_MINT_TEMPLATE_MISSING,
     FINDING_INSTRUCTIONS_OPAC_SKILL_REFERENCE_MISSING,
