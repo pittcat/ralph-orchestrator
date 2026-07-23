@@ -192,6 +192,48 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
     fn finalize_terminal_cleanup(&self, _repo_root: &std::path::Path) -> Result<(), BridgeError> {
         Ok(())
     }
+
+    /// 2026-07-22-001 plan U4 (KTD-8): mark `wave_id` cancelled in
+    /// the underlying store. The dispatcher calls this on aggregate
+    /// timeout / global deadline / spawn failure so subsequent
+    /// `tick`s observe the new phase and `inspect` surfaces the
+    /// `cancelled` state. Default: no-op so existing mocks keep
+    /// compiling. The store-level cancel does NOT itself kill the
+    /// spawned worker child; the dispatcher's deadline path owns
+    /// the process kill.
+    fn cancel_wave(&self, _wave_id: &str) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
+    /// 2026-07-22-001 plan U6 (KTD-7): enqueue a compensation
+    /// job for `wave_id`. Default: no-op (mocks / BDD bridges
+    /// without a store).
+    fn enqueue_compensation(
+        &self,
+        _wave_id: &str,
+        _kind: crate::supervisor::CompensationKind,
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
+    /// 2026-07-22-001 plan U6: drain pending compensation jobs.
+    /// Default: empty.
+    fn take_pending_compensations(
+        &self,
+    ) -> Result<Vec<(String, crate::supervisor::CompensationKind)>, BridgeError> {
+        Ok(Vec::new())
+    }
+
+    /// 2026-07-22-001 plan U6: mark a drained compensation job
+    /// completed. Default: no-op.
+    fn complete_compensation(
+        &self,
+        _wave_id: &str,
+        _kind: crate::supervisor::CompensationKind,
+        _ok: bool,
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
 }
 
 /// BDD-specific bridge that wires a `SupervisorCoordinator`
@@ -356,6 +398,46 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
         self.store
             .release_slot_dispatch(wave_id, slot_index, outcome)?;
         Ok(())
+    }
+
+    fn cancel_wave(&self, wave_id: &str) -> Result<(), BridgeError> {
+        // 2026-07-22-001 plan U4 (KTD-8): thread cancel into the
+        // store; NotFound is treated as success so the BDD
+        // scenarios stay robust to racey cancel/recover orderings.
+        match self.store.cancel_wave(wave_id) {
+            Ok(()) => Ok(()),
+            Err(SupervisorStoreError::UnknownWave(_)) => Ok(()),
+            Err(err) => Err(BridgeError::Store(err.to_string())),
+        }
+    }
+
+    fn enqueue_compensation(
+        &self,
+        wave_id: &str,
+        kind: crate::supervisor::CompensationKind,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .enqueue_compensation(wave_id, kind)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn take_pending_compensations(
+        &self,
+    ) -> Result<Vec<(String, crate::supervisor::CompensationKind)>, BridgeError> {
+        self.store
+            .take_pending_compensations()
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn complete_compensation(
+        &self,
+        wave_id: &str,
+        kind: crate::supervisor::CompensationKind,
+        ok: bool,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .complete_compensation(wave_id, kind, ok)
+            .map_err(|err| BridgeError::Store(err.to_string()))
     }
 }
 
