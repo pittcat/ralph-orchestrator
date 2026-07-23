@@ -2100,16 +2100,19 @@ fn payload_type_label(p: &PayloadType) -> String {
     }
 }
 
-/// U4 (2026-07-22-004 plan A2): `ralph emit --policy-check` must
-/// surface `PolicyDecision::Warn(findings)` whose `gate` is
-/// prefixed `payload_consistency:` as a `ValidationError`, so the
-/// CLI rejects the payload even when `event_policy.mode` is
-/// `observe`. Without this escalation, preset authors who lower
-/// `event_policy.payload_consistency.mode` to `observe` would
-/// bypass the gate at CLI precheck time even though the runtime
-/// still rejects it on the JSONL write path. TDD RED -> GREEN.
+/// U1 (2026-07-23-002 plan): Precheck/Apply parity for `Warn`.
+///
+/// The CLI `finding_to_validation_error` previously escalated
+/// `Warn(findings)` carrying a `payload_consistency:` gate to a
+/// `ValidationError`, while the runtime Apply path (and the emit
+/// write path in `commands/emit.rs`) accepted the event with only a
+/// warning. KTD1 removes that single-prefix carve-out: `Warn` is
+/// always non-fatal at the precheck boundary, regardless of the
+/// gate namespace. Enforce-mode `RejectWithResume`/`Hold`/`Block`
+/// still surface as `ValidationError`; only the `Warn` disposition
+/// is unified.
 #[cfg(test)]
-mod u4_payload_consistency_warn_tests {
+mod u1_warn_parity_tests {
     use super::*;
     use ralph_core::PolicyFinding;
 
@@ -2146,81 +2149,105 @@ mod u4_payload_consistency_warn_tests {
     }
 
     #[test]
-    fn u4_payload_consistency_warn_is_escalated_to_error() {
-        // Happy path: a Warn carrying a `payload_consistency:`
-        // gate must surface as `Some(ValidationError)`.
+    fn u1_payload_consistency_warn_is_not_escalated() {
+        // RF1: `Warn` carrying a `payload_consistency:` gate must
+        // match the runtime Apply disposition (non-fatal). The
+        // precheck no longer escalates by gate prefix.
         let decision = PolicyDecision::Warn(vec![payload_consistency_finding(
             "fix-done-blocked-zero-fixes-applied",
         )]);
         let result = finding_to_validation_error(&decision, "fix.done");
         assert!(
-            result.is_some(),
-            "payload_consistency Warn must surface as ValidationError, got None"
+            result.is_none(),
+            "payload_consistency Warn must match Apply (non-fatal), got ValidationError"
         );
-        let err = result.unwrap();
-        assert_eq!(err.reason_code, "semantic_gate_violation");
-        assert!(err.message.contains("payload_consistency"));
-        assert!(err.message.contains("fix-done-blocked-zero-fixes-applied"));
     }
 
     #[test]
-    fn u4_other_namespace_warn_remains_dropped() {
-        // Edge: a Warn whose gate does NOT carry the
-        // `payload_consistency:` prefix keeps the legacy drop
-        // behaviour (returns `None`).
+    fn u1_other_namespace_warn_remains_non_fatal() {
         let decision = PolicyDecision::Warn(vec![other_namespace_warn_finding()]);
         let result = finding_to_validation_error(&decision, "work.done");
         assert!(
             result.is_none(),
-            "non-payload_consistency Warn must keep drop behaviour, got Some"
+            "non-payload_consistency Warn must remain non-fatal, got ValidationError"
         );
     }
 
     #[test]
-    fn u4_non_semantic_gate_warn_remains_dropped() {
-        // Edge: a Warn with a non-SemanticGateViolation variant
-        // (e.g. `MissingRequiredField`) is dropped -- the U4
-        // escalation only targets `SemanticGateViolation` with
-        // the `payload_consistency:` gate prefix.
+    fn u1_non_semantic_gate_warn_remains_non_fatal() {
         let decision = PolicyDecision::Warn(vec![non_semantic_gate_warn_finding()]);
         let result = finding_to_validation_error(&decision, "work.done");
         assert!(
             result.is_none(),
-            "non-SemanticGateViolation Warn must keep drop behaviour, got Some"
+            "non-SemanticGateViolation Warn must remain non-fatal, got ValidationError"
         );
     }
 
     #[test]
-    fn u4_payload_consistency_warn_with_mixed_findings_picks_consistency() {
-        // Edge: a Warn carrying multiple findings where only one
-        // has the `payload_consistency:` prefix. The function must
-        // surface the consistency one as the error.
+    fn u1_mixed_warn_findings_remain_non_fatal() {
+        // A Warn batch that mixes consistency + other-namespace
+        // findings stays non-fatal; the precheck no longer picks
+        // the consistency finding to escalate.
         let decision = PolicyDecision::Warn(vec![
             other_namespace_warn_finding(),
             payload_consistency_finding("rule-x"),
         ]);
         let result = finding_to_validation_error(&decision, "fix.done");
         assert!(
-            result.is_some(),
-            "mixed Warn with payload_consistency finding must surface, got None"
+            result.is_none(),
+            "mixed Warn must remain non-fatal, got ValidationError"
         );
-        assert!(result.unwrap().message.contains("rule-x"));
     }
 
     #[test]
-    fn u4_accept_decision_still_returns_none() {
-        // Regression: `PolicyDecision::Accept` keeps returning
-        // `None`.
+    fn u1_accept_remains_none() {
         let result = finding_to_validation_error(&PolicyDecision::Accept, "fix.done");
         assert!(result.is_none());
     }
 
     #[test]
-    fn u4_reject_with_resume_still_returns_error() {
-        // Regression: `PolicyDecision::RejectWithResume` keeps
-        // returning `Some(ValidationError)`.
+    fn u1_acknowledge_and_forward_remains_none() {
+        // AcknowledgeAndForward is the dedup carve-out: same as
+        // Accept from the precheck's perspective.
+        let finding = payload_consistency_finding("rule-z");
+        let decision = PolicyDecision::AcknowledgeAndForward(finding);
+        let result = finding_to_validation_error(&decision, "fix.done");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn u1_reject_with_resume_surfaces_error() {
+        // Enforce + RejectWithResume still surfaces as a typed
+        // error; only Warn disposition is unified.
         let finding = payload_consistency_finding("rule-y");
         let decision = PolicyDecision::RejectWithResume(finding);
+        let result = finding_to_validation_error(&decision, "fix.done");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().reason_code, "semantic_gate_violation");
+    }
+
+    #[test]
+    fn u1_hold_surfaces_error() {
+        let finding = payload_consistency_finding("rule-h");
+        let decision = PolicyDecision::Hold(finding);
+        let result = finding_to_validation_error(&decision, "fix.done");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().reason_code, "semantic_gate_violation");
+    }
+
+    #[test]
+    fn u1_block_surfaces_error() {
+        let finding = payload_consistency_finding("rule-b");
+        let decision = PolicyDecision::Block(finding);
+        let result = finding_to_validation_error(&decision, "fix.done");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().reason_code, "semantic_gate_violation");
+    }
+
+    #[test]
+    fn u1_ignore_surfaces_error() {
+        let finding = payload_consistency_finding("rule-i");
+        let decision = PolicyDecision::Ignore(finding);
         let result = finding_to_validation_error(&decision, "fix.done");
         assert!(result.is_some());
         assert_eq!(result.unwrap().reason_code, "semantic_gate_violation");
@@ -2358,37 +2385,16 @@ pub fn validate_batch_against_config(
 fn finding_to_validation_error(decision: &PolicyDecision, _topic: &str) -> Option<ValidationError> {
     let finding = match decision {
         PolicyDecision::Accept => return None,
-        PolicyDecision::Warn(findings) => {
-            // U4 (2026-07-22-004 plan A2): the `payload_consistency:`
-            // gate is a same-payload consistency check, not a
-            // policy-mode choice. It must surface as a CLI
-            // precheck error even when `event_policy.mode` is
-            // `observe`, so preset authors cannot accidentally
-            // disable the gate by lowering the mode. Other Warn
-            // findings remain non-fatal at the loop level too,
-            // so we still accept those payloads (the loop writes
-            // the event + logs the warning). The findings are
-            // logged via the loop's normal warning path; CLI
-            // callers can inspect the events file for the
-            // warning field if they need to surface them.
-            if let Some(f) = findings.iter().find(|f| {
-                matches!(
-                    &f.violation_type,
-                    ViolationType::SemanticGateViolation { gate, .. }
-                        if gate.starts_with("payload_consistency:")
-                )
-            }) {
-                return Some(finding_record(f));
-            }
-            return None;
-        }
-        // U2 (plan 2026-07-04-004): AcknowledgeAndForward is the
-        // dedup-carve-out return for `review.dimensions.complete`
-        // re-emits. Treat the same as `Accept` from the
-        // CLI batch-validator's perspective — the dedup finding
-        // is logged by the runtime but the payload reaches the
-        // bus. Surfacing it as an error here would defeat the
-        // carve-out (perky-maple silent-success root cause).
+        // U1 (2026-07-23-002 plan, KTD1): `Warn` is non-fatal at
+        // the precheck boundary, matching the runtime Apply
+        // disposition. The previous `payload_consistency:` gate
+        // prefix carve-out is removed — the CLI no longer
+        // escalates Warn by gate namespace. Enforce-mode gates
+        // that need to reject payloads use `RejectWithResume` /
+        // `Hold` / `Block`, which the runtime and CLI both
+        // surface as `ValidationError`. `AcknowledgeAndForward`
+        // (dedup carve-out) is likewise non-fatal.
+        PolicyDecision::Warn(_findings) => return None,
         PolicyDecision::AcknowledgeAndForward(_finding) => return None,
         PolicyDecision::RejectWithResume(f)
         | PolicyDecision::Hold(f)
