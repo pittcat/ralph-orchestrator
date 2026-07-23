@@ -437,9 +437,12 @@ hats:
         `to`, and `evidence` (a short prose rationale
         pointing at the plan section that justifies the
         edge; do NOT omit `evidence`).
+      - `task_mapping`: list of identity-only entries,
+        each `{node_key, task_id, task_key, step}`.
+        U4 writes these; U3 leaves the list empty.
       - `waves`: optional; U5 will compute the
-        ready-wave selection. U3 leaves this empty so
-        downstream units fill it deterministically.
+        ready-wave selection. U3 / U4 leave this empty
+        so downstream units fill it deterministically.
 
       Edge rules (you MUST enforce — see §3 for the
       fail-closed exception):
@@ -522,6 +525,53 @@ hats:
       already exists with a matching `source_plan_hash`;
       if so, skip writing and stop. Only a hash change
       justifies a new artifact version.
+
+      ### 4.5. Task materialization (U4)
+
+      After writing the artifact on the first activation,
+      materialize each DAG node into a runtime task.
+      The mapping is identity-only (no dynamic state) and
+      lives both in the artifact (`task_mapping:`) and
+      in the runtime task ledger.
+
+      Per-node procedure:
+
+      1. Compute `node_key` of the form
+         `plan:<plan-key>:<unit_id>` (e.g.
+         `plan:2026-07-23-005-...:u3`).
+      2. Call `ralph tools task ensure --key
+         "<node_key>" --title "<unit title>"
+         --description "<unit scope>"`. The
+         command is idempotent: a re-entry with the
+         same `node_key` returns the existing task
+         instead of minting a new one.
+      3. Capture the live `task_id` from the
+         `ensure` output (do NOT hand-write
+         `task_id`).
+      4. Append `{node_key, task_id, task_key: node_key,
+         step: "plan"}` to `task_mapping` in the
+         artifact and re-write the artifact.
+
+      Coupling / coupled_merge nodes: emit **one**
+      task per coupled group, with `node_key`
+      suffixed by `:merged`. The mapping's
+      `merged_from` field lists the source unit ids
+      (artifact-only; not a runtime task field).
+
+      Replay: when §4 short-circuits (artifact
+      already exists with matching hash), DO NOT
+      re-materialize tasks — `ensure` is already
+      idempotent and the runtime's task ledger is
+      the live source of truth.
+
+      Downstream failure projection (U5+): when an
+      upstream task is `failed` / `cancelled`, mark
+      downstream tasks as `failed` with
+      `reason: upstream_dependency_failed` and the
+      upstream `task_id`. This is the **only** state
+      transition `task-planner` may perform; the
+      U5 exec-wave dispatcher handles its own wave
+      fan-out.
 
       ### 5. Things you must NOT do (this hat)
 
