@@ -2100,14 +2100,15 @@ pub fn render_json(report: &Report) -> Value {
     })
 }
 
+/// Truncate a string for safe display in a Markdown table cell.
+///
+/// U3 (2026-07-23-002 plan, KTD3): routes through `safe_display`
+/// so a malicious `rule.message` cannot break the table layout by
+/// injecting `|` (cell delimiter), ANSI escapes, control chars,
+/// zero-width chars, or backtick fences. Truncation is applied at
+/// a Unicode code-point boundary and marked with `[…]`.
 fn truncate_md(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let keep = max.saturating_sub(1);
-    let mut out: String = s.chars().take(keep).collect();
-    out.push('\u{2026}');
-    out
+    crate::safe_display::safe_display(s, max).text
 }
 
 /// Convenience helper: resolve + load + build a [`Report`] in one

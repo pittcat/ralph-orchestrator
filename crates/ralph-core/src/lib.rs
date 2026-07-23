@@ -48,6 +48,7 @@ mod hat_registry;
 mod hatless_ralph;
 pub mod hooks;
 pub mod recovery_runtime;
+pub mod safe_display;
 pub mod shipper_reason;
 /// 2026-07-03-001 plan U2: rusqlite-backed wave orchestration
 /// domain types + persistence trait. U3-U5 introduce the in-memory

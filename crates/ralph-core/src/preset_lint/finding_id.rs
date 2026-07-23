@@ -554,6 +554,17 @@ pub const FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP: &str = "preset.payload_consist
 pub const FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN: &str =
     "preset.payload_consistency_non_object_when";
 
+/// U3 (2026-07-23-002 plan, KTD3): a `payload_consistency` rule's
+/// `message` exceeds the maximum byte length (1024 UTF-8 bytes) or
+/// contains unsafe characters (ANSI escapes, C0/C1 control chars
+/// except `\n`/`\t`, zero-width characters). The runtime
+/// `safe_display` API strips these at render time, but the lint
+/// surfaces the misconfiguration at preset-load time so the rule
+/// author fixes the message rather than relying on runtime
+/// truncation/stripping. `Warn` in default mode, `Error` in strict.
+pub const FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE: &str =
+    "preset.payload_consistency_unsafe_message";
+
 /// Inventory of every finding id in this module. Use this in tests
 /// that assert the lint surface does not silently re-introduce a
 /// serial-only or coordinator-loop finding. Plan 2026-07-07-006
@@ -613,4 +624,5 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_FIELD,
     FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP,
     FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN,
+    FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE,
 ];

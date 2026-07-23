@@ -44,7 +44,7 @@ use crate::event_policy_payload_consistency::WHITELISTED_PREDICATE_OPS;
 use crate::preset_lint::finding_id::{
     FINDING_PAYLOAD_CONSISTENCY_DUPLICATE_ID, FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN,
     FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_FIELD, FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP,
-    FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_TOPIC,
+    FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_TOPIC, FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE,
 };
 use crate::preset_lint::{LintFinding, LintSeverity, LintStrictness};
 
@@ -86,6 +86,16 @@ pub fn check_payload_consistency(
     // preset-load time instead of turning the gated topic into a hard
     // runtime reject.
     for rule in rules {
+        // U3 (2026-07-23-002 plan, KTD3): check the rule's `message`
+        // for unsafe content (ANSI escapes, control chars, zero-width
+        // chars) or excessive length. The runtime `safe_display` API
+        // strips these at render time, but the lint surfaces the
+        // misconfiguration at preset-load time so the rule author
+        // fixes the message rather than relying on runtime stripping.
+        if let Some(reason) = check_message_unsafe(&rule.message) {
+            findings.push(unsafe_message_finding(severity, &rule.id, &reason));
+        }
+
         let when_is_object = matches!(rule.when, Value::Object(_));
         if !when_is_object {
             findings.push(non_object_when_finding(
@@ -315,6 +325,76 @@ fn non_object_when_finding(severity: LintSeverity, rule_id: &str, kind: &str) ->
         action_hint: Some(format!(
             "rewrite \"{rule_id}\" `when` as a JSON object: a single predicate \
              `{{field, <op>, value}}` or a combinator `{{all: [...]}}` / `{{any: [...]}}`"
+        )),
+    }
+}
+
+/// U3 (2026-07-23-002 plan, KTD3): check a `payload_consistency`
+/// rule's `message` for unsafe content. Returns `Some(reason)` when
+/// the message is unsafe, `None` when it is clean.
+///
+/// Unsafe content is:
+/// - Exceeds [`MAX_RULE_MESSAGE_BYTES`] UTF-8 bytes (1024).
+/// - Contains ANSI escape sequences (CSI `ESC [` or OSC `ESC ]`).
+/// - Contains C0 control characters except `\n` and `\t`.
+/// - Contains C1 control characters (`U+0080`–`U+009F`).
+/// - Contains zero-width characters (`U+200B`, `U+200C`, `U+200D`,
+///   `U+FEFF`, `U+2060`, `U+00AD`).
+fn check_message_unsafe(message: &str) -> Option<&'static str> {
+    use crate::safe_display::MAX_RULE_MESSAGE_BYTES;
+
+    if message.len() > MAX_RULE_MESSAGE_BYTES {
+        return Some("exceeds the 1024-byte limit");
+    }
+
+    // Check for ANSI escape sequences and control characters.
+    let bytes = message.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // ESC character — start of ANSI escape
+        if bytes[i] == 0x1B {
+            return Some("contains ANSI escape sequences");
+        }
+        // C0 control chars (except \n=0x0A and \t=0x09)
+        if bytes[i] < 0x20 && bytes[i] != 0x0A && bytes[i] != 0x09 {
+            return Some("contains C0 control characters");
+        }
+        i += 1;
+    }
+
+    // Check for C1 control chars and zero-width chars (multibyte).
+    for ch in message.chars() {
+        let code = ch as u32;
+        if (0x80..=0x9F).contains(&code) {
+            return Some("contains C1 control characters");
+        }
+        if matches!(
+            ch,
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{2060}' | '\u{00AD}'
+        ) {
+            return Some("contains zero-width characters");
+        }
+    }
+
+    None
+}
+
+fn unsafe_message_finding(severity: LintSeverity, rule_id: &str, reason: &str) -> LintFinding {
+    LintFinding {
+        id: FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE,
+        severity,
+        message: format!(
+            "payload_consistency rule \"{rule_id}\" has a `message` that {reason}; \
+             the runtime `safe_display` API will strip/truncate it at render time, \
+             but the message should be clean diagnostic text"
+        ),
+        topic: None,
+        hat: None,
+        owner: None,
+        action_hint: Some(format!(
+            "rewrite \"{rule_id}\" `message` as plain diagnostic text without ANSI \
+             escapes, control characters, zero-width characters, or excessive length \
+             (≤ 1024 UTF-8 bytes)"
         )),
     }
 }
@@ -582,5 +662,153 @@ mod tests {
         let config = config_with_rules(vec![]);
         let findings = check_payload_consistency(&config, LintStrictness::Strict);
         assert!(findings.is_empty());
+    }
+
+    // ── U3 (2026-07-23-002 plan, KTD3): message safety lint ──────
+
+    /// Helper: build a rule with a custom message.
+    fn rule_with_message(id: &str, message: &str) -> crate::config::PayloadConsistencyRule {
+        crate::config::PayloadConsistencyRule {
+            id: id.to_string(),
+            topic: "fix.done".to_string(),
+            when: json!({"field": "fix_status", "eq": "applied"}),
+            message: message.to_string(),
+        }
+    }
+
+    /// U3: a clean message produces no finding.
+    #[test]
+    fn clean_message_produces_no_finding() {
+        let config = config_with_rules(vec![rule_with_message(
+            "clean-rule",
+            "fix_status=applied is inconsistent with review_verdict=blocked",
+        )]);
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let unsafe_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE)
+            .collect();
+        assert!(
+            unsafe_findings.is_empty(),
+            "clean message should not produce an unsafe-message finding, got {unsafe_findings:?}"
+        );
+    }
+
+    /// U3: a message with ANSI escape sequences is flagged.
+    #[test]
+    fn ansi_escape_in_message_is_flagged() {
+        let config = config_with_rules(vec![rule_with_message(
+            "ansi-rule",
+            "\x1b[31mred text\x1b[0m",
+        )]);
+        let findings = check_payload_consistency(&config, LintStrictness::Default);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE)
+        );
+    }
+
+    /// U3: a message with C0 control characters (except \n/\t) is flagged.
+    #[test]
+    fn c0_control_in_message_is_flagged() {
+        let config =
+            config_with_rules(vec![rule_with_message("c0-rule", "has\x00null and\x01soh")]);
+        let findings = check_payload_consistency(&config, LintStrictness::Default);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE)
+        );
+    }
+
+    /// U3: newlines and tabs in message are allowed (legitimate
+    /// multi-line diagnostic text).
+    #[test]
+    fn newline_and_tab_in_message_are_allowed() {
+        let config = config_with_rules(vec![rule_with_message(
+            "multiline-rule",
+            "line one\nline two\tindented",
+        )]);
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let unsafe_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE)
+            .collect();
+        assert!(unsafe_findings.is_empty());
+    }
+
+    /// U3: a message with C1 control characters is flagged.
+    #[test]
+    fn c1_control_in_message_is_flagged() {
+        let config = config_with_rules(vec![rule_with_message(
+            "c1-rule",
+            "has\u{0085}NEL and\u{009f}APC",
+        )]);
+        let findings = check_payload_consistency(&config, LintStrictness::Default);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE)
+        );
+    }
+
+    /// U3: a message with zero-width characters is flagged.
+    #[test]
+    fn zero_width_in_message_is_flagged() {
+        let config = config_with_rules(vec![rule_with_message("zw-rule", "fix\u{200B}_status")]);
+        let findings = check_payload_consistency(&config, LintStrictness::Default);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE)
+        );
+    }
+
+    /// U3: a message exceeding 1024 UTF-8 bytes is flagged.
+    #[test]
+    fn oversized_message_is_flagged() {
+        let long_message = "x".repeat(1025);
+        let config = config_with_rules(vec![rule_with_message("long-rule", &long_message)]);
+        let findings = check_payload_consistency(&config, LintStrictness::Default);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE)
+        );
+    }
+
+    /// U3: a message at exactly 1024 bytes is NOT flagged (boundary).
+    #[test]
+    fn message_at_byte_limit_is_not_flagged() {
+        let message = "x".repeat(1024);
+        let config = config_with_rules(vec![rule_with_message("boundary-rule", &message)]);
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let unsafe_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE)
+            .collect();
+        assert!(unsafe_findings.is_empty());
+    }
+
+    /// U3: the finding is `Warn` in default mode, `Error` in strict.
+    #[test]
+    fn unsafe_message_finding_severity_follows_strictness() {
+        let config = config_with_rules(vec![rule_with_message(
+            "severity-rule",
+            "\x1b[31mansi\x1b[0m",
+        )]);
+        let warn_findings = check_payload_consistency(&config, LintStrictness::Default);
+        let strict_findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let warn_unsafe = warn_findings
+            .iter()
+            .find(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE)
+            .expect("Warn mode should still surface the finding");
+        assert_eq!(warn_unsafe.severity, LintSeverity::Warn);
+        let strict_unsafe = strict_findings
+            .iter()
+            .find(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE)
+            .expect("Strict mode should surface the finding");
+        assert_eq!(strict_unsafe.severity, LintSeverity::Error);
     }
 }
