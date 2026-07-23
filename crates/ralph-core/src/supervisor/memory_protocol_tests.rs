@@ -229,7 +229,9 @@ fn compensation_records_failure_state_on_wave() {
     // Dispatch slot 0 so `cancel_wave` (which only flips
     // Pending → Cancelled, R-B3/B4) leaves it Dispatched.
     // Then `record_slot_failure` lands cleanly.
-    s.try_dispatch_next(4).unwrap().expect("slot 0 dispatchable");
+    s.try_dispatch_next(4)
+        .unwrap()
+        .expect("slot 0 dispatchable");
     // Cancel trigger: pending slot 1 turns Cancelled.
     s.cancel_wave(&wave).unwrap();
     // Failure trigger: record a permanent failure on slot 0

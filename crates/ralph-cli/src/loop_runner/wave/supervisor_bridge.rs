@@ -215,9 +215,7 @@ impl CoordinatorSupervisorBridge {
     /// dry-run paths).
     #[allow(dead_code)]
     pub fn tasks_path(&self) -> Option<&std::path::Path> {
-        self.context
-            .as_ref()
-            .and_then(|c| c.tasks_path.as_deref())
+        self.context.as_ref().and_then(|c| c.tasks_path.as_deref())
     }
 
     /// Access the coordinator so the bridge can hand it to
@@ -308,9 +306,7 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         // 2026-07-23-007 plan U4 (R-W5): forward the loop's
         // `tasks.jsonl` path so the dispatcher can project slot
         // transitions onto the runtime task ledger.
-        self.context
-            .as_ref()
-            .and_then(|c| c.tasks_path.as_deref())
+        self.context.as_ref().and_then(|c| c.tasks_path.as_deref())
     }
 
     fn try_dispatch_next(&self, wave_id: &str, slot_index: u32) -> Result<bool, BridgeError> {

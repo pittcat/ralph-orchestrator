@@ -1597,11 +1597,8 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
                         // store / bridge is unavailable, fall back
                         // to skipping silently (the synthetic-failure
                         // sweep would catch it later anyway).
-                        let _ = bridge.record_slot_failure(
-                            &store_wave_id,
-                            index_u32,
-                            &reason_string,
-                        );
+                        let _ =
+                            bridge.record_slot_failure(&store_wave_id, index_u32, &reason_string);
                         continue;
                     }
                 }
@@ -1642,15 +1639,13 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
                     error = %err,
                     "U2: merge_event_channel_env rejected binding; failing closed"
                 );
-                let _ = bridge.record_slot_failure(
-                    &store_wave_id,
-                    index_u32,
-                    &reason_string,
-                );
+                let _ = bridge.record_slot_failure(&store_wave_id, index_u32, &reason_string);
                 continue;
             }
             for (k, v) in extras {
-                worker_backend.env_vars.retain(|(existing, _)| existing != &k);
+                worker_backend
+                    .env_vars
+                    .retain(|(existing, _)| existing != &k);
                 worker_backend.env_vars.push((k, v));
             }
         }
@@ -2493,8 +2488,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                         let mut accepted: usize = 0;
                         for ev in events.iter() {
                             accepted += 1;
-                            if ev.topic.ends_with(".unit.done")
-                                || ev.topic.ends_with(".wave.done")
+                            if ev.topic.ends_with(".unit.done") || ev.topic.ends_with(".wave.done")
                             {
                                 markers.push(TerminalMarker::Done);
                             } else if ev.topic.ends_with(".unit.failed")
@@ -2586,8 +2580,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                         let mut accepted: usize = 0;
                         for ev in events {
                             accepted += 1;
-                            if ev.topic.ends_with(".unit.done")
-                                || ev.topic.ends_with(".wave.done")
+                            if ev.topic.ends_with(".unit.done") || ev.topic.ends_with(".wave.done")
                             {
                                 markers.push(TerminalMarker::Done);
                             } else if ev.topic.ends_with(".unit.failed")
@@ -2624,12 +2617,8 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
             if let Some((Some(tasks_path), outcome, wave_id, slot_index)) = projection_input {
                 use super::task_projection::{SlotProjection, project_slot};
                 let projection = match outcome {
-                    ralph_core::supervisor::DispatchOutcome::Completed => {
-                        SlotProjection::Completed
-                    }
-                    ralph_core::supervisor::DispatchOutcome::Failed => {
-                        SlotProjection::Failed
-                    }
+                    ralph_core::supervisor::DispatchOutcome::Completed => SlotProjection::Completed,
+                    ralph_core::supervisor::DispatchOutcome::Failed => SlotProjection::Failed,
                 };
                 project_slot(
                     &tasks_path,

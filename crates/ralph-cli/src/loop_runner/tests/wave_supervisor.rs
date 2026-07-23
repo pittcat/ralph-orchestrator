@@ -2873,12 +2873,11 @@ pub(crate) static CAPTURED_ENV: std::sync::OnceLock<
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u32, Vec<(String, String)>>>>,
 > = std::sync::OnceLock::new();
 
-fn captured_env() -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u32, Vec<(String, String)>>>> {
+fn captured_env()
+-> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u32, Vec<(String, String)>>>> {
     CAPTURED_ENV
         .get_or_init(|| {
-            std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            ))
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
         })
         .clone()
 }
@@ -2897,8 +2896,7 @@ async fn run_u2_execute_wave_with_env_capture(
     use crate::loop_runner::wave::execute_wave_via_supervisor_with_executor;
 
     let bridge_arc: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
-    let executor_dyn: std::sync::Arc<dyn WaveWorkerExecutor> =
-        std::sync::Arc::new(executor);
+    let executor_dyn: std::sync::Arc<dyn WaveWorkerExecutor> = std::sync::Arc::new(executor);
 
     execute_wave_via_supervisor_with_executor(
         &wave,
@@ -2986,7 +2984,9 @@ async fn test_u2_workspace_root_and_channel_injected_into_worker_env() {
 
     let capture = captured_env();
     capture.lock().unwrap().clear();
-    let _outcome = run_u2_execute_wave_with_env_capture(bridge, wave, executor, &main_events_file, "u2-loop").await;
+    let _outcome =
+        run_u2_execute_wave_with_env_capture(bridge, wave, executor, &main_events_file, "u2-loop")
+            .await;
 
     let snap = capture.lock().unwrap().clone();
     assert_eq!(snap.len(), 1, "U2/007: one slot captured; got {snap:?}");
@@ -3090,7 +3090,9 @@ async fn test_u4_slot_terminal_projects_to_tasks_jsonl() {
 
     let wave = make_u3_wave("u4-projection", 1, 1);
     let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(1));
-    let _outcome = run_u2_execute_wave_with_env_capture(bridge, wave, executor, &main_events_file, "u4-loop").await;
+    let _outcome =
+        run_u2_execute_wave_with_env_capture(bridge, wave, executor, &main_events_file, "u4-loop")
+            .await;
 
     // U4/007: tasks.jsonl now carries one row for slot 0 with a
     // stable task_key and a terminal status.

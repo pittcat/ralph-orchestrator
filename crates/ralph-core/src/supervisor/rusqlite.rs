@@ -593,10 +593,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 )
                 .optional()?;
             if let Some((status, prior_reason)) = prior {
-                let is_terminal = matches!(
-                    status.as_str(),
-                    "completed" | "failed" | "cancelled"
-                );
+                let is_terminal = matches!(status.as_str(), "completed" | "failed" | "cancelled");
                 if is_terminal {
                     let same_reason = prior_reason
                         .as_deref()
@@ -612,7 +609,8 @@ impl SupervisorStore for RusqliteSupervisorStore {
                     return Ok(());
                 }
             }
-            let new_status = if reason == crate::supervisor::worker_outcome::REASON_WORKER_CANCELLED {
+            let new_status = if reason == crate::supervisor::worker_outcome::REASON_WORKER_CANCELLED
+            {
                 "cancelled"
             } else {
                 "failed"

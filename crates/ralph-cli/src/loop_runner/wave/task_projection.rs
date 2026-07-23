@@ -129,11 +129,7 @@ pub fn project_slot(
 /// `tasks.jsonl`. The function is idempotent — running it twice
 /// produces the same end state.
 #[allow(dead_code)] // Wired by recovery startup (out-of-scope for executor).
-pub fn recover_pending_projections(
-    tasks_path: &Path,
-    loop_id: &str,
-    store: &dyn SupervisorStore,
-) {
+pub fn recover_pending_projections(tasks_path: &Path, loop_id: &str, store: &dyn SupervisorStore) {
     let snapshots = match store.recover_active_waves() {
         Ok(s) => s,
         Err(err) => {
@@ -196,11 +192,7 @@ mod tests {
         let tasks_path = tmp.path().join("tasks.jsonl");
         replay_snapshot(&tasks_path, "loop-1", &snap);
         let store = TaskStore::load(&tasks_path).expect("load");
-        let keys: Vec<_> = store
-            .all()
-            .iter()
-            .filter_map(|t| t.key.clone())
-            .collect();
+        let keys: Vec<_> = store.all().iter().filter_map(|t| t.key.clone()).collect();
         assert!(
             !keys.iter().any(|k| k.contains("slot-1")),
             "Pending slot must not be projected; got {keys:?}"
@@ -258,11 +250,8 @@ mod tests {
             h.join().expect("worker thread");
         }
         let store = TaskStore::load(&tasks_path).expect("load");
-        let keys: std::collections::BTreeSet<_> = store
-            .all()
-            .iter()
-            .filter_map(|t| t.key.clone())
-            .collect();
+        let keys: std::collections::BTreeSet<_> =
+            store.all().iter().filter_map(|t| t.key.clone()).collect();
         for slot_index in 0u32..4 {
             let expected = format!("supervisor:loop-1:wave-w-1:slot-{slot_index}");
             assert!(
