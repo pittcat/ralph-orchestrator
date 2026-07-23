@@ -373,6 +373,10 @@ impl CliBackend {
     ///
     /// Uses `-p` for print mode with `--mode json` for NDJSON streaming output.
     /// Emits `PiStreamJson` output format for structured event parsing.
+    /// Pins skills to the workspace's `.agents/skills` via `--no-skills` + `--skill`
+    /// so the system prompt only carries project skills, not the user-global
+    /// skill index (`~/.pi/agent/skills` / `~/.agents/skills`). Global Pi
+    /// extensions are left enabled.
     pub fn pi() -> Self {
         Self {
             command: "pi".to_string(),
@@ -381,6 +385,9 @@ impl CliBackend {
                 "--mode".to_string(),
                 "json".to_string(),
                 "--no-session".to_string(),
+                "--no-skills".to_string(),
+                "--skill".to_string(),
+                ".agents/skills".to_string(),
             ],
             prompt_mode: PromptMode::Arg,
             prompt_flag: None, // Positional argument
@@ -905,7 +912,16 @@ mod tests {
         assert_eq!(cmd, "pi");
         assert_eq!(
             args,
-            vec!["-p", "--mode", "json", "--no-session", "test prompt"]
+            vec![
+                "-p",
+                "--mode",
+                "json",
+                "--no-session",
+                "--no-skills",
+                "--skill",
+                ".agents/skills",
+                "test prompt",
+            ]
         );
         assert!(stdin.is_none());
         assert_eq!(backend.output_format, OutputFormat::PiStreamJson);
@@ -963,10 +979,24 @@ mod tests {
 
         assert_eq!(backend.command, "pi");
         assert_eq!(backend.output_format, OutputFormat::PiStreamJson);
-        assert!(args.contains(&"--provider".to_string()));
-        assert!(args.contains(&"zai".to_string()));
-        assert!(args.contains(&"--model".to_string()));
-        assert!(args.contains(&"glm-5".to_string()));
+        // Headless defaults + user-supplied provider/model + prompt, in that order.
+        assert_eq!(
+            args,
+            vec![
+                "-p",
+                "--mode",
+                "json",
+                "--no-session",
+                "--no-skills",
+                "--skill",
+                ".agents/skills",
+                "--provider",
+                "zai",
+                "--model",
+                "glm-5",
+                "test prompt",
+            ]
+        );
     }
 
     #[test]
@@ -984,16 +1014,25 @@ mod tests {
         let (cmd, args, _, _) = backend.build_command("test prompt", false);
 
         assert_eq!(cmd, "pi");
-        // Default args + extra args + prompt
-        assert!(args.contains(&"-p".to_string()));
-        assert!(args.contains(&"--mode".to_string()));
-        assert!(args.contains(&"json".to_string()));
-        assert!(args.contains(&"--no-session".to_string()));
-        assert!(args.contains(&"--provider".to_string()));
-        assert!(args.contains(&"anthropic".to_string()));
-        assert!(args.contains(&"--model".to_string()));
-        assert!(args.contains(&"claude-sonnet-4".to_string()));
-        assert!(args.contains(&"test prompt".to_string()));
+        // Default args + extra args + prompt, in that order, with the new
+        // skill budget pinned before user-supplied provider/model flags.
+        assert_eq!(
+            args,
+            vec![
+                "-p",
+                "--mode",
+                "json",
+                "--no-session",
+                "--no-skills",
+                "--skill",
+                ".agents/skills",
+                "--provider",
+                "anthropic",
+                "--model",
+                "claude-sonnet-4",
+                "test prompt",
+            ]
+        );
     }
 
     #[test]
