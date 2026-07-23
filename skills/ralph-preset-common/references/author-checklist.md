@@ -144,6 +144,12 @@
 - [ ] **每个 `rule.topic` 在 `event_policy.schemas` 内**：所有规则的 `topic` 都必须在 schema map 里声明；未声明的 `topic` 会被 lint 拒收为 `preset.payload_consistency_unknown_topic`。
 - [ ] **`when` 引用的 `field` 在该 topic schema 字段并集内**：声明字段必须出现在 `required_fields` ∪ `known_fields` ∪ `field_docs.keys()` ∪ `allowed_values.keys()` ∪ `element_constraints` 中；未声明字段会让谓词永不命中（runtime 视为 miss），lint 拒收为 `preset.payload_consistency_unknown_field`。
 - [ ] **`rule.id` 在 preset 内唯一**：`id` 是 runtime `payload_consistency:<id>` gate 的稳定标识；重复的 `id` 会被 lint 拒收为 `preset.payload_consistency_duplicate_id`，并使 agent 收到的拒收原因变得无法解析。
+- [ ] **`when.op` 在白名单内**：`op` 只能是 `eq` / `ne` / `gt` / `gte` / `exists` / `non_empty`；其它 op 会被 lint 拒收为 `preset.payload_consistency_unknown_op`，runtime 也会直接拒收。
+- [ ] **`when` 是 object 形态**：单谓词 `{field, op, value}` 或组合 `{all:[...]}` / `{any:[...]}`；非 object `when` 会被 lint 拒收为 `preset.payload_consistency_non_object_when`。
+- [ ] **`rule.message` 安全且有界**：`message` 是不可信诊断数据（不是 agent 指令），长度 ≤ 1024 UTF-8 bytes，不含 ANSI escape / C0/C1 控制字符 / 零宽字符；违规会被 lint 拒收为 `preset.payload_consistency_unsafe_message`。runtime 对绕过 lint 的旧/动态配置会按 code-point 边界安全截断并标记 `truncated=true`。
+- [ ] **mode/action parity**：`mode: observe` 与 `mode: enforce` + `on_violation: warn` / `reject_with_resume` 在 Precheck (`--policy-check`) 与 Apply 路径行为一致——不要假设 CLI 会私自升级 Warn 为 fatal；runtime 由 `PolicyDecision` 统一决定。authoring 时按业务意图选 mode/action，不需要为 Precheck/Apply 分叉写额外配置。
+- [ ] **`referenced_fields` 由 predicate AST 自动派生**：`ValidationError` 的 `referenced_fields` 是 runtime 从 `when` 谓词 AST 遍历得到的稳定字段路径数组（按声明顺序去重），agent 据此定位需修复的字段；author **不**在 rule 里手写 `referenced_fields`，也**不**把 gate ID 塞进 `field`。
+- [ ] **`gate` 与 `field` 分离**：拒收反馈里 `gate` 字段携带 `payload_consistency:<rule_id>` 标识，`field` 字段只承载业务字段名（组合规则可为首个稳定字段）；不要在文档或 instructions 中暗示 agent 从 `field` 解析 gate ID。
 
 **拒交付信号：**
 

@@ -34,8 +34,16 @@ Observe → Precheck → Apply → Confirm。isolated 模式下 state-changing �
 
 ### payload consistency（载荷一致性闸）
 
-挂在 `event_policy.payload_consistency` 的同 payload 验收 checkpoint（默认关闭、preset opt-in）：在 `ralph emit` / `--policy-check` 与真实 Apply 使用同源路径上，按 preset 声明的谓词检查**当前交卷 JSON 是否自洽**（例如声称成功却与计数/状态互斥）。命中时以 `payload_consistency:<rule_id>` 拒收，agent 可读恢复说明沿用其他 `SemanticGateViolation` 拒收的同一条恢复通道；不读事件历史（跨事件互斥是 follow-up）。与 OPAC（操作纪律）和 `execution_contracts`（完成证据义务）分工，不互相替代。
+挂在 `event_policy.payload_consistency` 的同 payload 验收 checkpoint（默认关闭、preset opt-in）：在 `ralph emit` / `--policy-check` 与真实 Apply 使用同源路径上，按 preset 声明的谓词检查**当前交卷 JSON 是否自洽**（例如声称成功却与计数/状态互斥）。命中时以 `gate=payload_consistency:<rule_id>` 拒收，并附带 `referenced_fields`（从 predicate AST 派生的稳定字段路径数组）；agent 据此定位需修复字段，不从 `message` 解析。`rule.message` 是不可信诊断数据（≤1024 UTF-8 bytes，禁 ANSI/控制字符/零宽字符），不进 agent 指令通道。agent 恢复说明沿用其他 `SemanticGateViolation` 拒收的同一条恢复通道；不读事件历史（跨事件互斥是 follow-up）。与 OPAC（操作纪律）和 `execution_contracts`（完成证据义务）分工，不互相替代。
 
 ### wave protocol suite（六件套）
 
 Wave/supervisor 协议层能力集合：反压、分布式取消、状态持久化、幂等键、内容哈希去重、补偿。语义 SSOT 在 `SupervisorStore`；默认 wave 路径应吸收该套件，而非仅 `supervisor.enabled` preset。
+
+### Pi skill 上下文预算
+
+`ralph run -b pi`（headless）默认用 `--no-skills --skill .agents/skills`：不加载用户全局 skill 索引，只挂项目 `.agents/skills`；全局 Pi extensions 仍可加载。交互式 `pi_interactive` 路径不强制套用。缺 `.agents/skills` 不得硬失败。
+
+### Ralph 分阶段 Pi activation
+
+单次 hat activation 内，Pi extension 识别 Ralph 长 prompt，按 `ORIENTATION → EXECUTE → VERIFY → REPORT`（对齐 `build_custom_hat`）自动多轮披露与续跑；缺段跳过，解析失败则不接管。阶段完成须确定性信号；事实源与门禁仍在 Ralph。适用于所有 Ralph→Pi activation，不限某个 hat。

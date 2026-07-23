@@ -9,6 +9,19 @@
 #   (f) supervisor wave consumer hat (triggers contain `*.unit.ready`) without concurrency declaration
 #       (concurrency defaults to 1 → no parallelism)                      → preset.supervisor_wave_consumer_low_concurrency
 #
+# Anti-pattern axes (2026-07-23-002 plan U5 — Supervisor closure audit, review-only):
+#   (g) supervisor preset missing `event_loop.supervisor.max_concurrent_workers`
+#       or value > 8                                                       → supervisor_missing_global_cap
+#   (h) integrator hat emits `work.done` without verifying `success_slots`
+#       resources are present and readable                                 → supervisor_integrator_skips_resource_verification
+#   (i) main ledger would accept multiple `LOOP_COMPLETE` or `loop_stale` → supervisor_duplicate_or_stale_terminal
+#   (j) fan-in sink failure path is missing or fakes success               → supervisor_sink_failure_fake_success
+#   (k) terminal state (success or failure) does not release permit / close
+#       child / clean up temp worktree or branch                           → supervisor_terminal_cleanup_missing
+#   (l) restart path re-injects coordination terminal or re-consumes
+#       `success_slots` resources                                          → supervisor_restart_not_idempotent
+#   (m) happy path accepts `Failed` / `Cancelled` slot as success          → supervisor_happy_path_accepts_failure
+#
 # Not registered in presets/manifest.yml; intentionally anonymous.
 event_loop:
   # Axis (a): supervisor.enabled without isolated → preset.supervisor_requires_isolated

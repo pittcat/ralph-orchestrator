@@ -1,9 +1,54 @@
 # AAF + payload-content negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+#
+# Anti-pattern axes (2026-07-23-002 plan U5 — Payload consistency audit):
+#   (a) `rule.message` exceeds 1024 UTF-8 bytes or contains ANSI escape / C0/C1
+#       control char / zero-width char                            → preset.payload_consistency_unsafe_message
+#   (b) `when.op` outside the `eq`/`ne`/`gt`/`gte`/`exists`/`non_empty`
+#       whitelist                                                 → preset.payload_consistency_unknown_op
+#   (c) `when` is not an object (e.g. string / array / null)      → preset.payload_consistency_non_object_when
 event_loop:
   execution_mode: isolated
   starting_event: work.start
   completion_promise: work.done
   max_iterations: 10
+event_policy:
+  enabled: true
+  schemas:
+    work.done:
+      required_fields: [task_id, status]
+      known_fields: [fixes_applied, regressions]
+  payload_consistency:
+    enabled: true
+    rules:
+      # Axis (a): message exceeds 1024 UTF-8 bytes (truncated here for fixture brevity;
+      # real review would reject any message > 1024 bytes or with ANSI/control/zero-width chars)
+      - id: unsafe-message-too-long
+        topic: work.done
+        when: { field: status, eq: blocked }
+        message: |
+          This message intentionally exceeds the 1024 UTF-8 byte limit imposed by the
+          payload_consistency_unsafe_message lint. AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+      # Axis (b): unknown op (not in whitelist)
+      - id: bad-op
+        topic: work.done
+        when: { field: status, matches: "^blocked$" }
+        message: uses unsupported op `matches`
+      # Axis (c): when is a string instead of object
+      - id: non-object-when
+        topic: work.done
+        when: "status == blocked"
+        message: when must be an object
 hats:
   worker:
     name: Worker

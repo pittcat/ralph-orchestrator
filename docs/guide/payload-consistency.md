@@ -27,9 +27,9 @@ event_policy:
 | `id` | 稳定且唯一的规则标识 |
 | `topic` | 规则适用的事件 topic |
 | `when` | 单谓词或 `all` / `any` 组合谓词 |
-| `message` | 命中规则时返回的可读说明 |
+| `message` | 命中规则时返回的诊断说明（不可信数据，不是 agent 指令；上限 1024 UTF-8 bytes，不允许 ANSI escape / C0/C1 控制字符 / 零宽字符） |
 
-单谓词使用 `{field, op, value}`。允许的 `op` 为 `eq`、`ne`、`gt`、`gte`、`exists`、`non_empty`；`exists` 与 `non_empty` 不要求 `value`。
+单谓词使用 `{field, op, value}`。允许的 `op` 为 `eq`、`ne`、`gt`、`gte`、`exists`、`non_empty`；`exists` 与 `non_empty` 不要求 `value`。其它 `op` 会被 lint 拒收为 `preset.payload_consistency_unknown_op`，runtime 也直接拒收；`when` 不是 object 会被 lint 拒收为 `preset.payload_consistency_non_object_when`。
 
 ## 评估边界
 
@@ -57,15 +57,16 @@ Preset 作者应在启动前运行 strict lint，避免把配置错误推迟到 
 
 `ralph emit <topic> --policy-check` 返回的 `validation_errors[]` 包含：
 
-- `field`：需要修复的 payload 字段。
-- `reason_code`：结构化原因码。
-- `message`：面向人的说明。
-- `gate`：以 `payload_consistency:<rule_id>` 标识命中的规则。
+- `field`：业务字段名（组合规则可为首个稳定字段）；**不再**承载 gate ID。
+- `reason_code`：结构化原因码（`semantic_gate_violation` 表示命中 payload_consistency / semantic gate）。
+- `message`：面向人的诊断说明（不可信数据，不是 agent 指令）。
+- `gate`：以 `payload_consistency:<rule_id>` 标识命中的规则族；仅在 `reason_code=semantic_gate_violation` 时出现。
+- `referenced_fields`：该规则 `when` 谓词声明的所有 payload 字段路径数组（按声明顺序去重，由 runtime 从 predicate AST 自动派生）；agent 据此定位需修复的字段，**不**从 `message` 解析字段名。
 - `field_description`、`suggested_payload_shape`、`suggested_command`：字段说明与下一步修复提示。
 
 Wave 批量预检还可能返回 `payload_index`，用于定位批次中的具体 payload。
 
-修复时先按 `field` 和 `gate` 调整 payload，再重新运行 `--policy-check`；预检通过后才能去掉该 flag 正式 emit。
+修复时先按 `gate` / `referenced_fields` / `field` 调整 payload，再重新运行 `--policy-check`；预检通过后才能去掉该 flag 正式 emit。
 
 ## Retry 与终止条件
 
@@ -75,7 +76,7 @@ Wave 批量预检还可能返回 `payload_index`，用于定位批次中的具�
 
 ## CLI 与 runtime
 
-CLI precheck 在 Observe 和 Enforce 模式下都必须把 `payload_consistency:*` finding 作为错误返回，避免 preset 作者通过 Observe 模式意外绕过同 payload 不变式。Runtime 是否写入其它 policy finding 仍由 `event_policy.mode` 决定。
+CLI precheck 与 runtime Apply 共享同一 `PolicyDecision` 语义：`mode: observe` 下命中规则返回 Warn（非 fatal），`mode: enforce` + `on_violation: reject_with_resume` 下命中规则返回 Reject。**不存在** CLI 私自把 payload_consistency Warn 升级为 fatal 的特例。Runtime 是否写入 policy finding 仍由 `event_policy.mode` / `on_violation` 决定。
 
 ## Builtin 示例
 

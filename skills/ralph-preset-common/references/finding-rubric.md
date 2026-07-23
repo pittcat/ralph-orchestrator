@@ -129,6 +129,9 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.payload_consistency_duplicate_id` | P0 | 90 | Q4 | lint |
 | `preset.payload_consistency_unknown_topic` | P0 | 90 | Q4 | lint |
 | `preset.payload_consistency_unknown_field` | P0 | 90 | Q4 | lint |
+| `preset.payload_consistency_unknown_op` | P0 | 90 | Q4 | lint | `when.op` 不在 `eq`/`ne`/`gt`/`gte`/`exists`/`non_empty` 白名单 |
+| `preset.payload_consistency_non_object_when` | P0 | 90 | Q4 | lint | `when` 不是 object（单谓词或 `all`/`any` 组合） |
+| `preset.payload_consistency_unsafe_message` | P0 | 90 | Q4 | lint | `rule.message` 含 ANSI escape / C0/C1 控制字符 / 零宽字符 / 长度超过 1024 UTF-8 bytes |
 
 ### Artifact-First Handoff finding_id（review-only，lint 不直接产出）
 
@@ -200,6 +203,13 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 | supervisor sub-unit 状态未走 `ralph tools task list` 或业务 artifact，而是依赖读 `.ralph/supervisor.db` | P0 | visibility | Q2 / Q5 | `preset.supervisor_unit_state_not_via_task_api` |
 | hat `instructions` 要求把 `.ralph/supervisor.db` 当业务 artifact 接口（写或读） | P0 | visibility | Q2 | `preset.artifact_uses_internal_ledger` |
 | `execution_model` Intent 字段与 YAML 能力信号不一致（如 Intent= `single-chain` 但 `event_loop.supervisor.enabled: true`） | P0 | payload-content | Q4 | `preset.execution_model_intent_mismatch` |
+| supervisor preset 缺少 `event_loop.supervisor.max_concurrent_workers` 或上限超过合理范围（生产应 ≤ 8） | P1 | feasibility | Q3 | review-only（`supervisor_missing_global_cap`） |
+| integrator hat 在 `success_slots` 资源缺失 / 不可读时仍发 `work.done` | P0 | payload-content | Q4 / Q5 | review-only（`supervisor_integrator_skips_resource_verification`） |
+| 主 ledger 出现多个 `LOOP_COMPLETE`、`loop_stale` 或重复协调终态 | P0 | topology | Q4 | review-only（`supervisor_duplicate_or_stale_terminal`） |
+| supervisor preset 缺少 fan-in sink 失败的明确 fail-closed 路径（sink 失败仍冒充成功） | P0 | topology | Q4 | review-only（`supervisor_sink_failure_fake_success`） |
+| supervisor preset 在终态（成功或失败）后未释放 permit / 未关闭 child / 未清理临时 worktree/branch | P0 | state | Q5 | review-only（`supervisor_terminal_cleanup_missing`） |
+| supervisor preset 的 restart 路径会重复注入协调终态或重复消费 `success_slots` 资源 | P0 | topology | Q4 | review-only（`supervisor_restart_not_idempotent`） |
+| supervisor happy path 接受 `Failed` / `Cancelled` slot 作为成功 | P0 | payload-content | Q4 | review-only（`supervisor_happy_path_accepts_failure`） |
 
 命中按上表入主表；`preset.execution_model_intent_mismatch` 是 U4 新增 review-only 软性 finding，与既有 lint id `preset.supervisor_requires_isolated` / `preset.supervisor_hat_publishes_coord_topic` / `preset.artifact_uses_internal_ledger` 复用底层问题，但触发条件是 **capability + Intent 一致性**而非 preset 名。`presets/en/ce-executor-supervisor.yml` 等既有 builtin 仍受既有 lint 约束，不在本表新触发条件内。
 
