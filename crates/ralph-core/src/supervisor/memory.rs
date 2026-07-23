@@ -17,8 +17,9 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use super::{
-    DispatchOutcome, IdempotencyKey, IsolationMode, SlotResource, SlotStatus, SupervisorStore,
-    SupervisorStoreError, SupervisorStoreResult, WaveKind, WavePhase, WaveSnapshot,
+    CompensationKind, DispatchOutcome, IdempotencyKey, IsolationMode,
+    SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult,
+    WaveKind, WavePhase, WaveSnapshot,
 };
 
 /// Per-wave descriptor held in `InMemorySupervisorStore::waves`.
@@ -127,9 +128,10 @@ struct WorkerResult {
 
 #[derive(Debug, Clone)]
 // 2026-07-16 cleanup U4 (KTD-3): `wave_id` / `kind` / `status`
-// reserved for the supervisor compensation-hook (U4) execution
-// payload.
-#[allow(dead_code)]
+// 2026-07-22-001 plan U6: `compensation_jobs` is now actively
+// populated by the dispatcher's cancel / aggregate-timeout /
+// spawn-failure paths and drained by the coordinator tick.
+// The entry is no longer reserved.
 struct CompensationEntry {
     wave_id: String,
     kind: CompensationKind,
@@ -137,20 +139,7 @@ struct CompensationEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// 2026-07-16 cleanup U4 (KTD-3): U4 supervisor compensation-hook
-// discriminator; kept stable so the executor can dispatch to the
-// right hook without churn when U4 lands.
-#[allow(dead_code)]
-enum CompensationKind {
-    OnTimeout,
-    OnCancel,
-    OnPartial,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// 2026-07-16 cleanup U4 (KTD-3): U4 supervisor compensation-hook
-// lifecycle states.
-#[allow(dead_code)]
+// 2026-07-22-001 plan U6: compensation-hook lifecycle states.
 enum CompensationStatus {
     Pending,
     Executed,
@@ -671,6 +660,66 @@ impl SupervisorStore for InMemorySupervisorStore {
             .get_mut(wave_id)
             .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
         wave.phase = phase;
+        Ok(())
+    }
+
+    fn enqueue_compensation(
+        &self,
+        wave_id: &str,
+        kind: CompensationKind,
+    ) -> SupervisorStoreResult<()> {
+        // 2026-07-22-001 plan U6: dedup enqueue by (wave_id, kind)
+        // so a re-entered cancel path does not stack two jobs
+        // for the same wave. We also accept enqueue for unknown
+        // waves silently — the dispatcher may call cancel_wave
+        // before the store has registered the wave when the
+        // dispatcher is shutting down, and we do not want a
+        // compensation enqueue failure to abort the shutdown.
+        let mut inner = self.lock()?;
+        let exists = inner
+            .compensation
+            .iter()
+            .any(|c| c.wave_id == wave_id && c.kind == kind && c.status == CompensationStatus::Pending);
+        if !exists {
+            inner.compensation.push(CompensationEntry {
+                wave_id: wave_id.to_string(),
+                kind,
+                status: CompensationStatus::Pending,
+            });
+        }
+        Ok(())
+    }
+
+    fn take_pending_compensations(
+        &self,
+    ) -> SupervisorStoreResult<Vec<(String, CompensationKind)>> {
+        let inner = self.lock()?;
+        Ok(inner
+            .compensation
+            .iter()
+            .filter(|c| c.status == CompensationStatus::Pending)
+            .map(|c| (c.wave_id.clone(), c.kind))
+            .collect())
+    }
+
+    fn complete_compensation(
+        &self,
+        wave_id: &str,
+        kind: CompensationKind,
+        ok: bool,
+    ) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        if let Some(entry) = inner
+            .compensation
+            .iter_mut()
+            .find(|c| c.wave_id == wave_id && c.kind == kind && c.status == CompensationStatus::Pending)
+        {
+            entry.status = if ok {
+                CompensationStatus::Executed
+            } else {
+                CompensationStatus::Failed
+            };
+        }
         Ok(())
     }
 

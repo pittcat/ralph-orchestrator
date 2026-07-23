@@ -440,6 +440,55 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// entry point (KTD-8 — phase ownership is coordinator
     /// only).
     fn set_wave_phase(&self, wave_id: &str, phase: WavePhase) -> SupervisorStoreResult<()>;
+
+    /// 2026-07-22-001 plan U6 (KTD-7): enqueue a compensation
+    /// job for `wave_id`. The dispatcher calls this on
+    /// aggregate-timeout / global-deadline / spawn-failure so a
+    /// subsequent coordinator tick can drain the queue and run
+    /// the diagnostic hook (currently a no-op stderr record).
+    /// Repeated enqueue of the same `(wave_id, kind)` is a
+    /// no-op so a fan-in that re-tries does not duplicate
+    /// jobs.
+    fn enqueue_compensation(
+        &self,
+        wave_id: &str,
+        kind: CompensationKind,
+    ) -> SupervisorStoreResult<()>;
+
+    /// 2026-07-22-001 plan U6: drain pending compensation jobs
+    /// atomically and hand them to the caller. Returns
+    /// `(wave_id, kind)` tuples; the caller (dispatcher's
+    /// coordinator tick) is responsible for marking them
+    /// `executed` via [`Self::complete_compensation`] so the
+    /// store can advance the lifecycle.
+    fn take_pending_compensations(
+        &self,
+    ) -> SupervisorStoreResult<Vec<(String, CompensationKind)>>;
+
+    /// 2026-07-22-001 plan U6: mark a drained compensation job
+    /// completed (`ok`) or failed (`!ok`). The store records
+    /// this so a subsequent inspect / diagnose surfaces the
+    /// job's terminal state.
+    fn complete_compensation(
+        &self,
+        wave_id: &str,
+        kind: CompensationKind,
+        ok: bool,
+    ) -> SupervisorStoreResult<()>;
+}
+
+/// 2026-07-22-001 plan U6: compensation-hook discriminator.
+/// Mirrors the rusqlite `compensation_jobs.kind` column. We
+/// keep this stable so future hook commands can dispatch by
+/// kind without churn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompensationKind {
+    /// Aggregate timeout fired; wave did not reach Integrate.
+    OnTimeout,
+    /// Explicit cancel or global deadline exceeded.
+    OnCancel,
+    /// Partial threshold reached; some slots remained pending.
+    OnPartial,
 }
 
 pub use crate::worktree::Worktree;
