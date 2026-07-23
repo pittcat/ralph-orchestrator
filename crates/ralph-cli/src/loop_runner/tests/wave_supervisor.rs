@@ -872,6 +872,7 @@ fn production_bridge_with_factory(
         loop_id: loop_id.to_string(),
         repo_root: loop_ctx.repo_root().to_path_buf(),
         events_path: None,
+        tasks_path: None,
     };
     let store = std::sync::Arc::new(InMemorySupervisorStore::new());
     let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
@@ -1135,6 +1136,7 @@ fn production_bridge_default_factory_is_default_worktree_factory() {
             loop_id: "u4-default".to_string(),
             repo_root: tmp.path().to_path_buf(),
             events_path: None,
+            tasks_path: None,
         },
         std::sync::Arc::new(DefaultWorktreeFactory),
     );
@@ -1510,6 +1512,7 @@ fn test_bind_slot_factory_failure_returns_err() {
         loop_id: "u1-fail".to_string(),
         repo_root: tmp.path().to_path_buf(),
         events_path: None,
+        tasks_path: None,
     };
     let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
         store.clone() as std::sync::Arc<dyn SupervisorStore>,
@@ -2372,9 +2375,14 @@ impl U5RecordingExecutor {
 
 /// Build a deterministic `ralph_core::Event` for a (slot, seq) pair so
 /// the content hash is stable across runs.
+///
+/// Uses the production-shaped terminal topic `exec.unit.done` so the
+/// dispatcher's classifier (2026-07-23-007 plan U1) recognises it as
+/// a terminal Done marker and routes to `record_slot_result` instead
+/// of `record_slot_failure(empty_worker_result)`.
 fn u5_event(slot_index: u32, seq: usize) -> ralph_core::Event {
     ralph_core::Event {
-        topic: "exec.done".to_string(),
+        topic: "exec.unit.done".to_string(),
         payload: Some(format!("{{\"slot\":{slot_index},\"seq\":{seq}}}")),
         ts: String::new(),
         hat: None,
@@ -2395,6 +2403,14 @@ impl WaveWorkerExecutor for U5RecordingExecutor {
         let plan = std::sync::Arc::clone(&self.plan);
         let default = self.default.clone();
         Box::pin(async move {
+            // U2/007: capture the per-slot env map so the test
+            // surface can assert on RALPH_WORKSPACE_ROOT and
+            // RALPH_EVENTS_FILE. The executor runs in the dispatcher's
+            // task, so writes go through the recording Mutex.
+            if let Some(captured) = CAPTURED_ENV.get() {
+                let mut guard = captured.lock().unwrap();
+                guard.insert(request.index, request.backend.env_vars.clone());
+            }
             let _ = request.worker_rpc_tx.take();
             let _ = request.worker_tui_state.take();
             let index = request.index;
@@ -2586,12 +2602,6 @@ async fn run_u5_execute_wave(
     )
     .await;
     (outcome, bridge)
-}
-
-/// The sha256 of the empty string — the stable fingerprint the
-/// dispatcher must record for an empty event batch.
-fn empty_batch_hash() -> String {
-    ralph_core::agent_doc_sync::compute_sha256_hex("")
 }
 
 /// U5 验收 #1: N successful workers → the supervisor store records
@@ -2787,8 +2797,13 @@ async fn test_dispatcher_records_event_batch_count() {
     );
 }
 
-/// U5 验收 #5: an empty-event worker → `event_count == 0` and a
-/// stable empty-batch content hash (sha256 of "").
+/// U5 验收 #5 (flipped by 2026-07-23-007 plan U1): an empty-event
+/// worker → the dispatcher MUST classify via `classify_worker_outcome`
+/// and record `record_slot_failure("empty_worker_result")`. The legacy
+/// "stable hash on empty batch" assertion was incorrect: an exit-0
+/// worker with `event_count == 0` is a fail-close case, not a success.
+/// The non-empty count + content hash contract still holds for the
+/// accepted-batch path (verified by `test_dispatcher_records_event_batch_count`).
 #[tokio::test]
 async fn test_dispatcher_records_empty_batch_stable_hash() {
     let store = std::sync::Arc::new(InMemorySupervisorStore::new());
@@ -2799,15 +2814,400 @@ async fn test_dispatcher_records_empty_batch_stable_hash() {
 
     let (_outcome, bridge) = run_u5_execute_wave(bridge, wave, executor).await;
 
+    // The flipped semantic: success + zero events → record_slot_failure.
     let results = bridge.results_snapshot();
-    assert_eq!(results.len(), 1, "U5: one slot recorded; got {results:?}");
-    let (slot, hash, count) = &results[0];
-    assert_eq!(*slot, 0);
-    assert_eq!(*count, 0, "U5: empty batch → event_count == 0");
     assert_eq!(
-        *hash,
-        empty_batch_hash(),
-        "U5: empty batch must hash to the stable empty sha256"
+        results.len(),
+        0,
+        "U1/007: empty batch must NOT record a slot result; got {results:?}"
+    );
+    let failures = bridge.failures_snapshot();
+    assert_eq!(
+        failures.len(),
+        1,
+        "U1/007: empty batch must record exactly one slot failure; got {failures:?}"
+    );
+    let (slot, reason) = &failures[0];
+    assert_eq!(*slot, 0);
+    assert_eq!(
+        reason,
+        ralph_core::supervisor::worker_outcome::REASON_EMPTY_WORKER_RESULT,
+        "U1/007: empty batch must use the stable reason code empty_worker_result"
+    );
+
+    // The store snapshot reflects 0 completed slots + 1 failed slot.
+    let store_wave_id = bridge
+        .store
+        .recover_active_waves()
+        .expect("recover")
+        .pop()
+        .expect("one wave")
+        .wave_id;
+    let snap = bridge
+        .store
+        .fan_in_status(&store_wave_id)
+        .expect("snapshot");
+    assert_eq!(
+        snap.completed_count, 0,
+        "U1/007: empty batch must not lift completed_count"
+    );
+    assert_eq!(
+        snap.failed_count, 1,
+        "U1/007: empty batch must lift failed_count"
+    );
+}
+
+// =============================================================================
+// 2026-07-23-007 plan U2 (R-W1): control-plane binding + workspace root
+// injection in the production supervisor path.
+//
+// These tests drive `execute_wave_via_supervisor_with_executor` with the
+// real production bridge (`CoordinatorSupervisorBridge` +
+// `ProductionBridgeContext`) and a controllable executor that captures
+// the per-slot env map so the test surface can assert on
+// `RALPH_WORKSPACE_ROOT` / `RALPH_EVENTS_FILE`. The capture is
+// opt-in via a thread-local so the existing U5 tests stay untouched.
+// =============================================================================
+
+pub(crate) static CAPTURED_ENV: std::sync::OnceLock<
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u32, Vec<(String, String)>>>>,
+> = std::sync::OnceLock::new();
+
+fn captured_env()
+-> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u32, Vec<(String, String)>>>> {
+    CAPTURED_ENV
+        .get_or_init(|| {
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+        })
+        .clone()
+}
+
+/// Run a wave through the production supervisor path with env capture
+/// enabled. Returns the dispatch outcome and the captured per-slot
+/// env map. Uses an isolated tempdir for the wave's per-worker
+/// channels so the validator's parent-creatable check passes.
+async fn run_u2_execute_wave_with_env_capture(
+    bridge: CoordinatorSupervisorBridge,
+    wave: ralph_core::DetectedWave,
+    executor: U5RecordingExecutor,
+    main_events_file: &std::path::Path,
+    loop_id: &str,
+) -> WaveDispatchOutcome {
+    use crate::loop_runner::wave::execute_wave_via_supervisor_with_executor;
+
+    let bridge_arc: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
+    let executor_dyn: std::sync::Arc<dyn WaveWorkerExecutor> = std::sync::Arc::new(executor);
+
+    execute_wave_via_supervisor_with_executor(
+        &wave,
+        &ralph_adapters::CliBackend::claude(),
+        main_events_file,
+        false,
+        false,
+        None,
+        None,
+        loop_id,
+        WaveDispatchLimits::default(),
+        None,
+        None,
+        &bridge_arc,
+        executor_dyn,
+    )
+    .await
+}
+
+/// U2 验收 #1: production supervisor bridge with a real
+/// `ProductionBridgeContext.repo_root` — the spawned worker MUST
+/// observe `RALPH_WORKSPACE_ROOT == repo_root` and
+/// `RALPH_EVENTS_FILE == <validated absolute channel>` even when
+/// the parent process has polluted values for both. The
+/// `merge_event_channel_env` SSOT overrides whatever was in the
+/// worker_backend env before validation.
+#[tokio::test]
+async fn test_u2_workspace_root_and_channel_injected_into_worker_env() {
+    use crate::loop_runner::wave::CoordinatorSupervisorBridge;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    // U2/007: canonicalize the tempdir so symlinked paths
+    // (e.g. /var/tmp → /private/var/tmp on macOS) match the
+    // canonicalized workspace root in the validator. Without
+    // this, validate_control_plane_binding rejects every channel
+    // it observes in CI on macOS.
+    let workspace_root = std::fs::canonicalize(tmp.path()).expect("canonicalize workspace root");
+    let wave_dir = workspace_root.join(".ralph");
+    std::fs::create_dir_all(&wave_dir).expect("create wave dir");
+    let main_events_file = wave_dir.join("events.jsonl");
+
+    // U2/007: stub worktree factory — `DefaultWorktreeFactory`
+    // would invoke the real `git worktree add`, but the tempdir
+    // is not a git repo, so the bind would fail-closed and the
+    // executor would never run. The stub returns a synthetic
+    // worktree under the workspace root so the slot-subtree
+    // validator has something to reject / accept against.
+    #[derive(Debug)]
+    struct StubFactory;
+    impl ralph_core::supervisor::worktree_bind::WorktreeFactory for StubFactory {
+        fn create(
+            &self,
+            repo_root: std::path::PathBuf,
+            branch: String,
+        ) -> Result<
+            ralph_core::worktree::Worktree,
+            ralph_core::supervisor::worktree_bind::WorktreeError,
+        > {
+            let wt = repo_root.join(format!("wt-{branch}"));
+            std::fs::create_dir_all(&wt).ok();
+            Ok(ralph_core::worktree::Worktree {
+                path: wt,
+                branch,
+                is_main: false,
+                head: None,
+            })
+        }
+    }
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let context = ProductionBridgeContext {
+        loop_id: "u2-loop".to_string(),
+        repo_root: workspace_root.clone(),
+        events_path: Some(main_events_file.clone()),
+        tasks_path: None,
+    };
+    let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
+        store.clone() as std::sync::Arc<dyn SupervisorStore>,
+        context,
+        std::sync::Arc::new(StubFactory),
+    );
+
+    let wave = make_u3_wave("u2-routing", 1, 1);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(1));
+
+    let capture = captured_env();
+    capture.lock().unwrap().clear();
+    let _outcome =
+        run_u2_execute_wave_with_env_capture(bridge, wave, executor, &main_events_file, "u2-loop")
+            .await;
+
+    let snap = capture.lock().unwrap().clone();
+    assert_eq!(snap.len(), 1, "U2/007: one slot captured; got {snap:?}");
+    let env_map: std::collections::HashMap<String, String> = snap
+        .get(&0)
+        .expect("slot 0 captured")
+        .iter()
+        .cloned()
+        .collect();
+
+    let canonical_root = std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root.clone());
+    let expected_root = canonical_root.display().to_string();
+    let observed_root = env_map
+        .get("RALPH_WORKSPACE_ROOT")
+        .expect("RALPH_WORKSPACE_ROOT must be injected")
+        .clone();
+    assert!(
+        observed_root == expected_root || observed_root == workspace_root.display().to_string(),
+        "U2/007: RALPH_WORKSPACE_ROOT must equal the production repo_root; expected={expected_root}, got={observed_root}"
+    );
+
+    // The per-worker channel (RALPH_EVENTS_FILE) is the validated
+    // absolute path of the slot's per-worker JSONL (NOT the main
+    // events file). The dispatcher builds
+    // `<wave_dir>/wave-{id}-{index}.jsonl`, validates it, and the
+    // SSOT injects the validated canonical path here.
+    let observed_events = env_map
+        .get("RALPH_EVENTS_FILE")
+        .expect("RALPH_EVENTS_FILE must be injected")
+        .clone();
+    let observed_events_path = std::path::Path::new(&observed_events);
+    assert!(
+        observed_events_path.is_absolute(),
+        "U2/007: RALPH_EVENTS_FILE must be an absolute path; got {observed_events}"
+    );
+    // The injected path MUST live under the validated workspace root.
+    assert!(
+        observed_events_path.starts_with(&canonical_root),
+        "U2/007: RALPH_EVENTS_FILE must live under workspace_root; got {observed_events}, expected prefix {expected_root}"
+    );
+    // And it must NOT live inside the slot worktree (slot-subtree
+    // rejection contract).
+    assert!(
+        !observed_events_path.starts_with(workspace_root.join("wt-")),
+        "U2/007: RALPH_EVENTS_FILE must NOT live in slot subtree; got {observed_events}"
+    );
+}
+
+/// 2026-07-23-007 plan U4 (R-W5): when the production bridge
+/// carries a `tasks.jsonl` path, the dispatcher projects each
+/// slot's terminal state onto a stable task row. A successful
+/// slot ends up as `TaskStatus::Closed` in `tasks.jsonl`;
+/// `ralph tools task list` (via `TaskStore::load`) sees it.
+/// Idempotent re-projection does not duplicate rows.
+#[tokio::test]
+async fn test_u4_slot_terminal_projects_to_tasks_jsonl() {
+    use crate::loop_runner::wave::CoordinatorSupervisorBridge;
+    use ralph_core::TaskStore;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let workspace_root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    let tasks_dir = workspace_root.join(".ralph").join("agent");
+    std::fs::create_dir_all(&tasks_dir).expect("create tasks dir");
+    let tasks_path = tasks_dir.join("tasks.jsonl");
+    let main_events_file = workspace_root.join(".ralph").join("events.jsonl");
+
+    #[derive(Debug)]
+    struct StubFactory;
+    impl ralph_core::supervisor::worktree_bind::WorktreeFactory for StubFactory {
+        fn create(
+            &self,
+            repo_root: std::path::PathBuf,
+            branch: String,
+        ) -> Result<
+            ralph_core::worktree::Worktree,
+            ralph_core::supervisor::worktree_bind::WorktreeError,
+        > {
+            let wt = repo_root.join(format!("wt-{branch}"));
+            std::fs::create_dir_all(&wt).ok();
+            Ok(ralph_core::worktree::Worktree {
+                path: wt,
+                branch,
+                is_main: false,
+                head: None,
+            })
+        }
+    }
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let context = ProductionBridgeContext {
+        loop_id: "u4-loop".to_string(),
+        repo_root: workspace_root.clone(),
+        events_path: Some(main_events_file.clone()),
+        tasks_path: Some(tasks_path.clone()),
+    };
+    let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
+        store.clone() as std::sync::Arc<dyn SupervisorStore>,
+        context,
+        std::sync::Arc::new(StubFactory),
+    );
+
+    let wave = make_u3_wave("u4-projection", 1, 1);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(1));
+    let _outcome =
+        run_u2_execute_wave_with_env_capture(bridge, wave, executor, &main_events_file, "u4-loop")
+            .await;
+
+    // U4/007: tasks.jsonl now carries one row for slot 0 with a
+    // stable task_key and a terminal status.
+    let task_store = TaskStore::load(&tasks_path).expect("load");
+    let rows: Vec<_> = task_store.all().iter().collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "U4/007: exactly one task row projected; got {rows:?}"
+    );
+    let row = &rows[0];
+    let key = row.key.as_deref().unwrap_or("");
+    // U4/007: the task_key MUST start with `supervisor:u4-loop:`
+    // (loop-scoped) and reference slot 0. The wave-id portion is
+    // produced by the supervisor store's allocator, so we only
+    // assert the loop + slot shape to keep the test stable
+    // against allocator changes.
+    assert!(
+        key.starts_with("supervisor:u4-loop:") && key.ends_with(":slot-0"),
+        "U4/007: stable task_key must carry loop_id + slot_index; got {key:?}"
+    );
+    let status_str = format!("{:?}", row.status);
+    assert!(
+        status_str.to_lowercase().contains("closed") || status_str.to_lowercase().contains("done"),
+        "U4/007: completed slot must project to terminal status; got {status_str}"
+    );
+}
+
+/// 2026-07-23-007 plan U10 (T3 / T6): the sibling of
+/// `test_u4_slot_terminal_projects_to_tasks_jsonl` for the
+/// Failed path. A slot that classifies as Failed (e.g. the
+/// worker backend reports a non-zero exit with no accepted
+/// terminal marker) MUST project a `Failed` task row, NOT a
+/// `Closed` row. The existing Success sibling checked
+/// terminal-status with a substring match; this test uses
+/// `assert_eq!` against `TaskStatus::Failed` directly so the
+/// assertion strength matches the schema (folding testing:T6
+/// into the same test).
+#[tokio::test]
+async fn test_u4_failed_slot_projects_to_failed_task_row() {
+    use crate::loop_runner::wave::CoordinatorSupervisorBridge;
+    use ralph_core::TaskStatus;
+    use ralph_core::TaskStore;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let workspace_root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    let tasks_dir = workspace_root.join(".ralph").join("agent");
+    std::fs::create_dir_all(&tasks_dir).expect("create tasks dir");
+    let tasks_path = tasks_dir.join("tasks.jsonl");
+    let main_events_file = workspace_root.join(".ralph").join("events.jsonl");
+
+    #[derive(Debug)]
+    struct StubFactory;
+    impl ralph_core::supervisor::worktree_bind::WorktreeFactory for StubFactory {
+        fn create(
+            &self,
+            repo_root: std::path::PathBuf,
+            branch: String,
+        ) -> Result<
+            ralph_core::worktree::Worktree,
+            ralph_core::supervisor::worktree_bind::WorktreeError,
+        > {
+            let wt = repo_root.join(format!("wt-{branch}"));
+            std::fs::create_dir_all(&wt).ok();
+            Ok(ralph_core::worktree::Worktree {
+                path: wt,
+                branch,
+                is_main: false,
+                head: None,
+            })
+        }
+    }
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let context = ProductionBridgeContext {
+        loop_id: "u10-loop".to_string(),
+        repo_root: workspace_root.clone(),
+        events_path: Some(main_events_file.clone()),
+        tasks_path: Some(tasks_path.clone()),
+    };
+    let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
+        store.clone() as std::sync::Arc<dyn SupervisorStore>,
+        context,
+        std::sync::Arc::new(StubFactory),
+    );
+
+    let wave = make_u3_wave("u10-failed-projection", 1, 1);
+    // U5's Fail arm: the executor reports a non-zero exit with
+    // a structured error reason. The classifier maps it to
+    // SlotOutcome::Failed{worker_cancelled} (per the U3
+    // worker_outcome.rs short-circuit), so the slot must
+    // project to TaskStatus::Failed.
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Fail("boom".to_string()));
+    let _outcome =
+        run_u2_execute_wave_with_env_capture(bridge, wave, executor, &main_events_file, "u10-loop")
+            .await;
+
+    let task_store = TaskStore::load(&tasks_path).expect("load");
+    let rows: Vec<_> = task_store.all().iter().collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "U10/007: exactly one task row projected for the Failed slot; got {rows:?}"
+    );
+    let row = &rows[0];
+    let key = row.key.as_deref().unwrap_or("");
+    assert!(
+        key.starts_with("supervisor:u10-loop:") && key.ends_with(":slot-0"),
+        "U10/007: stable task_key must carry loop_id + slot_index; got {key:?}"
+    );
+    assert_eq!(
+        row.status,
+        TaskStatus::Failed,
+        "U10/007: Failed slot must project to TaskStatus::Failed (not Closed); got {:?}",
+        row.status
     );
 }
 
@@ -2842,6 +3242,7 @@ fn setup_u6_production_bridge(
         loop_id: "u6-loop".to_string(),
         repo_root: std::path::PathBuf::from("/tmp/u6-repo"),
         events_path: Some(events_path),
+        tasks_path: None,
     };
     let bridge = CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
         store.clone() as std::sync::Arc<dyn SupervisorStore>,
@@ -3045,6 +3446,7 @@ fn test_production_fan_in_partial_failure_injects_failed() {
         loop_id: "u6-loop".to_string(),
         repo_root: std::path::PathBuf::from("/tmp/u6-repo"),
         events_path: Some(events_path.clone()),
+        tasks_path: None,
     };
     let bridge =
         crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(

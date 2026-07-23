@@ -71,6 +71,13 @@ pub struct ProductionBridgeContext {
     /// sink the legacy `from_store` path used). `None` keeps the
     /// in-memory sink for the legacy / dry-run entry points.
     pub events_path: Option<std::path::PathBuf>,
+    /// 2026-07-23-007 plan U4 (R-W5): absolute path to the
+    /// loop's `tasks.jsonl`. The supervisor dispatcher projects
+    /// each slot transition (start / terminal) onto a stable
+    /// task via the `TaskStore` API, so operator hats reading
+    /// `ralph tools task list` see the slot's lifecycle. `None`
+    /// disables projection (legacy / dry-run paths).
+    pub tasks_path: Option<std::path::PathBuf>,
 }
 
 /// Production bridge: holds an `Arc<dyn SupervisorStore>` +
@@ -265,6 +272,21 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
 
     fn max_concurrent_workers(&self) -> u32 {
         self.max_concurrent_workers
+    }
+
+    fn repo_root(&self) -> Option<&std::path::Path> {
+        // 2026-07-23-007 plan U2 (R-W1): forward the workspace root
+        // from the construction-time `ProductionBridgeContext` so
+        // the dispatcher's control-plane validator sees the
+        // production repo_root via `Arc<dyn SupervisorBridge>`.
+        self.context.as_ref().map(|c| c.repo_root.as_path())
+    }
+
+    fn tasks_path(&self) -> Option<&std::path::Path> {
+        // 2026-07-23-007 plan U4 (R-W5): forward the loop's
+        // `tasks.jsonl` path so the dispatcher can project slot
+        // transitions onto the runtime task ledger.
+        self.context.as_ref().and_then(|c| c.tasks_path.as_deref())
     }
 
     fn try_dispatch_next(&self, wave_id: &str, slot_index: u32) -> Result<bool, BridgeError> {
@@ -941,6 +963,7 @@ mod tests {
                 loop_id: "dispatch-surface".to_string(),
                 repo_root: std::path::PathBuf::from("/tmp/dispatch-surface"),
                 events_path: None,
+                tasks_path: None,
             },
             Arc::new(DefaultWorktreeFactory),
             1,

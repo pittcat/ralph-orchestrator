@@ -16,6 +16,13 @@ metadata:
 
 This skill covers **runtime tasks**. For code tasks, see `/code-task-generator`.
 
+> **Supervisor-spawned rows** — when a preset enables `supervisor`, every slot's
+> lifecycle is projected onto a stable row in `.ralph/agent/tasks.jsonl` under
+> key `supervisor:<loop_id>:wave-<wave_id>:slot-<index>`. The dispatcher is the
+> SOLE writer of these rows; workers must NEVER touch `tasks.jsonl` directly.
+> Repeated projections (re-reports, restart replay) are idempotent — the same
+> task_key always resolves to the same row.
+
 ## Task Commands
 
 ```bash

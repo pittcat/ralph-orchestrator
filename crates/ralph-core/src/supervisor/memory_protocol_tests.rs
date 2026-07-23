@@ -211,13 +211,32 @@ fn cancel_wave_does_not_force_running_to_failed() {
 /// jobs themselves (out of scope for the store layer) live
 /// in the dispatch bridge; the recovery module owns the
 /// worker that runs them. This pins the read-side contract.
+///
+/// 2026-07-23-007 plan U3 (R-W3): `record_slot_failure` is
+/// guarded by first-terminal-wins. Once `cancel_wave` has
+/// flipped the Pending slot to Cancelled, a late
+/// `record_slot_failure` is rejected (slot is already
+/// terminal). The compensation path therefore records failure
+/// on a sibling Pending slot that was NOT touched by
+/// `cancel_wave` (e.g. because it had already been
+/// dispatched), or it accepts that the wave's slot population
+/// is fully Cancelled and the compensation verdict is the
+/// cancel flag itself.
 #[test]
 fn compensation_records_failure_state_on_wave() {
     let s = store();
     let wave = wave_into(&s, "comp", WaveKind::Fix, 2).unwrap();
-    // Cancel trigger: any pending slot on the wave turns Cancelled.
+    // Dispatch slot 0 so `cancel_wave` (which only flips
+    // Pending → Cancelled, R-B3/B4) leaves it Dispatched.
+    // Then `record_slot_failure` lands cleanly.
+    s.try_dispatch_next(4)
+        .unwrap()
+        .expect("slot 0 dispatchable");
+    // Cancel trigger: pending slot 1 turns Cancelled.
     s.cancel_wave(&wave).unwrap();
-    // Failure trigger: record a permanent failure on slot 0.
+    // Failure trigger: record a permanent failure on slot 0
+    // (which is still Dispatched — `cancel_wave` did not touch
+    // it because it was no longer Pending).
     s.record_slot_failure(&wave, 0, "permanent").unwrap();
     let snap = s.fan_in_status(&wave).unwrap();
     assert!(

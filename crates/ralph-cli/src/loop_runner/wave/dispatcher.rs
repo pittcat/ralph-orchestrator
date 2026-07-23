@@ -163,6 +163,19 @@ pub(crate) struct ProductionExecutor;
 /// worker task exits, including JoinSet cancellation/abort. A Drop
 /// guard is required because an aborted async task never executes code
 /// after its awaited executor future.
+///
+/// 2026-07-23-007 plan U6 (A2 / A5): the drop guard NEVER
+/// overwrites a slot the worker task already drove to a terminal
+/// state. The supervisor store's `release_slot_dispatch` is
+/// idempotent (no-op when the slot is already `Completed` /
+/// `Failed` / `Cancelled`), so a panic between
+/// `record_slot_result` and `guard.outcome = Completed` cannot
+/// downgrade a terminal write — the existing
+/// `release_slot_dispatch(Completed | Failed)` call is a safe
+/// no-op. The `outcome` field is kept so the guard preserves the
+/// explicit `Completed` signal for the dispatch_records
+/// transition; the store's `IN ('dispatched','running')` predicate
+/// is the actual safety gate.
 struct SupervisorSlotRelease {
     bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge>,
     wave_id: String,
@@ -1548,6 +1561,64 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         }
 
         let slot_cwd = binding.as_ref().and_then(|b| b.worktree_path.clone());
+
+        // 2026-07-23-007 plan U2 (R-W1): validate the per-worker
+        // events channel against the primary control plane so the
+        // spawned worker can never write a JSONL ledger inside
+        // its own slot subtree or escape the workspace via a
+        // symlink. Review slots still get a binding-less / shared
+        // read-only path (the validator's slot_worktree_root arg
+        // stays None so the slot-subtree rule is exempt).
+        let workspace_root = bridge.repo_root();
+        let validated_events_path = match workspace_root {
+            Some(root) => {
+                let slot_root_for_validate = match wave_kind {
+                    WaveKind::Review => None,
+                    _ => slot_cwd.as_deref(),
+                };
+                match ralph_core::control_plane::validate_control_plane_binding(
+                    &worker_events_file,
+                    slot_root_for_validate,
+                    root,
+                ) {
+                    Ok(p) => Some(p),
+                    Err(err) => {
+                        // Fail-closed: a slot whose channel binding
+                        // is invalid MUST NOT spawn. Mark this
+                        // index as "already spawned" so the next
+                        // approval round skips it; the actual
+                        // record_slot_failure is the inner
+                        // dispatcher's responsibility — but since
+                        // we never push a WorkerRequest here, the
+                        // slot will simply have no worker, which
+                        // the wave's terminal cleanup will pick up
+                        // as a never-reported slot (mirrors the
+                        // bind-failure path).
+                        let reason = ralph_core::control_plane::reason_for(&err);
+                        let reason_string = reason.to_string();
+                        warn!(
+                            wave_id = %wave.wave_id,
+                            slot_index = index_u32,
+                            wave_kind = ?wave_kind,
+                            events_path = %worker_events_file.display(),
+                            error = %err,
+                            "U2: control-plane binding rejected; failing closed (slot skipped, no spawn)"
+                        );
+                        // Best-effort: try to record the failure on
+                        // the bridge so the store sees a structured
+                        // reason even though no worker ran. If the
+                        // store / bridge is unavailable, fall back
+                        // to skipping silently (the synthetic-failure
+                        // sweep would catch it later anyway).
+                        let _ =
+                            bridge.record_slot_failure(&store_wave_id, index_u32, &reason_string);
+                        continue;
+                    }
+                }
+            }
+            None => None,
+        };
+
         if let Some(ref b) = binding {
             // Merge binding env (last-write-wins).
             let binding_env: std::collections::HashMap<String, String> =
@@ -1558,6 +1629,38 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
             worker_backend
                 .env_vars
                 .extend(b.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+
+        // 2026-07-23-007 plan U2 (R-W1): inject the
+        // `RALPH_WORKSPACE_ROOT` + `RALPH_EVENTS_FILE` binding as
+        // the SSOT for the spawned worker. `merge_event_channel_env`
+        // is the canonical validator; on success the validated
+        // absolute paths land in `worker_backend.env_vars`. On
+        // failure (relative path that escaped earlier checks) the
+        // slot is fail-closed the same way as a binding rejection.
+        if let (Some(root), Some(events_path)) = (workspace_root, validated_events_path.as_ref()) {
+            let mut extras: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            if let Err(err) =
+                ralph_core::control_plane::merge_event_channel_env(root, events_path, &mut extras)
+            {
+                let reason = ralph_core::control_plane::reason_for(&err);
+                let reason_string = reason.to_string();
+                warn!(
+                    wave_id = %wave.wave_id,
+                    slot_index = index_u32,
+                    error = %err,
+                    "U2: merge_event_channel_env rejected binding; failing closed"
+                );
+                let _ = bridge.record_slot_failure(&store_wave_id, index_u32, &reason_string);
+                continue;
+            }
+            for (k, v) in extras {
+                worker_backend
+                    .env_vars
+                    .retain(|(existing, _)| existing != &k);
+                worker_backend.env_vars.push((k, v));
+            }
         }
 
         let (progress_tx, _) = tokio::sync::mpsc::unbounded_channel::<(u32, bool, Duration)>();
@@ -1681,6 +1784,7 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
             },
             Some(Arc::clone(bridge)),
             Some(store_wave_id.clone()),
+            Some(loop_id.to_string()),
         )
         .await;
 
@@ -1752,6 +1856,7 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
                 },
                 Some(Arc::clone(bridge)),
                 Some(store_wave_id),
+                Some(loop_id.to_string()),
             )
             .await;
         }
@@ -2261,6 +2366,7 @@ pub(crate) async fn dispatch_wave_inner<E: WaveWorkerExecutor + ?Sized>(
         progress,
         None,
         None,
+        None,
     )
     .await
 }
@@ -2276,6 +2382,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
     progress: ProgressChannels,
     terminal_bridge: Option<Arc<dyn ralph_core::supervisor::SupervisorBridge>>,
     terminal_wave_id: Option<String>,
+    terminal_loop_id: Option<String>,
 ) -> WaveDispatchOutcome {
     // KTD-U3-3: permit is acquired inside each worker task; the
     // semaphore limits the number of concurrent workers to the
@@ -2306,6 +2413,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
         let executor = Arc::clone(&executor);
         let terminal_bridge = terminal_bridge.clone();
         let terminal_wave_id = terminal_wave_id.clone();
+        let terminal_loop_id = terminal_loop_id.clone();
         let request_index = request.index;
         // Replace the placeholder progress_tx with the real sender.
         let mut request = request;
@@ -2324,6 +2432,13 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                         slot_index: request_index,
                         outcome: ralph_core::supervisor::DispatchOutcome::Failed,
                     });
+            // 2026-07-23-007 plan U4 (R-W5): bring the loop id into
+            // the worker task so the post-terminal task projection
+            // can build the stable task_key. The clone is moved
+            // into the task; the outer `terminal_loop_id` is
+            // captured-by-move so each iteration needs its own
+            // `clone()` above.
+            let terminal_loop_id = terminal_loop_id;
             // KTD-U3-3: permit acquisition happens inside the task.
             // The Tokio semaphore only errors on close(), which the
             // dispatcher never does, so we map any error to a
@@ -2358,63 +2473,133 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
             // reaches this point; the Drop guard releases the slot as
             // `Failed` for those. This is persistence only: no sink,
             // no `wave.complete` injection, no `tick` (all U6).
+            //
+            // 2026-07-23-007 plan U1 (R-W2): classify the worker's
+            // exit + accepted event stream through
+            // `classify_worker_outcome` BEFORE recording — an
+            // exit-0 + zero-events worker is `empty_worker_result`,
+            // not a success. `WorkerExit::Cancelled` always wins
+            // over a terminal marker that slipped through (R-W4).
+            // The Err path from `run_wave_worker` already carries
+            // the original error reason; that path bypasses the
+            // classifier so the operator-facing message is
+            // preserved (the classifier would otherwise map it to
+            // `empty_worker_result` because the worker did not
+            // emit accepted events before it died).
+            // 2026-07-23-007 plan U1 (R-W2) + U5 (M1): classify the
+            // worker's exit + accepted event stream through a
+            // single helper BEFORE recording. A worker that emits
+            // a Done marker and is then cancelled
+            // (`WorkerExit::Cancelled`) still maps to
+            // `Failed{worker_cancelled}` (R-W4) at the helper
+            // boundary. Both the per-slot `record_slot_*` write
+            // and the drop-guard `outcome = Completed` arm read
+            // the same classification — no duplicated loop, no
+            // redundant `result.1.as_ref().unwrap().2`, no dead
+            // tuple.
+            let classified = classify_slot_result(&result.1);
             if let Some(guard) = release_guard.as_ref() {
-                match &result.1 {
-                    Ok((events, _duration, true)) => {
-                        let (content_hash, event_count) = compute_slot_batch_fingerprint(events);
-                        if let Err(error) = guard.bridge.record_slot_result(
-                            &guard.wave_id,
-                            guard.slot_index,
-                            &content_hash,
-                            event_count,
-                        ) {
-                            warn!(
-                                wave_id = %guard.wave_id,
-                                slot_index = guard.slot_index,
-                                %error,
-                                "U5: supervisor record_slot_result failed"
-                            );
+                use ralph_core::supervisor::worker_outcome::SlotOutcome;
+                match (&classified.outcome, &classified.reason) {
+                    (SlotOutcome::Completed(_), _) => {
+                        // Re-derive the events reference for the
+                        // fingerprint; the events live in the Ok
+                        // branch of `result.1` and the classifier
+                        // helper already iterated them. We re-borrow
+                        // here to keep the helper signature
+                        // borrow-free of `events`.
+                        if let Ok((events, _duration, _success)) = &result.1 {
+                            let (content_hash, event_count) =
+                                compute_slot_batch_fingerprint(events);
+                            if let Err(error) = guard.bridge.record_slot_result(
+                                &guard.wave_id,
+                                guard.slot_index,
+                                &content_hash,
+                                event_count,
+                            ) {
+                                warn!(
+                                    wave_id = %guard.wave_id,
+                                    slot_index = guard.slot_index,
+                                    %error,
+                                    "U5: supervisor record_slot_result failed"
+                                );
+                            }
                         }
                     }
-                    Ok((_events, _duration, false)) => {
-                        // Mirror `record_outcome`: Ok+success=false is a
-                        // non-zero exit / timeout-with-events. Persist as
-                        // slot failure so evaluate_phase returns Failed
-                        // instead of Integrate (R14 / AE5).
+                    (SlotOutcome::Failed { .. }, Some(reason_str)) => {
+                        let reason_str: &str = match reason_str {
+                            ClassifiedReason::Static(s) => s,
+                            ClassifiedReason::Dynamic(s) => s,
+                        };
                         if let Err(error) = guard.bridge.record_slot_failure(
                             &guard.wave_id,
                             guard.slot_index,
-                            "worker exited unsuccessfully",
+                            reason_str,
                         ) {
                             warn!(
                                 wave_id = %guard.wave_id,
                                 slot_index = guard.slot_index,
                                 %error,
-                                "U5: supervisor record_slot_failure failed"
+                                "U1/007: supervisor record_slot_failure failed"
                             );
                         }
                     }
-                    Err((reason, _duration)) => {
-                        if let Err(error) = guard.bridge.record_slot_failure(
-                            &guard.wave_id,
-                            guard.slot_index,
-                            reason,
-                        ) {
-                            warn!(
-                                wave_id = %guard.wave_id,
-                                slot_index = guard.slot_index,
-                                %error,
-                                "U5: supervisor record_slot_failure failed"
-                            );
-                        }
+                    (SlotOutcome::Failed { .. }, None) => {
+                        // Unreachable: `classify_slot_result` always
+                        // populates `reason` for a `Failed` outcome.
+                        // Surface as a warning so a future refactor
+                        // cannot silently drop the failure record.
+                        warn!(
+                            wave_id = %guard.wave_id,
+                            slot_index = guard.slot_index,
+                            "U5: classified SlotOutcome::Failed without a reason; skipping record_slot_failure"
+                        );
                     }
                 }
             }
 
-            if matches!(&result.1, Ok((_, _, true)))
-                && let Some(guard) = release_guard.as_mut()
-            {
-                guard.outcome = ralph_core::supervisor::DispatchOutcome::Completed;
+            // U4/007 projection is applied AFTER the classifier has set the
+            // drop guard's outcome (Completed vs Failed); see below.
+
+            // U1/007: drop-guard outcome follows the classifier —
+            // only an explicitly Completed outcome releases the
+            // slot as Completed. Failed / empty / cancel outcomes
+            // all release as Failed so a subsequent bridge iteration
+            // sees a consistent permit return.
+            if let Some(guard) = release_guard.as_mut() {
+                use ralph_core::supervisor::worker_outcome::SlotOutcome;
+                if matches!(classified.outcome, SlotOutcome::Completed(_)) {
+                    guard.outcome = ralph_core::supervisor::DispatchOutcome::Completed;
+                }
+            }
+
+            // 2026-07-23-007 plan U4 (R-W5): project the slot's
+            // terminal status onto `tasks.jsonl`. Done after the
+            // classifier above so the projection sees the correct
+            // Completed / Failed outcome. Idempotent — repeated
+            // projections (re-report + recovery replay) do not
+            // duplicate rows.
+            let projection_input = release_guard.as_ref().map(|g| {
+                (
+                    g.bridge.tasks_path().map(|p| p.to_path_buf()),
+                    g.outcome,
+                    g.wave_id.clone(),
+                    g.slot_index,
+                )
+            });
+            if let Some((Some(tasks_path), outcome, wave_id, slot_index)) = projection_input {
+                use super::task_projection::{SlotProjection, project_slot};
+                let projection = match outcome {
+                    ralph_core::supervisor::DispatchOutcome::Completed => SlotProjection::Completed,
+                    ralph_core::supervisor::DispatchOutcome::Failed => SlotProjection::Failed,
+                };
+                project_slot(
+                    &tasks_path,
+                    terminal_loop_id.as_deref().unwrap_or(""),
+                    &wave_id,
+                    slot_index,
+                    projection,
+                );
             }
             result
         });
@@ -2762,6 +2947,83 @@ fn compute_slot_batch_fingerprint(events: &[ralph_core::Event]) -> (String, usiz
         ralph_core::agent_doc_sync::compute_sha256_hex(&buf),
         events.len(),
     )
+}
+
+/// 2026-07-23-007 plan U5 (M1 / C3 / C4 / C5 / M3): single
+/// classification entry point for a worker's `WaveWorkerOutcome`.
+/// Both the per-slot `record_slot_*` block and the drop-guard
+/// `outcome = Completed` arm previously re-derived exit +
+/// markers from the same `events` slice, duplicating the
+/// classification loop and the redundant
+/// `result.1.as_ref().unwrap().2`. The helper is the one place
+/// that turns `(events, success, reason)` into the unified
+/// `ClassifiedSlot` so the two downstream consumers (the bridge
+/// record + the drop guard) read the same classification.
+///
+/// Two reason kinds exist:
+/// - `Static`: the classifier's stable reason constants
+///   (`empty_worker_result`, `worker_cancelled`, …).
+/// - `Dynamic`: the worker's original `Err` reason, which is
+///   operator-facing and may contain runtime details
+///   (e.g. "boom: worker crashed"). The legacy code carried it
+///   verbatim into `record_slot_failure(reason=…)` to preserve
+///   the operator's real failure message.
+#[derive(Debug)]
+enum ClassifiedReason<'a> {
+    Static(&'a str),
+    Dynamic(&'a str),
+}
+
+#[derive(Debug)]
+struct ClassifiedSlot<'a> {
+    outcome: ralph_core::supervisor::worker_outcome::SlotOutcome,
+    /// Reason string to forward to `record_slot_failure`. `None`
+    /// when the outcome is `Completed` (the bridge takes the
+    /// `record_slot_result` path, not the failure path).
+    reason: Option<ClassifiedReason<'a>>,
+}
+
+fn classify_slot_result<'a>(result: &'a WaveWorkerOutcome) -> ClassifiedSlot<'a> {
+    use ralph_core::supervisor::worker_outcome::{
+        SlotOutcome, TerminalMarker, WorkerExit, classify_worker_outcome,
+    };
+    match result {
+        Ok((events, _duration, success)) => {
+            let exit = if *success {
+                WorkerExit::Exit0
+            } else {
+                WorkerExit::ExitNonZero
+            };
+            let mut markers: Vec<TerminalMarker> = Vec::new();
+            let mut accepted: usize = 0;
+            for ev in events {
+                accepted += 1;
+                if ev.topic.ends_with(".unit.done") || ev.topic.ends_with(".wave.done") {
+                    markers.push(TerminalMarker::Done);
+                } else if ev.topic.ends_with(".unit.failed") || ev.topic.ends_with(".wave.failed") {
+                    markers.push(TerminalMarker::Failed);
+                }
+            }
+            let outcome = classify_worker_outcome(exit, accepted, &markers);
+            let reason = match &outcome {
+                SlotOutcome::Failed { reason } => Some(ClassifiedReason::Static(reason)),
+                SlotOutcome::Completed(_) => None,
+            };
+            ClassifiedSlot { outcome, reason }
+        }
+        Err((reason, _duration)) => {
+            // Err path preserves the worker's original error
+            // message — the classifier would map a zero-event Err
+            // to `empty_worker_result`, but the operator wants the
+            // worker's real failure (e.g. "boom: worker crashed").
+            ClassifiedSlot {
+                outcome: SlotOutcome::Failed {
+                    reason: ralph_core::supervisor::worker_outcome::REASON_WORKER_CANCELLED,
+                },
+                reason: Some(ClassifiedReason::Dynamic(reason)),
+            }
+        }
+    }
 }
 
 fn take_results(

@@ -759,3 +759,311 @@ fn conflicting_terminal_does_not_overwrite_completed_slot() {
         .record_slot_result("w-1", 0, "hash-A", 1)
         .expect("idempotent replay must succeed");
 }
+
+/// 2026-07-23-007 plan U6 (A2 / A5): the drop-guard's
+/// `release_slot_dispatch(Failed)` after a successful
+/// `record_slot_result(Completed)` MUST be a no-op, not a
+/// downgrade. This is the contract that lets the dispatcher
+/// treat `record_slot_*` as the sole terminal writer while
+/// keeping the drop guard as a fail-safe for panics BEFORE
+/// `record_slot_*`. Without this contract, a panic between
+/// `record_slot_result` and `guard.outcome = Completed` would
+/// silently flip a Completed slot back to Failed.
+#[test]
+fn release_slot_dispatch_after_completed_is_noop() {
+    use ralph_core::supervisor::DispatchOutcome;
+    use ralph_core::supervisor::SupervisorStore;
+    let mut fx = SupervisorP0Fixture::new_in_memory(
+        "u6-noop",
+        "u6-loop",
+        "task-u6",
+        "task-key-u6:step-1",
+        "step-1",
+    );
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+    // Worker task writes the terminal result first.
+    fx.store()
+        .as_ref()
+        .record_slot_result("w-1", 0, "hash-A", 1)
+        .expect("record_slot_result must succeed");
+    // Drop guard fires with the default `Failed` outcome after
+    // the worker task panics between record_slot_result and
+    // guard.outcome = Completed. The store MUST treat this as
+    // a no-op rather than downgrading the slot.
+    fx.store()
+        .as_ref()
+        .release_slot_dispatch("w-1", 0, DispatchOutcome::Failed)
+        .expect("release_slot_dispatch after Completed must succeed");
+    // Re-read via fan_in_status: the slot must still be Completed.
+    let snap = fx
+        .store()
+        .as_ref()
+        .fan_in_status("w-1")
+        .expect("fan_in_status must succeed");
+    assert_eq!(
+        snap.completed_count, 1,
+        "Completed slot must survive a Failed release_slot_dispatch; got {snap:?}"
+    );
+    assert_eq!(
+        snap.failed_count, 0,
+        "Completed slot must NOT be downgraded to Failed; got {snap:?}"
+    );
+}
+
+/// 2026-07-23-007 plan U6 (A2 / A5) control: when a worker
+/// task panics BEFORE `record_slot_result` (i.e. the slot
+/// stays in-flight), the drop guard's `release_slot_dispatch`
+/// MUST transition the slot to `Failed`. This is the other
+/// half of the contract — the drop guard exists to release
+/// in-flight slots when no terminal write has landed yet.
+#[test]
+fn release_slot_dispatch_before_record_slot_transitions_to_failed() {
+    use ralph_core::supervisor::DispatchOutcome;
+    use ralph_core::supervisor::SupervisorStore;
+    let mut fx = SupervisorP0Fixture::new_in_memory(
+        "u6-before",
+        "u6-loop",
+        "task-u6",
+        "task-key-u6:step-1",
+        "step-1",
+    );
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+    // Worker task panics BEFORE record_slot_result: no terminal
+    // write landed; the drop guard's release_slot_dispatch
+    // transitions the in-flight slot to Failed.
+    fx.store()
+        .as_ref()
+        .release_slot_dispatch("w-1", 0, DispatchOutcome::Failed)
+        .expect("release_slot_dispatch on in-flight slot must succeed");
+    let snap = fx
+        .store()
+        .as_ref()
+        .fan_in_status("w-1")
+        .expect("fan_in_status must succeed");
+    assert_eq!(
+        snap.failed_count, 1,
+        "in-flight slot must transition to Failed via drop guard; got {snap:?}"
+    );
+    assert_eq!(
+        snap.completed_count, 0,
+        "no Completed slot should exist; got {snap:?}"
+    );
+}
+
+// 2026-07-23-007 plan U8 (T1): rusqlite twins of the three
+// InMemory first-terminal-wins / cancel-wins tests. The
+// rusqlite store is the production persistence path; the
+// InMemory tests are characterization, not coverage.
+//
+// These tests are gated on the `supervisor-db` feature so the
+// CI matrix that runs without it does not break. With the
+// feature on they execute against a real SQLite file in a
+// per-test tempdir (see `SupervisorP0Fixture::new_rusqlite`).
+
+/// U8 / T1: a non-cancel `record_slot_failure` after Completed
+/// must be rejected; the row stays Completed.
+#[cfg(feature = "supervisor-db")]
+#[test]
+fn rusqlite_record_slot_failure_rejects_after_completed() {
+    use ralph_core::supervisor::SupervisorStore;
+    use ralph_core::supervisor::SupervisorStoreError;
+    let mut fx = SupervisorP0Fixture::new_rusqlite(
+        "u8-rusqlite-rejects",
+        "u8-loop",
+        "task-u8",
+        "task-key-u8:step-1",
+        "step-1",
+    );
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+    fx.store()
+        .as_ref()
+        .record_slot_result("w-1", 0, "hash-A", 1)
+        .expect("first terminal completes the slot");
+    let late = fx.store().as_ref().record_slot_failure("w-1", 0, "boom");
+    match late {
+        Err(SupervisorStoreError::AlreadyTerminal(_)) => {}
+        other => {
+            panic!("non-cancel failure after Completed must produce AlreadyTerminal, got {other:?}")
+        }
+    }
+    let snap = fx
+        .store()
+        .as_ref()
+        .fan_in_status("w-1")
+        .expect("fan_in_status must succeed");
+    assert_eq!(
+        snap.completed_count, 1,
+        "Completed slot must be preserved; got {snap:?}"
+    );
+    assert_eq!(
+        snap.failed_count, 0,
+        "no Failed slot should exist; got {snap:?}"
+    );
+}
+
+/// U8 / T1: same-reason replay against the rusqlite store is
+/// idempotent (no panic, no row drift).
+#[cfg(feature = "supervisor-db")]
+#[test]
+fn rusqlite_record_slot_failure_idempotent_same_reason() {
+    use ralph_core::supervisor::SupervisorStore;
+    let mut fx = SupervisorP0Fixture::new_rusqlite(
+        "u8-rusqlite-idempotent",
+        "u8-loop",
+        "task-u8",
+        "task-key-u8:step-1",
+        "step-1",
+    );
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+    fx.store()
+        .as_ref()
+        .record_slot_failure("w-1", 0, "boom")
+        .expect("first failure write must succeed");
+    fx.store()
+        .as_ref()
+        .record_slot_failure("w-1", 0, "boom")
+        .expect("idempotent replay must succeed");
+    let snap = fx
+        .store()
+        .as_ref()
+        .fan_in_status("w-1")
+        .expect("fan_in_status must succeed");
+    assert_eq!(
+        snap.failed_count, 1,
+        "exactly one Failed slot; got {snap:?}"
+    );
+}
+
+/// U8 / T1: cancel-after-completed wins against the rusqlite
+/// store. Mirrors the InMemory `cancel_after_completed_wins`
+/// test from U3; the rule lives at the supervisor store
+/// boundary, so both stores must enforce it identically.
+#[cfg(feature = "supervisor-db")]
+#[test]
+fn rusqlite_record_slot_failure_cancel_after_completed_wins() {
+    use ralph_core::supervisor::SupervisorStore;
+    let mut fx = SupervisorP0Fixture::new_rusqlite(
+        "u8-rusqlite-cancel-wins",
+        "u8-loop",
+        "task-u8",
+        "task-key-u8:step-1",
+        "step-1",
+    );
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+    fx.store()
+        .as_ref()
+        .record_slot_result("w-1", 0, "hash-A", 1)
+        .expect("first terminal completes the slot");
+    fx.store()
+        .as_ref()
+        .record_slot_failure(
+            "w-1",
+            0,
+            ralph_core::supervisor::worker_outcome::REASON_WORKER_CANCELLED,
+        )
+        .expect("cancel-after-Completed must overwrite");
+    let snap = fx
+        .store()
+        .as_ref()
+        .fan_in_status("w-1")
+        .expect("fan_in_status must succeed");
+    assert_eq!(
+        snap.completed_count, 0,
+        "Completed must be downgraded by cancel; got {snap:?}"
+    );
+    assert_eq!(
+        snap.failed_count, 0,
+        "Cancelled does not count as Failed; got {snap:?}"
+    );
+    assert_eq!(
+        snap.pending_count, 1,
+        "Cancelled slot surfaces in pending_count; got {snap:?}"
+    );
+}
+
+/// 2026-07-23-007 plan U9 (T2): dispatcher fail-close contract.
+/// When the control-plane validator rejects a slot's per-worker
+/// channel (e.g. the events file is inside the slot worktree),
+/// the dispatcher records a `record_slot_failure` with the
+/// validator's stable reason code
+/// (`invalid_control_plane_path`) and DOES NOT spawn a worker.
+///
+/// This is a character-level test that pins the store-side
+/// contract: a slot that was approved (status=Dispatched) can
+/// transition to Failed with the validator's reason code, and
+/// the no-spawn outcome is observable as `failed_count == 1`
+/// and `completed_count == 0`. The full dispatcher-level
+/// integration is exercised by the U2 tests in
+/// `loop_runner/tests/wave_supervisor.rs`; this test is the
+/// narrowest unit that proves the reason code propagates from
+/// `validate_control_plane_binding` → `reason_for` →
+/// `record_slot_failure` without mutation.
+#[test]
+fn dispatcher_fail_close_records_validator_reason() {
+    use ralph_core::control_plane::{
+        ControlPlaneError, reason_for, validate_control_plane_binding,
+    };
+    use ralph_core::supervisor::SupervisorStore;
+    let mut fx = SupervisorP0Fixture::new_in_memory(
+        "u9-fail-close",
+        "u9-loop",
+        "task-u9",
+        "task-key-u9:step-1",
+        "step-1",
+    );
+    fx.with_git_baseline();
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+
+    // 1. Drive the validator with an invalid channel (events file
+    //    inside the slot worktree) and capture the reason code.
+    let nested_orphan = fx.slot_worktree_path().join(".ralph/events.jsonl");
+    std::fs::create_dir_all(nested_orphan.parent().unwrap()).unwrap();
+    std::fs::write(&nested_orphan, "{}\n").unwrap();
+    let validator_err = validate_control_plane_binding(
+        &nested_orphan,
+        Some(fx.slot_worktree_path()),
+        fx.workspace_root(),
+    )
+    .expect_err("events file inside slot worktree must fail-close");
+    let validator_reason = reason_for(&validator_err);
+    assert_eq!(
+        validator_reason, "invalid_control_plane_path",
+        "validator reason must be the stable SSOT code"
+    );
+    let reason = match &validator_err {
+        ControlPlaneError::SlotSubtree { .. } => validator_reason,
+        other => panic!("expected SlotSubtree rejection, got {other:?}"),
+    };
+
+    // 2. The dispatcher writes this reason into the store via
+    //    `record_slot_failure` (dispatcher.rs:1613-1614). Replay
+    //    the same write here so the test asserts the store-side
+    //    contract independently of the dispatch loop machinery.
+    fx.store()
+        .as_ref()
+        .record_slot_failure("w-1", 0, reason)
+        .expect("record_slot_failure with validator reason must succeed");
+
+    // 3. The slot ends Failed with the validator's reason code
+    //    preserved verbatim; no Completed row exists (i.e. no
+    //    worker was spawned and reached the success path).
+    let snap = fx
+        .store()
+        .as_ref()
+        .fan_in_status("w-1")
+        .expect("fan_in_status must succeed");
+    assert_eq!(
+        snap.failed_count, 1,
+        "fail-close must produce one Failed slot; got {snap:?}"
+    );
+    assert_eq!(
+        snap.completed_count, 0,
+        "no worker may have been spawned; got {snap:?}"
+    );
+}
