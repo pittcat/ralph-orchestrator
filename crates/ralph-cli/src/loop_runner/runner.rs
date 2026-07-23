@@ -1371,7 +1371,79 @@ async fn run_loop_impl_inner(
                 }
             }
         } else {
-            None
+            // 2026-07-22-001 plan U3 (KTD-2 / KTD-3): the default
+            // wave path (preset does not opt into
+            // `event_loop.supervisor.enabled: true`) still
+            // benefits from a persistent rusqlite store whenever
+            // the operator configured a `db_path`. We attempt
+            // the bridge here so `recover_active_waves_at_startup`
+            // runs unconditionally and the dispatcher can reuse
+            // the same store the runner already opened — no
+            // double-open, no double-recover, no second ledger.
+            // When `supervisor-db` is off OR no `db_path` is
+            // configured, we skip the build entirely and let the
+            // dispatcher's lazy fallback (U2) construct an
+            // InMemory bridge only when a `DetectedWave` actually
+            // appears in a batch — preserving the 023 R1
+            // "no wave → no DB" invariant.
+            #[cfg(feature = "supervisor-db")]
+            {
+                if !supervisor_cfg.db_path.trim().is_empty() {
+                    let supervisor_events_path = resolve_emit_events_path(
+                        &ctx,
+                        crate::loop_runner::paths::config_state_machine_enabled(&config),
+                    );
+                    match build_supervisor_bridge(
+                        supervisor_cfg,
+                        &ctx,
+                        supervisor_events_path,
+                    ) {
+                        Ok(concrete) => {
+                            let store = concrete.store();
+                            if let Err(err) =
+                                ralph_core::supervisor::recover_active_waves_at_startup(
+                                    store,
+                                    supervisor_cfg.aggregate_timeout_secs,
+                                )
+                            {
+                                warn!(
+                                    error = %err,
+                                    "default-path supervisor recover_active_waves_at_startup \
+                                     failed; recovery will be retried on next tick"
+                                );
+                            }
+                            info!(
+                                db_path = %supervisor_cfg.db_path,
+                                "default wave path picked up supervisor-db (KTD-2 / 2026-07-22-001 U3)"
+                            );
+                            Some(Arc::new(concrete)
+                                as Arc<dyn ralph_core::supervisor::SupervisorBridge>)
+                        }
+                        Err(err) => {
+                            // R-C4 fail-closed for the default path
+                            // too: an operator-configured db_path
+                            // that fails to open is an explicit
+                            // misconfiguration we must surface
+                            // rather than silently downgrade to
+                            // in-memory.
+                            error!(
+                                db_path = %supervisor_cfg.db_path,
+                                error = %err,
+                                "default-path supervisor store open failed; aborting loop"
+                            );
+                            return Err(anyhow::anyhow!(
+                                "default-path supervisor store open failed: {err}"
+                            ));
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+            #[cfg(not(feature = "supervisor-db"))]
+            {
+                None
+            }
         };
 
     // Initialize event logger for history/observability (uses context for path resolution).
