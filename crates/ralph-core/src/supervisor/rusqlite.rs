@@ -23,7 +23,7 @@ use rusqlite::{Connection, OptionalExtension};
 #[cfg(feature = "supervisor-db")]
 use super::migrations;
 use super::{
-    DispatchOutcome, IsolationMode, SlotResource, SlotStatus, SupervisorStore,
+    CompensationKind, DispatchOutcome, IsolationMode, SlotResource, SlotStatus, SupervisorStore,
     SupervisorStoreError, SupervisorStoreResult, WaveKind, WavePhase, WaveSnapshot,
 };
 
@@ -924,6 +924,93 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 .optional()?;
             Ok(pid.flatten().map(|p| p.max(0) as u32))
         })
+    }
+
+    fn enqueue_compensation(
+        &self,
+        wave_id: &str,
+        kind: CompensationKind,
+    ) -> SupervisorStoreResult<()> {
+        // 2026-07-22-001 plan U6: persist the compensation job
+        // in the existing `compensation_jobs` table. Dedup on
+        // (wave_id, kind, status='pending') so a re-entered
+        // cancel path does not stack two jobs for the same
+        // wave. The full hook execution lands in a follow-up
+        // release (U6 follow-up); today we record the row and
+        // let the coordinator tick mark it executed/failed via
+        // `complete_compensation`.
+        self.with_conn(|conn| {
+            let existing: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM compensation_jobs
+                     WHERE wave_id = ?1 AND kind = ?2 AND status = 'pending'
+                     LIMIT 1",
+                    rusqlite::params![wave_id, compensation_kind_to_str(kind)],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if existing.is_none() {
+                conn.execute(
+                    "INSERT INTO compensation_jobs (wave_id, kind, status, created_at)
+                     VALUES (?1, ?2, 'pending', strftime('%s','now'))",
+                    rusqlite::params![wave_id, compensation_kind_to_str(kind)],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    fn take_pending_compensations(
+        &self,
+    ) -> SupervisorStoreResult<Vec<(String, CompensationKind)>> {
+        let pairs = self.with_conn(|conn| -> SupervisorStoreResult<Vec<(String, String)>> {
+            let mut stmt = conn.prepare(
+                "SELECT wave_id, kind FROM compensation_jobs WHERE status = 'pending' ORDER BY id ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+            Ok(rows)
+        })?;
+        Ok(pairs
+            .into_iter()
+            .filter_map(|(w, k)| match k.as_str() {
+                "timeout" => Some((w, CompensationKind::OnTimeout)),
+                "cancel" => Some((w, CompensationKind::OnCancel)),
+                "partial" => Some((w, CompensationKind::OnPartial)),
+                _ => None,
+            })
+            .collect())
+    }
+
+    fn complete_compensation(
+        &self,
+        wave_id: &str,
+        kind: CompensationKind,
+        ok: bool,
+    ) -> SupervisorStoreResult<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE compensation_jobs
+                 SET status = ?3, completed_at = strftime('%s','now')
+                 WHERE wave_id = ?1 AND kind = ?2 AND status = 'pending'",
+                rusqlite::params![
+                    wave_id,
+                    compensation_kind_to_str(kind),
+                    if ok { "executed" } else { "failed" }
+                ],
+            )?;
+            Ok(())
+        })
+    }
+}
+
+#[cfg(feature = "supervisor-db")]
+fn compensation_kind_to_str(kind: CompensationKind) -> &'static str {
+    match kind {
+        CompensationKind::OnTimeout => "timeout",
+        CompensationKind::OnCancel => "cancel",
+        CompensationKind::OnPartial => "partial",
     }
 }
 

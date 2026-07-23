@@ -481,6 +481,74 @@ pub async fn handle_wave_events(
 
     let mut any_success = false;
 
+    // 2026-07-22-001 plan U2 (KTD-1 / KTD-3): default wave path must
+    // route through `SupervisorStore` so cancellation, idempotency,
+    // and content-hash dedup are uniformly available — not the
+    // legacy `WaveTracker` island. The runner only constructs a
+    // production bridge when `supervisor.enabled: true`; for any
+    // other preset that emits a DetectedWave we **lazily** construct
+    // an in-memory bridge here. Pure pipeline runs (no
+    // DetectedWave) never reach this line, so the 023 R1
+    // "no wave → no DB / no bridge" invariant still holds.
+    //
+    // The bridge is intentionally `Arc::clone`'d into a local
+    // owned `Option<Arc<dyn SupervisorBridge>>` so the borrow on
+    // `supervisor_bridge` is released before downstream mutable
+    // calls. The cloned bridge is shared across iterations so the
+    // store accumulates the full wave history of this loop run.
+    let accepted_len = waves.len();
+    let supervisor_cfg = event_loop.config().event_loop.supervisor.clone();
+    let lazy_bridge: Option<Arc<dyn ralph_core::supervisor::SupervisorBridge>> =
+        if supervisor_bridge.is_some() {
+            supervisor_bridge.cloned()
+        } else if accepted_len > 0 {
+            use crate::loop_runner::wave::{
+                CoordinatorSupervisorBridge, ProductionBridgeContext,
+            };
+            use ralph_core::supervisor::worktree_bind::DefaultWorktreeFactory;
+            let cap = u32::MAX; // default path uses the per-wave cap; U5 refines.
+            // 2026-07-22-001 plan U3 (KTD-2): prefer the rusqlite
+            // store when the `supervisor-db` feature is on AND the
+            // operator configured a `db_path`. The runner has
+            // already attempted `recover_active_waves_at_startup`
+            // on the same store during startup, so any in-flight
+            // waves from a prior crash are reconciled by the time
+            // we get here. Falls back to `InMemorySupervisorStore`
+            // with a `wave_ledger_ephemeral` stderr warning when
+            // the rusqlite path is unavailable so an operator can
+            // see exactly why ledger writes do not survive a
+            // restart.
+            let store: Arc<dyn ralph_core::supervisor::SupervisorStore> =
+                match open_default_supervisor_store(&supervisor_cfg, ctx, &main_events_file) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            "default wave path failed to open supervisor store; aborting wave (fail-closed per 2026-07-22-001 plan U3 / KTD-2)"
+                        );
+                        result.global_deadline_exceeded = true;
+                        return result;
+                    }
+                };
+            let bridge = CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+                store,
+                ProductionBridgeContext {
+                    loop_id: loop_id.to_string(),
+                    repo_root: std::path::PathBuf::from("."),
+                    events_path: Some(main_events_file.clone()),
+                },
+                Arc::new(DefaultWorktreeFactory),
+                cap,
+            );
+            Some(Arc::new(bridge) as Arc<dyn ralph_core::supervisor::SupervisorBridge>)
+        } else {
+            None
+        };
+    let supervisor_bridge_owned: Option<Arc<dyn ralph_core::supervisor::SupervisorBridge>> =
+        lazy_bridge.or_else(|| supervisor_bridge.cloned());
+    let supervisor_bridge: Option<&Arc<dyn ralph_core::supervisor::SupervisorBridge>> =
+        supervisor_bridge_owned.as_ref();
+
     for detected in waves {
         let wave_timeout_secs = detected.timeout_secs();
 
@@ -1406,36 +1474,37 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     // the dispatcher's wave_id for logs but use the store id
     // for subsequent `bind_slot` / `record_slot_result` / `tick`
     // calls so the coordinator reads the same row.
-    let store_wave_id = match bridge.register_wave_if_absent(wave_kind, &wave.wave_id, wave.total) {
+    //
+    // 2026-07-22-001 plan U2: the previous `register_wave_if_absent`
+    // failure path fell back to the legacy `WaveTracker` dispatch —
+    // that re-opened the OPAC / register-double-spawn gap the
+    // supervisor store was designed to close. Register errors now
+    // fail closed so callers see the root cause (DB open failure,
+    // constraint conflict, etc.) instead of a silently different
+    // dispatch shape.
+    let store_wave_id = match bridge
+        .register_wave_if_absent(wave_kind, &wave.wave_id, wave.total)
+    {
         Ok(id) => id,
         Err(err) => {
-            warn!(
+            // 2026-07-22-001 plan U2: register errors fail closed.
+            // Map to `SpawnFailed { expected = total, spawned = 0 }`
+            // so the runner can write a `wave_spawn_failed`
+            // RecoveryDiagnosisEnvelope and the outer dispatcher can
+            // convert the error uniformly. The previous code's
+            // fallback to legacy `WaveTracker` dispatch re-opened
+            // the OPAC register-double-spawn gap; surfacing the
+            // error keeps the supervisor as the single source of
+            // truth.
+            tracing::warn!(
                 wave_id = %wave.wave_id,
                 error = %err,
-                "supervisor register_wave_if_absent failed; falling back to legacy dispatch"
+                "supervisor register_wave_if_absent failed; aborting wave (fail-closed per 2026-07-22-001 plan U2)"
             );
-            // Defensive: fall back to the legacy path. The
-            // supervisor store is the source of truth, but a
-            // transient error should not lose the wave.
-            //
-            // Boxed to break the async recursion cycle
-            // (`execute_wave_structured` → here → itself); see
-            // rustc E0733.
-            return Box::pin(execute_wave_structured(
-                wave,
-                global_backend,
-                main_events_file,
-                show_progress,
-                use_colors,
-                rpc_event_tx,
-                tui_state,
-                loop_id,
-                limits,
-                hats_source_label,
-                config_path,
-                None,
-            ))
-            .await;
+            return WaveDispatchOutcome::SpawnFailed {
+                spawned_count: 0,
+                expected_count: wave.total,
+            };
         }
     };
 
@@ -1794,16 +1863,89 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
             }
             WaveDispatchOutcome::AggregateDeadlineExceeded(round) => {
                 merge_round_into(&mut merged_wave, round);
+                // 2026-07-22-001 plan U4 (KTD-8): aggregate-timeout
+                // teardown is the canonical cancel signal. We mark
+                // the store wave as cancelled so any subsequent
+                // coordinator tick observes the new phase and so
+                // / inspect surfaces it. The store-level cancel
+                // does not itself kill the spawned worker child;
+                // dispatch_wave_inner_with_release's deadline path
+                // owns the process kill (kill-on-deadline is wired
+                // up there already).
+                if let Err(err) = bridge.cancel_wave(&store_wave_id) {
+                    tracing::warn!(
+                        wave_id = %store_wave_id,
+                        error = %err,
+                        "supervisor cancel_wave on aggregate timeout failed; \
+                         the dispatcher will still kill in-flight workers"
+                    );
+                }
+                // 2026-07-22-001 plan U6 (KTD-7): enqueue a
+                // compensation hook so a subsequent coordinator
+                // tick observes the failure mode and runs the
+                // diagnostic / cleanup record.
+                if let Err(err) =
+                    bridge.enqueue_compensation(&store_wave_id, ralph_core::supervisor::CompensationKind::OnTimeout)
+                {
+                    tracing::debug!(
+                        wave_id = %store_wave_id,
+                        error = %err,
+                        "supervisor enqueue_compensation(OnTimeout) no-op"
+                    );
+                }
                 terminal_outcome = merged_wave
                     .take()
                     .map(WaveDispatchOutcome::AggregateDeadlineExceeded);
                 break;
             }
             WaveDispatchOutcome::GlobalDeadlineExceeded => {
+                // U4: same cancel marker on global deadline so the
+                // ledger reflects the operator-visible "cancelled"
+                // state, not the implicit "failed" state.
+                if let Err(err) = bridge.cancel_wave(&store_wave_id) {
+                    tracing::warn!(
+                        wave_id = %store_wave_id,
+                        error = %err,
+                        "supervisor cancel_wave on global deadline failed"
+                    );
+                }
+                if let Err(err) = bridge.enqueue_compensation(
+                    &store_wave_id,
+                    ralph_core::supervisor::CompensationKind::OnCancel,
+                ) {
+                    tracing::debug!(
+                        wave_id = %store_wave_id,
+                        error = %err,
+                        "supervisor enqueue_compensation(OnCancel) no-op"
+                    );
+                }
                 terminal_outcome = Some(WaveDispatchOutcome::GlobalDeadlineExceeded);
                 break;
             }
             spawn_failed @ WaveDispatchOutcome::SpawnFailed { .. } => {
+                // 2026-07-22-001 plan U4: also mark the store
+                // wave as cancelled so a subsequent inspect /
+                // diagnose call shows the abort, not a phantom
+                // "in-flight" entry.
+                if let Err(err) = bridge.cancel_wave(&store_wave_id) {
+                    tracing::debug!(
+                        wave_id = %store_wave_id,
+                        error = %err,
+                        "supervisor cancel_wave on spawn failure no-op"
+                    );
+                }
+                // 2026-07-22-001 plan U6: spawn failure is also a
+                // compensation candidate (diagnostics hook).
+                if let Err(err) = bridge.enqueue_compensation(
+                    &store_wave_id,
+                    ralph_core::supervisor::CompensationKind::OnCancel,
+                ) {
+                    tracing::debug!(
+                        wave_id = %store_wave_id,
+                        error = %err,
+                        "supervisor enqueue_compensation(OnCancel) on spawn failure no-op"
+                    );
+                }
                 terminal_outcome = Some(spawn_failed);
                 break;
             }
@@ -2014,7 +2156,7 @@ pub(crate) fn run_supervisor_fan_in(
         }
     };
 
-    match action {
+    let action_outcome = match action {
         ralph_core::supervisor::CoordinatorAction::InjectedComplete { topic, .. } => {
             // U7 (2026-07-23-002): build the wave-coordination payload
             // shape that matches the **target topic's** schema. The
@@ -2066,6 +2208,67 @@ pub(crate) fn run_supervisor_fan_in(
                  merged_to_events stays false, retrying on next tick (KTD-7)"
             );
             SupervisorFanInOutcome::MergeFailed
+        }
+    };
+
+    // 2026-07-22-001 plan U6: every successful fan-in tick drains
+    // any pending compensation jobs (OnTimeout / OnCancel /
+    // OnPartial) and marks them executed. We do this after the
+    // coordinator action has been processed so a wave that just
+    // got marked cancelled observes the new phase before its
+    // compensation hook runs. Failures only warn — the wave's
+    // terminal phase still succeeds.
+    drain_pending_compensations(bridge);
+
+    action_outcome
+}
+
+/// 2026-07-22-001 plan U6 (KTD-7): drain any pending
+/// compensation jobs and mark them executed. The
+/// compensation-hook command itself is a no-op for now — we
+/// record stderr diagnostics so an operator scanning loop
+/// output sees exactly which waves triggered which
+/// compensation kind. Failures only warn; they do not block
+/// the wave's terminal phase (KTD-7).
+pub(crate) fn drain_pending_compensations(
+    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+) {
+    use ralph_core::supervisor::SupervisorBridge as _;
+    let pending = match bridge.take_pending_compensations() {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "supervisor take_pending_compensations returned an error; \
+                 treating as empty queue"
+            );
+            return;
+        }
+    };
+    for (wave_id, kind) in pending {
+        // The "hook" itself is a stderr diagnostic record.
+        // Hook command execution (e.g. cleaning up the
+        // wave's worktree branch) lands in a follow-up
+        // release; today we mark the job executed so a
+        // subsequent inspect surfaces its terminal status.
+        let kind_str = match kind {
+            ralph_core::supervisor::CompensationKind::OnTimeout => "timeout",
+            ralph_core::supervisor::CompensationKind::OnCancel => "cancel",
+            ralph_core::supervisor::CompensationKind::OnPartial => "partial",
+        };
+        tracing::info!(
+            wave_id = %wave_id,
+            kind = kind_str,
+            "supervisor compensation hook executed (2026-07-22-001 plan U6)"
+        );
+        if let Err(err) = bridge.complete_compensation(&wave_id, kind, true) {
+            tracing::warn!(
+                wave_id = %wave_id,
+                kind = kind_str,
+                error = %err,
+                "supervisor complete_compensation failed; \
+                 the job will be retried on the next drain"
+            );
         }
     }
 }
@@ -2293,6 +2496,64 @@ fn append_supervisor_coord_event(
             "U6: failed to append supervisor coordination event to ledger"
         );
     }
+}
+
+/// 2026-07-22-001 plan U3 (KTD-2 / KTD-3): pick the supervisor
+/// store the lazy default-path bridge should wrap.
+///
+/// Behavior:
+/// - When the `supervisor-db` cargo feature is on AND the operator
+///   has configured a `SupervisorConfig::db_path`, open the rusqlite
+///   store at the resolved absolute path (mirrors the runner's
+///   `build_supervisor_bridge` resolution). Open failure is
+///   fail-closed: the dispatcher surfaces the error so the loop
+///   halts rather than silently dropping to InMemory.
+/// - When the feature is off, or no `db_path` is configured, fall
+///   back to `InMemorySupervisorStore` and emit a one-shot stderr
+///   warning (`wave_ledger_ephemeral`) so an operator scanning
+///   logs sees exactly why ledger writes do not survive a restart.
+///
+/// The recovered `RusqliteSupervisorStore` carries the same rows
+/// the runner's startup `recover_active_waves_at_startup` already
+/// reconciled, so no further recovery is needed at this layer.
+fn open_default_supervisor_store(
+    cfg: &ralph_core::config::SupervisorConfig,
+    ctx: &ralph_core::LoopContext,
+    _events_file: &std::path::Path,
+) -> anyhow::Result<Arc<dyn ralph_core::supervisor::SupervisorStore>> {
+    #[cfg(feature = "supervisor-db")]
+    {
+        if !cfg.db_path.trim().is_empty() {
+            let db_path = std::path::Path::new(&cfg.db_path);
+            let resolved = if db_path.is_absolute() {
+                db_path.to_path_buf()
+            } else {
+                ctx.workspace().join(db_path)
+            };
+            if let Some(parent) = resolved.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            return ralph_core::supervisor::RusqliteSupervisorStore::open(&resolved)
+                .map(|store| Arc::new(store) as Arc<dyn ralph_core::supervisor::SupervisorStore>)
+                .map_err(|err| {
+                    anyhow::anyhow!(
+                        "supervisor-db open failed at {}: {err}",
+                        resolved.display()
+                    )
+                });
+        }
+    }
+    // Fallback: InMemory + stderr warn so an operator can see
+    // exactly why ledger writes do not survive a restart. We do
+    // NOT silently pretend we have persistence.
+    eprintln!(
+        "wave_ledger_ephemeral: no supervisor-db feature / db_path; \
+         default wave path is using in-memory SupervisorStore — \
+         wave state will not survive a process restart. \
+         Enable `event_loop.supervisor.db_path` to opt into \
+         persistence."
+    );
+    Ok(Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new()))
 }
 
 /// Compute the aggregate timeout from per-worker timeout and the

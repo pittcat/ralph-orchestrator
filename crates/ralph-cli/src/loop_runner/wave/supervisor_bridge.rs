@@ -512,6 +512,52 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         }
         Ok(())
     }
+
+    fn cancel_wave(&self, wave_id: &str) -> Result<(), BridgeError> {
+        // 2026-07-22-001 plan U4 (KTD-8): thread the
+        // aggregate-timeout / global-deadline cancel signal into
+        // the store. `NotFound` is treated as already-cancelled
+        // success so a fan-in that races the cancel is harmless
+        // (mirrors `finalize_terminal_cleanup`'s idempotency
+        // posture).
+        match self.store.cancel_wave(wave_id) {
+            Ok(()) => Ok(()),
+            Err(ralph_core::supervisor::SupervisorStoreError::UnknownWave(_)) => Ok(()),
+            Err(err) => Err(BridgeError::Store(err.to_string())),
+        }
+    }
+
+    fn enqueue_compensation(
+        &self,
+        wave_id: &str,
+        kind: ralph_core::supervisor::CompensationKind,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .enqueue_compensation(wave_id, kind)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn take_pending_compensations(
+        &self,
+    ) -> Result<
+        Vec<(String, ralph_core::supervisor::CompensationKind)>,
+        BridgeError,
+    > {
+        self.store
+            .take_pending_compensations()
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn complete_compensation(
+        &self,
+        wave_id: &str,
+        kind: ralph_core::supervisor::CompensationKind,
+        ok: bool,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .complete_compensation(wave_id, kind, ok)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
 }
 
 /// U4 R8 fail-closed helper: when `bridge.bind_slot` returns
