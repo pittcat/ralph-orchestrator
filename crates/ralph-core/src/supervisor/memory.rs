@@ -561,6 +561,13 @@ impl SupervisorStore for InMemorySupervisorStore {
         Ok(())
     }
 
+    fn list_wave_ids(&self) -> SupervisorStoreResult<Vec<String>> {
+        let inner = self.lock()?;
+        let mut ids: Vec<String> = inner.waves_by_id.keys().cloned().collect();
+        ids.sort();
+        Ok(ids)
+    }
+
     fn recover_active_waves(&self) -> SupervisorStoreResult<Vec<WaveSnapshot>> {
         let inner = self.lock()?;
         let mut out = Vec::new();

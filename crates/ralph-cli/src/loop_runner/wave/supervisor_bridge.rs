@@ -437,6 +437,59 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
             .release_slot_dispatch(wave_id, slot_index, outcome)?;
         Ok(())
     }
+
+    fn finalize_terminal_cleanup(&self, repo_root: &std::path::Path) -> Result<(), BridgeError> {
+        // KTD8 / R13: runner-owned terminal finalizer. Walk every
+        // wave (including Done/Failed) and remove its slot worktrees
+        // via the existing `remove_worktree` helper. Idempotent:
+        // `NotFound` is treated as already-cleaned success.
+        let wave_ids = self
+            .store
+            .list_wave_ids()
+            .map_err(|err| BridgeError::Store(err.to_string()))?;
+        for wave_id in wave_ids {
+            let resources = self
+                .store
+                .list_worktree_paths(&wave_id)
+                .map_err(|err| BridgeError::Store(err.to_string()))?;
+            for resource in resources {
+                let Some(ref path) = resource.worktree_path else {
+                    continue;
+                };
+                match ralph_core::worktree::remove_worktree(repo_root, path) {
+                    Ok(()) => {
+                        tracing::info!(
+                            wave_id = %wave_id,
+                            slot = resource.slot_index,
+                            path = %path,
+                            "R13: removed supervisor slot worktree"
+                        );
+                    }
+                    Err(ralph_core::WorktreeError::NotFound(_)) => {
+                        tracing::debug!(
+                            wave_id = %wave_id,
+                            slot = resource.slot_index,
+                            path = %path,
+                            "R13: slot worktree already absent (idempotent)"
+                        );
+                    }
+                    Err(err) => {
+                        // Keep pending cleanup diagnosable but do not
+                        // fail the loop exit — partial cleanup is
+                        // preferred over blocking LOOP_COMPLETE.
+                        tracing::warn!(
+                            wave_id = %wave_id,
+                            slot = resource.slot_index,
+                            path = %path,
+                            error = %err,
+                            "R13: failed to remove supervisor slot worktree"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// U4 R8 fail-closed helper: when `bridge.bind_slot` returns

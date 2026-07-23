@@ -970,6 +970,32 @@ hats:
         loop --format json` — the supervisor block carries
         `active_waves`, not the runtime-private diagnose command,
         which is reserved for runtime/diagnose tooling).
+      - `plan_name` — the plan-level identity. 取得方式:
+        从 `ralph tools task list` 筛 `ce-review:*` 的六条
+        reviewer task，读取它们的 plan 段（同一 plan 的
+        六条 reviewer task 同属一个 plan_name）；
+        或 `ralph inspect loop --format json` 取顶层
+        `plan_name`。本字段是 plan 级终态绑定的关键。
+      - `task_id` — 当前 loop 的 live id。取得方式:
+        `ralph tools task list` 顶部 live 的 reviewer task
+        的 `task_id`（per `ralph-tools-tasks` red box:
+        禁止手写、从 task API 读 live 值，避免复用已
+        关闭的 task id）。
+      - `task_key` — 注册时的稳定 key。取得方式:
+        同上，从对应 reviewer task 的 `task_key` 读取；
+        格式 `plan:<plan>:u<N>:step-<M>:round-<R>`
+        （per `ralph-tools-tasks` 三字段约束）。
+      - `step` — 当前正在被汇总的步骤标签。取得方式:
+        同上，从对应 reviewer task 的 `task_key` 中
+        `:step-<M>:` 段解析；per `ralph-tools-tasks` red
+        box，禁止凭空构造。
+      - `verdict` — 聚合判定。计算方式:六维 reviewer
+        全 pass → `"pass"`；任一 reviewer 失败 →
+        `"fail"`；六维都无 P0/P1 阻塞但有非阻塞提示
+        → `"pass_with_residuals"`。该字段是 plan 级
+        `plan_review_terminal` 的 gate（`verdict !=
+        "fail"` 视为 pass-class，per `ralph-tools-emit`
+        §3）。
 
       Use a single-line JSON payload. For the full
       `ralph emit` syntax and the strict rules on

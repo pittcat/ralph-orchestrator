@@ -1911,43 +1911,25 @@ pub(crate) fn run_supervisor_fan_in(
 
     match action {
         ralph_core::supervisor::CoordinatorAction::InjectedComplete { topic, .. } => {
-            // Build the `success_slots` payload from the store's
-            // per-slot resource bindings, filtered to the slots that
-            // actually completed this wave. Each entry carries the
-            // slot index + branch + worktree_path so the integrator
-            // knows which branches to merge.
-            let success_indices: std::collections::HashSet<u32> =
-                completed.results.iter().map(|r| r.index).collect();
-            let mut success_slots: Vec<serde_json::Value> = Vec::new();
-            match bridge.slot_resources(&store_wave_id) {
-                Ok(resources) => {
-                    let mut resources = resources;
-                    resources.sort_by_key(|r| r.slot_index);
-                    for res in resources {
-                        if !success_indices.contains(&res.slot_index) {
-                            continue;
-                        }
-                        success_slots.push(serde_json::json!({
-                            "slot_index": res.slot_index,
-                            "branch": res.branch,
-                            "worktree_path": res.worktree_path,
-                        }));
-                    }
-                }
-                Err(err) => {
-                    warn!(
-                        wave_id = %completed.wave_id,
-                        error = %err,
-                        "U6: slot_resources failed; success_slots payload will be empty"
-                    );
-                }
-            }
-            let payload = serde_json::json!({
-                "wave_id": completed.wave_id,
-                "completed_slots": success_slots.len(),
-                "success_slots": success_slots,
-                "merge_root_event_id": format!("fan-in:exec.wave.complete:{}", completed.wave_id),
-            });
+            // U7 (2026-07-23-002): build the wave-coordination payload
+            // shape that matches the **target topic's** schema. The
+            // earlier implementation hard-coded the exec-style payload
+            // (`completed_slots` / `success_slots` / `merge_root_event_id`)
+            // for every wave kind, but `review.wave.complete` and
+            // `fix.wave.complete` have different required_fields — see
+            // `presets/schemas/ce-executor-supervisor.yml`. A mismatched
+            // payload was rejected by the engine gate's required_fields
+            // check, the event was demoted to `MalformedLine`, and the
+            // downstream integrator hat (e.g. `review-synthesizer`)
+            // never woke up. The hard-gate counter then terminated the
+            // loop after three iterations with no events emitted.
+            let payload = build_wave_complete_payload(
+                wave_kind,
+                completed,
+                &store_wave_id,
+                bridge,
+                aggregate_timeout_secs,
+            );
             append_supervisor_coord_event(main_events_file, &topic, &payload);
             SupervisorFanInOutcome::InjectedComplete
         }
@@ -1956,16 +1938,11 @@ pub(crate) fn run_supervisor_fan_in(
             reason,
             blocking_slots,
         } => {
-            let payload = serde_json::json!({
-                "wave_id": completed.wave_id,
-                "reason": reason,
-                "blocking_slots": blocking_slots,
-                // 2026-07-23-001 plan U9: the U6 fan-in sink builds the
-                // `*.wave.failed` payload. The schema (`presets/schemas/ce-executor-supervisor.yml`)
-                // requires `wave_id`, `blocking_slots`, and `reason` —
-                // everything above — so the system_injected ledger event
-                // passes the engine gate's required_fields check.
-            });
+            // U7 (2026-07-23-002): mirror the success-path fix —
+            // `review.wave.failed` schema requires `missing_dimensions`,
+            // not `blocking_slots`. Exec/fix waves keep the existing
+            // `blocking_slots` shape.
+            let payload = build_wave_failed_payload(wave_kind, completed, reason, blocking_slots);
             append_supervisor_coord_event(main_events_file, &topic, &payload);
             SupervisorFanInOutcome::InjectedFailed
         }
@@ -1988,24 +1965,201 @@ pub(crate) fn run_supervisor_fan_in(
     }
 }
 
+/// U7 (2026-07-23-002): build the `*.wave.complete` payload that
+/// matches the **target topic's** schema — see
+/// `presets/schemas/ce-executor-supervisor.yml`.
+///
+/// - `exec.wave.complete` / `fix.wave.complete` require
+///   `wave_id`, `completed_slots`, `merge_root_event_id`. The
+///   payload also carries `success_slots` (per-slot branch +
+///   worktree_path) so the integrator knows which branches to
+///   merge.
+/// - `review.wave.complete` requires `wave_id`,
+///   `completed_dimensions`, `aggregate_timeout`. The
+///   dimensions are derived from the per-slot `review.unit.done`
+///   events (falling back to `assigned_dimensions` when the
+///   events do not carry a `dimension` field).
+fn build_wave_complete_payload(
+    wave_kind: ralph_core::supervisor::WaveKind,
+    completed: &ralph_core::CompletedWave,
+    store_wave_id: &str,
+    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+    aggregate_timeout_secs: u64,
+) -> serde_json::Value {
+    use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
+
+    match wave_kind {
+        WaveKind::Review => {
+            let completed_dimensions = collect_review_dimensions(completed);
+            serde_json::json!({
+                "wave_id": completed.wave_id,
+                "completed_dimensions": completed_dimensions,
+                "aggregate_timeout": aggregate_timeout_secs,
+            })
+        }
+        WaveKind::Exec | WaveKind::Fix => {
+            // Build the `success_slots` payload from the store's
+            // per-slot resource bindings, filtered to the slots that
+            // actually completed this wave. Each entry carries the
+            // slot index + branch + worktree_path so the integrator
+            // knows which branches to merge.
+            let success_indices: std::collections::HashSet<u32> =
+                completed.results.iter().map(|r| r.index).collect();
+            let mut success_slots: Vec<serde_json::Value> = Vec::new();
+            match bridge.slot_resources(store_wave_id) {
+                Ok(resources) => {
+                    let mut resources = resources;
+                    resources.sort_by_key(|r| r.slot_index);
+                    for res in resources {
+                        if !success_indices.contains(&res.slot_index) {
+                            continue;
+                        }
+                        success_slots.push(serde_json::json!({
+                            "slot_index": res.slot_index,
+                            "branch": res.branch,
+                            "worktree_path": res.worktree_path,
+                        }));
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        wave_id = %completed.wave_id,
+                        error = %err,
+                        "U6: slot_resources failed; success_slots payload will be empty"
+                    );
+                }
+            }
+            let topic_prefix = match wave_kind {
+                WaveKind::Exec => "exec",
+                WaveKind::Fix => "fix",
+                WaveKind::Review => "review",
+            };
+            serde_json::json!({
+                "wave_id": completed.wave_id,
+                "completed_slots": success_slots.len(),
+                "success_slots": success_slots,
+                "merge_root_event_id": format!("fan-in:{topic_prefix}.wave.complete:{}", completed.wave_id),
+            })
+        }
+    }
+}
+
+/// U7 (2026-07-23-002): build the `*.wave.failed` payload that
+/// matches the **target topic's** schema. Exec/fix waves carry
+/// `blocking_slots`; review waves carry `missing_dimensions`
+/// (the dimensions that never produced a `review.unit.done`).
+fn build_wave_failed_payload(
+    wave_kind: ralph_core::supervisor::WaveKind,
+    completed: &ralph_core::CompletedWave,
+    reason: &str,
+    blocking_slots: Vec<u32>,
+) -> serde_json::Value {
+    use ralph_core::supervisor::WaveKind;
+
+    match wave_kind {
+        WaveKind::Review => {
+            let completed_dims = collect_review_dimensions(completed);
+            let assigned: std::collections::HashSet<String> =
+                completed.assigned_dimensions.values().cloned().collect();
+            let missing_dimensions: Vec<String> = assigned
+                .into_iter()
+                .filter(|d| !completed_dims.contains(d))
+                .collect();
+            serde_json::json!({
+                "wave_id": completed.wave_id,
+                "missing_dimensions": missing_dimensions,
+                "reason": reason,
+            })
+        }
+        WaveKind::Exec | WaveKind::Fix => serde_json::json!({
+            "wave_id": completed.wave_id,
+            "reason": reason,
+            "blocking_slots": blocking_slots,
+        }),
+    }
+}
+
+/// U7 (2026-07-23-002): collect the per-slot `dimension` payload
+/// field from each `review.unit.done` event in `completed.results`,
+/// falling back to `completed.assigned_dimensions` when the event
+/// lacks the field. Returns the dimensions in stable slot-index
+/// order so the synthesizer's `completed_dimensions` list is
+/// deterministic across runs.
+fn collect_review_dimensions(completed: &ralph_core::CompletedWave) -> Vec<String> {
+    let mut by_index: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+    for result in &completed.results {
+        for event in &result.events {
+            if event.topic.as_str() != "review.unit.done" {
+                continue;
+            }
+            let payload_str = event.payload.as_str();
+            if !payload_str.is_empty()
+                && let Ok(serde_json::Value::Object(map)) =
+                    serde_json::from_str::<serde_json::Value>(payload_str)
+                && let Some(serde_json::Value::String(dim)) = map.get("dimension")
+            {
+                by_index.insert(result.index, dim.clone());
+                break;
+            }
+        }
+        if !by_index.contains_key(&result.index)
+            && let Some(dim) = completed.assigned_dimensions.get(&result.index)
+        {
+            by_index.insert(result.index, dim.clone());
+        }
+    }
+    by_index.into_values().collect()
+}
+
 /// U6: append a `system_injected: true` coordination event
 /// (`*.wave.complete` / `*.wave.failed`) to the loop's main ledger
 /// WITHOUT advancing the reader cursor. The caller's post-wave
 /// `process_events_from_jsonl` re-read picks it up (alongside the
 /// sink-written business events) and publishes it to the bus exactly
-/// once. The `integrator` hat attribution matches the fan-in owner.
+/// once.
+///
+/// U7 (2026-07-23-002): the `hat`/`source` attribution is derived
+/// from the coordination `topic` so it matches the registered
+/// integrator hat id (`exec-integrator` / `fix-integrator` /
+/// `review-synthesizer`). The earlier hard-coded `"integrator"` was
+/// not a registered hat id, so isolated-mode scope enforcement
+/// (`isolated_publish_allowed`) rejected the event before it reached
+/// the EventBus, leaving the integrator hat's pending queue empty.
 fn append_supervisor_coord_event(
     main_events_file: &Path,
     topic: &str,
     payload: &serde_json::Value,
 ) {
     use std::io::Write;
+    // Derive the hat attribution from the coordination topic.
+    // `exec.wave.complete` → `exec-integrator`, `fix.wave.complete` →
+    // `fix-integrator`, `review.wave.complete` → `review-synthesizer`.
+    // Failed waves route to the matching failure-handler hat
+    // (`exec-failure-handler` / `fix-failure-handler`); review has no
+    // dedicated failure-handler, so fall back to `review-synthesizer`.
+    let hat_attribution = if topic.starts_with("exec.wave.") {
+        if topic.ends_with(".failed") {
+            "exec-failure-handler"
+        } else {
+            "exec-integrator"
+        }
+    } else if topic.starts_with("fix.wave.") {
+        if topic.ends_with(".failed") {
+            "exec-failure-handler"
+        } else {
+            "fix-integrator"
+        }
+    } else if topic.starts_with("review.wave.") {
+        "review-synthesizer"
+    } else {
+        "ralph"
+    };
     let record = serde_json::json!({
         "topic": topic,
         "payload": payload,
         "ts": chrono::Utc::now().to_rfc3339(),
-        "hat": "integrator",
-        "source": "integrator",
+        "hat": hat_attribution,
+        "source": hat_attribution,
         "system_injected": true,
     });
     let result = (|| -> std::io::Result<()> {
@@ -2206,7 +2360,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
             // no `wave.complete` injection, no `tick` (all U6).
             if let Some(guard) = release_guard.as_ref() {
                 match &result.1 {
-                    Ok((events, _duration, _success)) => {
+                    Ok((events, _duration, true)) => {
                         let (content_hash, event_count) = compute_slot_batch_fingerprint(events);
                         if let Err(error) = guard.bridge.record_slot_result(
                             &guard.wave_id,
@@ -2219,6 +2373,24 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                                 slot_index = guard.slot_index,
                                 %error,
                                 "U5: supervisor record_slot_result failed"
+                            );
+                        }
+                    }
+                    Ok((_events, _duration, false)) => {
+                        // Mirror `record_outcome`: Ok+success=false is a
+                        // non-zero exit / timeout-with-events. Persist as
+                        // slot failure so evaluate_phase returns Failed
+                        // instead of Integrate (R14 / AE5).
+                        if let Err(error) = guard.bridge.record_slot_failure(
+                            &guard.wave_id,
+                            guard.slot_index,
+                            "worker exited unsuccessfully",
+                        ) {
+                            warn!(
+                                wave_id = %guard.wave_id,
+                                slot_index = guard.slot_index,
+                                %error,
+                                "U5: supervisor record_slot_failure failed"
                             );
                         }
                     }
@@ -2239,7 +2411,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                 }
             }
 
-            if result.1.is_ok()
+            if matches!(&result.1, Ok((_, _, true)))
                 && let Some(guard) = release_guard.as_mut()
             {
                 guard.outcome = ralph_core::supervisor::DispatchOutcome::Completed;
@@ -2543,10 +2715,23 @@ fn record_outcome(
 ) {
     match outcome {
         Ok((events, duration, success)) => {
-            let proto_events: Vec<ralph_proto::Event> =
-                events.into_iter().map(ralph_proto::Event::from).collect();
-            tracker.record_result(wave_id, index, proto_events);
-            let _ = (duration, success);
+            // PTY workers return Ok((_, _, false)) for non-zero exit and for
+            // timeout-with-events (`run_wave_worker_pty`). Distinguish:
+            // - events present → keep results visible (partial-timeout contract)
+            // - empty + unsuccessful → hard failure so a forced slot exit
+            //   (exit 1, no events) cannot Integrate → false-green LOOP_COMPLETE
+            if success || !events.is_empty() {
+                let proto_events: Vec<ralph_proto::Event> =
+                    events.into_iter().map(ralph_proto::Event::from).collect();
+                tracker.record_result(wave_id, index, proto_events);
+            } else {
+                tracker.record_failure(
+                    wave_id,
+                    index,
+                    "worker exited unsuccessfully".into(),
+                    duration,
+                );
+            }
         }
         Err((error, duration)) => {
             tracker.record_failure(wave_id, index, error, duration);

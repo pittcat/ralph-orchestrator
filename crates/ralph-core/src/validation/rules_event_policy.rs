@@ -75,8 +75,23 @@ impl ValidationRule for EventPolicyRule {
         // at view-construction time (see
         // `preset/engine/protocol.rs`) so the adapter wires
         // the real typed config end-to-end.
+        // 2026-07-23-002 plan U7: the completion_promise (e.g.
+        // `LOOP_COMPLETE`) is the authoritative end signal and must
+        // NOT be hard-rejected by the duplicate-terminal check. A
+        // pre-terminal topic like `plan.complete` (also in
+        // `terminal_topics`) sets `terminal_observed` when it is
+        // processed; without this exemption, the subsequent
+        // `LOOP_COMPLETE` is rejected as a duplicate terminal,
+        // blocking loop completion. The completion_promise is
+        // validated separately by `check_completion_event` after
+        // this gate, so exempting it here is safe.
+        let is_completion_promise = !protocol_view.completion_promise.is_empty()
+            && event.topic.as_str() == protocol_view.completion_promise.as_str();
         let mut decision = {
             let state = ctx.policy_runtime_state();
+            if is_completion_promise {
+                state.terminal_observed = false;
+            }
             let handoff_adapter = EventLoopHandoffConfig {
                 handoff_envelope: &protocol_view.handoff_envelope,
             };

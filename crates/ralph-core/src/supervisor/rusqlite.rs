@@ -706,6 +706,16 @@ impl SupervisorStore for RusqliteSupervisorStore {
         })
     }
 
+    fn list_wave_ids(&self) -> SupervisorStoreResult<Vec<String>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT wave_id FROM waves ORDER BY wave_id ASC")?;
+            let ids = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ids)
+        })
+    }
+
     fn recover_active_waves(&self) -> SupervisorStoreResult<Vec<WaveSnapshot>> {
         // U8 / R11 (crash-restart recovery): read the active wave
         // ids under the connection lock, then RELEASE it before

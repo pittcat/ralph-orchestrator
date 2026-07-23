@@ -192,6 +192,13 @@ impl SupervisorCoordinator {
         // Mark the wave as merged + advanced; U11 reads this
         // flag to skip double-injection on restart.
         self.store.mark_merge_to_events(&snapshot.wave_id)?;
+        // U7 (2026-07-23-002) / KTD-8: coordinator owns the phase
+        // verdict on the success path too — mirror `fail_wave`'s
+        // `set_wave_phase(Failed)`. Without this the wave stays in
+        // `Collect` forever even after a successful fan-in merge,
+        // breaking Outside-In assertions that require `Done`.
+        self.store
+            .set_wave_phase(&snapshot.wave_id, WavePhase::Done)?;
         let topic = coordinator_topic(snapshot.kind, true);
         Ok(CoordinatorAction::InjectedComplete {
             topic,
@@ -460,6 +467,19 @@ mod tests {
                 CoordinatorAction::InjectedComplete { ref topic, .. } if topic == "exec.wave.complete"
             ),
             "tick #1 must emit exec.wave.complete, got {action1:?}"
+        );
+        // U7 (2026-07-23-002): success path must also advance phase to Done
+        // (mirrors fail_wave → Failed). Outside-In full-chain asserts this.
+        let snap_after = store.fan_in_status(&wave).unwrap();
+        assert!(
+            snap_after.merged_to_events,
+            "merged_to_events must flip on InjectedComplete"
+        );
+        assert_eq!(
+            snap_after.phase,
+            WavePhase::Done,
+            "success fan-in must set phase=Done; got {:?}",
+            snap_after.phase
         );
         // Tick #2..#5: MUST NOT re-emit InjectedComplete
         // (KTD-7). They return either AlreadyDone or

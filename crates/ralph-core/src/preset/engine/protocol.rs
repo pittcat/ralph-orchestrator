@@ -92,6 +92,20 @@ pub struct ProtocolView {
     /// authoring SSOT and the embedded copy.
     pub protocol_hash: String,
 
+    /// 2026-07-23-002 plan U7: the loop's `completion_promise`
+    /// topic (e.g. `LOOP_COMPLETE`). Populated from
+    /// `EventLoopConfig::completion_promise` at view-construction
+    /// time so `EventPolicyRule` can exempt it from the
+    /// duplicate-terminal check. Without this, a pre-terminal
+    /// topic like `plan.complete` sets `terminal_observed`, and
+    /// the subsequent `LOOP_COMPLETE` (also in `terminal_topics`)
+    /// is hard-rejected as a duplicate terminal — blocking loop
+    /// completion. The completion_promise is the authoritative
+    /// end signal and must always pass the duplicate-terminal
+    /// gate (it is validated separately by
+    /// `check_completion_event`).
+    pub completion_promise: String,
+
     /// KTD-8: feature flag — whether the unified
     /// `ProtocolView`-backed validation pipeline is enabled
     /// (`UNIFIED_PROTOCOL_VIEW=1`). When `false`, callers
@@ -202,6 +216,7 @@ impl ProtocolView {
             handoff_envelope,
             topology_topics,
             protocol_hash,
+            completion_promise: config.completion_promise.clone(),
             feature_flag_enabled: feature_enabled,
         }
     }

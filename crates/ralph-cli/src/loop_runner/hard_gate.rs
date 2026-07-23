@@ -173,9 +173,42 @@ pub fn should_gate_missing_events(
         }
         return true;
     }
+
+    // Multi-consumer pass-through hats (e.g. shipper on `plan.complete`)
+    // receive the trigger via pending and intentionally do not re-emit —
+    // downstream consumers still hold the same event on the bus. Skip the
+    // legacy blanket gate when the activation consumed a declared trigger
+    // that is whitelisted in `trigger_multi_consumer_topics`.
+    if regular_events_declare_multi_consumer_pass_through(config, event_loop) {
+        return false;
+    }
+
     // Legacy blanket rule: hat has an obligation to publish but no
     // automatic fallback.
     !config.publishes.is_empty() && config.default_publishes.is_none()
+}
+
+/// True when this hat was activated by a multi-consumer trigger it is
+/// allowed to observe without re-emitting (pass-through forwarder).
+fn regular_events_declare_multi_consumer_pass_through(
+    config: &ralph_core::HatConfig,
+    event_loop: &EventLoop,
+) -> bool {
+    event_loop
+        .state()
+        .last_activation_events
+        .iter()
+        .any(|event| {
+            let topic = event.topic.as_str();
+            config.triggers.iter().any(|t| t == topic)
+                && config.trigger_multi_consumer_topics.contains(topic)
+                // Pass-through only: the hat's sole publish is the same
+                // topic (e.g. shipper forwards `plan.complete`). Hats like
+                // reporter that publish a different terminal topic must
+                // still emit.
+                && config.publishes.len() == 1
+                && config.publishes.iter().any(|p| p == topic)
+        })
 }
 
 /// U6: Handle execution contract rejections for operator visibility.

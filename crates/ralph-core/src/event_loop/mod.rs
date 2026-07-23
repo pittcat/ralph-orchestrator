@@ -3823,6 +3823,42 @@ impl EventLoop {
         }
     }
 
+    /// True when the last hat consumed a multi-consumer pass-through trigger
+    /// and another registered consumer still has that topic pending — stall
+    /// recovery must not inject targeted `task.resume` to the pass-through hat.
+    fn should_skip_stall_recovery_for_multi_consumer_peers(&self) -> bool {
+        let Some(last_hat) = self.state.last_hat.as_ref() else {
+            return false;
+        };
+        let Some(config) = self.registry.get_config(last_hat) else {
+            return false;
+        };
+        let Some(pass_through_trigger) =
+            self.state.last_activation_events.iter().find_map(|event| {
+                let topic = event.topic.as_str();
+                if config.triggers.iter().any(|t| t == topic)
+                    && config.trigger_multi_consumer_topics.contains(topic)
+                    && config.publishes.len() == 1
+                    && config.publishes.iter().any(|p| p == topic)
+                {
+                    Some(topic.to_string())
+                } else {
+                    None
+                }
+            })
+        else {
+            return false;
+        };
+        self.bus.hat_ids().any(|id| {
+            if id == last_hat {
+                return false;
+            }
+            self.bus
+                .peek_pending(id)
+                .is_some_and(|q| q.iter().any(|e| e.topic.as_str() == pass_through_trigger))
+        })
+    }
+
     /// Injects a fallback event to recover from a stalled loop.
     ///
     /// When no hats have pending events (agent failed to publish), this method
@@ -3839,6 +3875,14 @@ impl EventLoop {
             return false;
         }
         if self.state.completion_requested && self.check_completion_event().is_some() {
+            return false;
+        }
+
+        // Pass-through multi-consumer hats (e.g. shipper on `plan.complete`) may
+        // intentionally not re-emit; peer consumers still hold the same trigger.
+        // Injecting targeted `task.resume` to the pass-through hat would pre-empt
+        // round-robin and starve peers (reporter never sees `plan.complete`).
+        if self.should_skip_stall_recovery_for_multi_consumer_peers() {
             return false;
         }
 
@@ -4568,8 +4612,12 @@ impl EventLoop {
 
                 debug!("build_prompt: routing to HatlessRalph (solo mode)");
                 return Some(final_prompt);
-            } else {
-                // Multi-hat mode: collect events and determine active hats
+            } else if self.config.event_loop.execution_mode != HatExecutionMode::Isolated {
+                // Coordinator multi-hat mode: collect events and determine active hats.
+                // Isolated mode must NOT take this path — ralph is a round-robin peer
+                // and may only consume its own pending queue. Draining every hat's
+                // queue here steals multi-consumer handoffs (e.g. `plan.complete`
+                // pending for reporter/shipper) and downstream hats never activate.
                 let mut all_hat_ids: Vec<HatId> = self.bus.hat_ids().cloned().collect();
                 // Deterministic ordering (avoid HashMap iteration order nondeterminism).
                 all_hat_ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -4850,7 +4898,7 @@ impl EventLoop {
             }
         }
 
-        // Non-ralph hat requested
+        // Isolated per-hat prompt (including ralph when it is selected by round-robin).
         if self.config.event_loop.execution_mode == HatExecutionMode::Isolated {
             // Isolated mode: build focused prompt for this hat only.
             let mut events = self.bus.take_pending(&hat_id.clone());
@@ -4860,6 +4908,14 @@ impl EventLoop {
             let (guidance_events, regular_events): (Vec<_>, Vec<_>) = events
                 .into_iter()
                 .partition(|e| e.topic.as_str() == "human.guidance");
+
+            // Mirror the multi-hat Ralph path (L4636–4718): record the
+            // trigger events this activation consumed so the missing-event
+            // gate can distinguish pass-through hats (e.g. shipper on a
+            // multi-consumer `plan.complete`) from hats that truly forgot
+            // to emit.
+            self.state.record_hat_activation(hat_id);
+            self.state.last_activation_events = regular_events.clone();
 
             // Apply per-hat event filter if configured
             let hat_config = self.registry.get_config(hat_id);
@@ -8773,6 +8829,24 @@ impl EventLoop {
                     continue;
                 }
 
+                // U7 (2026-07-23-002): supervisor-injected coordination
+                // events (`*.wave.complete` / `*.wave.failed`, marked
+                // `system_injected: true` by `append_supervisor_coord_event`)
+                // bypass the per-hat scope check. They are
+                // orchestrator-produced, not agent output, and their
+                // `hat` field is attribution metadata for the
+                // downstream consumer hat, not a publish-scope claim.
+                // This aligns with the existing bypasses in
+                // `event_origin::validate_event_origin` (P0-1) and
+                // `EventBus::publish` (source guard). Without this
+                // bypass, isolated scope enforcement drops the
+                // coordination event before it reaches the EventBus,
+                // leaving the integrator hat's pending queue empty.
+                if event.system_injected == Some(true) {
+                    accepted.push(event);
+                    continue;
+                }
+
                 // R6/U2: ralph pseudo-hat may only publish control topics.
                 // Business topics from ralph are rejected here (fail-closed)
                 // so they do NOT count as progress toward the stall detector.
@@ -11950,7 +12024,8 @@ impl EventLoop {
                 let payload = event.payload.as_str().to_string();
                 let key = (event.topic.as_str().to_string(), payload);
                 let stashed = gate_outcomes.get(&key).cloned();
-                if self.apply_emit_gate_on_validated(event, stashed) {
+                let accepted = self.apply_emit_gate_on_validated(event, stashed);
+                if accepted {
                     pending.push(event.clone());
                 }
             }

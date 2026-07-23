@@ -45,6 +45,11 @@ schemas:
       - wave_id
       - completed_dimensions
       - aggregate_timeout
+      - plan_name
+      - task_id
+      - task_key
+      - step
+      - verdict
   review.wave.failed:
     required_fields:
       - wave_id

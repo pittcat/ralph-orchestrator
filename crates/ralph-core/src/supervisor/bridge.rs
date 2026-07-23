@@ -183,6 +183,15 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
     ) -> Result<(), BridgeError> {
         Ok(())
     }
+
+    /// U7 (2026-07-23-002) / KTD8 / R13: idempotent terminal finalizer.
+    /// Remove every slot worktree the store recorded for this loop.
+    /// `NotFound` is treated as already-cleaned success so restart
+    /// recovery can safely re-run the finalizer. Default: no-op for
+    /// mocks / bridges without a store.
+    fn finalize_terminal_cleanup(&self, _repo_root: &std::path::Path) -> Result<(), BridgeError> {
+        Ok(())
+    }
 }
 
 /// BDD-specific bridge that wires a `SupervisorCoordinator`

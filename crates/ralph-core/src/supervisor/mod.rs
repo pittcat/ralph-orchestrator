@@ -386,6 +386,11 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// calls return `Ok(())`.
     fn mark_merge_to_events(&self, wave_id: &str) -> SupervisorStoreResult<()>;
 
+    /// List every wave id known to the store, including Done/Failed.
+    /// Used by the terminal cleanup finalizer (KTD8 / R13) so
+    /// worktrees allocated by completed waves are still released.
+    fn list_wave_ids(&self) -> SupervisorStoreResult<Vec<String>>;
+
     /// Recover active waves on loop startup. Returns waves whose
     /// slot rows survived a crash (R-C3). Used by U11; does not
     /// touch DB state.

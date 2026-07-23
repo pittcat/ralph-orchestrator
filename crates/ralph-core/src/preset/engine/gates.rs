@@ -357,6 +357,7 @@ mod tests {
             topology_topics: HashSet::new(),
             protocol_hash: "0".to_string(),
             feature_flag_enabled: false,
+            completion_promise: "LOOP_COMPLETE".to_string(),
         }
     }
 

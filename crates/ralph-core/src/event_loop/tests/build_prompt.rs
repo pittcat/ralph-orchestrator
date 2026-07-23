@@ -540,3 +540,60 @@ hats:
         "RECOVERY DIRECTIVES must not appear when no task.resume carries directives"
     );
 }
+
+#[test]
+fn isolated_ralph_build_prompt_does_not_drain_multi_consumer_peer_pending() {
+    // Regression: coordinator-style ralph build_prompt drained every hat's
+    // pending queue even in isolated mode, stealing `plan.complete` from
+    // reporter/shipper when ralph was selected with a stray task.resume.
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+hats:
+  shipper:
+    name: "Shipper"
+    triggers: ["plan.complete"]
+    publishes: ["plan.complete"]
+    trigger_multi_consumer_topics: ["plan.complete"]
+  reporter:
+    name: "Reporter"
+    triggers: ["plan.complete"]
+    publishes: ["LOOP_COMPLETE"]
+    trigger_multi_consumer_topics: ["plan.complete"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Multi-consumer terminal handoff");
+
+    event_loop
+        .bus
+        .publish(Event::new("plan.complete", r#"{"plan_name":"p"}"#));
+    event_loop
+        .bus
+        .publish(Event::new("task.resume", r#"{"reason":"stall_no_events"}"#));
+
+    let ralph_id = HatId::new("ralph");
+    let reporter_id = HatId::new("reporter");
+    let shipper_id = HatId::new("shipper");
+
+    assert!(
+        event_loop.build_prompt(&ralph_id).is_some(),
+        "isolated ralph must use per-hat pending, not coordinator drain"
+    );
+
+    assert!(
+        event_loop
+            .bus
+            .peek_pending(&reporter_id)
+            .is_some_and(|q| q.iter().any(|e| e.topic.as_str() == "plan.complete")),
+        "reporter must still hold plan.complete after isolated ralph activation"
+    );
+    assert!(
+        event_loop
+            .bus
+            .peek_pending(&shipper_id)
+            .is_some_and(|q| q.iter().any(|e| e.topic.as_str() == "plan.complete")),
+        "shipper must still hold plan.complete after isolated ralph activation"
+    );
+}

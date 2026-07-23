@@ -1919,6 +1919,7 @@ async fn run_loop_impl_inner(
     event_loop.set_plan_baseline_sha(plan_baseline_sha);
 
     // Helper closure to handle termination (writes summary, prints status, records history)
+    let supervisor_bridge_for_cleanup = supervisor_bridge.clone();
     let handle_termination =
         |reason: &TerminationReason,
          state: &ralph_core::LoopState,
@@ -1928,6 +1929,23 @@ async fn run_loop_impl_inner(
          auto_merge: bool,
          prompt: &str,
          payload_violation_report_relpath: Option<&str>| {
+            // U7 (2026-07-23-002) / KTD8 / R13: release supervisor slot
+            // worktrees on every business terminal (success or failure).
+            // Idempotent — NotFound is treated as already-cleaned.
+            if let Some(ref bridge) = supervisor_bridge_for_cleanup {
+                let repo_root = context
+                    .as_ref()
+                    .map(|ctx| ctx.repo_root().to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                if let Err(err) = bridge.finalize_terminal_cleanup(&repo_root) {
+                    warn!(
+                        error = %err,
+                        reason = ?reason,
+                        "R13: supervisor terminal cleanup failed; worktrees may leak"
+                    );
+                }
+            }
+
             // Per spec: Write summary file on termination
             let summary_writer = if let Some(ctx) = context {
                 SummaryWriter::from_context(ctx)
