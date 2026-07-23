@@ -163,6 +163,19 @@ pub(crate) struct ProductionExecutor;
 /// worker task exits, including JoinSet cancellation/abort. A Drop
 /// guard is required because an aborted async task never executes code
 /// after its awaited executor future.
+///
+/// 2026-07-23-007 plan U6 (A2 / A5): the drop guard NEVER
+/// overwrites a slot the worker task already drove to a terminal
+/// state. The supervisor store's `release_slot_dispatch` is
+/// idempotent (no-op when the slot is already `Completed` /
+/// `Failed` / `Cancelled`), so a panic between
+/// `record_slot_result` and `guard.outcome = Completed` cannot
+/// downgrade a terminal write — the existing
+/// `release_slot_dispatch(Completed | Failed)` call is a safe
+/// no-op. The `outcome` field is kept so the guard preserves the
+/// explicit `Completed` signal for the dispatch_records
+/// transition; the store's `IN ('dispatched','running')` predicate
+/// is the actual safety gate.
 struct SupervisorSlotRelease {
     bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge>,
     wave_id: String,

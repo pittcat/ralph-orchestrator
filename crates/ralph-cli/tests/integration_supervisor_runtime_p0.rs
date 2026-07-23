@@ -759,3 +759,95 @@ fn conflicting_terminal_does_not_overwrite_completed_slot() {
         .record_slot_result("w-1", 0, "hash-A", 1)
         .expect("idempotent replay must succeed");
 }
+
+/// 2026-07-23-007 plan U6 (A2 / A5): the drop-guard's
+/// `release_slot_dispatch(Failed)` after a successful
+/// `record_slot_result(Completed)` MUST be a no-op, not a
+/// downgrade. This is the contract that lets the dispatcher
+/// treat `record_slot_*` as the sole terminal writer while
+/// keeping the drop guard as a fail-safe for panics BEFORE
+/// `record_slot_*`. Without this contract, a panic between
+/// `record_slot_result` and `guard.outcome = Completed` would
+/// silently flip a Completed slot back to Failed.
+#[test]
+fn release_slot_dispatch_after_completed_is_noop() {
+    use ralph_core::supervisor::DispatchOutcome;
+    use ralph_core::supervisor::SupervisorStore;
+    let mut fx = SupervisorP0Fixture::new_in_memory(
+        "u6-noop",
+        "u6-loop",
+        "task-u6",
+        "task-key-u6:step-1",
+        "step-1",
+    );
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+    // Worker task writes the terminal result first.
+    fx.store()
+        .as_ref()
+        .record_slot_result("w-1", 0, "hash-A", 1)
+        .expect("record_slot_result must succeed");
+    // Drop guard fires with the default `Failed` outcome after
+    // the worker task panics between record_slot_result and
+    // guard.outcome = Completed. The store MUST treat this as
+    // a no-op rather than downgrading the slot.
+    fx.store()
+        .as_ref()
+        .release_slot_dispatch("w-1", 0, DispatchOutcome::Failed)
+        .expect("release_slot_dispatch after Completed must succeed");
+    // Re-read via fan_in_status: the slot must still be Completed.
+    let snap = fx
+        .store()
+        .as_ref()
+        .fan_in_status("w-1")
+        .expect("fan_in_status must succeed");
+    assert_eq!(
+        snap.completed_count, 1,
+        "Completed slot must survive a Failed release_slot_dispatch; got {snap:?}"
+    );
+    assert_eq!(
+        snap.failed_count, 0,
+        "Completed slot must NOT be downgraded to Failed; got {snap:?}"
+    );
+}
+
+/// 2026-07-23-007 plan U6 (A2 / A5) control: when a worker
+/// task panics BEFORE `record_slot_result` (i.e. the slot
+/// stays in-flight), the drop guard's `release_slot_dispatch`
+/// MUST transition the slot to `Failed`. This is the other
+/// half of the contract — the drop guard exists to release
+/// in-flight slots when no terminal write has landed yet.
+#[test]
+fn release_slot_dispatch_before_record_slot_transitions_to_failed() {
+    use ralph_core::supervisor::DispatchOutcome;
+    use ralph_core::supervisor::SupervisorStore;
+    let mut fx = SupervisorP0Fixture::new_in_memory(
+        "u6-before",
+        "u6-loop",
+        "task-u6",
+        "task-key-u6:step-1",
+        "step-1",
+    );
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+    // Worker task panics BEFORE record_slot_result: no terminal
+    // write landed; the drop guard's release_slot_dispatch
+    // transitions the in-flight slot to Failed.
+    fx.store()
+        .as_ref()
+        .release_slot_dispatch("w-1", 0, DispatchOutcome::Failed)
+        .expect("release_slot_dispatch on in-flight slot must succeed");
+    let snap = fx
+        .store()
+        .as_ref()
+        .fan_in_status("w-1")
+        .expect("fan_in_status must succeed");
+    assert_eq!(
+        snap.failed_count, 1,
+        "in-flight slot must transition to Failed via drop guard; got {snap:?}"
+    );
+    assert_eq!(
+        snap.completed_count, 0,
+        "no Completed slot should exist; got {snap:?}"
+    );
+}
