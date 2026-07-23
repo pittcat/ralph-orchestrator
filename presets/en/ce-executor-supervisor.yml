@@ -352,169 +352,188 @@ hats:
 
   task-planner:
     name: "Task Planner"
-    description: "Emits per-unit execution readiness events to fan out work across supervisor slots."
+    # 2026-07-23-005 plan U2: task-planner is now the **dependency
+    # auditor**, not a one-shot fan-out dispatcher. It reads the
+    # runner-injected original plan path, parses the unit list, and
+    # writes a static execution-plan artifact with provenance
+    # (`source_plan_path` / `source_plan_hash`). U3 extends the
+    # artifact with edges/ready-wave selection; U4 materializes the
+    # DAG nodes into runtime tasks; U5 owns the iteration of
+    # ready waves. This hat owns only U2 — produce the static
+    # artifact and stop.
+    description: "Reads the original plan and writes a static execution-plan artifact with provenance."
     instructions: |
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
-      ## TASK PLANNER MODE — Single-shot wave fan-out (this hat)
+      ## TASK PLANNER MODE — Write the execution-plan artifact (this hat)
 
-      You are a **dispatcher hat** activated when a plan is
-      ready to be fanned out into per-unit work. You do not
-      implement code, run tests, or write project files.
-      You take the plan units that an earlier hat registered
-      and emit one batch wave that hands every unit off in
-      parallel.
+      You are a **planner hat** activated when the runtime
+      has anchored a plan to the loop (`ralph inspect loop`
+      shows `loop_anchor.plan_path`). You do not implement
+      code, run tests, edit project files, or call
+      `ralph wave emit`. You read the original plan, parse
+      its unit list, and write a single static artifact
+      (`.ralph/review/<plan-key>/execution-plan.yml`) that
+      subsequent hats and the runtime treat as the
+      dependency SSOT for this loop.
 
       ### 0. This activation is single-shot
 
-      In this activation, **emit exactly one**
-      `ralph wave emit` call to publish the per-unit
-      readiness events. Do not call `ralph emit` for any
-      business topic in this turn — your business output
-      is the wave itself, and the wave-emit call counts as
-      your one business emission for the turn. After the
-      wave emit, stop.
+      In this activation, **emit at most one** business
+      event. The accepted cases:
+
+      - **Happy path**: write the artifact, then stop
+        without emitting any business topic. The next hat
+        in the chain is wired through the artifact, not
+        through your emit; downstream routing reads the
+        artifact via `ralph inspect loop` /
+        `ralph tools task list`. Do not chain a handoff
+        emit just to "wake up" the next hat.
+      - **Invalid plan**: emit exactly one `plan.blocked`
+        with `reason: <category>` (see §3). Do not also
+        emit a handoff event in the same activation —
+        that would race the terminal and get dropped.
 
       This rule is the same as the always-injected
-      `ralph-tools` skill's §6 — the framing here is
-      identical; do not "fix" a dropped emit by re-trying
-      in the same activation. Wait for a `task.resume` to
-      land in a later turn.
+      `ralph-tools` skill's §6. Do not retry inside this
+      activation; let `task.resume` route a later turn.
 
-      If the wave emit fails (e.g. policy check rejects the
-      payload), stop and let the runtime surface a
-      `task.resume` to a later turn. Do not retry inside
-      this activation.
+      ### 1. Read the original plan
 
-      ### 1. Read the plan units
+      a. Use `ralph inspect loop --format json` to read
+         `loop_anchor.plan_path` — the runner injected
+         this from `--plan <file>` (or `ralph resume
+         --plan`). You MUST read that exact path; do
+         not infer the plan from the task list.
+      b. Read the plan file end-to-end. Parse the
+         `## Implementation Units` (or `### U<number>.
+         ...`) section and collect one entry per unit:
+         `unit_id` (`U1`, `U2`, ...), title, scope
+         summary, files written, verification hook.
+      c. Compute `source_plan_hash` as
+         `sha256(plan_file_contents)`. The hash is the
+         artifact's replay key — see §4.
+      d. Derive `<plan-key>` from the plan file stem
+         (e.g. `2026-07-23-005-…`); it matches the
+         `ralph review <plan-key>` directory layout.
 
-      a. Inspect the runtime tasks to learn the unit list:
-         `ralph tools task list`. Each task with
-         `task_key` matching `plan:*:u<n>` is one plan unit.
-         You need their `task_id`, `task_key`, and the
-         per-unit scope text (from the task's description).
-      b. If the task list is empty or none of the tasks
-         carry a `plan:*:u<n>` key, you have nothing to
-         fan out. Do not call `ralph wave emit`; stop and
-         let the next pass handle the gap.
+      ### 2. Write the execution-plan artifact
 
-      ### 2. Build the per-unit payload list
+      Path: `.ralph/review/<plan-key>/execution-plan.yml`.
 
-      For each plan unit, build a JSON object with at
-      least the wave's required fields:
+      Required fields (per `event_policy.schemas.
+      execution-plan.artifact`):
 
-      - `wave_id` — a fresh id of the form `w-<short-hash>`
-        that you generate once and reuse for every payload
-        in this wave.
-      - `slot_index` — `0` for the first unit, `1` for the
-        second, and so on. Monotonic, no gaps.
-      - `plan_name` — short name you reuse across units
-        (e.g. derived from the plan's filename slug).
-      - `task_id` / `task_key` — taken directly from the
-        runtime task for that unit.
-      - `unit_scope` — the one-line scope from the task's
-        description; downstream hats will read this.
+      - `version`: `"ce-execution-plan/v1"`.
+      - `source_plan_path`: repo-relative path you read.
+      - `source_plan_hash`: sha256 you computed.
+      - `generated_at`: UTC ISO-8601 timestamp.
+      - `nodes`: ordered list, one entry per plan unit,
+        with `unit_id`, `title`, `scope`, `files_written`
+        (best-effort from the plan), `verification`,
+        `original_provenance` (the plan heading line).
 
-      Keep each payload as a single line of JSON. Do not
-      pretty-print; do not include trailing comments.
+      The artifact MUST NOT include dynamic state
+      (`started` / `done` / `failed`). Dynamic state
+      lives only in the runtime task API
+      (`ralph tools task list`).
 
-      ### 3. Emit the wave
+      U3 will extend this artifact with `edges:` and
+      `waves:`. U2 only requires the source + nodes
+      block.
 
-      Pre-check the batch first (the loop's gate is the
-      same one; per `ralph-tools` §5):
-      `ralph wave emit exec.unit.ready --payloads-stdin
-      --policy-check < payloads.jsonl`. Only after the
-      precheck passes, drop `--policy-check` and emit the
-      real wave.
+      ### 3. Invalid plan → `plan.blocked`
 
-      Use `--payloads-stdin` (the multi-line `--payloads`
-      form is rejected — see `ralph-tools-wave` red box).
-      Pipe the payload list:
+      If any of the following hold, you do NOT write the
+      artifact. Emit exactly one `plan.blocked` and stop:
 
-      ```bash
-      printf '%s\n' \
-        '{"wave_id":"w-…","slot_index":0,"plan_name":"…","task_id":"…","task_key":"plan:slug:u1","unit_scope":"…"}' \
-        '{"wave_id":"w-…","slot_index":1,"plan_name":"…","task_id":"…","task_key":"plan:slug:u2","unit_scope":"…"}' \
-        | ralph wave emit exec.unit.ready --payloads-stdin
-      ```
+      - `loop_anchor.plan_path` is missing or points
+        outside the repo.
+      - The plan file is unreadable.
+      - The `## Implementation Units` section is empty,
+        or it lists zero `U<number>` headings.
+      - Any unit id is duplicated or does not match
+        the `U<number>` shape.
 
-      `task_id` / `task_key` per payload must be live ids
-      / stable keys from `ralph tools task list`
-      (consistent with the registered plan unit; see
-      `ralph-tools-tasks` red box on the strict-match
-      rule). Never hand-write `task_id`.
+      `reason` MUST be exactly one of:
+      `plan_missing`, `plan_unreadable`,
+      `plan_empty_units`, `plan_duplicate_unit_id`,
+      `plan_invalid_unit_id_shape`. The runtime treats
+      any other value as a hard error and rejects the
+      event.
 
-      If you want, pass `--idempotency-key` so re-entries
-      with the same key return the same `wave_id` instead
-      of double-dispatching.
+      ### 4. Replay safety
 
-      The wave-emit call returns one `wave_id` and a
-      per-payload event count. The downstream hats will
-      see the per-unit events on their own activations.
-
-      ### 4. Stop
-
-      You are done. Do not call `ralph emit` after the
-      wave emit. Do not chain another wave. The runtime
-      will route the per-unit work to the per-slot hats.
+      On a re-entry with the same `loop_id` and an
+      unchanged `source_plan_hash`, you MUST NOT
+      re-generate the artifact from scratch. Check
+      whether `.ralph/review/<plan-key>/execution-plan.yml`
+      already exists with a matching `source_plan_hash`;
+      if so, skip writing and stop. Only a hash change
+      justifies a new artifact version.
 
       ### 5. Things you must NOT do (this hat)
 
-      - **Do not edit any project file** — no code, no
-        tests, no docs.
-      - **Do not call `ralph emit`** for any business
-        topic in this turn. Your output is the wave.
-      - **Do not call `ralph wave emit` more than once**
-        in this turn.
-      - **Do not call `ralph wave emit` on a topic that
-        is not `exec.unit.ready`**. Other wave topics
-        belong to other hats (review fan-out, fix
-        fan-out).
-      - **Do not try to inspect the runtime's internal
-        ledger files**. If you need cross-hat state, use
-        `ralph tools task <cmd>`.
-      - **Do not retry on failure** inside this
-        activation. Stop; the runtime will surface a
-        `task.resume` for a retry if appropriate.
+      - **Do not edit any project file** other than the
+        artifact path listed in §2.
+      - **Do not call `ralph wave emit`**. Wave
+        dispatching belongs to U5 (executor / iteration
+        hat).
+      - **Do not call `ralph emit` for a non-terminal
+        business topic** in this activation. The
+        artifact is your business output; the next hat
+        picks up through the artifact, not your emit.
+      - **Do not read runtime internal ledgers**
+        (events.jsonl, supervisor.db). Use
+        `ralph inspect loop --format json` for loop
+        state and `ralph tools task list` for task state.
+      - **Do not run tests, build, or lint**. You are a
+        planner, not an implementer.
 
       ### 6. Useful runtime APIs (this hat may call)
 
-      - `ralph tools task list` — list all plan units
-        registered for the active plan.
-      - `ralph tools task show <id>` — read one unit's
-        full description / status.
-      - `ralph wave emit <topic> --payloads-stdin
-        [--policy-check]` — the only business-emitting
-        call you make. Always run with `--policy-check`
-        first; the loop's gate is the same one (per
-        `ralph-tools` §5). For the full syntax, the
-        `--payloads-stdin` requirement, the
-        `--idempotency-key` namespace convention, and
-        the `RALPH_WAVE_WORKER=1` block, load
-        `ralph-tools-wave` on demand.
+      - `ralph inspect loop --format json` — read
+        `loop_anchor.plan_path` and the resolved
+        baseline SHA.
+      - `ralph tools task list` — confirm the upstream
+        `coordinator` already registered the unit
+        tasks. If the list is empty, your artifact
+        still stands (the runtime can re-materialize
+        from it); do not fabricate task entries here.
+      - `ralph emit plan.blocked --policy-check
+        -j '<json>'` — only on invalid plan; the loop
+        gate is the same one (per `ralph-tools` §5).
+        For the strict rules on `task_id` /
+        `events.jsonl` allowlist, load
+        `ralph-tools-emit` on demand.
 
-      For full syntax of `ralph tools task <cmd>`, see the
-      `ralph-tools-tasks` skill (auto-injected under
-      `tasks.enabled`).
+      For full syntax of `ralph tools task <cmd>` and
+      task-key three-field consistency, see the
+      auto-injected `ralph-tools-tasks` skill.
 
       ### 7. Environment you can read
 
       - `RALPH_CURRENT_HAT` — should be `task-planner`.
-      - `RALPH_CURRENT_LOOP_ID` — current loop id;
-        include in any cross-iteration stable key.
+      - `RALPH_CURRENT_LOOP_ID` — current loop id; used
+        for the artifact's loop_id stamping.
       - `RALPH_HATS_SOURCE` — preset label, useful in
         error messages.
     triggers:
       - work.ready
+    # 2026-07-23-005 plan U2: task-planner no longer publishes the
+    # per-unit `exec.unit.ready` wave (that ownership moves to the
+    # exec-wave dispatcher in U5). It only emits `plan.blocked` on
+    # invalid-plan detection — the happy path writes the artifact
+    # and stops without any business emit. The `terminal_events`
+    # is left empty so the runtime does not force-quit after the
+    # hat returns successfully.
     publishes:
-      - exec.unit.ready
+      - plan.blocked
     event_filter:
       enabled: true
       events:
       - work.ready
     exempt_topics:
-      - exec.unit.ready
-    terminal_events:
-      - exec.unit.ready
+      - plan.blocked
 
   worker:
     name: "Worker"

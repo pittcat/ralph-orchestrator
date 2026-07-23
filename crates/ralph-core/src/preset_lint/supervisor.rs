@@ -28,7 +28,9 @@ use crate::event_origin::SUPERVISOR_COORDINATION_TOPICS;
 use crate::preset_lint::LintFinding;
 pub use crate::preset_lint::finding_id::{
     FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC, FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE,
-    FINDING_SUPERVISOR_REQUIRES_ISOLATED, FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY,
+    FINDING_SUPERVISOR_REQUIRES_ISOLATED, FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY,
+    FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY,
+    FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY,
 };
 use serde_yaml::Value;
 
@@ -84,6 +86,14 @@ pub fn check_supervisor_rules(raw_yaml: &str) -> Vec<LintFinding> {
     // capability gate, not a blanket check.
     if is_supervisor_enabled(&value) {
         findings.extend(check_wave_consumer_concurrency(&value));
+        // 2026-07-23-005 plan U2: `task-planner` ownership
+        // transfer. The hat is the dependency auditor, not the
+        // wave dispatcher, so it must not claim or consume
+        // `exec.unit.ready`. The two checks below fail
+        // loudly at preset-load time if a future refactor
+        // silently re-routes fan-out through `task-planner`.
+        findings.extend(check_task_planner_publishes_exec_ready(&value));
+        findings.extend(check_task_planner_triggers_exec_ready(&value));
     }
 
     findings
@@ -329,6 +339,95 @@ fn check_hat_publishes_coord_topic(value: &Value) -> Vec<LintFinding> {
                 findings.push(f);
             }
         }
+    }
+    findings
+}
+
+/// 2026-07-23-005 plan U2: `task-planner` is the dependency
+/// auditor and must NOT claim `exec.unit.ready` in `publishes:`.
+/// The hat writes the static execution-plan artifact; per-unit
+/// fan-out is the exec-wave dispatcher's job (U5). Re-introducing
+/// `exec.unit.ready` here would silently restore the single-shot
+/// broadcast that U2 just removed.
+fn check_task_planner_publishes_exec_ready(value: &Value) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Some(hats) = value.get("hats").and_then(|h| h.as_mapping()) else {
+        return findings;
+    };
+    let Some((_, hat_value)) = hats
+        .iter()
+        .find(|(id, _)| id.as_str() == Some("task-planner"))
+    else {
+        return findings;
+    };
+    let publishes: Vec<String> = hat_value
+        .get("publishes")
+        .and_then(|p| p.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if publishes.iter().any(|t| t == "exec.unit.ready") {
+        let mut f = LintFinding::new(
+            FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY,
+            "hat `task-planner` declares `exec.unit.ready` in `publishes:`. Per 2026-07-23-005 \
+             plan U2, task-planner is the dependency auditor and must not fan out per-unit \
+             readiness events; that ownership belongs to the exec-wave dispatcher hat (U5)."
+                .to_string(),
+        );
+        f.action_hint = Some(
+            "remove `exec.unit.ready` from `task-planner.publishes:`; the exec-wave dispatcher \
+             (U5) owns the per-unit fan-out."
+                .to_string(),
+        );
+        findings.push(f);
+    }
+    findings
+}
+
+/// 2026-07-23-005 plan U2: `task-planner` must NOT consume
+/// `exec.unit.ready` either. The hat is activated by
+/// `work.ready`; if it also lists `exec.unit.ready` in
+/// `triggers:` the runtime could re-route per-unit fan-out
+/// through `task-planner` and bypass the exec-wave
+/// dispatcher entirely. This is a sibling guard to
+/// [`check_task_planner_publishes_exec_ready`].
+fn check_task_planner_triggers_exec_ready(value: &Value) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Some(hats) = value.get("hats").and_then(|h| h.as_mapping()) else {
+        return findings;
+    };
+    let Some((_, hat_value)) = hats
+        .iter()
+        .find(|(id, _)| id.as_str() == Some("task-planner"))
+    else {
+        return findings;
+    };
+    let triggers: Vec<String> = hat_value
+        .get("triggers")
+        .and_then(|t| t.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if triggers.iter().any(|t| t == "exec.unit.ready") {
+        let mut f = LintFinding::new(
+            FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY,
+            "hat `task-planner` declares `exec.unit.ready` in `triggers:`. Per 2026-07-23-005 \
+             plan U2, task-planner is the dependency auditor and must not consume per-unit \
+             readiness events; the exec-wave dispatcher hat (U5) consumes them."
+                .to_string(),
+        );
+        f.action_hint = Some(
+            "remove `exec.unit.ready` from `task-planner.triggers:`; the exec-wave dispatcher \
+             (U5) consumes the per-unit fan-out."
+                .to_string(),
+        );
+        findings.push(f);
     }
     findings
 }
@@ -863,6 +962,79 @@ hats:
         assert!(
             findings.is_empty(),
             "legal supervisor preset must pass, got {findings:?}"
+        );
+    }
+
+    // 2026-07-23-005 plan U2: `task-planner` ownership
+    // transfer guards. The lint must flag any preset that
+    // re-introduces `exec.unit.ready` in `task-planner`'s
+    // `publishes:` or `triggers:` lists (U5 owns that
+    // ownership now).
+    #[test]
+    fn task_planner_publishing_exec_unit_ready_is_error() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  task-planner:
+    triggers:
+      - work.ready
+    publishes:
+      - exec.unit.ready
+";
+        let findings = run(yaml);
+        assert!(
+            findings.iter().any(|f| f.id == FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY),
+            "expected task_planner_publishes_exec_unit_ready finding, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn task_planner_triggering_exec_unit_ready_is_error() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  task-planner:
+    triggers:
+      - work.ready
+      - exec.unit.ready
+    publishes:
+      - plan.blocked
+";
+        let findings = run(yaml);
+        assert!(
+            findings.iter().any(|f| f.id == FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY),
+            "expected task_planner_triggers_exec_unit_ready finding, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn task_planner_without_exec_unit_ready_is_silent() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  task-planner:
+    triggers:
+      - work.ready
+    publishes:
+      - plan.blocked
+";
+        let findings = run(yaml);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.id != FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY
+                    && f.id != FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY),
+            "U2 ownership transfer guards must stay silent for a valid task-planner preset; \
+             got {findings:?}"
         );
     }
 }

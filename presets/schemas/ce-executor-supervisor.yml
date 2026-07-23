@@ -204,3 +204,19 @@ schemas:
     required_fields:
       - reason
     payload: json_object
+
+  # 2026-07-23-005 plan U2: execution-plan artifact contract.
+  # task-planner reads the runner-injected original plan path and
+  # produces a static DAG artifact at
+  # `.ralph/review/<plan-key>/execution-plan.yml`. The artifact is
+  # the dependency SSOT; dynamic state lives only in the runtime
+  # task API. U3 extends this entry with `edges:` and `waves:`
+  # sections; U2 only covers the source/nodes portion.
+  execution-plan.artifact:
+    required_fields:
+      - version
+      - source_plan_path
+      - source_plan_hash
+      - generated_at
+      - nodes
+    payload: json_object
