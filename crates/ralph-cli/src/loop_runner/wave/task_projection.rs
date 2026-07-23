@@ -15,13 +15,16 @@
 //! first-terminal-wins replay) and recover-on-restart produce
 //! the same final task state without duplicate rows.
 //!
-//! Recovery: a crash between the supervisor-store mutation and
-//! the `tasks.jsonl` write leaves the slot terminal in the store
-//! but the task stuck at `started` (or worse, never started).
-//! `recover_pending_projections` walks the active waves and
-//! replays the terminal state; the projection is idempotent, so
-//! a recovered state still produces the right `done` / `failed`
-//! row.
+//! Recovery: as of the 2026-07-23-007 plan a crash between the
+//! supervisor-store mutation and the `tasks.jsonl` write leaves
+//! the slot terminal in the store but the task stuck at `started`
+//! (or worse, never started). The slot supervisor has
+//! `recover_pending_projections` as a primitive at
+//! `task_projection.rs:<below>`; it is NOT currently wired into
+//! recovery startup. A `TODO` follows the symbol so the next
+//! supervisor change can promote it from a documented primitive
+//! to a real recovery backstop without re-deriving the
+//! recovery contract.
 
 use std::path::Path;
 
@@ -128,7 +131,18 @@ pub fn project_slot(
 /// dispatched state that has not yet been reflected in
 /// `tasks.jsonl`. The function is idempotent — running it twice
 /// produces the same end state.
-#[allow(dead_code)] // Wired by recovery startup (out-of-scope for executor).
+///
+/// 2026-07-23-007 plan U4 (A3 / R10): NOT currently wired into
+/// recovery startup. The supervisor lifecycle invokes
+/// `project_slot` on the dispatch tick, so a crash between the
+/// supervisor-store mutation and the `tasks.jsonl` write leaves
+/// the task row stale until the next dispatch. TODO(2026-07-23-007):
+/// wire this into `runner.rs:715` on loop startup to close the
+/// restart-replay gap. Until then, the symbol stays compiled
+/// out (no callers) so the next supervisor change can promote
+/// it from a documented primitive to a real recovery backstop
+/// without re-deriving the recovery contract.
+#[allow(dead_code)] // TODO(2026-07-23-007 U4 / R10): wire into recovery startup.
 pub fn recover_pending_projections(tasks_path: &Path, loop_id: &str, store: &dyn SupervisorStore) {
     let snapshots = match store.recover_active_waves() {
         Ok(s) => s,
