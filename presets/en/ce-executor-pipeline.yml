@@ -2452,6 +2452,28 @@ hats:
         (e.g. full-repo formatting).
       - **Do not attempt emit more than once in the same activation**: the
         final decision must be made once based on the audit.
+      - **Finish stabilization / in-activation retry (HARD RULE)**: this
+        activation must exhaust honest correction attempts before
+        `stabilization.blocked`. One failing test or one correction miss
+        is not permission to block early.
+        **Per-cluster correction budget**: on test / build / attribution
+        failure for a classified cluster (`test_bug`, `production_bug`, or
+        reproducible `flaky_or_env`), write a short failure brief and
+        **retry that cluster exactly 3 times** (retry #1, #2, #3 after the
+        first failure; 4 total attempts). Do not stop after 1–2 retries. If
+        it still cannot converge after retry #3, record the cluster in the
+        audit and continue with other independent clusters.
+        **Delegated full-suite repair budget**: when the authoritative full
+        suite is not green after Step 5 corrections, run up to **3 honest
+        delegated repair attempts** (one fresh repair subagent per causally
+        related failure cluster; main Test Hat reviews, commits, reverts;
+        never edits repair code itself). Only emit `stabilization.blocked`
+        after this repair budget is exhausted or an unrecoverable guard
+        fires (Oracle weakening temptation, unattributable dirty worktree,
+        full test command cannot run).
+        **Forbidden early exits**: `stabilization.blocked` because of one
+        failure, "first correction didn't work", "context pressure", or
+        deferring stabilization while recoverable clusters remain.
 
       ### Scope, traceability & active verification
 
@@ -2635,7 +2657,9 @@ hats:
 
       ### Step 8 — Emit stabilization.blocked
 
-      Any of the following conditions forces `stabilization.blocked`:
+      Any of the following conditions forces `stabilization.blocked`
+      **only after the per-cluster and full-suite retry budgets above are
+      exhausted** (unless the guard is immediately unrecoverable):
 
       - a completed Unit's critical acceptance condition lacks valid evidence,
         or the traceability matrix cannot close;
@@ -2927,6 +2951,16 @@ hats:
          `git add` / `git commit` / `git restore` / `git stash` /
          `git reset` — the reviewer's only allowed output is the
          `.ralph/review/...` evidence files and the emit.
+      1.5. **Confirm patch artifact (HARD RULE).** The canonical patch
+         from Step 1 MUST exist and be non-empty on disk before any
+         emit:
+         ```bash
+         test -s ".ralph/review/<plan>/review.diff.patch" \
+           || { echo "BLOCK: review.diff.patch missing or empty"; exit 1; }
+         ```
+         If this fails, return to Step 1, regenerate the patch, and
+         re-run Stage A; do NOT emit `review.goalalign.done` with a
+         ghost `diff_patch_file` path.
       2. Run `ralph emit --policy-check --triggered dim:goal-alignment
          ...` and ensure it passes (see `ralph-tools-emit` §5).
       3. **Stage B — pre-real-emit.** Re-run the HEAD + clean check
@@ -4122,6 +4156,11 @@ hats:
         many Units", "context pressure", "single-Unit budget", "one failure
         is enough", or "defer to next round" while any independent Unit
         remains unattempted.
+      - **Full-suite repair budget (HARD RULE)**: when final verification
+        finds failures introduced by this fixer diff, run up to **3
+        delegated repair attempts** (Step 4) before settling
+        `fix_status: partial` or `blocked`. Do not emit partial/blocked
+        on the first full-suite red.
       - Do NOT emit `work.done` / `work.failed` /
         `plan.*` / `review.*` / `align.done` / `report.done` /
         `LOOP_COMPLETE`.
