@@ -3134,6 +3134,33 @@ fn test_opac_sb2_supervisor_review_batch_origin_guard() {
     run_workflow_guard_scenario(yaml);
 }
 
+// 2026-07-23-005 plan U2 (R-B1 BDD): task-planner writes the
+// execution-plan artifact on the happy path and emits NO
+// business topic. The artifact at
+// `.ralph/review/<plan-key>/execution-plan.yml` is the new
+// dependency SSOT; downstream routing reads the artifact, not
+// a per-emit handoff. This fixture pins the topology
+// (task-planner no longer publishes `exec.unit.ready` — that
+// ownership moves to U5).
+#[test]
+fn test_u2_task_planner_writes_execution_plan_artifact() {
+    let yaml = load_scenario(
+        "tests/scenarios/supervisor/u2_task_planner_artifact_happy_path.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+// 2026-07-23-005 plan U3 (R-B1 BDD): task-planner fail-closes
+// on invalid DAG inputs (cycle, self-dep, unknown-dep,
+// no-ready). The fixture emits a single `plan.blocked` with a
+// strict `reason` enum; the runtime rejects any reason outside
+// the enum set.
+#[test]
+fn test_u3_task_planner_rejects_invalid_dag() {
+    let yaml = load_scenario("tests/scenarios/supervisor/u3_task_planner_rejects_invalid_dag.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 // Unit 2 (plan 2026-07-07-006): pipeline scenario's mock `work.done`
 // payload must carry every unit-evidence field the executor mode
 // promises. Read-only fixture check; the fixture cannot drift away

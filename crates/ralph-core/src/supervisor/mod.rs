@@ -462,6 +462,8 @@ mod memory_protocol_tests;
 mod merge_sink;
 #[cfg(feature = "supervisor-db")]
 mod migrations;
+#[cfg(test)]
+mod plan_b_contract;
 pub mod phase;
 mod recover;
 #[cfg(feature = "supervisor-db")]

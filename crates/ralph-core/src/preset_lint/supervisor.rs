@@ -27,8 +27,12 @@
 use crate::event_origin::SUPERVISOR_COORDINATION_TOPICS;
 use crate::preset_lint::LintFinding;
 pub use crate::preset_lint::finding_id::{
+    FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY, FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY,
+    FINDING_SUPERVISOR_DELETED_HAT_REFERENCED, FINDING_SUPERVISOR_DELETED_HAT_REINSTATED,
     FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC, FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE,
-    FINDING_SUPERVISOR_REQUIRES_ISOLATED, FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY,
+    FINDING_SUPERVISOR_REQUIRES_ISOLATED, FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY,
+    FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY,
+    FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY,
 };
 use serde_yaml::Value;
 
@@ -84,6 +88,26 @@ pub fn check_supervisor_rules(raw_yaml: &str) -> Vec<LintFinding> {
     // capability gate, not a blanket check.
     if is_supervisor_enabled(&value) {
         findings.extend(check_wave_consumer_concurrency(&value));
+        // 2026-07-23-005 plan U2: `task-planner` ownership
+        // transfer. The hat is the dependency auditor, not the
+        // wave dispatcher, so it must not claim or consume
+        // `exec.unit.ready`. The two checks below fail
+        // loudly at preset-load time if a future refactor
+        // silently re-routes fan-out through `task-planner`.
+        findings.extend(check_task_planner_publishes_exec_ready(&value));
+        findings.extend(check_task_planner_triggers_exec_ready(&value));
+        // 2026-07-23-005 plan U7: `alignment` is the
+        // read-only verifier and must not emit / consume
+        // per-unit fan-out topics. Two sibling findings.
+        findings.extend(check_alignment_publishes_wave_ready(&value));
+        findings.extend(check_alignment_triggers_wave_ready(&value));
+        // 2026-07-23-005 plan U8: deleted hats (progress-steward,
+        // shipper, fixer) must not be resurrected. The lint
+        // walks the entire preset (hats + business_topics +
+        // schema references + state projection + anywhere else
+        // a hat id could leak through) and reports any match.
+        findings.extend(check_deleted_hats_reinstated(&value));
+        findings.extend(check_deleted_hats_referenced(&value));
     }
 
     findings
@@ -331,6 +355,292 @@ fn check_hat_publishes_coord_topic(value: &Value) -> Vec<LintFinding> {
         }
     }
     findings
+}
+
+/// 2026-07-23-005 plan U2: `task-planner` is the dependency
+/// auditor and must NOT claim `exec.unit.ready` in `publishes:`.
+/// The hat writes the static execution-plan artifact; per-unit
+/// fan-out is the exec-wave dispatcher's job (U5). Re-introducing
+/// `exec.unit.ready` here would silently restore the single-shot
+/// broadcast that U2 just removed.
+fn check_task_planner_publishes_exec_ready(value: &Value) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Some(hats) = value.get("hats").and_then(|h| h.as_mapping()) else {
+        return findings;
+    };
+    let Some((_, hat_value)) = hats
+        .iter()
+        .find(|(id, _)| id.as_str() == Some("task-planner"))
+    else {
+        return findings;
+    };
+    let publishes: Vec<String> = hat_value
+        .get("publishes")
+        .and_then(|p| p.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if publishes.iter().any(|t| t == "exec.unit.ready") {
+        let mut f = LintFinding::new(
+            FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY,
+            "hat `task-planner` declares `exec.unit.ready` in `publishes:`. Per 2026-07-23-005 \
+             plan U2, task-planner is the dependency auditor and must not fan out per-unit \
+             readiness events; that ownership belongs to the exec-wave dispatcher hat (U5)."
+                .to_string(),
+        );
+        f.action_hint = Some(
+            "remove `exec.unit.ready` from `task-planner.publishes:`; the exec-wave dispatcher \
+             (U5) owns the per-unit fan-out."
+                .to_string(),
+        );
+        findings.push(f);
+    }
+    findings
+}
+
+/// 2026-07-23-005 plan U2: `task-planner` must NOT consume
+/// `exec.unit.ready` either. The hat is activated by
+/// `work.ready`; if it also lists `exec.unit.ready` in
+/// `triggers:` the runtime could re-route per-unit fan-out
+/// through `task-planner` and bypass the exec-wave
+/// dispatcher entirely. This is a sibling guard to
+/// [`check_task_planner_publishes_exec_ready`].
+fn check_task_planner_triggers_exec_ready(value: &Value) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Some(hats) = value.get("hats").and_then(|h| h.as_mapping()) else {
+        return findings;
+    };
+    let Some((_, hat_value)) = hats
+        .iter()
+        .find(|(id, _)| id.as_str() == Some("task-planner"))
+    else {
+        return findings;
+    };
+    let triggers: Vec<String> = hat_value
+        .get("triggers")
+        .and_then(|t| t.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if triggers.iter().any(|t| t == "exec.unit.ready") {
+        let mut f = LintFinding::new(
+            FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY,
+            "hat `task-planner` declares `exec.unit.ready` in `triggers:`. Per 2026-07-23-005 \
+             plan U2, task-planner is the dependency auditor and must not consume per-unit \
+             readiness events; the exec-wave dispatcher hat (U5) consumes them."
+                .to_string(),
+        );
+        f.action_hint = Some(
+            "remove `exec.unit.ready` from `task-planner.triggers:`; the exec-wave dispatcher \
+             (U5) consumes the per-unit fan-out."
+                .to_string(),
+        );
+        findings.push(f);
+    }
+    findings
+}
+
+/// Topics that mark a hat as a wave dispatcher. If `alignment`
+/// claims or consumes any of them, it has silently become a
+/// second fixer or dispatcher and bypasses the formal fix
+/// chain. U7 hard rule: alignment is read-only.
+const WAVE_DISPATCHER_TOPICS: &[&str] = &[
+    "exec.unit.ready",
+    "fix.unit.ready",
+    "review.unit.ready",
+];
+
+/// 2026-07-23-005 plan U7: `alignment` must NOT publish
+/// `*.unit.ready`. If it does, it has become a second wave
+/// dispatcher. The fix chain (fix-task-planner → fix-worker
+/// → fix-integrator) is the single source of code-change
+/// fan-out.
+fn check_alignment_publishes_wave_ready(value: &Value) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Some(hats) = value.get("hats").and_then(|h| h.as_mapping()) else {
+        return findings;
+    };
+    let Some((_, hat_value)) = hats
+        .iter()
+        .find(|(id, _)| id.as_str() == Some("alignment"))
+    else {
+        return findings;
+    };
+    let publishes: Vec<String> = hat_value
+        .get("publishes")
+        .and_then(|p| p.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    for topic in &publishes {
+        if WAVE_DISPATCHER_TOPICS.contains(&topic.as_str()) {
+            let mut f = LintFinding::new(
+                FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY,
+                format!(
+                    "hat `alignment` declares wave dispatcher topic `{topic}` in `publishes:`. \
+                     Per 2026-07-23-005 plan U7, alignment is a read-only verifier; emitting \
+                     per-unit readiness events turns it into a second dispatcher and bypasses \
+                     the formal fix chain."
+                ),
+            );
+            f.action_hint = Some(
+                "remove the wave dispatcher topic from `alignment.publishes:`; only \
+                 `plan.complete` and `plan.blocked` are allowed."
+                    .to_string(),
+            );
+            findings.push(f);
+        }
+    }
+    findings
+}
+
+/// 2026-07-23-005 plan U7 (sibling of the publishes-side
+/// check): `alignment` must NOT consume `*.unit.ready`
+/// either — it is activated by `fix.done` and the formal
+/// review / fix chain.
+/// 2026-07-23-005 plan U8: list of hat ids that the
+/// supervisor preset explicitly deleted. Each name MUST NOT
+/// appear in `hats:`; if it does, the lint surfaces a hard
+/// finding. The list is intentionally narrow: only
+/// hats whose deletion is part of U8.
+const DELETED_SUPERVISOR_HATS: &[&str] = &["progress-steward", "shipper", "fixer"];
+
+/// 2026-07-23-005 plan U7: `alignment` must NOT consume
+/// per-unit fan-out topics either. Same rationale as the
+/// publishes-side sibling finding.
+fn check_alignment_triggers_wave_ready(value: &Value) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Some(hats) = value.get("hats").and_then(|h| h.as_mapping()) else {
+        return findings;
+    };
+    let Some((_, hat_value)) = hats
+        .iter()
+        .find(|(id, _)| id.as_str() == Some("alignment"))
+    else {
+        return findings;
+    };
+    let triggers: Vec<String> = hat_value
+        .get("triggers")
+        .and_then(|t| t.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    for topic in &triggers {
+        if WAVE_DISPATCHER_TOPICS.contains(&topic.as_str()) {
+            let mut f = LintFinding::new(
+                FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY,
+                format!(
+                    "hat `alignment` consumes wave dispatcher topic `{topic}` in `triggers:`. \
+                     Per 2026-07-23-005 plan U7, alignment must not consume per-unit readiness \
+                     events; it is triggered by `fix.done`."
+                ),
+            );
+            f.action_hint = Some(
+                "remove the wave dispatcher topic from `alignment.triggers:`; alignment is \
+                 triggered by `fix.done`."
+                    .to_string(),
+            );
+            findings.push(f);
+        }
+    }
+    findings
+}
+
+/// 2026-07-23-005 plan U8: detect any deleted hat re-instated
+/// in `hats:`. One finding per offender so the operator can
+/// see which resurrection regressed the topology.
+fn check_deleted_hats_reinstated(value: &Value) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Some(hats) = value.get("hats").and_then(|h| h.as_mapping()) else {
+        return findings;
+    };
+    for deleted in DELETED_SUPERVISOR_HATS {
+        if hats.contains_key(*deleted) {
+            let mut f = LintFinding::new(
+                FINDING_SUPERVISOR_DELETED_HAT_REINSTATED,
+                format!(
+                    "hat `{deleted}` was deleted by 2026-07-23-005 plan U8 and must not be \
+                     reinstated. Each deleted hat had a specific architectural reason: \
+                     `progress-steward` (no loop-level rescue), `shipper` (single reporter \
+                     owner), `fixer` (no fallback fix chain)."
+                ),
+            );
+            f.action_hint = Some(format!(
+                "remove `{deleted}` from `hats:`; reporter is the single owner of \
+                 plan.complete / plan.blocked (U8)."
+            ));
+            findings.push(f);
+        }
+    }
+    findings
+}
+
+/// 2026-07-23-005 plan U8: detect any residual reference to
+/// the deleted hats anywhere else in the preset
+/// (state-projection entries, deny rules, trigger lists,
+/// coordinator_hats lists, etc.). Walks every string-typed
+/// scalar value and reports a single finding per deleted
+/// hat. The walk is shallow on purpose — we want a clear
+/// "you mentioned `progress-steward` somewhere" signal so
+/// the operator can grep for it.
+fn check_deleted_hats_referenced(value: &Value) -> Vec<LintFinding> {
+    let mut findings: Vec<LintFinding> = Vec::new();
+    let mut reported: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+    walk_strings(value, &mut |s| {
+        for deleted in DELETED_SUPERVISOR_HATS {
+            if s == *deleted && !reported.contains(deleted) {
+                let mut f = LintFinding::new(
+                    FINDING_SUPERVISOR_DELETED_HAT_REFERENCED,
+                    format!(
+                        "preset contains a residual reference to deleted hat `{deleted}` \
+                         outside `hats:`. 2026-07-23-005 plan U8 deleted this hat; remove \
+                         the reference (state-projection / deny rule / coordinator_hats / \
+                         etc.)."
+                    ),
+                );
+                f.action_hint = Some(format!(
+                    "grep for `{deleted}` and remove the stale reference"
+                ));
+                findings.push(f);
+                reported.insert(deleted);
+            }
+        }
+    });
+    findings
+}
+
+/// Depth-first walk that visits every string-typed scalar
+/// in a serde_yaml::Value tree (including mapping keys,
+/// because state-projection entries use the hat id as the
+/// key). The closure receives each string by reference.
+fn walk_strings<F: FnMut(&str)>(value: &Value, visit: &mut F) {
+    match value {
+        Value::String(s) => visit(s),
+        Value::Sequence(seq) => {
+            for v in seq {
+                walk_strings(v, visit);
+            }
+        }
+        Value::Mapping(map) => {
+            for (k, v) in map {
+                walk_strings(k, visit);
+                walk_strings(v, visit);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -863,6 +1173,254 @@ hats:
         assert!(
             findings.is_empty(),
             "legal supervisor preset must pass, got {findings:?}"
+        );
+    }
+
+    // 2026-07-23-005 plan U2: `task-planner` ownership
+    // transfer guards. The lint must flag any preset that
+    // re-introduces `exec.unit.ready` in `task-planner`'s
+    // `publishes:` or `triggers:` lists (U5 owns that
+    // ownership now).
+    #[test]
+    fn task_planner_publishing_exec_unit_ready_is_error() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  task-planner:
+    triggers:
+      - work.ready
+    publishes:
+      - exec.unit.ready
+";
+        let findings = run(yaml);
+        assert!(
+            findings.iter().any(|f| f.id == FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY),
+            "expected task_planner_publishes_exec_unit_ready finding, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn task_planner_triggering_exec_unit_ready_is_error() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  task-planner:
+    triggers:
+      - work.ready
+      - exec.unit.ready
+    publishes:
+      - plan.blocked
+";
+        let findings = run(yaml);
+        assert!(
+            findings.iter().any(|f| f.id == FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY),
+            "expected task_planner_triggers_exec_unit_ready finding, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn task_planner_without_exec_unit_ready_is_silent() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  task-planner:
+    triggers:
+      - work.ready
+    publishes:
+      - plan.blocked
+";
+        let findings = run(yaml);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.id != FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY
+                    && f.id != FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY),
+            "U2 ownership transfer guards must stay silent for a valid task-planner preset; \
+             got {findings:?}"
+        );
+    }
+
+    // 2026-07-23-005 plan U7: alignment is read-only and must
+    // not become a second wave dispatcher. The two lint rules
+    // catch any preset that re-introduces per-unit readiness
+    // topics in alignment's publishes / triggers.
+    #[test]
+    fn alignment_publishing_unit_ready_is_error() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  alignment:
+    triggers:
+      - fix.done
+    publishes:
+      - fix.unit.ready
+      - plan.complete
+";
+        let findings = run(yaml);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY),
+            "expected alignment_publishes_wave_ready finding, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn alignment_triggering_unit_ready_is_error() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  alignment:
+    triggers:
+      - fix.unit.ready
+    publishes:
+      - plan.complete
+";
+        let findings = run(yaml);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY),
+            "expected alignment_triggers_wave_ready finding, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn alignment_pure_read_only_is_silent() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  alignment:
+    triggers:
+      - fix.done
+    publishes:
+      - plan.complete
+      - plan.blocked
+";
+        let findings = run(yaml);
+        assert!(
+            findings.iter().all(|f| f.id
+                != FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY
+                && f.id != FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY),
+            "U7 alignment must stay read-only; got {findings:?}"
+        );
+    }
+
+    // 2026-07-23-005 plan U8: deleted hats must not be
+    // reinstated in `hats:` or referenced anywhere else
+    // (state-projection / deny rule / etc.).
+    #[test]
+    fn deleted_progress_steward_in_hats_is_error() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  progress-steward:
+    triggers:
+      - loop.stalled
+    publishes:
+      - work.ready
+";
+        let findings = run(yaml);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_SUPERVISOR_DELETED_HAT_REINSTATED),
+            "deleted progress-steward must trigger deleted_hat_reinstated; got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn deleted_shipper_referenced_in_state_projection_is_error() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats: {}
+state_projection:
+  shipper: 'present'
+";
+        let findings = run(yaml);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_SUPERVISOR_DELETED_HAT_REFERENCED),
+            "deleted shipper in state_projection must trigger deleted_hat_referenced; \
+             got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn deleted_fixer_referenced_in_deny_rules_is_error() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats: {}
+topic_deny_rules:
+  fixer:
+    deny:
+      - work.failed
+";
+        let findings = run(yaml);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_SUPERVISOR_DELETED_HAT_REFERENCED),
+            "deleted fixer in topic_deny_rules must trigger deleted_hat_referenced; \
+             got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn no_deleted_hat_references_is_silent() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  coordinator:
+    triggers:
+      - plan.ready
+    publishes:
+      - work.ready
+  reporter:
+    triggers:
+      - plan.complete
+      - plan.blocked
+    publishes:
+      - LOOP_COMPLETE
+";
+        let findings = run(yaml);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.id != FINDING_SUPERVISOR_DELETED_HAT_REINSTATED
+                    && f.id != FINDING_SUPERVISOR_DELETED_HAT_REFERENCED),
+            "clean U8 topology must not trigger deleted-hats lints; got {findings:?}"
         );
     }
 }

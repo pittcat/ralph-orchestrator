@@ -1,0 +1,74 @@
+# 2026-07-23-005 plan U2 (R-B1 BDD): task-planner writes the
+# execution-plan artifact and stops. The happy path emits NO
+# business topic (the artifact is the dependency SSOT; the
+# runtime routes downstream hats through the artifact path
+# rather than through a per-emit handoff). The invalid-plan
+# scenario is split into its own fixture below so each case
+# is asserted in isolation.
+#
+# Topology pin: only `coordinator` and `task-planner` are
+# declared; `task-planner` does NOT carry `exec.unit.ready` in
+# `publishes:` (U2 ownership transfer). This fixture pins the
+# pre-conditions: the supervisor preset's wave-coordinator
+# behavior moves to U5.
+
+name: u2_task_planner_writes_execution_plan_artifact
+description: "U2 - task-planner happy path: write artifact, no business emit; original plan path unchanged."
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 2
+  event_loop:
+    execution_mode: isolated
+    supervisor:
+      enabled: false
+  hats:
+    coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - work.ready
+    task-planner:
+      subscribes_to:
+        - work.ready
+      publishes:
+        - plan.blocked
+
+mock_responses:
+  # Iter 1: coordinator emits work.ready to hand off to task-planner
+  - text: |
+      <event topic="work.ready">
+      plan_name: "u2-demo"
+      plan_path: "docs/plans/u2-demo.md"
+      task_id: "u2-task-1"
+      task_key: "plan:u2-demo:u1"
+      step: "plan"
+      complexity: "small"
+      </event>
+    hat: coordinator
+  # Iter 2: task-planner writes the artifact. The fixture asserts
+  # the absence of any business event from task-planner — happy
+  # path = no emit (per U2 spec). We send a plain `waiting.`
+  # response so the loop ends without surprises.
+  - text: |
+      waiting.
+  # Iter 3: idle / loop completion path
+  - text: |
+      waiting.
+
+expected:
+  iterations: 3
+  events:
+    - topic: work.ready
+  # U2 happy path: task-planner emits NO business event. The
+  # artifact at `.ralph/review/<plan>/execution-plan.yml` is the
+  # dependency SSOT and the runtime routes downstream through
+  # the artifact path.
+  absent_events:
+    - topic: plan.blocked
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    - topic: exec.wave.complete
+    - topic: work.done
+    - topic: LOOP_COMPLETE
+  completion: false

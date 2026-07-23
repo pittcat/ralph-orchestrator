@@ -362,6 +362,56 @@ pub const FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC: &str =
 pub const FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY: &str =
     "preset.supervisor_wave_consumer_low_concurrency";
 
+/// 2026-07-23-005 plan U2: `task-planner` is the dependency auditor
+/// and must NOT claim the wave coordination topic `exec.unit.ready`
+/// in its `publishes:` list. That ownership transfers to the
+/// exec-wave dispatcher hat in U5; emitting `exec.unit.ready` from
+/// `task-planner` would re-introduce the single-shot fan-out that
+/// U2 just removed. Always `Error` severity so the preset fails to
+/// load with a clear remediation hint.
+pub const FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY: &str =
+    "preset.supervisor_task_planner_publishes_exec_unit_ready";
+
+/// 2026-07-23-005 plan U2: `task-planner` is the dependency
+/// auditor and must NOT have `exec.unit.ready` in `triggers:` —
+/// the hat does not consume per-unit readiness events (that is
+/// the wave dispatcher's job). Allowing it to consume the topic
+/// would silently re-route fan-out through `task-planner`.
+pub const FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY: &str =
+    "preset.supervisor_task_planner_triggers_exec_unit_ready";
+
+/// 2026-07-23-005 plan U7: `alignment` is a read-only verifier
+/// and must NOT emit any wave dispatch topic. If it lists
+/// `*.unit.ready` in `publishes:`, it has become a second
+/// dispatcher and bypasses the formal fix chain (U7 hard rule).
+pub const FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY: &str =
+    "preset.supervisor_alignment_publishes_wave_ready";
+
+/// 2026-07-23-005 plan U7: `alignment` must NOT consume
+/// per-unit fan-out topics either. Same rationale as the
+/// publishes-side sibling finding.
+pub const FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY: &str =
+    "preset.supervisor_alignment_triggers_wave_ready";
+
+/// 2026-07-23-005 plan U8: the deleted hats
+/// (`progress-steward`, `shipper`, `fixer`) MUST NOT
+/// appear in any supervisor preset. The lint is a
+/// hard error because each of these hats was deleted
+/// for a specific architectural reason (single owner of
+/// reporting, no fallback fixer, no progress rescue) and
+/// resurrecting them silently regresses the topology.
+pub const FINDING_SUPERVISOR_DELETED_HAT_REINSTATED: &str =
+    "preset.supervisor_deleted_hat_reinstated";
+
+/// 2026-07-23-005 plan U8: the deleted hats must not
+/// appear anywhere in the preset (not just `hats:` —
+/// also no orphan trigger publishes / deny rules /
+/// state-projection references). The lint walks every
+/// string-typed value in the preset and reports any
+/// match.
+pub const FINDING_SUPERVISOR_DELETED_HAT_REFERENCED: &str =
+    "preset.supervisor_deleted_hat_referenced";
+
 // ──────────────────────────────────────────────────────────────────────────
 // OPAC instructions lint finding IDs (2026-07-04-001 plan U11)
 // ──────────────────────────────────────────────────────────────────────────
@@ -606,6 +656,12 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE,
     FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC,
     FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY,
+    FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY,
+    FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY,
+    FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY,
+    FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY,
+    FINDING_SUPERVISOR_DELETED_HAT_REINSTATED,
+    FINDING_SUPERVISOR_DELETED_HAT_REFERENCED,
     FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL,
     FINDING_INSTRUCTIONS_FIX_UNIT_MINT_TEMPLATE_MISSING,
     FINDING_INSTRUCTIONS_OPAC_SKILL_REFERENCE_MISSING,

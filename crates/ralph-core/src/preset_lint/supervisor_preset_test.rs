@@ -83,22 +83,35 @@ fn ce_executor_supervisor_preset_contains_all_required_supervisor_keys() {
         .keys()
         .map(|k| k.as_str().unwrap_or("").to_string())
         .collect();
-    // R16 / F-021: the preset header advertises 16+1=17
-    // hats. Drift here means the runtime's hat allowlist
-    // desyncs. We pin a range (>= 15 functional hats + the
-    // mandatory `progress-steward`) so partial presets
-    // surface as failures without requiring the exact 17
-    // count to be perfectly synchronized with the header
-    // doc-comment.
+    // R16 / F-021: the preset header advertises 13+ functional
+    // hats for the post-U8 topology. Drift here means the
+    // runtime's hat allowlist desyncs. We pin a range (≥ 12
+    // functional hats) so partial presets surface as failures
+    // without requiring the exact count to be perfectly
+    // synchronized with the header doc-comment.
     assert!(
-        hat_names.len() >= 15,
-        "preset must declare at least 15 functional hats per R16; got {}: {:?}",
+        hat_names.len() >= 12,
+        "preset must declare at least 12 functional hats per R16; got {}: {:?}",
         hat_names.len(),
         hat_names
     );
+    // 2026-07-23-005 plan U8: `progress-steward` was deleted
+    // and must NOT be in the topology. The deleted-hats lint
+    // surfaces a structural regression; this structural pin
+    // mirrors the rule.
     assert!(
-        hat_names.iter().any(|h| h == "progress-steward"),
-        "preset must declare `progress-steward` per R16; got {:?}",
+        !hat_names.iter().any(|h| h == "progress-steward"),
+        "preset must NOT declare `progress-steward` (deleted by 2026-07-23-005 plan U8); got {:?}",
+        hat_names
+    );
+    assert!(
+        !hat_names.iter().any(|h| h == "shipper"),
+        "preset must NOT declare `shipper` (deleted by 2026-07-23-005 plan U8); got {:?}",
+        hat_names
+    );
+    assert!(
+        !hat_names.iter().any(|h| h == "fixer"),
+        "preset must NOT declare fallback `fixer` (deleted by 2026-07-23-005 plan U8); got {:?}",
         hat_names
     );
     assert!(
@@ -290,6 +303,83 @@ fn ce_executor_supervisor_preset_builtin_wave_consumers_match_expected_three() {
         "R6 / KTD-4a: builtin supervisor must have exactly three wave consumer hats \
          (worker / review-batch-worker / fix-worker); got {:?}",
         wave_consumers
+    );
+}
+
+#[test]
+fn ce_executor_supervisor_yaml_passes_strict_ambiguous_routing_check() {
+    use crate::config::{RalphConfig, ConfigError};
+    let config = RalphConfig::parse_yaml(PRESET_YAML).expect("preset must parse as RalphConfig");
+    let result = config.validate();
+
+    let ambiguous_errors: Vec<String> = match &result {
+        Err(ConfigError::AmbiguousRouting { trigger, hat1, hat2 }) => {
+            vec![format!("AmbiguousRouting({trigger}, {hat1}, {hat2})")]
+        }
+        Err(_) => vec![],
+        Ok(_) => vec![],
+    };
+
+    assert!(
+        ambiguous_errors.is_empty(),
+        "ce-executor-supervisor preset must validate with no AmbiguousRouting errors; \
+         got: {:?}",
+        ambiguous_errors
+    );
+}
+
+// 2026-07-23-005 plan U8: after atomic deletion of progress-steward /
+// shipper / fallback fixer, strict lint must report zero errors.
+// This test pins the U8 DoD gate so any topology regression surfaces
+// as a test failure rather than a silent preset-load warning.
+#[test]
+fn ce_executor_supervisor_yaml_passes_strict_topology_lint() {
+    use crate::config::RalphConfig;
+    use crate::preset_lint::{run_preset_lint_with_preset_name, LintStrictness};
+    use crate::runtime_contract::FindingSeverity;
+
+    let config = RalphConfig::parse_yaml(PRESET_YAML).expect("preset must parse as RalphConfig");
+    // Run in strict mode, builtin-embedded source, with raw YAML for full lint coverage.
+    let findings = run_preset_lint_with_preset_name(
+        &config,
+        LintStrictness::Strict,
+        true, // source_is_builtin_embedded
+        Some(PRESET_YAML),
+        "ce-executor-supervisor",
+    );
+
+    // Filter to only strict (Error-severity) findings; warnings are acceptable.
+    let strict_errors: Vec<_> = findings
+        .iter()
+        .filter(|f| f.severity == FindingSeverity::Error)
+        .collect();
+
+    // U8 residuals that must NOT appear:
+    let forbidden_ids: &[&str] = &[
+        "lint.preset.activation_egress_missing",
+        "lint.preset.handoff_pairing_broken",
+        "lint.preset.re_emit_trap",
+        "lint.preset.trigger_publish_asymmetry",
+        "topology.required_event_not_on_all_paths",
+        "required.no_publisher",
+        "required.no_subscriber",
+        "orphan.no_subscriber",
+        "lint.preset.invalid_topic_format",
+    ];
+
+    let unexpected: Vec<_> = strict_errors
+        .iter()
+        .filter(|f| forbidden_ids.contains(&f.id.as_str()))
+        .collect();
+
+    assert!(
+        unexpected.is_empty(),
+        "ce-executor-supervisor preset must have zero strict topology lint errors (U8 DoD gate). \
+         Unexpected findings: {:?}",
+        unexpected
+            .iter()
+            .map(|f| format!("{}: {}", f.id, f.message))
+            .collect::<Vec<_>>()
     );
 }
 

@@ -2,24 +2,25 @@
 # Pattern (2026-07-03-001 plan): plan.ready → parallel worker fan-out via
 # SupervisorStore rusqlite → per-slot worktrees → fan-in merge → integrator
 # runs full suite → work.done → parallel review wave → fix wave → fix.done
-# → progress-steward / reporter → LOOP_COMPLETE.
+# → reporter → LOOP_COMPLETE.
 #
-# 16 + 1 functional hats + progress-steward:
-# - coordinator: dispatch units to the supervisor + integrate waves
-# - task-planner: emit work.ready per plan unit (with --payloads batch)
+# 2026-07-23-005 plan U8 topology (after atomic deletion):
+# - coordinator: route to task-planner and integrate wave results
+# - task-planner: dependency auditor; writes execution-plan artifact
+# - exec-wave-dispatcher: dependency-aware iterative ready-wave fan-out
 # - worker: per-slot TDD implementation (worktree isolated)
 # - exec-integrator: subscribed to exec.wave.complete; merges + full-suite
-# - review-coordinator: emits 6 review-batch payloads (single emit,
-#   KTD-12) so review-synthesizer gets the aggregate fan-in
-# - review-batch-worker (×6): one per dimension; emits review.dimension.done
-# - review-synthesizer: synthesizes fix plan; emits review.complete
-# - fix-task-planner: emits fix.unit.ready per fix unit
+# - exec-failure-handler: subscribed to exec.wave.failed; emits work.failed
+# - review-coordinator: 7-payload shared-readonly review wave (testing +
+#   6 review dimensions) with pre/post write-set fingerprint gate
+# - review-batch-worker (×7): one per dimension; emits review.unit.done
+# - review-synthesizer: writes review.complete; consumed by fix-task-planner
+# - fix-task-planner: emits fix.unit.ready per fix unit (single Fix chain)
 # - fix-worker: parallel fix worktrees
 # - fix-integrator: subscribed to fix.wave.complete; merges + tests
-# - alignment: alignment pass
-# - reporter: manager-facing report
-# - fixer: hard fallback for isolated failures
-# - progress-steward: loop-level fallback on stall
+# - alignment: read-only verifier; emits plan.complete / plan.blocked
+# - reporter: single owner of plan-level reporting and LOOP_COMPLETE
+# (deleted hats: progress-steward, shipper, fallback fixer)
 #
 # Topological contract (KTD-1 / KTD-5 / KTD-8):
 # - supervisor.enabled: true + execution_mode: isolated (R-SW-1 lint)
@@ -153,7 +154,6 @@ tasks:
   enabled: true
   coordinator_hats:
     - coordinator
-    - progress-steward
 
 # 16 functional hats + progress-steward. Per-hat `publishes`
 # and `triggers` are deliberately minimal: the supervisor
@@ -227,7 +227,7 @@ hats:
          `task_id` / `task_key`; `step: "plan"`.
       d. Stop. The next hat picks up from `work.ready`.
 
-      ### 2. When you are activated by `fix.applied`
+      ### 2. When you are activated by `fix.done`
 
       A fix round succeeded upstream. ONE emit:
       `plan.complete`.
@@ -235,8 +235,8 @@ hats:
       a. Confirm the units are closed:
          `ralph tools task list -s done`. If any unit is
          not in `done` state, you are looking at a
-         partial state — fall back to §3 (emit
-         `plan.blocked` with `reason: review_terminal_drift`).
+         partial state — emit `plan.blocked` with
+         `reason: review_terminal_drift`.
       b. Pre-check the payload with
          `ralph emit plan.complete --policy-check -j '<json>'`
          first (same gate as the loop; per `ralph-tools` §5).
@@ -251,27 +251,7 @@ hats:
       c. Stop. The next hat in the pipeline will surface a
          final report and close the loop.
 
-      ### 3. When you are activated by `fix.exhausted`
-
-      The repair budget for the current plan is used up.
-      ONE emit: `plan.blocked`.
-
-      a. Do not retry by re-emitting `work.ready` or any
-         other hand-off. The repair counter has already
-         been consumed upstream.
-      b. Emit exactly one `plan.blocked`. Schema required
-         fields: `plan_name`, `task_id`, `task_key`, `step`,
-         `reason`.
-      c. The `reason` value must be exactly one of:
-         - `loop_stalled_max_iterations`
-         - `steward_escalation`
-         - `review_terminal_drift`
-         Pick the one that best describes what the
-         upstream hat reported. If you cannot pin a
-         reason, use `steward_escalation`.
-      d. Stop.
-
-      ### 4. Things you must NOT do (this hat)
+      ### 3. Things you must NOT do (this hat)
 
       - **Do not edit any project file** — no code, no
         tests, no docs. This hat only emits events.
@@ -291,7 +271,7 @@ hats:
         cross-hat state, use `ralph tools task <cmd>`
         — that is the supported API.
 
-      ### 5. Useful runtime APIs (this hat may call)
+      ### 4. Useful runtime APIs (this hat may call)
 
       - `ralph tools task add "<title>" -d "<desc>"`
         (optionally `--key plan:<slug>:u<n>`) — register
@@ -315,7 +295,7 @@ hats:
       default). For full syntax of `ralph emit`, load
       `ralph-tools-emit` on demand.
 
-      ### 6. Environment you can read
+      ### 5. Environment you can read
 
       - `RALPH_CURRENT_HAT` — should be `coordinator` for
         this activation. If it isn't, you are in the wrong
@@ -328,11 +308,10 @@ hats:
         error messages.
 
       Anything you cannot observe via the runtime APIs
-      listed in §5 / §6, you do not have. Do not assume.
+      listed in §4 / §5, you do not have. Do not assume.
     triggers:
       - plan.ready
-      - fix.applied
-      - fix.exhausted
+      - fix.done
     publishes:
       - work.ready
       - plan.complete
@@ -341,8 +320,7 @@ hats:
       enabled: true
       events:
       - plan.ready
-      - fix.applied
-      - fix.exhausted
+      - fix.done
     exempt_topics:
       - work.ready
       - plan.complete
@@ -352,168 +330,456 @@ hats:
 
   task-planner:
     name: "Task Planner"
-    description: "Emits per-unit execution readiness events to fan out work across supervisor slots."
+    # 2026-07-23-005 plan U2: task-planner is now the **dependency
+    # auditor**, not a one-shot fan-out dispatcher. It reads the
+    # runner-injected original plan path, parses the unit list, and
+    # writes a static execution-plan artifact with provenance
+    # (`source_plan_path` / `source_plan_hash`). U3 extends the
+    # artifact with edges/ready-wave selection; U4 materializes the
+    # DAG nodes into runtime tasks; U5 owns the iteration of
+    # ready waves. This hat owns only U2 — produce the static
+    # artifact and stop.
+    description: "Reads the original plan and writes a static execution-plan artifact with provenance."
     instructions: |
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
-      ## TASK PLANNER MODE — Single-shot wave fan-out (this hat)
+      ## TASK PLANNER MODE — Write the execution-plan artifact (this hat)
 
-      You are a **dispatcher hat** activated when a plan is
-      ready to be fanned out into per-unit work. You do not
-      implement code, run tests, or write project files.
-      You take the plan units that an earlier hat registered
-      and emit one batch wave that hands every unit off in
-      parallel.
+      You are a **planner hat** activated when the runtime
+      has anchored a plan to the loop (`ralph inspect loop`
+      shows `loop_anchor.plan_path`). You do not implement
+      code, run tests, edit project files, or call
+      `ralph wave emit`. You read the original plan, parse
+      its unit list, and write a single static artifact
+      (`.ralph/review/<plan-key>/execution-plan.yml`) that
+      subsequent hats and the runtime treat as the
+      dependency SSOT for this loop.
 
       ### 0. This activation is single-shot
 
-      In this activation, **emit exactly one**
-      `ralph wave emit` call to publish the per-unit
-      readiness events. Do not call `ralph emit` for any
-      business topic in this turn — your business output
-      is the wave itself, and the wave-emit call counts as
-      your one business emission for the turn. After the
-      wave emit, stop.
+      In this activation, **emit at most one** business
+      event. The accepted cases:
+
+      - **Happy path**: write the artifact, then stop
+        without emitting any business topic. The next hat
+        in the chain is wired through the artifact, not
+        through your emit; downstream routing reads the
+        artifact via `ralph inspect loop` /
+        `ralph tools task list`. Do not chain a handoff
+        emit just to "wake up" the next hat.
+      - **Invalid plan**: emit exactly one `plan.blocked`
+        with `reason: <category>` (see §3). Do not also
+        emit a handoff event in the same activation —
+        that would race the terminal and get dropped.
 
       This rule is the same as the always-injected
-      `ralph-tools` skill's §6 — the framing here is
-      identical; do not "fix" a dropped emit by re-trying
-      in the same activation. Wait for a `task.resume` to
-      land in a later turn.
+      `ralph-tools` skill's §6. Do not retry inside this
+      activation; let `task.resume` route a later turn.
 
-      If the wave emit fails (e.g. policy check rejects the
-      payload), stop and let the runtime surface a
-      `task.resume` to a later turn. Do not retry inside
-      this activation.
+      ### 1. Read the original plan
 
-      ### 1. Read the plan units
+      a. Use `ralph inspect loop --format json` to read
+         `loop_anchor.plan_path` — the runner injected
+         this from `--plan <file>` (or `ralph resume
+         --plan`). You MUST read that exact path; do
+         not infer the plan from the task list.
+      b. Read the plan file end-to-end. Parse the
+         `## Implementation Units` (or `### U<number>.
+         ...`) section and collect one entry per unit:
+         `unit_id` (`U1`, `U2`, ...), title, scope
+         summary, files written, verification hook.
+      c. Compute `source_plan_hash` as
+         `sha256(plan_file_contents)`. The hash is the
+         artifact's replay key — see §4.
+      d. Derive `<plan-key>` from the plan file stem
+         (e.g. `2026-07-23-005-…`); it matches the
+         `ralph review <plan-key>` directory layout.
 
-      a. Inspect the runtime tasks to learn the unit list:
-         `ralph tools task list`. Each task with
-         `task_key` matching `plan:*:u<n>` is one plan unit.
-         You need their `task_id`, `task_key`, and the
-         per-unit scope text (from the task's description).
-      b. If the task list is empty or none of the tasks
-         carry a `plan:*:u<n>` key, you have nothing to
-         fan out. Do not call `ralph wave emit`; stop and
-         let the next pass handle the gap.
+      ### 2. Write the execution-plan artifact
 
-      ### 2. Build the per-unit payload list
+      Path: `.ralph/review/<plan-key>/execution-plan.yml`.
 
-      For each plan unit, build a JSON object with at
-      least the wave's required fields:
+      Required fields (see the schema for the
+      ce-execution-plan artifact format):
 
-      - `wave_id` — a fresh id of the form `w-<short-hash>`
-        that you generate once and reuse for every payload
-        in this wave.
-      - `slot_index` — `0` for the first unit, `1` for the
-        second, and so on. Monotonic, no gaps.
-      - `plan_name` — short name you reuse across units
-        (e.g. derived from the plan's filename slug).
-      - `task_id` / `task_key` — taken directly from the
-        runtime task for that unit.
-      - `unit_scope` — the one-line scope from the task's
-        description; downstream hats will read this.
+      - `version`: `"ce-execution-plan/v1"`.
+      - `source_plan_path`: repo-relative path you read.
+      - `source_plan_hash`: sha256 you computed.
+      - `generated_at`: UTC ISO-8601 timestamp.
+      - `nodes`: ordered list, one entry per plan unit,
+        with `unit_id`, `title`, `scope`, `files_written`
+        (best-effort from the plan), `verification`,
+        `original_provenance` (the plan heading line).
+      - `edges`: ordered list of dependency edges, each
+        with `kind` ∈ {`explicit`, `artifact_io`,
+        `file_conflict`, `coupled_merge`}, `from`,
+        `to`, and `evidence` (a short prose rationale
+        pointing at the plan section that justifies the
+        edge; do NOT omit `evidence`).
+      - `task_mapping`: list of identity-only entries,
+        each `{node_key, task_id, task_key, step}`.
+        U4 writes these; U3 leaves the list empty.
+      - `waves`: optional; U5 will compute the
+        ready-wave selection. U3 / U4 leave this empty
+        so downstream units fill it deterministically.
 
-      Keep each payload as a single line of JSON. Do not
-      pretty-print; do not include trailing comments.
+      Edge rules (you MUST enforce — see §3 for the
+      fail-closed exception):
 
-      ### 3. Emit the wave
+      - **Explicit dependencies** from the plan's
+        `**Dependencies:**` lines are first-class.
+      - **Artifact I/O dependencies**: when unit B's
+        verification reads a file or artifact that
+        unit A writes, derive an `artifact_io` edge
+        `A → B`. Evidence: cite the file path or
+        artifact name.
+      - **File conflict**: when two units write the
+        same path, add a `file_conflict` edge between
+        them (ordering determined by stable
+        topological sort or, if tied, `coupled_merge`
+        below).
+      - **Coupled merge**: when two units cannot be
+        validated independently (B's verification
+        needs A's not-yet-merged output), emit a
+        single `coupled_merge` node that lists the
+        source unit ids in `merged_from`; downstream
+        hats will treat this as one execution unit.
 
-      Pre-check the batch first (the loop's gate is the
-      same one; per `ralph-tools` §5):
-      `ralph wave emit exec.unit.ready --payloads-stdin
-      --policy-check < payloads.jsonl`. Only after the
-      precheck passes, drop `--policy-check` and emit the
-      real wave.
+      Stable ordering: nodes and edges MUST be sorted
+      by `unit_id` ascending so re-runs produce
+      byte-identical artifacts. Use `unit_id` (string
+      sort) — `U2 < U10` lexicographically.
 
-      Use `--payloads-stdin` (the multi-line `--payloads`
-      form is rejected — see `ralph-tools-wave` red box).
-      Pipe the payload list:
+      The artifact MUST NOT include dynamic state
+      (`started` / `done` / `failed`). Dynamic state
+      lives only in the runtime task API
+      (`ralph tools task list`).
 
-      ```bash
-      printf '%s\n' \
-        '{"wave_id":"w-…","slot_index":0,"plan_name":"…","task_id":"…","task_key":"plan:slug:u1","unit_scope":"…"}' \
-        '{"wave_id":"w-…","slot_index":1,"plan_name":"…","task_id":"…","task_key":"plan:slug:u2","unit_scope":"…"}' \
-        | ralph wave emit exec.unit.ready --payloads-stdin
-      ```
+      U3 extends this artifact with `edges:`; U4
+      materializes nodes into runtime tasks; U5 owns
+      the iteration of ready waves.
 
-      `task_id` / `task_key` per payload must be live ids
-      / stable keys from `ralph tools task list`
-      (consistent with the registered plan unit; see
-      `ralph-tools-tasks` red box on the strict-match
-      rule). Never hand-write `task_id`.
+      ### 3. Invalid plan → `plan.blocked`
 
-      If you want, pass `--idempotency-key` so re-entries
-      with the same key return the same `wave_id` instead
-      of double-dispatching.
+      If any of the following hold, you do NOT write the
+      artifact. Emit exactly one `plan.blocked` and stop:
 
-      The wave-emit call returns one `wave_id` and a
-      per-payload event count. The downstream hats will
-      see the per-unit events on their own activations.
+      - `loop_anchor.plan_path` is missing or points
+        outside the repo.
+      - The plan file is unreadable.
+      - The `## Implementation Units` section is empty,
+        or it lists zero `U<number>` headings.
+      - Any unit id is duplicated or does not match
+        the `U<number>` shape.
+      - An edge references an unknown `from` or `to`
+        (not present in the `nodes` list).
+      - A unit declares itself as a dependency
+        (self-dependency, `from == to`).
+      - The edge graph contains a cycle
+        (no valid topological order).
+      - A `coupled_merge` node references a unit id
+        that is missing from `nodes`.
+      - The graph has no ready node (every node has
+        an unsatisfied dependency and no node has
+        been marked as a `coupled_merge` root).
 
-      ### 4. Stop
+      `reason` MUST be exactly one of:
+      `plan_missing`, `plan_unreadable`,
+      `plan_empty_units`, `plan_duplicate_unit_id`,
+      `plan_invalid_unit_id_shape`,
+      `plan_unknown_dependency`,
+      `plan_self_dependency`,
+      `plan_cycle_detected`,
+      `plan_coupled_merge_missing_unit`,
+      `plan_no_ready_node`. The runtime treats any
+      other value as a hard error and rejects the
+      event.
 
-      You are done. Do not call `ralph emit` after the
-      wave emit. Do not chain another wave. The runtime
-      will route the per-unit work to the per-slot hats.
+      ### 4. Replay safety
+
+      On a re-entry with the same `loop_id` and an
+      unchanged `source_plan_hash`, you MUST NOT
+      re-generate the artifact from scratch. Check
+      whether `.ralph/review/<plan-key>/execution-plan.yml`
+      already exists with a matching `source_plan_hash`;
+      if so, skip writing and stop. Only a hash change
+      justifies a new artifact version.
+
+      ### 4.5. Task materialization (U4)
+
+      After writing the artifact on the first activation,
+      materialize each DAG node into a runtime task.
+      The mapping is identity-only (no dynamic state) and
+      lives both in the artifact (`task_mapping:`) and
+      in the runtime task ledger.
+
+      Per-node procedure:
+
+      1. Compute `node_key` of the form
+         `plan:<plan-key>:<unit_id>` (e.g.
+         `plan:2026-07-23-005-...:u3`).
+      2. Call `ralph tools task ensure --key
+         "<node_key>" --title "<unit title>"
+         --description "<unit scope>"`. The
+         command is idempotent: a re-entry with the
+         same `node_key` returns the existing task
+         instead of minting a new one.
+      3. Capture the live `task_id` from the
+         `ensure` output (do NOT hand-write
+         `task_id`).
+      4. Append `{node_key, task_id, task_key: node_key,
+         step: "plan"}` to `task_mapping` in the
+         artifact and re-write the artifact.
+
+      Coupling / coupled_merge nodes: emit **one**
+      task per coupled group, with `node_key`
+      suffixed by `:merged`. The mapping's
+      `merged_from` field lists the source unit ids
+      (artifact-only; not a runtime task field).
+
+      Replay: when §4 short-circuits (artifact
+      already exists with matching hash), DO NOT
+      re-materialize tasks — `ensure` is already
+      idempotent and the runtime's task ledger is
+      the live source of truth.
+
+      Downstream failure projection (U5+): when an
+      upstream task is `failed` / `cancelled`, mark
+      downstream tasks as `failed` with
+      `reason: upstream_dependency_failed` and the
+      upstream `task_id`. This is the **only** state
+      transition `task-planner` may perform; the
+      U5 exec-wave dispatcher handles its own wave
+      fan-out.
 
       ### 5. Things you must NOT do (this hat)
 
-      - **Do not edit any project file** — no code, no
-        tests, no docs.
-      - **Do not call `ralph emit`** for any business
-        topic in this turn. Your output is the wave.
-      - **Do not call `ralph wave emit` more than once**
-        in this turn.
-      - **Do not call `ralph wave emit` on a topic that
-        is not `exec.unit.ready`**. Other wave topics
-        belong to other hats (review fan-out, fix
-        fan-out).
-      - **Do not try to inspect the runtime's internal
-        ledger files**. If you need cross-hat state, use
-        `ralph tools task <cmd>`.
-      - **Do not retry on failure** inside this
-        activation. Stop; the runtime will surface a
-        `task.resume` for a retry if appropriate.
+      - **Do not edit any project file** other than the
+        artifact path listed in §2.
+      - **Do not call `ralph wave emit`**. Wave
+        dispatching belongs to U5 (executor / iteration
+        hat).
+      - **Do not call `ralph emit` for a non-terminal
+        business topic** in this activation. The
+        artifact is your business output; the next hat
+        picks up through the artifact, not your emit.
+      - **Do not read runtime internal ledgers**
+        (events.jsonl, supervisor.db). Use
+        `ralph inspect loop --format json` for loop
+        state and `ralph tools task list` for task state.
+      - **Do not run tests, build, or lint**. You are a
+        planner, not an implementer.
 
       ### 6. Useful runtime APIs (this hat may call)
 
-      - `ralph tools task list` — list all plan units
-        registered for the active plan.
-      - `ralph tools task show <id>` — read one unit's
-        full description / status.
-      - `ralph wave emit <topic> --payloads-stdin
-        [--policy-check]` — the only business-emitting
-        call you make. Always run with `--policy-check`
-        first; the loop's gate is the same one (per
-        `ralph-tools` §5). For the full syntax, the
-        `--payloads-stdin` requirement, the
-        `--idempotency-key` namespace convention, and
-        the `RALPH_WAVE_WORKER=1` block, load
-        `ralph-tools-wave` on demand.
+      - `ralph inspect loop --format json` — read
+        `loop_anchor.plan_path` and the resolved
+        baseline SHA.
+      - `ralph tools task list` — confirm the upstream
+        `coordinator` already registered the unit
+        tasks. If the list is empty, your artifact
+        still stands (the runtime can re-materialize
+        from it); do not fabricate task entries here.
+      - `ralph emit plan.blocked --policy-check
+        -j '<json>'` — only on invalid plan; the loop
+        gate is the same one (per `ralph-tools` §5).
+        For the strict rules on `task_id` /
+        `events.jsonl` allowlist, load
+        `ralph-tools-emit` on demand.
 
-      For full syntax of `ralph tools task <cmd>`, see the
-      `ralph-tools-tasks` skill (auto-injected under
-      `tasks.enabled`).
+      For full syntax of `ralph tools task <cmd>` and
+      task-key three-field consistency, see the
+      auto-injected `ralph-tools-tasks` skill.
 
       ### 7. Environment you can read
 
       - `RALPH_CURRENT_HAT` — should be `task-planner`.
-      - `RALPH_CURRENT_LOOP_ID` — current loop id;
-        include in any cross-iteration stable key.
+      - `RALPH_CURRENT_LOOP_ID` — current loop id; used
+        for the artifact's loop_id stamping.
       - `RALPH_HATS_SOURCE` — preset label, useful in
         error messages.
+    # 2026-07-23-005 plan U2: task-planner no longer publishes the
+    # per-unit `exec.unit.ready` wave (that ownership moves to the
+    # exec-wave dispatcher in U5). It only emits `plan.blocked` on
+    # invalid-plan detection — the happy path writes the artifact
+    # and stops without any business emit. The `terminal_events`
+    # is left empty so the runtime does not force-quit after the
+    # hat returns successfully.
+    publishes:
+      - plan.blocked
+    event_filter:
+      enabled: true
+      events: []
+    exempt_topics:
+      - plan.blocked
+
+  # 2026-07-23-005 plan U5: exec-wave-dispatcher takes the
+  # dependency-aware fan-out role that the original
+  # `task-planner` owned pre-U2. It reads the static
+  # execution-plan artifact, picks the current ready nodes
+  # (those whose upstream tasks are all `done`), and emits
+  # one `exec.unit.ready` wave per activation. Each ready
+  # wave is one batch emit — never split across multiple
+  # `ralph wave emit` calls. Downstream `worker` slots fan
+  # out concurrently inside the wave. The supervisor's
+  # `exec.wave.complete` re-triggers this hat for the next
+  # ready wave.
+  exec-wave-dispatcher:
+    name: "Exec Wave Dispatcher"
+    description: "Iterates ready waves from the static execution-plan artifact; emits one exec.unit.ready batch per wave."
+    instructions: |
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-wave` red box.
+      ## EXEC WAVE DISPATCHER MODE — Iterative ready-wave fan-out (this hat)
+
+      You are a **dispatcher hat** activated by the
+      exec integrator after each wave merges (the
+      supervisor injects `exec.wave.complete` to signal
+      fan-in is done). You do not implement code or run
+      tests. You read the static execution-plan artifact
+      and the runtime task API, compute the current ready
+      set, and emit **one** `ralph wave emit
+      exec.unit.ready` per activation that covers every
+      ready node.
+
+      ### 0. This activation is single-shot
+
+      In this activation, **emit at most one**
+      `ralph wave emit` call. If the ready set is empty,
+      stop without emitting (the loop will route you to
+      `review-coordinator` via the exec.wave.complete
+      contract). Do not chain a follow-up emit. Do not
+      call `ralph emit` for a non-terminal business topic
+      in this turn — your output is the wave.
+
+      This rule is the same as the always-injected
+      `ralph-tools` skill's §6. The framing is identical;
+      do not "fix" a dropped emit by re-trying. Wait for
+      a `task.resume` to land in a later turn.
+
+      ### 1. Read the static DAG
+
+      a. The execution-plan artifact lives at
+         `.ralph/review/<plan-key>/execution-plan.yml`.
+         Read it via the runtime API (the loop injects
+         the path); do NOT parse it from the working
+         tree directly.
+      b. Use `ralph tools task list` to learn the live
+         status of each node (per U4's
+         `task_mapping`).
+
+      ### 2. Compute the ready set
+
+      A node is **ready** when:
+
+      - Its task is `open` (not `done`, not `failed`).
+      - Every upstream node (per the `edges:`
+        collection, ignoring `file_conflict` edges
+        which are absorbed into `coupled_merge`
+        groups) is `done`.
+
+      Sort the ready set by `unit_id` ascending so
+      wave IDs and slot indices are stable across
+      re-runs.
+
+      If the ready set is empty:
+
+      - If any task is `failed`, route via the existing
+        `exec-failure-handler` (`exec.wave.failed`); the
+        runtime will surface it to `reporter` via
+        `plan.blocked`.
+      - Otherwise, the plan is fully dispatched; the
+        supervisor's `exec.wave.complete` injection
+        will route the loop to the review phase
+        (U6 picks up from there).
+
+      ### 3. Build the wave payload
+
+      For each ready node, build a JSON object with
+      at least:
+
+      - `wave_id`: `w-<short-hash>` shared by every
+        payload in this wave (idempotent across
+        re-runs).
+      - `slot_index`: monotonic from `0`.
+      - `plan_name`: derived from the plan stem.
+      - `task_id` / `task_key`: live ids from
+        `ralph tools task list`. Never hand-write
+        `task_id`.
+      - `unit_scope`: the per-unit scope from the
+        artifact's `nodes[].scope`.
+
+      ### 4. Emit the wave (single batch)
+
+      Pre-check first (`ralph-tools-wave` red box):
+
+      ```bash
+      ralph wave emit exec.unit.ready \
+        --payloads-stdin --policy-check \
+        < payloads.jsonl
+      ```
+
+      Then drop `--policy-check` and emit for real.
+      Use `--idempotency-key` so a re-entry with the
+      same wave contents returns the same `wave_id`
+      instead of double-dispatching.
+
+      ### 5. Things you must NOT do (this hat)
+
+      - **Do not edit any project file** — no code,
+        no tests, no docs.
+      - **Do not call `ralph wave emit` more than
+        once** in this turn.
+      - **Do not call `ralph wave emit` on a topic
+        other than `exec.unit.ready`**.
+      - **Do not call `ralph emit` for a non-terminal
+        business topic** in this turn; your output is
+        the wave.
+      - **Do not bypass the static DAG** — the
+        execution-plan artifact is the dependency SSOT;
+        you compute ready sets from it, not from
+        ad-hoc inference.
+      - **Do not retry on failure** inside this
+        activation. Stop; the runtime will surface a
+        `task.resume` for a later turn.
+
+      ### 6. Useful runtime APIs (this hat may call)
+
+      - `ralph inspect loop --format json` — read
+        `loop_anchor.plan_path` and the resolved
+        baseline SHA.
+      - `ralph tools task list` — read live task
+        states for the ready-set computation.
+      - `ralph tools task show <id>` — read one
+        node's full description.
+      - `ralph wave emit exec.unit.ready
+        --payloads-stdin [--policy-check]` — the
+        only business-emitting call you make.
+        Always run with `--policy-check` first; the
+        loop's gate is the same one (per
+        `ralph-tools` §5).
+
+      For the full `ralph tools task <cmd>` syntax
+      and the `task_id` non-empty / events.jsonl
+      allowlist rules, see `ralph-tools-tasks` and
+      `ralph-tools-emit` (load on demand).
     triggers:
       - work.ready
+      - exec.wave.complete
+    trigger_multi_consumer_topics:
+      - exec.wave.complete
+    # 2026-07-23-005 plan U5: dispatcher only emits the
+    # per-unit readiness topic. `exec.wave.complete` is
+    # supervisor-only (origin guard rejects agent emit; see
+    # R14 / R-COORD-4). The dispatcher consumes the supervisor
+    # `exec.wave.complete` event to know when to compute the
+    # next ready wave.
     publishes:
       - exec.unit.ready
     event_filter:
       enabled: true
       events:
       - work.ready
+      - exec.wave.complete
     exempt_topics:
-      - exec.unit.ready
-    terminal_events:
       - exec.unit.ready
 
   worker:
@@ -571,6 +837,8 @@ hats:
     name: "Exec Integrator"
     description: "Merges completed execution waves and runs the full test suite."
     triggers:
+      - exec.wave.complete
+    trigger_multi_consumer_topics:
       - exec.wave.complete
     publishes:
       - work.done
@@ -646,22 +914,37 @@ hats:
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   review-coordinator:
     name: "Review Coordinator"
-    description: "Fans out review work across the six dimension reviewers."
+    # 2026-07-23-005 plan U6: review-coordinator fans out a
+    # SINGLE Review wave that contains the test dimension
+    # (`testing`) plus the six review dimensions. All seven
+    # slots run on the same merged commit, in
+    # `SharedReadonly` binding, so tester and reviewers see
+    # the same immutable code reference. The wave is
+    # recorded in `review.unit.ready` (one per dimension).
+    # U6 pins both the 7-payload shape and the
+    # pre/post-fingerprint write-set gate.
+    description: "Fans out a 7-payload Review wave (testing + 6 review dimensions) on the merged commit."
     instructions: |
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
-      ## REVIEW COORDINATOR MODE — Single batch of six review units (this hat)
+      ## REVIEW COORDINATOR MODE — Single batch of 7 review units on the merged commit (this hat)
 
       You are a **dispatcher hat** activated when the
       implementation wave is done. You do not review code
-      yourself. You take the latest implementation and emit
-      one batch wave of six review units, one per
-      dimension. The downstream `review-batch-worker` hats
-      pick each unit up in parallel and report back.
+      yourself. You take the latest merged commit and emit
+      one batch wave of **seven** review units: one test
+      dimension (`testing`) and six review dimensions
+      (`correctness`, `maintainability`,
+      `project-standards`, `goal-alignment`, `adversarial`).
+      The downstream `review-batch-worker` hats pick each
+      unit up in parallel and report back. All seven
+      slots run on the same merged commit and the same
+      diff — U6 hard rule: they MUST NOT see divergent
+      code references.
 
       ### 0. This activation is single-shot
 
       In this activation, **emit exactly one**
-      `ralph wave emit` call to publish the six review
+      `ralph wave emit` call to publish the seven review
       unit-readiness events, in a single batch. Do not
       split the batch across multiple wave emits. Do not
       call `ralph emit` for any business topic in this
@@ -677,29 +960,93 @@ hats:
       surface a `task.resume` to a later turn. Do not
       retry inside this activation.
 
-      ### 1. The six review dimensions
+      ### 1. The seven review dimensions
 
-      You are responsible for emitting exactly six
+      You are responsible for emitting exactly seven
       payloads, one per dimension, with these
       `dimension` values and `focus` guidance:
 
-      1. `correctness` — does the change do what the plan
-         asked, with the right semantics?
-      2. `testing` — does the test coverage match the
-         plan's test strategy, including edge cases?
+      1. `testing` — run the project's authoritative
+         test command on the merged commit. The test
+         dimension is REQUIRED and runs the same
+         immutable code reference as the reviewers.
+         DO NOT modify any file, test, or production
+         code — `SharedReadonly` is enforced by the
+         pre/post fingerprint gate in §3.
+      2. `correctness` — does the change do what the
+         plan asked, with the right semantics?
       3. `maintainability` — is the change readable,
-         modular, and well-named for future maintainers?
+         modular, and well-named for future
+         maintainers?
       4. `project-standards` — does it follow this
          project's conventions (CLAUDE.md, the lint
          preset, the test runner conventions)?
-      5. `goal-alignment` — does the result advance the
-         plan's stated goal, or only the surface request?
+      5. `goal-alignment` — does the result advance
+         the plan's stated goal, or only the surface
+         request?
       6. `adversarial` — what breaks under hostile
          inputs, edge values, or unexpected callers?
+      7. `merge-conflict` — verify the merged commit
+         is the only reference any slot will read;
+         flag any post-merge drift in the worktree.
 
-      Emit **exactly six** payloads — not five, not seven.
-      Skipping or duplicating a dimension corrupts the
-      fan-in.
+      Emit **exactly seven** payloads — not six, not
+      eight. Skipping or duplicating a dimension
+      corrupts the fan-in.
+
+      ### 2. Build the payload list
+
+      Each payload is one line of JSON. Required fields:
+
+      - `wave_id` — a fresh `w-<short-hash>` id you
+        generate once and reuse for all seven payloads
+        in this wave.
+      - `dimension` — one of the seven values from §1.
+        Each `dimension` value appears **exactly once**
+        across the seven payloads.
+      - `focus` — a one- or two-sentence instruction
+        that points the downstream reviewer at the
+        area of the diff worth scrutinising for this
+        dimension.
+      - `plan_name` — short name you reuse across the
+        seven payloads (e.g. derived from the plan's
+        filename slug).
+      - `task_id` / `task_key` — the implementation
+        plan's task id and key, so reviewers can find
+        the relevant unit(s) via
+        `ralph tools task show <id>`.
+      - `merged_commit` — the SHA the integrator
+        produced. All seven slots MUST receive the
+        same value; if any slot gets a different
+        commit, fail-close the review wave.
+      - `pre_write_fingerprint` — sha256 of the
+        worktree file set BEFORE the wave fan-out;
+        the synthesizer uses this to detect writes.
+
+      Use `slot_index` `0` through `6` for the seven
+      payloads, in any order. Keep payloads one line
+      each; do not pretty-print.
+
+      ### 3. Write-set fingerprint gate
+
+      Before emitting the wave, snapshot the worktree
+      file set (a sorted list of paths under the repo
+      root) and record its sha256 as
+      `pre_write_fingerprint` in every payload. After
+      the review fan-in completes, the
+      `review-synthesizer` re-snapshots and refuses
+      to mark the wave as passed if the post-wave
+      fingerprint differs from `pre_write_fingerprint`
+      AND any source file changed outside `.ralph/`.
+      `SharedReadonly` is NOT an OS sandbox — this
+      pre/post fingerprint comparison is the
+      enforcement gate.
+
+      Do NOT auto-clean or auto-revert the changes;
+      the gate's only response is to surface the
+      mismatch as a structured finding. The runtime
+      routes the finding to the `fix` chain (U7) or
+      `reporter` (U8).
 
       ### 2. Build the payload list
 
@@ -822,14 +1169,14 @@ hats:
       - `RALPH_HATS_SOURCE` — preset label.
     triggers:
       - work.done
-      - review.start
+      - exec.wave.complete
     publishes:
       - review.unit.ready
     event_filter:
       enabled: true
       events:
       - work.done
-      - review.start
+      - exec.wave.complete
     exempt_topics:
       - review.unit.ready
     terminal_events:
@@ -1352,200 +1699,159 @@ hats:
       - 协调 topic 由 supervisor 注入。
   alignment:
     name: "Alignment"
-    description: "Performs final alignment pass and emits plan.complete."
+    # 2026-07-23-005 plan U7: alignment is a read-only
+    # verifier. It MUST NOT modify code, tests, or docs.
+    # If it discovers a blocker, it surfaces a structured
+    # finding via `ralph emit plan.blocked` (U8 routes that
+    # to reporter); it never becomes a second fixer.
+    description: "Read-only final alignment pass; emits plan.complete on success or plan.blocked on alignment failure."
     triggers:
       - fix.done
     publishes:
       - plan.complete
+      - plan.blocked
     event_filter:
       enabled: true
       events:
       - fix.done
     exempt_topics:
       - plan.complete
+      - plan.blocked
     terminal_events:
       - plan.complete
     instructions: |
-      ## ALIGNMENT MODE — Final alignment pass
+      ## ALIGNMENT MODE — Read-only final alignment pass
 
       Activated by `fix.done`. Do a final alignment pass:
-      re-read the spec, confirm all acceptance criteria met,
-      then emit `plan.complete`.
+      re-read the spec, confirm all acceptance criteria
+      met, then emit exactly one `plan.complete`. If
+      alignment surfaces a blocker you cannot fix in
+      your role, emit `plan.blocked` instead.
 
       ### OPAC 四阶段 (本 hat 视角)
 
-      - **Observe**: `ralph inspect loop` + 读 `fix.done` payload。
-      - **Precheck**: `ralph emit plan.complete --policy-check`。
-      - **Apply**: emit `plan.complete`。
+      - **Observe**: `ralph inspect loop` + 读 `fix.done`
+        payload + 重读 spec。
+      - **Precheck**: `ralph emit plan.complete
+        --policy-check`（或 `plan.blocked`）。
+      - **Apply**: emit 单条终态。
       - **Confirm**: `ralph events --events-source main`。
 
       ### Constraints
 
+      - **Read-only**: 不能修改任何代码、测试或文档。
       - 一条业务事件即停（isolated 单事件预算）。
       - 不能调 wave emit。
-
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
-  shipper:
-    name: "Shipper"
-    description: "Promotes the plan completion event through the workflow."
-    triggers:
-      - plan.complete
-    publishes:
-      - plan.complete
-    event_filter:
-      enabled: true
-      events:
-      - plan.complete
-    exempt_topics:
-      - plan.complete
-    trigger_multi_consumer_topics:
-      - plan.complete
-    terminal_events:
-      - plan.complete
-    instructions: |
-      ## SHIPPER MODE — Plan Completion Gate
-
-      You are the hand-off hat for `plan.complete`. Your only job is to
-      forward the completion signal to downstream consumers (e.g. reporter).
-
-      ### `plan.blocked` reason routing (P0-2 STRICT-MATCH)
-      If you are ever triggered by `plan.blocked` instead of `plan.complete`,
-      route as follows using **STRICT EXACT MATCH** on the `reason` field:
-
-      1. Normalise `reason` with `trim()` + `to_lowercase()`.
-      2. Compare the normalised string with `==` against the whitelist below.
-         Substring, "starts with", or narrative prefix matching is **forbidden**.
-      3. Recoverable reasons that may route to forward-after-verification:
-         - `loop_stalled_max_iterations`
-         - `steward_escalation`
-         - `review_terminal_drift`
-      4. Any other reason is a hard-fail: forward as blocked and do not promote
-         to completion.
+      - 不能变成第二个 fixer:任何代码修复需求必须
+        走正式 fix chain（fix-task-planner → fix-worker
+        → fix-integrator），不要在本 hat 内部尝试。
 
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   reporter:
     name: "Reporter"
-    description: "Produces the manager-facing report and terminates the loop."
+    # 2026-07-23-005 plan U8: reporter is the **single** owner
+    # of plan-level reporting and loop termination. It now
+    # handles both `plan.complete` (success) and
+    # `plan.blocked` (failure) and produces a single
+    # `LOOP_COMPLETE` per loop with the appropriate verdict.
+    # The deleted `shipper` / `fixer` / `progress-steward`
+    # hats are no longer in the topology; this hat is the
+    # only consumer of `plan.complete`, `plan.blocked`,
+    # and `work.failed`.
+    description: "Single owner of plan-level reporting and loop termination. Consumes plan.complete, plan.blocked, and work.failed."
     triggers:
       - plan.complete
+      - plan.blocked
+      - work.failed
     publishes:
       - LOOP_COMPLETE
     event_filter:
       enabled: true
       events:
       - plan.complete
+      - plan.blocked
+      - work.failed
     exempt_topics:
       - LOOP_COMPLETE
     trigger_multi_consumer_topics:
       - plan.complete
+      - plan.blocked
+      - work.failed
     terminal_events:
       - LOOP_COMPLETE
     instructions: |
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
-      ## REPORTER MODE — Manager-facing report + terminate
+      ## REPORTER MODE — Single owner of report + loop termination
 
-      Activated by `plan.complete`. Produce a manager-facing
-      summary and emit `LOOP_COMPLETE`.
+      You are the **only** reporter and the **only**
+      emitter of `LOOP_COMPLETE` in this preset. You are
+      activated by `plan.complete` (success),
+      `plan.blocked` (failure), or `work.failed` (work
+      execution failure). Your job is to:
+
+      1. Write the manager-facing report (success or
+         failure summary).
+      2. Emit exactly one `LOOP_COMPLETE` with the
+         verdict embedded in the payload.
+
+      When activated by `work.failed`, treat it the same
+      as `plan.blocked` with `reason:
+      upstream_dependency_failed`.
+
+      ### `plan.blocked` reason whitelist (U8 strict)
+
+      When you are activated by `plan.blocked`, you
+      MUST use **strict exact match** on the `reason`
+      field (after `trim()` + `to_lowercase()`) to
+      classify the failure. Whitelisted reasons:
+
+      - `loop_stalled_max_iterations`
+      - `steward_escalation`
+      - `review_terminal_drift`
+      - `plan_missing`
+      - `plan_unreadable`
+      - `plan_empty_units`
+      - `plan_duplicate_unit_id`
+      - `plan_invalid_unit_id_shape`
+      - `plan_unknown_dependency`
+      - `plan_self_dependency`
+      - `plan_cycle_detected`
+      - `plan_coupled_merge_missing_unit`
+      - `plan_no_ready_node`
+      - `upstream_dependency_failed`
+      - `merge_conflict`
+      - `aggregate_timeout`
+      - `cancel`
+      - `alignment_failed`
+
+      Any other `reason` is a hard failure: emit
+      `LOOP_COMPLETE` with `verdict=failed`,
+      `reason="unrecognized_blocked_reason"`, and
+      surface the original `reason` in the report.
+
+      ### Report-write failure handling
+
+      If writing the report file fails, do **NOT**
+      retry. Emit exactly one `LOOP_COMPLETE` with
+      `report_written=false`, the target path, the
+      write error, and a minimal failure summary in
+      the payload. This guarantees the loop terminates
+      with `verdict=failed` instead of silently waiting
+      for a consumer that never arrives.
 
       ### OPAC 四阶段 (本 hat 视角)
 
-      - **Observe**: `ralph tools task list -s done` + 读
-        `plan.complete` payload。
-      - **Precheck**: `ralph emit LOOP_COMPLETE --policy-check`
-        （LOOP_COMPLETE 是 terminal，需含合规摘要）。
+      - **Observe**: `ralph tools task list -s done`
+        + 读 `plan.complete` / `plan.blocked` payload。
+      - **Precheck**: `ralph emit LOOP_COMPLETE
+        --policy-check`。
       - **Apply**: 写报告，emit `LOOP_COMPLETE`。
       - **Confirm**: `ralph events --events-source main`。
 
       ### Constraints
 
       - 一条业务事件即停。
-  fixer:
-    name: "Fixer"
-    description: "Hard fallback hat that attempts recovery on work.failed."
-    triggers:
-      - work.failed
-    publishes:
-      - fix.applied
-      - fix.exhausted
-    event_filter:
-      enabled: true
-      events:
-      - work.failed
-    terminal_events:
-      - fix.applied
-      - fix.exhausted
-    exempt_topics:
-      - fix.applied
-      - fix.exhausted
-    instructions: |
-      ## FIXER MODE — Hard fallback recovery
-
-      Activated by `work.failed`. Try a targeted fix; emit
-      `fix.applied` on success or `fix.exhausted` when you
-      give up. Do **not** chain: one activation = one
-      outcome event.
-
-      ### OPAC 四阶段 (本 hat 视角)
-
-      - **Observe**: `ralph tools task list` + 读 `work.failed`
-        payload（含失败原因 + task_key）。
-      - **Precheck**: `ralph emit fix.applied --policy-check` 或
-        `fix.exhausted`。
-      - **Apply**: 尝试恢复；emit 终态。
-      - **Confirm**: `ralph events --events-source hat-channel`。
-
-      ### Constraints
-
-      - 一条业务事件即停（isolated 单事件预算）。
-      - 不能调 wave emit。
-
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
-  progress-steward:
-    name: "Progress Steward"
-    description: "Loop-level fallback hat that recovers or escalates on stall."
-    triggers:
-      - loop.stalled
-    publishes:
-      - work.ready
-      - review.start
-      - task.resume
-      - plan.blocked
-    event_filter:
-      enabled: true
-      events:
-      - loop.stalled
-    terminal_events:
-      - plan.blocked
-    exempt_topics:
-      - work.ready
-      - review.start
-      - task.resume
-      - plan.blocked
-    instructions: |
-      ## PROGRESS STEWARD MODE — Loop-level stall recovery
-
-      Activated by `loop.stalled`. Recover the stalled
-      sequence by emitting `work.ready` (mint fresh unit),
-      `review.start` (re-dispatch review), `task.resume`
-      (U16: HandoffIndex consumer triggers routing
-      validation), or `plan.blocked` (escalate to operator).
-
-      ### OPAC 四阶段 (本 hat 视角)
-
-      - **Observe**: `ralph inspect loop` + `ralph tools task list`。
-      - **Precheck**: `ralph emit <chosen topic> --policy-check`。
-      - **Apply**: emit 单条 rescue 事件。
-      - **Confirm**: `ralph events --events-source main`。
-
-      ### Constraints
-
-      - 一条业务事件即停。
-      - `task.resume` 必须引用已知 consumer 的 `triggers`
-        （U16 routing 校验）。
-      - 不能调 wave emit。
-
-      # Default publishes fallback so cli/agents can emit any of
-      # the work.ready family without an explicit `publishes`.
-      default_publishes: [work.ready]
-
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+      - 报告写失败时**绝对不**重试——把失败摘要塞进
+        LOOP_COMPLETE payload，保证 loop 一定终止。
+      - 不要消费 `task.resume`——那是 runtime 内部
+        recovery 通道，不属于本 hat 的输入。
