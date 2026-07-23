@@ -10,6 +10,15 @@
 use std::process::Command;
 
 /// Keys that mark agent-owned CLI context (plus hat-execution overlays).
+///
+/// `RALPH_WORKSPACE_ROOT` and `RALPH_LOOP_ITERATION` are loop-runtime
+/// keys: `RALPH_WORKSPACE_ROOT` would otherwise let CwdGuard resolve
+/// back to the real repo root when a test sets `current_dir(temp_path)`
+/// (see mem-1784744041-fd32), so a `ralph emit` writes to the active
+/// loop's events file instead of the test's temp one and the test's
+/// read returns empty. `RALPH_LOOP_ITERATION` is not consulted by the
+/// spawned CLI but is stripped for consistency so the spawned process
+/// sees a uniform "no-loop" environment.
 pub const AGENT_CONTEXT_ENV_KEYS: &[&str] = &[
     "RALPH_CURRENT_HAT",
     "RALPH_CURRENT_LOOP_ID",
@@ -18,6 +27,8 @@ pub const AGENT_CONTEXT_ENV_KEYS: &[&str] = &[
     "RALPH_TRIGGERED_HAT",
     "RALPH_HATS_SOURCE",
     "RALPH_CONFIG",
+    "RALPH_WORKSPACE_ROOT",
+    "RALPH_LOOP_ITERATION",
 ];
 
 /// Drop agent-context env so the spawned `ralph` sees a human CLI.

@@ -32,6 +32,7 @@ unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NO_PROXY
 # even though the same suite passes in a human shell.
 unset RALPH_CURRENT_HAT RALPH_CURRENT_LOOP_ID RALPH_EVENTS_FILE \
   RALPH_WAVE_WORKER RALPH_TRIGGERED_HAT RALPH_HATS_SOURCE RALPH_CONFIG \
+  RALPH_WORKSPACE_ROOT RALPH_LOOP_ITERATION \
   2>/dev/null || true
 
 # 全局总超时:防止意外卡住(例如 IPC deadlock、PTY 未释放)。
