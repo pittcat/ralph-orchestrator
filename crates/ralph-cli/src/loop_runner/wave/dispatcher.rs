@@ -2358,43 +2358,86 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
             // reaches this point; the Drop guard releases the slot as
             // `Failed` for those. This is persistence only: no sink,
             // no `wave.complete` injection, no `tick` (all U6).
+            //
+            // 2026-07-23-007 plan U1 (R-W2): classify the worker's
+            // exit + accepted event stream through
+            // `classify_worker_outcome` BEFORE recording — an
+            // exit-0 + zero-events worker is `empty_worker_result`,
+            // not a success. `WorkerExit::Cancelled` always wins
+            // over a terminal marker that slipped through (R-W4).
+            // The Err path from `run_wave_worker` already carries
+            // the original error reason; that path bypasses the
+            // classifier so the operator-facing message is
+            // preserved (the classifier would otherwise map it to
+            // `empty_worker_result` because the worker did not
+            // emit accepted events before it died).
             if let Some(guard) = release_guard.as_ref() {
-                match &result.1 {
-                    Ok((events, _duration, true)) => {
-                        let (content_hash, event_count) = compute_slot_batch_fingerprint(events);
-                        if let Err(error) = guard.bridge.record_slot_result(
-                            &guard.wave_id,
-                            guard.slot_index,
-                            &content_hash,
-                            event_count,
-                        ) {
-                            warn!(
-                                wave_id = %guard.wave_id,
-                                slot_index = guard.slot_index,
-                                %error,
-                                "U5: supervisor record_slot_result failed"
-                            );
+                use ralph_core::supervisor::worker_outcome::{
+                    SlotOutcome, TerminalMarker, WorkerExit, classify_worker_outcome,
+                };
+                let (reason_to_record, completed_outcome) = match &result.1 {
+                    Ok((events, _duration, _success)) => {
+                        let exit = if result.1.as_ref().unwrap().2 {
+                            WorkerExit::Exit0
+                        } else {
+                            WorkerExit::ExitNonZero
+                        };
+                        let mut markers: Vec<TerminalMarker> = Vec::new();
+                        let mut accepted: usize = 0;
+                        for ev in events.iter() {
+                            accepted += 1;
+                            if ev.topic.ends_with(".unit.done")
+                                || ev.topic.ends_with(".wave.done")
+                            {
+                                markers.push(TerminalMarker::Done);
+                            } else if ev.topic.ends_with(".unit.failed")
+                                || ev.topic.ends_with(".wave.failed")
+                            {
+                                markers.push(TerminalMarker::Failed);
+                            }
                         }
-                    }
-                    Ok((_events, _duration, false)) => {
-                        // Mirror `record_outcome`: Ok+success=false is a
-                        // non-zero exit / timeout-with-events. Persist as
-                        // slot failure so evaluate_phase returns Failed
-                        // instead of Integrate (R14 / AE5).
-                        if let Err(error) = guard.bridge.record_slot_failure(
-                            &guard.wave_id,
-                            guard.slot_index,
-                            "worker exited unsuccessfully",
-                        ) {
-                            warn!(
-                                wave_id = %guard.wave_id,
-                                slot_index = guard.slot_index,
-                                %error,
-                                "U5: supervisor record_slot_failure failed"
-                            );
+                        match classify_worker_outcome(exit, accepted, &markers) {
+                            SlotOutcome::Completed(_) => {
+                                let (content_hash, event_count) =
+                                    compute_slot_batch_fingerprint(events);
+                                if let Err(error) = guard.bridge.record_slot_result(
+                                    &guard.wave_id,
+                                    guard.slot_index,
+                                    &content_hash,
+                                    event_count,
+                                ) {
+                                    warn!(
+                                        wave_id = %guard.wave_id,
+                                        slot_index = guard.slot_index,
+                                        %error,
+                                        "U5: supervisor record_slot_result failed"
+                                    );
+                                }
+                                (None, true)
+                            }
+                            SlotOutcome::Failed { reason } => {
+                                if let Err(error) = guard.bridge.record_slot_failure(
+                                    &guard.wave_id,
+                                    guard.slot_index,
+                                    reason,
+                                ) {
+                                    warn!(
+                                        wave_id = %guard.wave_id,
+                                        slot_index = guard.slot_index,
+                                        %error,
+                                        "U1/007: supervisor record_slot_failure failed"
+                                    );
+                                }
+                                (Some(reason.to_string()), false)
+                            }
                         }
                     }
                     Err((reason, _duration)) => {
+                        // Err path preserves the worker's original
+                        // error message — the classifier would map
+                        // a zero-event Err to `empty_worker_result`,
+                        // but the operator wants the worker's real
+                        // failure (e.g. "boom: worker crashed").
                         if let Err(error) = guard.bridge.record_slot_failure(
                             &guard.wave_id,
                             guard.slot_index,
@@ -2404,17 +2447,54 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                                 wave_id = %guard.wave_id,
                                 slot_index = guard.slot_index,
                                 %error,
-                                "U5: supervisor record_slot_failure failed"
+                                "U1/007: supervisor record_slot_failure failed"
                             );
                         }
+                        (Some(reason.clone()), false)
                     }
-                }
+                };
+                let _ = (reason_to_record, completed_outcome);
             }
 
-            if matches!(&result.1, Ok((_, _, true)))
-                && let Some(guard) = release_guard.as_mut()
-            {
-                guard.outcome = ralph_core::supervisor::DispatchOutcome::Completed;
+            // U1/007: drop-guard outcome follows the classifier —
+            // only an explicitly Completed outcome releases the
+            // slot as Completed. Failed / empty / cancel outcomes
+            // all release as Failed so a subsequent bridge iteration
+            // sees a consistent permit return.
+            if let Some(guard) = release_guard.as_mut() {
+                use ralph_core::supervisor::worker_outcome::{
+                    SlotOutcome, TerminalMarker, WorkerExit, classify_worker_outcome,
+                };
+                let classified = match &result.1 {
+                    Ok((events, _duration, success)) => {
+                        let exit = if *success {
+                            WorkerExit::Exit0
+                        } else {
+                            WorkerExit::ExitNonZero
+                        };
+                        let mut markers: Vec<TerminalMarker> = Vec::new();
+                        let mut accepted: usize = 0;
+                        for ev in events {
+                            accepted += 1;
+                            if ev.topic.ends_with(".unit.done")
+                                || ev.topic.ends_with(".wave.done")
+                            {
+                                markers.push(TerminalMarker::Done);
+                            } else if ev.topic.ends_with(".unit.failed")
+                                || ev.topic.ends_with(".wave.failed")
+                            {
+                                markers.push(TerminalMarker::Failed);
+                            }
+                        }
+                        classify_worker_outcome(exit, accepted, &markers)
+                    }
+                    Err(_) => SlotOutcome::Failed {
+                        reason: ralph_core::supervisor::worker_outcome::REASON_WORKER_CANCELLED,
+                    },
+                };
+                if matches!(classified, SlotOutcome::Completed(_)) {
+                    guard.outcome = ralph_core::supervisor::DispatchOutcome::Completed;
+                }
             }
             result
         });
@@ -2713,24 +2793,42 @@ fn record_outcome(
     index: u32,
     outcome: WaveWorkerOutcome,
 ) {
+    use ralph_core::supervisor::worker_outcome::{
+        SlotOutcome, TerminalMarker, WorkerExit, classify_worker_outcome,
+    };
     match outcome {
         Ok((events, duration, success)) => {
-            // PTY workers return Ok((_, _, false)) for non-zero exit and for
-            // timeout-with-events (`run_wave_worker_pty`). Distinguish:
-            // - events present → keep results visible (partial-timeout contract)
-            // - empty + unsuccessful → hard failure so a forced slot exit
-            //   (exit 1, no events) cannot Integrate → false-green LOOP_COMPLETE
-            if success || !events.is_empty() {
-                let proto_events: Vec<ralph_proto::Event> =
-                    events.into_iter().map(ralph_proto::Event::from).collect();
-                tracker.record_result(wave_id, index, proto_events);
+            // 2026-07-23-007 plan U1 (R-W2): drive every terminal
+            // classification through `classify_worker_outcome`
+            // instead of the legacy `success || !events.is_empty()`
+            // heuristic. Exit-0 + zero-events → `empty_worker_result`
+            // failure (no longer lifts `record_result`); Cancel
+            // always wins; non-zero exits with terminals still
+            // accept on the kind of the first terminal.
+            let exit = if success {
+                WorkerExit::Exit0
             } else {
-                tracker.record_failure(
-                    wave_id,
-                    index,
-                    "worker exited unsuccessfully".into(),
-                    duration,
-                );
+                WorkerExit::ExitNonZero
+            };
+            let mut markers: Vec<TerminalMarker> = Vec::new();
+            for ev in &events {
+                if ev.topic.ends_with(".unit.done") || ev.topic.ends_with(".wave.done") {
+                    markers.push(TerminalMarker::Done);
+                } else if ev.topic.ends_with(".unit.failed")
+                    || ev.topic.ends_with(".wave.failed")
+                {
+                    markers.push(TerminalMarker::Failed);
+                }
+            }
+            match classify_worker_outcome(exit, events.len(), &markers) {
+                SlotOutcome::Completed(_) => {
+                    let proto_events: Vec<ralph_proto::Event> =
+                        events.into_iter().map(ralph_proto::Event::from).collect();
+                    tracker.record_result(wave_id, index, proto_events);
+                }
+                SlotOutcome::Failed { reason } => {
+                    tracker.record_failure(wave_id, index, reason.to_string(), duration);
+                }
             }
         }
         Err((error, duration)) => {

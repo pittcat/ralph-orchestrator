@@ -2372,9 +2372,14 @@ impl U5RecordingExecutor {
 
 /// Build a deterministic `ralph_core::Event` for a (slot, seq) pair so
 /// the content hash is stable across runs.
+///
+/// Uses the production-shaped terminal topic `exec.unit.done` so the
+/// dispatcher's classifier (2026-07-23-007 plan U1) recognises it as
+/// a terminal Done marker and routes to `record_slot_result` instead
+/// of `record_slot_failure(empty_worker_result)`.
 fn u5_event(slot_index: u32, seq: usize) -> ralph_core::Event {
     ralph_core::Event {
-        topic: "exec.done".to_string(),
+        topic: "exec.unit.done".to_string(),
         payload: Some(format!("{{\"slot\":{slot_index},\"seq\":{seq}}}")),
         ts: String::new(),
         hat: None,
@@ -2787,8 +2792,13 @@ async fn test_dispatcher_records_event_batch_count() {
     );
 }
 
-/// U5 验收 #5: an empty-event worker → `event_count == 0` and a
-/// stable empty-batch content hash (sha256 of "").
+/// U5 验收 #5 (flipped by 2026-07-23-007 plan U1): an empty-event
+/// worker → the dispatcher MUST classify via `classify_worker_outcome`
+/// and record `record_slot_failure("empty_worker_result")`. The legacy
+/// "stable hash on empty batch" assertion was incorrect: an exit-0
+/// worker with `event_count == 0` is a fail-close case, not a success.
+/// The non-empty count + content hash contract still holds for the
+/// accepted-batch path (verified by `test_dispatcher_records_event_batch_count`).
 #[tokio::test]
 async fn test_dispatcher_records_empty_batch_stable_hash() {
     let store = std::sync::Arc::new(InMemorySupervisorStore::new());
@@ -2799,15 +2809,46 @@ async fn test_dispatcher_records_empty_batch_stable_hash() {
 
     let (_outcome, bridge) = run_u5_execute_wave(bridge, wave, executor).await;
 
+    // The flipped semantic: success + zero events → record_slot_failure.
     let results = bridge.results_snapshot();
-    assert_eq!(results.len(), 1, "U5: one slot recorded; got {results:?}");
-    let (slot, hash, count) = &results[0];
-    assert_eq!(*slot, 0);
-    assert_eq!(*count, 0, "U5: empty batch → event_count == 0");
     assert_eq!(
-        *hash,
-        empty_batch_hash(),
-        "U5: empty batch must hash to the stable empty sha256"
+        results.len(),
+        0,
+        "U1/007: empty batch must NOT record a slot result; got {results:?}"
+    );
+    let failures = bridge.failures_snapshot();
+    assert_eq!(
+        failures.len(),
+        1,
+        "U1/007: empty batch must record exactly one slot failure; got {failures:?}"
+    );
+    let (slot, reason) = &failures[0];
+    assert_eq!(*slot, 0);
+    assert_eq!(
+        reason,
+        ralph_core::supervisor::worker_outcome::REASON_EMPTY_WORKER_RESULT,
+        "U1/007: empty batch must use the stable reason code empty_worker_result"
+    );
+
+    // The store snapshot reflects 0 completed slots + 1 failed slot.
+    let store_wave_id = bridge
+        .store
+        .recover_active_waves()
+        .expect("recover")
+        .pop()
+        .expect("one wave")
+        .wave_id;
+    let snap = bridge
+        .store
+        .fan_in_status(&store_wave_id)
+        .expect("snapshot");
+    assert_eq!(
+        snap.completed_count, 0,
+        "U1/007: empty batch must not lift completed_count"
+    );
+    assert_eq!(
+        snap.failed_count, 1,
+        "U1/007: empty batch must lift failed_count"
     );
 }
 
