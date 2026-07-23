@@ -497,16 +497,21 @@ impl SupervisorStore for InMemorySupervisorStore {
                 })?;
         // 2026-07-23-007 plan U3 (R-W3): first-terminal-wins is
         // symmetrical with `record_slot_result` — a slot that
-        // already reached `Completed` / `Failed` / `Cancelled`
-        // MUST NOT be overwritten by a late failure. The
-        // idempotent replay of the SAME failure reason returns
-        // Ok without rewriting (mirrors the `record_slot_result`
-        // same-content_hash contract).
-        let already_terminal = matches!(
-            slot.status,
-            SlotStatus::Completed | SlotStatus::Failed | SlotStatus::Cancelled
-        );
-        if already_terminal {
+        // already reached `Failed` / `Cancelled` MUST NOT be
+        // overwritten by a late failure. The idempotent replay of
+        // the SAME failure reason returns Ok without rewriting
+        // (mirrors the `record_slot_result` same-content_hash
+        // contract).
+        //
+        // 2026-07-23-007 plan U3 (R-W4): cancel reason wins over a
+        // prior `Completed` row — a slot whose worker emitted a
+        // Done marker and was then cancelled MUST end as
+        // `Cancelled`, not `Completed`. Any other terminal kind
+        // still wins on first-write.
+        let already_failed = matches!(slot.status, SlotStatus::Failed | SlotStatus::Cancelled);
+        let cancel_wins = reason == crate::supervisor::worker_outcome::REASON_WORKER_CANCELLED
+            && matches!(slot.status, SlotStatus::Completed);
+        if already_failed {
             let same_reason = slot
                 .failure_reason
                 .as_deref()
@@ -519,6 +524,11 @@ impl SupervisorStore for InMemorySupervisorStore {
                 )));
             }
             return Ok(());
+        }
+        if matches!(slot.status, SlotStatus::Completed) && !cancel_wins {
+            return Err(SupervisorStoreError::AlreadyTerminal(format!(
+                "wave={wave_id} slot={slot_index} status=completed"
+            )));
         }
         // R-W4: cancel reason wins over Done marker — a slot
         // whose worker was cancelled MUST be marked Cancelled
@@ -1044,6 +1054,77 @@ mod tests {
             snap.pending_count, 1,
             "Cancelled slot surfaces in pending_count"
         );
+    }
+
+    /// 2026-07-23-007 plan U3 (R-W4): the cancel reason MUST win
+    /// over a prior `Completed` row. A worker that emitted a
+    /// `*.unit.done` marker and was then cancelled must end as
+    /// `Cancelled`, not `Completed`. Other failure reasons still
+    /// respect first-terminal-wins.
+    #[test]
+    fn record_slot_failure_cancel_after_completed_wins() {
+        let s = store();
+        let wave = s
+            .register_wave("u3-cancel-after-completed", WaveKind::Exec, 1)
+            .unwrap();
+        s.bind_worktree(
+            &wave,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/loose-ends/0".to_string()),
+                branch: Some("ralph/u3".to_string()),
+            },
+        )
+        .unwrap();
+        s.try_dispatch_next(4).unwrap().unwrap();
+        s.record_slot_result(&wave, 0, "hash-xyz", 3).unwrap();
+        let late = s.record_slot_failure(
+            &wave,
+            0,
+            crate::supervisor::worker_outcome::REASON_WORKER_CANCELLED,
+        );
+        assert!(
+            late.is_ok(),
+            "U3/007 R-W4: cancel-after-Completed must overwrite; got {late:?}"
+        );
+        let snap = s.fan_in_status(&wave).unwrap();
+        assert_eq!(snap.completed_count, 0, "Completed must be downgraded");
+        assert_eq!(snap.failed_count, 0, "Cancelled does not count as Failed");
+        assert_eq!(snap.pending_count, 1, "Cancelled slot surfaces in pending_count");
+    }
+
+    /// 2026-07-23-007 plan U3 (R-W4) control: a non-cancel
+    /// failure reason after `Completed` must still be rejected
+    /// by first-terminal-wins.
+    #[test]
+    fn record_slot_failure_non_cancel_after_completed_still_rejected() {
+        let s = store();
+        let wave = s
+            .register_wave("u3-non-cancel-after-completed", WaveKind::Exec, 1)
+            .unwrap();
+        s.bind_worktree(
+            &wave,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/loose-ends/0".to_string()),
+                branch: Some("ralph/u3".to_string()),
+            },
+        )
+        .unwrap();
+        s.try_dispatch_next(4).unwrap().unwrap();
+        s.record_slot_result(&wave, 0, "hash-xyz", 3).unwrap();
+        let late = s.record_slot_failure(&wave, 0, "boom");
+        assert!(
+            matches!(
+                late,
+                Err(crate::supervisor::SupervisorStoreError::AlreadyTerminal(_))
+            ),
+            "non-cancel failure after Completed must be rejected; got {late:?}"
+        );
+        let snap = s.fan_in_status(&wave).unwrap();
+        assert_eq!(snap.completed_count, 1, "Completed must be preserved");
     }
 
     #[test]
