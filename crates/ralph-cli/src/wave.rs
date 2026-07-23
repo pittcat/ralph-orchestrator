@@ -234,6 +234,35 @@ fn execute_verify(args: WaveVerifyArgs) -> Result<()> {
         );
     }
 
+    // 2026-07-22-001 plan U1: Precheck→Apply ticket gate. After every
+    // gate above passes (ACL, payload shape, policy precheck, origin
+    // guard), record a one-shot ticket so the subsequent `wave emit`
+    // can prove it targets the *same* payload set. Human CLI invocations
+    // skip the ticket — operators must not be locked out by a stuck
+    // ticket (mirrors `task_verify_gate::require_ticket`).
+    let op_ctx = crate::operation_guard::OperationContext::detect(
+        std::env::current_dir().unwrap_or_default(),
+    );
+    if op_ctx.is_agent_context {
+        let workspace = std::env::current_dir().unwrap_or_default();
+        let canonical =
+            crate::wave_verify_gate::canonical_payload_form(&payloads);
+        let fp = crate::wave_verify_gate::emission_fingerprint(
+            &args.topic,
+            &canonical,
+            op_ctx.current_loop_id.as_deref().unwrap_or(""),
+            op_ctx.current_hat_id.as_deref().unwrap_or(""),
+        );
+        let path = crate::wave_verify_gate::ticket_path(&workspace);
+        crate::wave_verify_gate::record_ticket(
+            &path,
+            &fp,
+            &args.topic,
+            op_ctx.current_loop_id.as_deref().unwrap_or(""),
+            op_ctx.current_hat_id.as_deref().unwrap_or(""),
+        )?;
+    }
+
     let wave_id_for_output = if matches!(args.output, WaveOutputFormat::Json) {
         // KTD-6 (P1 #7): emit a synthetic stable hash of (topic, payload digest, optional
         // idempotency key) so verify JSON carries a deterministic `wave_id`. The real wave_id
@@ -319,6 +348,24 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
         &events_file,
         &args.config,
     )?;
+
+    // 2026-07-22-001 plan U1: Precheck→Apply ticket gate. The policy
+    // precheck above verifies each payload against schema/origin rules;
+    // the OPAC ticket gate below closes the *drift* window where an
+    // agent could verify payloads P and then emit a *different* set
+    // P' that still passes the schema. `--unsafe-no-policy-check`
+    // bypasses the schema gate but NOT this OPAC ticket gate.
+    let workspace_root = std::env::current_dir().unwrap_or_default();
+    let op_ctx = crate::operation_guard::OperationContext::detect(workspace_root.clone());
+    let canonical = crate::wave_verify_gate::canonical_payload_form(&payloads);
+    let fp = crate::wave_verify_gate::emission_fingerprint(
+        &args.topic,
+        &canonical,
+        op_ctx.current_loop_id.as_deref().unwrap_or(""),
+        op_ctx.current_hat_id.as_deref().unwrap_or(""),
+    );
+    let ticket = crate::wave_verify_gate::ticket_path(&workspace_root);
+    crate::wave_verify_gate::require_ticket(&ticket, &op_ctx, &args.topic, &fp)?;
 
     // U2: Branch — with idempotency key or legacy path
     let outcome = if let Some(ref key) = args.idempotency_key {
@@ -922,6 +969,25 @@ fn append_idempotency_record(events_file: &Path, rec: &IdempotencyRecord) -> Res
     let path = idempotency_log_path(events_file);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+    }
+    // 2026-07-22-001 plan U5 (KTD-4, OQ1): the supervisor store
+    // is now the idempotency single source of truth — the
+    // `register_wave_if_absent` check on the dispatcher side
+    // already prevents double-spawn for the same wave_id. The
+    // sidecar file remains as a one-version compatibility shim
+    // (so existing operator tooling reading the log keeps
+    // working) but is no longer authoritative for dedup. Emit a
+    // one-shot stderr warning so an operator scanning the loop
+    // output can see exactly why the file is still being
+    // written and when it will be removed.
+    static SIDECAR_DEPRECATION_LOGGED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if !SIDECAR_DEPRECATION_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "wave_idempotency_sidecar_deprecation: writing .idempotency.jsonl for legacy compat; \
+             authoritative dedup lives in the supervisor store (`register_wave_if_absent`). \
+             The sidecar will be removed in a follow-up release (2026-07-22-001 plan U5)."
+        );
     }
     let mut f = fs::OpenOptions::new()
         .create(true)

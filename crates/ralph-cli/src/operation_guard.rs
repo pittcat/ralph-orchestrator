@@ -68,7 +68,8 @@ impl OperationContext {
     where
         F: Fn(&str) -> Option<String>,
     {
-        let current_loop_id = read_loop_id_marker(&workspace_root);
+        let current_loop_id = read_loop_id_marker(&workspace_root)
+            .or_else(|| env_lookup("RALPH_CURRENT_LOOP_ID"));
         let current_hat_id = read_current_hat(&env_lookup);
         let is_agent_context = compute_is_agent_context(&env_lookup);
 
@@ -485,7 +486,13 @@ mod tests {
             env_with("RALPH_CURRENT_LOOP_ID", "loop-a"),
         );
         assert!(ctx.is_agent_context);
-        assert_eq!(ctx.current_loop_id, None); // not from marker
+        // 2026-07-22-001 plan: `current_loop_id` now falls back to
+        // the RALPH_CURRENT_LOOP_ID env var when the workspace
+        // marker is missing (previously it was marker-only). The
+        // env-resolved loop_id is what the OPAC ticket gate
+        // threads into the verify/emit fingerprint so verify and
+        // emit must agree on the same value.
+        assert_eq!(ctx.current_loop_id.as_deref(), Some("loop-a"));
     }
 
     #[test]
