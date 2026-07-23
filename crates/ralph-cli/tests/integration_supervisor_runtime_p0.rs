@@ -443,3 +443,126 @@ fn fixture_self_test() {
     let snap = fx.snapshot();
     assert_eq!(snap.backend, "memory");
 }
+
+/// U2 (R-A2): the public wave_id is the stable identity the
+/// dispatcher / hat / coordination events reference. The store
+/// assigns its own `w-{seq}` id on registration; the bridge
+/// transparently resolves the public→store mapping even after
+/// the process loses its in-memory cache.
+///
+/// Sequence:
+/// 1. Register wave under `public-A` → store assigns `w-1`.
+/// 2. Build a fresh bridge + store handle (simulating process
+///    restart). The new bridge's `registered` map is empty.
+/// 3. Call `register_wave_if_absent(public-A, ...)` again →
+///    store returns `DuplicateKey`. The bridge MUST resolve
+///    back to `w-1` instead of fabricating `public-A`.
+#[test]
+fn public_wave_id_resolves_to_store_id_after_restart() {
+    use std::sync::Arc;
+    let mut fx = SupervisorP0Fixture::new_in_memory(
+        "public-A",
+        "loop-A",
+        "task-A",
+        "task-key-A:step-1",
+        "step-1",
+    );
+    fx.with_git_baseline();
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+
+    // The bridge used during register_and_bind already cached
+    // `public-A → w-1`. Build a fresh bridge against a fresh
+    // store handle — same kind, but new instance — to prove the
+    // bridge cannot rely on its own cache across restart.
+    let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
+    store.register_wave("public-A", WaveKind::Exec, 1).expect("first register");
+    let fresh_bridge = InMemoryCoordinatorBridge::from_store(store.clone());
+    let resolved = fresh_bridge
+        .register_wave_if_absent(WaveKind::Exec, "public-A", 1)
+        .expect("idempotent re-register");
+    // 2026-07-23-004 U2: the resolved id MUST be the original
+    // store id (`w-1`), not the caller-supplied `public-A`.
+    // Returning `public-A` would break every subsequent
+    // `bind_slot` / `tick` call because the store would not
+    // recognize it as a row.
+    assert_eq!(
+        resolved, "w-1",
+        "fresh bridge must resolve public-A back to the original store id, not the caller key"
+    );
+
+    // 2026-07-23-004 U2 A2.3: an unknown public wave id must
+    // not silently register a second wave under the caller's
+    // key — register_wave_if_absent on a never-registered key
+    // simply registers; the only fail-close path is when the
+    // bridge sees a DuplicateKey but the store has no row,
+    // which we cannot exercise through the public API because
+    // DuplicateKey implies the row exists. Validate the
+    // successful path remains idempotent for repeated calls.
+    let resolved_again = fresh_bridge
+        .register_wave_if_absent(WaveKind::Exec, "public-A", 1)
+        .expect("second idempotent call");
+    assert_eq!(resolved_again, resolved);
+}
+
+/// U2 (R-A2): out-of-range slot_index is rejected, not silently
+/// turned into a phantom slot.
+#[test]
+fn public_wave_id_out_of_range_slot_is_rejected() {
+    let mut fx = SupervisorP0Fixture::new_in_memory(
+        "public-OOR",
+        "loop-OOR",
+        "task-OOR",
+        "task-key-OOR:step-1",
+        "step-1",
+    );
+    fx.with_git_baseline();
+    // Register a 1-slot wave; bind slot_index=0.
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+
+    // Trying to bind slot_index=5 (> wave_total=1) should
+    // fail because the store only allocated slot 0.
+    let store: std::sync::Arc<dyn SupervisorStore> =
+        std::sync::Arc::new(InMemorySupervisorStore::new());
+    let wave_id = store
+        .register_wave("public-OOR", WaveKind::Exec, 1)
+        .expect("register");
+    let slot_resource = SlotResource {
+        slot_index: 5,
+        worktree_path: Some("/tmp/phantom".into()),
+        branch: Some("ralph/p0-phantom".into()),
+    };
+    let result = store.bind_worktree(&wave_id, 5, slot_resource);
+    assert!(
+        result.is_err(),
+        "out-of-range slot_index=5 for wave_total=1 must be rejected, got {result:?}"
+    );
+}
+
+/// U2 (R-A2): a totally unknown wave id is treated as missing
+/// rather than registered twice. The store's lookup gives
+/// `None` for unknown keys.
+#[test]
+fn unknown_public_wave_id_lookup_returns_none() {
+    let store: std::sync::Arc<dyn SupervisorStore> =
+        std::sync::Arc::new(InMemorySupervisorStore::new());
+    let looked = store
+        .wave_id_for_idempotency_key("never-registered")
+        .expect("store lookup");
+    assert!(
+        looked.is_none(),
+        "lookup of unknown public id must return None, got {looked:?}"
+    );
+
+    // And the in-memory store keeps the public→store map after
+    // registration so subsequent lookups succeed.
+    let assigned = store
+        .register_wave("now-registered", WaveKind::Exec, 1)
+        .expect("register");
+    let looked_after = store
+        .wave_id_for_idempotency_key("now-registered")
+        .expect("store lookup")
+        .expect("assigned store id");
+    assert_eq!(looked_after, assigned);
+}

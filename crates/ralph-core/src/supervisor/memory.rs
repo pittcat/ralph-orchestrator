@@ -568,6 +568,14 @@ impl SupervisorStore for InMemorySupervisorStore {
         Ok(ids)
     }
 
+    fn wave_id_for_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> SupervisorStoreResult<Option<String>> {
+        let inner = self.lock()?;
+        Ok(inner.waves_by_key.get(idempotency_key).cloned())
+    }
+
     fn recover_active_waves(&self) -> SupervisorStoreResult<Vec<WaveSnapshot>> {
         let inner = self.lock()?;
         let mut out = Vec::new();

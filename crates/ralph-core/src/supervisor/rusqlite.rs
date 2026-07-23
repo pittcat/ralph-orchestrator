@@ -716,6 +716,22 @@ impl SupervisorStore for RusqliteSupervisorStore {
         })
     }
 
+    fn wave_id_for_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> SupervisorStoreResult<Option<String>> {
+        self.with_conn(|conn| {
+            let wave_id: Option<String> = conn
+                .query_row(
+                    "SELECT wave_id FROM waves WHERE idempotency_key = ?1",
+                    [idempotency_key],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(wave_id)
+        })
+    }
+
     fn recover_active_waves(&self) -> SupervisorStoreResult<Vec<WaveSnapshot>> {
         // U8 / R11 (crash-restart recovery): read the active wave
         // ids under the connection lock, then RELEASE it before

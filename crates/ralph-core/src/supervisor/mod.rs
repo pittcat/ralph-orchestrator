@@ -391,6 +391,19 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// worktrees allocated by completed waves are still released.
     fn list_wave_ids(&self) -> SupervisorStoreResult<Vec<String>>;
 
+    /// 2026-07-23-004 plan U2 (R-A2): resolve the
+    /// store-assigned `wave_id` from the caller-supplied
+    /// idempotency key, returning `None` when no wave was ever
+    /// registered under that key. Implementations MUST back this
+    /// with their persistent idempotency_key index (Memory:
+    /// `waves_by_key`; rusqlite: `SELECT wave_id FROM waves`),
+    /// so a process restart can rebuild the public→store map
+    /// without observing the in-memory bridge cache.
+    fn wave_id_for_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> SupervisorStoreResult<Option<String>>;
+
     /// Recover active waves on loop startup. Returns waves whose
     /// slot rows survived a crash (R-C3). Used by U11; does not
     /// touch DB state.
