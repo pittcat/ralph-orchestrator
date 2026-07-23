@@ -2936,42 +2936,24 @@ fn record_outcome(
     index: u32,
     outcome: WaveWorkerOutcome,
 ) {
-    use ralph_core::supervisor::worker_outcome::{
-        SlotOutcome, TerminalMarker, WorkerExit, classify_worker_outcome,
-    };
     match outcome {
         Ok((events, duration, success)) => {
-            // 2026-07-23-007 plan U1 (R-W2): drive every terminal
-            // classification through `classify_worker_outcome`
-            // instead of the legacy `success || !events.is_empty()`
-            // heuristic. Exit-0 + zero-events → `empty_worker_result`
-            // failure (no longer lifts `record_result`); Cancel
-            // always wins; non-zero exits with terminals still
-            // accept on the kind of the first terminal.
-            let exit = if success {
-                WorkerExit::Exit0
+            // PTY workers return Ok((_, _, false)) for non-zero exit and for
+            // timeout-with-events (`run_wave_worker_pty`). Distinguish:
+            // - events present → keep results visible (partial-timeout contract)
+            // - empty + unsuccessful → hard failure so a forced slot exit
+            //   (exit 1, no events) cannot Integrate → false-green LOOP_COMPLETE
+            if success || !events.is_empty() {
+                let proto_events: Vec<ralph_proto::Event> =
+                    events.into_iter().map(ralph_proto::Event::from).collect();
+                tracker.record_result(wave_id, index, proto_events);
             } else {
-                WorkerExit::ExitNonZero
-            };
-            let mut markers: Vec<TerminalMarker> = Vec::new();
-            for ev in &events {
-                if ev.topic.ends_with(".unit.done") || ev.topic.ends_with(".wave.done") {
-                    markers.push(TerminalMarker::Done);
-                } else if ev.topic.ends_with(".unit.failed")
-                    || ev.topic.ends_with(".wave.failed")
-                {
-                    markers.push(TerminalMarker::Failed);
-                }
-            }
-            match classify_worker_outcome(exit, events.len(), &markers) {
-                SlotOutcome::Completed(_) => {
-                    let proto_events: Vec<ralph_proto::Event> =
-                        events.into_iter().map(ralph_proto::Event::from).collect();
-                    tracker.record_result(wave_id, index, proto_events);
-                }
-                SlotOutcome::Failed { reason } => {
-                    tracker.record_failure(wave_id, index, reason.to_string(), duration);
-                }
+                tracker.record_failure(
+                    wave_id,
+                    index,
+                    "worker exited unsuccessfully".into(),
+                    duration,
+                );
             }
         }
         Err((error, duration)) => {
