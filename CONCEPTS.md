@@ -24,6 +24,10 @@ A hat modified tracked files despite its read-only or tool-restriction contract.
 
 一种跨 hat 或 hat 与 sub-agent 的交接原则：完整结果、可恢复状态、证据和关键决策依据优先写入当前 workspace/worktree 的 `.ralph/` 业务 artifact，消息与事件只传递短状态、摘要、路径、必要身份和路由字段。Ralph 的内部 ledger 不属于可供 hat 自定义读写的业务 artifact。
 
+### execution.plan.ready
+
+`ce-executor-supervisor` 中 task-planner 在成功写入 `.ralph/review/<plan-key>/execution-plan.yml` 之后发出的业务 handoff topic。事件只携带路径、hash 与路由身份字段；DAG 正文留在 artifact。消费方是 `exec-wave-dispatcher`（首次 ready-wave fan-out）。失败路径发 `plan.blocked`，二者在同一 activation 互斥（isolated 单业务事件预算）。
+
 ### wave
 
 同一 hat 定义下、对 N 份同构 payload 的 orchestrator 级 fan-out/fan-in。共享 `wave_id`，用 `wave_index` / `wave_total` 区分 slot。需要账本级收齐、超时与诊断时用 wave；hat 内部分工优先 subagent。`events.jsonl` / `supervisor.db` 是 runtime ledger，不是 hat 业务 artifact。
