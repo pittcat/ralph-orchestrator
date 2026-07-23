@@ -380,6 +380,19 @@ pub const FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY: &str =
 pub const FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY: &str =
     "preset.supervisor_task_planner_triggers_exec_unit_ready";
 
+/// 2026-07-23-005 plan U7: `alignment` is a read-only verifier
+/// and must NOT emit any wave dispatch topic. If it lists
+/// `*.unit.ready` in `publishes:`, it has become a second
+/// dispatcher and bypasses the formal fix chain (U7 hard rule).
+pub const FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY: &str =
+    "preset.supervisor_alignment_publishes_wave_ready";
+
+/// 2026-07-23-005 plan U7: `alignment` must NOT consume
+/// per-unit fan-out topics either. Same rationale as the
+/// publishes-side sibling finding.
+pub const FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY: &str =
+    "preset.supervisor_alignment_triggers_wave_ready";
+
 // ──────────────────────────────────────────────────────────────────────────
 // OPAC instructions lint finding IDs (2026-07-04-001 plan U11)
 // ──────────────────────────────────────────────────────────────────────────
@@ -626,6 +639,8 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY,
     FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY,
     FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY,
+    FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY,
+    FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY,
     FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL,
     FINDING_INSTRUCTIONS_FIX_UNIT_MINT_TEMPLATE_MISSING,
     FINDING_INSTRUCTIONS_OPAC_SKILL_REFERENCE_MISSING,

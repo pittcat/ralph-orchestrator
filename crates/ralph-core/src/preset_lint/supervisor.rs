@@ -27,6 +27,7 @@
 use crate::event_origin::SUPERVISOR_COORDINATION_TOPICS;
 use crate::preset_lint::LintFinding;
 pub use crate::preset_lint::finding_id::{
+    FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY, FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY,
     FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC, FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE,
     FINDING_SUPERVISOR_REQUIRES_ISOLATED, FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY,
     FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY,
@@ -94,6 +95,11 @@ pub fn check_supervisor_rules(raw_yaml: &str) -> Vec<LintFinding> {
         // silently re-routes fan-out through `task-planner`.
         findings.extend(check_task_planner_publishes_exec_ready(&value));
         findings.extend(check_task_planner_triggers_exec_ready(&value));
+        // 2026-07-23-005 plan U7: `alignment` is the
+        // read-only verifier and must not emit / consume
+        // per-unit fan-out topics. Two sibling findings.
+        findings.extend(check_alignment_publishes_wave_ready(&value));
+        findings.extend(check_alignment_triggers_wave_ready(&value));
     }
 
     findings
@@ -428,6 +434,108 @@ fn check_task_planner_triggers_exec_ready(value: &Value) -> Vec<LintFinding> {
                 .to_string(),
         );
         findings.push(f);
+    }
+    findings
+}
+
+/// Topics that mark a hat as a wave dispatcher. If `alignment`
+/// claims or consumes any of them, it has silently become a
+/// second fixer or dispatcher and bypasses the formal fix
+/// chain. U7 hard rule: alignment is read-only.
+const WAVE_DISPATCHER_TOPICS: &[&str] = &[
+    "exec.unit.ready",
+    "fix.unit.ready",
+    "review.unit.ready",
+];
+
+/// 2026-07-23-005 plan U7: `alignment` must NOT publish
+/// `*.unit.ready`. If it does, it has become a second wave
+/// dispatcher. The fix chain (fix-task-planner → fix-worker
+/// → fix-integrator) is the single source of code-change
+/// fan-out.
+fn check_alignment_publishes_wave_ready(value: &Value) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Some(hats) = value.get("hats").and_then(|h| h.as_mapping()) else {
+        return findings;
+    };
+    let Some((_, hat_value)) = hats
+        .iter()
+        .find(|(id, _)| id.as_str() == Some("alignment"))
+    else {
+        return findings;
+    };
+    let publishes: Vec<String> = hat_value
+        .get("publishes")
+        .and_then(|p| p.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    for topic in &publishes {
+        if WAVE_DISPATCHER_TOPICS.contains(&topic.as_str()) {
+            let mut f = LintFinding::new(
+                FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY,
+                format!(
+                    "hat `alignment` declares wave dispatcher topic `{topic}` in `publishes:`. \
+                     Per 2026-07-23-005 plan U7, alignment is a read-only verifier; emitting \
+                     per-unit readiness events turns it into a second dispatcher and bypasses \
+                     the formal fix chain."
+                ),
+            );
+            f.action_hint = Some(
+                "remove the wave dispatcher topic from `alignment.publishes:`; only \
+                 `plan.complete` and `plan.blocked` are allowed."
+                    .to_string(),
+            );
+            findings.push(f);
+        }
+    }
+    findings
+}
+
+/// 2026-07-23-005 plan U7 (sibling of the publishes-side
+/// check): `alignment` must NOT consume `*.unit.ready`
+/// either — it is activated by `fix.done` and the formal
+/// review / fix chain.
+fn check_alignment_triggers_wave_ready(value: &Value) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Some(hats) = value.get("hats").and_then(|h| h.as_mapping()) else {
+        return findings;
+    };
+    let Some((_, hat_value)) = hats
+        .iter()
+        .find(|(id, _)| id.as_str() == Some("alignment"))
+    else {
+        return findings;
+    };
+    let triggers: Vec<String> = hat_value
+        .get("triggers")
+        .and_then(|t| t.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    for topic in &triggers {
+        if WAVE_DISPATCHER_TOPICS.contains(&topic.as_str()) {
+            let mut f = LintFinding::new(
+                FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY,
+                format!(
+                    "hat `alignment` consumes wave dispatcher topic `{topic}` in `triggers:`. \
+                     Per 2026-07-23-005 plan U7, alignment must not consume per-unit readiness \
+                     events; it is triggered by `fix.done`."
+                ),
+            );
+            f.action_hint = Some(
+                "remove the wave dispatcher topic from `alignment.triggers:`; alignment is \
+                 triggered by `fix.done`."
+                    .to_string(),
+            );
+            findings.push(f);
+        }
     }
     findings
 }
@@ -1035,6 +1143,81 @@ hats:
                     && f.id != FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY),
             "U2 ownership transfer guards must stay silent for a valid task-planner preset; \
              got {findings:?}"
+        );
+    }
+
+    // 2026-07-23-005 plan U7: alignment is read-only and must
+    // not become a second wave dispatcher. The two lint rules
+    // catch any preset that re-introduces per-unit readiness
+    // topics in alignment's publishes / triggers.
+    #[test]
+    fn alignment_publishing_unit_ready_is_error() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  alignment:
+    triggers:
+      - fix.done
+    publishes:
+      - fix.unit.ready
+      - plan.complete
+";
+        let findings = run(yaml);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY),
+            "expected alignment_publishes_wave_ready finding, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn alignment_triggering_unit_ready_is_error() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  alignment:
+    triggers:
+      - fix.unit.ready
+    publishes:
+      - plan.complete
+";
+        let findings = run(yaml);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY),
+            "expected alignment_triggers_wave_ready finding, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn alignment_pure_read_only_is_silent() {
+        let yaml = r"
+event_loop:
+  supervisor:
+    enabled: true
+  execution_mode: isolated
+hats:
+  alignment:
+    triggers:
+      - fix.done
+    publishes:
+      - plan.complete
+      - plan.blocked
+";
+        let findings = run(yaml);
+        assert!(
+            findings.iter().all(|f| f.id
+                != FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY
+                && f.id != FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY),
+            "U7 alignment must stay read-only; got {findings:?}"
         );
     }
 }

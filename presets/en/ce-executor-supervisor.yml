@@ -1720,37 +1720,52 @@ hats:
       - 协调 topic 由 supervisor 注入。
   alignment:
     name: "Alignment"
-    description: "Performs final alignment pass and emits plan.complete."
+    # 2026-07-23-005 plan U7: alignment is a read-only
+    # verifier. It MUST NOT modify code, tests, or docs.
+    # If it discovers a blocker, it surfaces a structured
+    # finding via `ralph emit plan.blocked` (U8 routes that
+    # to reporter); it never becomes a second fixer.
+    description: "Read-only final alignment pass; emits plan.complete on success or plan.blocked on alignment failure."
     triggers:
       - fix.done
     publishes:
       - plan.complete
+      - plan.blocked
     event_filter:
       enabled: true
       events:
       - fix.done
     exempt_topics:
       - plan.complete
+      - plan.blocked
     terminal_events:
       - plan.complete
     instructions: |
-      ## ALIGNMENT MODE — Final alignment pass
+      ## ALIGNMENT MODE — Read-only final alignment pass
 
       Activated by `fix.done`. Do a final alignment pass:
-      re-read the spec, confirm all acceptance criteria met,
-      then emit `plan.complete`.
+      re-read the spec, confirm all acceptance criteria
+      met, then emit exactly one `plan.complete`. If
+      alignment surfaces a blocker you cannot fix in
+      your role, emit `plan.blocked` instead.
 
       ### OPAC 四阶段 (本 hat 视角)
 
-      - **Observe**: `ralph inspect loop` + 读 `fix.done` payload。
-      - **Precheck**: `ralph emit plan.complete --policy-check`。
-      - **Apply**: emit `plan.complete`。
+      - **Observe**: `ralph inspect loop` + 读 `fix.done`
+        payload + 重读 spec。
+      - **Precheck**: `ralph emit plan.complete
+        --policy-check`（或 `plan.blocked`）。
+      - **Apply**: emit 单条终态。
       - **Confirm**: `ralph events --events-source main`。
 
       ### Constraints
 
+      - **Read-only**: 不能修改任何代码、测试或文档。
       - 一条业务事件即停（isolated 单事件预算）。
       - 不能调 wave emit。
+      - 不能变成第二个 fixer:任何代码修复需求必须
+        走正式 fix chain（fix-task-planner → fix-worker
+        → fix-integrator），不要在本 hat 内部尝试。
 
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   shipper:
