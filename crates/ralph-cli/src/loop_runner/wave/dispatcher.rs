@@ -536,6 +536,17 @@ pub async fn handle_wave_events(
                     loop_id: loop_id.to_string(),
                     repo_root: std::path::PathBuf::from("."),
                     events_path: Some(main_events_file.clone()),
+                    // 2026-07-23-007 plan U4 (R-W5): hand the bridge the
+                    // loop's `tasks.jsonl` path so the default wave path
+                    // projects slot transitions onto the runtime task
+                    // ledger (same derivation as `runner.rs`: events
+                    // file's parent `.ralph` dir + `agent/tasks.jsonl`).
+                    tasks_path: main_events_file
+                        .parent()
+                        .map(|p| p.join("agent").join("tasks.jsonl"))
+                        .or_else(|| {
+                            Some(std::path::PathBuf::from(".ralph/agent/tasks.jsonl"))
+                        }),
                 },
                 Arc::new(DefaultWorktreeFactory),
                 cap,

@@ -131,13 +131,6 @@ schemas:
       - reason
     payload: json_object
 
-  review.start:
-    required_fields:
-      - plan_name
-      - task_id
-      - task_key
-    payload: json_object
-
   fix.done:
     required_fields:
       - plan_name
@@ -147,29 +140,6 @@ schemas:
       - review_verdict
       - fixes_applied
       - fixes_skipped
-    payload: json_object
-
-  fix.applied:
-    required_fields:
-      - plan_name
-      - fix_round
-      - applied_count
-      - failed_count
-      - task_id
-      - task_key
-      - step
-      - commit_count
-      - changed_lines
-    payload: json_object
-
-  fix.exhausted:
-    required_fields:
-      - plan_name
-      - fix_round
-      - task_id
-      - task_key
-      - step
-      - reason
     payload: json_object
 
   plan.complete:
@@ -205,18 +175,12 @@ schemas:
       - reason
     payload: json_object
 
-  # 2026-07-23-005 plan U2: execution-plan artifact contract.
-  # task-planner reads the runner-injected original plan path and
-  # produces a static DAG artifact at
-  # `.ralph/review/<plan-key>/execution-plan.yml`. The artifact is
-  # the dependency SSOT; dynamic state lives only in the runtime
-  # task API. U3 extends this entry with `edges:` and `waves:`
-  # sections; U2 only covers the source/nodes portion.
-  execution-plan.artifact:
-    required_fields:
-      - version
-      - source_plan_path
-      - source_plan_hash
-      - generated_at
-      - nodes
-    payload: json_object
+  # NOTE (2026-07-23-005 U2/U3): the execution-plan artifact
+  # (`.ralph/review/<plan-key>/execution-plan.yml`) is a FILE artifact
+  # written by task-planner — NOT an emitted event — so it is
+  # intentionally NOT declared under event_policy.schemas (which is
+  # reserved for emitted event topics; declaring it here tripped the
+  # strict runtime-contract no_publisher / invalid_topic_format checks).
+  # Its format contract is: version, source_plan_path, source_plan_hash,
+  # generated_at, nodes (U2); edges, waves (U3). The authoritative
+  # documentation lives in the task-planner hat instructions.

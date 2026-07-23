@@ -118,10 +118,7 @@ event_loop:
       - "work.ready"
       - "work.done"
       - "work.failed"
-      - "review.start"
       - "review.complete"
-      - "fix.applied"
-      - "fix.exhausted"
       - "fix.done"
       # Sub-loop coordination topics emitted by hats that the
       # supervisor aggregates fan-in / fan-out for.
@@ -311,7 +308,14 @@ hats:
       listed in §4 / §5, you do not have. Do not assume.
     triggers:
       - plan.ready
-      - fix.done
+      # `fix.done` is owned solely by `alignment` (the post-2026-07-23-005
+      # read-only final gate that emits `plan.complete` on success or
+      # `plan.blocked` on failure). The coordinator previously also claimed
+      # `fix.done` and emitted a redundant `plan.complete`; that duplicate
+      # claim tripped AmbiguousRouting(fix.done, alignment, coordinator) and
+      # risked a round-robin race on the terminal handoff. Completion path is
+      # fix.done -> alignment -> plan.complete/plan.blocked -> reporter ->
+      # LOOP_COMPLETE, which does not need the coordinator.
     publishes:
       - work.ready
       - plan.complete
@@ -1169,6 +1173,16 @@ hats:
       - `RALPH_HATS_SOURCE` — preset label.
     triggers:
       - work.done
+      - exec.wave.complete
+    # `exec.wave.complete` is a design-level multi-consumer topic: the
+    # supervisor fan-in signal is consumed by exec-wave-dispatcher (next
+    # ready wave), exec-integrator (merge + full suite), AND this hat
+    # (dispatch the 7-payload review wave on the merged commit — see the
+    # exec-wave-dispatcher comment "route you to review-coordinator via
+    # the exec.wave.complete contract"). All three consumers must opt in
+    # to bypass the strict 1:1 AmbiguousRouting check; this hat was the
+    # missing opt-in.
+    trigger_multi_consumer_topics:
       - exec.wave.complete
     publishes:
       - review.unit.ready

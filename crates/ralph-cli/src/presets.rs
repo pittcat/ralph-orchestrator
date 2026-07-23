@@ -1986,7 +1986,24 @@ mod tests {
         // (EGRESS_MAX_HOPS). The 2026-07-08 bump of EGRESS_MAX_HOPS
         // from 10 to 12 let both presets pass strict with zero findings,
         // so these exemptions are no longer needed.
-        const EXEMPT_FINDINGS: &[(&str, &str, &str)] = &[];
+        //
+        // `ce-executor-supervisor` / `config.empty_terminal_events`:
+        // the 2026-07-23-005 supervisor redesign intentionally leaves
+        // `terminal_events` empty on `task-planner` (happy path writes the
+        // execution-plan artifact and stops WITHOUT any business emit, so a
+        // terminal event would force-quit a successful activation — see the
+        // hat's preset comment) and on `exec-wave-dispatcher` (its output is
+        // a single `ralph wave emit exec.unit.ready` batch; fan-in signaling
+        // is the supervisor-injected `exec.wave.complete`, not a hat emit).
+        // Empty `terminal_events` is an explicitly allowed legacy-hat shape
+        // (ralph_config.rs only warns), so this is a documented design choice,
+        // not a topology defect. Tracked by the ce-executor-supervisor
+        // redesign plan `2026-07-23-005-…`.
+        const EXEMPT_FINDINGS: &[(&str, &str, &str)] = &[(
+            "ce-executor-supervisor",
+            "config.empty_terminal_events",
+            "2026-07-23-005 supervisor redesign: task-planner + exec-wave-dispatcher intentionally have empty terminal_events",
+        )];
 
         let mut failures = Vec::new();
         for preset in PRESETS {
