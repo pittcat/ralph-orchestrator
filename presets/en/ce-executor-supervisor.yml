@@ -227,7 +227,7 @@ hats:
          `task_id` / `task_key`; `step: "plan"`.
       d. Stop. The next hat picks up from `work.ready`.
 
-      ### 2. When you are activated by `fix.applied`
+      ### 2. When you are activated by `fix.done`
 
       A fix round succeeded upstream. ONE emit:
       `plan.complete`.
@@ -235,8 +235,8 @@ hats:
       a. Confirm the units are closed:
          `ralph tools task list -s done`. If any unit is
          not in `done` state, you are looking at a
-         partial state — fall back to §3 (emit
-         `plan.blocked` with `reason: review_terminal_drift`).
+         partial state — emit `plan.blocked` with
+         `reason: review_terminal_drift`.
       b. Pre-check the payload with
          `ralph emit plan.complete --policy-check -j '<json>'`
          first (same gate as the loop; per `ralph-tools` §5).
@@ -251,27 +251,7 @@ hats:
       c. Stop. The next hat in the pipeline will surface a
          final report and close the loop.
 
-      ### 3. When you are activated by `fix.exhausted`
-
-      The repair budget for the current plan is used up.
-      ONE emit: `plan.blocked`.
-
-      a. Do not retry by re-emitting `work.ready` or any
-         other hand-off. The repair counter has already
-         been consumed upstream.
-      b. Emit exactly one `plan.blocked`. Schema required
-         fields: `plan_name`, `task_id`, `task_key`, `step`,
-         `reason`.
-      c. The `reason` value must be exactly one of:
-         - `loop_stalled_max_iterations`
-         - `steward_escalation`
-         - `review_terminal_drift`
-         Pick the one that best describes what the
-         upstream hat reported. If you cannot pin a
-         reason, use `steward_escalation`.
-      d. Stop.
-
-      ### 4. Things you must NOT do (this hat)
+      ### 3. Things you must NOT do (this hat)
 
       - **Do not edit any project file** — no code, no
         tests, no docs. This hat only emits events.
@@ -291,7 +271,7 @@ hats:
         cross-hat state, use `ralph tools task <cmd>`
         — that is the supported API.
 
-      ### 5. Useful runtime APIs (this hat may call)
+      ### 4. Useful runtime APIs (this hat may call)
 
       - `ralph tools task add "<title>" -d "<desc>"`
         (optionally `--key plan:<slug>:u<n>`) — register
@@ -315,7 +295,7 @@ hats:
       default). For full syntax of `ralph emit`, load
       `ralph-tools-emit` on demand.
 
-      ### 6. Environment you can read
+      ### 5. Environment you can read
 
       - `RALPH_CURRENT_HAT` — should be `coordinator` for
         this activation. If it isn't, you are in the wrong
@@ -328,11 +308,10 @@ hats:
         error messages.
 
       Anything you cannot observe via the runtime APIs
-      listed in §5 / §6, you do not have. Do not assume.
+      listed in §4 / §5, you do not have. Do not assume.
     triggers:
       - plan.ready
-      - fix.applied
-      - fix.exhausted
+      - fix.done
     publishes:
       - work.ready
       - plan.complete
@@ -341,8 +320,7 @@ hats:
       enabled: true
       events:
       - plan.ready
-      - fix.applied
-      - fix.exhausted
+      - fix.done
     exempt_topics:
       - work.ready
       - plan.complete
@@ -420,8 +398,8 @@ hats:
 
       Path: `.ralph/review/<plan-key>/execution-plan.yml`.
 
-      Required fields (per `event_policy.schemas.
-      execution-plan.artifact`):
+      Required fields (see the schema for the
+      ce-execution-plan artifact format):
 
       - `version`: `"ce-execution-plan/v1"`.
       - `source_plan_path`: repo-relative path you read.
@@ -1191,14 +1169,14 @@ hats:
       - `RALPH_HATS_SOURCE` — preset label.
     triggers:
       - work.done
-      - review.start
+      - exec.wave.complete
     publishes:
       - review.unit.ready
     event_filter:
       enabled: true
       events:
       - work.done
-      - review.start
+      - exec.wave.complete
     exempt_topics:
       - review.unit.ready
     terminal_events:
@@ -1778,11 +1756,13 @@ hats:
     # `LOOP_COMPLETE` per loop with the appropriate verdict.
     # The deleted `shipper` / `fixer` / `progress-steward`
     # hats are no longer in the topology; this hat is the
-    # only consumer of `plan.complete` and `plan.blocked`.
-    description: "Single owner of plan-level reporting and loop termination. Consumes plan.complete and plan.blocked."
+    # only consumer of `plan.complete`, `plan.blocked`,
+    # and `work.failed`.
+    description: "Single owner of plan-level reporting and loop termination. Consumes plan.complete, plan.blocked, and work.failed."
     triggers:
       - plan.complete
       - plan.blocked
+      - work.failed
     publishes:
       - LOOP_COMPLETE
     event_filter:
@@ -1790,11 +1770,13 @@ hats:
       events:
       - plan.complete
       - plan.blocked
+      - work.failed
     exempt_topics:
       - LOOP_COMPLETE
     trigger_multi_consumer_topics:
       - plan.complete
       - plan.blocked
+      - work.failed
     terminal_events:
       - LOOP_COMPLETE
     instructions: |
@@ -1803,13 +1785,18 @@ hats:
 
       You are the **only** reporter and the **only**
       emitter of `LOOP_COMPLETE` in this preset. You are
-      activated by either `plan.complete` (success) or
-      `plan.blocked` (failure). Your job is to:
+      activated by `plan.complete` (success),
+      `plan.blocked` (failure), or `work.failed` (work
+      execution failure). Your job is to:
 
       1. Write the manager-facing report (success or
          failure summary).
       2. Emit exactly one `LOOP_COMPLETE` with the
          verdict embedded in the payload.
+
+      When activated by `work.failed`, treat it the same
+      as `plan.blocked` with `reason:
+      upstream_dependency_failed`.
 
       ### `plan.blocked` reason whitelist (U8 strict)
 

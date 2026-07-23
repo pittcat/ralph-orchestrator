@@ -328,6 +328,61 @@ fn ce_executor_supervisor_yaml_passes_strict_ambiguous_routing_check() {
     );
 }
 
+// 2026-07-23-005 plan U8: after atomic deletion of progress-steward /
+// shipper / fallback fixer, strict lint must report zero errors.
+// This test pins the U8 DoD gate so any topology regression surfaces
+// as a test failure rather than a silent preset-load warning.
+#[test]
+fn ce_executor_supervisor_yaml_passes_strict_topology_lint() {
+    use crate::config::RalphConfig;
+    use crate::preset_lint::{run_preset_lint_with_preset_name, LintStrictness};
+    use crate::runtime_contract::FindingSeverity;
+
+    let config = RalphConfig::parse_yaml(PRESET_YAML).expect("preset must parse as RalphConfig");
+    // Run in strict mode, builtin-embedded source, with raw YAML for full lint coverage.
+    let findings = run_preset_lint_with_preset_name(
+        &config,
+        LintStrictness::Strict,
+        true, // source_is_builtin_embedded
+        Some(PRESET_YAML),
+        "ce-executor-supervisor",
+    );
+
+    // Filter to only strict (Error-severity) findings; warnings are acceptable.
+    let strict_errors: Vec<_> = findings
+        .iter()
+        .filter(|f| f.severity == FindingSeverity::Error)
+        .collect();
+
+    // U8 residuals that must NOT appear:
+    let forbidden_ids: &[&str] = &[
+        "lint.preset.activation_egress_missing",
+        "lint.preset.handoff_pairing_broken",
+        "lint.preset.re_emit_trap",
+        "lint.preset.trigger_publish_asymmetry",
+        "topology.required_event_not_on_all_paths",
+        "required.no_publisher",
+        "required.no_subscriber",
+        "orphan.no_subscriber",
+        "lint.preset.invalid_topic_format",
+    ];
+
+    let unexpected: Vec<_> = strict_errors
+        .iter()
+        .filter(|f| forbidden_ids.contains(&f.id.as_str()))
+        .collect();
+
+    assert!(
+        unexpected.is_empty(),
+        "ce-executor-supervisor preset must have zero strict topology lint errors (U8 DoD gate). \
+         Unexpected findings: {:?}",
+        unexpected
+            .iter()
+            .map(|f| format!("{}: {}", f.id, f.message))
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn ce_executor_supervisor_preset_wave_events_pass_detect_all_capped() {
     // End-to-end behavioral pin: build a full wave batch
