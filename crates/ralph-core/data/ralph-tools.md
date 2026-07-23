@@ -36,7 +36,7 @@ metadata:
 | 要管理 runtime task | `ralph tools task add/ensure/start/close` | `ralph-tools-tasks`（已注入，若 tasks.enabled） |
 | 要记录/查找记忆或 decision journal | `ralph tools memory add/search/prime` | `ralph-tools-memories`（已注入，若 memories.enabled） |
 | 要启动 loop / 复用 worktree / 预览 profiles | `ralph run ...` / `ralph inspect profiles` | `ralph tools skill load ralph-tools-cmdref` |
-| 要校验 hat 拓扑 | `ralph hats validate [--strict]` | `crates/ralph-cli/src/hats.rs:170` |
+| 要校验 hat 拓扑 | `ralph hats validate [--strict]` | `ralph hats --help`（strict 时启用 lint 所有权检查） |
 | Loop 崩溃/ledger 损坏需恢复 | `ralph loops clean --ledger` + `ralph diagnose --session latest` | `docs/guide/runtime-diagnosis.md`（JSON 含 `dup_storm_topics` + findings `hint`） |
 | `ralph emit` 报 `triggered_not_in_topology` | `--triggered` 不在 preset `hats[]`；改 hat id 或省略 | `ralph tools skill load ralph-tools-emit` |
 | prompt 顶部出现 `## TRIGGER CONTEXT` 区块 | 先读完它，再按 hat instructions 执行；不要从完整 payload / ledger 重新推断 | 本 skill「核心规则」第 8 条 |
@@ -46,7 +46,7 @@ metadata:
 - `ralph run --no-sync-agent-docs`：跳过启动前对 `CLAUDE.md` / `AGENTS.md` 的 managed block 同步。
 - `ralph inspect profiles [--no-default-profiles]`：只读预览最终生效的 profile overlay 解析结果。
 - `ralph emit --schema <TOPIC>`：只读打印 `<TOPIC>` 的 embedded 协议 + `protocol_hash`，用于 drift 检测。
-- `ralph loops clean --ledger`：截断损坏的 `StateLedger` 文件，崩溃后自动重建时会降级到 cold start。
+- `ralph loops clean --ledger`：截断损坏的 loop 状态文件，崩溃后自动重建时会降级到 cold start。
 
 ## 核心规则
 
@@ -70,7 +70,7 @@ metadata:
 
 ## 收到 `task.resume` 时（policy / origin / contract 拒收后自动注入）
 
-编排器拒收后会在 PENDING EVENTS 注入 `task.resume`（payload 形状：`crates/ralph-core/src/event_loop/rejection.rs:424-500+` `build_task_resume_payload`）。**不要重发同样 payload**，按以下顺序修复：
+编排器拒收后会在 PENDING EVENTS 注入 `task.resume`（payload 形状见 `ralph-tools-recovery-directives` skill）。**不要重发同样 payload**，按以下顺序修复：
 
 1. **读 PENDING EVENTS 里 `task.resume` 的 JSON payload**，关键字段：
    - `stage`：`origin` / `policy` / `execution_contract` / `payload_contract`
@@ -82,7 +82,7 @@ metadata:
    - `target_hat`：应当修复并重发的目标 hat
 2. **若 prompt 含 `## CORRECTION CONTEXT`**：runtime correction **高于** agent narrative；只执行 correction 的 `required_action`，遵守 `forbidden_action`；细则见 `ralph tools skill load ralph-tools-recovery-directives`。
 3. **对照 `required_fields` 补齐 payload**；用 `ralph emit <topic> --policy-check -j '...'` 预检（与 loop gate 同源 schema，**不写盘**）；通过后再正式 `ralph emit` 落盘。
-4. **bounded retry**：同类协议违规（同一 hat + topic + `task_key` + step + violation code）**第一次**给 structured correction；**第二次**同类违规 runtime fail-close（`plan.blocked(reason=protocol_violation_repeated:…)`），**不得** infinite `task.resume` 或 silent-success。post-terminal 业务 emit **无 retry**。
+4. **bounded retry**：同类协议违规（同一 hat + topic + `task_key` + step + violation code）**第一次**给 structured correction；**第二次**同类违规 runtime 阻塞 loop（`plan.blocked(reason=protocol_violation_repeated:…)`），**不得** infinite `task.resume` 或在没有 `LOOP_COMPLETE` 的情况下静默继续。post-terminal 业务 emit **无 retry**。
 5. **确认 hat 作用域**：isolated 模式下未在 `allowed_topics`（与 hat `publishes` 交集）的 topic 越权 — 改用 hat 实际可发的 topic，不要靠 `--unsafe-no-policy-check` 绕过。
 6. **复杂 violation**：按需加载 `ralph-tools-emit`（EmitResult `ok`/`recorded`/`errors[].code`/`suggested_command`）与 `ralph-tools-recovery-directives`。
 7. **仍不明**：`RALPH_DIAGNOSTICS=1` 启的 loop 把 envelope 写到 `recovery.jsonl`；`ralph diagnose --session latest` 出报告（`docs/guide/runtime-diagnosis.md` §10）。
@@ -113,7 +113,7 @@ metadata:
 | `ralph inspect loop` | 机器可读 loop + hat 身份摘要（OPAC Observe） | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph run` | 启动编排循环 | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph inspect profiles` | 预览 profile overlay 解析结果（只读，不启动 loop） | `ralph tools skill load ralph-tools-cmdref` |
-| `ralph hats validate [--strict]` | 拓扑/payload/orphan/lint 校验 | `crates/ralph-cli/src/hats.rs:170`（strict 时启用 lint 所有权检查） |
+| `ralph hats validate [--strict]` | 拓扑/payload/orphan/lint 校验 | `ralph hats validate --help`（strict 时启用 lint 所有权检查） |
 
 > **OPAC 纪律（agent context）**: 所有 state-changing 操作遵循 Observe → Precheck → Apply → Confirm 四阶段；详见 always-injected `ralph-tools-opac` skill。本表所有 `ralph emit` / `ralph tools task` / `ralph wave emit` 行均按 OPAC 纪律执行——agent 上下文默认 enforce `--policy-check`。
 
@@ -133,6 +133,6 @@ metadata:
 | `progress rate limited` | 5 秒内重复发送 | 等待 5 秒后重试 |
 | 退出码 2 (lint gate) | preset 静态 lint 在 strict 模式下发现 error | 修复 preset 配置后重试；查看 `.ralph/diagnostics/preset-lint-error-*.json` |
 | `policy validation failed` (`ralph wave emit`) | 任一 payload 违反 required_fields，整批拒绝 | 用 `--output json` 读 `validation_errors[].field` 一次性拿到全部缺失字段，修正后重发 |
-| `StateLedger replay failed` / ledger 损坏 | 进程崩溃导致 ledger 文件不完整 | `ralph loops clean --ledger` 截断损坏文件；下次启动自动 cold start 重建 |
+| `StateLedger replay failed` / ledger 损坏 | 进程崩溃导致 loop 状态文件不完整 | `ralph loops clean --ledger` 截断损坏文件；下次启动自动 cold start 重建 |
 | `plan.blocked` / `progress_task_mismatch` | 当前 step 的 task 状态与预期不一致 | 检查 `ralph tools task list`，按需关闭/重开相关 task |
 | 任何命令失败 | 通用恢复 | 1. `ralph <cmd> --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |

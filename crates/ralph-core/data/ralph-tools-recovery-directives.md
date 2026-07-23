@@ -15,7 +15,7 @@ metadata:
 
 1. **`## CORRECTION CONTEXT` / `task.resume.required_action` / `forbidden_action` 优先于一切自由推断** — 只执行 correction 指定的**唯一**动作。
 2. **不要**在同 activation 发第二个业务事件（isolated 单事件预算）。
-3. **bounded retry**：同类协议违规 signature（hat + topic + `task_key` + step + violation code）**第一次** → structured correction + 可执行 retry target；**第二次** → fail-close（`plan.blocked(reason=protocol_violation_repeated:…)`），**不得** infinite `task.resume` 或 silent-success。
+3. **bounded retry**：同类协议违规 signature（hat + topic + `task_key` + step + violation code）**第一次** → structured correction + 可执行 retry target；**第二次** → 阻塞 loop（`plan.blocked(reason=protocol_violation_repeated:…)`），**不得** infinite `task.resume` 或在没有 `LOOP_COMPLETE` 的情况下静默继续。
 4. **post-terminal**（loop 终态 honored）：业务 emit 拒写，**不**进入 retry budget。
 5. 收到 correction 后仍须先 `ralph emit --policy-check`，通过后再正式 emit（见 `ralph-tools-precheck`）。
 
@@ -28,7 +28,7 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 **行为规范：**
 - 把 `task.resume` payload 视作结构化 correction：读 `field` / `reason_code` / `message` / `gate`（与 `validation_errors[]` 字段含义一致），按命中的字段修复 payload。
 - 修复后**必须**先 `ralph emit <topic> --policy-check -j '<payload>'` 通过，再正式 emit。
-- 同类 violation signature（同一 `gate` 前缀 + `field` + `task_key` + step）**第 3 次**同类 task.resume 后 runtime fail-close（`plan.blocked(reason=correction_3_strike_exhausted:…)`）。payload_consistency 走 correction 通道，**不**参与 rejection retry budget（runtime 显式跳过该类拒收，不做 schema-style retry budget 计数）。**`protocol_violation_repeated:*`** 是 execution-contract 路径的 fail-close 标记，**不**用于 payload_consistency；不要把两者混用。
+- 同类 violation signature（同一 `gate` 前缀 + `field` + `task_key` + step）**第 3 次**同类 task.resume 后 runtime 会阻塞 loop（`plan.blocked(reason=correction_3_strike_exhausted:…)`）。payload_consistency 拒收**不**计入协议违规重试额度——它走 correction 通道独立计数。**`protocol_violation_repeated:*`** 是协议违规路径的阻塞标记，**不**用于 payload_consistency；不要把两者混用。
 
 **禁止：** 在没有按 `gate` 命中的字段重新对齐 payload 的情况下，机械重发同一份 payload。
 
@@ -82,7 +82,7 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 
 **What this means:**
 - The orchestrator detected that a handoff's target consumer does NOT subscribe to the handoff's topic (the orchestrator's `triggers:` check rejects misrouted handoffs before the pending-registration timer).
-- Without this detection the handoff would silently stall for 600s, then escalate to `task.resume → recovery_exhausted:stall_recovery:...:handoff_dispatch_timeout` and route through the handoff's prefix-allowlist as `REVIEW_COMPLETE(pass)` — the silent-success loop family (see the historical diagnosis reports for the original root cause; pipeline does not enable the prefix-allowlist promotion path).
+- Without this detection the handoff would silently stall for 600s, then escalate to `task.resume → recovery_exhausted:stall_recovery:...:handoff_dispatch_timeout`.
 - The orchestrator now skips the 600s pending registration and emits this diagnostic immediately. The producer's topic emissions are also bypassed.
 
 **行为规范：**

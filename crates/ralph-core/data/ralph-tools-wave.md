@@ -28,7 +28,7 @@ Wave OPAC 与单 emit OPAC 并列——同样四阶段，差别只在 Confirm �
 | **Apply** | `ralph wave emit --payloads-stdin` | agent context 默认 enforce `--policy-check`；不通过 verify 不能直发 |
 | **Confirm** | `ralph events --events-source main --output json \| jq 'select(.wave_id == ...)'` | wave 写主 ledger，不走 hat-channel |
 
-**Confirm 路径与单 emit 不同**：`ralph wave emit` 写入 `current-events`（参见 `crates/ralph-cli/src/wave.rs:resolve_events_file`），不走 hat-channel。所以 Confirm 不能用 `ralph events --events-source hat-channel`——必须从 main ledger 验。
+**Confirm 路径与单 emit 不同**：`ralph wave emit` 写入 `current-events`（不走 hat-channel）。所以 Confirm 不能用 `ralph events --events-source hat-channel`——必须从 main ledger 验。
 
 **反模式**：
 
@@ -39,7 +39,7 @@ Wave OPAC 与单 emit OPAC 并列——同样四阶段，差别只在 Confirm �
 
 ### `ralph wave verify`
 
-零写盘批预检；与 `wave emit` 共用同源 `ValidationPipeline` / schema / origin guard。
+零写盘批预检；与 `wave emit` 共用同源 schema / origin guard。
 
 ```bash
 cat payloads.jsonl | ralph wave verify review.wave.ready --payloads-stdin --output json
@@ -122,7 +122,7 @@ printf '%s\n' \
 
 **Schema 预检：**
 
-`ralph wave emit` 在 shape 校验之后、写盘之前会先对**整批** payload 做 event policy schema 预检（`crates/ralph-cli/src/policy_check.rs`），与 `ralph run` 循环内统一校验管线 `validation::rules_event_policy::EventPolicyRule` 行为一致：
+`ralph wave emit` 在 shape 校验之后、写盘之前会先对**整批** payload 做 event policy schema 预检，与 `ralph run` 循环内统一校验管线行为一致：
 
 - 默认行为：当 `ralph.yml`（或合并后的 preset）开启 `event_policy.enabled: true` 时强制启用预检。`require_policy_check_for_cli_emit: true` 不改变 wave 行为——wave 始终预检。
 - 任一 payload 缺必需字段（如 `review.wave.ready` 的 `depth`），或任意 payload 触发 `payload_consistency:*` gate → 整批**原子拒绝**，**不写盘**任何 line。
@@ -162,7 +162,7 @@ printf '%s\n' \
 | `Failed to open events file: <path>` | 事件文件路径不可写或不存在 | 确认 `RALPH_EVENTS_FILE` / marker 指向的路径可写；或 `mkdir -p .ralph` |
 | `--idempotency-key must not be empty` | key 为空串 | 传非空字符串（推荐 preset 公式） |
 | `--idempotency-key must not be whitespace-only` | key 全是空白 | 同上 |
-| `--idempotency-key exceeds 256 bytes` | key 过长（> 256B，参见 `crates/ralph-cli/src/wave.rs:MAX_IDEMPOTENCY_KEY_BYTES`） | 缩短；preset 公式远小于 256 |
+| `--idempotency-key exceeds 256 bytes` | key 过长（> 256B） | 缩短；preset 公式远小于 256 |
 | `--idempotency-key must be ASCII` | key 含非 ASCII 字节 | 改用 ASCII；如 `plan_name` 是中文，先 hash 或 percent-encode |
 | `idempotency-key conflict: ...` | 同 scope 不同 payload | 改用不同 key（`round-2` 递增或换 task） |
 | `incomplete prior wave emission: ...` | 上次 events 写了 N 行但 record 丢失，扫 events 也只找到少于 N 行 | 手工删除残留 events 行；或换新 key |
@@ -172,12 +172,12 @@ printf '%s\n' \
 
 > **wave worker 注意事项**：
 >
-> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，`ralph emit` 会将事件写入 **candidate-events**（不是 current-events），与 wave 调度器对 worker 输出的预期一致。`ralph wave emit` 本身在 worker 内被阻止（`crates/ralph-cli/src/wave.rs:128-137` `execute_emit` 入口检查）。
+> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，`ralph emit` 会将事件写入 **candidate-events**（不是 current-events），与 wave 调度器对 worker 输出的预期一致。`ralph wave emit` 本身在 worker 内被阻止（dispatcher hat 才能调用）。
 >
 > 2. **candidate-events vs current-events 落点**：
 >    - `ralph wave emit` → 写入 **current-events**（主循环的合并目标，3 级回退：`RALPH_EVENTS_FILE` → `.ralph/current-events` → `.ralph/events.jsonl`）
 >    - `ralph emit`（在 wave worker 内）→ 写入 **candidate-events**（与 wave 调度器约定）
->    - 不要混用：worker 内不要试图设置 `RALPH_EVENTS_FILE` 把结果写到 current-events 绕过 candidate-events——这会被 `ralph emit` 的 allowlist 校验拒绝（参见 `crates/ralph-cli/src/main.rs` 的 `resolve_emit_path`）。
+>    - 不要混用：worker 内不要试图设置 `RALPH_EVENTS_FILE` 把结果写到 current-events 绕过 candidate-events——这会被 `ralph emit` 的 allowlist 校验拒绝。
 >
 > 3. **wave_id 共享**：同一 `--payloads` 列表产生的 N 个事件共享同一个 `wave_id` 和 `wave_total`，由 `wave_index`（0..N-1）区分。聚合 hat（`aggregate.mode: wait_for_all`）据此识别同一 wave 的所有结果。
 

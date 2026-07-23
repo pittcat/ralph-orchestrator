@@ -87,7 +87,7 @@ ralph inspect loop --format json | jq 'has("supervisor")'
 
 - **task 变更**：`ralph tools task verify <add\|ensure\|start\|close\|fail\|reopen> [args…]`，三字段一致性：`ralph tools task verify-emit-bridge --task-id ID --task-key KEY --step STEP`
 - **单事件 emit**：`ralph emit <TOPIC> --policy-check -j '<payload>'`，**不带 flag 写盘会被 agent context 默认 enforce 拒收**（参考 `ralph-tools-emit` §5 precheck）
-- **wave emit**：`ralph wave verify --payloads-stdin`（零写盘 batch precheck）。**worker hat 不可 wave emit**（已在 `HatCommandPolicy` / dispatcher hat 限定）
+- **wave emit**：`ralph wave verify --payloads-stdin`（零写盘 batch precheck）。**worker hat 不可 wave emit**（仅 dispatcher hat 可调用）
 - **shell 残留 `RALPH_CURRENT_HAT`**：operator 在 agent shell 残留变量是常见误用源；如发现 context 错乱，先 `unset RALPH_CURRENT_HAT`
 
 ## Apply 阶段两步式 task verify gate

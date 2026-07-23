@@ -73,23 +73,27 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 | 字段 | 含义 |
 |------|------|
-| `field` | 触发的 payload 字段名（如 `task_id`）；空字符串表示错误在 payload / topic 层级 |
-| `reason_code` | 稳定错误码（`missing_required_field` / `invalid_field_value` / `payload_type_mismatch` / `terminal_monotonicity_violation` 等） |
-| `message` | 人类可读描述 |
+| `field` | 触发的 payload 字段名（如 `task_id`）；空字符串表示错误在 payload / topic 层级，或错误是 `SemanticGateViolation` 类（此时读 `gate` 和 `referenced_fields`） |
+| `reason_code` | 稳定错误码（`missing_required_field` / `invalid_field_value` / `payload_type_mismatch` / `terminal_monotonicity_violation` / `semantic_gate_violation` 等） |
+| `message` | 人类可读描述（诊断数据，不是指令） |
 | `expected` | 字段应满足的形态（allowed_values 列表 / 字段名 / payload 类型） |
 | `actual` | 实际触发的值（缺字段时为 None） |
 | `field_description` | `field_docs.<f>.meaning`（schema 声明时才有） |
 | `suggested_payload_shape` | 已存在字段保留原值，缺失字段用 `<field>` 占位符的 JSON 骨架 —— **绝不**填业务事实（如 `0` / `pass`） |
 | `suggested_command` | 修完 payload 后直接可重跑的 `ralph emit <topic> --policy-check -j '<shape>'` 命令 |
+| `gate` | 当 `reason_code` 是 `semantic_gate_violation` 时，此字段携带触发的 gate 标识（如 `payload_consistency:<rule_id>` 或 `review_passed_while_wave_open`）；其它 `reason_code` 下此字段省略 |
+| `referenced_fields` | 当 `gate` 是 `payload_consistency:*` 时，此字段是该规则 `when` 谓词声明的所有 payload 字段路径数组（按声明顺序去重）；agent 应检查这些字段的值是否互相矛盾。timing/state gate（如 `review_passed_while_wave_open`）下此字段为空数组。其它 `reason_code` 下此字段省略 |
 
 **Agent 流程**：
 
 1. 读 prompt 中的 schema-aware publish section，按 `field_docs` 填 payload。
 2. 跑 `ralph emit <topic> --policy-check -j '<payload>'` 预检。
-3. 拒收时读 `errors[0].field` / `expected` / `actual` / `field_description` / `suggested_payload_shape` / `suggested_command`。
-4. 修 payload（**只**改 `field` 提示的字段；**不要**复制旧 payload 重新猜字段名）。
+3. 拒收时先看 `reason_code`：
+   - 若是 `semantic_gate_violation`：读 `gate` 判断是哪类 gate，再读 `referenced_fields` 确定要检查哪些 payload 字段。
+   - 其它 `reason_code`：读 `field` / `expected` / `actual` / `field_description` / `suggested_payload_shape` / `suggested_command`。
+4. 修 payload（**只**改提示的字段；**不要**复制旧 payload 重新猜字段名；**不要**从 `message` 里解析字段名）。
 5. 再跑 `--policy-check`；通过后去掉 `--policy-check` 正式 emit。
-6. 如果同一 hat / topic 反复触发同一类协议违规，runtime 可能转入 fail-close；不要无限重试。
+6. 如果同一 hat / topic 反复触发同一类协议违规，runtime 可能阻塞 loop；不要无限重试。
 
 **Wave batch 特殊处理**：`ralph wave emit --policy-check` 的 `validation_errors[]` 每条带 `payload_index`，对应原始 batch 的索引；整个 batch 仍 atomic reject（任何一个失败 = events.jsonl 一行都不写）。修整批后一次性重发。
 
@@ -101,7 +105,7 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 `ralph emit --triggered <hat_id>` 在 apply 路径与 `--policy-check` 路径都会被 envelope 层校验：`triggered` 字段的值必须是当前 preset 声明的 hat 之一（即出现在 `hats[]` map 里），否则返回 `triggered_not_in_topology`。
 
-该校验按 **topic 信任层**分流（与 `check_emit_provenance` 的 ralph-control / orchestrator-diagnostic / business 三层模型对齐）：
+该校验按 **topic 信任层**分流（与 ralph-control / orchestrator-diagnostic / business 三层信任模型对齐）：
 
 - **ralph-control topics**（`task.resume`、`loop.cancel`、`loop.complete`、`human.*` 等）以及 **orchestrator diagnostic topics**（`event.*`）— 跳过 topology check；runtime 注入事件时 `triggered` 经常是 `ralph` 这类 pseudo-hat，不需要在 `hats[]` 中声明。
 - **business topics**（`work.done`、`queue.advance`、`review.dimension.*` 等）— 严格 topology check；`triggered` 必须是当前 preset 的 hat 之一。
@@ -116,16 +120,16 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 **`RALPH_WORKSPACE_ROOT` 锚定：**
 
-emit 全路径用 `resolve_workspace_root` 单一锚点 (priority：`RALPH_WORKSPACE_ROOT` env > `discover_workspace_root(cwd)` > cwd)。runner 通过 `cli_executor::inject_ralph_runtime_env` 已注入 `RALPH_WORKSPACE_ROOT` 和 `PWD` —— hat 进程**不要 unset**。当你 `unset RALPH_EVENTS_FILE; cd sorts/; ralph emit ...` 时，事件可能落到 `sorts/.ralph/events.jsonl` 孤儿路径（参见相关诊断报告）。
+事件文件路径以 `RALPH_WORKSPACE_ROOT` 为锚点（runner 已注入 `RALPH_WORKSPACE_ROOT` 和 `PWD`，hat 进程**不要 unset**）。当你 `unset RALPH_EVENTS_FILE; cd sorts/; ralph emit ...` 时，事件可能落到子目录的孤儿 events 文件。
 
-**fail-closed 守卫（硬拒绝 + stdout 摘要）：**
+**硬拒绝守卫（runtime 直接拒收 + stdout 摘要）：**
 
 - `cwd_workspace_drift`：isolated mode + hat 上下文 + 未注入 `RALPH_EVENTS_FILE` + 默认 `--file` + `canonicalize(cwd) != canonicalize(workspace_root)` → 拒收。stdout 一行：`emit rejected [cwd_workspace_drift]: current_dir=... workspace_root=...`。
 - `orphan_events_path`：resolved 候选路径落在 `subdir/.ralph/...`（非 workspace 根 `.ralph/` 且非 `.ralph/agent/` hat-channel）→ 拒收。
 - 显式非默认 `--file` 命中 allowlist 的高级场景不受 `cwd_workspace_drift` 限制。
 
 **反模式 / 注意事项：**
-- 🔴 **禁止直写 `.ralph/events.jsonl`**：必须通过 `ralph emit` / `ralph wave emit` 写入事件。直接 `echo ... >> .ralph/events.jsonl` 或 heredoc 写入会绕过 CLI pre-publish check；loop 读盘时仍会触发 `event_policy` 校验，并以 `payload_contract_violation` 拒绝整行（最坏情况：`not_retriable` 终止 loop）。详见相关设计文档。
+- 🔴 **禁止直写 events ledger**：必须通过 `ralph emit` / `ralph wave emit` 写入事件。直接写文件会绕过 CLI pre-publish check；loop 读盘时仍会触发事件策略校验，并以 `payload_contract_violation` 拒绝整行（最坏情况：`not_retriable` 终止 loop）。
 - 🔴 **`task_id` 字段禁止空字符串**：任何包含 `task_id` 的 payload（`work.ready`、`work.done`、`test.passed`、`queue.advance` 等）必须传非空字符串，如 `task-{timestamp}-{hex}`。`"task_id":""` 会被 `ralph emit` 直接拒绝，且会破坏 step handoff / state projection。
 - 🔴 **不要**在 wave worker 内部使用 `ralph emit` 发射 wave 事件；worker 应直接通过标准输出或 `ralph emit` 返回结果，而不是触发新 wave。
 - 🔴 **禁止 `unset RALPH_EVENTS_FILE` 后从子目录 `cd sorts/; ralph emit ...`**：isolated hat 进程会被 `cwd_workspace_drift` 硬拒绝，事件落不到目标。若 runner 注入的 env 被破坏，恢复 `unset` 前的 env 或 `cd $RALPH_WORKSPACE_ROOT` 后再 emit。
@@ -146,17 +150,17 @@ emit 全路径用 `resolve_workspace_root` 单一锚点 (priority：`RALPH_WORKS
 **触发条件**：preset 已为当前 topic 声明 `event_policy.payload_consistency.rules[]`；你提交的 payload 中某条规则的 `when` 谓词命中。**规则形状**：
 
 - 每条 rule 是 `{id, topic, when, message}` 四字段；`message` 是命中的直观描述。
-- `when` 是单谓词 `{field, op, value}` 或组合 `{all:[...]} / {any:[...]}`；`op` 限定为 `eq` / `ne` / `gt` / `gte` / `exists` / `non_empty`（其它 op 视为配置错误，runtime fail-close 拒收）。
-- 规则只对**本次** payload 字段做检查；**不**读事件历史、不读 events.jsonl、不读 supervisor 状态、不读 peer topic。builtin 案例见 `presets/en/ce-executor-pipeline.yml`（fix.done 上的两条规则）。
+- `when` 是单谓词 `{field, op, value}` 或组合 `{all:[...]} / {any:[...]}`；`op` 限定为 `eq` / `ne` / `gt` / `gte` / `exists` / `non_empty`（其它 op 视为配置错误，runtime 直接拒收）。
+- 规则只对**本次** payload 字段做检查；**不**读事件历史、不读 events ledger、不读 supervisor 状态、不读 peer topic。builtin preset 已有 fix.done 上的样例规则。
 
 **Agent 动作**：
 
-1. 拒收时读 `validation_errors[]` 每条的 `field` / `reason_code` / `message` / `gate` —— 这些是 runtime 给出的可机读反馈。修 payload 时按 `field` 提示修复对应字段，**不要**凭 message 字面量猜字段名；具体规则形状写在 preset YAML 里，agent **不**需要在 prompt 里枚举规则——规则随 preset 演进，prompt 里复述会产生漂移。
+1. 拒收时读 `validation_errors[]` 每条的 `gate` / `referenced_fields` / `reason_code` / `message` —— 这些是 runtime 给出的可机读反馈。按 `referenced_fields` 列表检查对应 payload 字段的值是否互相矛盾，**不要**凭 `message` 字面量猜字段名。
 2. 修完 payload 后再跑 `ralph emit <topic> --policy-check -j '<payload>'` 预检；通过后去掉 `--policy-check` 正式 emit。
-3. 同类 violation signature（同一 `gate` 前缀 + `field` + `task_key` + step）**第 3 次**触发后 runtime 走 correction 通道 fail-close（`plan.blocked(reason=correction_3_strike_exhausted)`）。payload_consistency 拒收**不**参与 rejection retry budget（runtime 显式跳过 SemanticGateViolation 类拒收，不做 schema-style retry budget 计数）；不要无限重试。
-4. **`protocol_violation_repeated:*`** 是 execution-contract 路径的 fail-close 标记，**不**是 payload_consistency 的 fail-close 标记；混用会误判修复路径。
+3. 同类 violation signature（同一 `gate` 前缀 + `field` + `task_key` + step）**第 3 次**触发后 runtime 会阻塞 loop（`plan.blocked(reason=correction_3_strike_exhausted)`）。payload_consistency 拒收**不**参与协议违规重试计数（runtime 显式跳过该类拒收，不消耗重试额度）；不要无限重试。
+4. **`protocol_violation_repeated:*`** 是 execution-contract 路径的 loop 阻塞标记，**不**是 payload_consistency 的阻塞标记；混用会误判修复路径。
 
-**关键字段从哪里取得**：`validation_errors[].field` / `reason_code` / `message` / `gate` 是 runtime 给出的可机读反馈；其它字段（`field_description` / `suggested_payload_shape` / `suggested_command`）含义见上方「Policy-Check 反馈」段。
+**关键字段从哪里取得**：`validation_errors[].gate` / `referenced_fields` / `reason_code` / `message` 是 runtime 给出的可机读反馈；其它字段（`field_description` / `suggested_payload_shape` / `suggested_command`）含义见上方「Policy-Check 反馈」段。
 
 **失败停止条件**：若你连续 3 次同类 `payload_consistency:*` 拒收，**停止**重发并按本文件「错误恢复」段处理 — runtime 已转入 `plan.blocked(reason=correction_3_strike_exhausted)`。
 
@@ -182,7 +186,7 @@ emit 全路径用 `resolve_workspace_root` 单一锚点 (priority：`RALPH_WORKS
 - **一个 turn 只发射一个业务事件**是默认纪律；去重层再强也只是兜底，不要在同一回合内通过“多发一次”来尝试修复。
 - 如果某条事件被去重层拒绝并收到 `task.resume`，下一回合只发一次修正后的事件，不要在同一回合继续补发。
 
-**NULL payload 拒收白名单**（`crates/ralph-core/src/event_policy.rs:1217-1227` `NULL_PAYLOAD_REJECT_TOPICS`）：以下 9 个 topic 不接受空 payload（`[PAYLOAD]` 省略 + 无 `-j`）— 必须传 JSON object：
+**NULL payload 拒收白名单**：以下 9 个 topic 不接受空 payload（`[PAYLOAD]` 省略 + 无 `-j`）— 必须传 JSON object：
 
 | Topic | 出现位置 |
 |-------|---------|
@@ -264,7 +268,7 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 
 ## `ralph emit` 响应：`EmitResult`
 
-> `ralph emit` 通过 `--output json` 返回 **统一** `EmitResult` JSON（SSOT 在 `crates/ralph-core/src/emit_result/`）。
+> `ralph emit` 通过 `--output json` 返回 **统一** `EmitResult` JSON。
 > 这是 agent 与脚本解析 emit 结果的单一事实源；不要自己 `tail events.jsonl | jq` 来判断 emit 是否落盘。
 
 **启用方式**：所有 `ralph emit` 子命令 + 子路径（policy-check / apply）通过 `--output json` 输出 `EmitResult` 到 stdout，stderr 仅保留警告。
@@ -373,7 +377,7 @@ policy-check 拒收:
 **Correction 注入**：拒收后 runner 可能在下一 activation 注入 `## CORRECTION CONTEXT` 或 `task.resume`（含 `required_action` / `forbidden_action` / `target_hat` / live `task_id`+`task_key`+`step`）。规则：
 
 1. **Correction 高于 narrative** — 只执行 correction 指定的唯一动作（见 `ralph-tools-recovery-directives`）。
-2. **bounded retry** — 同类 violation signature 第一次 → correction + 一次可执行 retry；第二次 → fail-close（`protocol_violation_repeated:*`），不得 infinite retry。
+2. **bounded retry** — 同类 violation signature 第一次 → correction + 一次可执行 retry；第二次 → 阻塞 loop（`protocol_violation_repeated:*`），不得 infinite retry。
 3. **post-terminal** — `LOOP_COMPLETE` honored 后业务 emit 拒写，无 retry budget。
 4. **修复后仍走两步 precheck** — `ralph emit <topic> --policy-check` 通过 → 去掉 `--policy-check` 正式 emit（`ralph-tools-precheck`）。
 
@@ -389,17 +393,10 @@ policy-check 拒收:
 
 ## Unified Pipeline
 
-`ralph emit --policy-check` 走 **unified validation pipeline**,与 loop 的 `process_parse_result` 使用同一 `ValidationPipeline::validate_pre_commit_with_view`。
+`ralph emit --policy-check` 与 loop 内的统一校验管线行为一致。
 
-> 之前的 `UNIFIED_*` env var 开关已全部移除;unified path 现在为唯一路径,不再提供 legacy compat path。
+### 进程崩溃后恢复
 
-### Ledger 状态查询
+进程崩溃后，loop 重启时自动从 events 文件重建状态：迭代计数、rejection 重试计数、handoff 审计轨迹、workflow phase 与 counter 集合。
 
-进程崩溃后,`StateLedger::new(workspace)` 自动调用 `replay_from_disk` 重建 `LedgerSnapshot`,恢复:
-- `iteration` 计数
-- `rejection_digest`(R11 retry counts)
-- `handoff_accepted_log` / `handoff_tracker_log` / `flow_lifecycle_log`（审计轨迹）
-- `workflow_phases`
-- counter 集合
-
-若 ledger 损坏,降级到 `LedgerSnapshot::cold_start()` 并 `warn!` 日志。修复方式:`ralph loops clean --ledger` 截断损坏文件。
+若状态文件损坏导致重建失败，loop 会降级到冷启动并打印 warning。修复方式：`ralph loops clean --ledger` 截断损坏文件后重试。

@@ -37,8 +37,6 @@ metadata:
 3. producer 发 `<X>.proposed` → gate hat 激活一轮 → 过则发 `<X>`，不过则发 `<X>.rejected`
 4. `<X>.rejected` → runtime 自动 `task.resume(target=on_fail.target)`；`retry_budget` 耗尽 → `on_exhausted`（默认 `plan.blocked(reason=precheck_failed)`）
 
-实现：`crates/ralph-core/src/config/ralph_config.rs` `apply_precheck_desugar`；runtime 闭环：`crates/ralph-core/src/event_loop/mod.rs` `drive_precheck_gate_obligation`。
-
 ---
 
 ## Topic 速查：你应该做什么
@@ -63,7 +61,7 @@ metadata:
 ## Gate hat（`precheck-<X>`）行为
 
 - 一轮 activation **必须且只能** emit `<X>`（过）或 `<X>.rejected`（不过）。
-- `<X>.rejected` payload 须含 `failed_checks` 与 `reason`（schema 注入见 `crates/ralph-core/src/config/precheck.rs` `inject_precheck_event_schemas`）。
+- `<X>.rejected` payload 须含 `failed_checks` 与 `reason`（runtime 在脱糖时自动注入 schema）。
 - 只做 **主观 checklist**（读产物、判断是否有实质内容）；git/test/task 等机械检查归 `execution_contracts` / `event_policy`，不要塞进 checklist。
 
 ---
@@ -74,7 +72,7 @@ metadata:
 RALPH_PRECHECK_MODE=off ralph run ...
 ```
 
-环境变量为 `off` 时，即使 YAML 里 `precheck.enabled: true` 也**不脱糖、不跑 gate**（`crates/ralph-core/src/config/precheck.rs` `precheck_runtime_enabled`）。
+环境变量为 `off` 时，即使 YAML 里 `precheck.enabled: true` 也**不脱糖、不跑 gate**。
 
 ---
 
@@ -86,7 +84,7 @@ RALPH_PRECHECK_MODE=off ralph run ...
 - ❌ 看到 `<X>.rejected` 后自己再 emit bare `<X>` — 等 `task.resume` 打回 producer 重做
 - ❌ 与 `ralph emit --policy-check` 混淆 — policy 失败在正式 emit 前（`--policy-check` 本身不写盘）；precheck 失败在 gate hat 轮次
 - ❌ 收到 protocol correction 后跳过 `--policy-check` 直接真实 emit — precheck 失败则本 activation 不得继续写盘 emit
-- ❌ 同类 protocol violation 无限自由 retry — 第二次同类违规必须 fail-close（见 `ralph-tools-recovery-directives` Correction 优先级）
+- ❌ 同类 protocol violation 无限自由 retry — 第二次同类违规 runtime 阻塞 loop（见 `ralph-tools-recovery-directives` Correction 优先级）
 
 ---
 
