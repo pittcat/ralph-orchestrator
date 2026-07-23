@@ -50,6 +50,12 @@ pub enum SlotProjection {
 /// swallowed so the dispatch loop can continue (the supervisor
 /// store is still the source of truth; recovery will replay on
 /// the next `recover_pending_projections` call).
+///
+/// 2026-07-23-007 plan U1 (C1): the load → mutate → save sequence
+/// runs inside `TaskStore::with_exclusive_lock` so concurrent
+/// per-slot `project_slot` calls (multi-slot waves dispatched on
+/// separate `JoinSet` workers) cannot lose a row to a stale
+/// read.
 pub fn project_slot(
     tasks_path: &Path,
     loop_id: &str,
@@ -70,43 +76,46 @@ pub fn project_slot(
             return;
         }
     };
-    let task = Task::new(summary, 3)
-        .with_loop_id(Some(loop_id.to_string()))
-        .with_key(Some(task_key.clone()));
-    store.ensure(task);
-    // Find the task id by stable key.
-    let task_id = match store
-        .all()
-        .iter()
-        .find(|t| t.key.as_deref() == Some(task_key.as_str()))
-        .map(|t| t.id.clone())
-    {
-        Some(id) => id,
-        None => {
-            tracing::warn!(
-                task_key,
-                "U4: task not found after ensure; skipping slot projection"
-            );
-            return;
-        }
-    };
-    // 2026-07-23-007 plan U4: `TaskStore::close` requires the task
-    // to have been started first; a worker slot that completes
-    // without an intermediate projection (e.g. first dispatch
-    // straight to terminal) must still get `started` so the close
-    // applies. `start` is idempotent — calling it on an
-    // already-started task is a no-op.
-    store.start(&task_id);
-    let result = match projection {
-        SlotProjection::Started => store.start(&task_id),
-        SlotProjection::Completed => store.close(&task_id),
-        SlotProjection::Failed => store.fail(&task_id),
-    };
-    // `start` / `close` / `fail` return `Option<&Task>` —
-    // `None` means the task was already in the target state
-    // (idempotent no-op); `Some` means we transitioned it.
-    let _ = result;
-    if let Err(err) = store.save() {
+    let projection_result = store.with_exclusive_lock(|store| {
+        // 2026-07-23-007 plan U4: `TaskStore::close` requires the task
+        // to have been started first; a worker slot that completes
+        // without an intermediate projection (e.g. first dispatch
+        // straight to terminal) must still get `started` so the close
+        // applies. `start` is idempotent — calling it on an
+        // already-started task is a no-op.
+        let task = Task::new(summary, 3)
+            .with_loop_id(Some(loop_id.to_string()))
+            .with_key(Some(task_key.clone()));
+        store.ensure(task);
+        // Find the task id by stable key.
+        let task_id = match store
+            .all()
+            .iter()
+            .find(|t| t.key.as_deref() == Some(task_key.as_str()))
+            .map(|t| t.id.clone())
+        {
+            Some(id) => id,
+            None => {
+                tracing::warn!(
+                    task_key,
+                    "U4: task not found after ensure; skipping slot projection"
+                );
+                return Ok::<_, std::io::Error>(());
+            }
+        };
+        store.start(&task_id);
+        let result = match projection {
+            SlotProjection::Started => store.start(&task_id),
+            SlotProjection::Completed => store.close(&task_id),
+            SlotProjection::Failed => store.fail(&task_id),
+        };
+        // `start` / `close` / `fail` return `Option<&Task>` —
+        // `None` means the task was already in the target state
+        // (idempotent no-op); `Some` means we transitioned it.
+        let _ = result;
+        Ok(())
+    });
+    if let Err(err) = projection_result {
         tracing::warn!(
             path = %tasks_path.display(),
             %err,
@@ -213,6 +222,58 @@ mod tests {
             store.all().len(),
             1,
             "idempotent projection must not duplicate rows; got {:?}",
+            store
+                .all()
+                .iter()
+                .map(|t| (t.key.clone(), t.status))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // 2026-07-23-007 plan U1 (C1): two slots racing `project_slot`
+    // against the same `TaskStore` must both land. Before U1
+    // wrapped the RMW in `with_exclusive_lock`, the second slot's
+    // reload could miss the first slot's write and the first
+    // slot's row was dropped.
+    #[test]
+    fn project_slot_concurrent_multi_slot_no_row_loss() {
+        use std::sync::Arc;
+        use std::thread;
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let tasks_path = Arc::new(tmp.path().join("tasks.jsonl"));
+        let mut handles = Vec::new();
+        for slot_index in 0u32..4 {
+            let tasks_path = Arc::clone(&tasks_path);
+            handles.push(thread::spawn(move || {
+                project_slot(
+                    &tasks_path,
+                    "loop-1",
+                    "w-1",
+                    slot_index,
+                    SlotProjection::Completed,
+                );
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread");
+        }
+        let store = TaskStore::load(&tasks_path).expect("load");
+        let keys: std::collections::BTreeSet<_> = store
+            .all()
+            .iter()
+            .filter_map(|t| t.key.clone())
+            .collect();
+        for slot_index in 0u32..4 {
+            let expected = format!("supervisor:loop-1:wave-w-1:slot-{slot_index}");
+            assert!(
+                keys.contains(&expected),
+                "slot {slot_index} row missing after concurrent projection; got {keys:?}"
+            );
+        }
+        assert_eq!(
+            store.all().len(),
+            4,
+            "concurrent projection must produce exactly 4 rows (one per slot); got {:?}",
             store
                 .all()
                 .iter()
