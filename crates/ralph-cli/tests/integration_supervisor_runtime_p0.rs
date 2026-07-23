@@ -851,3 +851,134 @@ fn release_slot_dispatch_before_record_slot_transitions_to_failed() {
         "no Completed slot should exist; got {snap:?}"
     );
 }
+
+// 2026-07-23-007 plan U8 (T1): rusqlite twins of the three
+// InMemory first-terminal-wins / cancel-wins tests. The
+// rusqlite store is the production persistence path; the
+// InMemory tests are characterization, not coverage.
+//
+// These tests are gated on the `supervisor-db` feature so the
+// CI matrix that runs without it does not break. With the
+// feature on they execute against a real SQLite file in a
+// per-test tempdir (see `SupervisorP0Fixture::new_rusqlite`).
+
+/// U8 / T1: a non-cancel `record_slot_failure` after Completed
+/// must be rejected; the row stays Completed.
+#[cfg(feature = "supervisor-db")]
+#[test]
+fn rusqlite_record_slot_failure_rejects_after_completed() {
+    use ralph_core::supervisor::SupervisorStore;
+    use ralph_core::supervisor::SupervisorStoreError;
+    let mut fx = SupervisorP0Fixture::new_rusqlite(
+        "u8-rusqlite-rejects",
+        "u8-loop",
+        "task-u8",
+        "task-key-u8:step-1",
+        "step-1",
+    );
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+    fx.store()
+        .as_ref()
+        .record_slot_result("w-1", 0, "hash-A", 1)
+        .expect("first terminal completes the slot");
+    let late = fx.store().as_ref().record_slot_failure("w-1", 0, "boom");
+    match late {
+        Err(SupervisorStoreError::AlreadyTerminal(_)) => {}
+        other => panic!(
+            "non-cancel failure after Completed must produce AlreadyTerminal, got {other:?}"
+        ),
+    }
+    let snap = fx
+        .store()
+        .as_ref()
+        .fan_in_status("w-1")
+        .expect("fan_in_status must succeed");
+    assert_eq!(
+        snap.completed_count, 1,
+        "Completed slot must be preserved; got {snap:?}"
+    );
+    assert_eq!(
+        snap.failed_count, 0,
+        "no Failed slot should exist; got {snap:?}"
+    );
+}
+
+/// U8 / T1: same-reason replay against the rusqlite store is
+/// idempotent (no panic, no row drift).
+#[cfg(feature = "supervisor-db")]
+#[test]
+fn rusqlite_record_slot_failure_idempotent_same_reason() {
+    use ralph_core::supervisor::SupervisorStore;
+    let mut fx = SupervisorP0Fixture::new_rusqlite(
+        "u8-rusqlite-idempotent",
+        "u8-loop",
+        "task-u8",
+        "task-key-u8:step-1",
+        "step-1",
+    );
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+    fx.store()
+        .as_ref()
+        .record_slot_failure("w-1", 0, "boom")
+        .expect("first failure write must succeed");
+    fx.store()
+        .as_ref()
+        .record_slot_failure("w-1", 0, "boom")
+        .expect("idempotent replay must succeed");
+    let snap = fx
+        .store()
+        .as_ref()
+        .fan_in_status("w-1")
+        .expect("fan_in_status must succeed");
+    assert_eq!(snap.failed_count, 1, "exactly one Failed slot; got {snap:?}");
+}
+
+/// U8 / T1: cancel-after-completed wins against the rusqlite
+/// store. Mirrors the InMemory `cancel_after_completed_wins`
+/// test from U3; the rule lives at the supervisor store
+/// boundary, so both stores must enforce it identically.
+#[cfg(feature = "supervisor-db")]
+#[test]
+fn rusqlite_record_slot_failure_cancel_after_completed_wins() {
+    use ralph_core::supervisor::SupervisorStore;
+    let mut fx = SupervisorP0Fixture::new_rusqlite(
+        "u8-rusqlite-cancel-wins",
+        "u8-loop",
+        "task-u8",
+        "task-key-u8:step-1",
+        "step-1",
+    );
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+    fx.store()
+        .as_ref()
+        .record_slot_result("w-1", 0, "hash-A", 1)
+        .expect("first terminal completes the slot");
+    fx.store()
+        .as_ref()
+        .record_slot_failure(
+            "w-1",
+            0,
+            ralph_core::supervisor::worker_outcome::REASON_WORKER_CANCELLED,
+        )
+        .expect("cancel-after-Completed must overwrite");
+    let snap = fx
+        .store()
+        .as_ref()
+        .fan_in_status("w-1")
+        .expect("fan_in_status must succeed");
+    assert_eq!(
+        snap.completed_count, 0,
+        "Completed must be downgraded by cancel; got {snap:?}"
+    );
+    assert_eq!(
+        snap.failed_count, 0,
+        "Cancelled does not count as Failed; got {snap:?}"
+    );
+    assert_eq!(
+        snap.pending_count, 1,
+        "Cancelled slot surfaces in pending_count; got {snap:?}"
+    );
+}
