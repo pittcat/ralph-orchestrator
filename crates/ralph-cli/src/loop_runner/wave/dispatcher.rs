@@ -1548,6 +1548,67 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         }
 
         let slot_cwd = binding.as_ref().and_then(|b| b.worktree_path.clone());
+
+        // 2026-07-23-007 plan U2 (R-W1): validate the per-worker
+        // events channel against the primary control plane so the
+        // spawned worker can never write a JSONL ledger inside
+        // its own slot subtree or escape the workspace via a
+        // symlink. Review slots still get a binding-less / shared
+        // read-only path (the validator's slot_worktree_root arg
+        // stays None so the slot-subtree rule is exempt).
+        let workspace_root = bridge.repo_root();
+        let validated_events_path = match workspace_root {
+            Some(root) => {
+                let slot_root_for_validate = match wave_kind {
+                    WaveKind::Review => None,
+                    _ => slot_cwd.as_deref(),
+                };
+                match ralph_core::control_plane::validate_control_plane_binding(
+                    &worker_events_file,
+                    slot_root_for_validate,
+                    root,
+                ) {
+                    Ok(p) => Some(p),
+                    Err(err) => {
+                        // Fail-closed: a slot whose channel binding
+                        // is invalid MUST NOT spawn. Mark this
+                        // index as "already spawned" so the next
+                        // approval round skips it; the actual
+                        // record_slot_failure is the inner
+                        // dispatcher's responsibility — but since
+                        // we never push a WorkerRequest here, the
+                        // slot will simply have no worker, which
+                        // the wave's terminal cleanup will pick up
+                        // as a never-reported slot (mirrors the
+                        // bind-failure path).
+                        let reason = ralph_core::control_plane::reason_for(&err);
+                        let reason_string = reason.to_string();
+                        warn!(
+                            wave_id = %wave.wave_id,
+                            slot_index = index_u32,
+                            wave_kind = ?wave_kind,
+                            events_path = %worker_events_file.display(),
+                            error = %err,
+                            "U2: control-plane binding rejected; failing closed (slot skipped, no spawn)"
+                        );
+                        // Best-effort: try to record the failure on
+                        // the bridge so the store sees a structured
+                        // reason even though no worker ran. If the
+                        // store / bridge is unavailable, fall back
+                        // to skipping silently (the synthetic-failure
+                        // sweep would catch it later anyway).
+                        let _ = bridge.record_slot_failure(
+                            &store_wave_id,
+                            index_u32,
+                            &reason_string,
+                        );
+                        continue;
+                    }
+                }
+            }
+            None => None,
+        };
+
         if let Some(ref b) = binding {
             // Merge binding env (last-write-wins).
             let binding_env: std::collections::HashMap<String, String> =
@@ -1558,6 +1619,40 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
             worker_backend
                 .env_vars
                 .extend(b.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+
+        // 2026-07-23-007 plan U2 (R-W1): inject the
+        // `RALPH_WORKSPACE_ROOT` + `RALPH_EVENTS_FILE` binding as
+        // the SSOT for the spawned worker. `merge_event_channel_env`
+        // is the canonical validator; on success the validated
+        // absolute paths land in `worker_backend.env_vars`. On
+        // failure (relative path that escaped earlier checks) the
+        // slot is fail-closed the same way as a binding rejection.
+        if let (Some(root), Some(events_path)) = (workspace_root, validated_events_path.as_ref()) {
+            let mut extras: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            if let Err(err) =
+                ralph_core::control_plane::merge_event_channel_env(root, events_path, &mut extras)
+            {
+                let reason = ralph_core::control_plane::reason_for(&err);
+                let reason_string = reason.to_string();
+                warn!(
+                    wave_id = %wave.wave_id,
+                    slot_index = index_u32,
+                    error = %err,
+                    "U2: merge_event_channel_env rejected binding; failing closed"
+                );
+                let _ = bridge.record_slot_failure(
+                    &store_wave_id,
+                    index_u32,
+                    &reason_string,
+                );
+                continue;
+            }
+            for (k, v) in extras {
+                worker_backend.env_vars.retain(|(existing, _)| existing != &k);
+                worker_backend.env_vars.push((k, v));
+            }
         }
 
         let (progress_tx, _) = tokio::sync::mpsc::unbounded_channel::<(u32, bool, Duration)>();

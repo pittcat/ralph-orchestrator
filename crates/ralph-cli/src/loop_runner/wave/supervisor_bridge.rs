@@ -191,6 +191,16 @@ impl CoordinatorSupervisorBridge {
         self.store.clone()
     }
 
+    /// 2026-07-23-007 plan U2 (R-W1): return the loop's primary
+    /// workspace root when the bridge was constructed with a
+    /// `ProductionBridgeContext`. `None` keeps the legacy
+    /// `from_store` / `with_in_memory_store` semantics — callers
+    /// without a context must not pretend to know the workspace
+    /// root.
+    pub fn repo_root(&self) -> Option<&std::path::Path> {
+        self.context.as_ref().map(|c| c.repo_root.as_path())
+    }
+
     /// Access the coordinator so the bridge can hand it to
     /// the runtime when the dispatcher needs to drive a tick
     /// outside the bridge trait.
@@ -265,6 +275,14 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
 
     fn max_concurrent_workers(&self) -> u32 {
         self.max_concurrent_workers
+    }
+
+    fn repo_root(&self) -> Option<&std::path::Path> {
+        // 2026-07-23-007 plan U2 (R-W1): forward the workspace root
+        // from the construction-time `ProductionBridgeContext` so
+        // the dispatcher's control-plane validator sees the
+        // production repo_root via `Arc<dyn SupervisorBridge>`.
+        self.context.as_ref().map(|c| c.repo_root.as_path())
     }
 
     fn try_dispatch_next(&self, wave_id: &str, slot_index: u32) -> Result<bool, BridgeError> {

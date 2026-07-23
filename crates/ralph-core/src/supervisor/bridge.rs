@@ -107,6 +107,18 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         u32::MAX
     }
 
+    /// 2026-07-23-007 plan U2 (R-W1): return the loop's primary
+    /// workspace root when the bridge was constructed with one
+    /// (i.e. `with_context_and_factory` in production). The
+    /// dispatcher uses this to validate the per-worker events
+    /// channel and to inject `RALPH_WORKSPACE_ROOT` into the
+    /// spawned worker's env. Default `None` keeps the legacy
+    /// mock / BDD bridges compatible — those bridges have no
+    /// workspace context to expose.
+    fn repo_root(&self) -> Option<&std::path::Path> {
+        None
+    }
+
     /// Ask the bridge whether the requested slot is approved for dispatch.
     /// The default keeps legacy/mock bridges compatible: without a store
     /// approval surface, the caller may proceed with its existing spawn path.
