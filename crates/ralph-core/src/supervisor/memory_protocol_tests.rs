@@ -67,20 +67,36 @@ fn same_content_hash_does_not_overwrite() {
     assert_eq!(snap_before.expected_total, snap_after.expected_total);
 }
 
-/// R-E2: differing content_hash for the same slot replaces the
-/// stored worker_result and the store's `dedup_diagnostics` (out of
-/// scope for U4) notes the divergence. The fan-in still counts the
-/// slot as completed (which is correct: latest write wins).
+/// 2026-07-23-004 plan U5 (R-A3): first-terminal-wins;
+/// conflicting terminal events for the same slot are rejected
+/// instead of replacing the recorded result. The previous
+/// "latest write wins" R-E2 contract is replaced by the
+/// stricter U5 contract.
 #[test]
 fn different_content_hash_replaces_record() {
     let s = store();
     let wave = wave_into(&s, "diff-hash", WaveKind::Exec, 1).unwrap();
     s.record_slot_result(&wave, 0, "hash-a", 1).unwrap();
-    s.record_slot_result(&wave, 0, "hash-b", 2).unwrap();
+    // The slot is now Completed with `hash-a`. A second
+    // record_slot_result with a different content_hash MUST be
+    // rejected — conflicting terminal events must not overwrite
+    // the recorded result.
+    let conflict =
+        s.record_slot_result(&wave, 0, "hash-b", 2);
+    assert!(
+        matches!(conflict, Err(SupervisorStoreError::AlreadyTerminal(_))),
+        "conflicting terminal must be rejected as AlreadyTerminal, got {conflict:?}"
+    );
+
+    // Idempotent replay with the SAME content_hash is allowed.
+    let replay = s.record_slot_result(&wave, 0, "hash-a", 1);
+    assert!(
+        replay.is_ok(),
+        "idempotent replay with the same content_hash must succeed, got {replay:?}"
+    );
+
     let snap = s.fan_in_status(&wave).unwrap();
     assert_eq!(snap.completed_count, 1);
-    // In-memory inspection: we only expose the public Surface; the
-    // hash comparison is contract-pinned via the dedup helper.
 }
 
 /// R-A2: when active workers reach the soft cap, additional

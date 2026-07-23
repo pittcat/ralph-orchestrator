@@ -248,6 +248,14 @@ pub enum SupervisorStoreError {
     UnknownWave(String),
     #[error("slot {slot_index} not found on wave {wave_id}")]
     UnknownSlot { wave_id: String, slot_index: u32 },
+    /// 2026-07-23-004 plan U5 (R-A3): the slot already
+    /// reached a terminal state. A conflicting terminal event
+    /// must NOT overwrite the recorded result. The
+    /// `AlreadyTerminal` reason maps to the
+    /// `conflicting_worker_terminal` reason code in the
+    /// dispatcher's slot failure path.
+    #[error("slot already terminal: {0}")]
+    AlreadyTerminal(String),
     #[error("backpressure limit reached; wave {0} enqueued")]
     BackpressureEnqueued(String),
     #[error("invalid transition: {0}")]

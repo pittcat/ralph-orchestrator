@@ -369,6 +369,19 @@ impl SupervisorP0Fixture {
             slot_resources,
         }
     }
+
+    /// Borrow the underlying store handle so caller-level tests
+    /// can drive the public store API directly (U4/U5 truth-table
+    /// checks).
+    pub fn store(&self) -> &std::sync::Arc<dyn SupervisorStore> {
+        &self.store
+    }
+
+    /// Convenience accessor: the wave_id resolved by
+    /// `register_and_bind`. Empty string when no wave is bound.
+    pub fn bound_wave_id(&self) -> &str {
+        self.bound_wave_id.as_deref().unwrap_or("")
+    }
 }
 
 /// Parse a null-delimited env dump that `env -0` produces.
@@ -685,4 +698,48 @@ fn unknown_public_wave_id_lookup_returns_none() {
         .expect("store lookup")
         .expect("assigned store id");
     assert_eq!(looked_after, assigned);
+}
+
+/// U5 (R-A4): first-terminal-wins. A conflicting terminal
+/// event MUST NOT overwrite a slot already in `Completed`.
+/// The fixture-based test drives the transition state through
+/// the public store API and verifies the typed failure.
+#[test]
+fn conflicting_terminal_does_not_overwrite_completed_slot() {
+    use ralph_core::supervisor::SupervisorStoreError;
+    use ralph_core::supervisor::SupervisorStore;
+    let mut fx = SupervisorP0Fixture::new_in_memory(
+        "u5-conflict",
+        "u5-loop",
+        "task-u5",
+        "task-key-u5:step-1",
+        "step-1",
+    );
+    fx.with_git_baseline();
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+
+    // The fixture's `register_and_bind` already wrote slot=0
+    // with status Pending. record_slot_result must transition
+    // it to Completed.
+    fx.store()
+        .as_ref()
+        .record_slot_result("w-1", 0, "hash-A", 1)
+        .expect("first terminal completes the slot");
+
+    // Conflicting second terminal: same slot, but a different
+    // content_hash. The store MUST refuse to overwrite.
+    let conflict = fx.store().as_ref().record_slot_result("w-1", 0, "hash-B", 2);
+    match conflict {
+        Err(SupervisorStoreError::AlreadyTerminal(_)) => {}
+        other => panic!(
+            "conflicting terminal must produce AlreadyTerminal, got {other:?}"
+        ),
+    }
+
+    // Idempotent replay with the same content_hash is allowed.
+    fx.store()
+        .as_ref()
+        .record_slot_result("w-1", 0, "hash-A", 1)
+        .expect("idempotent replay must succeed");
 }
