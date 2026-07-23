@@ -5,7 +5,7 @@ artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
 execution: code
-status: draft
+status: reviewed
 origin:
   - docs/report/2026-07-23-ce-executor-supervisor-primary-20260723-082003-diagnosis.md
 parallel_track: supervisor-runtime-p0
@@ -368,6 +368,7 @@ Feature: Reporter 是唯一报告与 loop completion 所有者
 - **验收测试**：fixture self-test 覆盖 complete/failed、success resources、重复 terminal 拒绝和 public ID 透传。
 - **需要拆分的单元测试**：fixture payload schema、single terminal、Memory-only task snapshot、stage failure injection。
 - **Red 预期失败原因**：Plan B 专属冻结 contract fixture 尚不存在。
+- **Execution note**：test-first——先写 fixture self-test 断言（Red），再实现冻结 contract fixture（Green）；fixture 必须明确标记为 Plan B contract double，不能冒充真实 worker E2E。
 - **最小实现范围**：仅新增 preset test fixture，不修改 runtime 或生产 preset；fixture 必须清楚标记为 Plan B contract double，不能冒充真实 worker E2E。
 - **集成验证**：`cargo nextest run -p ralph-core -- supervisor_preset`。
 - **回归范围**：现有 preset parse/lint 继续通过。
@@ -385,8 +386,9 @@ Feature: Reporter 是唯一报告与 loop completion 所有者
 - **验收测试**：正常、不可读 plan、空、重复 ID、source hash、原文件不变。
 - **需要拆分的单元测试**：本能力由 agent 产生 artifact，不虚构 Rust parser 单元测试；使用 schema validation、mock agent response 和真实 EventLoop BDD 验证节点字段、provenance 与失败 handoff。
 - **Red 预期失败原因**：当前 task-planner 不产出共享 artifact，且 instructions 没有把 runner 注入的原始 plan 上下文当作唯一来源。
+- **Execution note**：test-first——先写 artifact provenance 与非法输入（不可读/空/重复 ID）的 BDD scenario（Red），再修改 task-planner hat instructions 与 schema。
 - **最小实现范围**：修改 hat instructions/schema/BDD，使 agent 生成 artifact；不新增确定性 parser、CLI 或 runtime 模块。instructions 只引用现有可执行命令和注入 skill。
-- **集成验证**：用隔离 task-planner activation 读取 fixture plan，检查 artifact 与 task API。
+- **集成验证**：用隔离 task-planner activation 读取 fixture plan，检查 artifact 与 task API；回归入口 `cargo nextest run -p ralph-core --test scenarios -- task_planner`（覆盖 artifact happy path 与非法输入场景）。通过判据：artifact nodes/provenance 字段断言全绿、非法输入零 dispatch 且 `plan.blocked` 可达 reporter、source plan hash 未变。
 - **回归范围**：plan parsing、task three-field、isolated single-business-event budget。
 - **完成标准**：artifact schema/provenance 稳定；动态状态不写入 artifact；基础非法输入 reporter 可达；source plan 未修改。
 - **风险与注意事项**：artifact 必须在主 workspace 对后续 hats 可见，不能落 ephemeral private worktree。
@@ -395,15 +397,16 @@ Feature: Reporter 是唯一报告与 loop completion 所有者
 
 - **Unit 目标**：在 Unit 2 节点清单上生成有证据的 edges，并拒绝未知依赖、自依赖、环和无证据猜测。
 - **对应 Scenario**：B1 的独立/依赖、耦合、文件冲突与稳定重放；B2 的 unknown/self/cycle/no-ready。
-- **外部可观察结果**：artifact 增加带 `kind`、`from`、`to`、`evidence` 的边；U5 类跨 worktree 集成能力被合并或严格排序；非法图零 dispatch 并到 reporter。
+- **外部可观察结果**：artifact 增加带 `kind`、`from`、`to`、`evidence` 的边；输入计划中需跨 worktree 集成验收的能力（原文称“U5 类”，指输入计划中的示例 Unit，非本计划的 Unit 5）被合并或严格排序；非法图零 dispatch 并到 reporter。
 - **输入与输出**：输入 Unit 2 静态 nodes 和原计划证据；输出 edges、合并节点 provenance、stable ordering key 和 blocked reason。
 - **可依赖的已完成能力**：Unit 2 artifact source/nodes。
 - **明确禁止依赖的未来能力**：不创建 runtime task，不计算动态 ready 状态，不 emit wave。
 - **验收测试**：显式依赖、artifact 输入输出依赖、同文件冲突、耦合合并、unknown/self/cycle；同一 source hash 的第二次 activation 必须复用首次 artifact，不再次生成。
 - **需要拆分的单元测试**：该能力由 task-planner agent 完成；以 schema、mock responses 和 BDD 验证证据完整性、环拒绝和规范化排序，不虚构 Rust SCC/parser 单元测试。
 - **Red 预期失败原因**：当前 planner 没有共享 DAG/边证据，所有 Unit 被一次性广播。
+- **Execution note**：test-first——先写边证据完整性、unknown/self/cycle 拒绝与稳定排序的 scenario（Red），再扩展 artifact schema 与 task-planner instructions。
 - **最小实现范围**：扩展 artifact schema 与 task-planner instructions；不新增 runtime 算法模块。稳定性由 source-hash keyed artifact reuse 保证；首次生成只要求 nodes/edges 规范化排序和证据完整，不要求自然语言理由 byte-equal。
-- **集成验证**：`run_workflow_guard_scenario` 对 fixture plans 验证 artifact 与零 dispatch failure。
+- **集成验证**：`run_workflow_guard_scenario`（真实 EventLoop runner，禁用 `run_scenario` stub）对 fixture plans 验证 artifact 与零 dispatch failure；回归入口 `cargo nextest run -p ralph-core --test scenarios -- task_planner`。通过判据：每条边 evidence 可追溯、unknown/self/cycle 图零 worker、同 source hash 的二次 activation 复用首次 artifact 不重生成。
 - **回归范围**：artifact provenance、单事件预算、plan.blocked reporter consumer。
 - **完成标准**：每条边可追溯；非法图无 worker；相同 source hash 不重生成；本 Unit 不触碰 task/wave。
 - **风险与注意事项**：LLM 不负责机械最优，只要求 schema、证据和行为门禁；缺证据时 fail-close。
@@ -419,8 +422,9 @@ Feature: Reporter 是唯一报告与 loop completion 所有者
 - **验收测试**：首次 materialize、相同 source hash 重放、部分 tasks 已存在、identity 冲突、上游失败的 downstream failed 投影。
 - **需要拆分的单元测试**：使用 task API 集成/BDD 验证三字段、idempotency 和 reason；不直接编辑内部 task ledger。
 - **Red 预期失败原因**：当前 task ownership/identity 由 coordinator 一次注册且全程 open，没有 DAG node 映射。
+- **Execution note**：test-first——先写 materialize 幂等、identity 冲突与上游失败投影的 scenario（Red），再调整 preset task 编排契约。
 - **最小实现范围**：复用现有 `ralph tools task` API；不新增 task status。
-- **集成验证**：隔离 activation + task list/get 输出。
+- **集成验证**：隔离 activation + `ralph tools task list`/`show` 输出（禁直读 `.ralph/agent/tasks.jsonl`）；回归入口 `cargo nextest run -p ralph-core --test scenarios -- task_planner`。通过判据：一个 node 恰好一个 task、重放不重复创建、上游最终失败的 downstream task reason 为 `upstream_dependency_failed`。
 - **回归范围**：task three-field、外层 hat env、重复 activation。
 - **完成标准**：一个 node 对应一个 task；重放不重复；静态/动态状态分权明确。
 - **风险与注意事项**：禁止 task-planner 直接读取或写 `.ralph/agent/tasks.jsonl`。
@@ -435,9 +439,10 @@ Feature: Reporter 是唯一报告与 loop completion 所有者
 - **明确禁止依赖的未来能力**：不依赖 Review/Fix/删除 hats。
 - **验收测试**：3 independent batch、diamond DAG、file conflict、multi-wave unlock、upstream failed/timeout/cancel、idempotent replay。
 - **需要拆分的单元测试**：ready predicate、single batch construction、identity fields、downstream `upstream_dependency_failed` reason、all-done detection。
-- **Red 预期失败原因**：当前 planner 一次性发所有 Unit；U5 类依赖会落不同 worktree 并无法独立验收。
+- **Red 预期失败原因**：当前 planner 一次性发所有 Unit；需跨 worktree 集成验收的依赖（原文称“U5 类”，指输入计划中的示例 Unit，非本计划的 Unit 5）会落不同 worktree 并无法独立验收。
+- **Execution note**：test-first——先写 ready-wave batch emit、diamond/文件冲突分波与失败传播的 scenario（Red），再调整 coordinator/task-planner/exec-integrator 的 preset contract。
 - **最小实现范围**：调整 coordinator/task-planner/exec-integrator 的 preset contract；不修改 dispatcher。
-- **集成验证**：真实 workflow guard scenario 断言事件顺序、共享 wave ID、wave_total 和未启动节点。
+- **集成验证**：真实 workflow guard scenario（`run_workflow_guard_scenario`，禁用 `run_scenario` stub）断言事件顺序、共享 wave ID、wave_total 和未启动节点；回归入口 `cargo nextest run -p ralph-core --test scenarios -- supervisor`。通过判据：每个 ready wave 仅一次 batch emit、独立 nodes 同 wave 并发、上游失败后下游零启动。
 - **回归范围**：exec.wave.complete/failed consumer、merge resources、task close、单事件预算。
 - **完成标准**：每个 ready wave 一次 emit；无依赖节点提前执行；失败路径有 reporter consumer。
 - **风险与注意事项**：integrator 使用 runtime success resources，不读取内部 DB；merge conflict 视为结构化失败。
@@ -453,8 +458,9 @@ Feature: Reporter 是唯一报告与 loop completion 所有者
 - **验收测试**：payload context parity、并发 slots、review 前后 git 写集 fingerprint、test failure、review failure、missing context fail-close。
 - **需要拆分的单元测试**：review payload semantic fields、required dimensions、aggregate all-required rule、immutable ref equality、baseline/diff comparison。
 - **Red 预期失败原因**：当前 review 是六维批次但 tester 不是明确独立 dimension，测试/评审输入与权限合同不足。
+- **Execution note**：test-first——先写 context parity、写集 fingerprint fail-close 与 required 聚合的 scenario（Red），再收敛 review 拓扑为单一 Review wave。
 - **最小实现范围**：复用 `WaveKind::Review`；不新增 Test kind/topic family。
-- **集成验证**：`run_workflow_guard_scenario` 真实 EventLoop；不得使用 `run_scenario` stub。
+- **集成验证**：`run_workflow_guard_scenario` 真实 EventLoop（不得使用 `run_scenario` stub）；回归入口 `cargo nextest run -p ralph-core --test scenarios -- supervisor`。通过判据：tester 与各 review dimension 读同一 merged commit、review 前后写集 fingerprint 变化被检测并 fail-close（不自动清理共享 workspace）、任一 required slot 失败则 review 不 pass。
 - **回归范围**：review wave fan-in、review synthesizer、shared-readonly isolation、timeout/failure。
 - **完成标准**：测试与评审实际并发；全部读取同一 commit；任何写集变化被 synthesizer 检测、保留证据并 fail-close；aggregate 证据完整。
 - **风险与注意事项**：`SharedReadonly` 不是 OS sandbox；本计划通过 hat scope + 前后 fingerprint 检测并 fail-close，但绝不自动清理共享 workspace。tester 的测试失败是 finding/failure 证据，不允许它改测试或生产代码。
@@ -470,8 +476,9 @@ Feature: Reporter 是唯一报告与 loop completion 所有者
 - **验收测试**：no-fix、independent fixes、dependent/conflicting fixes、fix failure/exhausted、alignment pass/fail。
 - **需要拆分的单元测试**：fix readiness、batch emit、all-findings traceability、alignment routing。
 - **Red 预期失败原因**：当前存在正式 fix chain 与 fallback fixer 双路径，失败可能转 progress-steward。
+- **Execution note**：test-first——先写唯一正式 Fix 链、no-fix 跳过与 alignment 只读的 scenario（Red），再调整 supervisor preset 的 fix/alignment 路由。
 - **最小实现范围**：只调整 supervisor preset 的 fix/alignment 路由；不复制 pipeline preset 文本。
-- **集成验证**：fix workflow guard + CLI integration。
+- **集成验证**：fix workflow guard scenario（真实 EventLoop）+ `cargo nextest run -p ralph-cli --test integration_supervisor_primary`（contract-double 用例）。通过判据：每个修复可追溯到 review finding、fallback fixer 零激活、alignment 只读且失败进入 reporter。
 - **回归范围**：fix.wave.complete/failed、merge+tests、review finding traceability。
 - **完成标准**：每个代码修复可追溯到 finding；只有 fix-worker 写代码；alignment 失败进入 reporter。
 - **风险与注意事项**：不要让 alignment 形成第二 fixer；修复耗尽必须有限终止。
@@ -487,8 +494,9 @@ Feature: Reporter 是唯一报告与 loop completion 所有者
 - **验收测试**：正常、planner invalid、exec failed、merge conflict、review failed、fix exhausted、timeout、cancel、alignment failed、reporter write failure；最后一种断言单次写入、`report_written=false` 的唯一 LOOP_COMPLETE 和无再次激活。
 - **需要拆分的单元测试**：topic reachability、hat ownership、consumer uniqueness、terminal uniqueness、deleted-name absence as structured hat IDs（允许结构测试，不锁 prompt 文案）。
 - **Red 预期失败原因**：当前三 hats 存在，`plan.blocked` 无 consumer，shipper/reporter multi-consumer 可能被 fallback 抽干。
+- **Execution note**：characterization-first——先以 characterization 固化当前三 hats 拓扑与 `plan.blocked` 无消费者现状（Red 基线），再执行原子删除至 Green；不保留兼容 alias。
 - **最小实现范围**：一次原子 topology migration；不要保留兼容 alias。
-- **集成验证**：三个 preset lint 命令 + supervisor BDD failure matrix。
+- **集成验证**：三个 preset lint 命令（`cargo nextest run -p ralph-cli --bin ralph -- preset_lint` + `cargo nextest run -p ralph-core -- preset_lint` + `cargo nextest run -p ralph-cli --bin ralph -- presets`）+ supervisor BDD failure matrix（`cargo nextest run -p ralph-core --test scenarios -- supervisor`）。通过判据：三个已删除 hat 零结构引用、无 dead-end topic、成功与全部失败路径均由 reporter 单一终止。
 - **回归范围**：event policy schemas、required fields、topic deny rules、mechanism.flow、workflow activation、ownership/state projection。
 - **完成标准**：无任何 deleted hat 引用；正常时 reporter 先写报告再终止；报告写失败时以 LOOP_COMPLETE payload 保存最小失败报告并一次终止，不重试风暴。
 - **风险与注意事项**：本 Unit 用真实 EventLoop 证明 `plan.blocked` 能激活 reporter；Plan A 联合门禁证明最终外部状态仍为失败。产品语义已经冻结，禁止换用另一 failure topic。
@@ -504,6 +512,7 @@ Feature: Reporter 是唯一报告与 loop completion 所有者
 - **验收测试**：blocking full chain、invalid cycle、exec partial failure、review/test failure、fix path、cancel；测试用真实 EventLoop runner。
 - **需要拆分的单元测试**：不新增业务实现；只补 integration 暴露的遗漏。
 - **Red 预期失败原因**：若失败，必须回到对应 Unit 修正，不通过 mock runtime success 或削弱报告断言绕过。
+- **Execution note**：test-first（Outside-In）——先写 full-chain 与失败矩阵 BDD（Red），再补齐 integration 暴露的遗漏；本 Unit 不新增业务实现。
 - **最小实现范围**：同步 schema、operator skills、CLAUDE/AGENTS 和规则文档；只有 builtin 名称变化才更新 zsh completion。
 - **集成验证**：
   - `cargo nextest run -p ralph-cli --bin ralph -- preset_lint`
