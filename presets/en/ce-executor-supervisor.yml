@@ -935,22 +935,37 @@ hats:
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   review-coordinator:
     name: "Review Coordinator"
-    description: "Fans out review work across the six dimension reviewers."
+    # 2026-07-23-005 plan U6: review-coordinator fans out a
+    # SINGLE Review wave that contains the test dimension
+    # (`testing`) plus the six review dimensions. All seven
+    # slots run on the same merged commit, in
+    # `SharedReadonly` binding, so tester and reviewers see
+    # the same immutable code reference. The wave is
+    # recorded in `review.unit.ready` (one per dimension).
+    # U6 pins both the 7-payload shape and the
+    # pre/post-fingerprint write-set gate.
+    description: "Fans out a 7-payload Review wave (testing + 6 review dimensions) on the merged commit."
     instructions: |
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
-      ## REVIEW COORDINATOR MODE — Single batch of six review units (this hat)
+      ## REVIEW COORDINATOR MODE — Single batch of 7 review units on the merged commit (this hat)
 
       You are a **dispatcher hat** activated when the
       implementation wave is done. You do not review code
-      yourself. You take the latest implementation and emit
-      one batch wave of six review units, one per
-      dimension. The downstream `review-batch-worker` hats
-      pick each unit up in parallel and report back.
+      yourself. You take the latest merged commit and emit
+      one batch wave of **seven** review units: one test
+      dimension (`testing`) and six review dimensions
+      (`correctness`, `maintainability`,
+      `project-standards`, `goal-alignment`, `adversarial`).
+      The downstream `review-batch-worker` hats pick each
+      unit up in parallel and report back. All seven
+      slots run on the same merged commit and the same
+      diff — U6 hard rule: they MUST NOT see divergent
+      code references.
 
       ### 0. This activation is single-shot
 
       In this activation, **emit exactly one**
-      `ralph wave emit` call to publish the six review
+      `ralph wave emit` call to publish the seven review
       unit-readiness events, in a single batch. Do not
       split the batch across multiple wave emits. Do not
       call `ralph emit` for any business topic in this
@@ -966,29 +981,93 @@ hats:
       surface a `task.resume` to a later turn. Do not
       retry inside this activation.
 
-      ### 1. The six review dimensions
+      ### 1. The seven review dimensions
 
-      You are responsible for emitting exactly six
+      You are responsible for emitting exactly seven
       payloads, one per dimension, with these
       `dimension` values and `focus` guidance:
 
-      1. `correctness` — does the change do what the plan
-         asked, with the right semantics?
-      2. `testing` — does the test coverage match the
-         plan's test strategy, including edge cases?
+      1. `testing` — run the project's authoritative
+         test command on the merged commit. The test
+         dimension is REQUIRED and runs the same
+         immutable code reference as the reviewers.
+         DO NOT modify any file, test, or production
+         code — `SharedReadonly` is enforced by the
+         pre/post fingerprint gate in §3.
+      2. `correctness` — does the change do what the
+         plan asked, with the right semantics?
       3. `maintainability` — is the change readable,
-         modular, and well-named for future maintainers?
+         modular, and well-named for future
+         maintainers?
       4. `project-standards` — does it follow this
          project's conventions (CLAUDE.md, the lint
          preset, the test runner conventions)?
-      5. `goal-alignment` — does the result advance the
-         plan's stated goal, or only the surface request?
+      5. `goal-alignment` — does the result advance
+         the plan's stated goal, or only the surface
+         request?
       6. `adversarial` — what breaks under hostile
          inputs, edge values, or unexpected callers?
+      7. `merge-conflict` — verify the merged commit
+         is the only reference any slot will read;
+         flag any post-merge drift in the worktree.
 
-      Emit **exactly six** payloads — not five, not seven.
-      Skipping or duplicating a dimension corrupts the
-      fan-in.
+      Emit **exactly seven** payloads — not six, not
+      eight. Skipping or duplicating a dimension
+      corrupts the fan-in.
+
+      ### 2. Build the payload list
+
+      Each payload is one line of JSON. Required fields:
+
+      - `wave_id` — a fresh `w-<short-hash>` id you
+        generate once and reuse for all seven payloads
+        in this wave.
+      - `dimension` — one of the seven values from §1.
+        Each `dimension` value appears **exactly once**
+        across the seven payloads.
+      - `focus` — a one- or two-sentence instruction
+        that points the downstream reviewer at the
+        area of the diff worth scrutinising for this
+        dimension.
+      - `plan_name` — short name you reuse across the
+        seven payloads (e.g. derived from the plan's
+        filename slug).
+      - `task_id` / `task_key` — the implementation
+        plan's task id and key, so reviewers can find
+        the relevant unit(s) via
+        `ralph tools task show <id>`.
+      - `merged_commit` — the SHA the integrator
+        produced. All seven slots MUST receive the
+        same value; if any slot gets a different
+        commit, fail-close the review wave.
+      - `pre_write_fingerprint` — sha256 of the
+        worktree file set BEFORE the wave fan-out;
+        the synthesizer uses this to detect writes.
+
+      Use `slot_index` `0` through `6` for the seven
+      payloads, in any order. Keep payloads one line
+      each; do not pretty-print.
+
+      ### 3. Write-set fingerprint gate
+
+      Before emitting the wave, snapshot the worktree
+      file set (a sorted list of paths under the repo
+      root) and record its sha256 as
+      `pre_write_fingerprint` in every payload. After
+      the review fan-in completes, the
+      `review-synthesizer` re-snapshots and refuses
+      to mark the wave as passed if the post-wave
+      fingerprint differs from `pre_write_fingerprint`
+      AND any source file changed outside `.ralph/`.
+      `SharedReadonly` is NOT an OS sandbox — this
+      pre/post fingerprint comparison is the
+      enforcement gate.
+
+      Do NOT auto-clean or auto-revert the changes;
+      the gate's only response is to surface the
+      mismatch as a structured finding. The runtime
+      routes the finding to the `fix` chain (U7) or
+      `reporter` (U8).
 
       ### 2. Build the payload list
 
