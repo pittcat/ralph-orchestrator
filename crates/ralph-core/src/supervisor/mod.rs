@@ -460,6 +460,7 @@ mod recover;
 mod rusqlite;
 #[cfg(test)]
 mod types_tests;
+pub mod worker_outcome;
 pub mod worktree_bind;
 
 // 2026-07-03-001 supervisor real-wiring: re-export the sunk-down
