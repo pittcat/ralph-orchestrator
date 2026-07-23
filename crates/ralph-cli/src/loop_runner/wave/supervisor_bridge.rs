@@ -198,26 +198,6 @@ impl CoordinatorSupervisorBridge {
         self.store.clone()
     }
 
-    /// 2026-07-23-007 plan U2 (R-W1): return the loop's primary
-    /// workspace root when the bridge was constructed with a
-    /// `ProductionBridgeContext`. `None` keeps the legacy
-    /// `from_store` / `with_in_memory_store` semantics — callers
-    /// without a context must not pretend to know the workspace
-    /// root.
-    #[allow(dead_code)]
-    pub fn repo_root(&self) -> Option<&std::path::Path> {
-        self.context.as_ref().map(|c| c.repo_root.as_path())
-    }
-
-    /// 2026-07-23-007 plan U4 (R-W5): return the loop's primary
-    /// `tasks.jsonl` path when the bridge was constructed with
-    /// one. `None` disables slot→task projection (legacy /
-    /// dry-run paths).
-    #[allow(dead_code)]
-    pub fn tasks_path(&self) -> Option<&std::path::Path> {
-        self.context.as_ref().and_then(|c| c.tasks_path.as_deref())
-    }
-
     /// Access the coordinator so the bridge can hand it to
     /// the runtime when the dispatcher needs to drive a tick
     /// outside the bridge trait.
