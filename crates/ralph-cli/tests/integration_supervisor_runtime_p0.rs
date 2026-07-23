@@ -982,3 +982,85 @@ fn rusqlite_record_slot_failure_cancel_after_completed_wins() {
         "Cancelled slot surfaces in pending_count; got {snap:?}"
     );
 }
+
+/// 2026-07-23-007 plan U9 (T2): dispatcher fail-close contract.
+/// When the control-plane validator rejects a slot's per-worker
+/// channel (e.g. the events file is inside the slot worktree),
+/// the dispatcher records a `record_slot_failure` with the
+/// validator's stable reason code
+/// (`invalid_control_plane_path`) and DOES NOT spawn a worker.
+///
+/// This is a character-level test that pins the store-side
+/// contract: a slot that was approved (status=Dispatched) can
+/// transition to Failed with the validator's reason code, and
+/// the no-spawn outcome is observable as `failed_count == 1`
+/// and `completed_count == 0`. The full dispatcher-level
+/// integration is exercised by the U2 tests in
+/// `loop_runner/tests/wave_supervisor.rs`; this test is the
+/// narrowest unit that proves the reason code propagates from
+/// `validate_control_plane_binding` → `reason_for` →
+/// `record_slot_failure` without mutation.
+#[test]
+fn dispatcher_fail_close_records_validator_reason() {
+    use ralph_core::control_plane::{
+        ControlPlaneError, reason_for, validate_control_plane_binding,
+    };
+    use ralph_core::supervisor::SupervisorStore;
+    let mut fx = SupervisorP0Fixture::new_in_memory(
+        "u9-fail-close",
+        "u9-loop",
+        "task-u9",
+        "task-key-u9:step-1",
+        "step-1",
+    );
+    fx.with_git_baseline();
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+
+    // 1. Drive the validator with an invalid channel (events file
+    //    inside the slot worktree) and capture the reason code.
+    let nested_orphan = fx.slot_worktree_path().join(".ralph/events.jsonl");
+    std::fs::create_dir_all(nested_orphan.parent().unwrap()).unwrap();
+    std::fs::write(&nested_orphan, "{}\n").unwrap();
+    let validator_err = validate_control_plane_binding(
+        &nested_orphan,
+        Some(fx.slot_worktree_path()),
+        fx.workspace_root(),
+    )
+    .expect_err("events file inside slot worktree must fail-close");
+    let validator_reason = reason_for(&validator_err);
+    assert_eq!(
+        validator_reason, "invalid_control_plane_path",
+        "validator reason must be the stable SSOT code"
+    );
+    let reason = match &validator_err {
+        ControlPlaneError::SlotSubtree { .. } => validator_reason,
+        other => panic!("expected SlotSubtree rejection, got {other:?}"),
+    };
+
+    // 2. The dispatcher writes this reason into the store via
+    //    `record_slot_failure` (dispatcher.rs:1613-1614). Replay
+    //    the same write here so the test asserts the store-side
+    //    contract independently of the dispatch loop machinery.
+    fx.store()
+        .as_ref()
+        .record_slot_failure("w-1", 0, reason)
+        .expect("record_slot_failure with validator reason must succeed");
+
+    // 3. The slot ends Failed with the validator's reason code
+    //    preserved verbatim; no Completed row exists (i.e. no
+    //    worker was spawned and reached the success path).
+    let snap = fx
+        .store()
+        .as_ref()
+        .fan_in_status("w-1")
+        .expect("fan_in_status must succeed");
+    assert_eq!(
+        snap.failed_count, 1,
+        "fail-close must produce one Failed slot; got {snap:?}"
+    );
+    assert_eq!(
+        snap.completed_count, 0,
+        "no worker may have been spawned; got {snap:?}"
+    );
+}
