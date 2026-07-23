@@ -203,7 +203,11 @@ impl SupervisorP0Fixture {
     /// observe paths.
     pub fn with_git_baseline(&self) -> &Self {
         for dir in [self.workspace.path(), self.slot_worktree.path()] {
-            let _ = Command::new("git").arg("init").arg("--quiet").arg(dir).status();
+            let _ = Command::new("git")
+                .arg("init")
+                .arg("--quiet")
+                .arg(dir)
+                .status();
             let _ = Command::new("git")
                 .arg("-C")
                 .arg(dir)
@@ -215,7 +219,12 @@ impl SupervisorP0Fixture {
                 .args(["config", "user.name", "Fixture"])
                 .status();
             std::fs::write(dir.join("README.md"), "# fixture\n").unwrap();
-            let _ = Command::new("git").arg("-C").arg(dir).arg("add").arg(".").status();
+            let _ = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .arg("add")
+                .arg(".")
+                .status();
             let _ = Command::new("git")
                 .arg("-C")
                 .arg(dir)
@@ -241,11 +250,20 @@ impl SupervisorP0Fixture {
         let mut env = HashMap::new();
         env.insert("RALPH_CURRENT_HAT".into(), "executor".into());
         env.insert("RALPH_CURRENT_LOOP_ID".into(), self.local_loop_id.clone());
-        env.insert("RALPH_EVENTS_FILE".into(), channel_path.display().to_string());
+        env.insert(
+            "RALPH_EVENTS_FILE".into(),
+            channel_path.display().to_string(),
+        );
         env.insert("RALPH_WAVE_WORKER".into(), "1".into());
         env.insert("RALPH_TRIGGERED_HAT".into(), self.local_loop_id.clone());
-        env.insert("RALPH_HATS_SOURCE".into(), "builtin:ce-executor-supervisor".into());
-        env.insert("RALPH_WORKSPACE_ROOT".into(), self.workspace.path().display().to_string());
+        env.insert(
+            "RALPH_HATS_SOURCE".into(),
+            "builtin:ce-executor-supervisor".into(),
+        );
+        env.insert(
+            "RALPH_WORKSPACE_ROOT".into(),
+            self.workspace.path().display().to_string(),
+        );
         env.insert("RALPH_LOOP_ITERATION".into(), "1".into());
         env.insert("PATH".into(), std::env::var("PATH").unwrap_or_default());
         env
@@ -335,14 +353,12 @@ impl SupervisorP0Fixture {
         match self.backend {
             FixtureBackend::InMemory => std::sync::Arc::new(InMemorySupervisorStore::new()),
             #[cfg(feature = "supervisor-db")]
-            FixtureBackend::Rusqlite => {
-                std::sync::Arc::new(
-                    RusqliteSupervisorStore::open(
-                        self.workspace.path().join(".ralph/supervisor-fixture.db"),
-                    )
-                    .expect("rusqlite store"),
+            FixtureBackend::Rusqlite => std::sync::Arc::new(
+                RusqliteSupervisorStore::open(
+                    self.workspace.path().join(".ralph/supervisor-fixture.db"),
                 )
-            }
+                .expect("rusqlite store"),
+            ),
         }
     }
 
@@ -355,10 +371,7 @@ impl SupervisorP0Fixture {
             .bound_wave_id
             .as_deref()
             .unwrap_or_else(|| self.public_wave_id.as_str());
-        let snapshot = self
-            .store
-            .fan_in_status(wave_id)
-            .ok();
+        let snapshot = self.store.fan_in_status(wave_id).ok();
         let snapshots = snapshot.into_iter().collect::<Vec<_>>();
         let slot_resources = (0..self.wave_total)
             .map(|i| self.store.get_slot_resource(wave_id, i).ok().flatten())
@@ -489,7 +502,9 @@ fn public_wave_id_resolves_to_store_id_after_restart() {
     // store handle — same kind, but new instance — to prove the
     // bridge cannot rely on its own cache across restart.
     let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
-    store.register_wave("public-A", WaveKind::Exec, 1).expect("first register");
+    store
+        .register_wave("public-A", WaveKind::Exec, 1)
+        .expect("first register");
     let fresh_bridge = InMemoryCoordinatorBridge::from_store(store.clone());
     let resolved = fresh_bridge
         .register_wave_if_absent(WaveKind::Exec, "public-A", 1)
@@ -706,8 +721,8 @@ fn unknown_public_wave_id_lookup_returns_none() {
 /// the public store API and verifies the typed failure.
 #[test]
 fn conflicting_terminal_does_not_overwrite_completed_slot() {
-    use ralph_core::supervisor::SupervisorStoreError;
     use ralph_core::supervisor::SupervisorStore;
+    use ralph_core::supervisor::SupervisorStoreError;
     let mut fx = SupervisorP0Fixture::new_in_memory(
         "u5-conflict",
         "u5-loop",
@@ -729,12 +744,13 @@ fn conflicting_terminal_does_not_overwrite_completed_slot() {
 
     // Conflicting second terminal: same slot, but a different
     // content_hash. The store MUST refuse to overwrite.
-    let conflict = fx.store().as_ref().record_slot_result("w-1", 0, "hash-B", 2);
+    let conflict = fx
+        .store()
+        .as_ref()
+        .record_slot_result("w-1", 0, "hash-B", 2);
     match conflict {
         Err(SupervisorStoreError::AlreadyTerminal(_)) => {}
-        other => panic!(
-            "conflicting terminal must produce AlreadyTerminal, got {other:?}"
-        ),
+        other => panic!("conflicting terminal must produce AlreadyTerminal, got {other:?}"),
     }
 
     // Idempotent replay with the same content_hash is allowed.

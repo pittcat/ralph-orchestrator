@@ -1105,10 +1105,7 @@ mod tests {
         // Conflicting content_hash → AlreadyTerminal, no overwrite.
         let conflict = store.record_slot_result(&wave, 0, "h-b", 2);
         assert!(
-            matches!(
-                conflict,
-                Err(SupervisorStoreError::AlreadyTerminal(_))
-            ),
+            matches!(conflict, Err(SupervisorStoreError::AlreadyTerminal(_))),
             "conflicting content_hash must be rejected as AlreadyTerminal, got {conflict:?}"
         );
         let snap = store.fan_in_status(&wave).unwrap();

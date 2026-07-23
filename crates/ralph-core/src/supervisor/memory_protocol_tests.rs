@@ -81,8 +81,7 @@ fn different_content_hash_replaces_record() {
     // record_slot_result with a different content_hash MUST be
     // rejected — conflicting terminal events must not overwrite
     // the recorded result.
-    let conflict =
-        s.record_slot_result(&wave, 0, "hash-b", 2);
+    let conflict = s.record_slot_result(&wave, 0, "hash-b", 2);
     assert!(
         matches!(conflict, Err(SupervisorStoreError::AlreadyTerminal(_))),
         "conflicting terminal must be rejected as AlreadyTerminal, got {conflict:?}"

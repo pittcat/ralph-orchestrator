@@ -12,9 +12,9 @@
 //!   (not from dispatch / queue). The store records it the
 //!   same way both backends.
 
-use ralph_core::supervisor::SupervisorStore;
 #[cfg(feature = "supervisor-db")]
 use ralph_core::supervisor::RusqliteSupervisorStore;
+use ralph_core::supervisor::SupervisorStore;
 use ralph_core::supervisor::{InMemorySupervisorStore, WaveKind};
 
 use tempfile::TempDir;
@@ -25,7 +25,7 @@ use tempfile::TempDir;
 /// `now == deadline` (strict `>` semantics).
 #[test]
 fn evaluate_phase_now_equals_deadline_still_allows_integrate() {
-    use ralph_core::supervisor::phase::{evaluate_phase, PhaseInputs};
+    use ralph_core::supervisor::phase::{PhaseInputs, evaluate_phase};
     use ralph_core::supervisor::{SlotStatus, WaveSnapshot};
 
     let mut wave = WaveSnapshot {
@@ -123,8 +123,8 @@ fn memory_and_rusqlite_record_consistent_wave_shape() {
 /// the cancel flag wins before the deadline is checked.
 #[test]
 fn cancel_before_timeout_fires_cancelled_not_timeout() {
-    use ralph_core::supervisor::phase::{evaluate_phase, PhaseInputs};
     use ralph_core::supervisor::WaveSnapshot;
+    use ralph_core::supervisor::phase::{PhaseInputs, evaluate_phase};
 
     let wave = WaveSnapshot {
         wave_id: "w-cancel-wins".into(),

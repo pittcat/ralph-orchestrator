@@ -2746,7 +2746,9 @@ async fn test_dispatcher_record_idempotent_across_reruns() {
     );
 
     // A *conflicting* content_hash is rejected.
-    let conflict = bridge.store.record_slot_result(&store_wave_id, 0, "different-hash", 1);
+    let conflict = bridge
+        .store
+        .record_slot_result(&store_wave_id, 0, "different-hash", 1);
     assert!(
         conflict.is_err(),
         "conflicting content_hash must be rejected, got {conflict:?}"

@@ -180,20 +180,33 @@ mod tests {
     #[test]
     fn table_a3_1_exit_0_zero_events_fails_empty() {
         let out = classify_worker_outcome(WorkerExit::Exit0, 0, &[]);
-        assert_eq!(out, SlotOutcome::Failed { reason: REASON_EMPTY_WORKER_RESULT });
+        assert_eq!(
+            out,
+            SlotOutcome::Failed {
+                reason: REASON_EMPTY_WORKER_RESULT
+            }
+        );
     }
 
     #[test]
     fn table_a3_2_exit_0_with_events_no_terminal_fails_missing() {
-        let out =
-            classify_worker_outcome(WorkerExit::Exit0, 3, &[TerminalMarker::Done, TerminalMarker::Done]);
+        let out = classify_worker_outcome(
+            WorkerExit::Exit0,
+            3,
+            &[TerminalMarker::Done, TerminalMarker::Done],
+        );
         // Plan says "non-terminal events only": we feed
         // TerminalMarker::Done as a stand-in for "non-terminal
         // coverage"; the worker DID see a terminal, so the
         // expected behavior is Completed. We assert the
         // missing branch with zero-terminal events directly.
         let out2 = classify_worker_outcome(WorkerExit::Exit0, 1, &[]);
-        assert_eq!(out2, SlotOutcome::Failed { reason: REASON_MISSING_WORKER_TERMINAL });
+        assert_eq!(
+            out2,
+            SlotOutcome::Failed {
+                reason: REASON_MISSING_WORKER_TERMINAL
+            }
+        );
         // Demonstrate that a Done marker with `events > 0` is
         // accepted (this is the R-A3 success path):
         assert_eq!(out, SlotOutcome::Completed(WorkerTerminalKind::Done));
@@ -212,33 +225,40 @@ mod tests {
 
     #[test]
     fn table_a3_4_timeout_partial_evidence_still_fails_timeout() {
-        let out = classify_worker_outcome(
-            WorkerExit::Timeout,
-            5,
-            &[TerminalMarker::Done],
+        let out = classify_worker_outcome(WorkerExit::Timeout, 5, &[TerminalMarker::Done]);
+        assert_eq!(
+            out,
+            SlotOutcome::Failed {
+                reason: REASON_WORKER_TIMEOUT
+            }
         );
-        assert_eq!(out, SlotOutcome::Failed { reason: REASON_WORKER_TIMEOUT });
     }
 
     #[test]
     fn timeout_zero_events_is_timeout_not_empty() {
         let out = classify_worker_outcome(WorkerExit::Timeout, 0, &[]);
-        assert_eq!(out, SlotOutcome::Failed { reason: REASON_WORKER_TIMEOUT });
+        assert_eq!(
+            out,
+            SlotOutcome::Failed {
+                reason: REASON_WORKER_TIMEOUT
+            }
+        );
     }
 
     #[test]
     fn cancel_zero_events_is_cancelled_not_empty() {
         let out = classify_worker_outcome(WorkerExit::Cancelled, 0, &[]);
-        assert_eq!(out, SlotOutcome::Failed { reason: REASON_WORKER_CANCELLED });
+        assert_eq!(
+            out,
+            SlotOutcome::Failed {
+                reason: REASON_WORKER_CANCELLED
+            }
+        );
     }
 
     #[test]
     fn exit_nonzero_with_terminal_still_completes() {
-        let out = classify_worker_outcome(
-            WorkerExit::ExitNonZero,
-            1,
-            &[TerminalMarker::Failed],
-        );
+        let out = classify_worker_outcome(WorkerExit::ExitNonZero, 1, &[TerminalMarker::Failed]);
         assert_eq!(out, SlotOutcome::Completed(WorkerTerminalKind::Failed));
     }
 
