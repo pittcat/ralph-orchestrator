@@ -3121,6 +3121,96 @@ async fn test_u4_slot_terminal_projects_to_tasks_jsonl() {
     );
 }
 
+/// 2026-07-23-007 plan U10 (T3 / T6): the sibling of
+/// `test_u4_slot_terminal_projects_to_tasks_jsonl` for the
+/// Failed path. A slot that classifies as Failed (e.g. the
+/// worker backend reports a non-zero exit with no accepted
+/// terminal marker) MUST project a `Failed` task row, NOT a
+/// `Closed` row. The existing Success sibling checked
+/// terminal-status with a substring match; this test uses
+/// `assert_eq!` against `TaskStatus::Failed` directly so the
+/// assertion strength matches the schema (folding testing:T6
+/// into the same test).
+#[tokio::test]
+async fn test_u4_failed_slot_projects_to_failed_task_row() {
+    use crate::loop_runner::wave::CoordinatorSupervisorBridge;
+    use ralph_core::TaskStatus;
+    use ralph_core::TaskStore;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let workspace_root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    let tasks_dir = workspace_root.join(".ralph").join("agent");
+    std::fs::create_dir_all(&tasks_dir).expect("create tasks dir");
+    let tasks_path = tasks_dir.join("tasks.jsonl");
+    let main_events_file = workspace_root.join(".ralph").join("events.jsonl");
+
+    #[derive(Debug)]
+    struct StubFactory;
+    impl ralph_core::supervisor::worktree_bind::WorktreeFactory for StubFactory {
+        fn create(
+            &self,
+            repo_root: std::path::PathBuf,
+            branch: String,
+        ) -> Result<
+            ralph_core::worktree::Worktree,
+            ralph_core::supervisor::worktree_bind::WorktreeError,
+        > {
+            let wt = repo_root.join(format!("wt-{branch}"));
+            std::fs::create_dir_all(&wt).ok();
+            Ok(ralph_core::worktree::Worktree {
+                path: wt,
+                branch,
+                is_main: false,
+                head: None,
+            })
+        }
+    }
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let context = ProductionBridgeContext {
+        loop_id: "u10-loop".to_string(),
+        repo_root: workspace_root.clone(),
+        events_path: Some(main_events_file.clone()),
+        tasks_path: Some(tasks_path.clone()),
+    };
+    let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
+        store.clone() as std::sync::Arc<dyn SupervisorStore>,
+        context,
+        std::sync::Arc::new(StubFactory),
+    );
+
+    let wave = make_u3_wave("u10-failed-projection", 1, 1);
+    // U5's Fail arm: the executor reports a non-zero exit with
+    // a structured error reason. The classifier maps it to
+    // SlotOutcome::Failed{worker_cancelled} (per the U3
+    // worker_outcome.rs short-circuit), so the slot must
+    // project to TaskStatus::Failed.
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Fail("boom".to_string()));
+    let _outcome =
+        run_u2_execute_wave_with_env_capture(bridge, wave, executor, &main_events_file, "u10-loop")
+            .await;
+
+    let task_store = TaskStore::load(&tasks_path).expect("load");
+    let rows: Vec<_> = task_store.all().iter().collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "U10/007: exactly one task row projected for the Failed slot; got {rows:?}"
+    );
+    let row = &rows[0];
+    let key = row.key.as_deref().unwrap_or("");
+    assert!(
+        key.starts_with("supervisor:u10-loop:") && key.ends_with(":slot-0"),
+        "U10/007: stable task_key must carry loop_id + slot_index; got {key:?}"
+    );
+    assert_eq!(
+        row.status,
+        TaskStatus::Failed,
+        "U10/007: Failed slot must project to TaskStatus::Failed (not Closed); got {:?}",
+        row.status
+    );
+}
+
 // =============================================================================
 // 2026-07-23-001 plan U6: production ledger sink + unique coordination event.
 //
