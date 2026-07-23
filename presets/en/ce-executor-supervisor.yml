@@ -619,8 +619,6 @@ hats:
         for the artifact's loop_id stamping.
       - `RALPH_HATS_SOURCE` — preset label, useful in
         error messages.
-    triggers:
-      - work.ready
     # 2026-07-23-005 plan U2: task-planner no longer publishes the
     # per-unit `exec.unit.ready` wave (that ownership moves to the
     # exec-wave dispatcher in U5). It only emits `plan.blocked` on
@@ -632,8 +630,7 @@ hats:
       - plan.blocked
     event_filter:
       enabled: true
-      events:
-      - work.ready
+      events: []
     exempt_topics:
       - plan.blocked
 
@@ -789,6 +786,8 @@ hats:
     triggers:
       - work.ready
       - exec.wave.complete
+    trigger_multi_consumer_topics:
+      - exec.wave.complete
     # 2026-07-23-005 plan U5: dispatcher only emits the
     # per-unit readiness topic. `exec.wave.complete` is
     # supervisor-only (origin guard rejects agent emit; see
@@ -860,6 +859,8 @@ hats:
     name: "Exec Integrator"
     description: "Merges completed execution waves and runs the full test suite."
     triggers:
+      - exec.wave.complete
+    trigger_multi_consumer_topics:
       - exec.wave.complete
     publishes:
       - work.done

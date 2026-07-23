@@ -307,6 +307,28 @@ fn ce_executor_supervisor_preset_builtin_wave_consumers_match_expected_three() {
 }
 
 #[test]
+fn ce_executor_supervisor_yaml_passes_strict_ambiguous_routing_check() {
+    use crate::config::{RalphConfig, ConfigError};
+    let config = RalphConfig::parse_yaml(PRESET_YAML).expect("preset must parse as RalphConfig");
+    let result = config.validate();
+
+    let ambiguous_errors: Vec<String> = match &result {
+        Err(ConfigError::AmbiguousRouting { trigger, hat1, hat2 }) => {
+            vec![format!("AmbiguousRouting({trigger}, {hat1}, {hat2})")]
+        }
+        Err(_) => vec![],
+        Ok(_) => vec![],
+    };
+
+    assert!(
+        ambiguous_errors.is_empty(),
+        "ce-executor-supervisor preset must validate with no AmbiguousRouting errors; \
+         got: {:?}",
+        ambiguous_errors
+    );
+}
+
+#[test]
 fn ce_executor_supervisor_preset_wave_events_pass_detect_all_capped() {
     // End-to-end behavioral pin: build a full wave batch
     // for each of the three wave consumer hat topologies
