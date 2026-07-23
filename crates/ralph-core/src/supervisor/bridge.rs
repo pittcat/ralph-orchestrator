@@ -295,16 +295,29 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
         if let Some(existing) = guard.get(wave_id) {
             return Ok(existing.clone());
         }
-        // The store returns `DuplicateKey` if the wave was
-        // already registered (e.g. by a previous loop
-        // iteration); treat that as the idempotent success
-        // the trait name promises. We cannot recover the
-        // store-assigned id from the DuplicateKey error, so
-        // the dispatcher MUST reuse the same idempotency key
-        // across ticks (which it does — it's the wave_id).
+        // 2026-07-23-004 plan U2 (R-A2): the store allocates a
+        // distinct `w-{seq}` id from the idempotency key on first
+        // registration. On a process restart the in-memory map is
+        // empty, so a duplicate-key return is expected — but the
+        // caller key MUST NOT be returned as the store id. Look
+        // the original store id back up via the persistent
+        // idempotency_key index. When the lookup misses, surface
+        // a `BridgeError::Store` (the wave is gone from disk —
+        // cannot resolve the caller's caller-key back to a store
+        // row, so refuse to fabricate a fake id).
         let store_id = match self.store.register_wave(wave_id, kind, expected_total) {
             Ok(id) => id,
-            Err(SupervisorStoreError::DuplicateKey(_)) => wave_id.to_string(),
+            Err(SupervisorStoreError::DuplicateKey(_)) => {
+                match self.store.wave_id_for_idempotency_key(wave_id) {
+                    Ok(Some(resolved)) => resolved,
+                    Ok(None) => {
+                        return Err(BridgeError::Store(format!(
+                            "duplicate idempotency_key={wave_id} but store has no row"
+                        )));
+                    }
+                    Err(err) => return Err(BridgeError::Store(err.to_string())),
+                }
+            }
             Err(err) => return Err(BridgeError::Store(err.to_string())),
         };
         guard.insert(wave_id.to_string(), store_id.clone());

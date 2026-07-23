@@ -2720,15 +2720,21 @@ async fn test_dispatcher_record_idempotent_across_reruns() {
         "U5: first run records 2 completed slots"
     );
 
-    // Re-record the SAME slots directly through the bridge (simulating
-    // a duplicate record — e.g. a crash/replay that re-reports a slot).
-    // The completed_count MUST stay at 2 (idempotent).
+    // Re-record the SAME slots directly through the bridge
+    // (simulating a duplicate record — e.g. a crash/replay
+    // that re-reports a slot). 2026-07-23-004 plan U5 makes
+    // idempotency depend on the SAME content_hash; replaying
+    // with a conflicting hash is a different scenario
+    // (`test_dispatcher_record_conflicting_terminal_is_rejected`).
+    let recorded = bridge.slot_results.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 2, "bridge must have recorded 2 slots");
+    let (slot0_hash, slot1_hash) = (recorded[0].1.clone(), recorded[1].1.clone());
     bridge
-        .record_slot_result(&store_wave_id, 0, "dup-hash", 1)
-        .expect("re-record slot 0");
+        .record_slot_result(&store_wave_id, 0, &slot0_hash, 1)
+        .expect("re-record slot 0 with same hash must be idempotent");
     bridge
-        .record_slot_result(&store_wave_id, 1, "dup-hash", 1)
-        .expect("re-record slot 1");
+        .record_slot_result(&store_wave_id, 1, &slot1_hash, 1)
+        .expect("re-record slot 1 with same hash must be idempotent");
 
     let snap = bridge
         .store
@@ -2736,7 +2742,16 @@ async fn test_dispatcher_record_idempotent_across_reruns() {
         .expect("snapshot");
     assert_eq!(
         snap.completed_count, 2,
-        "U5: duplicate record_slot_result must NOT increase completed_count"
+        "U5: duplicate record_slot_result with same content_hash must NOT increase completed_count"
+    );
+
+    // A *conflicting* content_hash is rejected.
+    let conflict = bridge
+        .store
+        .record_slot_result(&store_wave_id, 0, "different-hash", 1);
+    assert!(
+        conflict.is_err(),
+        "conflicting content_hash must be rejected, got {conflict:?}"
     );
 }
 

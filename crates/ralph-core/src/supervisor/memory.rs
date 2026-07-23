@@ -426,6 +426,28 @@ impl SupervisorStore for InMemorySupervisorStore {
                     wave_id: wave_id.to_string(),
                     slot_index,
                 })?;
+        // 2026-07-23-004 plan U5 (R-A3 / R-A4): first-terminal-wins.
+        // Reject overwrite of an already-terminal slot;
+        // idempotent replay of the SAME content_hash is allowed
+        // and returns Ok without rewriting.
+        let is_terminal = matches!(
+            slot.status,
+            SlotStatus::Completed | SlotStatus::Failed | SlotStatus::Cancelled
+        );
+        if is_terminal {
+            let matches = slot
+                .content_hash
+                .as_deref()
+                .map(|h| h == content_hash)
+                .unwrap_or(false);
+            if !matches {
+                return Err(SupervisorStoreError::AlreadyTerminal(format!(
+                    "wave={wave_id} slot={slot_index} status={}",
+                    slot.status
+                )));
+            }
+            return Ok(());
+        }
         slot.status = SlotStatus::Completed;
         slot.content_hash = Some(content_hash.to_string());
         slot.event_count = Some(event_count);
@@ -566,6 +588,14 @@ impl SupervisorStore for InMemorySupervisorStore {
         let mut ids: Vec<String> = inner.waves_by_id.keys().cloned().collect();
         ids.sort();
         Ok(ids)
+    }
+
+    fn wave_id_for_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> SupervisorStoreResult<Option<String>> {
+        let inner = self.lock()?;
+        Ok(inner.waves_by_key.get(idempotency_key).cloned())
     }
 
     fn recover_active_waves(&self) -> SupervisorStoreResult<Vec<WaveSnapshot>> {

@@ -493,6 +493,45 @@ impl SupervisorStore for RusqliteSupervisorStore {
     ) -> SupervisorStoreResult<()> {
         self.with_conn(|conn| {
             let tx = conn.transaction()?;
+            // 2026-07-23-004 plan U5 (R-A3 / R-A4): first-terminal-wins.
+            // Inspect the slot's current status before the
+            // UPDATE — if already terminal, refuse to overwrite
+            // unless the new content_hash matches the recorded
+            // one (idempotent replay).
+            let current: Option<(String, Option<String>)> = tx
+                .query_row(
+                    "SELECT status, content_hash FROM wave_slots
+                     WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![wave_id, i64::from(slot_index)],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let (current_status, current_hash) = match current {
+                Some(row) => row,
+                None => {
+                    return Err(SupervisorStoreError::UnknownSlot {
+                        wave_id: wave_id.to_string(),
+                        slot_index,
+                    });
+                }
+            };
+            let is_terminal = matches!(
+                current_status.as_str(),
+                "completed" | "failed" | "cancelled"
+            );
+            if is_terminal {
+                let matches = current_hash
+                    .as_deref()
+                    .map(|h| h == content_hash)
+                    .unwrap_or(false);
+                if !matches {
+                    return Err(SupervisorStoreError::AlreadyTerminal(format!(
+                        "wave={wave_id} slot={slot_index} status={current_status}"
+                    )));
+                }
+                // Idempotent replay — same content_hash, no write.
+                return Ok(());
+            }
             tx.execute(
                 "UPDATE wave_slots SET status = 'completed', content_hash = ?3, event_count = ?4
                  WHERE wave_id = ?1 AND slot_index = ?2",
@@ -713,6 +752,22 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 .query_map([], |row| row.get(0))?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(ids)
+        })
+    }
+
+    fn wave_id_for_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> SupervisorStoreResult<Option<String>> {
+        self.with_conn(|conn| {
+            let wave_id: Option<String> = conn
+                .query_row(
+                    "SELECT wave_id FROM waves WHERE idempotency_key = ?1",
+                    [idempotency_key],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(wave_id)
         })
     }
 
@@ -1030,8 +1085,12 @@ mod tests {
         assert_eq!(store.try_dispatch_next(1).unwrap().unwrap().1, 1);
     }
 
-    /// R-E1: same content_hash re-recorded does not double-append
-    /// to the worker_results table; latest write wins.
+    /// 2026-07-23-004 plan U5 (R-A3): first-terminal-wins.
+    /// A conflicting terminal event MUST NOT overwrite the
+    /// recorded slot terminal. The `worker_results` history
+    /// table is still upserted on idempotent replay with the
+    /// SAME content_hash (R-E1), but a *different* content_hash
+    /// returns `AlreadyTerminal` and refuses to write.
     #[test]
     fn worker_results_replace_on_conflict() {
         let store = store();
@@ -1039,7 +1098,16 @@ mod tests {
         store.bind_worktree(&wave, 0, bind(0)).unwrap();
         store.try_dispatch_next(4).unwrap().unwrap();
         store.record_slot_result(&wave, 0, "h-a", 1).unwrap();
-        store.record_slot_result(&wave, 0, "h-b", 2).unwrap();
+        // Idempotent replay with same content_hash → Ok, no overwrite.
+        store
+            .record_slot_result(&wave, 0, "h-a", 1)
+            .expect("idempotent replay must succeed");
+        // Conflicting content_hash → AlreadyTerminal, no overwrite.
+        let conflict = store.record_slot_result(&wave, 0, "h-b", 2);
+        assert!(
+            matches!(conflict, Err(SupervisorStoreError::AlreadyTerminal(_))),
+            "conflicting content_hash must be rejected as AlreadyTerminal, got {conflict:?}"
+        );
         let snap = store.fan_in_status(&wave).unwrap();
         assert_eq!(snap.completed_count, 1);
     }

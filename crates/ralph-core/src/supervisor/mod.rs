@@ -248,6 +248,14 @@ pub enum SupervisorStoreError {
     UnknownWave(String),
     #[error("slot {slot_index} not found on wave {wave_id}")]
     UnknownSlot { wave_id: String, slot_index: u32 },
+    /// 2026-07-23-004 plan U5 (R-A3): the slot already
+    /// reached a terminal state. A conflicting terminal event
+    /// must NOT overwrite the recorded result. The
+    /// `AlreadyTerminal` reason maps to the
+    /// `conflicting_worker_terminal` reason code in the
+    /// dispatcher's slot failure path.
+    #[error("slot already terminal: {0}")]
+    AlreadyTerminal(String),
     #[error("backpressure limit reached; wave {0} enqueued")]
     BackpressureEnqueued(String),
     #[error("invalid transition: {0}")]
@@ -391,6 +399,19 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// worktrees allocated by completed waves are still released.
     fn list_wave_ids(&self) -> SupervisorStoreResult<Vec<String>>;
 
+    /// 2026-07-23-004 plan U2 (R-A2): resolve the
+    /// store-assigned `wave_id` from the caller-supplied
+    /// idempotency key, returning `None` when no wave was ever
+    /// registered under that key. Implementations MUST back this
+    /// with their persistent idempotency_key index (Memory:
+    /// `waves_by_key`; rusqlite: `SELECT wave_id FROM waves`),
+    /// so a process restart can rebuild the public→store map
+    /// without observing the in-memory bridge cache.
+    fn wave_id_for_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> SupervisorStoreResult<Option<String>>;
+
     /// Recover active waves on loop startup. Returns waves whose
     /// slot rows survived a crash (R-C3). Used by U11; does not
     /// touch DB state.
@@ -441,12 +462,13 @@ mod memory_protocol_tests;
 mod merge_sink;
 #[cfg(feature = "supervisor-db")]
 mod migrations;
-mod phase;
+pub mod phase;
 mod recover;
 #[cfg(feature = "supervisor-db")]
 mod rusqlite;
 #[cfg(test)]
 mod types_tests;
+pub mod worker_outcome;
 pub mod worktree_bind;
 
 // 2026-07-03-001 supervisor real-wiring: re-export the sunk-down
