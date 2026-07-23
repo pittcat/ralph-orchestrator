@@ -1887,6 +1887,27 @@ pub struct ValidationError {
     /// shape).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_command: Option<String>,
+    /// U2 (2026-07-23-002 plan, KTD2): independent gate identifier
+    /// for `SemanticGateViolation`. Carries the canonical gate
+    /// name (e.g. `payload_consistency:<rule_id>` or
+    /// `review_passed_while_wave_open`) so agent repair tooling
+    /// can dispatch on gate without parsing `message`. `None` for
+    /// schema-level violations (missing/invalid field, type
+    /// mismatch, etc.) where `reason_code` already identifies the
+    /// class. The legacy `field` slot is NOT used to carry the
+    /// gate ID — `field` stays empty for `SemanticGateViolation`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<String>,
+    /// U2 (2026-07-23-002 plan, KTD2): the static, declaration-order
+    /// set of business fields the rule's predicate AST references.
+    /// Agent repair tooling reads this list to know which payload
+    /// fields to inspect, and never parses `message` to recover
+    /// them. `None` for schema-level violations (field-scoped
+    /// violations already carry the single field in `field`).
+    /// Empty `Some(vec![])` for timing/state gates where the
+    /// violation is not field-scoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referenced_fields: Option<Vec<String>>,
 }
 
 impl ValidationError {
@@ -2122,6 +2143,7 @@ mod u1_warn_parity_tests {
             violation_type: ViolationType::SemanticGateViolation {
                 gate: format!("payload_consistency:{rule_id}"),
                 context: "test context".to_string(),
+                referenced_fields: Vec::new(),
             },
             message: format!("payload_consistency rule '{rule_id}' violated"),
         }
@@ -2133,6 +2155,7 @@ mod u1_warn_parity_tests {
             violation_type: ViolationType::SemanticGateViolation {
                 gate: "other_namespace:rule-1".to_string(),
                 context: "test context".to_string(),
+                referenced_fields: Vec::new(),
             },
             message: "other namespace warning".to_string(),
         }
@@ -2251,6 +2274,134 @@ mod u1_warn_parity_tests {
         let result = finding_to_validation_error(&decision, "fix.done");
         assert!(result.is_some());
         assert_eq!(result.unwrap().reason_code, "semantic_gate_violation");
+    }
+}
+
+/// U2 (2026-07-23-002 plan, KTD2): structurally actionable
+/// consistency feedback.
+///
+/// `ValidationError` must carry an independent `gate` field and a
+/// `referenced_fields` list so agent repair tooling can locate the
+/// offending payload fields without parsing `message`. The legacy
+/// `field` slot must NOT carry the gate ID for `SemanticGateViolation`
+/// — `field` is reserved for single-field schema violations.
+#[cfg(test)]
+mod u2_structured_feedback_tests {
+    use super::*;
+    use ralph_core::PolicyFinding;
+
+    fn consistency_finding_with_fields(rule_id: &str, fields: &[&str]) -> PolicyFinding {
+        PolicyFinding {
+            topic: "fix.done".to_string(),
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: format!("payload_consistency:{rule_id}"),
+                context: "contradiction between fix_status and fixes_applied".to_string(),
+                referenced_fields: fields.iter().map(|s| s.to_string()).collect(),
+            },
+            message: format!("payload_consistency rule '{rule_id}' violated"),
+        }
+    }
+
+    #[test]
+    fn u2_reject_with_resume_carries_independent_gate() {
+        // KTD2: gate is on its own field, not stuffed into `field`.
+        let finding = consistency_finding_with_fields(
+            "fix-done-blocked-zero-fixes-applied",
+            &["fix_status", "fixes_applied"],
+        );
+        let decision = PolicyDecision::RejectWithResume(finding);
+        let err = finding_to_validation_error(&decision, "fix.done")
+            .expect("RejectWithResume must surface as ValidationError");
+        assert_eq!(
+            err.gate.as_deref(),
+            Some("payload_consistency:fix-done-blocked-zero-fixes-applied"),
+            "gate must be its own structured field, got {:?}",
+            err.gate
+        );
+    }
+
+    #[test]
+    fn u2_reject_with_resume_carries_referenced_fields() {
+        // KTD2: referenced_fields is the static declared set, in
+        // declaration order, deduplicated by first occurrence.
+        let finding = consistency_finding_with_fields("rule-x", &["fix_status", "fixes_applied"]);
+        let decision = PolicyDecision::RejectWithResume(finding);
+        let err = finding_to_validation_error(&decision, "fix.done")
+            .expect("RejectWithResume must surface as ValidationError");
+        assert_eq!(
+            err.referenced_fields,
+            Some(vec!["fix_status".to_string(), "fixes_applied".to_string(),]),
+            "referenced_fields must carry the declared set in order, got {:?}",
+            err.referenced_fields
+        );
+    }
+
+    #[test]
+    fn u2_field_is_not_gate_id_for_semantic_gate_violation() {
+        // KTD2 / RF3: `field` must not carry the gate ID. For
+        // SemanticGateViolation the `field` slot is empty because
+        // the violation is not field-scoped at the schema level.
+        let finding = consistency_finding_with_fields("rule-y", &["fix_status"]);
+        let decision = PolicyDecision::RejectWithResume(finding);
+        let err = finding_to_validation_error(&decision, "fix.done")
+            .expect("RejectWithResume must surface as ValidationError");
+        assert!(
+            err.field.is_empty(),
+            "field must not carry the gate ID for SemanticGateViolation, got {:?}",
+            err.field
+        );
+    }
+
+    #[test]
+    fn u2_empty_referenced_fields_serialises_as_empty_array() {
+        // Timing/state gates (e.g. review_passed_while_wave_open)
+        // carry an empty referenced_fields list — the violation is
+        // not field-scoped. Agent tooling treats empty as "no
+        // payload field to inspect; check state/context instead".
+        let finding = PolicyFinding {
+            topic: "review.passed".to_string(),
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: "review_passed_while_wave_open".to_string(),
+                context: "wave='w-1' received=0/3 expected".to_string(),
+                referenced_fields: Vec::new(),
+            },
+            message: "review.passed while wave open".to_string(),
+        };
+        let decision = PolicyDecision::RejectWithResume(finding);
+        let err = finding_to_validation_error(&decision, "review.passed")
+            .expect("RejectWithResume must surface as ValidationError");
+        assert_eq!(
+            err.referenced_fields,
+            Some(Vec::new()),
+            "empty referenced_fields must serialise as empty Vec, got {:?}",
+            err.referenced_fields
+        );
+    }
+
+    #[test]
+    fn u2_hold_and_block_carry_structured_metadata() {
+        // All enforce dispositions (Hold/Block/Ignore) share the
+        // same finding_record path; they must all surface the
+        // structured gate + referenced_fields.
+        let finding = consistency_finding_with_fields("rule-h", &["fix_status"]);
+        for decision in [
+            PolicyDecision::Hold(finding.clone()),
+            PolicyDecision::Block(finding.clone()),
+            PolicyDecision::Ignore(finding.clone()),
+        ] {
+            let err = finding_to_validation_error(&decision, "fix.done")
+                .expect("enforce disposition must surface as ValidationError");
+            assert_eq!(
+                err.gate.as_deref(),
+                Some("payload_consistency:rule-h"),
+                "Hold/Block/Ignore must carry structured gate"
+            );
+            assert_eq!(
+                err.referenced_fields,
+                Some(vec!["fix_status".to_string()]),
+                "Hold/Block/Ignore must carry structured referenced_fields"
+            );
+        }
     }
 }
 
@@ -2405,34 +2556,68 @@ fn finding_to_validation_error(decision: &PolicyDecision, _topic: &str) -> Optio
 }
 
 fn finding_record(finding: &ralph_core::PolicyFinding) -> ValidationError {
-    let (field, reason_code) = match &finding.violation_type {
-        ViolationType::MissingRequiredField { field } => {
-            (field.clone(), "missing_required_field".to_string())
-        }
+    // U2 (2026-07-23-002 plan, KTD2): `SemanticGateViolation` carries
+    // its own `gate` and `referenced_fields`. The legacy `field` slot
+    // stays empty for semantic-gate violations — `field` is reserved
+    // for single-field schema violations and must NOT carry the gate
+    // ID (RF3). Schema-level variants keep populating `field` and
+    // leave `gate`/`referenced_fields` as `None` so the JSON shape
+    // stays backwards-compatible (skip_serializing_if = None).
+    let (field, reason_code, gate, referenced_fields) = match &finding.violation_type {
+        ViolationType::MissingRequiredField { field } => (
+            field.clone(),
+            "missing_required_field".to_string(),
+            None,
+            None,
+        ),
         ViolationType::InvalidFieldValue { field, .. } => {
-            (field.clone(), "invalid_field_value".to_string())
+            (field.clone(), "invalid_field_value".to_string(), None, None)
         }
-        ViolationType::PayloadTypeMismatch { .. } => {
-            (String::new(), "payload_type_mismatch".to_string())
+        ViolationType::PayloadTypeMismatch { .. } => (
+            String::new(),
+            "payload_type_mismatch".to_string(),
+            None,
+            None,
+        ),
+        ViolationType::TerminalMonotonicityViolation { .. } => (
+            String::new(),
+            "terminal_monotonicity_violation".to_string(),
+            None,
+            None,
+        ),
+        ViolationType::DuplicateTerminalEvent { .. } => (
+            String::new(),
+            "duplicate_terminal_event".to_string(),
+            None,
+            None,
+        ),
+        ViolationType::BusinessEventAfterCompletion { .. } => (
+            String::new(),
+            "business_event_after_completion".to_string(),
+            None,
+            None,
+        ),
+        ViolationType::InvalidTopicFormat { .. } => (
+            String::new(),
+            "invalid_topic_format".to_string(),
+            None,
+            None,
+        ),
+        ViolationType::TopicDenied { .. } => {
+            (String::new(), "topic_denied".to_string(), None, None)
         }
-        ViolationType::TerminalMonotonicityViolation { .. } => {
-            (String::new(), "terminal_monotonicity_violation".to_string())
-        }
-        ViolationType::DuplicateTerminalEvent { .. } => {
-            (String::new(), "duplicate_terminal_event".to_string())
-        }
-        ViolationType::BusinessEventAfterCompletion { .. } => {
-            (String::new(), "business_event_after_completion".to_string())
-        }
-        ViolationType::InvalidTopicFormat { .. } => {
-            (String::new(), "invalid_topic_format".to_string())
-        }
-        ViolationType::TopicDenied { .. } => (String::new(), "topic_denied".to_string()),
-        ViolationType::SemanticGateViolation { gate, .. } => {
-            (gate.clone(), "semantic_gate_violation".to_string())
-        }
+        ViolationType::SemanticGateViolation {
+            gate: g,
+            referenced_fields: rf,
+            ..
+        } => (
+            String::new(),
+            "semantic_gate_violation".to_string(),
+            Some(g.clone()),
+            Some(rf.clone()),
+        ),
         ViolationType::DuplicateWorkDone { .. } => {
-            (String::new(), "duplicate_work_done".to_string())
+            (String::new(), "duplicate_work_done".to_string(), None, None)
         }
     };
     ValidationError {
@@ -2440,6 +2625,8 @@ fn finding_record(finding: &ralph_core::PolicyFinding) -> ValidationError {
         field,
         reason_code,
         message: finding.message.clone(),
+        gate,
+        referenced_fields,
         ..Default::default()
     }
 }

@@ -296,6 +296,7 @@ impl ReviewStepTracker {
                         state.dimensions_received.len(),
                         state.wave_expected,
                     ),
+                    referenced_fields: Vec::new(),
                 },
                 message: format!(
                     "review_passed_while_wave_open: review-coordinator must not emit \
@@ -960,7 +961,7 @@ mod tests {
         // forged `InvalidFieldValue { field: "skip_reason" }`.
         // The gate field carries the canonical name for audit.
         match &finding.violation_type {
-            ViolationType::SemanticGateViolation { gate, context } => {
+            ViolationType::SemanticGateViolation { gate, context, .. } => {
                 assert_eq!(gate, "review_passed_while_wave_open");
                 assert!(
                     context.contains("received=0/3"),

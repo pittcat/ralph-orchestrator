@@ -63,9 +63,22 @@ pub enum ViolationType {
     /// consistency gates, identified by the `payload_consistency:<rule_id>`
     /// gate prefix — distinct from timing/state gates because the
     /// violation is internal to the current payload (no event history).
+    ///
+    /// U2 (2026-07-23-002 plan, KTD2): `referenced_fields` is the
+    /// stable, declaration-order set of business fields the rule's
+    /// predicate AST references. For timing/state gates (e.g.
+    /// `review_passed_while_wave_open`) it is empty because the
+    /// violation is not field-scoped. For payload-consistency gates
+    /// it carries every `field:` appearing in the rule's `when`
+    /// AST, deduplicated by first-occurrence. It is **not** the
+    /// short-circuited "matched" subset — it is the static set the
+    /// rule author declared. Agent repair tooling reads this list
+    /// to know which payload fields to inspect, and never parses
+    /// `message` to recover them.
     SemanticGateViolation {
         gate: String,
         context: String,
+        referenced_fields: Vec<String>,
     },
     /// U4 (2026-06-17-003 plan): duplicate `work.done` for the
     /// same `(plan_name, step, task_id)` tuple. The `hint`
@@ -2352,11 +2365,20 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                 == crate::event_policy_payload_consistency::EvalOutcome::Hit
             {
                 let gate = format!("payload_consistency:{}", rule.id);
+                // U2 (2026-07-23-002 plan, KTD2): collect the stable,
+                // declaration-order set of business fields the rule's
+                // predicate AST references so agent repair tooling can
+                // know which payload fields to inspect without parsing
+                // `rule.message`. This is the static declared set, not
+                // the short-circuited "matched" subset.
+                let referenced_fields =
+                    crate::event_policy_payload_consistency::collect_referenced_fields(&rule.when);
                 findings.push(PolicyFinding {
                     topic: topic.to_string(),
                     violation_type: ViolationType::SemanticGateViolation {
                         gate: gate.clone(),
                         context: rule.message.clone(),
+                        referenced_fields,
                     },
                     message: format!("{gate}: {}", rule.message),
                 });
@@ -6003,6 +6025,7 @@ mod tests {
             violation_type: ViolationType::SemanticGateViolation {
                 gate: "review_passed_while_wave_open".to_string(),
                 context: "wave='w-1' received=0/3 expected".to_string(),
+                referenced_fields: Vec::new(),
             },
             message: "review-coordinator must not emit review.passed while wave is incomplete"
                 .to_string(),
@@ -6064,6 +6087,7 @@ mod tests {
             violation_type: ViolationType::SemanticGateViolation {
                 gate: "review_passed_while_wave_open".to_string(),
                 context: "wave='w-1' received=0/3 expected".to_string(),
+                referenced_fields: Vec::new(),
             },
             message: "review-coordinator must not emit review.passed while wave is incomplete"
                 .to_string(),
@@ -7277,7 +7301,8 @@ hats:
         let PolicyDecision::RejectWithResume(finding) = decision else {
             panic!("expected RejectWithResume, got {decision:?}");
         };
-        let ViolationType::SemanticGateViolation { gate, context } = &finding.violation_type else {
+        let ViolationType::SemanticGateViolation { gate, context, .. } = &finding.violation_type
+        else {
             panic!(
                 "expected SemanticGateViolation, got {:?}",
                 finding.violation_type

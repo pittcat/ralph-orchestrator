@@ -155,6 +155,7 @@ pub fn check_review_complete_shipper_routing(
                     "plan.blocked reason '{}' is not on the recoverable whitelist",
                     blocked_reason
                 ),
+                referenced_fields: Vec::new(),
             },
             message: format!(
                 "shipper_non_recoverable_reason_promoted_to_pass: REVIEW_COMPLETE \

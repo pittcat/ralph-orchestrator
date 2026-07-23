@@ -1082,7 +1082,8 @@ mod tests {
         let PolicyDecision::RejectWithResume(finding) = decision else {
             panic!("hitting fix.done must be rejected, got {decision:?}");
         };
-        let ViolationType::SemanticGateViolation { gate, context } = &finding.violation_type else {
+        let ViolationType::SemanticGateViolation { gate, context, .. } = &finding.violation_type
+        else {
             panic!(
                 "hitting fix.done must trip a SemanticGateViolation, got {:?}",
                 finding.violation_type

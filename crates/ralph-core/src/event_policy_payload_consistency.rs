@@ -76,6 +76,61 @@ pub enum EvalOutcome {
 pub(crate) const WHITELISTED_PREDICATE_OPS: &[&str] =
     &["eq", "ne", "gt", "gte", "exists", "non_empty"];
 
+/// U2 (2026-07-23-002 plan, KTD2): collect the stable, declaration-order
+/// set of business fields referenced by a `when` predicate AST.
+///
+/// Walks the same combinator (`all`/`any`) and single-predicate shape
+/// as [`evaluate`], but instead of evaluating each predicate it
+/// extracts the `field:` value of every well-formed predicate node.
+/// Malformed branches (non-object, missing `field`, unknown op) are
+/// skipped silently — the fail-close `Hit` outcome of `evaluate`
+/// already surfaces them as a violation; this collector's job is
+/// only to enumerate the fields the author declared, not to
+/// second-guess the AST's validity.
+///
+/// Output is deduplicated by **first occurrence** so the order is
+/// stable across runs and independent of map iteration. The caller
+/// MUST NOT treat this list as the short-circuited "matched" subset
+/// (we never evaluate predicates here); it is the static set the
+/// rule author declared. Per KTD2 / R2 this distinction is what lets
+/// an agent know which payload fields to inspect without parsing
+/// `rule.message`.
+pub fn collect_referenced_fields(rule_when: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    collect_into(rule_when, &mut out, &mut seen);
+    out
+}
+
+fn collect_into(node: &Value, out: &mut Vec<String>, seen: &mut std::collections::HashSet<String>) {
+    match node {
+        Value::Object(obj) => {
+            if let Some(child) = obj.get("all").or_else(|| obj.get("any")) {
+                if let Value::Array(items) = child {
+                    for item in items {
+                        collect_into(item, out, seen);
+                    }
+                }
+                return;
+            }
+            // Single predicate (object with a `field` key and a known op).
+            // Only collect when the predicate declares a `field` and at
+            // least one whitelisted op — otherwise the rule is malformed
+            // and `evaluate` will fail-close to Hit; the collector's
+            // job is not to surface malformed shape.
+            if let Some(Value::String(field)) = obj.get("field") {
+                let has_known_op = obj
+                    .keys()
+                    .any(|k| WHITELISTED_PREDICATE_OPS.contains(&k.as_str()));
+                if has_known_op && seen.insert(field.clone()) {
+                    out.push(field.clone());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Evaluate a parsed `when` against a single payload.
 ///
 /// `rule_when` is the value of `PayloadConsistencyRule.when` as parsed

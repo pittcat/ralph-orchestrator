@@ -1123,6 +1123,7 @@ fn emit_command_with_root_and_hats(
             violation_type: ViolationType::SemanticGateViolation {
                 gate: "missing_provenance".to_string(),
                 context: err.message.clone(),
+                referenced_fields: Vec::new(),
             },
             topic: topic.to_string(),
             message: err.message.clone(),
@@ -1156,6 +1157,7 @@ fn emit_command_with_root_and_hats(
             violation_type: ViolationType::SemanticGateViolation {
                 gate: "isolated_scope".to_string(),
                 context: err.message.clone(),
+                referenced_fields: Vec::new(),
             },
             topic: topic.to_string(),
             message: err.message.clone(),
@@ -1175,6 +1177,7 @@ fn emit_command_with_root_and_hats(
             violation_type: ViolationType::SemanticGateViolation {
                 gate: "wave_dimension_assignment".to_string(),
                 context: err.message.clone(),
+                referenced_fields: Vec::new(),
             },
             topic: topic.to_string(),
             message: err.message.clone(),
@@ -1204,6 +1207,7 @@ fn emit_command_with_root_and_hats(
                         violation_type: ViolationType::SemanticGateViolation {
                             gate: "progress_task_gate".to_string(),
                             context: err.message.clone(),
+                            referenced_fields: Vec::new(),
                         },
                         topic: topic.to_string(),
                         message: err.message.clone(),
@@ -1293,6 +1297,7 @@ fn emit_command_with_root_and_hats(
             violation_type: ViolationType::SemanticGateViolation {
                 gate: "envelope_triggered".to_string(),
                 context: err.message.clone(),
+                referenced_fields: Vec::new(),
             },
             topic: topic.to_string(),
             message: err.message.clone(),
