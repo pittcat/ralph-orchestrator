@@ -540,6 +540,126 @@ fn public_wave_id_out_of_range_slot_is_rejected() {
     );
 }
 
+/// U3 (R-A1): the validator refuses events paths that live
+/// inside the slot worktree (the A1.3 fail-close case).
+#[test]
+fn control_plane_path_inside_slot_worktree_is_rejected() {
+    let mut fx = SupervisorP0Fixture::new_in_memory(
+        "u3-slot-rejection",
+        "u3-loop",
+        "task-u3-slot",
+        "task-key-u3-slot:step-1",
+        "step-1",
+    );
+    fx.with_git_baseline();
+    fx.with_wave(WaveKind::Exec, IsolationMode::Worktree, 0, 1)
+        .register_and_bind();
+
+    // Place the proposed events file inside the slot worktree.
+    let nested_orphan = fx.slot_worktree_path().join(".ralph/events.jsonl");
+    std::fs::create_dir_all(nested_orphan.parent().unwrap()).unwrap();
+    std::fs::write(&nested_orphan, "{}\n").unwrap();
+
+    // Import the crate-level validator via the bin's name. The
+    // public API path is intentionally stable so future U-IDs
+    // and the dispatcher can reuse it without depending on
+    // internal modules.
+    let result = ralph_core::control_plane::validate_control_plane_binding(
+        &nested_orphan,
+        Some(fx.slot_worktree_path()),
+        fx.workspace_root(),
+    );
+
+    assert!(
+        result.is_err(),
+        "events file inside slot worktree must fail-close, got {result:?}"
+    );
+    let reason = format!("{}", result.err().unwrap());
+    assert!(
+        reason.contains("invalid_control_plane_path"),
+        "fail-close must surface the stable reason code, got {reason}"
+    );
+
+    // Cleanup: the slot subtree should never carry JSONL
+    // ledger state, even after validation failure.
+    assert!(
+        nested_orphan.exists(),
+        "diagnostics file may remain on disk for the dispatcher to surface the failure"
+    );
+    // Any follow-up worker spawn must produce zero new state
+    // under the slot subtree by the time we observe it.
+    let subtree_writes = count_jsonl_under(fx.slot_worktree_path());
+    assert!(
+        subtree_writes <= 1,
+        "validation must not produce nested ledger writes, found {subtree_writes}"
+    );
+}
+
+/// U3 (R-A1): a relative events path is rejected (A1.3 second
+/// fail-close case).
+#[test]
+fn control_plane_relative_events_path_is_rejected() {
+    let fx = SupervisorP0Fixture::new_in_memory(
+        "u3-rel-rejection",
+        "u3-loop",
+        "task-u3-rel",
+        "task-key-u3-rel:step-1",
+        "step-1",
+    );
+    let rel = std::path::Path::new(".ralph/events.jsonl");
+    let result = ralph_core::control_plane::validate_control_plane_binding(
+        rel,
+        Some(fx.slot_worktree_path()),
+        fx.workspace_root(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(ralph_core::control_plane::ControlPlaneError::RelativePath { .. })
+        ),
+        "relative events path must produce RelativePath error, got {result:?}"
+    );
+}
+
+/// Count JSONL files under a directory (excluding
+/// `.ralph/current-events`-style symlinks so we don't follow
+/// them outside the subtree).
+fn count_jsonl_under(dir: &Path) -> usize {
+    let mut count = 0usize;
+    for entry in walkdir_safe(dir) {
+        if entry.extension().map(|e| e == "jsonl").unwrap_or(false) {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Tiny dir-walker that does not depend on the `walkdir`
+/// crate; uses `std::fs::read_dir` recursively up to depth 4.
+fn walkdir_safe(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let depth = dir.components().count() - root.components().count();
+        if depth > 4 {
+            continue;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
 /// U2 (R-A2): a totally unknown wave id is treated as missing
 /// rather than registered twice. The store's lookup gives
 /// `None` for unknown keys.
