@@ -34,7 +34,10 @@ pub enum ControlPlaneError {
     /// The path escapes the primary workspace via a symlink.
     /// Workers cannot be allowed to escape the namespace they
     /// are bound to, even if the path string looks safe.
-    SymlinkEscape { path: PathBuf, workspace_root: PathBuf },
+    SymlinkEscape {
+        path: PathBuf,
+        workspace_root: PathBuf,
+    },
     /// The events file's parent directory cannot be created /
     /// is not writable.
     UncreatableParent { path: PathBuf },
@@ -54,7 +57,10 @@ impl std::fmt::Display for ControlPlaneError {
                 path.display(),
                 slot_root.display()
             ),
-            ControlPlaneError::SymlinkEscape { path, workspace_root } => write!(
+            ControlPlaneError::SymlinkEscape {
+                path,
+                workspace_root,
+            } => write!(
                 f,
                 "invalid_control_plane_path: symlink at {} escapes workspace {}",
                 path.display(),
@@ -109,11 +115,14 @@ pub fn validate_control_plane_binding(
         });
     }
 
-    let canonical_workspace = std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
-    let resolved_events = std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
+    let canonical_workspace =
+        std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    let resolved_events =
+        std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
 
     if let Some(slot_root) = slot_worktree_root {
-        let canonical_slot = std::fs::canonicalize(slot_root).unwrap_or_else(|_| slot_root.to_path_buf());
+        let canonical_slot =
+            std::fs::canonicalize(slot_root).unwrap_or_else(|_| slot_root.to_path_buf());
         if resolved_events.starts_with(&canonical_slot) {
             return Err(ControlPlaneError::SlotSubtree {
                 path: events_path.to_path_buf(),
@@ -121,12 +130,11 @@ pub fn validate_control_plane_binding(
             });
         }
         // symlink inside slot escape → flag it
-        if resolved_events.starts_with(&canonical_workspace) && canonical_slot.starts_with(&canonical_workspace)
+        if resolved_events.starts_with(&canonical_workspace)
+            && canonical_slot.starts_with(&canonical_workspace)
             && resolved_events != canonical_workspace
             && (resolved_events == canonical_slot
-                || resolved_events
-                    .ancestors()
-                    .any(|a| a == canonical_slot))
+                || resolved_events.ancestors().any(|a| a == canonical_slot))
         {
             return Err(ControlPlaneError::SlotSubtree {
                 path: events_path.to_path_buf(),
@@ -148,19 +156,18 @@ pub fn validate_control_plane_binding(
     // Parent must exist or be safely creatable. Caller may
     // have set up `parent.exists()`; if not we test creation
     // of a uniquely named probe to confirm writability.
-    if let Some(parent) = events_path.parent() {
-        if !parent.exists() {
-            // Best-effort: try to create the chain. If we
-            // are running as a normal user in a non-existent
-            // nested dir under our own temp tree, this will
-            // succeed and we will leave it (the directory is
-            // needed for the ledger anyway).
-            if let Err(_) = std::fs::create_dir_all(parent) {
-                return Err(ControlPlaneError::UncreatableParent {
-                    path: events_path.to_path_buf(),
-                });
-            }
-        }
+    if let Some(parent) = events_path.parent()
+        && !parent.exists()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        // Best-effort: try to create the chain. If we
+        // are running as a normal user in a non-existent
+        // nested dir under our own temp tree, this will
+        // succeed and we will leave it (the directory is
+        // needed for the ledger anyway).
+        return Err(ControlPlaneError::UncreatableParent {
+            path: events_path.to_path_buf(),
+        });
     }
 
     Ok(resolved_events)
@@ -174,6 +181,7 @@ pub fn validate_control_plane_binding(
 /// Returned keys (always absolute):
 /// * `RALPH_WORKSPACE_ROOT` — primary workspace
 /// * `RALPH_EVENTS_FILE` — primary control-plane events file
+#[allow(clippy::implicit_hasher)] // public binding API: caller supplies the env HashMap
 pub fn merge_event_channel_env(
     workspace_root: &Path,
     events_file: &Path,
@@ -206,11 +214,8 @@ mod tests {
 
     #[test]
     fn relative_path_is_rejected() {
-        let res = validate_control_plane_binding(
-            Path::new("events.jsonl"),
-            None,
-            Path::new("/tmp"),
-        );
+        let res =
+            validate_control_plane_binding(Path::new("events.jsonl"), None, Path::new("/tmp"));
         assert!(matches!(res, Err(ControlPlaneError::RelativePath { .. })));
     }
 
@@ -221,11 +226,7 @@ mod tests {
         std::fs::create_dir_all(&slot).unwrap();
         let events = slot.join("events.jsonl");
         std::fs::write(&events, "").unwrap();
-        let res = validate_control_plane_binding(
-            &events,
-            Some(slot.as_path()),
-            tmp.path(),
-        );
+        let res = validate_control_plane_binding(&events, Some(slot.as_path()), tmp.path());
         assert!(
             matches!(res, Err(ControlPlaneError::SlotSubtree { .. })),
             "slot subtree should be rejected, got {res:?}"
