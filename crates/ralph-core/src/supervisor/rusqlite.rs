@@ -574,10 +574,53 @@ impl SupervisorStore for RusqliteSupervisorStore {
     ) -> SupervisorStoreResult<()> {
         self.with_conn(|conn| {
             let tx = conn.transaction()?;
+            // 2026-07-23-007 plan U3 (R-W3): first-terminal-wins
+            // — refuse to overwrite an already-terminal slot. The
+            // dispatcher passes a canonical reason from
+            // `classify_worker_outcome`, so a re-emitted same-reason
+            // failure is a no-op (idempotent replay), and a
+            // different reason returns `AlreadyTerminal`.
+            //
+            // R-W4: cancel reason wins — a slot whose worker was
+            // cancelled must be marked Cancelled even if a Done
+            // marker slipped through earlier.
+            let prior = tx
+                .query_row(
+                    "SELECT status, failure_reason FROM wave_slots
+                     WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![wave_id, i64::from(slot_index)],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?;
+            if let Some((status, prior_reason)) = prior {
+                let is_terminal = matches!(
+                    status.as_str(),
+                    "completed" | "failed" | "cancelled"
+                );
+                if is_terminal {
+                    let same_reason = prior_reason
+                        .as_deref()
+                        .map(|p| p == reason)
+                        .unwrap_or(false);
+                    if !same_reason {
+                        return Err(SupervisorStoreError::AlreadyTerminal(format!(
+                            "wave={wave_id} slot={slot_index} status={status}"
+                        )));
+                    }
+                    // Idempotent replay — commit no-op.
+                    tx.commit()?;
+                    return Ok(());
+                }
+            }
+            let new_status = if reason == crate::supervisor::worker_outcome::REASON_WORKER_CANCELLED {
+                "cancelled"
+            } else {
+                "failed"
+            };
             tx.execute(
-                "UPDATE wave_slots SET status = 'failed', failure_reason = ?3
+                "UPDATE wave_slots SET status = ?3, failure_reason = ?4
                  WHERE wave_id = ?1 AND slot_index = ?2",
-                rusqlite::params![wave_id, i64::from(slot_index), reason],
+                rusqlite::params![wave_id, i64::from(slot_index), new_status, reason],
             )?;
             tx.execute(
                 "UPDATE dispatch_records SET outcome = 'failed'

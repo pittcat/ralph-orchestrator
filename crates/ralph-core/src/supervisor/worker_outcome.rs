@@ -136,7 +136,11 @@ pub fn classify_worker_outcome(
     // missing-terminal checks because they are about the
     // dispatcher's lease on the worker, not about the
     // worker's output.
-    if exit.is_cancelled() && accepted_event_count == 0 && terminals.is_empty() {
+    //
+    // 2026-07-23-007 plan U3 (R-W4): cancel always wins — even if
+    // a Done marker slipped through before the cancel, a cancelled
+    // worker's terminal must be `worker_cancelled`, not Completed.
+    if exit.is_cancelled() {
         return SlotOutcome::Failed {
             reason: REASON_WORKER_CANCELLED,
         };
@@ -266,5 +270,27 @@ mod tests {
     fn done_only_completes() {
         let out = classify_worker_outcome(WorkerExit::Exit0, 7, &[TerminalMarker::Done]);
         assert_eq!(out, SlotOutcome::Completed(WorkerTerminalKind::Done));
+    }
+
+    /// 2026-07-23-007 plan U3 (R-W4): cancel with a Done marker
+    /// already in the event stream — the cancel classification
+    /// MUST still win. The legacy implementation required
+    /// zero events AND zero terminals for `worker_cancelled`,
+    /// which let a Done marker slip through and lift the slot
+    /// to Completed. The new contract always returns
+    /// `worker_cancelled` for `WorkerExit::Cancelled`.
+    #[test]
+    fn cancel_with_done_marker_still_returns_worker_cancelled() {
+        let out = classify_worker_outcome(
+            WorkerExit::Cancelled,
+            5,
+            &[TerminalMarker::Done, TerminalMarker::Done],
+        );
+        assert_eq!(
+            out,
+            SlotOutcome::Failed {
+                reason: REASON_WORKER_CANCELLED
+            }
+        );
     }
 }

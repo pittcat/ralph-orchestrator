@@ -484,9 +484,6 @@ impl SupervisorStore for InMemorySupervisorStore {
     ) -> SupervisorStoreResult<()> {
         let mut inner = self.lock()?;
         let key = (wave_id.to_string(), slot_index);
-        if let Some(d) = inner.dispatches.get_mut(&key) {
-            d.outcome = Some(DispatchOutcome::Failed);
-        }
         let wave = inner
             .waves_by_id
             .get_mut(wave_id)
@@ -498,8 +495,45 @@ impl SupervisorStore for InMemorySupervisorStore {
                     wave_id: wave_id.to_string(),
                     slot_index,
                 })?;
-        slot.status = SlotStatus::Failed;
+        // 2026-07-23-007 plan U3 (R-W3): first-terminal-wins is
+        // symmetrical with `record_slot_result` — a slot that
+        // already reached `Completed` / `Failed` / `Cancelled`
+        // MUST NOT be overwritten by a late failure. The
+        // idempotent replay of the SAME failure reason returns
+        // Ok without rewriting (mirrors the `record_slot_result`
+        // same-content_hash contract).
+        let already_terminal = matches!(
+            slot.status,
+            SlotStatus::Completed | SlotStatus::Failed | SlotStatus::Cancelled
+        );
+        if already_terminal {
+            let same_reason = slot
+                .failure_reason
+                .as_deref()
+                .map(|r| r == reason)
+                .unwrap_or(false);
+            if !same_reason {
+                return Err(SupervisorStoreError::AlreadyTerminal(format!(
+                    "wave={wave_id} slot={slot_index} status={}",
+                    slot.status
+                )));
+            }
+            return Ok(());
+        }
+        // R-W4: cancel reason wins over Done marker — a slot
+        // whose worker was cancelled MUST be marked Cancelled
+        // even if a Done event slipped through before the cancel.
+        // The dispatcher passes the canonical
+        // `REASON_WORKER_CANCELLED` constant via the classifier.
+        if reason == crate::supervisor::worker_outcome::REASON_WORKER_CANCELLED {
+            slot.status = SlotStatus::Cancelled;
+        } else {
+            slot.status = SlotStatus::Failed;
+        }
         slot.failure_reason = Some(reason.to_string());
+        if let Some(d) = inner.dispatches.get_mut(&key) {
+            d.outcome = Some(DispatchOutcome::Failed);
+        }
         // U2 / F-002 / KTD-8: the store MUST NOT mutate
         // `wave.phase` here; phase verdict is coordinator-owned
         // via `set_wave_phase`, called by the coordinator
@@ -903,6 +937,115 @@ mod tests {
         assert_eq!(
             snap.in_flight_count, 1,
             "slot 1 should still be in_flight after the sibling failure"
+        );
+    }
+
+    /// 2026-07-23-007 plan U3 (R-W3 / R-W4): first-terminal-wins
+    /// is symmetric for `record_slot_failure`. A slot that
+    /// already reached `Completed` MUST NOT be overwritten by a
+    /// late `record_slot_failure` — the legacy implementation
+    /// unconditionally flipped `slot.status = Failed`, letting
+    /// the wave's terminal contract drift. Same-reason replay
+    /// stays idempotent (no-op). The cancel reason
+    /// (`worker_cancelled`) wins over a stale Done marker.
+    #[test]
+    fn record_slot_failure_after_completed_is_rejected() {
+        let s = store();
+        let wave = s
+            .register_wave("u3-after-completed", WaveKind::Exec, 1)
+            .unwrap();
+        s.bind_worktree(
+            &wave,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/loose-ends/0".to_string()),
+                branch: Some("ralph/u3".to_string()),
+            },
+        )
+        .unwrap();
+        s.try_dispatch_next(4).unwrap().unwrap();
+        // Step 1: slot reaches Completed via `record_slot_result`.
+        s.record_slot_result(&wave, 0, "hash-xyz", 3).unwrap();
+        // Step 2: a late failure arrives — must be rejected with
+        // AlreadyTerminal; the slot stays Completed.
+        let late = s.record_slot_failure(&wave, 0, "boom");
+        assert!(
+            matches!(
+                late,
+                Err(crate::supervisor::SupervisorStoreError::AlreadyTerminal(_))
+            ),
+            "U3/007: late failure after Completed must be AlreadyTerminal; got {late:?}"
+        );
+        let snap = s.fan_in_status(&wave).unwrap();
+        assert_eq!(snap.completed_count, 1, "slot must stay Completed");
+        assert_eq!(snap.failed_count, 0, "no failed slots");
+    }
+
+    #[test]
+    fn record_slot_failure_same_reason_after_failed_is_idempotent() {
+        let s = store();
+        let wave = s
+            .register_wave("u3-same-reason", WaveKind::Exec, 1)
+            .unwrap();
+        s.bind_worktree(
+            &wave,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/loose-ends/0".to_string()),
+                branch: Some("ralph/u3".to_string()),
+            },
+        )
+        .unwrap();
+        s.try_dispatch_next(4).unwrap().unwrap();
+        s.record_slot_failure(&wave, 0, "boom").unwrap();
+        // Same reason replay → idempotent Ok.
+        s.record_slot_failure(&wave, 0, "boom").unwrap();
+        let snap = s.fan_in_status(&wave).unwrap();
+        assert_eq!(snap.failed_count, 1);
+    }
+
+    #[test]
+    fn record_slot_failure_cancel_reason_lifts_to_cancelled_status() {
+        let s = store();
+        let wave = s
+            .register_wave("u3-cancel-wins", WaveKind::Exec, 1)
+            .unwrap();
+        s.bind_worktree(
+            &wave,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/loose-ends/0".to_string()),
+                branch: Some("ralph/u3".to_string()),
+            },
+        )
+        .unwrap();
+        s.try_dispatch_next(4).unwrap().unwrap();
+        // R-W4: cancel reason wins → slot is `Cancelled`, not
+        // generic `Failed`. The dispatcher passes the canonical
+        // reason from `worker_outcome::REASON_WORKER_CANCELLED`.
+        s.record_slot_failure(
+            &wave,
+            0,
+            crate::supervisor::worker_outcome::REASON_WORKER_CANCELLED,
+        )
+        .unwrap();
+        // The slot's failure_reason matches; the status is the
+        // distinct `Cancelled` marker so the coordinator /
+        // reporter can route it differently. The store keeps the
+        // Cancelled count separate from `failed_count` so the
+        // caller can distinguish operator-initiated cancel from
+        // worker-induced failure.
+        let snap = s.fan_in_status(&wave).unwrap();
+        assert_eq!(
+            snap.failed_count, 0,
+            "Cancelled does not count as Failed"
+        );
+        assert_eq!(
+            snap.pending_count, 1,
+            "Cancelled slot surfaces in pending_count"
         );
     }
 
