@@ -3000,8 +3000,7 @@ fn classify_slot_result<'a>(result: &'a WaveWorkerOutcome) -> ClassifiedSlot<'a>
                 accepted += 1;
                 if ev.topic.ends_with(".unit.done") || ev.topic.ends_with(".wave.done") {
                     markers.push(TerminalMarker::Done);
-                } else if ev.topic.ends_with(".unit.failed") || ev.topic.ends_with(".wave.failed")
-                {
+                } else if ev.topic.ends_with(".unit.failed") || ev.topic.ends_with(".wave.failed") {
                     markers.push(TerminalMarker::Failed);
                 }
             }

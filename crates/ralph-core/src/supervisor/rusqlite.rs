@@ -593,8 +593,12 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 )
                 .optional()?;
             if let Some((status, prior_reason)) = prior {
-                let is_terminal = matches!(status.as_str(), "completed" | "failed" | "cancelled");
-                if is_terminal {
+                let is_failed = matches!(status.as_str(), "failed" | "cancelled");
+                let is_completed = status.as_str() == "completed";
+                let cancel_wins = reason
+                    == crate::supervisor::worker_outcome::REASON_WORKER_CANCELLED
+                    && is_completed;
+                if is_failed {
                     let same_reason = prior_reason
                         .as_deref()
                         .map(|p| p == reason)
@@ -607,6 +611,11 @@ impl SupervisorStore for RusqliteSupervisorStore {
                     // Idempotent replay — commit no-op.
                     tx.commit()?;
                     return Ok(());
+                }
+                if is_completed && !cancel_wins {
+                    return Err(SupervisorStoreError::AlreadyTerminal(format!(
+                        "wave={wave_id} slot={slot_index} status=completed"
+                    )));
                 }
             }
             let new_status = if reason == crate::supervisor::worker_outcome::REASON_WORKER_CANCELLED

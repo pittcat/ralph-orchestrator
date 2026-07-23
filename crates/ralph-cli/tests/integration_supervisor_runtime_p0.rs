@@ -885,9 +885,9 @@ fn rusqlite_record_slot_failure_rejects_after_completed() {
     let late = fx.store().as_ref().record_slot_failure("w-1", 0, "boom");
     match late {
         Err(SupervisorStoreError::AlreadyTerminal(_)) => {}
-        other => panic!(
-            "non-cancel failure after Completed must produce AlreadyTerminal, got {other:?}"
-        ),
+        other => {
+            panic!("non-cancel failure after Completed must produce AlreadyTerminal, got {other:?}")
+        }
     }
     let snap = fx
         .store()
@@ -932,7 +932,10 @@ fn rusqlite_record_slot_failure_idempotent_same_reason() {
         .as_ref()
         .fan_in_status("w-1")
         .expect("fan_in_status must succeed");
-    assert_eq!(snap.failed_count, 1, "exactly one Failed slot; got {snap:?}");
+    assert_eq!(
+        snap.failed_count, 1,
+        "exactly one Failed slot; got {snap:?}"
+    );
 }
 
 /// U8 / T1: cancel-after-completed wins against the rusqlite

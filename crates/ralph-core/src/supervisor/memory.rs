@@ -1091,7 +1091,10 @@ mod tests {
         let snap = s.fan_in_status(&wave).unwrap();
         assert_eq!(snap.completed_count, 0, "Completed must be downgraded");
         assert_eq!(snap.failed_count, 0, "Cancelled does not count as Failed");
-        assert_eq!(snap.pending_count, 1, "Cancelled slot surfaces in pending_count");
+        assert_eq!(
+            snap.pending_count, 1,
+            "Cancelled slot surfaces in pending_count"
+        );
     }
 
     /// 2026-07-23-007 plan U3 (R-W4) control: a non-cancel
