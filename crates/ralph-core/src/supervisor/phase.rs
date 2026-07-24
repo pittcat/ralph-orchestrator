@@ -277,6 +277,83 @@ mod tests {
         }
     }
 
+    // 2026-07-24-005 plan U4 (R5 / S5 / F-003): `blocking_slots`
+    // MUST list only Failed / Cancelled slot indices, never
+    // Completed. The `snap` helper above uses a synthetic
+    // slot layout ([completed..., failed..., in_flight...,
+    // pending...]) — for `snap(4, 3, 1, 0, 0, false)` the
+    // failed slot is index 3, and the three Completed slots
+    // (indices 0, 1, 2) must NOT appear in `blocking_slots`.
+    //
+    // Pre-fix (F-003) range-fabrication code would have
+    // produced `expected_total - completed_count .. expected_total`
+    // = `[1, 2, 3]`, mis-classifying slots 1, 2 (Completed)
+    // as blocking. The new contract filters per-slot status.
+    #[test]
+    fn u4_blocking_slots_excludes_completed_under_required_slot_failure() {
+        let (s, i) = snap(4, 3, 1, 0, 0, false);
+        let decision = evaluate_phase(&s, &i);
+        let blocking = match decision {
+            PhaseDecision::Failed {
+                reason: FailedReason::RequiredSlotFailure,
+                blocking_slots,
+            } => blocking_slots,
+            other => panic!("expected RequiredSlotFailure, got {other:?}"),
+        };
+        // The single Failed slot is index 3 (snap builds
+        // [Completed, Completed, Completed, Failed] for
+        // expected=4, completed=3, failed=1).
+        assert_eq!(
+            blocking,
+            vec![3],
+            "blocking_slots must equal the Failed slot index; \
+             pre-fix F-003 would have fabricated a wrong range. \
+             got {blocking:?}"
+        );
+        // And the three Completed indices must NOT appear.
+        for completed_idx in [0u32, 1, 2] {
+            assert!(
+                !blocking.contains(&completed_idx),
+                "blocking_slots must not include Completed index {completed_idx} (S5 / R5); \
+                 got {blocking:?}"
+            );
+        }
+    }
+
+    // 2026-07-24-005 plan U4 (S5 optional Timeout path): the
+    // same Completed-vs-blocking contract must hold when
+    // `evaluate_phase` short-circuits to `Failed(Timeout)`
+    // because the wave ran past its budget. Reuses the same
+    // mixed snapshot.
+    #[test]
+    fn u4_blocking_slots_excludes_completed_under_timeout() {
+        let (s, mut i) = snap(4, 3, 1, 0, 0, false);
+        // Force the timeout branch.
+        i.elapsed_secs = i.aggregate_timeout_secs + 1;
+        let decision = evaluate_phase(&s, &i);
+        let blocking = match decision {
+            PhaseDecision::Failed {
+                reason: FailedReason::Timeout,
+                blocking_slots,
+            } => blocking_slots,
+            other => panic!("expected Timeout, got {other:?}"),
+        };
+        assert_eq!(
+            blocking,
+            vec![3],
+            "Timeout path: blocking_slots must equal the Failed slot index; \
+             pre-fix F-003 would have fabricated a wrong range. \
+             got {blocking:?}"
+        );
+        for completed_idx in [0u32, 1, 2] {
+            assert!(
+                !blocking.contains(&completed_idx),
+                "Timeout path: blocking_slots must not include Completed index \
+                 {completed_idx} (S5 / R5); got {blocking:?}"
+            );
+        }
+    }
+
     #[test]
     fn partial_complete_stays_in_collect() {
         let (s, i) = snap(4, 2, 0, 1, 1, false);
