@@ -47,3 +47,18 @@ for _name, _path in (
 ):
     if _path.is_file():
         _load(_name, _path)
+
+
+# Pre-load the ralph-e2e-bootstrap helpers under distinct module
+# names so they don't clash with ralph-project-bootstrap's
+# identically-named ``handoff`` module.
+_E2E_BOOTSTRAP_SCRIPTS = SKILLS_DIR / "ralph-e2e-bootstrap" / "scripts"
+for _name, _path in (
+    ("plan_diff", _E2E_BOOTSTRAP_SCRIPTS / "plan_diff.py"),
+    ("binary_resolve", _E2E_BOOTSTRAP_SCRIPTS / "binary_resolve.py"),
+    ("sandbox_suite", _E2E_BOOTSTRAP_SCRIPTS / "sandbox_suite.py"),
+    ("gate", _E2E_BOOTSTRAP_SCRIPTS / "gate.py"),
+    ("e2e_handoff", _E2E_BOOTSTRAP_SCRIPTS / "e2e_handoff.py"),
+):
+    if _path.is_file():
+        _load(_name, _path)
