@@ -7,6 +7,7 @@ It ships operator skills:
 
 | Skill | Purpose |
 |---|---|
+| `ralph-e2e-bootstrap` | Bootstrap an E2E sandbox directory from a development plan + git diff via combo-box decisions and static gates; deliver a copy-paste launch command |
 | `ralph-loop` | Run, monitor, resume, merge, debug Ralph loops |
 | `ralph-preset-author` | Draft presets (builtin + local) with per-hat AAF tables **+ payload contract notes** before review |
 | `ralph-preset-review` | Per-hat activation dry-run + **payload audit** + mechanical lint → `preset-review-report.md` |

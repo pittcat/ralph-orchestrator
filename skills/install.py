@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Iterable
 
 PUBLIC_SKILLS: tuple[str, ...] = (
+    "ralph-e2e-bootstrap",
     "ralph-loop",
     "ralph-preset-author",
     "ralph-preset-review",

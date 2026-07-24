@@ -1,0 +1,29 @@
+name: ralph-e2e-bootstrap
+display_name: "Ralph E2E Bootstrap"
+description: |
+  Bring an E2E sandbox directory onto an existing Ralph preset.
+when_to_use: |
+  Use when the operator has a known E2E harness directory
+  and a known preset, and wants a copy-paste launch command.
+  Do NOT use this skill to author or review presets, to monitor
+  loops, or to diagnose a loop that already ran.
+inputs:
+  - plan_path
+  - sandbox_path
+  - preset (path or builtin id, already passing strict lint)
+outputs:
+  - preset-bound ralph.<stem>.yml and PROMPT.<stem>.md (idempotent)
+  - four-stage static-gate evidence
+  - handoff command (static_only by default)
+boundaries:
+  - Does not author or review presets.
+  - Does not spawn a live ralph run.
+  - Does not rewrite the supplied plan file.
+  - Does not mutate presets/ or crates/.
+verification_gates:
+  - capability probe (ralph --version / --help)
+  - ralph preset check --strict
+  - ralph preflight --strict
+  - ralph run --dry-run --plan <abs>
+
+
