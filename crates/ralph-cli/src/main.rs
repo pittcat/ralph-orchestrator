@@ -574,6 +574,7 @@ mod tests {
         .expect("CLI parse failed");
         let args = match cli.command.expect("run subcommand") {
             Commands::Run(args) => args,
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Run, got {other:?}"),
         };
         assert_eq!(
@@ -593,6 +594,7 @@ mod tests {
             .expect("CLI parse failed");
         let args = match cli.command.expect("run subcommand") {
             Commands::Run(args) => args,
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Run, got {other:?}"),
         };
         assert!(args.no_default_profiles);
@@ -608,6 +610,7 @@ mod tests {
         let cli = Cli::try_parse_from(["ralph", "run"]).expect("CLI parse failed");
         let args = match cli.command.expect("run subcommand") {
             Commands::Run(args) => args,
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Run, got {other:?}"),
         };
         assert!(args.profiles.is_empty());
@@ -624,10 +627,12 @@ mod tests {
         let cli = Cli::try_parse_from(["ralph", "inspect", "profiles"]).expect("CLI parse failed");
         let args = match cli.command.expect("inspect subcommand") {
             Commands::Inspect(args) => args,
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Inspect, got {other:?}"),
         };
         let profiles_args = match args.command.expect("profiles subcommand") {
             crate::commands::inspect::InspectCommands::Profiles(p) => p,
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Profiles, got {other:?}"),
         };
         assert!(profiles_args.profiles.is_empty());
@@ -657,10 +662,12 @@ mod tests {
         .expect("CLI parse failed");
         let args = match cli.command.expect("inspect subcommand") {
             Commands::Inspect(args) => args,
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Inspect, got {other:?}"),
         };
         let profiles_args = match args.command.expect("profiles subcommand") {
             crate::commands::inspect::InspectCommands::Profiles(p) => p,
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Profiles, got {other:?}"),
         };
         assert_eq!(
@@ -767,6 +774,7 @@ mod tests {
             .expect("CLI parse failed");
         let args = match cli.command.expect("events subcommand") {
             Commands::Events(args) => args,
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Events, got {other:?}"),
         };
         assert_eq!(
@@ -780,6 +788,7 @@ mod tests {
         let cli = Cli::try_parse_from(["ralph", "events"]).expect("CLI parse failed");
         let args = match cli.command.expect("events subcommand") {
             Commands::Events(args) => args,
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Events, got {other:?}"),
         };
         assert_eq!(

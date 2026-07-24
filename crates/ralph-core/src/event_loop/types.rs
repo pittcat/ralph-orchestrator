@@ -33,7 +33,7 @@ use ralph_proto::{Event, EventBus};
 use serde::{Deserialize, Serialize};
 
 /// Result of processing events from JSONL.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProcessedEvents {
     /// Whether any valid events were found and published.
     pub had_events: bool,

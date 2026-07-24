@@ -1568,6 +1568,7 @@ Still working..."#;
             BuildStatus::Fail { missing, .. } => {
                 assert!(missing.iter().any(|m| m == "typecheck"));
             }
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Fail, got {other:?}"),
         }
     }
@@ -1737,6 +1738,7 @@ Still working..."#;
             ReviewStatus::Fail { missing, .. } => {
                 assert!(missing.iter().any(|m| m == "build"));
             }
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Fail, got {other:?}"),
         }
     }
@@ -1783,6 +1785,7 @@ Still working..."#;
                 assert!(missing.contains(&"tests".to_string()));
                 assert!(missing.contains(&"build".to_string()));
             }
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Fail for missing dimensions, got {other:?}"),
         }
     }

@@ -1230,7 +1230,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
                     scope_key,
                     legacy_wave_id,
                     payload_digest,
-                    expected_count as i64,
+                    i64::from(expected_count),
                     now,
                 ],
             )?;

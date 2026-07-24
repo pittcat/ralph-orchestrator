@@ -599,6 +599,7 @@ fn u6_fix_applied_missing_payload_field_rejected_with_dynamic_topic() {
                 finding.message
             );
         }
+        #[allow(clippy::match_wildcard_for_single_variants)]
         other => panic!("expected Reject decision, got {:?}", other),
     }
 }
@@ -814,6 +815,7 @@ fn test_execution_contract_commit_only_clean_branch_logic() {
                 other => panic!("expected WorkingTreeDirtyWithCommits, got {other:?}"),
             }
         }
+        #[allow(clippy::match_wildcard_for_single_variants)]
         other => panic!("case 1 expected Reject, got {other:?}"),
     }
 
@@ -867,6 +869,7 @@ fn test_execution_contract_commit_only_clean_branch_logic() {
                 findings[0].kind
             );
         }
+        #[allow(clippy::match_wildcard_for_single_variants)]
         other => panic!("case 3 expected Reject, got {other:?}"),
     }
 }

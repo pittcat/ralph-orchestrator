@@ -46,7 +46,7 @@ fn run_ralph(
     let store_path = workspace.join(".ralph/test-store.db");
     let store_path_str = store_path.to_string_lossy().into_owned();
     let mut store_env: Vec<(&str, &str)> = vec![("RALPH_EMISSION_STORE_PATH", &store_path_str)];
-    for (k, v) in extra_env.iter() {
+    for (k, v) in extra_env {
         store_env.push((*k, *v));
     }
 
@@ -395,7 +395,7 @@ fn u8_human_path_uses_ralph_bin_scrub_helper() {
     let payloads = write_payloads(ws, &[r#"{"dim":"x"}"#]);
 
     // First: pure human (no env at all).
-    let (code_a, s_a, _) = run_ralph(
+    let (code_a, _s_a, _) = run_ralph(
         ws,
         &["wave", "emit", "review.wave.ready", "--payloads-stdin"],
         &[],

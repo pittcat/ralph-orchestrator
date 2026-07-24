@@ -57,7 +57,7 @@ fn run_ralph(
     let store_path = workspace.join(".ralph/test-store.db");
     let store_path_str = store_path.to_string_lossy().into_owned();
     let mut store_env: Vec<(&str, &str)> = vec![("RALPH_EMISSION_STORE_PATH", &store_path_str)];
-    for (k, v) in extra_env.iter() {
+    for (k, v) in extra_env {
         store_env.push((*k, *v));
     }
 

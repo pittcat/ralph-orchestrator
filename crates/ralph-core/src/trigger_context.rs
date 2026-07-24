@@ -83,7 +83,7 @@ pub struct MatchedTrigger<'a> {
 /// context never leaks across hat subscriptions (R21 / R22).
 /// When the hat declares no triggers, the helper returns
 /// `None` (caller should treat this as a no-op).
-pub fn find_matching_trigger_event<'a, 'b>(
+pub fn find_matching_trigger_event<'a>(
     events: &'a [ralph_proto::Event],
     hat_triggers: &[String],
 ) -> Option<MatchedTrigger<'a>> {

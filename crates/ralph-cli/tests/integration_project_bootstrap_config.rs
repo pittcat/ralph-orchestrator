@@ -279,14 +279,14 @@ fn explicit_pipeline_config_overrides_default_ralph_yml() {
     // of the pipeline-suite's ``PROMPT.x.md``.
     fs::write(
         dir.path().join("ralph.yml"),
-        r#"cli:
+        r"cli:
   backend: claude
 event_loop:
   prompt_file: PROMPT.default.md
   max_iterations: 1
   max_runtime_seconds: 1
 core: {}
-"#,
+",
     )
     .expect("write default ralph.yml");
     let cfg = dir.path().join("ralph.pipeline.yml");

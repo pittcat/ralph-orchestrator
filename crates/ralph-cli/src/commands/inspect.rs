@@ -1640,7 +1640,6 @@ mod tests {
         // And the --no-default-profiles branch must agree.
         let mut inspect_args = inspect_args;
         inspect_args.no_default_profiles = true;
-        let mut run_args = run_args;
         run_args.no_default_profiles = true;
         let inspect_specs =
             crate::commands::profile_args::collect_active_profile_specs(&config, &inspect_args)

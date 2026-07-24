@@ -14,6 +14,7 @@ pub enum CheckExitResult {
 }
 
 /// Run the check_exit_conditions.py script to determine if warmup can transition.
+#[allow(clippy::unused_async)]
 pub async fn run_check_exit_conditions(ctx: &LoopContext) -> Result<CheckExitResult> {
     let script_path = find_skills_script("check_exit_conditions.py")
         .context("check_exit_conditions.py not found in skills directory")?;
@@ -86,6 +87,7 @@ pub async fn run_check_exit_conditions(ctx: &LoopContext) -> Result<CheckExitRes
 }
 
 /// Run the transition_warmup_to_production.py script to perform phase transition.
+#[allow(clippy::unused_async)]
 pub async fn run_transition_script(ctx: &LoopContext, stop: bool) -> Result<()> {
     let script_path = find_skills_script("transition_warmup_to_production.py")
         .context("transition_warmup_to_production.py not found in skills directory")?;

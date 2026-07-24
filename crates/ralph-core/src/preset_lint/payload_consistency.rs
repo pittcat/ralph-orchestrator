@@ -93,7 +93,7 @@ pub fn check_payload_consistency(
         // misconfiguration at preset-load time so the rule author
         // fixes the message rather than relying on runtime stripping.
         if let Some(reason) = check_message_unsafe(&rule.message) {
-            findings.push(unsafe_message_finding(severity, &rule.id, &reason));
+            findings.push(unsafe_message_finding(severity, &rule.id, reason));
         }
 
         let when_is_object = matches!(rule.when, Value::Object(_));

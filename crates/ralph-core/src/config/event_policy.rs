@@ -174,7 +174,7 @@ mod tests {
     #[test]
     fn parses_payload_consistency_block() {
         let config: EventPolicyConfig = serde_yaml::from_str(
-            r#"
+            "
 enabled: true
 mode: enforce
 payload_consistency:
@@ -187,7 +187,7 @@ payload_consistency:
           - field: x
             eq: y
       message: payload fields must agree
-"#,
+",
         )
         .expect("payload_consistency block should parse");
 
@@ -202,10 +202,10 @@ payload_consistency:
     #[test]
     fn missing_payload_consistency_block_defaults_to_disabled() {
         let config: EventPolicyConfig = serde_yaml::from_str(
-            r#"
+            "
 enabled: true
 mode: observe
-"#,
+",
         )
         .expect("legacy event policy should parse");
 
@@ -216,7 +216,7 @@ mode: observe
     #[test]
     fn parses_rule_when_as_json_value() {
         let config: EventPolicyConfig = serde_yaml::from_str(
-            r#"
+            "
 enabled: true
 mode: enforce
 payload_consistency:
@@ -229,7 +229,7 @@ payload_consistency:
           - field: x
             eq: y
       message: payload fields must agree
-"#,
+",
         )
         .expect("minimal payload consistency rule should parse");
 
@@ -242,7 +242,7 @@ payload_consistency:
     #[test]
     fn existing_event_policy_yaml_parses_with_unchanged_fields() {
         let config: EventPolicyConfig = serde_yaml::from_str(
-            r#"
+            "
 enabled: true
 mode: enforce
 on_violation: reject_with_resume
@@ -254,7 +254,7 @@ business_topics:
 require_policy_check_for_cli_emit: true
 allow_unsafe_cli_emit: false
 require_emit_provenance: true
-"#,
+",
         )
         .expect("existing event policy YAML should remain valid");
 
@@ -272,13 +272,13 @@ require_emit_provenance: true
     #[test]
     fn rejects_non_boolean_payload_consistency_enabled() {
         let result = serde_yaml::from_str::<EventPolicyConfig>(
-            r#"
+            "
 enabled: true
 mode: enforce
 payload_consistency:
-  enabled: "yes"
+  enabled: \"yes\"
   rules: []
-"#,
+",
         );
 
         assert!(result.is_err());
@@ -287,7 +287,7 @@ payload_consistency:
     #[test]
     fn rejects_payload_consistency_rule_missing_required_field() {
         let result = serde_yaml::from_str::<EventPolicyConfig>(
-            r#"
+            "
 enabled: true
 mode: enforce
 payload_consistency:
@@ -296,7 +296,7 @@ payload_consistency:
     - id: r1
       topic: fix.done
       when: {}
-"#,
+",
         );
 
         assert!(result.is_err());

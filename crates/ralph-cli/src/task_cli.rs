@@ -1726,7 +1726,7 @@ fn close_task_with_context_and_config(
 /// - **fail-closed on empty / unreadable channel**: agents still get a
 ///   `hint: run ralph inspect loop` so they can self-diagnose.
 fn emit_close_completion_warning(
-    root: &PathBuf,
+    root: &Path,
     config: &ralph_core::config::RalphConfig,
     caller_hat: &str,
     task_id: &str,
@@ -3860,7 +3860,7 @@ tasks:
         // Capture stderr by sending it to a sink (the helper uses
         // eprintln!). We assert behaviour via the empty-channel and
         // happy-path checks separately; here we just confirm no panic.
-        emit_close_completion_warning(&root.to_path_buf(), &config, "executor", "task-1");
+        emit_close_completion_warning(root, &config, "executor", "task-1");
     }
 
     #[test]
@@ -3870,7 +3870,7 @@ tasks:
         let root = temp_dir.path();
         let config = config_with_completion_topics(&["some.completion"]);
         // Hat publishes nothing → derive_completion_publishes is empty.
-        emit_close_completion_warning(&root.to_path_buf(), &config, "unknown", "task-2");
+        emit_close_completion_warning(root, &config, "unknown", "task-2");
         // No assertion needed: the helper bails out early when expected==[].
     }
 

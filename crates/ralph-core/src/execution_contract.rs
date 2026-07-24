@@ -1689,9 +1689,11 @@ mod tests {
             ExecutionContractDecision::Reject(findings) => {
                 let finding = findings
                     .iter()
-                    .find_map(|f| match &f.kind {
-                        ExecutionContractViolationKind::TaskNotTerminal { .. } => Some(f),
-                        _ => None,
+                    .find(|f| {
+                        matches!(
+                            &f.kind,
+                            ExecutionContractViolationKind::TaskNotTerminal { .. }
+                        )
                     })
                     .expect("Should have a TaskNotTerminal rejection");
 
@@ -1767,9 +1769,11 @@ mod tests {
             ExecutionContractDecision::Reject(findings) => {
                 let finding = findings
                     .iter()
-                    .find_map(|f| match &f.kind {
-                        ExecutionContractViolationKind::TaskNotTerminal { .. } => Some(f),
-                        _ => None,
+                    .find(|f| {
+                        matches!(
+                            &f.kind,
+                            ExecutionContractViolationKind::TaskNotTerminal { .. }
+                        )
                     })
                     .expect("Should have a TaskNotTerminal rejection");
 

@@ -565,7 +565,6 @@ fn task_resume_payload_matches_topic(payload: &str, topic: &str) -> bool {
 /// `#[allow(dead_code)]` — kept for backwards compatibility
 /// (legacy callers + tests) but the runner now invokes
 /// `inject_hard_gate_guidance_with_triggers` directly.
-
 pub fn resolve_display_hat_for_execution(
     event_loop: &EventLoop,
     hat_id: &HatId,

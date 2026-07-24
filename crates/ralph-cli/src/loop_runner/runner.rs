@@ -519,7 +519,7 @@ pub(crate) fn persist_starting_event_to_events_file(
 ///   (equivalent to `--no-auto-merge`). If `None`, uses `config.features.auto_merge`.
 /// * `resume_loop_id` - Explicit loop ID to use when resuming (`--loop-id`).
 ///   If `None` and `resume` is true, reuses the existing `current-loop-id` marker.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::large_futures)]
 pub async fn run_loop_impl(
     config: RalphConfig,
     color_mode: ColorMode,

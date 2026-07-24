@@ -66,9 +66,9 @@ pub fn can_view(caller: &LoopCaller, entry: &LoopEntry) -> AuthzDecision {
             hat_id,
             allow_unowned,
         } => {
-            if entry.owner_hat_id.as_deref() == Some(hat_id.as_str()) {
-                AuthzDecision::Allow
-            } else if entry.owner_hat_id.is_none() && *allow_unowned {
+            if entry.owner_hat_id.as_deref() == Some(hat_id.as_str())
+                || (entry.owner_hat_id.is_none() && *allow_unowned)
+            {
                 AuthzDecision::Allow
             } else {
                 AuthzDecision::Deny {

@@ -382,7 +382,6 @@ impl FlowLifecycleRegistry {
     /// All non-terminal records, in insertion order. Used by
     /// Unit 6 (`GateWaveMutex`) to decide whether a
     /// `missing_event_gate` should be suppressed.
-    #[must_use]
     pub fn active_records(&self) -> impl Iterator<Item = &FlowLifecycleRecord> {
         self.records.values().filter(|r| !r.phase.is_terminal())
     }
@@ -602,15 +601,15 @@ fn is_legal_transition(current: FlowPhase, next: FlowPhase) -> bool {
     if current.is_terminal() {
         return false;
     }
-    match (current, next) {
-        (Detected, Spawning | Failed) => true,
-        (Spawning, WorkersActive | Failed) => true,
-        (WorkersActive, Aggregating | PartialClosed | Failed) => true,
-        (Aggregating, Closed | Degraded) => true,
-        (PartialClosed, Degraded) => true,
-        (Failed, Degraded) => true,
-        _ => false,
-    }
+    matches!(
+        (current, next),
+        (Detected, Spawning | Failed)
+            | (Spawning, WorkersActive | Failed)
+            | (WorkersActive, Aggregating | PartialClosed | Failed)
+            | (Aggregating, Closed | Degraded)
+            | (PartialClosed, Degraded)
+            | (Failed, Degraded)
+    )
 }
 
 fn build_transition_envelope(

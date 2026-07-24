@@ -680,9 +680,12 @@ fn emit_command_with_root_and_hats(
         };
         let discovered_config_path = effective_config_sources
             .iter()
-            .find_map(|source| match source {
-                ConfigSource::File(path) => Some(path.clone()),
-                _ => None,
+            .find_map(|source| {
+                if let ConfigSource::File(path) = source {
+                    Some(path.clone())
+                } else {
+                    None
+                }
             })
             .unwrap_or_else(|| workspace_root.join("ralph.yml"));
         match crate::preflight::load_config_for_preflight_sync(
@@ -1323,17 +1326,13 @@ fn emit_command_with_root_and_hats(
             .as_ref()
             .is_some_and(|c| c.event_loop.execution_mode == HatExecutionMode::Isolated)
         && !ralph_core::event_origin::is_ralph_control_topic(topic)
-        && hat.is_some()
+        && let Some(hat_str) = hat.as_ref()
     {
         // U7 (2026-06-17-004 plan, R7): in isolated mode, when a business topic
         // has no explicit --source and hat is known, default source to the emitting
         // hat so downstream consumers always have a stable attribution field.
         // Control topics (loop.cancel, task.resume, etc.) are unchanged.
-        record["source"] = serde_json::Value::String(
-            hat.as_ref()
-                .expect("U7 R7: hat checked non-None above")
-                .clone(),
-        );
+        record["source"] = serde_json::Value::String(hat_str.clone());
     }
 
     // Auto-tag with wave metadata from env vars (set by loop runner on wave workers)

@@ -370,7 +370,7 @@ impl SupervisorP0Fixture {
         let wave_id = self
             .bound_wave_id
             .as_deref()
-            .unwrap_or_else(|| self.public_wave_id.as_str());
+            .unwrap_or(self.public_wave_id.as_str());
         let snapshot = self.store.fan_in_status(wave_id).ok();
         let snapshots = snapshot.into_iter().collect::<Vec<_>>();
         let slot_resources = (0..self.wave_total)
@@ -407,11 +407,10 @@ fn parse_env_nul(bytes: &[u8]) -> HashMap<String, String> {
         let mut iter = chunk.splitn(2, |b| *b == b'=');
         let key = iter.next().unwrap_or(b"").to_vec();
         let val = iter.next().unwrap_or(b"").to_vec();
-        if let Ok(k) = std::str::from_utf8(&key) {
-            if let Ok(v) = std::str::from_utf8(&val) {
+        if let Ok(k) = std::str::from_utf8(&key)
+            && let Ok(v) = std::str::from_utf8(&val) {
                 out.insert(k.to_string(), v.to_string());
             }
-        }
     }
     out
 }

@@ -1539,7 +1539,7 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
 
     // U3 KTD-5: the local effective cap is
     // `min(hat.concurrency, bridge.max_concurrent_workers())`.
-    let effective_cap: u32 = (wave.hat_config.concurrency as u32)
+    let effective_cap: u32 = wave.hat_config.concurrency
         .min(bridge.max_concurrent_workers())
         .max(1);
 
@@ -3322,7 +3322,6 @@ fn take_results(
 /// `take_wave_results`) so it survives across dispatch rounds.
 /// See `PendingTaskResumeRecord` in `super::io` for the
 /// pre-rendered line format.
-
 /// 2026-07-23-001 plan U9: fold one approval round's `CompletedWave`
 /// into the wave-level accumulator inside the supervisor's batched
 /// dispatch. Per-round waves carry round-scoped `wave_total` /
@@ -3649,6 +3648,7 @@ fn record_wave_spawn_failed_envelope(
 /// after a stable retry window. **No** worker, TUI update, or backend
 /// call is performed — the wave is short-circuited before any of those
 /// side-effects.
+#[allow(clippy::unused_async)]
 async fn handle_wave_rejection(
     rejected: &ralph_core::RejectedWave,
     event_loop: &mut ralph_core::EventLoop,

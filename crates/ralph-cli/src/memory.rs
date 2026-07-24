@@ -1516,7 +1516,7 @@ mod tests {
             MemoryVisibility::Private,
         );
         // format_memories_as_markdown should embed both owner and visibility
-        let md = format_memories_as_markdown(&[memory.clone()]);
+        let md = format_memories_as_markdown(std::slice::from_ref(&memory));
         assert!(md.contains("owner: executor"), "owner missing in md: {md}");
         assert!(
             md.contains("visibility: private"),

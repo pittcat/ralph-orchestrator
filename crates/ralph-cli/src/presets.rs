@@ -1490,7 +1490,6 @@ mod tests {
     /// and the `## ORCHESTRATOR CONTEXT` / `ralph tools task` HARD
     /// RULE clauses; the per-step `progress.md` / `task start` /
     /// `task close` ordering is no longer an agent obligation.
-
     // ------------------------------------------------------------------
     // 2026-06-17-005 R4 contract: state projection is the single writer
     // for `.ralph/agent/tasks.jsonl` and `.ralph/agent/progress.md`.
@@ -1501,7 +1500,6 @@ mod tests {
     // projector-driven model. See U4 of
     // docs/plans/2026-06-17-005-fix-state-projection-phase1-review-findings-plan.md.
     // ------------------------------------------------------------------
-
     /// R4: the cross-hat HARD RULE comment must declare
     /// `## ORCHESTRATOR CONTEXT` as the canonical read source
     /// **and** forbid agent-side `ralph tools task` calls.
@@ -1867,7 +1865,6 @@ mod tests {
                     // Skip escape; pass through next char verbatim.
                     current.push(bytes[idx + 1] as char);
                     idx += 2;
-                    continue;
                 } else if c == b'"' {
                     in_quote = false;
                     idx += 1;
@@ -1883,23 +1880,19 @@ mod tests {
                         out.push(std::mem::take(&mut current));
                         had_quote = false;
                     }
-                    continue;
                 } else {
                     current.push(c as char);
                     idx += 1;
-                    continue;
                 }
             } else {
                 if c == b'"' {
                     in_quote = true;
                     had_quote = true;
                     idx += 1;
-                    continue;
                 } else if c == b')' {
                     return Some(out);
                 } else {
                     idx += 1;
-                    continue;
                 }
             }
         }

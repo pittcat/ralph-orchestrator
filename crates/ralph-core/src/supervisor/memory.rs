@@ -122,6 +122,7 @@ struct Inner {
 /// exercise the same state-machine semantics as the rusqlite
 /// store (U4 contract: `CURRENT_VERSION` v3).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct EmissionRow {
     scope_key: String,
     public_wave_id: String,

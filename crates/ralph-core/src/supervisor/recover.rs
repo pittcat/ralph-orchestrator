@@ -107,22 +107,20 @@ pub fn recover_active_waves_at_startup(
             elapsed_secs,
             cancel_requested: snapshot.cancel_requested,
         };
-        match evaluate_phase(&snapshot, &inputs) {
-            PhaseDecision::Failed {
-                reason: FailedReason::Timeout,
-                ..
-            } => {
-                store.set_wave_phase(&snapshot.wave_id, WavePhase::Failed)?;
-                report.timed_out.push(snapshot.wave_id.clone());
-            }
-            // Cancelled / RequiredSlotFailure / ExpectedTotalZero:
-            // leave the phase alone — the coordinator's next
-            // `tick` will call `fail_wave` and write the phase
-            // itself. Recovery only short-circuits the Timeout
-            // branch because a timed-out wave may never tick
-            // again (no slots left to record).
-            _ => {}
+        if let PhaseDecision::Failed {
+            reason: FailedReason::Timeout,
+            ..
+        } = evaluate_phase(&snapshot, &inputs)
+        {
+            store.set_wave_phase(&snapshot.wave_id, WavePhase::Failed)?;
+            report.timed_out.push(snapshot.wave_id.clone());
         }
+        // Cancelled / RequiredSlotFailure / ExpectedTotalZero:
+        // leave the phase alone — the coordinator's next
+        // `tick` will call `fail_wave` and write the phase
+        // itself. Recovery only short-circuits the Timeout
+        // branch because a timed-out wave may never tick
+        // again (no slots left to record).
     }
     Ok(report)
 }

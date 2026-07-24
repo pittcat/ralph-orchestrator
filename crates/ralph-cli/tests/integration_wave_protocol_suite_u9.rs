@@ -23,11 +23,11 @@ mod common;
 /// the wave emit path's precheck agrees with the test's payload
 /// shape.
 fn write_minimal_ralph_yml(workspace: &std::path::Path) {
-    let yaml = r#"
+    let yaml = r"
 event_loop:
   event_policy:
     enabled: false
-"#;
+";
     std::fs::write(workspace.join("ralph.yml"), yaml).unwrap();
     std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
 }

@@ -47,6 +47,7 @@ fn u12_required_emit_returns_pending_when_partial() {
             assert!(topics.contains(&"plan.complete"));
             assert!(topics.contains(&"plan.blocked"));
         }
+        #[allow(clippy::match_wildcard_for_single_variants)]
         other => panic!("expected Pending, got {other:?}"),
     }
 }

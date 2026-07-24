@@ -274,9 +274,7 @@ pub fn resolve_wave_context_for_synthesizer_with_aggregate_timeout(
         .or_else(|| pick_wave(&orphan_dones))
         .or(latest_wave_id);
 
-    let Some(wave_id) = chosen else {
-        return None;
-    };
+    let wave_id = chosen?;
 
     if let Some(acc) = per_wave.get(&wave_id) {
         context_from_wave(&wave_id, acc, aggregate_timeout)

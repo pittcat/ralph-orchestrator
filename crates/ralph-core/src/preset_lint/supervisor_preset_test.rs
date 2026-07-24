@@ -490,7 +490,7 @@ fn ce_executor_supervisor_schema_has_no_deleted_hat_or_artifact_topics() {
     ];
     for topic in forbidden {
         assert!(
-            !schemas.contains_key(&serde_yaml::Value::String(topic.to_string())),
+            !schemas.contains_key(serde_yaml::Value::String(topic.to_string())),
             "R5: schema must NOT declare deleted-hat/artifact topic `{topic}`"
         );
     }

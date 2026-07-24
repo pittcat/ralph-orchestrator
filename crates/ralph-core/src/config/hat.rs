@@ -1420,8 +1420,8 @@ obligations:
             Some("noise field")
         );
         // Nested objects / non-string scalars should NOT be mirrored.
-        assert!(ctx.payload_fields.get("nested").is_none());
-        assert!(ctx.payload_fields.get("commit_count").is_none());
+        assert!(!ctx.payload_fields.contains_key("nested"));
+        assert!(!ctx.payload_fields.contains_key("commit_count"));
         // Typed fields are still extracted for backward compatibility.
         assert_eq!(ctx.commit_count, Some(3));
     }

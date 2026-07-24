@@ -549,7 +549,7 @@ mod tests {
 
         let result = sync_file(&FileSyncConfig {
             path: &path,
-            blocks: &[block.clone()],
+            blocks: std::slice::from_ref(&block),
             on_error: OnError::Warn,
         })
         .unwrap();
@@ -574,7 +574,7 @@ mod tests {
         let block = sample_block();
         let result = sync_file(&FileSyncConfig {
             path: &path,
-            blocks: &[block.clone()],
+            blocks: std::slice::from_ref(&block),
             on_error: OnError::Warn,
         })
         .unwrap();
@@ -641,7 +641,7 @@ mod tests {
         let block = sample_block();
         let result = sync_file(&FileSyncConfig {
             path: &path,
-            blocks: &[block.clone()],
+            blocks: std::slice::from_ref(&block),
             on_error: OnError::Warn,
         })
         .unwrap();
@@ -846,7 +846,7 @@ mod tests {
 
         let result = sync_file(&FileSyncConfig {
             path: &path,
-            blocks: &[block.clone()],
+            blocks: std::slice::from_ref(&block),
             on_error: OnError::Warn,
         })
         .unwrap();
@@ -885,7 +885,7 @@ mod tests {
 
         let result = sync_file(&FileSyncConfig {
             path: &path,
-            blocks: &[block.clone()],
+            blocks: std::slice::from_ref(&block),
             on_error: OnError::Warn,
         })
         .unwrap();
@@ -927,7 +927,7 @@ mod tests {
 
         let result = sync_file(&FileSyncConfig {
             path: &path,
-            blocks: &[block.clone()],
+            blocks: std::slice::from_ref(&block),
             on_error: OnError::Warn,
         })
         .unwrap();

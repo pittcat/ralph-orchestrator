@@ -129,18 +129,15 @@ use crate::display::{
 use crate::rpc_stdin::{GuidanceMessage, RpcDispatcher, run_stdin_reader, run_stdout_emitter};
 
 /// Shared atomic state written by the main loop and read by the RPC `get_state` handler.
-
 /// Determine whether the active hat requires an explicit emit and has no
 /// default_publishes fallback. Only hats that *should* publish but have no
 /// automatic兜底 are hard-gated.
-
 /// Resolves the active timestamped events JSONL file path for this run.
 ///
 /// The authoritative source is `.ralph/current-events`, which contains a
 /// relative path like `.ralph/events-YYYYMMDD-HHMMSS.jsonl`.
 ///
 /// Falls back to `ctx.events_path()` if the marker is missing/unreadable.
-
 /// R3: Register the current loop in the [`LoopRegistry`] with the
 /// appropriate `owner_hat_id`. In `--resume` mode the existing entry is
 /// left in place — re-registering would clobber the worktree path and
@@ -150,6 +147,5 @@ use crate::rpc_stdin::{GuidanceMessage, RpcDispatcher, run_stdin_reader, run_std
 /// the entry so the P7 authorization helpers can gate cross-loop
 /// operations. Human CLI invocations stay `None` so any operator can
 /// still attach, view logs, or merge.
-
 #[cfg(test)]
 mod tests;

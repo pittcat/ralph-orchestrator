@@ -40,7 +40,7 @@ mod common;
 
 /// 单条测试的整体时间预算(看门狗,防 CI 挂死)。
 /// 正常路径 exec 5 PTY spawn,exec 5/sleep 0.6s × 5 slots + 路由调度,典型 < 5s。
-const RUN_TIMEOUT: Duration = Duration::from_secs(60);
+const RUN_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// exec worker 的并发探测睡眠:足够长让 5 个 slot 在 cap=4
 /// 下产生可观察的重叠窗口。
@@ -108,7 +108,7 @@ event_loop:
 /// 关键:不写未来时间戳(event_reader 拒绝 future_timestamp 窗口外的事件)。
 fn fake_backend_script(probe_sleep: &str) -> String {
     format!(
-        r##"#!/bin/sh
+        r#"#!/bin/sh
 # U9 E2E fake backend for builtin:ce-executor-supervisor.
 # 每个 activation 只写该 hat 允许的唯一业务事件(isolated 单事件预算)。
 cat >/dev/null 2>&1 || true
@@ -197,7 +197,7 @@ EOF
     ;;
 esac
 exit 0
-"##,
+"#,
         probe_sleep = probe_sleep
     )
 }
@@ -587,7 +587,7 @@ fn supervisor_primary_path_exec_wave_completes_with_schema_payload() {
     if let Ok(entries) = std::fs::read_dir(&conc_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(_) = name.strip_prefix("seen-") {
+            if name.strip_prefix("seen-").is_some() {
                 let n: u32 = std::fs::read_to_string(entry.path())
                     .unwrap_or_default()
                     .trim()
@@ -617,7 +617,7 @@ fn ledger_payload_string(ev: &Value) -> String {
     match ev.get("payload") {
         None => String::new(),
         Some(Value::String(s)) => s.clone(),
-        Some(Value::Object(_)) | Some(Value::Array(_)) => {
+        Some(Value::Object(_) | Value::Array(_)) => {
             // The fan-in sink normalizes `*.wave.complete` / `*.wave.failed`
             // 业务 payload 为 JSON object(this happens after U6 — see the
             // queue/serve boundary). Serialize it back to a JSON string

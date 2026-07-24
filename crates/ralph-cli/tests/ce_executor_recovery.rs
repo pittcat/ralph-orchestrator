@@ -155,6 +155,7 @@ fn contract_invalid_work_done_from_executor_is_rejected() {
         "LOOP_COMPLETE",
     ) {
         OriginCheck::Accepted => {}
+        #[allow(clippy::match_wildcard_for_single_variants)]
         other => {
             panic!("executor work.done should be in-scope for contract rejection, got {other:?}")
         }

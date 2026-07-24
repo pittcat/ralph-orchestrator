@@ -23,7 +23,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::config::RalphConfig;
-use crate::event_loop::flow_declaration::{RUNNER_BINDING_WAVE_PREFIX, is_wave_runner_binding};
+use crate::event_loop::flow_declaration::is_wave_runner_binding;
 
 // ──────────────────────────────────────────────────────────────────────────
 // Handoff graph
@@ -151,9 +151,9 @@ impl HandoffGraph {
         // already enjoys. The virtual node is keyed
         // `wave_runtime` so it does not collide with the
         // supervisor's `supervisor` node.
-        if let Some(mech) = config.mechanism.as_ref() {
-            if let Some(flow) = mech.flow.as_ref() {
-                if flow
+        if let Some(mech) = config.mechanism.as_ref()
+            && let Some(flow) = mech.flow.as_ref()
+                && flow
                     .steps
                     .iter()
                     .any(|s| is_wave_runner_binding(s.runs.as_deref()))
@@ -183,8 +183,6 @@ impl HandoffGraph {
                             .push((*wave_topic).to_string());
                     }
                 }
-            }
-        }
 
         hat_order.sort();
 
@@ -882,6 +880,7 @@ pub fn run_workflow_activation_contract(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::preset_lint::LintSeverity;
@@ -1487,8 +1486,9 @@ hats:
 
     #[test]
     fn wave_exemption_fires_for_coordination_topics_when_binding_declared() {
-        let mut cfg = RalphConfig::default();
         use crate::config::{FlowStepConfig, MechanismConfig};
+        use crate::event_loop::flow_declaration::RUNNER_BINDING_WAVE_PREFIX;
+        let mut cfg = RalphConfig::default();
         cfg.mechanism = Some(MechanismConfig {
             flow: Some(crate::config::FlowDeclarationConfig {
                 flow_type: "declared".to_string(),
@@ -1592,15 +1592,14 @@ pub fn wave_coord_check_v2(config: &RalphConfig, trigger: &str) -> bool {
         .mechanism
         .as_ref()
         .and_then(|m| m.flow.as_ref())
-        .map_or(false, |f| {
+        .is_some_and(|f| {
             let mut found = false;
             for s in &f.steps {
-                if let Some(r) = s.runs.as_deref() {
-                    if r.starts_with("wave.runtime.") {
+                if let Some(r) = s.runs.as_deref()
+                    && r.starts_with("wave.runtime.") {
                         found = true;
                         break;
                     }
-                }
             }
             found
         })

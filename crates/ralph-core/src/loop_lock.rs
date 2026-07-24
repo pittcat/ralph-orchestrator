@@ -628,6 +628,7 @@ mod tests {
                 // Same-process re-acquisition causes this; acceptable in tests
                 assert_eq!(stale.prompt, "active lock");
             }
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("Expected Active or Stale, got {:?}", other),
         }
     }

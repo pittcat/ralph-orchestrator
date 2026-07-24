@@ -951,6 +951,7 @@ fn extract_unit_from_key(key: &str) -> Option<String> {
     Some(last[..idx].to_lowercase())
 }
 
+#[allow(clippy::unused_async)]
 async fn execute_plan_sync(args: PlanSyncArgs) -> Result<()> {
     let plan_path = match resolve_plan_path(args.plan.as_deref()) {
         Ok(p) => p,

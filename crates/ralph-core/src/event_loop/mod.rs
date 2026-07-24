@@ -257,21 +257,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-impl Default for ProcessedEvents {
-    fn default() -> Self {
-        Self {
-            had_events: false,
-            had_raw_events: false,
-            had_rejected_events: false,
-            had_plan_events: false,
-            has_orphans: false,
-            accepted_events: Vec::new(),
-            contract_rejections: Vec::new(),
-            payload_contract_violation: None,
-        }
-    }
-}
-
 impl TerminationReason {
     /// Returns the exit code for this termination reason per spec.
     ///
@@ -9478,8 +9463,7 @@ impl EventLoop {
                     is_dual_publish_step_handoff
                 };
 
-                if should_admit && evicted_non_terminal.is_some() {
-                    let idx = evicted_non_terminal.unwrap();
+                if should_admit && let Some(idx) = evicted_non_terminal {
                     let evicted = accepted.remove(idx);
                     warn!(
                         evicted_topic = %evicted.topic,

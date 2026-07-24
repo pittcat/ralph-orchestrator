@@ -65,7 +65,7 @@ fn sync_creates_section_when_file_missing() {
 
     let block = sample_block();
     let report =
-        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(&[block.clone()]))
+        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(std::slice::from_ref(&block)))
             .expect("warn mode must not propagate errors");
 
     assert_eq!(report.synced, 1);
@@ -108,7 +108,7 @@ fn sync_appends_block_when_marker_absent() {
 
     let block = sample_block();
     let report =
-        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(&[block.clone()]))
+        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(std::slice::from_ref(&block)))
             .expect("warn mode must not propagate errors");
 
     assert_eq!(report.synced, 1, "one block must be appended");
@@ -218,7 +218,7 @@ fn sync_replaces_in_place_on_v_mismatch() {
     fs::write(&path, &existing).unwrap();
 
     let report =
-        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(&[block.clone()]))
+        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(std::slice::from_ref(&block)))
             .expect("warn mode must not propagate errors");
 
     assert_eq!(report.synced, 1, "block must be reported as replaced");
@@ -356,7 +356,7 @@ fn sync_retries_lock_then_succeeds() {
     barrier.wait();
     let started = Instant::now();
     let report =
-        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(&[block.clone()]))
+        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(std::slice::from_ref(&block)))
             .expect("warn mode must not propagate errors");
     let elapsed = started.elapsed();
 

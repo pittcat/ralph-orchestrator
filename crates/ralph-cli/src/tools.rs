@@ -37,6 +37,7 @@ pub enum ToolsCommands {
 }
 
 /// Execute a tools command.
+#[allow(clippy::unused_async)]
 pub async fn execute(
     args: ToolsArgs,
     use_colors: bool,

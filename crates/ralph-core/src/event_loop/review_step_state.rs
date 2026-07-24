@@ -1680,7 +1680,7 @@ mod tests {
             step: "fix-04".to_string(),
         };
         assert!(
-            tracker.steps.get(&absent).is_none(),
+            !tracker.steps.contains_key(&absent),
             "fix-04 not present in fix-plan must not be prefilled"
         );
     }

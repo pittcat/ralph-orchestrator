@@ -264,25 +264,25 @@ pub fn consume_claimed_ticket(workspace: &Path) -> anyhow::Result<bool> {
     let ticket = ticket_path(workspace);
     // Always drop the claim marker first so retries are
     // unblocked even when the ticket delete errors.
-    if claim.exists() {
-        if let Err(err) = std::fs::remove_file(&claim) {
-            eprintln!(
-                "warning: failed to delete claim marker at {}: {}",
-                claim.display(),
-                err
-            );
-        }
+    if claim.exists()
+        && let Err(err) = std::fs::remove_file(&claim)
+    {
+        eprintln!(
+            "warning: failed to delete claim marker at {}: {}",
+            claim.display(),
+            err
+        );
     }
     let mut cleanup_failed = false;
-    if ticket.exists() {
-        if let Err(err) = std::fs::remove_file(&ticket) {
-            eprintln!(
-                "warning: failed to delete ticket at {}: {}",
-                ticket.display(),
-                err
-            );
-            cleanup_failed = true;
-        }
+    if ticket.exists()
+        && let Err(err) = std::fs::remove_file(&ticket)
+    {
+        eprintln!(
+            "warning: failed to delete ticket at {}: {}",
+            ticket.display(),
+            err
+        );
+        cleanup_failed = true;
     }
     Ok(cleanup_failed)
 }
@@ -546,7 +546,6 @@ mod wave_verify_gate_tests {
     #[test]
     fn test_require_ticket_human_bypass() {
         let ws = temp_workspace();
-        let path = ticket_path(ws.path());
         let ctx = make_ctx("loop-1", "executor", false);
         let canonical = canonical_payload_form(&[r#"{"dim":"x"}"#.to_string()]);
         let fp = emission_fingerprint("review.wave.ready", &canonical, "loop-1", "executor");

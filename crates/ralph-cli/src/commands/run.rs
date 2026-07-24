@@ -1525,8 +1525,8 @@ pub(crate) fn run_loop_result_exit_code(err: &anyhow::Error) -> Option<i32> {
 /// Documented exit codes:
 /// - 0: clean completion (`CompletionPromise`, `Cancelled`)
 /// - 1: generic failure (`ConsecutiveFailures`, `LoopThrashing`, `LoopStale`,
-///      `ValidationFailure`, `Stopped`, `WorkspaceGone`, `RecoveryExhausted`,
-///      `ReviewFailed`, and any unrecognized reason)
+///   `ValidationFailure`, `Stopped`, `WorkspaceGone`, `RecoveryExhausted`,
+///   `ReviewFailed`, and any unrecognized reason)
 /// - 2: payload contract violation (`PayloadContractViolation`)
 /// - 3: max iterations exceeded (`MaxIterations`)
 /// - 4: max runtime exceeded (`MaxRuntime`)

@@ -2158,7 +2158,7 @@ async fn test_dispatcher_spawns_only_approved_slot() {
     // once for slot 0 (approved) and then visit slot 1/2 to
     // confirm the store returns `Ok(false)` for them.
     assert!(
-        calls.len() >= 1,
+        !calls.is_empty(),
         "U3 KTD-2: dispatcher MUST query the bridge at least once (slot 0); got {calls:?}"
     );
     let first = calls.first().expect("non-empty");

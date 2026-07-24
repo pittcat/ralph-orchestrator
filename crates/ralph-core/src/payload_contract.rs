@@ -18,6 +18,7 @@ use ralph_proto::HatId;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
+use std::sync::LazyLock;
 
 /// A single extracted payload field reference.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -53,14 +54,24 @@ pub enum ExtractionPattern {
 ///
 /// Deduplication is based on (hat_id, field) — only the first occurrence
 /// is kept, with its original line number and pattern preserved.
+static FROM_PAYLOAD_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)From\s+event\s+payload\s*:\s*").unwrap());
+static MUST_INCLUDE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)payload\s+MUST\s+include\s*:\s*").unwrap());
+static BACKTICK_FIELD_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
+static BACKTICK_INTENT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)from\s+event\s+payload|event\s+payload\s*:|payload\s+MUST\s+include").unwrap()
+});
+
 pub fn extract_payload_field_refs(
     hat_id: &str,
     instructions: &str,
     ignore_fields: &[String],
 ) -> Vec<PayloadFieldRef> {
-    let from_payload_regex = Regex::new(r"(?i)From\s+event\s+payload\s*:\s*").unwrap();
-    let must_include_regex = Regex::new(r"(?i)payload\s+MUST\s+include\s*:\s*").unwrap();
-    let backtick_field_regex = Regex::new(r"`([^`]+)`").unwrap();
+    let from_payload_regex = &FROM_PAYLOAD_REGEX;
+    let must_include_regex = &MUST_INCLUDE_REGEX;
+    let backtick_field_regex = &BACKTICK_FIELD_REGEX;
 
     let ignore_set: BTreeSet<String> = ignore_fields.iter().cloned().collect();
     // Track seen (hat_id, field) pairs for deduplication
@@ -117,9 +128,7 @@ pub fn extract_payload_field_refs(
         // reviewer") do NOT count — this avoids false positives from
         // backticked topic names like `work.done` or file paths like
         // `fix-log.md` that appear on those lines.
-        let backtick_intent_regex =
-            Regex::new(r"(?i)from\s+event\s+payload|event\s+payload\s*:|payload\s+MUST\s+include")
-                .unwrap();
+        let backtick_intent_regex = &BACKTICK_INTENT_REGEX;
         if backtick_intent_regex.is_match(line) {
             for caps in backtick_field_regex.captures_iter(line) {
                 if let Some(field_match) = caps.get(1) {

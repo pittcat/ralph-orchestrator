@@ -18,7 +18,7 @@ pub fn normalize_cli_output_for_parsing(
         BackendOutputFormat::PiStreamJson => extract_pi_stream_text(raw_output),
         BackendOutputFormat::TraeStreamJson => extract_trae_stream_text(raw_output),
         BackendOutputFormat::AgentStreamJson => extract_agent_stream_text(raw_output),
-        _ => raw_output.to_string(),
+        BackendOutputFormat::Text => raw_output.to_string(),
     }
 }
 

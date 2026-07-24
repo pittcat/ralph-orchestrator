@@ -511,6 +511,7 @@ hats:
         let decision = HatCommandPolicy::check_task(&ctx, hats, None, "add");
         let deny = match decision {
             PolicyDecision::Deny { reason, .. } => reason,
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected deny, got {other:?}"),
         };
         assert_eq!(deny, "missing_hat");
@@ -630,6 +631,7 @@ hats:
         let decision = HatCommandPolicy::check_wave_emit(&agent_ctx("ghost"), &cfg);
         let deny = match decision {
             PolicyDecision::Deny { reason, .. } => reason,
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected deny, got {other:?}"),
         };
         assert_eq!(deny, "non_dispatcher_hat");
@@ -707,6 +709,7 @@ hats:
         let decision = HatCommandPolicy::check_task(&agent_ctx("executor"), hats, None, "add");
         let deny = match decision {
             PolicyDecision::Deny { reason, hint } => (reason, hint),
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Deny, got {other:?}"),
         };
         assert_eq!(deny.0, "non_coordinator_owner");
@@ -738,6 +741,7 @@ hats:
         let decision = HatCommandPolicy::check_task(&agent_ctx("executor"), &[], Some(&err), "add");
         let deny = match decision {
             PolicyDecision::Deny { reason, hint } => (reason, hint),
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Deny, got {other:?}"),
         };
         assert_eq!(deny.0, "non_coordinator_owner");
@@ -783,6 +787,7 @@ hats:
         );
         let deny = match decision {
             PolicyDecision::Deny { reason, hint } => (reason, hint),
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Deny, got {other:?}"),
         };
         assert_eq!(deny.0, "projector_ssot_task_create_forbidden");

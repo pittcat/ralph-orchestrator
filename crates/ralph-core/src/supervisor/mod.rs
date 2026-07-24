@@ -965,7 +965,7 @@ mod u3_tests {
 
     #[test]
     fn summarize_unavailable_returns_unavailable_marker() {
-        use crate::supervisor::{InMemorySupervisorStore, SupervisorStore};
+        use crate::supervisor::InMemorySupervisorStore;
         let store = InMemorySupervisorStore::new();
         // Drop the store so the inner lock cannot be acquired —
         // simulating a panic on read. We instead force an error by

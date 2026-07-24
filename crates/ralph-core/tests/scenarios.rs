@@ -730,6 +730,7 @@ fn run_bdd_supervisor_fan_in(
                 injected += 1;
             }
             CoordinatorAction::AlreadyDone | CoordinatorAction::ContinueCollect => {}
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => {
                 eprintln!("[bdd-supervisor] unexpected action for {wave_id}: {other:?}");
             }

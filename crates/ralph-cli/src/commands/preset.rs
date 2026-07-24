@@ -1131,8 +1131,6 @@ fn print_diff_human(result: &DiffResult, use_colors: bool) {
     // Status with color
     let status_color = if result.up_to_date {
         colors::GREEN
-    } else if result.is_newer {
-        colors::YELLOW
     } else {
         colors::YELLOW
     };

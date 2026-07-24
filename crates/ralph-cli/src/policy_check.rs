@@ -452,7 +452,7 @@ pub fn build_policy_state(
 /// gated topics are surfaced as a parse-style mismatch so the agent
 /// gets structured backpressure instead of a silent fall-through
 /// (review finding #6 / U3 fail-closed alignment).
-#[allow(deprecated)]
+#[allow(deprecated, clippy::result_large_err)]
 pub fn check_step_handoff_gate(
     topic: &str,
     payload_str: &str,
@@ -534,6 +534,7 @@ fn mismatch_to_validation_error(m: &ProgressTaskMismatch, topic: &str) -> Valida
 /// - `Err(ValidationError)` with `reason_code=dimension_mismatch` when mismatched
 /// - `Err(ValidationError)` with `reason_code=dimension_mismatch` when payload is not JSON
 ///   or lacks `dimension` (actual is rendered as `<missing>`)
+#[allow(clippy::result_large_err)]
 pub fn check_wave_dimension_assignment(
     topic: &str,
     payload_str: &str,
@@ -548,6 +549,7 @@ pub fn check_wave_dimension_assignment(
 /// expected dimension explicitly. Split out so unit tests can drive
 /// both branches without mutating process-global env vars (the
 /// workspace `forbid(unsafe_code)` lint blocks `set_var`).
+#[allow(clippy::result_large_err)]
 fn check_wave_dimension_assignment_with_env(
     topic: &str,
     payload_str: &str,
@@ -611,6 +613,7 @@ fn check_wave_dimension_assignment_with_env(
 /// topic is not in the hat's `publishes` list. The message names
 /// the hat, the topic, and the hat's allowed publishes so the
 /// agent can self-correct without re-reading the preset.
+#[allow(clippy::result_large_err)]
 pub fn check_isolated_scope(
     hat: Option<&str>,
     topic: &str,
@@ -1520,10 +1523,12 @@ event_loop:
     fn cfg_with_hats(ids: &[&str]) -> RalphConfig {
         // RalphConfig.hats is HashMap<String, HatConfig>; build
         // it as a YAML mapping keyed by hat id.
-        let hat_blocks: String = ids
-            .iter()
-            .map(|id| format!("  {id}:\n    name: {id}\n    triggers: []\n    publishes: []\n"))
-            .collect();
+        let mut hat_blocks = String::new();
+        for id in ids {
+            hat_blocks.push_str(&format!(
+                "  {id}:\n    name: {id}\n    triggers: []\n    publishes: []\n"
+            ));
+        }
         let yaml = format!("hats:\n{hat_blocks}");
         serde_yaml::from_str(&yaml).expect("synthetic RalphConfig yaml")
     }
@@ -1662,6 +1667,7 @@ hats:
 /// (post-U1 fix in `event_origin.rs`) so the recovery envelope can
 /// be emitted by the runner without a hat. This matches the runtime
 /// origin-guard exemption for control topics.
+#[allow(clippy::result_large_err)]
 pub fn check_emit_provenance(
     hat: Option<&str>,
     topic: &str,
@@ -1720,6 +1726,7 @@ pub fn check_emit_provenance(
 /// is set to a value that does not appear in the loaded
 /// preset's `hats[]` map. The error message names the offending
 /// value AND the resolved hat ids so the agent can self-correct.
+#[allow(clippy::result_large_err)]
 pub fn check_envelope_triggered(
     topic: &str,
     triggered: Option<&str>,

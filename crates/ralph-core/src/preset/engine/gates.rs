@@ -382,6 +382,7 @@ mod tests {
                 assert_eq!(kind, RejectionKind::MissingField);
                 assert!(message.contains("plan_name"));
             }
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Reject, got {other:?}"),
         }
     }
@@ -407,6 +408,7 @@ mod tests {
                     "missing required fields MUST keep MissingField kind; flipping the kind breaks the typed escalation chain"
                 );
             }
+            #[allow(clippy::match_wildcard_for_single_variants)]
             other => panic!("expected Reject, got {other:?}"),
         }
     }

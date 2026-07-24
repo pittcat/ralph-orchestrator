@@ -5788,16 +5788,13 @@ mod tests {
         required_when: HashMap<String, serde_json::Value>,
         forbid_null: bool,
     ) {
-        let mut constraint = ElementConstraint {
+        let constraint = ElementConstraint {
             field: field.to_string(),
             required,
             allowed_values: allowed,
             required_when,
             forbid_null_when_required: forbid_null,
-            ..Default::default()
         };
-        // Default field is empty for callers that don't set it; set here.
-        constraint.field = field.to_string();
         let mut ec = HashMap::new();
         ec.insert("dimensions".to_string(), constraint);
         config.schemas.insert(

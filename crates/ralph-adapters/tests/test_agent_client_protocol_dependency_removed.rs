@@ -14,7 +14,7 @@
 //! can resolve the workspace.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const FORBIDDEN_SUBSTRING: &str = "agent-client-protocol";
 
@@ -32,7 +32,7 @@ fn workspace_root() -> PathBuf {
 /// test with the offending path and underlying IO error if the file
 /// cannot be read. This produces an actionable diagnostic if a file is
 /// missing or unreadable in CI, rather than a generic panic.
-fn read_workspace_file(workspace_root: &PathBuf, relative: &str) -> String {
+fn read_workspace_file(workspace_root: &Path, relative: &str) -> String {
     let path = workspace_root.join(relative);
     fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!(

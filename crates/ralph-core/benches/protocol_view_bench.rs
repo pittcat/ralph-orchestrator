@@ -103,7 +103,7 @@ fn main() {
     }
     let total = start.elapsed();
 
-    fn summarise(label: &str, samples: &mut Vec<u128>) -> f64 {
+    fn summarise(label: &str, samples: &mut [u128]) -> f64 {
         samples.sort_unstable();
         let n = samples.len();
         let p50 = samples[n / 2];

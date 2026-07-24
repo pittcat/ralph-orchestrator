@@ -219,7 +219,7 @@ mod tests {
                 skip: false,
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
-                blocks: &[block.clone()],
+                blocks: std::slice::from_ref(&block),
                 session_dir: None,
             },
         )
@@ -525,7 +525,7 @@ mod tests {
                 skip: false,
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
-                blocks: &[block.clone()],
+                blocks: std::slice::from_ref(&block),
                 session_dir: None,
             },
         )
@@ -567,7 +567,7 @@ mod tests {
                 skip: false,
                 on_error: OnError::Warn,
                 target_files: &["CLAUDE.md"],
-                blocks: &[block.clone()],
+                blocks: std::slice::from_ref(&block),
                 session_dir: None,
             },
         )

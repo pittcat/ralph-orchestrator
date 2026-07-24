@@ -2174,7 +2174,7 @@ fn try_legacy_sidecar_import(
         );
     }
     let on_disk = count_recovered_events(events_file, &record.wave_id, idempotency_key)?;
-    if on_disk != record.count || record.count as u32 != expected_count {
+    if on_disk != record.count || record.count != expected_count {
         bail!(
             "sidecar_import_conflict: legacy idempotency row for key '{idempotency_key}' \
              count/on-disk mismatch (sidecar_count={}, on_disk={on_disk}, expected={expected_count}). \
