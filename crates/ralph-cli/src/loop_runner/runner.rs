@@ -1332,6 +1332,15 @@ async fn run_loop_impl_inner(
                 &ctx,
                 crate::loop_runner::paths::config_state_machine_enabled(&config),
             );
+            // 2026-07-24-001 plan U3 (R7): derive the loop's
+            // `tasks.jsonl` path for pending-projection recovery.
+            // Same derivation as `wave/dispatcher.rs` and the bridge
+            // context built in `build_supervisor_bridge`: the events
+            // file's parent `.ralph` dir + `agent/tasks.jsonl`.
+            let supervisor_tasks_path = supervisor_events_path
+                .parent()
+                .map(|p| p.join("agent").join("tasks.jsonl"))
+                .unwrap_or_else(|| std::path::PathBuf::from(".ralph/agent/tasks.jsonl"));
             match build_supervisor_bridge(supervisor_cfg, &ctx, supervisor_events_path) {
                 Ok(concrete) => {
                     // U11: reconcile in-flight waves before the loop
@@ -1343,15 +1352,32 @@ async fn run_loop_impl_inner(
                     // surfaces on the next `tick` and the dispatcher
                     // falls back to the legacy path (KTD-7 R3).
                     let store = concrete.store();
-                    if let Err(err) = ralph_core::supervisor::recover_active_waves_at_startup(
-                        store,
+                    // `recover_active_waves_at_startup` consumes its
+                    // store argument, so hand it a clone and keep the
+                    // original for the projection replay below.
+                    match ralph_core::supervisor::recover_active_waves_at_startup(
+                        store.clone(),
                         supervisor_cfg.aggregate_timeout_secs,
                     ) {
-                        warn!(
-                            error = %err,
-                            "supervisor recover_active_waves_at_startup failed; \
-                             recovery will be retried on next tick"
-                        );
+                        Ok(_) => {
+                            // 2026-07-24-001 plan U3 (R7 / KTD5): wave
+                            // recovery succeeded — replay any slot
+                            // projections that a crash left pending so
+                            // `tasks.jsonl` terminal state matches the
+                            // supervisor store. Idempotent.
+                            crate::loop_runner::wave::task_projection::recover_pending_projections(
+                                &supervisor_tasks_path,
+                                &loop_id,
+                                store.as_ref(),
+                            );
+                        }
+                        Err(err) => {
+                            warn!(
+                                error = %err,
+                                "supervisor recover_active_waves_at_startup failed; \
+                                 recovery will be retried on next tick"
+                            );
+                        }
                     }
                     info!(
                         db_path = %supervisor_cfg.db_path,
@@ -1403,24 +1429,43 @@ async fn run_loop_impl_inner(
                         &ctx,
                         crate::loop_runner::paths::config_state_machine_enabled(&config),
                     );
-                    match build_supervisor_bridge(
-                        supervisor_cfg,
-                        &ctx,
-                        supervisor_events_path,
-                    ) {
+                    // 2026-07-24-001 plan U3 (R7): same `tasks.jsonl`
+                    // derivation as the dispatcher and the bridge
+                    // context (events parent `.ralph` dir +
+                    // `agent/tasks.jsonl`).
+                    let supervisor_tasks_path = supervisor_events_path
+                        .parent()
+                        .map(|p| p.join("agent").join("tasks.jsonl"))
+                        .unwrap_or_else(|| std::path::PathBuf::from(".ralph/agent/tasks.jsonl"));
+                    match build_supervisor_bridge(supervisor_cfg, &ctx, supervisor_events_path) {
                         Ok(concrete) => {
                             let store = concrete.store();
-                            if let Err(err) =
-                                ralph_core::supervisor::recover_active_waves_at_startup(
-                                    store,
-                                    supervisor_cfg.aggregate_timeout_secs,
-                                )
-                            {
-                                warn!(
-                                    error = %err,
-                                    "default-path supervisor recover_active_waves_at_startup \
-                                     failed; recovery will be retried on next tick"
-                                );
+                            // `recover_active_waves_at_startup`
+                            // consumes its store argument; clone it
+                            // and keep the original for the projection
+                            // replay below.
+                            match ralph_core::supervisor::recover_active_waves_at_startup(
+                                store.clone(),
+                                supervisor_cfg.aggregate_timeout_secs,
+                            ) {
+                                Ok(_) => {
+                                    // 2026-07-24-001 plan U3 (R7 /
+                                    // KTD5): replay pending slot→task
+                                    // projections after wave recovery
+                                    // succeeds (idempotent).
+                                    crate::loop_runner::wave::task_projection::recover_pending_projections(
+                                        &supervisor_tasks_path,
+                                        &loop_id,
+                                        store.as_ref(),
+                                    );
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        error = %err,
+                                        "default-path supervisor recover_active_waves_at_startup \
+                                         failed; recovery will be retried on next tick"
+                                    );
+                                }
                             }
                             info!(
                                 db_path = %supervisor_cfg.db_path,

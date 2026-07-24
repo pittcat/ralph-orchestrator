@@ -538,6 +538,134 @@ fn recover_active_waves_at_startup_returns_report_on_empty_store() {
     assert!(report.already_merged.is_empty());
 }
 
+/// 2026-07-24-001 plan U3 (R7 / KTD5 / Feature C3): a crash between
+/// the supervisor-store mutation and the `tasks.jsonl` write leaves
+/// the slot terminal (`Completed`) in the store while the projected
+/// task row is stuck at `started`. `recover_pending_projections` —
+/// now wired into loop startup right after a successful
+/// `recover_active_waves_at_startup` — must replay the store
+/// snapshot and bring the task to its terminal (`Closed`) state, and
+/// a second recover must be a no-op (idempotent).
+#[test]
+fn recover_pending_projections_closes_stale_task_and_is_idempotent() {
+    use crate::loop_runner::wave::task_projection::{
+        SlotProjection, project_slot, recover_pending_projections, slot_task_key,
+    };
+    use ralph_core::TaskStore;
+    use ralph_core::supervisor::{
+        InMemorySupervisorStore, SlotResource, SupervisorStore, WaveKind,
+    };
+    use ralph_core::task::TaskStatus;
+    use std::sync::Arc;
+
+    let loop_id = "loop-recover";
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let tasks_path = tmp.path().join("agent").join("tasks.jsonl");
+
+    // Build the supervisor store: a 2-slot Exec wave whose slot 0
+    // reached `Completed` while slot 1 is still `Pending`, so the
+    // wave stays in a non-terminal phase and is returned by
+    // `recover_active_waves`. Exec slots default to `Worktree`
+    // isolation, so slot 0 needs a binding before it is
+    // dispatchable.
+    let store = InMemorySupervisorStore::new();
+    let wave_id = store
+        .register_wave("idem-key", WaveKind::Exec, 2)
+        .expect("register wave");
+    store
+        .bind_worktree(
+            &wave_id,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/worktrees/recover-0".to_string()),
+                branch: Some("ralph/recover-0".to_string()),
+            },
+        )
+        .expect("bind slot 0 worktree");
+    let (dispatched_wave, dispatched_slot) = store
+        .try_dispatch_next(4)
+        .expect("dispatch")
+        .expect("a slot must be dispatchable");
+    assert_eq!(dispatched_wave, wave_id);
+    assert_eq!(dispatched_slot, 0);
+    store
+        .record_slot_result(&wave_id, 0, "hash-0", 1)
+        .expect("slot 0 completes in the store");
+
+    // Crash simulation: the runtime had projected slot 0 as
+    // `Started` onto `tasks.jsonl` before it could project the
+    // terminal `Completed`. The task row is therefore stuck at
+    // `InProgress` while the store already shows `Completed`.
+    project_slot(&tasks_path, loop_id, &wave_id, 0, SlotProjection::Started);
+    let task_key = slot_task_key(loop_id, &wave_id, 0);
+    let status_before = {
+        let store = TaskStore::load(&tasks_path).expect("load tasks");
+        store
+            .all()
+            .iter()
+            .find(|t| t.key.as_deref() == Some(task_key.as_str()))
+            .map(|t| t.status)
+            .expect("started task row must exist before recover")
+    };
+    assert_eq!(
+        status_before,
+        TaskStatus::InProgress,
+        "pre-recover the projected task must still be started"
+    );
+
+    // Startup recover replays the store snapshot.
+    let store_arc: Arc<dyn SupervisorStore> = Arc::new(store);
+    recover_pending_projections(&tasks_path, loop_id, store_arc.as_ref());
+
+    let status_after = {
+        let store = TaskStore::load(&tasks_path).expect("load tasks");
+        store
+            .all()
+            .iter()
+            .find(|t| t.key.as_deref() == Some(task_key.as_str()))
+            .map(|t| t.status)
+            .expect("task row must exist after recover")
+    };
+    assert_eq!(
+        status_after,
+        TaskStatus::Closed,
+        "recover must close the stale started task to match the store's Completed slot"
+    );
+
+    // Idempotency: a second recover leaves the ledger unchanged
+    // (same row count, same terminal status, no duplicate rows).
+    let snapshot_after_first = {
+        let store = TaskStore::load(&tasks_path).expect("load tasks");
+        store
+            .all()
+            .iter()
+            .map(|t| (t.key.clone(), t.status))
+            .collect::<Vec<_>>()
+    };
+    recover_pending_projections(&tasks_path, loop_id, store_arc.as_ref());
+    let snapshot_after_second = {
+        let store = TaskStore::load(&tasks_path).expect("load tasks");
+        store
+            .all()
+            .iter()
+            .map(|t| (t.key.clone(), t.status))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        snapshot_after_first, snapshot_after_second,
+        "a second recover_pending_projections must be a no-op"
+    );
+    let closed_count = snapshot_after_second
+        .iter()
+        .filter(|(k, s)| k.as_deref() == Some(task_key.as_str()) && *s == TaskStatus::Closed)
+        .count();
+    assert_eq!(
+        closed_count, 1,
+        "exactly one closed row for the slot; got {snapshot_after_second:?}"
+    );
+}
+
 // ── 2026-07-22-003 plan U1: pipeline zero-impact characterization gate ──────
 //
 // Goal: the `ce-executor-pipeline` preset (and any other preset that
@@ -3798,7 +3926,7 @@ fn u2_register_failure_fails_closed() {
 #[test]
 fn u2_lazy_bridge_uses_in_memory_store_trait_surface() {
     use ralph_core::supervisor::{
-        InMemorySupervisorStore, SupervisorBridge as _, SupervisorStore as _, WaveKind,
+        InMemorySupervisorStore, SupervisorStore as _, WaveKind,
     };
     // Direct store: register_wave accepts (wave_id, kind, total).
     let store = InMemorySupervisorStore::new();
@@ -3841,7 +3969,7 @@ fn u2_lazy_bridge_uses_in_memory_store_trait_surface() {
 /// for content-hash dedup and concurrent dispatch safety.
 #[test]
 fn u5_register_wave_if_absent_is_idempotent_sso_t() {
-    use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
+    use ralph_core::supervisor::WaveKind;
     let bridge: Arc<dyn SupervisorBridge> = Arc::new(
         crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store(),
     );
@@ -3865,7 +3993,7 @@ fn u5_register_wave_if_absent_is_idempotent_sso_t() {
 /// is a stable input to the dedup logic.
 #[test]
 fn u5_content_hash_is_part_of_record_slot_result_signature() {
-    use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
+    use ralph_core::supervisor::WaveKind;
     let bridge: Arc<dyn SupervisorBridge> = Arc::new(
         crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store(),
     );
@@ -3899,7 +4027,7 @@ fn u5_content_hash_is_part_of_record_slot_result_signature() {
 /// surfaces as a test failure.
 #[test]
 fn u5_lazy_bridge_default_cap_is_unlimited() {
-    use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
+    use ralph_core::supervisor::WaveKind;
     let bridge: Arc<dyn SupervisorBridge> = Arc::new(
         crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store(),
     );
@@ -3937,7 +4065,7 @@ fn u5_lazy_bridge_default_cap_is_unlimited() {
 /// lazy-bridge routes through the same trait method.
 #[test]
 fn u7_lazy_bridge_bind_slot_routes_to_production_trait_method() {
-    use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
+    use ralph_core::supervisor::WaveKind;
     let bridge: Arc<dyn SupervisorBridge> = Arc::new(
         crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store(),
     );
@@ -3974,7 +4102,7 @@ fn u7_lazy_bridge_bind_slot_routes_to_production_trait_method() {
 /// surfaces as a test failure.
 #[test]
 fn u7_review_default_is_shared_readonly() {
-    use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
+    use ralph_core::supervisor::WaveKind;
     let bridge: Arc<dyn SupervisorBridge> = Arc::new(
         crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store(),
     );
