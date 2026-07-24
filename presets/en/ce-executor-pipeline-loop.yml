@@ -594,7 +594,7 @@ event_loop:
             source: "executor writes .ralph/agent/decisions.md"
             fill_rule: "literal .ralph/agent/decisions.md after recording every planned Unit's disposition"
           execution_status:
-            meaning: "overall execution outcome: complete when every planned Unit reached a commit; partial when any Unit failed, was blocked, or was skipped"
+            meaning: "overall execution outcome: complete when every planned Unit reached a commit; partial when any Unit failed, was blocked, or was skipped, or when all Units were blocked off a prior dependency failure (zero failed and zero completed but the dependency chain broke); partial is a settlement bill, not a failure — it carries the residual Unit classification for downstream processing"
             source: "executor settlement audit"
             fill_rule: "one of complete, partial; complete only when completed_units == planned_units; partial when failed_units / blocked_units / skipped_units is non-empty or completed_units is a proper subset of planned_units"
       work.failed:
