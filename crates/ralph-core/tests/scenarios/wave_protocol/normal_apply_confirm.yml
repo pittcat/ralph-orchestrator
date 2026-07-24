@@ -1,0 +1,54 @@
+# 2026-07-24-003 plan U8 / S1: Apply → Confirm happy path
+#
+# Validates the wave protocol closure from a real EventLoop
+# perspective. The mock back-end:
+#   1. injects `work.done` (the supervisor trigger),
+#   2. the work-dispatcher hat publishes `review.wave.ready`
+#      in response (mirroring the production wave slot write),
+#   3. the loop closes with `LOOP_COMPLETE`.
+#
+# The contract under test: the wave's `work.done → review.wave.ready`
+# chain is visible in the ledger, no `plan.blocked` (no
+# fail-closed event), and the loop closes cleanly. Together
+# with U5 store-cutover tests this proves S1 (正常 Apply
+# 后公开 Confirm).
+
+name: normal_apply_confirm
+description: U8 S1 wave apply → confirm happy path through the runtime event loop
+
+config:
+  prompt_file: PROMPT.md
+  topic_format_whitelist:
+    - LOOP_COMPLETE
+  max_iterations: 4
+  hats:
+    work-dispatcher:
+      subscribes_to:
+        - work.done
+      publishes:
+        - review.wave.ready
+        - plan.blocked
+      default_publishes: review.wave.ready
+
+mock_responses:
+  - |
+    <event topic="work.done">
+    plan_name: "wave-protocol-u8-s1"
+    </event>
+  - |
+    <event topic="review.wave.ready">
+    plan_name: "wave-protocol-u8-s1"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    done
+    </event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: work.done
+    - topic: review.wave.ready
+  absent_events:
+    - topic: plan.blocked
+  completion: true

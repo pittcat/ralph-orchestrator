@@ -453,9 +453,7 @@ pub fn is_wave_coordination_topic_trigger(
     config: &crate::config::RalphConfig,
     trigger: &str,
 ) -> bool {
-    if !(trigger.ends_with(".wave.complete")
-        || trigger.ends_with(".wave.failed"))
-    {
+    if !(trigger.ends_with(".wave.complete") || trigger.ends_with(".wave.failed")) {
         return false;
     }
     preset_uses_wave_runtime(config)
@@ -1011,8 +1009,8 @@ pub fn detect_required_topic_gaps(
         // supervisor-only exemption above so wave-only
         // presets do not falsely report "no subscriber" for
         // their declared `event_policy.schemas` unit topics.
-        let is_wave_slot = preset_uses_wave_runtime(config)
-            && is_supervisor_slot_topic(topic.as_str());
+        let is_wave_slot =
+            preset_uses_wave_runtime(config) && is_supervisor_slot_topic(topic.as_str());
         if !has_subscriber
             && !publishing_hat_also_publishes_completion
             && !is_supervisor_slot

@@ -627,4 +627,3 @@ fn ledger_payload_string(ev: &Value) -> String {
         Some(other) => other.to_string(),
     }
 }
-

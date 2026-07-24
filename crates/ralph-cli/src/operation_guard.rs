@@ -68,8 +68,8 @@ impl OperationContext {
     where
         F: Fn(&str) -> Option<String>,
     {
-        let current_loop_id = read_loop_id_marker(&workspace_root)
-            .or_else(|| env_lookup("RALPH_CURRENT_LOOP_ID"));
+        let current_loop_id =
+            read_loop_id_marker(&workspace_root).or_else(|| env_lookup("RALPH_CURRENT_LOOP_ID"));
         let current_hat_id = read_current_hat(&env_lookup);
         let is_agent_context = compute_is_agent_context(&env_lookup);
 

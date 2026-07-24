@@ -502,9 +502,7 @@ pub async fn handle_wave_events(
         if supervisor_bridge.is_some() {
             supervisor_bridge.cloned()
         } else if accepted_len > 0 {
-            use crate::loop_runner::wave::{
-                CoordinatorSupervisorBridge, ProductionBridgeContext,
-            };
+            use crate::loop_runner::wave::{CoordinatorSupervisorBridge, ProductionBridgeContext};
             use ralph_core::supervisor::worktree_bind::DefaultWorktreeFactory;
             let cap = u32::MAX; // default path uses the per-wave cap; U5 refines.
             // 2026-07-22-001 plan U3 (KTD-2): prefer the rusqlite
@@ -544,9 +542,7 @@ pub async fn handle_wave_events(
                     tasks_path: main_events_file
                         .parent()
                         .map(|p| p.join("agent").join("tasks.jsonl"))
-                        .or_else(|| {
-                            Some(std::path::PathBuf::from(".ralph/agent/tasks.jsonl"))
-                        }),
+                        .or_else(|| Some(std::path::PathBuf::from(".ralph/agent/tasks.jsonl"))),
                 },
                 Arc::new(DefaultWorktreeFactory),
                 cap,
@@ -1493,9 +1489,7 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     // fail closed so callers see the root cause (DB open failure,
     // constraint conflict, etc.) instead of a silently different
     // dispatch shape.
-    let store_wave_id = match bridge
-        .register_wave_if_absent(wave_kind, &wave.wave_id, wave.total)
-    {
+    let store_wave_id = match bridge.register_wave_if_absent(wave_kind, &wave.wave_id, wave.total) {
         Ok(id) => id,
         Err(err) => {
             // 2026-07-22-001 plan U2: register errors fail closed.
@@ -1895,9 +1889,10 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
                 // compensation hook so a subsequent coordinator
                 // tick observes the failure mode and runs the
                 // diagnostic / cleanup record.
-                if let Err(err) =
-                    bridge.enqueue_compensation(&store_wave_id, ralph_core::supervisor::CompensationKind::OnTimeout)
-                {
+                if let Err(err) = bridge.enqueue_compensation(
+                    &store_wave_id,
+                    ralph_core::supervisor::CompensationKind::OnTimeout,
+                ) {
                     tracing::debug!(
                         wave_id = %store_wave_id,
                         error = %err,
@@ -2547,10 +2542,7 @@ fn open_default_supervisor_store(
             return ralph_core::supervisor::RusqliteSupervisorStore::open(&resolved)
                 .map(|store| Arc::new(store) as Arc<dyn ralph_core::supervisor::SupervisorStore>)
                 .map_err(|err| {
-                    anyhow::anyhow!(
-                        "supervisor-db open failed at {}: {err}",
-                        resolved.display()
-                    )
+                    anyhow::anyhow!("supervisor-db open failed at {}: {err}", resolved.display())
                 });
         }
     }
@@ -2564,7 +2556,9 @@ fn open_default_supervisor_store(
          Enable `event_loop.supervisor.db_path` to opt into \
          persistence."
     );
-    Ok(Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new()))
+    Ok(Arc::new(
+        ralph_core::supervisor::InMemorySupervisorStore::new(),
+    ))
 }
 
 /// Compute the aggregate timeout from per-worker timeout and the

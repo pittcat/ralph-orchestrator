@@ -15,12 +15,12 @@
 //! - S9: reservation + zero events on disk → `FailedPartial`
 //! - Migration v2 → v3 keeps waves / slots / seq intact
 
+#[cfg(feature = "supervisor-db")]
+use ralph_core::supervisor::RusqliteSupervisorStore;
 use ralph_core::supervisor::{
     EmissionReservation, EmissionState, InMemorySupervisorStore, SupervisorStore,
     SupervisorStoreError, WaveKind,
 };
-#[cfg(feature = "supervisor-db")]
-use ralph_core::supervisor::RusqliteSupervisorStore;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 
@@ -135,12 +135,8 @@ fn reserve_emission_payload_conflict_returns_conflict() {
     store
         .reserve_emission("scope", "digest-A", 1, &always_zero)
         .expect("first");
-    store
-        .mark_emission_applying("scope")
-        .expect("applying");
-    store
-        .mark_emission_applied("scope", 1)
-        .expect("applied");
+    store.mark_emission_applying("scope").expect("applying");
+    store.mark_emission_applied("scope", 1).expect("applied");
 
     let conflict = store
         .reserve_emission("scope", "digest-B", 1, &always_zero)
@@ -167,8 +163,12 @@ fn reserve_emission_distinct_scopes_yield_distinct_ids() {
         .expect("b");
     match (a, b) {
         (
-            EmissionReservation::Reserved { public_wave_id: a_id },
-            EmissionReservation::Reserved { public_wave_id: b_id },
+            EmissionReservation::Reserved {
+                public_wave_id: a_id,
+            },
+            EmissionReservation::Reserved {
+                public_wave_id: b_id,
+            },
         ) => assert_ne!(a_id, b_id),
         _ => panic!("expected two Reserved variants"),
     }
@@ -264,9 +264,7 @@ fn emission_state_for_wave_id_tracks_lifecycle() {
         other => panic!("expected Reserved, got {other:?}"),
     };
     assert_eq!(
-        store
-            .emission_state_for_wave_id(&id)
-            .expect("state lookup"),
+        store.emission_state_for_wave_id(&id).expect("state lookup"),
         Some(EmissionState::Reserved)
     );
 
@@ -484,7 +482,12 @@ fn reserve_emission_recovery_required_when_partial() {
     };
     // Caller wrote 1 of 3 events then crashed before mark_applied.
     let second = store
-        .reserve_emission("scope", "digest", 3, &events_jsonl_count(&[(&first_id, "p1")]))
+        .reserve_emission(
+            "scope",
+            "digest",
+            3,
+            &events_jsonl_count(&[(&first_id, "p1")]),
+        )
         .expect("second");
     match second {
         EmissionReservation::RecoveryRequired {

@@ -193,7 +193,10 @@ fn baseline_idempotency_writes_sidecar() {
     let events_file = ws.join(".ralph/events.jsonl");
     let parent = events_file.parent().expect("parent");
     let file_name = events_file.file_name().expect("file_name");
-    let sidecar = parent.join(format!(".{}.idempotency.jsonl", file_name.to_string_lossy()));
+    let sidecar = parent.join(format!(
+        ".{}.idempotency.jsonl",
+        file_name.to_string_lossy()
+    ));
     assert!(
         sidecar.exists(),
         "baseline must write .idempotency.jsonl next to events file (U5 inverts this): {sidecar:?}"
@@ -276,7 +279,10 @@ fn baseline_ticket_removed_before_event_write_on_io_failure() {
         ],
         Some(&payloads),
     );
-    assert_ne!(e_code, 0, "emit must fail under IO failure; stderr={e_stderr}");
+    assert_ne!(
+        e_code, 0,
+        "emit must fail under IO failure; stderr={e_stderr}"
+    );
 
     // Baseline invariant: `require_ticket` consumes the ticket *before*
     // the IO failure is observed, so the agent has no ticket left.
@@ -310,12 +316,7 @@ fn baseline_inspect_loop_swallows_corrupt_store() {
     std::fs::write(&db_path, b"not a sqlite database\n").unwrap();
 
     // `inspect loop` must succeed (read-only / best-effort contract).
-    let (code, stdout, stderr) = run_ralph(
-        ws,
-        &["inspect", "loop", "--format", "json"],
-        &[],
-        None,
-    );
+    let (code, stdout, stderr) = run_ralph(ws, &["inspect", "loop", "--format", "json"], &[], None);
     assert_eq!(
         code, 0,
         "inspect loop must remain best-effort even with corrupt store; stderr={stderr}"

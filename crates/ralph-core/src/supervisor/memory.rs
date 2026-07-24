@@ -825,7 +825,8 @@ impl SupervisorStore for InMemorySupervisorStore {
                     // re-running. (S9 fail-closed path.)
                     Ok(EmissionReservation::Conflict)
                 }
-                EmissionState::RecoveryRequired | EmissionState::Reserved
+                EmissionState::RecoveryRequired
+                | EmissionState::Reserved
                 | EmissionState::Applying => {
                     // Use the caller-supplied closure to count
                     // events on disk; the closure lets the trait

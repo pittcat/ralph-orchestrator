@@ -539,10 +539,7 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
 
     fn take_pending_compensations(
         &self,
-    ) -> Result<
-        Vec<(String, ralph_core::supervisor::CompensationKind)>,
-        BridgeError,
-    > {
+    ) -> Result<Vec<(String, ralph_core::supervisor::CompensationKind)>, BridgeError> {
         self.store
             .take_pending_compensations()
             .map_err(|err| BridgeError::Store(err.to_string()))

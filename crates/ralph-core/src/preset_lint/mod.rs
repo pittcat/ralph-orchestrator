@@ -134,7 +134,7 @@ pub use topic_format::{
 };
 pub use trigger_context::{check_trigger_context, check_trigger_context_topology};
 pub use workflow_activation::{
-    HandoffGraph, source_label_is_builtin_embedded, run_workflow_activation_contract,
+    HandoffGraph, run_workflow_activation_contract, source_label_is_builtin_embedded,
     wave_coord_check_v2 as is_wave_coordination_trigger,
 };
 

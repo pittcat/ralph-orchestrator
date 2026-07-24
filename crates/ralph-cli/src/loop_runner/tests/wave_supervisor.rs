@@ -3925,9 +3925,7 @@ fn u2_register_failure_fails_closed() {
 /// calls (`Arc<dyn SupervisorBridge>`) is idempotent.
 #[test]
 fn u2_lazy_bridge_uses_in_memory_store_trait_surface() {
-    use ralph_core::supervisor::{
-        InMemorySupervisorStore, SupervisorStore as _, WaveKind,
-    };
+    use ralph_core::supervisor::{InMemorySupervisorStore, SupervisorStore as _, WaveKind};
     // Direct store: register_wave accepts (wave_id, kind, total).
     let store = InMemorySupervisorStore::new();
     let id = store
@@ -3939,9 +3937,8 @@ fn u2_lazy_bridge_uses_in_memory_store_trait_surface() {
     // exposes `register_wave_if_absent`, which the dispatcher calls.
     // The lazy-bridge construction in `handle_wave_events` uses this
     // exact surface so we pin it here as the lazy-bridge contract.
-    let bridge: Arc<dyn SupervisorBridge> = Arc::new(
-        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store(),
-    );
+    let bridge: Arc<dyn SupervisorBridge> =
+        Arc::new(crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store());
     let lazy_id = bridge
         .register_wave_if_absent(WaveKind::Exec, "u2-lazy-bridge", 1)
         .expect("first bridge register ok");
@@ -3970,9 +3967,8 @@ fn u2_lazy_bridge_uses_in_memory_store_trait_surface() {
 #[test]
 fn u5_register_wave_if_absent_is_idempotent_sso_t() {
     use ralph_core::supervisor::WaveKind;
-    let bridge: Arc<dyn SupervisorBridge> = Arc::new(
-        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store(),
-    );
+    let bridge: Arc<dyn SupervisorBridge> =
+        Arc::new(crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store());
     let id1 = bridge
         .register_wave_if_absent(WaveKind::Exec, "u5-sso-wave", 3)
         .expect("first register");
@@ -3994,9 +3990,8 @@ fn u5_register_wave_if_absent_is_idempotent_sso_t() {
 #[test]
 fn u5_content_hash_is_part_of_record_slot_result_signature() {
     use ralph_core::supervisor::WaveKind;
-    let bridge: Arc<dyn SupervisorBridge> = Arc::new(
-        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store(),
-    );
+    let bridge: Arc<dyn SupervisorBridge> =
+        Arc::new(crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store());
     let wave_id = bridge
         .register_wave_if_absent(WaveKind::Exec, "u5-content-hash", 2)
         .expect("register");
@@ -4028,9 +4023,8 @@ fn u5_content_hash_is_part_of_record_slot_result_signature() {
 #[test]
 fn u5_lazy_bridge_default_cap_is_unlimited() {
     use ralph_core::supervisor::WaveKind;
-    let bridge: Arc<dyn SupervisorBridge> = Arc::new(
-        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store(),
-    );
+    let bridge: Arc<dyn SupervisorBridge> =
+        Arc::new(crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store());
     // Lazy construction defaults the cap to u32::MAX. U5's
     // production cap wiring threads `max_concurrent_workers`
     // through the dispatcher's reverse-pressure scheduler; that
@@ -4066,9 +4060,8 @@ fn u5_lazy_bridge_default_cap_is_unlimited() {
 #[test]
 fn u7_lazy_bridge_bind_slot_routes_to_production_trait_method() {
     use ralph_core::supervisor::WaveKind;
-    let bridge: Arc<dyn SupervisorBridge> = Arc::new(
-        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store(),
-    );
+    let bridge: Arc<dyn SupervisorBridge> =
+        Arc::new(crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store());
     // No production worktree path is exercised here; the
     // factory's `DefaultWorktreeFactory` returns `None` when no
     // repo is associated (the in-memory coordinator has no
@@ -4103,9 +4096,8 @@ fn u7_lazy_bridge_bind_slot_routes_to_production_trait_method() {
 #[test]
 fn u7_review_default_is_shared_readonly() {
     use ralph_core::supervisor::WaveKind;
-    let bridge: Arc<dyn SupervisorBridge> = Arc::new(
-        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store(),
-    );
+    let bridge: Arc<dyn SupervisorBridge> =
+        Arc::new(crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store());
     let binding = bridge
         .bind_slot(WaveKind::Review, "u7-review-default", 0)
         .expect("bind_slot ok");

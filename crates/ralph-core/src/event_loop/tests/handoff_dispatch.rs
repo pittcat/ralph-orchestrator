@@ -433,7 +433,6 @@ hats:
     );
 }
 
-
 /// Regression: `ce-executor-supervisor`'s top-level `mechanism.flow`
 /// must load into `FlowStepScopeStage` so `work.ready` is admitted
 /// to the bus and lands in `task-planner`'s pending queue.
@@ -454,7 +453,11 @@ fn supervisor_work_ready_lands_in_task_planner_pending() {
     let yaml = include_str!("../../../../../presets/en/ce-executor-supervisor.yml");
     let config = RalphConfig::parse_yaml(yaml).expect("parse supervisor preset");
     assert!(
-        config.mechanism.as_ref().and_then(|m| m.flow.as_ref()).is_some(),
+        config
+            .mechanism
+            .as_ref()
+            .and_then(|m| m.flow.as_ref())
+            .is_some(),
         "builtin supervisor must declare top-level mechanism.flow"
     );
 
@@ -491,4 +494,3 @@ fn supervisor_work_ready_lands_in_task_planner_pending() {
         "work.ready must land in task-planner pending after FlowStepScope admits it; got {topics:?}"
     );
 }
-

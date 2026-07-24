@@ -1027,9 +1027,8 @@ impl SupervisorStore for RusqliteSupervisorStore {
         // same id. We derive the seq from `wave_id_seq` so a
         // future migration off SQLite keeps a single allocator.
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "INSERT INTO wave_id_seq (placeholder) VALUES (0) RETURNING seq",
-            )?;
+            let mut stmt =
+                conn.prepare("INSERT INTO wave_id_seq (placeholder) VALUES (0) RETURNING seq")?;
             let seq: i64 = stmt.query_row([], |row| row.get(0))?;
             let public_wave_id = format!("w-rs-{seq}");
 
@@ -1081,7 +1080,9 @@ impl SupervisorStore for RusqliteSupervisorStore {
                     public_wave_id: existing_public_wave_id,
                 }),
                 EmissionState::Failed => Ok(EmissionReservation::Conflict),
-                EmissionState::Reserved | EmissionState::Applying | EmissionState::RecoveryRequired => {
+                EmissionState::Reserved
+                | EmissionState::Applying
+                | EmissionState::RecoveryRequired => {
                     let on_disk = count_events_on_disk(&existing_public_wave_id);
                     if on_disk == 0 {
                         Ok(EmissionReservation::FailedPartial {

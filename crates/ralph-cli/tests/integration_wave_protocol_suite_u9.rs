@@ -143,11 +143,21 @@ fn u9_opac_verify_then_emit_succeeds_in_default_path() {
     // 2. Emit (same payload file → same fingerprint)
     let (e_code, e_stdout, e_stderr) = run_ralph(
         ws,
-        &["wave", "emit", "review.wave.ready", "--payloads-stdin", "--output", "json"],
+        &[
+            "wave",
+            "emit",
+            "review.wave.ready",
+            "--payloads-stdin",
+            "--output",
+            "json",
+        ],
         &env,
         Some(&payloads),
     );
-    assert_eq!(e_code, 0, "verify-then-emit must succeed; stdout={e_stdout} stderr={e_stderr}");
+    assert_eq!(
+        e_code, 0,
+        "verify-then-emit must succeed; stdout={e_stdout} stderr={e_stderr}"
+    );
 
     // 3. Confirm: events file must contain 2 records for the
     //    emitted wave_id. (The event file is the default
@@ -175,7 +185,14 @@ fn u9_human_cli_bypasses_ticket_gate() {
     // is false → require_ticket returns Ok early.
     let (code, _stdout, _stderr) = run_ralph(
         ws,
-        &["wave", "emit", "review.wave.ready", "--payloads-stdin", "--output", "json"],
+        &[
+            "wave",
+            "emit",
+            "review.wave.ready",
+            "--payloads-stdin",
+            "--output",
+            "json",
+        ],
         &[],
         Some(&payloads),
     );
@@ -218,10 +235,7 @@ fn u9_opac_fingerprint_drift_denies_emit() {
         &env,
         Some(&payload_b),
     );
-    assert_ne!(
-        e_code, 0,
-        "drift between verify and emit must deny"
-    );
+    assert_ne!(e_code, 0, "drift between verify and emit must deny");
     assert!(
         e_stderr.contains("fingerprint mismatch"),
         "expected fingerprint mismatch deny, got: {e_stderr}"

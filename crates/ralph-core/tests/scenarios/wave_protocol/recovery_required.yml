@@ -1,0 +1,50 @@
+# 2026-07-24-003 plan U8 / S9: partial wave → fail-closed recovery
+#
+# Validates that a wave whose slot count is below the
+# declared `expected_total` is fail-closed by the runtime:
+# the EventLoop does NOT silently re-emit missing slots and
+# no terminal green signal (`LOOP_COMPLETE`) is produced.
+# An operator can then run `ralph wave inspect <wave_id>` to
+# surface the gap (paired with the U5 recovery_required /
+# failed_partial paths).
+#
+# The mock back-end injects `work.done` and the dispatcher
+# publishes `review.wave.ready` once, then the loop should
+# stop without `LOOP_COMPLETE` (the wave is incomplete, so
+# the runtime must not auto-close).
+
+name: recovery_required
+description: U8 S9 partial wave is fail-closed; the runtime never auto-recovers a missing slot
+
+config:
+  prompt_file: PROMPT.md
+  topic_format_whitelist:
+    - LOOP_COMPLETE
+  max_iterations: 4
+  hats:
+    work-dispatcher:
+      subscribes_to:
+        - work.done
+      publishes:
+        - review.wave.ready
+        - plan.blocked
+      default_publishes: review.wave.ready
+
+mock_responses:
+  - |
+    <event topic="work.done">
+    plan_name: "wave-protocol-u8-s9"
+    </event>
+  - |
+    <event topic="review.wave.ready">
+    plan_name: "wave-protocol-u8-s9"
+    </event>
+
+expected:
+  iterations: 2
+  events:
+    - topic: work.done
+    - topic: review.wave.ready
+  absent_events:
+    - topic: LOOP_COMPLETE
+  completion: false

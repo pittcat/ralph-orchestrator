@@ -84,7 +84,10 @@ fn inspect_help_lists_subcommand() {
     );
     // The other subcommands still appear (no surface regression).
     assert!(stdout.contains("emit"), "emit must still appear: {stdout}");
-    assert!(stdout.contains("verify"), "verify must still appear: {stdout}");
+    assert!(
+        stdout.contains("verify"),
+        "verify must still appear: {stdout}"
+    );
 }
 
 // =============================================================================
@@ -143,7 +146,12 @@ fn assert_no_forbidden_fields(view: &serde_json::Value, label: &str) {
     }
     // And no values that look like absolute paths to internal ledgers.
     let s = serde_json::to_string(view).expect("re-serialise view");
-    for forbidden_fragment in [".ralph/", "supervisor.db", "events.jsonl", ".ralph-wave-verify"] {
+    for forbidden_fragment in [
+        ".ralph/",
+        "supervisor.db",
+        "events.jsonl",
+        ".ralph-wave-verify",
+    ] {
         assert!(
             !s.contains(forbidden_fragment),
             "{label}: serialised view must not contain `{forbidden_fragment}`: {s}"
@@ -178,11 +186,8 @@ fn inspect_unavailable_store_view_omits_internal_fields() {
     std::fs::create_dir_all(&ralph_dir).unwrap();
     std::fs::write(ralph_dir.join("supervisor.db"), b"not a sqlite database\n").unwrap();
 
-    let (_code, stdout, _stderr) = run_ralph(
-        ws,
-        &["wave", "inspect", "w-x", "--output", "json"],
-        &[],
-    );
+    let (_code, stdout, _stderr) =
+        run_ralph(ws, &["wave", "inspect", "w-x", "--output", "json"], &[]);
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("stdout must be JSON; raw={stdout:?}; err={e}"));
     assert_eq!(parsed["registered"], serde_json::json!(false));
@@ -204,11 +209,8 @@ fn inspect_unknown_text_output_is_human_friendly() {
     let tmp = TempDir::new().unwrap();
     let ws = tmp.path();
     write_minimal_ralph_yml(ws);
-    let (code, stdout, stderr) = run_ralph(
-        ws,
-        &["wave", "inspect", "w-none", "--output", "text"],
-        &[],
-    );
+    let (code, stdout, stderr) =
+        run_ralph(ws, &["wave", "inspect", "w-none", "--output", "text"], &[]);
     assert_eq!(code, 0, "inspect unknown must exit 0; stderr={stderr}");
     let lower = stdout.to_lowercase();
     assert!(
@@ -229,10 +231,7 @@ fn inspect_requires_wave_id_arg() {
     let ws = tmp.path();
     write_minimal_ralph_yml(ws);
     let (code, _stdout, stderr) = run_ralph(ws, &["wave", "inspect"], &[]);
-    assert_ne!(
-        code, 0,
-        "missing wave_id must fail; stderr={stderr}"
-    );
+    assert_ne!(code, 0, "missing wave_id must fail; stderr={stderr}");
     let lower = stderr.to_lowercase();
     assert!(
         lower.contains("usage") || lower.contains("required") || lower.contains("<wave_id>"),
@@ -249,11 +248,8 @@ fn inspect_rejects_unknown_output_format() {
     let tmp = TempDir::new().unwrap();
     let ws = tmp.path();
     write_minimal_ralph_yml(ws);
-    let (code, _stdout, stderr) = run_ralph(
-        ws,
-        &["wave", "inspect", "w-x", "--output", "xml"],
-        &[],
-    );
+    let (code, _stdout, stderr) =
+        run_ralph(ws, &["wave", "inspect", "w-x", "--output", "xml"], &[]);
     assert_ne!(code, 0, "unknown --output must fail: {stderr}");
 }
 
@@ -270,13 +266,7 @@ fn inspect_tolerates_polluted_hat_env() {
     write_minimal_ralph_yml(ws);
     let (code, stdout, stderr) = run_ralph(
         ws,
-        &[
-            "wave",
-            "inspect",
-            "w-polluted",
-            "--output",
-            "json",
-        ],
+        &["wave", "inspect", "w-polluted", "--output", "json"],
         &[
             ("RALPH_CURRENT_HAT", "executor"),
             ("RALPH_CURRENT_LOOP_ID", "loop-polluted"),
@@ -350,11 +340,8 @@ fn wave_inspect_corrupt_store_surfaces_unavailable() {
     std::fs::create_dir_all(&ralph_dir).unwrap();
     std::fs::write(ralph_dir.join("supervisor.db"), b"corrupted\n").unwrap();
 
-    let (_code, stdout, _stderr) = run_ralph(
-        ws,
-        &["wave", "inspect", "w-x", "--output", "json"],
-        &[],
-    );
+    let (_code, stdout, _stderr) =
+        run_ralph(ws, &["wave", "inspect", "w-x", "--output", "json"], &[]);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(
         parsed["availability"],
@@ -378,11 +365,8 @@ fn wave_inspect_missing_store_is_known_unknown() {
     write_minimal_ralph_yml(ws);
     // No supervisor.db on disk.
 
-    let (_code, stdout, _stderr) = run_ralph(
-        ws,
-        &["wave", "inspect", "w-x", "--output", "json"],
-        &[],
-    );
+    let (_code, stdout, _stderr) =
+        run_ralph(ws, &["wave", "inspect", "w-x", "--output", "json"], &[]);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(parsed["registered"], serde_json::json!(false));
     assert_eq!(

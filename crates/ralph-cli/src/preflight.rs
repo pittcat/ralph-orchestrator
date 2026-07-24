@@ -1473,14 +1473,11 @@ mechanism:
             ralph_core::runtime_contract::preset_uses_wave_runtime(&config),
             "default_core_value + overlay must preserve mechanism.flow.steps[].runs \
              wave.runtime.* (got mechanism={:?})",
-            config.mechanism.as_ref().map(|m| m
-                .flow
-                .as_ref()
-                .map(|f| f
-                    .steps
-                    .iter()
-                    .map(|s| (s.id.clone(), s.runs.clone()))
-                    .collect::<Vec<_>>()))
+            config.mechanism.as_ref().map(|m| m.flow.as_ref().map(|f| f
+                .steps
+                .iter()
+                .map(|s| (s.id.clone(), s.runs.clone()))
+                .collect::<Vec<_>>()))
         );
     }
 

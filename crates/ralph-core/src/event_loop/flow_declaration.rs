@@ -166,11 +166,13 @@ fn default_state_idempotency() -> String {
 /// produces `*.wave.complete` / `*.wave.failed` even when
 /// `event_loop.supervisor.enabled` is false.
 pub fn is_wave_runner_binding(runs: Option<&str>) -> bool {
-    runs.map(|r| r.starts_with(RUNNER_BINDING_WAVE_PREFIX)).unwrap_or(false)
+    runs.map(|r| r.starts_with(RUNNER_BINDING_WAVE_PREFIX))
+        .unwrap_or(false)
 }
 
 pub fn is_supervisor_runner_binding(runs: Option<&str>) -> bool {
-    runs.map(|r| r.starts_with(RUNNER_BINDING_SUPERVISOR_PREFIX)).unwrap_or(false)
+    runs.map(|r| r.starts_with(RUNNER_BINDING_SUPERVISOR_PREFIX))
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Error)]
@@ -214,9 +216,7 @@ impl FlowDeclaration {
     /// as null and `FlowStepScopeStage` rejected every business
     /// emit with `flow_step_undeclared` (supervisor primary-path
     /// E2E: `work.ready` never reached `task-planner`).
-    pub fn from_config(
-        cfg: &crate::config::FlowDeclarationConfig,
-    ) -> Result<Self, FlowParseError> {
+    pub fn from_config(cfg: &crate::config::FlowDeclarationConfig) -> Result<Self, FlowParseError> {
         let decl = FlowDeclaration {
             flow_type: cfg.flow_type.clone(),
             version: cfg.version,
@@ -316,7 +316,9 @@ impl FlowDeclaration {
     /// runner binding qualifies, mirroring the supervisor
     /// exemption in `runtime_contract.rs:844`.
     pub fn uses_wave_runtime(&self) -> bool {
-        self.steps.iter().any(|s| is_wave_runner_binding(s.runs.as_deref()))
+        self.steps
+            .iter()
+            .any(|s| is_wave_runner_binding(s.runs.as_deref()))
     }
 }
 

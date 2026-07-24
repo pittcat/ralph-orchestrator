@@ -185,11 +185,11 @@ fn u6_apply_before_failure_restores_ticket_for_retry() {
         &env,
         Some(&payloads),
     );
-    assert_eq!(r_code, 0, "retry after restore must succeed; stdout={r_stdout}");
-    assert!(
-        !ticket.exists(),
-        "successful retry must consume the ticket"
+    assert_eq!(
+        r_code, 0,
+        "retry after restore must succeed; stdout={r_stdout}"
     );
+    assert!(!ticket.exists(), "successful retry must consume the ticket");
 
     // 4. No extra events appended: the retry reuses the
     //    AlreadyApplied state, the on-disk batch is exactly 2.
@@ -280,7 +280,10 @@ fn u6_fingerprint_mismatch_leaves_ticket_prepared() {
         &env,
         Some(&payload_a),
     );
-    assert_eq!(e2_code, 0, "matching retry must succeed; stdout={e2_stdout}");
+    assert_eq!(
+        e2_code, 0,
+        "matching retry must succeed; stdout={e2_stdout}"
+    );
     assert!(
         !ticket.exists(),
         "successful matching emit must consume the ticket"
@@ -411,7 +414,14 @@ fn u6_human_cli_bypasses_ticket_state_machine() {
 
     let (code, _stdout, _) = run_ralph(
         ws,
-        &["wave", "emit", "review.wave.ready", "--payloads-stdin", "--output", "json"],
+        &[
+            "wave",
+            "emit",
+            "review.wave.ready",
+            "--payloads-stdin",
+            "--output",
+            "json",
+        ],
         &[],
         Some(&payloads),
     );

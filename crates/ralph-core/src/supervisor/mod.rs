@@ -905,11 +905,7 @@ pub fn sanitize_unavailable_reason(reason: &str) -> String {
     if trimmed.is_empty() {
         return "unavailable".to_string();
     }
-    let head = trimmed
-        .split(':')
-        .next()
-        .unwrap_or(trimmed)
-        .trim();
+    let head = trimmed.split(':').next().unwrap_or(trimmed).trim();
     let sanitised = if head.is_empty() { trimmed } else { head };
     if sanitised.chars().count() > MAX {
         let mut s: String = sanitised.chars().take(MAX).collect();

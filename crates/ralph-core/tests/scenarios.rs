@@ -1532,6 +1532,32 @@ fn test_implementation_review_wave() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-24-003 plan U8 / S1: Apply → Confirm happy path through
+/// the real EventLoop runner. The wave event flows from
+/// `work.done` through the dispatcher to `review.wave.ready`
+/// and the loop closes without any fail-closed event. Uses
+/// `run_workflow_guard_scenario` (the real EventLoop runner,
+/// not the `run_scenario` stub) so `expected.events` actually
+/// checks what hit the ledger.
+#[test]
+fn test_wave_protocol_normal_apply_confirm() {
+    let yaml = load_scenario("tests/scenarios/wave_protocol/normal_apply_confirm.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-24-003 plan U8 / S9: a partial wave is fail-closed —
+/// the runtime never auto-recovers a missing slot. We model
+/// the contract by leaving the mock response without
+/// `completion: true` and asserting the loop neither emits a
+/// terminal green signal (`review.passed` / `LOOP_COMPLETE`)
+/// nor silently re-fires the wave. An operator can then run
+/// `ralph wave inspect <wave_id>` to inspect the gap.
+#[test]
+fn test_wave_protocol_recovery_required() {
+    let yaml = load_scenario("tests/scenarios/wave_protocol/recovery_required.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-07-24-003 plan U4: synthesizer integrity failure → blocked terminal;
 /// fix.plan.ready must stay absent.
 #[test]

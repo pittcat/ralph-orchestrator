@@ -28,16 +28,16 @@ pub enum WaveCommands {
     /// Emit multiple events as a wave for parallel execution
     Emit(WaveEmitArgs),
     /// U21: OPAC Precheck for `ralph wave emit` mutations.
-///
-/// Validate payloads against the active event policy (no
-/// business events written) and record a one-shot
-/// `ralph-wave-verify-ticket` so the next `ralph wave emit`
-/// can prove it targets the same payload set. Mirrors
-/// `ralph wave emit` schema / origin-guard checks but stops
-/// before any business-event write step. Returns the same
-/// `{ok, wave_id?, error?}` shape so agents can treat verify
-/// and emit uniformly. Intended for OPAC Precheck stage.
-Verify(WaveVerifyArgs),
+    ///
+    /// Validate payloads against the active event policy (no
+    /// business events written) and record a one-shot
+    /// `ralph-wave-verify-ticket` so the next `ralph wave emit`
+    /// can prove it targets the same payload set. Mirrors
+    /// `ralph wave emit` schema / origin-guard checks but stops
+    /// before any business-event write step. Returns the same
+    /// `{ok, wave_id?, error?}` shape so agents can treat verify
+    /// and emit uniformly. Intended for OPAC Precheck stage.
+    Verify(WaveVerifyArgs),
     /// 2026-07-24-003 plan Unit 2: read-only Confirm for a wave.
     ///
     /// Returns the public `wave_id`'s current state from the
@@ -235,7 +235,11 @@ fn execute_inspect(args: WaveInspectArgs) -> Result<()> {
         bail!("ralph wave inspect: <wave_id> must not be empty");
     }
 
-    let store_path = std::path::PathBuf::from(".ralph/supervisor.db");
+    let store_path = std::env::var("RALPH_EMISSION_STORE_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(".ralph/supervisor.db"));
 
     // No ledger on disk → the wave cannot have reached the store.
     // Surface the lookup-miss shape (`available / registered=false`)
@@ -253,24 +257,48 @@ fn execute_inspect(args: WaveInspectArgs) -> Result<()> {
     {
         match ralph_core::supervisor::RusqliteSupervisorStore::open(&store_path) {
             Ok(store) => {
-                let view = match store.fan_in_status(&wave_id) {
-                    Ok(snap) => WaveInspectView::from_snapshot(&snap),
-                    Err(err) => match err {
-                        ralph_core::supervisor::SupervisorStoreError::UnknownWave(_) => {
-                            WaveInspectView::unknown(wave_id)
+                // 2026-07-24-003 plan U8: a `wave_id` returned by
+                // the cutover emission (U5) is the store-minted
+                // `public_wave_id` in `wave_emissions` — not
+                // necessarily a runtime wave row. Probe the
+                // emission table FIRST so S1 / S2 / S7
+                // confirm-after-Apply round-trips resolve
+                // correctly; fall back to `fan_in_status` for
+                // dispatcher-issued runtime waves.
+                let view = match store.emission_state_for_wave_id(&wave_id) {
+                    Ok(Some(state)) => {
+                        let mut v = WaveInspectView::from_emission_state(state);
+                        v.wave_id = wave_id.clone();
+                        v
+                    }
+                    Ok(None) => match store.fan_in_status(&wave_id) {
+                        Ok(snap) => {
+                            let mut v = WaveInspectView::from_snapshot(&snap);
+                            v.wave_id = wave_id.clone();
+                            v
                         }
-                        other => {
-                            let reason =
-                                ralph_core::supervisor::sanitize_unavailable_reason(&other.to_string());
-                            WaveInspectView::unavailable(wave_id, &reason)
-                        }
+                        Err(err) => match err {
+                            ralph_core::supervisor::SupervisorStoreError::UnknownWave(_) => {
+                                WaveInspectView::unknown(wave_id)
+                            }
+                            other => {
+                                let reason = ralph_core::supervisor::sanitize_unavailable_reason(
+                                    &other.to_string(),
+                                );
+                                WaveInspectView::unavailable(wave_id, &reason)
+                            }
+                        },
                     },
+                    Err(err) => {
+                        let reason =
+                            ralph_core::supervisor::sanitize_unavailable_reason(&err.to_string());
+                        WaveInspectView::unavailable(wave_id, &reason)
+                    }
                 };
                 emit_view(view, args.output)
             }
             Err(err) => {
-                let reason =
-                    ralph_core::supervisor::sanitize_unavailable_reason(&err.to_string());
+                let reason = ralph_core::supervisor::sanitize_unavailable_reason(&err.to_string());
                 emit_view(WaveInspectView::unavailable(wave_id, &reason), args.output)
             }
         }
@@ -351,6 +379,38 @@ impl WaveInspectView {
             registered: false,
             availability: "available",
             phase: None,
+            expected_total: None,
+            completed_count: None,
+            failed_count: None,
+            pending_count: None,
+            in_flight_count: None,
+            cancel_requested: None,
+            unavailable_reason: None,
+        }
+    }
+
+    /// 2026-07-24-003 plan U8: build a registered view from an
+    /// emission-side `EmissionState` (the cutover path minting
+    /// a `public_wave_id` on first apply). The phase string is
+    /// derived from the state so the agent sees a stable
+    /// confirm surface: `applied` → `done`,
+    /// `recovery_required` / `failed` → `failed`, others →
+    /// `dispatch`. The view's `wave_id` field is filled by the
+    /// call site from the queried id.
+    pub fn from_emission_state(state: ralph_core::supervisor::EmissionState) -> Self {
+        use ralph_core::supervisor::EmissionState as E;
+        let phase = match state {
+            E::Applied => "done",
+            E::Failed => "failed",
+            E::RecoveryRequired => "failed",
+            E::Reserved | E::Applying => "dispatch",
+        };
+        Self {
+            ok: true,
+            wave_id: String::new(),
+            registered: true,
+            availability: "available",
+            phase: Some(phase.to_string()),
             expected_total: None,
             completed_count: None,
             failed_count: None,
@@ -534,8 +594,7 @@ fn execute_verify(args: WaveVerifyArgs) -> Result<()> {
     );
     if op_ctx.is_agent_context {
         let workspace = std::env::current_dir().unwrap_or_default();
-        let canonical =
-            crate::wave_verify_gate::canonical_payload_form(&payloads);
+        let canonical = crate::wave_verify_gate::canonical_payload_form(&payloads);
         let fp = crate::wave_verify_gate::emission_fingerprint(
             &args.topic,
             &canonical,
@@ -655,12 +714,7 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
     );
     let ticket = crate::wave_verify_gate::ticket_path(&workspace_root);
     let _ = ticket; // resolved for parity with the verify path; not consumed here.
-    crate::wave_verify_gate::require_ticket(
-        &workspace_root,
-        &op_ctx,
-        &args.topic,
-        &fp,
-    )?;
+    crate::wave_verify_gate::require_ticket(&workspace_root, &op_ctx, &args.topic, &fp)?;
 
     // 2026-07-24-003 plan U6: fault injection seam for the
     // ticket-recovery tests. Recognised values:
@@ -686,7 +740,9 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
     //
     // U6: the keyed branch owns the ticket cleanup. On any
     // failure it restores the ticket; on success it consumes.
-    let (outcome, used_store_cutover, mut applied_cleanup_pending) = if let Some(ref key) = args.idempotency_key {
+    let (outcome, used_store_cutover, mut applied_cleanup_pending) = if let Some(ref key) =
+        args.idempotency_key
+    {
         let (loop_id, hat) = build_scope_inputs();
         let outcome_res = write_wave_events_with_idempotency_store_with_injection(
             &args.topic,
@@ -703,9 +759,7 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
                 // Apply-before-failure path: the ticket is
                 // still claimed; restore so the next retry
                 // can re-claim without re-verifying.
-                if let Err(restore_err) =
-                    crate::wave_verify_gate::restore_ticket(&workspace_root)
-                {
+                if let Err(restore_err) = crate::wave_verify_gate::restore_ticket(&workspace_root) {
                     eprintln!(
                         "warning: failed to restore ticket after emit failure: {restore_err}"
                     );
@@ -747,12 +801,10 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
             // marker (the apply phase is over) but pretend the
             // ticket delete errored, so the response surfaces
             // `applied_cleanup_pending: true`.
-            if let Err(err) = std::fs::remove_file(
-                crate::wave_verify_gate::claim_marker_path(&workspace_root),
-            ) {
-                eprintln!(
-                    "warning: claim marker cleanup errored during fault injection: {err}"
-                );
+            if let Err(err) =
+                std::fs::remove_file(crate::wave_verify_gate::claim_marker_path(&workspace_root))
+            {
+                eprintln!("warning: claim marker cleanup errored during fault injection: {err}");
             }
             Ok::<_, anyhow::Error>(true)
         } else {
@@ -769,9 +821,7 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
                 applied_cleanup_pending = true;
             }
             Err(err) => {
-                eprintln!(
-                    "warning: ticket cleanup errored unexpectedly: {err}"
-                );
+                eprintln!("warning: ticket cleanup errored unexpectedly: {err}");
                 applied_cleanup_pending = true;
             }
         }
@@ -1802,7 +1852,9 @@ pub fn write_wave_events_with_idempotency_store_with_injection(
         match candidate {
             Some(p) => match ralph_core::supervisor::RusqliteSupervisorStore::open(&p) {
                 Ok(s) => std::sync::Arc::new(s),
-                Err(_) => std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new()),
+                Err(_) => {
+                    std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new())
+                }
             },
             None => std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new()),
         }
@@ -1831,8 +1883,7 @@ pub fn write_wave_events_with_idempotency_store_with_injection(
                 Err(_) => continue,
             };
             if v.get("wave_id").and_then(|x| x.as_str()) == Some(wave_id)
-                && v.get("idempotency_key").and_then(|x| x.as_str())
-                    == Some(idempotency_key)
+                && v.get("idempotency_key").and_then(|x| x.as_str()) == Some(idempotency_key)
             {
                 n += 1;
             }
@@ -1885,12 +1936,8 @@ pub fn write_wave_events_with_idempotency_store_with_injection(
 
     // Drive the store. The `count_events_on_disk` closure lets the
     // store peek at on-disk rows without owning the events_file.
-    let reservation = store.reserve_emission(
-        &scope_key,
-        &payload_digest,
-        expected_count,
-        &count_for_wave,
-    )?;
+    let reservation =
+        store.reserve_emission(&scope_key, &payload_digest, expected_count, &count_for_wave)?;
 
     use ralph_core::supervisor::EmissionReservation as R;
     match reservation {
@@ -3433,12 +3480,7 @@ event_loop:
         let json = serde_json::to_value(&view).expect("serialise");
         assert_eq!(json["availability"], serde_json::json!("unavailable"));
         assert!(
-            json["unavailable_reason"]
-                .as_str()
-                .unwrap()
-                .chars()
-                .count()
-                <= 200,
+            json["unavailable_reason"].as_str().unwrap().chars().count() <= 200,
             "reason must be capped at 200 chars"
         );
     }

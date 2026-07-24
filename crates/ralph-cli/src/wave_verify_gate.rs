@@ -55,8 +55,7 @@ pub const TICKET_REL_PATH: &str = ".ralph/agent/.ralph-wave-verify-ticket";
 /// The claim marker carries the unix-second timestamp of the
 /// claim so an operator can `cat` the workspace and see when the
 /// ticket was taken into Apply.
-pub const TICKET_CLAIM_REL_PATH: &str =
-    ".ralph/agent/.ralph-wave-verify-ticket.claim";
+pub const TICKET_CLAIM_REL_PATH: &str = ".ralph/agent/.ralph-wave-verify-ticket.claim";
 
 /// Stable deny prefix (mirrors `task_verify_gate denied` for
 /// grep-ability).
@@ -152,11 +151,8 @@ pub fn record_ticket(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let line = format!(
-        "{fingerprint}\u{1F}{topic}\u{1F}{loop_id}\u{1F}{hat_id}\u{1F}{now}\n"
-    );
-    std::fs::write(path, line)
-        .with_context(|| format!("write ticket to {}", path.display()))?;
+    let line = format!("{fingerprint}\u{1F}{topic}\u{1F}{loop_id}\u{1F}{hat_id}\u{1F}{now}\n");
+    std::fs::write(path, line).with_context(|| format!("write ticket to {}", path.display()))?;
     Ok(())
 }
 
@@ -173,8 +169,8 @@ pub fn read_ticket(path: &Path) -> anyhow::Result<Option<TicketRecord>> {
     if !path.exists() {
         return Ok(None);
     }
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("read ticket {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("read ticket {}", path.display()))?;
     let line = raw.lines().next().unwrap_or("").trim_end();
     if line.is_empty() {
         return Ok(None);
@@ -231,8 +227,7 @@ pub struct TicketRecord {
 /// delete helper used by tests / one-shot scripts.
 pub fn consume_ticket(path: &Path) -> anyhow::Result<()> {
     if path.exists() {
-        std::fs::remove_file(path)
-            .with_context(|| format!("delete ticket {}", path.display()))?;
+        std::fs::remove_file(path).with_context(|| format!("delete ticket {}", path.display()))?;
     }
     Ok(())
 }
@@ -264,9 +259,7 @@ pub fn restore_ticket(workspace: &Path) -> anyhow::Result<()> {
 /// The claim marker is always removed when present so a retry
 /// sees a clean workspace; the underlying ticket is what we
 /// surface as cleanup-pending when the delete I/O errors.
-pub fn consume_claimed_ticket(
-    workspace: &Path,
-) -> anyhow::Result<bool> {
+pub fn consume_claimed_ticket(workspace: &Path) -> anyhow::Result<bool> {
     let claim = claim_marker_path(workspace);
     let ticket = ticket_path(workspace);
     // Always drop the claim marker first so retries are
@@ -411,9 +404,8 @@ pub fn require_ticket(
     // on success, restore_ticket on failure) can find the right
     // state to roll forward / back.
     if let Some(parent) = claim.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("create parent dir for {}", claim.display())
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create parent dir for {}", claim.display()))?;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -448,10 +440,8 @@ mod wave_verify_gate_tests {
 
     #[test]
     fn test_fingerprint_stable_for_same_payloads() {
-        let canonical = canonical_payload_form(&[
-            r#"{"dim":"a"}"#.to_string(),
-            r#"{"dim":"b"}"#.to_string(),
-        ]);
+        let canonical =
+            canonical_payload_form(&[r#"{"dim":"a"}"#.to_string(), r#"{"dim":"b"}"#.to_string()]);
         let a = emission_fingerprint("review.wave.ready", &canonical, "loop-1", "executor");
         let b = emission_fingerprint("review.wave.ready", &canonical, "loop-1", "executor");
         assert_eq!(a, b, "same inputs must hash equal");
@@ -469,10 +459,8 @@ mod wave_verify_gate_tests {
 
     #[test]
     fn test_canonical_payload_form_unit_separator() {
-        let joined = canonical_payload_form(&[
-            r#"{"a":"1"}"#.to_string(),
-            r#"{"a":"2"}"#.to_string(),
-        ]);
+        let joined =
+            canonical_payload_form(&[r#"{"a":"1"}"#.to_string(), r#"{"a":"2"}"#.to_string()]);
         // Verify the separator character is present and the order matches.
         assert_eq!(joined, "{\"a\":\"1\"}\u{1F}{\"a\":\"2\"}");
     }
@@ -521,8 +509,14 @@ mod wave_verify_gate_tests {
         let err = require_ticket(ws.path(), &ctx, "review.wave.ready", &fp)
             .expect_err("missing ticket must deny");
         let msg = err.to_string();
-        assert!(msg.starts_with(DENY_PREFIX), "must carry stable prefix: {msg}");
-        assert!(msg.contains("no verify ticket"), "must explain root cause: {msg}");
+        assert!(
+            msg.starts_with(DENY_PREFIX),
+            "must carry stable prefix: {msg}"
+        );
+        assert!(
+            msg.contains("no verify ticket"),
+            "must explain root cause: {msg}"
+        );
         assert!(
             msg.contains("ralph wave verify review.wave.ready"),
             "must include recovery: {msg}"
@@ -550,15 +544,9 @@ mod wave_verify_gate_tests {
         let ctx = make_ctx("loop-1", "executor", true);
         let canonical = canonical_payload_form(&[r#"{"dim":"x"}"#.to_string()]);
         let fp = emission_fingerprint("review.wave.ready", &canonical, "loop-1", "executor");
-        record_ticket(
-            &path,
-            &fp,
-            "review.wave.ready",
-            "loop-1",
-            "executor",
-        )
-        .expect("record");
-        require_ticket(ws.path(), &ctx, "review.wave.ready", &fp).expect("matching ticket must allow");
+        record_ticket(&path, &fp, "review.wave.ready", "loop-1", "executor").expect("record");
+        require_ticket(ws.path(), &ctx, "review.wave.ready", &fp)
+            .expect("matching ticket must allow");
         // U6: ticket is NOT consumed yet; the claim marker is
         // written instead. The Apply step is responsible for
         // `consume_claimed_ticket` (success) or `restore_ticket`
@@ -574,8 +562,10 @@ mod wave_verify_gate_tests {
         let ctx = make_ctx("loop-1", "executor", true);
         let canonical_a = canonical_payload_form(&[r#"{"dim":"a"}"#.to_string()]);
         let canonical_b = canonical_payload_form(&[r#"{"dim":"b"}"#.to_string()]);
-        let on_disk_fp = emission_fingerprint("review.wave.ready", &canonical_a, "loop-1", "executor");
-        let pending_fp = emission_fingerprint("review.wave.ready", &canonical_b, "loop-1", "executor");
+        let on_disk_fp =
+            emission_fingerprint("review.wave.ready", &canonical_a, "loop-1", "executor");
+        let pending_fp =
+            emission_fingerprint("review.wave.ready", &canonical_b, "loop-1", "executor");
         record_ticket(
             &path,
             &on_disk_fp,
@@ -602,14 +592,7 @@ mod wave_verify_gate_tests {
         let ctx = make_ctx("loop-1", "executor", true);
         let canonical = canonical_payload_form(&[r#"{"dim":"x"}"#.to_string()]);
         let fp = emission_fingerprint("review.wave.ready", &canonical, "loop-1", "executor");
-        record_ticket(
-            &path,
-            &fp,
-            "review.wave.ready",
-            "loop-1",
-            "executor",
-        )
-        .expect("record");
+        record_ticket(&path, &fp, "review.wave.ready", "loop-1", "executor").expect("record");
         let err = require_ticket(ws.path(), &ctx, "review.different", &fp)
             .expect_err("topic mismatch must deny");
         let msg = err.to_string();
@@ -626,14 +609,7 @@ mod wave_verify_gate_tests {
         let ctx = make_ctx("loop-1", "worker", true);
         let canonical = canonical_payload_form(&[r#"{"dim":"x"}"#.to_string()]);
         let fp = emission_fingerprint("review.wave.ready", &canonical, "loop-1", "executor");
-        record_ticket(
-            &path,
-            &fp,
-            "review.wave.ready",
-            "loop-1",
-            "executor",
-        )
-        .expect("record");
+        record_ticket(&path, &fp, "review.wave.ready", "loop-1", "executor").expect("record");
         let err = require_ticket(ws.path(), &ctx, "review.wave.ready", &fp)
             .expect_err("hat mismatch must deny");
         let msg = err.to_string();
@@ -653,14 +629,7 @@ mod wave_verify_gate_tests {
         let ctx = make_ctx("loop-1", "executor", true);
         let canonical = canonical_payload_form(&[r#"{"dim":"x"}"#.to_string()]);
         let fp = emission_fingerprint("review.wave.ready", &canonical, "loop-1", "executor");
-        record_ticket(
-            &path,
-            &fp,
-            "review.wave.ready",
-            "loop-1",
-            "executor",
-        )
-        .expect("record");
+        record_ticket(&path, &fp, "review.wave.ready", "loop-1", "executor").expect("record");
         require_ticket(ws.path(), &ctx, "review.wave.ready", &fp)
             .expect("first claim must succeed");
         let err = require_ticket(ws.path(), &ctx, "review.wave.ready", &fp)
@@ -680,8 +649,7 @@ mod wave_verify_gate_tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "stub\n").unwrap();
         std::fs::write(&claim, "stub\n").unwrap();
-        let cleanup_failed =
-            consume_claimed_ticket(ws.path()).expect("consume must succeed");
+        let cleanup_failed = consume_claimed_ticket(ws.path()).expect("consume must succeed");
         assert!(!cleanup_failed, "no cleanup failure");
         assert!(!path.exists(), "ticket must be removed");
         assert!(!claim.exists(), "claim marker must be removed");

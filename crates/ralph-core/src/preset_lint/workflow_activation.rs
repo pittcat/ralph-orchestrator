@@ -23,9 +23,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::config::RalphConfig;
-use crate::event_loop::flow_declaration::{
-    RUNNER_BINDING_WAVE_PREFIX, is_wave_runner_binding,
-};
+use crate::event_loop::flow_declaration::{RUNNER_BINDING_WAVE_PREFIX, is_wave_runner_binding};
 
 // ──────────────────────────────────────────────────────────────────────────
 // Handoff graph
@@ -155,7 +153,11 @@ impl HandoffGraph {
         // supervisor's `supervisor` node.
         if let Some(mech) = config.mechanism.as_ref() {
             if let Some(flow) = mech.flow.as_ref() {
-                if flow.steps.iter().any(|s| is_wave_runner_binding(s.runs.as_deref())) {
+                if flow
+                    .steps
+                    .iter()
+                    .any(|s| is_wave_runner_binding(s.runs.as_deref()))
+                {
                     const WAVE_SLOT_TO_WAVE: &[(&str, &str)] = &[
                         ("exec.unit.done", "exec.wave.complete"),
                         ("exec.unit.failed", "exec.wave.failed"),
@@ -1563,7 +1565,6 @@ hats:
     }
 }
 
-
 pub fn wave_coord_check_v2(config: &RalphConfig, trigger: &str) -> bool {
     // 2026-07-24-003 plan U1 / capability-gap fix: see
     // `crate::runtime_contract::is_wave_coordination_topic_trigger`
@@ -1577,9 +1578,7 @@ pub fn wave_coord_check_v2(config: &RalphConfig, trigger: &str) -> bool {
     // runner binding gets the `*.wave.{complete,failed}`
     // runtime-injected exemption, per `finding-rubric.md`
     // "Wave capability audit".
-    if !(trigger.ends_with(".wave.complete")
-        || trigger.ends_with(".wave.failed"))
-    {
+    if !(trigger.ends_with(".wave.complete") || trigger.ends_with(".wave.failed")) {
         return false;
     }
     // Wave-only fan-out: check the typed mechanism view at
@@ -1589,18 +1588,23 @@ pub fn wave_coord_check_v2(config: &RalphConfig, trigger: &str) -> bool {
     // finding; deeper diagnosis (e.g. listing which
     // bindings exist) is reserved for the
     // `preset_lint::metadata_runtime_drift` rule.
-    if !config.mechanism.as_ref().and_then(|m| m.flow.as_ref()).map_or(false, |f| {
-        let mut found = false;
-        for s in &f.steps {
-            if let Some(r) = s.runs.as_deref() {
-                if r.starts_with("wave.runtime.") {
-                    found = true;
-                    break;
+    if !config
+        .mechanism
+        .as_ref()
+        .and_then(|m| m.flow.as_ref())
+        .map_or(false, |f| {
+            let mut found = false;
+            for s in &f.steps {
+                if let Some(r) = s.runs.as_deref() {
+                    if r.starts_with("wave.runtime.") {
+                        found = true;
+                        break;
+                    }
                 }
             }
-        }
-        found
-    }) {
+            found
+        })
+    {
         return false;
     }
     true

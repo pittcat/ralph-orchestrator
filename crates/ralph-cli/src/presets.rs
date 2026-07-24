@@ -697,7 +697,11 @@ mod tests {
         // (ce-executor-supervisor / ce-executor-pipeline / debug /
         // merge-batch / merge-loop / autoresearch). 2026-07-24
         // plan U5 added `implementation-review`; bump to 7.
-        assert_eq!(presets.len(), 7, "Expected 7 public presets (added implementation-review 2026-07-24)");
+        assert_eq!(
+            presets.len(),
+            7,
+            "Expected 7 public presets (added implementation-review 2026-07-24)"
+        );
     }
 
     #[test]
@@ -2111,11 +2115,7 @@ mod tests {
         // This is by design — `work.done` is the success-path handoff, while
         // the failure path is handled by the fix wave. The runtime still
         // requires `work.done` on every successful completion.
-        let topology_exempt: &[&str] = &[
-            "autoresearch",
-            "debug",
-            "ce-executor-supervisor",
-        ];
+        let topology_exempt: &[&str] = &["autoresearch", "debug", "ce-executor-supervisor"];
 
         // Per-preset finding-id exemptions (P2 #16 + #22).
         //
