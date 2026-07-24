@@ -961,6 +961,37 @@ impl SupervisorStore for InMemorySupervisorStore {
             .map(|r| r.state))
     }
 
+    fn adopt_legacy_emission(
+        &self,
+        scope_key: &str,
+        payload_digest: &str,
+        expected_count: u32,
+        legacy_wave_id: &str,
+    ) -> SupervisorStoreResult<String> {
+        let mut inner = self.lock()?;
+        if let Some(existing) = inner.emissions.get(scope_key).cloned() {
+            // Idempotent re-import: return the recorded id.
+            return Ok(existing.public_wave_id);
+        }
+        inner.emissions.insert(
+            scope_key.to_string(),
+            EmissionRow {
+                scope_key: scope_key.to_string(),
+                public_wave_id: legacy_wave_id.to_string(),
+                payload_digest: payload_digest.to_string(),
+                expected_count,
+                state: EmissionState::Applied,
+                applied_at: Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                ),
+            },
+        );
+        Ok(legacy_wave_id.to_string())
+    }
+
     fn record_slot_pid(
         &self,
         wave_id: &str,

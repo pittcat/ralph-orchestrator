@@ -636,6 +636,30 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
         &self,
         public_wave_id: &str,
     ) -> SupervisorStoreResult<Option<EmissionState>>;
+
+    /// 2026-07-24-003 plan U5 (S10): adopt a legacy
+    /// `public_wave_id` that already lives on disk as a complete
+    /// batch. Used by the CLI sidecar miss-import path to
+    /// register a pre-fix workspace's emissions without writing
+    /// a second wave.
+    ///
+    /// Behaviour:
+    /// - If the scope already has an emission row, return that
+    ///   row's `public_wave_id` (idempotent: a second import for
+    ///   the same scope MUST NOT mint a third wave id).
+    /// - Otherwise insert a new row in the `Applied` state with
+    ///   `expected_count` events and return `legacy_wave_id`.
+    ///
+    /// The `payload_digest` is recorded for future conflict
+    /// detection (a subsequent emit that disagrees is a
+    /// `Conflict`).
+    fn adopt_legacy_emission(
+        &self,
+        scope_key: &str,
+        payload_digest: &str,
+        expected_count: u32,
+        legacy_wave_id: &str,
+    ) -> SupervisorStoreResult<String>;
 }
 
 /// 2026-07-22-001 plan U6: compensation-hook discriminator.

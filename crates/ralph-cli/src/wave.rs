@@ -652,14 +652,34 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
     crate::wave_verify_gate::require_ticket(&ticket, &op_ctx, &args.topic, &fp)?;
 
     // U2: Branch — with idempotency key or legacy path
-    let outcome = if let Some(ref key) = args.idempotency_key {
-        write_wave_events_with_idempotency(&args.topic, &payloads, &events_file, key)?
+    //
+    // 2026-07-24-003 plan U5: the keyed branch now routes through
+    // the supervisor store (single source of truth). The
+    // no-key branch retains the legacy FileLock + sidecar writer
+    // (S15: human CLI without a key keeps the old behaviour, so
+    // operator smol-scripts that don't carry idempotency keys
+    // still get unique wave_ids and the dual-process happy
+    // path keeps FileLock as the only mutex).
+    let (outcome, used_store_cutover) = if let Some(ref key) = args.idempotency_key {
+        let (loop_id, hat) = build_scope_inputs();
+        let out = write_wave_events_with_idempotency_store(
+            &args.topic,
+            &payloads,
+            &events_file,
+            key,
+            &loop_id,
+            &hat,
+        )?;
+        (out, true)
     } else {
         let wave_id = write_wave_events(&args.topic, &payloads, &events_file)?;
-        IdempotencyOutcome {
-            wave_id,
-            deduplicated: false,
-        }
+        (
+            IdempotencyOutcome {
+                wave_id,
+                deduplicated: false,
+            },
+            false,
+        )
     };
 
     let wave_id = outcome.wave_id;
@@ -673,18 +693,30 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
             println!("{}", wave_id);
         }
         WaveOutputFormat::Json => {
-            // `events_file` is converted to its string form for JSON friendliness.
-            // `ok: true` mirrors the failure-path shape `{ok: false, error, ...}`
-            // emitted by `policy_check::emit_policy_validation_failure` so agents
-            // can use a uniform `jq '.ok'` contract on both paths.
-            let events_file_str = events_file.to_string_lossy().to_string();
+            // U5 / R11: the success JSON surface is the agent's
+            // contract; `events_file` MUST NOT appear — agents
+            // never need to read internal ledger paths.
+            // `ok: true` mirrors the failure-path shape
+            // `{ok: false, error, ...}` emitted by
+            // `policy_check::emit_policy_validation_failure` so
+            // agents can use a uniform `jq '.ok'` contract on
+            // both paths. The `applied_via: store` tag is
+            // informational (helps operators distinguish
+            // store-routed from no-key emissions when grepping
+            // logs); agents that ignore unknown fields still
+            // parse cleanly.
+            let applied_via = if used_store_cutover {
+                "store"
+            } else {
+                "legacy_file_lock"
+            };
             let payload = serde_json::json!({
                 "ok": true,
                 "wave_id": wave_id,
                 "topic": args.topic,
                 "count": total,
-                "events_file": events_file_str,
                 "deduplicated": deduplicated,
+                "applied_via": applied_via,
             });
             println!("{}", serde_json::to_string(&payload)?);
         }
@@ -1034,11 +1066,39 @@ pub fn write_wave_events_with_provenance(
     idempotency_key: Option<&str>,
     idempotency_hash: Option<&str>,
 ) -> Result<String> {
+    write_wave_events_with_provenance_with_wave_id(
+        topic,
+        payloads,
+        events_file,
+        hat,
+        idempotency_key,
+        idempotency_hash,
+        None,
+    )
+}
+
+/// 2026-07-24-003 plan U5 variant: write a batch with an *explicit*
+/// `wave_id`, skipping internal `generate_wave_id()`. Used by the
+/// store cutover when `SupervisorStore::reserve_emission` minted a
+/// `public_wave_id` for us — the events must carry that exact id so
+/// `wave inspect` can correlate the JSONL row with the store row.
+pub fn write_wave_events_with_provenance_with_wave_id(
+    topic: &str,
+    payloads: &[String],
+    events_file: &Path,
+    hat: Option<&str>,
+    idempotency_key: Option<&str>,
+    idempotency_hash: Option<&str>,
+    explicit_wave_id: Option<&str>,
+) -> Result<String> {
     if payloads.is_empty() {
         bail!("At least one payload is required");
     }
 
-    let wave_id = generate_wave_id();
+    let wave_id = match explicit_wave_id {
+        Some(id) => id.to_string(),
+        None => generate_wave_id(),
+    };
 
     let total = payloads.len() as u32;
     let ts = chrono::Utc::now().to_rfc3339();
@@ -1249,6 +1309,7 @@ fn read_idempotency_records(events_file: &Path) -> Result<Vec<IdempotencyRecord>
 }
 
 /// U2: Append one idempotency record to the log file (with fsync).
+#[allow(dead_code)] // legacy sidecar writer; see `write_wave_events_with_idempotency_store`.
 fn append_idempotency_record(events_file: &Path, rec: &IdempotencyRecord) -> Result<()> {
     let path = idempotency_log_path(events_file);
     if let Some(parent) = path.parent() {
@@ -1326,6 +1387,7 @@ fn count_recovered_events(
 /// avoid cross-scope false positive on recovery scans.
 /// Used by the recovery path when the idempotency record was lost (crash
 /// between events append and record append).
+#[allow(dead_code)] // legacy recovery path; store-driven recovery uses `reserve_emission`.
 fn try_recover_from_events(
     events_file: &Path,
     idempotency_key: &str,
@@ -1408,24 +1470,33 @@ fn validate_idempotency_key(key: &str) -> Result<()> {
 /// payload digest, returns the original wave_id with `deduplicated=true`.
 ///
 /// Uses `FileLock::exclusive()` for concurrency safety.
+///
+/// 2026-07-24-003 plan U5: this legacy sidecar-based routine is
+/// **not** called by the production `wave emit` path any more — it
+/// survives only so the unit tests in this module can continue
+/// asserting the sidecar writer / reader semantics (including
+/// recovery paths) without taking a dependency on the
+/// `supervisor-db` feature gate. Production traffic uses
+/// [`write_wave_events_with_idempotency_store`].
+#[allow(dead_code)]
 pub fn write_wave_events_with_idempotency(
     topic: &str,
     payloads: &[String],
     events_file: &Path,
     idempotency_key: &str,
 ) -> Result<IdempotencyOutcome> {
-    let (loop_id, hat) = build_scope_inputs();
     write_wave_events_with_idempotency_with_scope(
         topic,
         payloads,
         events_file,
         idempotency_key,
-        &loop_id,
-        &hat,
+        &build_scope_inputs().0,
+        &build_scope_inputs().1,
     )
 }
 
 /// U2: Like [`write_wave_events_with_idempotency`] but with explicit scope params for testability.
+#[allow(dead_code)]
 pub fn write_wave_events_with_idempotency_with_scope(
     topic: &str,
     payloads: &[String],
@@ -1532,6 +1603,277 @@ pub fn write_wave_events_with_idempotency_with_scope(
         wave_id,
         deduplicated: false,
     })
+}
+
+/// 2026-07-24-003 plan U5: emit a wave *through the supervisor store*.
+///
+/// This is the new single source of truth for keyed wave emits.
+/// The CLI no longer writes the legacy `.idempotency.jsonl` for
+/// happy-path traffic; the store's `wave_emissions` table is the
+/// dedup authority. A legacy sidecar is imported only when the
+/// store has no record for the scope (the miss-import branch —
+///
+/// (S10) — closes the migration window without making the
+/// sidecar authoritative for new emissions (S1, S15).
+///
+/// Behaviour table:
+///
+/// | `reserve_emission` returns | CLI action |
+/// |---|---|
+/// | `Reserved { public_wave_id }` | append N events with that id → `mark_emission_applying` → `mark_emission_applied` → success (`deduplicated=false`). |
+/// | `AlreadyApplied { public_wave_id }` | return id with `deduplicated=true`, zero writes. |
+/// | `Conflict` | return `idempotency_key_conflict`, zero writes. |
+/// | `RecoveryRequired { ... }` / `FailedPartial { ... }` | return inspect-guided error, zero writes. |
+pub fn write_wave_events_with_idempotency_store(
+    topic: &str,
+    payloads: &[String],
+    events_file: &Path,
+    idempotency_key: &str,
+    loop_id: &str,
+    hat: &str,
+) -> Result<IdempotencyOutcome> {
+    if payloads.is_empty() {
+        bail!("At least one payload is required");
+    }
+    if idempotency_key.is_empty() {
+        bail!("idempotency_key must not be empty (caller bug)");
+    }
+
+    let scope_key = compute_scope_key(loop_id, hat, topic, idempotency_key);
+    let payload_digest = compute_payload_digest(payloads);
+    let expected_count = payloads.len() as u32;
+
+    // Open the supervisor store. The dispatcher path is opt-in:
+    // the production CLI falls back to the in-memory store unless
+    // the operator explicitly opted in by either (a) having
+    // `.ralph/supervisor.db` already on disk (production preset
+    // started the loop and seeded it) or (b) supplying
+    // `RALPH_EMISSION_STORE_PATH` to point at a specific SQLite
+    // file. Tests use (b) to share the store across processes.
+    #[cfg(feature = "supervisor-db")]
+    let store: std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore> = {
+        use std::path::PathBuf;
+        let candidate: Option<PathBuf> = std::env::var("RALPH_EMISSION_STORE_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                let default = PathBuf::from(".ralph/supervisor.db");
+                if default.exists() {
+                    Some(default)
+                } else {
+                    None
+                }
+            });
+        match candidate {
+            Some(p) => match ralph_core::supervisor::RusqliteSupervisorStore::open(&p) {
+                Ok(s) => std::sync::Arc::new(s),
+                Err(_) => std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new()),
+            },
+            None => std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new()),
+        }
+    };
+    #[cfg(not(feature = "supervisor-db"))]
+    let store: std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore> =
+        std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+
+    // Count helper: events on disk carrying a specific wave_id.
+    let count_for_wave = |wave_id: &str| -> u32 {
+        if !events_file.exists() {
+            return 0;
+        }
+        let body = match fs::read_to_string(events_file) {
+            Ok(b) => b,
+            Err(_) => return 0,
+        };
+        let mut n: u32 = 0;
+        for line in body.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let v: serde_json::Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v.get("wave_id").and_then(|x| x.as_str()) == Some(wave_id)
+                && v.get("idempotency_key").and_then(|x| x.as_str())
+                    == Some(idempotency_key)
+            {
+                n += 1;
+            }
+        }
+        n
+    };
+
+    // Miss-import branch: try the legacy sidecar exactly once,
+    // before talking to the store. The store has no row for this
+    // scope, but a pre-fix workspace may still have a valid sidecar
+    // + a complete batch on disk. If the sidecar digest matches
+    // and the events file carries `count` records with that
+    // wave_id, adopt the row via the store (S10).
+    if let Some(legacy_wave_id) = try_legacy_sidecar_import(
+        events_file,
+        idempotency_key,
+        &scope_key,
+        &payload_digest,
+        expected_count,
+    )? {
+        let adopted = store.adopt_legacy_emission(
+            &scope_key,
+            &payload_digest,
+            expected_count,
+            &legacy_wave_id,
+        )?;
+        return Ok(IdempotencyOutcome {
+            wave_id: adopted,
+            deduplicated: true,
+        });
+    }
+
+    // Drive the store. The `count_events_on_disk` closure lets the
+    // store peek at on-disk rows without owning the events_file.
+    let reservation = store.reserve_emission(
+        &scope_key,
+        &payload_digest,
+        expected_count,
+        &count_for_wave,
+    )?;
+
+    use ralph_core::supervisor::EmissionReservation as R;
+    match reservation {
+        R::Reserved { public_wave_id } => {
+            // Lock events_file to keep multi-process file-writes
+            // serialised; two racers hit the same store row, only
+            // one gets `Reserved`.
+            let lock = FileLock::new(events_file)
+                .with_context(|| format!("create FileLock for {}", events_file.display()))?;
+            let _guard = lock.exclusive().with_context(|| {
+                format!("acquire exclusive lock on {}", lock.lock_path().display())
+            })?;
+
+            // Append events with the store-minted `public_wave_id`.
+            store
+                .mark_emission_applying(&scope_key)
+                .map_err(|e| anyhow!("failed to mark emission applying: {e}"))?;
+            let write_result = write_wave_events_with_provenance_with_wave_id(
+                topic,
+                payloads,
+                events_file,
+                if hat.is_empty() { None } else { Some(hat) },
+                Some(idempotency_key),
+                Some(&scope_key),
+                Some(&public_wave_id),
+            );
+            match write_result {
+                Ok(wave_id) => {
+                    let now_secs = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    store
+                        .mark_emission_applied(&scope_key, now_secs)
+                        .map_err(|e| anyhow!("failed to mark emission applied: {e}"))?;
+                    Ok(IdempotencyOutcome {
+                        wave_id,
+                        deduplicated: false,
+                    })
+                }
+                Err(write_err) => {
+                    // Mark the reservation as recovery-required so a
+                    // subsequent retry can either complete or fail
+                    // closed. We deliberately do NOT touch the JSONL
+                    // line — partial emission is fail-closed (S9).
+                    let _ = store.mark_emission_recovery_required(&scope_key);
+                    Err(write_err)
+                }
+            }
+        }
+        R::AlreadyApplied { public_wave_id } => Ok(IdempotencyOutcome {
+            wave_id: public_wave_id,
+            deduplicated: true,
+        }),
+        R::Conflict => {
+            bail!(
+                "idempotency_key_conflict: scope {} already reserved with a different payload digest. \
+                 Use a different --idempotency-key for this payload set.",
+                scope_key
+            );
+        }
+        R::RecoveryRequired {
+            public_wave_id,
+            on_disk,
+            expected,
+        } => {
+            bail!(
+                "wave_emission_recovery_required: store has reservation {public_wave_id} \
+                 for scope {scope_key} but only {on_disk}/{expected} events present on disk. \
+                 Run `ralph wave inspect {public_wave_id}` to inspect; the prior batch must be \
+                 completed or cleaned up before a re-emit can apply."
+            );
+        }
+        R::FailedPartial {
+            public_wave_id,
+            on_disk,
+            expected,
+        } => {
+            bail!(
+                "wave_emission_failed_partial: scope {scope_key} reservation {public_wave_id} \
+                 has {on_disk}/{expected} events on disk (partial). Re-emitting would create a \
+                 second wave; refusing to do so. Inspect via `ralph wave inspect {public_wave_id}` \
+                 and recover manually before re-emitting with a different --idempotency-key."
+            );
+        }
+    }
+}
+
+/// Sidecar miss-import: read the legacy `.idempotency.jsonl` row
+/// for `scope_key`, and only adopt it when (a) the
+/// `payload_digest` matches the incoming batch and (b) the events
+/// file carries exactly `expected_count` rows with that wave_id +
+/// idempotency_key. In every other case the legacy row is ignored
+/// (S11 — migration conflict fail-closed).
+///
+/// When adopted, the sidecar row is removed so subsequent emits
+/// cannot accidentally re-import it.
+fn try_legacy_sidecar_import(
+    events_file: &Path,
+    idempotency_key: &str,
+    scope_key: &str,
+    payload_digest: &str,
+    expected_count: u32,
+) -> Result<Option<String>> {
+    let sidecar_path = idempotency_log_path(events_file);
+    if !sidecar_path.exists() {
+        return Ok(None);
+    }
+    let records = read_idempotency_records(events_file)?;
+    let Some(record) = records.into_iter().find(|r| r.scope_key == scope_key) else {
+        return Ok(None);
+    };
+
+    // The user-friendly key is what the agent passed; the row's
+    // recorded key must round-trip the same way.
+    if record.idempotency_key != idempotency_key {
+        // Different key under the same scope — treat as a stale row.
+        return Ok(None);
+    }
+    if record.payload_digest != payload_digest {
+        // Digest drift: legacy row does not match the batch.
+        return Ok(None);
+    }
+    let on_disk = count_recovered_events(events_file, &record.wave_id, idempotency_key)?;
+    if on_disk != record.count || record.count as u32 != expected_count {
+        // Partial or count mismatch — refuse to adopt.
+        return Ok(None);
+    }
+
+    // We adopted the row. Remove the sidecar so the next emit does
+    // not re-import it. Failure to delete is non-fatal — the store
+    // is now the source of truth and a future emit will simply
+    // treat the row as stale.
+    let _ = fs::remove_file(&sidecar_path);
+    Ok(Some(record.wave_id))
 }
 
 /// Generate a unique wave ID.

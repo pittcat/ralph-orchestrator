@@ -1203,6 +1203,49 @@ impl SupervisorStore for RusqliteSupervisorStore {
             })
         })
     }
+
+    fn adopt_legacy_emission(
+        &self,
+        scope_key: &str,
+        payload_digest: &str,
+        expected_count: u32,
+        legacy_wave_id: &str,
+    ) -> SupervisorStoreResult<String> {
+        self.with_conn(|conn| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            // 2026-07-24-003 plan U5 (S10): idempotent import. If
+            // the scope already has an emission row, return the
+            // recorded id; never mint a third wave. `INSERT OR
+            // IGNORE` + a follow-up lookup covers the
+            // unique-collision branch.
+            let inserted = conn.execute(
+                "INSERT OR IGNORE INTO wave_emissions \
+                   (scope_key, public_wave_id, payload_digest, expected_count, state, applied_at) \
+                 VALUES (?1, ?2, ?3, ?4, 'applied', ?5)",
+                rusqlite::params![
+                    scope_key,
+                    legacy_wave_id,
+                    payload_digest,
+                    expected_count as i64,
+                    now,
+                ],
+            )?;
+            let _ = inserted;
+            // Read back the canonical id (handles both the
+            // inserted and the already-present branches).
+            let recorded: String = conn
+                .query_row(
+                    "SELECT public_wave_id FROM wave_emissions WHERE scope_key = ?1",
+                    [scope_key],
+                    |row| row.get(0),
+                )
+                .map_err(|err| SupervisorStoreError::Storage(err.to_string()))?;
+            Ok(recorded)
+        })
+    }
 }
 
 #[cfg(feature = "supervisor-db")]
