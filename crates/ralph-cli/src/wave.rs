@@ -7,6 +7,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use ralph_core::agent_doc_sync::compute_sha256_hex;
 use ralph_core::file_lock::FileLock;
+#[cfg(feature = "supervisor-db")]
+use ralph_core::supervisor::SupervisorStore;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -31,6 +33,27 @@ pub enum WaveCommands {
     /// Returns the same `{ok, wave_id?, error?}` shape so agents can
     /// treat verify and emit uniformly. Intended for OPAC Precheck stage.
     Verify(WaveVerifyArgs),
+    /// 2026-07-24-003 plan Unit 2: read-only Confirm for a wave.
+    ///
+    /// Returns the public `wave_id`'s current state from the
+    /// supervisor store: phase, expected/done/failed/pending/in-flight
+    /// counts, and `cancel_requested`. Unknown wave_id → `registered:
+    /// false`; corrupt / missing store → `availability: unavailable`.
+    /// Pair with `ralph wave emit` for the OPAC Apply/Confirm loop.
+    /// Read-only — never mutates the store, events JSONL, or tickets.
+    Inspect(WaveInspectArgs),
+}
+
+/// Arguments for `ralph wave inspect`.
+#[derive(Parser, Debug)]
+pub struct WaveInspectArgs {
+    /// Public wave id (the value `ralph wave emit` echoed on the
+    /// success response).
+    pub wave_id: String,
+
+    /// Output format: `text` (default) or `json` (agent-stable shape).
+    #[arg(long, value_enum, default_value_t = WaveOutputFormat::Text)]
+    pub output: WaveOutputFormat,
 }
 
 /// Arguments for `ralph wave verify`.
@@ -157,6 +180,7 @@ pub fn execute(args: WaveArgs, use_colors: bool) -> Result<()> {
     match args.command {
         WaveCommands::Emit(emit_args) => execute_emit(emit_args, use_colors),
         WaveCommands::Verify(verify_args) => execute_verify(verify_args),
+        WaveCommands::Inspect(inspect_args) => execute_inspect(inspect_args),
     }
 }
 
@@ -182,6 +206,266 @@ fn enforce_wave_acl(_verb: &str) -> Result<()> {
             bail!("wave ACL denied: {reason}; {hint}")
         }
     }
+}
+
+/// Execute `ralph wave inspect` — read-only public Confirm.
+///
+/// Returns a stable, agent-safe DTO describing the public wave id:
+/// `registered` (`true` when the store has a row for this wave),
+/// `availability` (`"available"` for a healthy lookup miss;
+/// `"unavailable"` when the store cannot be opened), `phase`,
+/// `expected_total`, slot counts, and `cancel_requested`. The
+/// function never echoes `db_path`, `events_file`, internal `store_id`,
+/// `pid`, payloads, or ticket paths — agents should not need to read
+/// internal ledgers to know whether their wave landed (S13, R11).
+///
+/// 2026-07-24-003 plan U3: when the supervisor store is reachable,
+/// the command queries `SupervisorStore::fan_in_status` for the
+/// public wave id. A `Found` row populates the phase / counts;
+/// `UnknownWave` becomes the lookup-miss view. A corrupt or missing
+/// db becomes `unavailable` with a sanitised reason (S13).
+fn execute_inspect(args: WaveInspectArgs) -> Result<()> {
+    let wave_id = args.wave_id.trim().to_string();
+    if wave_id.is_empty() {
+        bail!("ralph wave inspect: <wave_id> must not be empty");
+    }
+
+    let store_path = std::path::PathBuf::from(".ralph/supervisor.db");
+
+    // No ledger on disk → the wave cannot have reached the store.
+    // Surface the lookup-miss shape (`available / registered=false`)
+    // so the agent distinguishes "store healthy, wave unknown" from
+    // "store unreachable".
+    if !store_path.exists() {
+        return emit_view(WaveInspectView::unknown(wave_id), args.output);
+    }
+
+    // Best-effort open: a corrupt DB MUST NOT abort the read-only
+    // Confirm command. We probe with `rusqlite` only when the
+    // feature is compiled in; otherwise the file's mere presence
+    // without a backing store still classifies as unavailable.
+    #[cfg(feature = "supervisor-db")]
+    {
+        match ralph_core::supervisor::RusqliteSupervisorStore::open(&store_path) {
+            Ok(store) => {
+                let view = match store.fan_in_status(&wave_id) {
+                    Ok(snap) => WaveInspectView::from_snapshot(&snap),
+                    Err(err) => match err {
+                        ralph_core::supervisor::SupervisorStoreError::UnknownWave(_) => {
+                            WaveInspectView::unknown(wave_id)
+                        }
+                        other => {
+                            let reason =
+                                ralph_core::supervisor::sanitize_unavailable_reason(&other.to_string());
+                            WaveInspectView::unavailable(wave_id, &reason)
+                        }
+                    },
+                };
+                emit_view(view, args.output)
+            }
+            Err(err) => {
+                let reason =
+                    ralph_core::supervisor::sanitize_unavailable_reason(&err.to_string());
+                emit_view(WaveInspectView::unavailable(wave_id, &reason), args.output)
+            }
+        }
+    }
+    #[cfg(not(feature = "supervisor-db"))]
+    {
+        let _ = wave_id; // suppress unused warning on no-feature builds
+        emit_view(
+            WaveInspectView::unavailable(
+                args.wave_id,
+                "supervisor-db feature not compiled in this build",
+            ),
+            args.output,
+        )
+    }
+}
+
+fn emit_view(view: WaveInspectView, output: WaveOutputFormat) -> Result<()> {
+    match output {
+        WaveOutputFormat::Text => println!("{}", render_wave_inspect_view_text(&view)),
+        WaveOutputFormat::Json => {
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            serde_json::to_writer_pretty(&mut handle, &view)?;
+            writeln!(handle)?;
+        }
+    }
+    Ok(())
+}
+
+/// Serializable view of the inspection result. Both human and JSON
+/// output derive from this struct so the two surfaces cannot drift.
+///
+/// Output safety (R11): the struct never includes `db_path`,
+/// `events_file`, internal `store_id`, `pid`, payloads, or ticket
+/// paths — only the public `wave_id`, `phase`, slot counts, and the
+/// `availability` reason code. `skip_serializing_if` on
+/// `unavailable_reason` keeps the JSON quiet in the happy path.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct WaveInspectView {
+    pub ok: bool,
+    pub wave_id: String,
+    pub registered: bool,
+    /// `"available"` for a healthy lookup, `"unavailable"` when the
+    /// store cannot be opened. The two states map onto S13's
+    /// "unknown ≠ unavailable" distinction.
+    pub availability: &'static str,
+    /// Stable enum string from `WavePhase` (`dispatch`, `collect`,
+    /// `integrate`, `done`, `failed`). Empty string when
+    /// `registered == false` (the wave never reached the store).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_total: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_flight_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel_requested: Option<bool>,
+    /// Stable, opaque reason code for the unavailable branch. Only
+    /// emitted when `availability == "unavailable"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+impl WaveInspectView {
+    /// Lookup-miss: the wave never made it into the supervisor store.
+    /// `availability` stays `available` because the store is healthy.
+    pub fn unknown(wave_id: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            wave_id: wave_id.into(),
+            registered: false,
+            availability: "available",
+            phase: None,
+            expected_total: None,
+            completed_count: None,
+            failed_count: None,
+            pending_count: None,
+            in_flight_count: None,
+            cancel_requested: None,
+            unavailable_reason: None,
+        }
+    }
+
+    /// 2026-07-24-003 plan U3: build a registered view from a
+    /// live `WaveSnapshot`. The phase string is rendered through
+    /// `WavePhase::as_str` (stable contract) so the agent-facing
+    /// shape stays decoupled from internal enum reprs.
+    pub fn from_snapshot(snap: &ralph_core::supervisor::WaveSnapshot) -> Self {
+        Self {
+            ok: true,
+            wave_id: snap.wave_id.clone(),
+            registered: true,
+            availability: "available",
+            phase: Some(snap.phase.to_string()),
+            expected_total: Some(snap.expected_total),
+            completed_count: Some(snap.completed_count),
+            failed_count: Some(snap.failed_count),
+            pending_count: Some(snap.pending_count),
+            in_flight_count: Some(snap.in_flight_count),
+            cancel_requested: Some(snap.cancel_requested),
+            unavailable_reason: None,
+        }
+    }
+
+    /// Store-open failure: the lookup cannot be trusted. `registered`
+    /// stays `false` (no row proven) and `availability` flips to
+    /// `unavailable` so the agent can distinguish the two failure
+    /// modes (S13). The `reason` is sanitised before emission so a
+    /// verbose sqlite error (which may echo `.ralph/supervisor.db`
+    /// or a host filesystem path) cannot leak into the agent JSON
+    /// surface (R11).
+    pub fn unavailable(wave_id: impl Into<String>, reason: &str) -> Self {
+        const MAX: usize = 200;
+        let trimmed = reason.trim();
+        let stable = if trimmed.is_empty() {
+            "unavailable".to_string()
+        } else {
+            // Strip any path-like segments: a verbose rusqlite error
+            // typically reads "failed to open supervisor database:
+            // ... .ralph/supervisor.db: file is not a database". Drop
+            // everything after the first colon-separated fragment
+            // that contains a `/`, then cap to MAX chars.
+            let head = trimmed
+                .split(|c: char| c == ':')
+                .next()
+                .unwrap_or(trimmed)
+                .trim();
+            let sanitised = if head.is_empty() { trimmed } else { head };
+            if sanitised.chars().count() > MAX {
+                let mut s: String = sanitised.chars().take(MAX).collect();
+                s.push('…');
+                s
+            } else {
+                sanitised.to_string()
+            }
+        };
+        Self {
+            ok: true,
+            wave_id: wave_id.into(),
+            registered: false,
+            availability: "unavailable",
+            phase: None,
+            expected_total: None,
+            completed_count: None,
+            failed_count: None,
+            pending_count: None,
+            in_flight_count: None,
+            cancel_requested: None,
+            unavailable_reason: Some(stable),
+        }
+    }
+}
+
+/// Render the inspect view in plain text for humans / smoke tests.
+/// The text surface never echoes ledger paths or payloads — agents
+/// that want machine-readable fields should pin `--output json`.
+pub fn render_wave_inspect_view_text(view: &WaveInspectView) -> String {
+    let mut out = String::new();
+    out.push_str("wave: ");
+    out.push_str(&view.wave_id);
+    out.push('\n');
+    if !view.registered {
+        if view.availability == "unavailable" {
+            out.push_str("status: unavailable (store open failed)\n");
+            if let Some(reason) = &view.unavailable_reason {
+                out.push_str("reason: ");
+                out.push_str(reason);
+                out.push('\n');
+            }
+        } else {
+            out.push_str("status: not registered (no row in store)\n");
+        }
+        return out;
+    }
+    out.push_str("status: registered\n");
+    if let Some(phase) = &view.phase {
+        out.push_str("phase: ");
+        out.push_str(phase);
+        out.push('\n');
+    }
+    if let Some(total) = view.expected_total {
+        out.push_str(&format!(
+            "counts: expected={total} pending={} in_flight={} completed={} failed={}\n",
+            view.pending_count.unwrap_or(0),
+            view.in_flight_count.unwrap_or(0),
+            view.completed_count.unwrap_or(0),
+            view.failed_count.unwrap_or(0),
+        ));
+    }
+    if matches!(view.cancel_requested, Some(true)) {
+        out.push_str("cancel_requested: true\n");
+    }
+    out
 }
 
 /// Execute `ralph wave verify` — zero-disk precheck. Validates payloads
@@ -2580,5 +2864,163 @@ event_loop:
             result.is_ok(),
             "unsafe-bypass must work when config permits it, got: {result:?}"
         );
+    }
+
+    // ---- 2026-07-24-003 plan U2: wave inspect DTO + view ----
+
+    /// `unknown` collapses the per-wave fields so the JSON is the
+    /// minimum `{ok, wave_id, registered, availability}` shape — no
+    /// stray `phase` / counts / cancel keys.
+    #[test]
+    fn u2_inspect_view_unknown_minimal_shape() {
+        let view = WaveInspectView::unknown("w-miss");
+        assert!(view.ok);
+        assert_eq!(view.wave_id, "w-miss");
+        assert!(!view.registered);
+        assert_eq!(view.availability, "available");
+        assert_eq!(view.phase, None);
+        assert_eq!(view.expected_total, None);
+        assert_eq!(view.completed_count, None);
+        assert_eq!(view.failed_count, None);
+        assert_eq!(view.pending_count, None);
+        assert_eq!(view.in_flight_count, None);
+        assert_eq!(view.cancel_requested, None);
+        assert_eq!(view.unavailable_reason, None);
+
+        // The serialised shape must omit every optional field. Pin
+        // the JSON keys explicitly so downstream consumers can
+        // rely on a stable shape.
+        let json = serde_json::to_value(&view).expect("serialise");
+        let obj = json.as_object().expect("object");
+        assert!(obj.contains_key("ok"));
+        assert!(obj.contains_key("wave_id"));
+        assert!(obj.contains_key("registered"));
+        assert!(obj.contains_key("availability"));
+        assert!(!obj.contains_key("phase"));
+        assert!(!obj.contains_key("expected_total"));
+        assert!(!obj.contains_key("completed_count"));
+        assert!(!obj.contains_key("failed_count"));
+        assert!(!obj.contains_key("pending_count"));
+        assert!(!obj.contains_key("in_flight_count"));
+        assert!(!obj.contains_key("cancel_requested"));
+        assert!(!obj.contains_key("unavailable_reason"));
+    }
+
+    /// `unavailable` keeps the same minimal shape plus the
+    /// `unavailable_reason` field. The reason must be sanitised so
+    /// the view never leaks internal paths.
+    #[test]
+    fn u2_inspect_view_unavailable_sanitises_reason() {
+        let view = WaveInspectView::unavailable(
+            "w-x",
+            "failed to open supervisor database: migration failed on .ralph/supervisor.db: file is not a database",
+        );
+        assert!(!view.registered);
+        assert_eq!(view.availability, "unavailable");
+        let reason = view
+            .unavailable_reason
+            .as_deref()
+            .expect("reason must be present");
+        assert!(
+            !reason.contains(".ralph"),
+            "sanitised reason must drop internal paths: {reason}"
+        );
+        assert!(
+            !reason.contains("supervisor.db"),
+            "sanitised reason must drop db filename: {reason}"
+        );
+        assert!(
+            !reason.contains('/'),
+            "sanitised reason must be free of path separators: {reason}"
+        );
+
+        // Round-trip: the reason stays bounded and human-readable.
+        let json = serde_json::to_value(&view).expect("serialise");
+        assert_eq!(json["availability"], serde_json::json!("unavailable"));
+        assert!(
+            json["unavailable_reason"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count()
+                <= 200,
+            "reason must be capped at 200 chars"
+        );
+    }
+
+    /// `unavailable_reason` is empty / whitespace → fall back to the
+    /// literal `"unavailable"` so the JSON key is never empty.
+    #[test]
+    fn u2_inspect_view_unavailable_empty_reason_falls_back() {
+        let view = WaveInspectView::unavailable("w-x", "   ");
+        assert_eq!(
+            view.unavailable_reason.as_deref(),
+            Some("unavailable"),
+            "empty / whitespace reason must fall back to literal"
+        );
+    }
+
+    /// Human text output for unknown wave must contain
+    /// `not registered` (and never echo a path).
+    #[test]
+    fn u2_render_wave_inspect_view_text_unknown() {
+        let view = WaveInspectView::unknown("w-x");
+        let s = render_wave_inspect_view_text(&view);
+        assert!(s.contains("not registered"), "{s}");
+        assert!(s.contains("w-x"), "{s}");
+        assert!(!s.contains('/'), "{s}");
+    }
+
+    /// Human text output for unavailable store must say so and echo
+    /// the sanitised reason.
+    #[test]
+    fn u2_render_wave_inspect_view_text_unavailable() {
+        let view = WaveInspectView::unavailable("w-x", "store open failed");
+        let s = render_wave_inspect_view_text(&view);
+        assert!(s.contains("unavailable"), "{s}");
+        assert!(s.contains("store open failed"), "{s}");
+    }
+
+    /// `from_snapshot` propagates every public field verbatim and
+    /// renders the phase via `WavePhase`'s stable Display form
+    /// (U3 contract: phase strings are an agent-safe contract).
+    #[test]
+    fn u3_inspect_view_from_snapshot_propagates_fields() {
+        use ralph_core::supervisor::{WaveKind, WavePhase, WaveSnapshot};
+        let snap = WaveSnapshot {
+            wave_id: "w-found".into(),
+            kind: WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 5,
+            completed_count: 2,
+            failed_count: 0,
+            pending_count: 2,
+            in_flight_count: 1,
+            cancel_requested: false,
+            merged_to_events: false,
+            started_at: std::time::SystemTime::now(),
+            slots: vec![(0, ralph_core::supervisor::SlotStatus::Completed)],
+        };
+        let view = WaveInspectView::from_snapshot(&snap);
+        assert!(view.ok);
+        assert!(view.registered);
+        assert_eq!(view.wave_id, "w-found");
+        assert_eq!(view.availability, "available");
+        assert_eq!(view.phase.as_deref(), Some("collect"));
+        assert_eq!(view.expected_total, Some(5));
+        assert_eq!(view.completed_count, Some(2));
+        assert_eq!(view.failed_count, Some(0));
+        assert_eq!(view.pending_count, Some(2));
+        assert_eq!(view.in_flight_count, Some(1));
+        assert_eq!(view.cancel_requested, Some(false));
+        assert_eq!(view.unavailable_reason, None);
+
+        // Every field renders in the JSON shape — no skip on the
+        // registered branch.
+        let json = serde_json::to_value(&view).expect("serialise");
+        assert_eq!(json["phase"], serde_json::json!("collect"));
+        assert_eq!(json["expected_total"], serde_json::json!(5));
+        assert_eq!(json["completed_count"], serde_json::json!(2));
+        assert!(json.get("unavailable_reason").is_none());
     }
 }

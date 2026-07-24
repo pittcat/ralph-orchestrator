@@ -23,8 +23,10 @@ mod imp {
     ///
     /// U4 bump: `wave_id_seq` autoincrement table replaces the
     /// pre-fix `SELECT COUNT(*) + 1 FROM waves` allocator.
+    /// U4 (2026-07-24-003) bump: `wave_emissions` reservation
+    /// table backs the CLI emission state machine.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 2;
+    pub const CURRENT_VERSION: i64 = 3;
 
     /// Apply migrations sequentially. Each migration is a
     /// closure that performs the SQL DDL and bumps the
@@ -72,9 +74,12 @@ mod imp {
         // replaces the `SELECT COUNT(*) + 1 FROM waves`
         // allocator. v1 keeps the original schema; v2 adds
         // the singleton seq row used by `register_wave`.
-        // The migration is idempotent because v2 uses
-        // `CREATE TABLE IF NOT EXISTS`; existing v1
-        // databases auto-upgrade.
+        // v3 (2026-07-24-003 plan U4) adds `wave_emissions`
+        // for the CLI emission state machine. The migrations
+        // are idempotent because every step uses
+        // `CREATE TABLE IF NOT EXISTS`; existing v1/v2
+        // databases auto-upgrade without touching existing
+        // rows.
         &[
             Migration {
                 version: 1,
@@ -83,6 +88,10 @@ mod imp {
             Migration {
                 version: 2,
                 ddl: include_str!("migrations/v2.sql"),
+            },
+            Migration {
+                version: 3,
+                ddl: include_str!("migrations/v3.sql"),
             },
         ]
     }

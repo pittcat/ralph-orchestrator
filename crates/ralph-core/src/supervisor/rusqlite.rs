@@ -23,8 +23,9 @@ use rusqlite::{Connection, OptionalExtension};
 #[cfg(feature = "supervisor-db")]
 use super::migrations;
 use super::{
-    CompensationKind, DispatchOutcome, IsolationMode, SlotResource, SlotStatus, SupervisorStore,
-    SupervisorStoreError, SupervisorStoreResult, WaveKind, WavePhase, WaveSnapshot,
+    CompensationKind, DispatchOutcome, EmissionReservation, EmissionState, IsolationMode,
+    SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult,
+    WaveKind, WavePhase, WaveSnapshot,
 };
 
 /// Persistent `SupervisorStore` backed by SQLite (WAL mode,
@@ -1000,6 +1001,221 @@ impl SupervisorStore for RusqliteSupervisorStore {
             )?;
             Ok(())
         })
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-07-24-003 plan U4: emission reservation state machine.
+    //
+    // SQLite `UNIQUE (scope_key)` constraint backs the
+    // single-owner invariant. `INSERT OR IGNORE` lets us probe
+    // for an existing row without surfacing the constraint
+    // error to the caller; the affected-row count distinguishes
+    // the "inserted fresh" branch from the "already reserved"
+    // branch.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn reserve_emission(
+        &self,
+        scope_key: &str,
+        payload_digest: &str,
+        expected_count: u32,
+        count_events_on_disk: &dyn Fn(&str) -> u32,
+    ) -> SupervisorStoreResult<EmissionReservation> {
+        // Atomic fresh reservation: allocate a public_wave_id
+        // inside the same connection so two parallel emits on
+        // distinct (loop, hat, topic, key) tuples never mint the
+        // same id. We derive the seq from `wave_id_seq` so a
+        // future migration off SQLite keeps a single allocator.
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "INSERT INTO wave_id_seq (placeholder) VALUES (0) RETURNING seq",
+            )?;
+            let seq: i64 = stmt.query_row([], |row| row.get(0))?;
+            let public_wave_id = format!("w-rs-{seq}");
+
+            // Try to insert a fresh emission row. The UNIQUE
+            // constraint on `scope_key` makes a parallel
+            // reservation a no-op so we can probe the existing
+            // row instead.
+            let inserted = conn.execute(
+                "INSERT OR IGNORE INTO wave_emissions
+                   (scope_key, public_wave_id, payload_digest, expected_count, state)
+                 VALUES (?1, ?2, ?3, ?4, 'reserved')",
+                rusqlite::params![scope_key, &public_wave_id, payload_digest, expected_count],
+            )?;
+
+            if inserted == 1 {
+                return Ok(EmissionReservation::Reserved { public_wave_id });
+            }
+
+            // A row already exists; load it and classify.
+            let existing = conn
+                .query_row(
+                    "SELECT public_wave_id, payload_digest, expected_count, state
+                     FROM wave_emissions WHERE scope_key = ?1",
+                    [scope_key],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)? as u32,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => {
+                        SupervisorStoreError::UnknownWave(scope_key.to_string())
+                    }
+                    other => SupervisorStoreError::Storage(other.to_string()),
+                })?;
+
+            let (existing_public_wave_id, existing_payload_digest, existing_expected, state_str) =
+                existing;
+            if existing_payload_digest != payload_digest {
+                return Ok(EmissionReservation::Conflict);
+            }
+            let state = parse_emission_state(&state_str)?;
+            match state {
+                EmissionState::Applied => Ok(EmissionReservation::AlreadyApplied {
+                    public_wave_id: existing_public_wave_id,
+                }),
+                EmissionState::Failed => Ok(EmissionReservation::Conflict),
+                EmissionState::Reserved | EmissionState::Applying | EmissionState::RecoveryRequired => {
+                    let on_disk = count_events_on_disk(&existing_public_wave_id);
+                    if on_disk == 0 {
+                        Ok(EmissionReservation::FailedPartial {
+                            public_wave_id: existing_public_wave_id,
+                            on_disk,
+                            expected: existing_expected,
+                        })
+                    } else if on_disk < existing_expected {
+                        Ok(EmissionReservation::RecoveryRequired {
+                            public_wave_id: existing_public_wave_id,
+                            on_disk,
+                            expected: existing_expected,
+                        })
+                    } else {
+                        // Recovery path: events present + row never
+                        // reached applied → advance to applied.
+                        conn.execute(
+                            "UPDATE wave_emissions
+                             SET state = 'applied', applied_at = strftime('%s','now')
+                             WHERE scope_key = ?1",
+                            [scope_key],
+                        )?;
+                        Ok(EmissionReservation::AlreadyApplied {
+                            public_wave_id: existing_public_wave_id,
+                        })
+                    }
+                }
+            }
+        })
+    }
+
+    fn mark_emission_applying(&self, scope_key: &str) -> SupervisorStoreResult<()> {
+        self.with_conn(|conn| {
+            let rows = conn.execute(
+                "UPDATE wave_emissions
+                 SET state = 'applying'
+                 WHERE scope_key = ?1 AND state = 'reserved'",
+                [scope_key],
+            )?;
+            if rows == 0 {
+                return Err(SupervisorStoreError::InvalidTransition(format!(
+                    "emission row for {scope_key} not in state Reserved"
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    fn mark_emission_applied(
+        &self,
+        scope_key: &str,
+        applied_at_unix_secs: u64,
+    ) -> SupervisorStoreResult<()> {
+        self.with_conn(|conn| {
+            let rows = conn.execute(
+                "UPDATE wave_emissions
+                 SET state = 'applied', applied_at = ?2
+                 WHERE scope_key = ?1 AND state IN ('applying', 'reserved')",
+                rusqlite::params![scope_key, applied_at_unix_secs as i64],
+            )?;
+            if rows == 0 {
+                return Err(SupervisorStoreError::InvalidTransition(format!(
+                    "emission row for {scope_key} not in Applying/Reserved state"
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    fn mark_emission_recovery_required(&self, scope_key: &str) -> SupervisorStoreResult<()> {
+        self.with_conn(|conn| {
+            let rows = conn.execute(
+                "UPDATE wave_emissions
+                 SET state = 'recovery_required'
+                 WHERE scope_key = ?1 AND state IN ('reserved', 'applying')",
+                [scope_key],
+            )?;
+            if rows == 0 {
+                return Err(SupervisorStoreError::InvalidTransition(format!(
+                    "emission row for {scope_key} not in Reserved/Applying state"
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    fn mark_emission_failed(&self, scope_key: &str) -> SupervisorStoreResult<()> {
+        self.with_conn(|conn| {
+            let rows = conn.execute(
+                "UPDATE wave_emissions
+                 SET state = 'failed'
+                 WHERE scope_key = ?1 AND state IN ('reserved', 'applying', 'recovery_required')",
+                [scope_key],
+            )?;
+            if rows == 0 {
+                return Err(SupervisorStoreError::InvalidTransition(format!(
+                    "emission row for {scope_key} already terminal-applied"
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    fn emission_state_for_wave_id(
+        &self,
+        public_wave_id: &str,
+    ) -> SupervisorStoreResult<Option<EmissionState>> {
+        self.with_conn(|conn| {
+            let state_str: Option<String> = conn
+                .query_row(
+                    "SELECT state FROM wave_emissions WHERE public_wave_id = ?1",
+                    [public_wave_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(match state_str {
+                Some(s) => Some(parse_emission_state(&s)?),
+                None => None,
+            })
+        })
+    }
+}
+
+#[cfg(feature = "supervisor-db")]
+fn parse_emission_state(s: &str) -> SupervisorStoreResult<EmissionState> {
+    match s {
+        "reserved" => Ok(EmissionState::Reserved),
+        "applying" => Ok(EmissionState::Applying),
+        "applied" => Ok(EmissionState::Applied),
+        "recovery_required" => Ok(EmissionState::RecoveryRequired),
+        "failed" => Ok(EmissionState::Failed),
+        other => Err(SupervisorStoreError::Storage(format!(
+            "unknown emission state '{other}'"
+        ))),
     }
 }
 

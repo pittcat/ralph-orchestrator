@@ -749,23 +749,53 @@ fn build_supervisor_summary(
 
     // Best-effort open: a missing / corrupt db must NOT abort the
     // inspect command (Observe stage is read-only and best-effort).
-    // Failure paths collapse to a default summary; supervisors that
-    // need a hard signal should check `LoopState.diagnostics` instead.
+    //
+    // 2026-07-24-003 plan U3: a store-open failure now surfaces as
+    // `availability = "unavailable"` with a sanitised reason so the
+    // agent can distinguish a healthy empty store from a corrupt
+    // one (S13). The previous "default empty summary" shape masked
+    // the corruption from operators and was the U1 baseline
+    // invariant `baseline_inspect_loop_swallows_corrupt_store`.
     #[cfg(feature = "supervisor-db")]
     {
         match ralph_core::supervisor::RusqliteSupervisorStore::open(&db_path) {
-            Ok(store) => Some(ralph_core::supervisor::summarize(&store)),
-            Err(_) => Some(ralph_core::supervisor::SupervisorInspectSummary::default()),
+            Ok(store) => {
+                // U3: also include terminal waves (Done / Failed) in
+                // the summary so the agent can confirm a previous
+                // `*.wave.complete` event. We deliberately re-use
+                // `summarize` for the active-waves branch and append
+                // terminal waves via `list_wave_ids` + `fan_in_status`.
+                // For now `summarize` already covers the active case;
+                // terminal surfacing is U5 (the inspect command
+                // already exposes terminal waves through the wave
+                // command's inspect path).
+                Some(ralph_core::supervisor::summarize(&store))
+            }
+            Err(err) => {
+                let reason = err.to_string();
+                let sanitised = ralph_core::supervisor::sanitize_unavailable_reason(&reason);
+                Some(ralph_core::supervisor::SupervisorInspectSummary {
+                    availability: "unavailable",
+                    unavailable_reason: Some(sanitised),
+                    ..ralph_core::supervisor::SupervisorInspectSummary::default()
+                })
+            }
         }
     }
     #[cfg(not(feature = "supervisor-db"))]
     {
         // Without the rusqlite feature the binary cannot open the
         // supervisor store. Surface a default summary so the JSON
-        // shape stays stable; consumers pin `loop_inspect.v1` and
-        // know `active_waves: []` is the contract for "store
-        // unreachable".
-        Some(ralph_core::supervisor::SupervisorInspectSummary::default())
+        // shape stays stable; consumers pin `loop_inspect.v2` and
+        // know `availability: "unavailable"` is the contract for
+        // "store unreachable".
+        Some(ralph_core::supervisor::SupervisorInspectSummary {
+            availability: "unavailable",
+            unavailable_reason: Some(
+                "supervisor-db feature not compiled in this build".to_string(),
+            ),
+            ..ralph_core::supervisor::SupervisorInspectSummary::default()
+        })
     }
 }
 

@@ -17,9 +17,9 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use super::{
-    CompensationKind, DispatchOutcome, IdempotencyKey, IsolationMode, SlotResource, SlotStatus,
-    SupervisorStore, SupervisorStoreError, SupervisorStoreResult, WaveKind, WavePhase,
-    WaveSnapshot,
+    CompensationKind, DispatchOutcome, EmissionReservation, EmissionState, IdempotencyKey,
+    IsolationMode, SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError,
+    SupervisorStoreResult, WaveKind, WavePhase, WaveSnapshot,
 };
 
 /// Per-wave descriptor held in `InMemorySupervisorStore::waves`.
@@ -86,6 +86,11 @@ impl Clone for InMemorySupervisorStore {
 // `--features supervisor-db` integration path. Pinning the field
 // shape now avoids a churn round-trip when the rusqlite store
 // (U5) starts reading them.
+// 2026-07-24-003 plan U4: `emissions` is the in-memory mirror of
+// the v3 `wave_emissions` table. It backs the CLI emission
+// reservation state machine (reserve / apply / recovery / fail)
+// so unit tests can exercise the dual-process happy path
+// without a SQLite dependency.
 #[allow(dead_code)]
 struct Inner {
     /// Stable wave ID assignment counter; the runtime specifies
@@ -105,6 +110,25 @@ struct Inner {
     queue: Vec<String>,
     /// Per-wave compensation jobs (executed by U4 hooks).
     compensation: Vec<CompensationEntry>,
+    /// 2026-07-24-003 plan U4: in-memory mirror of the
+    /// `wave_emissions` v3 table. The store hands the CLI a
+    /// `public_wave_id` on `reserve_emission`; `scope_key` is
+    /// the dedup primary key.
+    emissions: HashMap<String, EmissionRow>,
+}
+
+/// 2026-07-24-003 plan U4: in-memory emission reservation row.
+/// Mirrors the `wave_emissions` SQLite schema so unit tests
+/// exercise the same state-machine semantics as the rusqlite
+/// store (U4 contract: `CURRENT_VERSION` v3).
+#[derive(Debug, Clone)]
+struct EmissionRow {
+    scope_key: String,
+    public_wave_id: String,
+    payload_digest: String,
+    expected_count: u32,
+    state: EmissionState,
+    applied_at: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -760,6 +784,181 @@ impl SupervisorStore for InMemorySupervisorStore {
             };
         }
         Ok(())
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-07-24-003 plan U4: emission reservation state machine.
+    //
+    // The InMemory implementation serialises under the same
+    // `Mutex` as the rest of the store, so concurrent
+    // `reserve_emission` calls on the same `scope_key` always
+    // observe the prior commit before deciding the outcome.
+    // The rusqlite implementation (mirrored below) relies on the
+    // `scope_key` UNIQUE constraint + an in-transaction
+    // re-read for the same guarantee.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn reserve_emission(
+        &self,
+        scope_key: &str,
+        payload_digest: &str,
+        expected_count: u32,
+        count_events_on_disk: &dyn Fn(&str) -> u32,
+    ) -> SupervisorStoreResult<EmissionReservation> {
+        let mut inner = self.lock()?;
+
+        if let Some(existing) = inner.emissions.get(scope_key).cloned() {
+            // Same scope: payload digest mismatch is a hard conflict
+            // (S4). The CLI must pick a different `--idempotency-key`.
+            if existing.payload_digest != payload_digest {
+                return Ok(EmissionReservation::Conflict);
+            }
+            // Same scope + same digest: classify by state.
+            return match existing.state {
+                EmissionState::Applied => Ok(EmissionReservation::AlreadyApplied {
+                    public_wave_id: existing.public_wave_id,
+                }),
+                EmissionState::Failed => {
+                    // A previous fail terminal — the caller is
+                    // retrying; treat as conflict so the agent
+                    // surfaces the history rather than silently
+                    // re-running. (S9 fail-closed path.)
+                    Ok(EmissionReservation::Conflict)
+                }
+                EmissionState::RecoveryRequired | EmissionState::Reserved
+                | EmissionState::Applying => {
+                    // Use the caller-supplied closure to count
+                    // events on disk; the closure lets the trait
+                    // surface stay free of file paths.
+                    let on_disk = count_events_on_disk(&existing.public_wave_id);
+                    if on_disk == 0 {
+                        Ok(EmissionReservation::FailedPartial {
+                            public_wave_id: existing.public_wave_id,
+                            on_disk,
+                            expected: existing.expected_count,
+                        })
+                    } else if on_disk < existing.expected_count {
+                        Ok(EmissionReservation::RecoveryRequired {
+                            public_wave_id: existing.public_wave_id,
+                            on_disk,
+                            expected: existing.expected_count,
+                        })
+                    } else {
+                        // on_disk >= expected_count and the row
+                        // never reached `applied`: recover by
+                        // transitioning the row to `applied`
+                        // and returning `AlreadyApplied`.
+                        inner
+                            .emissions
+                            .get_mut(scope_key)
+                            .expect("scope_key just observed")
+                            .state = EmissionState::Applied;
+                        Ok(EmissionReservation::AlreadyApplied {
+                            public_wave_id: existing.public_wave_id,
+                        })
+                    }
+                }
+            };
+        }
+
+        // First call: allocate a fresh public_wave_id. The
+        // allocator format mirrors `wave::generate_wave_id` so
+        // the existing operator tooling that greps for `w-` keeps
+        // working. We deliberately use the store's own counter
+        // (rather than re-using `chrono::Utc::now()` + PID) so
+        // two reservations in the same nanosecond still get
+        // distinct ids.
+        let public_wave_id = format!("w-{}", inner.next_wave_seq);
+        inner.next_wave_seq += 1;
+        inner.emissions.insert(
+            scope_key.to_string(),
+            EmissionRow {
+                scope_key: scope_key.to_string(),
+                public_wave_id: public_wave_id.clone(),
+                payload_digest: payload_digest.to_string(),
+                expected_count,
+                state: EmissionState::Reserved,
+                applied_at: None,
+            },
+        );
+        Ok(EmissionReservation::Reserved { public_wave_id })
+    }
+
+    fn mark_emission_applying(&self, scope_key: &str) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        let row = inner
+            .emissions
+            .get_mut(scope_key)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(scope_key.to_string()))?;
+        if row.state != EmissionState::Reserved {
+            return Err(SupervisorStoreError::InvalidTransition(format!(
+                "emission row for {scope_key} is in state {:?}, expected Reserved",
+                row.state
+            )));
+        }
+        row.state = EmissionState::Applying;
+        Ok(())
+    }
+
+    fn mark_emission_applied(
+        &self,
+        scope_key: &str,
+        applied_at_unix_secs: u64,
+    ) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        let row = inner
+            .emissions
+            .get_mut(scope_key)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(scope_key.to_string()))?;
+        if !matches!(row.state, EmissionState::Applying | EmissionState::Reserved) {
+            return Err(SupervisorStoreError::InvalidTransition(format!(
+                "emission row for {scope_key} is in state {:?}, expected Applying or Reserved",
+                row.state
+            )));
+        }
+        row.state = EmissionState::Applied;
+        row.applied_at = Some(applied_at_unix_secs);
+        Ok(())
+    }
+
+    fn mark_emission_recovery_required(&self, scope_key: &str) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        let row = inner
+            .emissions
+            .get_mut(scope_key)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(scope_key.to_string()))?;
+        row.state = EmissionState::RecoveryRequired;
+        Ok(())
+    }
+
+    fn mark_emission_failed(&self, scope_key: &str) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        let row = inner
+            .emissions
+            .get_mut(scope_key)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(scope_key.to_string()))?;
+        if !matches!(
+            row.state,
+            EmissionState::Reserved | EmissionState::Applying | EmissionState::RecoveryRequired
+        ) {
+            return Err(SupervisorStoreError::InvalidTransition(format!(
+                "emission row for {scope_key} is terminal-applied; cannot mark failed"
+            )));
+        }
+        row.state = EmissionState::Failed;
+        Ok(())
+    }
+
+    fn emission_state_for_wave_id(
+        &self,
+        public_wave_id: &str,
+    ) -> SupervisorStoreResult<Option<EmissionState>> {
+        let inner = self.lock()?;
+        Ok(inner
+            .emissions
+            .values()
+            .find(|r| r.public_wave_id == public_wave_id)
+            .map(|r| r.state))
     }
 
     fn record_slot_pid(
