@@ -59,6 +59,19 @@ mechanism:
         allowed_emits:
           - exec.wave.complete
           - exec.wave.failed
+          # 2026-07-24-005 plan U2 (KTD2/R2/R3): exec unit
+          # terminals are owned by the supervisor exec wave,
+          # not the unit_loop. Listed here so FlowStepScope
+          # accepts worker `exec.unit.done` / `exec.unit.failed`
+          # / `exec.unit.ready` on the exec_wave step without
+          # flagging `flow_unknown_emit`. NON_TRANSITION in
+          # `advance_plan_step` keeps the step from collapsing
+          # to exec_integrate on the first unit completion —
+          # only `exec.wave.complete` / `exec.wave.failed`
+          # still advance the step.
+          - exec.unit.ready
+          - exec.unit.done
+          - exec.unit.failed
       - id: exec_integrate
         kind: await
         on: exec.wave.complete

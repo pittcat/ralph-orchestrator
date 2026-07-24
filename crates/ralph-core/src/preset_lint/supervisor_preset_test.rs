@@ -669,3 +669,76 @@ fn ce_executor_supervisor_preset_wave_events_pass_detect_all_capped() {
         );
     }
 }
+
+// 2026-07-24-005 plan U2 (R2 / R3 / S1 / S2 / S6): structural
+// pin of `exec_wave.allowed_emits` against the supervisor
+// preset. Replaces the old `text contains "exec.unit.done"`
+// string-pin with a typed YAML parse so a typo or wrong
+// nesting fails loudly. Companion to the
+// `u2_advance_*_on_exec_wave_*` advance_plan_step tests in
+// `event_loop/mod.rs`.
+#[test]
+fn ce_executor_supervisor_preset_exec_wave_mounts_unit_terminal_topics() {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(PRESET_YAML).expect("preset YAML must parse");
+    // Preset SSOT: top-level `mechanism:`, not
+    // `event_loop.mechanism` (per `effective_mechanism_config`
+    // and the existing `initial_returns_first_step_id_from_top_level_mechanism`
+    // pin).
+    let mechanism = yaml
+        .get("mechanism")
+        .expect("preset must have top-level mechanism key");
+    let flow = mechanism
+        .get("flow")
+        .expect("preset must declare mechanism.flow");
+    let steps = flow
+        .get("steps")
+        .and_then(|v| v.as_sequence())
+        .expect("mechanism.flow.steps must be a sequence");
+
+    let allowed = |step_id: &str| -> Vec<String> {
+        steps
+            .iter()
+            .find(|s| s.get("id").and_then(serde_yaml::Value::as_str) == Some(step_id))
+            .unwrap_or_else(|| panic!("mechanism.flow must contain a `{step_id}` step"))
+            .get("allowed_emits")
+            .and_then(|v| v.as_sequence())
+            .unwrap_or_else(|| {
+                panic!("`{step_id}` step must declare allowed_emits as a sequence")
+            })
+            .iter()
+            .filter_map(serde_yaml::Value::as_str)
+            .map(str::to_string)
+            .collect()
+    };
+
+    let exec_wave = allowed("exec_wave");
+    for required in ["exec.unit.ready", "exec.unit.done", "exec.unit.failed"] {
+        assert!(
+            exec_wave.iter().any(|t| t == required),
+            "exec_wave.allowed_emits must contain `{required}` after U2 (R2); got {exec_wave:?}"
+        );
+    }
+    // Wave terminals must remain in exec_wave.allowed_emits
+    // so the wave still advances to exec_integrate.
+    for required in ["exec.wave.complete", "exec.wave.failed"] {
+        assert!(
+            exec_wave.iter().any(|t| t == required),
+            "exec_wave.allowed_emits must keep `{required}`; got {exec_wave:?}"
+        );
+    }
+
+    // S2 / S3 boundary: `unit_loop.allowed_emits` must NOT
+    // mount `exec.unit.done` (the supervisor owns the unit
+    // terminal) and must keep `execution.plan.ready` so
+    // task-planner can hand off to exec-wave-dispatcher.
+    let unit_loop = allowed("unit_loop");
+    assert!(
+        !unit_loop.iter().any(|t| t == "exec.unit.done"),
+        "unit_loop.allowed_emits must NOT mount `exec.unit.done` (S2 product decision); got {unit_loop:?}"
+    );
+    assert!(
+        unit_loop.iter().any(|t| t == "execution.plan.ready"),
+        "unit_loop.allowed_emits must keep `execution.plan.ready` for the task-planner handoff; got {unit_loop:?}"
+    );
+}

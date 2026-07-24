@@ -95,6 +95,12 @@ fn write_project_config(repo: &Path) {
 event_loop:
   max_iterations: 30
   max_runtime_seconds: 120
+  # This fixture stops after proving production fan-in and does not model the
+  # downstream hats. Keep fail-close beyond max_iterations so a reachable
+  # reporter cannot loop on its intentionally empty fake-backend branch.
+  progress_steward:
+    enabled: false
+    max_steward_iterations: 100
 "#,
             backend.display()
         ),
