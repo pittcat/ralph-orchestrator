@@ -1517,6 +1517,29 @@ fn test_ce_executor_pipeline_blocked() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-24-003 plan U2: scope ambiguity fail-close — no wave dispatch.
+#[test]
+fn test_implementation_review_scope() {
+    let yaml = load_scenario("tests/scenarios/implementation_review_scope.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-24-003 plan U3: success topic/schema chain through wave fan-in
+/// stand-in to LOOP_COMPLETE{result:clean}.
+#[test]
+fn test_implementation_review_wave() {
+    let yaml = load_scenario("tests/scenarios/implementation_review_wave.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-24-003 plan U4: synthesizer integrity failure → blocked terminal;
+/// fix.plan.ready must stay absent.
+#[test]
+fn test_implementation_review_fan_in() {
+    let yaml = load_scenario("tests/scenarios/implementation_review_fan_in.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-07-16-001 plan U2 bill contract, inverted by 2026-07-24-002
 /// plan U3 (B1): a non-final Unit failure (U2) with commits on
 /// record (`completed_units` non-empty) MUST settle via `work.done`

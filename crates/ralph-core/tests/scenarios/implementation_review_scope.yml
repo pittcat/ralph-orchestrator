@@ -1,0 +1,80 @@
+# implementation-review U2: scope ambiguity fail-close
+#
+# scope-preparer emits scope.blocked; finalizer completes with blocked.
+# No wave dispatch (absent review.unit.ready).
+
+name: implementation_review_scope
+description: Scope blocked short-circuits before wave dispatch
+
+config:
+  prompt_file: PROMPT.md
+  topic_format_whitelist:
+    - LOOP_COMPLETE
+  max_iterations: 10
+  hats:
+    scope-preparer:
+      subscribes_to:
+        - review.start
+      publishes:
+        - scope.ready
+        - scope.blocked
+    review-dispatcher:
+      subscribes_to:
+        - scope.ready
+      publishes:
+        - review.unit.ready
+    finalizer:
+      subscribes_to:
+        - scope.blocked
+        - review.blocked
+        - review.wave.failed
+        - fix.plan.ready
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "review.start"
+    completion_promise: "LOOP_COMPLETE"
+    required_events: []
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        scope.blocked:
+          required_fields:
+            - plan_name
+            - plan_path
+            - reason
+            - block_artifact_path
+            - scope_digest
+          payload: json_object
+        LOOP_COMPLETE:
+          required_fields:
+            - reason
+          payload: json_object
+
+mock_responses:
+  - text: |
+      <event topic="scope.blocked">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","reason":"ambiguous_candidates","block_artifact_path":".ralph/review/demo-plan/scope-blocked.md","scope_digest":"abcd1234ef567890"}
+      </event>
+    hat: scope-preparer
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"implementation-review scenario complete"}
+      </event>
+    hat: finalizer
+
+expected:
+  iterations: 2
+  events:
+    - topic: scope.blocked
+  absent_events:
+    - topic: scope.ready
+    - topic: review.unit.ready
+    - topic: review.unit.done
+    - topic: review.wave.complete
+    - topic: review.synthesized
+    - topic: fix.plan.ready
+  completion: true

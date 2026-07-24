@@ -665,6 +665,24 @@ mod tests {
     fn assert_public_preset_has_required_events(preset: &EmbeddedPreset) {
         let config =
             RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
+        // 2026-07-24-003 plan KTD14: implementation-review is a
+        // branching finalizer-only completion preset. Mutually
+        // exclusive success/blocked handoffs must NOT be listed in
+        // required_events (that caused the historic review.passed +
+        // review.complete infinite-loop class of bugs). Empty is the
+        // correct contract: finalizer is the sole LOOP_COMPLETE
+        // publisher and ownership/publishes gates block premature
+        // completion from other hats.
+        if preset.name == "implementation-review" {
+            assert!(
+                config.event_loop.required_events.is_empty(),
+                "Preset '{}' must keep required_events empty (KTD14 \
+                 branching finalizer-only completion); got {:?}",
+                preset.name,
+                config.event_loop.required_events
+            );
+            return;
+        }
         assert!(
             !config.event_loop.required_events.is_empty(),
             "Preset '{}' should define required_events to block premature completion",
@@ -1939,15 +1957,6 @@ mod tests {
             // the fix wave. The runtime still requires `work.done` on every
             // successful completion.
             "ce-executor-supervisor",
-            // 2026-07-24-003 plan U1: implementation-review declares
-            // 4 blocked paths (scope.blocked / review.blocked /
-            // review.wave.failed) + 1 success path; the static
-            // `required_event_not_on_all_paths` check assumes a
-            // single success path. Adding a topology exemption is
-            // the documented design choice (this preset's
-            // branching completion paths are intentional, per
-            // plan R10/R11).
-            "implementation-review",
         ];
 
         // Per-preset finding-id exemptions for the non-strict authoring
@@ -2106,15 +2115,6 @@ mod tests {
             "autoresearch",
             "debug",
             "ce-executor-supervisor",
-            // 2026-07-24-003 plan U1: implementation-review declares
-            // 4 blocked paths (scope.blocked / review.blocked /
-            // review.wave.failed) + 1 success path; the strict
-            // `required_event_not_on_all_paths` check assumes a
-            // single success path. Adding a topology exemption is
-            // the documented design choice (this preset's
-            // branching completion paths are intentional, per
-            // plan R10/R11).
-            "implementation-review",
         ];
 
         // Per-preset finding-id exemptions (P2 #16 + #22).

@@ -92,6 +92,17 @@ pub(crate) fn default_core_value() -> Result<Value> {
             }
         }
 
+        // 2026-07-24-003 plan review P0: top-level `mechanism` is
+        // `Option<MechanismConfig>` and serialises as `mechanism: null`
+        // on `RalphConfig::default()`. `merge_hats_overlay`'s default
+        // branch treats any present key as "operator wins" and skips
+        // the preset value — so a wave-only preset's
+        // `mechanism.flow.steps[].runs: wave.runtime.*` never landed
+        // and `ralph preset check` kept reporting false R5 / topology
+        // gaps. Strip the null placeholder the same way we strip
+        // event_loop opt-in keys above.
+        mapping.remove(Value::String("mechanism".to_string()));
+
         // 2026-06-24: also strip
         // `telemetry.runtime_diagnosis.drift.coord_join_mode`. Unlike
         // the event_loop-level keys above (which are Option-typed and
@@ -594,6 +605,17 @@ event_loop:
              (framework default `true` would block preset opt-in via \
              `contains_key` guard in `merge_hats_overlay`); got {:?}",
             tasks_enabled
+        );
+
+        // 2026-07-24-003 review P0: top-level mechanism:null must be
+        // stripped so wave-only presets' `runs: wave.runtime.*` survive
+        // the overlay "operator wins" guard.
+        assert!(
+            default_value.get("mechanism").is_none(),
+            "default core value must NOT contain top-level mechanism \
+             (Option::None serialises as null and would block preset \
+             mechanism.flow via merge_hats_overlay contains_key); got {:?}",
+            default_value.get("mechanism")
         );
 
         // 2026-07-03-001 plan U1: the supervisor opt-in must

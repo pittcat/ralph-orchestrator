@@ -155,12 +155,7 @@ impl HandoffGraph {
         // supervisor's `supervisor` node.
         if let Some(mech) = config.mechanism.as_ref() {
             if let Some(flow) = mech.flow.as_ref() {
-                if flow.steps.iter().any(|s| {
-                    s.runs
-                        .as_deref()
-                        .map(|r| r.starts_with(RUNNER_BINDING_WAVE_PREFIX))
-                        .unwrap_or(false)
-                }) {
+                if flow.steps.iter().any(|s| is_wave_runner_binding(s.runs.as_deref())) {
                     const WAVE_SLOT_TO_WAVE: &[(&str, &str)] = &[
                         ("exec.unit.done", "exec.wave.complete"),
                         ("exec.unit.failed", "exec.wave.failed"),
@@ -188,11 +183,6 @@ impl HandoffGraph {
                 }
             }
         }
-        // Suppress the unused-import lint while keeping the
-        // classifier helper available for callers that may
-        // import it; this module consumes the prefix constant
-        // directly so the helper is not inlined here.
-        let _ = is_wave_runner_binding;
 
         hat_order.sort();
 
@@ -541,21 +531,14 @@ fn reaches_progress_endpoint(
     if terminals.contains(start_topic) {
         return true;
     }
-    // 2026-07-24-003 plan U1 / capability-gap fix: the default
-    // wave hot path (`*.unit.done` → runtime aggregate → inject
-    // `*.wave.complete`) is not visible in the typed hat
-    // graph. Without this short-circuit, every wave dispatcher
-    // and wave worker would receive R3/R4 spurious "no
-    // activation egress" findings because the runtime-owned
-    // fan-in step is invisible. The check is conservative:
-    // exempt any hop that crosses an `*.unit.done` /
-    // `*.unit.failed` topic on its way to a terminal.
-    //
-    // The check is capability-triggered (not preset-name
-    // pinned) per `finding-rubric.md` "Wave capability audit".
-    if start_topic.ends_with(".unit.done") || start_topic.ends_with(".unit.failed") {
-        return true;
-    }
+    // 2026-07-24-003 plan U1 / capability-gap fix (P1 narrow):
+    // the default wave hot path (`*.unit.done` → runtime
+    // aggregate → inject `*.wave.complete`) is modelled as a
+    // virtual `wave_runtime` node in `HandoffGraph::from_config`
+    // when the preset declares `wave.runtime.*`. Do NOT
+    // short-circuit every `*.unit.done` / `*.unit.failed` here
+    // — that would falsify R3/R4 egress for non-wave presets.
+    // Reachability goes through the virtual node + normal BFS.
     if max_hops == 0 {
         return false;
     }
@@ -729,28 +712,7 @@ pub fn check_trigger_publish_asymmetry(
     // declaring a `wave.runtime.*` step gets the exemption set.
     // Preset-name checks would be ralph-preset-review finding
     // `preset.execution_model_intent_mismatch` territory.
-/// 2026-07-24-003 plan U1 / capability-gap fix: predicate
-/// that gates R5 ("no publisher" archetype) exemption for
-/// runtime-injected wave coordination topics. Returns
-/// `true` when (a) the trigger topic matches the
-/// `*.wave.{complete,failed}` pattern AND (b) the preset
-/// declares a `mechanism.flow.steps[].runs` binding prefixed
-/// with `wave.runtime.*`. The dual condition prevents the
-/// exemption from accidentally short-circuiting real
-/// orphan triggers in non-wave presets — e.g. a hat that
-/// declares `triggers: [my.acme.wave.complete]` without any
-/// wave runner binding still surfaces R5 "no publisher"
-/// because the topic name matches the suffix but the
-/// capability gate fails.
-///
-/// Capability-triggered (not preset-name pinned) per
-/// `finding-rubric.md` "Wave capability audit". The
-/// `RalphConfig.mechanism` field is mandatory for any
-/// preset that opts into the mechanism foundation (see
-/// `flow_declaration_missing` lint rule); presets without
-/// `mechanism:` fail that gate before they reach this
-/// exemption, so the explicit `None` default is safe.
-
+    //
     // R5 is per-trigger and depends only on graph topology (no
     // bounded BFS over terminals), so the terminal set is unused.
     // The call is kept for symmetry with R3 / R4 and to give the

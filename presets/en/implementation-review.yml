@@ -63,21 +63,13 @@ event_loop:
   execution_mode: isolated
   prompt_file: "PROMPT.md"
   completion_promise: "LOOP_COMPLETE"
-  # U7 gate (test_public_presets_have_required_events): non-empty
-  # required_events block premature completion — every public
-  # builtin must declare at least one intermediate hat output
-  # that finalizer waits on. We list both the canonical success
-  # path and the four blocked paths so the static
-  # `topology.unreachable_required` check can find them in
-  # the hat graph (scope-preparer publishes scope.blocked;
-  # review-synthesizer publishes review.synthesized /
-  # review.blocked).
-  required_events:
-    - "review.synthesized"
-    - "fix.plan.ready"
-    - "scope.blocked"
-    - "review.blocked"
-    - "review.wave.failed"
+  # KTD14: required_events MUST stay empty. Listing mutually exclusive
+  # success + blocked handoffs (review.synthesized AND scope.blocked,
+  # etc.) makes missing_required_events wait for events that never fire
+  # on the success path — the historic review.passed+review.complete
+  # infinite-loop class of bugs. Finalizer is the sole LOOP_COMPLETE
+  # publisher; hat publishes/ownership gates block premature completion.
+  required_events: []
   starting_event: "review.start"
   max_iterations: 30
   max_runtime_seconds: 14400  # 4 hours; bounded by six-dim review fan-out, not by per-unit commits.
@@ -1325,8 +1317,11 @@ hats:
 
       - `review.wave.complete` payload (runtime-injected, see Step 0):
         `wave_id`, `completed_dimensions[]`, `aggregate_timeout`.
-      - `scope.ready` projection via `ralph inspect loop --format json`
-        (canonical manifest path / plan_key / scope digest — KTD16).
+      - `ralph inspect loop --format json` → `loop_anchor.plan_name` /
+        `plan_path` (operator `--plan`; NOT a `scope.ready`
+        state_projection — `scope.ready` is not in the projector
+        topic whitelist). Canonical digests and paths come from
+        reading `.ralph/review/<plan_name>/scope-manifest.json`.
       - `.ralph/review/<plan>/scope-manifest.json` (read via `Read`).
       - `.ralph/review/<plan>/review.diff.patch` (read via `Read`).
       - `.ralph/review/<plan>/dimensions/<dim>.md` for each `dim` in
@@ -1342,13 +1337,21 @@ hats:
 
       ### Step 1 — Re-validate scope identity
 
+      - Resolve `plan_name` from `ralph inspect loop --format json`
+        (`loop_anchor.plan_name`). Canonical paths:
+        `.ralph/review/<plan_name>/scope-manifest.json` and
+        `.ralph/review/<plan_name>/review.diff.patch`.
+      - Read `scope-manifest.json`; treat its
+        `review_head_sha` / `patch_digest` / `scope_digest` /
+        `scope_manifest_path` as the frozen identity (R13 via
+        artifact + loop_anchor, not task-ledger state_projection).
       - `actual_head = git rev-parse HEAD`; must equal
-        `scope.ready.review_head_sha` (read via `ralph inspect loop`).
+        `scope-manifest.review_head_sha`.
       - porcelain filter (excluding `.ralph/`) must still be empty.
-      - `sha256sum <patch_path>` must still equal
-        `scope.ready.patch_digest`.
-      - `scope_digest` (read manifest, recompute) must equal
-        `scope.ready.scope_digest`.
+      - `sha256sum` of the patch file must still equal
+        `scope-manifest.patch_digest`.
+      - Recomputed `scope_digest` from the manifest bytes must equal
+        the manifest's recorded `scope_digest`.
       - Any drift → `review.blocked` with `reason: scope_drift_pre_synth`
         (write the block artifact first).
 
@@ -1482,12 +1485,12 @@ hats:
 
       ### Inputs you can Observe
 
-      - `review.synthesized` payload (in the trigger payload AND via
-        `ralph inspect loop` projection): `plan_name`, `plan_path`,
+      - `review.synthesized` trigger payload: `plan_name`, `plan_path`,
         `synthesized_review_file`, `findings_count`, `p0_count`,
         `p1_count`, `p2_count`, `p3_count`, `scope_digest`,
         `patch_digest`, `review_head_sha`, `first_implementation_commit_sha`,
-        `resolved_baseline_sha`.
+        `resolved_baseline_sha` (read from the trigger; do NOT
+        reconstruct from main event history).
       - `.ralph/review/<plan>/synthesized-review.md` (read via `Read`).
       - `.ralph/review/<plan>/scope-manifest.json` (read via `Read`).
 
@@ -1654,8 +1657,9 @@ hats:
         only when trigger is `scope.blocked`).
       - `.ralph/review/<plan>/review-blocked.md` (read via `Read` —
         only when trigger is `review.blocked`).
-      - `ralph inspect loop --format json` for `plan_name` and loop
-        identity.
+      - `ralph inspect loop --format json` for `loop_anchor.plan_name`
+        / `plan_path` when the trigger payload omits them (blocked
+        paths still carry `plan_name` / `plan_path` in the handoff).
 
       ### Step 0 — Treat review.wave.failed as runtime-injected
 

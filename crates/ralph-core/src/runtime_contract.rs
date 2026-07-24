@@ -811,17 +811,21 @@ pub fn detect_orphan_topics(
             if config.event_loop.supervisor.enabled && is_supervisor_slot_topic(topic) {
                 continue;
             }
-            // 2026-07-24-003 plan U1 / capability-gap fix: when a
-            // preset declares a `wave.runtime.*` runner binding,
-            // its `*.unit.done` consumers have the same built-in
-            // wave hot-path consumer behaviour: the runtime's
-            // default wave aggregation path treats them as
-            // fan-in payloads even when no hat subscribes. This
-            // exempts e.g. `review.unit.done` from the legacy
-            // "no hat subscribers" warning for wave-only
-            // presets.
-            if preset_uses_wave_runtime(config) && is_wave_coordination_topic(topic)
-                || topic.ends_with(".unit.done") || topic.ends_with(".unit.failed")
+            // 2026-07-24-003 plan U1 / capability-gap fix (P1
+            // precedence fix): when a preset declares a
+            // `wave.runtime.*` runner binding, both
+            // `*.wave.{complete,failed}` (runtime-injected) and
+            // `*.unit.{done,failed}` (runtime-consumed fan-in
+            // inputs) are exempt from the "no hat subscribers"
+            // orphan warning. Both arms require
+            // `preset_uses_wave_runtime` — without that gate,
+            // every non-wave preset's `*.unit.done` publish would
+            // silently skip orphan detection (operator-precedence
+            // bug: `&&` binds tighter than `||`).
+            if preset_uses_wave_runtime(config)
+                && (is_wave_coordination_topic(topic)
+                    || topic.ends_with(".unit.done")
+                    || topic.ends_with(".unit.failed"))
             {
                 continue;
             }

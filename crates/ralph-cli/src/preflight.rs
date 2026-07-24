@@ -1453,6 +1453,37 @@ mechanism:
         assert_eq!(flow.steps[0].id, "step-01");
     }
 
+    /// 2026-07-24-003 review P0: the real `ralph preset check -H`
+    /// path builds core via `default_core_value()`, which used to
+    /// leave `mechanism: null` and cause the overlay "operator wins"
+    /// branch to drop the preset's wave.runtime binding. Pin that
+    /// the implementation-review mechanism.runs survives.
+    #[test]
+    fn default_core_overlay_preserves_implementation_review_wave_runtime_runs() {
+        let hats_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../presets/en/implementation-review.yml");
+        let content = std::fs::read_to_string(&hats_path).expect("read implementation-review.yml");
+        let hats_value =
+            crate::config_resolution::parse_yaml_value(&content, "implementation-review")
+                .expect("parse hats yaml");
+        let core = crate::config_resolution::default_core_value().expect("default core");
+        let merged = merge_hats_overlay(core, hats_value).expect("merge");
+        let config: RalphConfig = serde_yaml::from_value(merged).expect("deserialize RalphConfig");
+        assert!(
+            ralph_core::runtime_contract::preset_uses_wave_runtime(&config),
+            "default_core_value + overlay must preserve mechanism.flow.steps[].runs \
+             wave.runtime.* (got mechanism={:?})",
+            config.mechanism.as_ref().map(|m| m
+                .flow
+                .as_ref()
+                .map(|f| f
+                    .steps
+                    .iter()
+                    .map(|s| (s.id.clone(), s.runs.clone()))
+                    .collect::<Vec<_>>()))
+        );
+    }
+
     /// `ce-executor-pipeline` is hat-only: no `mechanism.flow` block in YAML.
     #[test]
     fn ce_executor_pipeline_overlay_has_no_mechanism_flow() {

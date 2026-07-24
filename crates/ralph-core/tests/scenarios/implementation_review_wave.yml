@@ -1,0 +1,173 @@
+# implementation-review U3: success topic/schema chain through wave fan-in
+#
+# Scenario fixture uses a stand-in `wave-runtime` hat to model the
+# runtime-injected review.wave.complete (origin guard blocks agents
+# from emitting it in the real preset). Asserts six unit.done →
+# wave.complete → synthesizer → fix-planner → finalizer, and that
+# blocked handoffs stay absent.
+
+name: implementation_review_wave
+description: Six-slot wave success chain to LOOP_COMPLETE with fix.plan.ready
+
+config:
+  prompt_file: PROMPT.md
+  topic_format_whitelist:
+    - LOOP_COMPLETE
+  max_iterations: 20
+  hats:
+    scope-preparer:
+      subscribes_to:
+        - review.start
+      publishes:
+        - scope.ready
+        - scope.blocked
+    review-dispatcher:
+      subscribes_to:
+        - scope.ready
+      publishes:
+        - review.unit.ready
+    review-worker:
+      subscribes_to:
+        - review.unit.ready
+      publishes:
+        - review.unit.done
+      concurrency: 6
+    wave-runtime:
+      # Stand-in for runtime default wave hot path (not present in the
+      # real builtin — agents must not emit review.wave.complete).
+      subscribes_to:
+        - review.unit.done
+      publishes:
+        - review.wave.complete
+        - review.wave.failed
+    review-synthesizer:
+      subscribes_to:
+        - review.wave.complete
+      publishes:
+        - review.synthesized
+        - review.blocked
+    fix-planner:
+      subscribes_to:
+        - review.synthesized
+      publishes:
+        - fix.plan.ready
+    finalizer:
+      subscribes_to:
+        - fix.plan.ready
+        - scope.blocked
+        - review.blocked
+        - review.wave.failed
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "review.start"
+    completion_promise: "LOOP_COMPLETE"
+    required_events: []
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        scope.ready:
+          required_fields:
+            - plan_name
+            - plan_path
+            - scope_digest
+            - patch_path
+            - patch_digest
+            - scope_manifest_path
+            - review_head_sha
+          payload: json_object
+        review.unit.ready:
+          required_fields:
+            - plan_name
+            - scope_digest
+            - dimension
+            - slot_index
+          payload: json_object
+        review.unit.done:
+          required_fields:
+            - plan_name
+            - scope_digest
+            - dimension
+            - findings_count
+            - findings_file
+          payload: json_object
+        review.wave.complete:
+          required_fields:
+            - wave_id
+            - completed_dimensions
+          payload: json_object
+        review.synthesized:
+          required_fields:
+            - plan_name
+            - synthesized_review_file
+            - findings_count
+            - scope_digest
+          payload: json_object
+        fix.plan.ready:
+          required_fields:
+            - plan_name
+            - fix_plan_path
+            - result
+            - scope_digest
+          payload: json_object
+        LOOP_COMPLETE:
+          required_fields:
+            - reason
+          payload: json_object
+
+mock_responses:
+  - text: |
+      <event topic="scope.ready">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_path":".ralph/review/demo-plan/review.diff.patch","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","scope_manifest_path":".ralph/review/demo-plan/scope-manifest.json","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","first_implementation_commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","resolved_baseline_sha":"cccccccccccccccccccccccccccccccccccccccc","dirty_verdict":"clean"}
+      </event>
+    hat: scope-preparer
+  # Dispatcher emits one review.unit.ready; scenario runner wakes one
+  # worker activation. Wave stand-in then fans in to wave.complete.
+  - text: |
+      <event topic="review.unit.ready">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_path":".ralph/review/demo-plan/review.diff.patch","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","scope_manifest_path":".ralph/review/demo-plan/scope-manifest.json","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","first_implementation_commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","resolved_baseline_sha":"cccccccccccccccccccccccccccccccccccccccc","slot_index":0,"dimension":"goal-alignment","idempotency_payload_version":1}
+      </event>
+    hat: review-dispatcher
+  - text: |
+      <event topic="review.unit.done">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","dimension":"goal-alignment","slot_index":0,"findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/goal-alignment.md","handoff_precheck_failed":false}
+      </event>
+    hat: review-worker
+  - text: |
+      <event topic="review.wave.complete">
+      {"wave_id":"wave-demo-1","completed_dimensions":["goal-alignment","correctness","testing","maintainability","project-standards","adversarial"],"aggregate_timeout":false}
+      </event>
+    hat: wave-runtime
+  - text: |
+      <event topic="review.synthesized">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","synthesized_review_file":".ralph/review/demo-plan/synthesized-review.md","findings_count":0,"p0_count":0,"p1_count":0,"p2_count":0,"p3_count":0,"scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","first_implementation_commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","resolved_baseline_sha":"cccccccccccccccccccccccccccccccccccccccc"}
+      </event>
+    hat: review-synthesizer
+  - text: |
+      <event topic="fix.plan.ready">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","fix_plan_path":".ralph/review/demo-plan/fix-plan.md","result":"clean","findings_count":0,"p0_count":0,"p1_count":0,"p2_count":0,"p3_count":0,"scope_digest":"abcd1234ef567890","source_review_file":".ralph/review/demo-plan/synthesized-review.md"}
+      </event>
+    hat: fix-planner
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"implementation-review scenario complete"}
+      </event>
+    hat: finalizer
+
+expected:
+  iterations: 7
+  events:
+    - topic: scope.ready
+    - topic: review.unit.ready
+    - topic: review.unit.done
+    - topic: review.wave.complete
+    - topic: review.synthesized
+    - topic: fix.plan.ready
+  absent_events:
+    - topic: scope.blocked
+    - topic: review.blocked
+    - topic: review.wave.failed
+  completion: true
