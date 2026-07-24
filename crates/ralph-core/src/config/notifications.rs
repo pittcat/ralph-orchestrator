@@ -160,9 +160,10 @@ impl NotificationEndpoint {
 /// Unknown values (e.g. `on: [bogus]`) deserialize to `Unknown` via
 /// `#[serde(other)]` instead of failing the parse; `validate()` rejects
 /// them with a field-path error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OnStatus {
+    #[default]
     Success,
     Failure,
     /// Catch-all for unrecognized status strings.
@@ -193,12 +194,6 @@ impl OnStatus {
     /// Returns `true` if the value is a known variant.
     fn is_valid(self) -> bool {
         matches!(self, OnStatus::Success | OnStatus::Failure)
-    }
-}
-
-impl Default for OnStatus {
-    fn default() -> Self {
-        OnStatus::Success
     }
 }
 

@@ -1,13 +1,4 @@
 use ralph_core::{ConfigError, RalphConfig};
-use std::fs;
-use std::path::PathBuf;
-use tempfile::TempDir;
-
-fn write_config_file(temp_dir: &TempDir, yaml: &str) -> PathBuf {
-    let path = temp_dir.path().join("ralph.yml");
-    fs::write(&path, yaml).expect("failed to write temporary config file");
-    path
-}
 
 // ── Test 1: default is disabled ─────────────────────────────────────────────
 
