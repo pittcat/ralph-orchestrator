@@ -797,7 +797,7 @@ impl ReviewStepTracker {
     /// `open_waves_needing_intervention` can be exercised
     /// without sleeping.
     #[cfg(test)]
-    fn backdate_last_dimension_for_test(
+    pub(crate) fn backdate_last_dimension_for_test(
         &mut self,
         plan_name: &str,
         task_id: &str,

@@ -306,17 +306,18 @@ def _atomic_pair_write(
 
     Each half is written via _atomic_write_with_provenance, which
     stages a .tmp sibling, writes a 3-line provenance header + payload,
-    then os.replace-s it into place.  On any failure all .tmp files are
-    unlinked and any ``rollback_paths`` we created in this call are
-    removed.  If we were updating an existing pair (``updated_pair``
-    is set), we verify both originals are still byte-equivalent to the
-    snapshot taken before the call; if either has been modified the
-    pair is left in a half-written state and we raise
-    ``SandboxError("pair-half-written: …: rerun")``.
+    then os.replace-s it into place.
 
-    Returns early (no exception) when both halves write successfully.
+    On any failure:
+    * Clean up staged ``.tmp`` siblings.
+    * For **create** paths (``updated_pair is None``): unlink any
+      halves this call created (``rollback_paths``) so a partial
+      create does not leave orphan owned files.
+    * For **update** paths (``updated_pair`` set): restore both
+      originals from the pre-call byte snapshots so a half-failed
+      update never destroys the prior owned suite.
     """
-    # Snapshot originals for updated_pair contract check.
+    # Snapshot originals for updated_pair restore.
     original_config_bytes: bytes | None = None
     original_prompt_bytes: bytes | None = None
     if updated_pair is not None:
@@ -354,29 +355,54 @@ def _atomic_pair_write(
                 stale.unlink()
             except OSError:
                 pass
-    for path_ in [config_path, prompt_path]:
-        try:
-            path_.unlink()
-        except FileNotFoundError:
-            pass
 
     if updated_pair is None:
+        # Create path: remove any halves this call produced.
+        for path_ in list(rollback_paths) + [config_path, prompt_path]:
+            try:
+                path_.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
         raise errors[config_path if config_path in errors else prompt_path]
 
-    # Verify pair invariant: both originals must still be intact so
-    # the caller can retry and the pair is still in its pre-call state.
-    for path, original_bytes, name in [
-        (config_path, original_config_bytes, "config"),
-        (prompt_path, original_prompt_bytes, "prompt"),
+    # Update path: restore pre-call snapshots so the owned suite
+    # is never left half-written or deleted.
+    for path, original_bytes in [
+        (config_path, original_config_bytes),
+        (prompt_path, original_prompt_bytes),
     ]:
         if original_bytes is None:
-            continue  # did not exist before; nothing to verify
-        if not path.exists() or path.read_bytes() != original_bytes:
-            # New file exists (written before the other half failed) but
-            # original is gone or modified — the pair is half-written.
-            raise SandboxError(f"pair-half-written: {name} ({path}): rerun")
+            # Did not exist before this call — remove any partial write.
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            continue
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{path.name}.restore.", suffix=".tmp", dir=path.parent
+            )
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(original_bytes)
+                os.replace(tmp_name, path)
+            except Exception:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
+        except OSError as restore_exc:
+            raise SandboxError(
+                f"pair-half-written: failed to restore {path} after write error "
+                f"({restore_exc}); original error: {errors.get(path) or next(iter(errors.values()))}"
+            ) from restore_exc
 
-    # Both originals intact; rollback is clean.  Re-raise the first error.
+    # Both originals restored (or never existed). Re-raise the first write error.
     raise errors[config_path if config_path in errors else prompt_path]
 
 
@@ -498,6 +524,7 @@ def generate_suite(
     preset: str,
     plan_path: Path,
     stem: str | None = None,
+    binary: str = "ralph",
 ) -> SuiteResult:
     """Generate the preset-bound pair in ``sandbox``.
 
@@ -515,6 +542,11 @@ def generate_suite(
     stem:
         Override for the derived preset stem. When ``None`` the
         function derives it from ``preset`` via :func:`derive_stem`.
+    binary:
+        Absolute path (or PATH name) of the ``ralph`` binary that
+        gate / handoff must use. Defaults to ``"ralph"`` only for
+        callers that resolve PATH later; production skill wiring
+        MUST pass the value from :func:`binary_resolve.resolve_binary`.
 
     Raises
     ------
@@ -569,7 +601,7 @@ def generate_suite(
     except Exception as exc:
         raise SandboxError(f"atomic write failed: {exc.__class__.__name__}: {exc}") from exc
 
-    binary_token = "ralph"
+    binary_token = binary.strip() or "ralph"
     argv, launch_argv = _build_argv(binary_token, config_path, preset, plan_path)
 
     return SuiteResult(

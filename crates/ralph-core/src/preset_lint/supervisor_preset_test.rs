@@ -741,4 +741,19 @@ fn ce_executor_supervisor_preset_exec_wave_mounts_unit_terminal_topics() {
         unit_loop.iter().any(|t| t == "execution.plan.ready"),
         "unit_loop.allowed_emits must keep `execution.plan.ready` for the task-planner handoff; got {unit_loop:?}"
     );
+
+    let review_loop = allowed("review_loop");
+    for required in ["review.unit.ready", "review.unit.done"] {
+        assert!(
+            review_loop.iter().any(|t| t == required),
+            "review_loop.allowed_emits must contain `{required}` (005 residual closure); got {review_loop:?}"
+        );
+    }
+    let fix_loop = allowed("fix_loop");
+    for required in ["fix.unit.ready", "fix.unit.done", "fix.unit.failed"] {
+        assert!(
+            fix_loop.iter().any(|t| t == required),
+            "fix_loop.allowed_emits must contain `{required}` (005 residual closure); got {fix_loop:?}"
+        );
+    }
 }

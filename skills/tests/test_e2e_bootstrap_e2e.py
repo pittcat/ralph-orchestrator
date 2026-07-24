@@ -94,14 +94,19 @@ def test_e2e_full_pipeline_static_only(tmp_path: Path, monkeypatch: pytest.Monke
     )
     assert resolution.ok is True
 
-    # U4 — sandbox suite generation.
+    # U4 — sandbox suite generation (R6: same binary as gate/handoff).
     suite = sandbox_suite.generate_suite(
         sandbox=sandbox,
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
+        binary=resolution.binary,
     )
     assert (sandbox / "ralph.ce-executor-pipeline.yml").is_file()
     assert (sandbox / "PROMPT.ce-executor-pipeline.md").is_file()
+    assert suite.argv[0] == resolution.binary
+    assert suite.launch_argv[0] == resolution.binary
+    assert "--dry-run" in suite.argv
+    assert "--dry-run" not in suite.launch_argv
 
     # U5 — static gate — use the shared factory.
     # probe_capability calls: (binary, --version), (binary, --help),

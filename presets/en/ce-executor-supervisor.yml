@@ -83,12 +83,20 @@ mechanism:
         allowed_emits:
           - review.wave.complete
           - review.wave.failed
+          # Same isomorphic mount as exec_wave (2026-07-24-005
+          # residual closure): unit topics must pass FlowStepScope
+          # without advancing the step; only wave terminals advance.
+          - review.unit.ready
+          - review.unit.done
       - id: fix_loop
         kind: side_effect
         runs: supervisor.fix.wave
         allowed_emits:
           - fix.wave.complete
           - fix.wave.failed
+          - fix.unit.ready
+          - fix.unit.done
+          - fix.unit.failed
       - id: plan_end
         kind: terminal
         allowed_emits:
@@ -112,9 +120,11 @@ event_loop:
   # 2026-07-24-004 plan U2 (KTD2): pin `progress_steward.enabled`
   # to `false`. The `progress-steward` and `shipper` hats are
   # permanently deleted (2026-07-23-005); do NOT restore them.
-  # Opening this switch only re-arms the dead U5 escalation path
-  # that still hardcodes `target=shipper`, which EventBus then
-  # silently drops. Operators MUST keep this `false`. Note: this
+  # Opening this switch re-arms `loop.stalled` wakes toward a
+  # missing steward hat (silent drop). Fail-close `plan.blocked`
+  # now targets `reporter` (2026-07-24-005 U1), but enabling
+  # steward without restoring the hat is still a dead wake path.
+  # Operators MUST keep this `false`. Note: this
   # key is outside the hats event_loop overlay allowlist, so an
   # operator `ralph.yml` that sets `enabled: true` still wins —
   # see plan residuals. Disabled steward may still fail-close

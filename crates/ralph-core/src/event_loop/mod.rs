@@ -14174,6 +14174,13 @@ pub(crate) fn advance_plan_step(
         "exec.unit.ready",
         "exec.unit.done",
         "exec.unit.failed",
+        // Review / fix wave unit terminals — same isomorphic
+        // contract as exec_wave (005 residual closure).
+        "review.unit.ready",
+        "review.unit.done",
+        "fix.unit.ready",
+        "fix.unit.done",
+        "fix.unit.failed",
     ];
     if NON_TRANSITION_TOPICS.contains(&accepted_topic) {
         return None;
@@ -14383,6 +14390,62 @@ mod u4_current_plan_step_tests {
         let cfg = exec_wave_flow();
         let next = advance_plan_step(&cfg, "unit_loop", "execution.plan.ready");
         assert_eq!(next, Some("exec_wave".to_string()));
+    }
+
+    fn review_fix_wave_flow() -> RalphConfig {
+        flow_config(vec![
+            (
+                "review_loop",
+                vec![
+                    "review.wave.complete",
+                    "review.wave.failed",
+                    "review.unit.ready",
+                    "review.unit.done",
+                ],
+            ),
+            (
+                "fix_loop",
+                vec![
+                    "fix.wave.complete",
+                    "fix.wave.failed",
+                    "fix.unit.ready",
+                    "fix.unit.done",
+                    "fix.unit.failed",
+                ],
+            ),
+            ("plan_end", vec!["plan.complete"]),
+        ])
+    }
+
+    #[test]
+    fn u2_review_unit_done_on_review_loop_returns_none() {
+        let cfg = review_fix_wave_flow();
+        assert_eq!(advance_plan_step(&cfg, "review_loop", "review.unit.done"), None);
+    }
+
+    #[test]
+    fn u2_fix_unit_done_on_fix_loop_returns_none() {
+        let cfg = review_fix_wave_flow();
+        assert_eq!(advance_plan_step(&cfg, "fix_loop", "fix.unit.done"), None);
+        assert_eq!(advance_plan_step(&cfg, "fix_loop", "fix.unit.failed"), None);
+    }
+
+    #[test]
+    fn u2_review_wave_complete_advances_to_fix_loop() {
+        let cfg = review_fix_wave_flow();
+        assert_eq!(
+            advance_plan_step(&cfg, "review_loop", "review.wave.complete"),
+            Some("fix_loop".to_string())
+        );
+    }
+
+    #[test]
+    fn u2_fix_wave_complete_advances_to_plan_end() {
+        let cfg = review_fix_wave_flow();
+        assert_eq!(
+            advance_plan_step(&cfg, "fix_loop", "fix.wave.complete"),
+            Some("plan_end".to_string())
+        );
     }
 }
 

@@ -349,6 +349,21 @@ mechanism:
       - id: exec_integrate
         kind: await
         allowed_emits: [plan.complete]
+      - id: review_loop
+        kind: side_effect
+        allowed_emits:
+          - review.wave.complete
+          - review.wave.failed
+          - review.unit.ready
+          - review.unit.done
+      - id: fix_loop
+        kind: side_effect
+        allowed_emits:
+          - fix.wave.complete
+          - fix.wave.failed
+          - fix.unit.ready
+          - fix.unit.done
+          - fix.unit.failed
 "#;
     FlowDeclaration::from_yaml(SUPERVISOR_FLOW_YAML).unwrap()
 }
@@ -407,5 +422,25 @@ fn u3_unit_loop_accepts_execution_plan_ready() {
     assert!(
         stage.check(&mut ctx_for("unit_loop"), &e).is_ok(),
         "unit_loop must accept `execution.plan.ready` (S3 handoff)"
+    );
+}
+
+#[test]
+fn u3_review_loop_accepts_review_unit_done() {
+    let stage = FlowStepScopeStage::new(supervisor_flow());
+    let e = ev_with_source("review.unit.done", "{}", "review-batch-worker");
+    assert!(
+        stage.check(&mut ctx_for("review_loop"), &e).is_ok(),
+        "review_loop must accept `review.unit.done` after isomorphic mount"
+    );
+}
+
+#[test]
+fn u3_fix_loop_accepts_fix_unit_done() {
+    let stage = FlowStepScopeStage::new(supervisor_flow());
+    let e = ev_with_source("fix.unit.done", "{}", "worker");
+    assert!(
+        stage.check(&mut ctx_for("fix_loop"), &e).is_ok(),
+        "fix_loop must accept `fix.unit.done` after isomorphic mount"
     );
 }

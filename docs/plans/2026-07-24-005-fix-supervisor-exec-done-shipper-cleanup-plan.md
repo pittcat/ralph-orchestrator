@@ -457,7 +457,7 @@ Feature: Supervisor exec wave 接受 unit 终态且失败可到达 reporter
 
 ### Deferred to Follow-Up Work
 
-- review/fix 波次 `*.unit.*` 与对应 side_effect step 的 allowed_emits / NON_TRANSITION 同构
+- ~~review/fix 波次 `*.unit.*` 与对应 side_effect step 的 allowed_emits / NON_TRANSITION 同构~~ — **已闭合**（review 发现 P1：`review_loop`/`fix_loop` 已挂 unit topics + NON_TRANSITION）
 - 可选：真实 supervisor E2E 复跑验证 121001 场景消失
 - 004 其它 residuals（M4 等）仍有效
 

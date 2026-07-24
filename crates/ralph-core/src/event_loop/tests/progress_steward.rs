@@ -191,7 +191,7 @@ fn test_u5_admitted_business_event_resets_stall_counter() {
 /// steward activations without a forwarded business event, the
 /// runtime auto-emits `plan.blocked(reason=loop_stalled_max_iterations)`
 /// and resets the counters. This terminates the loop cleanly
-/// via shipper → reporter.
+/// via `reporter` (was shipper → reporter; 2026-07-24-005 U1).
 #[test]
 fn test_u5_steward_self_loop_escalates_to_plan_blocked() {
     let temp_dir = tempfile::tempdir().unwrap();

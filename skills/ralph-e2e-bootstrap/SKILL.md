@@ -40,7 +40,7 @@ arbitrary project bootstrap (`ralph-project-bootstrap` owns that) and
 - **No Rust / CLI mutation.** Implementation lives only under
   `skills/ralph-e2e-bootstrap/**`, `skills/tests/**`, the catalog
   (`skills/install.py` PUBLIC_SKILLS + `.claude-plugin/marketplace.json`),
-  `docs/guide/e2e-bootstrap.md`, and `CONCEPTS.md`. Anything else is
+  and `CONCEPTS.md`. Anything else is
   forbidden by R14.
 
 ## Combo-box Interaction Contract
@@ -86,7 +86,9 @@ acceptance in `.ralph/agent/decisions.md`.
    raises `blocked`.
 4. **U4 — Sandbox Suite.** Run `scripts/sandbox_suite.py` to author
    `ralph.<stem>.yml` + `PROMPT.<stem>.md` inside the caller-supplied
-   sandbox directory. The pair is **preset-bound** (`<stem>` derives
+   sandbox directory. Pass the resolved binary from U3 as
+   `binary=` so `argv` / `launch_argv` match the gate binary (R6).
+   The pair is **preset-bound** (`<stem>` derives
    from the resolved preset). The plan file is read-only — the
    generated argv references the absolute path via `--plan`. Refuse to
    write inside `presets/`.
@@ -141,8 +143,6 @@ argv MUST also include `-c ralph.<stem>.yml -H <preset>` so
 ## See also
 
 - `references/interaction.md` — combo-box decision-point table
-- `docs/guide/e2e-bootstrap.md` — operator guide (optional, referenced
-  from this SKILL)
 - `skills/ralph-project-bootstrap/` — sibling skill with the same
   static-gate + handoff shape (do not duplicate the underlying
   cli_probe / handoff helpers; reuse them).

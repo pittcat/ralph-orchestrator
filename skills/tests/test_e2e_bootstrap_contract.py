@@ -660,6 +660,81 @@ def test_mid_write_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert "atomic write failed" in str(excinfo.value).lower()
 
 
+def test_update_pair_restores_originals_on_second_half_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Half-failed update must restore both originals (not unlink them)."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+
+    # First write succeeds — establishes owned pair.
+    first = sandbox_suite.generate_suite(
+        sandbox=sandbox,
+        preset="builtin:ce-executor-pipeline",
+        plan_path=plan,
+    )
+    config_path = Path(first.config_path)
+    prompt_path = Path(first.prompt_path)
+    original_config = config_path.read_bytes()
+    original_prompt = prompt_path.read_bytes()
+
+    # Simulate: config half replaces successfully, prompt half raises.
+    # Bypass provenance gate so we exercise the restore path, not
+    # write_conflict short-circuit.
+    calls = {"n": 0}
+
+    def flaky_write(path, payload, profile_sha256, prompt_sha256):  # noqa: ANN001, ARG001
+        calls["n"] += 1
+        if path.name.startswith("PROMPT."):
+            raise OSError("simulated prompt write failure")
+        # Successful half: overwrite in place (production uses
+        # os.replace; byte-identity of the write is enough here).
+        path.write_bytes(
+            f"# generated_by: ralph-e2e-bootstrap\n"
+            f"# profile_sha256: {profile_sha256}\n"
+            f"# prompt_sha256: {prompt_sha256}\n".encode("utf-8")
+            + payload
+        )
+
+    monkeypatch.setattr(sandbox_suite, "_atomic_write_with_provenance", flaky_write)
+
+    with pytest.raises(OSError, match="simulated prompt write failure"):
+        sandbox_suite._atomic_pair_write(
+            config_path,
+            prompt_path,
+            b"# new config body\n",
+            b"# new prompt body\n",
+            profile_sha256="a" * 64,
+            prompt_sha256="b" * 64,
+            updated_pair=(config_path, prompt_path),
+        )
+
+    assert config_path.read_bytes() == original_config
+    assert prompt_path.read_bytes() == original_prompt
+    assert calls["n"] >= 2
+
+
+def test_generate_suite_uses_resolved_binary(tmp_path: Path) -> None:
+    """R6: suite argv/launch_argv must carry the resolved binary token."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+    resolved = str(tmp_path / "target" / "debug" / "ralph")
+
+    result = sandbox_suite.generate_suite(
+        sandbox=sandbox,
+        preset="builtin:ce-executor-pipeline",
+        plan_path=plan,
+        binary=resolved,
+    )
+    assert result.argv[0] == resolved
+    assert result.launch_argv[0] == resolved
+    assert result.argv[0] == result.launch_argv[0]
+
+
 # ---------------------------------------------------------------------------
 # Unit 5 — static gate + handoff
 # ---------------------------------------------------------------------------
