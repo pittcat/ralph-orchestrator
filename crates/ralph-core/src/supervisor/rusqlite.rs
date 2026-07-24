@@ -28,6 +28,20 @@ use super::{
     WaveKind, WavePhase, WaveSnapshot,
 };
 
+/// `PRAGMA busy_timeout` value installed on every supervisor
+/// store connection. Two `ralph wave emit` processes may race
+/// the same fresh database; without a non-zero timeout, the
+/// losing process hits `SQLITE_BUSY` ("database is locked")
+/// the moment the winner starts writing the WAL header or any
+/// DDL transaction. Five seconds covers the worst-case
+/// migration + WAL-switch window on cold-disk CI runners while
+/// remaining short enough that a wedged peer can't block a
+/// loop indefinitely. The migration runner caps the wait via
+/// the underlying timeout, so this stays a safety bound, not a
+/// SLA. (2026-07-25)
+#[cfg(feature = "supervisor-db")]
+const BUSY_TIMEOUT_MS: u32 = 5_000;
+
 /// Persistent `SupervisorStore` backed by SQLite (WAL mode,
 /// foreign keys ON, see `migrations::run`). The store is
 /// `Send + Sync` because the underlying `Connection` lives
@@ -46,10 +60,34 @@ impl RusqliteSupervisorStore {
     /// return a ready store. Errors surface as `Open(...)` so
     /// the runtime can mark the supervisor path as failed
     /// (R-C4). The path is created if missing.
+    ///
+    /// `busy_timeout` is set BEFORE we touch the file in any
+    /// way, including the WAL header switch in `migrations::run`.
+    /// Two processes racing the same fresh database can both
+    /// try to flip `journal_mode` to `WAL`; without a non-zero
+    /// `busy_timeout` the loser hits `SQLITE_BUSY` immediately
+    /// and the store fails closed even though either process
+    /// alone would succeed. The timeout makes the loser wait
+    /// for the winner to release the write lock so both stores
+    /// open cleanly (2026-07-25 integration
+    /// `u8_concurrent_barrier_same_key_single_apply`).
     pub fn open(path: impl AsRef<Path>) -> SupervisorStoreResult<Self> {
         let path = path.as_ref();
         let conn = Connection::open(path)
             .map_err(|err| SupervisorStoreError::Open(format!("{}: {err}", path.display())))?;
+        // 2026-07-25: tolerate concurrent open of the same DB.
+        // The value matches the supervisor preset's worst-case
+        // DDL/transactions window (sub-second) plus slack for
+        // cold-disk CI runners; absolute cap is just a bound on
+        // the longest possible wait before SQLITE_BUSY
+        // propagates so we never wedge a loop on a stuck peer.
+        conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)
+            .map_err(|err| {
+                SupervisorStoreError::Open(format!(
+                    "failed to set busy_timeout on {}: {err}",
+                    path.display()
+                ))
+            })?;
         migrations::run(&conn).map_err(|err| {
             SupervisorStoreError::Open(format!("migration failed on {}: {err}", path.display()))
         })?;
@@ -61,7 +99,17 @@ impl RusqliteSupervisorStore {
     /// Construct a store around an already-open `Connection`.
     /// Used by tests so they can pass `:memory:` connections.
     /// Migrations still run here so the same invariant holds.
+    /// Also installs `busy_timeout` so a connection hand-built
+    /// by callers still tolerates concurrent writers (e.g.
+    /// shared `:memory:` is uncommon but see
+    /// `RusqliteSupervisorStore::open` for the production
+    /// rationale).
     pub fn from_connection(connection: Connection) -> SupervisorStoreResult<Self> {
+        connection
+            .pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)
+            .map_err(|err| {
+                SupervisorStoreError::Open(format!("failed to set busy_timeout: {err}"))
+            })?;
         migrations::run(&connection)
             .map_err(|err| SupervisorStoreError::Open(format!("migration failed: {err}")))?;
         Ok(Self {
