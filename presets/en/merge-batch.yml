@@ -321,6 +321,8 @@ hats:
       1. **Read** `stabilize-log.md` and `stabilize-state.json` (if missing, start attempt 1)
       2. **Verification command** (pin on attempt 1, reuse thereafter):
          - If `stabilize-state.json` has `verification_command`, reuse it
+         - Else if the prompt names a verification command, use it verbatim
+           (prompt takes priority over discovery; do not narrow it to a subset)
          - Else discover from the repo — NEVER assume a fixed stack:
            `-c` backpressure gates → AGENTS.md / CLAUDE.md / CONTRIBUTING.md → CI
            workflows → package.json / pyproject.toml / Cargo.toml / Makefile / justfile
