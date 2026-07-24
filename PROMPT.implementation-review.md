@@ -1,10 +1,9 @@
-# Implementation Review Prompt
+# Ralph 计划驱动运行入口
 
-This prompt is the runtime entry for the `implementation-review` workflow.
+本文件仅用于安全预检和首次运行占位。
 
-- Provide the real repository-relative implementation plan with `--plan PLAN_PATH`.
-- Read that plan before reviewing any code, and use it as the source of review scope and intent.
-- Keep the review read-only: do not modify tracked source files, the plan, or unrelated project files.
-- Write only the review artifacts required by the active workflow under `.ralph/review/<plan>/`.
-- If the plan is missing, unreadable, ambiguous, or the review scope cannot be frozen safely, stop without project changes and report the blocking artifact.
-- Follow the injected Ralph tools guidance for event prechecks, payload fields, and terminal completion.
+- 正式运行必须通过 `--plan <仓库相对路径>` 提供真实的已实施计划。
+- 启动后先读取该计划以及最近的 `CLAUDE.md` 和 `AGENTS.md`，再履行当前激活职责。
+- 如果未提供计划、计划不可读或无法唯一确定工作范围，立即停止；不要修改项目文件，也不要虚构输入。
+- 保留与当前任务无关的操作者改动；不要推送远端，也不要创建或切换分支或 worktree。
+- 只使用项目文档或 CI 已证明的验证命令；任何失败都阻止成功结论。
